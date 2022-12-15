@@ -51,6 +51,7 @@ impl FileCacheMeta {
         blob_file: String,
         blob_info: Arc<BlobInfo>,
         reader: Option<Arc<dyn BlobReader>>,
+        runtime: Option<Arc<Runtime>>,
         sync: bool,
     ) -> Result<Self> {
         if sync {
@@ -68,28 +69,32 @@ impl FileCacheMeta {
             };
             let meta1 = meta.clone();
 
-            std::thread::spawn(move || {
-                let mut retry = 0;
-                let mut delayer = Delayer::new(
-                    DelayType::BackOff,
-                    Duration::from_millis(DOWNLOAD_META_RETRY_DELAY),
-                );
-                while retry < DOWNLOAD_META_RETRY_COUNT {
-                    match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
-                        Ok(m) => {
-                            *meta1.meta.lock().unwrap() = Some(Arc::new(m));
-                            return;
-                        }
-                        Err(e) => {
-                            info!("temporarily failed to get blob.meta, {}", e);
-                            delayer.delay();
-                            retry += 1;
+            if let Some(r) = runtime {
+                r.as_ref().spawn_blocking(move || {
+                    let mut retry = 0;
+                    let mut delayer = Delayer::new(
+                        DelayType::BackOff,
+                        Duration::from_millis(DOWNLOAD_META_RETRY_DELAY),
+                    );
+                    while retry < DOWNLOAD_META_RETRY_COUNT {
+                        match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
+                            Ok(m) => {
+                                *meta1.meta.lock().unwrap() = Some(Arc::new(m));
+                                return;
+                            }
+                            Err(e) => {
+                                info!("temporarily failed to get blob.meta, {}", e);
+                                delayer.delay();
+                                retry += 1;
+                            }
                         }
                     }
-                }
-                warn!("failed to get blob.meta");
-                meta1.has_error.store(true, Ordering::Release);
-            });
+                    warn!("failed to get blob.meta");
+                    meta1.has_error.store(true, Ordering::Release);
+                });
+            } else {
+                warn!("Want download blob meta asynchronously but no runtime.");
+            }
 
             Ok(meta)
         }
