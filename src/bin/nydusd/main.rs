@@ -29,22 +29,21 @@ use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::Resource;
 
+use nydus::blob_cache::BlobCacheMgr;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
-use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{DaemonError, NydusDaemon};
 use crate::fs_service::{FsBackendMountCmd, FsService};
 use crate::service_controller::create_daemon;
 
-use nydus::ensure_threads;
+use nydus::validate_threads_configuration;
 
 mod fusedev;
 #[cfg(feature = "virtiofs")]
 mod virtiofs;
 
 mod api_server_glue;
-mod blob_cache;
 mod daemon;
 #[cfg(target_os = "linux")]
 mod fs_cache;
@@ -191,7 +190,7 @@ extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
 const SHARED_DIR_HELP_MESSAGE: &str = "Local directory to share via passthroughfs FUSE driver";
 
 pub fn thread_validator(v: &str) -> std::result::Result<String, String> {
-    ensure_threads(v).map(|s| s.to_string())
+    validate_threads_configuration(v).map(|s| s.to_string())
 }
 
 fn append_fs_options(app: Command) -> Command {

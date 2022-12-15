@@ -44,7 +44,7 @@ pub struct DaemonConf {
 }
 
 /// Blob cache object type for nydus/rafs bootstrap blob.
-pub const BLOB_CACHE_TYPE_BOOTSTRAP: &str = "bootstrap";
+pub const BLOB_CACHE_TYPE_META_BLOB: &str = "bootstrap";
 /// Blob cache object type for nydus/rafs data blob.
 pub const BLOB_CACHE_TYPE_DATA_BLOB: &str = "datablob";
 

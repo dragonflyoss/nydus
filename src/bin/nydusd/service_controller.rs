@@ -10,17 +10,17 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use nydus::blob_cache::BlobCacheMgr;
 use nydus_api::http::BlobCacheList;
 use nydus_app::BuildTimeInfo;
 
-use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{
     DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
     DaemonStateMachineSubscriber,
 };
 use crate::{FsService, NydusDaemon, SubCmdArgs, DAEMON_CONTROLLER};
 #[cfg(target_os = "linux")]
-use nydus::ensure_threads;
+use nydus::validate_threads_configuration;
 
 pub struct ServiceController {
     bti: BuildTimeInfo,
@@ -123,7 +123,7 @@ impl ServiceController {
         let tag = subargs.value_of("fscache-tag").map(|s| s.as_str());
 
         let threads = if let Some(threads_value) = subargs.value_of("fscache-threads") {
-            ensure_threads(threads_value).map_err(|err| einval!(err))?
+            validate_threads_configuration(threads_value).map_err(|err| einval!(err))?
         } else {
             1usize
         };

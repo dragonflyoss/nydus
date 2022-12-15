@@ -6,20 +6,20 @@
 
 use std::convert::TryFrom;
 use std::convert::TryInto;
-use std::io::{Read, Write};
+use std::io::{Error, Read, Result, Write};
 use std::mem::size_of;
 use std::path::Path;
 use std::slice;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
 use nydus_utils::compress::Decoder;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{compress, digest};
 use serde::Serialize;
-use storage::backend::{BlobBufReader, BlobReader};
-use storage::utils::alloc_buf;
 use tar::{EntryType, Header};
+
+use crate::backend::{BlobBufReader, BlobReader};
+use crate::utils::alloc_buf;
 
 /// File name for RAFS data chunks.
 pub const ENTRY_BLOB_RAW: &str = "image.blob";
@@ -45,14 +45,14 @@ bitflags! {
 }
 
 impl TryFrom<compress::Algorithm> for TocEntryFlags {
-    type Error = anyhow::Error;
+    type Error = Error;
 
     fn try_from(c: compress::Algorithm) -> std::result::Result<Self, Self::Error> {
         match c {
             compress::Algorithm::None => Ok(Self::COMPRESSION_NONE),
             compress::Algorithm::Zstd => Ok(Self::COMPRESSION_ZSTD),
             compress::Algorithm::Lz4Block => Ok(Self::COMPRESSION_LZ4_BLOCK),
-            _ => bail!("unsupported compressor {}", c,),
+            _ => return Err(eother!(format!("unsupported compressor {}", c,))),
         }
     }
 }
@@ -62,7 +62,7 @@ impl TocEntry {
     pub fn name(&self) -> Result<String> {
         String::from_utf8(self.name.to_vec())
             .map(|v| v.trim_end_matches('\0').to_string())
-            .map_err(|_e| anyhow!(format!("failed to get ToC entry name")))
+            .map_err(|_e| eother!(format!("failed to get ToC entry name")))
     }
 
     /// Get digest of uncompressed content.
@@ -167,52 +167,51 @@ impl TocEntry {
 
         if self.flags & TocEntryFlags::COMPRESSION_ZSTD.bits() != 0 {
             let mut decoder = Decoder::new(buf_reader, compress::Algorithm::Zstd)
-                .map_err(|_| anyhow!("failed to create decode"))?;
+                .map_err(|_| eother!("failed to create decode"))?;
             let mut buf = alloc_buf(0x40000);
             loop {
                 let sz = decoder
                     .read(&mut buf)
-                    .map_err(|e| anyhow!("failed to decompress data, {}", e))?;
+                    .map_err(|e| eother!(format!("failed to decompress data, {}", e)))?;
                 if sz == 0 {
                     break;
                 }
                 hasher.digest_update(&buf[..sz]);
                 writer
                     .write_all(&buf[..sz])
-                    .map_err(|e| anyhow!("failed to write decompressed data, {}", e))?;
+                    .map_err(|e| eother!(format!("failed to write decompressed data, {}", e)))?;
                 count += sz as u64;
             }
         } else if self.flags & TocEntryFlags::COMPRESSION_LZ4_BLOCK.bits() != 0 {
-            return Err(anyhow!("unsupported compression algorithm lz4_block."));
+            return Err(eother!("unsupported compression algorithm lz4_block."));
         } else if self.flags & TocEntryFlags::COMPRESSION_NONE.bits() != 0 {
             let mut buf = alloc_buf(0x40000);
             loop {
                 let sz = buf_reader
                     .read(&mut buf)
-                    .map_err(|e| anyhow!("failed to decompress data, {}", e))?;
+                    .map_err(|e| eother!(format!("failed to decompress data, {}", e)))?;
                 if sz == 0 {
                     break;
                 }
                 hasher.digest_update(&buf[..sz]);
                 writer
                     .write_all(&buf[..sz])
-                    .map_err(|e| anyhow!("failed to write decompressed data, {}", e))?;
+                    .map_err(|e| eother!(format!("failed to write decompressed data, {}", e)))?;
                 count += sz as u64;
             }
         } else {
-            return Err(anyhow!("unsupported compression algorithm."));
+            return Err(eother!("unsupported compression algorithm."));
         }
 
         if count != self.uncompressed_size {
-            return Err(anyhow!(
+            return Err(eother!(format!(
                 "size of decompressed content doesn't match, expect {}, got {}",
-                self.uncompressed_size,
-                count,
-            ));
+                self.uncompressed_size, count,
+            )));
         }
         let digest = hasher.digest_finalize();
         if digest.data != self.uncompressed_digest {
-            return Err(anyhow!("digest of decompressed content doesn't match"));
+            return Err(eother!("digest of decompressed content doesn't match"));
         }
 
         Ok(())
@@ -225,43 +224,42 @@ impl TocEntry {
 
         if self.flags & TocEntryFlags::COMPRESSION_ZSTD.bits() != 0 {
             let mut decoder = Decoder::new(buf, compress::Algorithm::Zstd)
-                .map_err(|_| anyhow!("failed to create decode"))?;
+                .map_err(|_| eother!("failed to create decode"))?;
             let mut buf = alloc_buf(0x40000);
             loop {
                 let sz = decoder
                     .read(&mut buf)
-                    .map_err(|e| anyhow!("failed to decompress data, {}", e))?;
+                    .map_err(|e| eother!(format!("failed to decompress data, {}", e)))?;
                 if sz == 0 {
                     break;
                 }
                 hasher.digest_update(&buf[..sz]);
                 writer
                     .write_all(&buf[..sz])
-                    .map_err(|e| anyhow!("failed to write decompressed data, {}", e))?;
+                    .map_err(|e| eother!(format!("failed to write decompressed data, {}", e)))?;
                 count += sz as u64;
             }
         } else if self.flags & TocEntryFlags::COMPRESSION_LZ4_BLOCK.bits() != 0 {
-            return Err(anyhow!("unsupported compression algorithm lz4_block."));
+            return Err(eother!("unsupported compression algorithm lz4_block."));
         } else if self.flags & TocEntryFlags::COMPRESSION_NONE.bits() != 0 {
             hasher.digest_update(buf);
             writer
                 .write_all(buf)
-                .map_err(|e| anyhow!("failed to write decompressed data, {}", e))?;
+                .map_err(|e| eother!(format!("failed to write decompressed data, {}", e)))?;
             count = buf.len() as u64;
         } else {
-            return Err(anyhow!("unsupported compression algorithm."));
+            return Err(eother!("unsupported compression algorithm."));
         }
 
         if count != self.uncompressed_size {
-            return Err(anyhow!(
+            return Err(eother!(format!(
                 "size of decompressed content doesn't match, expect {}, got {}",
-                self.uncompressed_size,
-                count,
-            ));
+                self.uncompressed_size, count,
+            )));
         }
         let digest = hasher.digest_finalize();
         if digest.data != self.uncompressed_digest {
-            return Err(anyhow!("digest of decompressed content doesn't match"));
+            return Err(eother!("digest of decompressed content doesn't match"));
         }
 
         Ok(())
@@ -299,7 +297,7 @@ impl TocEntryList {
     ) -> Result<&mut TocEntry> {
         let name_size = name.as_bytes().len();
         if name_size > 16 {
-            bail!("invalid entry name length {}", name_size);
+            return Err(eother!(format!("invalid entry name length {}", name_size)));
         }
 
         let last = self.entries.len();
@@ -335,56 +333,54 @@ impl TocEntryList {
         digest: &RafsDigest,
     ) -> Result<Self> {
         if !(512..=0x10000).contains(&size) || size % 128 != 0 {
-            return Err(anyhow!("invalid size {} of blob ToC", size));
+            return Err(eother!(format!("invalid size {} of blob ToC", size)));
         }
 
         let size = size as usize;
         let mut buf = alloc_buf(size);
         let sz = reader
             .read(&mut buf, offset)
-            .map_err(|e| anyhow!("failed to read data from backend, {:?}", e))?;
+            .map_err(|e| eother!(format!("failed to read data from backend, {:?}", e)))?;
 
         if sz != size {
-            return Err(anyhow!(
+            return Err(eother!(format!(
                 "failed to read data from backend, expect {}, got {} bytes",
-                size,
-                sz
-            ));
+                size, sz
+            )));
         }
 
         let dv = digest::RafsDigest::from_buf(&buf, digest::Algorithm::Sha256);
         if &dv != digest {
-            return Err(anyhow!("toc content digest value doesn't match"));
+            return Err(eother!("toc content digest value doesn't match"));
         }
 
         let size = size - 512;
         let header = Header::from_byte_slice(&buf[size..]);
         let entry_type = header.entry_type();
         if entry_type != EntryType::Regular {
-            return Err(anyhow!("Tar entry type for ToC is not a regular file"));
+            return Err(eother!("Tar entry type for ToC is not a regular file"));
         }
         let entry_size = header
             .entry_size()
-            .map_err(|_| anyhow!("failed to get entry size from tar header"))?;
+            .map_err(|_| eother!("failed to get entry size from tar header"))?;
         if entry_size != size as u64 {
-            return Err(anyhow!(
+            return Err(eother!(format!(
                 "invalid toc entry size in tar header, expect {}, got {}",
-                size,
-                entry_size
-            ));
+                size, entry_size
+            )));
         }
         let name = header
             .path()
-            .map_err(|_| anyhow!("failed to get ToC file name from tar header"))?;
+            .map_err(|_| eother!("failed to get ToC file name from tar header"))?;
         if name != Path::new(ENTRY_TOC) {
-            return Err(anyhow!(
+            return Err(eother!(format!(
                 "ToC file name from tar header doesn't match, {}",
                 name.display()
-            ));
+            )));
         }
         let _header = header
             .as_gnu()
-            .ok_or_else(|| anyhow!("invalid GNU tar header for ToC"))?;
+            .ok_or_else(|| eother!("invalid GNU tar header for ToC"))?;
 
         let mut list = TocEntryList::new();
         let mut pos = 0;
@@ -418,8 +414,8 @@ impl TocEntryList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::factory::BlobFactory;
     use nydus_api::{BackendConfigV2, LocalFsConfig};
-    use storage::factory::BlobFactory;
 
     #[test]
     fn test_read_toc_list() {

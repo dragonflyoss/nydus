@@ -311,6 +311,7 @@ impl BlobInfo {
         self.fs_cache_file = file;
     }
 
+    #[cfg(target_os = "linux")]
     /// Get the associated `File` object provided by Linux fscache subsystem.
     pub(crate) fn get_fscache_file(&self) -> Option<Arc<File>> {
         self.fs_cache_file.clone()

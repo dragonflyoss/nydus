@@ -22,9 +22,10 @@ libc = "0.2"
 log = "0.4.8"
 nix = "0.24"
 reqwest = { version = "0.11.11", features = ["blocking", "json"], optional = true }
-serde = { version = "1.0.110", features = ["serde_derive", "rc"], optional = true }
+serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 sha2 = { version = "0.10.2", optional = true }
+tar = "0.4.38"
 time = { version = "0.3.14", features = ["formatting"], optional = true }
 tokio = { version = "1.19.0", features = ["rt", "rt-multi-thread", "sync", "time"] }
 url = { version = "2.1.1", optional = true }
@@ -44,7 +45,7 @@ regex = "1.7.0"
 [features]
 backend-localfs = []
 backend-oss = ["base64", "httpdate", "hmac-sha1-compact", "reqwest", "url"]
-backend-registry = ["base64", "reqwest", "serde", "url"]
+backend-registry = ["base64", "reqwest", "url"]
 backend-s3 = ["base64", "hmac", "http", "reqwest", "sha2", "time", "url"]
 
 [package.metadata.docs.rs]

@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::layout::toc;
+use nydus_storage::meta::toc;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{compress, digest};
 use sha2::Digest;
