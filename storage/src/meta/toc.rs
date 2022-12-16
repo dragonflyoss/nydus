@@ -6,11 +6,12 @@
 
 use std::convert::TryFrom;
 use std::convert::TryInto;
+use std::fs::OpenOptions;
 use std::io::{Error, Read, Result, Write};
 use std::mem::size_of;
 use std::path::Path;
-use std::slice;
 use std::sync::Arc;
+use std::{fs, slice};
 
 use nydus_utils::compress::Decoder;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
@@ -53,6 +54,43 @@ impl TryFrom<compress::Algorithm> for TocEntryFlags {
             compress::Algorithm::Zstd => Ok(Self::COMPRESSION_ZSTD),
             compress::Algorithm::Lz4Block => Ok(Self::COMPRESSION_LZ4_BLOCK),
             _ => return Err(eother!(format!("unsupported compressor {}", c,))),
+        }
+    }
+}
+
+/// RAFS TOC entry on-disk format, 128 bytes.
+///
+/// The structure is designed to seek TOC data with the `name` field.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TocEntry {
+    /// Possible values: COMPRESSOR
+    flags: u32,
+    reserved1: u32,
+    /// Name of entry file
+    name: [u8; 16],
+    /// Sha256 of uncompressed data
+    uncompressed_digest: [u8; 32],
+    /// Offset of compressed data
+    compressed_offset: u64,
+    /// Size of compressed data
+    compressed_size: u64,
+    /// Size of uncompressed data
+    uncompressed_size: u64,
+    reserved2: [u8; 44],
+}
+
+impl Default for TocEntry {
+    fn default() -> Self {
+        TocEntry {
+            flags: 0,
+            reserved1: 0,
+            name: [0u8; 16],
+            uncompressed_digest: [0u8; 32],
+            compressed_offset: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+            reserved2: [0u8; 44],
         }
     }
 }
@@ -109,46 +147,7 @@ impl TocEntry {
 
         Ok(())
     }
-}
 
-/// RAFS TOC entry on-disk format, 128 bytes.
-///
-/// The structure is designed to seek TOC data with the `name` field.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct TocEntry {
-    /// Possible values: COMPRESSOR
-    flags: u32,
-    reserved1: u32,
-    /// Name of entry file
-    name: [u8; 16],
-    /// Sha256 of uncompressed data
-    uncompressed_digest: [u8; 32],
-    /// Offset of compressed data
-    compressed_offset: u64,
-    /// Size of compressed data
-    compressed_size: u64,
-    /// Size of uncompressed data
-    uncompressed_size: u64,
-    reserved2: [u8; 44],
-}
-
-impl Default for TocEntry {
-    fn default() -> Self {
-        TocEntry {
-            flags: 0,
-            reserved1: 0,
-            name: [0u8; 16],
-            uncompressed_digest: [0u8; 32],
-            compressed_offset: 0,
-            compressed_size: 0,
-            uncompressed_size: 0,
-            reserved2: [0u8; 44],
-        }
-    }
-}
-
-impl TocEntry {
     /// Extract the content from a reader into a writer.
     pub fn extract_from_reader<W: Write>(
         &self,
@@ -325,6 +324,19 @@ impl TocEntryList {
         data
     }
 
+    /// Get ToC entry with specified name.
+    pub fn get_entry(&self, name: &str) -> Option<&TocEntry> {
+        for toc in self.entries.iter() {
+            if let Ok(n) = toc.name() {
+                if n == name {
+                    return Some(toc);
+                }
+            }
+        }
+
+        None
+    }
+
     /// Read a `TocEntryList` from a reader.
     pub fn read_from_blob(
         reader: &dyn BlobReader,
@@ -397,17 +409,46 @@ impl TocEntryList {
         Ok(list)
     }
 
-    /// Get ToC entry with specified name.
-    pub fn get_entry(&self, name: &str) -> Option<&TocEntry> {
-        for toc in self.entries.iter() {
-            if let Ok(n) = toc.name() {
-                if n == name {
-                    return Some(toc);
+    /// Read a `TocEntryList` from a reader.
+    pub fn extract_from_blob<P: AsRef<Path>>(
+        &self,
+        reader: Arc<dyn BlobReader>,
+        bootstrap: Option<P>,
+    ) -> Result<()> {
+        if let Some(path) = bootstrap {
+            let bootstrap = self
+                .get_entry(ENTRY_BOOTSTRAP)
+                .ok_or_else(|| enoent!("`image.boot` doesn't exist in the ToC list"))?;
+            if bootstrap.compressor() == compress::Algorithm::None
+                && bootstrap.compressed_size() != bootstrap.uncompressed_size()
+            {
+                return Err(einval!("invalid ToC entry for `image.boot`"));
+            }
+
+            let mut ready = false;
+            if path.as_ref().exists() {
+                let mut file = OpenOptions::new().read(true).open(path.as_ref())?;
+                let digest = RafsDigest::from_reader(&mut file, digest::Algorithm::Sha256)?;
+                if digest.data == bootstrap.uncompressed_digest {
+                    ready = true;
                 }
+            }
+            if !ready {
+                let p = path
+                    .as_ref()
+                    .to_path_buf()
+                    .with_extension("toc_downloading");
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(p.as_path())?;
+                bootstrap.extract_from_reader(reader, &mut file)?;
+                fs::rename(p, path)?;
             }
         }
 
-        None
+        Ok(())
     }
 }
 
