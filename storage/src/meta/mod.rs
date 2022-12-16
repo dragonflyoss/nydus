@@ -52,7 +52,8 @@ use nydus_utils::digest::{DigestData, RafsDigest};
 use nydus_utils::filemap::FileMapState;
 
 use crate::backend::BlobReader;
-use crate::device::{BlobChunkInfo, BlobFeatures, BlobInfo};
+use crate::device::v5::BlobV5ChunkInfo;
+use crate::device::{BlobChunkFlags, BlobChunkInfo, BlobFeatures, BlobInfo};
 use crate::meta::toc::{TocEntryList, TocLocation};
 use crate::utils::alloc_buf;
 use crate::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
@@ -430,8 +431,10 @@ impl BlobMetaInfo {
             if let Some(reader) = reader {
                 let toc_path = format!("{}.{}", blob_path, TOC_FILE_SUFFIX);
                 let location = if blob_info.rafs_blob_toc_size() != 0 {
-                    let offset =
-                        blob_info.compressed_size() - blob_info.rafs_blob_toc_size() as u64;
+                    let blob_size = reader
+                        .blob_size()
+                        .map_err(|_e| eio!("failed to get blob size"))?;
+                    let offset = blob_size - blob_info.rafs_blob_toc_size() as u64;
                     let mut location =
                         TocLocation::new(offset, blob_info.rafs_blob_toc_size() as u64);
                     let digest = blob_info.rafs_blob_toc_digest();
@@ -1471,6 +1474,29 @@ impl BlobChunkInfo for BlobMetaChunk {
     }
 
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl BlobV5ChunkInfo for BlobMetaChunk {
+    fn index(&self) -> u32 {
+        self.chunk_index as u32
+    }
+
+    fn file_offset(&self) -> u64 {
+        // Not used for RAFS v6
+        0
+    }
+
+    fn flags(&self) -> BlobChunkFlags {
+        let mut flags = BlobChunkFlags::empty();
+        if self.is_compressed() {
+            flags |= BlobChunkFlags::COMPRESSED;
+        }
+        flags
+    }
+
+    fn as_base(&self) -> &dyn BlobChunkInfo {
         self
     }
 }

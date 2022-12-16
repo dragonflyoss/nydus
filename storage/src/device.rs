@@ -1069,6 +1069,21 @@ impl BlobDevice {
         }
     }
 
+    /// RAFS V6: get chunk information object for chunks.
+    pub fn get_chunk_info(
+        &self,
+        blob_index: u32,
+        chunk_index: u32,
+    ) -> Option<Arc<dyn BlobChunkInfo>> {
+        if (blob_index as usize) < self.blob_count {
+            let state = self.blobs.load();
+            let blob = &state[blob_index as usize];
+            blob.get_chunk_info(chunk_index)
+        } else {
+            None
+        }
+    }
+
     fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {
         let blob_index = iovec.blob_index();
         if (blob_index as usize) < self.blob_count {
