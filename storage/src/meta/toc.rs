@@ -4,18 +4,16 @@
 
 //! Rafs filesystem TOC entry layout and data structures.
 
-use std::convert::TryFrom;
-use std::convert::TryInto;
-use std::fs::OpenOptions;
+use std::convert::{TryFrom, TryInto};
+use std::fs::{self, OpenOptions};
 use std::io::{Error, Read, Result, Write};
 use std::mem::size_of;
 use std::path::Path;
+use std::slice;
 use std::sync::Arc;
-use std::{fs, slice};
 
-use nydus_utils::compress::Decoder;
-use nydus_utils::digest::{DigestHasher, RafsDigest};
-use nydus_utils::{compress, digest};
+use nydus_utils::compress::{self, Decoder};
+use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use serde::Serialize;
 use tar::{EntryType, Header};
 
@@ -30,6 +28,8 @@ pub const ENTRY_BOOTSTRAP: &str = "image.boot";
 pub const ENTRY_BLOB_META: &str = "blob.meta";
 /// File name for RAFS blob compression information.
 pub const ENTRY_BLOB_META_HEADER: &str = "blob.meta.header";
+/// File name for RAFS chunk digest array.
+pub const ENTRY_BLOB_DIGEST: &str = "blob.digest";
 /// File name for RAFS blob ToC table.
 pub const ENTRY_TOC: &str = "rafs.blob.toc";
 
@@ -338,32 +338,97 @@ impl TocEntryList {
     }
 
     /// Read a `TocEntryList` from a reader.
-    pub fn read_from_blob(
+    pub fn read_from_blob<W: Write>(
         reader: &dyn BlobReader,
-        offset: u64,
-        size: u64,
-        digest: &RafsDigest,
+        cache_file: Option<&mut W>,
+        location: &TocLocation,
     ) -> Result<Self> {
-        if !(512..=0x10000).contains(&size) || size % 128 != 0 {
-            return Err(eother!(format!("invalid size {} of blob ToC", size)));
-        }
+        location.validate()?;
+        let (offset, size) = if location.auto_detect {
+            let blob_size = reader
+                .blob_size()
+                .map_err(|e| eio!(format!("failed to get blob size, {:?}", e)))?;
+            let size = if blob_size > 0x1000 {
+                0x1000
+            } else {
+                blob_size >> 7 << 7
+            };
+            (blob_size - size, size)
+        } else {
+            (location.offset, location.size)
+        };
 
         let size = size as usize;
         let mut buf = alloc_buf(size);
         let sz = reader
             .read(&mut buf, offset)
-            .map_err(|e| eother!(format!("failed to read data from backend, {:?}", e)))?;
-
+            .map_err(|e| eother!(format!("failed to read ToC from backend, {:?}", e)))?;
         if sz != size {
             return Err(eother!(format!(
-                "failed to read data from backend, expect {}, got {} bytes",
+                "failed to read ToC from backend, expect {}, got {} bytes",
                 size, sz
             )));
         }
 
-        let dv = digest::RafsDigest::from_buf(&buf, digest::Algorithm::Sha256);
-        if &dv != digest {
-            return Err(eother!("toc content digest value doesn't match"));
+        if let Some(writer) = cache_file {
+            writer.write_all(&buf)?;
+        }
+
+        Self::parse(&buf, size, location)
+    }
+
+    /// Read a `TocEntryList` from a cache file or the storage backend.
+    pub fn read_from_cache_file<P: AsRef<Path>>(
+        path: P,
+        reader: &dyn BlobReader,
+        location: &TocLocation,
+    ) -> Result<Self> {
+        location.validate()?;
+
+        if let Ok(mut file) = OpenOptions::new().read(true).open(path.as_ref()) {
+            let md = file.metadata()?;
+            if md.len() <= 0x1000 {
+                let size = md.len() as usize;
+                let mut buf = alloc_buf(size);
+                file.read_exact(&mut buf)
+                    .map_err(|e| eother!(format!("failed to read ToC from cache, {:?}", e)))?;
+                if let Ok(toc) = Self::parse(&buf, size as usize, location) {
+                    return Ok(toc);
+                }
+            }
+        }
+
+        let p = path
+            .as_ref()
+            .to_path_buf()
+            .with_extension("toc_downloading");
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(p.as_path())
+        {
+            match Self::read_from_blob(reader, Some(&mut file), location) {
+                Ok(v) => {
+                    let _ = fs::rename(p, path.as_ref());
+                    Ok(v)
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(p);
+                    Err(e)
+                }
+            }
+        } else {
+            Self::read_from_blob::<fs::File>(reader, None, location)
+        }
+    }
+
+    fn parse(buf: &[u8], size: usize, location: &TocLocation) -> Result<Self> {
+        if location.validate_digest {
+            let dv = digest::RafsDigest::from_buf(&buf, digest::Algorithm::Sha256);
+            if dv != location.digest {
+                return Err(eother!("toc content digest value doesn't match"));
+            }
         }
 
         let size = size - 512;
@@ -375,7 +440,9 @@ impl TocEntryList {
         let entry_size = header
             .entry_size()
             .map_err(|_| eother!("failed to get entry size from tar header"))?;
-        if entry_size != size as u64 {
+        if (location.auto_detect && entry_size > size as u64)
+            || (!location.auto_detect && entry_size != size as u64)
+        {
             return Err(eother!(format!(
                 "invalid toc entry size in tar header, expect {}, got {}",
                 size, entry_size
@@ -395,7 +462,7 @@ impl TocEntryList {
             .ok_or_else(|| eother!("invalid GNU tar header for ToC"))?;
 
         let mut list = TocEntryList::new();
-        let mut pos = 0;
+        let mut pos = size - entry_size as usize;
         while pos < size {
             let mut entry = TocEntry::default();
             let s = unsafe {
@@ -414,6 +481,7 @@ impl TocEntryList {
         &self,
         reader: Arc<dyn BlobReader>,
         bootstrap: Option<P>,
+        digest: Option<P>,
     ) -> Result<()> {
         if let Some(path) = bootstrap {
             let bootstrap = self
@@ -443,8 +511,101 @@ impl TocEntryList {
                     .write(true)
                     .truncate(true)
                     .open(p.as_path())?;
-                bootstrap.extract_from_reader(reader, &mut file)?;
+                bootstrap.extract_from_reader(reader.clone(), &mut file)?;
                 fs::rename(p, path)?;
+            }
+        }
+
+        if let Some(path) = digest {
+            let cda = self
+                .get_entry(ENTRY_BLOB_DIGEST)
+                .ok_or_else(|| enoent!("`blob.digest` doesn't exist in the ToC list"))?;
+            if cda.compressor() == compress::Algorithm::None
+                && cda.compressed_size() != cda.uncompressed_size()
+            {
+                return Err(einval!("invalid ToC entry for `image.boot`"));
+            }
+
+            let mut ready = false;
+            if path.as_ref().exists() {
+                let mut file = OpenOptions::new().read(true).open(path.as_ref())?;
+                let digest = RafsDigest::from_reader(&mut file, digest::Algorithm::Sha256)?;
+                if digest.data == cda.uncompressed_digest {
+                    ready = true;
+                }
+            }
+            if !ready {
+                let p = path
+                    .as_ref()
+                    .to_path_buf()
+                    .with_extension("toc_downloading");
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(p.as_path())?;
+                cda.extract_from_reader(reader.clone(), &mut file)?;
+                fs::rename(p, path)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Information to locate ToC in data blobs.
+pub struct TocLocation {
+    /// Enable validating digest of the ToC content.
+    pub validate_digest: bool,
+    /// Auto detect location of ToC content.
+    pub auto_detect: bool,
+    /// Offset of the ToC content in the data blob.
+    pub offset: u64,
+    /// Size of the ToC content.
+    pub size: u64,
+    /// SHA256 digest of ToC content.
+    pub digest: RafsDigest,
+}
+
+impl Default for TocLocation {
+    fn default() -> Self {
+        TocLocation {
+            validate_digest: false,
+            auto_detect: true,
+            offset: 0,
+            size: 0,
+            digest: RafsDigest::default(),
+        }
+    }
+}
+
+impl TocLocation {
+    /// Create a `TocLocation` object with offset and size.
+    pub fn new(offset: u64, size: u64) -> Self {
+        TocLocation {
+            validate_digest: false,
+            auto_detect: false,
+            offset,
+            size,
+            digest: RafsDigest::default(),
+        }
+    }
+
+    /// Create a `TocLocation` object with offset, size and digest.
+    pub fn with_digest(offset: u64, size: u64, digest: RafsDigest) -> Self {
+        TocLocation {
+            validate_digest: true,
+            auto_detect: false,
+            offset,
+            size,
+            digest,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !self.auto_detect {
+            if !(512..=0x10000).contains(&self.size) || self.size % 128 != 0 {
+                return Err(eother!(format!("invalid size {} of blob ToC", self.size)));
             }
         }
 
@@ -457,6 +618,7 @@ mod tests {
     use super::*;
     use crate::factory::BlobFactory;
     use nydus_api::{BackendConfigV2, LocalFsConfig};
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_read_toc_list() {
@@ -482,7 +644,9 @@ mod tests {
         };
         let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();
         let blob = blob_mgr.get_reader(id).unwrap();
-        let list = TocEntryList::read_from_blob(blob.as_ref(), 9010, 1024, &digest).unwrap();
+        let location = TocLocation::with_digest(9010, 1024, digest);
+        let list =
+            TocEntryList::read_from_blob::<fs::File>(blob.as_ref(), None, &location).unwrap();
         assert_eq!(list.entries.len(), 4);
 
         assert!(list.get_entry(ENTRY_BLOB_RAW).is_some());
@@ -501,5 +665,83 @@ mod tests {
         assert_eq!(entry.uncompressed_size, 0x1000);
         entry.extract_from_reader(blob.clone(), &mut buf).unwrap();
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn test_parse_toc_list() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = Path::new(root_dir).join("../tests/texture/toc");
+        let id = "2fa78cad554b75ac91a4a125ed148d0ddeb25efa4aaa8bd80e5dc292690a4dca";
+        let mut digest = RafsDigest {
+            data: [
+                79u8, 223, 187, 54, 239, 116, 163, 198, 58, 40, 226, 171, 175, 165, 64, 68, 199,
+                89, 65, 85, 190, 182, 221, 173, 159, 54, 130, 92, 254, 88, 40, 108,
+            ],
+        };
+        let config = BackendConfigV2 {
+            backend_type: "localfs".to_string(),
+            localfs: Some(LocalFsConfig {
+                blob_file: "".to_string(),
+                dir: path.to_str().unwrap().to_string(),
+                alt_dirs: vec![],
+            }),
+            oss: None,
+            registry: None,
+            s3: None,
+        };
+        let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();
+        let blob = blob_mgr.get_reader(id).unwrap();
+
+        digest.data[0] = 0;
+        let location = TocLocation::with_digest(9010, 1024, digest);
+        assert!(TocEntryList::read_from_blob::<fs::File>(blob.as_ref(), None, &location).is_err());
+        digest.data[0] = 79u8;
+
+        let location = TocLocation::new(9000, 1024);
+        assert!(TocEntryList::read_from_blob::<fs::File>(blob.as_ref(), None, &location).is_err());
+
+        let location = Default::default();
+        let list =
+            TocEntryList::read_from_blob::<fs::File>(blob.as_ref(), None, &location).unwrap();
+        assert_eq!(list.entries.len(), 4);
+    }
+
+    #[test]
+    fn test_read_from_cache_file() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = Path::new(root_dir).join("../tests/texture/toc");
+        let id = "2fa78cad554b75ac91a4a125ed148d0ddeb25efa4aaa8bd80e5dc292690a4dca";
+        let config = BackendConfigV2 {
+            backend_type: "localfs".to_string(),
+            localfs: Some(LocalFsConfig {
+                blob_file: "".to_string(),
+                dir: path.to_str().unwrap().to_string(),
+                alt_dirs: vec![],
+            }),
+            oss: None,
+            registry: None,
+            s3: None,
+        };
+        let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();
+        let blob = blob_mgr.get_reader(id).unwrap();
+
+        let tempfile = TempFile::new().unwrap();
+        let path = tempfile.as_path().to_path_buf();
+        let mut file = tempfile.into_file();
+        file.write_all(&[0u8; 32]).unwrap();
+
+        let location = Default::default();
+        let list = TocEntryList::read_from_cache_file(&path, blob.as_ref(), &location).unwrap();
+        assert_eq!(list.entries.len(), 4);
+        assert_eq!(path.metadata().unwrap().len(), 0x1000);
+        let list = TocEntryList::read_from_cache_file(&path, blob.as_ref(), &location).unwrap();
+        assert_eq!(list.entries.len(), 4);
+
+        list.extract_from_blob(blob.clone(), Some(path.as_path()), None)
+            .unwrap();
+        assert_eq!(path.metadata().unwrap().len(), 20480);
+        list.extract_from_blob(blob.clone(), Some(path.as_path()), None)
+            .unwrap();
+        assert_eq!(path.metadata().unwrap().len(), 20480);
     }
 }
