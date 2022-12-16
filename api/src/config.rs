@@ -53,6 +53,25 @@ impl ConfigV2 {
         }
     }
 
+    /// Create a new configuration object for `backend-localfs` and `filecache`.
+    pub fn new_localfs(id: &str, dir: &str) -> Result<Self> {
+        let content = format!(
+            r#"
+        version = 2
+        id = "{}"
+        backend.type = "localfs"
+        backend.localfs.dir = "{}"
+        cache.type = "filecache"
+        cache.compressed = false
+        cache.validate = false
+        cache.filecache.work_dir = "{}"
+        "#,
+            id, dir, dir
+        );
+
+        Self::from_str(&content)
+    }
+
     /// Read configuration information from a file.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let md = fs::metadata(path.as_ref())?;
@@ -1655,5 +1674,12 @@ mod tests {
         "#;
         let config = ConfigV2::from_str(content).unwrap();
         assert_eq!(&config.id, "");
+    }
+
+    #[test]
+    fn test_new_localfs() {
+        let config = ConfigV2::new_localfs("id1", "./").unwrap();
+        assert_eq!(&config.id, "id1");
+        assert_eq!(config.backend.as_ref().unwrap().backend_type, "localfs");
     }
 }

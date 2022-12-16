@@ -424,13 +424,9 @@ impl TocEntryList {
     }
 
     fn parse(buf: &[u8], size: usize, location: &TocLocation) -> Result<Self> {
-        if location.validate_digest {
-            let dv = digest::RafsDigest::from_buf(buf, digest::Algorithm::Sha256);
-            if dv != location.digest {
-                return Err(eother!("toc content digest value doesn't match"));
-            }
+        if size < 512 {
+            return Err(einval!(format!("blob ToC size {} is too small", size)));
         }
-
         let size = size - 512;
         let header = Header::from_byte_slice(&buf[size..]);
         let entry_type = header.entry_type();
@@ -463,6 +459,16 @@ impl TocEntryList {
 
         let mut list = TocEntryList::new();
         let mut pos = size - entry_size as usize;
+        if location.validate_digest {
+            let dv = digest::RafsDigest::from_buf(&buf[pos..], digest::Algorithm::Sha256);
+            if dv != location.digest {
+                return Err(eother!(format!(
+                    "toc content digest value doesn't match, expect {:?}, got {:?}",
+                    location.digest.data, dv.data
+                )));
+            }
+        }
+
         while pos < size {
             let mut entry = TocEntry::default();
             let s = unsafe {
@@ -554,6 +560,7 @@ impl TocEntryList {
 }
 
 /// Information to locate ToC in data blobs.
+#[derive(Debug)]
 pub struct TocLocation {
     /// Enable validating digest of the ToC content.
     pub validate_digest: bool,
