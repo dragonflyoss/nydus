@@ -42,7 +42,7 @@ use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
 
 pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
-pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_000f;
+pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_001f;
 
 bitflags! {
     /// Features bits for blob management.
@@ -55,6 +55,8 @@ bitflags! {
         const CHUNK_INFO_V2 = 0x0000_0004;
         /// Blob compression information data include context data for zlib random access.
         const ZRAN = 0x0000_0008;
+        /// Chunk digest array is inlined in the data blob.
+        const INLINED_CHUNK_DIGEST = 0x0000_0010;
         /// Rafs V5 image without extended blob table, this is an internal flag.
         const _V5_NO_EXT_BLOB_TABLE = 0x1000_0000;
     }

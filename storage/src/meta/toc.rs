@@ -425,7 +425,7 @@ impl TocEntryList {
 
     fn parse(buf: &[u8], size: usize, location: &TocLocation) -> Result<Self> {
         if location.validate_digest {
-            let dv = digest::RafsDigest::from_buf(&buf, digest::Algorithm::Sha256);
+            let dv = digest::RafsDigest::from_buf(buf, digest::Algorithm::Sha256);
             if dv != location.digest {
                 return Err(eother!("toc content digest value doesn't match"));
             }
@@ -603,10 +603,8 @@ impl TocLocation {
     }
 
     fn validate(&self) -> Result<()> {
-        if !self.auto_detect {
-            if !(512..=0x10000).contains(&self.size) || self.size % 128 != 0 {
-                return Err(eother!(format!("invalid size {} of blob ToC", self.size)));
-            }
+        if !self.auto_detect && (!(512..=0x10000).contains(&self.size) || self.size % 128 != 0) {
+            return Err(eother!(format!("invalid size {} of blob ToC", self.size)));
         }
 
         Ok(())

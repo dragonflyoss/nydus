@@ -199,7 +199,11 @@ impl FileCacheEntry {
         let blob_uncompressed_size = blob_info.uncompressed_size();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
-        let need_validation = (mgr.validate || !is_direct_chunkmap) && !is_legacy_stargz;
+        // Validation is supported by RAFS v5 (which has no meta_ci) or v6 with chunk digest array.
+        let validation_supported = !blob_info.meta_ci_is_valid()
+            || blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
+        let need_validation =
+            ((mgr.validate && validation_supported) || !is_direct_chunkmap) && !is_legacy_stargz;
         trace!(
             "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, zran {}",
             mgr.cache_raw_data,
@@ -231,6 +235,7 @@ impl FileCacheEntry {
                 Some(rafs_blob_reader),
                 Some(runtime.clone()),
                 false,
+                need_validation,
             )?;
             Some(meta)
         } else {
