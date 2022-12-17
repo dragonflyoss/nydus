@@ -215,6 +215,9 @@ impl FileCacheEntry {
             .get_reader(blob_info.blob_id())
             .map_err(|_e| eio!("failed to get blob reader"))?;
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
+        let need_validation = mgr.need_validation
+            && !blob_info.is_legacy_stargz()
+            && blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
         let rafs_blob_reader = if blob_info.rafs_blob_digest() != &[0u8; 32] {
             let ref_blob_id = hex::encode(blob_info.rafs_blob_digest());
             mgr.backend
@@ -230,6 +233,7 @@ impl FileCacheEntry {
                 Some(rafs_blob_reader),
                 None,
                 true,
+                need_validation,
             )?
         } else {
             return Err(enosys!(
@@ -259,7 +263,7 @@ impl FileCacheEntry {
             is_legacy_stargz: blob_info.is_legacy_stargz(),
             is_zran,
             dio_enabled: true,
-            need_validation: mgr.need_validation && !blob_info.is_legacy_stargz(),
+            need_validation,
             batch_size: RAFS_DEFAULT_CHUNK_SIZE,
             prefetch_config,
         })

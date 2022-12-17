@@ -212,6 +212,7 @@ impl Display for BlobChunkInfoV2Ondisk {
 mod tests {
     use super::*;
     use crate::meta::BlobMetaChunkArray;
+    use nydus_utils::digest::RafsDigest;
     use nydus_utils::filemap::FileMapState;
     use std::mem::ManuallyDrop;
 
@@ -286,9 +287,12 @@ mod tests {
                     data: 0,
                 },
             ])),
+            chunk_digest_array: Default::default(),
             zran_info_array: Default::default(),
             zran_dict_table: Default::default(),
-            filemap: FileMapState::default(),
+            blob_meta_file_map: FileMapState::default(),
+            chunk_digest_file_map: FileMapState::default(),
+            chunk_digest_default: RafsDigest::default(),
         };
 
         assert_eq!(

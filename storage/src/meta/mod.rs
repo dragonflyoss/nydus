@@ -43,15 +43,17 @@ use std::fs::OpenOptions;
 use std::io::Result;
 use std::mem::{size_of, ManuallyDrop};
 use std::ops::{Add, BitAnd, Not};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nydus_utils::compress;
 use nydus_utils::compress::zlib_random::ZranContext;
-use nydus_utils::digest::RafsDigest;
+use nydus_utils::digest::{DigestData, RafsDigest};
 use nydus_utils::filemap::FileMapState;
 
 use crate::backend::BlobReader;
 use crate::device::{BlobChunkInfo, BlobFeatures, BlobInfo};
+use crate::meta::toc::{TocEntryList, TocLocation};
 use crate::utils::alloc_buf;
 use crate::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 
@@ -76,7 +78,9 @@ const BLOB_METADATA_V2_MAX_SIZE: u64 = RAFS_MAX_CHUNK_SIZE * 24;
 const BLOB_METADATA_V2_RESERVED_SIZE: u64 = BLOB_METADATA_HEADER_SIZE - 64;
 
 /// File suffix for blob meta file.
-pub const FILE_SUFFIX: &str = "blob.meta";
+const META_FILE_SUFFIX: &str = "blob.meta";
+const DIGEST_FILE_SUFFIX: &str = "blob.digest";
+const TOC_FILE_SUFFIX: &str = "blob.toc";
 
 /// On disk format for blob meta data header, containing meta information for a data blob.
 #[repr(C)]
@@ -259,6 +263,15 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
+    /// Set flag indicating that chunk digest is inlined in the data blob.
+    pub fn set_inlined_chunk_digest(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::INLINED_CHUNK_DIGEST.bits();
+        } else {
+            self.s_features &= !BlobFeatures::INLINED_CHUNK_DIGEST.bits();
+        }
+    }
+
     /// Get blob meta feature flags.
     pub fn features(&self) -> u32 {
         self.s_features
@@ -298,6 +311,7 @@ impl BlobMetaInfo {
         blob_path: &str,
         blob_info: &BlobInfo,
         reader: Option<&Arc<dyn BlobReader>>,
+        load_chunk_digest: bool,
     ) -> Result<Self> {
         assert_eq!(
             size_of::<BlobMetaHeaderOndisk>() as u64,
@@ -313,7 +327,7 @@ impl BlobMetaInfo {
         }
 
         let uncompressed_size = blob_info.meta_ci_uncompressed_size() as usize;
-        let meta_path = format!("{}.{}", blob_path, FILE_SUFFIX);
+        let meta_path = format!("{}.{}", blob_path, META_FILE_SUFFIX);
         trace!(
             "try to open blob meta file: path {:?} uncompressed_size {} chunk_count {}",
             meta_path,
@@ -351,19 +365,19 @@ impl BlobMetaInfo {
         let base = filemap.validate_range(0, expected_size)?;
         let header = filemap.get_mut::<BlobMetaHeaderOndisk>(aligned_uncompressed_size as usize)?;
         if !Self::validate_header(blob_info, header)? {
-            if !enable_write {
+            if let Some(reader) = reader {
+                let buffer =
+                    unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
+                buffer[0..].fill(0);
+                Self::read_metadata(blob_info, reader, buffer)?;
+                assert!(Self::validate_header(blob_info, header).is_ok());
+                filemap.sync_data()?;
+            } else {
                 return Err(enoent!(format!(
                     "blob metadata file '{}' header is invalid",
                     meta_path
                 )));
             }
-
-            let buffer = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
-            buffer[0..].fill(0);
-            Self::read_metadata(blob_info, reader.as_ref().unwrap(), buffer)?;
-
-            assert!(Self::validate_header(blob_info, header).is_ok());
-            filemap.sync_data()?;
         }
 
         let chunk_infos = BlobMetaChunkArray::from_file_map(&filemap, blob_info)?;
@@ -374,20 +388,25 @@ impl BlobMetaInfo {
             compressed_size: blob_info.compressed_size(),
             uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_info_array: chunk_infos,
+            chunk_digest_array: Default::default(),
             zran_info_array: Default::default(),
             zran_dict_table: Default::default(),
-            filemap,
+            blob_meta_file_map: filemap,
+            chunk_digest_file_map: FileMapState::default(),
+            chunk_digest_default: RafsDigest::default(),
         };
 
         if blob_info.has_feature(BlobFeatures::ZRAN) {
             let header = state
-                .filemap
+                .blob_meta_file_map
                 .get_mut::<BlobMetaHeaderOndisk>(aligned_uncompressed_size as usize)?;
             let zran_offset = header.s_ci_zran_offset as usize;
             let zran_count = header.s_ci_zran_count as usize;
             let ci_zran_size = header.s_ci_zran_size as usize;
             let zran_size = header.s_ci_zran_count as usize * size_of::<ZranInflateContext>();
-            let ptr = state.filemap.validate_range(zran_offset, zran_size)?;
+            let ptr = state
+                .blob_meta_file_map
+                .validate_range(zran_offset, zran_size)?;
             let array = unsafe {
                 Vec::from_raw_parts(
                     ptr as *mut u8 as *mut ZranInflateContext,
@@ -399,11 +418,64 @@ impl BlobMetaInfo {
 
             let zran_dict_size = ci_zran_size - zran_size;
             let ptr = state
-                .filemap
+                .blob_meta_file_map
                 .validate_range(zran_offset + zran_size, zran_dict_size)?;
             let array =
                 unsafe { Vec::from_raw_parts(ptr as *mut u8, zran_dict_size, zran_dict_size) };
             state.zran_dict_table = ManuallyDrop::new(array);
+        }
+
+        if load_chunk_digest && blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
+            let digest_path = PathBuf::from(format!("{}.{}", blob_path, DIGEST_FILE_SUFFIX));
+            if let Some(reader) = reader {
+                let toc_path = format!("{}.{}", blob_path, TOC_FILE_SUFFIX);
+                let location = if blob_info.rafs_blob_toc_size() != 0 {
+                    let offset =
+                        blob_info.compressed_size() - blob_info.rafs_blob_toc_size() as u64;
+                    let mut location =
+                        TocLocation::new(offset, blob_info.rafs_blob_toc_size() as u64);
+                    let digest = blob_info.rafs_blob_toc_digest();
+                    for c in digest {
+                        if *c != 0 {
+                            location.validate_digest = true;
+                            location.digest.data = *digest;
+                            break;
+                        }
+                    }
+                    location
+                } else {
+                    TocLocation::default()
+                };
+                let toc_list =
+                    TocEntryList::read_from_cache_file(&toc_path, reader.as_ref(), &location)?;
+                toc_list.extract_from_blob(reader.clone(), None, Some(&digest_path))?;
+            }
+            if !digest_path.exists() {
+                return Err(eother!("failed to download chunk digest file from blob"));
+            }
+
+            let file = OpenOptions::new().read(true).open(&digest_path)?;
+            let md = file.metadata()?;
+            let size = 32 * blob_info.chunk_count() as usize;
+            if md.len() != size as u64 {
+                return Err(eother!(format!(
+                    "size of chunk digest file doesn't match, expect {}, got {}",
+                    size,
+                    md.len()
+                )));
+            }
+
+            let file_map = FileMapState::new(file, 0, size, false)?;
+            let ptr = file_map.validate_range(0, size)?;
+            let array = unsafe {
+                Vec::from_raw_parts(
+                    ptr as *mut u8 as *mut _,
+                    chunk_count as usize,
+                    chunk_count as usize,
+                )
+            };
+            state.chunk_digest_file_map = file_map;
+            state.chunk_digest_array = ManuallyDrop::new(array);
         }
 
         Ok(BlobMetaInfo {
@@ -498,10 +570,27 @@ impl BlobMetaInfo {
         self.state.add_more_chunks(chunks, max_size)
     }
 
+    /// Get uncompressed offset of chunks.
     pub fn get_uncompressed_offset(&self, chunk_index: usize) -> u64 {
         self.state.get_uncompressed_offset(chunk_index)
     }
 
+    /// Get number of chunks in the data blob.
+    pub fn get_chunk_count(&self) -> usize {
+        self.state.chunk_info_array.len()
+    }
+
+    /// Get content digest for chunks.
+    pub fn get_chunk_digest(&self, chunk_index: usize) -> Option<&[u8]> {
+        self.state.get_chunk_digest(chunk_index)
+    }
+
+    /// Get `BlobChunkInfo` object for chunks.
+    pub fn get_chunk_info(&self, chunk_index: usize) -> Arc<dyn BlobChunkInfo> {
+        BlobMetaChunk::new(chunk_index, &self.state)
+    }
+
+    /// Get chunk index for an uncompressed offset.
     pub fn get_chunk_index(&self, addr: u64) -> Result<usize> {
         self.state.get_chunk_index(addr)
     }
@@ -678,9 +767,12 @@ pub struct BlobMetaState {
     pub(crate) compressed_size: u64,
     pub(crate) uncompressed_size: u64,
     pub(crate) chunk_info_array: ManuallyDrop<BlobMetaChunkArray>,
+    pub(crate) chunk_digest_array: ManuallyDrop<Vec<DigestData>>,
     pub(crate) zran_info_array: ManuallyDrop<Vec<ZranInflateContext>>,
     pub(crate) zran_dict_table: ManuallyDrop<Vec<u8>>,
-    filemap: FileMapState,
+    blob_meta_file_map: FileMapState,
+    chunk_digest_file_map: FileMapState,
+    chunk_digest_default: RafsDigest,
 }
 
 impl BlobMetaState {
@@ -717,6 +809,14 @@ impl BlobMetaState {
 
     fn get_uncompressed_offset(&self, chunk_index: usize) -> u64 {
         self.chunk_info_array.uncompressed_offset(chunk_index)
+    }
+
+    fn get_chunk_digest(&self, chunk_index: usize) -> Option<&[u8]> {
+        if chunk_index < self.chunk_digest_array.len() {
+            Some(&self.chunk_digest_array[chunk_index])
+        } else {
+            None
+        }
     }
 
     fn get_chunk_index(&self, addr: u64) -> Result<usize> {
@@ -1328,7 +1428,12 @@ impl BlobMetaChunk {
 
 impl BlobChunkInfo for BlobMetaChunk {
     fn chunk_id(&self) -> &RafsDigest {
-        panic!("BlobMetaChunk doesn't support `chunk_id()`");
+        if self.chunk_index < self.meta.chunk_digest_array.len() {
+            let digest = &self.meta.chunk_digest_array[self.chunk_index];
+            digest.into()
+        } else {
+            &self.meta.chunk_digest_default
+        }
     }
 
     fn id(&self) -> u32 {
@@ -1512,7 +1617,7 @@ pub(crate) mod tests {
             features,
         );
         blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
-        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
+        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None, false).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
         assert_eq!(meta.state.zran_dict_table.len(), 0xa0348 - 0x15 * 40);
@@ -1565,7 +1670,7 @@ pub(crate) mod tests {
             features,
         );
         blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
-        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
+        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None, false).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
         assert_eq!(meta.state.zran_dict_table.len(), 0xa0348 - 0x15 * 40);
@@ -1622,7 +1727,7 @@ pub(crate) mod tests {
             features,
         );
         blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
-        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None).unwrap();
+        let meta = BlobMetaInfo::new(&path.display().to_string(), &blob_info, None, false).unwrap();
         assert_eq!(meta.state.chunk_info_array.len(), 0xa3);
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
         assert_eq!(meta.state.zran_dict_table.len(), 0xa0348 - 0x15 * 40);

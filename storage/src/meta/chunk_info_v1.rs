@@ -132,6 +132,7 @@ mod tests {
     use std::sync::Arc;
 
     use nydus_utils::compress;
+    use nydus_utils::digest::RafsDigest;
     use nydus_utils::filemap::FileMapState;
     use nydus_utils::metrics::BackendMetrics;
     use vmm_sys_util::tempfile::TempFile;
@@ -205,9 +206,12 @@ mod tests {
                     comp_info: u64::to_le(0x00ff_f000_0010_0000),
                 },
             ])),
+            chunk_digest_array: Default::default(),
             zran_info_array: Default::default(),
             zran_dict_table: Default::default(),
-            filemap: FileMapState::default(),
+            blob_meta_file_map: FileMapState::default(),
+            chunk_digest_file_map: FileMapState::default(),
+            chunk_digest_default: RafsDigest::default(),
         };
 
         assert_eq!(
@@ -281,9 +285,12 @@ mod tests {
                     comp_info: u64::to_le(0x00ff_f000_0000_5000),
                 },
             ])),
+            chunk_digest_array: Default::default(),
             zran_info_array: Default::default(),
             zran_dict_table: Default::default(),
-            filemap: FileMapState::default(),
+            blob_meta_file_map: FileMapState::default(),
+            chunk_digest_file_map: FileMapState::default(),
+            chunk_digest_default: RafsDigest::default(),
         };
         let info = BlobMetaInfo {
             state: Arc::new(state),
