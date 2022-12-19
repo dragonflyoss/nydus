@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io::Result;
 use std::sync::Arc;
 
-use nydus_storage::device::BlobInfo;
+use nydus_storage::device::{BlobChunkInfo, BlobDevice, BlobInfo};
 
 use crate::metadata::{Inode, RafsInode, RafsSuperBlock, RafsSuperInodes};
 use crate::mock::MockInode;
@@ -63,6 +63,14 @@ impl RafsSuperBlock for MockSuperBlock {
     }
 
     fn root_ino(&self) -> u64 {
+        unimplemented!()
+    }
+
+    fn get_chunk_info(&self, _idx: usize) -> Result<Arc<dyn BlobChunkInfo>> {
+        unimplemented!()
+    }
+
+    fn set_blob_device(&self, _blob_device: BlobDevice) {
         unimplemented!()
     }
 }

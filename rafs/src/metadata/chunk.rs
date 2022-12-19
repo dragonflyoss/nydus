@@ -8,6 +8,7 @@ use std::fmt::{self, Display, Formatter};
 use anyhow::{Context, Result};
 use nydus_storage::device::v5::BlobV5ChunkInfo;
 use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo};
+use nydus_storage::meta::BlobMetaChunk;
 use nydus_utils::digest::RafsDigest;
 
 use crate::metadata::cached_v5::CachedChunkInfoV5;
@@ -37,7 +38,9 @@ impl ChunkWrapper {
 
     /// Create a `ChunkWrapper` object from a `BlobChunkInfo` trait object.
     pub fn from_chunk_info(cki: &dyn BlobChunkInfo) -> Self {
-        if let Some(cki_v5) = cki.as_any().downcast_ref::<CachedChunkInfoV5>() {
+        if let Some(cki) = cki.as_any().downcast_ref::<BlobMetaChunk>() {
+            ChunkWrapper::V6(to_rafsv5_chunk_info(cki))
+        } else if let Some(cki_v5) = cki.as_any().downcast_ref::<CachedChunkInfoV5>() {
             ChunkWrapper::V5(to_rafsv5_chunk_info(cki_v5))
         } else if let Some(cki_v5) = cki.as_any().downcast_ref::<DirectChunkInfoV5>() {
             ChunkWrapper::V5(to_rafsv5_chunk_info(cki_v5))

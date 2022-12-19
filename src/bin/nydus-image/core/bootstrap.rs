@@ -18,8 +18,8 @@ use nydus_rafs::metadata::layout::v6::{
 };
 use nydus_rafs::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
 use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperConfig};
-use nydus_utils::digest;
-use nydus_utils::digest::{DigestHasher, RafsDigest};
+use nydus_storage::device::BlobFeatures;
+use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 
 use super::context::{
     ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
@@ -318,6 +318,10 @@ impl Bootstrap {
             };
             rs.load(r)
                 .context("failed to load superblock from bootstrap")?;
+            if rs.meta.has_inlined_chunk_digest() {
+                rs.create_blob_device(ctx.configuration.clone())
+                    .context("failed to create `BlobDevice` for `RafsSuper`")?;
+            }
             rs
         } else {
             return Err(Error::msg("bootstrap context's parent bootstrap is null"));
@@ -547,6 +551,7 @@ impl Bootstrap {
         let mut devtable: Vec<RafsV6Device> = Vec::new();
         let blobs = blob_table.get_all();
         let mut block_count = 0u32;
+        let mut inlined_chunk_digest = true;
         for entry in blobs.iter() {
             let mut devslot = RafsV6Device::new();
             // blob id is String, which is processed by sha256.finalize().
@@ -562,6 +567,9 @@ impl Bootstrap {
                     "uncompressed blob size (0x:{:x}) is too big",
                     entry.uncompressed_size()
                 ));
+            }
+            if !entry.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
+                inlined_chunk_digest = false;
             }
             let cnt = (entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32;
             assert!(block_count.checked_add(cnt).is_some());
@@ -645,6 +653,9 @@ impl Bootstrap {
         // we need to write extended_sb until chunk table is dumped.
         if ctx.explicit_uidgid {
             ext_sb.set_explicit_uidgid();
+        }
+        if inlined_chunk_digest {
+            ext_sb.set_inlined_chunk_digest();
         }
 
         // dump devtslot

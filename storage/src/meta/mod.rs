@@ -1575,6 +1575,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     if features.contains(BlobFeatures::ZRAN) {
         output += "zran ";
     }
+    if features.contains(BlobFeatures::INLINED_CHUNK_DIGEST) {
+        output += "chunk-digest ";
+    }
     output.trim_end().to_string()
 }
 
