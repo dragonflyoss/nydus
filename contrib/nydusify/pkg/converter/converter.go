@@ -432,9 +432,6 @@ func (cvt *Converter) Convert(ctx context.Context) error {
 		if utils.RetryWithHTTP(err) {
 			cvt.SourceRemote.MaybeWithHTTP(err)
 			cvt.TargetRemote.MaybeWithHTTP(err)
-			if cvt.CacheRemote != nil {
-				cvt.CacheRemote.MaybeWithHTTP(err)
-			}
 			return cvt.convert(ctx)
 		}
 		return errors.Wrap(err, "Failed to convert")

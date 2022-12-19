@@ -49,10 +49,15 @@ func newCacheGlue(
 		return nil, errors.Wrap(err, "Import cache image")
 	}
 
-	// Ingore the error of importing cache image, it doesn't affect
+	// Ignore the error of importing cache image, it doesn't affect
 	// the build workflow.
 	if err := cache.Import(ctx); err != nil {
-		logrus.Warnf("Failed to import cache: %s", err)
+		if utils.RetryWithHTTP(err) {
+			cacheRemote.MaybeWithHTTP(err)
+			if err := cache.Import(ctx); err != nil {
+				logrus.Warnf("Failed to import cache: %s", err)
+			}
+		}
 	}
 
 	return &cacheGlue{
