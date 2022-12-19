@@ -16,6 +16,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 )
 
@@ -137,6 +138,11 @@ func (checker *Checker) check(ctx context.Context) error {
 		}
 	}
 
+	var sourceRemote *remote.Remote
+	if checker.sourceParser != nil {
+		sourceRemote = checker.sourceParser.Remote
+	}
+
 	rules := []rule.Rule{
 		&rule.ManifestRule{
 			SourceParsed:  sourceParsed,
@@ -157,7 +163,7 @@ func (checker *Checker) check(ctx context.Context) error {
 			SourceMountPath: filepath.Join(checker.WorkDir, "fs/source_mounted"),
 			SourceParsed:    sourceParsed,
 			SourcePath:      filepath.Join(checker.WorkDir, "fs/source"),
-			SourceRemote:    checker.sourceParser.Remote,
+			SourceRemote:    sourceRemote,
 			Target:          checker.Target,
 			TargetInsecure:  checker.TargetInsecure,
 			PlainHTTP:       checker.targetParser.Remote.IsWithHTTP(),
