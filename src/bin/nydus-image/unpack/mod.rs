@@ -10,7 +10,7 @@ use std::str;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nydus_api::LocalFsConfig;
+use nydus_api::{ConfigV2, LocalFsConfig};
 use nydus_rafs::{
     metadata::{RafsInodeExt, RafsMode, RafsSuper},
     RafsIoReader, RafsIterator,
@@ -30,7 +30,7 @@ use self::pax::{
 mod pax;
 
 pub trait Unpacker {
-    fn unpack(&self) -> Result<()>;
+    fn unpack(&self, config: Arc<ConfigV2>) -> Result<()>;
 }
 
 ///  A unpacker with the ability to convert bootstrap file and blob file to tar
@@ -58,7 +58,7 @@ impl OCIUnpacker {
         })
     }
 
-    fn load_rafs(&self) -> Result<RafsSuper> {
+    fn load_rafs(&self, config: Arc<ConfigV2>) -> Result<RafsSuper> {
         let bootstrap = OpenOptions::new()
             .read(true)
             .write(false)
@@ -67,25 +67,29 @@ impl OCIUnpacker {
 
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
-            validate_digest: false,
+            validate_digest: config.is_chunk_validation_enabled(),
             ..Default::default()
         };
 
         rs.load(&mut (Box::new(bootstrap) as RafsIoReader))
             .with_context(|| format!("fail to load bootstrap {:?}", self.bootstrap))?;
+        if config.is_chunk_validation_enabled() && rs.meta.has_inlined_chunk_digest() {
+            rs.create_blob_device(config)
+                .context("failed to create blob device")?;
+        }
 
         Ok(rs)
     }
 }
 
 impl Unpacker for OCIUnpacker {
-    fn unpack(&self) -> Result<()> {
+    fn unpack(&self, config: Arc<ConfigV2>) -> Result<()> {
         debug!(
             "oci unpacker, bootstrap file: {:?}, blob file: {:?}, output file: {:?}",
             self.bootstrap, self.blob, self.output
         );
 
-        let rafs = self.load_rafs()?;
+        let rafs = self.load_rafs(config)?;
 
         let mut builder = self
             .builder_factory

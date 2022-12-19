@@ -22,7 +22,7 @@ use std::time::Duration;
 use anyhow::bail;
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::Entry;
-use nydus_api::RafsConfigV2;
+use nydus_api::{ConfigV2, RafsConfigV2};
 use nydus_storage::device::{BlobChunkInfo, BlobDevice, BlobInfo, BlobIoMerge, BlobIoVec};
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
@@ -96,9 +96,10 @@ pub trait RafsSuperBlock: RafsSuperInodes + Send + Sync {
     fn root_ino(&self) -> u64;
 
     /// Get the `BlobChunkInfo` object by a chunk index, used by RAFS v6.
-    fn get_chunk_info(&self, _idx: usize) -> Result<Arc<dyn BlobChunkInfo>> {
-        unimplemented!()
-    }
+    fn get_chunk_info(&self, _idx: usize) -> Result<Arc<dyn BlobChunkInfo>>;
+
+    /// Associate `BlobDevice` object with the `RafsSuperBlock` object, used by RAFS v6.
+    fn set_blob_device(&self, blob_device: BlobDevice);
 }
 
 /// Result codes for `RafsInodeWalkHandler`.
@@ -263,10 +264,12 @@ bitflags! {
         const EXPLICIT_UID_GID = 0x0000_0010;
         /// Inode may have associated extended attributes.
         const HAS_XATTR = 0x0000_0020;
-        // Data chunks are compressed with gzip
+        /// Data chunks are compressed with gzip
         const COMPRESSION_GZIP = 0x0000_0040;
-        // Data chunks are compressed with zstd
+        /// Data chunks are compressed with zstd
         const COMPRESSION_ZSTD = 0x0000_0080;
+        /// Chunk digests are inlined in RAFS v6 data blob.
+        const INLINED_CHUNK_DIGEST = 0x0000_0100;
     }
 }
 
@@ -451,6 +454,11 @@ impl RafsSuperMeta {
     /// Check whether the filesystem supports extended attribute or not.
     pub fn has_xattr(&self) -> bool {
         self.flags.contains(RafsSuperFlags::HAS_XATTR)
+    }
+
+    /// Check whether data blobs have inlined chunk digest array.
+    pub fn has_inlined_chunk_digest(&self) -> bool {
+        self.is_v6() && self.flags.contains(RafsSuperFlags::INLINED_CHUNK_DIGEST)
     }
 
     /// Get compression algorithm to handle chunk data for the filesystem.
@@ -674,6 +682,14 @@ impl RafsSuper {
         Err(einval!("invalid superblock version number"))
     }
 
+    /// Create `BlobDevice` for `RafsSuper` object, which will be used to parse blob meta.
+    pub fn create_blob_device(&self, config: Arc<ConfigV2>) -> Result<()> {
+        let blobs = self.superblock.get_blob_infos();
+        let device = BlobDevice::new(&config, &blobs)?;
+        self.superblock.set_blob_device(device);
+        Ok(())
+    }
+
     /// Update the filesystem metadata and storage backend.
     pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
         if self.meta.is_v5() {
@@ -856,7 +872,7 @@ impl RafsSuper {
 // For nydus-image
 impl RafsSuper {
     /// Load Rafs super block from a metadata file for a chunk dictionary.
-    pub fn load_chunk_dict_from_metadata(path: &Path) -> Result<Self> {
+    pub fn load_chunk_dict_from_metadata(path: &Path, config: Arc<ConfigV2>) -> Result<Self> {
         // open bootstrap file
         let file = OpenOptions::new().read(true).write(false).open(path)?;
         let mut rs = RafsSuper {
@@ -868,6 +884,9 @@ impl RafsSuper {
 
         rs.meta.is_chunk_dict = true;
         rs.load(&mut reader)?;
+        if rs.meta.has_inlined_chunk_digest() {
+            rs.create_blob_device(config)?;
+        }
 
         Ok(rs)
     }

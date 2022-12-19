@@ -477,6 +477,11 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= RafsSuperFlags::EXPLICIT_UID_GID.bits();
     }
 
+    /// Set flag indicating that chunk digest is inlined in the data blob.
+    pub fn set_inlined_chunk_digest(&mut self) {
+        self.s_flags |= RafsSuperFlags::INLINED_CHUNK_DIGEST.bits();
+    }
+
     /// Set message digest algorithm to handle chunk of the Rafs filesystem.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         let c: RafsSuperFlags = digester.into();

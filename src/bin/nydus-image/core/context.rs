@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
+use nydus_api::ConfigV2;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
 use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
@@ -32,6 +33,7 @@ use nydus_storage::meta::{
     toc, BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
     ZranContextGenerator,
 };
+use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
@@ -364,6 +366,8 @@ pub struct BlobContext {
     pub blob_meta_info: BlobMetaChunkArray,
     /// Blob metadata header stored in the data blob, for v6
     pub blob_meta_header: BlobMetaHeaderOndisk,
+    /// Blob chunk digest array.
+    pub blob_chunk_digest: Vec<DigestData>,
 
     /// Final compressed blob file size.
     pub compressed_blob_size: u64,
@@ -415,6 +419,7 @@ impl BlobContext {
             blob_meta_info_enabled: false,
             blob_meta_info,
             blob_meta_header: BlobMetaHeaderOndisk::default(),
+            blob_chunk_digest: Vec::new(),
 
             compressed_blob_size: 0,
             uncompressed_blob_size: 0,
@@ -442,6 +447,9 @@ impl BlobContext {
         }
         if features.contains(BlobFeatures::ZRAN) {
             blob_ctx.blob_meta_header.set_ci_zran(true);
+        }
+        if features.contains(BlobFeatures::INLINED_CHUNK_DIGEST) {
+            blob_ctx.blob_meta_header.set_inlined_chunk_digest(true);
         }
 
         blob_ctx
@@ -524,6 +532,7 @@ impl BlobContext {
                         chunk.uncompressed_offset(),
                         chunk.uncompressed_size(),
                     );
+                    self.blob_chunk_digest.push(chunk.id().data);
                 }
                 BlobMetaChunkArray::V2(_) => {
                     if let Some(mut info) = chunk_info {
@@ -539,6 +548,7 @@ impl BlobContext {
                             0,
                         );
                     }
+                    self.blob_chunk_digest.push(chunk.id().data);
                 }
             }
         }
@@ -942,6 +952,7 @@ pub struct BuildContext {
     pub has_xattr: bool,
 
     pub features: Features,
+    pub configuration: Arc<ConfigV2>,
 }
 
 impl BuildContext {
@@ -985,6 +996,7 @@ impl BuildContext {
             has_xattr: false,
 
             features,
+            configuration: Arc::new(ConfigV2::default()),
         }
     }
 
@@ -994,6 +1006,10 @@ impl BuildContext {
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
         self.chunk_size = chunk_size;
+    }
+
+    pub fn set_configuration(&mut self, config: Arc<ConfigV2>) {
+        self.configuration = config;
     }
 }
 
@@ -1022,6 +1038,7 @@ impl Default for BuildContext {
             has_xattr: true,
             blob_inline_meta: false,
             features: Features::new(),
+            configuration: Arc::new(ConfigV2::default()),
         }
     }
 }

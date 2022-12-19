@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use nydus_api::ConfigV2;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::layout::v5::RafsV5ChunkInfo;
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig};
@@ -16,6 +17,7 @@ use nydus_storage::device::BlobInfo;
 use nydus_utils::digest::RafsDigest;
 
 use crate::core::tree::Tree;
+
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct DigestWithBlobIndex(pub RafsDigest, pub u32);
 
@@ -93,9 +95,10 @@ impl ChunkDict for HashChunkDict {
 impl HashChunkDict {
     fn from_bootstrap_file(
         path: &Path,
+        config: Arc<ConfigV2>,
         target_rafs_config: Option<RafsSuperConfig>,
     ) -> Result<Self> {
-        let rs = RafsSuper::load_chunk_dict_from_metadata(path)
+        let rs = RafsSuper::load_chunk_dict_from_metadata(path, config)
             .with_context(|| format!("failed to open bootstrap file {:?}", path))?;
         let mut d = HashChunkDict {
             m: HashMap::new(),
@@ -106,7 +109,7 @@ impl HashChunkDict {
         let config = target_rafs_config.unwrap_or_else(|| rs.meta.get_config());
         config.check_compatibility(&rs.meta)?;
 
-        if rs.meta.is_v5() {
+        if rs.meta.is_v5() || rs.meta.has_inlined_chunk_digest() {
             Tree::from_bootstrap(&rs, &mut d).context("failed to build tree from bootstrap")?;
         } else if rs.meta.is_v6() {
             Self::load_chunk_table(&rs, &mut d).context("failed to load chunk table")?;
@@ -160,23 +163,22 @@ pub fn parse_chunk_dict_arg(arg: &str) -> Result<PathBuf> {
         Some(idx) => (&arg[0..idx], &arg[idx + 1..]),
     };
 
-    info!("parse chunk dict argument {}={}", file_type, file_path);
+    debug!("parse chunk dict argument {}={}", file_type, file_path);
 
     match file_type {
         "bootstrap" => Ok(PathBuf::from(file_path)),
-        _ => {
-            bail!("invalid chunk dict type {}", file_type);
-        }
+        _ => bail!("invalid chunk dict type {}", file_type),
     }
 }
 
 /// Load a chunk dictionary from external source.
 pub(crate) fn import_chunk_dict(
     arg: &str,
-    config: Option<RafsSuperConfig>,
+    config: Arc<ConfigV2>,
+    rafs_config: Option<RafsSuperConfig>,
 ) -> Result<Arc<dyn ChunkDict>> {
     let file_path = parse_chunk_dict_arg(arg)?;
-    HashChunkDict::from_bootstrap_file(&file_path, config)
+    HashChunkDict::from_bootstrap_file(&file_path, config, rafs_config)
         .map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
 }
 
@@ -203,7 +205,7 @@ mod tests {
         let mut source_path = PathBuf::from(root_dir);
         source_path.push("tests/texture/bootstrap/rafs-v5.boot");
         let path = source_path.to_str().unwrap();
-        let dict = import_chunk_dict(path, None).unwrap();
+        let dict = import_chunk_dict(path, Arc::new(ConfigV2::default()), None).unwrap();
 
         assert!(dict.get_chunk(&RafsDigest::default()).is_none());
         assert_eq!(dict.get_blobs().len(), 18);

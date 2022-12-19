@@ -18,6 +18,7 @@ extern crate lazy_static;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::parser::ValueSource;
@@ -155,6 +156,11 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
         .long("output-json")
         .short('J')
         .help("File path to save operation result in JSON format");
+    let arg_config = Arg::new("config")
+        .long("config")
+        .short('C')
+        .help("Configuration file")
+        .required(false);
 
     App::new("")
         .version(bti_string)
@@ -256,6 +262,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .default_value("blake3")
                         .value_parser(["blake3", "sha256"]),
                 )
+                .arg( arg_config.clone() )
                 .arg(
                     Arg::new("fs-version")
                         .long("fs-version")
@@ -480,6 +487,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .help("path to RAFS data blob file")
                 .required(false),
                 )
+            .arg(arg_config)
+            .arg(
+                Arg::new("blob-dir")
+                    .long("blob-dir")
+                    .short('D')
+                    .conflicts_with("config")
+                    .help("Directory path hosting data blobs and cache files"),
+            )
             .arg(
                 Arg::new("output")
                 .long("output")
@@ -715,6 +730,12 @@ impl Command {
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
 
+        let mut config = Self::get_configuration(matches)?;
+        if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
+            cache.cache_validate = true;
+        }
+        build_ctx.set_configuration(config);
+
         let mut blob_mgr = BlobManager::new();
         if let Some(chunk_dict_arg) = matches.get_one::<String>("chunk-dict") {
             let config = RafsSuperConfig {
@@ -725,7 +746,13 @@ impl Command {
                 explicit_uidgid: !repeatable,
             };
             blob_mgr.set_chunk_dict(timing_tracer!(
-                { import_chunk_dict(chunk_dict_arg, Some(config)) },
+                {
+                    import_chunk_dict(
+                        chunk_dict_arg,
+                        build_ctx.configuration.clone(),
+                        Some(config),
+                    )
+                },
                 "import_chunk_dict"
             )?);
         }
@@ -840,9 +867,11 @@ impl Command {
 
         let rs = RafsSuper::load_from_metadata(&bootstrap_path, RafsMode::Direct, true)?;
         info!("load bootstrap {:?} successfully", bootstrap_path);
+        let config =
+            Self::get_configuration(matches).context("failed to get configuration information")?;
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,
-            Some(args) => Some(import_chunk_dict(args, Some(rs.meta.get_config()))?),
+            Some(args) => Some(import_chunk_dict(args, config, Some(rs.meta.get_config()))?),
         };
 
         let cfg_file = matches.get_one::<String>("backend-config").unwrap();
@@ -871,6 +900,7 @@ impl Command {
         if bootstrap.is_empty() {
             return Err(anyhow!("invalid empty --bootstrap option"));
         }
+        let config = Self::get_configuration(args)?;
         let output = args.get_one::<String>("output").expect("pass in output");
         if output.is_empty() {
             return Err(anyhow!("invalid empty --output option"));
@@ -881,7 +911,7 @@ impl Command {
         let unpacker =
             OCIUnpacker::new(bootstrap, blob, output).with_context(|| "fail to create unpacker")?;
 
-        unpacker.unpack().with_context(|| "fail to unpack")
+        unpacker.unpack(config).with_context(|| "fail to unpack")
     }
 
     fn check(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
@@ -1066,6 +1096,21 @@ impl Command {
         } else {
             Ok(None)
         }
+    }
+
+    fn get_configuration(matches: &clap::ArgMatches) -> Result<Arc<ConfigV2>> {
+        let config = if let Some(config_file) = matches.get_one::<String>("config") {
+            ConfigV2::from_file(config_file)?
+        } else if let Some(dir) = matches.get_one::<String>("blob-dir") {
+            ConfigV2::new_localfs("", dir)?
+        } else {
+            ConfigV2::new_localfs("", ".")?
+        };
+        if !config.validate() {
+            return Err(anyhow!("invalid configuration: {:?}", config));
+        }
+
+        Ok(Arc::new(config))
     }
 
     fn get_blob_id(matches: &clap::ArgMatches) -> Result<String> {

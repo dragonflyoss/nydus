@@ -144,6 +144,22 @@ impl ConfigV2 {
 
         cfg
     }
+
+    /// Check whether chunk digest validation is enabled or not.
+    pub fn is_chunk_validation_enabled(&self) -> bool {
+        let mut validation = if let Some(cache) = &self.cache {
+            cache.cache_validate
+        } else {
+            false
+        };
+        if let Some(rafs) = &self.rafs {
+            if rafs.validate {
+                validation = true;
+            }
+        }
+
+        validation
+    }
 }
 
 impl FromStr for ConfigV2 {

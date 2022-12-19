@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
+use std::io::Write;
+use std::slice;
 
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
@@ -165,6 +167,9 @@ impl Blob {
             BlobMetaChunkArray::V1(_) => header.set_chunk_info_v2(false),
             BlobMetaChunkArray::V2(_) => header.set_chunk_info_v2(true),
         }
+        if ctx.features.is_enabled(Feature::BlobToc) && blob_ctx.chunk_count > 0 {
+            header.set_inlined_chunk_digest(true);
+        }
 
         let header_size = header.as_bytes().len();
         blob_ctx.blob_meta_header = header;
@@ -215,6 +220,28 @@ impl Blob {
                 compressed_offset + compressed_size,
                 header_size as u64,
                 header_size as u64,
+            )?;
+
+            let buf = unsafe {
+                slice::from_raw_parts(
+                    blob_ctx.blob_chunk_digest.as_ptr() as *const u8,
+                    blob_ctx.blob_chunk_digest.len() * 32,
+                )
+            };
+            assert!(!buf.is_empty());
+            // The chunk digest array is almost incompressible, no need for compression.
+            let digest = RafsDigest::from_buf(buf, digest::Algorithm::Sha256);
+            let compressed_offset = blob_writer.pos()?;
+            let size = buf.len() as u64;
+            blob_writer.write_all(buf)?;
+            blob_ctx.write_tar_header(blob_writer, toc::ENTRY_BLOB_DIGEST, size)?;
+            blob_ctx.entry_list.add(
+                toc::ENTRY_BLOB_DIGEST,
+                compress::Algorithm::None,
+                digest,
+                compressed_offset,
+                size,
+                size,
             )?;
         }
 

@@ -7,7 +7,7 @@
 use std::io::Result;
 use std::sync::Arc;
 
-use storage::device::BlobInfo;
+use storage::device::{BlobChunkInfo, BlobDevice, BlobInfo};
 
 use crate::metadata::{Inode, RafsInode, RafsSuperBlock, RafsSuperInodes};
 use crate::{RafsInodeExt, RafsIoReader, RafsResult};
@@ -56,5 +56,13 @@ impl RafsSuperBlock for NoopSuperBlock {
 
     fn root_ino(&self) -> u64 {
         unimplemented!()
+    }
+
+    fn get_chunk_info(&self, _idx: usize) -> Result<Arc<dyn BlobChunkInfo>> {
+        unimplemented!("used by RAFS v6 only")
+    }
+
+    fn set_blob_device(&self, _blob_device: BlobDevice) {
+        unimplemented!("used by RAFS v6 only")
     }
 }
