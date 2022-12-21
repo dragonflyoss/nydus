@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/provider"
 )
 
 func main() {

@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -23,11 +22,8 @@ import (
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics/fileexporter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/packer"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/viewer"
 )
@@ -392,7 +388,7 @@ func main() {
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				target, err := getTargetReference(c)
+				targetRef, err := getTargetReference(c)
 				if err != nil {
 					return err
 				}
@@ -402,16 +398,9 @@ func main() {
 					return err
 				}
 
-				var cacheRemote *remote.Remote
-				cache, err := getCacheReference(c, target)
+				cacheRef, err := getCacheReference(c, targetRef)
 				if err != nil {
 					return err
-				}
-				if cache != "" {
-					cacheRemote, err = provider.DefaultRemote(cache, c.Bool("build-cache-insecure"))
-					if err != nil {
-						return err
-					}
 				}
 				cacheMaxRecords := c.Uint("build-cache-max-records")
 				if cacheMaxRecords < 1 {
@@ -428,71 +417,42 @@ func main() {
 					return fmt.Errorf("--fs-version should be one of %v", possibleFsVersions)
 				}
 
-				logger, err := provider.DefaultLogger()
-				if err != nil {
-					return err
-				}
-
-				sourceRemote, err := provider.DefaultRemote(c.String("source"), c.Bool("source-insecure"))
-				if err != nil {
-					return errors.Wrap(err, "Parse source reference")
-				}
-
 				targetPlatform := c.String("platform")
-				targetRemote, err := provider.DefaultRemote(target, c.Bool("target-insecure"))
-				if err != nil {
-					return err
-				}
 
 				prefetchPatterns, err := getPrefetchPatterns(c)
 				if err != nil {
 					return err
 				}
 
-				metrics.Register(fileexporter.New(filepath.Join(c.String("work-dir"), "conversion_metrics.prom")))
-				defer metrics.Export()
-
 				opt := converter.Opt{
-					Logger: logger,
+					WorkDir:        c.String("work-dir"),
+					NydusImagePath: c.String("nydus-image"),
 
-					TargetPlatform: targetPlatform,
-
-					SourceRemote: sourceRemote,
-					TargetRemote: targetRemote,
-
-					CacheRemote:     cacheRemote,
-					CacheMaxRecords: cacheMaxRecords,
-					CacheVersion:    cacheVersion,
-
-					WorkDir:          c.String("work-dir"),
-					PrefetchPatterns: prefetchPatterns,
-					NydusImagePath:   c.String("nydus-image"),
-					MultiPlatform:    c.Bool("multi-platform"),
-					DockerV2Format:   c.Bool("docker-v2-format"),
+					Source:         c.String("source"),
+					Target:         targetRef,
+					SourceInsecure: c.Bool("source-insecure"),
+					TargetInsecure: c.Bool("target-insecure"),
 
 					BackendType:      backendType,
 					BackendConfig:    backendConfig,
 					BackendForcePush: c.Bool("backend-force-push"),
 
-					NydusifyVersion: version,
-					FsVersion:       fsVersion,
-					FsAlignChunk:    c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
-					Compressor:      c.String("compressor"),
-					ChunkSize:       c.String("chunk-size"),
+					CacheRef:        cacheRef,
+					CacheInsecure:   c.Bool("build-cache-insecure"),
+					CacheMaxRecords: cacheMaxRecords,
+					CacheVersion:    cacheVersion,
 
-					ChunkDict: converter.ChunkDictOpt{
-						Args:     c.String("chunk-dict"),
-						Insecure: c.Bool("chunk-dict-insecure"),
-						Platform: targetPlatform,
-					},
+					PrefetchPatterns: prefetchPatterns,
+					MultiPlatform:    c.Bool("multi-platform"),
+					DockerV2Format:   c.Bool("docker-v2-format"),
+					TargetPlatform:   targetPlatform,
+					FsVersion:        fsVersion,
+					FsAlignChunk:     c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
+					Compressor:       c.String("compressor"),
+					ChunkSize:        c.String("chunk-size"),
 				}
 
-				cvt, err := converter.New(opt)
-				if err != nil {
-					return err
-				}
-
-				return cvt.Convert(context.Background())
+				return converter.Convert(context.Background(), opt)
 			},
 		},
 		{
