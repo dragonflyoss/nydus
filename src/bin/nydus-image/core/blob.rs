@@ -55,6 +55,7 @@ impl Blob {
             ConversionType::TarToRef
             | ConversionType::TargzToRef
             | ConversionType::EStargzToRef => {
+                // Use `sha256(tarball)` as `blob_id` for ref-type conversions.
                 if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                     if let Some(zran) = &ctx.blob_zran_generator {
                         let reader = zran.lock().unwrap().reader();
