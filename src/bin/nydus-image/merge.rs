@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use hex::FromHex;
 
-use nydus_rafs::metadata::{RafsInodeExt, RafsMode, RafsSuper, RafsVersion};
+use nydus_rafs::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
@@ -113,8 +113,9 @@ impl Merger {
         let mut chunk_dict_blobs = HashSet::new();
         let mut config = None;
         if let Some(chunk_dict_path) = &chunk_dict {
-            let rs = RafsSuper::load_from_metadata(chunk_dict_path, RafsMode::Direct, true)
-                .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
+            let (rs, _) =
+                RafsSuper::load_from_file(chunk_dict_path, true, false, ctx.configuration.clone())
+                    .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
             config = Some(rs.meta.get_config());
             for blob in rs.superblock.get_blob_infos() {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
@@ -126,8 +127,9 @@ impl Merger {
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new();
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
-            let rs = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)
-                .context(format!("load bootstrap {:?}", bootstrap_path))?;
+            let (rs, _) =
+                RafsSuper::load_from_file(bootstrap_path, true, false, ctx.configuration.clone())
+                    .context(format!("load bootstrap {:?}", bootstrap_path))?;
 
             config
                 .get_or_insert_with(|| rs.meta.get_config())
@@ -146,8 +148,8 @@ impl Merger {
             let mut blob_idx_map = Vec::new();
             let mut parent_blob_added = false;
             for blob in rs.superblock.get_blob_infos() {
-                let mut blob_ctx = BlobContext::from(ctx, &blob, ChunkSource::Parent);
-                if chunk_dict_blobs.get(blob.blob_id()).is_none() {
+                let mut blob_ctx = BlobContext::from(ctx, &blob, ChunkSource::Parent)?;
+                if chunk_dict_blobs.get(&blob.blob_id()).is_none() {
                     // It is assumed that the `nydus-image create` at each layer and `nydus-image merge` commands
                     // use the same chunk dict bootstrap. So the parent bootstrap includes multiple blobs, but
                     // only at most one new blob, the other blobs should be from the chunk dict image.

@@ -26,8 +26,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
 use nydus_api::ConfigV2;
 use nydus_app::{setup_logging, BuildTimeInfo};
-use nydus_rafs::metadata::{RafsMode, RafsSuper, RafsSuperConfig, RafsVersion};
-use nydus_rafs::RafsIoReader;
+use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::format_blob_features;
@@ -221,6 +220,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .alias("inline-bootstrap")
                         .help("Inline RAFS metadata and blob metadata into the data blob")
                         .action(ArgAction::SetTrue)
+                        .conflicts_with("blob-id")
                         .required(false),
                 )
                 .arg(
@@ -589,7 +589,7 @@ impl Command {
     fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blob_id = Self::get_blob_id(matches)?;
         let blob_offset = Self::get_blob_offset(matches)?;
-        let parent_bootstrap = Self::get_parent_bootstrap(matches)?;
+        let parent_path = Self::get_parent_bootstrap(matches)?;
         let prefetch = Self::get_prefetch(matches)?;
         let source_path = PathBuf::from(matches.get_one::<String>("SOURCE").unwrap());
         let conversion_type: ConversionType = matches.get_one::<String>("type").unwrap().parse()?;
@@ -742,7 +742,7 @@ impl Command {
         if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
             cache.cache_validate = true;
         }
-        build_ctx.set_configuration(config);
+        build_ctx.set_configuration(config.clone());
 
         let mut blob_mgr = BlobManager::new();
         if let Some(chunk_dict_arg) = matches.get_one::<String>("chunk-dict") {
@@ -766,10 +766,10 @@ impl Command {
         }
 
         let mut bootstrap_mgr = if blob_inline_meta {
-            BootstrapManager::new(None, parent_bootstrap)
+            BootstrapManager::new(None, parent_path)
         } else {
             let bootstrap_path = Self::get_bootstrap_storage(matches)?;
-            BootstrapManager::new(Some(bootstrap_path), parent_bootstrap)
+            BootstrapManager::new(Some(bootstrap_path), parent_path)
         };
 
         let mut builder: Box<dyn Builder> = match conversion_type {
@@ -810,7 +810,7 @@ impl Command {
         // Validate output bootstrap file
         if !blob_inline_meta {
             if let Some(ArtifactStorage::SingleFile(p)) = &bootstrap_mgr.bootstrap_storage {
-                Self::validate_image(matches, p).context("failed to validate bootstrap")?;
+                Self::validate_image(matches, p, config).context("failed to validate bootstrap")?;
             }
         }
 
@@ -873,10 +873,10 @@ impl Command {
             Some(s) => PathBuf::from(s),
         };
 
-        let rs = RafsSuper::load_from_metadata(&bootstrap_path, RafsMode::Direct, true)?;
-        info!("load bootstrap {:?} successfully", bootstrap_path);
         let config =
             Self::get_configuration(matches).context("failed to get configuration information")?;
+        let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, true, false, config.clone())?;
+        info!("load bootstrap {:?} successfully", bootstrap_path);
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,
             Some(args) => Some(import_chunk_dict(args, config, Some(rs.meta.get_config()))?),
@@ -925,20 +925,22 @@ impl Command {
     fn check(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let verbose = matches.get_flag("verbose");
-        let mut validator = Validator::new(bootstrap_path)?;
+        let config = Self::get_configuration(matches)?;
+        let mut validator = Validator::new(bootstrap_path, config)?;
         let blobs = validator
             .check(verbose)
             .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
 
-        println!("RAFS filesystem metadata is valid and references data blobs: ");
+        println!("RAFS filesystem metadata is valid, referenced data blobs: ");
         let mut blob_ids = Vec::new();
         for (idx, blob) in blobs.iter().enumerate() {
             println!(
-                "\t {}: {}, compressed size 0x{:x}, uncompressed size 0x{:x}, meta features: {}",
+                "\t {}: {}, compressed size 0x{:x}, uncompressed size 0x{:x}, chunks: 0x{:x}, features: {}",
                 idx,
                 blob.blob_id(),
                 blob.compressed_size(),
                 blob.uncompressed_size(),
+                blob.chunk_count(),
                 format_blob_features(blob.features()),
             );
             blob_ids.push(blob.blob_id().to_string());
@@ -979,9 +981,13 @@ impl Command {
             .get_one::<String>("target")
             .map(Path::new)
             .unwrap_or_else(|| Path::new(""));
+        let mut config = Self::get_configuration(matches)?;
+        if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
+            cache.cache_validate = true;
+        }
 
         if let Some(blob) = matches.get_one::<String>("bootstrap").map(PathBuf::from) {
-            stat.stat(&blob, true)?;
+            stat.stat(&blob, true, config.clone())?;
         } else if let Some(d) = matches.get_one::<String>("blob-dir").map(PathBuf::from) {
             Self::ensure_directory(d.clone())?;
 
@@ -993,8 +999,8 @@ impl Command {
             for child in children {
                 let path = child.path();
                 if path.is_file() && path != target {
-                    if let Err(e) = stat.stat(&path, true) {
-                        error!(
+                    if let Err(e) = stat.stat(&path, true, config.clone()) {
+                        debug!(
                             "failed to process {}, {}",
                             path.to_str().unwrap_or_default(),
                             e
@@ -1008,7 +1014,7 @@ impl Command {
 
         if let Some(blob) = matches.get_one::<String>("target").map(PathBuf::from) {
             stat.target_enabled = true;
-            stat.stat(&blob, false)?;
+            stat.stat(&blob, false, config)?;
         }
 
         stat.finalize();
@@ -1087,24 +1093,14 @@ impl Command {
         }
     }
 
-    fn get_parent_bootstrap(matches: &clap::ArgMatches) -> Result<Option<RafsIoReader>> {
-        let mut parent_bootstrap_path = Path::new("");
+    fn get_parent_bootstrap(matches: &clap::ArgMatches) -> Result<Option<String>> {
+        let mut parent_bootstrap_path = String::new();
         if let Some(_parent_bootstrap_path) = matches.get_one::<String>("parent-bootstrap") {
-            parent_bootstrap_path = Path::new(_parent_bootstrap_path);
+            parent_bootstrap_path = _parent_bootstrap_path.to_string();
         }
 
-        if parent_bootstrap_path != Path::new("") {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(false)
-                .open(parent_bootstrap_path)
-                .with_context(|| {
-                    format!(
-                        "failed to open parent bootstrap file {:?}",
-                        parent_bootstrap_path
-                    )
-                })?;
-            Ok(Some(Box::new(file)))
+        if !parent_bootstrap_path.is_empty() {
+            Ok(Some(parent_bootstrap_path))
         } else {
             Ok(None)
         }
@@ -1154,9 +1150,13 @@ impl Command {
         }
     }
 
-    fn validate_image(matches: &clap::ArgMatches, bootstrap_path: &Path) -> Result<()> {
+    fn validate_image(
+        matches: &clap::ArgMatches,
+        bootstrap_path: &Path,
+        config: Arc<ConfigV2>,
+    ) -> Result<()> {
         if !matches.get_flag("disable-check") {
-            let mut validator = Validator::new(bootstrap_path)?;
+            let mut validator = Validator::new(bootstrap_path, config)?;
             timing_tracer!(
                 {
                     validator

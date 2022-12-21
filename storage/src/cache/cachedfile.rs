@@ -118,6 +118,7 @@ impl FileCacheMeta {
 }
 
 pub(crate) struct FileCacheEntry {
+    pub(crate) blob_id: String,
     pub(crate) blob_info: Arc<BlobInfo>,
     pub(crate) chunk_map: Arc<dyn ChunkMap>,
     pub(crate) file: Arc<File>,
@@ -371,7 +372,7 @@ impl AsRawFd for FileCacheEntry {
 
 impl BlobCache for FileCacheEntry {
     fn blob_id(&self) -> &str {
-        self.blob_info.blob_id()
+        &self.blob_id
     }
 
     fn blob_uncompressed_size(&self) -> Result<u64> {
@@ -446,8 +447,7 @@ impl BlobCache for FileCacheEntry {
                 warn!("storage: inaccurate prefetch status");
             }
             if val == 0 || val == 1 {
-                self.workers
-                    .flush_pending_prefetch_requests(self.blob_info.blob_id());
+                self.workers.flush_pending_prefetch_requests(&self.blob_id);
                 return Ok(());
             }
         }

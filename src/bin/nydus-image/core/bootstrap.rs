@@ -17,7 +17,7 @@ use nydus_rafs::metadata::layout::v6::{
     RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
 };
 use nydus_rafs::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
-use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperConfig};
+use nydus_rafs::metadata::{RafsStore, RafsSuper, RafsSuperConfig};
 use nydus_storage::device::BlobFeatures;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 
@@ -310,19 +310,9 @@ impl Bootstrap {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<Tree> {
-        let rs = if let Some(r) = bootstrap_mgr.f_parent_bootstrap.as_mut() {
-            let mut rs = RafsSuper {
-                mode: RafsMode::Direct,
-                validate_digest: true,
-                ..Default::default()
-            };
-            rs.load(r)
-                .context("failed to load superblock from bootstrap")?;
-            if rs.meta.has_inlined_chunk_digest() {
-                rs.create_blob_device(ctx.configuration.clone())
-                    .context("failed to create `BlobDevice` for `RafsSuper`")?;
-            }
-            rs
+        let rs = if let Some(path) = bootstrap_mgr.f_parent_path.as_ref() {
+            RafsSuper::load_from_file(path, true, false, ctx.configuration.clone())
+                .map(|(rs, _)| rs)?
         } else {
             return Err(Error::msg("bootstrap context's parent bootstrap is null"));
         };
@@ -338,7 +328,7 @@ impl Bootstrap {
 
         // Reuse lower layer blob table,
         // we need to append the blob entry of upper layer to the table
-        blob_mgr.from_blob_table(ctx, rs.superblock.get_blob_infos());
+        blob_mgr.prepend_from_blob_table(ctx, rs.superblock.get_blob_infos())?;
 
         // Build node tree of lower layer from a bootstrap file, and add chunks
         // of lower node to layered_chunk_dict for chunk deduplication on next.
@@ -574,7 +564,8 @@ impl Bootstrap {
             let cnt = (entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32;
             assert!(block_count.checked_add(cnt).is_some());
             block_count += cnt;
-            let id = entry.blob_id().as_bytes();
+            let id = entry.blob_id();
+            let id = id.as_bytes();
             let mut blob_id = [0u8; 64];
             blob_id[..id.len()].copy_from_slice(id);
             devslot.set_blob_id(&blob_id);

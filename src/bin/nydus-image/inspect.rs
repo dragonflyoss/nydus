@@ -13,10 +13,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::Context;
 use nydus_api::ConfigV2;
 use nydus_rafs::metadata::{RafsInode, RafsInodeExt, RafsInodeWalkAction, RafsSuper};
-use nydus_rafs::{RafsIoRead, RafsIoReader};
+use nydus_rafs::RafsIoReader;
 use nydus_storage::device::BlobChunkInfo;
 use serde_json::Value;
 
@@ -41,23 +40,7 @@ impl RafsInspector {
         request_mode: bool,
         config: Arc<ConfigV2>,
     ) -> Result<Self, anyhow::Error> {
-        let mut f = <dyn RafsIoRead>::from_file(bootstrap_path).map_err(|e| {
-            anyhow!(
-                "failed to open RAFS meta file, path={:?}, {:?}",
-                bootstrap_path,
-                e
-            )
-        })?;
-        let mut rafs_meta = RafsSuper::default();
-        rafs_meta
-            .load(&mut f)
-            .map_err(|e| anyhow!("failed to load RAFS meta, error {:?}", e))?;
-        if rafs_meta.meta.has_inlined_chunk_digest() {
-            rafs_meta.create_blob_device(config).context(
-                "failed to open RAFS data blob, wrong working directory or configuration?",
-            )?;
-        }
-
+        let (rafs_meta, f) = RafsSuper::load_from_file(bootstrap_path, false, false, config)?;
         let root_ino = rafs_meta.superblock.root_ino();
 
         Ok(RafsInspector {
@@ -657,7 +640,7 @@ Blocks:             {blocks}"#,
         let blob_infos = self.rafs_meta.superblock.get_blob_infos();
         for b in blob_infos.iter() {
             if b.blob_index() == blob_index {
-                return Ok(b.blob_id().to_owned());
+                return Ok(b.blob_id());
             }
         }
         Err(anyhow!("can not find blob by index: {}", blob_index))

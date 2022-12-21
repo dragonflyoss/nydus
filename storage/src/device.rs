@@ -26,8 +26,10 @@ use std::convert::TryFrom;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{self, Error};
+use std::ops::Deref;
 use std::os::unix::io::AsRawFd;
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
@@ -126,18 +128,21 @@ pub struct BlobInfo {
     meta_ci_uncompressed_size: u64,
 
     // SHA256 digest of blob ToC content, including the toc tar header.
-    // It's all zero for inlined bootstrap.
+    // It's all zero for blobs with inlined-meta.
     rafs_blob_toc_digest: [u8; 32],
-    // SHA256 digest of RAFS blob containing `blob.meta`, `blob.digest` `blob.toc` and optionally
-    // 'image.boot`. Default to `self.blob_id` when it's all zero.
+    // SHA256 digest of RAFS blob for ZRAN, containing `blob.meta`, `blob.digest` `blob.toc` and
+    // optionally 'image.boot`. It's all zero for ZRAN blobs with inlined-meta, so need special
+    // handling.
     rafs_blob_digest: [u8; 32],
-    // Size of RAFS blob, zero for inlined bootstrap.
+    // Size of RAFS blob for ZRAN. It's zero ZRAN blobs with inlined-meta.
     rafs_blob_size: u64,
-    // Size of blob ToC content, it's zero for inlined bootstrap.
+    // Size of blob ToC content, it's zero for blobs with inlined-meta.
     rafs_blob_toc_size: u32,
 
     /// V6: support fs-cache mode
     fs_cache_file: Option<Arc<File>>,
+    /// V6: support inlined-meta
+    meta_path: Arc<Mutex<String>>,
 }
 
 impl BlobInfo {
@@ -176,6 +181,7 @@ impl BlobInfo {
             rafs_blob_toc_size: 0,
 
             fs_cache_file: None,
+            meta_path: Arc::new(Mutex::new(String::new())),
         };
 
         blob_info.compute_features();
@@ -188,8 +194,19 @@ impl BlobInfo {
         self.blob_index
     }
 
-    /// Get the id of the blob.
-    pub fn blob_id(&self) -> &str {
+    /// Get the id of the blob, with special handling of `inlined-meta` case.
+    pub fn blob_id(&self) -> String {
+        if self.has_feature(BlobFeatures::INLINED_META) && !self.has_feature(BlobFeatures::ZRAN) {
+            let guard = self.meta_path.lock().unwrap();
+            if !guard.is_empty() {
+                return guard.deref().clone();
+            }
+        }
+        self.blob_id.clone()
+    }
+
+    /// Get raw blob id, without special handling of `inlined-meta` case.
+    pub fn raw_blob_id(&self) -> &str {
         &self.blob_id
     }
 
@@ -335,7 +352,7 @@ impl BlobInfo {
             self.blob_features |= BlobFeatures::_V5_NO_EXT_BLOB_TABLE;
         }
         if self.compressor == compress::Algorithm::GZip
-            && self.has_feature(BlobFeatures::CHUNK_INFO_V2)
+            && !self.has_feature(BlobFeatures::CHUNK_INFO_V2)
         {
             self.is_legacy_stargz = true;
         }
@@ -385,6 +402,33 @@ impl BlobInfo {
     /// Set size of the RAFS blob.
     pub fn set_rafs_blob_size(&mut self, size: u64) {
         self.rafs_blob_size = size;
+    }
+
+    /// Set path for meta blob file, which will be used by `get_blob_id()` and `get_rafs_blob_id()`.
+    pub fn set_meta_path(&self, meta_path: &Path) -> Result<(), Error> {
+        let id = meta_path
+            .file_stem()
+            .ok_or_else(|| einval!("failed to get blob id from meta file name"))?;
+        let id = id
+            .to_str()
+            .ok_or_else(|| einval!("failed to get blob id from meta file name"))?;
+        *self.meta_path.lock().unwrap() = id.to_string();
+        Ok(())
+    }
+
+    /// Get RAFS blob id for ZRan.
+    pub fn get_rafs_blob_id(&self) -> Result<String, Error> {
+        assert!(self.has_feature(BlobFeatures::ZRAN));
+        let id = if self.has_feature(BlobFeatures::INLINED_META) {
+            let guard = self.meta_path.lock().unwrap();
+            if guard.is_empty() {
+                return Err(einval!("failed to get blob id from meta file name"));
+            }
+            guard.deref().clone()
+        } else {
+            hex::encode(&self.rafs_blob_digest)
+        };
+        Ok(id)
     }
 }
 

@@ -98,7 +98,7 @@ impl HashChunkDict {
         config: Arc<ConfigV2>,
         target_rafs_config: Option<RafsSuperConfig>,
     ) -> Result<Self> {
-        let rs = RafsSuper::load_chunk_dict_from_metadata(path, config)
+        let (rs, _) = RafsSuper::load_from_file(path, true, true, config)
             .with_context(|| format!("failed to open bootstrap file {:?}", path))?;
         let mut d = HashChunkDict {
             m: HashMap::new(),

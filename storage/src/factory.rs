@@ -121,7 +121,7 @@ impl BlobFactory {
         if let Some(mgr) = guard.get(&key) {
             return mgr.get_blob_cache(blob_info);
         }
-        let backend = Self::new_backend(backend_cfg, blob_info.blob_id())?;
+        let backend = Self::new_backend(backend_cfg, &blob_info.blob_id())?;
         let mgr = match cache_cfg.cache_type.as_str() {
             "blobcache" | "filecache" => {
                 let mgr = FileCacheMgr::new(cache_cfg, backend, ASYNC_RUNTIME.clone(), &config.id)?;
