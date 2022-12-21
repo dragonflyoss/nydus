@@ -400,6 +400,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("File path of RAFS metadata")
                         .required(true),
                 )
+                .arg( arg_config.clone() )
+                .arg(
+                    Arg::new("blob-dir")
+                        .long("blob-dir")
+                        .short('D')
+                        .conflicts_with("config")
+                        .help("Directory path hosting data blobs and cache files"),
+                )
                 .arg(
                     Arg::new("request")
                         .long("request")
@@ -944,8 +952,12 @@ impl Command {
     fn inspect(matches: &clap::ArgMatches) -> Result<()> {
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let cmd = matches.get_one::<String>("request");
-        let mut inspector =
-            inspect::RafsInspector::new(bootstrap_path, cmd.is_some()).map_err(|e| {
+        let mut config = Self::get_configuration(matches)?;
+        if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
+            cache.cache_validate = true;
+        }
+        let mut inspector = inspect::RafsInspector::new(bootstrap_path, cmd.is_some(), config)
+            .map_err(|e| {
                 error!("failed to create inspector, {:?}", e);
                 e
             })?;
