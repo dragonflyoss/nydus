@@ -6,9 +6,11 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::{RafsMode, RafsSuper};
+use nydus_api::ConfigV2;
+use nydus_rafs::metadata::RafsSuper;
 use serde::Serialize;
 
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
@@ -157,8 +159,8 @@ impl ImageStat {
         }
     }
 
-    pub fn stat(&mut self, path: &Path, is_base: bool) -> Result<()> {
-        let rs = RafsSuper::load_from_metadata(path, RafsMode::Direct, false)?;
+    pub fn stat(&mut self, path: &Path, is_base: bool, config: Arc<ConfigV2>) -> Result<()> {
+        let (rs, _) = RafsSuper::load_from_file(path, false, false, config)?;
         let mut dict = HashChunkDict::default();
         let mut hardlinks = HashSet::new();
         let tree =

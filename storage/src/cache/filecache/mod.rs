@@ -70,7 +70,7 @@ impl FileCacheMgr {
 
     // Get the file cache entry for the specified blob object.
     fn get(&self, blob: &Arc<BlobInfo>) -> Option<Arc<FileCacheEntry>> {
-        self.blobs.read().unwrap().get(blob.blob_id()).cloned()
+        self.blobs.read().unwrap().get(&blob.blob_id()).cloned()
     }
 
     // Create a file cache entry for the specified blob object if not present, otherwise
@@ -89,15 +89,16 @@ impl FileCacheMgr {
         )?;
         let entry = Arc::new(entry);
         let mut guard = self.blobs.write().unwrap();
-        if let Some(entry) = guard.get(blob.blob_id()) {
+        if let Some(entry) = guard.get(&blob.blob_id()) {
             Ok(entry.clone())
         } else {
-            guard.insert(blob.blob_id().to_owned(), entry.clone());
+            let blob_id = blob.blob_id();
+            guard.insert(blob_id.clone(), entry.clone());
             self.metrics
                 .underlying_files
                 .lock()
                 .unwrap()
-                .insert(blob.blob_id().to_string());
+                .insert(blob_id);
             Ok(entry)
         }
     }
@@ -169,7 +170,14 @@ impl FileCacheEntry {
         runtime: Arc<Runtime>,
         workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {
-        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
+        let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
+        let blob_id = blob_info.blob_id();
+        let rafs_blob_id = if is_zran {
+            blob_info.get_rafs_blob_id()?
+        } else {
+            blob_id.clone()
+        };
+        let blob_file_path = format!("{}/{}", mgr.work_dir, rafs_blob_id);
         let suffix = if mgr.cache_raw_data {
             ".blob.raw"
         } else {
@@ -182,15 +190,16 @@ impl FileCacheEntry {
             .open(blob_file_path.clone() + suffix)?;
         let (chunk_map, is_direct_chunkmap) =
             Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
-        let reader = mgr
-            .backend
-            .get_reader(blob_info.blob_id())
-            .map_err(|_e| eio!("failed to get blob reader"))?;
-        let rafs_blob_reader = if blob_info.rafs_blob_digest() != &[0u8; 32] {
-            let rafs_blob_id = hex::encode(blob_info.rafs_blob_digest());
+        let reader = mgr.backend.get_reader(&blob_id).map_err(|e| {
+            eio!(format!(
+                "failed to get reader for blob {}, {:?}",
+                blob_id, e
+            ))
+        })?;
+        let rafs_blob_reader = if is_zran {
             mgr.backend
                 .get_reader(&rafs_blob_id)
-                .map_err(|_e| eio!("failed to get rafs blob reader"))?
+                .map_err(|_e| eio!("failed to get reader for rafs blob"))?
         } else {
             reader.clone()
         };
@@ -198,7 +207,6 @@ impl FileCacheEntry {
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
         let blob_uncompressed_size = blob_info.uncompressed_size();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
-        let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
         // Validation is supported by RAFS v5 (which has no meta_ci) or v6 with chunk digest array.
         let validation_supported = !blob_info.meta_ci_is_valid()
             || blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
@@ -244,6 +252,7 @@ impl FileCacheEntry {
         let is_get_blob_object_supported = meta.is_some() && is_direct_chunkmap;
 
         Ok(FileCacheEntry {
+            blob_id,
             blob_info,
             chunk_map,
             file: Arc::new(file),

@@ -117,6 +117,23 @@ pub trait BlobReader: Send + Sync {
         }
     }
 
+    /// Read as much as possible data into buffer.
+    fn read_all(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+        let mut off = 0usize;
+        let mut left = buf.len();
+
+        while left > 0 {
+            let cnt = self.read(&mut buf[off..], offset + off as u64)?;
+            if cnt == 0 {
+                break;
+            }
+            off += cnt;
+            left -= cnt;
+        }
+
+        Ok(off as usize)
+    }
+
     /// Read a range of data from the blob file into the provided buffers.
     ///
     /// Read data of range [offset, offset + max_size) from the blob file, and returns:

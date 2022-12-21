@@ -12,8 +12,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use nydus_api::{ConfigV2, LocalFsConfig};
 use nydus_rafs::{
-    metadata::{RafsInodeExt, RafsMode, RafsSuper},
-    RafsIoReader, RafsIterator,
+    metadata::{RafsInodeExt, RafsSuper},
+    RafsIterator,
 };
 use nydus_storage::{
     backend::{localfs::LocalFs, BlobBackend, BlobReader},
@@ -59,25 +59,12 @@ impl OCIUnpacker {
     }
 
     fn load_rafs(&self, config: Arc<ConfigV2>) -> Result<RafsSuper> {
-        let bootstrap = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(&*self.bootstrap)
-            .with_context(|| format!("fail to open bootstrap {:?}", self.bootstrap))?;
-
-        let mut rs = RafsSuper {
-            mode: RafsMode::Direct,
-            validate_digest: config.is_chunk_validation_enabled(),
-            ..Default::default()
-        };
-
-        rs.load(&mut (Box::new(bootstrap) as RafsIoReader))
-            .with_context(|| format!("fail to load bootstrap {:?}", self.bootstrap))?;
-        if config.is_chunk_validation_enabled() && rs.meta.has_inlined_chunk_digest() {
-            rs.create_blob_device(config)
-                .context("failed to create blob device")?;
-        }
-
+        let (rs, _) = RafsSuper::load_from_file(
+            self.bootstrap.as_path(),
+            config.is_chunk_validation_enabled(),
+            false,
+            config.clone(),
+        )?;
         Ok(rs)
     }
 }

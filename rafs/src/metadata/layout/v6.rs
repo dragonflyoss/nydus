@@ -1269,7 +1269,7 @@ struct RafsV6Blob {
     // Size of the uncompressed blob, not including CI array and header.
     uncompressed_size: u64,
 
-    // Size of blob ToC content, it's zero for inlined bootstrap.
+    // Size of blob ToC content, it's zero for blobs with inlined-meta.
     rafs_blob_toc_size: u32,
     // Compression algorithm for the compression information array.
     ci_compressor: u32,
@@ -1281,12 +1281,13 @@ struct RafsV6Blob {
     ci_uncompressed_size: u64,
 
     // SHA256 digest of blob ToC content, including the toc tar header.
-    // It's all zero for inlined bootstrap.
+    // It's all zero for blobs with inlined-meta.
     rafs_blob_toc_digest: [u8; 32],
-    // SHA256 digest of RAFS blob containing `blob.meta`, `blob.digest` `blob.toc` and optionally
-    // 'image.boot`. Default to `self.blob_id` when it's all zero.
+    // SHA256 digest of RAFS blob for ZRAN, containing `blob.meta`, `blob.digest` `blob.toc` and
+    // optionally 'image.boot`. It's all zero for ZRAN blobs with inlined-meta, so need special
+    // handling.
     rafs_blob_digest: [u8; 32],
-    // Size of RAFS blob, zero for inlined bootstrap.
+    // Size of RAFS blob for ZRAN. It's zero ZRAN blobs with inlined-meta.
     rafs_blob_size: u64,
 
     reserved2: [u8; 48],
@@ -1366,7 +1367,8 @@ impl RafsV6Blob {
             return Err(einval!(msg));
         }
 
-        let id = blob_info.blob_id().as_bytes();
+        let blob_id = blob_info.blob_id();
+        let id = blob_id.as_bytes();
         let mut blob_id = [0u8; BLOB_SHA256_LEN];
         blob_id[..id.len()].copy_from_slice(id);
 

@@ -667,7 +667,8 @@ impl Node {
                             .clone()
                             .get_blobs_by_inner_idx(chunk.blob_index())
                         {
-                            blob_mgr.add(BlobContext::from(ctx, blob, ChunkSource::Dict))
+                            let ctx = BlobContext::from(ctx, blob, ChunkSource::Dict)?;
+                            blob_mgr.add(ctx);
                         }
                         blob_idx
                     };

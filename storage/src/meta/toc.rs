@@ -270,6 +270,8 @@ impl TocEntry {
 /// Container to host a list of ToC entries.
 pub struct TocEntryList {
     entries: Vec<TocEntry>,
+    toc_digest: RafsDigest,
+    toc_size: u32,
 }
 
 impl Default for TocEntryList {
@@ -283,6 +285,8 @@ impl TocEntryList {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            toc_digest: RafsDigest::default(),
+            toc_size: 0,
         }
     }
 
@@ -339,6 +343,16 @@ impl TocEntryList {
         None
     }
 
+    /// Get digest of ToC content.
+    pub fn toc_digest(&self) -> &RafsDigest {
+        &self.toc_digest
+    }
+
+    /// Get size of ToC content.
+    pub fn toc_size(&self) -> u32 {
+        self.toc_size
+    }
+
     /// Read a `TocEntryList` from a reader.
     pub fn read_from_blob<W: Write>(
         reader: &dyn BlobReader,
@@ -389,9 +403,9 @@ impl TocEntryList {
 
         if let Ok(mut file) = OpenOptions::new().read(true).open(path.as_ref()) {
             let md = file.metadata()?;
-            if md.len() <= 0x1000 {
-                let size = md.len() as usize;
-                let mut buf = alloc_buf(size);
+            let size = md.len();
+            if size > 512 && size % 128 == 0 && md.len() <= 0x1000 {
+                let mut buf = alloc_buf(size as usize);
                 file.read_exact(&mut buf)
                     .map_err(|e| eother!(format!("failed to read ToC from cache, {:?}", e)))?;
                 if let Ok(toc) = Self::parse(&buf, size as usize, location) {
@@ -438,9 +452,7 @@ impl TocEntryList {
         let entry_size = header
             .entry_size()
             .map_err(|_| eother!("failed to get entry size from tar header"))?;
-        if (location.auto_detect && entry_size > size as u64)
-            || (!location.auto_detect && entry_size != size as u64)
-        {
+        if entry_size > size as u64 {
             return Err(eother!(format!(
                 "invalid toc entry size in tar header, expect {}, got {}",
                 size, entry_size
@@ -459,16 +471,15 @@ impl TocEntryList {
             .as_gnu()
             .ok_or_else(|| eother!("invalid GNU tar header for ToC"))?;
 
-        let mut list = TocEntryList::new();
         let mut pos = size - entry_size as usize;
-        if location.validate_digest {
-            let dv = digest::RafsDigest::from_buf(&buf[pos..], digest::Algorithm::Sha256);
-            if dv != location.digest {
-                return Err(eother!(format!(
-                    "toc content digest value doesn't match, expect {:?}, got {:?}",
-                    location.digest.data, dv.data
-                )));
-            }
+        let mut list = TocEntryList::new();
+        list.toc_digest = digest::RafsDigest::from_buf(&buf[pos..], digest::Algorithm::Sha256);
+        list.toc_size = (entry_size + 512) as u32;
+        if location.validate_digest && list.toc_digest != location.digest {
+            return Err(eother!(format!(
+                "toc content digest value doesn't match, expect {:?}, got {:?}",
+                location.digest.data, list.toc_digest.data
+            )));
         }
 
         while pos < size {
@@ -591,7 +602,7 @@ impl TocEntryList {
         let blob_mgr = BlobFactory::new_backend(backend_config, "extract_rafs_meta")?;
         let reader = blob_mgr
             .get_reader(id)
-            .map_err(|e| eother!(format!("failed to get blob reader, {:?}", e)))?;
+            .map_err(|e| eother!(format!("failed to get reader for blob {}, {:?}", id, e)))?;
         let location = TocLocation::default();
         let toc = TocEntryList::read_from_blob::<File>(reader.as_ref(), None, &location)?;
         toc.extract_from_blob(reader, Some(path.clone()), None)?;

@@ -71,10 +71,24 @@ fn dump_bootstrap(
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+        // Make sure blob id is updated according to blob hash if not specified by user.
         if blob_ctx.blob_id.is_empty() {
+            // `Blob::dump()` should have set `blob_ctx.blob_id` to referenced OCI tarball for
+            // ref-type conversion.
             assert!(!ctx.conversion_type.is_to_ref());
-            // Make sure blob id is updated according to blob hash if user not specified.
-            blob_ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
+            if ctx.blob_inline_meta {
+                // Set special blob id for blob with inlined meta.
+                blob_ctx.blob_id = "x".repeat(64);
+            } else {
+                blob_ctx.blob_id = format!("{:x}", blob_ctx.blob_hash.clone().finalize());
+            }
+        }
+        if !ctx.conversion_type.is_to_ref() {
+            if ctx.blob_inline_meta {
+                blob_ctx.compressed_blob_size = 0;
+            } else {
+                blob_ctx.compressed_blob_size = blob_writer.pos()?;
+            }
         }
     }
 
@@ -158,17 +172,30 @@ fn finalize_blob(
 ) -> Result<()> {
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
         dump_toc(ctx, blob_ctx, blob_writer)?;
-        let hash = blob_ctx.blob_hash.clone().finalize();
 
+        if !ctx.conversion_type.is_to_ref() {
+            if ctx.blob_inline_meta {
+                blob_ctx.compressed_blob_size = 0;
+            } else {
+                blob_ctx.compressed_blob_size = blob_writer.pos()?;
+            }
+        }
+        if ctx.blob_inline_meta && blob_ctx.blob_id == "x".repeat(64) {
+            blob_ctx.blob_id = String::new();
+        }
+
+        let hash = blob_ctx.blob_hash.clone().finalize();
         let rafs_blob_id = if ctx.blob_id.is_empty() {
             format!("{:x}", hash)
         } else {
             assert!(!ctx.conversion_type.is_to_ref());
             ctx.blob_id.clone()
         };
+
         if ctx.conversion_type.is_to_ref() {
             if blob_ctx.blob_id.is_empty() {
-                // A tarball without file will fall through this path
+                // Use `sha256(tarball)` as `blob_id`. A tarball without files will fall through
+                // this path because `Blob::dump()` hasn't generated `blob_ctx.blob_id`.
                 if let Some(zran) = &ctx.blob_zran_generator {
                     let reader = zran.lock().unwrap().reader();
                     blob_ctx.compressed_blob_size = reader.get_data_size();
@@ -184,17 +211,17 @@ fn finalize_blob(
                     }
                 }
             }
-        } else {
+            if !ctx.blob_inline_meta {
+                blob_ctx.rafs_blob_digest = hash.into();
+                blob_ctx.rafs_blob_size = blob_writer.pos()?;
+            }
+        } else if blob_ctx.blob_id.is_empty() {
             // `blob_ctx.blob_id` should be RAFS blob id.
             blob_ctx.blob_id = rafs_blob_id.clone();
         }
-        if ctx.blob_id.is_empty() {
-            // Keep `rafs_blob_digest` as zero if `blob_id` is specified by user.
-            blob_ctx.rafs_blob_digest = hash.into();
-        }
-        blob_ctx.rafs_blob_size = blob_ctx.compressed_blob_size;
 
         blob_writer.finalize(Some(rafs_blob_id))?;
     }
+
     Ok(())
 }

@@ -642,12 +642,21 @@ impl BlobMetaInfo {
         let mut raw_data = alloc_buf(expected_raw_size);
 
         let read_size = reader
-            .read(&mut raw_data, blob_info.meta_ci_offset())
-            .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
+            .read_all(&mut raw_data, blob_info.meta_ci_offset())
+            .map_err(|e| {
+                eio!(format!(
+                    "failed to read metadata for blob {} from backend, {:?}",
+                    blob_info.blob_id(),
+                    e
+                ))
+            })?;
         if read_size != expected_raw_size {
             return Err(eio!(format!(
-                "failed to read blob metadata from backend, compressor {}",
-                blob_info.meta_ci_compressor()
+                "failed to read metadata for blob {} from backend, compressor {}, got {} bytes, expect {} bytes",
+                blob_info.blob_id(),
+                blob_info.meta_ci_compressor(),
+                read_size,
+                expected_raw_size
             )));
         }
 
@@ -1578,14 +1587,14 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     if features.contains(BlobFeatures::ALIGNED) {
         output += "4K-align ";
     }
+    if features.contains(BlobFeatures::INLINED_CHUNK_DIGEST) {
+        output += "chunk-digest ";
+    }
     if features.contains(BlobFeatures::CHUNK_INFO_V2) {
         output += "chunk-v2 ";
     }
     if features.contains(BlobFeatures::ZRAN) {
         output += "zran ";
-    }
-    if features.contains(BlobFeatures::INLINED_CHUNK_DIGEST) {
-        output += "chunk-digest ";
     }
     output.trim_end().to_string()
 }

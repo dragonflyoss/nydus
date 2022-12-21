@@ -36,6 +36,7 @@ use crate::utils::{alloc_buf, copyv};
 use crate::{StorageError, StorageResult};
 
 struct DummyCache {
+    blob_id: String,
     blob_info: Arc<BlobInfo>,
     chunk_map: Arc<dyn ChunkMap>,
     reader: Arc<dyn BlobReader>,
@@ -47,7 +48,7 @@ struct DummyCache {
 
 impl BlobCache for DummyCache {
     fn blob_id(&self) -> &str {
-        self.blob_info.blob_id()
+        &self.blob_id
     }
 
     fn blob_uncompressed_size(&self) -> Result<u64> {
@@ -208,10 +209,11 @@ impl BlobCacheMgr for DummyCacheMgr {
             ));
         }
 
-        let blob_id = blob_info.blob_id().to_owned();
+        let blob_id = blob_info.blob_id();
         let reader = self.backend.get_reader(&blob_id).map_err(|e| eother!(e))?;
 
         Ok(Arc::new(DummyCache {
+            blob_id,
             blob_info: blob_info.clone(),
             chunk_map: Arc::new(NoopChunkMap::new(self.cached)),
             reader,

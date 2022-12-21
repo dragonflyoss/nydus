@@ -14,7 +14,7 @@ use nydus_api::{
     BlobCacheEntry, BlobCacheList, BlobCacheObjectId, ConfigV2, BLOB_CACHE_TYPE_DATA_BLOB,
     BLOB_CACHE_TYPE_META_BLOB,
 };
-use nydus_rafs::metadata::{RafsMode, RafsSuper};
+use nydus_rafs::metadata::RafsSuper;
 use nydus_storage::device::BlobInfo;
 
 const ID_SPLITTER: &str = "/";
@@ -92,7 +92,7 @@ impl BlobCacheObjectConfig {
     }
 
     fn new_data_blob(domain_id: String, blob_info: Arc<BlobInfo>, config: Arc<ConfigV2>) -> Self {
-        let scoped_blob_id = generate_blob_key(&domain_id, blob_info.blob_id());
+        let scoped_blob_id = generate_blob_key(&domain_id, &blob_info.blob_id());
 
         BlobCacheObjectConfig::DataBlob(Arc::new(BlobCacheConfigDataBlob {
             blob_info,
@@ -343,7 +343,7 @@ impl BlobCacheMgr {
         path: PathBuf,
         factory_config: Arc<ConfigV2>,
     ) -> Result<()> {
-        let rs = RafsSuper::load_from_metadata(&path, RafsMode::Direct, true)?;
+        let (rs, _) = RafsSuper::load_from_file(&path, true, false, factory_config.clone())?;
         let meta = BlobCacheObjectConfig::new_meta_blob(
             domain_id.to_string(),
             id.to_string(),

@@ -11,7 +11,7 @@ use std::convert::{TryFrom, TryInto};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::OpenOptions;
-use std::io::{Error, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
@@ -23,7 +23,10 @@ use anyhow::bail;
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::Entry;
 use nydus_api::{ConfigV2, RafsConfigV2};
-use nydus_storage::device::{BlobChunkInfo, BlobDevice, BlobInfo, BlobIoMerge, BlobIoVec};
+use nydus_storage::device::{
+    BlobChunkInfo, BlobDevice, BlobFeatures, BlobInfo, BlobIoMerge, BlobIoVec,
+};
+use nydus_storage::meta::toc::TocEntryList;
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 use serde::Serialize;
@@ -646,30 +649,59 @@ impl RafsSuper {
     }
 
     /// Load Rafs super block from a metadata file.
-    pub fn load_from_metadata<P: AsRef<Path>>(
+    pub fn load_from_file<P: AsRef<Path>>(
         path: P,
-        mode: RafsMode,
         validate_digest: bool,
-    ) -> Result<Self> {
+        is_chunk_dict: bool,
+        config: Arc<ConfigV2>,
+    ) -> Result<(Self, RafsIoReader)> {
+        let mut rs = RafsSuper {
+            mode: RafsMode::Direct,
+            validate_digest,
+            ..Default::default()
+        };
+        rs.meta.is_chunk_dict = is_chunk_dict;
+
         // open bootstrap file
         let file = OpenOptions::new()
             .read(true)
             .write(false)
             .open(path.as_ref())?;
-        let mut rs = RafsSuper {
-            mode,
-            validate_digest,
-            ..Default::default()
-        };
         let mut reader = Box::new(file) as RafsIoReader;
 
-        rs.load(&mut reader)?;
+        if let Err(e) = rs.load(&mut reader) {
+            let id = match path.as_ref().file_stem() {
+                Some(v) => v,
+                None => return Err(e),
+            };
+            let id = match id.to_str() {
+                Some(v) => v,
+                None => return Err(e),
+            };
+            let path = match TocEntryList::extract_rafs_meta(id, config.clone()) {
+                Ok(v) => v,
+                Err(_e) => {
+                    debug!("failed to load inlined RAFS meta, {}", e);
+                    return Err(e);
+                }
+            };
+            let file = OpenOptions::new().read(true).write(false).open(path)?;
+            reader = Box::new(file) as RafsIoReader;
+            rs.load(&mut reader)?;
+        }
 
-        Ok(rs)
+        rs.set_blob_meta_path(path.as_ref())?;
+        if (validate_digest || config.is_chunk_validation_enabled())
+            && rs.meta.has_inlined_chunk_digest()
+        {
+            rs.create_blob_device(config)?;
+        }
+
+        Ok((rs, reader))
     }
 
     /// Load RAFS metadata and optionally cache inodes.
-    pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
+    pub(crate) fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         // Try to load the filesystem as Rafs v5
         if self.try_load_v5(r)? {
             return Ok(());
@@ -679,10 +711,26 @@ impl RafsSuper {
             return Ok(());
         }
 
-        Err(einval!("invalid superblock version number"))
+        Err(Error::new(ErrorKind::Other, "invalid RAFS superblock"))
     }
 
-    /// Create `BlobDevice` for `RafsSuper` object, which will be used to parse blob meta.
+    /// Set meta blob file path from which the `RafsSuper` object is loaded from.
+    ///
+    /// It's used to support inlined-meta and ZRan blobs.
+    pub fn set_blob_meta_path(&self, meta_path: &Path) -> Result<()> {
+        let blobs = self.superblock.get_blob_infos();
+        for blob in blobs.iter() {
+            if blob.has_feature(BlobFeatures::ZRAN) || blob.has_feature(BlobFeatures::INLINED_META)
+            {
+                blob.set_meta_path(meta_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Create a `BlobDevice` object and associated it with the `RafsSuper` object.
+    ///
+    /// The `BlobDevice` object is needed to get meta information from RAFS V6 data blobs.
     pub fn create_blob_device(&self, config: Arc<ConfigV2>) -> Result<()> {
         let blobs = self.superblock.get_blob_infos();
         let device = BlobDevice::new(&config, &blobs)?;
@@ -871,26 +919,6 @@ impl RafsSuper {
 
 // For nydus-image
 impl RafsSuper {
-    /// Load Rafs super block from a metadata file for a chunk dictionary.
-    pub fn load_chunk_dict_from_metadata(path: &Path, config: Arc<ConfigV2>) -> Result<Self> {
-        // open bootstrap file
-        let file = OpenOptions::new().read(true).write(false).open(path)?;
-        let mut rs = RafsSuper {
-            mode: RafsMode::Direct,
-            validate_digest: true,
-            ..Default::default()
-        };
-        let mut reader = Box::new(file) as RafsIoReader;
-
-        rs.meta.is_chunk_dict = true;
-        rs.load(&mut reader)?;
-        if rs.meta.has_inlined_chunk_digest() {
-            rs.create_blob_device(config)?;
-        }
-
-        Ok(rs)
-    }
-
     /// Convert an inode number to a file path.
     pub fn path_from_ino(&self, ino: Inode) -> Result<PathBuf> {
         if ino == self.superblock.root_ino() {
