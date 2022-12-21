@@ -424,6 +424,15 @@ func main() {
 					return err
 				}
 
+				chunkDictRef := ""
+				chunkDict := c.String("chunk-dict")
+				if chunkDict != "" {
+					_, _, chunkDictRef, err = converter.ParseChunkDictArgs(chunkDict)
+					if err != nil {
+						return errors.Wrap(err, "parse chunk dict arguments")
+					}
+				}
+
 				opt := converter.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
@@ -441,6 +450,9 @@ func main() {
 					CacheInsecure:   c.Bool("build-cache-insecure"),
 					CacheMaxRecords: cacheMaxRecords,
 					CacheVersion:    cacheVersion,
+
+					ChunkDictRef:      chunkDictRef,
+					ChunkDictInsecure: c.Bool("chunk-dict-insecure"),
 
 					PrefetchPatterns: prefetchPatterns,
 					MultiPlatform:    c.Bool("multi-platform"),
