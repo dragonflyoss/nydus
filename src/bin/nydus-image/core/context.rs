@@ -442,6 +442,9 @@ impl BlobContext {
         if features.contains(BlobFeatures::ALIGNED) {
             blob_ctx.blob_meta_header.set_4k_aligned(true);
         }
+        if features.contains(BlobFeatures::INLINED_META) {
+            blob_ctx.blob_meta_header.set_inlined_meta(true);
+        }
         if features.contains(BlobFeatures::CHUNK_INFO_V2) {
             blob_ctx.blob_meta_header.set_chunk_info_v2(true);
         }
@@ -972,6 +975,11 @@ impl BuildContext {
         blob_inline_meta: bool,
         features: Features,
     ) -> Self {
+        let blob_features = if blob_inline_meta {
+            BlobFeatures::INLINED_META
+        } else {
+            BlobFeatures::empty()
+        };
         BuildContext {
             blob_id,
             aligned_chunk,
@@ -991,7 +999,7 @@ impl BuildContext {
             blob_storage,
             blob_zran_generator: None,
             blob_tar_reader: None,
-            blob_features: BlobFeatures::empty(),
+            blob_features,
             blob_inline_meta,
             has_xattr: false,
 

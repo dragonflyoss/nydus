@@ -5,19 +5,21 @@
 //! Rafs filesystem TOC entry layout and data structures.
 
 use std::convert::{TryFrom, TryInto};
-use std::fs::{self, OpenOptions};
-use std::io::{Error, Read, Result, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::mem::size_of;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::slice;
 use std::sync::Arc;
 
+use nydus_api::ConfigV2;
 use nydus_utils::compress::{self, Decoder};
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use serde::Serialize;
 use tar::{EntryType, Header};
 
 use crate::backend::{BlobBufReader, BlobReader};
+use crate::factory::BlobFactory;
 use crate::utils::alloc_buf;
 
 /// File name for RAFS data chunks.
@@ -419,7 +421,7 @@ impl TocEntryList {
                 }
             }
         } else {
-            Self::read_from_blob::<fs::File>(reader, None, location)
+            Self::read_from_blob::<File>(reader, None, location)
         }
     }
 
@@ -517,8 +519,16 @@ impl TocEntryList {
                     .write(true)
                     .truncate(true)
                     .open(p.as_path())?;
-                bootstrap.extract_from_reader(reader.clone(), &mut file)?;
-                fs::rename(p, path)?;
+                bootstrap
+                    .extract_from_reader(reader.clone(), &mut file)
+                    .map_err(|e| {
+                        let _ = fs::remove_file(&p);
+                        e
+                    })?;
+                fs::rename(&p, path).map_err(|e| {
+                    let _ = fs::remove_file(&p);
+                    e
+                })?;
             }
         }
 
@@ -529,7 +539,7 @@ impl TocEntryList {
             if cda.compressor() == compress::Algorithm::None
                 && cda.compressed_size() != cda.uncompressed_size()
             {
-                return Err(einval!("invalid ToC entry for `image.boot`"));
+                return Err(einval!("invalid ToC entry for `blob.digest`"));
             }
 
             let mut ready = false;
@@ -550,12 +560,43 @@ impl TocEntryList {
                     .write(true)
                     .truncate(true)
                     .open(p.as_path())?;
-                cda.extract_from_reader(reader.clone(), &mut file)?;
-                fs::rename(p, path)?;
+                cda.extract_from_reader(reader.clone(), &mut file)
+                    .map_err(|e| {
+                        let _ = fs::remove_file(&p);
+                        e
+                    })?;
+                fs::rename(&p, path).map_err(|e| {
+                    let _ = fs::remove_file(&p);
+                    e
+                })?;
             }
         }
 
         Ok(())
+    }
+
+    /// Extract inlined RAFS metadata from data blobs.
+    pub fn extract_rafs_meta(id: &str, config: Arc<ConfigV2>) -> Result<PathBuf> {
+        let backend_config = config.get_backend_config()?;
+        let workdir = config.get_cache_working_directory()?;
+        let path = PathBuf::from(workdir);
+        if !path.is_dir() {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                "invalid cache working directory",
+            ));
+        }
+        let path = path.join(id).with_extension(ENTRY_BOOTSTRAP);
+
+        let blob_mgr = BlobFactory::new_backend(backend_config, "extract_rafs_meta")?;
+        let reader = blob_mgr
+            .get_reader(id)
+            .map_err(|e| eother!(format!("failed to get blob reader, {:?}", e)))?;
+        let location = TocLocation::default();
+        let toc = TocEntryList::read_from_blob::<File>(reader.as_ref(), None, &location)?;
+        toc.extract_from_blob(reader, Some(path.clone()), None)?;
+
+        Ok(path)
     }
 }
 
