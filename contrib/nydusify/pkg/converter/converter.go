@@ -7,11 +7,8 @@ package converter
 import (
 	"context"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/defaults"
-	"github.com/goharbor/acceleration-service/pkg/content"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/goharbor/acceleration-service/pkg/converter"
-	"github.com/pkg/errors"
 )
 
 type Opt struct {
@@ -47,24 +44,13 @@ type Opt struct {
 }
 
 func Convert(ctx context.Context, opt Opt) error {
-	if opt.ContainerdAddress == "" {
-		opt.ContainerdAddress = defaults.DefaultAddress
-	}
-	client, err := containerd.New(
-		opt.ContainerdAddress,
-		containerd.WithDefaultNamespace("nydusify"),
-	)
+	pvd, err := provider.New(opt.WorkDir, hosts(opt))
 	if err != nil {
-		return errors.Wrap(err, "connect to containerd")
-	}
-
-	provider, err := content.NewLocalProvider(client, hosts(opt))
-	if err != nil {
-		return errors.Wrap(err, "create content provider")
+		return err
 	}
 
 	cvt, err := converter.NewLocalConverter(
-		converter.WithProvider(provider),
+		converter.WithProvider(pvd),
 		converter.WithDriver("nydus", getConfig(opt)),
 	)
 	if err != nil {
