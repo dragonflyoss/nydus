@@ -72,7 +72,8 @@ func getBackendConfig(c *cli.Context, required bool) (string, string, error) {
 		}
 		return "", "", nil
 	}
-	possibleBackendTypes := []string{"registry", "oss", "s3"}
+
+	possibleBackendTypes := []string{"oss", "s3"}
 	if !isPossibleValue(possibleBackendTypes, backendType) {
 		return "", "", fmt.Errorf("--backend-type should be one of %v", possibleBackendTypes)
 	}
@@ -239,8 +240,8 @@ func main() {
 
 				&cli.StringFlag{
 					Name:    "backend-type",
-					Value:   "registry",
-					Usage:   "Type of storage backend, possible values: 'registry', 'oss', 's3'",
+					Value:   "",
+					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
 					EnvVars: []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -393,7 +394,7 @@ func main() {
 					return err
 				}
 
-				backendType, backendConfig, err := getBackendConfig(c, true)
+				backendType, backendConfig, err := getBackendConfig(c, false)
 				if err != nil {
 					return err
 				}
@@ -499,7 +500,7 @@ func main() {
 				&cli.StringFlag{
 					Name:    "backend-type",
 					Value:   "",
-					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified, possible values: 'registry', 'oss', 's3'",
+					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified, possible values: 'oss', 's3'",
 					EnvVars: []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -602,7 +603,7 @@ func main() {
 					Name:     "backend-type",
 					Value:    "",
 					Required: true,
-					Usage:    "Type of storage backend, possible values: 'registry', 'oss', 's3'",
+					Usage:    "Type of storage backend, possible values: 'oss', 's3'",
 					EnvVars:  []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -647,7 +648,7 @@ func main() {
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				backendType, backendConfig, err := getBackendConfig(c, true)
+				backendType, backendConfig, err := getBackendConfig(c, false)
 				if err != nil {
 					return err
 				} else if backendConfig == "" {
@@ -714,7 +715,7 @@ func main() {
 					Name:        "backend-type",
 					Value:       "oss",
 					DefaultText: "oss",
-					Usage:       "Type of storage backend, possible values: 'registry', 'oss', 's3'",
+					Usage:       "Type of storage backend, possible values: 'oss', 's3'",
 					EnvVars:     []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
