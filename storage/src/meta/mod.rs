@@ -246,6 +246,15 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
+    /// Set flag indicating whether RAFS meta is inlined in the data blob.
+    pub fn set_inlined_meta(&mut self, inlined: bool) {
+        if inlined {
+            self.s_features |= BlobFeatures::INLINED_META.bits();
+        } else {
+            self.s_features &= !BlobFeatures::INLINED_META.bits();
+        }
+    }
+
     /// Set flag indicating whether to chunk information format v2 is used or not.
     pub fn set_chunk_info_v2(&mut self, enable: bool) {
         if enable {
