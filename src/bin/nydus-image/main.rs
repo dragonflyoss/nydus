@@ -327,8 +327,13 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("bootstrap")
                         .long("bootstrap")
                         .short('B')
-                        .help("output path of nydus overlaid bootstrap")
-                        .required(true),
+                        .help("output path of nydus overlaid bootstrap"),
+                )
+                .arg(
+                    Arg::new("blob-dir")
+                        .long("blob-dir")
+                        .short('D')
+                        .help("Directory path to save generated RAFS metadata and data blobs"),
                 )
                 .arg(
                     arg_chunk_dict.clone(),
@@ -343,20 +348,27 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("blob-digests")
                     .long("blob-digests")
                         .required(false)
-                        .help("rafs blob digest list separated by comma"),
-                )
-                .arg(
-                    Arg::new("blob-toc-digests")
-                    .long("blob-toc-digests")
-                        .required(false)
-                        .help("rafs blob toc digest list separated by comma"),
+                        .help("RAFS blob digest list separated by comma"),
                 )
                 .arg(
                     Arg::new("blob-sizes")
                     .long("blob-sizes")
                         .required(false)
-                        .help("rafs blob size list separated by comma"),
+                        .help("RAFS blob size list separated by comma"),
                 )
+                .arg(
+                    Arg::new("blob-toc-digests")
+                        .long("blob-toc-digests")
+                        .required(false)
+                        .help("RAFS blob toc digest list separated by comma"),
+                )
+                .arg(
+                    Arg::new("blob-toc-sizes")
+                        .long("blob-toc-sizes")
+                        .required(false)
+                        .help("RAFS blob toc size list separated by comma"),
+                )
+                .arg(arg_config.clone())
                 .arg(
                     Arg::new("SOURCE")
                         .help("bootstrap paths (allow one or more)")
@@ -381,6 +393,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required(false),
                 )
                 .arg(
+                    Arg::new("blob-dir")
+                        .long("blob-dir")
+                        .short('D')
+                        .conflicts_with("config")
+                        .help("Directory for localfs storage backend, hosting data blobs and cache files"),
+                )
+                .arg(arg_config.clone())
+                .arg(
                     Arg::new("verbose")
                         .long("verbose")
                         .short('v')
@@ -400,14 +420,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("File path of RAFS metadata")
                         .required(true),
                 )
-                .arg( arg_config.clone() )
                 .arg(
                     Arg::new("blob-dir")
                         .long("blob-dir")
                         .short('D')
                         .conflicts_with("config")
-                        .help("Directory path hosting data blobs and cache files"),
+                        .help("Directory for localfs storage backend, hosting data blobs and cache files"),
                 )
+                .arg(arg_config.clone())
                 .arg(
                     Arg::new("request")
                         .long("request")
@@ -437,9 +457,10 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("target")
                         .long("target")
                         .short('T')
-                        .help("Generate statistics information for the RAFS filesystem after removing chunks existing in other filesystems")
+                        .help("Generate statistics information for the RAFS filesystem after applying chunk deduplication")
                         .required(false),
                 )
+                .arg(arg_config.clone())
                 .arg(
                     arg_output_json.clone(),
                 )
@@ -501,7 +522,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .long("blob-dir")
                     .short('D')
                     .conflicts_with("config")
-                    .help("Directory path hosting data blobs and cache files"),
+                    .help("Directory for localfs storage backend, hosting data blobs and cache files"),
             )
             .arg(
                 Arg::new("output")
@@ -823,18 +844,6 @@ impl Command {
             .get_many::<String>("SOURCE")
             .map(|paths| paths.map(PathBuf::from).collect())
             .unwrap();
-        let blob_digests: Option<Vec<String>> =
-            matches.get_one::<String>("blob-digests").map(|list| {
-                list.split(',')
-                    .map(|item| item.trim().to_string())
-                    .collect()
-            });
-        let blob_toc_digests: Option<Vec<String>> =
-            matches.get_one::<String>("blob-toc-digests").map(|list| {
-                list.split(',')
-                    .map(|item| item.trim().to_string())
-                    .collect()
-            });
         let blob_sizes: Option<Vec<u64>> = matches.get_one::<String>("blob-sizes").map(|list| {
             list.split(',')
                 .map(|item| {
@@ -844,24 +853,52 @@ impl Command {
                 })
                 .collect()
         });
+        let blob_digests: Option<Vec<String>> =
+            matches.get_one::<String>("blob-digests").map(|list| {
+                list.split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            });
+        let blob_toc_sizes: Option<Vec<u64>> =
+            matches.get_one::<String>("blob-toc-sizes").map(|list| {
+                list.split(',')
+                    .map(|item| {
+                        item.trim()
+                            .parse::<u64>()
+                            .expect("invalid number in --blob-toc-sizes option")
+                    })
+                    .collect()
+            });
+        let blob_toc_digests: Option<Vec<String>> =
+            matches.get_one::<String>("blob-toc-digests").map(|list| {
+                list.split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            });
         let target_bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let chunk_dict_path = if let Some(arg) = matches.get_one::<String>("chunk-dict") {
             Some(parse_chunk_dict_arg(arg)?)
         } else {
             None
         };
+        let config =
+            Self::get_configuration(matches).context("failed to get configuration information")?;
         let mut ctx = BuildContext {
             prefetch: Self::get_prefetch(matches)?,
             ..Default::default()
         };
+        ctx.configuration = config.clone();
+
         let output = Merger::merge(
             &mut ctx,
             source_bootstrap_paths,
             blob_digests,
-            blob_toc_digests,
             blob_sizes,
+            blob_toc_digests,
+            blob_toc_sizes,
             target_bootstrap_path,
             chunk_dict_path,
+            config,
         )?;
         OutputSerializer::dump(matches, output, build_info)
     }
