@@ -328,7 +328,7 @@ impl Bootstrap {
 
         // Reuse lower layer blob table,
         // we need to append the blob entry of upper layer to the table
-        blob_mgr.prepend_from_blob_table(ctx, rs.superblock.get_blob_infos())?;
+        blob_mgr.extend_from_blob_table(ctx, rs.superblock.get_blob_infos())?;
 
         // Build node tree of lower layer from a bootstrap file, and add chunks
         // of lower node to layered_chunk_dict for chunk deduplication on next.

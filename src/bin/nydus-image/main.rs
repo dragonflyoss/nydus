@@ -462,6 +462,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 )
                 .arg(arg_config.clone())
                 .arg(
+                    Arg::new("digester")
+                        .long("digester")
+                        .help("Algorithm to digest data chunks:")
+                        .required(false)
+                        .default_value("blake3")
+                        .value_parser(["blake3", "sha256"]),
+                )
+                .arg(
                     arg_output_json.clone(),
                 )
         )
@@ -765,7 +773,7 @@ impl Command {
         }
         build_ctx.set_configuration(config.clone());
 
-        let mut blob_mgr = BlobManager::new();
+        let mut blob_mgr = BlobManager::new(digester);
         if let Some(chunk_dict_arg) = matches.get_one::<String>("chunk-dict") {
             let config = RafsSuperConfig {
                 version,
@@ -775,13 +783,7 @@ impl Command {
                 explicit_uidgid: !repeatable,
             };
             blob_mgr.set_chunk_dict(timing_tracer!(
-                {
-                    import_chunk_dict(
-                        chunk_dict_arg,
-                        build_ctx.configuration.clone(),
-                        Some(config),
-                    )
-                },
+                { import_chunk_dict(chunk_dict_arg, build_ctx.configuration.clone(), &config) },
                 "import_chunk_dict"
             )?);
         }
@@ -916,7 +918,7 @@ impl Command {
         info!("load bootstrap {:?} successfully", bootstrap_path);
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,
-            Some(args) => Some(import_chunk_dict(args, config, Some(rs.meta.get_config()))?),
+            Some(args) => Some(import_chunk_dict(args, config, &rs.meta.get_config())?),
         };
 
         let cfg_file = matches.get_one::<String>("backend-config").unwrap();
@@ -1013,7 +1015,12 @@ impl Command {
     }
 
     fn stat(matches: &clap::ArgMatches) -> Result<()> {
-        let mut stat = stat::ImageStat::new();
+        let digester = matches
+            .get_one::<String>("digester")
+            .map(|s| s.as_str())
+            .unwrap_or_default()
+            .parse()?;
+        let mut stat = stat::ImageStat::new(digester);
         let target = matches
             .get_one::<String>("target")
             .map(Path::new)
@@ -1035,7 +1042,7 @@ impl Command {
             let children = children.collect::<Result<Vec<DirEntry>, std::io::Error>>()?;
             for child in children {
                 let path = child.path();
-                if path.is_file() && path != target {
+                if path.is_file() && path != target && path.extension().is_none() {
                     if let Err(e) = stat.stat(&path, true, config.clone()) {
                         debug!(
                             "failed to process {}, {}",

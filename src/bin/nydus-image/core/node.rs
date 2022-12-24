@@ -385,11 +385,7 @@ impl Node {
             let chunk_size = ctx.chunk_size;
             let file_offset = i as u64 * chunk_size as u64;
             let uncompressed_size = if i == self.inode.child_count() - 1 {
-                (self.inode.size() as u64)
-                    .checked_sub(chunk_size as u64 * i as u64)
-                    .ok_or_else(|| {
-                        anyhow!("the rest chunk size of inode is bigger than chunk_size")
-                    })? as u32
+                (self.inode.size() - chunk_size as u64 * i as u64) as u32
             } else {
                 chunk_size
             };
@@ -400,7 +396,7 @@ impl Node {
                 h.digest_update(chunk.id().as_ref());
             }
 
-            let mut chunk = match self.find_duplicated_chunk(
+            let mut chunk = match self.deduplicate_chunk(
                 ctx,
                 blob_mgr,
                 file_offset,
@@ -420,7 +416,9 @@ impl Node {
 
             blob_size += chunk.compressed_size() as u64;
             blob_ctx.add_chunk_meta_info(&chunk, chunk_info)?;
-            blob_mgr.layered_chunk_dict.add_chunk(chunk.clone());
+            blob_mgr
+                .layered_chunk_dict
+                .add_chunk(chunk.clone(), ctx.digester);
             self.chunks.push(NodeChunk {
                 source: ChunkSource::Build,
                 inner: chunk,
@@ -617,7 +615,7 @@ impl Node {
         Ok(())
     }
 
-    fn find_duplicated_chunk(
+    fn deduplicate_chunk(
         &mut self,
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
@@ -625,76 +623,61 @@ impl Node {
         uncompressed_size: u32,
         mut chunk: ChunkWrapper,
     ) -> Result<Option<ChunkWrapper>> {
-        // Check whether we already have the same chunk data by matching chunk digest.
-        let exist_chunk = match blob_mgr.global_chunk_dict.get_chunk(chunk.id()) {
-            Some(v) => Some((v, true)),
-            None => blob_mgr
+        let dict = &blob_mgr.global_chunk_dict;
+        let mut cached_chunk = dict.get_chunk(chunk.id(), uncompressed_size);
+        let from_dict = cached_chunk.is_some();
+        if cached_chunk.is_none() {
+            cached_chunk = blob_mgr
                 .layered_chunk_dict
-                .get_chunk(chunk.id())
-                .map(|v| (v, false)),
+                .get_chunk(chunk.id(), uncompressed_size);
+        }
+        let cached_chunk = match cached_chunk {
+            Some(v) => v,
+            None => return Ok(Some(chunk)),
         };
 
-        // TODO: we should also compare the actual data to avoid chunk digest conflicts.
-        if let Some((cached_chunk, from_dict)) = exist_chunk {
-            // hole cached_chunk may have zero uncompressed size
-            if cached_chunk.uncompressed_size() == 0
-                || cached_chunk.uncompressed_size() == uncompressed_size
-            {
-                // The chunks of hardlink should be always deduplicated.
-                if !self.is_hardlink() {
-                    event_tracer!("dedup_uncompressed_size", +uncompressed_size);
-                    event_tracer!("dedup_chunks", +1);
+        // The chunks of hardlink should be always deduplicated.
+        if !self.is_hardlink() {
+            event_tracer!("dedup_uncompressed_size", +uncompressed_size);
+            event_tracer!("dedup_chunks", +1);
+        }
+        chunk.copy_from(cached_chunk);
+        chunk.set_file_offset(file_offset);
+
+        // Only add actually referenced data blobs from chunk dictionary to the blob table.
+        if from_dict {
+            let blob_index = if let Some(blob_idx) = dict.get_real_blob_idx(chunk.blob_index()) {
+                blob_idx
+            } else {
+                let blob_idx = blob_mgr.alloc_index()?;
+                dict.set_real_blob_idx(chunk.blob_index(), blob_idx);
+                if let Some(blob) = dict.get_blob_by_inner_idx(chunk.blob_index()) {
+                    let ctx = BlobContext::from(ctx, blob, ChunkSource::Dict)?;
+                    blob_mgr.add(ctx);
                 }
-
-                chunk.copy_from(cached_chunk);
-                chunk.set_file_offset(file_offset);
-                // During the build process, if a blob in the chunk dict is never used
-                // for de-duplication, the blob should not be referenced in the blob table
-                // of final bootstrap, this logic ensure it.
-                if from_dict {
-                    let blob_index = if let Some(blob_idx) = blob_mgr
-                        .global_chunk_dict
-                        .get_real_blob_idx(chunk.blob_index())
-                    {
-                        blob_idx
-                    } else {
-                        let blob_idx = blob_mgr.alloc_index()?;
-                        blob_mgr
-                            .global_chunk_dict
-                            .set_real_blob_idx(chunk.blob_index(), blob_idx);
-                        if let Some(blob) = blob_mgr
-                            .global_chunk_dict
-                            .clone()
-                            .get_blobs_by_inner_idx(chunk.blob_index())
-                        {
-                            let ctx = BlobContext::from(ctx, blob, ChunkSource::Dict)?;
-                            blob_mgr.add(ctx);
-                        }
-                        blob_idx
-                    };
-                    chunk.set_blob_index(blob_index);
-                }
-                trace!(
-                    "\t\tbuilding duplicated chunk: {} compressor {}",
-                    chunk,
-                    ctx.compressor
-                );
-
-                let source = if from_dict {
-                    ChunkSource::Dict
-                } else {
-                    ChunkSource::Build
-                };
-                self.chunks.push(NodeChunk {
-                    source,
-                    inner: chunk,
-                });
-
-                return Ok(None);
-            }
+                blob_idx
+            };
+            chunk.set_blob_index(blob_index);
         }
 
-        Ok(Some(chunk))
+        trace!(
+            "\t\tfound duplicated chunk: {} compressor {}",
+            chunk,
+            ctx.compressor
+        );
+        let source = if from_dict {
+            ChunkSource::Dict
+        } else if Some(chunk.blob_index()) != blob_mgr.get_current_blob().map(|(u, _)| u) {
+            ChunkSource::Parent
+        } else {
+            ChunkSource::Build
+        };
+        self.chunks.push(NodeChunk {
+            source,
+            inner: chunk,
+        });
+
+        Ok(None)
     }
 }
 

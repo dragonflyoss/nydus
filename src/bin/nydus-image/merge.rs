@@ -134,7 +134,7 @@ impl Merger {
         let mut fs_version = RafsVersion::V6;
         let mut chunk_size = None;
         let mut tree: Option<Tree> = None;
-        let mut blob_mgr = BlobManager::new();
+        let mut blob_mgr = BlobManager::new(ctx.digester);
 
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
             let (rs, _) = RafsSuper::load_from_file(bootstrap_path, true, false, config_v2.clone())
@@ -250,7 +250,7 @@ impl Merger {
                     tree.apply(node, true, WhiteoutSpec::Oci)?;
                 }
             } else {
-                let mut dict = HashChunkDict::default();
+                let mut dict = HashChunkDict::new(rs.meta.get_digester());
                 tree = Some(Tree::from_bootstrap(&rs, &mut dict)?);
             }
         }

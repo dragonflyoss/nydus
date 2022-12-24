@@ -679,12 +679,12 @@ pub struct BlobManager {
 }
 
 impl BlobManager {
-    pub fn new() -> Self {
+    pub fn new(digester: digest::Algorithm) -> Self {
         Self {
             blobs: Vec::new(),
             current_blob_index: None,
             global_chunk_dict: Arc::new(()),
-            layered_chunk_dict: HashChunkDict::default(),
+            layered_chunk_dict: HashChunkDict::new(digester),
         }
     }
 
@@ -769,8 +769,21 @@ impl BlobManager {
         self.blobs.last()
     }
 
-    #[allow(clippy::wrong_self_convention)]
-    pub fn prepend_from_blob_table(
+    pub fn get_blob_idx_by_id(&self, id: &str) -> Option<u32> {
+        for (idx, blob) in self.blobs.iter().enumerate() {
+            if blob.blob_id.eq(id) {
+                return Some(idx as u32);
+            }
+        }
+        None
+    }
+
+    pub fn get_blob_ids(&self) -> Vec<String> {
+        self.blobs.iter().map(|b| b.blob_id.to_owned()).collect()
+    }
+
+    /// Prepend all blobs from `blob_table` to the blob manager.
+    pub fn extend_from_blob_table(
         &mut self,
         ctx: &BuildContext,
         blob_table: Vec<Arc<BlobInfo>>,
@@ -790,23 +803,12 @@ impl BlobManager {
         Ok(())
     }
 
-    pub fn get_blob_idx_by_id(&self, id: &str) -> Option<u32> {
-        for (idx, blob) in self.blobs.iter().enumerate() {
-            if blob.blob_id.eq(id) {
-                return Some(idx as u32);
-            }
-        }
-        None
-    }
-
-    pub fn get_blob_ids(&self) -> Vec<String> {
-        self.blobs.iter().map(|b| b.blob_id.to_owned()).collect()
-    }
-
-    /// Extend blobs which belong to ChunkDict and setup real_blob_idx map
-    /// should call this function after import parent bootstrap
-    /// otherwise will break blobs order
-    pub fn extend_blob_table_from_chunk_dict(&mut self, ctx: &BuildContext) -> Result<()> {
+    /// Import all blobs from the global chunk dictionary for later chunk deduplication.
+    ///
+    /// The order to import blobs from parent bootstrap and chunk dictionary is important.
+    /// All blobs from parent bootstrap must be imported first, otherwise we need to fix blob index
+    /// of chunks from parent bootstrap.
+    pub fn extend_from_chunk_dict(&mut self, ctx: &BuildContext) -> Result<()> {
         let blobs = self.global_chunk_dict.get_blobs();
 
         for blob in blobs.iter() {

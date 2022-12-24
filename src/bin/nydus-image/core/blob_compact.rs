@@ -17,7 +17,7 @@ use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::utils::alloc_buf;
 use nydus_utils::digest::RafsDigest;
-use nydus_utils::try_round_up_4k;
+use nydus_utils::{digest, try_round_up_4k};
 
 use crate::core::blob::Blob;
 use crate::core::bootstrap::Bootstrap;
@@ -268,13 +268,14 @@ impl BlobCompactor {
         ori_blob_mgr: BlobManager,
         nodes: Vec<Node>,
         backend: Arc<dyn BlobBackend + Send + Sync>,
+        digester: digest::Algorithm,
     ) -> Result<Self> {
         let ori_blobs_number = ori_blob_mgr.len();
         let mut compactor = Self {
             version,
             states: vec![None; ori_blobs_number],
             ori_blob_mgr,
-            new_blob_mgr: BlobManager::new(),
+            new_blob_mgr: BlobManager::new(digester),
             nodes,
             c2nodes: HashMap::new(),
             b2nodes: HashMap::new(),
@@ -299,7 +300,9 @@ impl BlobCompactor {
                 let chunk_key = ChunkKey::from(&chunk.inner);
                 if let Some(State::ChunkDict) = self.states[chunk.inner.blob_index() as usize] {
                     // dedup by chunk dict
-                    if let Some(c) = chunk_dict.get_chunk(chunk.inner.id()) {
+                    if let Some(c) =
+                        chunk_dict.get_chunk(chunk.inner.id(), chunk.inner.uncompressed_size())
+                    {
                         apply_chunk_change(c, &mut chunk.inner)?;
                     } else if let Some(c) = all_chunks.get_chunk(&chunk_key) {
                         apply_chunk_change(c, &mut chunk.inner)?;
@@ -576,23 +579,29 @@ impl BlobCompactor {
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
-        let mut ori_blob_mgr = BlobManager::new();
-        ori_blob_mgr.prepend_from_blob_table(&build_ctx, rs.superblock.get_blob_infos())?;
+        let mut ori_blob_mgr = BlobManager::new(rs.meta.get_digester());
+        ori_blob_mgr.extend_from_blob_table(&build_ctx, rs.superblock.get_blob_infos())?;
         if let Some(dict) = chunk_dict {
             ori_blob_mgr.set_chunk_dict(dict);
-            ori_blob_mgr.extend_blob_table_from_chunk_dict(&build_ctx)?;
+            ori_blob_mgr.extend_from_chunk_dict(&build_ctx)?;
         }
         if ori_blob_mgr.len() < cfg.layers_to_compact {
             return Ok(None);
         }
-        let mut _dict = HashChunkDict::default();
+        let mut _dict = HashChunkDict::new(build_ctx.digester);
         let mut tree = Tree::from_bootstrap(&rs, &mut _dict)?;
         let mut bootstrap = Bootstrap::new()?;
         bootstrap.build(&mut build_ctx, &mut bootstrap_ctx, &mut tree)?;
         let mut nodes = Vec::new();
         // move out nodes
         std::mem::swap(&mut bootstrap_ctx.nodes, &mut nodes);
-        let mut compactor = Self::new(build_ctx.fs_version, ori_blob_mgr, nodes, backend.clone())?;
+        let mut compactor = Self::new(
+            build_ctx.fs_version,
+            ori_blob_mgr,
+            nodes,
+            backend.clone(),
+            rs.meta.get_digester(),
+        )?;
         compactor.compact(cfg)?;
         compactor.dump_new_blobs(&build_ctx, &cfg.blobs_dir, build_ctx.aligned_chunk)?;
         if compactor.new_blob_mgr.len() == 0 {

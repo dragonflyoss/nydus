@@ -266,6 +266,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             PathBuf::from("/")
         };
 
+        let blobs = self.rs.superblock.get_blob_infos();
         let child_count = inode.get_child_count();
         let mut children = Vec::with_capacity(child_count as usize);
         event_tracer!("load_from_parent_bootstrap", +child_count);
@@ -279,7 +280,10 @@ impl<'a> MetadataTreeBuilder<'a> {
 
             if child.is_reg() {
                 for chunk in &child.chunks {
-                    chunk_dict.add_chunk(chunk.inner.clone());
+                    let blob_idx = chunk.inner.blob_index();
+                    if let Some(blob) = blobs.get(blob_idx as usize) {
+                        chunk_dict.add_chunk(chunk.inner.clone(), blob.digester());
+                    }
                 }
             }
 
