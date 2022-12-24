@@ -211,20 +211,18 @@ impl BlobFs {
             return Err(einval!("no valid bootstrap"));
         }
 
-        let rafs_conf = Arc::new(blob_ondemand_conf.rafs_conf.clone());
-        let mut bootstrap =
-            <dyn RafsIoRead>::from_file(path.to_str().unwrap()).map_err(|e| eother!(e))?;
+        let config = Arc::new(blob_ondemand_conf.rafs_conf.clone());
 
         trace!("blobfs: async create Rafs start!");
         let rafs_join_handle = std::thread::spawn(move || {
-            let mut rafs = match Rafs::new(&rafs_conf, "blobfs", &mut bootstrap) {
+            let (mut rafs, reader) = match Rafs::new(&config, "blobfs", path) {
                 Ok(rafs) => rafs,
                 Err(e) => {
                     error!("blobfs: new rafs failed {:?}.", e);
                     return None;
                 }
             };
-            match rafs.import(bootstrap, None) {
+            match rafs.import(reader, None) {
                 Ok(_) => {}
                 Err(e) => {
                     error!("blobfs: new rafs failed {:?}.", e);

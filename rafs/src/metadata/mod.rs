@@ -681,7 +681,7 @@ impl RafsSuper {
             let path = match TocEntryList::extract_rafs_meta(id, config.clone()) {
                 Ok(v) => v,
                 Err(_e) => {
-                    debug!("failed to load inlined RAFS meta, {}", e);
+                    debug!("failed to load inlined RAFS meta, {}", _e);
                     return Err(e);
                 }
             };
