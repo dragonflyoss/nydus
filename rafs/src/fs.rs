@@ -20,7 +20,7 @@ use std::ffi::{CStr, OsStr, OsString};
 use std::io::Result;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -78,14 +78,14 @@ pub struct Rafs {
 
 impl Rafs {
     /// Create a new instance of `Rafs`.
-    pub fn new(cfg: &Arc<ConfigV2>, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
+    pub fn new(cfg: &Arc<ConfigV2>, id: &str, path: &Path) -> RafsResult<(Self, RafsIoReader)> {
         let cache_cfg = cfg.get_cache_config().map_err(RafsError::LoadConfig)?;
         let rafs_cfg = cfg.get_rafs_config().map_err(RafsError::LoadConfig)?;
-        let mut sb = RafsSuper::new(rafs_cfg).map_err(RafsError::FillSuperblock)?;
-        sb.load(r).map_err(RafsError::FillSuperblock)?;
-
+        let (sb, reader) = RafsSuper::load_from_file(path, false, false, cfg.clone())
+            .map_err(RafsError::FillSuperblock)?;
         let blob_infos = sb.superblock.get_blob_infos();
         let device = BlobDevice::new(cfg, &blob_infos).map_err(RafsError::CreateDevice)?;
+
         if cfg.is_chunk_validation_enabled() && sb.meta.has_inlined_chunk_digest() {
             sb.superblock.set_blob_device(device.clone());
         }
@@ -131,7 +131,7 @@ impl Rafs {
         rafs.ios
             .toggle_latest_read_files_recording(rafs_cfg.latest_read_files);
 
-        Ok(rafs)
+        Ok((rafs, reader))
     }
 
     /// Update storage backend for blobs.
@@ -872,7 +872,6 @@ impl FileSystem for Rafs {
 #[cfg(all(test, feature = "backend-oss"))]
 pub(crate) mod tests {
     use super::*;
-    use crate::RafsIoRead;
     use std::str::FromStr;
 
     pub fn new_rafs_backend() -> Box<Rafs> {
@@ -906,11 +905,10 @@ pub(crate) mod tests {
         let mut source_path = PathBuf::from(root_dir);
         source_path.push("../tests/texture/bootstrap/rafs-v5.boot");
         let mountpoint = "/mnt";
-        let rafs_config = Arc::new(ConfigV2::from_str(config).unwrap());
+        let config = Arc::new(ConfigV2::from_str(config).unwrap());
         let bootstrapfile = source_path.to_str().unwrap();
-        let mut bootstrap = <dyn RafsIoRead>::from_file(bootstrapfile).unwrap();
-        let mut rafs = Rafs::new(&rafs_config, mountpoint, &mut bootstrap).unwrap();
-        rafs.import(bootstrap, Some(vec![std::path::PathBuf::new()]))
+        let (mut rafs, reader) = Rafs::new(&config, mountpoint, Path::new(bootstrapfile)).unwrap();
+        rafs.import(reader, Some(vec![std::path::PathBuf::new()]))
             .unwrap();
         Box::new(rafs)
     }

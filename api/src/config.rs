@@ -124,7 +124,7 @@ impl ConfigV2 {
     pub fn get_cache_working_directory(&self) -> Result<String> {
         let cache = self.get_cache_config()?;
         match cache.cache_type.as_str() {
-            "filecache" => {
+            "blobcache" | "filecache" => {
                 if let Some(c) = cache.file_cache.as_ref() {
                     return Ok(c.work_dir.clone());
                 }

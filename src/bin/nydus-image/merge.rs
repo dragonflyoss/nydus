@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use hex::FromHex;
 use nydus_api::ConfigV2;
 use nydus_rafs::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
+use nydus_storage::device::BlobFeatures;
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
@@ -164,10 +165,18 @@ impl Merger {
                     // runtime, should change it to the hash of whole tar blob.
                     blob_ctx.blob_id = blob.blob_id().to_owned();
                     if let Some(digest) = Self::get_digest_from_list(&blob_digests, layer_idx)? {
-                        blob_ctx.rafs_blob_digest = digest;
+                        if blob.has_feature(BlobFeatures::ZRAN) {
+                            blob_ctx.rafs_blob_digest = digest;
+                        } else {
+                            blob_ctx.blob_id = hex::encode(digest);
+                        }
                     }
                     if let Some(size) = Self::get_size_from_list(&blob_sizes, layer_idx)? {
-                        blob_ctx.rafs_blob_size = size;
+                        if blob.has_feature(BlobFeatures::ZRAN) {
+                            blob_ctx.rafs_blob_size = size;
+                        } else {
+                            blob_ctx.compressed_blob_size = size;
+                        }
                     }
                     if let Some(digest) = Self::get_digest_from_list(&blob_toc_digests, layer_idx)?
                     {
