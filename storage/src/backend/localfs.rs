@@ -5,8 +5,9 @@
 //! Storage backend driver to access blobs on local filesystems.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{Error, Result};
+use std::io::Result;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -25,12 +26,17 @@ type LocalFsResult<T> = std::result::Result<T, LocalFsError>;
 /// Error codes related to localfs storage backend.
 #[derive(Debug)]
 pub enum LocalFsError {
-    BlobFile(Error),
-    ReadVecBlob(Error),
-    ReadBlob(nix::Error),
-    CopyData(Error),
-    Readahead(Error),
-    AccessLog(Error),
+    BlobFile(String),
+    ReadBlob(String),
+}
+
+impl fmt::Display for LocalFsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LocalFsError::BlobFile(s) => write!(f, "{}", s),
+            LocalFsError::ReadBlob(s) => write!(f, "{}", s),
+        }
+    }
 }
 
 impl From<LocalFsError> for BackendError {
@@ -47,22 +53,17 @@ struct LocalFsEntry {
 
 impl BlobReader for LocalFsEntry {
     fn blob_size(&self) -> BackendResult<u64> {
-        self.file
-            .metadata()
-            .map(|v| v.len())
-            .map_err(|e| LocalFsError::BlobFile(e).into())
+        self.file.metadata().map(|v| v.len()).map_err(|e| {
+            let msg = format!("failed to get size of localfs blob {}, {}", self.id, e);
+            LocalFsError::BlobFile(msg).into()
+        })
     }
 
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        debug!(
-            "local blob file reading: offset={}, size={} from={}",
-            offset,
-            buf.len(),
-            self.id,
-        );
-
-        uio::pread(self.file.as_raw_fd(), buf, offset as i64)
-            .map_err(|e| LocalFsError::ReadBlob(e).into())
+        uio::pread(self.file.as_raw_fd(), buf, offset as i64).map_err(|e| {
+            let msg = format!("failed to read data from blob {}, {}", self.id, e);
+            LocalFsError::ReadBlob(msg).into()
+        })
     }
 
     fn readv(
@@ -74,8 +75,10 @@ impl BlobReader for LocalFsEntry {
         let mut c = MemSliceCursor::new(bufs);
         let mut iovec = c.consume(max_size);
 
-        readv(self.file.as_raw_fd(), &mut iovec, offset)
-            .map_err(|e| LocalFsError::ReadVecBlob(e).into())
+        readv(self.file.as_raw_fd(), &mut iovec, offset).map_err(|e| {
+            let msg = format!("failed to read data from blob {}, {}", self.id, e);
+            LocalFsError::ReadBlob(msg).into()
+        })
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -147,7 +150,9 @@ impl LocalFs {
             }
         };
 
-        path.canonicalize().map_err(LocalFsError::BlobFile)
+        path.canonicalize().map_err(|e| {
+            LocalFsError::BlobFile(format!("invalid file path {}, {}", path.display(), e))
+        })
     }
 
     #[allow(clippy::mutex_atomic)]
@@ -161,7 +166,14 @@ impl LocalFs {
         let file = OpenOptions::new()
             .read(true)
             .open(&blob_file_path)
-            .map_err(LocalFsError::BlobFile)?;
+            .map_err(|e| {
+                let msg = format!(
+                    "failed to open blob file {}, {}",
+                    blob_file_path.display(),
+                    e
+                );
+                LocalFsError::BlobFile(msg)
+            })?;
         // Don't expect poisoned lock here.
         let mut table_guard = self.entries.write().unwrap();
         if let Some(entry) = table_guard.get(blob_id) {

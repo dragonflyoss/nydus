@@ -190,12 +190,10 @@ impl FileCacheEntry {
             .open(blob_file_path.clone() + suffix)?;
         let (chunk_map, is_direct_chunkmap) =
             Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
-        let reader = mgr.backend.get_reader(&blob_id).map_err(|e| {
-            eio!(format!(
-                "failed to get reader for blob {}, {:?}",
-                blob_id, e
-            ))
-        })?;
+        let reader = mgr
+            .backend
+            .get_reader(&blob_id)
+            .map_err(|e| eio!(format!("failed to get reader for blob {}, {}", blob_id, e)))?;
         let rafs_blob_reader = if is_zran {
             mgr.backend
                 .get_reader(&rafs_blob_id)

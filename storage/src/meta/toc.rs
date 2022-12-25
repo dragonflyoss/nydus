@@ -363,7 +363,7 @@ impl TocEntryList {
         let (offset, size) = if location.auto_detect {
             let blob_size = reader
                 .blob_size()
-                .map_err(|e| eio!(format!("failed to get blob size, {:?}", e)))?;
+                .map_err(|e| eio!(format!("failed to get blob size, {}", e)))?;
             let size = if blob_size > 0x1000 {
                 0x1000
             } else {
@@ -378,7 +378,7 @@ impl TocEntryList {
         let mut buf = alloc_buf(size);
         let sz = reader
             .read(&mut buf, offset)
-            .map_err(|e| eother!(format!("failed to read ToC from backend, {:?}", e)))?;
+            .map_err(|e| eother!(format!("failed to read ToC from backend, {}", e)))?;
         if sz != size {
             return Err(eother!(format!(
                 "failed to read ToC from backend, expect {}, got {} bytes",
@@ -390,7 +390,7 @@ impl TocEntryList {
             writer.write_all(&buf)?;
         }
 
-        Self::parse(&buf, size, location)
+        Self::parse_toc_header(&buf, size, location)
     }
 
     /// Read a `TocEntryList` from a cache file or the storage backend.
@@ -407,8 +407,8 @@ impl TocEntryList {
             if size > 512 && size % 128 == 0 && md.len() <= 0x1000 {
                 let mut buf = alloc_buf(size as usize);
                 file.read_exact(&mut buf)
-                    .map_err(|e| eother!(format!("failed to read ToC from cache, {:?}", e)))?;
-                if let Ok(toc) = Self::parse(&buf, size as usize, location) {
+                    .map_err(|e| eother!(format!("failed to read ToC from cache, {}", e)))?;
+                if let Ok(toc) = Self::parse_toc_header(&buf, size as usize, location) {
                     return Ok(toc);
                 }
             }
@@ -439,7 +439,7 @@ impl TocEntryList {
         }
     }
 
-    fn parse(buf: &[u8], size: usize, location: &TocLocation) -> Result<Self> {
+    fn parse_toc_header(buf: &[u8], size: usize, location: &TocLocation) -> Result<Self> {
         if size < 512 {
             return Err(einval!(format!("blob ToC size {} is too small", size)));
         }
@@ -602,7 +602,7 @@ impl TocEntryList {
         let blob_mgr = BlobFactory::new_backend(backend_config, "extract_rafs_meta")?;
         let reader = blob_mgr
             .get_reader(id)
-            .map_err(|e| eother!(format!("failed to get reader for blob {}, {:?}", id, e)))?;
+            .map_err(|e| eother!(format!("failed to get reader for blob {}, {}", id, e)))?;
         let location = TocLocation::default();
         let toc = TocEntryList::read_from_blob::<File>(reader.as_ref(), None, &location)?;
         toc.extract_from_blob(reader, Some(path.clone()), None)?;
