@@ -435,6 +435,17 @@ impl Node {
         Ok(blob_size)
     }
 
+    pub fn dedup_bootstrap(
+        &self,
+        chunk: &ChunkWrapper,
+        writer: &mut dyn RafsIoWrite,
+    ) -> Result<()> {
+        match chunk {
+            ChunkWrapper::V5(_) => self.dedup_bootstrap_v5(chunk, writer),
+            ChunkWrapper::V6(_) => self.dedup_bootstrap_v6(chunk, writer),
+        }
+    }
+
     fn build_inode_xattr(&mut self) -> Result<()> {
         let file_xattrs = match xattr::list(&self.path) {
             Ok(x) => x,
@@ -879,6 +890,14 @@ impl Node {
         }
     }
 
+    fn dedup_bootstrap_v5(&self, chunk: &ChunkWrapper, writer: &mut dyn RafsIoWrite) -> Result<()> {
+        chunk
+            .store(writer)
+            .context("failed to dump chunk info to bootstrap")
+            .unwrap();
+        Ok(())
+    }
+
     // Filesystem may have different algorithms to calculate `i_size` for directory entries,
     // which may break "repeatable build". To support repeatable build, instead of reuse the value
     // provided by the source filesystem, we use our own algorithm to calculate `i_size` for
@@ -956,6 +975,21 @@ impl Node {
         Ok(())
     }
 
+    fn dedup_bootstrap_v6(&self, chunk: &ChunkWrapper, writer: &mut dyn RafsIoWrite) -> Result<()> {
+        let mut v6_chunk = RafsV6InodeChunkAddr::new();
+        // for erofs, bump id by 1 since device id 0 is bootstrap.
+        v6_chunk.set_blob_index(chunk.blob_index());
+        v6_chunk.set_blob_ci_index(chunk.index());
+        v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
+        let mut chunks: Vec<u8> = Vec::new();
+        chunks.extend(v6_chunk.as_ref());
+        writer
+            .write(chunks.as_slice())
+            .context("failed to write chunkindexes")
+            .unwrap();
+        Ok(())
+    }
+
     pub fn v6_dir_d_size(&self, tree: &Tree) -> Result<u64> {
         ensure!(self.is_dir(), "{} is not a directory", self);
         // Use length in byte, instead of length in character.
@@ -1022,7 +1056,7 @@ impl Node {
         Ok(())
     }
 
-    fn v6_size_with_xattr(&self) -> usize {
+    pub fn v6_size_with_xattr(&self) -> usize {
         self.inode
             .get_inode_size_with_xattr(&self.xattrs, self.v6_compact_inode)
     }
