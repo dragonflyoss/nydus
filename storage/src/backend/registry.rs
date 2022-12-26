@@ -391,7 +391,6 @@ impl RegistryReader {
         &self,
         method: Method,
         url: &str,
-        data: Option<ReqBody<R>>,
         mut headers: HeaderMap,
         catch_status: bool,
     ) -> RegistryResult<Response> {
@@ -404,23 +403,6 @@ impl RegistryReader {
                 HEADER_AUTHORIZATION,
                 HeaderValue::from_str(cached_auth.as_str()).unwrap(),
             );
-        }
-
-        // For upload request with payload, the auth header should be cached
-        // after create_upload(), so we can request registry server directly
-        if let Some(data) = data {
-            return self
-                .connection
-                .call(
-                    method,
-                    url,
-                    None,
-                    Some(data),
-                    &mut headers,
-                    catch_status,
-                    false,
-                )
-                .map_err(RegistryError::Request);
         }
 
         // Try to request registry server with `authorization` header
@@ -461,7 +443,7 @@ impl RegistryReader {
                     // Try to request registry server with `authorization` header again
                     let resp = self
                         .connection
-                        .call(method, url, None, data, &mut headers, catch_status, false)
+                        .call::<&[u8]>(method, url, None, None, &mut headers, catch_status, false)
                         .map_err(RegistryError::Request)?;
 
                     let status = resp.status();
@@ -534,13 +516,7 @@ impl RegistryReader {
                 return self._try_read(buf, offset, false);
             }
         } else {
-            resp = match self.request::<&[u8]>(
-                Method::GET,
-                url.as_str(),
-                None,
-                headers.clone(),
-                false,
-            ) {
+            resp = match self.request::<&[u8]>(Method::GET, url.as_str(), headers.clone(), false) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
                     if self.state.needs_fallback_http(&e) =>
@@ -550,7 +526,7 @@ impl RegistryReader {
                         .state
                         .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
                         .map_err(RegistryError::Url)?;
-                    self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?
+                    self.request::<&[u8]>(Method::GET, url.as_str(), headers.clone(), false)?
                 }
                 Err(RegistryError::Request(ConnectionError::Common(e))) => {
                     if e.to_string().contains("self signed certificate") {
@@ -633,8 +609,7 @@ impl BlobReader for RegistryReader {
             .url(&format!("/blobs/sha256:{}", self.blob_id), &[])
             .map_err(RegistryError::Url)?;
 
-        let resp =
-            match self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true) {
+        let resp = match self.request::<&[u8]>(Method::HEAD, url.as_str(), HeaderMap::new(), true) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
                     if self.state.needs_fallback_http(&e) =>
@@ -644,7 +619,7 @@ impl BlobReader for RegistryReader {
                         .state
                         .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
                         .map_err(RegistryError::Url)?;
-                    self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?
+                self.request::<&[u8]>(Method::HEAD, url.as_str(), HeaderMap::new(), true)?
                 }
                 Err(e) => {
                     return Err(BackendError::Registry(e));
