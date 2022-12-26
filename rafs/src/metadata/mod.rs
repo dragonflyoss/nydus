@@ -670,15 +670,8 @@ impl RafsSuper {
         let mut reader = Box::new(file) as RafsIoReader;
 
         if let Err(e) = rs.load(&mut reader) {
-            let id = match path.as_ref().file_stem() {
-                Some(v) => v,
-                None => return Err(e),
-            };
-            let id = match id.to_str() {
-                Some(v) => v,
-                None => return Err(e),
-            };
-            let path = match TocEntryList::extract_rafs_meta(id, config.clone()) {
+            let id = BlobInfo::get_blob_id_from_meta_path(path.as_ref())?;
+            let path = match TocEntryList::extract_rafs_meta(&id, config.clone()) {
                 Ok(v) => v,
                 Err(_e) => {
                     debug!("failed to load inlined RAFS meta, {}", _e);

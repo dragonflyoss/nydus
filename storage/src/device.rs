@@ -405,15 +405,44 @@ impl BlobInfo {
     }
 
     /// Set path for meta blob file, which will be used by `get_blob_id()` and `get_rafs_blob_id()`.
-    pub fn set_meta_path(&self, meta_path: &Path) -> Result<(), Error> {
-        let id = meta_path
-            .file_stem()
-            .ok_or_else(|| einval!("failed to get blob id from meta file name"))?;
-        let id = id
-            .to_str()
-            .ok_or_else(|| einval!("failed to get blob id from meta file name"))?;
-        *self.meta_path.lock().unwrap() = id.to_string();
+    pub fn set_meta_path(&self, path: &Path) -> Result<(), Error> {
+        *self.meta_path.lock().unwrap() = Self::get_blob_id_from_meta_path(path)?;
         Ok(())
+    }
+
+    pub fn get_blob_id_from_meta_path(path: &Path) -> Result<String, Error> {
+        let mut id = path.file_name().ok_or_else(|| {
+            einval!(format!(
+                "failed to get blob id from meta file path {}",
+                path.display()
+            ))
+        })?;
+        loop {
+            let id1 = Path::new(id).file_stem().ok_or_else(|| {
+                einval!(format!(
+                    "failed to get blob id from meta file path {}",
+                    path.display()
+                ))
+            })?;
+            if id1.is_empty() {
+                return Err(einval!(format!(
+                    "failed to get blob id from meta file path {}",
+                    path.display()
+                )));
+            } else if id == id1 {
+                break;
+            } else {
+                id = id1;
+            }
+        }
+        let id = id.to_str().ok_or_else(|| {
+            einval!(format!(
+                "failed to get blob id from meta file path {}",
+                path.display()
+            ))
+        })?;
+
+        Ok(id.to_string())
     }
 
     /// Get RAFS blob id for ZRan.
