@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/cli/cli/config"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -59,8 +60,10 @@ func NewAuthRegistry(t *testing.T) *Registry {
 	configString := fmt.Sprintf(`{"auths": { "localhost:%d": { "auth": "%s" }}}`,
 		registryPort, base64AuthString)
 	configFile, _ := filepath.Abs(filepath.Join(".docker", "config.json"))
-	err = os.Setenv("DOCKER_CONFIG", path.Dir(configFile))
-	assert.Nil(t, err)
+	// Since docker config is only loaded once (sync.Once is used),
+	// it is better to use config.SetDir here.
+	// See: https://github.com/docker/cli/blob/139e924690b9b3f5e49c86d93a4025da9d47c6a9/cli/config/config.go#L49
+	config.SetDir(path.Dir(configFile))
 	err = os.WriteFile(configFile, []byte(configString), 0644)
 	assert.Nil(t, err)
 

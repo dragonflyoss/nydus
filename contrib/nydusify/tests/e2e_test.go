@@ -39,7 +39,7 @@ func testBasicAuth(t *testing.T, fsVersion string) {
 	nydusify.Check(t)
 }
 
-func testReproducableBuild(t *testing.T, fsVersion string) {
+func testReproducibleBuild(t *testing.T, fsVersion string) {
 	registry := NewRegistry(t)
 	registry.Build(t, "image-basic")
 	defer registry.Destroy(t)
@@ -204,7 +204,7 @@ func TestSmoke(t *testing.T) {
 	for _, v := range fsVersions {
 		testBasicConvert(t, v)
 		testBasicAuth(t, v)
-		testReproducableBuild(t, v)
+		testReproducibleBuild(t, v)
 		testConvertWithCache(t, v)
 		testConvertWithChunkDict(t, v)
 		testConvertWithS3Backend(t, v)

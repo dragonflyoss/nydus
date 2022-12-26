@@ -6,10 +6,8 @@ package tests
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -17,8 +15,6 @@ import (
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 )
 
 var nydusImagePath string
@@ -47,25 +43,12 @@ type Nydusify struct {
 	workDir       string
 }
 
-func buildRegistryBackendConfig(registry *Registry, repo string) string {
-	config := make(map[string]string)
-	config["host"] = registry.host
-	config["repo"] = repo
-	config["scheme"] = "http"
-	if registry.authString != "" {
-		config["auth"] = registry.authString
-	}
-	configBytes, _ := json.Marshal(config)
-	return string(configBytes)
-}
-
 func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string, fsVersion string) *Nydusify {
-	backendType := "registry"
+	backendType := ""
 	if os.Getenv("BACKEND_TYPE") != "" {
 		backendType = os.Getenv("BACKEND_TYPE")
 	}
-	repoTag := strings.Split(target, ":")
-	backendConfig := buildRegistryBackendConfig(registry, repoTag[0])
+	backendConfig := ""
 	if os.Getenv("BACKEND_CONFIG") != "" {
 		backendConfig = os.Getenv("BACKEND_CONFIG")
 	}
@@ -102,30 +85,12 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 		buildCache = host + "/" + nydusify.Cache
 	}
 
-	logger, err := provider.DefaultLogger()
-	assert.Nil(t, err)
-
-	sourceRemote, err := provider.DefaultRemote(host+"/"+nydusify.Source, true)
-	assert.Nil(t, err)
-
-	targetRemote, err := provider.DefaultRemote(host+"/"+nydusify.Target, true)
-	assert.Nil(t, err)
-
-	var cacheRemote *remote.Remote
-	if buildCache != "" {
-		buildCache = host + "/" + nydusify.Cache
-		cacheRemote, err = provider.DefaultRemote(buildCache, true)
-		assert.Nil(t, err)
-	}
-
 	opt := converter.Opt{
-		Logger: logger,
-
 		TargetPlatform: "linux/amd64",
-		SourceRemote:   sourceRemote,
-		TargetRemote:   targetRemote,
+		Source:         host + "/" + nydusify.Source,
+		Target:         host + "/" + nydusify.Target,
 
-		CacheRemote:     cacheRemote,
+		CacheRef:        buildCache,
 		CacheMaxRecords: 10,
 		CacheVersion:    "v1",
 
@@ -138,18 +103,10 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 		BackendType:   nydusify.backendType,
 		BackendConfig: nydusify.backendConfig,
 
-		ChunkDict: converter.ChunkDictOpt{
-			Args:     nydusify.chunkDictArgs,
-			Insecure: false,
-			Platform: "linux/amd64",
-		},
 		FsVersion: nydusify.fsVersion,
 	}
 
-	cvt, err := converter.New(opt)
-	assert.Nil(t, err)
-
-	err = cvt.Convert(context.Background())
+	err := converter.Convert(context.Background(), opt)
 	assert.Nil(t, err)
 }
 
