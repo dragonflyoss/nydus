@@ -211,7 +211,9 @@ impl TocEntry {
             )));
         }
         let digest = hasher.digest_finalize();
-        if digest.data != self.uncompressed_digest {
+        if digest.data != self.uncompressed_digest
+            && self.uncompressed_digest != RafsDigest::default().data
+        {
             return Err(eother!("digest of decompressed content doesn't match"));
         }
 
@@ -359,38 +361,11 @@ impl TocEntryList {
         cache_file: Option<&mut W>,
         location: &TocLocation,
     ) -> Result<Self> {
-        location.validate()?;
-        let (offset, size) = if location.auto_detect {
-            let blob_size = reader
-                .blob_size()
-                .map_err(|e| eio!(format!("failed to get blob size, {}", e)))?;
-            let size = if blob_size > 0x1000 {
-                0x1000
-            } else {
-                blob_size >> 7 << 7
-            };
-            (blob_size - size, size)
-        } else {
-            (location.offset, location.size)
-        };
-
-        let size = size as usize;
-        let mut buf = alloc_buf(size);
-        let sz = reader
-            .read(&mut buf, offset)
-            .map_err(|e| eother!(format!("failed to read ToC from backend, {}", e)))?;
-        if sz != size {
-            return Err(eother!(format!(
-                "failed to read ToC from backend, expect {}, got {} bytes",
-                size, sz
-            )));
-        }
-
+        let (buf, _) = Self::read_toc_header(reader, location)?;
         if let Some(writer) = cache_file {
             writer.write_all(&buf)?;
         }
-
-        Self::parse_toc_header(&buf, size, location)
+        Self::parse_toc_header(&buf, location)
     }
 
     /// Read a `TocEntryList` from a cache file or the storage backend.
@@ -408,7 +383,7 @@ impl TocEntryList {
                 let mut buf = alloc_buf(size as usize);
                 file.read_exact(&mut buf)
                     .map_err(|e| eother!(format!("failed to read ToC from cache, {}", e)))?;
-                if let Ok(toc) = Self::parse_toc_header(&buf, size as usize, location) {
+                if let Ok(toc) = Self::parse_toc_header(&buf, location) {
                     return Ok(toc);
                 }
             }
@@ -439,11 +414,42 @@ impl TocEntryList {
         }
     }
 
-    fn parse_toc_header(buf: &[u8], size: usize, location: &TocLocation) -> Result<Self> {
-        if size < 512 {
-            return Err(einval!(format!("blob ToC size {} is too small", size)));
+    fn read_toc_header(reader: &dyn BlobReader, location: &TocLocation) -> Result<(Vec<u8>, u64)> {
+        location.validate()?;
+        let (offset, size) = if location.auto_detect {
+            let blob_size = reader
+                .blob_size()
+                .map_err(|e| eio!(format!("failed to get blob size, {}", e)))?;
+            let size = if blob_size > 0x1000 {
+                0x1000
+            } else {
+                blob_size >> 7 << 7
+            };
+            (blob_size - size, size)
+        } else {
+            (location.offset, location.size)
+        };
+
+        let size = size as usize;
+        let mut buf = alloc_buf(size);
+        let sz = reader
+            .read(&mut buf, offset)
+            .map_err(|e| eother!(format!("failed to read ToC from backend, {}", e)))?;
+        if sz != size {
+            return Err(eother!(format!(
+                "failed to read ToC from backend, expect {}, got {} bytes",
+                size, sz
+            )));
         }
-        let size = size - 512;
+
+        Ok((buf, offset + 0x1000))
+    }
+
+    fn parse_toc_header(buf: &[u8], location: &TocLocation) -> Result<Self> {
+        if buf.len() < 512 {
+            return Err(einval!(format!("blob ToC size {} is too small", buf.len())));
+        }
+        let size = buf.len() - 512;
         let header = Header::from_byte_slice(&buf[size..]);
         let entry_type = header.entry_type();
         if entry_type != EntryType::Regular {
@@ -604,8 +610,56 @@ impl TocEntryList {
             .get_reader(id)
             .map_err(|e| eother!(format!("failed to get reader for blob {}, {}", id, e)))?;
         let location = TocLocation::default();
-        let toc = TocEntryList::read_from_blob::<File>(reader.as_ref(), None, &location)?;
-        toc.extract_from_blob(reader, Some(path.clone()), None)?;
+        let (buf, blob_size) = Self::read_toc_header(reader.as_ref(), &location)?;
+
+        if let Ok(toc) = Self::parse_toc_header(&buf, &location) {
+            toc.extract_from_blob(reader, Some(path.clone()), None)?;
+        } else {
+            if buf.len() < 512 {
+                return Err(einval!(format!("blob ToC size {} is too small", buf.len())));
+            }
+            let header = Header::from_byte_slice(&buf[buf.len() - 512..]);
+            let entry_type = header.entry_type();
+            if entry_type != EntryType::Regular {
+                return Err(eother!(
+                    "Tar entry type for `image.boot` is not a regular file"
+                ));
+            }
+            let name = header
+                .path()
+                .map_err(|_| eother!("failed to get `image.boot` file name from tar header"))?;
+            if name != Path::new(ENTRY_BOOTSTRAP) {
+                return Err(eother!(format!(
+                    "file name from tar header doesn't match `image.boot`, {}",
+                    name.display()
+                )));
+            }
+            let _header = header
+                .as_gnu()
+                .ok_or_else(|| eother!("invalid GNU tar header for ToC"))?;
+            let entry_size = header
+                .entry_size()
+                .map_err(|_| eother!("failed to get entry size from tar header"))?;
+            if entry_size > blob_size - 512 {
+                return Err(eother!(format!(
+                    "invalid `image.boot` entry size in tar header, max {}, got {}",
+                    blob_size - 512,
+                    entry_size
+                )));
+            }
+            let offset = blob_size - 512 - entry_size;
+
+            let mut toc = TocEntryList::new();
+            toc.add(
+                ENTRY_BOOTSTRAP,
+                compress::Algorithm::None,
+                RafsDigest::default(),
+                offset,
+                entry_size,
+                entry_size,
+            )?;
+            toc.extract_from_blob(reader, Some(path.clone()), None)?;
+        }
 
         Ok(path)
     }
