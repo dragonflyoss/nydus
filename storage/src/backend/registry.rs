@@ -256,7 +256,6 @@ impl RegistryState {
                 Some(ReqBody::Form(form)),
                 &mut headers,
                 true,
-                true,
             )
             .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
         let ret: TokenResponse = token_resp.json().map_err(|e| {
@@ -392,7 +391,6 @@ impl RegistryReader {
         method: Method,
         url: &str,
         mut headers: HeaderMap,
-        catch_status: bool,
     ) -> RegistryResult<Response> {
         // Try get authorization header from cache for this request
         let mut last_cached_auth = String::new();
@@ -408,7 +406,7 @@ impl RegistryReader {
         // Try to request registry server with `authorization` header
         let mut resp = self
             .connection
-            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false, false)
+            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
             .map_err(RegistryError::Request)?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             if headers.contains_key(HEADER_AUTHORIZATION) {
@@ -423,7 +421,7 @@ impl RegistryReader {
 
                 resp = self
                     .connection
-                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false, false)
+                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
                     .map_err(RegistryError::Request)?;
             };
 
@@ -443,7 +441,7 @@ impl RegistryReader {
                     // Try to request registry server with `authorization` header again
                     let resp = self
                         .connection
-                        .call::<&[u8]>(method, url, None, None, &mut headers, catch_status, false)
+                        .call::<&[u8]>(method, url, None, None, &mut headers, false)
                         .map_err(RegistryError::Request)?;
 
                     let status = resp.status();
@@ -451,12 +449,11 @@ impl RegistryReader {
                         // Cache authorization header for next request
                         self.state.cached_auth.set(&last_cached_auth, auth_header)
                     }
-                    return respond(resp, catch_status).map_err(RegistryError::Request);
                 }
             }
         }
 
-        respond(resp, catch_status).map_err(RegistryError::Request)
+        Ok(resp)
     }
 
     /// Read data from registry server
@@ -499,7 +496,6 @@ impl RegistryReader {
                     None,
                     &mut headers,
                     false,
-                    false,
                 )
                 .map_err(RegistryError::Request)?;
 
@@ -516,7 +512,7 @@ impl RegistryReader {
                 return self._try_read(buf, offset, false);
             }
         } else {
-            resp = match self.request::<&[u8]>(Method::GET, url.as_str(), headers.clone(), false) {
+            resp = match self.request::<&[u8]>(Method::GET, url.as_str(), headers.clone()) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
                     if self.state.needs_fallback_http(&e) =>
@@ -526,7 +522,7 @@ impl RegistryReader {
                         .state
                         .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
                         .map_err(RegistryError::Url)?;
-                    self.request::<&[u8]>(Method::GET, url.as_str(), headers.clone(), false)?
+                    self.request::<&[u8]>(Method::GET, url.as_str(), headers.clone())?
                 }
                 Err(RegistryError::Request(ConnectionError::Common(e))) => {
                     if e.to_string().contains("self signed certificate") {
@@ -576,7 +572,6 @@ impl RegistryReader {
                             None,
                             &mut headers,
                             true,
-                            false,
                         )
                         .map_err(RegistryError::Request);
                     match resp_ret {
@@ -609,22 +604,22 @@ impl BlobReader for RegistryReader {
             .url(&format!("/blobs/sha256:{}", self.blob_id), &[])
             .map_err(RegistryError::Url)?;
 
-        let resp = match self.request::<&[u8]>(Method::HEAD, url.as_str(), HeaderMap::new(), true) {
-                Ok(res) => res,
-                Err(RegistryError::Request(ConnectionError::Common(e)))
-                    if self.state.needs_fallback_http(&e) =>
-                {
-                    self.state.fallback_http();
-                    let url = self
-                        .state
-                        .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
-                        .map_err(RegistryError::Url)?;
-                self.request::<&[u8]>(Method::HEAD, url.as_str(), HeaderMap::new(), true)?
-                }
-                Err(e) => {
-                    return Err(BackendError::Registry(e));
-                }
-            };
+        let resp = match self.request::<&[u8]>(Method::HEAD, url.as_str(), HeaderMap::new()) {
+            Ok(res) => res,
+            Err(RegistryError::Request(ConnectionError::Common(e)))
+                if self.state.needs_fallback_http(&e) =>
+            {
+                self.state.fallback_http();
+                let url = self
+                    .state
+                    .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
+                    .map_err(RegistryError::Url)?;
+                self.request::<&[u8]>(Method::HEAD, url.as_str(), HeaderMap::new())?
+            }
+            Err(e) => {
+                return Err(BackendError::Registry(e));
+            }
+        };
         let content_length = resp
             .headers()
             .get(CONTENT_LENGTH)

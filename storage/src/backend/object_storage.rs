@@ -75,15 +75,7 @@ where
 
         let resp = self
             .connection
-            .call::<&[u8]>(
-                Method::HEAD,
-                url.as_str(),
-                None,
-                None,
-                &mut headers,
-                true,
-                false,
-            )
+            .call::<&[u8]>(Method::HEAD, url.as_str(), None, None, &mut headers, false)
             .map_err(ObjectStorageError::Request)?;
         let content_length = resp
             .headers()
@@ -122,15 +114,7 @@ where
         // Safe because the the call() is a synchronous operation.
         let mut resp = self
             .connection
-            .call::<&[u8]>(
-                Method::GET,
-                url.as_str(),
-                None,
-                None,
-                &mut headers,
-                true,
-                false,
-            )
+            .call::<&[u8]>(Method::GET, url.as_str(), None, None, &mut headers, false)
             .map_err(ObjectStorageError::Request)?;
         Ok(resp
             .copy_to(&mut buf)
