@@ -671,19 +671,19 @@ impl RafsSuper {
 
         if let Err(e) = rs.load(&mut reader) {
             let id = BlobInfo::get_blob_id_from_meta_path(path.as_ref())?;
-            let path = match TocEntryList::extract_rafs_meta(&id, config.clone()) {
+            let new_path = match TocEntryList::extract_rafs_meta(&id, config.clone()) {
                 Ok(v) => v,
                 Err(_e) => {
                     debug!("failed to load inlined RAFS meta, {}", _e);
                     return Err(e);
                 }
             };
-            let file = OpenOptions::new().read(true).write(false).open(path)?;
+            let file = OpenOptions::new().read(true).write(false).open(new_path)?;
             reader = Box::new(file) as RafsIoReader;
             rs.load(&mut reader)?;
+            rs.set_blob_id_from_meta_path(path.as_ref())?;
         }
 
-        rs.set_blob_meta_path(path.as_ref())?;
         if (validate_digest || config.is_chunk_validation_enabled())
             && rs.meta.has_inlined_chunk_digest()
         {
@@ -710,12 +710,14 @@ impl RafsSuper {
     /// Set meta blob file path from which the `RafsSuper` object is loaded from.
     ///
     /// It's used to support inlined-meta and ZRan blobs.
-    pub fn set_blob_meta_path(&self, meta_path: &Path) -> Result<()> {
+    pub fn set_blob_id_from_meta_path(&self, meta_path: &Path) -> Result<()> {
         let blobs = self.superblock.get_blob_infos();
         for blob in blobs.iter() {
-            if blob.has_feature(BlobFeatures::ZRAN) || blob.has_feature(BlobFeatures::INLINED_META)
+            if blob.has_feature(BlobFeatures::ZRAN)
+                || blob.has_feature(BlobFeatures::INLINED_META)
+                || !blob.meta_ci_is_valid()
             {
-                blob.set_meta_path(meta_path)?;
+                blob.set_blob_id_from_meta_path(meta_path)?;
             }
         }
         Ok(())

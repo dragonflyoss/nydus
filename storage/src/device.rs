@@ -196,7 +196,9 @@ impl BlobInfo {
 
     /// Get the id of the blob, with special handling of `inlined-meta` case.
     pub fn blob_id(&self) -> String {
-        if self.has_feature(BlobFeatures::INLINED_META) && !self.has_feature(BlobFeatures::ZRAN) {
+        if self.has_feature(BlobFeatures::INLINED_META) && !self.has_feature(BlobFeatures::ZRAN)
+            || !self.meta_ci_is_valid()
+        {
             let guard = self.meta_path.lock().unwrap();
             if !guard.is_empty() {
                 return guard.deref().clone();
@@ -405,12 +407,13 @@ impl BlobInfo {
     }
 
     /// Set path for meta blob file, which will be used by `get_blob_id()` and `get_rafs_blob_id()`.
-    pub fn set_meta_path(&self, path: &Path) -> Result<(), Error> {
+    pub fn set_blob_id_from_meta_path(&self, path: &Path) -> Result<(), Error> {
         *self.meta_path.lock().unwrap() = Self::get_blob_id_from_meta_path(path)?;
         Ok(())
     }
 
     pub fn get_blob_id_from_meta_path(path: &Path) -> Result<String, Error> {
+        // Manual implementation of Path::file_prefix().
         let mut id = path.file_name().ok_or_else(|| {
             einval!(format!(
                 "failed to get blob id from meta file path {}",
