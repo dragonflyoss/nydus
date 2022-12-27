@@ -84,11 +84,7 @@ fn dump_bootstrap(
             }
         }
         if !ctx.conversion_type.is_to_ref() {
-            if ctx.blob_inline_meta {
-                blob_ctx.compressed_blob_size = 0;
-            } else {
-                blob_ctx.compressed_blob_size = blob_writer.pos()?;
-            }
+            blob_ctx.compressed_blob_size = blob_writer.pos()?;
         }
     }
 
@@ -174,11 +170,7 @@ fn finalize_blob(
         dump_toc(ctx, blob_ctx, blob_writer)?;
 
         if !ctx.conversion_type.is_to_ref() {
-            if ctx.blob_inline_meta {
-                blob_ctx.compressed_blob_size = 0;
-            } else {
-                blob_ctx.compressed_blob_size = blob_writer.pos()?;
-            }
+            blob_ctx.compressed_blob_size = blob_writer.pos()?;
         }
         if ctx.blob_inline_meta && blob_ctx.blob_id == "x".repeat(64) {
             blob_ctx.blob_id = String::new();

@@ -282,6 +282,15 @@ impl BlobMetaHeaderOndisk {
         }
     }
 
+    /// Set flag indicating having inlined-meta capability.
+    pub fn set_cap_inlined_meta(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::CAP_INLINED_META.bits();
+        } else {
+            self.s_features &= !BlobFeatures::CAP_INLINED_META.bits();
+        }
+    }
+
     /// Get blob meta feature flags.
     pub fn features(&self) -> u32 {
         self.s_features

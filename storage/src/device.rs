@@ -59,8 +59,10 @@ bitflags! {
         const ZRAN = 0x0000_0008;
         /// Chunk digest array is inlined in the data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0010;
+        /// Inlined-meta capability, used to support backward compatibility for legacy converters.
+        const CAP_INLINED_META = 0x4000_0000;
         /// Rafs V5 image without extended blob table, this is an internal flag.
-        const _V5_NO_EXT_BLOB_TABLE = 0x1000_0000;
+        const _V5_NO_EXT_BLOB_TABLE = 0x8000_0000;
     }
 }
 
@@ -196,8 +198,8 @@ impl BlobInfo {
 
     /// Get the id of the blob, with special handling of `inlined-meta` case.
     pub fn blob_id(&self) -> String {
-        if self.has_feature(BlobFeatures::INLINED_META) && !self.has_feature(BlobFeatures::ZRAN)
-            || !self.meta_ci_is_valid()
+        if (self.has_feature(BlobFeatures::INLINED_META) && !self.has_feature(BlobFeatures::ZRAN))
+            || !self.has_feature(BlobFeatures::CAP_INLINED_META)
         {
             let guard = self.meta_path.lock().unwrap();
             if !guard.is_empty() {
@@ -1015,6 +1017,11 @@ impl BlobDevice {
     /// Close the blob device.
     pub fn close(&self) -> io::Result<()> {
         Ok(())
+    }
+
+    /// Check whether the `BlobDevice` has any blobs.
+    pub fn is_empty(&self) -> bool {
+        self.blob_count == 0
     }
 
     /// Read a range of data from a data blob into the provided writer

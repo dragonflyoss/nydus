@@ -343,7 +343,7 @@ impl BlobCacheMgr {
         path: PathBuf,
         factory_config: Arc<ConfigV2>,
     ) -> Result<()> {
-        let (rs, _) = RafsSuper::load_from_file(&path, true, false, factory_config.clone())?;
+        let (rs, _) = RafsSuper::load_from_file(&path, factory_config.clone(), true, false, true)?;
         let meta = BlobCacheObjectConfig::new_meta_blob(
             domain_id.to_string(),
             id.to_string(),

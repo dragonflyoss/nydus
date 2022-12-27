@@ -651,9 +651,10 @@ impl RafsSuper {
     /// Load Rafs super block from a metadata file.
     pub fn load_from_file<P: AsRef<Path>>(
         path: P,
+        config: Arc<ConfigV2>,
         validate_digest: bool,
         is_chunk_dict: bool,
-        config: Arc<ConfigV2>,
+        mut can_access_data_blobs: bool,
     ) -> Result<(Self, RafsIoReader)> {
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
@@ -682,9 +683,33 @@ impl RafsSuper {
             reader = Box::new(file) as RafsIoReader;
             rs.load(&mut reader)?;
             rs.set_blob_id_from_meta_path(path.as_ref())?;
+            can_access_data_blobs = true;
+        } else {
+            // Backward compatibility: try to fix blob id for old converters.
+            // Old converters extracts bootstraps from data blobs with inlined bootstrap
+            // use blob digest as the bootstrap file name. The last blob in the blob table from
+            // the bootstrap has wrong blod id, so we need to fix it.
+            let mut fixed = false;
+            let blobs = rs.superblock.get_blob_infos();
+            for blob in blobs.iter() {
+                // Fix blob id for new images with old converters.
+                if blob.has_feature(BlobFeatures::INLINED_META) {
+                    blob.set_blob_id_from_meta_path(path.as_ref())?;
+                    fixed = true;
+                }
+            }
+            if !fixed && !can_access_data_blobs && !blobs.is_empty() {
+                // Fix blob id for old images with old converters.
+                let last = blobs.len() - 1;
+                let blob = &blobs[last];
+                if !blob.has_feature(BlobFeatures::CAP_INLINED_META) {
+                    rs.set_blob_id_from_meta_path(path.as_ref())?;
+                }
+            }
         }
 
-        if (validate_digest || config.is_chunk_validation_enabled())
+        if can_access_data_blobs
+            && (validate_digest || config.is_chunk_validation_enabled())
             && rs.meta.has_inlined_chunk_digest()
         {
             rs.create_blob_device(config)?;
@@ -713,9 +738,8 @@ impl RafsSuper {
     pub fn set_blob_id_from_meta_path(&self, meta_path: &Path) -> Result<()> {
         let blobs = self.superblock.get_blob_infos();
         for blob in blobs.iter() {
-            if blob.has_feature(BlobFeatures::ZRAN)
-                || blob.has_feature(BlobFeatures::INLINED_META)
-                || !blob.meta_ci_is_valid()
+            if blob.has_feature(BlobFeatures::INLINED_META)
+                || !blob.has_feature(BlobFeatures::CAP_INLINED_META)
             {
                 blob.set_blob_id_from_meta_path(meta_path)?;
             }

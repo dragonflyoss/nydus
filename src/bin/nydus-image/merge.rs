@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use hex::FromHex;
 use nydus_api::ConfigV2;
 use nydus_rafs::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
-use nydus_storage::device::BlobFeatures;
+use nydus_storage::device::{BlobFeatures, BlobInfo};
 
 use crate::core::bootstrap::Bootstrap;
 use crate::core::chunk_dict::HashChunkDict;
@@ -31,18 +31,6 @@ use crate::core::tree::{MetadataTreeBuilder, Tree};
 pub struct Merger {}
 
 impl Merger {
-    /*
-    /// Merge assumes the bootstrap name is in `$blob_digest` format.
-    fn get_raw_blob_digest(bootstrap_path: &Path) -> Result<String> {
-        let file_name = bootstrap_path
-            .file_name()
-            .ok_or_else(|| anyhow!("get file name"))?
-            .to_str()
-            .ok_or_else(|| anyhow!("convert to string"))?;
-        Ok(file_name.to_string())
-    }
-     */
-
     fn get_digest_from_list(digests: &Option<Vec<String>>, idx: usize) -> Result<Option<[u8; 32]>> {
         Ok(if let Some(digests) = &digests {
             let digest = digests
@@ -122,9 +110,14 @@ impl Merger {
         let mut chunk_dict_blobs = HashSet::new();
         let mut config = None;
         if let Some(chunk_dict_path) = &chunk_dict {
-            let (rs, _) =
-                RafsSuper::load_from_file(chunk_dict_path, true, false, config_v2.clone())
-                    .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
+            let (rs, _) = RafsSuper::load_from_file(
+                chunk_dict_path,
+                config_v2.clone(),
+                true,
+                false,
+                ctx.can_access_data_blobs,
+            )
+            .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
             config = Some(rs.meta.get_config());
             for blob in rs.superblock.get_blob_infos() {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
@@ -137,8 +130,14 @@ impl Merger {
         let mut blob_mgr = BlobManager::new(ctx.digester);
 
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
-            let (rs, _) = RafsSuper::load_from_file(bootstrap_path, true, false, config_v2.clone())
-                .context(format!("load bootstrap {:?}", bootstrap_path))?;
+            let (rs, _) = RafsSuper::load_from_file(
+                bootstrap_path,
+                config_v2.clone(),
+                true,
+                false,
+                ctx.can_access_data_blobs,
+            )
+            .context(format!("load bootstrap {:?}", bootstrap_path))?;
             config
                 .get_or_insert_with(|| rs.meta.get_config())
                 .check_compatibility(&rs.meta)?;
@@ -161,9 +160,14 @@ impl Merger {
                     }
                     parent_blob_added = true;
 
-                    // The blob id (blob sha256 hash) in parent bootstrap is invalid for nydusd
-                    // runtime, should change it to the hash of whole tar blob.
-                    blob_ctx.blob_id = blob.blob_id().to_owned();
+                    if ctx.can_access_data_blobs {
+                        // `blob.blob_id()` should have been fixed when loading the bootstrap.
+                        blob_ctx.blob_id = blob.blob_id();
+                    } else {
+                        // The blob id (blob sha256 hash) in parent bootstrap is invalid for nydusd
+                        // runtime, should change it to the hash of whole tar blob.
+                        blob_ctx.blob_id = BlobInfo::get_blob_id_from_meta_path(bootstrap_path)?;
+                    }
                     if let Some(digest) = Self::get_digest_from_list(&blob_digests, layer_idx)? {
                         if blob.has_feature(BlobFeatures::ZRAN) {
                             blob_ctx.rafs_blob_digest = digest;

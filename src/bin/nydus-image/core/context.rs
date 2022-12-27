@@ -444,21 +444,24 @@ impl BlobContext {
             entry_list: toc::TocEntryList::new(),
         };
 
-        if features.contains(BlobFeatures::ALIGNED) {
-            blob_ctx.blob_meta_header.set_4k_aligned(true);
-        }
-        if features.contains(BlobFeatures::INLINED_META) {
-            blob_ctx.blob_meta_header.set_inlined_meta(true);
-        }
-        if features.contains(BlobFeatures::CHUNK_INFO_V2) {
-            blob_ctx.blob_meta_header.set_chunk_info_v2(true);
-        }
-        if features.contains(BlobFeatures::ZRAN) {
-            blob_ctx.blob_meta_header.set_ci_zran(true);
-        }
-        if features.contains(BlobFeatures::INLINED_CHUNK_DIGEST) {
-            blob_ctx.blob_meta_header.set_inlined_chunk_digest(true);
-        }
+        blob_ctx
+            .blob_meta_header
+            .set_4k_aligned(features.contains(BlobFeatures::ALIGNED));
+        blob_ctx
+            .blob_meta_header
+            .set_inlined_meta(features.contains(BlobFeatures::INLINED_META));
+        blob_ctx
+            .blob_meta_header
+            .set_chunk_info_v2(features.contains(BlobFeatures::CHUNK_INFO_V2));
+        blob_ctx
+            .blob_meta_header
+            .set_ci_zran(features.contains(BlobFeatures::ZRAN));
+        blob_ctx
+            .blob_meta_header
+            .set_inlined_chunk_digest(features.contains(BlobFeatures::INLINED_CHUNK_DIGEST));
+        blob_ctx
+            .blob_meta_header
+            .set_cap_inlined_meta(features.contains(BlobFeatures::CAP_INLINED_META));
 
         blob_ctx
     }
@@ -473,60 +476,76 @@ impl BlobContext {
         let mut features = blob.features();
 
         // Fixes up blob info objects from inlined-meta blobs.
-        if features.contains(BlobFeatures::INLINED_META)
-            && (chunk_source == ChunkSource::Dict || chunk_source == ChunkSource::Parent)
-        {
-            let backend_config = ctx
-                .configuration
-                .get_backend_config()
-                .map_err(|e| anyhow!("failed to get backend storage configuration, {}", e))?;
-            let blob_mgr = BlobFactory::new_backend(backend_config, "fix-inlined-meta")?;
+        if chunk_source == ChunkSource::Dict || chunk_source == ChunkSource::Parent {
+            if features.contains(BlobFeatures::INLINED_META) {
+                features &= !BlobFeatures::INLINED_META;
 
-            if features.contains(BlobFeatures::ZRAN) {
-                if let Ok(digest) = blob.get_rafs_blob_id() {
-                    let reader = blob_mgr.get_reader(&digest).map_err(|e| {
-                        anyhow!("failed to get reader for blob {}, {:?}", digest, e)
+                if !features.contains(BlobFeatures::ZRAN) {
+                    blob_id = blob.blob_id();
+                }
+
+                if ctx.can_access_data_blobs {
+                    let backend_config = ctx.configuration.get_backend_config().map_err(|e| {
+                        anyhow!("failed to get backend storage configuration, {}", e)
                     })?;
-                    let size = reader
-                        .blob_size()
-                        .map_err(|e| anyhow!("failed to get blob size, {:?}", e))?;
-                    if let Ok(v) = hex::decode(digest) {
-                        if v.len() == 32 {
-                            rafs_blob_digest.copy_from_slice(&v[..32]);
-                            rafs_blob_size = size;
+                    let blob_mgr = BlobFactory::new_backend(backend_config, "fix-inlined-meta")?;
+
+                    if features.contains(BlobFeatures::ZRAN) {
+                        if let Ok(digest) = blob.get_rafs_blob_id() {
+                            let reader = blob_mgr.get_reader(&digest).map_err(|e| {
+                                anyhow!("failed to get reader for blob {}, {}", digest, e)
+                            })?;
+                            let size = reader
+                                .blob_size()
+                                .map_err(|e| anyhow!("failed to get blob size, {:?}", e))?;
+                            if let Ok(v) = hex::decode(digest) {
+                                if v.len() == 32 {
+                                    rafs_blob_digest.copy_from_slice(&v[..32]);
+                                    rafs_blob_size = size;
+                                }
+                            }
+                            if let Ok(toc) = TocEntryList::read_from_blob::<File>(
+                                reader.as_ref(),
+                                None,
+                                &TocLocation::default(),
+                            ) {
+                                toc_digest = toc.toc_digest().data;
+                                toc_size = toc.toc_size();
+                            }
+                        }
+                    } else {
+                        let reader = blob_mgr.get_reader(&blob_id).map_err(|e| {
+                            anyhow!("failed to get reader for blob {}, {}", blob_id, e)
+                        })?;
+                        compressed_blob_size = reader
+                            .blob_size()
+                            .map_err(|e| anyhow!("failed to get blob size, {:?}", e))?;
+                        if let Ok(toc) = TocEntryList::read_from_blob::<File>(
+                            reader.as_ref(),
+                            None,
+                            &TocLocation::default(),
+                        ) {
+                            toc_digest = toc.toc_digest().data;
+                            toc_size = toc.toc_size();
                         }
                     }
-                    if let Ok(toc) = TocEntryList::read_from_blob::<File>(
-                        reader.as_ref(),
-                        None,
-                        &TocLocation::default(),
-                    ) {
-                        toc_digest = toc.toc_digest().data;
-                        toc_size = toc.toc_size();
+                } else if features.contains(BlobFeatures::ZRAN) {
+                    if let Ok(digest) = blob.get_rafs_blob_id() {
+                        if let Ok(v) = hex::decode(digest) {
+                            if v.len() == 32 {
+                                rafs_blob_digest.copy_from_slice(&v[..32]);
+                            }
+                        }
                     }
                 }
-            } else {
+            } else if !blob.has_feature(BlobFeatures::CAP_INLINED_META)
+                && !ctx.can_access_data_blobs
+            {
                 blob_id = blob.blob_id();
-                let reader = blob_mgr
-                    .get_reader(&blob_id)
-                    .map_err(|e| anyhow!("failed to get reader for blob {}, {:?}", blob_id, e))?;
-                compressed_blob_size = reader
-                    .blob_size()
-                    .map_err(|e| anyhow!("failed to get blob size, {:?}", e))?;
-                if let Ok(toc) = TocEntryList::read_from_blob::<File>(
-                    reader.as_ref(),
-                    None,
-                    &TocLocation::default(),
-                ) {
-                    toc_digest = toc.toc_digest().data;
-                    toc_size = toc.toc_size();
-                }
             }
-            features &= !BlobFeatures::INLINED_META;
-        };
+        }
 
         let mut blob_ctx = Self::new(blob_id, 0, features, blob.compressor(), blob.digester());
-
         blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
         blob_ctx.uncompressed_blob_size = blob.uncompressed_size();
@@ -842,6 +861,8 @@ impl BlobManager {
             let mut flags = RafsSuperFlags::empty();
             match &mut blob_table {
                 RafsBlobTable::V5(table) => {
+                    let blob_features = BlobFeatures::from_bits(ctx.blob_meta_header.features())
+                        .ok_or_else(|| anyhow!("invalid blob features"))?;
                     flags |= RafsSuperFlags::from(ctx.blob_compressor);
                     flags |= RafsSuperFlags::from(ctx.blob_digester);
                     table.add(
@@ -852,7 +873,7 @@ impl BlobManager {
                         chunk_count,
                         decompressed_blob_size,
                         compressed_blob_size,
-                        BlobFeatures::empty(),
+                        blob_features,
                         flags,
                     );
                 }
@@ -1004,6 +1025,8 @@ pub struct BuildContext {
     pub chunk_size: u32,
     /// Version number of output metadata and data blob.
     pub fs_version: RafsVersion,
+    /// Whether any directory/file has extended attributes.
+    pub has_xattr: bool,
 
     /// Format conversion type.
     pub conversion_type: ConversionType,
@@ -1021,10 +1044,12 @@ pub struct BuildContext {
     pub blob_tar_reader: Option<BufReaderInfo<File>>,
     pub blob_features: BlobFeatures,
     pub blob_inline_meta: bool,
-    pub has_xattr: bool,
 
     pub features: Features,
     pub configuration: Arc<ConfigV2>,
+
+    // For backward compatiblity for `nydus-image merge`
+    pub can_access_data_blobs: bool,
 }
 
 impl BuildContext {
@@ -1045,9 +1070,9 @@ impl BuildContext {
         features: Features,
     ) -> Self {
         let blob_features = if blob_inline_meta {
-            BlobFeatures::INLINED_META
+            BlobFeatures::INLINED_META | BlobFeatures::CAP_INLINED_META
         } else {
-            BlobFeatures::empty()
+            BlobFeatures::CAP_INLINED_META
         };
         BuildContext {
             blob_id,
@@ -1074,6 +1099,7 @@ impl BuildContext {
 
             features,
             configuration: Arc::new(ConfigV2::default()),
+            can_access_data_blobs: true,
         }
     }
 
@@ -1116,6 +1142,7 @@ impl Default for BuildContext {
             blob_inline_meta: false,
             features: Features::new(),
             configuration: Arc::new(ConfigV2::default()),
+            can_access_data_blobs: true,
         }
     }
 }

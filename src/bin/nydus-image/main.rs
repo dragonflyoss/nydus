@@ -766,6 +766,7 @@ impl Command {
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
+        build_ctx.can_access_data_blobs = matches.get_one::<String>("config").is_some();
 
         let mut config = Self::get_configuration(matches)?;
         if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
@@ -783,7 +784,14 @@ impl Command {
                 explicit_uidgid: !repeatable,
             };
             blob_mgr.set_chunk_dict(timing_tracer!(
-                { import_chunk_dict(chunk_dict_arg, build_ctx.configuration.clone(), &config) },
+                {
+                    import_chunk_dict(
+                        chunk_dict_arg,
+                        build_ctx.configuration.clone(),
+                        &config,
+                        build_ctx.can_access_data_blobs,
+                    )
+                },
                 "import_chunk_dict"
             )?);
         }
@@ -890,6 +898,7 @@ impl Command {
             ..Default::default()
         };
         ctx.configuration = config.clone();
+        ctx.can_access_data_blobs = matches.get_one::<String>("config").is_some();
 
         let output = Merger::merge(
             &mut ctx,
@@ -912,13 +921,25 @@ impl Command {
             Some(s) => PathBuf::from(s),
         };
 
+        let can_access_data_blobs = matches.get_one::<String>("config").is_some();
         let config =
             Self::get_configuration(matches).context("failed to get configuration information")?;
-        let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, true, false, config.clone())?;
+        let (rs, _) = RafsSuper::load_from_file(
+            &bootstrap_path,
+            config.clone(),
+            true,
+            false,
+            can_access_data_blobs,
+        )?;
         info!("load bootstrap {:?} successfully", bootstrap_path);
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,
-            Some(args) => Some(import_chunk_dict(args, config, &rs.meta.get_config())?),
+            Some(args) => Some(import_chunk_dict(
+                args,
+                config,
+                &rs.meta.get_config(),
+                can_access_data_blobs,
+            )?),
         };
 
         let cfg_file = matches.get_one::<String>("backend-config").unwrap();

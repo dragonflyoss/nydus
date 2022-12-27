@@ -20,7 +20,7 @@ pub struct Validator {
 
 impl Validator {
     pub fn new(bootstrap_path: &Path, config: Arc<ConfigV2>) -> Result<Self> {
-        let (sb, _) = RafsSuper::load_from_file(bootstrap_path, true, false, config)?;
+        let (sb, _) = RafsSuper::load_from_file(bootstrap_path, config, true, false, true)?;
 
         Ok(Self { sb })
     }

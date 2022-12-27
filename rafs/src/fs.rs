@@ -81,7 +81,7 @@ impl Rafs {
     pub fn new(cfg: &Arc<ConfigV2>, id: &str, path: &Path) -> RafsResult<(Self, RafsIoReader)> {
         let cache_cfg = cfg.get_cache_config().map_err(RafsError::LoadConfig)?;
         let rafs_cfg = cfg.get_rafs_config().map_err(RafsError::LoadConfig)?;
-        let (sb, reader) = RafsSuper::load_from_file(path, false, false, cfg.clone())
+        let (sb, reader) = RafsSuper::load_from_file(path, cfg.clone(), false, false, true)
             .map_err(RafsError::FillSuperblock)?;
         let blob_infos = sb.superblock.get_blob_infos();
         let device = BlobDevice::new(cfg, &blob_infos).map_err(RafsError::CreateDevice)?;

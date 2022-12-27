@@ -61,9 +61,10 @@ impl OCIUnpacker {
     fn load_rafs(&self, config: Arc<ConfigV2>) -> Result<RafsSuper> {
         let (rs, _) = RafsSuper::load_from_file(
             self.bootstrap.as_path(),
+            config.clone(),
             config.is_chunk_validation_enabled(),
             false,
-            config.clone(),
+            true,
         )?;
         Ok(rs)
     }
