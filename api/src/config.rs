@@ -586,6 +586,8 @@ pub struct RafsConfigV2 {
     /// Filesystem prefetching configuration.
     #[serde(default)]
     pub prefetch: PrefetchConfigV2,
+    #[serde(default)]
+    pub warmup: u64,
 }
 
 impl RafsConfigV2 {
@@ -908,9 +910,13 @@ struct RafsConfig {
     /// Record file name if file access trace log.
     #[serde(default)]
     pub latest_read_files: bool,
-    // ZERO value means, amplifying user io is not enabled.
+    /// ZERO value means, amplifying user io is not enabled.
     #[serde(default = "default_batch_size")]
     pub amplify_io: usize,
+    /// Let Rafs wait for a period before completing mount. So prefetch
+    /// can download data as much as possible. In millisecond.
+    #[serde(default)]
+    pub warmup: u64,
 }
 
 impl TryFrom<RafsConfig> for ConfigV2 {
@@ -928,6 +934,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
             access_pattern: v.access_pattern,
             latest_read_files: v.latest_read_files,
             prefetch: v.fs_prefetch.into(),
+            warmup: v.warmup,
         };
         if !cache.prefetch.enable && rafs.prefetch.enable {
             cache.prefetch = rafs.prefetch.clone();

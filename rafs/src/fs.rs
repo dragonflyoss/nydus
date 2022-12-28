@@ -69,6 +69,7 @@ pub struct Rafs {
     prefetch_all: bool,
     xattr_enabled: bool,
     amplify_io: u32,
+    warmup: u64,
 
     // static inode attributes
     i_uid: u32,
@@ -99,6 +100,7 @@ impl Rafs {
             amplify_io: rafs_cfg.prefetch.batch_size as u32,
             prefetch_all: rafs_cfg.prefetch.prefetch_all,
             xattr_enabled: rafs_cfg.enable_xattr,
+            warmup: rafs_cfg.warmup,
 
             i_uid: geteuid().into(),
             i_gid: getegid().into(),
@@ -173,6 +175,13 @@ impl Rafs {
             self.prefetch(r, prefetch_files);
         }
         self.initialized = true;
+
+        // Wait for prefetch to download layers data as much as possible.
+        // So rafs can directly hit local file cache thus reducing requests
+        // to the Registry.
+        if self.warmup > 0 {
+            std::thread::sleep(Duration::from_millis(self.warmup));
+        }
 
         Ok(())
     }
