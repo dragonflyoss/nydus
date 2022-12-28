@@ -447,35 +447,50 @@ impl TocEntryList {
 
     fn parse_toc_header(buf: &[u8], location: &TocLocation) -> Result<Self> {
         if buf.len() < 512 {
-            return Err(einval!(format!("blob ToC size {} is too small", buf.len())));
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("blob ToC size {} is too small", buf.len()),
+            ));
         }
         let size = buf.len() - 512;
         let header = Header::from_byte_slice(&buf[size..]);
         let entry_type = header.entry_type();
         if entry_type != EntryType::Regular {
-            return Err(eother!("Tar entry type for ToC is not a regular file"));
+            return Err(Error::new(
+                ErrorKind::Other,
+                "Tar entry type for ToC is not a regular file",
+            ));
         }
-        let entry_size = header
-            .entry_size()
-            .map_err(|_| eother!("failed to get entry size from tar header"))?;
+        let entry_size = header.entry_size().map_err(|_| {
+            Error::new(ErrorKind::Other, "failed to get entry size from tar header")
+        })?;
         if entry_size > size as u64 {
-            return Err(eother!(format!(
-                "invalid toc entry size in tar header, expect {}, got {}",
-                size, entry_size
-            )));
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "invalid toc entry size in tar header, expect {}, got {}",
+                    size, entry_size
+                ),
+            ));
         }
-        let name = header
-            .path()
-            .map_err(|_| eother!("failed to get ToC file name from tar header"))?;
+        let name = header.path().map_err(|_| {
+            Error::new(
+                ErrorKind::Other,
+                "failed to get ToC file name from tar header",
+            )
+        })?;
         if name != Path::new(ENTRY_TOC) {
-            return Err(eother!(format!(
-                "ToC file name from tar header doesn't match, {}",
-                name.display()
-            )));
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "ToC file name from tar header doesn't match, {}",
+                    name.display()
+                ),
+            ));
         }
         let _header = header
             .as_gnu()
-            .ok_or_else(|| eother!("invalid GNU tar header for ToC"))?;
+            .ok_or_else(|| Error::new(ErrorKind::Other, "invalid GNU tar header for ToC"))?;
 
         let mut pos = size - entry_size as usize;
         let mut list = TocEntryList::new();

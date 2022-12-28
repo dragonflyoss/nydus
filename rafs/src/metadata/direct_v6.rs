@@ -1170,7 +1170,12 @@ impl RafsInodeExt for OndiskInodeWrapper {
                 *chunk_map = Some(self.mapping.load_chunk_map()?);
             }
             match chunk_map.as_ref().unwrap().get(chunk_addr) {
-                None => Err(enoent!("failed to get chunk info")),
+                None => Err(enoent!(format!(
+                    "failed to get chunk info for chunk {}/{}/{}",
+                    chunk_addr.blob_index(),
+                    chunk_addr.blob_ci_index(),
+                    chunk_addr.block_addr()
+                ))),
                 Some(idx) => DirectChunkInfoV6::new(&state, self.mapping.clone(), *idx)
                     .map(|v| Arc::new(v) as Arc<dyn BlobChunkInfo>),
             }

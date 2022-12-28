@@ -145,9 +145,12 @@ impl ConfigV2 {
 
     /// Get configuration information for RAFS filesystem.
     pub fn get_rafs_config(&self) -> Result<&RafsConfigV2> {
-        self.rafs
-            .as_ref()
-            .ok_or_else(|| einval!("no configuration information for rafs"))
+        self.rafs.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "no configuration information for rafs",
+            )
+        })
     }
 
     /// Clone the object with all secrets removed.
