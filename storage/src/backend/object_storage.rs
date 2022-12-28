@@ -11,7 +11,7 @@ use std::marker::Send;
 use std::sync::Arc;
 
 use reqwest::header::{HeaderMap, CONTENT_LENGTH};
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 
 use nydus_utils::metrics::BackendMetrics;
 
@@ -21,6 +21,7 @@ use super::{BackendError, BackendResult, BlobBackend, BlobReader};
 /// Error codes related to object storage backend.
 #[derive(Debug)]
 pub enum ObjectStorageError {
+    Common(String),
     Auth(Error),
     Url(String),
     Request(ConnectionError),
@@ -116,10 +117,19 @@ where
             .connection
             .call::<&[u8]>(Method::GET, url.as_str(), None, None, &mut headers, false)
             .map_err(ObjectStorageError::Request)?;
-        Ok(resp
-            .copy_to(&mut buf)
-            .map_err(ObjectStorageError::Transport)
-            .map(|size| size as usize)?)
+
+        let status = resp.status();
+
+        if status == StatusCode::PARTIAL_CONTENT || status == StatusCode::OK {
+            // TODO: Support multiple range request
+            resp.copy_to(&mut buf)
+                .map_err(|e| BackendError::ObjectStorage(ObjectStorageError::Transport(e)))
+                .map(|size| size as usize)
+        } else {
+            Err(BackendError::ObjectStorage(ObjectStorageError::Common(
+                format!("Unrecognized status code {} response {:?}", status, resp),
+            )))
+        }
     }
 
     fn metrics(&self) -> &BackendMetrics {
