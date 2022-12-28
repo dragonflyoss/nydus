@@ -9,6 +9,7 @@ import (
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/goharbor/acceleration-service/pkg/converter"
+	"github.com/goharbor/acceleration-service/pkg/platformutil"
 )
 
 type Opt struct {
@@ -33,14 +34,17 @@ type Opt struct {
 	BackendConfig    string
 	BackendForcePush bool
 
-	TargetPlatform   string
-	MultiPlatform    bool
-	DockerV2Format   bool
+	MergePlatform    bool
+	Docker2OCI       bool
 	FsVersion        string
 	FsAlignChunk     bool
 	Compressor       string
 	ChunkSize        string
 	PrefetchPatterns string
+	OCIRef           bool
+
+	AllPlatforms bool
+	Platforms    string
 }
 
 func Convert(ctx context.Context, opt Opt) error {
@@ -49,9 +53,15 @@ func Convert(ctx context.Context, opt Opt) error {
 		return err
 	}
 
-	cvt, err := converter.NewLocalConverter(
+	platformMC, err := platformutil.ParsePlatforms(opt.AllPlatforms, opt.Platforms)
+	if err != nil {
+		return err
+	}
+
+	cvt, err := converter.New(
 		converter.WithProvider(pvd),
 		converter.WithDriver("nydus", getConfig(opt)),
+		converter.WithPlatform(platformMC),
 	)
 	if err != nil {
 		return err
