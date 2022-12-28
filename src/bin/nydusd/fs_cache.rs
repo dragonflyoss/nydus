@@ -510,7 +510,7 @@ impl FsCacheHandler {
             Some(1) => nydus_api::default_batch_size() as u64,
             Some(s) => s as u64,
         };
-        let blob_size = blob_info.compressed_size();
+        let blob_size = blob_info.compressed_data_size();
         let count = (blob_size + size - 1) / size;
         let mut blob_req = Vec::with_capacity(count as usize);
         let mut pre_offset = 0u64;

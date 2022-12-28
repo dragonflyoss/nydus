@@ -588,7 +588,7 @@ impl BlobContext {
 
     // TODO: check the logic to reset prefetch size
     pub fn set_blob_prefetch_size(&mut self, ctx: &BuildContext) {
-        if (self.compressed_blob_size > 0
+        if (self.uncompressed_blob_size > 0
             || (ctx.conversion_type == ConversionType::EStargzIndexToRef
                 && !self.blob_id.is_empty()))
             && ctx.prefetch.policy != PrefetchPolicy::Blob
@@ -657,7 +657,7 @@ impl BlobContext {
 
     /// Get blob id if the blob has some chunks.
     pub fn blob_id(&mut self) -> Option<String> {
-        if self.compressed_blob_size > 0 {
+        if self.uncompressed_blob_size > 0 {
             Some(self.blob_id.to_string())
         } else {
             None

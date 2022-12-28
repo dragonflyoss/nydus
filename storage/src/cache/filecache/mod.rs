@@ -221,7 +221,7 @@ impl FileCacheEntry {
         // Set cache file to its expected size.
         let file_size = file.metadata()?.len();
         let cached_file_size = if mgr.cache_raw_data {
-            blob_info.compressed_size()
+            blob_info.compressed_data_size()
         } else {
             blob_info.uncompressed_size()
         };

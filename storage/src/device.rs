@@ -218,7 +218,26 @@ impl BlobInfo {
         &self.blob_id
     }
 
-    /// Get size of the compressed blob.
+    /// Get size of compressed chunk data, not including `blob.meta`, `blob.chunk`, `toc` etc.
+    pub fn compressed_data_size(&self) -> u64 {
+        if self.has_feature(BlobFeatures::ZRAN) {
+            // It's the size of OCIv1 targz blob.
+            self.compressed_size
+        } else if self.has_feature(BlobFeatures::CAP_TAR_TOC) && self.meta_ci_is_valid() {
+            if self.has_feature(BlobFeatures::HAS_TOC)
+                || self.has_feature(BlobFeatures::INLINED_FS_META)
+            {
+                // There's a tar header between chunk data and compression information.
+                self.meta_ci_offset - 0x200
+            } else {
+                self.meta_ci_offset
+            }
+        } else {
+            self.compressed_size
+        }
+    }
+
+    /// Get size of the compressed blob, including `blob.meta`, `blob.chunk`, `toc` etc.
     pub fn compressed_size(&self) -> u64 {
         self.compressed_size
     }

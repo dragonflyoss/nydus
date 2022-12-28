@@ -438,7 +438,7 @@ impl Rafs {
                 let batch_size = 1024 * 1024 * 2;
 
                 for blob in &blob_infos {
-                    let blob_size = blob.compressed_size();
+                    let blob_size = blob.compressed_data_size();
                     let count = div_round_up(blob_size, batch_size);
 
                     let mut pre_offset = 0u64;
