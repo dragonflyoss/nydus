@@ -5,12 +5,11 @@
 //! Storage backend driver to access blobs on container image registry.
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt::Display;
 use std::io::{Read, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fmt, thread};
 
 use arc_swap::ArcSwapOption;
 use reqwest::blocking::Response;
@@ -40,13 +39,22 @@ const REDIRECTED_STATUS_CODE: [StatusCode; 2] = [
 #[derive(Debug)]
 pub enum RegistryError {
     Common(String),
-    Url(ParseError),
+    Url(String, ParseError),
     Request(ConnectionError),
     Scheme(String),
-    Auth(String),
-    ResponseHead(String),
-    Response(std::io::Error),
     Transport(reqwest::Error),
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RegistryError::Common(s) => write!(f, "failed to access blob from registry, {}", s),
+            RegistryError::Url(u, e) => write!(f, "failed to parse URL {}, {}", u, e),
+            RegistryError::Request(e) => write!(f, "failed to issue request, {}", e),
+            RegistryError::Scheme(s) => write!(f, "invalid scheme, {}", s),
+            RegistryError::Transport(e) => write!(f, "network transport error, {}", e),
+        }
+    }
 }
 
 impl From<RegistryError> for BackendError {
@@ -144,7 +152,7 @@ impl Scheme {
     }
 }
 
-impl Display for Scheme {
+impl fmt::Display for Scheme {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.0.load(Ordering::Relaxed) {
             write!(f, "https")
@@ -498,7 +506,7 @@ impl RegistryReader {
         let url = self
             .state
             .url(url.as_str(), &[])
-            .map_err(RegistryError::Url)?;
+            .map_err(|e| RegistryError::Url(url, e))?;
         let mut headers = HeaderMap::new();
         let end_at = offset + buf.len() as u64 - 1;
         let range = format!("bytes={}-{}", offset, end_at);
@@ -546,10 +554,11 @@ impl RegistryReader {
                     if self.state.needs_fallback_http(&e) =>
                 {
                     self.state.fallback_http();
+                    let url = format!("/blobs/sha256:{}", self.blob_id);
                     let url = self
                         .state
-                        .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
-                        .map_err(RegistryError::Url)?;
+                        .url(url.as_str(), &[])
+                        .map_err(|e| RegistryError::Url(url, e))?;
                     self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?
                 }
                 Err(RegistryError::Request(ConnectionError::Common(e))) => {
@@ -568,7 +577,8 @@ impl RegistryReader {
             if REDIRECTED_STATUS_CODE.contains(&status) {
                 if let Some(location) = resp.headers().get("location") {
                     let location = location.to_str().unwrap();
-                    let mut location = Url::parse(location).map_err(RegistryError::Url)?;
+                    let mut location = Url::parse(location)
+                        .map_err(|e| RegistryError::Url(location.to_string(), e))?;
                     // Note: Some P2P proxy server supports only scheme specified origin blob server,
                     // so we need change scheme to `blob_url_scheme` here
                     if !self.state.blob_url_scheme.is_empty() {
@@ -587,7 +597,7 @@ impl RegistryReader {
                                     self.state.blob_redirected_host.as_str(),
                                     e
                                 );
-                                RegistryError::Url(e)
+                                RegistryError::Url(location.to_string(), e)
                             })?;
                         debug!("New redirected location {:?}", location.host_str());
                     }
@@ -628,10 +638,11 @@ impl RegistryReader {
 
 impl BlobReader for RegistryReader {
     fn blob_size(&self) -> BackendResult<u64> {
+        let url = format!("/blobs/sha256:{}", self.blob_id);
         let url = self
             .state
-            .url(&format!("/blobs/sha256:{}", self.blob_id), &[])
-            .map_err(RegistryError::Url)?;
+            .url(&url, &[])
+            .map_err(|e| RegistryError::Url(url, e))?;
 
         let resp =
             match self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true) {
@@ -640,10 +651,11 @@ impl BlobReader for RegistryReader {
                     if self.state.needs_fallback_http(&e) =>
                 {
                     self.state.fallback_http();
+                    let url = format!("/blobs/sha256:{}", self.blob_id);
                     let url = self
                         .state
-                        .url(format!("/blobs/sha256:{}", self.blob_id).as_str(), &[])
-                        .map_err(RegistryError::Url)?;
+                        .url(&url, &[])
+                        .map_err(|e| RegistryError::Url(url, e))?;
                     self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?
                 }
                 Err(e) => {

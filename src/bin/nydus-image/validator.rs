@@ -8,7 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::{RafsMode, RafsSuper};
+use nydus_api::ConfigV2;
+use nydus_rafs::metadata::RafsSuper;
 use nydus_storage::device::BlobInfo;
 
 use crate::tree::Tree;
@@ -18,8 +19,8 @@ pub struct Validator {
 }
 
 impl Validator {
-    pub fn new(bootstrap_path: &Path) -> Result<Self> {
-        let sb = RafsSuper::load_from_metadata(bootstrap_path, RafsMode::Direct, true)?;
+    pub fn new(bootstrap_path: &Path, config: Arc<ConfigV2>) -> Result<Self> {
+        let (sb, _) = RafsSuper::load_from_file(bootstrap_path, config, true, false, true)?;
 
         Ok(Self { sb })
     }

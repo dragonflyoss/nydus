@@ -20,18 +20,22 @@ use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
+use nydus_api::ConfigV2;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
 use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
 use nydus_rafs::metadata::layout::RafsBlobTable;
 use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
 use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
-use nydus_rafs::{RafsIoReader, RafsIoWrite};
+use nydus_rafs::RafsIoWrite;
 use nydus_storage::device::{BlobFeatures, BlobInfo};
+use nydus_storage::factory::BlobFactory;
+use nydus_storage::meta::toc::{TocEntryList, TocLocation};
 use nydus_storage::meta::{
     toc, BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
     ZranContextGenerator,
 };
+use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
@@ -364,6 +368,8 @@ pub struct BlobContext {
     pub blob_meta_info: BlobMetaChunkArray,
     /// Blob metadata header stored in the data blob, for v6
     pub blob_meta_header: BlobMetaHeaderOndisk,
+    /// Blob chunk digest array.
+    pub blob_chunk_digest: Vec<DigestData>,
 
     /// Final compressed blob file size.
     pub compressed_blob_size: u64,
@@ -381,13 +387,16 @@ pub struct BlobContext {
     /// Whether the blob is from chunk dict.
     pub chunk_source: ChunkSource,
 
-    // SHA256 digest of the TOC list digest (including toc list tar header, only valid in merged bootstrap).
+    // SHA256 digest of blob ToC content, including the toc tar header.
+    // It's all zero for blobs with inlined-meta.
     pub rafs_blob_toc_digest: [u8; 32],
-    // SHA256 digest of the rafs blob (only valid in merged bootstrap).
+    // SHA256 digest of RAFS blob for ZRAN, containing `blob.meta`, `blob.digest` `blob.toc` and
+    // optionally 'image.boot`. It's all zero for ZRAN blobs with inlined-meta, so need special
+    // handling.
     pub rafs_blob_digest: [u8; 32],
-    // Size of the rafs blob (only valid in merged bootstrap).
+    // Size of RAFS blob for ZRAN. It's zero ZRAN blobs with inlined-meta.
     pub rafs_blob_size: u64,
-    // Size of the ToC section in RAFS data blob.
+    // Size of blob ToC content, it's zero for blobs with inlined-meta.
     pub rafs_blob_toc_size: u32,
 
     pub entry_list: toc::TocEntryList,
@@ -415,6 +424,7 @@ impl BlobContext {
             blob_meta_info_enabled: false,
             blob_meta_info,
             blob_meta_header: BlobMetaHeaderOndisk::default(),
+            blob_chunk_digest: Vec::new(),
 
             compressed_blob_size: 0,
             uncompressed_blob_size: 0,
@@ -434,36 +444,116 @@ impl BlobContext {
             entry_list: toc::TocEntryList::new(),
         };
 
-        if features.contains(BlobFeatures::ALIGNED) {
-            blob_ctx.blob_meta_header.set_4k_aligned(true);
-        }
-        if features.contains(BlobFeatures::CHUNK_INFO_V2) {
-            blob_ctx.blob_meta_header.set_chunk_info_v2(true);
-        }
-        if features.contains(BlobFeatures::ZRAN) {
-            blob_ctx.blob_meta_header.set_ci_zran(true);
-        }
+        blob_ctx
+            .blob_meta_header
+            .set_4k_aligned(features.contains(BlobFeatures::ALIGNED));
+        blob_ctx
+            .blob_meta_header
+            .set_inlined_fs_meta(features.contains(BlobFeatures::INLINED_FS_META));
+        blob_ctx
+            .blob_meta_header
+            .set_chunk_info_v2(features.contains(BlobFeatures::CHUNK_INFO_V2));
+        blob_ctx
+            .blob_meta_header
+            .set_ci_zran(features.contains(BlobFeatures::ZRAN));
+        blob_ctx
+            .blob_meta_header
+            .set_inlined_chunk_digest(features.contains(BlobFeatures::INLINED_CHUNK_DIGEST));
+        blob_ctx
+            .blob_meta_header
+            .set_cap_tar_toc(features.contains(BlobFeatures::CAP_TAR_TOC));
 
         blob_ctx
     }
 
-    pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Self {
-        let mut blob_ctx = Self::new(
-            blob.blob_id().to_owned(),
-            0,
-            blob.features(),
-            blob.compressor(),
-            blob.digester(),
-        );
+    pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Result<Self> {
+        let mut compressed_blob_size = blob.compressed_size();
+        let mut rafs_blob_size = blob.rafs_blob_size();
+        let mut toc_size = blob.rafs_blob_toc_size();
+        let mut rafs_blob_digest = blob.rafs_blob_digest().to_owned();
+        let mut toc_digest = blob.rafs_blob_toc_digest().to_owned();
+        let mut blob_id = blob.raw_blob_id().to_string();
+        let mut features = blob.features();
 
+        // Fixes up blob info objects from inlined-meta blobs.
+        if chunk_source == ChunkSource::Dict || chunk_source == ChunkSource::Parent {
+            if features.contains(BlobFeatures::INLINED_FS_META) {
+                features &= !BlobFeatures::INLINED_FS_META;
+
+                if !features.contains(BlobFeatures::ZRAN) {
+                    blob_id = blob.blob_id();
+                }
+
+                if ctx.can_access_data_blobs {
+                    let backend_config = ctx.configuration.get_backend_config().map_err(|e| {
+                        anyhow!("failed to get backend storage configuration, {}", e)
+                    })?;
+                    let blob_mgr = BlobFactory::new_backend(backend_config, "fix-inlined-meta")?;
+
+                    if features.contains(BlobFeatures::ZRAN) {
+                        if let Ok(digest) = blob.get_rafs_blob_id() {
+                            let reader = blob_mgr.get_reader(&digest).map_err(|e| {
+                                anyhow!("failed to get reader for blob {}, {}", digest, e)
+                            })?;
+                            let size = reader
+                                .blob_size()
+                                .map_err(|e| anyhow!("failed to get blob size, {:?}", e))?;
+                            if let Ok(v) = hex::decode(digest) {
+                                if v.len() == 32 {
+                                    rafs_blob_digest.copy_from_slice(&v[..32]);
+                                    rafs_blob_size = size;
+                                }
+                            }
+                            if let Ok(toc) = TocEntryList::read_from_blob::<File>(
+                                reader.as_ref(),
+                                None,
+                                &TocLocation::default(),
+                            ) {
+                                toc_digest = toc.toc_digest().data;
+                                toc_size = toc.toc_size();
+                            }
+                        }
+                    } else {
+                        let reader = blob_mgr.get_reader(&blob_id).map_err(|e| {
+                            anyhow!("failed to get reader for blob {}, {}", blob_id, e)
+                        })?;
+                        compressed_blob_size = reader
+                            .blob_size()
+                            .map_err(|e| anyhow!("failed to get blob size, {:?}", e))?;
+                        if let Ok(toc) = TocEntryList::read_from_blob::<File>(
+                            reader.as_ref(),
+                            None,
+                            &TocLocation::default(),
+                        ) {
+                            toc_digest = toc.toc_digest().data;
+                            toc_size = toc.toc_size();
+                        }
+                    }
+                } else if features.contains(BlobFeatures::ZRAN) {
+                    if let Ok(digest) = blob.get_rafs_blob_id() {
+                        if let Ok(v) = hex::decode(digest) {
+                            if v.len() == 32 {
+                                rafs_blob_digest.copy_from_slice(&v[..32]);
+                            }
+                        }
+                    }
+                }
+            } else if !blob.has_feature(BlobFeatures::CAP_TAR_TOC) && !ctx.can_access_data_blobs {
+                blob_id = blob.blob_id();
+            }
+        }
+
+        let mut blob_ctx = Self::new(blob_id, 0, features, blob.compressor(), blob.digester());
         blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
         blob_ctx.uncompressed_blob_size = blob.uncompressed_size();
-        blob_ctx.compressed_blob_size = blob.compressed_size();
+        blob_ctx.compressed_blob_size = compressed_blob_size;
         blob_ctx.chunk_size = blob.chunk_size();
         blob_ctx.chunk_source = chunk_source;
-        blob_ctx.rafs_blob_digest = *blob.rafs_blob_digest();
-        blob_ctx.blob_meta_header.set_4k_aligned(ctx.aligned_chunk);
+        blob_ctx.rafs_blob_digest = rafs_blob_digest;
+        blob_ctx.rafs_blob_size = rafs_blob_size;
+        blob_ctx.rafs_blob_toc_digest = toc_digest;
+        blob_ctx.rafs_blob_toc_size = toc_size;
 
         if blob.meta_ci_is_valid() {
             blob_ctx
@@ -479,15 +569,10 @@ impl BlobContext {
             blob_ctx
                 .blob_meta_header
                 .set_ci_uncompressed_size(blob.meta_ci_uncompressed_size());
-
-            blob_ctx.blob_meta_header.set_4k_aligned(true);
-            blob_ctx
-                .blob_meta_header
-                .set_chunk_info_v2(blob.has_feature(BlobFeatures::CHUNK_INFO_V2));
             blob_ctx.blob_meta_info_enabled = true;
         }
 
-        blob_ctx
+        Ok(blob_ctx)
     }
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
@@ -524,6 +609,7 @@ impl BlobContext {
                         chunk.uncompressed_offset(),
                         chunk.uncompressed_size(),
                     );
+                    self.blob_chunk_digest.push(chunk.id().data);
                 }
                 BlobMetaChunkArray::V2(_) => {
                     if let Some(mut info) = chunk_info {
@@ -539,6 +625,7 @@ impl BlobContext {
                             0,
                         );
                     }
+                    self.blob_chunk_digest.push(chunk.id().data);
                 }
             }
         }
@@ -609,12 +696,12 @@ pub struct BlobManager {
 }
 
 impl BlobManager {
-    pub fn new() -> Self {
+    pub fn new(digester: digest::Algorithm) -> Self {
         Self {
             blobs: Vec::new(),
             current_blob_index: None,
             global_chunk_dict: Arc::new(()),
-            layered_chunk_dict: HashChunkDict::default(),
+            layered_chunk_dict: HashChunkDict::new(digester),
         }
     }
 
@@ -699,14 +786,6 @@ impl BlobManager {
         self.blobs.last()
     }
 
-    #[allow(clippy::wrong_self_convention)]
-    pub fn from_blob_table(&mut self, ctx: &BuildContext, blob_table: Vec<Arc<BlobInfo>>) {
-        self.blobs = blob_table
-            .iter()
-            .map(|entry| BlobContext::from(ctx, entry.as_ref(), ChunkSource::Parent))
-            .collect();
-    }
-
     pub fn get_blob_idx_by_id(&self, id: &str) -> Option<u32> {
         for (idx, blob) in self.blobs.iter().enumerate() {
             if blob.blob_id.eq(id) {
@@ -720,19 +799,43 @@ impl BlobManager {
         self.blobs.iter().map(|b| b.blob_id.to_owned()).collect()
     }
 
-    /// Extend blobs which belong to ChunkDict and setup real_blob_idx map
-    /// should call this function after import parent bootstrap
-    /// otherwise will break blobs order
-    pub fn extend_blob_table_from_chunk_dict(&mut self, ctx: &BuildContext) -> Result<()> {
+    /// Prepend all blobs from `blob_table` to the blob manager.
+    pub fn extend_from_blob_table(
+        &mut self,
+        ctx: &BuildContext,
+        blob_table: Vec<Arc<BlobInfo>>,
+    ) -> Result<()> {
+        let mut blobs: Vec<BlobContext> = Vec::new();
+        for blob in blob_table.iter() {
+            let ctx = BlobContext::from(ctx, blob.as_ref(), ChunkSource::Parent)?;
+            blobs.push(ctx);
+        }
+        if let Some(curr) = self.current_blob_index {
+            self.current_blob_index = Some(curr + blobs.len() as u32);
+            blobs.append(&mut self.blobs);
+        } else {
+            assert!(self.blobs.is_empty());
+        }
+        self.blobs = blobs;
+        Ok(())
+    }
+
+    /// Import all blobs from the global chunk dictionary for later chunk deduplication.
+    ///
+    /// The order to import blobs from parent bootstrap and chunk dictionary is important.
+    /// All blobs from parent bootstrap must be imported first, otherwise we need to fix blob index
+    /// of chunks from parent bootstrap.
+    pub fn extend_from_chunk_dict(&mut self, ctx: &BuildContext) -> Result<()> {
         let blobs = self.global_chunk_dict.get_blobs();
 
         for blob in blobs.iter() {
-            if let Some(real_idx) = self.get_blob_idx_by_id(blob.blob_id()) {
+            if let Some(real_idx) = self.get_blob_idx_by_id(&blob.blob_id()) {
                 self.global_chunk_dict
                     .set_real_blob_idx(blob.blob_index(), real_idx);
             } else {
                 let idx = self.alloc_index()?;
-                self.add(BlobContext::from(ctx, blob.as_ref(), ChunkSource::Dict));
+                let ctx = BlobContext::from(ctx, blob.as_ref(), ChunkSource::Dict)?;
+                self.add(ctx);
                 self.global_chunk_dict
                     .set_real_blob_idx(blob.blob_index(), idx);
             }
@@ -756,6 +859,8 @@ impl BlobManager {
             let mut flags = RafsSuperFlags::empty();
             match &mut blob_table {
                 RafsBlobTable::V5(table) => {
+                    let blob_features = BlobFeatures::from_bits(ctx.blob_meta_header.features())
+                        .ok_or_else(|| anyhow!("invalid blob features"))?;
                     flags |= RafsSuperFlags::from(ctx.blob_compressor);
                     flags |= RafsSuperFlags::from(ctx.blob_digester);
                     table.add(
@@ -766,7 +871,7 @@ impl BlobManager {
                         chunk_count,
                         decompressed_blob_size,
                         compressed_blob_size,
-                        BlobFeatures::empty(),
+                        blob_features,
                         flags,
                     );
                 }
@@ -875,18 +980,14 @@ impl BootstrapContext {
 /// BootstrapManager is used to hold the parent bootstrap reader and create
 /// new bootstrap context.
 pub struct BootstrapManager {
-    /// Parent bootstrap file reader.
-    pub f_parent_bootstrap: Option<RafsIoReader>,
+    pub f_parent_path: Option<PathBuf>,
     pub bootstrap_storage: Option<ArtifactStorage>,
 }
 
 impl BootstrapManager {
-    pub fn new(
-        bootstrap_storage: Option<ArtifactStorage>,
-        f_parent_bootstrap: Option<RafsIoReader>,
-    ) -> Self {
+    pub fn new(bootstrap_storage: Option<ArtifactStorage>, f_parent_path: Option<String>) -> Self {
         Self {
-            f_parent_bootstrap,
+            f_parent_path: f_parent_path.map(PathBuf::from),
             bootstrap_storage,
         }
     }
@@ -894,7 +995,7 @@ impl BootstrapManager {
     pub fn create_ctx(&self, fifo: bool) -> Result<BootstrapContext> {
         BootstrapContext::new(
             self.bootstrap_storage.clone(),
-            self.f_parent_bootstrap.is_some(),
+            self.f_parent_path.is_some(),
             fifo,
         )
     }
@@ -922,6 +1023,8 @@ pub struct BuildContext {
     pub chunk_size: u32,
     /// Version number of output metadata and data blob.
     pub fs_version: RafsVersion,
+    /// Whether any directory/file has extended attributes.
+    pub has_xattr: bool,
 
     /// Format conversion type.
     pub conversion_type: ConversionType,
@@ -939,9 +1042,12 @@ pub struct BuildContext {
     pub blob_tar_reader: Option<BufReaderInfo<File>>,
     pub blob_features: BlobFeatures,
     pub blob_inline_meta: bool,
-    pub has_xattr: bool,
 
     pub features: Features,
+    pub configuration: Arc<ConfigV2>,
+
+    // For backward compatiblity for `nydus-image merge`
+    pub can_access_data_blobs: bool,
 }
 
 impl BuildContext {
@@ -961,6 +1067,11 @@ impl BuildContext {
         blob_inline_meta: bool,
         features: Features,
     ) -> Self {
+        let blob_features = if blob_inline_meta {
+            BlobFeatures::INLINED_FS_META | BlobFeatures::CAP_TAR_TOC
+        } else {
+            BlobFeatures::CAP_TAR_TOC
+        };
         BuildContext {
             blob_id,
             aligned_chunk,
@@ -980,11 +1091,13 @@ impl BuildContext {
             blob_storage,
             blob_zran_generator: None,
             blob_tar_reader: None,
-            blob_features: BlobFeatures::empty(),
+            blob_features,
             blob_inline_meta,
             has_xattr: false,
 
             features,
+            configuration: Arc::new(ConfigV2::default()),
+            can_access_data_blobs: true,
         }
     }
 
@@ -994,6 +1107,10 @@ impl BuildContext {
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
         self.chunk_size = chunk_size;
+    }
+
+    pub fn set_configuration(&mut self, config: Arc<ConfigV2>) {
+        self.configuration = config;
     }
 }
 
@@ -1022,6 +1139,8 @@ impl Default for BuildContext {
             has_xattr: true,
             blob_inline_meta: false,
             features: Features::new(),
+            configuration: Arc::new(ConfigV2::default()),
+            can_access_data_blobs: true,
         }
     }
 }

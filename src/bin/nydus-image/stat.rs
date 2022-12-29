@@ -6,9 +6,12 @@ use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::{RafsMode, RafsSuper};
+use nydus_api::ConfigV2;
+use nydus_rafs::metadata::RafsSuper;
+use nydus_utils::digest;
 use serde::Serialize;
 
 use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
@@ -145,21 +148,21 @@ pub(crate) struct ImageStat {
 }
 
 impl ImageStat {
-    pub fn new() -> Self {
+    pub fn new(digester: digest::Algorithm) -> Self {
         ImageStat {
             dedup_enabled: false,
             target_enabled: false,
 
             base_image: ImageInfo::new(),
             target_image: ImageInfo::new(),
-            dedup_dict: Default::default(),
+            dedup_dict: HashChunkDict::new(digester),
             dedup_info: [Default::default(); 20],
         }
     }
 
-    pub fn stat(&mut self, path: &Path, is_base: bool) -> Result<()> {
-        let rs = RafsSuper::load_from_metadata(path, RafsMode::Direct, false)?;
-        let mut dict = HashChunkDict::default();
+    pub fn stat(&mut self, path: &Path, is_base: bool, config: Arc<ConfigV2>) -> Result<()> {
+        let (rs, _) = RafsSuper::load_from_file(path, config, false, false, true)?;
+        let mut dict = HashChunkDict::new(rs.meta.get_digester());
         let mut hardlinks = HashSet::new();
         let tree =
             Tree::from_bootstrap(&rs, &mut dict).context("failed to load bootstrap for stats")?;
@@ -206,11 +209,16 @@ impl ImageStat {
                 image.own_chunks += 1;
                 image.own_comp_size += entry.0.compressed_size() as u64;
                 image.own_uncomp_size += entry.0.uncompressed_size() as u64;
-                self.dedup_dict.add_chunk(entry.0.clone());
+                self.dedup_dict
+                    .add_chunk(entry.0.clone(), rs.meta.get_digester());
             }
         } else {
             for entry in dict.m.values() {
-                if self.dedup_dict.get_chunk(entry.0.id()).is_some() {
+                if self
+                    .dedup_dict
+                    .get_chunk(entry.0.id(), entry.0.uncompressed_size())
+                    .is_some()
+                {
                     image.ref_chunks += 1;
                     image.ref_comp_size += entry.0.compressed_size() as u64;
                     image.ref_uncomp_size += entry.0.uncompressed_size() as u64;

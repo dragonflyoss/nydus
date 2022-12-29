@@ -5,7 +5,6 @@
 //! Provide structures and functions to open/close/access a filesystem instance.
 
 use std::ffi::CStr;
-use std::fs::File;
 use std::os::raw::c_char;
 use std::path::Path;
 use std::ptr::{null, null_mut};
@@ -14,7 +13,6 @@ use std::sync::Arc;
 
 use nydus_api::ConfigV2;
 use nydus_rafs::fs::Rafs;
-use nydus_rafs::RafsIoRead;
 
 use crate::{cstr_to_str, set_errno, Inode};
 
@@ -83,16 +81,7 @@ fn do_nydus_open_rafs(bootstrap: &str, config: &str) -> NydusFsHandle {
         }
     };
     let cfg = Arc::new(cfg);
-    let reader = match File::open(bootstrap) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("failed to open bootstrap file {}, {}", bootstrap, e);
-            return fs_error_einval();
-        }
-    };
-    let mut reader = Box::new(reader) as Box<dyn RafsIoRead>;
-
-    let mut rafs = match Rafs::new(&cfg, &cfg.id, &mut reader) {
+    let (mut rafs, reader) = match Rafs::new(&cfg, &cfg.id, Path::new(bootstrap)) {
         Err(e) => {
             warn!(
                 "failed to open filesystem from bootstrap {}, {}",

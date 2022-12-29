@@ -10,10 +10,10 @@ use std::str;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use nydus_api::LocalFsConfig;
+use nydus_api::{ConfigV2, LocalFsConfig};
 use nydus_rafs::{
-    metadata::{RafsInodeExt, RafsMode, RafsSuper},
-    RafsIoReader, RafsIterator,
+    metadata::{RafsInodeExt, RafsSuper},
+    RafsIterator,
 };
 use nydus_storage::{
     backend::{localfs::LocalFs, BlobBackend, BlobReader},
@@ -30,7 +30,7 @@ use self::pax::{
 mod pax;
 
 pub trait Unpacker {
-    fn unpack(&self) -> Result<()>;
+    fn unpack(&self, config: Arc<ConfigV2>) -> Result<()>;
 }
 
 ///  A unpacker with the ability to convert bootstrap file and blob file to tar
@@ -58,34 +58,26 @@ impl OCIUnpacker {
         })
     }
 
-    fn load_rafs(&self) -> Result<RafsSuper> {
-        let bootstrap = OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(&*self.bootstrap)
-            .with_context(|| format!("fail to open bootstrap {:?}", self.bootstrap))?;
-
-        let mut rs = RafsSuper {
-            mode: RafsMode::Direct,
-            validate_digest: false,
-            ..Default::default()
-        };
-
-        rs.load(&mut (Box::new(bootstrap) as RafsIoReader))
-            .with_context(|| format!("fail to load bootstrap {:?}", self.bootstrap))?;
-
+    fn load_rafs(&self, config: Arc<ConfigV2>) -> Result<RafsSuper> {
+        let (rs, _) = RafsSuper::load_from_file(
+            self.bootstrap.as_path(),
+            config.clone(),
+            config.is_chunk_validation_enabled(),
+            false,
+            true,
+        )?;
         Ok(rs)
     }
 }
 
 impl Unpacker for OCIUnpacker {
-    fn unpack(&self) -> Result<()> {
+    fn unpack(&self, config: Arc<ConfigV2>) -> Result<()> {
         debug!(
             "oci unpacker, bootstrap file: {:?}, blob file: {:?}, output file: {:?}",
             self.bootstrap, self.blob, self.output
         );
 
-        let rafs = self.load_rafs()?;
+        let rafs = self.load_rafs(config)?;
 
         let mut builder = self
             .builder_factory

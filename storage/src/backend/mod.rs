@@ -13,6 +13,7 @@
 //!   The [LocalFs](localfs/struct.LocalFs.html) storage backend supports backend level data
 //!   prefetching, which is to load data into page cache.
 
+use std::fmt;
 use std::io::Read;
 use std::{sync::Arc, time::Duration};
 
@@ -58,6 +59,21 @@ pub enum BackendError {
     #[cfg(any(feature = "backend-oss", feature = "backend-s3"))]
     /// Error from object storage backend.
     ObjectStorage(self::object_storage::ObjectStorageError),
+}
+
+impl fmt::Display for BackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BackendError::Unsupported(s) => write!(f, "{}", s),
+            BackendError::CopyData(e) => write!(f, "failed to copy data, {}", e),
+            #[cfg(feature = "backend-registry")]
+            BackendError::Registry(e) => write!(f, "{:?}", e),
+            #[cfg(feature = "backend-localfs")]
+            BackendError::LocalFs(e) => write!(f, "{}", e),
+            #[cfg(any(feature = "backend-oss", feature = "backend-s3"))]
+            BackendError::ObjectStorage(e) => write!(f, "{}", e),
+        }
+    }
 }
 
 /// Specialized `Result` for storage backends.
@@ -115,6 +131,23 @@ pub trait BlobReader: Send + Sync {
                 }
             }
         }
+    }
+
+    /// Read as much as possible data into buffer.
+    fn read_all(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+        let mut off = 0usize;
+        let mut left = buf.len();
+
+        while left > 0 {
+            let cnt = self.read(&mut buf[off..], offset + off as u64)?;
+            if cnt == 0 {
+                break;
+            }
+            off += cnt;
+            left -= cnt;
+        }
+
+        Ok(off as usize)
     }
 
     /// Read a range of data from the blob file into the provided buffers.

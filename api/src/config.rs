@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::fs;
-use std::io::Result;
+use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -51,6 +51,25 @@ impl ConfigV2 {
             cache: None,
             rafs: None,
         }
+    }
+
+    /// Create a new configuration object for `backend-localfs` and `filecache`.
+    pub fn new_localfs(id: &str, dir: &str) -> Result<Self> {
+        let content = format!(
+            r#"
+        version = 2
+        id = "{}"
+        backend.type = "localfs"
+        backend.localfs.dir = "{}"
+        cache.type = "filecache"
+        cache.compressed = false
+        cache.validate = false
+        cache.filecache.work_dir = "{}"
+        "#,
+            id, dir, dir
+        );
+
+        Self::from_str(&content)
     }
 
     /// Read configuration information from a file.
@@ -101,11 +120,37 @@ impl ConfigV2 {
             .ok_or_else(|| einval!("no configuration information for cache"))
     }
 
+    /// Get cache working directory.
+    pub fn get_cache_working_directory(&self) -> Result<String> {
+        let cache = self.get_cache_config()?;
+        match cache.cache_type.as_str() {
+            "blobcache" | "filecache" => {
+                if let Some(c) = cache.file_cache.as_ref() {
+                    return Ok(c.work_dir.clone());
+                }
+            }
+            "fscache" => {
+                if let Some(c) = cache.fs_cache.as_ref() {
+                    return Ok(c.work_dir.clone());
+                }
+            }
+            _ => {}
+        }
+
+        Err(Error::new(
+            ErrorKind::NotFound,
+            "no working directory configured",
+        ))
+    }
+
     /// Get configuration information for RAFS filesystem.
     pub fn get_rafs_config(&self) -> Result<&RafsConfigV2> {
-        self.rafs
-            .as_ref()
-            .ok_or_else(|| einval!("no configuration information for rafs"))
+        self.rafs.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "no configuration information for rafs",
+            )
+        })
     }
 
     /// Clone the object with all secrets removed.
@@ -124,6 +169,22 @@ impl ConfigV2 {
         }
 
         cfg
+    }
+
+    /// Check whether chunk digest validation is enabled or not.
+    pub fn is_chunk_validation_enabled(&self) -> bool {
+        let mut validation = if let Some(cache) = &self.cache {
+            cache.cache_validate
+        } else {
+            false
+        };
+        if let Some(rafs) = &self.rafs {
+            if rafs.validate {
+                validation = true;
+            }
+        }
+
+        validation
     }
 }
 
@@ -1655,5 +1716,12 @@ mod tests {
         "#;
         let config = ConfigV2::from_str(content).unwrap();
         assert_eq!(&config.id, "");
+    }
+
+    #[test]
+    fn test_new_localfs() {
+        let config = ConfigV2::new_localfs("id1", "./").unwrap();
+        assert_eq!(&config.id, "id1");
+        assert_eq!(config.backend.as_ref().unwrap().backend_type, "localfs");
     }
 }

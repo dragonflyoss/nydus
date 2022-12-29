@@ -17,9 +17,9 @@ use nydus_rafs::metadata::layout::v6::{
     RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
 };
 use nydus_rafs::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
-use nydus_rafs::metadata::{RafsMode, RafsStore, RafsSuper, RafsSuperConfig};
-use nydus_utils::digest;
-use nydus_utils::digest::{DigestHasher, RafsDigest};
+use nydus_rafs::metadata::{RafsStore, RafsSuper, RafsSuperConfig};
+use nydus_storage::device::BlobFeatures;
+use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 
 use super::context::{
     ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
@@ -310,15 +310,15 @@ impl Bootstrap {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<Tree> {
-        let rs = if let Some(r) = bootstrap_mgr.f_parent_bootstrap.as_mut() {
-            let mut rs = RafsSuper {
-                mode: RafsMode::Direct,
-                validate_digest: true,
-                ..Default::default()
-            };
-            rs.load(r)
-                .context("failed to load superblock from bootstrap")?;
-            rs
+        let rs = if let Some(path) = bootstrap_mgr.f_parent_path.as_ref() {
+            RafsSuper::load_from_file(
+                path,
+                ctx.configuration.clone(),
+                true,
+                false,
+                ctx.can_access_data_blobs,
+            )
+            .map(|(rs, _)| rs)?
         } else {
             return Err(Error::msg("bootstrap context's parent bootstrap is null"));
         };
@@ -334,7 +334,7 @@ impl Bootstrap {
 
         // Reuse lower layer blob table,
         // we need to append the blob entry of upper layer to the table
-        blob_mgr.from_blob_table(ctx, rs.superblock.get_blob_infos());
+        blob_mgr.extend_from_blob_table(ctx, rs.superblock.get_blob_infos())?;
 
         // Build node tree of lower layer from a bootstrap file, and add chunks
         // of lower node to layered_chunk_dict for chunk deduplication on next.
@@ -547,6 +547,7 @@ impl Bootstrap {
         let mut devtable: Vec<RafsV6Device> = Vec::new();
         let blobs = blob_table.get_all();
         let mut block_count = 0u32;
+        let mut inlined_chunk_digest = true;
         for entry in blobs.iter() {
             let mut devslot = RafsV6Device::new();
             // blob id is String, which is processed by sha256.finalize().
@@ -563,10 +564,14 @@ impl Bootstrap {
                     entry.uncompressed_size()
                 ));
             }
+            if !entry.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
+                inlined_chunk_digest = false;
+            }
             let cnt = (entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32;
             assert!(block_count.checked_add(cnt).is_some());
             block_count += cnt;
-            let id = entry.blob_id().as_bytes();
+            let id = entry.blob_id();
+            let id = id.as_bytes();
             let mut blob_id = [0u8; 64];
             blob_id[..id.len()].copy_from_slice(id);
             devslot.set_blob_id(&blob_id);
@@ -645,6 +650,9 @@ impl Bootstrap {
         // we need to write extended_sb until chunk table is dumped.
         if ctx.explicit_uidgid {
             ext_sb.set_explicit_uidgid();
+        }
+        if inlined_chunk_digest {
+            ext_sb.set_inlined_chunk_digest();
         }
 
         // dump devtslot

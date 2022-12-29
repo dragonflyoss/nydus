@@ -572,8 +572,12 @@ impl RafsV5BlobTable {
         blob_info.set_prefetch_info(prefetch_offset as u64, prefetch_size as u64);
 
         self.entries.push(Arc::new(blob_info));
-        self.extended
-            .add(chunk_count, uncompressed_size, compressed_size);
+        self.extended.add(
+            chunk_count,
+            uncompressed_size,
+            compressed_size,
+            blob_features.bits(),
+        );
 
         blob_index
     }
@@ -636,7 +640,8 @@ impl RafsV5BlobTable {
                         return Err(einval!());
                     }
                     let entry = &self.extended.entries[index];
-                    (entry.chunk_count, entry.uncompressed_size, entry.compressed_size, BlobFeatures::empty())
+                    let blob_features = BlobFeatures::from_bits(entry.features).ok_or_else(|| einval!("invalid blob feature flags"))?;
+                    (entry.chunk_count, entry.uncompressed_size, entry.compressed_size, blob_features)
                 } else {
                     (0, 0, 0, BlobFeatures::_V5_NO_EXT_BLOB_TABLE)
                 };
@@ -709,7 +714,7 @@ impl RafsStore for RafsV5BlobTable {
 pub struct RafsV5ExtBlobEntry {
     /// Number of chunks in a blob file.
     pub chunk_count: u32,
-    pub reserved1: [u8; 4],     //   --  8 Bytes
+    pub features: u32,
     pub uncompressed_size: u64, // -- 16 Bytes
     pub compressed_size: u64,   // -- 24 Bytes
     pub reserved2: [u8; RAFSV5_EXT_BLOB_RESERVED_SIZE],
@@ -723,6 +728,7 @@ impl Debug for RafsV5ExtBlobEntry {
             .field("chunk_count", &self.chunk_count)
             .field("blob_cache_size", &self.uncompressed_size)
             .field("compressed_blob_size", &self.compressed_size)
+            .field("features", &self.features)
             .finish()
     }
 }
@@ -731,7 +737,7 @@ impl Default for RafsV5ExtBlobEntry {
     fn default() -> Self {
         RafsV5ExtBlobEntry {
             chunk_count: 0,
-            reserved1: [0; 4],
+            features: 0,
             uncompressed_size: 0,
             compressed_size: 0,
             reserved2: [0; RAFSV5_EXT_BLOB_RESERVED_SIZE],
@@ -740,11 +746,17 @@ impl Default for RafsV5ExtBlobEntry {
 }
 
 impl RafsV5ExtBlobEntry {
-    pub fn new(chunk_count: u32, blob_cache_size: u64, compressed_blob_size: u64) -> Self {
+    pub fn new(
+        chunk_count: u32,
+        blob_cache_size: u64,
+        compressed_blob_size: u64,
+        features: u32,
+    ) -> Self {
         Self {
             chunk_count,
             uncompressed_size: blob_cache_size,
             compressed_size: compressed_blob_size,
+            features,
             ..Default::default()
         }
     }
@@ -779,11 +791,18 @@ impl RafsV5ExtBlobTable {
     }
 
     /// Add a new entry into the extended blob information table.
-    pub fn add(&mut self, chunk_count: u32, blob_cache_size: u64, compressed_blob_size: u64) {
+    pub fn add(
+        &mut self,
+        chunk_count: u32,
+        blob_cache_size: u64,
+        compressed_blob_size: u64,
+        features: u32,
+    ) {
         self.entries.push(Arc::new(RafsV5ExtBlobEntry::new(
             chunk_count,
             blob_cache_size,
             compressed_blob_size,
+            features,
         )));
     }
 
@@ -824,7 +843,7 @@ impl RafsStore for RafsV5ExtBlobTable {
             .enumerate()
             .try_for_each::<_, Result<()>>(|(_idx, entry)| {
                 w.write_all(&u32::to_le_bytes(entry.chunk_count))?;
-                w.write_all(&entry.reserved1)?;
+                w.write_all(&u32::to_le_bytes(entry.features))?;
                 w.write_all(&u64::to_le_bytes(entry.uncompressed_size))?;
                 w.write_all(&u64::to_le_bytes(entry.compressed_size))?;
                 w.write_all(&entry.reserved2)?;
@@ -1519,7 +1538,7 @@ pub mod tests {
         // Create extended blob table
         let mut table = RafsV5ExtBlobTable::new();
         for i in 0..5 {
-            table.add(i * 3, 100, 100);
+            table.add(i * 3, 100, 100, 0);
         }
 
         // Store extended blob table
@@ -1550,7 +1569,7 @@ pub mod tests {
         // Check expected blob table
         for i in 0..5 {
             assert_eq!(table.get(i).unwrap().chunk_count, i * 3);
-            assert_eq!(table.get(i).unwrap().reserved1, [0u8; 4]);
+            assert_eq!(table.get(i).unwrap().features, 0);
             assert_eq!(table.get(i).unwrap().uncompressed_size, 100);
             assert_eq!(
                 table.get(i).unwrap().reserved2,

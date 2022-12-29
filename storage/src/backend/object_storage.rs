@@ -5,6 +5,7 @@
 
 //! Base module used to implement object storage backend drivers (such as oss, s3, etc.).
 
+use std::fmt;
 use std::fmt::Debug;
 use std::io::{Error, Result};
 use std::marker::Send;
@@ -22,11 +23,24 @@ use super::{BackendError, BackendResult, BlobBackend, BlobReader};
 #[derive(Debug)]
 pub enum ObjectStorageError {
     Auth(Error),
-    Url(String),
     Request(ConnectionError),
     ConstructHeader(String),
     Transport(reqwest::Error),
     Response(String),
+}
+
+impl fmt::Display for ObjectStorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ObjectStorageError::Auth(e) => write!(f, "failed to generate auth info, {}", e),
+            ObjectStorageError::Request(e) => write!(f, "network communication error, {}", e),
+            ObjectStorageError::ConstructHeader(e) => {
+                write!(f, "failed to generate HTTP header, {}", e)
+            }
+            ObjectStorageError::Transport(e) => write!(f, "network communication error, {}", e),
+            ObjectStorageError::Response(s) => write!(f, "network communication error, {}", s),
+        }
+    }
 }
 
 impl From<ObjectStorageError> for BackendError {

@@ -13,8 +13,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use nydus_api::ConfigV2;
 use nydus_rafs::metadata::{RafsInode, RafsInodeExt, RafsInodeWalkAction, RafsSuper};
-use nydus_rafs::{RafsIoRead, RafsIoReader};
+use nydus_rafs::RafsIoReader;
 use nydus_storage::device::BlobChunkInfo;
 use serde_json::Value;
 
@@ -34,18 +35,12 @@ pub(crate) struct RafsInspector {
 
 impl RafsInspector {
     // create the RafsInspector
-    pub fn new(bootstrap_path: &Path, request_mode: bool) -> Result<Self, anyhow::Error> {
-        // Load Bootstrap
-        let mut f = <dyn RafsIoRead>::from_file(bootstrap_path)
-            .map_err(|e| anyhow!("Can't find bootstrap, path={:?}, {:?}", bootstrap_path, e))?;
-
-        // Load rafs_meta(RafsSuper) from bootstrap
-        let mut rafs_meta = RafsSuper::default();
-        rafs_meta
-            .load(&mut f)
-            .map_err(|e| anyhow!("Can't load bootstrap, error {:?}", e))?;
-
-        // Get ino of root directory.
+    pub fn new(
+        bootstrap_path: &Path,
+        request_mode: bool,
+        config: Arc<ConfigV2>,
+    ) -> Result<Self, anyhow::Error> {
+        let (rafs_meta, f) = RafsSuper::load_from_file(bootstrap_path, config, false, false, true)?;
         let root_ino = rafs_meta.superblock.root_ino();
 
         Ok(RafsInspector {
@@ -89,16 +84,29 @@ impl RafsInspector {
         } else {
             println!(
                 r#"
-    Version:            {version}
-    Inodes Count:       {inodes_count}
-    Chunk Size:         {chunk_size}KB
-    Root Inode:         {root_inode}
-    Flags:              {flags}"#,
+    Version:                {version}
+    Inodes Count:           {inodes_count}
+    Chunk Size:             {chunk_size}KB
+    Root Inode:             {root_inode}
+    Flags:                  {flags}
+    Blob table offset:      0x{blob_tbl_offset:x}
+    Blob table size:        0x{blob_tbl_size:x}
+    Prefetch table offset:  0x{prefetch_tbl_offset:x}
+    Prefetch table entries: 0x{prefetch_tbl_entries:x}
+    Chunk table offset:     0x{chunk_tbl_offset:x}
+    Chunk table size:       0x{chunk_tbl_size:x}
+    "#,
                 version = self.rafs_meta.meta.version >> 8,
                 inodes_count = self.rafs_meta.meta.inodes_count,
                 chunk_size = self.rafs_meta.meta.chunk_size / 1024,
                 flags = self.rafs_meta.meta.flags,
                 root_inode = self.rafs_meta.superblock.root_ino(),
+                blob_tbl_offset = self.rafs_meta.meta.blob_table_offset,
+                blob_tbl_size = self.rafs_meta.meta.blob_table_size,
+                prefetch_tbl_offset = self.rafs_meta.meta.prefetch_table_offset,
+                prefetch_tbl_entries = self.rafs_meta.meta.prefetch_table_entries,
+                chunk_tbl_offset = self.rafs_meta.meta.chunk_table_offset,
+                chunk_tbl_size = self.rafs_meta.meta.chunk_table_size,
             );
             None
         };
@@ -208,55 +216,53 @@ impl RafsInspector {
                     return Err(Error::new(ErrorKind::Other, e));
                 }
 
-                if self.rafs_meta.meta.is_v5() {
-                    let child_inode = self.rafs_meta.get_extended_inode(child_ino, false)?;
-                    let mut chunks = Vec::<Arc<dyn BlobChunkInfo>>::new();
+                let child_inode = dir_inode.get_child_by_name(&child_name)?;
+                let mut chunks = Vec::<Arc<dyn BlobChunkInfo>>::new();
 
-                    // only reg_file can get and print chunk info
-                    if !child_inode.is_reg() {
+                // only reg_file can get and print chunk info
+                if !child_inode.is_reg() {
+                    return Ok(RafsInodeWalkAction::Break);
+                }
+
+                let chunk_count = child_inode.get_chunk_count();
+                for idx in 0..chunk_count {
+                    let cur_chunk = child_inode.get_chunk_info(idx)?;
+                    chunks.push(cur_chunk);
+                }
+
+                println!("  Chunk list:");
+                for (i, c) in chunks.iter().enumerate() {
+                    let blob_id = if let Ok(id) = self.get_blob_id_by_index(c.blob_index()) {
+                        id.to_owned()
+                    } else {
+                        error!(
+                            "Blob index is {}. But no blob entry associate with it",
+                            c.blob_index()
+                        );
                         return Ok(RafsInodeWalkAction::Break);
-                    }
+                    };
 
-                    let chunk_count = child_inode.get_chunk_count();
-                    for idx in 0..chunk_count {
-                        let cur_chunk = child_inode.get_chunk_info(idx)?;
-                        chunks.push(cur_chunk);
-                    }
+                    // file_offset = chunk_index * chunk_size
+                    let file_offset = i * self.rafs_meta.meta.chunk_size as usize;
 
-                    println!("  Chunk list:");
-                    for (i, c) in chunks.iter().enumerate() {
-                        let blob_id = if let Ok(id) = self.get_blob_id_by_index(c.blob_index()) {
-                            id.to_owned()
-                        } else {
-                            error!(
-                                "Blob index is {}. But no blob entry associate with it",
-                                c.blob_index()
-                            );
-                            return Ok(RafsInodeWalkAction::Break);
-                        };
-
-                        // file_offset = chunk_index * chunk_size
-                        let file_offset = c.id() * self.rafs_meta.meta.chunk_size;
-
-                        println!(
-                            r#"        {} ->
+                    println!(
+                        r#"        {} ->
         file offset: {file_offset}, chunk index: {chunk_index}
         compressed size: {compressed_size}, decompressed size: {decompressed_size}
         compressed offset: {compressed_offset}, decompressed offset: {decompressed_offset}
-        blob id: {blob_id} 
+        blob id: {blob_id}
         chunk id: {chunk_id}
     "#,
-                            i,
-                            chunk_index = c.id(),
-                            file_offset = file_offset,
-                            compressed_size = c.compressed_size(),
-                            decompressed_size = c.uncompressed_size(),
-                            decompressed_offset = c.uncompressed_offset(),
-                            compressed_offset = c.compressed_offset(),
-                            blob_id = blob_id,
-                            chunk_id = c.chunk_id()
-                        );
-                    }
+                        i,
+                        chunk_index = c.id(),
+                        file_offset = file_offset,
+                        compressed_size = c.compressed_size(),
+                        decompressed_size = c.uncompressed_size(),
+                        decompressed_offset = c.uncompressed_offset(),
+                        compressed_offset = c.compressed_offset(),
+                        blob_id = blob_id,
+                        chunk_id = c.chunk_id()
+                    );
                 }
                 Ok(RafsInodeWalkAction::Break)
             } else {
@@ -272,9 +278,9 @@ impl RafsInspector {
         let blob_infos = self.rafs_meta.superblock.get_blob_infos();
 
         let mut value = json!([]);
-        for (_i, blob_info) in blob_infos.iter().enumerate() {
+        for blob_info in blob_infos.iter() {
             if self.request_mode {
-                let v = json!({"blob_id": blob_info.blob_id(), 
+                let v = json!({"blob_id": blob_info.blob_id(),
                                     "readahead_offset": blob_info.prefetch_offset(),
                                     "readahead_size": blob_info.prefetch_size(),
                                     "decompressed_size": blob_info.uncompressed_size(),
@@ -283,17 +289,47 @@ impl RafsInspector {
             } else {
                 print!(
                     r#"
-Blob ID:            {blob_id}
-Readahead Offset:   {readahead_offset}
-Readahead Size:     {readahead_size}
-Cache Size:         {cache_size}
-Compressed Size:    {compressed_size}
+Blob Index:             {blob_index}
+Blob ID:                {blob_id}
+Raw Blob ID:            {raw_blob_id}
+Features:               {features:?}
+Compressor:             {compressor}
+Digester:               {digester}
+Cache Size:             {cache_size}
+Compressed Size:        {compressed_size}
+Chunk Size:             {chunk_size}
+Chunk Count:            {chunk_count}
+Prefetch Table Offset:  {prefetch_tbl_offset}
+Prefetch Table Size:    {prefetch_tbl_size}
+Meta Compressor:        {meta_compressor}
+Meta Offset:            {meta_offset}
+Meta Compressed Size:   {meta_comp_size}
+Meta Uncompressed Size: {meta_uncomp_size}
+ToC Digest:             {toc_digest}
+ToC Size:               {toc_size}
+RAFS Blob Digest:       {rafs_digest}
+RAFS Blob Size:         {rafs_size}
 "#,
+                    blob_index = blob_info.blob_index(),
                     blob_id = blob_info.blob_id(),
-                    readahead_offset = blob_info.prefetch_offset(),
-                    readahead_size = blob_info.prefetch_size(),
+                    raw_blob_id = blob_info.raw_blob_id(),
+                    features = blob_info.features(),
                     cache_size = blob_info.uncompressed_size(),
                     compressed_size = blob_info.compressed_size(),
+                    chunk_size = blob_info.chunk_size(),
+                    chunk_count = blob_info.chunk_count(),
+                    compressor = blob_info.compressor(),
+                    digester = blob_info.digester(),
+                    prefetch_tbl_offset = blob_info.prefetch_offset(),
+                    prefetch_tbl_size = blob_info.prefetch_size(),
+                    meta_compressor = blob_info.meta_ci_compressor(),
+                    meta_offset = blob_info.meta_ci_offset(),
+                    meta_comp_size = blob_info.meta_ci_compressed_size(),
+                    meta_uncomp_size = blob_info.meta_ci_uncompressed_size(),
+                    toc_digest = hex::encode(blob_info.rafs_blob_toc_digest()),
+                    toc_size = blob_info.rafs_blob_toc_size(),
+                    rafs_digest = hex::encode(blob_info.rafs_blob_digest()),
+                    rafs_size = blob_info.rafs_blob_size(),
                 );
             }
         }
@@ -604,12 +640,12 @@ Blocks:             {blocks}"#,
     // Match blobinfo by using blob index
     fn get_blob_id_by_index(&self, blob_index: u32) -> Result<String, anyhow::Error> {
         let blob_infos = self.rafs_meta.superblock.get_blob_infos();
-        for (_i, b) in blob_infos.iter().enumerate() {
+        for b in blob_infos.iter() {
             if b.blob_index() == blob_index {
-                return Ok(b.blob_id().to_owned());
+                return Ok(b.blob_id());
             }
         }
-        Err(anyhow!("can not find blob info by index: {}", blob_index))
+        Err(anyhow!("can not find blob by index: {}", blob_index))
     }
 }
 
@@ -628,7 +664,7 @@ impl Executor {
     pub fn execute(
         inspector: &mut RafsInspector,
         input: String,
-    ) -> std::result::Result<Option<Value>, ExecuteError> {
+    ) -> Result<Option<Value>, ExecuteError> {
         let mut raw = input
             .strip_suffix('\n')
             .unwrap_or(&input)
@@ -638,7 +674,6 @@ impl Executor {
             None => return Ok(None),
         };
         let args = raw.next().map(|a| a.trim());
-
         debug!("execute {:?} {:?}", cmd, args);
 
         let output = match (cmd, args) {
@@ -664,8 +699,8 @@ impl Executor {
                 })?;
                 inspector.cmd_check_inode(ino)
             }
-            _ => {
-                println!("Unsupported command!");
+            (cmd, _) => {
+                println!("Unsupported command: {}", cmd);
                 {
                     Self::usage();
                     return Err(ExecuteError::IllegalCommand);
@@ -680,14 +715,15 @@ impl Executor {
     pub(crate) fn usage() {
         println!(
             r#"
-    stats:              Display global rafs metadata
+    stats:              Display RAFS filesystesm metadata
     ls:                 Show files in current directory
     cd DIR:             Change current directory
-    stat FILE_NAME:     Show particular information of rafs inode
-    blobs:              Show blobs table
+    stat FILE_NAME:     Show particular information of RAFS file
+    blobs:              Show blob table
     prefetch:           Show prefetch table
     chunk OFFSET:       List basic info of a single chunk together with a list of files that share it
     icheck INODE:       Show path of the inode and basic information
+    exit:               Exit
         "#
         );
     }
@@ -698,7 +734,7 @@ pub(crate) struct Prompt {}
 impl Prompt {
     pub(crate) fn run(mut inspector: RafsInspector) {
         loop {
-            print!("Inspecting Rafs :> ");
+            print!("Inspecting RAFS :> ");
             std::io::stdout().flush().unwrap();
 
             let mut input = String::new();
@@ -709,12 +745,12 @@ impl Prompt {
                 Err(ExecuteError::IllegalCommand) => continue,
                 Err(ExecuteError::HelpCommand) => continue,
                 Err(ExecuteError::ExecError(e)) => {
-                    println!("Failed in executing command, {:?}", e);
+                    println!("Failed to execute command, {:?}", e);
                     continue;
                 }
                 Ok(Some(o)) => {
                     serde_json::to_writer(std::io::stdout(), &o)
-                        .unwrap_or_else(|e| error!("Failed to serialize, {:?}", e));
+                        .unwrap_or_else(|e| error!("Failed to serialize message, {:?}", e));
                 }
                 _ => continue,
             }

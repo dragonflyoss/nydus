@@ -76,7 +76,7 @@ impl FsCacheMgr {
 
     // Get the file cache entry for the specified blob object.
     fn get(&self, blob: &Arc<BlobInfo>) -> Option<Arc<FileCacheEntry>> {
-        self.blobs.read().unwrap().get(blob.blob_id()).cloned()
+        self.blobs.read().unwrap().get(&blob.blob_id()).cloned()
     }
 
     // Create a file cache entry for the specified blob object if not present, otherwise
@@ -95,15 +95,16 @@ impl FsCacheMgr {
         )?;
         let entry = Arc::new(entry);
         let mut guard = self.blobs.write().unwrap();
-        if let Some(entry) = guard.get(blob.blob_id()) {
+        if let Some(entry) = guard.get(&blob.blob_id()) {
             Ok(entry.clone())
         } else {
-            guard.insert(blob.blob_id().to_owned(), entry.clone());
+            let blob_id = blob.blob_id();
+            guard.insert(blob_id.clone(), entry.clone());
             self.metrics
                 .underlying_files
                 .lock()
                 .unwrap()
-                .insert(blob.blob_id().to_string());
+                .insert(blob_id);
             Ok(entry)
         }
     }
@@ -204,7 +205,14 @@ impl FileCacheEntry {
         let file = blob_info
             .get_fscache_file()
             .ok_or_else(|| einval!("No fscache file associated with the blob_info"))?;
-        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_info.blob_id());
+        let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
+        let blob_id = blob_info.blob_id();
+        let rafs_blob_id = if is_zran {
+            blob_info.get_rafs_blob_id()?
+        } else {
+            blob_id.clone()
+        };
+        let blob_file_path = format!("{}/{}", mgr.work_dir, rafs_blob_id);
         let chunk_map = Arc::new(BlobStateMap::from(IndexedChunkMap::new(
             &blob_file_path,
             blob_info.chunk_count(),
@@ -212,17 +220,19 @@ impl FileCacheEntry {
         )?));
         let reader = mgr
             .backend
-            .get_reader(blob_info.blob_id())
-            .map_err(|_e| eio!("failed to get blob reader"))?;
-        let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
-        let rafs_blob_reader = if blob_info.rafs_blob_digest() != &[0u8; 32] {
-            let ref_blob_id = hex::encode(blob_info.rafs_blob_digest());
+            .get_reader(&blob_id)
+            .map_err(|_e| eio!("failed to get reader for data blob"))?;
+        let rafs_blob_reader = if is_zran {
             mgr.backend
-                .get_reader(&ref_blob_id)
-                .map_err(|_e| eio!("failed to get rafs blob reader"))?
+                .get_reader(&rafs_blob_id)
+                .map_err(|_e| eio!("failed to get reader for rafs blob"))?
         } else {
             reader.clone()
         };
+        let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
+        let need_validation = mgr.need_validation
+            && !blob_info.is_legacy_stargz()
+            && blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
         let meta = if blob_info.meta_ci_is_valid() {
             FileCacheMeta::new(
                 blob_file_path,
@@ -230,17 +240,18 @@ impl FileCacheEntry {
                 Some(rafs_blob_reader),
                 None,
                 true,
+                need_validation,
             )?
         } else {
             return Err(enosys!(
                 "fscache doesn't support blobs without blob meta information"
             ));
         };
-        let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
 
         Self::restore_chunk_map(blob_info.clone(), file.clone(), &meta, &chunk_map);
 
         Ok(FileCacheEntry {
+            blob_id,
             blob_info: blob_info.clone(),
             chunk_map,
             file,
@@ -259,7 +270,7 @@ impl FileCacheEntry {
             is_legacy_stargz: blob_info.is_legacy_stargz(),
             is_zran,
             dio_enabled: true,
-            need_validation: mgr.need_validation && !blob_info.is_legacy_stargz(),
+            need_validation,
             batch_size: RAFS_DEFAULT_CHUNK_SIZE,
             prefetch_config,
         })

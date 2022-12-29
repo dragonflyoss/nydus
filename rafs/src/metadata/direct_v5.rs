@@ -326,6 +326,14 @@ impl RafsSuperBlock for DirectSuperBlockV5 {
     fn root_ino(&self) -> u64 {
         RAFS_V5_ROOT_INODE
     }
+
+    fn get_chunk_info(&self, _idx: usize) -> Result<Arc<dyn BlobChunkInfo>> {
+        unimplemented!("used by RAFS v6 only")
+    }
+
+    fn set_blob_device(&self, _blob_device: BlobDevice) {
+        unimplemented!("used by RAFS v6 only")
+    }
 }
 
 /// Direct-mapped RAFS v5 inode object.

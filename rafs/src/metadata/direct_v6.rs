@@ -29,12 +29,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::{ArcSwap, Guard};
-use nydus_utils::filemap::{clone_file, FileMapState};
-use nydus_utils::{digest::RafsDigest, div_round_up, round_up};
-use storage::device::{
+use nydus_storage::device::{
     v5::BlobV5ChunkInfo, BlobChunkFlags, BlobChunkInfo, BlobDevice, BlobInfo, BlobIoDesc, BlobIoVec,
 };
-use storage::utils::readahead;
+use nydus_storage::utils::readahead;
+use nydus_utils::filemap::{clone_file, FileMapState};
+use nydus_utils::{digest::RafsDigest, div_round_up, round_up};
 
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::layout::v6::{
@@ -90,6 +90,7 @@ struct DirectCachedInfo {
 pub struct DirectSuperBlockV6 {
     info: Arc<DirectCachedInfo>,
     state: Arc<ArcSwap<DirectMappingState>>,
+    device: Arc<Mutex<BlobDevice>>,
 }
 
 impl DirectSuperBlockV6 {
@@ -109,6 +110,7 @@ impl DirectSuperBlockV6 {
         Self {
             info: Arc::new(info),
             state: Arc::new(ArcSwap::new(Arc::new(state))),
+            device: Arc::new(Mutex::new(BlobDevice::default())),
         }
     }
 
@@ -283,6 +285,10 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
         let state = self.state.load();
         let chunk = DirectChunkInfoV6::new(&state, self.clone(), idx)?;
         Ok(Arc::new(chunk))
+    }
+
+    fn set_blob_device(&self, blob_device: BlobDevice) {
+        *self.device.lock().unwrap() = blob_device;
     }
 }
 
@@ -1145,14 +1151,35 @@ impl RafsInodeExt for OndiskInodeWrapper {
             + OndiskInodeWrapper::inode_xattr_size(inode)
             + (idx as usize * size_of::<RafsV6InodeChunkAddr>());
         let chunk_addr = state.map.get_ref::<RafsV6InodeChunkAddr>(offset)?;
-        let mut chunk_map = self.mapping.info.chunk_map.lock().unwrap();
-        if chunk_map.is_none() {
-            *chunk_map = Some(self.mapping.load_chunk_map()?);
-        }
-        match chunk_map.as_ref().unwrap().get(chunk_addr) {
-            None => Err(enoent!("failed to get chunk info")),
-            Some(idx) => DirectChunkInfoV6::new(&state, self.mapping.clone(), *idx)
-                .map(|v| Arc::new(v) as Arc<dyn BlobChunkInfo>),
+        let has_device = self.mapping.device.lock().unwrap().is_empty();
+
+        if state.meta.has_inlined_chunk_digest() && has_device {
+            let blob_index = chunk_addr.blob_index();
+            let chunk_index = chunk_addr.blob_ci_index();
+            let device = self.mapping.device.lock().unwrap();
+            device
+                .get_chunk_info(blob_index, chunk_index)
+                .ok_or_else(|| {
+                    enoent!(format!(
+                        "no chunk information object for blob {} chunk {}",
+                        blob_index, chunk_index
+                    ))
+                })
+        } else {
+            let mut chunk_map = self.mapping.info.chunk_map.lock().unwrap();
+            if chunk_map.is_none() {
+                *chunk_map = Some(self.mapping.load_chunk_map()?);
+            }
+            match chunk_map.as_ref().unwrap().get(chunk_addr) {
+                None => Err(enoent!(format!(
+                    "failed to get chunk info for chunk {}/{}/{}",
+                    chunk_addr.blob_index(),
+                    chunk_addr.blob_ci_index(),
+                    chunk_addr.block_addr()
+                ))),
+                Some(idx) => DirectChunkInfoV6::new(&state, self.mapping.clone(), *idx)
+                    .map(|v| Arc::new(v) as Arc<dyn BlobChunkInfo>),
+            }
         }
     }
 }
@@ -1170,7 +1197,7 @@ macro_rules! impl_chunkinfo_getter {
 }
 
 /// RAFS v6 chunk information object.
-pub struct DirectChunkInfoV6 {
+pub(crate) struct DirectChunkInfoV6 {
     mapping: DirectSuperBlockV6,
     offset: usize,
     digest: RafsDigest,

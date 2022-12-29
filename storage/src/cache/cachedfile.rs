@@ -53,9 +53,10 @@ impl FileCacheMeta {
         reader: Option<Arc<dyn BlobReader>>,
         runtime: Option<Arc<Runtime>>,
         sync: bool,
+        validation: bool,
     ) -> Result<Self> {
         if sync {
-            match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
+            match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref(), validation) {
                 Ok(m) => Ok(FileCacheMeta {
                     has_error: Arc::new(AtomicBool::new(false)),
                     meta: Arc::new(Mutex::new(Some(Arc::new(m)))),
@@ -77,7 +78,8 @@ impl FileCacheMeta {
                         Duration::from_millis(DOWNLOAD_META_RETRY_DELAY),
                     );
                     while retry < DOWNLOAD_META_RETRY_COUNT {
-                        match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref()) {
+                        match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref(), validation)
+                        {
                             Ok(m) => {
                                 *meta1.meta.lock().unwrap() = Some(Arc::new(m));
                                 return;
@@ -116,6 +118,7 @@ impl FileCacheMeta {
 }
 
 pub(crate) struct FileCacheEntry {
+    pub(crate) blob_id: String,
     pub(crate) blob_info: Arc<BlobInfo>,
     pub(crate) chunk_map: Arc<dyn ChunkMap>,
     pub(crate) file: Arc<File>,
@@ -369,7 +372,7 @@ impl AsRawFd for FileCacheEntry {
 
 impl BlobCache for FileCacheEntry {
     fn blob_id(&self) -> &str {
-        self.blob_info.blob_id()
+        &self.blob_id
     }
 
     fn blob_uncompressed_size(&self) -> Result<u64> {
@@ -444,8 +447,7 @@ impl BlobCache for FileCacheEntry {
                 warn!("storage: inaccurate prefetch status");
             }
             if val == 0 || val == 1 {
-                self.workers
-                    .flush_pending_prefetch_requests(self.blob_info.blob_id());
+                self.workers.flush_pending_prefetch_requests(&self.blob_id);
                 return Ok(());
             }
         }

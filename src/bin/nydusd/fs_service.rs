@@ -7,7 +7,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, MutexGuard};
 
@@ -197,12 +197,10 @@ pub fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSyste
 
     match cmd.fs_type {
         FsBackendType::Rafs => {
-            let rafs_cfg =
-                ConfigV2::from_str(cmd.config.as_str()).map_err(RafsError::LoadConfig)?;
-            let rafs_cfg = Arc::new(rafs_cfg);
-            let mut bootstrap = <dyn RafsIoRead>::from_file(&cmd.source)?;
-            let mut rafs = Rafs::new(&rafs_cfg, &cmd.mountpoint, &mut bootstrap)?;
-            rafs.import(bootstrap, prefetch_files)?;
+            let config = ConfigV2::from_str(cmd.config.as_str()).map_err(RafsError::LoadConfig)?;
+            let config = Arc::new(config);
+            let (mut rafs, reader) = Rafs::new(&config, &cmd.mountpoint, Path::new(&cmd.source))?;
+            rafs.import(reader, prefetch_files)?;
             info!("RAFS filesystem imported");
             Ok(Box::new(rafs))
         }

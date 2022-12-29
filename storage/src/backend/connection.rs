@@ -9,8 +9,8 @@ use std::io::{Read, Result};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{fmt, thread};
 
 use log::{max_level, Level};
 
@@ -41,10 +41,25 @@ pub enum ConnectionError {
     ErrorWithMsg(String),
     Common(reqwest::Error),
     Format(reqwest::Error),
-    Url(ParseError),
-    Scheme,
-    Host,
-    Port,
+    Url(String, ParseError),
+    Scheme(String),
+    MirrorHost,
+    MirrorPort,
+}
+
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConnectionError::Disconnected => write!(f, "network connection disconnected"),
+            ConnectionError::ErrorWithMsg(s) => write!(f, "network error, {}", s),
+            ConnectionError::Common(e) => write!(f, "network error, {}", e),
+            ConnectionError::Format(e) => write!(f, "{}", e),
+            ConnectionError::Url(s, e) => write!(f, "failed to parse URL {}, {}", s, e),
+            ConnectionError::Scheme(s) => write!(f, "invalid scheme {}", s),
+            ConnectionError::MirrorHost => write!(f, "invalid mirror host"),
+            ConnectionError::MirrorPort => write!(f, "invalid mirror port"),
+        }
+    }
 }
 
 /// Specialized `Result` for network communication.
@@ -254,18 +269,20 @@ pub(crate) struct Mirror {
 impl Mirror {
     /// Convert original URL to mirror URL.
     fn mirror_url(&self, url: &str) -> ConnectionResult<Url> {
-        let mirror_host = Url::parse(self.config.host.as_ref()).map_err(ConnectionError::Url)?;
-        let mut current_url = Url::parse(url).map_err(ConnectionError::Url)?;
+        let mirror_host = Url::parse(&self.config.host)
+            .map_err(|e| ConnectionError::Url(self.config.host.clone(), e))?;
+        let mut current_url =
+            Url::parse(url).map_err(|e| ConnectionError::Url(url.to_string(), e))?;
 
         current_url
             .set_scheme(mirror_host.scheme())
-            .map_err(|_| ConnectionError::Scheme)?;
+            .map_err(|_| ConnectionError::Scheme(mirror_host.scheme().to_string()))?;
         current_url
             .set_host(mirror_host.host_str())
-            .map_err(|_| ConnectionError::Host)?;
+            .map_err(|_| ConnectionError::MirrorHost)?;
         current_url
             .set_port(mirror_host.port())
-            .map_err(|_| ConnectionError::Port)?;
+            .map_err(|_| ConnectionError::MirrorPort)?;
         Ok(current_url)
     }
 }
