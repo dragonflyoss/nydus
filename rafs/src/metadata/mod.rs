@@ -693,7 +693,7 @@ impl RafsSuper {
             let blobs = rs.superblock.get_blob_infos();
             for blob in blobs.iter() {
                 // Fix blob id for new images with old converters.
-                if blob.has_feature(BlobFeatures::INLINED_META) {
+                if blob.has_feature(BlobFeatures::INLINED_FS_META) {
                     blob.set_blob_id_from_meta_path(path.as_ref())?;
                     fixed = true;
                 }
@@ -702,7 +702,7 @@ impl RafsSuper {
                 // Fix blob id for old images with old converters.
                 let last = blobs.len() - 1;
                 let blob = &blobs[last];
-                if !blob.has_feature(BlobFeatures::CAP_INLINED_META) {
+                if !blob.has_feature(BlobFeatures::CAP_TAR_TOC) {
                     rs.set_blob_id_from_meta_path(path.as_ref())?;
                 }
             }
@@ -738,8 +738,8 @@ impl RafsSuper {
     pub fn set_blob_id_from_meta_path(&self, meta_path: &Path) -> Result<()> {
         let blobs = self.superblock.get_blob_infos();
         for blob in blobs.iter() {
-            if blob.has_feature(BlobFeatures::INLINED_META)
-                || !blob.has_feature(BlobFeatures::CAP_INLINED_META)
+            if blob.has_feature(BlobFeatures::INLINED_FS_META)
+                || !blob.has_feature(BlobFeatures::CAP_TAR_TOC)
             {
                 blob.set_blob_id_from_meta_path(meta_path)?;
             }

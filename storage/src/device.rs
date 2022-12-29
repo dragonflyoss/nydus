@@ -52,15 +52,16 @@ bitflags! {
         /// Uncompressed chunk data is 4K aligned.
         const ALIGNED = 0x0000_0001;
         /// RAFS meta data is inlined in the data blob.
-        const INLINED_META = 0x0000_0002;
+        const INLINED_FS_META = 0x0000_0002;
         /// Blob chunk information format v2.
         const CHUNK_INFO_V2 = 0x0000_0004;
         /// Blob compression information data include context data for zlib random access.
         const ZRAN = 0x0000_0008;
         /// Chunk digest array is inlined in the data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0010;
-        /// Inlined-meta capability, used to support backward compatibility for legacy converters.
-        const CAP_INLINED_META = 0x4000_0000;
+        /// Data blob are encoded with Tar header and optionally ToC.
+        /// It's also a flag indicating that images are generated with `nydus-image` v2.2 or newer.
+        const CAP_TAR_TOC = 0x4000_0000;
         /// Rafs V5 image without extended blob table, this is an internal flag.
         const _V5_NO_EXT_BLOB_TABLE = 0x8000_0000;
     }
@@ -198,8 +199,9 @@ impl BlobInfo {
 
     /// Get the id of the blob, with special handling of `inlined-meta` case.
     pub fn blob_id(&self) -> String {
-        if (self.has_feature(BlobFeatures::INLINED_META) && !self.has_feature(BlobFeatures::ZRAN))
-            || !self.has_feature(BlobFeatures::CAP_INLINED_META)
+        if (self.has_feature(BlobFeatures::INLINED_FS_META)
+            && !self.has_feature(BlobFeatures::ZRAN))
+            || !self.has_feature(BlobFeatures::CAP_TAR_TOC)
         {
             let guard = self.meta_path.lock().unwrap();
             if !guard.is_empty() {
@@ -453,7 +455,7 @@ impl BlobInfo {
     /// Get RAFS blob id for ZRan.
     pub fn get_rafs_blob_id(&self) -> Result<String, Error> {
         assert!(self.has_feature(BlobFeatures::ZRAN));
-        let id = if self.has_feature(BlobFeatures::INLINED_META) {
+        let id = if self.has_feature(BlobFeatures::INLINED_FS_META) {
             let guard = self.meta_path.lock().unwrap();
             if guard.is_empty() {
                 return Err(einval!("failed to get blob id from meta file name"));

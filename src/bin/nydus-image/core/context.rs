@@ -449,7 +449,7 @@ impl BlobContext {
             .set_4k_aligned(features.contains(BlobFeatures::ALIGNED));
         blob_ctx
             .blob_meta_header
-            .set_inlined_meta(features.contains(BlobFeatures::INLINED_META));
+            .set_inlined_fs_meta(features.contains(BlobFeatures::INLINED_FS_META));
         blob_ctx
             .blob_meta_header
             .set_chunk_info_v2(features.contains(BlobFeatures::CHUNK_INFO_V2));
@@ -461,7 +461,7 @@ impl BlobContext {
             .set_inlined_chunk_digest(features.contains(BlobFeatures::INLINED_CHUNK_DIGEST));
         blob_ctx
             .blob_meta_header
-            .set_cap_inlined_meta(features.contains(BlobFeatures::CAP_INLINED_META));
+            .set_cap_tar_toc(features.contains(BlobFeatures::CAP_TAR_TOC));
 
         blob_ctx
     }
@@ -477,8 +477,8 @@ impl BlobContext {
 
         // Fixes up blob info objects from inlined-meta blobs.
         if chunk_source == ChunkSource::Dict || chunk_source == ChunkSource::Parent {
-            if features.contains(BlobFeatures::INLINED_META) {
-                features &= !BlobFeatures::INLINED_META;
+            if features.contains(BlobFeatures::INLINED_FS_META) {
+                features &= !BlobFeatures::INLINED_FS_META;
 
                 if !features.contains(BlobFeatures::ZRAN) {
                     blob_id = blob.blob_id();
@@ -538,9 +538,7 @@ impl BlobContext {
                         }
                     }
                 }
-            } else if !blob.has_feature(BlobFeatures::CAP_INLINED_META)
-                && !ctx.can_access_data_blobs
-            {
+            } else if !blob.has_feature(BlobFeatures::CAP_TAR_TOC) && !ctx.can_access_data_blobs {
                 blob_id = blob.blob_id();
             }
         }
@@ -1070,9 +1068,9 @@ impl BuildContext {
         features: Features,
     ) -> Self {
         let blob_features = if blob_inline_meta {
-            BlobFeatures::INLINED_META | BlobFeatures::CAP_INLINED_META
+            BlobFeatures::INLINED_FS_META | BlobFeatures::CAP_TAR_TOC
         } else {
-            BlobFeatures::CAP_INLINED_META
+            BlobFeatures::CAP_TAR_TOC
         };
         BuildContext {
             blob_id,

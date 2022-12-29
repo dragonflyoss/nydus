@@ -247,11 +247,11 @@ impl BlobMetaHeaderOndisk {
     }
 
     /// Set flag indicating whether RAFS meta is inlined in the data blob.
-    pub fn set_inlined_meta(&mut self, inlined: bool) {
+    pub fn set_inlined_fs_meta(&mut self, inlined: bool) {
         if inlined {
-            self.s_features |= BlobFeatures::INLINED_META.bits();
+            self.s_features |= BlobFeatures::INLINED_FS_META.bits();
         } else {
-            self.s_features &= !BlobFeatures::INLINED_META.bits();
+            self.s_features &= !BlobFeatures::INLINED_FS_META.bits();
         }
     }
 
@@ -283,11 +283,11 @@ impl BlobMetaHeaderOndisk {
     }
 
     /// Set flag indicating having inlined-meta capability.
-    pub fn set_cap_inlined_meta(&mut self, enable: bool) {
+    pub fn set_cap_tar_toc(&mut self, enable: bool) {
         if enable {
-            self.s_features |= BlobFeatures::CAP_INLINED_META.bits();
+            self.s_features |= BlobFeatures::CAP_TAR_TOC.bits();
         } else {
-            self.s_features &= !BlobFeatures::CAP_INLINED_META.bits();
+            self.s_features &= !BlobFeatures::CAP_TAR_TOC.bits();
         }
     }
 
@@ -1660,7 +1660,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::INLINED_META
+            | BlobFeatures::INLINED_FS_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
@@ -1713,7 +1713,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::INLINED_META
+            | BlobFeatures::INLINED_FS_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
@@ -1770,7 +1770,7 @@ pub(crate) mod tests {
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
 
         let features = BlobFeatures::ALIGNED
-            | BlobFeatures::INLINED_META
+            | BlobFeatures::INLINED_FS_META
             | BlobFeatures::CHUNK_INFO_V2
             | BlobFeatures::ZRAN;
         let mut blob_info = BlobInfo::new(
