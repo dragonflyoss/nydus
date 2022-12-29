@@ -1022,8 +1022,8 @@ impl BlobDevice {
     }
 
     /// Check whether the `BlobDevice` has any blobs.
-    pub fn is_empty(&self) -> bool {
-        self.blob_count == 0
+    pub fn has_device(&self) -> bool {
+        self.blob_count > 0
     }
 
     /// Read a range of data from a data blob into the provided writer
