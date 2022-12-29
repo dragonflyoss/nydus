@@ -514,6 +514,7 @@ impl FsCacheHandler {
             Some(1) => nydus_api::default_batch_size() as u64,
             Some(s) => s as u64,
         };
+        let size = std::cmp::max(0x4_0000u64, size);
         let blob_size = blob_info.compressed_data_size();
         let count = (blob_size + size - 1) / size;
         let mut blob_req = Vec::with_capacity(count as usize);
@@ -525,21 +526,15 @@ impl FsCacheHandler {
                 len: cmp::min(size, blob_size - pre_offset),
             });
             pre_offset += size;
-            if pre_offset > blob_size {
+            if pre_offset >= blob_size {
                 break;
             }
         }
 
-        info!(
-            "fscache: start to prefetch data for blob {}",
-            blob.blob_id()
-        );
+        let id = blob.blob_id();
+        info!("fscache: start to prefetch data for blob {}", id);
         if let Err(e) = blob.prefetch(blob.clone(), &blob_req, &[]) {
-            warn!(
-                "fscache: failed to prefetch data for blob {}, {}",
-                blob.blob_id(),
-                e
-            );
+            warn!("fscache: failed to prefetch data for blob {}, {}", id, e);
         }
 
         Ok(())
@@ -748,8 +743,8 @@ impl FsCacheHandler {
             let file_name = match child.file_name().to_str() {
                 Some(n) => n.to_string(),
                 None => {
-                    env::set_current_dir(&cwd_old)?;
-                    return Err(eother!("get file name failed"));
+                    warn!("failed to get file name of {}", child.path().display());
+                    continue;
                 }
             };
             if !path.is_dir() || !file_name.starts_with("Ierofs,") {
@@ -771,7 +766,7 @@ impl FsCacheHandler {
                     res = false;
                 }
                 Ok(true) => {
-                    warn!("blob {} in use, skip!", cookie_path)
+                    warn!("blob {} in use, skip!", cookie_path);
                     res = false;
                 }
                 Ok(false) => {
