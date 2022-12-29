@@ -222,7 +222,7 @@ impl RegistryState {
     }
 
     /// Request registry authentication server to get bearer token
-    fn get_token(&self, auth: BearerAuth, connection: &Arc<Connection>) -> Result<String> {
+    fn get_token(&self, auth: BearerAuth, connection: &Arc<Connection>) -> RegistryResult<String> {
         // The information needed for getting token needs to be placed both in
         // the query and in the body to be compatible with different registry
         // implementations, which have been tested on these platforms:
@@ -255,13 +255,22 @@ impl RegistryState {
                 &mut headers,
                 true,
             )
-            .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
+            .map_err(|e| RegistryError::Auth(format!("request auth {:?}", e)))?;
+
+        if token_resp.status() != StatusCode::OK {
+            return Err(RegistryError::Auth(format!(
+                "authorized error, status {}",
+                token_resp.status()
+            )));
+        }
+
         let ret: TokenResponse = token_resp.json().map_err(|e| {
-            einval!(format!(
-                "registry auth server response decode failed: {:?}",
+            RegistryError::Auth(format!(
+                "decode registry auth server response failed: {:?}",
                 e
             ))
         })?;
+
         if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
             self.refresh_token_time
                 .store(Some(Arc::new(now_timestamp.as_secs() + ret.expires_in)));
@@ -277,13 +286,13 @@ impl RegistryState {
         Ok(ret.token)
     }
 
-    fn get_auth_header(&self, auth: Auth, connection: &Arc<Connection>) -> Result<String> {
+    fn get_auth_header(&self, auth: Auth, connection: &Arc<Connection>) -> RegistryResult<String> {
         match auth {
             Auth::Basic(_) => self
                 .auth
                 .as_ref()
                 .map(|auth| format!("Basic {}", auth))
-                .ok_or_else(|| einval!("invalid auth config")),
+                .ok_or_else(|| RegistryError::Auth("invalid auth config".to_string())),
             Auth::Bearer(auth) => {
                 let token = self.get_token(auth, connection)?;
                 Ok(format!("Bearer {}", token))
@@ -423,10 +432,7 @@ impl RegistryReader {
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
                 // Get token from registry authorization server
                 if let Some(auth) = RegistryState::parse_auth(resp_auth_header, &self.state.auth) {
-                    let auth_header = self
-                        .state
-                        .get_auth_header(auth, &self.connection)
-                        .map_err(|e| RegistryError::Common(e.to_string()))?;
+                    let auth_header = self.state.get_auth_header(auth, &self.connection)?;
 
                     headers.insert(
                         HEADER_AUTHORIZATION,
@@ -438,7 +444,7 @@ impl RegistryReader {
                     self.state.cached_auth.set(auth_header.as_str());
 
                     // Try to request registry server with `authorization` header again,
-                    // It's exactly a resend of the original request!
+                    // It re-sends the original request!
                     resp = self
                         .connection
                         .call::<&[u8]>(method, url, None, None, &mut headers, false)
@@ -603,6 +609,14 @@ impl BlobReader for RegistryReader {
                 return Err(BackendError::Registry(e));
             }
         };
+
+        if resp.status() != StatusCode::OK {
+            return Err(BackendError::Registry(RegistryError::Response(format!(
+                "head blob size, status {}",
+                resp.status()
+            ))));
+        }
+
         let content_length = resp
             .headers()
             .get(CONTENT_LENGTH)

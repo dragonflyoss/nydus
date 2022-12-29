@@ -78,6 +78,13 @@ where
             .connection
             .call::<&[u8]>(Method::HEAD, url.as_str(), None, None, &mut headers, false)
             .map_err(ObjectStorageError::Request)?;
+
+        if resp.status() != StatusCode::OK && resp.status() != StatusCode::NO_CONTENT {
+            return Err(BackendError::ObjectStorage(ObjectStorageError::Response(
+                format!("head blob size, status {}", resp.status()),
+            )));
+        }
+
         let content_length = resp
             .headers()
             .get(CONTENT_LENGTH)
