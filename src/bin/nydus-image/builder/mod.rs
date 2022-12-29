@@ -125,11 +125,15 @@ fn dump_bootstrap(
         };
 
         let compressed_size = bootstrap_data.len();
-        blob_ctx.write_tar_header(blob_writer, toc::ENTRY_BOOTSTRAP, compressed_size as u64)?;
+        blob_ctx.write_tar_header(
+            blob_writer,
+            toc::TOC_ENTRY_BOOTSTRAP,
+            compressed_size as u64,
+        )?;
 
         if ctx.features.is_enabled(Feature::BlobToc) {
             blob_ctx.entry_list.add(
-                toc::ENTRY_BOOTSTRAP,
+                toc::TOC_ENTRY_BOOTSTRAP,
                 compressor,
                 uncompressed_digest,
                 bootstrap_offset,
@@ -153,7 +157,7 @@ fn dump_toc(
         let toc_size = data.len() as u64;
         blob_ctx.write_data(blob_writer, &data)?;
         hasher.digest_update(&data);
-        let header = blob_ctx.write_tar_header(blob_writer, toc::ENTRY_TOC, toc_size)?;
+        let header = blob_ctx.write_tar_header(blob_writer, toc::TOC_ENTRY_BLOB_TOC, toc_size)?;
         hasher.digest_update(header.as_bytes());
         blob_ctx.rafs_blob_toc_digest = hasher.digest_finalize().data;
         blob_ctx.rafs_blob_toc_size = toc_size as u32 + header.as_bytes().len() as u32;

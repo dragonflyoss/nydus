@@ -23,20 +23,21 @@ use crate::factory::BlobFactory;
 use crate::utils::alloc_buf;
 
 /// File name for RAFS data chunks.
-pub const ENTRY_BLOB_RAW: &str = "image.blob";
+pub const TOC_ENTRY_BLOB_RAW: &str = "image.blob";
 /// File name for RAFS meta/bootstrap.
-pub const ENTRY_BOOTSTRAP: &str = "image.boot";
-/// File name for RAFS blob compression information.
-pub const ENTRY_BLOB_META: &str = "blob.meta";
-/// File name for RAFS blob compression information.
-pub const ENTRY_BLOB_META_HEADER: &str = "blob.meta.header";
-/// File name for RAFS chunk digest array.
-pub const ENTRY_BLOB_DIGEST: &str = "blob.digest";
+pub const TOC_ENTRY_BOOTSTRAP: &str = "image.boot";
+/// File name for RAFS blob compression context table.
+pub const TOC_ENTRY_BLOB_META: &str = "blob.meta";
+/// File name for RAFS blob compression context table header.
+pub const TOC_ENTRY_BLOB_META_HEADER: &str = "blob.meta.header";
+/// File name for RAFS chunk digest table.
+pub const TOC_ENTRY_BLOB_DIGEST: &str = "blob.digest";
 /// File name for RAFS blob ToC table.
-pub const ENTRY_TOC: &str = "rafs.blob.toc";
+pub const TOC_ENTRY_BLOB_TOC: &str = "rafs.blob.toc";
 
 bitflags! {
     #[derive(Serialize)]
+    /// Feature flags for ToC entry.
     pub struct TocEntryFlags: u32 {
         /// Entry data is not compressed.
         const COMPRESSION_NONE = 0x0001;
@@ -60,9 +61,9 @@ impl TryFrom<compress::Algorithm> for TocEntryFlags {
     }
 }
 
-/// RAFS TOC entry on-disk format, 128 bytes.
+/// Blob ToC entry on-disk format, 128 bytes.
 ///
-/// The structure is designed to seek TOC data with the `name` field.
+/// The structure is designed to seek ToC data with the `name` field.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TocEntry {
@@ -127,7 +128,7 @@ impl TocEntry {
         self.compressed_size
     }
 
-    /// Get compression algorithm for the associated data.
+    /// Get compression algorithm to process entry  data.
     pub fn compressor(&self) -> compress::Algorithm {
         if self.flags & TocEntryFlags::COMPRESSION_ZSTD.bits() != 0 {
             compress::Algorithm::Zstd
@@ -138,7 +139,7 @@ impl TocEntry {
         }
     }
 
-    /// Set compression algorithm for the associated data.
+    /// Set compression algorithm to process entry data.
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) -> Result<()> {
         let c: TocEntryFlags = compressor.try_into()?;
 
@@ -150,7 +151,7 @@ impl TocEntry {
         Ok(())
     }
 
-    /// Extract the content from a reader into a writer.
+    /// Extract entry data from a `BlobReader` into a writer.
     pub fn extract_from_reader<W: Write>(
         &self,
         reader: Arc<dyn BlobReader>,
@@ -168,7 +169,7 @@ impl TocEntry {
 
         if self.flags & TocEntryFlags::COMPRESSION_ZSTD.bits() != 0 {
             let mut decoder = Decoder::new(buf_reader, compress::Algorithm::Zstd)
-                .map_err(|_| eother!("failed to create decode"))?;
+                .map_err(|_| eother!("failed to create decoder"))?;
             let mut buf = alloc_buf(0x40000);
             loop {
                 let sz = decoder
@@ -220,14 +221,14 @@ impl TocEntry {
         Ok(())
     }
 
-    /// Extract  content from a buffer into a writer.
+    /// Extract entry data from a data buffer into a writer.
     pub fn extract_from_buf<W: Write>(&self, buf: &[u8], writer: &mut W) -> Result<()> {
         let mut hasher = digest::RafsDigest::hasher(digest::Algorithm::Sha256);
         let mut count = 0;
 
         if self.flags & TocEntryFlags::COMPRESSION_ZSTD.bits() != 0 {
             let mut decoder = Decoder::new(buf, compress::Algorithm::Zstd)
-                .map_err(|_| eother!("failed to create decode"))?;
+                .map_err(|_| eother!("failed to create decoder"))?;
             let mut buf = alloc_buf(0x40000);
             loop {
                 let sz = decoder
@@ -269,7 +270,7 @@ impl TocEntry {
     }
 }
 
-/// Container to host a list of ToC entries.
+/// Container to host a group of ToC entries.
 pub struct TocEntryList {
     entries: Vec<TocEntry>,
     toc_digest: RafsDigest,
@@ -283,7 +284,7 @@ impl Default for TocEntryList {
 }
 
 impl TocEntryList {
-    /// Create a new instance of `EntryList`.
+    /// Create a new instance of [TocEntryList].
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -355,7 +356,7 @@ impl TocEntryList {
         self.toc_size
     }
 
-    /// Read a `TocEntryList` from a reader.
+    /// Read a [TocEntryList] from a [BlobReader].
     pub fn read_from_blob<W: Write>(
         reader: &dyn BlobReader,
         cache_file: Option<&mut W>,
@@ -368,7 +369,7 @@ impl TocEntryList {
         Self::parse_toc_header(&buf, location)
     }
 
-    /// Read a `TocEntryList` from a cache file or the storage backend.
+    /// Read a [TocEntryList] from cache file, and fallback to storage backend.
     pub fn read_from_cache_file<P: AsRef<Path>>(
         path: P,
         reader: &dyn BlobReader,
@@ -479,7 +480,7 @@ impl TocEntryList {
                 "failed to get ToC file name from tar header",
             )
         })?;
-        if name != Path::new(ENTRY_TOC) {
+        if name != Path::new(TOC_ENTRY_BLOB_TOC) {
             return Err(Error::new(
                 ErrorKind::Other,
                 format!(
@@ -516,7 +517,7 @@ impl TocEntryList {
         Ok(list)
     }
 
-    /// Read a `TocEntryList` from a reader.
+    /// Extract `image.boot` and/or `blob.digest` from a [BlobReader] into files.
     pub fn extract_from_blob<P: AsRef<Path>>(
         &self,
         reader: Arc<dyn BlobReader>,
@@ -525,7 +526,7 @@ impl TocEntryList {
     ) -> Result<()> {
         if let Some(path) = bootstrap {
             let bootstrap = self
-                .get_entry(ENTRY_BOOTSTRAP)
+                .get_entry(TOC_ENTRY_BOOTSTRAP)
                 .ok_or_else(|| enoent!("`image.boot` doesn't exist in the ToC list"))?;
             if bootstrap.compressor() == compress::Algorithm::None
                 && bootstrap.compressed_size() != bootstrap.uncompressed_size()
@@ -566,7 +567,7 @@ impl TocEntryList {
 
         if let Some(path) = digest {
             let cda = self
-                .get_entry(ENTRY_BLOB_DIGEST)
+                .get_entry(TOC_ENTRY_BLOB_DIGEST)
                 .ok_or_else(|| enoent!("`blob.digest` doesn't exist in the ToC list"))?;
             if cda.compressor() == compress::Algorithm::None
                 && cda.compressed_size() != cda.uncompressed_size()
@@ -618,7 +619,7 @@ impl TocEntryList {
                 "invalid cache working directory",
             ));
         }
-        let path = path.join(id).with_extension(ENTRY_BOOTSTRAP);
+        let path = path.join(id).with_extension(TOC_ENTRY_BOOTSTRAP);
 
         let blob_mgr = BlobFactory::new_backend(backend_config, "extract_rafs_meta")?;
         let reader = blob_mgr
@@ -643,7 +644,7 @@ impl TocEntryList {
             let name = header
                 .path()
                 .map_err(|_| eother!("failed to get `image.boot` file name from tar header"))?;
-            if name != Path::new(ENTRY_BOOTSTRAP) {
+            if name != Path::new(TOC_ENTRY_BOOTSTRAP) {
                 return Err(eother!(format!(
                     "file name from tar header doesn't match `image.boot`, {}",
                     name.display()
@@ -666,7 +667,7 @@ impl TocEntryList {
 
             let mut toc = TocEntryList::new();
             toc.add(
-                ENTRY_BOOTSTRAP,
+                TOC_ENTRY_BOOTSTRAP,
                 compress::Algorithm::None,
                 RafsDigest::default(),
                 offset,
@@ -680,7 +681,7 @@ impl TocEntryList {
     }
 }
 
-/// Information to locate ToC in data blobs.
+/// Information to locate and validate ToC content.
 #[derive(Debug)]
 pub struct TocLocation {
     /// Enable validating digest of the ToC content.
@@ -708,7 +709,7 @@ impl Default for TocLocation {
 }
 
 impl TocLocation {
-    /// Create a `TocLocation` object with offset and size.
+    /// Create a [TocLocation] object with offset and size.
     pub fn new(offset: u64, size: u64) -> Self {
         TocLocation {
             validate_digest: false,
@@ -719,7 +720,7 @@ impl TocLocation {
         }
     }
 
-    /// Create a `TocLocation` object with offset, size and digest.
+    /// Create a [TocLocation] object with offset, size and digest.
     pub fn with_digest(offset: u64, size: u64, digest: RafsDigest) -> Self {
         TocLocation {
             validate_digest: true,
@@ -775,19 +776,19 @@ mod tests {
             TocEntryList::read_from_blob::<fs::File>(blob.as_ref(), None, &location).unwrap();
         assert_eq!(list.entries.len(), 4);
 
-        assert!(list.get_entry(ENTRY_BLOB_RAW).is_some());
-        assert!(list.get_entry(ENTRY_BOOTSTRAP).is_some());
-        assert!(list.get_entry(ENTRY_BLOB_META).is_some());
-        assert!(list.get_entry(ENTRY_BLOB_META_HEADER).is_some());
+        assert!(list.get_entry(TOC_ENTRY_BLOB_RAW).is_some());
+        assert!(list.get_entry(TOC_ENTRY_BOOTSTRAP).is_some());
+        assert!(list.get_entry(TOC_ENTRY_BLOB_META).is_some());
+        assert!(list.get_entry(TOC_ENTRY_BLOB_META_HEADER).is_some());
 
         let mut buf = Vec::new();
-        let entry = list.get_entry(ENTRY_BLOB_META).unwrap();
+        let entry = list.get_entry(TOC_ENTRY_BLOB_META).unwrap();
         assert_eq!(entry.uncompressed_size, 0x30);
         entry.extract_from_reader(blob.clone(), &mut buf).unwrap();
         assert!(!buf.is_empty());
 
         let mut buf = Vec::new();
-        let entry = list.get_entry(ENTRY_BLOB_META_HEADER).unwrap();
+        let entry = list.get_entry(TOC_ENTRY_BLOB_META_HEADER).unwrap();
         assert_eq!(entry.uncompressed_size, 0x1000);
         entry.extract_from_reader(blob.clone(), &mut buf).unwrap();
         assert!(!buf.is_empty());

@@ -33,7 +33,7 @@ use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
     BlobObject, BlobPrefetchRequest,
 };
-use crate::meta::{BlobMetaChunk, BlobMetaInfo};
+use crate::meta::{BlobCompressionContextInfo, BlobMetaChunk};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{StorageError, StorageResult, RAFS_BATCH_SIZE_TO_GAP_SHIFT, RAFS_DEFAULT_CHUNK_SIZE};
 
@@ -43,7 +43,7 @@ const DOWNLOAD_META_RETRY_DELAY: u64 = 400;
 #[derive(Default, Clone)]
 pub(crate) struct FileCacheMeta {
     has_error: Arc<AtomicBool>,
-    meta: Arc<Mutex<Option<Arc<BlobMetaInfo>>>>,
+    meta: Arc<Mutex<Option<Arc<BlobCompressionContextInfo>>>>,
 }
 
 impl FileCacheMeta {
@@ -56,7 +56,12 @@ impl FileCacheMeta {
         validation: bool,
     ) -> Result<Self> {
         if sync {
-            match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref(), validation) {
+            match BlobCompressionContextInfo::new(
+                &blob_file,
+                &blob_info,
+                reader.as_ref(),
+                validation,
+            ) {
                 Ok(m) => Ok(FileCacheMeta {
                     has_error: Arc::new(AtomicBool::new(false)),
                     meta: Arc::new(Mutex::new(Some(Arc::new(m)))),
@@ -78,8 +83,12 @@ impl FileCacheMeta {
                         Duration::from_millis(DOWNLOAD_META_RETRY_DELAY),
                     );
                     while retry < DOWNLOAD_META_RETRY_COUNT {
-                        match BlobMetaInfo::new(&blob_file, &blob_info, reader.as_ref(), validation)
-                        {
+                        match BlobCompressionContextInfo::new(
+                            &blob_file,
+                            &blob_info,
+                            reader.as_ref(),
+                            validation,
+                        ) {
                             Ok(m) => {
                                 *meta1.meta.lock().unwrap() = Some(Arc::new(m));
                                 return;
@@ -102,7 +111,7 @@ impl FileCacheMeta {
         }
     }
 
-    pub(crate) fn get_blob_meta(&self) -> Option<Arc<BlobMetaInfo>> {
+    pub(crate) fn get_blob_meta(&self) -> Option<Arc<BlobCompressionContextInfo>> {
         loop {
             let meta = self.meta.lock().unwrap();
             if meta.is_some() {
@@ -277,7 +286,7 @@ impl FileCacheEntry {
 
     fn strip_ready_chunks(
         &self,
-        meta: Arc<BlobMetaInfo>,
+        meta: Arc<BlobCompressionContextInfo>,
         old_chunks: Option<&[Arc<dyn BlobChunkInfo>]>,
         mut extended_chunks: Vec<Arc<dyn BlobChunkInfo>>,
     ) -> Vec<Arc<dyn BlobChunkInfo>> {
@@ -596,7 +605,7 @@ impl BlobCache for FileCacheEntry {
         }
     }
 
-    fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobMetaInfo>>> {
+    fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobCompressionContextInfo>>> {
         if let Some(meta) = self.meta.as_ref() {
             if let Some(bm) = meta.get_blob_meta() {
                 Ok(Some(bm))

@@ -99,7 +99,7 @@ impl Blob {
             if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                 blob_ctx.write_tar_header(
                     blob_writer,
-                    toc::ENTRY_BLOB_RAW,
+                    toc::TOC_ENTRY_BLOB_RAW,
                     blob_ctx.compressed_blob_size,
                 )?;
                 if ctx.features.is_enabled(Feature::BlobToc) {
@@ -107,7 +107,7 @@ impl Blob {
                         data: blob_ctx.blob_hash.clone().finalize().into(),
                     };
                     blob_ctx.entry_list.add(
-                        toc::ENTRY_BLOB_RAW,
+                        toc::TOC_ENTRY_BLOB_RAW,
                         compress::Algorithm::None,
                         blob_digest,
                         blob_ctx.compressed_offset,
@@ -189,7 +189,7 @@ impl Blob {
         if ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc) {
             blob_ctx.write_tar_header(
                 blob_writer,
-                toc::ENTRY_BLOB_META,
+                toc::TOC_ENTRY_BLOB_META,
                 compressed_size + header_size as u64,
             )?;
         }
@@ -204,7 +204,7 @@ impl Blob {
             };
             hasher.digest_update(ci_data);
             blob_ctx.entry_list.add(
-                toc::ENTRY_BLOB_META,
+                toc::TOC_ENTRY_BLOB_META,
                 compressor,
                 hasher.digest_finalize(),
                 compressed_offset,
@@ -215,7 +215,7 @@ impl Blob {
             let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
             hasher.digest_update(header.as_bytes());
             blob_ctx.entry_list.add(
-                toc::ENTRY_BLOB_META_HEADER,
+                toc::TOC_ENTRY_BLOB_META_HEADER,
                 compress::Algorithm::None,
                 hasher.digest_finalize(),
                 compressed_offset + compressed_size,
@@ -235,9 +235,9 @@ impl Blob {
             let compressed_offset = blob_writer.pos()?;
             let size = buf.len() as u64;
             blob_writer.write_all(buf)?;
-            blob_ctx.write_tar_header(blob_writer, toc::ENTRY_BLOB_DIGEST, size)?;
+            blob_ctx.write_tar_header(blob_writer, toc::TOC_ENTRY_BLOB_DIGEST, size)?;
             blob_ctx.entry_list.add(
-                toc::ENTRY_BLOB_DIGEST,
+                toc::TOC_ENTRY_BLOB_DIGEST,
                 compress::Algorithm::None,
                 digest,
                 compressed_offset,

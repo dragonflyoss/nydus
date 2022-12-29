@@ -6,12 +6,13 @@ use std::io::{BufReader, Read, Result};
 use std::mem::size_of;
 use std::slice;
 
+use nydus_utils::compress::zlib_random::{ZranContext, ZranGenerator, ZranReader};
+
 use crate::meta::chunk_info_v2::BlobChunkInfoV2Ondisk;
 use crate::meta::{round_up_4k, BlobMetaChunkInfo};
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
-use nydus_utils::compress::zlib_random::{ZranContext, ZranGenerator, ZranReader};
 
-/// Context information to support zlib random access.
+/// Context information to support random access to zlib/gzip stream .
 #[repr(C, packed)]
 pub struct ZranInflateContext {
     /// Offset in the original compression data stream.
@@ -35,22 +36,22 @@ pub struct ZranInflateContext {
 }
 
 impl ZranInflateContext {
-    /// Get the offset into the compressed stream.
+    /// Get offset into the compressed stream.
     pub fn in_offset(&self) -> u64 {
         u64::from_le(self.in_offset)
     }
 
-    /// Get the size of compressed data.
+    /// Get size of compressed data.
     pub fn in_size(&self) -> u32 {
         u32::from_le(self.in_len)
     }
 
-    /// Get the offset into the uncompressed stream.
+    /// Get offset into the decompressed stream.
     pub fn out_offset(&self) -> u64 {
         u64::from_le(self.out_offset)
     }
 
-    /// Get the size of the decompressed data.
+    /// Get size of the decompressed data.
     pub fn out_size(&self) -> u32 {
         u32::from_le(self.out_len)
     }
@@ -100,7 +101,7 @@ impl From<&ZranInflateContext> for ZranContext {
     }
 }
 
-/// Struct to generate zlib/gzip random access context information.
+/// Struct to generate [ZranInflateContext] objects for zlib/gzip stream.
 pub struct ZranContextGenerator<R> {
     generator: ZranGenerator<R>,
     reader: ZranReader<R>,
@@ -108,7 +109,7 @@ pub struct ZranContextGenerator<R> {
 }
 
 impl<R: Read> ZranContextGenerator<R> {
-    /// Create a new instance of `ZranContextGenerator`.
+    /// Create a new instance of [ZranContextGenerator].
     pub fn new(file: R) -> Result<Self> {
         let reader = ZranReader::new(file)?;
         let mut generator = ZranGenerator::new(reader.clone());
@@ -124,7 +125,7 @@ impl<R: Read> ZranContextGenerator<R> {
         })
     }
 
-    /// Create a new instance of `ZranContextGenerator` from a `BufReader`.
+    /// Create a new instance of [ZranContextGenerator] from a `BufReader`.
     pub fn from_buf_reader(buf_reader: BufReader<R>) -> Result<Self> {
         let buf = buf_reader.buffer().to_vec();
         let file = buf_reader.into_inner();
@@ -144,17 +145,17 @@ impl<R: Read> ZranContextGenerator<R> {
         })
     }
 
-    /// Get the reader to read decompressed data.
+    /// Get reader to read decompressed data.
     pub fn reader(&self) -> ZranReader<R> {
         self.reader.clone()
     }
 
-    /// Get number of zlib inflate context entries.
+    /// Get number of zlib/gzip inflate context entries.
     pub fn len(&self) -> usize {
         self.generator.get_compression_ctx_array().len()
     }
 
-    /// Check whether there's any zlib inflate context entries.
+    /// Check whether there's any zlib/gzip inflate context entries.
     pub fn is_empty(&self) -> bool {
         self.generator.get_compression_ctx_array().is_empty()
     }
@@ -182,7 +183,7 @@ impl<R: Read> ZranContextGenerator<R> {
         Ok(chunk)
     }
 
-    /// Save the zlib random access information to a file.
+    /// Save the zlib/gzip random access information to a file.
     pub fn to_vec(&self) -> Result<(Vec<u8>, u32)> {
         let mut data = Vec::new();
         let records = self.generator.get_compression_ctx_array();

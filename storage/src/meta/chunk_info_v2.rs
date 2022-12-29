@@ -2,10 +2,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::device::BlobFeatures;
 use std::fmt::{Display, Formatter};
 
-use crate::meta::{BlobMetaChunkInfo, BlobMetaState, BLOB_METADATA_CHUNK_SIZE_MASK};
+use crate::device::BlobFeatures;
+use crate::meta::{BlobCompressionContext, BlobMetaChunkInfo, BLOB_CCT_CHUNK_SIZE_MASK};
 
 const CHUNK_V2_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
 const CHUNK_V2_COMP_SIZE_SHIFT: u64 = 40;
@@ -17,7 +17,7 @@ const CHUNK_V2_FLAG_COMPRESSED: u64 = 0x1 << 56;
 const CHUNK_V2_FLAG_ZRAN: u64 = 0x2 << 56;
 const CHUNK_V2_FLAG_VALID: u64 = 0x3 << 56;
 
-/// Blob chunk compression information on disk format V2.
+/// Chunk compression information on disk format V2.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct BlobChunkInfoV2Ondisk {
@@ -83,14 +83,14 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
     }
 
     fn compressed_size(&self) -> u32 {
-        ((u64::from_le(self.comp_info) >> CHUNK_V2_COMP_SIZE_SHIFT) & BLOB_METADATA_CHUNK_SIZE_MASK)
+        ((u64::from_le(self.comp_info) >> CHUNK_V2_COMP_SIZE_SHIFT) & BLOB_CCT_CHUNK_SIZE_MASK)
             as u32
     }
 
     fn set_compressed_size(&mut self, size: u32) {
         let size = size as u64;
-        assert!(size <= BLOB_METADATA_CHUNK_SIZE_MASK);
-        self.comp_info &= u64::to_le(!(BLOB_METADATA_CHUNK_SIZE_MASK << CHUNK_V2_COMP_SIZE_SHIFT));
+        assert!(size <= BLOB_CCT_CHUNK_SIZE_MASK);
+        self.comp_info &= u64::to_le(!(BLOB_CCT_CHUNK_SIZE_MASK << CHUNK_V2_COMP_SIZE_SHIFT));
         self.comp_info |= u64::to_le(size << CHUNK_V2_COMP_SIZE_SHIFT);
     }
 
@@ -108,14 +108,13 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
 
     fn uncompressed_size(&self) -> u32 {
         let size = u64::from_le(self.uncomp_info) >> CHUNK_V2_UNCOMP_SIZE_SHIFT;
-        (size & BLOB_METADATA_CHUNK_SIZE_MASK) as u32 + 1
+        (size & BLOB_CCT_CHUNK_SIZE_MASK) as u32 + 1
     }
 
     fn set_uncompressed_size(&mut self, size: u32) {
         let size = size as u64;
-        assert!(size != 0 && size - 1 <= BLOB_METADATA_CHUNK_SIZE_MASK);
-        self.uncomp_info &=
-            u64::to_le(!(BLOB_METADATA_CHUNK_SIZE_MASK << CHUNK_V2_UNCOMP_SIZE_SHIFT));
+        assert!(size != 0 && size - 1 <= BLOB_CCT_CHUNK_SIZE_MASK);
+        self.uncomp_info &= u64::to_le(!(BLOB_CCT_CHUNK_SIZE_MASK << CHUNK_V2_UNCOMP_SIZE_SHIFT));
         self.uncomp_info |= u64::to_le((size - 1) << CHUNK_V2_UNCOMP_SIZE_SHIFT);
     }
 
@@ -141,7 +140,7 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         u64::from_le(self.data)
     }
 
-    fn validate(&self, state: &BlobMetaState) -> std::io::Result<()> {
+    fn validate(&self, state: &BlobCompressionContext) -> std::io::Result<()> {
         if self.compressed_end() > state.compressed_size
             || self.uncompressed_end() > state.uncompressed_size
             || self.uncompressed_size() == 0
@@ -270,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_get_chunk_index_with_hole() {
-        let state = BlobMetaState {
+        let state = BlobCompressionContext {
             blob_index: 0,
             blob_features: 0,
             compressed_size: 0,
