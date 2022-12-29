@@ -86,9 +86,9 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	}
 
 	opt := converter.Opt{
-		TargetPlatform: "linux/amd64",
-		Source:         host + "/" + nydusify.Source,
-		Target:         host + "/" + nydusify.Target,
+		Platforms: "linux/amd64",
+		Source:    host + "/" + nydusify.Source,
+		Target:    host + "/" + nydusify.Target,
 
 		CacheRef:        buildCache,
 		CacheMaxRecords: 10,
@@ -97,8 +97,8 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 		WorkDir:          nydusify.workDir,
 		PrefetchPatterns: "/",
 		NydusImagePath:   nydusImagePath,
-		MultiPlatform:    false,
-		DockerV2Format:   true,
+		MergePlatform:    false,
+		Docker2OCI:       true,
 
 		BackendType:   nydusify.backendType,
 		BackendConfig: nydusify.backendConfig,

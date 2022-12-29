@@ -14,7 +14,7 @@ func main() {
 	target := "localhost:5000/ubuntu:latest-nydus"
 
 	opt := converter.Opt{
-		TargetPlatform: "linux/amd64",
+		Platforms:      "linux/amd64",
 		Source:         source,
 		Target:         target,
 		SourceInsecure: true,
@@ -23,8 +23,8 @@ func main() {
 		WorkDir:          workDir,
 		PrefetchPatterns: "/",
 		NydusImagePath:   nydusImagePath,
-		MultiPlatform:    false,
-		DockerV2Format:   true,
+		MergePlatform:    false,
+		Docker2OCI:       true,
 	}
 
 	if err := converter.Convert(context.Background(), opt); err != nil {

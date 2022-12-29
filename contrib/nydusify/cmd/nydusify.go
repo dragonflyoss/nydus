@@ -313,21 +313,34 @@ func main() {
 				},
 
 				&cli.BoolFlag{
-					Name:    "multi-platform",
+					Name:    "merge-platform",
 					Value:   false,
 					Usage:   "Generate an OCI image index with both OCI and Nydus manifests for the image, please ensure that the OCI image exists in the target repository",
-					EnvVars: []string{"MULTI_PLATFORM"},
+					EnvVars: []string{"MERGE_PLATFORM"},
+					Aliases: []string{"multi-platform"},
+				},
+				&cli.BoolFlag{
+					Name:  "all-platforms",
+					Value: false,
+					Usage: "Convert images for all platforms, conflicts with --platform",
 				},
 				&cli.StringFlag{
 					Name:  "platform",
 					Value: "linux/" + runtime.GOARCH,
-					Usage: "Specify platform identifier to choose image manifest, possible values: 'linux/amd64' and 'linux/arm64'",
+					Usage: "Convert images for specific platforms, for example: 'linux/amd64,linux/arm64'",
 				},
 				&cli.BoolFlag{
-					Name:    "docker-v2-format",
+					Name:    "oci-ref",
 					Value:   false,
-					Usage:   "Enable support of docker image manifest v2, schema 2 format",
-					EnvVars: []string{"DOCKER_V2_FORMAT"},
+					Usage:   "Convert to OCI-referenced nydus zran image",
+					EnvVars: []string{"OCI_REF"},
+				},
+				&cli.BoolFlag{
+					Name:    "oci",
+					Value:   false,
+					Usage:   "Convert Docker media types to OCI media types",
+					EnvVars: []string{"OCI"},
+					Aliases: []string{"docker-v2-format"},
 				},
 				&cli.StringFlag{
 					Name:        "fs-version",
@@ -368,10 +381,11 @@ func main() {
 					EnvVars: []string{"COMPRESSOR"},
 				},
 				&cli.StringFlag{
-					Name:    "chunk-size",
+					Name:    "fs-chunk-size",
 					Value:   "0x100000",
 					Usage:   "size of nydus image data chunk, must be power of two and between 0x1000-0x100000, [default: 0x100000]",
-					EnvVars: []string{"CHUNK_SIZE"},
+					EnvVars: []string{"FS_CHUNK_SIZE"},
+					Aliases: []string{"chunk-size"},
 				},
 				&cli.StringFlag{
 					Name:    "work-dir",
@@ -418,8 +432,6 @@ func main() {
 					return fmt.Errorf("--fs-version should be one of %v", possibleFsVersions)
 				}
 
-				targetPlatform := c.String("platform")
-
 				prefetchPatterns, err := getPrefetchPatterns(c)
 				if err != nil {
 					return err
@@ -456,13 +468,16 @@ func main() {
 					ChunkDictInsecure: c.Bool("chunk-dict-insecure"),
 
 					PrefetchPatterns: prefetchPatterns,
-					MultiPlatform:    c.Bool("multi-platform"),
-					DockerV2Format:   c.Bool("docker-v2-format"),
-					TargetPlatform:   targetPlatform,
+					MergePlatform:    c.Bool("merge-platform"),
+					Docker2OCI:       c.Bool("oci"),
 					FsVersion:        fsVersion,
 					FsAlignChunk:     c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
 					Compressor:       c.String("compressor"),
 					ChunkSize:        c.String("chunk-size"),
+
+					OCIRef:       c.Bool("oci-ref"),
+					AllPlatforms: c.Bool("all-platforms"),
+					Platforms:    c.String("platform"),
 				}
 
 				return converter.Convert(context.Background(), opt)
