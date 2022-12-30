@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard, RwLock};
 use std::{cmp, env, thread, time};
 
 use mio::unix::SourceFd;
@@ -427,21 +427,21 @@ impl FsCacheHandler {
             .unwrap_or(msg.volume_key.as_str());
 
         let key = generate_blob_key(domain_id, &msg.cookie_key);
-        let msg = match self.get_config(&key) {
+        match self.get_config(&key) {
             None => {
                 unsafe { libc::close(msg.fd as i32) };
-                format!("copen {},{}", hdr.msg_id, -libc::ENOENT)
+                self.reply(&format!("copen {},{}", hdr.msg_id, -libc::ENOENT));
             }
             Some(cfg) => match cfg {
                 BlobCacheObjectConfig::DataBlob(config) => {
-                    self.handle_open_data_blob(hdr, msg, config)
+                    let reply = self.handle_open_data_blob(hdr, msg, config);
+                    self.reply(&reply);
                 }
                 BlobCacheObjectConfig::MetaBlob(config) => {
-                    self.handle_open_bootstrap(hdr, msg, config)
+                    self.handle_open_bootstrap(hdr, msg, config);
                 }
             },
-        };
-        self.reply(&msg);
+        }
     }
 
     fn handle_open_data_blob(
@@ -572,25 +572,21 @@ impl FsCacheHandler {
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
         config: Arc<BlobCacheConfigMetaBlob>,
-    ) -> String {
+    ) {
+        let path = config.path().display();
+        let condvar = Arc::new((Mutex::new(false), Condvar::new()));
+        let condvar2 = condvar.clone();
         let mut state = self.get_state();
+
         let ret: i64 = if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {
             match OpenOptions::new().read(true).open(config.path()) {
                 Err(e) => {
-                    warn!(
-                        "fscache: failed to open bootstrap file {}, {}",
-                        config.path().display(),
-                        e
-                    );
+                    warn!("fscache: failed to open bootstrap file {}, {}", path, e);
                     -libc::ENOENT as i64
                 }
                 Ok(f) => match f.metadata() {
                     Err(e) => {
-                        warn!(
-                            "fscache: failed to open bootstrap file {}, {}",
-                            config.path().display(),
-                            e
-                        );
+                        warn!("fscache: failed to open bootstrap file {}, {}", path, e);
                         -libc::ENOENT as i64
                     }
                     Ok(md) => {
@@ -601,14 +597,21 @@ impl FsCacheHandler {
                         });
                         let object = FsCacheObject::Bootstrap(bootstrap.clone());
                         e.insert((object, msg.fd));
-                        ASYNC_RUNTIME.spawn_blocking(move || {
-                            //add slight delay to let copen reply first
-                            thread::sleep(time::Duration::from_millis(10));
+                        ASYNC_RUNTIME.spawn_blocking(|| async move {
+                            // Ensure copen reply message has been sent to kernel.
+                            {
+                                let (m, c) = condvar.as_ref();
+                                let mut g = m.lock().unwrap();
+                                while !*g {
+                                    g = c.wait(g).unwrap();
+                                }
+                            }
+
                             for _i in 0..3 {
                                 if Self::fill_bootstrap_cache(bootstrap.clone()).is_ok() {
                                     break;
                                 }
-                                thread::sleep(time::Duration::from_secs(2));
+                                tokio::time::sleep(time::Duration::from_secs(2)).await;
                             }
                         });
                         md.len() as i64
@@ -622,7 +625,12 @@ impl FsCacheHandler {
         if ret < 0 {
             unsafe { libc::close(msg.fd as i32) };
         }
-        format!("copen {},{}", hdr.msg_id, ret)
+        self.reply(&format!("copen {},{}", hdr.msg_id, ret));
+        if ret >= 0 {
+            let (m, c) = condvar2.as_ref();
+            *m.lock().unwrap() = true;
+            c.notify_one();
+        }
     }
 
     fn handle_close_request(&self, hdr: &FsCacheMsgHeader) {
