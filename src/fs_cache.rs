@@ -20,15 +20,16 @@ use std::{cmp, env, thread, time};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
-use nydus::blob_cache::{
-    generate_blob_key, BlobCacheConfigDataBlob, BlobCacheConfigMetaBlob, BlobCacheMgr,
-    BlobCacheObjectConfig,
-};
 use nydus_storage::cache::BlobCache;
 use nydus_storage::device::BlobPrefetchRequest;
 use nydus_storage::factory::{ASYNC_RUNTIME, BLOB_FACTORY};
 
-ioctl_write_int!(fscache_cread, 0x98, 1);
+use crate::blob_cache::{
+    generate_blob_key, BlobCacheConfigDataBlob, BlobCacheConfigMetaBlob, BlobCacheMgr,
+    BlobCacheObjectConfig,
+};
+
+nix::ioctl_write_int!(fscache_cread, 0x98, 1);
 
 /// Maximum size of fscache request message from kernel.
 const MIN_DATA_BUF_SIZE: usize = 1024;

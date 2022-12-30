@@ -14,6 +14,8 @@ use nydus_api::ConfigV2;
 use serde::{Deserialize, Serialize};
 
 pub mod blob_cache;
+#[cfg(target_os = "linux")]
+pub mod fs_cache;
 
 /// Error code related to Nydus library.
 #[derive(Debug)]

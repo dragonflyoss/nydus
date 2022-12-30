@@ -34,7 +34,7 @@ pub struct ServiceController {
 
     fscache_enabled: AtomicBool,
     #[cfg(target_os = "linux")]
-    fscache: Mutex<Option<Arc<crate::fs_cache::FsCacheHandler>>>,
+    fscache: Mutex<Option<Arc<nydus::fs_cache::FsCacheHandler>>>,
 }
 
 impl ServiceController {
@@ -134,7 +134,7 @@ impl ServiceController {
             tag.unwrap_or("<none>"),
             threads
         );
-        let fscache = crate::fs_cache::FsCacheHandler::new(
+        let fscache = nydus::fs_cache::FsCacheHandler::new(
             "/dev/cachefiles",
             p,
             tag,
