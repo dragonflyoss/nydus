@@ -8,7 +8,7 @@ use std::collections::hash_map::Entry::Vacant;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Error, ErrorKind, Result, Write};
+use std::io::{copy, Error, ErrorKind, Result, Write};
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -559,36 +559,17 @@ impl FsCacheHandler {
         BLOB_FACTORY.new_blob_cache(config.config_v2(), &blob_ref)
     }
 
-    fn fill_bootstrap_cache(bootstrap_fd: RawFd, cachefile_fd: RawFd, size: usize) -> Result<()> {
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                bootstrap_fd,
-                0_i64,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            warn!(
-                "fscache: failed to mmap bootstrap file, {}",
-                std::io::Error::last_os_error()
-            );
-            return Err(eio!("fscache: fill bootstrap cachefile error"));
-        }
-
-        let ret = unsafe { libc::pwrite(cachefile_fd, base, size, 0) };
-        let _ = unsafe { libc::munmap(base, size) };
-
-        if ret != size as isize {
-            warn!(
-                "fscache: failed to write bootstrap blob data to cached file, {}",
-                std::io::Error::last_os_error()
-            );
-            return Err(eio!("fscache: fill bootstrap cachefile error"));
-        }
-        Ok(())
+    fn fill_bootstrap_cache(bootstrap: Arc<FsCacheBootstrap>) -> Result<u64> {
+        // Safe because bootstrap.bootstrap_file/cache_file are valid.
+        let mut src = unsafe { File::from_raw_fd(bootstrap.bootstrap_file.as_raw_fd()) };
+        let mut dst = unsafe { File::from_raw_fd(bootstrap.cache_file.as_raw_fd()) };
+        let ret = copy(&mut src, &mut dst);
+        std::mem::forget(src);
+        std::mem::forget(dst);
+        ret.map_err(|e| {
+            warn!("failed to copy content from bootstap into cache fd, {}", e);
+            e
+        })
     }
 
     fn handle_open_bootstrap(
@@ -619,21 +600,17 @@ impl FsCacheHandler {
                     }
                     Ok(md) => {
                         let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
-                        let bootstrap_fd = f.as_raw_fd();
-                        let cachefile_fd = cache_file.as_raw_fd();
-                        let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootstrap {
+                        let bootstrap = Arc::new(FsCacheBootstrap {
                             bootstrap_file: f,
                             cache_file,
-                        }));
+                        });
+                        let object = FsCacheObject::Bootstrap(bootstrap.clone());
                         e.insert((object, msg.fd));
-                        let len = md.len() as usize;
                         ASYNC_RUNTIME.spawn_blocking(move || {
                             //add slight delay to let copen reply first
                             thread::sleep(time::Duration::from_millis(10));
                             for _i in 0..3 {
-                                if Self::fill_bootstrap_cache(bootstrap_fd, cachefile_fd, len)
-                                    .is_ok()
-                                {
+                                if Self::fill_bootstrap_cache(bootstrap.clone()).is_ok() {
                                     break;
                                 }
                                 thread::sleep(time::Duration::from_secs(2));
@@ -793,7 +770,10 @@ impl FsCacheHandler {
                     warn!("blob {} call inuse err {}, cull failed!", cookie_path, e);
                     res = false;
                 }
-                Ok(true) => debug!("blob {} in use, skip!", cookie_path),
+                Ok(true) => {
+                    warn!("blob {} in use, skip!", cookie_path)
+                    res = false;
+                }
                 Ok(false) => {
                     if let Err(e) = self.cull(&cookie_dir, &cookie_name) {
                         warn!("blob {} call cull err {}, cull failed!", cookie_path, e);
