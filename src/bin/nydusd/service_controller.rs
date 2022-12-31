@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
 use std::any::Any;
-use std::io::Result;
 #[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -11,12 +10,12 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use nydus::blob_cache::BlobCacheMgr;
+use nydus::Result;
 use nydus_api::http::BlobCacheList;
 use nydus_app::BuildTimeInfo;
 
 use crate::daemon::{
-    DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
-    DaemonStateMachineSubscriber,
+    DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
 };
 use crate::{FsService, NydusDaemon, SubCmdArgs, DAEMON_CONTROLLER};
 #[cfg(target_os = "linux")]
@@ -26,7 +25,7 @@ pub struct ServiceController {
     bti: BuildTimeInfo,
     id: Option<String>,
     request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
-    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
+    result_receiver: Mutex<Receiver<Result<()>>>,
     state: AtomicI32,
     supervisor: Option<String>,
 
@@ -39,7 +38,7 @@ pub struct ServiceController {
 
 impl ServiceController {
     /// Start all enabled services.
-    fn start_services(&self) -> Result<()> {
+    fn start_services(&self) -> std::io::Result<()> {
         info!("Starting all Nydus services...");
 
         #[cfg(target_os = "linux")]
@@ -75,7 +74,7 @@ impl ServiceController {
         }
     }
 
-    fn initialize_blob_cache(&self, config: &Option<serde_json::Value>) -> Result<()> {
+    fn initialize_blob_cache(&self, config: &Option<serde_json::Value>) -> std::io::Result<()> {
         DAEMON_CONTROLLER.set_blob_cache_mgr(self.blob_cache_mgr.clone());
 
         // Create blob cache objects configured by the configuration file.
@@ -98,7 +97,7 @@ impl ServiceController {
 
 #[cfg(target_os = "linux")]
 impl ServiceController {
-    fn initialize_fscache_service(&self, subargs: &SubCmdArgs, path: &str) -> Result<()> {
+    fn initialize_fscache_service(&self, subargs: &SubCmdArgs, path: &str) -> std::io::Result<()> {
         // Validate --fscache option value is an existing directory.
         let p = match Path::new(&path).canonicalize() {
             Err(e) => {
@@ -169,17 +168,17 @@ impl NydusDaemon for ServiceController {
         self.bti.clone()
     }
 
-    fn start(&self) -> DaemonResult<()> {
+    fn start(&self) -> Result<()> {
         self.start_services()
-            .map_err(|e| DaemonError::StartService(format!("{}", e)))
+            .map_err(|e| nydus::Error::StartService(format!("{}", e)))
     }
 
-    fn disconnect(&self) -> DaemonResult<()> {
+    fn disconnect(&self) -> Result<()> {
         self.stop_services();
         Ok(())
     }
 
-    fn wait(&self) -> DaemonResult<()> {
+    fn wait(&self) -> Result<()> {
         Ok(())
     }
 
@@ -187,47 +186,50 @@ impl NydusDaemon for ServiceController {
         self.supervisor.clone()
     }
 
-    fn save(&self) -> DaemonResult<()> {
-        Err(DaemonError::Unsupported)
+    fn save(&self) -> Result<()> {
+        Err(nydus::Error::Unsupported)
     }
 
-    fn restore(&self) -> DaemonResult<()> {
-        Err(DaemonError::Unsupported)
+    fn restore(&self) -> Result<()> {
+        Err(nydus::Error::Unsupported)
     }
 
     fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>> {
         None
     }
 
-    fn delete_blob(&self, _blob_id: String) -> DaemonResult<()> {
+    fn delete_blob(&self, _blob_id: String) -> Result<()> {
         #[cfg(target_os = "linux")]
         if self.fscache_enabled.load(Ordering::Acquire) {
             if let Some(fscache) = self.fscache.lock().unwrap().clone() {
                 return fscache
                     .cull_cache(_blob_id)
-                    .map_err(|e| DaemonError::StartService(format!("{}", e)));
+                    .map_err(|e| nydus::Error::StartService(format!("{}", e)));
             }
         }
-        Err(DaemonError::Unsupported)
+        Err(nydus::Error::Unsupported)
     }
 }
 
 impl DaemonStateMachineSubscriber for ServiceController {
-    fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
+    fn on_event(&self, event: DaemonStateMachineInput) -> Result<()> {
         self.request_sender
             .lock()
             .unwrap()
             .send(event)
-            .map_err(|e| DaemonError::Channel(format!("send {:?}", e)))?;
+            .map_err(|e| nydus::Error::Channel(format!("send {:?}", e)))?;
         self.result_receiver
             .lock()
             .expect("Not expect poisoned lock!")
             .recv()
-            .map_err(|e| DaemonError::Channel(format!("recv {:?}", e)))?
+            .map_err(|e| nydus::Error::Channel(format!("recv {:?}", e)))?
     }
 }
 
-pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn NydusDaemon>> {
+pub fn create_daemon(
+    subargs: &SubCmdArgs,
+    bti: BuildTimeInfo,
+) -> std::io::Result<Arc<dyn NydusDaemon>> {
     let id = subargs.value_of("id").map(|id| id.to_string());
     let supervisor = subargs.value_of("supervisor").map(|s| s.to_string());
     let config = match subargs.value_of("config") {
@@ -241,7 +243,7 @@ pub fn create_daemon(subargs: &SubCmdArgs, bti: BuildTimeInfo) -> Result<Arc<dyn
     };
 
     let (to_sm, from_client) = channel::<DaemonStateMachineInput>();
-    let (to_client, from_sm) = channel::<DaemonResult<()>>();
+    let (to_client, from_sm) = channel::<Result<()>>();
     let service_controller = ServiceController {
         bti,
         id,

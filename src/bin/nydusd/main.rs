@@ -25,10 +25,11 @@ use rlimit::Resource;
 
 use nydus::blob_cache::BlobCacheMgr;
 use nydus::validate_threads_configuration;
+use nydus::Error as NydusError;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
-use crate::daemon::{DaemonError, NydusDaemon};
+use crate::daemon::NydusDaemon;
 use crate::fs_service::{FsBackendMountCmd, FsService};
 use crate::service_controller::create_daemon;
 
@@ -585,7 +586,7 @@ fn process_fs_service(
             None => match args.value_of("config") {
                 Some(v) => std::fs::read_to_string(v)?,
                 None => {
-                    let e = DaemonError::InvalidArguments(
+                    let e = NydusError::InvalidArguments(
                         "both --config and --localfs-dir are missing".to_string(),
                     );
                     return Err(e.into());
@@ -599,7 +600,7 @@ fn process_fs_service(
                 let content = match std::fs::read_to_string(v) {
                     Ok(v) => v,
                     Err(_) => {
-                        let e = DaemonError::InvalidArguments(
+                        let e = NydusError::InvalidArguments(
                             "the prefetch-files arg is not a file path".to_string(),
                         );
                         return Err(e.into());
@@ -664,9 +665,7 @@ fn process_fs_service(
 
         // mountpoint means fuse device only
         let mountpoint = args.value_of("mountpoint").ok_or_else(|| {
-            DaemonError::InvalidArguments(
-                "Mountpoint must be provided for FUSE server!".to_string(),
-            )
+            NydusError::InvalidArguments("Mountpoint must be provided for FUSE server!".to_string())
         })?;
 
         let daemon = {
@@ -697,7 +696,7 @@ fn process_fs_service(
         #[cfg(feature = "virtiofs")]
         {
             let vu_sock = args.value_of("sock").ok_or_else(|| {
-                DaemonError::InvalidArguments("vhost socket must be provided!".to_string())
+                NydusError::InvalidArguments("vhost socket must be provided!".to_string())
             })?;
             let _ = apisock.as_ref();
             DAEMON_CONTROLLER.set_daemon(virtiofs::create_virtiofs_daemon(

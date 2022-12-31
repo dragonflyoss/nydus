@@ -1,12 +1,11 @@
 use std::convert::TryFrom;
 use std::path::PathBuf;
 
-use crate::daemon::DaemonResult;
+use nydus::Result;
+
 use crate::fs_service::FsBackendUmountCmd;
 use crate::FsBackendMountCmd;
 
-#[derive(Debug)]
-pub enum UpgradeMgrError {}
 pub struct UpgradeManager {}
 
 impl UpgradeManager {
@@ -49,29 +48,27 @@ pub fn add_mounts_state(
     _mgr: &mut UpgradeManager,
     _cmd: FsBackendMountCmd,
     _vfs_index: u8,
-) -> DaemonResult<()> {
+) -> Result<()> {
     Ok(())
 }
 
-pub fn update_mounts_state(_mgr: &mut UpgradeManager, _cmd: FsBackendMountCmd) -> DaemonResult<()> {
+pub fn update_mounts_state(_mgr: &mut UpgradeManager, _cmd: FsBackendMountCmd) -> Result<()> {
     Ok(())
 }
 
-pub fn remove_mounts_state(
-    _mgr: &mut UpgradeManager,
-    _cmd: FsBackendUmountCmd,
-) -> DaemonResult<()> {
+pub fn remove_mounts_state(_mgr: &mut UpgradeManager, _cmd: FsBackendUmountCmd) -> Result<()> {
     Ok(())
 }
 
 pub mod fusedev_upgrade {
-    use crate::daemon::DaemonResult;
+    use super::*;
     use crate::fusedev::FusedevDaemon;
-    pub fn save(_daemon: &FusedevDaemon) -> DaemonResult<()> {
+
+    pub fn save(_daemon: &FusedevDaemon) -> Result<()> {
         Ok(())
     }
 
-    pub fn restore(_daemon: &FusedevDaemon) -> DaemonResult<()> {
+    pub fn restore(_daemon: &FusedevDaemon) -> Result<()> {
         Ok(())
     }
 }

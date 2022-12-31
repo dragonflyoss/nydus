@@ -14,6 +14,7 @@ use std::sync::{Arc, MutexGuard};
 use fuse_backend_rs::api::{BackFileSystem, Vfs};
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
+use nydus::{Error, Result};
 use nydus::{FsBackendDescriptor, FsBackendType};
 use nydus_api::ConfigV2;
 use nydus_rafs::fs::Rafs;
@@ -21,9 +22,7 @@ use nydus_rafs::{RafsError, RafsIoRead};
 use nydus_storage::factory::BLOB_FACTORY;
 use serde::{self, Deserialize, Serialize};
 
-use crate::daemon::DaemonResult;
 use crate::upgrade::{self, UpgradeManager};
-use crate::DaemonError;
 
 /// Command to mount a filesystem.
 #[derive(Clone)]
@@ -46,12 +45,12 @@ pub struct FsBackendUmountCmd {
 pub struct FsBackendCollection(HashMap<String, FsBackendDescriptor>);
 
 impl FsBackendCollection {
-    pub fn add(&mut self, id: &str, cmd: &FsBackendMountCmd) -> DaemonResult<()> {
+    pub fn add(&mut self, id: &str, cmd: &FsBackendMountCmd) -> Result<()> {
         // We only wash Rafs backend now.
         let fs_config = match cmd.fs_type {
             FsBackendType::Rafs => {
                 let cfg = ConfigV2::from_str(&cmd.config)
-                    .map_err(|e| DaemonError::InvalidConfig(format!("{}", e)))?;
+                    .map_err(|e| Error::InvalidConfig(format!("{}", e)))?;
                 let cfg = cfg.clone_without_secrets();
                 Some(cfg)
             }
@@ -86,9 +85,9 @@ pub trait FsService: Send + Sync {
 
     // NOTE: This method is not thread-safe, however, it is acceptable as
     // mount/umount/remount/restore_mount is invoked from single thread in FSM
-    fn mount(&self, cmd: FsBackendMountCmd) -> DaemonResult<()> {
+    fn mount(&self, cmd: FsBackendMountCmd) -> Result<()> {
         if self.backend_from_mountpoint(&cmd.mountpoint)?.is_some() {
-            return Err(DaemonError::AlreadyExists);
+            return Err(Error::AlreadyExists);
         }
         let backend = fs_backend_factory(&cmd)?;
         let index = self.get_vfs().mount(backend, &cmd.mountpoint)?;
@@ -103,22 +102,22 @@ pub trait FsService: Send + Sync {
         Ok(())
     }
 
-    fn remount(&self, cmd: FsBackendMountCmd) -> DaemonResult<()> {
+    fn remount(&self, cmd: FsBackendMountCmd) -> Result<()> {
         let rootfs = self
             .backend_from_mountpoint(&cmd.mountpoint)?
-            .ok_or(DaemonError::NotFound)?;
+            .ok_or(Error::NotFound)?;
         let mut bootstrap = <dyn RafsIoRead>::from_file(&&cmd.source)?;
         let any_fs = rootfs.deref().as_any();
         let rafs = any_fs
             .downcast_ref::<Rafs>()
-            .ok_or_else(|| DaemonError::FsTypeMismatch("to rafs".to_string()))?;
+            .ok_or_else(|| Error::FsTypeMismatch("to rafs".to_string()))?;
         let rafs_cfg = ConfigV2::from_str(&cmd.config).map_err(RafsError::LoadConfig)?;
         let rafs_cfg = Arc::new(rafs_cfg);
 
         rafs.update(&mut bootstrap, &rafs_cfg)
             .map_err(|e| match e {
-                RafsError::Unsupported => DaemonError::Unsupported,
-                e => DaemonError::Rafs(e),
+                RafsError::Unsupported => Error::Unsupported,
+                e => Error::Rafs(e),
             })?;
 
         // To update mounted time and backend configurations.
@@ -132,10 +131,10 @@ pub trait FsService: Send + Sync {
         Ok(())
     }
 
-    fn umount(&self, cmd: FsBackendUmountCmd) -> DaemonResult<()> {
+    fn umount(&self, cmd: FsBackendUmountCmd) -> Result<()> {
         let _ = self
             .backend_from_mountpoint(&cmd.mountpoint)?
-            .ok_or(DaemonError::NotFound)?;
+            .ok_or(Error::NotFound)?;
 
         self.get_vfs().umount(&cmd.mountpoint)?;
         self.backend_collection().del(&cmd.mountpoint);
@@ -150,23 +149,23 @@ pub trait FsService: Send + Sync {
         Ok(())
     }
 
-    fn backend_from_mountpoint(&self, mp: &str) -> DaemonResult<Option<Arc<BackFileSystem>>> {
+    fn backend_from_mountpoint(&self, mp: &str) -> Result<Option<Arc<BackFileSystem>>> {
         self.get_vfs().get_rootfs(mp).map_err(|e| e.into())
     }
 
-    fn export_backend_info(&self, mountpoint: &str) -> DaemonResult<String> {
+    fn export_backend_info(&self, mountpoint: &str) -> Result<String> {
         let fs = self
             .backend_from_mountpoint(mountpoint)?
-            .ok_or(DaemonError::NotFound)?;
+            .ok_or(Error::NotFound)?;
         let any_fs = fs.deref().as_any();
         let rafs = any_fs
             .downcast_ref::<Rafs>()
-            .ok_or_else(|| DaemonError::FsTypeMismatch("to rafs".to_string()))?;
-        let resp = serde_json::to_string(rafs.metadata()).map_err(DaemonError::Serde)?;
+            .ok_or_else(|| Error::FsTypeMismatch("to rafs".to_string()))?;
+        let resp = serde_json::to_string(rafs.metadata()).map_err(Error::Serde)?;
         Ok(resp)
     }
 
-    fn export_inflight_ops(&self) -> DaemonResult<Option<String>>;
+    fn export_inflight_ops(&self) -> Result<Option<String>>;
 
     /// Provides a reference to the Any trait. This is useful to let the call access the underlying fs service.
     fn as_any(&self) -> &dyn Any;
@@ -178,12 +177,12 @@ pub trait FsService: Send + Sync {
 /// - an item may be file or directroy.
 /// - items must be separated by space, such as "<path1> <path2> <path3>".
 /// - each item must be absolute path, such as "/foo1/bar1 /foo2/bar2".
-fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> DaemonResult<Option<Vec<PathBuf>>> {
+fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> Result<Option<Vec<PathBuf>>> {
     if let Some(list) = input {
         let list: Vec<PathBuf> = list.iter().map(PathBuf::from).collect();
         for elem in list.iter() {
             if !elem.is_absolute() {
-                return Err(DaemonError::Common("Illegal prefetch list".to_string()));
+                return Err(Error::Common("Illegal prefetch list".to_string()));
             }
         }
         Ok(Some(list))
@@ -192,7 +191,7 @@ fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> DaemonResult<Opti
     }
 }
 
-pub fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
+pub fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
     let prefetch_files = validate_prefetch_file_list(&cmd.prefetch_files)?;
 
     match cmd.fs_type {
@@ -206,7 +205,7 @@ pub fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSyste
         }
         FsBackendType::PassthroughFs => {
             #[cfg(target_os = "macos")]
-            return Err(DaemonError::InvalidArguments(String::from(
+            return Err(Error::InvalidArguments(String::from(
                 "not support passthroughfs",
             )));
             #[cfg(target_os = "linux")]
@@ -225,10 +224,8 @@ pub fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSyste
                 // TODO: Passthrough Fs needs to enlarge rlimit against host. We can exploit `MountCmd`
                 // `config` field to pass such a configuration into here.
                 let passthrough_fs =
-                    PassthroughFs::<()>::new(fs_cfg).map_err(DaemonError::PassthroughFs)?;
-                passthrough_fs
-                    .import()
-                    .map_err(DaemonError::PassthroughFs)?;
+                    PassthroughFs::<()>::new(fs_cfg).map_err(Error::PassthroughFs)?;
+                passthrough_fs.import().map_err(Error::PassthroughFs)?;
                 info!("PassthroughFs imported");
                 Ok(Box::new(passthrough_fs))
             }

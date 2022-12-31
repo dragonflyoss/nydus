@@ -5,7 +5,6 @@
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
 use std::any::Any;
-use std::io::Result;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -26,11 +25,12 @@ use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, Gues
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 
+use nydus::{Error, Result};
 use nydus_app::BuildTimeInfo;
 
 use crate::daemon::{
-    DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
-    DaemonStateMachineSubscriber, NydusDaemon,
+    DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
+    NydusDaemon,
 };
 use crate::fs_service::{FsBackendCollection, FsService};
 use crate::upgrade::UpgradeManager;
@@ -61,17 +61,17 @@ struct VhostUserFsBackend {
 impl VhostUserFsBackend {
     // There's no way to recover if error happens during processing a virtq, let the caller
     // to handle it.
-    fn process_queue(&mut self, vring_state: &mut MutexGuard<VringState>) -> Result<bool> {
+    fn process_queue(&mut self, vring_state: &mut MutexGuard<VringState>) -> std::io::Result<bool> {
         let mut used_any = false;
         let guest_mem = match &self.mem {
             Some(m) => m,
-            None => return Err(DaemonError::QueueMemoryUnset.into()),
+            None => return Err(Error::QueueMemoryUnset.into()),
         };
 
         let avail_chains: Vec<DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>> = vring_state
             .get_queue_mut()
             .iter(guest_mem.memory())
-            .map_err(|_| DaemonError::IterateQueue)?
+            .map_err(|_| Error::IterateQueue)?
             .collect();
 
         for chain in avail_chains {
@@ -81,10 +81,10 @@ impl VhostUserFsBackend {
             let mem = chain.memory();
 
             let reader = Reader::from_descriptor_chain(mem, chain.clone())
-                .map_err(DaemonError::InvalidDescriptorChain)?;
+                .map_err(Error::InvalidDescriptorChain)?;
             let writer = VirtioFsWriter::new(mem, chain.clone())
                 .map(|w| w.into())
-                .map_err(DaemonError::InvalidDescriptorChain)?;
+                .map_err(Error::InvalidDescriptorChain)?;
 
             self.server
                 .handle_message(
@@ -95,7 +95,7 @@ impl VhostUserFsBackend {
                         .map(|x| x as &mut dyn FsCacheReqHandler),
                     None,
                 )
-                .map_err(DaemonError::ProcessQueue)?;
+                .map_err(Error::ProcessQueue)?;
 
             if self.event_idx {
                 if vring_state.add_used(head_index, 0).is_err() {
@@ -130,10 +130,10 @@ struct VhostUserFsBackendHandler {
 }
 
 impl VhostUserFsBackendHandler {
-    fn new(vfs: Arc<Vfs>) -> Result<Self> {
+    fn new(vfs: Arc<Vfs>) -> std::io::Result<Self> {
         let backend = VhostUserFsBackend {
             event_idx: false,
-            kill_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(DaemonError::Epoll)?,
+            kill_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::Epoll)?,
             mem: None,
             server: Arc::new(Server::new(vfs)),
             vu_req: None,
@@ -195,7 +195,7 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
         _thread_id: usize,
     ) -> VhostUserBackendResult<bool> {
         if evset != EventSet::IN {
-            return Err(DaemonError::HandleEventNotEpollIn.into());
+            return Err(Error::HandleEventNotEpollIn.into());
         }
 
         let mut vring_state = match device_event {
@@ -207,7 +207,7 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
                 debug!("QUEUE_EVENT");
                 vrings[1].get_mut()
             }
-            _ => return Err(DaemonError::HandleEventUnknownEvent.into()),
+            _ => return Err(Error::HandleEventUnknownEvent.into()),
         };
 
         if self.backend.lock().unwrap().event_idx {
@@ -266,8 +266,8 @@ impl FsService for VirtioFsService {
         self.backend_collection.lock().unwrap()
     }
 
-    fn export_inflight_ops(&self) -> DaemonResult<Option<String>> {
-        Err(DaemonError::Unsupported)
+    fn export_inflight_ops(&self) -> Result<Option<String>> {
+        Err(Error::Unsupported)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -279,7 +279,7 @@ struct VirtiofsDaemon<S: 'static + VhostUserBackend<VringMutex> + Clone> {
     bti: BuildTimeInfo,
     id: Option<String>,
     request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
-    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
+    result_receiver: Mutex<Receiver<Result<()>>>,
     service: Arc<VirtioFsService>,
     state: AtomicI32,
     supervisor: Option<String>,
@@ -309,9 +309,9 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
         self.bti.clone()
     }
 
-    fn start(&self) -> DaemonResult<()> {
-        let listener = Listener::new(&self.sock, true)
-            .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
+    fn start(&self) -> Result<()> {
+        let listener =
+            Listener::new(&self.sock, true).map_err(|e| Error::StartService(format!("{:?}", e)))?;
         let vu_daemon = self.daemon.clone();
         let _ = thread::Builder::new()
             .name("vhost_user_listener".to_string())
@@ -322,33 +322,33 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
                     .start(listener)
                     .unwrap_or_else(|e| error!("{:?}", e));
             })
-            .map_err(DaemonError::ThreadSpawn)?;
+            .map_err(Error::ThreadSpawn)?;
 
         Ok(())
     }
 
-    fn disconnect(&self) -> DaemonResult<()> {
+    fn disconnect(&self) -> Result<()> {
         Ok(())
     }
 
-    fn wait(&self) -> DaemonResult<()> {
+    fn wait(&self) -> Result<()> {
         self.daemon
             .lock()
             .unwrap()
             .wait()
-            .map_err(|e| DaemonError::WaitDaemon(eother!(e)))
+            .map_err(|e| Error::WaitDaemon(eother!(e)))
     }
 
     fn supervisor(&self) -> Option<String> {
         self.supervisor.clone()
     }
 
-    fn save(&self) -> DaemonResult<()> {
-        Err(DaemonError::Unsupported)
+    fn save(&self) -> Result<()> {
+        Err(Error::Unsupported)
     }
 
-    fn restore(&self) -> DaemonResult<()> {
-        Err(DaemonError::Unsupported)
+    fn restore(&self) -> Result<()> {
+        Err(Error::Unsupported)
     }
 
     fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>> {
@@ -359,18 +359,18 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
 impl<S: 'static + VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscriber
     for VirtiofsDaemon<S>
 {
-    fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
+    fn on_event(&self, event: DaemonStateMachineInput) -> Result<()> {
         self.request_sender
             .lock()
             .unwrap()
             .send(event)
-            .map_err(|e| DaemonError::Channel(format!("send {:?}", e)))?;
+            .map_err(|e| Error::Channel(format!("send {:?}", e)))?;
 
         self.result_receiver
             .lock()
             .expect("Not expect poisoned lock!")
             .recv()
-            .map_err(|e| DaemonError::Channel(format!("recv {:?}", e)))?
+            .map_err(|e| Error::Channel(format!("recv {:?}", e)))?
     }
 }
 
@@ -381,15 +381,15 @@ pub fn create_virtiofs_daemon(
     vfs: Arc<Vfs>,
     mount_cmd: Option<FsBackendMountCmd>,
     bti: BuildTimeInfo,
-) -> Result<Arc<dyn NydusDaemon>> {
+) -> std::io::Result<Arc<dyn NydusDaemon>> {
     let vu_daemon = VhostUserDaemon::new(
         String::from("vhost-user-fs-backend"),
         Arc::new(RwLock::new(VhostUserFsBackendHandler::new(vfs.clone())?)),
         GuestMemoryAtomic::new(GuestMemoryMmap::new()),
     )
-    .map_err(|e| DaemonError::DaemonFailure(format!("{:?}", e)))?;
+    .map_err(|e| Error::DaemonFailure(format!("{:?}", e)))?;
     let (trigger, events_rx) = channel::<DaemonStateMachineInput>();
-    let (result_sender, result_receiver) = channel::<DaemonResult<()>>();
+    let (result_sender, result_receiver) = channel::<Result<()>>();
     let service = VirtioFsService::new(vfs);
     let daemon = Arc::new(VirtiofsDaemon {
         bti,

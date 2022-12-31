@@ -31,12 +31,13 @@ use fuse_backend_rs::transport::{FuseChannel, FuseSession};
 use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
+use nydus::{Error as NydusError, Result as NydusResult};
 use nydus_app::BuildTimeInfo;
 use serde::Serialize;
 
 use crate::daemon::{
-    DaemonError, DaemonResult, DaemonState, DaemonStateMachineContext, DaemonStateMachineInput,
-    DaemonStateMachineSubscriber, NydusDaemon,
+    DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
+    NydusDaemon,
 };
 use crate::fs_service::{FsBackendCollection, FsBackendMountCmd, FsService};
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
@@ -128,7 +129,7 @@ impl FuseServer {
                             return Err(eio!("fuse session has been shut down"));
                         }
                         _ => {
-                            error!("Handling fuse message, {}", DaemonError::ProcessQueue(e));
+                            error!("Handling fuse message, {}", NydusError::ProcessQueue(e));
                             continue;
                         }
                     }
@@ -196,10 +197,10 @@ impl FusedevFsService {
         inflight_op
     }
 
-    fn disconnect(&self) -> DaemonResult<()> {
+    fn disconnect(&self) -> NydusResult<()> {
         let mut session = self.session.lock().expect("Not expect poisoned lock.");
-        session.umount().map_err(DaemonError::SessionShutdown)?;
-        session.wake().map_err(DaemonError::SessionShutdown)?;
+        session.umount().map_err(NydusError::SessionShutdown)?;
+        session.wake().map_err(NydusError::SessionShutdown)?;
         Ok(())
     }
 }
@@ -219,7 +220,7 @@ impl FsService for FusedevFsService {
         self.backend_collection.lock().unwrap()
     }
 
-    fn export_inflight_ops(&self) -> DaemonResult<Option<String>> {
+    fn export_inflight_ops(&self) -> NydusResult<Option<String>> {
         let ops = self.inflight_ops.lock().unwrap();
 
         let r = ops
@@ -231,7 +232,7 @@ impl FsService for FusedevFsService {
         if r.is_empty() {
             Ok(None)
         } else {
-            let resp = serde_json::to_string(&r).map_err(DaemonError::Serde)?;
+            let resp = serde_json::to_string(&r).map_err(NydusError::Serde)?;
             Ok(Some(resp))
         }
     }
@@ -245,7 +246,7 @@ pub struct FusedevDaemon {
     bti: BuildTimeInfo,
     id: Option<String>,
     request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
-    result_receiver: Mutex<Receiver<DaemonResult<()>>>,
+    result_receiver: Mutex<Receiver<NydusResult<()>>>,
     service: Arc<FusedevFsService>,
     state: AtomicI32,
     supervisor: Option<String>,
@@ -255,8 +256,11 @@ pub struct FusedevDaemon {
 }
 
 impl FusedevDaemon {
-    fn kick_one_server(&self, waker: Arc<Waker>) -> Result<()> {
-        let mut s = self.service.create_fuse_server()?;
+    fn kick_one_server(&self, waker: Arc<Waker>) -> NydusResult<()> {
+        let mut s = self
+            .service
+            .create_fuse_server()
+            .map_err(NydusError::CreateFuseServer)?;
         let inflight_op = self.service.create_inflight_op();
         let thread = thread::Builder::new()
             .name("fuse_server".to_string())
@@ -270,7 +274,7 @@ impl FusedevDaemon {
 
                 Ok(())
             })
-            .map_err(DaemonError::ThreadSpawn)?;
+            .map_err(NydusError::ThreadSpawn)?;
 
         self.fuse_service_threads.lock().unwrap().push(thread);
 
@@ -289,18 +293,18 @@ impl FusedevDaemon {
 }
 
 impl DaemonStateMachineSubscriber for FusedevDaemon {
-    fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()> {
+    fn on_event(&self, event: DaemonStateMachineInput) -> NydusResult<()> {
         self.request_sender
             .lock()
             .unwrap()
             .send(event)
-            .map_err(|e| DaemonError::Channel(format!("send {:?}", e)))?;
+            .map_err(|e| NydusError::Channel(format!("send {:?}", e)))?;
 
         self.result_receiver
             .lock()
             .expect("Not expect poisoned lock!")
             .recv()
-            .map_err(|e| DaemonError::Channel(format!("recv {:?}", e)))?
+            .map_err(|e| NydusError::Channel(format!("recv {:?}", e)))?
     }
 }
 
@@ -329,18 +333,18 @@ impl NydusDaemon for FusedevDaemon {
         self.bti.clone()
     }
 
-    fn start(&self) -> DaemonResult<()> {
+    fn start(&self) -> NydusResult<()> {
         info!("start {} fuse servers", self.threads_cnt);
         for _ in 0..self.threads_cnt {
             let waker = DAEMON_CONTROLLER.alloc_waker();
             self.kick_one_server(waker)
-                .map_err(|e| DaemonError::StartService(format!("{:?}", e)))?;
+                .map_err(|e| NydusError::StartService(format!("{:?}", e)))?;
         }
 
         Ok(())
     }
 
-    fn disconnect(&self) -> DaemonResult<()> {
+    fn disconnect(&self) -> NydusResult<()> {
         self.service.disconnect()
     }
 
@@ -351,17 +355,17 @@ impl NydusDaemon for FusedevDaemon {
             .session
             .lock()
             .expect("Not expect poisoned lock.");
-        if let Err(e) = session.wake().map_err(DaemonError::SessionShutdown) {
+        if let Err(e) = session.wake().map_err(NydusError::SessionShutdown) {
             error!("stop fuse service thread failed: {:?}", e);
         }
     }
 
-    fn wait(&self) -> DaemonResult<()> {
+    fn wait(&self) -> NydusResult<()> {
         self.wait_state_machine()?;
         self.wait_service()
     }
 
-    fn wait_state_machine(&self) -> DaemonResult<()> {
+    fn wait_state_machine(&self) -> NydusResult<()> {
         let mut guard = self.state_machine_thread.lock().unwrap();
         if guard.is_some() {
             guard
@@ -369,30 +373,30 @@ impl NydusDaemon for FusedevDaemon {
                 .unwrap()
                 .join()
                 .map_err(|e| {
-                    DaemonError::WaitDaemon(
+                    NydusError::WaitDaemon(
                         *e.downcast::<Error>()
                             .unwrap_or_else(|e| Box::new(eother!(e))),
                     )
                 })?
-                .map_err(DaemonError::WaitDaemon)?;
+                .map_err(NydusError::WaitDaemon)?;
         }
 
         Ok(())
     }
 
-    fn wait_service(&self) -> DaemonResult<()> {
+    fn wait_service(&self) -> NydusResult<()> {
         loop {
             let handle = self.fuse_service_threads.lock().unwrap().pop();
             if let Some(handle) = handle {
                 handle
                     .join()
                     .map_err(|e| {
-                        DaemonError::WaitDaemon(
+                        NydusError::WaitDaemon(
                             *e.downcast::<Error>()
                                 .unwrap_or_else(|e| Box::new(eother!(e))),
                         )
                     })?
-                    .map_err(DaemonError::WaitDaemon)?;
+                    .map_err(NydusError::WaitDaemon)?;
             } else {
                 // No more handles to wait
                 break;
@@ -407,11 +411,11 @@ impl NydusDaemon for FusedevDaemon {
         self.supervisor.clone()
     }
 
-    fn save(&self) -> DaemonResult<()> {
+    fn save(&self) -> NydusResult<()> {
         upgrade::fusedev_upgrade::save(self)
     }
 
-    fn restore(&self) -> DaemonResult<()> {
+    fn restore(&self) -> NydusResult<()> {
         upgrade::fusedev_upgrade::restore(self)
     }
 
@@ -539,7 +543,7 @@ pub fn create_fuse_daemon(
 ) -> Result<Arc<dyn NydusDaemon>> {
     let mnt = Path::new(mountpoint).canonicalize()?;
     let (trigger, events_rx) = channel::<DaemonStateMachineInput>();
-    let (result_sender, result_receiver) = channel::<DaemonResult<()>>();
+    let (result_sender, result_receiver) = channel::<NydusResult<()>>();
     let service = FusedevFsService::new(vfs, &mnt, supervisor.as_ref(), fp, readonly)?;
     let daemon = Arc::new(FusedevDaemon {
         bti,

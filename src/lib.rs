@@ -8,10 +8,16 @@ extern crate log;
 extern crate nydus_error;
 
 use std::fmt::{self, Display};
+use std::io;
 use std::str::FromStr;
 
-use nydus_api::ConfigV2;
+use fuse_backend_rs::api::vfs::VfsError;
+use fuse_backend_rs::transport::Error as FuseTransportError;
+use fuse_backend_rs::Error as FuseError;
+use nydus_api::{ConfigV2, DaemonErrorKind};
+use nydus_rafs::RafsError;
 use serde::{Deserialize, Serialize};
+use serde_json::Error as SerdeError;
 
 pub mod blob_cache;
 #[cfg(target_os = "linux")]
@@ -19,21 +25,121 @@ pub mod fs_cache;
 
 /// Error code related to Nydus library.
 #[derive(Debug)]
-pub enum NydusError {
-    /// Invalid argument.
+pub enum Error {
+    /// Object already exists.
+    AlreadyExists,
+    /// Generic error message.
+    Common(String),
+    /// Invalid arguments provided.
     InvalidArguments(String),
+    /// Invalid config provided
+    InvalidConfig(String),
+    /// Object not found.
+    NotFound,
+    /// Daemon does not reach the stable working state yet,
+    /// some capabilities may not be provided.
+    NotReady,
+    /// Request not supported.
+    Unsupported,
+    /// Failed to serialize/deserialize message.
+    Serde(SerdeError),
+    /// Cannot spawn a new thread
+    ThreadSpawn(io::Error),
+    /// Cannot create FUSE server
+    CreateFuseServer(io::Error),
+    /*
+    /// Failed to upgrade the mount
+    UpgradeManager(UpgradeMgrError),
+     */
+    /// State-machine related error codes if something bad happens when to communicate with state-machine
+    Channel(String),
+    /// Failed to start service.
+    StartService(String),
+    /// Failed to stop service
+    ServiceStop,
+    /// Input event to stat-machine is not expected.
+    UnexpectedEvent(String),
+    /// Wait daemon failure
+    WaitDaemon(io::Error),
+
+    // Filesystem type mismatch.
+    FsTypeMismatch(String),
+    /// Failure occurred in the Passthrough subsystem.
+    PassthroughFs(io::Error),
+    /// Failure occurred in the Rafs subsystem.
+    Rafs(RafsError),
+    /// Failure occurred in the VFS subsystem.
+    Vfs(VfsError),
+
+    // virtio-fs
+    /// Failed to handle event other than input event.
+    HandleEventNotEpollIn,
+    /// Failed to handle unknown event.
+    HandleEventUnknownEvent,
+    /// Fail to walk descriptor chain
+    IterateQueue,
+    /// Invalid Virtio descriptor chain.
+    InvalidDescriptorChain(FuseTransportError),
+    /// Processing queue failed.
+    ProcessQueue(FuseError),
+    /// Cannot create epoll context.
+    Epoll(io::Error),
+    /// Daemon related error
+    DaemonFailure(String),
+    /// Missing virtqueue memory
+    QueueMemoryUnset,
+
+    // Fuse session has been shutdown.
+    SessionShutdown(FuseTransportError),
 }
 
-impl Display for NydusError {
+impl Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NydusError::InvalidArguments(s) => write!(f, "invalid argument: {}", s),
+            Self::InvalidArguments(s) => write!(f, "Invalid argument: {}", s),
+            Self::InvalidConfig(s) => write!(f, "Invalid config: {}", s),
+            Self::DaemonFailure(s) => write!(f, "Daemon error: {}", s),
+            _ => write!(f, "{:?}", self),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<Error> for io::Error {
+    fn from(e: Error) -> Self {
+        einval!(e)
+    }
+}
+
+impl From<VfsError> for Error {
+    fn from(e: VfsError) -> Self {
+        Error::Vfs(e)
+    }
+}
+
+impl From<RafsError> for Error {
+    fn from(error: RafsError) -> Self {
+        Error::Rafs(error)
+    }
+}
+
+impl From<Error> for DaemonErrorKind {
+    fn from(e: Error) -> Self {
+        use Error::*;
+        match e {
+            //UpgradeManager(_) => DaemonErrorKind::UpgradeManager,
+            NotReady => DaemonErrorKind::NotReady,
+            Unsupported => DaemonErrorKind::Unsupported,
+            Serde(e) => DaemonErrorKind::Serde(e),
+            UnexpectedEvent(e) => DaemonErrorKind::UnexpectedEvent(e),
+            o => DaemonErrorKind::Other(o.to_string()),
         }
     }
 }
 
 /// Specialized `Result` for Nydus library.
-pub type Result<T> = std::result::Result<T, NydusError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Type of supported backend filesystems.
 #[derive(Clone, Debug, Serialize, PartialEq, Deserialize)]
@@ -45,7 +151,7 @@ pub enum FsBackendType {
 }
 
 impl FromStr for FsBackendType {
-    type Err = NydusError;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<FsBackendType> {
         match s {
@@ -53,7 +159,7 @@ impl FromStr for FsBackendType {
             "passthrough" => Ok(FsBackendType::PassthroughFs),
             "passthroughfs" => Ok(FsBackendType::PassthroughFs),
             "passthrough_fs" => Ok(FsBackendType::PassthroughFs),
-            o => Err(NydusError::InvalidArguments(format!(
+            o => Err(Error::InvalidArguments(format!(
                 "only 'rafs' and 'passthrough_fs' are supported, but {} was specified",
                 o
             ))),

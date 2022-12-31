@@ -8,26 +8,18 @@ use std::any::Any;
 use std::cmp::PartialEq;
 use std::convert::From;
 use std::fmt::{Display, Formatter};
-use std::io::Result;
 use std::ops::Deref;
 use std::process::id;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::{error, fmt, io};
 
-use fuse_backend_rs::api::vfs::VfsError;
-use fuse_backend_rs::transport::Error as FuseTransportError;
-use fuse_backend_rs::Error as FuseError;
+use nydus::{Error, Result};
+use nydus_app::BuildTimeInfo;
 use rust_fsm::*;
 use serde::{self, Serialize};
-use serde_json::Error as SerdeError;
-
-use nydus_app::BuildTimeInfo;
-use nydus_rafs::RafsError;
 
 use crate::fs_service::{FsBackendCollection, FsService};
-use crate::upgrade::UpgradeMgrError;
 
 #[allow(dead_code)]
 #[allow(clippy::upper_case_acronyms)]
@@ -58,106 +50,6 @@ impl From<i32> for DaemonState {
     }
 }
 
-#[derive(Debug)]
-pub enum DaemonError {
-    /// Object already exists.
-    AlreadyExists,
-    /// Generic error message.
-    Common(String),
-    /// Invalid arguments provided.
-    InvalidArguments(String),
-    /// Invalid config provided
-    InvalidConfig(String),
-    /// Object not found.
-    NotFound,
-    /// Daemon does not reach the stable working state yet,
-    /// some capabilities may not be provided.
-    NotReady,
-    /// Request not supported.
-    Unsupported,
-    /// Failed to serialize/deserialize message.
-    Serde(SerdeError),
-    /// Cannot spawn a new thread
-    ThreadSpawn(io::Error),
-    /// Failed to upgrade the mount
-    UpgradeManager(UpgradeMgrError),
-
-    /// State-machine related error codes if something bad happens when to communicate with state-machine
-    Channel(String),
-    /// Failed to start service.
-    StartService(String),
-    /// Failed to stop service
-    ServiceStop,
-    /// Input event to stat-machine is not expected.
-    UnexpectedEvent(DaemonStateMachineInput),
-    /// Wait daemon failure
-    WaitDaemon(io::Error),
-
-    // Filesystem type mismatch.
-    FsTypeMismatch(String),
-    /// Failure occurred in the Passthrough subsystem.
-    PassthroughFs(io::Error),
-    /// Failure occurred in the Rafs subsystem.
-    Rafs(RafsError),
-    /// Failure occurred in the VFS subsystem.
-    Vfs(VfsError),
-
-    // virtio-fs
-    /// Failed to handle event other than input event.
-    HandleEventNotEpollIn,
-    /// Failed to handle unknown event.
-    HandleEventUnknownEvent,
-    /// Fail to walk descriptor chain
-    IterateQueue,
-    /// Invalid Virtio descriptor chain.
-    InvalidDescriptorChain(FuseTransportError),
-    /// Processing queue failed.
-    ProcessQueue(FuseError),
-    /// Cannot create epoll context.
-    Epoll(io::Error),
-    /// Daemon related error
-    DaemonFailure(String),
-    /// Missing virtqueue memory
-    QueueMemoryUnset,
-
-    // Fuse session has been shutdown.
-    SessionShutdown(FuseTransportError),
-}
-
-impl fmt::Display for DaemonError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidArguments(s) => write!(f, "Invalid argument: {}", s),
-            Self::InvalidConfig(s) => write!(f, "Invalid config: {}", s),
-            Self::DaemonFailure(s) => write!(f, "Daemon error: {}", s),
-            _ => write!(f, "{:?}", self),
-        }
-    }
-}
-
-impl error::Error for DaemonError {}
-
-impl From<DaemonError> for io::Error {
-    fn from(e: DaemonError) -> Self {
-        einval!(e)
-    }
-}
-
-impl From<VfsError> for DaemonError {
-    fn from(e: VfsError) -> Self {
-        DaemonError::Vfs(e)
-    }
-}
-
-impl From<RafsError> for DaemonError {
-    fn from(error: RafsError) -> Self {
-        DaemonError::Rafs(error)
-    }
-}
-
-/// Specialized version of `std::result::Result` for `NydusDaemon`.
-pub type DaemonResult<T> = std::result::Result<T, DaemonError>;
-
 /// Used to export daemon working state
 #[derive(Serialize)]
 pub struct DaemonInfo {
@@ -174,7 +66,7 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
     fn get_state(&self) -> DaemonState;
     fn set_state(&self, s: DaemonState);
     fn version(&self) -> BuildTimeInfo;
-    fn export_info(&self, include_fs_info: bool) -> DaemonResult<String> {
+    fn export_info(&self, include_fs_info: bool) -> Result<String> {
         let mut response = DaemonInfo {
             version: self.version(),
             id: self.id(),
@@ -188,13 +80,13 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
             }
         }
 
-        serde_json::to_string(&response).map_err(DaemonError::Serde)
+        serde_json::to_string(&response).map_err(Error::Serde)
     }
 
-    fn start(&self) -> DaemonResult<()>;
-    fn disconnect(&self) -> DaemonResult<()>;
+    fn start(&self) -> Result<()>;
+    fn disconnect(&self) -> Result<()>;
     fn interrupt(&self) {}
-    fn stop(&self) -> DaemonResult<()> {
+    fn stop(&self) -> Result<()> {
         let s = self.get_state();
 
         if s == DaemonState::STOPPED {
@@ -207,14 +99,14 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
 
         self.on_event(DaemonStateMachineInput::Stop)
     }
-    fn wait(&self) -> DaemonResult<()>;
-    fn wait_service(&self) -> DaemonResult<()> {
+    fn wait(&self) -> Result<()>;
+    fn wait_service(&self) -> Result<()> {
         Ok(())
     }
-    fn wait_state_machine(&self) -> DaemonResult<()> {
+    fn wait_state_machine(&self) -> Result<()> {
         Ok(())
     }
-    fn trigger_exit(&self) -> DaemonResult<()> {
+    fn trigger_exit(&self) -> Result<()> {
         let s = self.get_state();
 
         if s == DaemonState::STOPPED {
@@ -232,19 +124,19 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
         self.on_event(DaemonStateMachineInput::Exit)
     }
     fn supervisor(&self) -> Option<String>;
-    fn save(&self) -> DaemonResult<()>;
-    fn restore(&self) -> DaemonResult<()>;
-    fn trigger_takeover(&self) -> DaemonResult<()> {
+    fn save(&self) -> Result<()>;
+    fn restore(&self) -> Result<()>;
+    fn trigger_takeover(&self) -> Result<()> {
         self.on_event(DaemonStateMachineInput::Takeover)
     }
-    fn trigger_start(&self) -> DaemonResult<()> {
+    fn trigger_start(&self) -> Result<()> {
         self.on_event(DaemonStateMachineInput::Start)
     }
 
     // For backward compatibility.
     fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>>;
 
-    fn delete_blob(&self, _blob_id: String) -> DaemonResult<()> {
+    fn delete_blob(&self, _blob_id: String) -> Result<()> {
         Ok(())
     }
 }
@@ -285,7 +177,7 @@ pub struct DaemonStateMachineContext {
     daemon: Arc<dyn NydusDaemon>,
     sm: StateMachine<DaemonStateMachine>,
     request_receiver: Receiver<DaemonStateMachineInput>,
-    result_sender: Sender<DaemonResult<()>>,
+    result_sender: Sender<Result<()>>,
 }
 
 impl DaemonStateMachineContext {
@@ -293,7 +185,7 @@ impl DaemonStateMachineContext {
     pub fn new(
         daemon: Arc<dyn NydusDaemon>,
         request_receiver: Receiver<DaemonStateMachineInput>,
-        result_sender: Sender<DaemonResult<()>>,
+        result_sender: Sender<Result<()>>,
     ) -> Self {
         DaemonStateMachineContext {
             pid: id(),
@@ -304,7 +196,7 @@ impl DaemonStateMachineContext {
         }
     }
 
-    pub fn kick_state_machine(mut self) -> Result<JoinHandle<Result<()>>> {
+    pub fn kick_state_machine(mut self) -> std::io::Result<JoinHandle<std::io::Result<()>>> {
         let thread = thread::Builder::new()
             .name("state_machine".to_string())
             .spawn(move || {
@@ -326,7 +218,7 @@ impl DaemonStateMachineContext {
                         );
                         // Safe to unwrap because channel is never closed
                         self.result_sender
-                            .send(Err(DaemonError::UnexpectedEvent(input.clone())))
+                            .send(Err(Error::UnexpectedEvent(format!("{:?}", input))))
                             .unwrap();
                         continue;
                     };
@@ -388,7 +280,7 @@ impl DaemonStateMachineContext {
                 info!("state_machine thread exits");
                 Ok(())
             })
-            .map_err(DaemonError::ThreadSpawn)?;
+            .map_err(Error::ThreadSpawn)?;
         Ok(thread)
     }
 }
@@ -398,7 +290,7 @@ pub trait DaemonStateMachineSubscriber {
     /// Event handler for state transition events.
     ///
     /// It should be invoked in single-thread context.
-    fn on_event(&self, event: DaemonStateMachineInput) -> DaemonResult<()>;
+    fn on_event(&self, event: DaemonStateMachineInput) -> Result<()>;
 }
 
 #[cfg(test)]
