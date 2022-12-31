@@ -39,7 +39,7 @@ use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
 
 use super::chunk_dict::{ChunkDict, HashChunkDict};
-use super::feature::Features;
+use super::feature::{Feature, Features};
 use super::node::{ChunkSource, Node, WhiteoutSpec};
 use super::prefetch::{Prefetch, PrefetchPolicy};
 
@@ -461,6 +461,9 @@ impl BlobContext {
             .set_inlined_chunk_digest(features.contains(BlobFeatures::INLINED_CHUNK_DIGEST));
         blob_ctx
             .blob_meta_header
+            .set_has_toc(features.contains(BlobFeatures::HAS_TOC));
+        blob_ctx
+            .blob_meta_header
             .set_cap_tar_toc(features.contains(BlobFeatures::CAP_TAR_TOC));
 
         blob_ctx
@@ -504,13 +507,15 @@ impl BlobContext {
                                     rafs_blob_size = size;
                                 }
                             }
-                            if let Ok(toc) = TocEntryList::read_from_blob::<File>(
-                                reader.as_ref(),
-                                None,
-                                &TocLocation::default(),
-                            ) {
-                                toc_digest = toc.toc_digest().data;
-                                toc_size = toc.toc_size();
+                            if blob.has_feature(BlobFeatures::HAS_TOC) {
+                                if let Ok(toc) = TocEntryList::read_from_blob::<File>(
+                                    reader.as_ref(),
+                                    None,
+                                    &TocLocation::default(),
+                                ) {
+                                    toc_digest = toc.toc_digest().data;
+                                    toc_size = toc.toc_size();
+                                }
                             }
                         }
                     } else {
@@ -520,13 +525,15 @@ impl BlobContext {
                         compressed_blob_size = reader
                             .blob_size()
                             .map_err(|e| anyhow!("failed to get blob size, {:?}", e))?;
-                        if let Ok(toc) = TocEntryList::read_from_blob::<File>(
-                            reader.as_ref(),
-                            None,
-                            &TocLocation::default(),
-                        ) {
-                            toc_digest = toc.toc_digest().data;
-                            toc_size = toc.toc_size();
+                        if blob.has_feature(BlobFeatures::HAS_TOC) {
+                            if let Ok(toc) = TocEntryList::read_from_blob::<File>(
+                                reader.as_ref(),
+                                None,
+                                &TocLocation::default(),
+                            ) {
+                                toc_digest = toc.toc_digest().data;
+                                toc_size = toc.toc_size();
+                            }
                         }
                     }
                 } else if features.contains(BlobFeatures::ZRAN) {
@@ -1067,11 +1074,15 @@ impl BuildContext {
         blob_inline_meta: bool,
         features: Features,
     ) -> Self {
-        let blob_features = if blob_inline_meta {
-            BlobFeatures::INLINED_FS_META | BlobFeatures::CAP_TAR_TOC
-        } else {
-            BlobFeatures::CAP_TAR_TOC
+        // It's a flag for images built with new nydus-image 2.2 and newer.
+        let mut blob_features = BlobFeatures::CAP_TAR_TOC;
+        if blob_inline_meta {
+            blob_features |= BlobFeatures::INLINED_FS_META;
         };
+        if features.is_enabled(Feature::BlobToc) {
+            blob_features |= BlobFeatures::HAS_TOC;
+        }
+
         BuildContext {
             blob_id,
             aligned_chunk,

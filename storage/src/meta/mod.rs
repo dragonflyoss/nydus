@@ -274,6 +274,15 @@ impl BlobCompressionContextHeader {
     }
 
     /// Set flag indicating new blob format with tar/toc headers.
+    pub fn set_has_toc(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::HAS_TOC.bits();
+        } else {
+            self.s_features &= !BlobFeatures::HAS_TOC.bits();
+        }
+    }
+
+    /// Set flag indicating having inlined-meta capability.
     pub fn set_cap_tar_toc(&mut self, enable: bool) {
         if enable {
             self.s_features |= BlobFeatures::CAP_TAR_TOC.bits();
@@ -1603,6 +1612,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     }
     if features.contains(BlobFeatures::INLINED_FS_META) {
         output += "fs-meta ";
+    }
+    if features.contains(BlobFeatures::HAS_TOC) {
+        output += "toc ";
     }
     if features.contains(BlobFeatures::ZRAN) {
         output += "zran ";

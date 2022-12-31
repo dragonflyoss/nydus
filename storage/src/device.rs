@@ -59,6 +59,8 @@ bitflags! {
         const ZRAN = 0x0000_0008;
         /// Chunk digest array is inlined in the data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0010;
+        /// Blob has Table of Content (ToC) at the tail.
+        const HAS_TOC = 0x2000_0000;
         /// Data blob are encoded with Tar header and optionally ToC.
         /// It's also a flag indicating that images are generated with `nydus-image` v2.2 or newer.
         const CAP_TAR_TOC = 0x4000_0000;
