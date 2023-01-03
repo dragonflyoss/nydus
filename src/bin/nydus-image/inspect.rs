@@ -292,11 +292,12 @@ impl RafsInspector {
 Blob Index:             {blob_index}
 Blob ID:                {blob_id}
 Raw Blob ID:            {raw_blob_id}
+Blob Size:              {blob_size}
+Compressed Data Size:   {compressed_size}
+Uncompressed Data Size: {uncompressed_size}
 Features:               {features:?}
 Compressor:             {compressor}
 Digester:               {digester}
-Cache Size:             {cache_size}
-Compressed Size:        {compressed_size}
 Chunk Size:             {chunk_size}
 Chunk Count:            {chunk_count}
 Prefetch Table Offset:  {prefetch_tbl_offset}
@@ -314,8 +315,9 @@ RAFS Blob Size:         {rafs_size}
                     blob_id = blob_info.blob_id(),
                     raw_blob_id = blob_info.raw_blob_id(),
                     features = blob_info.features(),
-                    cache_size = blob_info.uncompressed_size(),
-                    compressed_size = blob_info.compressed_size(),
+                    uncompressed_size = blob_info.uncompressed_size(),
+                    blob_size = blob_info.compressed_size(),
+                    compressed_size = blob_info.compressed_data_size(),
                     chunk_size = blob_info.chunk_size(),
                     chunk_count = blob_info.chunk_count(),
                     compressor = blob_info.compressor(),

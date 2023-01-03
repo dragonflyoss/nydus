@@ -995,9 +995,10 @@ impl Command {
         let mut blob_ids = Vec::new();
         for (idx, blob) in blobs.iter().enumerate() {
             println!(
-                "\t {}: {}, compressed size 0x{:x}, uncompressed size 0x{:x}, chunks: 0x{:x}, features: {}",
+                "\t {}: {}, compressed data size 0x{:x}, compressed file size 0x{:x}, uncompressed file size 0x{:x}, chunks: 0x{:x}, features: {}",
                 idx,
                 blob.blob_id(),
+                blob.compressed_data_size(),
                 blob.compressed_size(),
                 blob.uncompressed_size(),
                 blob.chunk_count(),

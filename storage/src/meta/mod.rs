@@ -274,6 +274,15 @@ impl BlobCompressionContextHeader {
     }
 
     /// Set flag indicating new blob format with tar/toc headers.
+    pub fn set_has_toc(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::HAS_TOC.bits();
+        } else {
+            self.s_features &= !BlobFeatures::HAS_TOC.bits();
+        }
+    }
+
+    /// Set flag indicating having inlined-meta capability.
     pub fn set_cap_tar_toc(&mut self, enable: bool) {
         if enable {
             self.s_features |= BlobFeatures::CAP_TAR_TOC.bits();
@@ -395,7 +404,7 @@ impl BlobCompressionContextInfo {
         let mut state = BlobCompressionContext {
             blob_index: blob_info.blob_index(),
             blob_features: blob_info.features().bits(),
-            compressed_size: blob_info.compressed_size(),
+            compressed_size: blob_info.compressed_data_size(),
             uncompressed_size: round_up_4k(blob_info.uncompressed_size()),
             chunk_info_array: chunk_infos,
             chunk_digest_array: Default::default(),
@@ -1197,7 +1206,6 @@ impl BlobMetaChunkArray {
                 }
             }
 
-            let mut vec = Vec::with_capacity(128);
             for entry in &chunk_info_array[index..] {
                 entry.validate(state)?;
                 if !entry.is_zran() {
@@ -1207,8 +1215,8 @@ impl BlobMetaChunkArray {
                 }
                 if entry.get_zran_index() != zran_last {
                     let ctx = &state.zran_info_array[entry.get_zran_index() as usize];
-                    if count + ctx.out_size() as u64 > batch_size
-                        && entry.uncompressed_offset() > end
+                    if count + ctx.out_size() as u64 >= batch_size
+                        && entry.uncompressed_offset() >= end
                     {
                         return Ok(vec);
                     }
@@ -1218,7 +1226,17 @@ impl BlobMetaChunkArray {
                 vec.push(BlobMetaChunk::new(index, state));
                 index += 1;
             }
-            return Ok(vec);
+
+            if let Some(c) = vec.last() {
+                if c.uncompressed_end() >= end {
+                    return Ok(vec);
+                }
+            }
+            return Err(einval!(format!(
+                "entry not found index {} chunk_info_array.len {}",
+                index,
+                chunk_info_array.len(),
+            )));
         }
 
         vec.push(BlobMetaChunk::new(index, state));
@@ -1237,7 +1255,7 @@ impl BlobMetaChunkArray {
                         entry.uncompressed_size(),
                         last_end
                     )));
-                } else if last_end >= end && entry.aligned_uncompressed_end() > batch_end {
+                } else if last_end >= end && entry.aligned_uncompressed_end() >= batch_end {
                     // Avoid read amplify if next chunk is too big.
                     return Ok(vec);
                 }
@@ -1249,11 +1267,18 @@ impl BlobMetaChunkArray {
                 }
             }
 
-            Err(einval!(format!(
-                "entry not found index {} chunk_info_array.len {}",
-                index,
-                chunk_info_array.len(),
-            )))
+            if last_end >= end {
+                Ok(vec)
+            } else {
+                Err(einval!(format!(
+                    "entry not found index {} chunk_info_array.len {}, last_end 0x{:x}, end 0x{:x}, blob compressed size 0x{:x}",
+                    index,
+                    chunk_info_array.len(),
+                    last_end,
+                    end,
+                    state.uncompressed_size,
+                )))
+            }
         }
     }
 
@@ -1289,7 +1314,6 @@ impl BlobMetaChunkArray {
                 }
             }
 
-            let mut vec = Vec::with_capacity(128);
             for entry in &chunk_info_array[index..] {
                 entry.validate(state)?;
                 if !entry.is_zran() {
@@ -1309,7 +1333,17 @@ impl BlobMetaChunkArray {
                 vec.push(BlobMetaChunk::new(index, state));
                 index += 1;
             }
-            return Ok(vec);
+
+            if let Some(c) = vec.last() {
+                if c.uncompressed_end() >= end {
+                    return Ok(vec);
+                }
+            }
+            return Err(einval!(format!(
+                "entry not found index {} chunk_info_array.len {}",
+                index,
+                chunk_info_array.len(),
+            )));
         }
 
         vec.push(BlobMetaChunk::new(index, state));
@@ -1333,11 +1367,18 @@ impl BlobMetaChunkArray {
                 }
             }
 
-            Err(einval!(format!(
-                "entry not found index {} chunk_info_array.len {}",
-                index,
-                chunk_info_array.len(),
-            )))
+            if last_end >= end {
+                Ok(vec)
+            } else {
+                Err(einval!(format!(
+                    "entry not found index {} chunk_info_array.len {}, last_end 0x{:x}, end 0x{:x}, blob compressed size 0x{:x}",
+                    index,
+                    chunk_info_array.len(),
+                    last_end,
+                    end,
+                    state.compressed_size,
+                )))
+            }
         }
     }
 
@@ -1603,6 +1644,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     }
     if features.contains(BlobFeatures::INLINED_FS_META) {
         output += "fs-meta ";
+    }
+    if features.contains(BlobFeatures::HAS_TOC) {
+        output += "toc ";
     }
     if features.contains(BlobFeatures::ZRAN) {
         output += "zran ";

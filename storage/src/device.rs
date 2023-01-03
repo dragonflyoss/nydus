@@ -59,6 +59,8 @@ bitflags! {
         const ZRAN = 0x0000_0008;
         /// Chunk digest array is inlined in the data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0010;
+        /// Blob has Table of Content (ToC) at the tail.
+        const HAS_TOC = 0x2000_0000;
         /// Data blob are encoded with Tar header and optionally ToC.
         /// It's also a flag indicating that images are generated with `nydus-image` v2.2 or newer.
         const CAP_TAR_TOC = 0x4000_0000;
@@ -216,7 +218,26 @@ impl BlobInfo {
         &self.blob_id
     }
 
-    /// Get size of the compressed blob.
+    /// Get size of compressed chunk data, not including `blob.meta`, `blob.chunk`, `toc` etc.
+    pub fn compressed_data_size(&self) -> u64 {
+        if self.has_feature(BlobFeatures::ZRAN) {
+            // It's the size of OCIv1 targz blob.
+            self.compressed_size
+        } else if self.has_feature(BlobFeatures::CAP_TAR_TOC) && self.meta_ci_is_valid() {
+            if self.has_feature(BlobFeatures::HAS_TOC)
+                || self.has_feature(BlobFeatures::INLINED_FS_META)
+            {
+                // There's a tar header between chunk data and compression information.
+                self.meta_ci_offset - 0x200
+            } else {
+                self.meta_ci_offset
+            }
+        } else {
+            self.compressed_size
+        }
+    }
+
+    /// Get size of the compressed blob, including `blob.meta`, `blob.chunk`, `toc` etc.
     pub fn compressed_size(&self) -> u64 {
         self.compressed_size
     }
