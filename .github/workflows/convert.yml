@@ -49,8 +49,6 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
                  --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v5 \
-                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I-v5 \
-                 --build-cache-version v1 \
                  --fs-version 5
             # use local registry for speed
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
@@ -70,8 +68,6 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
                  --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6 \
-                 --build-cache ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/nydus-build-cache:$I-v6 \
-                 --build-cache-version v1 \
                  --fs-version 6
             # use local registry for speed
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
