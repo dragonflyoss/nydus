@@ -30,7 +30,7 @@ use crate::cache::state::ChunkMap;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
-use crate::meta::BlobMetaInfo;
+use crate::meta::BlobCompressionContextInfo;
 use crate::utils::{alloc_buf, check_digest};
 use crate::{StorageResult, RAFS_MAX_CHUNK_SIZE};
 
@@ -362,7 +362,7 @@ pub trait BlobCache: Send + Sync {
         }
     }
 
-    fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobMetaInfo>>> {
+    fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobCompressionContextInfo>>> {
         Ok(None)
     }
 }
@@ -396,7 +396,7 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
         }
     }
 
-    fn decompress_zran(&mut self, meta: &Arc<BlobMetaInfo>) -> Result<()> {
+    fn decompress_zran(&mut self, meta: &Arc<BlobCompressionContextInfo>) -> Result<()> {
         let (ctx, dict) = meta
             .get_zran_context(self.zran_idx)
             .ok_or_else(|| einval!("failed to get ZRan context for chunk"))?;

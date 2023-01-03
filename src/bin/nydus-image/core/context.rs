@@ -32,8 +32,8 @@ use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::toc::{TocEntryList, TocLocation};
 use nydus_storage::meta::{
-    toc, BlobChunkInfoV2Ondisk, BlobMetaChunkArray, BlobMetaChunkInfo, BlobMetaHeaderOndisk,
-    ZranContextGenerator,
+    toc, BlobChunkInfoV2Ondisk, BlobCompressionContextHeader, BlobMetaChunkArray,
+    BlobMetaChunkInfo, ZranContextGenerator,
 };
 use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
@@ -367,7 +367,7 @@ pub struct BlobContext {
     /// Data chunks stored in the data blob, for v6.
     pub blob_meta_info: BlobMetaChunkArray,
     /// Blob metadata header stored in the data blob, for v6
-    pub blob_meta_header: BlobMetaHeaderOndisk,
+    pub blob_meta_header: BlobCompressionContextHeader,
     /// Blob chunk digest array.
     pub blob_chunk_digest: Vec<DigestData>,
 
@@ -423,7 +423,7 @@ impl BlobContext {
             blob_prefetch_size: 0,
             blob_meta_info_enabled: false,
             blob_meta_info,
-            blob_meta_header: BlobMetaHeaderOndisk::default(),
+            blob_meta_header: BlobCompressionContextHeader::default(),
             blob_chunk_digest: Vec::new(),
 
             compressed_blob_size: 0,

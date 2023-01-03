@@ -14,7 +14,9 @@ use std::sync::Arc;
 
 use lazy_static::lazy_static;
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-use nydus_storage::meta::{BlobChunkInfoV1Ondisk, BlobChunkInfoV2Ondisk, BlobMetaHeaderOndisk};
+use nydus_storage::meta::{
+    BlobChunkInfoV1Ondisk, BlobChunkInfoV2Ondisk, BlobCompressionContextHeader,
+};
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest, round_up, ByteSize};
 
@@ -1588,7 +1590,7 @@ impl RafsV6BlobTable {
         rafs_blob_toc_digest: [u8; 32],
         rafs_blob_size: u64,
         rafs_blob_toc_size: u32,
-        header: BlobMetaHeaderOndisk,
+        header: BlobCompressionContextHeader,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         let blob_features = BlobFeatures::try_from(header.features()).unwrap();
