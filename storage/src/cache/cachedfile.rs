@@ -704,71 +704,73 @@ impl FileCacheEntry {
                 start = std::cmp::min(*chunk_id - chunk_index, start);
                 end = std::cmp::max(*chunk_id - chunk_index, end);
             }
-            if end < start {
-                return Ok(());
-            }
             (start as usize, end as usize)
         };
 
-        let start_chunk = &chunks[start_idx];
-        let end_chunk = &chunks[end_idx];
-        let (blob_offset, blob_end, blob_size) =
-            self.get_blob_range(&chunks[start_idx..=end_idx])?;
-        trace!(
-            "fetch data range {:x}-{:x} for chunk {}-{} from blob {:x}",
-            blob_offset,
-            blob_end,
-            start_chunk.id(),
-            end_chunk.id(),
-            chunks[0].blob_index()
-        );
+        if start_idx <= end_idx {
+            let start_chunk = &chunks[start_idx];
+            let end_chunk = &chunks[end_idx];
+            let (blob_offset, blob_end, blob_size) =
+                self.get_blob_range(&chunks[start_idx..=end_idx])?;
+            trace!(
+                "fetch data range {:x}-{:x} for chunk {}-{} from blob {:x}",
+                blob_offset,
+                blob_end,
+                start_chunk.id(),
+                end_chunk.id(),
+                chunks[0].blob_index()
+            );
 
-        match self.read_chunks_from_backend(
-            blob_offset,
-            blob_size,
-            &chunks[start_idx..=end_idx],
-            prefetch,
-        ) {
-            Ok(mut bufs) => {
-                if self.is_raw_data {
-                    let res =
-                        Self::persist_cached_data(&self.file, blob_offset, bufs.compressed_buf());
-                    for idx in start_idx..=end_idx {
-                        if status[idx] {
-                            self.update_chunk_pending_status(chunks[idx].as_ref(), res.is_ok());
+            match self.read_chunks_from_backend(
+                blob_offset,
+                blob_size,
+                &chunks[start_idx..=end_idx],
+                prefetch,
+            ) {
+                Ok(mut bufs) => {
+                    if self.is_raw_data {
+                        let res = Self::persist_cached_data(
+                            &self.file,
+                            blob_offset,
+                            bufs.compressed_buf(),
+                        );
+                        for idx in start_idx..=end_idx {
+                            if status[idx] {
+                                self.update_chunk_pending_status(chunks[idx].as_ref(), res.is_ok());
+                            }
                         }
-                    }
-                } else {
-                    for idx in start_idx..=end_idx {
-                        let mut buf = match bufs.next() {
-                            None => return Err(einval!("invalid chunk decompressed status")),
-                            Some(Err(e)) => {
-                                for idx in idx..=end_idx {
-                                    if status[idx] {
-                                        bitmap.clear_range_pending(chunks[idx].id(), 1)
+                    } else {
+                        for idx in start_idx..=end_idx {
+                            let mut buf = match bufs.next() {
+                                None => return Err(einval!("invalid chunk decompressed status")),
+                                Some(Err(e)) => {
+                                    for idx in idx..=end_idx {
+                                        if status[idx] {
+                                            bitmap.clear_range_pending(chunks[idx].id(), 1)
+                                        }
                                     }
+                                    return Err(e);
                                 }
-                                return Err(e);
-                            }
-                            Some(Ok(v)) => v,
-                        };
+                                Some(Ok(v)) => v,
+                            };
 
-                        if status[idx] {
-                            if self.dio_enabled {
-                                self.adjust_buffer_for_dio(&mut buf)
+                            if status[idx] {
+                                if self.dio_enabled {
+                                    self.adjust_buffer_for_dio(&mut buf)
+                                }
+                                self.persist_chunk_data(chunks[idx].as_ref(), buf.as_ref());
                             }
-                            self.persist_chunk_data(chunks[idx].as_ref(), buf.as_ref());
                         }
                     }
                 }
-            }
-            Err(e) => {
-                for idx in 0..chunks.len() {
-                    if status[idx] {
-                        bitmap.clear_range_pending(chunks[idx].id(), 1)
+                Err(e) => {
+                    for idx in 0..chunks.len() {
+                        if status[idx] {
+                            bitmap.clear_range_pending(chunks[idx].id(), 1)
+                        }
                     }
+                    return Err(e);
                 }
-                return Err(e);
             }
         }
 
@@ -1106,10 +1108,12 @@ impl FileCacheEntry {
         let mut d = DataBuffer::Allocated(alloc_buf(d_size));
 
         // Try to read and validate data from cache if:
-        // - the chunk is marked as ready
-        // - it's not in direct map mode and blob is not a legacy stargz. Legacy stargz has
-        //   incorrect chunk hash value, so can't be used to validate data from cache.
-        let buffer = if self.read_file_cache(chunk.as_ref(), d.mut_slice()).is_ok() {
+        // - it's an stargz image and the chunk is ready.
+        // - chunk data validation is enabled.
+        // - digested or dummy chunk map is used.
+        let is_ready = self.chunk_map.is_ready(chunk.as_ref())?;
+        let try_cache = is_ready || !self.is_direct_chunkmap;
+        let buffer = if try_cache && self.read_file_cache(chunk.as_ref(), d.mut_slice()).is_ok() {
             self.metrics.whole_hits.inc();
             self.chunk_map.set_ready_and_clear_pending(chunk.as_ref())?;
             trace!(
