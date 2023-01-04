@@ -220,10 +220,10 @@ fn append_fs_options(app: Command) -> Command {
     .arg(
         Arg::new("prefetch-files")
             .long("prefetch-files")
-            .help("List of files/directories to prefetch")
+            .help("A file include the list of files/directories to prefetch")
             .required(false)
             .requires("bootstrap")
-            .num_args(1..),
+            .num_args(1),
     )
     .arg(
         Arg::new("virtual-mountpoint")
@@ -604,9 +604,29 @@ fn process_fs_service(
             },
         };
 
-        let prefetch_files: Option<Vec<String>> = args
-            .values_of("prefetch-files")
-            .map(|files| files.map(|s| s.to_string()).collect());
+        // read the prefetch list of files from prefetch-files
+        let prefetch_files: Option<Vec<String>> = match args.value_of("prefetch-files") {
+            Some(v) => {
+                let content = match std::fs::read_to_string(v) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        let e = DaemonError::InvalidArguments(
+                            "the prefetch-files arg is not a file path".to_string(),
+                        );
+                        return Err(e.into());
+                    }
+                };
+                let mut prefetch_files: Vec<String> = Vec::new();
+                for line in content.lines() {
+                    if line.is_empty() || line.trim().is_empty() {
+                        continue;
+                    }
+                    prefetch_files.push(line.trim().to_string());
+                }
+                Some(prefetch_files)
+            }
+            None => None,
+        };
 
         let cmd = FsBackendMountCmd {
             fs_type: nydus::FsBackendType::Rafs,
