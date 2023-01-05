@@ -26,11 +26,11 @@ git clone https://github.com/dragonflyoss/image-service.git
 
 # Install nydusd
 cargo build --target x86_64-unknown-linux-musl --release --bin nydusd
-sudo install -D -m 755 ./target/x86_64-unknown-linux-musl/release/nydusd /usr/local/bin
+sudo install -D -m 755 ./target/x86_64-unknown-linux-musl/release/nydusd /usr/bin
 
 # Install nydus-image
 cargo build --target x86_64-unknown-linux-musl --release --bin nydus-image
-sudo install -D -m 755 ./target/x86_64-unknown-linux-musl/release/nydus-image /usr/local/bin
+sudo install -D -m 755 ./target/x86_64-unknown-linux-musl/release/nydus-image /usr/bin
 ```
 
 2. Get nydus zran artifact:
