@@ -44,8 +44,8 @@ cd image-service
 make release
 ```
 
-4. Copy the "nydus-image" binary file compiled in Step 3 into _$PATH_ e.g. /usr/local/bin with \
-``cp target/release/nydus-image /usr/local/bin``
+4. Copy the "nydus-image" binary file compiled in Step 3 into _$PATH_ e.g. /usr/bin with \
+``cp target/release/nydus-image /usr/bin``
 
 5. Build ctr-remote with
 
