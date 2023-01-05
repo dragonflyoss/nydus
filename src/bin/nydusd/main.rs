@@ -220,7 +220,7 @@ fn append_fs_options(app: Command) -> Command {
     .arg(
         Arg::new("prefetch-files")
             .long("prefetch-files")
-            .help("A file include the list of files/directories to prefetch")
+            .help("A file including the list of files/directories to be prefetched")
             .required(false)
             .requires("bootstrap")
             .num_args(1),
