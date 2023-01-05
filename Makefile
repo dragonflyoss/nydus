@@ -11,7 +11,7 @@ all-install: install contrib-install
 all-clean: clean contrib-clean
 
 TEST_WORKDIR_PREFIX ?= "/tmp"
-INSTALL_DIR_PREFIX ?= "/usr/local/bin"
+INSTALL_DIR_PREFIX ?= "/usr/bin"
 DOCKER ?= "true"
 
 CARGO ?= $(shell which cargo)

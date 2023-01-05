@@ -7,13 +7,13 @@ This document will walk through how to setup a nydus image service to work with 
 1. Get `nydus-image`, `nydusd`, `nydusify`, `nydusctl` and `nydus-overlayfs` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
 
 ```bash
-sudo install -D -m 755 nydusd nydus-image nydusify nydusctl nydus-overlayfs /usr/local/bin
+sudo install -D -m 755 nydusd nydus-image nydusify nydusctl nydus-overlayfs /usr/bin
 ```
 
 2. Get `containerd-nydus-grpc` (nydus snapshotter) binary from nydus-snapshotter [release](https://github.com/containerd/nydus-snapshotter/releases/latest) page.
 
 ```bash
-sudo install -D -m 755 containerd-nydus-grpc /usr/local/bin
+sudo install -D -m 755 containerd-nydus-grpc /usr/bin
 ```
 
 ## Start Nydus Snapshotter
@@ -76,7 +76,7 @@ sudo rm -rf /var/lib/containerd-nydus
 3. Start `containerd-nydus-grpc` (nydus snapshotter):
 
 ```bash
-sudo /usr/local/bin/containerd-nydus-grpc \
+sudo /usr/bin/containerd-nydus-grpc \
     --config-path /etc/nydus/nydusd-config.fusedev.json \
     --log-to-stdout
 ```
