@@ -348,10 +348,8 @@ components:
           description: usually to be the metadata source
           type: string
         prefetch_files:
-          description: files that need to be prefetched
-          type: array
-          items:
-            type: string
+          description: local file path which recorded a file list to be prefetched
+          type: string
         config:
           description: inline request, use to configure fs backend.
           type: string
