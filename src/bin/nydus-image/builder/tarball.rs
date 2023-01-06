@@ -30,6 +30,7 @@ use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsVersion};
+use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::ZranContextGenerator;
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
 use nydus_utils::compact::makedev;
@@ -118,6 +119,7 @@ impl<'a> TarballTreeBuilder<'a> {
                     let generator = ZranContextGenerator::from_buf_reader(buf_reader)?;
                     let reader = generator.reader();
                     self.ctx.blob_zran_generator = Some(Mutex::new(generator));
+                    self.ctx.blob_features.insert(BlobFeatures::ZRAN);
                     TarReader::Zran(reader)
                 } else {
                     buf_reader.seek_relative(-3).unwrap();

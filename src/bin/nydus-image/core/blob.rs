@@ -142,9 +142,14 @@ impl Blob {
             header.set_ci_zran_offset(ci_data.len() as u64);
             header.set_ci_zran_size(zran_data.len() as u64);
             header.set_ci_zran(true);
+            header.set_separate_blob(true);
             zran_buf = [ci_data, &zran_data].concat();
             ci_data = &zran_buf;
+        } else if ctx.blob_tar_reader.is_some() {
+            header.set_separate_blob(true);
+            header.set_ci_zran(false);
         } else {
+            header.set_separate_blob(false);
             header.set_ci_zran(false);
         };
 

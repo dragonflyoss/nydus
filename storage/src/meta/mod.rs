@@ -264,6 +264,15 @@ impl BlobCompressionContextHeader {
         }
     }
 
+    /// Set flag indicating whether blob.data and blob.meta are stored in separated blobs.
+    pub fn set_separate_blob(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::SEPARATE.bits();
+        } else {
+            self.s_features &= !BlobFeatures::SEPARATE.bits();
+        }
+    }
+
     /// Set flag indicating whether chunk digest is inlined in the data blob or not.
     pub fn set_inlined_chunk_digest(&mut self, enable: bool) {
         if enable {
@@ -448,14 +457,13 @@ impl BlobCompressionContextInfo {
             let digest_path = PathBuf::from(format!("{}.{}", blob_path, BLOB_DIGEST_FILE_SUFFIX));
             if let Some(reader) = reader {
                 let toc_path = format!("{}.{}", blob_path, BLOB_TOC_FILE_SUFFIX);
-                let location = if blob_info.rafs_blob_toc_size() != 0 {
+                let location = if blob_info.blob_toc_size() != 0 {
                     let blob_size = reader
                         .blob_size()
                         .map_err(|_e| eio!("failed to get blob size"))?;
-                    let offset = blob_size - blob_info.rafs_blob_toc_size() as u64;
-                    let mut location =
-                        TocLocation::new(offset, blob_info.rafs_blob_toc_size() as u64);
-                    let digest = blob_info.rafs_blob_toc_digest();
+                    let offset = blob_size - blob_info.blob_toc_size() as u64;
+                    let mut location = TocLocation::new(offset, blob_info.blob_toc_size() as u64);
+                    let digest = blob_info.blob_toc_digest();
                     for c in digest {
                         if *c != 0 {
                             location.validate_digest = true;
@@ -882,6 +890,10 @@ impl BlobCompressionContext {
         } else {
             None
         }
+    }
+
+    pub(crate) fn is_separate(&self) -> bool {
+        self.blob_features & BlobFeatures::SEPARATE.bits() != 0
     }
 }
 
@@ -1644,6 +1656,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     }
     if features.contains(BlobFeatures::INLINED_FS_META) {
         output += "fs-meta ";
+    }
+    if features.contains(BlobFeatures::SEPARATE) {
+        output += "separate ";
     }
     if features.contains(BlobFeatures::HAS_TOC) {
         output += "toc ";

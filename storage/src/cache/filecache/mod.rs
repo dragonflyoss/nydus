@@ -170,14 +170,15 @@ impl FileCacheEntry {
         runtime: Arc<Runtime>,
         workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {
+        let is_separate_meta = blob_info.has_feature(BlobFeatures::SEPARATE);
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
         let blob_id = blob_info.blob_id();
-        let rafs_blob_id = if is_zran {
-            blob_info.get_rafs_blob_id()?
+        let blob_meta_id = if is_separate_meta {
+            blob_info.get_blob_meta_id()?
         } else {
             blob_id.clone()
         };
-        let blob_file_path = format!("{}/{}", mgr.work_dir, rafs_blob_id);
+        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
         let suffix = if mgr.cache_raw_data {
             ".blob.raw"
         } else {
@@ -194,9 +195,9 @@ impl FileCacheEntry {
             .backend
             .get_reader(&blob_id)
             .map_err(|e| eio!(format!("failed to get reader for blob {}, {}", blob_id, e)))?;
-        let rafs_blob_reader = if is_zran {
+        let blob_meta_reader = if is_separate_meta {
             mgr.backend
-                .get_reader(&rafs_blob_id)
+                .get_reader(&blob_meta_id)
                 .map_err(|_e| eio!("failed to get reader for rafs blob"))?
         } else {
             reader.clone()
@@ -211,10 +212,11 @@ impl FileCacheEntry {
         let need_validation =
             ((mgr.validate && validation_supported) || !is_direct_chunkmap) && !is_legacy_stargz;
         trace!(
-            "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, zran {}",
+            "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, separate_meta {}, zran {}",
             mgr.cache_raw_data,
             is_direct_chunkmap,
             is_legacy_stargz,
+            is_separate_meta,
             is_zran,
         );
 
@@ -238,7 +240,7 @@ impl FileCacheEntry {
             let meta = FileCacheMeta::new(
                 blob_file_path,
                 blob_info.clone(),
-                Some(rafs_blob_reader),
+                Some(blob_meta_reader),
                 Some(runtime.clone()),
                 false,
                 need_validation,

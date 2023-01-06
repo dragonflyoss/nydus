@@ -389,15 +389,15 @@ pub struct BlobContext {
 
     // SHA256 digest of blob ToC content, including the toc tar header.
     // It's all zero for blobs with inlined-meta.
-    pub rafs_blob_toc_digest: [u8; 32],
+    pub blob_toc_digest: [u8; 32],
     // SHA256 digest of RAFS blob for ZRAN, containing `blob.meta`, `blob.digest` `blob.toc` and
     // optionally 'image.boot`. It's all zero for ZRAN blobs with inlined-meta, so need special
     // handling.
-    pub rafs_blob_digest: [u8; 32],
+    pub blob_meta_digest: [u8; 32],
     // Size of RAFS blob for ZRAN. It's zero ZRAN blobs with inlined-meta.
-    pub rafs_blob_size: u64,
+    pub blob_meta_size: u64,
     // Size of blob ToC content, it's zero for blobs with inlined-meta.
-    pub rafs_blob_toc_size: u32,
+    pub blob_toc_size: u32,
 
     pub entry_list: toc::TocEntryList,
 }
@@ -436,10 +436,10 @@ impl BlobContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             chunk_source: ChunkSource::Build,
 
-            rafs_blob_toc_digest: [0u8; 32],
-            rafs_blob_digest: [0u8; 32],
-            rafs_blob_size: 0,
-            rafs_blob_toc_size: 0,
+            blob_toc_digest: [0u8; 32],
+            blob_meta_digest: [0u8; 32],
+            blob_meta_size: 0,
+            blob_toc_size: 0,
 
             entry_list: toc::TocEntryList::new(),
         };
@@ -458,6 +458,9 @@ impl BlobContext {
             .set_ci_zran(features.contains(BlobFeatures::ZRAN));
         blob_ctx
             .blob_meta_header
+            .set_separate_blob(features.contains(BlobFeatures::SEPARATE));
+        blob_ctx
+            .blob_meta_header
             .set_inlined_chunk_digest(features.contains(BlobFeatures::INLINED_CHUNK_DIGEST));
         blob_ctx
             .blob_meta_header
@@ -471,10 +474,10 @@ impl BlobContext {
 
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Result<Self> {
         let mut compressed_blob_size = blob.compressed_size();
-        let mut rafs_blob_size = blob.rafs_blob_size();
-        let mut toc_size = blob.rafs_blob_toc_size();
-        let mut rafs_blob_digest = blob.rafs_blob_digest().to_owned();
-        let mut toc_digest = blob.rafs_blob_toc_digest().to_owned();
+        let mut blob_meta_size = blob.blob_meta_size();
+        let mut toc_size = blob.blob_toc_size();
+        let mut blob_meta_digest = blob.blob_meta_digest().to_owned();
+        let mut toc_digest = blob.blob_toc_digest().to_owned();
         let mut blob_id = blob.raw_blob_id().to_string();
         let mut features = blob.features();
 
@@ -483,7 +486,7 @@ impl BlobContext {
             if features.contains(BlobFeatures::INLINED_FS_META) {
                 features &= !BlobFeatures::INLINED_FS_META;
 
-                if !features.contains(BlobFeatures::ZRAN) {
+                if !features.contains(BlobFeatures::SEPARATE) {
                     blob_id = blob.blob_id();
                 }
 
@@ -493,8 +496,8 @@ impl BlobContext {
                     })?;
                     let blob_mgr = BlobFactory::new_backend(backend_config, "fix-inlined-meta")?;
 
-                    if features.contains(BlobFeatures::ZRAN) {
-                        if let Ok(digest) = blob.get_rafs_blob_id() {
+                    if features.contains(BlobFeatures::SEPARATE) {
+                        if let Ok(digest) = blob.get_blob_meta_id() {
                             let reader = blob_mgr.get_reader(&digest).map_err(|e| {
                                 anyhow!("failed to get reader for blob {}, {}", digest, e)
                             })?;
@@ -503,8 +506,8 @@ impl BlobContext {
                                 .map_err(|e| anyhow!("failed to get blob size, {:?}", e))?;
                             if let Ok(v) = hex::decode(digest) {
                                 if v.len() == 32 {
-                                    rafs_blob_digest.copy_from_slice(&v[..32]);
-                                    rafs_blob_size = size;
+                                    blob_meta_digest.copy_from_slice(&v[..32]);
+                                    blob_meta_size = size;
                                 }
                             }
                             if blob.has_feature(BlobFeatures::HAS_TOC) {
@@ -536,11 +539,11 @@ impl BlobContext {
                             }
                         }
                     }
-                } else if features.contains(BlobFeatures::ZRAN) {
-                    if let Ok(digest) = blob.get_rafs_blob_id() {
+                } else if features.contains(BlobFeatures::SEPARATE) {
+                    if let Ok(digest) = blob.get_blob_meta_id() {
                         if let Ok(v) = hex::decode(digest) {
                             if v.len() == 32 {
-                                rafs_blob_digest.copy_from_slice(&v[..32]);
+                                blob_meta_digest.copy_from_slice(&v[..32]);
                             }
                         }
                     }
@@ -557,10 +560,10 @@ impl BlobContext {
         blob_ctx.compressed_blob_size = compressed_blob_size;
         blob_ctx.chunk_size = blob.chunk_size();
         blob_ctx.chunk_source = chunk_source;
-        blob_ctx.rafs_blob_digest = rafs_blob_digest;
-        blob_ctx.rafs_blob_size = rafs_blob_size;
-        blob_ctx.rafs_blob_toc_digest = toc_digest;
-        blob_ctx.rafs_blob_toc_size = toc_size;
+        blob_ctx.blob_meta_digest = blob_meta_digest;
+        blob_ctx.blob_meta_size = blob_meta_size;
+        blob_ctx.blob_toc_digest = toc_digest;
+        blob_ctx.blob_toc_size = toc_size;
 
         if blob.meta_ci_is_valid() {
             blob_ctx
@@ -894,10 +897,10 @@ impl BlobManager {
                         decompressed_blob_size,
                         compressed_blob_size,
                         flags,
-                        ctx.rafs_blob_digest,
-                        ctx.rafs_blob_toc_digest,
-                        ctx.rafs_blob_size,
-                        ctx.rafs_blob_toc_size,
+                        ctx.blob_meta_digest,
+                        ctx.blob_toc_digest,
+                        ctx.blob_meta_size,
+                        ctx.blob_toc_size,
                         ctx.blob_meta_header,
                     );
                 }

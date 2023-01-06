@@ -205,14 +205,15 @@ impl FileCacheEntry {
         let file = blob_info
             .get_fscache_file()
             .ok_or_else(|| einval!("No fscache file associated with the blob_info"))?;
+        let is_separate_meta = blob_info.has_feature(BlobFeatures::SEPARATE);
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
         let blob_id = blob_info.blob_id();
-        let rafs_blob_id = if is_zran {
-            blob_info.get_rafs_blob_id()?
+        let blob_meta_id = if is_separate_meta {
+            blob_info.get_blob_meta_id()?
         } else {
             blob_id.clone()
         };
-        let blob_file_path = format!("{}/{}", mgr.work_dir, rafs_blob_id);
+        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
         let chunk_map = Arc::new(BlobStateMap::from(IndexedChunkMap::new(
             &blob_file_path,
             blob_info.chunk_count(),
@@ -222,9 +223,9 @@ impl FileCacheEntry {
             .backend
             .get_reader(&blob_id)
             .map_err(|_e| eio!("failed to get reader for data blob"))?;
-        let rafs_blob_reader = if is_zran {
+        let blob_meta_reader = if is_separate_meta {
             mgr.backend
-                .get_reader(&rafs_blob_id)
+                .get_reader(&blob_meta_id)
                 .map_err(|_e| eio!("failed to get reader for rafs blob"))?
         } else {
             reader.clone()
@@ -237,7 +238,7 @@ impl FileCacheEntry {
             FileCacheMeta::new(
                 blob_file_path,
                 blob_info.clone(),
-                Some(rafs_blob_reader),
+                Some(blob_meta_reader),
                 None,
                 true,
                 need_validation,
