@@ -276,7 +276,7 @@ impl RegistryState {
         if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
             self.refresh_token_time
                 .store(Some(Arc::new(now_timestamp.as_secs() + ret.expires_in)));
-            info!(
+            debug!(
                 "cached bearer auth, next time: {}",
                 now_timestamp.as_secs() + ret.expires_in
             );
