@@ -1272,7 +1272,7 @@ struct RafsV6Blob {
     uncompressed_size: u64,
 
     // Size of blob ToC content, it's zero for blobs with inlined-meta.
-    rafs_blob_toc_size: u32,
+    blob_toc_size: u32,
     // Compression algorithm for the compression information array.
     ci_compressor: u32,
     // Offset into the compressed blob for the compression information array.
@@ -1284,13 +1284,13 @@ struct RafsV6Blob {
 
     // SHA256 digest of blob ToC content, including the toc tar header.
     // It's all zero for blobs with inlined-meta.
-    rafs_blob_toc_digest: [u8; 32],
+    blob_toc_digest: [u8; 32],
     // SHA256 digest of RAFS blob for ZRAN, containing `blob.meta`, `blob.digest` `blob.toc` and
     // optionally 'image.boot`. It's all zero for ZRAN blobs with inlined-meta, so need special
     // handling.
-    rafs_blob_digest: [u8; 32],
+    blob_meta_digest: [u8; 32],
     // Size of RAFS blob for ZRAN. It's zero ZRAN blobs with inlined-meta.
-    rafs_blob_size: u64,
+    blob_meta_size: u64,
 
     reserved2: [u8; 48],
 }
@@ -1312,10 +1312,10 @@ impl Default for RafsV6Blob {
             ci_compressed_size: 0u64,
             ci_uncompressed_size: 0u64,
 
-            rafs_blob_toc_digest: [0u8; 32],
-            rafs_blob_digest: [0u8; 32],
-            rafs_blob_size: 0,
-            rafs_blob_toc_size: 0u32,
+            blob_toc_digest: [0u8; 32],
+            blob_meta_digest: [0u8; 32],
+            blob_meta_size: 0,
+            blob_toc_size: 0u32,
 
             reserved2: [0u8; 48],
         }
@@ -1355,10 +1355,10 @@ impl RafsV6Blob {
             u64::from_le(self.ci_uncompressed_size),
             u32::from_le(self.ci_compressor),
         );
-        blob_info.set_rafs_blob_toc_digest(self.rafs_blob_toc_digest);
-        blob_info.set_rafs_blob_digest(self.rafs_blob_digest);
-        blob_info.set_rafs_blob_size(self.rafs_blob_size);
-        blob_info.set_rafs_blob_toc_size(self.rafs_blob_toc_size);
+        blob_info.set_blob_toc_digest(self.blob_toc_digest);
+        blob_info.set_blob_meta_digest(self.blob_meta_digest);
+        blob_info.set_blob_meta_size(self.blob_meta_size);
+        blob_info.set_blob_toc_size(self.blob_toc_size);
 
         Ok(blob_info)
     }
@@ -1389,10 +1389,10 @@ impl RafsV6Blob {
             ci_compressed_size: blob_info.meta_ci_compressed_size().to_le(),
             ci_uncompressed_size: blob_info.meta_ci_uncompressed_size().to_le(),
 
-            rafs_blob_toc_digest: *blob_info.rafs_blob_toc_digest(),
-            rafs_blob_digest: *blob_info.rafs_blob_digest(),
-            rafs_blob_size: blob_info.rafs_blob_size(),
-            rafs_blob_toc_size: blob_info.rafs_blob_toc_size(),
+            blob_toc_digest: *blob_info.blob_toc_digest(),
+            blob_meta_digest: *blob_info.blob_meta_digest(),
+            blob_meta_size: blob_info.blob_meta_size(),
+            blob_toc_size: blob_info.blob_toc_size(),
 
             reserved2: [0u8; 48],
         })
@@ -1435,8 +1435,8 @@ impl RafsV6Blob {
             || c_size != chunk_size as u64
         {
             error!(
-                "RafsV6Blob: idx {} invalid chunk_size {:x}",
-                blob_index, c_size,
+                "RafsV6Blob: idx {} invalid chunk_size 0x{:x}, expect 0x{:x}",
+                blob_index, c_size, chunk_size
             );
             return false;
         }
@@ -1586,10 +1586,10 @@ impl RafsV6BlobTable {
         uncompressed_size: u64,
         compressed_size: u64,
         flags: RafsSuperFlags,
-        rafs_blob_digest: [u8; 32],
-        rafs_blob_toc_digest: [u8; 32],
-        rafs_blob_size: u64,
-        rafs_blob_toc_size: u32,
+        blob_meta_digest: [u8; 32],
+        blob_toc_digest: [u8; 32],
+        blob_meta_size: u64,
+        blob_toc_size: u32,
         header: BlobCompressionContextHeader,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
@@ -1613,10 +1613,10 @@ impl RafsV6BlobTable {
             header.ci_uncompressed_size(),
             header.ci_compressor() as u32,
         );
-        blob_info.set_rafs_blob_digest(rafs_blob_digest);
-        blob_info.set_rafs_blob_toc_digest(rafs_blob_toc_digest);
-        blob_info.set_rafs_blob_size(rafs_blob_size);
-        blob_info.set_rafs_blob_toc_size(rafs_blob_toc_size);
+        blob_info.set_blob_meta_digest(blob_meta_digest);
+        blob_info.set_blob_toc_digest(blob_toc_digest);
+        blob_info.set_blob_meta_size(blob_meta_size);
+        blob_info.set_blob_toc_size(blob_toc_size);
 
         self.entries.push(Arc::new(blob_info));
 

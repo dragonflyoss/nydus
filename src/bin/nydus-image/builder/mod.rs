@@ -159,8 +159,8 @@ fn dump_toc(
         hasher.digest_update(&data);
         let header = blob_ctx.write_tar_header(blob_writer, toc::TOC_ENTRY_BLOB_TOC, toc_size)?;
         hasher.digest_update(header.as_bytes());
-        blob_ctx.rafs_blob_toc_digest = hasher.digest_finalize().data;
-        blob_ctx.rafs_blob_toc_size = toc_size as u32 + header.as_bytes().len() as u32;
+        blob_ctx.blob_toc_digest = hasher.digest_finalize().data;
+        blob_ctx.blob_toc_size = toc_size as u32 + header.as_bytes().len() as u32;
     }
     Ok(())
 }
@@ -181,7 +181,7 @@ fn finalize_blob(
         }
 
         let hash = blob_ctx.blob_hash.clone().finalize();
-        let rafs_blob_id = if ctx.blob_id.is_empty() {
+        let blob_meta_id = if ctx.blob_id.is_empty() {
             format!("{:x}", hash)
         } else {
             assert!(!ctx.conversion_type.is_to_ref());
@@ -208,15 +208,15 @@ fn finalize_blob(
                 }
             }
             if !ctx.blob_inline_meta {
-                blob_ctx.rafs_blob_digest = hash.into();
-                blob_ctx.rafs_blob_size = blob_writer.pos()?;
+                blob_ctx.blob_meta_digest = hash.into();
+                blob_ctx.blob_meta_size = blob_writer.pos()?;
             }
         } else if blob_ctx.blob_id.is_empty() {
             // `blob_ctx.blob_id` should be RAFS blob id.
-            blob_ctx.blob_id = rafs_blob_id.clone();
+            blob_ctx.blob_id = blob_meta_id.clone();
         }
 
-        blob_writer.finalize(Some(rafs_blob_id))?;
+        blob_writer.finalize(Some(blob_meta_id))?;
     }
 
     Ok(())

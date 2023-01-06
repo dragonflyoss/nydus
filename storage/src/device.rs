@@ -44,7 +44,7 @@ use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
 
 pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
-pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_001f;
+pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_003f;
 
 bitflags! {
     /// Features bits for blob management.
@@ -57,8 +57,10 @@ bitflags! {
         const CHUNK_INFO_V2 = 0x0000_0004;
         /// Blob compression information data include context data for zlib random access.
         const ZRAN = 0x0000_0008;
+        /// Blob data and blob meta are stored in separate blobs.
+        const SEPARATE = 0x0000_0010;
         /// Chunk digest array is inlined in the data blob.
-        const INLINED_CHUNK_DIGEST = 0x0000_0010;
+        const INLINED_CHUNK_DIGEST = 0x0000_0020;
         /// Blob has Table of Content (ToC) at the tail.
         const HAS_TOC = 0x2000_0000;
         /// Data blob are encoded with Tar header and optionally ToC.
@@ -134,15 +136,15 @@ pub struct BlobInfo {
 
     // SHA256 digest of blob ToC content, including the toc tar header.
     // It's all zero for blobs with inlined-meta.
-    rafs_blob_toc_digest: [u8; 32],
+    blob_toc_digest: [u8; 32],
     // SHA256 digest of RAFS blob for ZRAN, containing `blob.meta`, `blob.digest` `blob.toc` and
     // optionally 'image.boot`. It's all zero for ZRAN blobs with inlined-meta, so need special
     // handling.
-    rafs_blob_digest: [u8; 32],
+    blob_meta_digest: [u8; 32],
     // Size of RAFS blob for ZRAN. It's zero ZRAN blobs with inlined-meta.
-    rafs_blob_size: u64,
+    blob_meta_size: u64,
     // Size of blob ToC content, it's zero for blobs with inlined-meta.
-    rafs_blob_toc_size: u32,
+    blob_toc_size: u32,
 
     /// V6: support fs-cache mode
     fs_cache_file: Option<Arc<File>>,
@@ -180,10 +182,10 @@ impl BlobInfo {
             meta_ci_compressed_size: 0,
             meta_ci_uncompressed_size: 0,
 
-            rafs_blob_toc_digest: [0u8; 32],
-            rafs_blob_digest: [0u8; 32],
-            rafs_blob_size: 0,
-            rafs_blob_toc_size: 0,
+            blob_toc_digest: [0u8; 32],
+            blob_meta_digest: [0u8; 32],
+            blob_meta_size: 0,
+            blob_toc_size: 0,
 
             fs_cache_file: None,
             meta_path: Arc::new(Mutex::new(String::new())),
@@ -202,7 +204,7 @@ impl BlobInfo {
     /// Get the id of the blob, with special handling of `inlined-meta` case.
     pub fn blob_id(&self) -> String {
         if (self.has_feature(BlobFeatures::INLINED_FS_META)
-            && !self.has_feature(BlobFeatures::ZRAN))
+            && !self.has_feature(BlobFeatures::SEPARATE))
             || !self.has_feature(BlobFeatures::CAP_TAR_TOC)
         {
             let guard = self.meta_path.lock().unwrap();
@@ -220,8 +222,8 @@ impl BlobInfo {
 
     /// Get size of compressed chunk data, not including `blob.meta`, `blob.chunk`, `toc` etc.
     pub fn compressed_data_size(&self) -> u64 {
-        if self.has_feature(BlobFeatures::ZRAN) {
-            // It's the size of OCIv1 targz blob.
+        if self.has_feature(BlobFeatures::SEPARATE) {
+            // It's the size of referenced OCIv1 targz blob.
             self.compressed_size
         } else if self.has_feature(BlobFeatures::CAP_TAR_TOC) && self.meta_ci_is_valid() {
             if self.has_feature(BlobFeatures::HAS_TOC)
@@ -388,23 +390,23 @@ impl BlobInfo {
     /// Get SHA256 digest of the ToC content, including the toc tar header.
     ///
     /// It's all zero for inlined bootstrap.
-    pub fn rafs_blob_toc_digest(&self) -> &[u8; 32] {
-        &self.rafs_blob_toc_digest
+    pub fn blob_toc_digest(&self) -> &[u8; 32] {
+        &self.blob_toc_digest
     }
 
     /// Set SHA256 digest of the ToC content, including the toc tar header.
-    pub fn set_rafs_blob_toc_digest(&mut self, digest: [u8; 32]) {
-        self.rafs_blob_toc_digest = digest;
+    pub fn set_blob_toc_digest(&mut self, digest: [u8; 32]) {
+        self.blob_toc_digest = digest;
     }
 
     /// Get size of the ToC content. It's all zero for inlined bootstrap.
-    pub fn rafs_blob_toc_size(&self) -> u32 {
-        self.rafs_blob_toc_size
+    pub fn blob_toc_size(&self) -> u32 {
+        self.blob_toc_size
     }
 
     /// Set size of the ToC content.
-    pub fn set_rafs_blob_toc_size(&mut self, sz: u32) {
-        self.rafs_blob_toc_size = sz;
+    pub fn set_blob_toc_size(&mut self, sz: u32) {
+        self.blob_toc_size = sz;
     }
 
     /// The RAFS blob contains `blob.meta`, `blob.digest`, `image.boot`, `ToC` etc.
@@ -412,26 +414,26 @@ impl BlobInfo {
     /// optionally 'image.boot`.
     ///
     /// Default to `self.blob_id` when it's all zero.
-    pub fn rafs_blob_digest(&self) -> &[u8; 32] {
-        &self.rafs_blob_digest
+    pub fn blob_meta_digest(&self) -> &[u8; 32] {
+        &self.blob_meta_digest
     }
 
     /// Set SHA256 digest of the RAFS blob.
-    pub fn set_rafs_blob_digest(&mut self, digest: [u8; 32]) {
-        self.rafs_blob_digest = digest;
+    pub fn set_blob_meta_digest(&mut self, digest: [u8; 32]) {
+        self.blob_meta_digest = digest;
     }
 
     /// Get size of the RAFS blob.
-    pub fn rafs_blob_size(&self) -> u64 {
-        self.rafs_blob_size
+    pub fn blob_meta_size(&self) -> u64 {
+        self.blob_meta_size
     }
 
     /// Set size of the RAFS blob.
-    pub fn set_rafs_blob_size(&mut self, size: u64) {
-        self.rafs_blob_size = size;
+    pub fn set_blob_meta_size(&mut self, size: u64) {
+        self.blob_meta_size = size;
     }
 
-    /// Set path for meta blob file, which will be used by `get_blob_id()` and `get_rafs_blob_id()`.
+    /// Set path for meta blob file, which will be used by `get_blob_id()` and `get_blob_meta_id()`.
     pub fn set_blob_id_from_meta_path(&self, path: &Path) -> Result<(), Error> {
         *self.meta_path.lock().unwrap() = Self::get_blob_id_from_meta_path(path)?;
         Ok(())
@@ -474,8 +476,8 @@ impl BlobInfo {
     }
 
     /// Get RAFS blob id for ZRan.
-    pub fn get_rafs_blob_id(&self) -> Result<String, Error> {
-        assert!(self.has_feature(BlobFeatures::ZRAN));
+    pub fn get_blob_meta_id(&self) -> Result<String, Error> {
+        assert!(self.has_feature(BlobFeatures::SEPARATE));
         let id = if self.has_feature(BlobFeatures::INLINED_FS_META) {
             let guard = self.meta_path.lock().unwrap();
             if guard.is_empty() {
@@ -483,7 +485,7 @@ impl BlobInfo {
             }
             guard.deref().clone()
         } else {
-            hex::encode(&self.rafs_blob_digest)
+            hex::encode(&self.blob_meta_digest)
         };
         Ok(id)
     }

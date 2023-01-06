@@ -587,7 +587,7 @@ impl Node {
         chunk.set_uncompressed_offset(pre_uncompressed_offset);
         chunk.set_uncompressed_size(uncompressed_size);
 
-        let compressed_size = if ctx.blob_features.contains(BlobFeatures::ZRAN) {
+        let compressed_size = if ctx.blob_features.contains(BlobFeatures::SEPARATE) {
             // For `tar-ref`, `targz-ref`, `estargz-ref` and `estargzindex-ref`.
             chunk.compressed_size()
         } else {

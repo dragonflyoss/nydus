@@ -144,7 +144,7 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         if self.compressed_end() > state.compressed_size
             || self.uncompressed_end() > state.uncompressed_size
             || self.uncompressed_size() == 0
-            || (!self.is_zran() && self.compressed_size() == 0)
+            || (!state.is_separate() && self.compressed_size() == 0)
             || (!self.is_compressed() && self.uncompressed_size() != self.compressed_size())
         {
             return Err(einval!(format!(

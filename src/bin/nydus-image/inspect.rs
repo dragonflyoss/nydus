@@ -298,7 +298,7 @@ Uncompressed Data Size: {uncompressed_size}
 Features:               {features:?}
 Compressor:             {compressor}
 Digester:               {digester}
-Chunk Size:             {chunk_size}
+Chunk Size:             0x{chunk_size:x}
 Chunk Count:            {chunk_count}
 Prefetch Table Offset:  {prefetch_tbl_offset}
 Prefetch Table Size:    {prefetch_tbl_size}
@@ -328,10 +328,10 @@ RAFS Blob Size:         {rafs_size}
                     meta_offset = blob_info.meta_ci_offset(),
                     meta_comp_size = blob_info.meta_ci_compressed_size(),
                     meta_uncomp_size = blob_info.meta_ci_uncompressed_size(),
-                    toc_digest = hex::encode(blob_info.rafs_blob_toc_digest()),
-                    toc_size = blob_info.rafs_blob_toc_size(),
-                    rafs_digest = hex::encode(blob_info.rafs_blob_digest()),
-                    rafs_size = blob_info.rafs_blob_size(),
+                    toc_digest = hex::encode(blob_info.blob_toc_digest()),
+                    toc_size = blob_info.blob_toc_size(),
+                    rafs_digest = hex::encode(blob_info.blob_meta_digest()),
+                    rafs_size = blob_info.blob_meta_size(),
                 );
             }
         }
