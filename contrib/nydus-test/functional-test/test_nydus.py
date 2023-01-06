@@ -582,7 +582,7 @@ def test_shared_blobcache(nydus_anchor: NydusAnchor, nydus_image, rafs_conf: Raf
             .apisock(tempfile.NamedTemporaryFile().name)
             .prefetch_files(os.path.abspath(tmp_file))
             .set_mountpoint(mountpoint)
-        )  
+        )
         return rafs
 
     cases = []
@@ -613,7 +613,7 @@ def test_shared_blobcache(nydus_anchor: NydusAnchor, nydus_image, rafs_conf: Raf
 
     for case in cases:
         case[0].umount()
-    
+
 
 # @pytest.mark.skip(reason="ECS can't pass this case!")
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
@@ -753,8 +753,7 @@ def test_specified_prefetch(
 
     tmp_file = tmp_path / "prefetch.txt"
     with open(tmp_file, "w") as f:
-        for d in prefetching_files:
-            f.write(os.path.join("/", d) + "\n") 
+        f.writelines(os.path.join("/", d) + '\n' for d in prefetching_files)
 
     print(os.path.abspath(tmp_file))
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
