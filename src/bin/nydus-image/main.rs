@@ -9,7 +9,6 @@ extern crate clap;
 extern crate anyhow;
 #[macro_use]
 extern crate log;
-extern crate serde;
 #[macro_use]
 extern crate serde_json;
 #[macro_use]
@@ -77,7 +76,7 @@ pub struct OutputSerializer {
 
 impl OutputSerializer {
     fn dump(
-        matches: &clap::ArgMatches,
+        matches: &ArgMatches,
         build_output: BuildOutput,
         build_info: &BuildTimeInfo,
     ) -> Result<()> {
@@ -108,8 +107,8 @@ impl OutputSerializer {
         Ok(())
     }
 
-    fn dump_with_check(
-        matches: &clap::ArgMatches,
+    fn dump_for_check(
+        matches: &ArgMatches,
         build_info: &BuildTimeInfo,
         blob_ids: Vec<String>,
         bootstrap: &Path,
@@ -144,10 +143,10 @@ impl OutputSerializer {
 fn prepare_cmd_args(bti_string: &'static str) -> App {
     let arg_chunk_dict = Arg::new("chunk-dict")
         .long("chunk-dict")
-        .help("File path of the chunk dictionary for data deduplication");
+        .help("File path of chunk dictionary for data deduplication");
     let arg_prefetch_policy = Arg::new("prefetch-policy")
         .long("prefetch-policy")
-        .help("Set blob data prefetch policy")
+        .help("Set data prefetch policy")
         .required(false)
         .default_value("none")
         .value_parser(["fs", "blob", "none"]);
@@ -158,7 +157,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
     let arg_config = Arg::new("config")
         .long("config")
         .short('C')
-        .help("Configuration file")
+        .help("Configuration file for storage backend, cache and RAFS FUSE filesystem.")
         .required(false);
 
     App::new("")
@@ -230,15 +229,15 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("OSS object id for the generated RAFS data blob")
                 )
                 .arg(
+                    Arg::new("blob-data-size")
+                        .long("blob-data-size")
+                        .help("Set data blob size for 'estargztoc-ref' conversion"),
+                )
+                .arg(
                     Arg::new("blob-offset")
                         .long("blob-offset")
                         .help("File offset to store RAFS data, to support storing data blobs into tar files")
                         .default_value("0"),
-                )
-                .arg(
-                    Arg::new("blob-data-size")
-                        .long("blob-data-size")
-                        .help("Set data blob size for 'estargztoc-ref' conversion"),
                 )
                 .arg(
                     Arg::new("chunk-size")
@@ -615,14 +614,14 @@ fn main() -> Result<()> {
 struct Command {}
 
 impl Command {
-    fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+    fn create(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blob_id = Self::get_blob_id(matches)?;
         let blob_offset = Self::get_blob_offset(matches)?;
         let parent_path = Self::get_parent_bootstrap(matches)?;
         let prefetch = Self::get_prefetch(matches)?;
         let source_path = PathBuf::from(matches.get_one::<String>("SOURCE").unwrap());
         let conversion_type: ConversionType = matches.get_one::<String>("type").unwrap().parse()?;
-        let blob_stor = Self::get_blob_storage(matches, conversion_type)?;
+        let blob_storage = Self::get_blob_storage(matches, conversion_type)?;
         let blob_inline_meta = matches.get_flag("blob-inline-meta");
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
@@ -653,21 +652,16 @@ impl Command {
         match conversion_type {
             ConversionType::DirectoryToRafs => {
                 Self::ensure_directory(&source_path)?;
-                if blob_stor.is_none() {
-                    bail!("both --blob and --blob-dir are not provided");
+                if blob_storage.is_none() {
+                    bail!("both --blob and --blob-dir are missing");
                 }
             }
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
             | ConversionType::TarToRafs => {
                 Self::ensure_file(&source_path)?;
-                if blob_stor.is_none() {
-                    bail!("both --blob and --blob-dir are not provided");
-                } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
-                    bail!(
-                        "conversion type {} conflicts with '--prefetch-policy blob'",
-                        conversion_type
-                    );
+                if blob_storage.is_none() {
+                    bail!("both --blob and --blob-dir are missing");
                 }
             }
             ConversionType::TarToRef
@@ -682,10 +676,18 @@ impl Command {
                         conversion_type, compressor
                     );
                 }
+                if matches.value_source("digester") != Some(ValueSource::DefaultValue)
+                    && digester != digest::Algorithm::Sha256
+                {
+                    info!(
+                        "only SHA256 is supported for conversion type {}, use SHA256 instead of {}",
+                        conversion_type, compressor
+                    );
+                }
                 compressor = compress::Algorithm::GZip;
                 digester = digest::Algorithm::Sha256;
-                if blob_stor.is_none() {
-                    bail!("both --blob and --blob-dir are not provided");
+                if blob_storage.is_none() {
+                    bail!("both --blob and --blob-dir are missing");
                 } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
                     bail!(
                         "conversion type {} conflicts with '--prefetch-policy blob'",
@@ -715,9 +717,17 @@ impl Command {
                         conversion_type, compressor
                     );
                 }
+                if matches.value_source("digester") != Some(ValueSource::DefaultValue)
+                    && digester != digest::Algorithm::Sha256
+                {
+                    info!(
+                        "only SHA256 is supported for conversion type {}, use SHA256 instead of {}",
+                        conversion_type, compressor
+                    );
+                }
                 compressor = compress::Algorithm::GZip;
                 digester = digest::Algorithm::Sha256;
-                if blob_stor.is_some() {
+                if blob_storage.is_some() {
                     bail!(
                         "conversion type '{}' conflicts with '--blob'",
                         conversion_type
@@ -760,7 +770,7 @@ impl Command {
             conversion_type,
             source_path,
             prefetch,
-            blob_stor,
+            blob_storage,
             blob_inline_meta,
             features,
         );
@@ -849,7 +859,7 @@ impl Command {
         OutputSerializer::dump(matches, build_output, build_info)
     }
 
-    fn merge(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+    fn merge(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let source_bootstrap_paths: Vec<PathBuf> = matches
             .get_many::<String>("SOURCE")
             .map(|paths| paths.map(PathBuf::from).collect())
@@ -1007,7 +1017,7 @@ impl Command {
             blob_ids.push(blob.blob_id().to_string());
         }
 
-        OutputSerializer::dump_with_check(matches, build_info, blob_ids, bootstrap_path)?;
+        OutputSerializer::dump_for_check(matches, build_info, blob_ids, bootstrap_path)?;
 
         Ok(())
     }
@@ -1036,7 +1046,7 @@ impl Command {
         Ok(())
     }
 
-    fn stat(matches: &clap::ArgMatches) -> Result<()> {
+    fn stat(matches: &ArgMatches) -> Result<()> {
         let digester = matches
             .get_one::<String>("digester")
             .map(|s| s.as_str())
@@ -1094,17 +1104,17 @@ impl Command {
         Ok(())
     }
 
-    fn get_bootstrap(matches: &clap::ArgMatches) -> Result<&Path> {
+    fn get_bootstrap<'a, 'b>(matches: &ArgMatches) -> Result<&Path> {
         match matches.get_one::<String>("bootstrap") {
             Some(s) => Ok(Path::new(s)),
             None => match matches.get_one::<String>("BOOTSTRAP") {
                 Some(s) => Ok(Path::new(s)),
-                None => bail!("missing parameter `bootstrap`"),
+                None => bail!("missing parameter `bootstrap` or `BOOTSTRAP`"),
             },
         }
     }
 
-    fn get_bootstrap_storage(matches: &clap::ArgMatches) -> Result<ArtifactStorage> {
+    fn get_bootstrap_storage(matches: &ArgMatches) -> Result<ArtifactStorage> {
         if let Some(s) = matches.get_one::<String>("bootstrap") {
             Ok(ArtifactStorage::SingleFile(s.into()))
         } else if let Some(d) = matches.get_one::<String>("blob-dir").map(PathBuf::from) {
@@ -1121,7 +1131,7 @@ impl Command {
     // For cli/binary interface compatibility sake, keep option `backend-config`, but
     // it only receives "localfs" backend type and it will be REMOVED in the future
     fn get_blob_storage(
-        matches: &clap::ArgMatches,
+        matches: &ArgMatches,
         conversion_type: ConversionType,
     ) -> Result<Option<ArtifactStorage>> {
         // Must specify a path to blob file.
@@ -1141,7 +1151,7 @@ impl Command {
             Ok(Some(ArtifactStorage::FileDir(d)))
         } else if let Some(config_json) = matches.get_one::<String>("backend-config") {
             let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
-            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
+            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob-dir instead.");
             if let Some(bf) = config.get("blob_file") {
                 // Even unwrap, it is caused by invalid json. Image creation just can't start.
                 let b: PathBuf = bf
@@ -1159,7 +1169,7 @@ impl Command {
         }
     }
 
-    fn get_parent_bootstrap(matches: &clap::ArgMatches) -> Result<Option<String>> {
+    fn get_parent_bootstrap(matches: &ArgMatches) -> Result<Option<String>> {
         let mut parent_bootstrap_path = String::new();
         if let Some(_parent_bootstrap_path) = matches.get_one::<String>("parent-bootstrap") {
             parent_bootstrap_path = _parent_bootstrap_path.to_string();
@@ -1187,7 +1197,7 @@ impl Command {
         Ok(Arc::new(config))
     }
 
-    fn get_blob_id(matches: &clap::ArgMatches) -> Result<String> {
+    fn get_blob_id(matches: &ArgMatches) -> Result<String> {
         let mut blob_id = String::new();
 
         if let Some(p_blob_id) = matches.get_one::<String>("blob-id") {
@@ -1200,7 +1210,7 @@ impl Command {
         Ok(blob_id)
     }
 
-    fn get_blob_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u64> {
+    fn get_blob_size(matches: &ArgMatches, ty: ConversionType) -> Result<u64> {
         if ty != ConversionType::EStargzIndexToRef {
             return Ok(0);
         }
@@ -1236,7 +1246,7 @@ impl Command {
         Ok(())
     }
 
-    fn get_chunk_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u32> {
+    fn get_chunk_size(matches: &ArgMatches, ty: ConversionType) -> Result<u32> {
         match matches.get_one::<String>("chunk-size") {
             None => {
                 if ty == ConversionType::EStargzIndexToRef {
@@ -1260,7 +1270,7 @@ impl Command {
         }
     }
 
-    fn get_prefetch(matches: &clap::ArgMatches) -> Result<Prefetch> {
+    fn get_prefetch(matches: &ArgMatches) -> Result<Prefetch> {
         let prefetch_policy = matches
             .get_one::<String>("prefetch-policy")
             .map(|s| s.as_str())
@@ -1269,7 +1279,7 @@ impl Command {
         Prefetch::new(prefetch_policy)
     }
 
-    fn get_blob_offset(matches: &clap::ArgMatches) -> Result<u64> {
+    fn get_blob_offset(matches: &ArgMatches) -> Result<u64> {
         match matches.get_one::<String>("blob-offset") {
             None => Ok(0),
             Some(v) => v
@@ -1278,7 +1288,7 @@ impl Command {
         }
     }
 
-    fn get_fs_version(matches: &clap::ArgMatches) -> Result<RafsVersion> {
+    fn get_fs_version(matches: &ArgMatches) -> Result<RafsVersion> {
         match matches.get_one::<String>("fs-version") {
             None => Ok(RafsVersion::V6),
             Some(v) => {

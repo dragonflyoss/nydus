@@ -1070,7 +1070,7 @@ impl BuildContext {
         digester: digest::Algorithm,
         explicit_uidgid: bool,
         whiteout_spec: WhiteoutSpec,
-        source_type: ConversionType,
+        conversion_type: ConversionType,
         source_path: PathBuf,
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
@@ -1098,7 +1098,7 @@ impl BuildContext {
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
             fs_version: RafsVersion::default(),
 
-            conversion_type: source_type,
+            conversion_type,
             source_path,
 
             prefetch,
