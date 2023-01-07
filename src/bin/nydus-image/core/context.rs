@@ -490,7 +490,7 @@ impl BlobContext {
                     blob_id = blob.blob_id();
                 }
 
-                if ctx.can_access_data_blobs {
+                if ctx.configuration.internal.blob_accessible() {
                     let backend_config = ctx.configuration.get_backend_config().map_err(|e| {
                         anyhow!("failed to get backend storage configuration, {}", e)
                     })?;
@@ -548,7 +548,9 @@ impl BlobContext {
                         }
                     }
                 }
-            } else if !blob.has_feature(BlobFeatures::CAP_TAR_TOC) && !ctx.can_access_data_blobs {
+            } else if !blob.has_feature(BlobFeatures::CAP_TAR_TOC)
+                && !ctx.configuration.internal.blob_accessible()
+            {
                 blob_id = blob.blob_id();
             }
         }
@@ -1055,9 +1057,6 @@ pub struct BuildContext {
 
     pub features: Features,
     pub configuration: Arc<ConfigV2>,
-
-    // For backward compatiblity for `nydus-image merge`
-    pub can_access_data_blobs: bool,
 }
 
 impl BuildContext {
@@ -1111,7 +1110,6 @@ impl BuildContext {
 
             features,
             configuration: Arc::new(ConfigV2::default()),
-            can_access_data_blobs: true,
         }
     }
 
@@ -1154,7 +1152,6 @@ impl Default for BuildContext {
             blob_inline_meta: false,
             features: Features::new(),
             configuration: Arc::new(ConfigV2::default()),
-            can_access_data_blobs: true,
         }
     }
 }

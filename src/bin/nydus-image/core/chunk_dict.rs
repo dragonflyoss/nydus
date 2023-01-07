@@ -122,9 +122,8 @@ impl HashChunkDict {
         path: &Path,
         config: Arc<ConfigV2>,
         rafs_config: &RafsSuperConfig,
-        can_access_data_blobs: bool,
     ) -> Result<Self> {
-        let (rs, _) = RafsSuper::load_from_file(path, config, true, true, can_access_data_blobs)
+        let (rs, _) = RafsSuper::load_from_file(path, config, true, true)
             .with_context(|| format!("failed to open bootstrap file {:?}", path))?;
         let mut d = HashChunkDict {
             m: HashMap::new(),
@@ -202,10 +201,9 @@ pub(crate) fn import_chunk_dict(
     arg: &str,
     config: Arc<ConfigV2>,
     rafs_config: &RafsSuperConfig,
-    can_access_data_blobs: bool,
 ) -> Result<Arc<dyn ChunkDict>> {
     let file_path = parse_chunk_dict_arg(arg)?;
-    HashChunkDict::from_bootstrap_file(&file_path, config, rafs_config, can_access_data_blobs)
+    HashChunkDict::from_bootstrap_file(&file_path, config, rafs_config)
         .map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
 }
 
@@ -240,8 +238,7 @@ mod tests {
             chunk_size: 0x100000,
             explicit_uidgid: true,
         };
-        let dict =
-            import_chunk_dict(path, Arc::new(ConfigV2::default()), &rafs_config, false).unwrap();
+        let dict = import_chunk_dict(path, Arc::new(ConfigV2::default()), &rafs_config).unwrap();
 
         assert!(dict.get_chunk(&RafsDigest::default(), 0).is_none());
         assert_eq!(dict.get_blobs().len(), 18);

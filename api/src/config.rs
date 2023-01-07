@@ -9,6 +9,8 @@ use std::fs;
 use std::io::{Error, ErrorKind, Result};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -27,6 +29,9 @@ pub struct ConfigV2 {
     pub cache: Option<CacheConfigV2>,
     /// Configuration information for RAFS filesystem.
     pub rafs: Option<RafsConfigV2>,
+    /// Internal runtime configuration.
+    #[serde(skip)]
+    pub internal: ConfigV2Internal,
 }
 
 impl Default for ConfigV2 {
@@ -37,6 +42,7 @@ impl Default for ConfigV2 {
             backend: None,
             cache: None,
             rafs: None,
+            internal: ConfigV2Internal::default(),
         }
     }
 }
@@ -50,6 +56,7 @@ impl ConfigV2 {
             backend: None,
             cache: None,
             rafs: None,
+            internal: ConfigV2Internal::default(),
         }
     }
 
@@ -787,7 +794,43 @@ impl From<&BlobCacheEntryConfigV2> for ConfigV2 {
             backend: Some(c.backend.clone()),
             cache: Some(c.cache.clone()),
             rafs: None,
+            internal: ConfigV2Internal::default(),
         }
+    }
+}
+
+/// Internal runtime configuration.
+#[derive(Clone, Debug)]
+pub struct ConfigV2Internal {
+    /// It's possible to access the raw or more blob objects.
+    pub blob_accessible: Arc<AtomicBool>,
+}
+
+impl Default for ConfigV2Internal {
+    fn default() -> Self {
+        ConfigV2Internal {
+            blob_accessible: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl PartialEq for ConfigV2Internal {
+    fn eq(&self, other: &Self) -> bool {
+        self.blob_accessible() == other.blob_accessible()
+    }
+}
+
+impl Eq for ConfigV2Internal {}
+
+impl ConfigV2Internal {
+    /// Get the auto-probe flag.
+    pub fn blob_accessible(&self) -> bool {
+        self.blob_accessible.load(Ordering::Relaxed)
+    }
+
+    /// Set the auto-probe flag.
+    pub fn set_blob_accessible(&self, accessible: bool) {
+        self.blob_accessible.store(accessible, Ordering::Relaxed);
     }
 }
 
@@ -1000,6 +1043,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
             backend: Some(backend),
             cache: Some(cache),
             rafs: Some(rafs),
+            internal: ConfigV2Internal::default(),
         })
     }
 }
