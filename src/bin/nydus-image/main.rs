@@ -816,7 +816,7 @@ impl Command {
                     bail!("conversion type {} conflicts with RAFS v5", conversion_type);
                 }
                 build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
-                build_ctx.blob_features.insert(BlobFeatures::ZRAN);
+                build_ctx.blob_features.insert(BlobFeatures::SEPARATE);
                 Box::new(TarballBuilder::new(conversion_type))
             }
             ConversionType::DirectoryToStargz

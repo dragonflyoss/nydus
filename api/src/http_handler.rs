@@ -184,12 +184,12 @@ fn kick_api_server(
 // --> GET / 200 835ms 746b
 
 fn trace_api_begin(request: &dbs_uhttp::Request) {
-    info!("<--- {:?} {:?}", request.method(), request.uri());
+    debug!("<--- {:?} {:?}", request.method(), request.uri());
 }
 
 fn trace_api_end(response: &dbs_uhttp::Response, method: dbs_uhttp::Method, recv_time: SystemTime) {
     let elapse = SystemTime::now().duration_since(recv_time);
-    info!(
+    debug!(
         "---> {:?} Status Code: {:?}, Elapse: {:?}, Body Size: {:?}",
         method,
         response.status(),
