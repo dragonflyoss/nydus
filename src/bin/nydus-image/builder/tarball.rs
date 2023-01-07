@@ -192,6 +192,18 @@ impl<'a> TarballTreeBuilder<'a> {
     ) -> Result<Node> {
         let header = entry.header();
         let entry_type = header.entry_type();
+        assert!(!entry_type.is_gnu_longname());
+        assert!(!entry_type.is_gnu_longlink());
+        assert!(!entry_type.is_pax_local_extensions());
+        if entry_type.is_pax_global_extensions() {
+            return Err(anyhow!("unsupported pax_global_extensions from tar header"));
+        } else if entry_type.is_contiguous() {
+            return Err(anyhow!("unsupported contiguous entry type from tar header"));
+        } else if entry_type.is_gnu_sparse() {
+            return Err(anyhow!(
+                "unsupported gnu sparse file extension from tar header"
+            ));
+        }
 
         let mut file_size = entry.size();
         let name = Self::get_file_name(path.as_ref())?;
@@ -202,9 +214,6 @@ impl<'a> TarballTreeBuilder<'a> {
             RafsVersion::V5 => RafsV5InodeFlags::default(),
             RafsVersion::V6 => RafsV5InodeFlags::default(),
         };
-
-        // TODO: check how to handle following tar headers: is_continous, is_gnu_long_name,
-        // is_gnu_sparse, is_gnu_long_link, is_pax_global_ext, is_pax_local_ext
 
         // Parse special files
         let rdev = if entry_type.is_block_special()
@@ -281,19 +290,24 @@ impl<'a> TarballTreeBuilder<'a> {
         // Parse xattrs
         let mut xattrs = RafsXAttrs::new();
         if let Some(exts) = entry.pax_extensions()? {
-            let _ = exts
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let key = e.key_bytes();
-                    let prefix = b"SCHILY.xattr.";
-                    if key.starts_with(prefix) {
-                        Some((&key[prefix.len()..], e))
-                    } else {
-                        None
+            for p in exts {
+                match p {
+                    Ok(pax) => {
+                        let prefix = b"SCHILY.xattr.";
+                        let key = pax.key_bytes();
+                        if key.starts_with(prefix) {
+                            let x_key = OsStr::from_bytes(&key[prefix.len()..]);
+                            xattrs.add(x_key.to_os_string(), pax.value_bytes().to_vec())?;
+                        }
                     }
-                })
-                .map(|(key, e)| (OsStr::from_bytes(key), e.value_bytes()))
-                .map(|(key, value)| xattrs.add(key.to_os_string(), value.to_vec()));
+                    Err(e) => {
+                        return Err(anyhow!(
+                            "failed to parse PaxExtension from tar header, {}",
+                            e
+                        ))
+                    }
+                }
+            }
         }
 
         let v5_inode = RafsV5Inode {
