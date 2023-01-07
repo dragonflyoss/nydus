@@ -302,6 +302,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("disable-check")
                         .long("disable-check")
                         .help("Disable RAFS metadata validation after build")
+                        .hide(true)
                         .action(ArgAction::SetTrue)
                         .required(false)
                 )
@@ -848,13 +849,6 @@ impl Command {
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
 
-        // Validate output bootstrap file
-        if !blob_inline_meta {
-            if let Some(ArtifactStorage::SingleFile(p)) = &bootstrap_mgr.bootstrap_storage {
-                Self::validate_image(matches, p, config).context("failed to validate bootstrap")?;
-            }
-        }
-
         info!("successfully built RAFS filesystem: \n{}", build_output);
         OutputSerializer::dump(matches, build_output, build_info)
     }
@@ -1224,26 +1218,6 @@ impl Command {
                 Ok(size)
             }
         }
-    }
-
-    fn validate_image(
-        matches: &clap::ArgMatches,
-        bootstrap_path: &Path,
-        config: Arc<ConfigV2>,
-    ) -> Result<()> {
-        if !matches.get_flag("disable-check") {
-            let mut validator = Validator::new(bootstrap_path, config)?;
-            timing_tracer!(
-                {
-                    validator
-                        .check(false)
-                        .context("failed to validate bootstrap")
-                },
-                "validate_bootstrap"
-            )?;
-        }
-
-        Ok(())
     }
 
     fn get_chunk_size(matches: &ArgMatches, ty: ConversionType) -> Result<u32> {
