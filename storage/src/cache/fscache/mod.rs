@@ -224,9 +224,12 @@ impl FileCacheEntry {
             .get_reader(&blob_id)
             .map_err(|_e| eio!("failed to get reader for data blob"))?;
         let blob_meta_reader = if is_separate_meta {
-            mgr.backend
-                .get_reader(&blob_meta_id)
-                .map_err(|_e| eio!("failed to get reader for rafs blob"))?
+            mgr.backend.get_reader(&blob_meta_id).map_err(|e| {
+                eio!(format!(
+                    "failed to get reader for blob.meta {}, {}",
+                    blob_id, e
+                ))
+            })?
         } else {
             reader.clone()
         };
