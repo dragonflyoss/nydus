@@ -1028,7 +1028,11 @@ pub struct RafsV6InodeChunkHeader {
 
 impl RafsV6InodeChunkHeader {
     /// Create a new instance of `RafsV6InodeChunkHeader`.
-    pub fn new(chunk_size: u32) -> Self {
+    ///
+    /// If all chunks are continous in uncompressed cache file, the `chunk_size` will set to
+    /// `inode.size().next_power_of_two()`, so EROFS can optimize page cache in this case.
+    /// Otherwise `chunk_size` is set to RAFS filesystem's chunk size.
+    pub fn new(chunk_size: u64) -> Self {
         assert!(chunk_size.is_power_of_two());
         let chunk_bits = chunk_size.trailing_zeros() as u16;
         assert!(chunk_bits >= EROFS_BLOCK_BITS as u16);
@@ -2062,7 +2066,7 @@ mod tests {
     #[test]
     fn test_rafs_v6_chunk_header() {
         let chunk_size: u32 = 1024 * 1024;
-        let header = RafsV6InodeChunkHeader::new(chunk_size);
+        let header = RafsV6InodeChunkHeader::new(chunk_size as u64);
         let target = EROFS_CHUNK_FORMAT_INDEXES_FLAG | (20 - 12) as u16;
         assert_eq!(u16::from_le(header.format), target);
     }

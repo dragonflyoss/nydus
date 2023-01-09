@@ -1276,22 +1276,40 @@ impl Node {
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, ChunkWrapper>,
         inode: &mut Box<dyn RafsV6OndiskInode>,
     ) -> Result<()> {
-        let info = RafsV6InodeChunkHeader::new(ctx.chunk_size);
-        inode.set_u(info.to_u32());
+        let mut is_continuous = true;
+        let mut prev = None;
 
         // write chunk indexes, chunk contents has been written to blob file.
         let mut chunks: Vec<u8> = Vec::new();
         for chunk in self.chunks.iter() {
+            let uncompressed_offset = chunk.inner.uncompressed_offset();
+            let blob_idx = chunk.inner.blob_index();
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
-            v6_chunk.set_blob_index(chunk.inner.blob_index());
+            v6_chunk.set_blob_index(blob_idx);
             v6_chunk.set_blob_ci_index(chunk.inner.index());
-            v6_chunk.set_block_addr((chunk.inner.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
+            v6_chunk.set_block_addr((uncompressed_offset / EROFS_BLOCK_SIZE) as u32);
             chunks.extend(v6_chunk.as_ref());
             chunk_cache.insert(
                 DigestWithBlobIndex(*chunk.inner.id(), chunk.inner.blob_index() + 1),
                 chunk.inner.clone(),
             );
+
+            if let Some((prev_idx, prev_pos)) = prev {
+                if prev_pos + ctx.chunk_size as u64 != uncompressed_offset || prev_idx != blob_idx {
+                    is_continuous = false;
+                }
+            }
+            prev = Some((blob_idx, uncompressed_offset));
         }
+
+        // Special optimization to enable page cache sharing for EROFS.
+        let chunk_size = if is_continuous && inode.size() > ctx.chunk_size as u64 {
+            inode.size().next_power_of_two()
+        } else {
+            ctx.chunk_size as u64
+        };
+        let info = RafsV6InodeChunkHeader::new(chunk_size);
+        inode.set_u(info.to_u32());
 
         f_bootstrap
             .seek(SeekFrom::Start(self.v6_offset))
