@@ -564,7 +564,7 @@ def test_pseudo_fs(nydus_anchor, nydus_image: RafsImage, rafs_conf: RafsConf):
     nc.umount_rafs("/pseudo3")
 
 
-def test_shared_blobcache(nydus_anchor: NydusAnchor, nydus_image, rafs_conf: RafsConf):
+def test_shared_blobcache(nydus_anchor: NydusAnchor, nydus_image, rafs_conf: RafsConf, tmp_path):
     """
     description:
         Start more than one nydusd, let them share the same blobcache.
@@ -573,11 +573,14 @@ def test_shared_blobcache(nydus_anchor: NydusAnchor, nydus_image, rafs_conf: Raf
     rafs_conf.enable_rafs_blobcache().set_rafs_backend(Backend.LOCALFS)
     rafs_conf.dump_rafs_conf()
 
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+
     def make_rafs(mountpoint):
         rafs = (
             NydusDaemon(nydus_anchor, nydus_image, rafs_conf)
             .apisock(tempfile.NamedTemporaryFile().name)
-            .prefetch_files("/")
+            .prefetch_files(os.path.abspath(tmp_file))
             .set_mountpoint(mountpoint)
         )
         return rafs
@@ -716,6 +719,7 @@ def test_specified_prefetch(
     rafs_conf: RafsConf,
     nydus_scratch_image: RafsImage,
     backend,
+    tmp_path
 ):
     """
     description:
@@ -747,10 +751,13 @@ def test_specified_prefetch(
     prefetching_files.append("/a/b/c/d")
     prefetching_files.append(os.path.join("/", "f/g/h/"))
 
-    specified_files = " ".join([os.path.join("/", d) for d in prefetching_files])
+    tmp_file = tmp_path / "prefetch.txt"
+    with open(tmp_file, "w") as f:
+        f.writelines(os.path.join("/", d) + '\n' for d in prefetching_files)
 
+    print(os.path.abspath(tmp_file))
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
-    rafs.prefetch_files(specified_files).mount()
+    rafs.prefetch_files(os.path.abspath(tmp_file)).mount()
 
     nc = NydusAPIClient(rafs.get_apisock())
 
@@ -850,6 +857,7 @@ def test_blobcache_recovery(
     nydus_anchor: NydusAnchor,
     rafs_conf: RafsConf,
     nydus_scratch_image: RafsImage,
+    tmp_path
 ):
     rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY)
     rafs_conf.enable_fs_prefetch()
@@ -868,7 +876,9 @@ def test_blobcache_recovery(
     nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image()
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
-    rafs.prefetch_files("/").mount()
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+    rafs.prefetch_files(os.path.abspath(tmp_file)).mount()
     wg = WorkloadGen(nydus_anchor.mountpoint, nydus_scratch_image.rootfs())
 
     wg.setup_workload_generator()

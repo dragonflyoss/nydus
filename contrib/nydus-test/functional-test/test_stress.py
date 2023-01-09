@@ -59,15 +59,18 @@ def teardown_module(module):
     SCRATCH_IMAGE.clean_up()
 
 
-def test_file_read_with_cache(nydus_anchor, rafs_conf: RafsConf):
+def test_file_read_with_cache(nydus_anchor, rafs_conf: RafsConf, tmp_path):
 
     rafs_conf.enable_rafs_blobcache().enable_fs_prefetch(
         threads_count=4,
         merging_size=Size(128, Unit.KB).B,
     ).set_rafs_backend(Backend.OSS)
 
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+
     rafs = (
-        NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+        NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files(os.path.abspath(tmp_file)).mount()
     )
 
     sleep(8)
@@ -75,7 +78,7 @@ def test_file_read_with_cache(nydus_anchor, rafs_conf: RafsConf):
     rafs.umount()
 
     rafs = (
-        NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+        NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files(os.path.abspath(tmp_file)).mount()
     )
 
     wg = WorkloadGen(rafs.mountpoint, None)
@@ -119,6 +122,7 @@ def test_stress_fio(
     blk_size,
     direct,
     readwrite,
+    tmp_path
 ):
     rafs_conf.enable_rafs_blobcache().enable_fs_prefetch(
         threads_count=4,
@@ -126,7 +130,9 @@ def test_stress_fio(
         bandwidth_rate=Size(10, Unit.MB).B,
     ).set_rafs_backend(Backend.OSS)
 
-    NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+    NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files(os.path.abspath(tmp_file)).mount()
     fio = Fio()
 
     fio.create_command(blk_size, readwrite).block_size(blk_size).direct(direct).numjobs(
@@ -154,6 +160,7 @@ def test_stress_fio_higher_limit(
     blk_size,
     direct,
     readwrite,
+    tmp_path
 ):
     rafs_conf.enable_rafs_blobcache().enable_fs_prefetch(
         threads_count=4,
@@ -161,7 +168,9 @@ def test_stress_fio_higher_limit(
         bandwidth_rate=Size(50, Unit.MB).B,
     ).set_rafs_backend(Backend.OSS)
 
-    NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files("/").mount()
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+    NydusDaemon(nydus_anchor, SCRATCH_IMAGE, rafs_conf).prefetch_files(os.path.abspath(tmp_file)).mount()
 
     fio = Fio()
 

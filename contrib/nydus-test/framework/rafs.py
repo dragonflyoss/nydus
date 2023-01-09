@@ -619,8 +619,8 @@ class NydusDaemon(utils.ArtifactProcess):
         self.params.log_level(level)
         return self
 
-    def prefetch_files(self, dirs_list: str):
-        self.params.set_param("prefetch-files", dirs_list)
+    def prefetch_files(self, file_path: str):
+        self.params.set_param("prefetch-files", file_path)
         return self
 
     def shared_dir(self, shared_dir):

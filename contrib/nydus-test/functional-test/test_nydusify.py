@@ -2,6 +2,7 @@ import pytest
 import posixpath
 import time
 import platform
+import os
 
 from nydus_anchor import NydusAnchor
 from oss import OssHelper
@@ -32,6 +33,7 @@ def test_basic_conversion(
     fs_version,
     local_registry,
     nydusify_converter,
+    tmp_path
 ):
     """
     No need to locate where bootstrap is as we can directly pull it from registry
@@ -73,7 +75,9 @@ def test_basic_conversion(
 
     workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.overlayfs)
     # No need to locate where bootstrap is as we can directly pull it from registry
-    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files(os.path.abspath(tmp_file)).mount()
 
     assert workload_gen.verify_entire_fs()
     workload_gen.setup_workload_generator()
@@ -96,6 +100,7 @@ def test_build_cache(
     enable_multiplatform,
     local_registry,
     nydusify_converter,
+    tmp_path
 ):
     """
     No need to locate where bootstrap is as we can directly pull it from registry
@@ -153,7 +158,9 @@ def test_build_cache(
 
     workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.overlayfs)
     # No need to locate where bootstrap is as we can directly pull it from registry
-    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files(os.path.abspath(tmp_file)).mount()
 
     assert workload_gen.verify_entire_fs()
     workload_gen.setup_workload_generator()
@@ -173,6 +180,7 @@ def test_upload_oss(
     source,
     local_registry,
     nydusify_converter,
+    tmp_path
 ):
     """
     docker python client manual: https://docker-py.readthedocs.io/en/stable/
@@ -230,7 +238,10 @@ def test_upload_oss(
     rafs = NydusDaemon(nydus_anchor, None, rafs_conf)
 
     workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.overlayfs)
-    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
+    
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files(os.path.abspath(tmp_file)).mount()
 
     assert workload_gen.verify_entire_fs()
     workload_gen.setup_workload_generator()
@@ -273,6 +284,7 @@ def test_chunk_dict(
     chunk_dict_arg,
     local_registry,
     nydusify_converter,
+    tmp_path
 ):
     '''
     only support oss backend now
@@ -327,7 +339,10 @@ def test_chunk_dict(
     rafs = RafsMount(nydus_anchor, None, rafs_conf)
 
     workload_gen = WorkloadGen(nydus_anchor.mount_point, nydus_anchor.overlayfs)
-    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
+
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files(os.path.abspath(tmp_file)).mount()
 
     assert workload_gen.verify_entire_fs()
     workload_gen.setup_workload_generator()
@@ -351,6 +366,7 @@ def test_cross_platform_multiplatform(
     enable_multiplatform,
     local_registry,
     nydusify_converter,
+    tmp_path
 ):
     """
     - copy the entire repo from source registry to target registry
@@ -434,7 +450,9 @@ def test_cross_platform_multiplatform(
     workload_gen = WorkloadGen(nydus_anchor.mountpoint, nydus_anchor.overlayfs)
     # No need to locate where bootstrap is as we can directly pull it from registry
     rafs = NydusDaemon(nydus_anchor, None, rafs_conf)
-    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files("/").mount()
+    tmp_file = tmp_path / "prefetch.txt"
+    tmp_file.write_text("/")
+    rafs.thread_num(6).bootstrap(pulled_bootstrap).prefetch_files(os.path.abspath(tmp_file)).mount()
 
     assert workload_gen.verify_entire_fs()
     workload_gen.setup_workload_generator()
