@@ -12,7 +12,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::sync::{Arc, Mutex};
 use std::{mem, ptr};
 
-use libz_ng_sys::{
+use libz_sys::{
     inflate, inflateEnd, inflateInit2_, inflatePrime, inflateReset, inflateSetDictionary, uInt,
     z_stream, Z_BLOCK, Z_BUF_ERROR, Z_OK, Z_STREAM_END,
 };
