@@ -110,14 +110,9 @@ impl Merger {
         let mut chunk_dict_blobs = HashSet::new();
         let mut config = None;
         if let Some(chunk_dict_path) = &chunk_dict {
-            let (rs, _) = RafsSuper::load_from_file(
-                chunk_dict_path,
-                config_v2.clone(),
-                true,
-                false,
-                ctx.can_access_data_blobs,
-            )
-            .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
+            let (rs, _) =
+                RafsSuper::load_from_file(chunk_dict_path, config_v2.clone(), true, false)
+                    .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
             config = Some(rs.meta.get_config());
             for blob in rs.superblock.get_blob_infos() {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
@@ -130,14 +125,8 @@ impl Merger {
         let mut blob_mgr = BlobManager::new(ctx.digester);
 
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
-            let (rs, _) = RafsSuper::load_from_file(
-                bootstrap_path,
-                config_v2.clone(),
-                true,
-                false,
-                ctx.can_access_data_blobs,
-            )
-            .context(format!("load bootstrap {:?}", bootstrap_path))?;
+            let (rs, _) = RafsSuper::load_from_file(bootstrap_path, config_v2.clone(), true, false)
+                .context(format!("load bootstrap {:?}", bootstrap_path))?;
             config
                 .get_or_insert_with(|| rs.meta.get_config())
                 .check_compatibility(&rs.meta)?;
@@ -160,7 +149,7 @@ impl Merger {
                     }
                     parent_blob_added = true;
 
-                    if ctx.can_access_data_blobs {
+                    if ctx.configuration.internal.blob_accessible() {
                         // `blob.blob_id()` should have been fixed when loading the bootstrap.
                         blob_ctx.blob_id = blob.blob_id();
                     } else {

@@ -161,7 +161,7 @@ impl ImageStat {
     }
 
     pub fn stat(&mut self, path: &Path, is_base: bool, config: Arc<ConfigV2>) -> Result<()> {
-        let (rs, _) = RafsSuper::load_from_file(path, config, false, false, true)?;
+        let (rs, _) = RafsSuper::load_from_file(path, config, false, false)?;
         let mut dict = HashChunkDict::new(rs.meta.get_digester());
         let mut hardlinks = HashSet::new();
         let tree =

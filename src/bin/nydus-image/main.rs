@@ -9,7 +9,6 @@ extern crate clap;
 extern crate anyhow;
 #[macro_use]
 extern crate log;
-extern crate serde;
 #[macro_use]
 extern crate serde_json;
 #[macro_use]
@@ -77,7 +76,7 @@ pub struct OutputSerializer {
 
 impl OutputSerializer {
     fn dump(
-        matches: &clap::ArgMatches,
+        matches: &ArgMatches,
         build_output: BuildOutput,
         build_info: &BuildTimeInfo,
     ) -> Result<()> {
@@ -108,8 +107,8 @@ impl OutputSerializer {
         Ok(())
     }
 
-    fn dump_with_check(
-        matches: &clap::ArgMatches,
+    fn dump_for_check(
+        matches: &ArgMatches,
         build_info: &BuildTimeInfo,
         blob_ids: Vec<String>,
         bootstrap: &Path,
@@ -144,10 +143,10 @@ impl OutputSerializer {
 fn prepare_cmd_args(bti_string: &'static str) -> App {
     let arg_chunk_dict = Arg::new("chunk-dict")
         .long("chunk-dict")
-        .help("File path of the chunk dictionary for data deduplication");
+        .help("File path of chunk dictionary for data deduplication");
     let arg_prefetch_policy = Arg::new("prefetch-policy")
         .long("prefetch-policy")
-        .help("Set blob data prefetch policy")
+        .help("Set data prefetch policy")
         .required(false)
         .default_value("none")
         .value_parser(["fs", "blob", "none"]);
@@ -158,7 +157,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
     let arg_config = Arg::new("config")
         .long("config")
         .short('C')
-        .help("Configuration file")
+        .help("Configuration file for storage backend, cache and RAFS FUSE filesystem.")
         .required(false);
 
     App::new("")
@@ -230,15 +229,15 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("OSS object id for the generated RAFS data blob")
                 )
                 .arg(
+                    Arg::new("blob-data-size")
+                        .long("blob-data-size")
+                        .help("Set data blob size for 'estargztoc-ref' conversion"),
+                )
+                .arg(
                     Arg::new("blob-offset")
                         .long("blob-offset")
                         .help("File offset to store RAFS data, to support storing data blobs into tar files")
                         .default_value("0"),
-                )
-                .arg(
-                    Arg::new("blob-data-size")
-                        .long("blob-data-size")
-                        .help("Set data blob size for 'estargztoc-ref' conversion"),
                 )
                 .arg(
                     Arg::new("chunk-size")
@@ -303,6 +302,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("disable-check")
                         .long("disable-check")
                         .help("Disable RAFS metadata validation after build")
+                        .hide(true)
                         .action(ArgAction::SetTrue)
                         .required(false)
                 )
@@ -388,7 +388,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("bootstrap")
                         .short('B')
                         .long("bootstrap")
-                        .help("File path of RAFS metadata")
+                        .help("[Deprecated] File path of RAFS meta blob/bootstrap")
                         .conflicts_with("BOOTSTRAP")
                         .required(false),
                 )
@@ -416,9 +416,17 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             App::new("inspect")
                 .about("Inspect RAFS filesystem metadata in interactive or request mode")
                 .arg(
-                    Arg::new("bootstrap")
+                    Arg::new("BOOTSTRAP")
                         .help("File path of RAFS metadata")
-                        .required(true),
+                        .required_unless_present("bootstrap"),
+                )
+                .arg(
+                    Arg::new("bootstrap")
+                        .short('B')
+                        .long("bootstrap")
+                        .help("[Deprecated] File path of RAFS meta blob/bootstrap")
+                        .conflicts_with("BOOTSTRAP")
+                        .required(false),
                 )
                 .arg(
                     Arg::new("blob-dir")
@@ -510,12 +518,18 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
         .subcommand(
             App::new("unpack")
             .about("Unpack a RAFS filesystem to a tar file")
-            .arg(
-                Arg::new("bootstrap")
-                .long("bootstrap")
-                .short('B')
-                .help("path to RAFS bootstrap file")
-                .required(true)
+                .arg(
+                    Arg::new("BOOTSTRAP")
+                        .help("File path of RAFS metadata")
+                        .required_unless_present("bootstrap"),
+                )
+                .arg(
+                    Arg::new("bootstrap")
+                        .short('B')
+                        .long("bootstrap")
+                        .help("[Deprecated] File path of RAFS meta blob/bootstrap")
+                        .conflicts_with("BOOTSTRAP")
+                        .required(false),
                 )
             .arg(
                 Arg::new("blob")
@@ -524,7 +538,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .help("path to RAFS data blob file")
                 .required(false),
                 )
-            .arg(arg_config)
             .arg(
                 Arg::new("blob-dir")
                     .long("blob-dir")
@@ -532,6 +545,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .conflicts_with("config")
                     .help("Directory for localfs storage backend, hosting data blobs and cache files"),
             )
+            .arg(arg_config)
             .arg(
                 Arg::new("output")
                 .long("output")
@@ -615,14 +629,14 @@ fn main() -> Result<()> {
 struct Command {}
 
 impl Command {
-    fn create(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+    fn create(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blob_id = Self::get_blob_id(matches)?;
         let blob_offset = Self::get_blob_offset(matches)?;
         let parent_path = Self::get_parent_bootstrap(matches)?;
         let prefetch = Self::get_prefetch(matches)?;
         let source_path = PathBuf::from(matches.get_one::<String>("SOURCE").unwrap());
         let conversion_type: ConversionType = matches.get_one::<String>("type").unwrap().parse()?;
-        let blob_stor = Self::get_blob_storage(matches, conversion_type)?;
+        let blob_storage = Self::get_blob_storage(matches, conversion_type)?;
         let blob_inline_meta = matches.get_flag("blob-inline-meta");
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
@@ -653,21 +667,16 @@ impl Command {
         match conversion_type {
             ConversionType::DirectoryToRafs => {
                 Self::ensure_directory(&source_path)?;
-                if blob_stor.is_none() {
-                    bail!("both --blob and --blob-dir are not provided");
+                if blob_storage.is_none() {
+                    bail!("both --blob and --blob-dir are missing");
                 }
             }
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
             | ConversionType::TarToRafs => {
                 Self::ensure_file(&source_path)?;
-                if blob_stor.is_none() {
-                    bail!("both --blob and --blob-dir are not provided");
-                } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
-                    bail!(
-                        "conversion type {} conflicts with '--prefetch-policy blob'",
-                        conversion_type
-                    );
+                if blob_storage.is_none() {
+                    bail!("both --blob and --blob-dir are missing");
                 }
             }
             ConversionType::TarToRef
@@ -682,10 +691,18 @@ impl Command {
                         conversion_type, compressor
                     );
                 }
+                if matches.value_source("digester") != Some(ValueSource::DefaultValue)
+                    && digester != digest::Algorithm::Sha256
+                {
+                    info!(
+                        "only SHA256 is supported for conversion type {}, use SHA256 instead of {}",
+                        conversion_type, compressor
+                    );
+                }
                 compressor = compress::Algorithm::GZip;
                 digester = digest::Algorithm::Sha256;
-                if blob_stor.is_none() {
-                    bail!("both --blob and --blob-dir are not provided");
+                if blob_storage.is_none() {
+                    bail!("both --blob and --blob-dir are missing");
                 } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
                     bail!(
                         "conversion type {} conflicts with '--prefetch-policy blob'",
@@ -715,9 +732,17 @@ impl Command {
                         conversion_type, compressor
                     );
                 }
+                if matches.value_source("digester") != Some(ValueSource::DefaultValue)
+                    && digester != digest::Algorithm::Sha256
+                {
+                    info!(
+                        "only SHA256 is supported for conversion type {}, use SHA256 instead of {}",
+                        conversion_type, compressor
+                    );
+                }
                 compressor = compress::Algorithm::GZip;
                 digester = digest::Algorithm::Sha256;
-                if blob_stor.is_some() {
+                if blob_storage.is_some() {
                     bail!(
                         "conversion type '{}' conflicts with '--blob'",
                         conversion_type
@@ -760,18 +785,18 @@ impl Command {
             conversion_type,
             source_path,
             prefetch,
-            blob_stor,
+            blob_storage,
             blob_inline_meta,
             features,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
-        build_ctx.can_access_data_blobs = matches.get_one::<String>("config").is_some();
 
         let mut config = Self::get_configuration(matches)?;
         if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
             cache.cache_validate = true;
         }
+        config.internal.set_blob_accessible(true);
         build_ctx.set_configuration(config.clone());
 
         let mut blob_mgr = BlobManager::new(digester);
@@ -784,14 +809,7 @@ impl Command {
                 explicit_uidgid: !repeatable,
             };
             blob_mgr.set_chunk_dict(timing_tracer!(
-                {
-                    import_chunk_dict(
-                        chunk_dict_arg,
-                        build_ctx.configuration.clone(),
-                        &config,
-                        build_ctx.can_access_data_blobs,
-                    )
-                },
+                { import_chunk_dict(chunk_dict_arg, build_ctx.configuration.clone(), &config,) },
                 "import_chunk_dict"
             )?);
         }
@@ -838,18 +856,11 @@ impl Command {
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
 
-        // Validate output bootstrap file
-        if !blob_inline_meta {
-            if let Some(ArtifactStorage::SingleFile(p)) = &bootstrap_mgr.bootstrap_storage {
-                Self::validate_image(matches, p, config).context("failed to validate bootstrap")?;
-            }
-        }
-
         info!("successfully built RAFS filesystem: \n{}", build_output);
         OutputSerializer::dump(matches, build_output, build_info)
     }
 
-    fn merge(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+    fn merge(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let source_bootstrap_paths: Vec<PathBuf> = matches
             .get_many::<String>("SOURCE")
             .map(|paths| paths.map(PathBuf::from).collect())
@@ -893,12 +904,14 @@ impl Command {
         };
         let config =
             Self::get_configuration(matches).context("failed to get configuration information")?;
+        config
+            .internal
+            .set_blob_accessible(matches.get_one::<String>("config").is_some());
         let mut ctx = BuildContext {
             prefetch: Self::get_prefetch(matches)?,
             ..Default::default()
         };
         ctx.configuration = config.clone();
-        ctx.can_access_data_blobs = matches.get_one::<String>("config").is_some();
 
         let output = Merger::merge(
             &mut ctx,
@@ -914,32 +927,23 @@ impl Command {
         OutputSerializer::dump(matches, output, build_info)
     }
 
-    fn compact(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+    fn compact(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+        let config =
+            Self::get_configuration(matches).context("failed to get configuration information")?;
+        config
+            .internal
+            .set_blob_accessible(matches.get_one::<String>("config").is_some());
         let bootstrap_path = PathBuf::from(Self::get_bootstrap(matches)?);
         let dst_bootstrap = match matches.get_one::<String>("output-bootstrap") {
             None => bootstrap_path.with_extension("bootstrap.compact"),
             Some(s) => PathBuf::from(s),
         };
 
-        let can_access_data_blobs = matches.get_one::<String>("config").is_some();
-        let config =
-            Self::get_configuration(matches).context("failed to get configuration information")?;
-        let (rs, _) = RafsSuper::load_from_file(
-            &bootstrap_path,
-            config.clone(),
-            true,
-            false,
-            can_access_data_blobs,
-        )?;
+        let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, config.clone(), true, false)?;
         info!("load bootstrap {:?} successfully", bootstrap_path);
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,
-            Some(args) => Some(import_chunk_dict(
-                args,
-                config,
-                &rs.meta.get_config(),
-                can_access_data_blobs,
-            )?),
+            Some(args) => Some(import_chunk_dict(args, config, &rs.meta.get_config())?),
         };
 
         let cfg_file = matches.get_one::<String>("backend-config").unwrap();
@@ -961,31 +965,33 @@ impl Command {
         Ok(())
     }
 
-    fn unpack(args: &clap::ArgMatches) -> Result<()> {
-        let bootstrap = args
-            .get_one::<String>("bootstrap")
-            .expect("pass in bootstrap");
-        if bootstrap.is_empty() {
-            return Err(anyhow!("invalid empty --bootstrap option"));
-        }
-        let config = Self::get_configuration(args)?;
-        let output = args.get_one::<String>("output").expect("pass in output");
+    fn unpack(matches: &ArgMatches) -> Result<()> {
+        let bootstrap = Self::get_bootstrap(matches)?;
+        let config = Self::get_configuration(matches)?;
+        config
+            .internal
+            .set_blob_accessible(matches.get_one::<String>("config").is_some());
+        let output = matches.get_one::<String>("output").expect("pass in output");
         if output.is_empty() {
             return Err(anyhow!("invalid empty --output option"));
         }
+        let blob = matches.get_one::<String>("blob").map(|s| s.as_str());
 
-        let blob = args.get_one::<String>("blob").map(|s| s.as_str());
-
-        let unpacker =
-            OCIUnpacker::new(bootstrap, blob, output).with_context(|| "fail to create unpacker")?;
-
-        unpacker.unpack(config).with_context(|| "fail to unpack")
+        OCIUnpacker::new(bootstrap, blob, output)
+            .with_context(|| "fail to create unpacker")?
+            .unpack(config)
+            .with_context(|| "fail to unpack")
     }
 
-    fn check(matches: &clap::ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+    fn check(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let verbose = matches.get_flag("verbose");
         let config = Self::get_configuration(matches)?;
+        // For backward compatibility with v2.1
+        config
+            .internal
+            .set_blob_accessible(matches.get_one::<String>("bootstrap").is_none());
+
         let mut validator = Validator::new(bootstrap_path, config)?;
         let blobs = validator
             .check(verbose)
@@ -1007,18 +1013,23 @@ impl Command {
             blob_ids.push(blob.blob_id().to_string());
         }
 
-        OutputSerializer::dump_with_check(matches, build_info, blob_ids, bootstrap_path)?;
+        OutputSerializer::dump_for_check(matches, build_info, blob_ids, bootstrap_path)?;
 
         Ok(())
     }
 
-    fn inspect(matches: &clap::ArgMatches) -> Result<()> {
+    fn inspect(matches: &ArgMatches) -> Result<()> {
         let bootstrap_path = Self::get_bootstrap(matches)?;
-        let cmd = matches.get_one::<String>("request");
         let mut config = Self::get_configuration(matches)?;
+        // For backward compatibility with v2.1
+        config
+            .internal
+            .set_blob_accessible(matches.get_one::<String>("bootstrap").is_none());
         if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
             cache.cache_validate = true;
         }
+
+        let cmd = matches.get_one::<String>("request");
         let mut inspector = inspect::RafsInspector::new(bootstrap_path, cmd.is_some(), config)
             .map_err(|e| {
                 error!("failed to create inspector, {:?}", e);
@@ -1036,7 +1047,7 @@ impl Command {
         Ok(())
     }
 
-    fn stat(matches: &clap::ArgMatches) -> Result<()> {
+    fn stat(matches: &ArgMatches) -> Result<()> {
         let digester = matches
             .get_one::<String>("digester")
             .map(|s| s.as_str())
@@ -1051,6 +1062,9 @@ impl Command {
         if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
             cache.cache_validate = true;
         }
+        config
+            .internal
+            .set_blob_accessible(matches.get_one::<String>("config").is_some());
 
         if let Some(blob) = matches.get_one::<String>("bootstrap").map(PathBuf::from) {
             stat.stat(&blob, true, config.clone())?;
@@ -1094,17 +1108,17 @@ impl Command {
         Ok(())
     }
 
-    fn get_bootstrap(matches: &clap::ArgMatches) -> Result<&Path> {
+    fn get_bootstrap(matches: &ArgMatches) -> Result<&Path> {
         match matches.get_one::<String>("bootstrap") {
             Some(s) => Ok(Path::new(s)),
             None => match matches.get_one::<String>("BOOTSTRAP") {
                 Some(s) => Ok(Path::new(s)),
-                None => bail!("missing parameter `bootstrap`"),
+                None => bail!("missing parameter `bootstrap` or `BOOTSTRAP`"),
             },
         }
     }
 
-    fn get_bootstrap_storage(matches: &clap::ArgMatches) -> Result<ArtifactStorage> {
+    fn get_bootstrap_storage(matches: &ArgMatches) -> Result<ArtifactStorage> {
         if let Some(s) = matches.get_one::<String>("bootstrap") {
             Ok(ArtifactStorage::SingleFile(s.into()))
         } else if let Some(d) = matches.get_one::<String>("blob-dir").map(PathBuf::from) {
@@ -1121,7 +1135,7 @@ impl Command {
     // For cli/binary interface compatibility sake, keep option `backend-config`, but
     // it only receives "localfs" backend type and it will be REMOVED in the future
     fn get_blob_storage(
-        matches: &clap::ArgMatches,
+        matches: &ArgMatches,
         conversion_type: ConversionType,
     ) -> Result<Option<ArtifactStorage>> {
         // Must specify a path to blob file.
@@ -1141,7 +1155,7 @@ impl Command {
             Ok(Some(ArtifactStorage::FileDir(d)))
         } else if let Some(config_json) = matches.get_one::<String>("backend-config") {
             let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
-            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob instead.");
+            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob-dir instead.");
             if let Some(bf) = config.get("blob_file") {
                 // Even unwrap, it is caused by invalid json. Image creation just can't start.
                 let b: PathBuf = bf
@@ -1159,7 +1173,7 @@ impl Command {
         }
     }
 
-    fn get_parent_bootstrap(matches: &clap::ArgMatches) -> Result<Option<String>> {
+    fn get_parent_bootstrap(matches: &ArgMatches) -> Result<Option<String>> {
         let mut parent_bootstrap_path = String::new();
         if let Some(_parent_bootstrap_path) = matches.get_one::<String>("parent-bootstrap") {
             parent_bootstrap_path = _parent_bootstrap_path.to_string();
@@ -1172,13 +1186,13 @@ impl Command {
         }
     }
 
-    fn get_configuration(matches: &clap::ArgMatches) -> Result<Arc<ConfigV2>> {
+    fn get_configuration(matches: &ArgMatches) -> Result<Arc<ConfigV2>> {
         let config = if let Some(config_file) = matches.get_one::<String>("config") {
             ConfigV2::from_file(config_file)?
         } else if let Some(dir) = matches.get_one::<String>("blob-dir") {
             ConfigV2::new_localfs("", dir)?
         } else {
-            ConfigV2::new_localfs("", ".")?
+            ConfigV2::default()
         };
         if !config.validate() {
             return Err(anyhow!("invalid configuration: {:?}", config));
@@ -1187,7 +1201,7 @@ impl Command {
         Ok(Arc::new(config))
     }
 
-    fn get_blob_id(matches: &clap::ArgMatches) -> Result<String> {
+    fn get_blob_id(matches: &ArgMatches) -> Result<String> {
         let mut blob_id = String::new();
 
         if let Some(p_blob_id) = matches.get_one::<String>("blob-id") {
@@ -1200,7 +1214,7 @@ impl Command {
         Ok(blob_id)
     }
 
-    fn get_blob_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u64> {
+    fn get_blob_size(matches: &ArgMatches, ty: ConversionType) -> Result<u64> {
         if ty != ConversionType::EStargzIndexToRef {
             return Ok(0);
         }
@@ -1216,27 +1230,7 @@ impl Command {
         }
     }
 
-    fn validate_image(
-        matches: &clap::ArgMatches,
-        bootstrap_path: &Path,
-        config: Arc<ConfigV2>,
-    ) -> Result<()> {
-        if !matches.get_flag("disable-check") {
-            let mut validator = Validator::new(bootstrap_path, config)?;
-            timing_tracer!(
-                {
-                    validator
-                        .check(false)
-                        .context("failed to validate bootstrap")
-                },
-                "validate_bootstrap"
-            )?;
-        }
-
-        Ok(())
-    }
-
-    fn get_chunk_size(matches: &clap::ArgMatches, ty: ConversionType) -> Result<u32> {
+    fn get_chunk_size(matches: &ArgMatches, ty: ConversionType) -> Result<u32> {
         match matches.get_one::<String>("chunk-size") {
             None => {
                 if ty == ConversionType::EStargzIndexToRef {
@@ -1260,7 +1254,7 @@ impl Command {
         }
     }
 
-    fn get_prefetch(matches: &clap::ArgMatches) -> Result<Prefetch> {
+    fn get_prefetch(matches: &ArgMatches) -> Result<Prefetch> {
         let prefetch_policy = matches
             .get_one::<String>("prefetch-policy")
             .map(|s| s.as_str())
@@ -1269,7 +1263,7 @@ impl Command {
         Prefetch::new(prefetch_policy)
     }
 
-    fn get_blob_offset(matches: &clap::ArgMatches) -> Result<u64> {
+    fn get_blob_offset(matches: &ArgMatches) -> Result<u64> {
         match matches.get_one::<String>("blob-offset") {
             None => Ok(0),
             Some(v) => v
@@ -1278,7 +1272,7 @@ impl Command {
         }
     }
 
-    fn get_fs_version(matches: &clap::ArgMatches) -> Result<RafsVersion> {
+    fn get_fs_version(matches: &ArgMatches) -> Result<RafsVersion> {
         match matches.get_one::<String>("fs-version") {
             None => Ok(RafsVersion::V6),
             Some(v) => {

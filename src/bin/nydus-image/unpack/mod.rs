@@ -43,8 +43,8 @@ pub struct OCIUnpacker {
 }
 
 impl OCIUnpacker {
-    pub fn new(bootstrap: &str, blob: Option<&str>, output: &str) -> Result<Self> {
-        let bootstrap = PathBuf::from(bootstrap);
+    pub fn new(bootstrap: &Path, blob: Option<&str>, output: &str) -> Result<Self> {
+        let bootstrap = bootstrap.to_path_buf();
         let output = PathBuf::from(output);
         let blob = blob.map(PathBuf::from);
 
@@ -64,7 +64,6 @@ impl OCIUnpacker {
             config.clone(),
             config.is_chunk_validation_enabled(),
             false,
-            true,
         )?;
         Ok(rs)
     }

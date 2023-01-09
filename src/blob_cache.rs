@@ -333,7 +333,10 @@ impl BlobCacheMgr {
             ));
         }
 
-        Ok((path, Arc::new(config.into())))
+        let config: Arc<ConfigV2> = Arc::new(config.into());
+        config.internal.set_blob_accessible(true);
+
+        Ok((path, config))
     }
 
     fn add_meta_object(
@@ -341,14 +344,14 @@ impl BlobCacheMgr {
         domain_id: &str,
         id: &str,
         path: PathBuf,
-        factory_config: Arc<ConfigV2>,
+        config: Arc<ConfigV2>,
     ) -> Result<()> {
-        let (rs, _) = RafsSuper::load_from_file(&path, factory_config.clone(), true, false, true)?;
+        let (rs, _) = RafsSuper::load_from_file(&path, config.clone(), true, false)?;
         let meta = BlobCacheObjectConfig::new_meta_blob(
             domain_id.to_string(),
             id.to_string(),
             path,
-            factory_config,
+            config,
         );
         let meta_obj = meta.meta_config().unwrap();
         let mut state = self.get_state();

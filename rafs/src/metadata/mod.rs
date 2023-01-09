@@ -654,7 +654,6 @@ impl RafsSuper {
         config: Arc<ConfigV2>,
         validate_digest: bool,
         is_chunk_dict: bool,
-        mut can_access_data_blobs: bool,
     ) -> Result<(Self, RafsIoReader)> {
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
@@ -669,6 +668,7 @@ impl RafsSuper {
             .write(false)
             .open(path.as_ref())?;
         let mut reader = Box::new(file) as RafsIoReader;
+        let mut blob_accessible = config.internal.blob_accessible();
 
         if let Err(e) = rs.load(&mut reader) {
             let id = BlobInfo::get_blob_id_from_meta_path(path.as_ref())?;
@@ -683,7 +683,7 @@ impl RafsSuper {
             reader = Box::new(file) as RafsIoReader;
             rs.load(&mut reader)?;
             rs.set_blob_id_from_meta_path(path.as_ref())?;
-            can_access_data_blobs = true;
+            blob_accessible = true;
         } else {
             // Backward compatibility: try to fix blob id for old converters.
             // Old converters extracts bootstraps from data blobs with inlined bootstrap
@@ -698,7 +698,7 @@ impl RafsSuper {
                     fixed = true;
                 }
             }
-            if !fixed && !can_access_data_blobs && !blobs.is_empty() {
+            if !fixed && !blob_accessible && !blobs.is_empty() {
                 // Fix blob id for old images with old converters.
                 let last = blobs.len() - 1;
                 let blob = &blobs[last];
@@ -708,7 +708,7 @@ impl RafsSuper {
             }
         }
 
-        if can_access_data_blobs
+        if blob_accessible
             && (validate_digest || config.is_chunk_validation_enabled())
             && rs.meta.has_inlined_chunk_digest()
         {
