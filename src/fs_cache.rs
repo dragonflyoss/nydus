@@ -4,33 +4,32 @@
 
 //! Handler to cooperate with Linux fscache subsystem for blob cache.
 
-use std::cmp;
 use std::collections::hash_map::Entry::Vacant;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::env;
-use std::fs::{self, DirEntry, File, OpenOptions};
-use std::io::{Error, ErrorKind, Result, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{copy, Error, ErrorKind, Result, Write};
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, Mutex, MutexGuard, RwLock};
-use std::{thread, time};
+use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard, RwLock};
+use std::{cmp, env, thread, time};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
-use nydus::blob_cache::{
+use nydus_storage::cache::BlobCache;
+use nydus_storage::device::BlobPrefetchRequest;
+use nydus_storage::factory::{ASYNC_RUNTIME, BLOB_FACTORY};
+
+use crate::blob_cache::{
     generate_blob_key, BlobCacheConfigDataBlob, BlobCacheConfigMetaBlob, BlobCacheMgr,
     BlobCacheObjectConfig,
 };
-use storage::cache::BlobCache;
-use storage::device::BlobPrefetchRequest;
-use storage::factory::{ASYNC_RUNTIME, BLOB_FACTORY};
 
-ioctl_write_int!(fscache_cread, 0x98, 1);
+nix::ioctl_write_int!(fscache_cread, 0x98, 1);
 
 /// Maximum size of fscache request message from kernel.
 const MIN_DATA_BUF_SIZE: usize = 1024;
@@ -41,8 +40,8 @@ const MSG_READ_SIZE: usize = 16;
 const TOKEN_EVENT_WAKER: usize = 1;
 const TOKEN_EVENT_FSCACHE: usize = 2;
 
-const BLOBCACHE_INIT_RETRY: u8 = 5;
-const BLOBCACHE_INIT_INTERVAL_MS: u64 = 300;
+const BLOB_CACHE_INIT_RETRY: u8 = 5;
+const BLOB_CACHE_INIT_INTERVAL_MS: u64 = 300;
 
 /// Command code in requests from fscache driver.
 #[repr(u32)]
@@ -214,11 +213,11 @@ struct FsCacheBlobCache {
 }
 
 impl FsCacheBlobCache {
-    fn set_blobcache(&mut self, cache: Option<Arc<dyn BlobCache>>) {
+    fn set_blob_cache(&mut self, cache: Option<Arc<dyn BlobCache>>) {
         self.cache = cache;
     }
 
-    fn get_blobcache(&self) -> Option<Arc<dyn BlobCache>> {
+    fn get_blob_cache(&self) -> Option<Arc<dyn BlobCache>> {
         self.cache.clone()
     }
 }
@@ -253,7 +252,7 @@ pub struct FsCacheHandler {
 }
 
 impl FsCacheHandler {
-    /// Create a new instance of `FsCacheService`.
+    /// Create a new instance of [FsCacheHandler].
     pub fn new(
         path: &str,
         dir: &str,
@@ -306,6 +305,7 @@ impl FsCacheHandler {
             blob_cache_mgr,
         };
         let cache_dir = PathBuf::new().join(dir).join("cache");
+
         Ok(FsCacheHandler {
             active: AtomicBool::new(true),
             barrier: Barrier::new(threads + 1),
@@ -343,7 +343,7 @@ impl FsCacheHandler {
         loop {
             match self.poller.lock().unwrap().poll(&mut events, None) {
                 Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => {
                     warn!("fscache: failed to poll events");
                     return Err(e);
@@ -428,21 +428,21 @@ impl FsCacheHandler {
             .unwrap_or(msg.volume_key.as_str());
 
         let key = generate_blob_key(domain_id, &msg.cookie_key);
-        let msg = match self.get_config(&key) {
+        match self.get_config(&key) {
             None => {
                 unsafe { libc::close(msg.fd as i32) };
-                format!("copen {},{}", hdr.msg_id, -libc::ENOENT)
+                self.reply(&format!("copen {},{}", hdr.msg_id, -libc::ENOENT));
             }
             Some(cfg) => match cfg {
                 BlobCacheObjectConfig::DataBlob(config) => {
-                    self.handle_open_data_blob(hdr, msg, config)
+                    let reply = self.handle_open_data_blob(hdr, msg, config);
+                    self.reply(&reply);
                 }
                 BlobCacheObjectConfig::MetaBlob(config) => {
-                    self.handle_open_bootstrap(hdr, msg, config)
+                    self.handle_open_bootstrap(hdr, msg, config);
                 }
             },
-        };
-        self.reply(&msg);
+        }
     }
 
     fn handle_open_data_blob(
@@ -462,8 +462,9 @@ impl FsCacheHandler {
             state.id_to_config_map.insert(hdr.object_id, config.clone());
             let blob_size = config.blob_info().deref().uncompressed_size();
             let barrier = Arc::new(Barrier::new(2));
-            Self::init_blobcache(fsblob, Arc::clone(&barrier));
-            // make sure the blobcache init thread gets wlock before user daemon receives first ondemand request.
+            Self::init_blob_cache(fsblob, barrier.clone());
+            // make sure that the blobcache init thread have gotten writer lock before user daemon
+            // receives first request.
             barrier.wait();
             format!("copen {},{}", hdr.msg_id, blob_size)
         } else {
@@ -472,22 +473,26 @@ impl FsCacheHandler {
         }
     }
 
-    fn init_blobcache(fsblob: Arc<RwLock<FsCacheBlobCache>>, barrier: Arc<Barrier>) {
+    fn init_blob_cache(fsblob: Arc<RwLock<FsCacheBlobCache>>, barrier: Arc<Barrier>) {
         thread::spawn(move || {
             let mut guard = fsblob.write().unwrap();
             barrier.wait();
             //for now FsCacheBlobCache only init once, should not have blobcache associated with it
-            assert!(guard.get_blobcache().is_none());
-            for _ in 0..BLOBCACHE_INIT_RETRY {
+            assert!(guard.get_blob_cache().is_none());
+            for _ in 0..BLOB_CACHE_INIT_RETRY {
                 match Self::create_data_blob_object(&guard.config, guard.file.clone()) {
                     Err(e) => {
                         warn!("fscache: create_data_blob_object failed {}", e);
-                        thread::sleep(time::Duration::from_millis(BLOBCACHE_INIT_INTERVAL_MS));
+                        thread::sleep(time::Duration::from_millis(BLOB_CACHE_INIT_INTERVAL_MS));
                     }
                     Ok(blob) => {
-                        guard.set_blobcache(Some(blob.clone()));
-                        if let Err(e) = Self::do_prefetch(&guard.config, blob) {
-                            warn!("failed to prefetch filesystem data, {}", e);
+                        guard.set_blob_cache(Some(blob.clone()));
+                        if let Err(e) = Self::do_prefetch(&guard.config, blob.clone()) {
+                            warn!(
+                                "fscache: failed to prefetch data for blob {}, {}",
+                                blob.blob_id(),
+                                e
+                            );
                         }
                         break;
                     }
@@ -510,6 +515,7 @@ impl FsCacheHandler {
             Some(1) => nydus_api::default_batch_size() as u64,
             Some(s) => s as u64,
         };
+        let size = std::cmp::max(0x4_0000u64, size);
         let blob_size = blob_info.compressed_data_size();
         let count = (blob_size + size - 1) / size;
         let mut blob_req = Vec::with_capacity(count as usize);
@@ -521,14 +527,15 @@ impl FsCacheHandler {
                 len: cmp::min(size, blob_size - pre_offset),
             });
             pre_offset += size;
-            if pre_offset > blob_size {
+            if pre_offset >= blob_size {
                 break;
             }
         }
 
-        info!("blob prefetch start");
+        let id = blob.blob_id();
+        info!("fscache: start to prefetch data for blob {}", id);
         if let Err(e) = blob.prefetch(blob.clone(), &blob_req, &[]) {
-            warn!("fscache: failed to prefetch blob data, {}", e);
+            warn!("fscache: failed to prefetch data for blob {}, {}", id, e);
         }
 
         Ok(())
@@ -548,36 +555,17 @@ impl FsCacheHandler {
         BLOB_FACTORY.new_blob_cache(config.config_v2(), &blob_ref)
     }
 
-    fn fill_bootstrap_cache(bootstrap_fd: RawFd, cachefile_fd: RawFd, size: usize) -> Result<()> {
-        let base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                size,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                bootstrap_fd,
-                0_i64,
-            )
-        };
-        if base == libc::MAP_FAILED {
-            warn!(
-                "fscache: failed to mmap bootstrap file, {}",
-                std::io::Error::last_os_error()
-            );
-            return Err(eio!("fscache: fill bootstrap cachefile error"));
-        }
-
-        let ret = unsafe { libc::pwrite(cachefile_fd, base, size, 0) };
-        let _ = unsafe { libc::munmap(base, size) };
-
-        if ret != size as isize {
-            warn!(
-                "fscache: failed to write bootstrap blob data to cached file, {}",
-                std::io::Error::last_os_error()
-            );
-            return Err(eio!("fscache: fill bootstrap cachefile error"));
-        }
-        Ok(())
+    fn fill_bootstrap_cache(bootstrap: Arc<FsCacheBootstrap>) -> Result<u64> {
+        // Safe because bootstrap.bootstrap_file/cache_file are valid.
+        let mut src = unsafe { File::from_raw_fd(bootstrap.bootstrap_file.as_raw_fd()) };
+        let mut dst = unsafe { File::from_raw_fd(bootstrap.cache_file.as_raw_fd()) };
+        let ret = copy(&mut src, &mut dst);
+        std::mem::forget(src);
+        std::mem::forget(dst);
+        ret.map_err(|e| {
+            warn!("failed to copy content from bootstap into cache fd, {}", e);
+            e
+        })
     }
 
     fn handle_open_bootstrap(
@@ -585,47 +573,46 @@ impl FsCacheHandler {
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
         config: Arc<BlobCacheConfigMetaBlob>,
-    ) -> String {
+    ) {
+        let path = config.path().display();
+        let condvar = Arc::new((Mutex::new(false), Condvar::new()));
+        let condvar2 = condvar.clone();
         let mut state = self.get_state();
+
         let ret: i64 = if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {
             match OpenOptions::new().read(true).open(config.path()) {
                 Err(e) => {
-                    warn!(
-                        "fscache: failed to open bootstrap file {}, {}",
-                        config.path().display(),
-                        e
-                    );
+                    warn!("fscache: failed to open bootstrap file {}, {}", path, e);
                     -libc::ENOENT as i64
                 }
                 Ok(f) => match f.metadata() {
                     Err(e) => {
-                        warn!(
-                            "fscache: failed to open bootstrap file {}, {}",
-                            config.path().display(),
-                            e
-                        );
+                        warn!("fscache: failed to open bootstrap file {}, {}", path, e);
                         -libc::ENOENT as i64
                     }
                     Ok(md) => {
                         let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
-                        let bootstrap_fd = f.as_raw_fd();
-                        let cachefile_fd = cache_file.as_raw_fd();
-                        let object = FsCacheObject::Bootstrap(Arc::new(FsCacheBootstrap {
+                        let bootstrap = Arc::new(FsCacheBootstrap {
                             bootstrap_file: f,
                             cache_file,
-                        }));
+                        });
+                        let object = FsCacheObject::Bootstrap(bootstrap.clone());
                         e.insert((object, msg.fd));
-                        let len = md.len() as usize;
-                        ASYNC_RUNTIME.spawn_blocking(move || {
-                            //add slight delay to let copen reply first
-                            thread::sleep(time::Duration::from_millis(10));
+                        ASYNC_RUNTIME.spawn_blocking(|| async move {
+                            // Ensure copen reply message has been sent to kernel.
+                            {
+                                let (m, c) = condvar.as_ref();
+                                let mut g = m.lock().unwrap();
+                                while !*g {
+                                    g = c.wait(g).unwrap();
+                                }
+                            }
+
                             for _i in 0..3 {
-                                if Self::fill_bootstrap_cache(bootstrap_fd, cachefile_fd, len)
-                                    .is_ok()
-                                {
+                                if Self::fill_bootstrap_cache(bootstrap.clone()).is_ok() {
                                     break;
                                 }
-                                thread::sleep(time::Duration::from_secs(2));
+                                tokio::time::sleep(time::Duration::from_secs(2)).await;
                             }
                         });
                         md.len() as i64
@@ -639,7 +626,12 @@ impl FsCacheHandler {
         if ret < 0 {
             unsafe { libc::close(msg.fd as i32) };
         }
-        format!("copen {},{}", hdr.msg_id, ret)
+        self.reply(&format!("copen {},{}", hdr.msg_id, ret));
+        if ret >= 0 {
+            let (m, c) = condvar2.as_ref();
+            *m.lock().unwrap() = true;
+            c.notify_one();
+        }
     }
 
     fn handle_close_request(&self, hdr: &FsCacheMsgHeader) {
@@ -653,7 +645,7 @@ impl FsCacheHandler {
             let config = state.id_to_config_map.remove(&hdr.object_id).unwrap();
             let factory_config = config.config_v2();
             let guard = fsblob.read().unwrap();
-            match guard.get_blobcache() {
+            match guard.get_blob_cache() {
                 Some(blob) => {
                     if let Ok(cache_cfg) = factory_config.get_cache_config() {
                         if cache_cfg.prefetch.enable {
@@ -664,7 +656,7 @@ impl FsCacheHandler {
                     drop(blob);
                     BLOB_FACTORY.gc(Some((factory_config, &id)));
                 }
-                _ => warn!("fscache: blob object not ready"),
+                _ => warn!("fscache: blob object not ready {}", hdr.object_id),
             }
         }
     }
@@ -683,24 +675,20 @@ impl FsCacheHandler {
             Some((FsCacheObject::DataBlob(fsblob), u)) => {
                 fd = u;
                 let guard = fsblob.read().unwrap();
-                match guard.get_blobcache() {
-                    Some(blob) => {
-                        match blob.get_blob_object() {
-                            None => {
-                                warn!("fscache: internal error: cached object is not BlobCache objects");
-                            }
-                            Some(obj) => match obj.fetch_range_uncompressed(msg.off, msg.len) {
-                                Ok(_) => {}
-                                Err(e) => error!(
-                                    "{}",
-                                    format!("fscache: failed to read data from blob object: {}", e,)
-                                ),
-                            },
+                match guard.get_blob_cache() {
+                    Some(blob) => match blob.get_blob_object() {
+                        None => {
+                            warn!("fscache: internal error: cached object is not BlobCache objects")
                         }
-                    }
+                        Some(obj) => {
+                            if let Err(e) = obj.fetch_range_uncompressed(msg.off, msg.len) {
+                                error!("fscache: failed to read data from blob object: {}", e,);
+                            }
+                        }
+                    },
                     _ => {
-                        warn!("fscache: blob object not ready")
                         //TODO: maybe we should retry init blob object here
+                        warn!("fscache: blob object not ready");
                     }
                 }
             }
@@ -742,12 +730,14 @@ impl FsCacheHandler {
             }
         }
 
-        unsafe { fscache_cread(fd as i32, hdr.msg_id as u64).unwrap() };
+        if let Err(e) = unsafe { fscache_cread(fd as i32, hdr.msg_id as u64) } {
+            warn!("failed to send reply for cread request, {}", e);
+        }
     }
 
+    /// Reclaim unused facache objects.
     pub fn cull_cache(&self, blob_id: String) -> Result<()> {
         let children = fs::read_dir(self.cache_dir.clone())?;
-        let children = children.collect::<Result<Vec<DirEntry>>>()?;
         let mut res = true;
         // This is safe, because only api server which is a single thread server will call this func,
         // and no other func will change cwd.
@@ -757,12 +747,13 @@ impl FsCacheHandler {
 
         // calc blob path in all volumes then try to cull them
         for child in children {
+            let child = child?;
             let path = child.path();
             let file_name = match child.file_name().to_str() {
                 Some(n) => n.to_string(),
                 None => {
-                    env::set_current_dir(&cwd_old)?;
-                    return Err(eother!("get file name failed"));
+                    warn!("failed to get file name of {}", child.path().display());
+                    continue;
                 }
             };
             if !path.is_dir() || !file_name.starts_with("Ierofs,") {
@@ -773,38 +764,34 @@ impl FsCacheHandler {
             let volume_key = &file_name[1..];
             let (cookie_dir, cookie_name) = self.generate_cookie_path(&path, volume_key, &blob_id);
             let cookie_path = cookie_dir.join(&cookie_name);
-            if cookie_path.is_file() {
-                match self.inuse(&cookie_dir, &cookie_name) {
-                    Err(e) => {
-                        warn!(
-                            "blob {} call inuse err {}, cull failed!",
-                            cookie_path.display(),
-                            e
-                        );
+            if !cookie_path.is_file() {
+                continue;
+            }
+            let cookie_path = cookie_path.display();
+
+            match self.inuse(&cookie_dir, &cookie_name) {
+                Err(e) => {
+                    warn!("blob {} call inuse err {}, cull failed!", cookie_path, e);
+                    res = false;
+                }
+                Ok(true) => {
+                    warn!("blob {} in use, skip!", cookie_path);
+                    res = false;
+                }
+                Ok(false) => {
+                    if let Err(e) = self.cull(&cookie_dir, &cookie_name) {
+                        warn!("blob {} call cull err {}, cull failed!", cookie_path, e);
                         res = false;
-                    }
-                    Ok(true) => {
-                        warn!("blob {} in use, cull failed!", cookie_path.display());
-                        res = false;
-                    }
-                    Ok(false) => {
-                        if let Err(e) = self.cull(&cookie_dir, &cookie_name) {
-                            warn!(
-                                "blob {} call cull err {}, cull failed!",
-                                cookie_path.display(),
-                                e
-                            );
-                            res = false;
-                        }
                     }
                 }
             }
         }
+
         env::set_current_dir(&cwd_old)?;
         if res {
             Ok(())
         } else {
-            Err(eother!("cull blob failed"))
+            Err(eother!("failed to cull blob objects from fscache"))
         }
     }
 

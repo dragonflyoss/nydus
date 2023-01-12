@@ -10,9 +10,6 @@ extern crate clap;
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
-#[cfg(target_os = "linux")]
-#[macro_use]
-extern crate nix;
 #[macro_use]
 extern crate nydus_error;
 extern crate nydus_rafs as rafs;
@@ -45,8 +42,6 @@ mod virtiofs;
 
 mod api_server_glue;
 mod daemon;
-#[cfg(target_os = "linux")]
-mod fs_cache;
 mod fs_service;
 mod service_controller;
 mod upgrade;
