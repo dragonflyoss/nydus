@@ -85,10 +85,10 @@ endef
 	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET_STATIC})
 
 # Targets that are exposed to developers and users.
-build: .format
+build: .format .release_version
 	${CARGO} build $(CARGO_COMMON) $(CARGO_BUILD_FLAGS)
 	# Cargo will skip checking if it is already checked
-	${CARGO} clippy $(CARGO_COMMON) --workspace $(EXCLUDE_PACKAGES) --bins --tests -- -Dwarnings --allow clippy::unnecessary_cast --allow clippy::needless_borrow
+	${CARGO} clippy --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) --bins --tests -- -Dwarnings --allow clippy::unnecessary_cast --allow clippy::needless_borrow
 
 release: .format .release_version build
 
@@ -103,11 +103,13 @@ install: release
 	@sudo install -m 755 target/release/nydus-image $(INSTALL_DIR_PREFIX)/nydus-image
 	@sudo install -m 755 target/release/nydusctl $(INSTALL_DIR_PREFIX)/nydusctl
 
-ut:
-	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) -- --skip integration --nocapture --test-threads=8
+ut: .release_version
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) -- --skip integration --nocapture --test-threads=8
 
-smoke: ut
-	$(SUDO) TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) $(CARGO) test --test '*' $(CARGO_COMMON) -- --nocapture --test-threads=8
+smoke-only:
+	make -C smoke test
+
+smoke: release smoke-only
 
 docker-nydus-smoke:
 	docker build -t nydus-smoke --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/nydus-smoke
@@ -208,6 +210,3 @@ docker-example: all-static-release
 	@EXIT_CODE=$$?
 	@docker rm -f $$cid
 	@exit $$EXIT_CODE
-
-integration-test:
-	make -C smoke test
