@@ -481,6 +481,7 @@ Blob ID: {}
         Ok(None)
     }
 
+    #[allow(clippy::type_complexity)]
     /// Walkthrough the file tree rooted at ino, calling cb for each file or directory
     /// in the tree by DFS order, including ino, please ensure ino is a directory.
     fn walk_dir(
@@ -497,6 +498,7 @@ Blob ID: {}
         self.walk_dir_inner(inode.as_ref(), parent, parent_inode_ext, cb)
     }
 
+    #[allow(clippy::only_used_in_recursion, clippy::type_complexity)]
     fn walk_dir_inner(
         &self,
         inode: &dyn RafsInodeExt,

@@ -106,7 +106,7 @@ impl FileSystem for BlobFs {
 
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
         #[cfg(feature = "virtiofs")]
-        let _ = self.bootstrap_args.get_rafs_handle()?;
+        self.bootstrap_args.get_rafs_handle()?;
         self.pfs.init(capable)
     }
 

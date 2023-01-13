@@ -1,4 +1,4 @@
-FROM rust:1.61.0
+FROM rust:1.66.1
 ARG RUST_TARGET=x86_64-unknown-linux-musl
 
 RUN mkdir /root/.cargo/

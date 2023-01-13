@@ -323,11 +323,11 @@ impl BlobCompactor {
                 // construct blobs/chunk --> nodes index map
                 self.c2nodes
                     .entry(chunk_key)
-                    .or_insert(vec![])
+                    .or_default()
                     .push((node_idx, chunk_idx));
                 self.b2nodes
                     .entry(chunk.inner.blob_index())
-                    .or_insert(vec![])
+                    .or_default()
                     .push((node_idx, chunk_idx));
             }
         }

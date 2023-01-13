@@ -549,7 +549,7 @@ impl Builder for TarballBuilder {
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.blob_inline_meta)?;
-        let layer_idx = if bootstrap_ctx.layered { 1u16 } else { 0u16 };
+        let layer_idx = u16::from(bootstrap_ctx.layered);
         let mut blob_writer = match self.ty {
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs

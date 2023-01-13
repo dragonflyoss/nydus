@@ -934,7 +934,7 @@ impl BootstrapContext {
             Box::new(ArtifactFileWriter(ArtifactWriter::new(storage, fifo)?))
                 as Box<dyn RafsIoWrite>
         } else {
-            Box::new(ArtifactMemoryWriter::default()) as Box<dyn RafsIoWrite>
+            Box::<ArtifactMemoryWriter>::default() as Box<dyn RafsIoWrite>
         };
         Ok(Self {
             layered,

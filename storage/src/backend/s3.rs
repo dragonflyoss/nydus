@@ -231,7 +231,7 @@ impl ObjectStorageState for S3State {
 fn sha256_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    return format!("{:x}", hasher.finalize());
+    format!("{:x}", hasher.finalize())
 }
 
 // modified based on https://github.com/minio/minio-rs/blob/5fea81d68d381fd2a4c27e4d259f7012de08ab77/src/s3/signer.rs#L25-L29
