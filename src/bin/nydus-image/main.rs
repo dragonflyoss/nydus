@@ -39,7 +39,7 @@ use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
 use crate::core::context::{
     ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
-use crate::core::feature::Features;
+use crate::core::feature::{Feature, Features};
 use crate::core::node::{self, WhiteoutSpec};
 use crate::core::prefetch::{Prefetch, PrefetchPolicy};
 use crate::core::tree;
@@ -774,6 +774,10 @@ impl Command {
                 .map(|s| s.as_str())
                 .unwrap_or_default(),
         )?;
+        if features.is_enabled(Feature::BlobToc) && version == RafsVersion::V5 {
+            bail!("`--features blob-toc` can't be used with `--version 5` ");
+        }
+
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,

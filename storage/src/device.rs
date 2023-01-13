@@ -225,16 +225,29 @@ impl BlobInfo {
         if self.has_feature(BlobFeatures::SEPARATE) {
             // It's the size of referenced OCIv1 targz blob.
             self.compressed_size
-        } else if self.has_feature(BlobFeatures::CAP_TAR_TOC) && self.meta_ci_is_valid() {
-            if self.has_feature(BlobFeatures::HAS_TOC)
-                || self.has_feature(BlobFeatures::INLINED_FS_META)
-            {
-                // There's a tar header between chunk data and compression information.
-                self.meta_ci_offset - 0x200
+        } else if self.has_feature(BlobFeatures::CAP_TAR_TOC) {
+            // Image built with nydus 2.2 and newer versions.
+            if self.meta_ci_is_valid() {
+                // For RAFS v6
+                if self.has_feature(BlobFeatures::HAS_TOC)
+                    || self.has_feature(BlobFeatures::INLINED_FS_META)
+                {
+                    // There's a tar header between chunk data and compression information.
+                    self.meta_ci_offset - 0x200
+                } else {
+                    self.meta_ci_offset
+                }
             } else {
-                self.meta_ci_offset
+                // For RAFS v5
+                if self.has_feature(BlobFeatures::INLINED_FS_META) {
+                    // There's a tar header between chunk data and compression information.
+                    self.compressed_size - 0x200
+                } else {
+                    self.compressed_size
+                }
             }
         } else {
+            // Images built with nydus 2.1 and previous versions.
             self.compressed_size
         }
     }
