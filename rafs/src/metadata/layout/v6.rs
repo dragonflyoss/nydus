@@ -389,8 +389,7 @@ impl RafsV6SuperBlockExt {
 
         let chunk_size = u32::from_le(self.s_chunk_size) as u64;
         if !chunk_size.is_power_of_two()
-            || chunk_size < EROFS_BLOCK_SIZE
-            || chunk_size > RAFS_MAX_CHUNK_SIZE
+            || !(EROFS_BLOCK_SIZE..=RAFS_MAX_CHUNK_SIZE).contains(&chunk_size)
         {
             return Err(einval!("invalid chunk size in Rafs v6 extended superblock"));
         }
@@ -1434,8 +1433,7 @@ impl RafsV6Blob {
 
         let c_size = u32::from_le(self.chunk_size) as u64;
         if c_size.count_ones() != 1
-            || c_size < EROFS_BLOCK_SIZE
-            || c_size > RAFS_MAX_CHUNK_SIZE
+            || !(EROFS_BLOCK_SIZE..=RAFS_MAX_CHUNK_SIZE).contains(&c_size)
             || c_size != chunk_size as u64
         {
             error!(

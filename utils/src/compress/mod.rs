@@ -142,6 +142,7 @@ pub fn decompress(src: &[u8], dst: &mut [u8], algorithm: Algorithm) -> Result<us
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 /// Stream decoder for gzip/lz4/zstd.
 pub enum Decoder<'a, R: Read> {
     None(R),

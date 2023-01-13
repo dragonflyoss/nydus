@@ -1126,8 +1126,7 @@ impl BlobDevice {
                     req.len
                 );
                 if let Some(obj) = cache.get_blob_object() {
-                    let _ = obj
-                        .fetch_range_uncompressed(req.offset as u64, req.len as u64)
+                    obj.fetch_range_uncompressed(req.offset as u64, req.len as u64)
                         .map_err(|e| {
                             warn!(
                                 "Failed to prefetch data from blob {}, offset {}, size {}, {}",

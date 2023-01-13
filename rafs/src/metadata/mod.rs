@@ -999,6 +999,7 @@ impl RafsSuper {
         self.do_walk_directory(inode.deref(), parent, cb)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn do_walk_directory<P: AsRef<Path>>(
         &self,
         inode: &dyn RafsInodeExt,

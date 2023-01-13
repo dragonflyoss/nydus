@@ -32,7 +32,7 @@ fn get_git_commit_hash() -> String {
 }
 
 fn get_git_commit_version() -> String {
-    let tag = Command::new("git").args(&["describe", "--tags"]).output();
+    let tag = Command::new("git").args(["describe", "--tags"]).output();
     if let Ok(tag) = tag {
         if let Some(tag) = String::from_utf8_lossy(&tag.stdout).lines().next() {
             return tag.to_string();
