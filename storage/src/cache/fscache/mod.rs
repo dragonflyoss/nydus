@@ -213,12 +213,6 @@ impl FileCacheEntry {
         } else {
             blob_id.clone()
         };
-        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
-        let chunk_map = Arc::new(BlobStateMap::from(IndexedChunkMap::new(
-            &blob_file_path,
-            blob_info.chunk_count(),
-            false,
-        )?));
         let reader = mgr
             .backend
             .get_reader(&blob_id)
@@ -234,12 +228,14 @@ impl FileCacheEntry {
             reader.clone()
         };
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
+
         let need_validation = mgr.need_validation
             && !blob_info.is_legacy_stargz()
             && blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
+        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
         let meta = if blob_info.meta_ci_is_valid() {
             FileCacheMeta::new(
-                blob_file_path,
+                blob_file_path.clone(),
                 blob_info.clone(),
                 Some(blob_meta_reader),
                 None,
@@ -252,6 +248,11 @@ impl FileCacheEntry {
             ));
         };
 
+        let chunk_map = Arc::new(BlobStateMap::from(IndexedChunkMap::new(
+            &blob_file_path,
+            blob_info.chunk_count(),
+            false,
+        )?));
         Self::restore_chunk_map(blob_info.clone(), file.clone(), &meta, &chunk_map);
 
         Ok(FileCacheEntry {

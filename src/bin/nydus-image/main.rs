@@ -237,6 +237,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     Arg::new("blob-offset")
                         .long("blob-offset")
                         .help("File offset to store RAFS data, to support storing data blobs into tar files")
+                        .hide(true)
                         .default_value("0"),
                 )
                 .arg(
