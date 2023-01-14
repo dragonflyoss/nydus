@@ -282,7 +282,16 @@ impl BlobCompressionContextHeader {
         }
     }
 
-    /// Set flag indicating new blob format with tar/toc headers.
+    /// Set flag indicating new blob format with tar headers.
+    pub fn set_has_tar_header(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::HAS_TAR_HEADER.bits();
+        } else {
+            self.s_features &= !BlobFeatures::HAS_TAR_HEADER.bits();
+        }
+    }
+
+    /// Set flag indicating new blob format with toc headers.
     pub fn set_has_toc(&mut self, enable: bool) {
         if enable {
             self.s_features |= BlobFeatures::HAS_TOC.bits();
@@ -1646,7 +1655,10 @@ pub trait BlobMetaChunkInfo {
 pub fn format_blob_features(features: BlobFeatures) -> String {
     let mut output = String::new();
     if features.contains(BlobFeatures::ALIGNED) {
-        output += "4K-align ";
+        output += "aligned ";
+    }
+    if features.contains(BlobFeatures::CAP_TAR_TOC) {
+        output += "cap_toc ";
     }
     if features.contains(BlobFeatures::INLINED_CHUNK_DIGEST) {
         output += "chunk-digest ";
@@ -1659,6 +1671,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     }
     if features.contains(BlobFeatures::SEPARATE) {
         output += "separate ";
+    }
+    if features.contains(BlobFeatures::HAS_TAR_HEADER) {
+        output += "tar-header ";
     }
     if features.contains(BlobFeatures::HAS_TOC) {
         output += "toc ";

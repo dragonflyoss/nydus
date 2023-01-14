@@ -61,6 +61,8 @@ bitflags! {
         const SEPARATE = 0x0000_0010;
         /// Chunk digest array is inlined in the data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0020;
+        /// Blob has TAR headers to separate contents.
+        const HAS_TAR_HEADER = 0x1000_0000;
         /// Blob has Table of Content (ToC) at the tail.
         const HAS_TOC = 0x2000_0000;
         /// Data blob are encoded with Tar header and optionally ToC.
@@ -229,9 +231,7 @@ impl BlobInfo {
             // Image built with nydus 2.2 and newer versions.
             if self.meta_ci_is_valid() {
                 // For RAFS v6
-                if self.has_feature(BlobFeatures::HAS_TOC)
-                    || self.has_feature(BlobFeatures::INLINED_FS_META)
-                {
+                if self.has_feature(BlobFeatures::HAS_TAR_HEADER) {
                     // There's a tar header between chunk data and compression information.
                     self.meta_ci_offset - 0x200
                 } else {
@@ -239,8 +239,8 @@ impl BlobInfo {
                 }
             } else {
                 // For RAFS v5
-                if self.has_feature(BlobFeatures::INLINED_FS_META) {
-                    // There's a tar header between chunk data and compression information.
+                if self.has_feature(BlobFeatures::HAS_TAR_HEADER) {
+                    // There's a tar header between chunk data and fs meta data.
                     self.compressed_size - 0x200
                 } else {
                     self.compressed_size

@@ -464,6 +464,9 @@ impl BlobContext {
             .set_inlined_chunk_digest(features.contains(BlobFeatures::INLINED_CHUNK_DIGEST));
         blob_ctx
             .blob_meta_header
+            .set_has_tar_header(features.contains(BlobFeatures::HAS_TAR_HEADER));
+        blob_ctx
+            .blob_meta_header
             .set_has_toc(features.contains(BlobFeatures::HAS_TOC));
         blob_ctx
             .blob_meta_header
@@ -1080,9 +1083,11 @@ impl BuildContext {
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
         if blob_inline_meta {
             blob_features |= BlobFeatures::INLINED_FS_META;
+            blob_features |= BlobFeatures::HAS_TAR_HEADER;
         };
         if features.is_enabled(Feature::BlobToc) {
             blob_features |= BlobFeatures::HAS_TOC;
+            blob_features |= BlobFeatures::HAS_TAR_HEADER;
         }
 
         BuildContext {
