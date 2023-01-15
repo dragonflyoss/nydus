@@ -25,9 +25,9 @@ nix = "0.24"
 
 nydus-error = { version = "0.2", path = "../error" }
 
-[target.'cfg(target_arch = "powerpc64")'.dependencies]
+[target.'cfg(target_arch = "powerpc64le")'.dependencies]
 libz-sys = { version = "1.1.8", optional = true }
-[target.'cfg(not(target_arch = "powerpc64"))'.dependencies]
+[target.'cfg(not(target_arch = "powerpc64le"))'.dependencies]
 libz-sys = { version = "1.1.8", package = "libz-ng-sys", optional = true }
 
 [dev-dependencies]
