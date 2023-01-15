@@ -283,8 +283,6 @@ def test_meta(
     nydus_anchor: NydusAnchor, rafs_conf: RafsConf, nydus_scratch_image: RafsImage
 ):
     anchor = nydus_anchor
-    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY).enable_rafs_blobcache()
-    rafs_conf.dump_rafs_conf()
 
     dist = Distributor(nydus_scratch_image.rootfs(), 8, 5)
     dist.generate_tree()
@@ -298,6 +296,9 @@ def test_meta(
     # Do some meta operations on scratch dir before creating rafs image file.
     # Use scratch dir as image source dir as we just prepared test meta into it.
     nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image()
+
+    rafs_conf.set_rafs_backend(Backend.BACKEND_PROXY).enable_rafs_blobcache()
+    rafs_conf.dump_rafs_conf()
     rafs = NydusDaemon(anchor, nydus_scratch_image, rafs_conf)
     rafs.thread_num(4).mount()
     assert rafs.is_mounted()
@@ -674,7 +675,7 @@ def test_certain_files_prefetch(
     )
 
     rafs_conf = RafsConf(nydus_anchor, nydus_scratch_image)
-    rafs_conf.set_rafs_backend(Backend.LOCALFS, image=nydus_scratch_image)
+    rafs_conf.set_rafs_backend(Backend.LOCALFS)
     rafs_conf.dump_rafs_conf()
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)

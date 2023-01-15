@@ -149,7 +149,7 @@ class RafsConf:
         if backend_type == Backend.LOCALFS:
             if "image" in kwargs:
                 self._configure_rafs(
-                    "device.backend.config.blob_file", kwargs.pop("image").blob_abs_path
+                    "device.backend.config.blob_file", kwargs.pop("image").localfs_backing_blob
                 )
             else:
                 self._configure_rafs(
@@ -311,10 +311,6 @@ class RafsImage(LinuxCommand):
         if type == Backend.LOCALFS:
             if not os.path.exists(self.anchor.localfs_workdir):
                 os.mkdir(self.anchor.localfs_workdir)
-            self.localfs_backing_blob = os.path.join(
-                self.anchor.localfs_workdir, self.blob_name
-            )
-
             self.set_param("blob-dir", self.anchor.localfs_workdir)
             return self
         elif type == Backend.OSS:
@@ -434,6 +430,8 @@ class RafsImage(LinuxCommand):
                 self.blob_abs_path,
                 os.path.join(self.anchor.backend_proxy_blobs_dir, self.blob_id),
             )
+        elif self.backend_type == Backend.LOCALFS:
+            self.localfs_backing_blob = os.path.join(self.anchor.localfs_workdir, self.blob_id)
 
         self.anchor.put_dustbin(self.bootstrap_name)
         # Only oss has a temporary place to hold blob
