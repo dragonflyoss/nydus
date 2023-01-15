@@ -134,7 +134,7 @@ def test_prefetch_without_cache(
     hint_files = "\n".join(hint_files)
 
     nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image(
-        readahead_policy="fs", readahead_files=hint_files.encode()
+        prefetch_policy="fs", prefetch_files=hint_files.encode()
     )
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
@@ -190,8 +190,8 @@ def test_prefetch_with_cache(
         Backend.BACKEND_PROXY, prefix="object_prefix/"
     ).create_image(
         compressor=compressor,
-        readahead_policy="fs",
-        readahead_files="/".encode(),
+        prefetch_policy="fs",
+        prefetch_files="/".encode(),
     )
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
@@ -643,9 +643,9 @@ def test_signal_handling(
     rafs.p.wait()
 
 
-@pytest.mark.parametrize("readahead_policy", ["fs"])
+@pytest.mark.parametrize("prefetch_policy", ["fs"])
 def test_certain_files_prefetch(
-    nydus_anchor: NydusAnchor, nydus_scratch_image: RafsImage, readahead_policy
+    nydus_anchor: NydusAnchor, nydus_scratch_image: RafsImage, prefetch_policy
 ):
     """
     description:
@@ -669,13 +669,12 @@ def test_certain_files_prefetch(
     hint_files = "\n".join(hint_files)
 
     nydus_scratch_image.set_backend(Backend.LOCALFS).create_image(
-        readahead_policy=readahead_policy,
-        readahead_files=hint_files.encode(),
+        prefetch_policy=prefetch_policy,
+        prefetch_files=hint_files.encode(),
     )
 
     rafs_conf = RafsConf(nydus_anchor, nydus_scratch_image)
     rafs_conf.set_rafs_backend(Backend.LOCALFS, image=nydus_scratch_image)
-    rafs_conf.enable_records_readahead(interval=1)
     rafs_conf.dump_rafs_conf()
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)

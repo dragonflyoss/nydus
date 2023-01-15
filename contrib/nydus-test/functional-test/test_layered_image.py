@@ -136,9 +136,9 @@ def test_blobcache(
     )
     # shutil.rmtree(nydus_scratch_parent_image.rootfs())
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image(
-        readahead_policy="fs",
+        prefetch_policy="fs",
+        prefetch_files=hint_files_parent.encode(),
         parent_image=nydus_scratch_parent_image,
-        readahead_files=hint_files_parent.encode(),
         chunk_size=Size(64, Unit.KB).B,
     )
 
@@ -216,8 +216,8 @@ def test_layered_rebuild(
     nydus_scratch_image.set_backend(backend).create_image(
         parent_image=nydus_scratch_parent_image,
         chunk_size=Size(64, Unit.KB).B,
-        readahead_policy="fs",
-        readahead_files="/".encode(),
+        prefetch_policy="fs",
+        prefetch_files="/".encode(),
     )
 
     rafs = NydusDaemon(nydus_anchor, nydus_scratch_image, rafs_conf)
@@ -360,7 +360,7 @@ def test_prefetch_with_cache(
     # hint_files_parent = "\n".join(hint_files_parent)
 
     nydus_scratch_parent_image.set_backend(Backend.BACKEND_PROXY).create_image(
-        readahead_policy="fs", readahead_files="/".encode()
+        prefetch_policy="fs", prefetch_files="/".encode()
     )
 
     hint_files = dist_upper.put_multiple_files(1000, Size(8, Unit.KB))
@@ -371,8 +371,8 @@ def test_prefetch_with_cache(
 
     nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image(
         parent_image=nydus_scratch_parent_image,
-        readahead_policy="fs",
-        readahead_files=hint_files.encode(),
+        prefetch_policy="fs",
+        prefetch_files=hint_files.encode(),
     )
 
     nydus_anchor.mount_overlayfs(

@@ -75,7 +75,6 @@ class RafsConf:
         self.anchor = anchor
         self.rafs_image = image
 
-        os.getenv("PREFERRED_MODE", "direct")
         self._rafs_conf_default = {
             "device": {
                 "backend": {
@@ -204,11 +203,6 @@ class RafsConf:
         self._configure_rafs("fs_prefetch.bandwidth_rate", bandwidth_rate)
         self._configure_rafs("fs_prefetch.prefetch_all", prefetch_all)
 
-        return self
-
-    def enable_records_readahead(self, interval=1):
-        exec("self._device_conf.device.backend.config.readahead=True")
-        exec("self._device_conf.device.backend.config.readahead_sec=" + str(interval))
         return self
 
     def enable_validation(self):
@@ -350,8 +344,8 @@ class RafsImage(LinuxCommand):
         clear_from_oss=True,
         oss_uploader="util",
         compressor=None,
-        readahead_policy=None,
-        readahead_files="",
+        prefetch_policy=None,
+        prefetch_files="",
         from_stargz=False,
         fs_version=None,
         disable_check=False,
@@ -367,8 +361,8 @@ class RafsImage(LinuxCommand):
         self.parent_image = parent_image
 
         assert oss_uploader in ("util", "builder", "none")
-        if readahead_policy is not None:
-            self.set_param("prefetch-policy", readahead_policy)
+        if prefetch_policy is not None:
+            self.set_param("prefetch-policy", prefetch_policy)
 
         self.set_param("log-level", self.anchor.log_level)
 
@@ -417,8 +411,8 @@ class RafsImage(LinuxCommand):
                 stdout=self.anchor.logging_file,
                 stderr=self.anchor.logging_file,
             )
-            if readahead_policy is not None:
-                p.communicate(input=readahead_files)
+            if prefetch_policy is not None:
+                p.communicate(input=prefetch_files)
             p.wait()
         assert p.returncode == 0
         assert os.path.exists(os.path.join(self.test_dir, self.bootstrap_name))
