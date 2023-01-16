@@ -314,7 +314,11 @@ pub trait BlobCache: Send + Sync {
             chunk.compressed_offset(),
             duration
         );
-        self.validate_chunk_data(chunk, buffer, false)?;
+        self.validate_chunk_data(chunk, buffer, false)
+            .map_err(|e| {
+                warn!("failed to read data from backend, {}", e);
+                e
+            })?;
 
         Ok(c_buf)
     }
@@ -356,7 +360,10 @@ pub trait BlobCache: Send + Sync {
             && !self.is_legacy_stargz()
             && !check_digest(buffer, chunk.chunk_id(), self.blob_digester())
         {
-            Err(eio!("data digest value doesn't match"))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "data digest value doesn't match",
+            ))
         } else {
             Ok(d_size)
         }
@@ -473,7 +480,12 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
         let mut buffer = alloc_buf(d_size);
         self.cache
             .decompress_chunk_data(buf, &mut buffer, chunk.is_compressed())?;
-        self.cache.validate_chunk_data(chunk, &buffer, false)?;
+        self.cache
+            .validate_chunk_data(chunk, &buffer, false)
+            .map_err(|e| {
+                warn!("failed to read data from backend, {}", e);
+                e
+            })?;
         Ok(buffer)
     }
 
