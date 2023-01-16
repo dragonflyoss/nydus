@@ -2,9 +2,12 @@
 
 <p><img src="misc/logo.svg" width="170"></p>
 
-![CI](https://github.com/dragonflyoss/image-service/actions/workflows/ci.yml/badge.svg?event=schedule)
-![Image Conversion](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml/badge.svg?event=schedule)
-![Release Test Daily](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml/badge.svg?event=schedule)
+[![Release Version](https://img.shields.io/github/v/release/dragonflyoss/image-service?style=flat)](https://github.com/dragonflyoss/image-service/releases)
+[![License](https://img.shields.io/crates/l/nydus-rs)](https://crates.io/crates/nydus-rs)
+[![CI](https://github.com/dragonflyoss/image-service/actions/workflows/ci.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/ci.yml)
+[![Image Conversion](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml)
+[![Release Test Daily](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml)
+[![Nydus Stars](https://img.shields.io/github/stars/dragonflyoss/image-service?label=Nydus%20Stars&style=social)](https://github.com/dragonflyoss/image-service)
 
 The nydus project implements a content-addressable filesystem on top of a RAFS format that improves the current OCI image specification, in terms of container launching speed, image space, and network bandwidth efficiency, as well as data integrity.
 
