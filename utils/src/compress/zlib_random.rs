@@ -28,8 +28,11 @@ const ZRAN_MIN_COMP_SIZE: u64 = 768 * 1024;
 const ZRAN_MAX_COMP_SIZE: u64 = 2048 * 1024;
 const ZRAN_MAX_UNCOMP_SIZE: u64 = 2048 * 1024;
 const ZLIB_ALIGN: usize = std::mem::align_of::<usize>();
+
+#[cfg(target_arch = "powerpc64")]
 // For libz-sys
-//const ZLIB_VERSION: &str = "1.2.8\0";
+const ZLIB_VERSION: &str = "1.2.8\0";
+#[cfg(not(target_arch = "powerpc64"))]
 // For libz-ng-sys
 const ZLIB_VERSION: &str = "2.1.0\0";
 
@@ -566,13 +569,26 @@ impl ZranStream {
     fn get_compression_dict(&mut self, buf: &mut [u8]) -> Result<usize> {
         let mut len: uInt = 0;
         assert_eq!(buf.len(), ZRAN_DICT_WIN_SIZE);
+
+        //#[cfg(target_arch = "powerpc64")]
         let ret = unsafe {
+            inflateGetDictionary(
+                self.stream.deref_mut() as *mut z_stream,
+                buf.as_mut_ptr(),
+                &mut len as *mut uInt,
+            )
+        };
+        /*
+        #[cfg(not(target_arch = "powerpc64"))]
+            let ret = unsafe {
             zng_inflateGetDictionary(
                 self.stream.deref_mut() as *mut z_stream,
                 buf.as_mut_ptr(),
                 &mut len as *mut uInt,
             )
         };
+         */
+
         if ret != Z_OK {
             Err(einval!("failed to get inflate dictionary"))
         } else {
@@ -688,11 +704,21 @@ extern "C" fn zfree(_ptr: *mut c_void, address: *mut c_void) {
 }
 
 extern "system" {
+    //#[cfg(target_arch = "powerpc64")]
+    pub fn inflateGetDictionary(
+        strm: *mut z_stream,
+        dictionary: *mut u8,
+        dictLength: *mut uInt,
+    ) -> c_int;
+
+    /*
+    #[cfg(not(target_arch = "powerpc64"))]
     pub fn zng_inflateGetDictionary(
         strm: *mut z_stream,
         dictionary: *mut u8,
         dictLength: *mut uInt,
     ) -> c_int;
+     */
 }
 
 #[cfg(test)]
