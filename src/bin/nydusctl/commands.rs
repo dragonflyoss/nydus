@@ -296,6 +296,7 @@ impl CommandFsStats {
         let metrics = client.get("v1/metrics").await?;
         let m = metrics.as_object().unwrap();
         let fop_counter = m["fop_hits"].as_array().unwrap();
+        let fop_errors = m["fop_errors"].as_array().unwrap();
         if raw {
             println!("{}", metrics);
         } else {
@@ -322,7 +323,15 @@ impl CommandFsStats {
                 print!("{:<8}", d.as_u64().unwrap());
             }
 
-            println!();
+            println!("\n");
+
+            println!("Read Errors: {}", fop_errors[4]);
+            let data_read = m["data_read"].as_u64().unwrap();
+            println!(
+                "Read Data: {}Bytes ({}MB)",
+                data_read,
+                data_read / 1024 / 1024
+            );
 
             print!(
                 r#"
