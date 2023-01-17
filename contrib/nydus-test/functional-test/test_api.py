@@ -135,7 +135,7 @@ def test_backend_swap(
     dist.put_multiple_files(100, Size(2, Unit.MB))
 
     nydus_scratch_image.set_backend(Backend.BACKEND_PROXY).create_image(
-        readahead_policy="fs", readahead_files="/".encode()
+        prefetch_policy="fs", prefetch_files="/".encode()
     )
     rafs_conf.set_rafs_backend(
         Backend.BACKEND_PROXY
@@ -168,7 +168,7 @@ def test_backend_swap(
     new_image = (
         RafsImage(nydus_anchor, nydus_scratch_image.rootfs())
         .set_backend(Backend.BACKEND_PROXY)
-        .create_image(readahead_policy="fs", readahead_files="/".encode())
+        .create_image(prefetch_policy="fs", prefetch_files="/".encode())
     )
 
     # TODO: Once upon a time, more than one fd are open. Check why this happens.

@@ -131,15 +131,20 @@ impl FileMapState {
     pub fn get_slice<T>(&self, offset: usize, count: usize) -> Result<&[T]> {
         let start = self.base.wrapping_add(offset);
         if count.checked_mul(size_of::<T>()).is_none() {
-            return Err(einval!("count to validate_slice() is too big"));
+            bail_einval!("count 0x{count:x} to validate_slice() is too big");
         }
         let size = count * size_of::<T>();
         if size.checked_add(start as usize).is_none() {
-            return Err(einval!("invalid parameter to validate_slice()"));
+            bail_einval!(
+                "invalid parameter to validate_slice(), offset 0x{offset:x}, count 0x{count:x}"
+            );
         }
         let end = start.wrapping_add(size);
         if start > end || start < self.base || end < self.base || end > self.end {
-            return Err(einval!("invalid range"));
+            bail_einval!(
+                "invalid range in validate_slice, base 0x{:p}, start 0x{start:p}, end 0x{end:p}",
+                self.base
+            );
         }
         Ok(unsafe { std::slice::from_raw_parts(start as *const T, count) })
     }

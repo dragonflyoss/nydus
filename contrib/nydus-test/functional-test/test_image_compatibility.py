@@ -54,8 +54,8 @@ def test_prefetch_with_cache(
     nydus_scratch_image.set_backend(Backend.LOCALFS).create_image(
         image_bin=converter,
         compressor=compressor,
-        readahead_policy="fs",
-        readahead_files="/".encode(),
+        prefetch_policy="fs",
+        prefetch_files="/".encode(),
     )
 
     rafs_conf.enable_rafs_blobcache(

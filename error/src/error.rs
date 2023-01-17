@@ -62,6 +62,22 @@ define_libc_error_macro!(enosys, ENOSYS);
 define_libc_error_macro!(epipe, EPIPE);
 define_libc_error_macro!(eio, EIO);
 
+/// Return EINVAL error with formatted error message.
+#[macro_export]
+macro_rules! bail_einval {
+    ($($arg:tt)*) => {{
+        return Err(einval!(format!($($arg)*)))
+    }}
+}
+
+/// Return EIO error with formatted error message.
+#[macro_export]
+macro_rules! bail_eio {
+    ($($arg:tt)*) => {{
+        return Err(eio!(format!($($arg)*)))
+    }}
+}
+
 // Add more custom error macro here if necessary
 define_error_macro!(last_error, std::io::Error::last_os_error());
 define_error_macro!(eother, std::io::Error::new(std::io::ErrorKind::Other, ""));
@@ -86,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn test_evinva() {
+    fn test_einval() {
         assert_eq!(
             check_size(0x2000).unwrap_err().kind(),
             std::io::Error::from_raw_os_error(libc::EINVAL).kind()
