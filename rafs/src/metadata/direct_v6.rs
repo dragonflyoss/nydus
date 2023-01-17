@@ -444,7 +444,7 @@ impl OndiskInodeWrapper {
                     (inode.union() as u64 * EROFS_BLOCK_SIZE) as usize
                         + index * EROFS_BLOCK_SIZE as usize
                 } else {
-                    self.offset as usize + Self::inode_xattr_size(inode) as usize
+                    self.offset as usize + Self::inode_size(inode) + Self::xattr_size(inode)
                 }
             }
             _ => return Err(RafsError::InvalidImageData),
@@ -536,17 +536,16 @@ impl OndiskInodeWrapper {
     fn find_target_block(
         &self,
         state: &Guard<Arc<DirectMappingState>>,
+        inode: &dyn RafsV6OndiskInode,
         name: &OsStr,
-    ) -> Result<usize> {
-        let inode = self.disk_inode(state);
-        if inode.size() == 0 {
-            return Err(enoent!());
+    ) -> Result<Option<usize>> {
+        if inode.size() == 0 || !self.is_dir() {
+            return Ok(None);
         }
 
         let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
         let mut first = 0;
         let mut last = (blocks_count - 1) as i64;
-        let mut target_block = 0usize;
         while first <= last {
             let pivot = first + ((last - first) >> 1);
             let head_entry = self
@@ -567,8 +566,7 @@ impl OndiskInodeWrapper {
                 )
                 .map_err(err_invalidate_data)?;
             if h_name <= name && t_name >= name {
-                target_block = pivot as usize;
-                break;
+                return Ok(Some(pivot as usize));
             } else if h_name > name {
                 last = pivot - 1;
             } else {
@@ -576,7 +574,7 @@ impl OndiskInodeWrapper {
             }
         }
 
-        Ok(target_block)
+        Ok(None)
     }
 
     fn get_parent(&mut self) -> Result<()> {
@@ -972,7 +970,7 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInodeExt>> {
         let state = self.state();
         let inode = self.disk_inode(&state);
-        if let Ok(target_block) = self.find_target_block(&state, name) {
+        if let Some(target_block) = self.find_target_block(&state, inode, name)? {
             let head_entry = self
                 .get_entry(&state, inode, target_block, 0)
                 .map_err(err_invalidate_data)?;
