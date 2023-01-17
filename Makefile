@@ -208,3 +208,6 @@ docker-example: all-static-release
 	@EXIT_CODE=$$?
 	@docker rm -f $$cid
 	@exit $$EXIT_CODE
+
+integration-test:
+	make -C smoke test
