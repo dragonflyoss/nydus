@@ -570,7 +570,6 @@ impl ZranStream {
         let mut len: uInt = 0;
         assert_eq!(buf.len(), ZRAN_DICT_WIN_SIZE);
 
-        //#[cfg(target_arch = "powerpc64")]
         let ret = unsafe {
             inflateGetDictionary(
                 self.stream.deref_mut() as *mut z_stream,
@@ -578,16 +577,6 @@ impl ZranStream {
                 &mut len as *mut uInt,
             )
         };
-        /*
-        #[cfg(not(target_arch = "powerpc64"))]
-            let ret = unsafe {
-            zng_inflateGetDictionary(
-                self.stream.deref_mut() as *mut z_stream,
-                buf.as_mut_ptr(),
-                &mut len as *mut uInt,
-            )
-        };
-         */
 
         if ret != Z_OK {
             Err(einval!("failed to get inflate dictionary"))
@@ -704,21 +693,11 @@ extern "C" fn zfree(_ptr: *mut c_void, address: *mut c_void) {
 }
 
 extern "system" {
-    //#[cfg(target_arch = "powerpc64")]
     pub fn inflateGetDictionary(
         strm: *mut z_stream,
         dictionary: *mut u8,
         dictLength: *mut uInt,
     ) -> c_int;
-
-    /*
-    #[cfg(not(target_arch = "powerpc64"))]
-    pub fn zng_inflateGetDictionary(
-        strm: *mut z_stream,
-        dictionary: *mut u8,
-        dictLength: *mut uInt,
-    ) -> c_int;
-     */
 }
 
 #[cfg(test)]
