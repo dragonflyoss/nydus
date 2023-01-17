@@ -444,7 +444,7 @@ impl OndiskInodeWrapper {
                     (inode.union() as u64 * EROFS_BLOCK_SIZE) as usize
                         + index * EROFS_BLOCK_SIZE as usize
                 } else {
-                    self.offset as usize + Self::inode_xattr_size(inode) as usize
+                    self.offset as usize + Self::inode_size(inode) + Self::xattr_size(inode)
                 }
             }
             _ => return Err(RafsError::InvalidImageData),
