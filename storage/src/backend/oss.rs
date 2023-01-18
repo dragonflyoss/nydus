@@ -8,9 +8,10 @@ use std::io::Result;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use hmac_sha1_compact::HMAC;
+use hmac::{Hmac, Mac};
 use reqwest::header::HeaderMap;
 use reqwest::Method;
+use sha1::Sha1;
 
 use nydus_api::OssConfig;
 use nydus_utils::metrics::BackendMetrics;
@@ -20,6 +21,8 @@ use crate::backend::object_storage::{ObjectStorage, ObjectStorageState};
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";
+
+type HmacSha1 = Hmac<Sha1>;
 
 // `OssState` is almost identical to `OssConfig`, but let's keep them separated.
 #[derive(Debug)]
@@ -91,8 +94,12 @@ impl ObjectStorageState for OssState {
             data.insert(4, canonicalized_oss_headers.as_str());
         }
         let data = data.join("\n");
-        let digest = HMAC::mac(data.as_bytes(), self.access_key_secret.as_bytes());
-        let signature = base64::encode(&digest);
+        let hmac = HmacSha1::new_from_slice(self.access_key_secret.as_bytes())
+            .map_err(|e| einval!(e))?
+            .chain_update(data.as_bytes())
+            .finalize()
+            .into_bytes();
+        let signature = base64::encode(&hmac);
 
         let authorization = format!("OSS {}:{}", self.access_key_id, signature);
 
