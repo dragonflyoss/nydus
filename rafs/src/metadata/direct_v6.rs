@@ -640,16 +640,15 @@ impl OndiskInodeWrapper {
         Ok(chunks)
     }
 
-    fn find_target_block(&self, name: &OsStr) -> Result<usize> {
+    fn find_target_block(&self, name: &OsStr) -> Result<Option<usize>> {
         let inode = self.disk_inode();
         if inode.size() == 0 {
-            return Err(enoent!());
+            return Ok(None);
         }
         let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
         // find target block
         let mut first = 0;
         let mut last = (blocks_count - 1) as i64;
-        let mut target_block = 0usize;
         while first <= last {
             let pivot = first + ((last - first) >> 1);
             let head_entry = self
@@ -664,15 +663,17 @@ impl OndiskInodeWrapper {
                 .entry_name(pivot as usize, entries_count - 1, entries_count)
                 .map_err(err_invalidate_data)?;
             if h_name <= name && t_name >= name {
-                target_block = pivot as usize;
-                break;
+                return Ok(Some(pivot as usize));
             } else if h_name > name {
+                if pivot == 0 {
+                    break;
+                }
                 last = pivot - 1;
             } else {
                 first = pivot + 1;
             }
         }
-        Ok(target_block)
+        Ok(None)
     }
 }
 
@@ -785,7 +786,7 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_child_by_name(&self, name: &OsStr) -> Result<Arc<dyn RafsInode>> {
         let mut target: Option<u64> = None;
         // find target dirent
-        if let Ok(target_block) = self.find_target_block(name) {
+        if let Some(target_block) = self.find_target_block(name)? {
             let head_entry = self
                 .get_entry(target_block, 0)
                 .map_err(err_invalidate_data)?;
