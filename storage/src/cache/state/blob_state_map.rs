@@ -206,7 +206,11 @@ impl RangeMap for BlobStateMap<IndexedChunkMap, u32> {
             }
         }
 
-        Ok(Some(res))
+        if res.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(res))
+        }
     }
 
     fn set_range_ready_and_clear_pending(&self, start: Self::I, count: Self::I) -> Result<()> {
