@@ -568,6 +568,9 @@ impl OndiskInodeWrapper {
             if h_name <= name && t_name >= name {
                 return Ok(Some(pivot as usize));
             } else if h_name > name {
+                if pivot == 0 {
+                    break;
+                }
                 last = pivot - 1;
             } else {
                 first = pivot + 1;
