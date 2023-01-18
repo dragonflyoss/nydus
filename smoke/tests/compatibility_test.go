@@ -13,6 +13,13 @@ import (
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 )
 
+const (
+	paramImage             = "image"
+	paramNydusImageVersion = "nydus_image_version"
+	paramNydusdVersion     = "nydusd_version"
+	paramNydusifyVersion   = "nydusify_version"
+)
+
 func getFromEnv(t *testing.T, env, version string) string {
 	version = strings.ReplaceAll(version, ".", "_")
 	key := fmt.Sprintf("%s_%s", env, version)
@@ -27,59 +34,66 @@ func getFromEnv(t *testing.T, env, version string) string {
 }
 
 func TestCompatibility(t *testing.T) {
-	images := []string{"nginx:latest"}
-	fsVersions := []string{"5", "6"}
 
-	builderVersions := []string{"v0.1.0", "v2.1.2", "latest"}
-	nydusifyVersions := []string{"v0.1.0", "v2.1.2", "latest"}
-	nydusdVersions := []string{"v0.1.0", "v2.1.2", "latest"}
+	params := tool.DescartesIterator{}
+	params.
+		Register(paramImage, []interface{}{"nginx:latest"}).
+		Register(paramFSVersion, []interface{}{"5", "6"}).
+		Register(paramNydusImageVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
+		Register(paramNydusifyVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
+		Register(paramNydusdVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
+		Skip(func(param *tool.DescartesItem) bool {
 
-	for _, image := range images {
-		sourceImage := tool.PrepareImage(t, image)
-		for _, fsVersion := range fsVersions {
-			for _, builderVersion := range builderVersions {
-				for _, nydusdVersion := range nydusdVersions {
-					for _, nydusifyVersion := range nydusifyVersions {
-						if builderVersion == "v0.1.0" && (nydusifyVersion != "v0.1.0" || fsVersion != "5") {
-							continue
-						}
-						if nydusifyVersion == "v0.1.0" && (builderVersion != "v0.1.0" || fsVersion != "5") {
-							continue
-						}
-						if nydusdVersion == "v0.1.0" && fsVersion != "5" {
-							continue
-						}
-
-						nydusifyNotSupportCompressor := nydusifyVersion == "v0.1.0"
-						nydusifyOnlySupportV5 := nydusifyVersion == "v0.1.0"
-
-						builderPath := getFromEnv(t, "NYDUS_BUILDER", builderVersion)
-						nydusdPath := getFromEnv(t, "NYDUS_NYDUSD", nydusdVersion)
-						nydusifyPath := getFromEnv(t, "NYDUS_NYDUSIFY", nydusifyVersion)
-						nydusifyCheckerPath := getFromEnv(t, "NYDUS_NYDUSIFY", "latest")
-
-						name := fmt.Sprintf(
-							"image=%s, fs_version=%s, nydus-image=%s, nydusd=%s, nydusify=%s",
-							image, fsVersion, builderVersion, nydusdVersion, nydusifyVersion,
-						)
-						ctx := tool.DefaultContext()
-						ctx.Binary = tool.BinaryContext{
-							Builder:                      builderPath,
-							Nydusd:                       nydusdPath,
-							Nydusify:                     nydusifyPath,
-							NydusifyChecker:              nydusifyCheckerPath,
-							NydusifyOnlySupportV5:        nydusifyOnlySupportV5,
-							NydusifyNotSupportCompressor: nydusifyNotSupportCompressor,
-						}
-						ctx.Build.FSVersion = fsVersion
-						ctx.Build.Compressor = "lz4_block"
-						ctx.Build.ChunkSize = "0x100000"
-						ctx.Build.OCIRef = false
-
-						t.Run(name, makeImageTest(t, *ctx, sourceImage))
-					}
-				}
+			// Nydus-image 0.1.0 only works with nydus-nydusify 0.1.0, vice versa.
+			// They both only work with rafs v5.
+			if param.GetString(paramNydusImageVersion) == "v0.1.0" || param.GetString(paramNydusifyVersion) == "v0.1.0" {
+				return param.GetString(paramNydusImageVersion) != "v0.1.0" ||
+					param.GetString(paramNydusifyVersion) != "v0.1.0" ||
+					param.GetString(paramFSVersion) != "5"
 			}
+
+			// Nydusd 0.1.0 only works with rafs v5.
+			if param.GetString(paramNydusdVersion) == "v0.1.0" {
+				return param.GetString(paramFSVersion) != "5"
+			}
+
+			return false
+		})
+
+	preparedImages := make(map[string]string)
+	for params.HasNext() {
+		param := params.Next()
+		if param == nil {
+			continue
 		}
+
+		image := param.GetString(paramImage)
+		if _, ok := preparedImages[image]; !ok {
+			preparedImages[image] = tool.PrepareImage(t, image)
+		}
+
+		nydusifyNotSupportCompressor := param.GetString(paramNydusifyVersion) == "v0.1.0"
+		nydusifyOnlySupportV5 := param.GetString(paramNydusifyVersion) == "v0.1.0"
+
+		builderPath := getFromEnv(t, "NYDUS_BUILDER", param.GetString(paramNydusImageVersion))
+		nydusdPath := getFromEnv(t, "NYDUS_NYDUSD", param.GetString(paramNydusdVersion))
+		nydusifyPath := getFromEnv(t, "NYDUS_NYDUSIFY", param.GetString(paramNydusifyVersion))
+		nydusifyCheckerPath := getFromEnv(t, "NYDUS_NYDUSIFY", "latest")
+
+		ctx := tool.DefaultContext()
+		ctx.Binary = tool.BinaryContext{
+			Builder:                      builderPath,
+			Nydusd:                       nydusdPath,
+			Nydusify:                     nydusifyPath,
+			NydusifyChecker:              nydusifyCheckerPath,
+			NydusifyOnlySupportV5:        nydusifyOnlySupportV5,
+			NydusifyNotSupportCompressor: nydusifyNotSupportCompressor,
+		}
+		ctx.Build.FSVersion = param.GetString(paramFSVersion)
+		ctx.Build.Compressor = "lz4_block"
+		ctx.Build.ChunkSize = "0x100000"
+		ctx.Build.OCIRef = false
+
+		t.Run(param.Str(), makeImageTest(t, *ctx, preparedImages[image]))
 	}
 }

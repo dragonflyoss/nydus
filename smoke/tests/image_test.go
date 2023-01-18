@@ -12,6 +12,10 @@ import (
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 )
 
+const (
+	paramZran = "zran"
+)
+
 func makeImageTest(t *testing.T, ctx tool.Context, source string) func(t *testing.T) {
 	return func(t *testing.T) {
 		t.Parallel()
@@ -58,26 +62,32 @@ func makeImageTest(t *testing.T, ctx tool.Context, source string) func(t *testin
 }
 
 func TestImage(t *testing.T) {
-	images := []string{"nginx:latest"}
-	fsVersions := []string{"5", "6"}
-	// True is for zran images
-	ociRefs := []bool{false, true}
+	params := tool.DescartesIterator{}
+	params.
+		Register(paramImage, []interface{}{"nginx:latest"}).
+		Register(paramFSVersion, []interface{}{"5", "6"}).
+		Register(paramZran, []interface{}{false, true}).
+		Skip(func(param *tool.DescartesItem) bool {
+			// Zran not work with rafs v6.
+			return param.GetString(paramFSVersion) == "5" && param.GetBool(paramZran)
+		})
 
-	for _, image := range images {
-		sourceImage := tool.PrepareImage(t, image)
-		for _, fsVersion := range fsVersions {
-			for _, ociRef := range ociRefs {
-				if fsVersion == "5" && ociRef {
-					continue
-				}
-
-				ctx := tool.DefaultContext()
-				ctx.Build.FSVersion = fsVersion
-				ctx.Build.OCIRef = ociRef
-
-				name := fmt.Sprintf("image=%s,fs_version=%s,zran=%v", image, fsVersion, ociRef)
-				t.Run(name, makeImageTest(t, *ctx, sourceImage))
-			}
+	preparedImages := make(map[string]string)
+	for params.HasNext() {
+		param := params.Next()
+		if param == nil {
+			continue
 		}
+
+		image := param.GetString(paramImage)
+		if _, ok := preparedImages[image]; !ok {
+			preparedImages[image] = tool.PrepareImage(t, image)
+		}
+
+		ctx := tool.DefaultContext()
+		ctx.Build.FSVersion = param.GetString(paramFSVersion)
+		ctx.Build.OCIRef = param.GetBool(paramZran)
+
+		t.Run(param.Str(), makeImageTest(t, *ctx, preparedImages[image]))
 	}
 }

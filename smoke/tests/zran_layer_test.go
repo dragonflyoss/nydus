@@ -5,7 +5,6 @@
 package tests
 
 import (
-	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -14,6 +13,10 @@ import (
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	paramGzip = "gzip"
 )
 
 func makeZranLayerTest(ctx tool.Context) func(t *testing.T) {
@@ -46,20 +49,19 @@ func makeZranLayerTest(ctx tool.Context) func(t *testing.T) {
 func TestZranLayer(t *testing.T) {
 	t.Parallel()
 
-	gzips := []bool{false, true}
-	cacheCompresses := []bool{true, false}
-	enablePrefetches := []bool{false, true}
+	params := tool.DescartesIterator{}
+	params.
+		Register(paramGzip, []interface{}{false, true}).
+		Register(paramCacheCompressed, []interface{}{true, false}).
+		Register(paramEnablePrefetch, []interface{}{false, true})
 
 	ctx := tool.DefaultContext()
-	for _, gzip := range gzips {
-		for _, cacheCompressed := range cacheCompresses {
-			for _, enablePrefetch := range enablePrefetches {
-				ctx.Build.OCIRefGzip = gzip
-				ctx.Runtime.CacheCompressed = cacheCompressed
-				ctx.Runtime.EnablePrefetch = enablePrefetch
-				name := fmt.Sprintf("gzip=%v,cache_compressed=%v,enable_prefetch=%v", gzip, cacheCompressed, enablePrefetch)
-				t.Run(name, makeZranLayerTest(*ctx))
-			}
-		}
+	for params.HasNext() {
+		param := params.Next()
+
+		ctx.Build.OCIRefGzip = param.GetBool(paramGzip)
+		ctx.Runtime.CacheCompressed = param.GetBool(paramCacheCompressed)
+		ctx.Runtime.EnablePrefetch = param.GetBool(paramEnablePrefetch)
+		t.Run(param.Str(), makeZranLayerTest(*ctx))
 	}
 }

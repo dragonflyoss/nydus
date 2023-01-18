@@ -5,7 +5,6 @@
 package tests
 
 import (
-	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -14,6 +13,16 @@ import (
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	paramCompressor      = "compressor"
+	paramFSVersion       = "fs_version"
+	paramChunkSize       = "chunk_size"
+	paramCacheType       = "cache_type"
+	paramCacheCompressed = "cache_compressed"
+	paramRafsMode        = "rafs_mode"
+	paramEnablePrefetch  = "enable_prefetch"
 )
 
 func makeNativeLayerTest(ctx tool.Context) func(t *testing.T) {
@@ -101,51 +110,46 @@ func makeNativeLayerTest(ctx tool.Context) func(t *testing.T) {
 func testNativeLayer(t *testing.T, ctx tool.Context) {
 	t.Parallel()
 
-	compressors := []string{"zstd", "none", "lz4_block"}
-	fsVersions := []string{"5", "6"}
-	// FIXME: specify chunk size `0x200000` case.
-	chunkSizes := []string{"0x100000"}
+	params := tool.DescartesIterator{}
+	params.
+		Register(paramCompressor, []interface{}{"zstd", "none", "lz4_block"}).
+		Register(paramFSVersion, []interface{}{"5", "6"}).
+		// FIXME: specify chunk size `0x200000` case.
+		Register(paramChunkSize, []interface{}{"0x100000"}).
+		Register(paramCacheType, []interface{}{"blobcache", ""}).
+		Register(paramCacheCompressed, []interface{}{true, false}).
+		Register(paramRafsMode, []interface{}{"direct", "cached"}).
+		Register(paramEnablePrefetch, []interface{}{false, true}).
+		Skip(func(param *tool.DescartesItem) bool {
 
-	cacheTypes := []string{"blobcache", ""}
-	cacheCompresses := []bool{true, false}
-	rafsModes := []string{"direct", "cached"}
-	enablePrefetches := []bool{false, true}
-
-	for _, compressor := range compressors {
-		for _, fsVersion := range fsVersions {
-			for _, chunkSize := range chunkSizes {
-				for _, cacheType := range cacheTypes {
-					for _, cacheCompressed := range cacheCompresses {
-						for _, rafsMode := range rafsModes {
-							for _, enablePrefetch := range enablePrefetches {
-								if fsVersion == "6" {
-									if rafsMode == "cached" || cacheType == "" {
-										continue
-									}
-								}
-								if cacheType == "" && enablePrefetch {
-									continue
-								}
-
-								ctx.Build.Compressor = compressor
-								ctx.Build.FSVersion = fsVersion
-								ctx.Build.ChunkSize = chunkSize
-								ctx.Runtime.CacheType = cacheType
-								ctx.Runtime.CacheCompressed = cacheCompressed
-								ctx.Runtime.RafsMode = rafsMode
-								ctx.Runtime.EnablePrefetch = enablePrefetch
-
-								name := fmt.Sprintf(
-									"compressor=%s,fs_version=%s,chunk_size=%s,cache_type=%s,cache_compressed=%v,rafs_mode=%s,enable_prefetch=%v",
-									compressor, fsVersion, chunkSize, cacheType, cacheCompressed, rafsMode, enablePrefetch,
-								)
-								t.Run(name, makeNativeLayerTest(ctx))
-							}
-						}
-					}
-				}
+			// rafs v6 not support cached mode nor dummy cache
+			if param.GetString(paramFSVersion) == "6" {
+				return param.GetString(paramRafsMode) == "cached" || param.GetString(paramCacheType) == ""
 			}
+
+			// dummy cache not support prefetch
+			if param.GetString(paramCacheType) == "" && param.GetBool(paramEnablePrefetch) {
+				return true
+			}
+
+			return false
+		})
+
+	for params.HasNext() {
+		param := params.Next()
+		if param == nil {
+			continue
 		}
+
+		ctx.Build.Compressor = param.GetString(paramCompressor)
+		ctx.Build.FSVersion = param.GetString(paramFSVersion)
+		ctx.Build.ChunkSize = param.GetString(paramChunkSize)
+		ctx.Runtime.CacheType = param.GetString(paramCacheType)
+		ctx.Runtime.CacheCompressed = param.GetBool(paramCacheCompressed)
+		ctx.Runtime.RafsMode = param.GetString(paramRafsMode)
+		ctx.Runtime.EnablePrefetch = param.GetBool(paramEnablePrefetch)
+
+		t.Run(param.Str(), makeNativeLayerTest(ctx))
 	}
 }
 
