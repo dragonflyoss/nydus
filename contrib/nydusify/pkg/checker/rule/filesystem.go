@@ -54,7 +54,6 @@ type Node struct {
 	Symlink string
 	UID     uint32
 	GID     uint32
-	Mtime   syscall.Timespec
 	Xattrs  map[string][]byte
 	Hash    []byte
 }
@@ -69,9 +68,9 @@ type RegistryBackendConfig struct {
 
 func (node *Node) String() string {
 	return fmt.Sprintf(
-		"Path: %s, Size: %d, Mode: %d, Rdev: %d, Symink: %s, UID: %d, GID: %d, Mtime.Sec: %d, "+
-			"Mtime.Nsec: %d, Xattrs: %v, Hash: %s", node.Path, node.Size, node.Mode, node.Rdev, node.Symlink,
-		node.UID, node.GID, node.Mtime.Sec, node.Mtime.Nsec, node.Xattrs, hex.EncodeToString(node.Hash),
+		"Path: %s, Size: %d, Mode: %d, Rdev: %d, Symink: %s, UID: %d, GID: %d, "+
+			"Xattrs: %v, Hash: %s", node.Path, node.Size, node.Mode, node.Rdev, node.Symlink,
+		node.UID, node.GID, node.Xattrs, hex.EncodeToString(node.Hash),
 	)
 }
 
@@ -103,8 +102,7 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 
 	if err := filepath.Walk(rootfs, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			logrus.Warnf("Failed to stat in mountpoint: %s", err)
-			return nil
+			return errors.Wrapf(err, "Failed to stat file %s", path)
 		}
 
 		rootfsPath, err := filepath.Rel(rootfs, path)
@@ -157,7 +155,6 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 			Symlink: symlink,
 			UID:     stat.Uid,
 			GID:     stat.Gid,
-			Mtime:   stat.Mtim,
 			Xattrs:  xattrs,
 			Hash:    hash,
 		}
@@ -286,7 +283,6 @@ func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
 func (rule *FilesystemRule) verify() error {
 	logrus.Infof("Verifying filesystem for source and Nydus image")
 
-	validate := true
 	sourceNodes := map[string]Node{}
 
 	// Concurrently walk the rootfs directory of source and Nydus image
@@ -309,25 +305,17 @@ func (rule *FilesystemRule) verify() error {
 	for path, sourceNode := range sourceNodes {
 		nydusNode, exist := nydusNodes[path]
 		if !exist {
-			logrus.Warnf("File not found in Nydus image: %s", path)
-			validate = false
-			continue
+			return fmt.Errorf("File not found in Nydus image: %s", path)
 		}
 		delete(nydusNodes, path)
 
 		if path != "/" && !reflect.DeepEqual(sourceNode, nydusNode) {
-			logrus.Warnf("File not match in Nydus image: %s <=> %s", sourceNode.String(), nydusNode.String())
-			validate = false
+			return fmt.Errorf("File not match in Nydus image: %s <=> %s", sourceNode.String(), nydusNode.String())
 		}
 	}
 
 	for path := range nydusNodes {
-		logrus.Warnf("File not found in source image: %s", path)
-		validate = false
-	}
-
-	if !validate {
-		return errors.Errorf("Failed to verify source image and Nydus image")
+		return fmt.Errorf("File not found in source image: %s", path)
 	}
 
 	return nil

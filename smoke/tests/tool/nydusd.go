@@ -1,4 +1,4 @@
-// Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2023 Nydus Developers. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -21,20 +21,21 @@ import (
 )
 
 type NydusdConfig struct {
-	EnablePrefetch bool
-	NydusdPath     string
-	BootstrapPath  string
-	ConfigPath     string
-	BackendType    string
-	BackendConfig  string
-	BlobCacheDir   string
-	APISockPath    string
-	MountPath      string
-	Mode           string
-	DigestValidate bool
+	EnablePrefetch  bool
+	NydusdPath      string
+	BootstrapPath   string
+	ConfigPath      string
+	BackendType     string
+	BackendConfig   string
+	BlobCacheDir    string
+	APISockPath     string
+	MountPath       string
+	RafsMode        string
+	DigestValidate  bool
+	CacheType       string
+	CacheCompressed bool
 }
 
-// Nydusd runs nydusd binary.
 type Nydusd struct {
 	NydusdConfig
 }
@@ -44,58 +45,48 @@ type daemonInfo struct {
 }
 
 var configTpl = `
-{
-	"device": {
-		"backend": {
-			"type": "{{.BackendType}}",
-			"config": {{.BackendConfig}}
-		},
-		"cache": {
-			"type": "blobcache",
-			"config": {
-				"work_dir": "{{.BlobCacheDir}}"
-			}
-		}
-	},
-	"mode": "{{.Mode}}",
-	"iostats_files": false,
-	"fs_prefetch": {
-		"enable": {{.EnablePrefetch}},
-		"threads_count": 10,
-		"merging_size": 131072
-	},
-	"digest_validate": {{.DigestValidate}},
-	"enable_xattr": true
-}
-`
+ {
+	 "device": {
+		 "backend": {
+			 "type": "{{.BackendType}}",
+			 "config": {{.BackendConfig}}
+		 },
+		 "cache": {
+			 "type": "{{.CacheType}}",
+			 "config": {
+				 "compressed": {{.CacheCompressed}},
+				 "work_dir": "{{.BlobCacheDir}}"
+			 }
+		 }
+	 },
+	 "mode": "{{.RafsMode}}",
+	 "iostats_files": false,
+	 "fs_prefetch": {
+		 "enable": {{.EnablePrefetch}},
+		 "threads_count": 10,
+		 "merging_size": 131072
+	 },
+	 "digest_validate": {{.DigestValidate}},
+	 "enable_xattr": true
+ }
+ `
 
 func makeConfig(conf NydusdConfig) error {
 	tpl := template.Must(template.New("").Parse(configTpl))
 
 	var ret bytes.Buffer
-	if conf.BackendType == "" {
-		conf.BackendType = "localfs"
-		conf.BackendConfig = `{"dir": "/fake"}`
-		conf.EnablePrefetch = false
-	} else {
-		if conf.BackendConfig == "" {
-			return errors.Errorf("empty backend configuration string")
-		}
-		conf.EnablePrefetch = true
-	}
 	if err := tpl.Execute(&ret, conf); err != nil {
-		return errors.New("failed to prepare configuration file for Nydusd")
+		return errors.New("prepare config template for Nydusd")
 	}
 
-	if err := os.WriteFile(conf.ConfigPath, ret.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(conf.ConfigPath, ret.Bytes(), 0600); err != nil {
 		return errors.New("write config file for Nydusd")
 	}
 
 	return nil
 }
 
-// Wait until Nydusd ready by checking daemon state RUNNING
-func checkReady(ctx context.Context, sock string) (<-chan bool, error) {
+func checkReady(ctx context.Context, sock string) <-chan bool {
 	ready := make(chan bool)
 
 	transport := &http.Transport{
@@ -147,12 +138,12 @@ func checkReady(ctx context.Context, sock string) (<-chan bool, error) {
 		}
 	}()
 
-	return ready, nil
+	return ready
 }
 
 func NewNydusd(conf NydusdConfig) (*Nydusd, error) {
 	if err := makeConfig(conf); err != nil {
-		return nil, errors.Wrapf(err, "failed to create configuration file for Nydusd")
+		return nil, errors.New("create config file for Nydusd")
 	}
 	return &Nydusd{
 		NydusdConfig: conf,
@@ -160,13 +151,9 @@ func NewNydusd(conf NydusdConfig) (*Nydusd, error) {
 }
 
 func (nydusd *Nydusd) Mount() error {
-	// Umount is called to clean up mountpoint in nydusd's mount path
-	// Flag is used as a hint to prevent redundant error message
-	nydusd.Umount(true)
+	_ = nydusd.Umount()
 
 	args := []string{
-		// For backward compatibility, do not use "fuse" subcommand in checker.
-		// "fuse",
 		"--config",
 		nydusd.ConfigPath,
 		"--mountpoint",
@@ -191,10 +178,7 @@ func (nydusd *Nydusd) Mount() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ready, err := checkReady(ctx, nydusd.APISockPath)
-	if err != nil {
-		return errors.New("check Nydusd state")
-	}
+	ready := checkReady(ctx, nydusd.APISockPath)
 
 	select {
 	case err := <-runErr:
@@ -203,21 +187,17 @@ func (nydusd *Nydusd) Mount() error {
 		}
 	case <-ready:
 		return nil
-	case <-time.After(30 * time.Second):
+	case <-time.After(10 * time.Second):
 		return errors.New("timeout to wait Nydusd ready")
 	}
 
 	return nil
 }
 
-func (nydusd *Nydusd) Umount(silent bool) error {
+func (nydusd *Nydusd) Umount() error {
 	if _, err := os.Stat(nydusd.MountPath); err == nil {
 		cmd := exec.Command("umount", nydusd.MountPath)
-
-		if !silent {
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-		}
+		cmd.Stdout = os.Stdout
 		if err := cmd.Run(); err != nil {
 			return err
 		}
