@@ -63,9 +63,6 @@ func TestCompatibility(t *testing.T) {
 	preparedImages := make(map[string]string)
 	for params.HasNext() {
 		param := params.Next()
-		if param == nil {
-			continue
-		}
 
 		image := param.GetString(paramImage)
 		if _, ok := preparedImages[image]; !ok {

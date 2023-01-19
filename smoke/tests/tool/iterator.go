@@ -47,51 +47,121 @@ func (d *DescartesItem) Str() string {
 	return sb.String()
 }
 
+// Generator of Cartesian product.
+//
+// An example is below:
+//
+//	import (
+//        "fmt"
+//        "github.com/dragonflyoss/image-service/smoke/tests/tool"
+//    )
+//
+//	products := tool.DescartesIterator{}
+//	products.
+//		Register("name", []interface{}{"foo", "imoer", "morgan"}).
+//		Register("age", []interface{}{"20", "30"}).
+//		Skip(func(item *tool.DescartesItem) bool {
+//            // skip ("morgan", "30")
+//			return item.GetString("name") == "morgan" && param.GetString("age") == "30"
+//		})
+//
+//    // output:
+//    //       age: 20, name: foo
+//    //       age: 20, name: imoer
+//    //       age: 20, name: morgan
+//    //       age: 30, name: foo
+//    //       age: 30, name: imoer
+//    for products.HasNext(){
+//        item := products.Next()
+//        fmt.Println(item.Str())
+//    }
+//
 type DescartesIterator struct {
 	cursores  []int
 	valLists  [][]interface{}
 	cursorMap map[string]int
 	skip      func(item *DescartesItem) bool
+
+	// cached result
+	nextCursors []int
+	nextItem    *DescartesItem
+	hasNext     *bool
 }
 
+// The existence of result is consistent with result of `HasNext()`.
+//
+// It is recommended to call `HasNext()` before `Next()`. However, `Next()` can be used without
+// `HasNext()` called. If there is no left item, nil is returned.
 func (c *DescartesIterator) Next() *DescartesItem {
-	var carry bool
-	for idx := range c.cursores {
-		if c.cursores[idx]+1 < len(c.valLists[idx]) {
-			carry = false
-			c.cursores[idx]++
-			break
-		} else {
-			c.cursores[idx] = 0
-			carry = true
-		}
+	if c.hasNext == nil {
+		c.calNext()
 	}
-
-	if carry {
-		for idx := range c.cursores {
-			c.cursores[idx] = len(c.valLists[idx]) - 1
-		}
+	if !*c.hasNext {
 		return nil
 	}
 
-	item := &DescartesItem{vals: make(map[string]interface{})}
-	for name, idx := range c.cursorMap {
-		item.vals[name] = c.valLists[idx][c.cursores[idx]]
-	}
+	c.cursores = c.nextCursors
+	result := c.nextItem
 
-	if c.skip != nil && c.skip(item) {
-		return nil
-	}
-	return item
+	c.clearNext()
+
+	return result
 }
 
 func (c *DescartesIterator) HasNext() bool {
-	for idx := range c.cursores {
-		if c.cursores[idx]+1 < len(c.valLists[idx]) {
-			return true
+	c.calNext()
+	return *c.hasNext
+}
+
+func (c *DescartesIterator) calNext() {
+
+	cursors := make([]int, len(c.cursores))
+	copy(cursors, c.cursores)
+
+	item := &DescartesItem{vals: make(map[string]interface{})}
+	for {
+		carried := false
+		for idx := range cursors {
+			if cursors[idx]+1 < len(c.valLists[idx]) {
+				carried = true
+				cursors[idx]++
+				break
+			} else {
+				carried = false
+				cursors[idx] = 0
+			}
+		}
+		if !carried {
+			c.noNext()
+			return
+		}
+
+		for name, idx := range c.cursorMap {
+			item.vals[name] = c.valLists[idx][cursors[idx]]
+		}
+		if c.skip == nil || !c.skip(item) {
+			c.haveNext(cursors, item)
+			return
 		}
 	}
-	return false
+}
+
+func (c *DescartesIterator) noNext() {
+	c.hasNext = func(val bool) *bool { return &val }(false)
+	c.nextCursors = nil
+	c.nextItem = nil
+}
+
+func (c *DescartesIterator) haveNext(nextCursors []int, nextItem *DescartesItem) {
+	c.hasNext = func(val bool) *bool { return &val }(true)
+	c.nextCursors = nextCursors
+	c.nextItem = nextItem
+}
+
+func (c *DescartesIterator) clearNext() {
+	c.hasNext = nil
+	c.nextCursors = nil
+	c.nextItem = nil
 }
 
 func (c *DescartesIterator) Register(name string, vals []interface{}) *DescartesIterator {
@@ -108,6 +178,9 @@ func (c *DescartesIterator) Register(name string, vals []interface{}) *Descartes
 	return c
 }
 
+// It's used to skip certain item.
+//
+// Note: The closure is strongly recommended to be idempotent. Because it's used every time `HasNext()` called.
 func (c *DescartesIterator) Skip(f func(item *DescartesItem) bool) *DescartesIterator {
 	c.skip = f
 	return c

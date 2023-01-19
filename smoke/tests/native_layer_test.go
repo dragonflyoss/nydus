@@ -137,9 +137,6 @@ func testNativeLayer(t *testing.T, ctx tool.Context) {
 
 	for params.HasNext() {
 		param := params.Next()
-		if param == nil {
-			continue
-		}
 
 		ctx.Build.Compressor = param.GetString(paramCompressor)
 		ctx.Build.FSVersion = param.GetString(paramFSVersion)
