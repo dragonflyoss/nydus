@@ -61,8 +61,8 @@ func (d *DescartesItem) Str() string {
 //		Register("name", []interface{}{"foo", "imoer", "morgan"}).
 //		Register("age", []interface{}{"20", "30"}).
 //		Skip(func(item *tool.DescartesItem) bool {
-//            // skip ("morgan", "30")
-//			return item.GetString("name") == "morgan" && param.GetString("age") == "30"
+//    		// skip ("morgan", "30")
+//    		return item.GetString("name") == "morgan" && param.GetString("age") == "30"
 //		})
 //
 //    // output:
