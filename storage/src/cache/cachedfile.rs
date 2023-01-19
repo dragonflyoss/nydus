@@ -300,7 +300,7 @@ impl FileCacheEntry {
 
             let first = old_chunks.as_ref().map(|v| v[0].id()).unwrap_or(u32::MAX);
             let mut start = 0;
-            while start < extended_chunks.len() {
+            while start < extended_chunks.len() - 1 {
                 let id = extended_chunks[start].id();
                 if id == first || set.contains(&meta.get_zran_index(id)) {
                     break;
@@ -321,7 +321,7 @@ impl FileCacheEntry {
                 end -= 1;
             }
 
-            assert!(end >= start);
+            assert!(end >= start, "start 0x{:x}, end 0x{:x}", start, end);
             if start == 0 && end == extended_chunks.len() - 1 {
                 extended_chunks
             } else {
@@ -635,8 +635,15 @@ impl BlobObject for FileCacheEntry {
         let meta = self.meta.as_ref().ok_or_else(|| enoent!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let mut chunks = meta.get_chunks_compressed(offset, size, self.prefetch_batch_size())?;
-        if let Some(meta) = self.get_blob_meta_info()? {
-            chunks = self.strip_ready_chunks(meta, None, chunks);
+        if !chunks.is_empty() {
+            if let Some(meta) = self.get_blob_meta_info()? {
+                chunks = self.strip_ready_chunks(meta, None, chunks);
+            }
+        } else {
+            panic!(
+                "fetch_range_compressed offset 0x{:x}, size 0x{:x}",
+                offset, size
+            );
         }
         if chunks.is_empty() {
             Ok(())
