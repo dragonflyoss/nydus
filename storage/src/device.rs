@@ -165,6 +165,7 @@ impl BlobInfo {
         chunk_count: u32,
         blob_features: BlobFeatures,
     ) -> Self {
+        let blob_id = blob_id.trim_end_matches('\0').to_string();
         let mut blob_info = BlobInfo {
             blob_index,
             blob_id,
