@@ -4,6 +4,8 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
+//! Infrastructure to define and implement filesystem services.
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -14,38 +16,43 @@ use std::sync::{Arc, MutexGuard};
 use fuse_backend_rs::api::{BackFileSystem, Vfs};
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
-use nydus::{Error, Result};
-use nydus::{FsBackendDescriptor, FsBackendType};
 use nydus_api::ConfigV2;
 use nydus_rafs::fs::Rafs;
 use nydus_rafs::{RafsError, RafsIoRead};
 use nydus_storage::factory::BLOB_FACTORY;
-use serde::{self, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
-use crate::upgrade::{self, UpgradeManager};
+use crate::upgrade::UpgradeManager;
+use crate::{Error, FsBackendDescriptor, FsBackendType, Result};
 
-/// Command to mount a filesystem.
+/// Request structure to mount a filesystem instance.
 #[derive(Clone)]
 pub struct FsBackendMountCmd {
+    /// Filesystem type.
     pub fs_type: FsBackendType,
+    /// Mount source.
     pub source: String,
+    /// Configuration information for the mount operation.
     pub config: String,
+    /// Filesystem mountpoint.
     pub mountpoint: String,
+    /// Optional prefetch file list.
     pub prefetch_files: Option<Vec<String>>,
 }
 
-/// Command to unmount a filesystem.
+/// Request structure to unmount a filesystem instance.
 #[derive(Clone, Deserialize, Serialize, Debug)]
 pub struct FsBackendUmountCmd {
+    /// Filesystem mountpoint.
     pub mountpoint: String,
 }
 
-/// List of filesystem backend information.
+/// List of filesystem metrics and statistics information objects.
 #[derive(Default, Serialize, Clone)]
 pub struct FsBackendCollection(HashMap<String, FsBackendDescriptor>);
 
 impl FsBackendCollection {
-    pub fn add(&mut self, id: &str, cmd: &FsBackendMountCmd) -> Result<()> {
+    fn add(&mut self, id: &str, cmd: &FsBackendMountCmd) -> Result<()> {
         // We only wash Rafs backend now.
         let fs_config = match cmd.fs_type {
             FsBackendType::Rafs => {
@@ -55,7 +62,7 @@ impl FsBackendCollection {
                 Some(cfg)
             }
             FsBackendType::PassthroughFs => {
-                // Passthrough Fs has no config ever input.
+                // Passthrough Fs has no configuration information.
                 None
             }
         };
@@ -72,17 +79,27 @@ impl FsBackendCollection {
         Ok(())
     }
 
-    pub fn del(&mut self, id: &str) {
+    fn del(&mut self, id: &str) {
         self.0.remove(id);
     }
 }
 
-/// Define services provided by a filesystem provider.
+/// Abstract interfaces for filesystem service provider.
 pub trait FsService: Send + Sync {
+    /// Get the [Vfs](https://docs.rs/fuse-backend-rs/latest/fuse_backend_rs/api/vfs/struct.Vfs.html)
+    /// object associated with the filesystem service object.
     fn get_vfs(&self) -> &Vfs;
-    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>>;
-    fn backend_collection(&self) -> MutexGuard<FsBackendCollection>;
 
+    /// Get the [BackFileSystem](https://docs.rs/fuse-backend-rs/latest/fuse_backend_rs/api/vfs/type.BackFileSystem.html)
+    /// object associated with a mount point.
+    fn backend_from_mountpoint(&self, mp: &str) -> Result<Option<Arc<BackFileSystem>>> {
+        self.get_vfs().get_rootfs(mp).map_err(|e| e.into())
+    }
+
+    /// Get handle to the optional upgrade manager.
+    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>>;
+
+    /// Mount a new filesystem instance.
     // NOTE: This method is not thread-safe, however, it is acceptable as
     // mount/umount/remount/restore_mount is invoked from single thread in FSM
     fn mount(&self, cmd: FsBackendMountCmd) -> Result<()> {
@@ -92,25 +109,36 @@ pub trait FsService: Send + Sync {
         let backend = fs_backend_factory(&cmd)?;
         let index = self.get_vfs().mount(backend, &cmd.mountpoint)?;
         info!("{} filesystem mounted at {}", &cmd.fs_type, &cmd.mountpoint);
-        self.backend_collection().add(&cmd.mountpoint, &cmd)?;
 
-        // Add mounts opaque to UpgradeManager
+        if let Err(e) = self.backend_collection().add(&cmd.mountpoint, &cmd) {
+            warn!(
+                "failed to add filesystem instance to metrics manager, {}",
+                e
+            );
+        }
         if let Some(mut mgr_guard) = self.upgrade_mgr() {
-            upgrade::add_mounts_state(&mut mgr_guard, cmd, index)?;
+            if let Err(e) = mgr_guard.add_mounts_state(cmd, index) {
+                warn!(
+                    "failed to add filesystem instance to upgrade manager, {}",
+                    e
+                );
+                warn!("disable online upgrade due to inconsistent status!!!");
+            }
         }
 
         Ok(())
     }
 
+    /// Remount a filesystem instance.
     fn remount(&self, cmd: FsBackendMountCmd) -> Result<()> {
         let rootfs = self
             .backend_from_mountpoint(&cmd.mountpoint)?
             .ok_or(Error::NotFound)?;
-        let mut bootstrap = <dyn RafsIoRead>::from_file(&&cmd.source)?;
+        let mut bootstrap = <dyn RafsIoRead>::from_file(&cmd.source)?;
         let any_fs = rootfs.deref().as_any();
         let rafs = any_fs
             .downcast_ref::<Rafs>()
-            .ok_or_else(|| Error::FsTypeMismatch("to rafs".to_string()))?;
+            .ok_or_else(|| Error::FsTypeMismatch("RAFS".to_string()))?;
         let rafs_cfg = ConfigV2::from_str(&cmd.config).map_err(RafsError::LoadConfig)?;
         let rafs_cfg = Arc::new(rafs_cfg);
 
@@ -121,16 +149,27 @@ pub trait FsService: Send + Sync {
             })?;
 
         // To update mounted time and backend configurations.
-        self.backend_collection().add(&cmd.mountpoint, &cmd)?;
-
+        if let Err(e) = self.backend_collection().add(&cmd.mountpoint, &cmd) {
+            warn!(
+                "failed to update filesystem instance to metrics manager, {}",
+                e
+            );
+        }
         // Update mounts opaque from UpgradeManager
         if let Some(mut mgr_guard) = self.upgrade_mgr() {
-            upgrade::update_mounts_state(&mut mgr_guard, cmd)?;
+            if let Err(e) = mgr_guard.update_mounts_state(cmd) {
+                warn!(
+                    "failed to update filesystem instance to upgrade manager, {}",
+                    e
+                );
+                warn!("disable online upgrade due to inconsistent status!!!");
+            }
         }
 
         Ok(())
     }
 
+    /// Umount a filesystem instance.
     fn umount(&self, cmd: FsBackendUmountCmd) -> Result<()> {
         let _ = self
             .backend_from_mountpoint(&cmd.mountpoint)?
@@ -140,7 +179,12 @@ pub trait FsService: Send + Sync {
         self.backend_collection().del(&cmd.mountpoint);
         if let Some(mut mgr_guard) = self.upgrade_mgr() {
             // Remove mount opaque from UpgradeManager
-            upgrade::remove_mounts_state(&mut mgr_guard, cmd)?;
+            if let Err(e) = mgr_guard.remove_mounts_state(cmd) {
+                warn!(
+                    "failed to remove filesystem instance from upgrade manager, {}",
+                    e
+                );
+            }
         }
 
         debug!("try to gc unused blobs");
@@ -149,10 +193,10 @@ pub trait FsService: Send + Sync {
         Ok(())
     }
 
-    fn backend_from_mountpoint(&self, mp: &str) -> Result<Option<Arc<BackFileSystem>>> {
-        self.get_vfs().get_rootfs(mp).map_err(|e| e.into())
-    }
+    /// Get list of metrics information objects about mounted filesystem instances.
+    fn backend_collection(&self) -> MutexGuard<FsBackendCollection>;
 
+    /// Export information about the filesystem service.
     fn export_backend_info(&self, mountpoint: &str) -> Result<String> {
         let fs = self
             .backend_from_mountpoint(mountpoint)?
@@ -160,14 +204,15 @@ pub trait FsService: Send + Sync {
         let any_fs = fs.deref().as_any();
         let rafs = any_fs
             .downcast_ref::<Rafs>()
-            .ok_or_else(|| Error::FsTypeMismatch("to rafs".to_string()))?;
+            .ok_or_else(|| Error::FsTypeMismatch("RAFS".to_string()))?;
         let resp = serde_json::to_string(rafs.metadata()).map_err(Error::Serde)?;
         Ok(resp)
     }
 
+    /// Export metrics about in-flight operations.
     fn export_inflight_ops(&self) -> Result<Option<String>>;
 
-    /// Provides a reference to the Any trait. This is useful to let the call access the underlying fs service.
+    /// Cast `self` to trait object of [Any] to support object downcast.
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -191,7 +236,7 @@ fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> Result<Option<Vec
     }
 }
 
-pub fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
+fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
     let prefetch_files = validate_prefetch_file_list(&cmd.prefetch_files)?;
 
     match cmd.fs_type {
@@ -221,8 +266,6 @@ pub fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
                     xattr: true,
                     ..Default::default()
                 };
-                // TODO: Passthrough Fs needs to enlarge rlimit against host. We can exploit `MountCmd`
-                // `config` field to pass such a configuration into here.
                 let passthrough_fs =
                     PassthroughFs::<()>::new(fs_cfg).map_err(Error::PassthroughFs)?;
                 passthrough_fs.import().map_err(Error::PassthroughFs)?;

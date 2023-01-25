@@ -14,6 +14,8 @@ use mio::Waker;
 use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
 
+use nydus::daemon::NydusDaemon;
+use nydus::fs_service::{FsBackendMountCmd, FsBackendUmountCmd, FsService};
 use nydus::{Error, FsBackendType};
 use nydus_api::{
     start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
@@ -21,8 +23,6 @@ use nydus_api::{
 };
 use nydus_utils::metrics;
 
-use crate::daemon::NydusDaemon;
-use crate::fs_service::{FsBackendMountCmd, FsBackendUmountCmd, FsService};
 use crate::DAEMON_CONTROLLER;
 
 struct ApiServer {

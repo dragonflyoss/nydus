@@ -17,31 +17,24 @@ use std::io::{Error, ErrorKind, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clap::parser::ValuesRef;
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use mio::{Events, Poll, Token, Waker};
 use nix::sys::signal;
 use rlimit::Resource;
 
 use nydus::blob_cache::BlobCacheMgr;
-use nydus::validate_threads_configuration;
-use nydus::Error as NydusError;
+use nydus::daemon::NydusDaemon;
+use nydus::fs_service::{FsBackendMountCmd, FsService};
+use nydus::singleton::create_daemon;
+use nydus::{validate_threads_configuration, Error as NydusError, SubCmdArgs};
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
-use crate::daemon::NydusDaemon;
-use crate::fs_service::{FsBackendMountCmd, FsService};
-use crate::service_controller::create_daemon;
 
-mod fusedev;
 #[cfg(feature = "virtiofs")]
 mod virtiofs;
 
 mod api_server_glue;
-mod daemon;
-mod fs_service;
-mod service_controller;
-mod upgrade;
 
 /// Minimal number of file descriptors reserved for system.
 const RLIMIT_NOFILE_RESERVED: u64 = 16384;
@@ -139,7 +132,7 @@ impl DaemonController {
 
         let daemon = self.daemon.lock().unwrap().take();
         if let Some(d) = daemon {
-            if let Err(e) = d.stop() {
+            if let Err(e) = d.trigger_stop() {
                 error!("failed to stop daemon: {}", e);
             }
             if let Err(e) = d.wait() {
@@ -493,37 +486,6 @@ fn handle_rlimit_nofile_option(args: &ArgMatches, option_name: &str) -> Result<(
     Ok(())
 }
 
-pub struct SubCmdArgs<'a> {
-    args: &'a ArgMatches,
-    subargs: &'a ArgMatches,
-}
-
-impl<'a> SubCmdArgs<'a> {
-    fn new(args: &'a ArgMatches, subargs: &'a ArgMatches) -> Self {
-        SubCmdArgs { args, subargs }
-    }
-
-    pub fn value_of(&self, key: &str) -> Option<&String> {
-        if let Some(v) = self.subargs.get_one::<String>(key) {
-            Some(v)
-        } else {
-            self.args.get_one::<String>(key)
-        }
-    }
-
-    pub fn values_of(&self, key: &str) -> Option<ValuesRef<String>> {
-        if let Some(v) = self.subargs.get_many::<String>(key) {
-            Some(v)
-        } else {
-            self.args.get_many::<String>(key)
-        }
-    }
-
-    pub fn is_present(&self, key: &str) -> bool {
-        self.subargs.get_flag(key) || self.args.get_flag(key)
-    }
-}
-
 fn process_fs_service(
     args: SubCmdArgs,
     bti: BuildTimeInfo,
@@ -669,12 +631,13 @@ fn process_fs_service(
         })?;
 
         let daemon = {
-            fusedev::create_fuse_daemon(
+            nydus::fusedev::create_fuse_daemon(
                 mountpoint,
                 vfs,
                 supervisor,
                 daemon_id,
                 threads,
+                DAEMON_CONTROLLER.alloc_waker(),
                 apisock,
                 args.is_present("upgrade"),
                 !args.is_present("writable"),
@@ -714,11 +677,14 @@ fn process_singleton_arguments(
     bti: BuildTimeInfo,
 ) -> Result<()> {
     info!("Start Nydus daemon in singleton mode!");
-    let daemon = create_daemon(subargs, bti).map_err(|e| {
+    let daemon = create_daemon(subargs, bti, DAEMON_CONTROLLER.alloc_waker()).map_err(|e| {
         error!("Failed to start singleton daemon: {}", e);
         e
     })?;
     DAEMON_CONTROLLER.set_singleton_mode(true);
+    if let Some(blob_mgr) = daemon.get_blob_cache_mgr() {
+        DAEMON_CONTROLLER.set_blob_cache_mgr(blob_mgr);
+    }
     DAEMON_CONTROLLER.set_daemon(daemon);
     Ok(())
 }

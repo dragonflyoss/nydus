@@ -11,6 +11,8 @@ use std::fmt::{self, Display};
 use std::io;
 use std::str::FromStr;
 
+use clap::parser::ValuesRef;
+use clap::ArgMatches;
 use fuse_backend_rs::api::vfs::VfsError;
 use fuse_backend_rs::transport::Error as FuseTransportError;
 use fuse_backend_rs::Error as FuseError;
@@ -20,8 +22,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeError;
 
 pub mod blob_cache;
+pub mod daemon;
 #[cfg(target_os = "linux")]
 pub mod fs_cache;
+pub mod fs_service;
+pub mod fusedev;
+pub mod singleton;
+pub mod upgrade;
 
 /// Error code related to Nydus library.
 #[derive(Debug)]
@@ -202,6 +209,37 @@ pub fn validate_threads_configuration<V: AsRef<str>>(v: V) -> std::result::Resul
             "invalid thread number configuration: {}",
             v.as_ref()
         ))
+    }
+}
+
+pub struct SubCmdArgs<'a> {
+    args: &'a ArgMatches,
+    subargs: &'a ArgMatches,
+}
+
+impl<'a> SubCmdArgs<'a> {
+    pub fn new(args: &'a ArgMatches, subargs: &'a ArgMatches) -> Self {
+        SubCmdArgs { args, subargs }
+    }
+
+    pub fn value_of(&self, key: &str) -> Option<&String> {
+        if let Some(v) = self.subargs.get_one::<String>(key) {
+            Some(v)
+        } else {
+            self.args.get_one::<String>(key)
+        }
+    }
+
+    pub fn values_of(&self, key: &str) -> Option<ValuesRef<String>> {
+        if let Some(v) = self.subargs.get_many::<String>(key) {
+            Some(v)
+        } else {
+            self.args.get_many::<String>(key)
+        }
+    }
+
+    pub fn is_present(&self, key: &str) -> bool {
+        self.subargs.get_flag(key) || self.args.get_flag(key)
     }
 }
 
