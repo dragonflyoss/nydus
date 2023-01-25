@@ -16,10 +16,10 @@ use fuse_backend_rs::api::{BackFileSystem, Vfs};
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
 use nydus::{FsBackendDescriptor, FsBackendType};
 use nydus_api::ConfigV2;
-use rafs::fs::Rafs;
-use rafs::{RafsError, RafsIoRead};
+use nydus_rafs::fs::Rafs;
+use nydus_rafs::{RafsError, RafsIoRead};
+use nydus_storage::factory::BLOB_FACTORY;
 use serde::{self, Deserialize, Serialize};
-use storage::factory::BLOB_FACTORY;
 
 use crate::daemon::DaemonResult;
 use crate::upgrade::{self, UpgradeManager};
