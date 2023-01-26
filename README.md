@@ -4,11 +4,14 @@
 
 [![Release Version](https://img.shields.io/github/v/release/dragonflyoss/image-service?style=flat)](https://github.com/dragonflyoss/image-service/releases)
 [![License](https://img.shields.io/crates/l/nydus-rs)](https://crates.io/crates/nydus-rs)
-[![CI](https://github.com/dragonflyoss/image-service/actions/workflows/ci.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/ci.yml)
+
+[![Smoke Test](https://github.com/dragonflyoss/image-service/actions/workflows/smoke.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/ci.yml)
 [![Image Conversion](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml)
 [![Release Test Daily](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml)
+[![Twitter](https://img.shields.io/twitter/url?style=social&url=https%3A%2F%2Ftwitter.com%2Fdragonfly_oss)](https://twitter.com/dragonfly_oss)
 [![Nydus Stars](https://img.shields.io/github/stars/dragonflyoss/image-service?label=Nydus%20Stars&style=social)](https://github.com/dragonflyoss/image-service)
 
+## Introduction
 The nydus project implements a content-addressable filesystem on top of a RAFS format that improves the current OCI image specification, in terms of container launching speed, image space, and network bandwidth efficiency, as well as data integrity.
 
 The following benchmarking result shows the performance improvement compared with the OCI image for the container cold startup elapsed time on containerd. As the OCI image size increases, the container startup time of using Nydus image remains very short.
@@ -120,13 +123,21 @@ Nydus is able to generate a tiny artifact called a `nydus zran` from an existing
 
 Nydus cooperates with Harbor community to develop [acceleration-service](https://github.com/goharbor/acceleration-service) which provides a general service for Harbor to support image acceleration based on kinds of accelerators like Nydus, eStargz, etc.
 
-## Docker graph driver
+## Run with Docker
 
-A **experimental** plugin helps to start docker container from nydus image. For more particular instructions, please refer to
+A **experimental** plugin helps to start Docker container from nydus image. For more particular instructions, please refer to [Docker Nydus Graph Driver](https://github.com/nydusaccelerator/docker-nydus-graphdriver)
 
-- [Docker Nydus Graph Driver](https://github.com/nydusaccelerator/docker-nydus-graphdriver)
+## Run with macOS
 
-## Learn Concepts and Commands
+Nydus can also run with macfuse(a.k.a osxfuse).For more details please read [nydus with macOS](./docs/nydus_with_macos.md).
+
+## Run eStargz image (with lazy pulling)
+
+The containerd remote snapshotter plugin [nydus-snapshotter](https://github.com/containerd/nydus-snapshotter) can be used to run nydus images, or to run [eStargz](https://github.com/containerd/stargz-snapshotter) images directly by appending `--enable-stargz` command line option.
+
+In the future, `zstd::chunked` can work in this way as well.
+
+## Documentation
 
 Browse the documentation to learn more. Here are some topics you may be interested in:
 
@@ -137,36 +148,20 @@ Browse the documentation to learn more. Here are some topics you may be interest
 - [The Evolution of the Nydus Image Acceleration](https://d7y.io/blog/2022/06/06/evolution-of-nydus/) \([Video](https://youtu.be/yr6CB1JN1xg)\)
 - [Introduction to Nydus Image Service on In-kernel EROFS](https://static.sched.com/hosted_files/osseu2022/59/Introduction%20to%20Nydus%20Image%20Service%20on%20In-kernel%20EROFS.pdf) \([Video](https://youtu.be/2Uog-y2Gcus)\)
 
-## Run with macos
-
-- Nydus can also run with macfuse(a.k.a osxfuse).For more details please read [nydus with macos](./docs/nydus_with_macos.md).
-
-## Run eStargz image (with lazy pulling)
-
-The containerd remote snapshotter plugin [nydus-snapshotter](https://github.com/containerd/nydus-snapshotter) can be used to run nydus images, or to run [eStargz](https://github.com/containerd/stargz-snapshotter) images directly by appending `--enable-stargz` command line option.
-
-In the future, `zstd::chunked` can work in this way as well.
-
 ## Community
 
 Nydus aims to form a **vendor-neutral opensource** image distribution solution to all communities.
 Questions, bug reports, technical discussion, feature requests and contribution are always welcomed!
 
 We're very pleased to hear your use cases any time.
-Feel free to reach/join us via Slack and/or Dingtalk
+Feel free to reach/join us via Slack and/or Dingtalk.
 
-- Slack
+- **Slack:** [Nydus Workspace](https://join.slack.com/t/nydusimageservice/shared_invite/zt-pz4qvl4y-WIh4itPNILGhPS8JqdFm_w)
 
-  Join our Slack [workspace](https://join.slack.com/t/nydusimageservice/shared_invite/zt-pz4qvl4y-WIh4itPNILGhPS8JqdFm_w)
+- **Twitter:** [@dragonfly_oss](https://twitter.com/dragonfly_oss)
 
-- Dingtalk
-
-  Join nydus-devel group by clicking [URL](https://h5.dingtalk.com/circle/healthCheckin.html?dtaction=os&corpId=dingbbd4fb77fb7c4f7f85db999db6125bc4&1fd25e0=3e15bd0&cbdbhh=qwertyuiop) on your phone.
-
-  You can also search our talking group by number _34971767_ and QR code
+- **Dingtalk:** [34971767](https://qr.dingtalk.com/action/joingroup?code=v1,k1,ioWGzuDZEIO10Bf+/ohz4RcQqAkW0MtOwoG1nbbMxQg=&_dt_no_comment=1&origin=11)
 
 <img src="./misc/dingtalk.jpg" width="250" height="300"/>
 
-Nydus bi-weekly technical community meeting is also regularly available, currrently held on Wednesdays
-at 06:00 UTC (14:00 Beijing, Shanghai) starting from Aug 10, 2022.
-For more details, please see our [HackMD](https://hackmd.io/@Nydus/Bk8u2X0p9) page.
+- **Technical Meeting:** Every Wednesday at 06:00 UTC (Beijing, Shanghai 14:00), please see our [HackMD](https://hackmd.io/@Nydus/Bk8u2X0p9) page for more information.
