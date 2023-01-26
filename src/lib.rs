@@ -10,6 +10,7 @@ extern crate nydus_error;
 use std::fmt::{self, Display};
 use std::io;
 use std::str::FromStr;
+use std::sync::mpsc::{RecvError, SendError};
 
 use clap::parser::ValuesRef;
 use clap::ArgMatches;
@@ -21,97 +22,92 @@ use nydus_rafs::RafsError;
 use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeError;
 
+use crate::daemon::DaemonStateMachineInput;
+
 pub mod blob_cache;
 pub mod daemon;
 #[cfg(target_os = "linux")]
-pub mod fs_cache;
-pub mod fs_service;
-pub mod fusedev;
-pub mod singleton;
+mod fs_cache;
+mod fs_service;
+mod fusedev;
+mod singleton;
 pub mod upgrade;
 
-/// Error code related to Nydus library.
-#[derive(Debug)]
-pub enum Error {
-    /// Object already exists.
-    AlreadyExists,
-    /// Generic error message.
-    Common(String),
-    /// Invalid arguments provided.
-    InvalidArguments(String),
-    /// Invalid config provided
-    InvalidConfig(String),
-    /// Object not found.
-    NotFound,
-    /// Daemon does not reach the stable working state yet,
-    /// some capabilities may not be provided.
-    NotReady,
-    /// Request not supported.
-    Unsupported,
-    /// Failed to serialize/deserialize message.
-    Serde(SerdeError),
-    /// Cannot spawn a new thread
-    ThreadSpawn(io::Error),
-    /// Cannot create FUSE server
-    CreateFuseServer(io::Error),
-    /*
-    /// Failed to upgrade the mount
-    UpgradeManager(UpgradeMgrError),
-     */
-    /// State-machine related error codes if something bad happens when to communicate with state-machine
-    Channel(String),
-    /// Failed to start service.
-    StartService(String),
-    /// Failed to stop service
-    ServiceStop,
-    /// Input event to stat-machine is not expected.
-    UnexpectedEvent(String),
-    /// Wait daemon failure
-    WaitDaemon(io::Error),
+pub use fs_cache::FsCacheHandler;
+pub use fs_service::{FsBackendCollection, FsBackendMountCmd, FsBackendUmountCmd, FsService};
+pub use fusedev::{create_fuse_daemon, FusedevDaemon};
+pub use singleton::create_daemon;
 
-    // Filesystem type mismatch.
+/// Error code related to Nydus library.
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    #[error("object or filesystem already exists")]
+    AlreadyExists,
+    /// Invalid arguments provided.
+    #[error("invalid argument `{0}`")]
+    InvalidArguments(String),
+    #[error("invalid configuration, {0}")]
+    InvalidConfig(String),
+    #[error("invalid prefetch file list")]
+    InvalidPrefetchList,
+    #[error("object or filesystem doesn't exist")]
+    NotFound,
+    #[error("daemon is not ready yet")]
+    NotReady,
+    #[error("unsupported request or operation")]
+    Unsupported,
+    #[error("failed to serialize/deserialize message, {0}")]
+    Serde(SerdeError),
+    #[error("failed to spawn thread, {0}")]
+    ThreadSpawn(io::Error),
+    #[error("failed to send message to channel, {0}")]
+    ChannelSend(#[from] SendError<DaemonStateMachineInput>),
+    #[error("failed to receive message from channel, {0}")]
+    ChannelReceive(#[from] RecvError),
+    #[error(transparent)]
+    UpgradeManager(upgrade::UpgradeMgrError),
+    #[error("failed to start service, {0}")]
+    StartService(String),
+    /// Input event to stat-machine is not expected.
+    #[error("unexpect state machine transition event `{0:?}`")]
+    UnexpectedEvent(DaemonStateMachineInput),
+    #[error("failed to wait daemon, {0}")]
+    WaitDaemon(#[source] io::Error),
+
+    #[error("filesystem type mismatch, expect {0}")]
     FsTypeMismatch(String),
-    /// Failure occurred in the Passthrough subsystem.
-    PassthroughFs(io::Error),
-    /// Failure occurred in the Rafs subsystem.
-    Rafs(RafsError),
-    /// Failure occurred in the VFS subsystem.
+    #[error("passthroughfs failed to handle request, {0}")]
+    PassthroughFs(#[source] io::Error),
+    #[error("RAFS failed to handle request, {0}")]
+    Rafs(#[from] RafsError),
+    #[error("VFS failed to handle request, {0:?}")]
     Vfs(VfsError),
 
-    // virtio-fs
-    /// Failed to handle event other than input event.
-    HandleEventNotEpollIn,
-    /// Failed to handle unknown event.
-    HandleEventUnknownEvent,
-    /// Fail to walk descriptor chain
-    IterateQueue,
-    /// Invalid Virtio descriptor chain.
-    InvalidDescriptorChain(FuseTransportError),
-    /// Processing queue failed.
-    ProcessQueue(FuseError),
-    /// Cannot create epoll context.
-    Epoll(io::Error),
-    /// Daemon related error
-    DaemonFailure(String),
-    /// Missing virtqueue memory
-    QueueMemoryUnset,
-
+    // fusedev
+    #[error("failed to create FUSE server, {0}")]
+    CreateFuseServer(io::Error),
     // Fuse session has been shutdown.
+    #[error("FUSE session has been shut down, {0}")]
     SessionShutdown(FuseTransportError),
-}
 
-impl Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidArguments(s) => write!(f, "Invalid argument: {}", s),
-            Self::InvalidConfig(s) => write!(f, "Invalid config: {}", s),
-            Self::DaemonFailure(s) => write!(f, "Daemon error: {}", s),
-            _ => write!(f, "{:?}", self),
-        }
-    }
+    // virtio-fs
+    #[error("failed to handle event other than input event")]
+    HandleEventNotEpollIn,
+    #[error("failed to handle unknown event")]
+    HandleEventUnknownEvent,
+    #[error("fail to walk descriptor chain")]
+    IterateQueue,
+    #[error("invalid Virtio descriptor chain, {0}")]
+    InvalidDescriptorChain(#[from] FuseTransportError),
+    #[error("failed to process FUSE request, {0}")]
+    ProcessQueue(#[from] FuseError),
+    #[error("failed to create epoll context, {0}")]
+    Epoll(#[source] io::Error),
+    #[error("vhost-user failed to process request, {0}")]
+    VhostUser(String),
+    #[error("missing memory configuration for virtio queue")]
+    QueueMemoryUnset,
 }
-
-impl std::error::Error for Error {}
 
 impl From<Error> for io::Error {
     fn from(e: Error) -> Self {
@@ -125,21 +121,15 @@ impl From<VfsError> for Error {
     }
 }
 
-impl From<RafsError> for Error {
-    fn from(error: RafsError) -> Self {
-        Error::Rafs(error)
-    }
-}
-
 impl From<Error> for DaemonErrorKind {
     fn from(e: Error) -> Self {
         use Error::*;
         match e {
-            //UpgradeManager(_) => DaemonErrorKind::UpgradeManager,
+            UpgradeManager(_) => DaemonErrorKind::UpgradeManager,
             NotReady => DaemonErrorKind::NotReady,
             Unsupported => DaemonErrorKind::Unsupported,
             Serde(e) => DaemonErrorKind::Serde(e),
-            UnexpectedEvent(e) => DaemonErrorKind::UnexpectedEvent(e),
+            UnexpectedEvent(e) => DaemonErrorKind::UnexpectedEvent(format!("{:?}", e)),
             o => DaemonErrorKind::Other(o.to_string()),
         }
     }
@@ -212,16 +202,19 @@ pub fn validate_threads_configuration<V: AsRef<str>>(v: V) -> std::result::Resul
     }
 }
 
+/// Helper to access commandline options.
 pub struct SubCmdArgs<'a> {
     args: &'a ArgMatches,
     subargs: &'a ArgMatches,
 }
 
 impl<'a> SubCmdArgs<'a> {
+    /// Create a new instance of [SubCmdArgs].
     pub fn new(args: &'a ArgMatches, subargs: &'a ArgMatches) -> Self {
         SubCmdArgs { args, subargs }
     }
 
+    /// Get value of commandline option `key`.
     pub fn value_of(&self, key: &str) -> Option<&String> {
         if let Some(v) = self.subargs.get_one::<String>(key) {
             Some(v)
@@ -230,6 +223,7 @@ impl<'a> SubCmdArgs<'a> {
         }
     }
 
+    /// Get reference to commandline option `key`.
     pub fn values_of(&self, key: &str) -> Option<ValuesRef<String>> {
         if let Some(v) = self.subargs.get_many::<String>(key) {
             Some(v)
@@ -238,6 +232,7 @@ impl<'a> SubCmdArgs<'a> {
         }
     }
 
+    /// Check whether commandline optio `key` is present.
     pub fn is_present(&self, key: &str) -> bool {
         self.subargs.get_flag(key) || self.args.get_flag(key)
     }

@@ -3,7 +3,6 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-use std::convert::From;
 use std::io::Result;
 use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -15,8 +14,7 @@ use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
 
 use nydus::daemon::NydusDaemon;
-use nydus::fs_service::{FsBackendMountCmd, FsBackendUmountCmd, FsService};
-use nydus::{Error, FsBackendType};
+use nydus::{FsBackendMountCmd, FsBackendType, FsBackendUmountCmd, FsService};
 use nydus_api::{
     start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
     ApiResult, BlobCacheEntry, BlobCacheObjectId, DaemonConf, DaemonErrorKind, MetricsErrorKind,
@@ -222,7 +220,7 @@ impl ApiServer {
 
     fn do_mount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
-            .map_err(|e| ApiError::MountFilesystem(Error::from(e).into()))?;
+            .map_err(|e| ApiError::MountFilesystem(e.into()))?;
         let fs = self.get_default_fs_service()?;
         fs.mount(FsBackendMountCmd {
             fs_type,
@@ -237,7 +235,7 @@ impl ApiServer {
 
     fn do_remount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
-            .map_err(|e| ApiError::MountFilesystem(Error::from(e).into()))?;
+            .map_err(|e| ApiError::MountFilesystem(e.into()))?;
         self.get_default_fs_service()?
             .remount(FsBackendMountCmd {
                 fs_type,

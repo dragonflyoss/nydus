@@ -266,7 +266,7 @@ impl DaemonStateMachineContext {
                 );
                 // Safe to unwrap because channel is never closed
                 self.result_sender
-                    .send(Err(Error::UnexpectedEvent(format!("{:?}", input))))
+                    .send(Err(Error::UnexpectedEvent(event)))
                     .unwrap();
                 continue;
             };

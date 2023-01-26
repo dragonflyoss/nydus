@@ -24,9 +24,10 @@ use rlimit::Resource;
 
 use nydus::blob_cache::BlobCacheMgr;
 use nydus::daemon::NydusDaemon;
-use nydus::fs_service::{FsBackendMountCmd, FsService};
-use nydus::singleton::create_daemon;
-use nydus::{validate_threads_configuration, Error as NydusError, SubCmdArgs};
+use nydus::{
+    create_daemon, validate_threads_configuration, Error as NydusError, FsBackendMountCmd,
+    FsService, SubCmdArgs,
+};
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
@@ -631,7 +632,7 @@ fn process_fs_service(
         })?;
 
         let daemon = {
-            nydus::fusedev::create_fuse_daemon(
+            nydus::create_fuse_daemon(
                 mountpoint,
                 vfs,
                 supervisor,

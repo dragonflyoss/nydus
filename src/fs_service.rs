@@ -47,7 +47,7 @@ pub struct FsBackendUmountCmd {
     pub mountpoint: String,
 }
 
-/// List of filesystem metrics and statistics information objects.
+/// List of [FsBackendDescriptor], providing filesystem metrics and statistics information.
 #[derive(Default, Serialize, Clone)]
 pub struct FsBackendCollection(HashMap<String, FsBackendDescriptor>);
 
@@ -227,7 +227,7 @@ fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> Result<Option<Vec
         let list: Vec<PathBuf> = list.iter().map(PathBuf::from).collect();
         for elem in list.iter() {
             if !elem.is_absolute() {
-                return Err(Error::Common("Illegal prefetch list".to_string()));
+                return Err(Error::InvalidPrefetchList);
             }
         }
         Ok(Some(list))

@@ -10,6 +10,10 @@ use std::path::PathBuf;
 use crate::fs_service::{FsBackendMountCmd, FsBackendUmountCmd};
 use crate::Result;
 
+/// Error codes related to upgrade manager.
+#[derive(thiserror::Error, Debug)]
+pub enum UpgradeMgrError {}
+
 /// FUSE fail-over policies.
 #[derive(PartialEq, Eq)]
 pub enum FailoverPolicy {

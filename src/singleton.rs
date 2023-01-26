@@ -221,13 +221,13 @@ impl DaemonStateMachineSubscriber for ServiceController {
             .lock()
             .unwrap()
             .send(event)
-            .map_err(|e| Error::Channel(format!("failed to send request, {}", e)))?;
+            .map_err(Error::ChannelSend)?;
 
         self.result_receiver
             .lock()
             .expect("Not expect poisoned lock!")
             .recv()
-            .map_err(|e| Error::Channel(format!("failed to receive reply, {}", e)))?
+            .map_err(Error::ChannelReceive)?
     }
 }
 

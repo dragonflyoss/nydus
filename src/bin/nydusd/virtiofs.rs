@@ -25,16 +25,13 @@ use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, Gues
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
 
-use nydus::{Error, Result};
-use nydus_app::BuildTimeInfo;
-
-use crate::daemon::{
+use nydus::daemon::{
     DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
     NydusDaemon,
 };
-use crate::fs_service::{FsBackendCollection, FsService};
-use crate::upgrade::UpgradeManager;
-use crate::FsBackendMountCmd;
+use nydus::upgrade::UpgradeManager;
+use nydus::{Error, FsBackendCollection, FsBackendMountCmd, FsService, Result};
+use nydus_app::BuildTimeInfo;
 
 const VIRTIO_F_VERSION_1: u32 = 32;
 const QUEUE_SIZE: usize = 1024;
@@ -311,7 +308,7 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
 
     fn start(&self) -> Result<()> {
         let listener =
-            Listener::new(&self.sock, true).map_err(|e| Error::StartService(format!("{:?}", e)))?;
+            Listener::new(&self.sock, true).map_err(|e| Error::StartService(format!("{}", e)))?;
         let vu_daemon = self.daemon.clone();
         let _ = thread::Builder::new()
             .name("vhost_user_listener".to_string())
@@ -327,7 +324,7 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
         Ok(())
     }
 
-    fn disconnect(&self) -> Result<()> {
+    fn umount(&self) -> Result<()> {
         Ok(())
     }
 
@@ -364,13 +361,13 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscr
             .lock()
             .unwrap()
             .send(event)
-            .map_err(|e| Error::Channel(format!("send {:?}", e)))?;
+            .map_err(Error::ChannelSend)?;
 
         self.result_receiver
             .lock()
             .expect("Not expect poisoned lock!")
             .recv()
-            .map_err(|e| Error::Channel(format!("recv {:?}", e)))?
+            .map_err(Error::ChannelReceive)?
     }
 }
 
@@ -387,7 +384,7 @@ pub fn create_virtiofs_daemon(
         Arc::new(RwLock::new(VhostUserFsBackendHandler::new(vfs.clone())?)),
         GuestMemoryAtomic::new(GuestMemoryMmap::new()),
     )
-    .map_err(|e| Error::DaemonFailure(format!("{:?}", e)))?;
+    .map_err(|e| Error::VhostUser(format!("{:?}", e)))?;
     let (trigger, events_rx) = channel::<DaemonStateMachineInput>();
     let (result_sender, result_receiver) = channel::<Result<()>>();
     let service = VirtioFsService::new(vfs);

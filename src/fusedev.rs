@@ -263,6 +263,7 @@ pub struct FusedevDaemon {
 
 impl FusedevDaemon {
     /// Create a new instance of [FusedevDaemon].
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         trigger: Sender<DaemonStateMachineInput>,
         receiver: Receiver<NydusResult<()>>,
@@ -325,13 +326,13 @@ impl DaemonStateMachineSubscriber for FusedevDaemon {
             .lock()
             .unwrap()
             .send(event)
-            .map_err(|e| NydusError::Channel(format!("failed to send request, {}", e)))?;
+            .map_err(NydusError::ChannelSend)?;
 
         self.result_receiver
             .lock()
             .expect("Not expect poisoned lock!")
             .recv()
-            .map_err(|e| NydusError::Channel(format!("failed to receive reply, {}", e)))?
+            .map_err(NydusError::ChannelReceive)?
     }
 }
 
@@ -364,7 +365,7 @@ impl NydusDaemon for FusedevDaemon {
         for _ in 0..self.threads_cnt {
             let waker = self.waker.clone();
             self.kick_one_server(waker)
-                .map_err(|e| NydusError::StartService(format!("{:?}", e)))?;
+                .map_err(|e| NydusError::StartService(format!("{}", e)))?;
         }
 
         Ok(())
