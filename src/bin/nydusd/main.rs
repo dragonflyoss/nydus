@@ -4,16 +4,13 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 #![deny(warnings)]
-#![allow(dead_code)]
-extern crate clap;
+
 #[macro_use]
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
 extern crate nydus_error;
-extern crate nydus_rafs as rafs;
-extern crate nydus_storage as storage;
 
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
@@ -27,14 +24,13 @@ use nix::sys::signal;
 use rlimit::Resource;
 
 use nydus::blob_cache::BlobCacheMgr;
+use nydus::validate_threads_configuration;
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
 
 use crate::api_server_glue::ApiServerController;
 use crate::daemon::{DaemonError, NydusDaemon};
 use crate::fs_service::{FsBackendMountCmd, FsService};
 use crate::service_controller::create_daemon;
-
-use nydus::validate_threads_configuration;
 
 mod fusedev;
 #[cfg(feature = "virtiofs")]
@@ -53,6 +49,8 @@ const RLIMIT_NOFILE_MAX: u64 = 1_000_000;
 
 lazy_static! {
     static ref DAEMON_CONTROLLER: DaemonController = DaemonController::new();
+    static ref BTI_STRING: String = BuildTimeInfo::dump().0;
+    static ref BTI: BuildTimeInfo = BuildTimeInfo::dump().1;
 }
 
 /// Controller to manage registered filesystem/blobcache/fscache services.
@@ -178,13 +176,7 @@ impl DaemonController {
     }
 }
 
-extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
-    DAEMON_CONTROLLER.shutdown();
-}
-
-const SHARED_DIR_HELP_MESSAGE: &str = "Local directory to share via passthroughfs FUSE driver";
-
-pub fn thread_validator(v: &str) -> std::result::Result<String, String> {
+fn thread_validator(v: &str) -> std::result::Result<String, String> {
     validate_threads_configuration(v).map(|s| s.to_string())
 }
 
@@ -193,7 +185,7 @@ fn append_fs_options(app: Command) -> Command {
         Arg::new("bootstrap")
             .long("bootstrap")
             .short('B')
-            .help("RAFS filesystem metadata file, which also enables `rafs` mode")
+            .help("Path to the RAFS filesystem metadata file")
             .conflicts_with("shared-dir"),
     )
     .arg(
@@ -201,7 +193,7 @@ fn append_fs_options(app: Command) -> Command {
             .long("localfs-dir")
             .short('D')
             .help(
-                "Enable 'localfs' storage backend by using the directory for blob and cache files",
+                "Path to the `localfs` working directory, which also enables the `localfs` storage backend"
             )
             .conflicts_with("config"),
     )
@@ -209,13 +201,12 @@ fn append_fs_options(app: Command) -> Command {
         Arg::new("shared-dir")
             .long("shared-dir")
             .short('s')
-            .help(SHARED_DIR_HELP_MESSAGE)
-            .conflicts_with("bootstrap"),
+            .help("Path to the directory to be shared via the `passthroughfs` FUSE driver")
     )
     .arg(
         Arg::new("prefetch-files")
             .long("prefetch-files")
-            .help("local file path which recorded files/directories to be prefetched and separated by newlines")
+            .help("Path to the prefetch configuration file containing a list of directories/files separated by newlines")
             .required(false)
             .requires("bootstrap")
             .num_args(1),
@@ -224,7 +215,7 @@ fn append_fs_options(app: Command) -> Command {
         Arg::new("virtual-mountpoint")
             .long("virtual-mountpoint")
             .short('m')
-            .help("Path within the FUSE/virtiofs device to mount the filesystem")
+            .help("Mountpoint within the FUSE/virtiofs device to mount the RAFS/passthroughfs filesystem")
             .default_value("/")
             .required(false),
     )
@@ -235,8 +226,8 @@ fn append_fuse_options(app: Command) -> Command {
         Arg::new("mountpoint")
             .long("mountpoint")
             .short('M')
-            .help("Path to mount the FUSE filesystem, target for `mount.fuse`")
-            .required(false),
+            .help("Mountpoint for the FUSE filesystem, target for `mount.fuse`")
+            .required(true),
     )
     .arg(
         Arg::new("failover-policy")
@@ -247,10 +238,11 @@ fn append_fuse_options(app: Command) -> Command {
             .required(false),
     )
     .arg(
-        Arg::new("threads")
-            .long("thread-num")
+        Arg::new("fuse-threads")
+            .long("fuse-threads")
+            .alias("thread-num")
             .default_value("4")
-            .help("Number of worker threads to serve IO requests")
+            .help("Number of worker threads to serve FUSE I/O requests")
             .value_parser(thread_validator)
             .required(false),
     )
@@ -263,7 +255,7 @@ fn append_fuse_options(app: Command) -> Command {
 }
 
 fn append_fuse_subcmd_options(cmd: Command) -> Command {
-    let subcmd = Command::new("fuse").about("Run as a dedicated FUSE server");
+    let subcmd = Command::new("fuse").about("Run the Nydus daemon as a dedicated FUSE server");
     let subcmd = append_fuse_options(subcmd);
     let subcmd = append_fs_options(subcmd);
     cmd.subcommand(subcmd)
@@ -274,21 +266,22 @@ fn append_virtiofs_options(cmd: Command) -> Command {
     cmd.arg(
         Arg::new("hybrid-mode")
             .long("hybrid-mode")
-            .help("Enables both `rafs` and `passthroughfs` modes")
+            .help("Enables both `RAFS` and `passthroughfs` filesystem drivers")
             .action(ArgAction::SetFalse)
             .required(false),
     )
     .arg(
         Arg::new("sock")
             .long("sock")
-            .help("Vhost-user API socket")
-            .required(false),
+            .help("Path to the vhost-user API socket")
+            .required(true),
     )
 }
 
 #[cfg(feature = "virtiofs")]
 fn append_virtiofs_subcmd_options(cmd: Command) -> Command {
-    let subcmd = Command::new("virtiofs").about("Run as a dedicated virtiofs server");
+    let subcmd =
+        Command::new("virtiofs").about("Run the Nydus daemon as a dedicated virtio-fs server");
     let subcmd = append_virtiofs_options(subcmd);
     let subcmd = append_fs_options(subcmd);
     cmd.subcommand(subcmd)
@@ -296,6 +289,12 @@ fn append_virtiofs_subcmd_options(cmd: Command) -> Command {
 
 fn append_fscache_options(app: Command) -> Command {
     app.arg(
+        Arg::new("fscache")
+            .long("fscache")
+            .short('F')
+            .help("Working directory for Linux fscache driver to store cache files"),
+    )
+    .arg(
         Arg::new("fscache-tag")
             .long("fscache-tag")
             .help("Tag to identify the fscache daemon instance")
@@ -311,15 +310,9 @@ fn append_fscache_options(app: Command) -> Command {
     )
 }
 
-fn append_services_subcmd_options(cmd: Command) -> Command {
+fn append_singleton_subcmd_options(cmd: Command) -> Command {
     let subcmd = Command::new("singleton")
-        .about("Run as a global daemon to host multiple blobcache/fscache/fuse/virtio-fs services")
-        .arg(
-            Arg::new("fscache")
-                .long("fscache")
-                .short('F')
-                .help("Working directory for Linux fscache driver to store cached files"),
-        );
+        .about("Run the Nydus daemon to host multiple blobcache/fscache/fuse/virtio-fs services");
     let subcmd = append_fscache_options(subcmd);
 
     // TODO: enable support of fuse service
@@ -339,12 +332,12 @@ fn append_services_subcmd_options(cmd: Command) -> Command {
 
 fn prepare_commandline_options() -> Command {
     let cmdline = Command::new("nydusd")
-        .about("Nydus BlobCache/FsCache/Image Service")
+        .about("Nydus daemon to provide BlobCache, FsCache, FUSE, Virtio-fs and container image services")
         .arg(
             Arg::new("apisock")
                 .long("apisock")
                 .short('A')
-                .help("Administration API socket")
+                .help("Path to the Nydus daemon administration API socket")
                 .required(false)
                 .global(true),
         )
@@ -352,7 +345,7 @@ fn prepare_commandline_options() -> Command {
             Arg::new("config")
                 .long("config")
                 .short('C')
-                .help("Configuration file")
+                .help("Path to the Nydus daemon configuration file")
                 .required(false)
                 .global(true),
         )
@@ -401,7 +394,7 @@ fn prepare_commandline_options() -> Command {
         .arg(
             Arg::new("supervisor")
                 .long("supervisor")
-                .help("Supervisor API socket")
+                .help("Path to the Nydus daemon supervisor API socket")
                 .required(false)
                 .requires("id")
                 .global(true),
@@ -409,18 +402,19 @@ fn prepare_commandline_options() -> Command {
         .arg(
             Arg::new("upgrade")
                 .long("upgrade")
-                .help("Starts daemon in upgrade mode")
+                .help("Start Nydus daemon in upgrade mode")
                 .action(ArgAction::SetTrue)
                 .required(false)
                 .global(true),
-        );
+        )
+        .args_conflicts_with_subcommands(true);
+
     let cmdline = append_fuse_options(cmdline);
     let cmdline = append_fs_options(cmdline);
-
     let cmdline = append_fuse_subcmd_options(cmdline);
     #[cfg(feature = "virtiofs")]
     let cmdline = append_virtiofs_subcmd_options(cmdline);
-    append_services_subcmd_options(cmdline)
+    append_singleton_subcmd_options(cmdline)
 }
 
 #[cfg(target_os = "macos")]
@@ -655,7 +649,7 @@ fn process_fs_service(
     if is_fuse {
         // threads means number of fuse service threads
         let threads: u32 = args
-            .value_of("threads")
+            .value_of("fuse-threads")
             .map(|n| n.parse().unwrap_or(1))
             .unwrap_or(1);
 
@@ -720,7 +714,7 @@ fn process_singleton_arguments(
     _apisock: Option<&str>,
     bti: BuildTimeInfo,
 ) -> Result<()> {
-    info!("Start Nydus in singleton mode!");
+    info!("Start Nydus daemon in singleton mode!");
     let daemon = create_daemon(subargs, bti).map_err(|e| {
         error!("Failed to start singleton daemon: {}", e);
         e
@@ -730,9 +724,8 @@ fn process_singleton_arguments(
     Ok(())
 }
 
-lazy_static! {
-    static ref BTI_STRING: String = BuildTimeInfo::dump().0;
-    static ref BTI: BuildTimeInfo = BuildTimeInfo::dump().1;
+extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
+    DAEMON_CONTROLLER.shutdown();
 }
 
 fn main() -> Result<()> {

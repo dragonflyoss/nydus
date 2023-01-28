@@ -23,10 +23,10 @@ use rust_fsm::*;
 use serde::{self, Serialize};
 use serde_json::Error as SerdeError;
 
-use crate::fs_service::{FsBackendCollection, FsService};
 use nydus_app::BuildTimeInfo;
-use rafs::RafsError;
+use nydus_rafs::RafsError;
 
+use crate::fs_service::{FsBackendCollection, FsService};
 use crate::upgrade::UpgradeMgrError;
 
 #[allow(dead_code)]

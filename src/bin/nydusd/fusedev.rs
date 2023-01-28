@@ -277,6 +277,7 @@ impl FusedevDaemon {
         Ok(())
     }
 
+    /*
     pub fn get_fusedev_fsservice(&self) -> &FusedevFsService {
         self.service
             .as_ref()
@@ -284,6 +285,7 @@ impl FusedevDaemon {
             .downcast_ref::<FusedevFsService>()
             .unwrap()
     }
+     */
 }
 
 impl DaemonStateMachineSubscriber for FusedevDaemon {
