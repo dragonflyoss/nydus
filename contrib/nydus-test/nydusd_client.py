@@ -70,7 +70,7 @@ def check_resp(func):
     return wrapped
 
 
-def exit_on_disconnecion(func):
+def exit_on_disconnection(func):
     def wrapped(*args):
         try:
             resp = func(*args)
@@ -135,44 +135,43 @@ class NydusAPIClient:
 
     @convert_to_dict
     @check_resp
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def get_global_metrics(self, id=None) -> dict:
         query = "" if id is None else f"?id={id}"
         path = self.build_path(f"metrics{query}")
         resp = requests.get(path)
         return resp
 
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def get_files_metrics(self, id=None) -> dict:
         query = "" if id is None else f"?id={id}"
         path = self.build_path(f"metrics/files{query}")
         resp = requests.get(path)
         return resp.json()
 
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def get_latest_files_metrics(self, id=None) -> dict:
-        query = "" if id is None else f"?id={id}"
-        path = self.build_path(f"metrics/files?latest=true")
+        path = self.build_path("metrics/files?latest=true")
         resp = requests.get(path)
         return resp.json()
 
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def get_access_patterns(self, id=None) -> dict:
         query = "" if id is None else f"?id={id}"
         path = self.build_path(f"metrics/pattern{query}")
         resp = requests.get(path)
         return resp.json()
 
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def get_backend_metrics(self, id=None):
         query = "" if id is None else f"?id={id}"
         path = self.build_path(f"metrics/backend{query}")
         resp = requests.get(path)
         return resp.json()
 
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def get_inflight_metrics(self):
-        path = self.build_path(f"metrics/inflight")
+        path = self.build_path("metrics/inflight")
         resp = requests.get(path)
         if resp.status_code == 204:
             print("No inflight requests")
@@ -182,7 +181,7 @@ class NydusAPIClient:
             return resp.json()
 
     @convert_to_dict
-    @exit_on_disconnecion
+    @exit_on_disconnection
     @retry_request(0.2, total=2)
     def get_blobcache_metrics(self, id=None):
         query = "" if id is None else f"?id={id}"
@@ -191,13 +190,13 @@ class NydusAPIClient:
         return resp
 
     @raw_json_body
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def get_daemon_info(self):
-        path = self.build_path(f"daemon")
+        path = self.build_path("daemon")
         resp = requests.get(path)
         return resp
 
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def get_events(self) -> dict:
         path = self.build_path("daemon/events")
         resp = requests.get(path)
@@ -211,7 +210,7 @@ class NydusAPIClient:
                 r = resp.json()
                 logging.info(r)
 
-                if wait_state != None:
+                if wait_state is not None:
                     if r["state"] == wait_state:
                         break
                 else:
@@ -251,7 +250,7 @@ class NydusAPIClient:
         return resp
 
     @raw_json_body
-    @exit_on_disconnecion
+    @exit_on_disconnection
     def show_daemon_backend(self, mp=None) -> dict:
         query = "" if mp is None else f"?mountpoint={mp}"
         path = self.build_path(f"daemon/backend{query}")
@@ -259,13 +258,13 @@ class NydusAPIClient:
         return resp
 
     def show_daemon_events(self):
-        path = self.build_path(f"daemon/events")
+        path = self.build_path("daemon/events")
         resp = requests.get(path)
         return resp
 
     def set_daemon_log_level(self, level):
         body_json = json.dumps({"log_level": level})
-        path = self.build_path(f"daemon")
+        path = self.build_path("daemon")
         resp = requests.put(path, data=body_json)
 
     @check_resp
