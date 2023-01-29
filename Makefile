@@ -72,7 +72,7 @@ define build_golang
 	fi
 endef
 
-.PHONY: .release_version .format .musl_target \
+.PHONY: .release_version .format .musl_target .clean_libz_sys \
 	all all-build all-release all-static-release build release static-release
 
 .release_version:
@@ -84,6 +84,11 @@ endef
 .musl_target:
 	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET_STATIC})
 
+# Workaround to clean up stale cache for libz-sys
+.clean_libz_sys:
+	@${CARGO} clean --target ${RUST_TARGET_STATIC} -p libz-sys
+	@${CARGO} clean --target ${RUST_TARGET_STATIC} --release -p libz-sys
+
 # Targets that are exposed to developers and users.
 build: .format .release_version
 	${CARGO} build $(CARGO_COMMON) $(CARGO_BUILD_FLAGS)
@@ -92,7 +97,7 @@ build: .format .release_version
 
 release: .format .release_version build
 
-static-release: .musl_target .format .release_version build
+static-release: .clean_libz_sys .musl_target .format .release_version build
 
 clean:
 	${CARGO} clean
