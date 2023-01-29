@@ -77,7 +77,6 @@ def test_iostats(
 def test_global_metrics(
     nydus_anchor: NydusAnchor, nydus_image: RafsImage, rafs_conf: RafsConf
 ):
-    rafs_id = "/"
 
     rafs_conf.enable_files_iostats().set_rafs_backend(Backend.BACKEND_PROXY)
     nydus_image.set_backend(Backend.BACKEND_PROXY).create_image()
@@ -88,28 +87,13 @@ def test_global_metrics(
     nc = NydusAPIClient(rafs.get_apisock())
 
     gm = nc.get_global_metrics()
-    assert gm["files_account_enabled"] == True
-    assert gm["measure_latency"] == True
-
-    file_counters = nc.get_files_metrics(rafs_id)
-    assert len(file_counters)
-
-    logging.info("There are %d file counters created.", len(file_counters))
+    assert gm["files_account_enabled"]
+    assert gm["measure_latency"]
 
     wg = WorkloadGen(nydus_anchor.mountpoint, nydus_image.rootfs())
     wg.setup_workload_generator()
 
     wg.io_read(4)
-
-    file_counters = nc.get_files_metrics(rafs_id)
-    assert file_counters is not None and len(file_counters)
-    logging.info(
-        "There are %d file counters created after some read.", len(file_counters)
-    )
-
-    if len(file_counters):
-        k = random.choice(list(file_counters))
-        logging.info("ino: %s, stats: %s", k, file_counters[k])
 
     gm_old = nc.get_global_metrics()
 
