@@ -178,19 +178,6 @@ impl FileCacheEntry {
         } else {
             blob_id.clone()
         };
-        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
-        let suffix = if mgr.cache_raw_data {
-            ".blob.raw"
-        } else {
-            ".blob.data"
-        };
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .open(blob_file_path.clone() + suffix)?;
-        let (chunk_map, is_direct_chunkmap) =
-            Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
         let reader = mgr
             .backend
             .get_reader(&blob_id)
@@ -205,6 +192,10 @@ impl FileCacheEntry {
         } else {
             reader.clone()
         };
+
+        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
+        let (chunk_map, is_direct_chunkmap) =
+            Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
 
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
         let blob_uncompressed_size = blob_info.uncompressed_size();
@@ -224,6 +215,17 @@ impl FileCacheEntry {
         );
 
         // Set cache file to its expected size.
+        let suffix = if mgr.cache_raw_data {
+            ".blob.raw"
+        } else {
+            ".blob.data"
+        };
+        let blob_data_file_path = blob_file_path.clone() + suffix;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&blob_data_file_path)?;
         let file_size = file.metadata()?.len();
         let cached_file_size = if mgr.cache_raw_data {
             blob_info.compressed_data_size()
