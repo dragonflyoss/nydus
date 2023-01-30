@@ -150,5 +150,5 @@ func testNativeLayer(t *testing.T, ctx tool.Context) {
 }
 
 func TestNativeLayer(t *testing.T) {
-	testNativeLayer(t, *tool.DefaultContext())
+	testNativeLayer(t, *tool.DefaultContext(t))
 }

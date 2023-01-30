@@ -5,9 +5,6 @@
 package tests
 
 import (
-	"fmt"
-	"os"
-	"strings"
 	"testing"
 
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
@@ -19,19 +16,6 @@ const (
 	paramNydusdVersion     = "nydusd_version"
 	paramNydusifyVersion   = "nydusify_version"
 )
-
-func getFromEnv(t *testing.T, env, version string) string {
-	version = strings.ReplaceAll(version, ".", "_")
-	key := fmt.Sprintf("%s_%s", env, version)
-	if version == "latest" {
-		key = env
-	}
-	binary := os.Getenv(key)
-	if binary == "" {
-		t.Skipf("skip compatibility test because no env `%s` specified", key)
-	}
-	return binary
-}
 
 func TestCompatibility(t *testing.T) {
 
@@ -72,12 +56,12 @@ func TestCompatibility(t *testing.T) {
 		nydusifyNotSupportCompressor := param.GetString(paramNydusifyVersion) == "v0.1.0"
 		nydusifyOnlySupportV5 := param.GetString(paramNydusifyVersion) == "v0.1.0"
 
-		builderPath := getFromEnv(t, "NYDUS_BUILDER", param.GetString(paramNydusImageVersion))
-		nydusdPath := getFromEnv(t, "NYDUS_NYDUSD", param.GetString(paramNydusdVersion))
-		nydusifyPath := getFromEnv(t, "NYDUS_NYDUSIFY", param.GetString(paramNydusifyVersion))
-		nydusifyCheckerPath := getFromEnv(t, "NYDUS_NYDUSIFY", "latest")
+		builderPath := tool.GetBinary(t, "NYDUS_BUILDER", param.GetString(paramNydusImageVersion))
+		nydusdPath := tool.GetBinary(t, "NYDUS_NYDUSD", param.GetString(paramNydusdVersion))
+		nydusifyPath := tool.GetBinary(t, "NYDUS_NYDUSIFY", param.GetString(paramNydusifyVersion))
+		nydusifyCheckerPath := tool.GetBinary(t, "NYDUS_NYDUSIFY", "latest")
 
-		ctx := tool.DefaultContext()
+		ctx := tool.DefaultContext(t)
 		ctx.Binary = tool.BinaryContext{
 			Builder:                      builderPath,
 			Nydusd:                       nydusdPath,
