@@ -81,7 +81,7 @@ func TestImage(t *testing.T) {
 			preparedImages[image] = tool.PrepareImage(t, image)
 		}
 
-		ctx := tool.DefaultContext()
+		ctx := tool.DefaultContext(t)
 		ctx.Build.FSVersion = param.GetString(paramFSVersion)
 		ctx.Build.OCIRef = param.GetBool(paramZran)
 

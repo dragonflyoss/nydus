@@ -54,13 +54,13 @@ type Context struct {
 	Env     EnvContext
 }
 
-func DefaultContext() *Context {
+func DefaultContext(t *testing.T) *Context {
 	return &Context{
 		Binary: BinaryContext{
-			Builder:               "nydus-image",
-			Nydusd:                "nydusd",
-			Nydusify:              "nydusify",
-			NydusifyChecker:       "nydusify",
+			Builder:               GetBinary(t, "NYDUS_BUILDER", "latest"),
+			Nydusd:                GetBinary(t, "NYDUS_NYDUSD", "latest"),
+			Nydusify:              GetBinary(t, "NYDUS_NYDUSIFY", "latest"),
+			NydusifyChecker:       GetBinary(t, "NYDUS_NYDUSIFY", "latest"),
 			NydusifyOnlySupportV5: false,
 		},
 		Build: BuildContext{

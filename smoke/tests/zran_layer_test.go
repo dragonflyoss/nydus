@@ -21,6 +21,8 @@ const (
 
 func makeZranLayerTest(ctx tool.Context) func(t *testing.T) {
 	return func(t *testing.T) {
+		t.Parallel()
+
 		// Prepare work directory
 		ctx.PrepareWorkDir(t)
 		defer ctx.Destroy(t)
@@ -47,15 +49,13 @@ func makeZranLayerTest(ctx tool.Context) func(t *testing.T) {
 }
 
 func TestZranLayer(t *testing.T) {
-	t.Parallel()
-
 	params := tool.DescartesIterator{}
 	params.
 		Register(paramGzip, []interface{}{false, true}).
 		Register(paramCacheCompressed, []interface{}{true, false}).
 		Register(paramEnablePrefetch, []interface{}{false, true})
 
-	ctx := tool.DefaultContext()
+	ctx := tool.DefaultContext(t)
 	for params.HasNext() {
 		param := params.Next()
 

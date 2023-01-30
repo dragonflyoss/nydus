@@ -5,12 +5,20 @@
 package tool
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+var defaultBinary = map[string]string{
+	"NYDUS_BUILDER":  "nydus-image",
+	"NYDUS_NYDUSD":   "nydusd",
+	"NYDUS_NYDUSIFY": "nydusify",
+}
 
 func Run(t *testing.T, cmd string) {
 	_cmd := exec.Command("sh", "-c", cmd)
@@ -32,21 +40,18 @@ func RunWithOutput(cmd string) string {
 	return string(output)
 }
 
-func GetBinaries(t *testing.T) (string, string, string) {
-	builderPath := os.Getenv("NYDUS_BUILDER")
-	if builderPath == "" {
-		builderPath = "nydus-image"
+func GetBinary(t *testing.T, env, version string) string {
+	version = strings.ReplaceAll(version, ".", "_")
+	key := fmt.Sprintf("%s_%s", env, version)
+	if version == "latest" && os.Getenv(key) == "" {
+		key = env
 	}
-
-	nydusdPath := os.Getenv("NYDUS_NYDUSD")
-	if nydusdPath == "" {
-		nydusdPath = "nydusd"
+	binary := os.Getenv(key)
+	if binary == "" {
+		if version == "latest" && defaultBinary[env] != "" {
+			return defaultBinary[env]
+		}
+		t.Fatalf("not found binary from env `%s`, version %s", env, version)
 	}
-
-	nydusifyPath := os.Getenv("NYDUS_NYDUSIFY")
-	if nydusifyPath == "" {
-		nydusifyPath = "nydusify"
-	}
-
-	return builderPath, nydusdPath, nydusifyPath
+	return binary
 }
