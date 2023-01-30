@@ -902,7 +902,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-api"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "dbs-uhttp",
  "http",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-app"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "flexi_logger",
  "libc",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-blobfs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fuse-backend-rs",
  "libc",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-error"
-version = "0.2.1"
+version = "0.2.3"
 dependencies = [
  "backtrace",
  "httpdate",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-rafs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-storage"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arc-swap",
  "base64",
@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-utils"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "flate2",

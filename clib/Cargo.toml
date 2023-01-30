@@ -16,9 +16,10 @@ crate-type = ["cdylib", "staticlib"]
 libc = "0.2.137"
 log = "0.4.17"
 fuse-backend-rs = "0.10.0"
-nydus-api = { version = "0.1.0", path = "../api" }
-nydus-rafs = { version = "0.1.0", path = "../rafs" }
+nydus-api = { version = "0.2", path = "../api" }
+nydus-rafs = { version = "0.2.0", path = "../rafs" }
 
 [features]
-backend-registry = ["nydus-rafs/backend-registry"]
+baekend-s3 = ["nydus-rafs/backend-s3"]
 backend-oss = ["nydus-rafs/backend-oss"]
+backend-registry = ["nydus-rafs/backend-registry"]

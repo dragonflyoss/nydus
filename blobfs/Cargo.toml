@@ -1,6 +1,6 @@
 [package]
 name = "nydus-blobfs"
-version = "0.1.0"
+version = "0.2.0"
 description = "Blob object file system for Nydus Image Service"
 authors = ["The Nydus Developers"]
 license = "Apache-2.0 OR BSD-3-Clause"
@@ -17,9 +17,9 @@ serde_json = "1.0.53"
 vm-memory = { version = "0.9" }
 
 nydus-error = { version = "0.2", path = "../error" }
-nydus-api = { version = "0.1", path = "../api" }
-nydus-rafs = { version = "0.1", path = "../rafs" }
-nydus-storage = { version = "0.5", path = "../storage", features = [
+nydus-api = { version = "0.2", path = "../api" }
+nydus-rafs = { version = "0.2", path = "../rafs" }
+nydus-storage = { version = "0.6", path = "../storage", features = [
     "backend-localfs",
 ] }
 
