@@ -3,7 +3,6 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-use std::convert::From;
 use std::io::Result;
 use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -14,39 +13,15 @@ use mio::Waker;
 use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
 
-use nydus::{FsBackendType, NydusError};
+use nydus::daemon::NydusDaemon;
+use nydus::{FsBackendMountCmd, FsBackendType, FsBackendUmountCmd, FsService};
 use nydus_api::{
     start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
     ApiResult, BlobCacheEntry, BlobCacheObjectId, DaemonConf, DaemonErrorKind, MetricsErrorKind,
 };
 use nydus_utils::metrics;
 
-use crate::daemon::{DaemonError, NydusDaemon};
-use crate::fs_service::{FsBackendMountCmd, FsBackendUmountCmd, FsService};
 use crate::DAEMON_CONTROLLER;
-
-impl From<DaemonError> for DaemonErrorKind {
-    fn from(e: DaemonError) -> Self {
-        use DaemonError::*;
-        match e {
-            UpgradeManager(_) => DaemonErrorKind::UpgradeManager,
-            NotReady => DaemonErrorKind::NotReady,
-            Unsupported => DaemonErrorKind::Unsupported,
-            Serde(e) => DaemonErrorKind::Serde(e),
-            UnexpectedEvent(e) => DaemonErrorKind::UnexpectedEvent(format!("{:?}", e)),
-            o => DaemonErrorKind::Other(o.to_string()),
-        }
-    }
-}
-
-impl From<NydusError> for DaemonError {
-    fn from(e: NydusError) -> Self {
-        use NydusError::*;
-        match e {
-            InvalidArguments(e) => DaemonError::FsTypeMismatch(e),
-        }
-    }
-}
 
 struct ApiServer {
     to_http: Sender<ApiResponse>,
@@ -245,7 +220,7 @@ impl ApiServer {
 
     fn do_mount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
-            .map_err(|e| ApiError::MountFilesystem(DaemonError::from(e).into()))?;
+            .map_err(|e| ApiError::MountFilesystem(e.into()))?;
         let fs = self.get_default_fs_service()?;
         fs.mount(FsBackendMountCmd {
             fs_type,
@@ -260,7 +235,7 @@ impl ApiServer {
 
     fn do_remount(&self, mountpoint: String, cmd: ApiMountCmd) -> ApiResponse {
         let fs_type = FsBackendType::from_str(&cmd.fs_type)
-            .map_err(|e| ApiError::MountFilesystem(DaemonError::from(e).into()))?;
+            .map_err(|e| ApiError::MountFilesystem(e.into()))?;
         self.get_default_fs_service()?
             .remount(FsBackendMountCmd {
                 fs_type,

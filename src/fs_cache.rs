@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-//! Handler to cooperate with Linux fscache subsystem for blob cache.
+//! FsCache manager to cooperate with the Linux fscache subsystem to support EROFS.
 
 use std::collections::hash_map::Entry::Vacant;
 use std::collections::HashMap;
