@@ -114,8 +114,7 @@ func testNativeLayer(t *testing.T, ctx tool.Context) {
 	params.
 		Register(paramCompressor, []interface{}{"zstd", "none", "lz4_block"}).
 		Register(paramFSVersion, []interface{}{"5", "6"}).
-		// FIXME: specify chunk size `0x200000` case.
-		Register(paramChunkSize, []interface{}{"0x100000"}).
+		Register(paramChunkSize, []interface{}{"0x100000", "0x200000"}).
 		Register(paramCacheType, []interface{}{"blobcache", ""}).
 		Register(paramCacheCompressed, []interface{}{true, false}).
 		Register(paramRafsMode, []interface{}{"direct", "cached"}).
