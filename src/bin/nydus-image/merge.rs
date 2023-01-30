@@ -140,6 +140,17 @@ impl Merger {
             let mut parent_blob_added = false;
             for blob in rs.superblock.get_blob_infos() {
                 let mut blob_ctx = BlobContext::from(ctx, &blob, ChunkSource::Parent)?;
+                if let Some(chunk_size) = chunk_size {
+                    ensure!(
+                        chunk_size == blob_ctx.chunk_size,
+                        "can not merge bootstraps with inconsistent chunk size, current bootstrap {:?} with chunk size {:x}, expected {:x}",
+                        bootstrap_path,
+                        blob_ctx.chunk_size,
+                        chunk_size,
+                    );
+                } else {
+                    chunk_size = Some(blob_ctx.chunk_size);
+                }
                 if chunk_dict_blobs.get(&blob.blob_id()).is_none() {
                     // It is assumed that the `nydus-image create` at each layer and `nydus-image merge` commands
                     // use the same chunk dict bootstrap. So the parent bootstrap includes multiple blobs, but
@@ -177,18 +188,6 @@ impl Merger {
                     }
                     if let Some(size) = Self::get_size_from_list(&blob_toc_sizes, layer_idx)? {
                         blob_ctx.blob_toc_size = size as u32;
-                    }
-
-                    if chunk_size.is_none() {
-                        chunk_size = Some(blob_ctx.chunk_size);
-                    }
-                    if chunk_size != Some(blob_ctx.chunk_size) {
-                        bail!(
-                            "can not merge bootstraps with inconsistent chunk size, current bootstrap {:?} with chunk size {:x}, expected {:x}",
-                            bootstrap_path,
-                            blob_ctx.chunk_size,
-                            chunk_size.unwrap(),
-                        );
                     }
                 }
 
