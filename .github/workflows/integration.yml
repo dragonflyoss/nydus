@@ -1,4 +1,4 @@
-name: Nydus Integration Test
+name: Integration Test
 
 on:
   schedule:
