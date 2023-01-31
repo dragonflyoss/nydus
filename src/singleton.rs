@@ -21,6 +21,7 @@ use crate::daemon::{
 use crate::fs_service::FsService;
 use crate::{Error, Result, SubCmdArgs};
 
+#[allow(dead_code)]
 struct ServiceController {
     bti: BuildTimeInfo,
     id: Option<String>,
