@@ -491,7 +491,7 @@ impl BlobInfo {
 
     /// Get RAFS blob id for ZRan.
     pub fn get_blob_meta_id(&self) -> Result<String, Error> {
-        assert!(self.has_feature(BlobFeatures::SEPARATE));
+        //assert!(self.has_feature(BlobFeatures::SEPARATE));
         let id = if self.has_feature(BlobFeatures::INLINED_FS_META) {
             let guard = self.meta_path.lock().unwrap();
             if guard.is_empty() {

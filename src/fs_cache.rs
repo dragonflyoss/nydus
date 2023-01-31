@@ -453,6 +453,12 @@ impl FsCacheHandler {
     ) -> String {
         let mut state = self.state.lock().unwrap();
         if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {
+            warn!(
+                "handle_open_data_blob {} {} {}",
+                hdr.object_id,
+                config.blob_info().blob_id(),
+                config.blob_info().get_blob_meta_id().unwrap_or_default()
+            );
             let fsblob = Arc::new(RwLock::new(FsCacheBlobCache {
                 cache: None,
                 config: config.clone(),

@@ -92,8 +92,11 @@ impl FsCacheMgr {
             self.prefetch_config.clone(),
             self.runtime.clone(),
             self.worker_mgr.clone(),
-        )?;
-        let entry = Arc::new(entry);
+        );
+        if entry.is_err() {
+            panic!("No fscache file associated with the blob, {:?}", blob);
+        }
+        let entry = Arc::new(entry.unwrap());
         let mut guard = self.blobs.write().unwrap();
         if let Some(entry) = guard.get(&blob.blob_id()) {
             Ok(entry.clone())
@@ -191,7 +194,7 @@ impl Drop for FsCacheMgr {
 }
 
 impl FileCacheEntry {
-    pub fn new_fs_cache(
+    fn new_fs_cache(
         mgr: &FsCacheMgr,
         blob_info: Arc<BlobInfo>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
