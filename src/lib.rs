@@ -220,7 +220,7 @@ impl<'a> SubCmdArgs<'a> {
         if let Some(v) = self.subargs.get_one::<String>(key) {
             Some(v)
         } else {
-            self.args.get_one::<String>(key)
+            self.args.try_get_one::<String>(key).unwrap_or_default()
         }
     }
 
