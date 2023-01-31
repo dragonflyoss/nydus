@@ -132,6 +132,19 @@ jobs:
       run: |
         make ut
 
+  nydus-macos-unit-test:
+    runs-on: macos-11
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v2
+      - name: build and check
+        run: |
+          rustup component add rustfmt && rustup component add clippy
+          make
+          make ut
+
   nydus-cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
