@@ -33,6 +33,7 @@ mod fusedev;
 mod singleton;
 pub mod upgrade;
 
+#[cfg(target_os = "linux")]
 pub use fs_cache::FsCacheHandler;
 pub use fs_service::{FsBackendCollection, FsBackendMountCmd, FsBackendUmountCmd, FsService};
 pub use fusedev::{create_fuse_daemon, FusedevDaemon};
