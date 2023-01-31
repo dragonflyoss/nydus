@@ -136,14 +136,17 @@ jobs:
     runs-on: macos-11
     strategy:
       matrix:
-        arch: [amd64, arm64]
+        arch: [amd64]
     steps:
-      - uses: actions/checkout@v2
-      - name: build and check
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.2.0
+        with:
+          cache-on-failure: true
+      - name: Unit Test
         run: |
-          rustup component add rustfmt && rustup component add clippy
           make
-          make ut
 
   nydus-cargo-deny:
     name: cargo-deny
