@@ -1,4 +1,4 @@
-name: Convert Top Docker Hub Images
+name: Convert & Check Images
 
 on:
   schedule:
@@ -14,34 +14,142 @@ env:
   FSCK_PATCH_PATH: misc/top_images/fsck.patch
 
 jobs:
-  convert-images:
+  nydusify-build:
     runs-on: ubuntu-latest
-    # don't run this action on forks
-    if: github.repository_owner == 'dragonflyoss'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Setup Golang
+      uses: actions/setup-go@v3
+      with:
+        go-version: ~1.18
+    - name: Golang Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-golang-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-golang-
+    - name: Build Contrib
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/local/bin v1.47.3
+        make -e DOCKER=false nydusify-release
+    - name: Upload Nydusify
+      uses: actions/upload-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd/nydusify
+
+  nydus-build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2.2.0
+      with:
+        cache-on-failure: true
+    - name: Build Nydus
+      run: |
+        rustup component add rustfmt clippy
+        make
+    - name: Upload Nydus Binaries
+      uses: actions/upload-artifact@master
+      with:
+        name: nydus-artifact
+        path: |
+          target/release/nydus-image
+          target/release/nydusd
+
+  fsck-erofs-build:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
-      - name: Install Nydus binaries
-        run: |
-          NYDUS_VERSION=$(curl --silent "https://api.github.com/repos/dragonflyoss/image-service/releases/latest" | grep -Po '"tag_name": "\K.*?(?=")')
-          wget https://github.com/dragonflyoss/image-service/releases/download/$NYDUS_VERSION/nydus-static-$NYDUS_VERSION-linux-amd64.tgz
-          tar xzf nydus-static-$NYDUS_VERSION-linux-amd64.tgz
-          sudo cp nydus-static/nydusify nydus-static/nydus-image /usr/local/bin/
-          sudo cp nydus-static/nydusd /usr/local/bin/nydusd
-      - name: Log in to the container registry
-        uses: docker/login-action@f054a8b539a109f9f41c372932f1ae047eff08c9
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/checkout@v3
       - name: Build fsck.erofs
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential git autotools-dev automake libtool pkg-config uuid-dev liblz4-dev
           git clone https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git
           cd erofs-utils && git apply ../${{ env.FSCK_PATCH_PATH }} && ./autogen.sh && ./configure && make && cd ..
           sudo cp erofs-utils/fsck/fsck.erofs /usr/local/bin/
-      - name: Convert RAFS v5 images
+      - name: Upload fsck.erofs
+        uses: actions/upload-artifact@master
+        with:
+          name: fsck-erofs-artifact
+          path: |
+            /usr/local/bin/fsck.erofs
+
+  convert-zran:
+    runs-on: ubuntu-latest
+    needs: [nydusify-build, nydus-build]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Login ghcr registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download Nydus
+        uses: actions/download-artifact@master
+        with:
+          name: nydus-artifact
+          path: /usr/local/bin
+      - name: Download Nydusify
+        uses: actions/download-artifact@master
+        with:
+          name: nydusify-artifact
+          path: /usr/local/bin
+      - name: Convert and check zran images
         run: |
+          sudo chmod +x /usr/local/bin/nydus*
+          sudo docker run -d --restart=always -p 5000:5000 registry
+          for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            echo "converting $I:latest to $I:nydus-nightly-oci-ref"
+            # for pre-built images
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+                 --oci-ref \
+                 --source $I:latest \
+                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-oci-ref
+            # use local registry for speed
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+                 --oci-ref \
+                 --source $I:latest \
+                 --target localhost:5000/$I:nydus-nightly-oci-ref
+
+            sudo rm -rf ./tmp
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
+                --target localhost:5000/$I:nydus-nightly-oci-ref
+          done
+
+  convert-native-v5:
+    runs-on: ubuntu-latest
+    needs: [nydusify-build, nydus-build]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Login ghcr registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download Nydus
+        uses: actions/download-artifact@master
+        with:
+          name: nydus-artifact
+          path: /usr/local/bin
+      - name: Download Nydusify
+        uses: actions/download-artifact@master
+        with:
+          name: nydusify-artifact
+          path: /usr/local/bin
+      - name: Convert and check RAFS v5 images
+        run: |
+          sudo chmod +x /usr/local/bin/nydus*
           sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v5"
@@ -60,8 +168,39 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
                 --target localhost:5000/$I:nydus-nightly-v5
           done
+
+  convert-native-v6:
+    runs-on: ubuntu-latest
+    needs: [nydusify-build, nydus-build, fsck-erofs-build]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Login ghcr registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download Nydus
+        uses: actions/download-artifact@master
+        with:
+          name: nydus-artifact
+          path: /usr/local/bin
+      - name: Download Nydusify
+        uses: actions/download-artifact@master
+        with:
+          name: nydusify-artifact
+          path: /usr/local/bin
+      - name: Download fsck.erofs
+        uses: actions/download-artifact@master
+        with:
+          name: fsck-erofs-artifact
+          path: /usr/local/bin
       - name: Convert and check RAFS v6 images
         run: |
+          sudo chmod +x /usr/local/bin/nydus*
+          sudo chmod +x /usr/local/bin/fsck.erofs
+          sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v6"
             # for pre-built images
