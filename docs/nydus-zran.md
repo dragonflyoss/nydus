@@ -11,26 +11,18 @@ A simple test result is shown below:
 - Workload: node -v
 - Registry Network: 3MB/s
 
-| image type             | image size | acceld conversion | acceld push | nerdctl run | read data |
-| ---------------------- | ---------- | ----------------- | ----------- | ----------- | --------- |
-| OCI v1                 | 353.05MB   | -                 | -           | 126s        | 353.05MB  |
-| Nydus (Native RAFS v6) | 337.94MB   | 29s               | 1m58s       | 11s         | 21.18MB   |
-| Nydus (Zran)           | 14MB       | 11s               | 12s         | 15s         | 28.78MB   |
+| image type             | image size | nydusify conversion | nydusify push | nerdctl run | read data |
+| ---------------------- | ---------- | ------------------- | ------------- | ----------- | --------- |
+| OCI v1                 | 353.05MB   | -                   | -             | 126s        | 353.05MB  |
+| Nydus (Native RAFS v6) | 337.94MB   | 29s                 | 1m58s         | 11s         | 21.18MB   |
+| Nydus (Zran)           | 14MB       | 11s                 | 12s           | 15s         | 28.78MB   |
 
 ## Generate nydus zran artifact
 
-1. Build `nydus-image` and `nydusd`:
+1. Get nydus components `nydusd`, `nydus-image`, `nydusify` from [release](https://github.com/dragonflyoss/image-service/releases) page (requires >= v2.2).
 
-``` bash
-git clone https://github.com/dragonflyoss/image-service.git
-
-# Install nydusd
-cargo build --target x86_64-unknown-linux-musl --release --bin nydusd
-sudo install -D -m 755 ./target/x86_64-unknown-linux-musl/release/nydusd /usr/bin
-
-# Install nydus-image
-cargo build --target x86_64-unknown-linux-musl --release --bin nydus-image
-sudo install -D -m 755 ./target/x86_64-unknown-linux-musl/release/nydus-image /usr/bin
+```
+sudo install -D -m 755 nydusd nydus-image nydusify /usr/bin
 ```
 
 2. Get nydus zran artifact:
@@ -41,20 +33,11 @@ There are some pre-generated nydus zran artifacts under the same OCI image repo 
 - `docker.io/hsiangkao/node:18` -> `docker.io/hsiangkao/node:18-nydus-oci-ref`
 - `docker.io/hsiangkao/gcc:12.2.0` -> `docker.io/hsiangkao/gcc:12.2.0-nydus-oci-ref`
 
-Or you can generate one by `accelctl` tool:
+Or you can generate one by `nydusify` tool:
 
 ``` bash
-# Clone accelctl repo
-git clone https://github.com/imeoer/acceleration-service.git -b nydus-zran-ref
-cd acceleration-service
-
-# Get compiled ./accelctl
-make
-
-# Make sure the base64 encoded registry auth is configured correctly in `./misc/config/config.nydus.ref.yaml` configuration file.
-#
 # Convert the existing OCI image `your-registry.com/node:19.0` to `your-registry.com/node:19.0-nydus-oci-ref`:
-sudo ./accelctl convert --config ./misc/config/config.nydus.ref.yaml your-registry.com/node:19.0
+sudo nydusify convert --oci-ref --source your-registry.com/node:19.0 --target your-registry.com/node:19.0-nydus-oci-ref
 ```
 
 ## Run nydus zran artifact:
