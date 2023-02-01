@@ -42,6 +42,7 @@ vhost-user-fs = ["fuse-backend-rs/vhost-user-fs"]
 backend-oss = ["nydus-storage/backend-oss"]
 backend-s3 = ["nydus-storage/backend-s3"]
 backend-registry = ["nydus-storage/backend-registry"]
+backend-http-proxy = ["nydus-storage/backend-http-proxy"]
 
 [package.metadata.docs.rs]
 all-features = true

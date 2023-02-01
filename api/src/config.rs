@@ -238,6 +238,8 @@ pub struct BackendConfigV2 {
     pub s3: Option<S3Config>,
     /// Configuration for container registry backend.
     pub registry: Option<RegistryConfig>,
+    /// Configuration for local http proxy.
+    pub http_proxy: Option<HttpProxyConfig>,
 }
 
 impl BackendConfigV2 {
@@ -271,6 +273,28 @@ impl BackendConfigV2 {
             "registry" => match self.registry.as_ref() {
                 Some(v) => {
                     if v.host.is_empty() || v.repo.is_empty() {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
+
+            "http-proxy" => match self.http_proxy.as_ref() {
+                Some(v) => {
+                    let is_valid_unix_socket_path = |path: &str| {
+                        let path = Path::new(path);
+                        path.is_absolute() && path.exists()
+                    };
+                    if v.addr.is_empty()
+                        || !(v.addr.starts_with("http://")
+                            || v.addr.starts_with("https://")
+                            || is_valid_unix_socket_path(&v.addr))
+                    {
+                        return false;
+                    }
+
+                    // check if v.path is valid url path format
+                    if Path::new(&v.path).join("any_blob_id").to_str().is_none() {
                         return false;
                     }
                 }
@@ -323,6 +347,17 @@ impl BackendConfigV2 {
             self.registry
                 .as_ref()
                 .ok_or_else(|| einval!("no configuration information for registry"))
+        }
+    }
+
+    /// Get configuration information for http proxy
+    pub fn get_http_proxy_config(&self) -> Result<&HttpProxyConfig> {
+        if &self.backend_type != "http-proxy" {
+            Err(einval!("backend type is not 'http-proxy'"))
+        } else {
+            self.http_proxy
+                .as_ref()
+                .ok_or_else(|| einval!("no configuration information for http-proxy"))
         }
     }
 }
@@ -407,6 +442,35 @@ pub struct S3Config {
     /// S3 secret
     #[serde(default)]
     pub access_key_secret: String,
+    /// Skip SSL certificate validation for HTTPS scheme.
+    #[serde(default)]
+    pub skip_verify: bool,
+    /// Drop the read request once http request timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
+    pub timeout: u32,
+    /// Drop the read request once http connection timeout, in seconds.
+    #[serde(default = "default_http_timeout")]
+    pub connect_timeout: u32,
+    /// Retry count when read request failed.
+    #[serde(default)]
+    pub retry_limit: u8,
+    /// Enable HTTP proxy for the read request.
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+    /// Enable mirrors for the read request.
+    #[serde(default)]
+    pub mirrors: Vec<MirrorConfig>,
+}
+
+/// Http proxy configuration information to access blobs.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HttpProxyConfig {
+    /// Address of http proxy server, like `http://xxx.xxx` or `https://xxx.xxx` or `/path/to/unix.sock`.
+    pub addr: String,
+    /// Path to access the blobs, like `/<_namespace>/<_repo>/blobs`.
+    /// If the http proxy server is over unix socket, this field will be ignored.
+    #[serde(default)]
+    pub path: String,
     /// Skip SSL certificate validation for HTTPS scheme.
     #[serde(default)]
     pub skip_verify: bool,
@@ -904,6 +968,7 @@ impl TryFrom<&BackendConfig> for BackendConfigV2 {
             oss: None,
             s3: None,
             registry: None,
+            http_proxy: None,
         };
 
         match value.backend_type.as_str() {

@@ -21,6 +21,8 @@ use nydus_api::{BackendConfigV2, ConfigV2};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 
+#[cfg(feature = "backend-http-proxy")]
+use crate::backend::http_proxy;
 #[cfg(feature = "backend-localfs")]
 use crate::backend::localfs;
 #[cfg(feature = "backend-oss")]
@@ -211,6 +213,11 @@ impl BlobFactory {
             #[cfg(feature = "backend-localfs")]
             "localfs" => Ok(Arc::new(localfs::LocalFs::new(
                 config.get_localfs_config()?,
+                Some(blob_id),
+            )?)),
+            #[cfg(feature = "backend-http-proxy")]
+            "http-proxy" => Ok(Arc::new(http_proxy::HttpProxy::new(
+                config.get_http_proxy_config()?,
                 Some(blob_id),
             )?)),
             _ => Err(einval!(format!(

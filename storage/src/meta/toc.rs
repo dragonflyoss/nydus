@@ -768,6 +768,7 @@ mod tests {
             oss: None,
             registry: None,
             s3: None,
+            http_proxy: None,
         };
         let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();
         let blob = blob_mgr.get_reader(id).unwrap();
@@ -815,6 +816,7 @@ mod tests {
             oss: None,
             registry: None,
             s3: None,
+            http_proxy: None,
         };
         let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();
         let blob = blob_mgr.get_reader(id).unwrap();
@@ -848,6 +850,7 @@ mod tests {
             oss: None,
             registry: None,
             s3: None,
+            http_proxy: None,
         };
         let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();
         let blob = blob_mgr.get_reader(id).unwrap();
