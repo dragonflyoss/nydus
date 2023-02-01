@@ -16,7 +16,7 @@ use tokio::runtime::Runtime;
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{BlobStateMap, IndexedChunkMap, RangeMap};
-use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
+use crate::cache::worker::{AsyncPrefetchConfig, PrefetchMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
@@ -32,8 +32,8 @@ pub struct FsCacheMgr {
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
+    prefetch_mgr: Arc<PrefetchMgr>,
     runtime: Arc<Runtime>,
-    worker_mgr: Arc<AsyncWorkerMgr>,
     work_dir: String,
     need_validation: bool,
     blobs_check_count: Arc<AtomicU8>,
@@ -56,7 +56,7 @@ impl FsCacheMgr {
         let work_dir = blob_cfg.get_work_dir()?;
         let metrics = BlobcacheMetrics::new(id, work_dir);
         let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new((&config.prefetch).into());
-        let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
+        let worker_mgr = PrefetchMgr::new(metrics.clone(), prefetch_config.clone())?;
 
         BLOB_FACTORY.start_mgr_checker();
 
@@ -66,7 +66,7 @@ impl FsCacheMgr {
             metrics,
             prefetch_config,
             runtime,
-            worker_mgr: Arc::new(worker_mgr),
+            prefetch_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
             need_validation: config.cache_validate,
             blobs_check_count: Arc::new(AtomicU8::new(0)),
@@ -91,7 +91,7 @@ impl FsCacheMgr {
             blob.clone(),
             self.prefetch_config.clone(),
             self.runtime.clone(),
-            self.worker_mgr.clone(),
+            self.prefetch_mgr.clone(),
         )?;
         let entry = Arc::new(entry);
         let mut guard = self.blobs.write().unwrap();
@@ -112,13 +112,12 @@ impl FsCacheMgr {
 
 impl BlobCacheMgr for FsCacheMgr {
     fn init(&self) -> Result<()> {
-        AsyncWorkerMgr::start(self.worker_mgr.clone())
+        self.prefetch_mgr.setup()
     }
 
     fn destroy(&self) {
         if !self.closed.load(Ordering::Acquire) {
             self.closed.store(true, Ordering::Release);
-            self.worker_mgr.stop();
             self.backend().shutdown();
             self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
         }
@@ -173,7 +172,6 @@ impl BlobCacheMgr for FsCacheMgr {
         // we should double check blobs stat, in case some blobs hadn't been created when we checked.
         if all_ready {
             if self.blobs_check_count.load(Ordering::Acquire) == FSCACHE_BLOBS_CHECK_NUM {
-                self.worker_mgr.stop();
                 self.metrics.data_all_ready.store(true, Ordering::Release);
             } else {
                 self.blobs_check_count.fetch_add(1, Ordering::Acquire);
@@ -196,7 +194,7 @@ impl FileCacheEntry {
         blob_info: Arc<BlobInfo>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
         runtime: Arc<Runtime>,
-        workers: Arc<AsyncWorkerMgr>,
+        prefetch_mgr: Arc<PrefetchMgr>,
     ) -> Result<Self> {
         if blob_info.has_feature(BlobFeatures::_V5_NO_EXT_BLOB_TABLE) {
             return Err(einval!("fscache does not support Rafs v5 blobs"));
@@ -269,7 +267,7 @@ impl FileCacheEntry {
             prefetch_state: Arc::new(AtomicU32::new(0)),
             reader,
             runtime,
-            workers,
+            prefetch_mgr,
 
             blob_compressed_size,
             blob_uncompressed_size: blob_info.uncompressed_size(),

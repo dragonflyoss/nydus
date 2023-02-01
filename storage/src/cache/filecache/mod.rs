@@ -19,7 +19,7 @@ use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{
     BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap, NoopChunkMap,
 };
-use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
+use crate::cache::worker::{AsyncPrefetchConfig, PrefetchMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
@@ -32,8 +32,8 @@ pub struct FileCacheMgr {
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
+    prefetch_mgr: Arc<PrefetchMgr>,
     runtime: Arc<Runtime>,
-    worker_mgr: Arc<AsyncWorkerMgr>,
     work_dir: String,
     validate: bool,
     disable_indexed_map: bool,
@@ -53,7 +53,7 @@ impl FileCacheMgr {
         let work_dir = blob_cfg.get_work_dir()?;
         let metrics = BlobcacheMetrics::new(id, work_dir);
         let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new((&config.prefetch).into());
-        let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
+        let worker_mgr = PrefetchMgr::new(metrics.clone(), prefetch_config.clone())?;
 
         Ok(FileCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
@@ -61,7 +61,7 @@ impl FileCacheMgr {
             metrics,
             prefetch_config,
             runtime,
-            worker_mgr: Arc::new(worker_mgr),
+            prefetch_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
             disable_indexed_map: blob_cfg.disable_indexed_map,
             validate: config.cache_validate,
@@ -87,7 +87,7 @@ impl FileCacheMgr {
             blob.clone(),
             self.prefetch_config.clone(),
             self.runtime.clone(),
-            self.worker_mgr.clone(),
+            self.prefetch_mgr.clone(),
         )?;
         let entry = Arc::new(entry);
         let mut guard = self.blobs.write().unwrap();
@@ -108,13 +108,12 @@ impl FileCacheMgr {
 
 impl BlobCacheMgr for FileCacheMgr {
     fn init(&self) -> Result<()> {
-        AsyncWorkerMgr::start(self.worker_mgr.clone())
+        self.prefetch_mgr.setup()
     }
 
     fn destroy(&self) {
         if !self.closed.load(Ordering::Acquire) {
             self.closed.store(true, Ordering::Release);
-            self.worker_mgr.stop();
             self.backend().shutdown();
             self.metrics.release().unwrap_or_else(|e| error!("{:?}", e));
         }
@@ -170,7 +169,7 @@ impl FileCacheEntry {
         blob_info: Arc<BlobInfo>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
         runtime: Arc<Runtime>,
-        workers: Arc<AsyncWorkerMgr>,
+        prefetch_mgr: Arc<PrefetchMgr>,
     ) -> Result<Self> {
         let is_separate_meta = blob_info.has_feature(BlobFeatures::SEPARATE);
         let is_tarfs = blob_info.features().is_tarfs();
@@ -296,7 +295,7 @@ impl FileCacheEntry {
             prefetch_state: Arc::new(AtomicU32::new(0)),
             reader,
             runtime,
-            workers,
+            prefetch_mgr,
 
             blob_compressed_size,
             blob_uncompressed_size,

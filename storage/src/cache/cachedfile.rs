@@ -27,7 +27,7 @@ use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
-use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
+use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, PrefetchMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
@@ -134,9 +134,9 @@ pub(crate) struct FileCacheEntry {
     pub(crate) meta: Option<FileCacheMeta>,
     pub(crate) metrics: Arc<BlobcacheMetrics>,
     pub(crate) prefetch_state: Arc<AtomicU32>,
+    pub(crate) prefetch_mgr: Arc<PrefetchMgr>,
     pub(crate) reader: Arc<dyn BlobReader>,
     pub(crate) runtime: Arc<Runtime>,
-    pub(crate) workers: Arc<AsyncWorkerMgr>,
 
     pub(crate) blob_compressed_size: u64,
     pub(crate) blob_uncompressed_size: u64,
@@ -458,7 +458,8 @@ impl BlobCache for FileCacheEntry {
                 warn!("storage: inaccurate prefetch status");
             }
             if val == 0 || val == 1 {
-                self.workers.flush_pending_prefetch_requests(&self.blob_id);
+                self.prefetch_mgr
+                    .flush_pending_prefetch_requests(&self.blob_id);
                 return Ok(());
             }
         }
@@ -477,11 +478,12 @@ impl BlobCache for FileCacheEntry {
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
             let msg = AsyncPrefetchMessage::new_blob_prefetch(
+                self.prefetch_mgr.clone(),
                 blob_cache.clone(),
                 req.offset as u64,
                 req.len as u64,
             );
-            let _ = self.workers.send_prefetch_message(msg);
+            let _ = self.prefetch_mgr.send_prefetch_message(msg);
         }
 
         // Then handle fs prefetch
@@ -494,8 +496,12 @@ impl BlobCache for FileCacheEntry {
             max_comp_size,
             max_comp_size as u64 >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
             |req: BlobIoRange| {
-                let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
-                let _ = self.workers.send_prefetch_message(msg);
+                let msg = AsyncPrefetchMessage::new_fs_prefetch(
+                    self.prefetch_mgr.clone(),
+                    blob_cache.clone(),
+                    req,
+                );
+                let _ = self.prefetch_mgr.send_prefetch_message(msg);
             },
         );
 
@@ -593,7 +599,7 @@ impl BlobCache for FileCacheEntry {
 
     fn read(&self, iovec: &mut BlobIoVec, buffers: &[FileVolatileSlice]) -> Result<usize> {
         self.metrics.total.inc();
-        self.workers.consume_prefetch_budget(iovec.size());
+        self.prefetch_mgr.consume_prefetch_budget(iovec.size());
 
         if iovec.is_empty() {
             Ok(0)
