@@ -83,7 +83,7 @@ jobs:
 
   convert-zran:
     runs-on: ubuntu-latest
-    needs: [nydusify-build, nydus-build]
+    needs: [nydusify-build, nydus-build, fsck-erofs-build]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -135,6 +135,9 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check \
                 --source localhost:5000/$I \
                 --target localhost:5000/$I:nydus-nightly-oci-ref
+
+            sudo fsck.erofs -d1 output/nydus_bootstrap
+            sudo rm -rf ./output
           done
 
   convert-native-v5:
