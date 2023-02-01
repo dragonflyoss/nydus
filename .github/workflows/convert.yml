@@ -103,9 +103,15 @@ jobs:
         with:
           name: nydusify-artifact
           path: /usr/local/bin
+      - name: Download fsck.erofs
+        uses: actions/download-artifact@master
+        with:
+          name: fsck-erofs-artifact
+          path: /usr/local/bin
       - name: Convert and check zran images
         run: |
           sudo chmod +x /usr/local/bin/nydus*
+          sudo chmod +x /usr/local/bin/fsck.erofs
           sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-oci-ref"
