@@ -1212,6 +1212,7 @@ impl BlobMetaChunkArray {
             let zran_index = entry.get_zran_index();
             let mut count = state.zran_info_array[zran_index as usize].out_size() as u64;
             let mut zran_last = zran_index;
+            let mut zran_end = entry.aligned_uncompressed_end();
 
             while index > 0 {
                 let entry = Self::get_chunk_entry(state, chunk_info_array, index - 1)?;
@@ -1244,19 +1245,21 @@ impl BlobMetaChunkArray {
                     count += ctx.out_size() as u64;
                     zran_last = entry.get_zran_index();
                 }
+                zran_end = entry.aligned_uncompressed_end();
                 vec.push(BlobMetaChunk::new(index, state));
                 index += 1;
             }
 
-            if let Some(c) = vec.last() {
-                if c.uncompressed_end() >= end {
-                    return Ok(vec);
-                }
+            if zran_end >= end {
+                return Ok(vec);
             }
             return Err(einval!(format!(
-                "entry not found index {} chunk_info_array.len {}",
+                "entry not found index {} chunk_info_array.len {}, end 0x{:x}, range [0x{:x}-0x{:x}]",
                 index,
                 chunk_info_array.len(),
+                vec.last().map(|v| v.uncompressed_end()).unwrap_or_default(),
+                start,
+                end,
             )));
         }
 
