@@ -10,15 +10,46 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"text/template"
 	"time"
 
 	"github.com/pkg/errors"
 )
+
+type GlobalMetrics struct {
+	FilesAccountEnabled bool     `json:"files_account_enabled"`
+	MeasureLatency      bool     `json:"measure_latency"`
+	AccessPattern       bool     `json:"access_pattern_enabled"`
+	DataRead            uint64   `json:"data_read"`
+	FOPS                []uint64 `json:"fop_hits"`
+}
+
+type FileMetrics struct {
+}
+
+type BackendMetrics struct {
+}
+
+type AccessPatternMetrics struct {
+	Ino                  uint64 `json:"ino"`
+	NRRead               uint64 `json:"nr_read"`
+	FirstAccessTimeSecs  uint   `json:"first_access_time_secs"`
+	FirstAccessTimeNanos uint64 `json:"first_access_time_nanos"`
+}
+
+type BlobCacheMetrics struct {
+	PrefetchDataAmount uint64 `json:"prefetch_data_amount"`
+}
+
+type InflightMetrics struct {
+	Ino uint64 `json:"inode"`
+}
 
 type NydusdConfig struct {
 	EnablePrefetch  bool
@@ -34,6 +65,10 @@ type NydusdConfig struct {
 	DigestValidate  bool
 	CacheType       string
 	CacheCompressed bool
+	IOStatsFiles    bool
+	LatestReadFiles bool
+	AccessPattern   bool
+	PrefetchFiles   []string
 }
 
 type Nydusd struct {
@@ -60,14 +95,16 @@ var configTpl = `
 		 }
 	 },
 	 "mode": "{{.RafsMode}}",
-	 "iostats_files": false,
+	 "iostats_files": {{.IOStatsFiles}},
 	 "fs_prefetch": {
 		 "enable": {{.EnablePrefetch}},
 		 "threads_count": 10,
 		 "merging_size": 131072
 	 },
 	 "digest_validate": {{.DigestValidate}},
-	 "enable_xattr": true
+	 "enable_xattr": true,
+     "latest_read_files": {{.LatestReadFiles}},
+     "access_pattern": {{.AccessPattern}}
  }
  `
 
@@ -80,13 +117,13 @@ func makeConfig(conf NydusdConfig) error {
 	}
 
 	if err := os.WriteFile(conf.ConfigPath, ret.Bytes(), 0600); err != nil {
-		return errors.New("write config file for Nydusd")
+		return errors.Wrapf(err, "write config file for Nydusd")
 	}
 
 	return nil
 }
 
-func checkReady(ctx context.Context, sock string) <-chan bool {
+func CheckReady(ctx context.Context, sock string) <-chan bool {
 	ready := make(chan bool)
 
 	transport := &http.Transport{
@@ -143,7 +180,7 @@ func checkReady(ctx context.Context, sock string) <-chan bool {
 
 func NewNydusd(conf NydusdConfig) (*Nydusd, error) {
 	if err := makeConfig(conf); err != nil {
-		return nil, errors.New("create config file for Nydusd")
+		return nil, errors.Wrap(err, "create config file for Nydusd")
 	}
 	return &Nydusd{
 		NydusdConfig: conf,
@@ -154,16 +191,18 @@ func (nydusd *Nydusd) Mount() error {
 	_ = nydusd.Umount()
 
 	args := []string{
-		"--config",
-		nydusd.ConfigPath,
 		"--mountpoint",
 		nydusd.MountPath,
-		"--bootstrap",
-		nydusd.BootstrapPath,
 		"--apisock",
 		nydusd.APISockPath,
 		"--log-level",
 		"error",
+	}
+	if len(nydusd.ConfigPath) > 0 {
+		args = append(args, "--config", nydusd.ConfigPath)
+	}
+	if len(nydusd.BootstrapPath) > 0 {
+		args = append(args, "--bootstrap", nydusd.BootstrapPath)
 	}
 
 	cmd := exec.Command(nydusd.NydusdPath, args...)
@@ -178,7 +217,7 @@ func (nydusd *Nydusd) Mount() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ready := checkReady(ctx, nydusd.APISockPath)
+	ready := CheckReady(ctx, nydusd.APISockPath)
 
 	select {
 	case err := <-runErr:
@@ -194,6 +233,64 @@ func (nydusd *Nydusd) Mount() error {
 	return nil
 }
 
+func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
+
+	err := makeConfig(config)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(config.ConfigPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	rafsConfig, err := ioutil.ReadAll(f)
+	if err != nil {
+		return err
+	}
+
+	nydusdConfig := struct {
+		Bootstrap     string   `json:"source"`
+		RafsConfig    string   `json:"config"`
+		FsType        string   `json:"fs_type"`
+		PrefetchFiles []string `json:"prefetch_files"`
+	}{
+		Bootstrap:     config.BootstrapPath,
+		RafsConfig:    string(rafsConfig),
+		FsType:        "rafs",
+		PrefetchFiles: config.PrefetchFiles,
+	}
+
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", nydusd.APISockPath)
+		},
+	}
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	body, err := json.Marshal(nydusdConfig)
+	if err != nil {
+		return err
+	}
+	_, err = client.Post(
+		fmt.Sprintf("http://unix/api/v1/mount?mountpoint=%s", config.MountPath),
+		"application/json",
+		bytes.NewBuffer(body),
+	)
+
+	return err
+}
+
 func (nydusd *Nydusd) Umount() error {
 	if _, err := os.Stat(nydusd.MountPath); err == nil {
 		cmd := exec.Command("umount", nydusd.MountPath)
@@ -203,4 +300,291 @@ func (nydusd *Nydusd) Umount() error {
 		}
 	}
 	return nil
+}
+
+func (nydusd *Nydusd) GetGlobalMetrics() (*GlobalMetrics, error) {
+
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", nydusd.APISockPath)
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	resp, err := client.Get(fmt.Sprintf("http://unix%s", "/api/v1/metrics"))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var info GlobalMetrics
+	if err = json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+
+	return &info, nil
+}
+
+func (nydusd *Nydusd) GetFilesMetrics(id string) (map[string]FileMetrics, error) {
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", nydusd.APISockPath)
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	resp, err := client.Get(fmt.Sprintf("http://unix/api/v1/metrics/files?id=%s", id))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	info := make(map[string]FileMetrics)
+	if err = json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+func (nydusd *Nydusd) GetBackendMetrics(id string) (*BackendMetrics, error) {
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", nydusd.APISockPath)
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	resp, err := client.Get(fmt.Sprintf("http://unix/api/v1/metrics/backend?id=%s", id))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var info BackendMetrics
+	if err = json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+
+	return &info, nil
+}
+
+func (nydusd *Nydusd) GetLatestFileMetrics() ([][]uint64, error) {
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", nydusd.APISockPath)
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	resp, err := client.Get("http://unix/api/v1/metrics/files?latest=true")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var info [][]uint64
+	if err = json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+func (nydusd *Nydusd) GetAccessPatternMetrics(id string) ([]AccessPatternMetrics, error) {
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", nydusd.APISockPath)
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	args := ""
+	if len(id) > 0 {
+		args += "?id=" + id
+	}
+
+	resp, err := client.Get(fmt.Sprintf("http://unix/api/v1/metrics/pattern%s", args))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if strings.Contains(string(body), "Pattern(Metrics(Stats(NoCounter)))") {
+		return nil, nil
+	}
+
+	var info []AccessPatternMetrics
+	if err = json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+
+	return info, nil
+}
+
+func (nydusd *Nydusd) GetBlobCacheMetrics(id string) (*BlobCacheMetrics, error) {
+
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", nydusd.APISockPath)
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	args := ""
+	if len(id) > 0 {
+		args += "?id=" + id
+	}
+
+	resp, err := client.Get(fmt.Sprintf("http://unix/api/v1/metrics/blobcache%s", args))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var info BlobCacheMetrics
+	if err = json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+
+	return &info, nil
+}
+
+func (nydusd *Nydusd) GetInflightMetrics() (*InflightMetrics, error) {
+
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", nydusd.APISockPath)
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	resp, err := client.Get("http://unix/api/v1/metrics/inflight")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var info InflightMetrics
+	if err = json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+
+	return &info, err
 }
