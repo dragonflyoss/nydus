@@ -708,7 +708,8 @@ impl RafsSuper {
             }
         }
 
-        if blob_accessible
+        if !config.is_fs_cache()
+            && blob_accessible
             && (validate_digest || config.is_chunk_validation_enabled())
             && rs.meta.has_inlined_chunk_digest()
         {

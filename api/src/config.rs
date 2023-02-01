@@ -193,6 +193,15 @@ impl ConfigV2 {
 
         validation
     }
+
+    /// Check whether fscache is enabled or not.
+    pub fn is_fs_cache(&self) -> bool {
+        if let Some(cache) = self.cache.as_ref() {
+            cache.fs_cache.is_some()
+        } else {
+            false
+        }
+    }
 }
 
 impl FromStr for ConfigV2 {
