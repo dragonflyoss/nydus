@@ -109,19 +109,31 @@ jobs:
           sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-oci-ref"
+            ghcr_repo=${{ env.REGISTRY }}/${{ env.ORGANIZATION }}
+
+            # push oci image to ghcr/local for zran reference
+            sudo docker pull $I:latest
+            sudo docker tag $I:latest $ghcr_repo/$I
+            sudo docker tag $I:latest localhost:5000/$I
+            sudo DOCKER_CONFIG=$HOME/.docker docker push $ghcr_repo/$I
+            sudo docker push localhost:5000/$I
+
             # for pre-built images
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --oci-ref \
-                 --source $I:latest \
-                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-oci-ref
+                 --source $ghcr_repo/$I \
+                 --target $ghcr_repo/$I:nydus-nightly-oci-ref
+
             # use local registry for speed
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --oci-ref \
-                 --source $I:latest \
+                 --source localhost:5000/$I \
                  --target localhost:5000/$I:nydus-nightly-oci-ref
 
+            # check zran image and referenced oci image
             sudo rm -rf ./tmp
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify check \
+                --source localhost:5000/$I \
                 --target localhost:5000/$I:nydus-nightly-oci-ref
           done
 
