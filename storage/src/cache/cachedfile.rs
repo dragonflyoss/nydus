@@ -631,19 +631,20 @@ impl BlobObject for FileCacheEntry {
         }
     }
 
-    fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<()> {
+    fn fetch_range_compressed(&self, offset: u64, size: u64, prefetch: bool) -> Result<()> {
         let meta = self.meta.as_ref().ok_or_else(|| enoent!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
-        let mut chunks = meta.get_chunks_compressed(offset, size, self.prefetch_batch_size())?;
+        let mut chunks =
+            meta.get_chunks_compressed(offset, size, self.prefetch_batch_size(), prefetch)?;
         if !chunks.is_empty() {
             if let Some(meta) = self.get_blob_meta_info()? {
                 chunks = self.strip_ready_chunks(meta, None, chunks);
             }
         } else {
-            panic!(
+            return Err(einval!(format!(
                 "fetch_range_compressed offset 0x{:x}, size 0x{:x}",
                 offset, size
-            );
+            )));
         }
         if chunks.is_empty() {
             Ok(())
@@ -707,12 +708,7 @@ impl FileCacheEntry {
         };
 
         let mut status = vec![false; count as usize];
-        let (start_idx, end_idx) = if self.is_zran {
-            for chunk_id in pending.iter() {
-                status[(*chunk_id - chunk_index) as usize] = true;
-            }
-            (0, pending.len() - 1)
-        } else {
+        let (start_idx, end_idx) = {
             let mut start = u32::MAX;
             let mut end = 0;
             for chunk_id in pending.iter() {
@@ -792,7 +788,10 @@ impl FileCacheEntry {
 
         if !bitmap.wait_for_range_ready(chunk_index, count)? {
             if prefetch {
-                return Err(eio!("failed to read data from storage backend"));
+                return Err(eio!(format!(
+                    "failed to prefetch data from storage backend for chunk {}/{}",
+                    chunk_index, count
+                )));
             }
 
             // if we are in on-demand path, retry for the timeout chunks
