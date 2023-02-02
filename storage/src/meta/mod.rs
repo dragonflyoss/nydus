@@ -574,6 +574,7 @@ impl BlobCompressionContextInfo {
         start: u64,
         size: u64,
         batch_size: u64,
+        prefetch: bool,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         let end = start.checked_add(size).ok_or_else(|| {
             einval!(einval!(format!(
@@ -597,7 +598,7 @@ impl BlobCompressionContextInfo {
         };
 
         self.state
-            .get_chunks_compressed(start, end, batch_end, batch_size)
+            .get_chunks_compressed(start, end, batch_end, batch_size, prefetch)
     }
 
     /// Amplify the request by appending more continuous chunks to the chunk array.
@@ -844,9 +845,10 @@ impl BlobCompressionContext {
         end: u64,
         batch_end: u64,
         batch_size: u64,
+        prefetch: bool,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         self.chunk_info_array
-            .get_chunks_compressed(self, start, end, batch_end, batch_size)
+            .get_chunks_compressed(self, start, end, batch_end, batch_size, prefetch)
     }
 
     fn add_more_chunks(
@@ -1045,8 +1047,8 @@ impl BlobMetaChunkArray {
 
     fn get_chunk_index_nocheck(&self, addr: u64, compressed: bool) -> Result<usize> {
         match self {
-            BlobMetaChunkArray::V1(v) => Self::_get_chunk_index_nocheck(v, addr, compressed),
-            BlobMetaChunkArray::V2(v) => Self::_get_chunk_index_nocheck(v, addr, compressed),
+            BlobMetaChunkArray::V1(v) => Self::_get_chunk_index_nocheck(v, addr, compressed, false),
+            BlobMetaChunkArray::V2(v) => Self::_get_chunk_index_nocheck(v, addr, compressed, false),
         }
     }
 
@@ -1057,13 +1059,14 @@ impl BlobMetaChunkArray {
         end: u64,
         batch_end: u64,
         batch_size: u64,
+        prefetch: bool,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         match self {
             BlobMetaChunkArray::V1(v) => {
-                Self::_get_chunks_compressed(state, v, start, end, batch_end, batch_size)
+                Self::_get_chunks_compressed(state, v, start, end, batch_end, batch_size, prefetch)
             }
             BlobMetaChunkArray::V2(v) => {
-                Self::_get_chunks_compressed(state, v, start, end, batch_end, batch_size)
+                Self::_get_chunks_compressed(state, v, start, end, batch_end, batch_size, prefetch)
             }
         }
     }
@@ -1151,6 +1154,7 @@ impl BlobMetaChunkArray {
         chunks: &[T],
         addr: u64,
         compressed: bool,
+        prefetch: bool,
     ) -> Result<usize> {
         let mut size = chunks.len();
         let mut left = 0;
@@ -1183,10 +1187,24 @@ impl BlobMetaChunkArray {
             size = right - left;
         }
 
+        // Special handling prefetch for ZRan blobs because they may have holes.
+        if prefetch {
+            let entry = &chunks[right];
+            if entry.compressed_offset() > addr {
+                return Ok(right);
+            }
+            if left < chunks.len() {
+                let entry = &chunks[left];
+                if entry.compressed_offset() > addr {
+                    return Ok(left);
+                }
+            }
+        }
+
         // if addr == self.chunks[last].compressed_offset, return einval with error msg.
         Err(einval!(format!(
-            "failed to get chunk index, start: {}, end: {}, addr: {}",
-            start, end, addr
+            "failed to get chunk index, prefetch {}, left {}, right {}, start: {}, end: {}, addr: {}",
+            prefetch, left, right, start, end, addr
         )))
     }
 
@@ -1199,7 +1217,7 @@ impl BlobMetaChunkArray {
         batch_size: u64,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         let mut vec = Vec::with_capacity(512);
-        let mut index = Self::_get_chunk_index_nocheck(chunk_info_array, start, false)?;
+        let mut index = Self::_get_chunk_index_nocheck(chunk_info_array, start, false, false)?;
         let entry = Self::get_chunk_entry(state, chunk_info_array, index)?;
         trace!(
             "get_chunks_uncompressed: entry {} {}",
@@ -1313,9 +1331,10 @@ impl BlobMetaChunkArray {
         end: u64,
         batch_end: u64,
         batch_size: u64,
+        prefetch: bool,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         let mut vec = Vec::with_capacity(512);
-        let mut index = Self::_get_chunk_index_nocheck(chunk_info_array, start, true)?;
+        let mut index = Self::_get_chunk_index_nocheck(chunk_info_array, start, true, prefetch)?;
         let entry = Self::get_chunk_entry(state, chunk_info_array, index)?;
 
         // Special handling of ZRan chunks
@@ -1338,6 +1357,7 @@ impl BlobMetaChunkArray {
                 }
             }
 
+            error!("get chunks: {}", index);
             for entry in &chunk_info_array[index..] {
                 entry.validate(state)?;
                 if !entry.is_zran() {
@@ -1352,6 +1372,7 @@ impl BlobMetaChunkArray {
                     {
                         return Ok(vec);
                     }
+                    error!("get chunks: next {}", index);
                     zran_last = entry.get_zran_index();
                 }
                 vec.push(BlobMetaChunk::new(index, state));
@@ -1360,6 +1381,11 @@ impl BlobMetaChunkArray {
 
             if let Some(c) = vec.last() {
                 if c.uncompressed_end() >= end {
+                    return Ok(vec);
+                }
+                // Special handling prefetch for ZRan blobs
+                if prefetch && index >= chunk_info_array.len() {
+                    error!("get chunks: last {}", index);
                     return Ok(vec);
                 }
             }
@@ -1391,7 +1417,7 @@ impl BlobMetaChunkArray {
                 }
             }
 
-            if last_end >= end {
+            if last_end >= end || (prefetch && !vec.is_empty()) {
                 Ok(vec)
             } else {
                 Err(einval!(format!(
@@ -1873,34 +1899,34 @@ pub(crate) mod tests {
         assert_eq!(meta.state.zran_info_array.len(), 0x15);
         assert_eq!(meta.state.zran_dict_table.len(), 0xa0348 - 0x15 * 40);
 
-        let chunks = meta.get_chunks_compressed(0xb8, 1, 0x30000).unwrap();
+        let chunks = meta.get_chunks_compressed(0xb8, 1, 0x30000, false).unwrap();
         assert_eq!(chunks.len(), 67);
 
         let chunks = meta
-            .get_chunks_compressed(0xb8, 1, RAFS_DEFAULT_CHUNK_SIZE)
+            .get_chunks_compressed(0xb8, 1, RAFS_DEFAULT_CHUNK_SIZE, false)
             .unwrap();
         assert_eq!(chunks.len(), 116);
 
         let chunks = meta
-            .get_chunks_compressed(0xb8, 1, 2 * RAFS_DEFAULT_CHUNK_SIZE)
+            .get_chunks_compressed(0xb8, 1, 2 * RAFS_DEFAULT_CHUNK_SIZE, false)
             .unwrap();
         assert_eq!(chunks.len(), 120);
 
         let chunks = meta
-            .get_chunks_compressed(0x5fd41e, 1, RAFS_DEFAULT_CHUNK_SIZE / 2)
+            .get_chunks_compressed(0x5fd41e, 1, RAFS_DEFAULT_CHUNK_SIZE / 2, false)
             .unwrap();
         assert_eq!(chunks.len(), 3);
 
         let chunks = meta
-            .get_chunks_compressed(0x95d55d, 0x20, RAFS_DEFAULT_CHUNK_SIZE)
+            .get_chunks_compressed(0x95d55d, 0x20, RAFS_DEFAULT_CHUNK_SIZE, false)
             .unwrap();
         assert_eq!(chunks.len(), 12);
 
         assert!(meta
-            .get_chunks_compressed(0x0, 0x1, RAFS_DEFAULT_CHUNK_SIZE)
+            .get_chunks_compressed(0x0, 0x1, RAFS_DEFAULT_CHUNK_SIZE, false)
             .is_err());
         assert!(meta
-            .get_chunks_compressed(0x1000000, 0x1, RAFS_DEFAULT_CHUNK_SIZE)
+            .get_chunks_compressed(0x1000000, 0x1, RAFS_DEFAULT_CHUNK_SIZE, false)
             .is_err());
     }
 }

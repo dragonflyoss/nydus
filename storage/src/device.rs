@@ -978,7 +978,7 @@ pub trait BlobObject: AsRawFd {
     /// Fetch data from storage backend covering compressed blob range [offset, offset + size).
     ///
     /// Used by asynchronous prefetch worker to implement blob prefetch.
-    fn fetch_range_compressed(&self, offset: u64, size: u64) -> io::Result<()>;
+    fn fetch_range_compressed(&self, offset: u64, size: u64, prefetch: bool) -> io::Result<()>;
 
     /// Fetch data from storage backend and make sure data range [offset, offset + size) is ready
     /// for use.
