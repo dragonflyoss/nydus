@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
+	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
 )
 
 const (
@@ -17,15 +18,20 @@ const (
 	paramNydusifyVersion   = "nydusify_version"
 )
 
-func TestCompatibility(t *testing.T) {
+type CompatibilityTestSuite struct {
+	t              *testing.T
+	preparedImages map[string]string
+}
 
-	params := tool.DescartesIterator{}
-	params.
-		Register(paramImage, []interface{}{"nginx:latest"}).
-		Register(paramFSVersion, []interface{}{"5", "6"}).
-		Register(paramNydusImageVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
-		Register(paramNydusifyVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
-		Register(paramNydusdVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
+func (c *CompatibilityTestSuite) TestConvertImages() test.Generator {
+
+	scenarios := tool.DescartesIterator{}
+	scenarios.
+		Dimension(paramImage, []interface{}{"nginx:latest"}).
+		Dimension(paramFSVersion, []interface{}{"5", "6"}).
+		Dimension(paramNydusImageVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
+		Dimension(paramNydusifyVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
+		Dimension(paramNydusdVersion, []interface{}{"v0.1.0", "v2.1.2", "latest"}).
 		Skip(func(param *tool.DescartesItem) bool {
 
 			// Nydus-image 0.1.0 only works with nydus-nydusify 0.1.0, vice versa.
@@ -44,24 +50,21 @@ func TestCompatibility(t *testing.T) {
 			return false
 		})
 
-	preparedImages := make(map[string]string)
-	for params.HasNext() {
-		param := params.Next()
-
-		image := param.GetString(paramImage)
-		if _, ok := preparedImages[image]; !ok {
-			preparedImages[image] = tool.PrepareImage(t, image)
+	return func() (name string, testCase test.Case) {
+		if !scenarios.HasNext() {
+			return
 		}
+		scenario := scenarios.Next()
 
-		nydusifyNotSupportCompressor := param.GetString(paramNydusifyVersion) == "v0.1.0"
-		nydusifyOnlySupportV5 := param.GetString(paramNydusifyVersion) == "v0.1.0"
+		nydusifyNotSupportCompressor := scenario.GetString(paramNydusifyVersion) == "v0.1.0"
+		nydusifyOnlySupportV5 := scenario.GetString(paramNydusifyVersion) == "v0.1.0"
 
-		builderPath := tool.GetBinary(t, "NYDUS_BUILDER", param.GetString(paramNydusImageVersion))
-		nydusdPath := tool.GetBinary(t, "NYDUS_NYDUSD", param.GetString(paramNydusdVersion))
-		nydusifyPath := tool.GetBinary(t, "NYDUS_NYDUSIFY", param.GetString(paramNydusifyVersion))
-		nydusifyCheckerPath := tool.GetBinary(t, "NYDUS_NYDUSIFY", "latest")
+		builderPath := tool.GetBinary(c.t, "NYDUS_BUILDER", scenario.GetString(paramNydusImageVersion))
+		nydusdPath := tool.GetBinary(c.t, "NYDUS_NYDUSD", scenario.GetString(paramNydusdVersion))
+		nydusifyPath := tool.GetBinary(c.t, "NYDUS_NYDUSIFY", scenario.GetString(paramNydusifyVersion))
+		nydusifyCheckerPath := tool.GetBinary(c.t, "NYDUS_NYDUSIFY", "latest")
 
-		ctx := tool.DefaultContext(t)
+		ctx := tool.DefaultContext(c.t)
 		ctx.Binary = tool.BinaryContext{
 			Builder:                      builderPath,
 			Nydusd:                       nydusdPath,
@@ -70,11 +73,31 @@ func TestCompatibility(t *testing.T) {
 			NydusifyOnlySupportV5:        nydusifyOnlySupportV5,
 			NydusifyNotSupportCompressor: nydusifyNotSupportCompressor,
 		}
-		ctx.Build.FSVersion = param.GetString(paramFSVersion)
+		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
 		ctx.Build.Compressor = "lz4_block"
 		ctx.Build.ChunkSize = "0x100000"
 		ctx.Build.OCIRef = false
 
-		t.Run(param.Str(), makeImageTest(t, *ctx, preparedImages[image]))
+		image := c.prepareImage(c.t, scenario.GetString(paramImage))
+		return scenario.Str(), func(t *testing.T) {
+			imageTest := &ImageTestSuite{T: t}
+			imageTest.TestConvertImage(t, *ctx, image)
+		}
 	}
+}
+
+func (c *CompatibilityTestSuite) prepareImage(t *testing.T, image string) string {
+	if c.preparedImages == nil {
+		c.preparedImages = make(map[string]string)
+	}
+	loc, ok := c.preparedImages[image]
+	if !ok {
+		loc = tool.PrepareImage(t, image)
+		c.preparedImages[image] = loc
+	}
+	return loc
+}
+
+func TestCompatibility(t *testing.T) {
+	test.Run(t, &CompatibilityTestSuite{t: t})
 }

@@ -19,25 +19,10 @@ import (
 
 	"github.com/dragonflyoss/image-service/smoke/tests/texture"
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
+	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
 )
 
-type APIV1TestSuite struct {
-}
-
-func (a *APIV1TestSuite) start(pt *testing.T) {
-	pt.Run("TestDaemonStatus", func(t *testing.T) {
-		t.Parallel()
-		a.TestDaemonStatus(t)
-	})
-	pt.Run("TestMetrics", func(t *testing.T) {
-		t.Parallel()
-		a.TestMetrics(t)
-	})
-	pt.Run("TestPrefetch", func(t *testing.T) {
-		t.Parallel()
-		a.TestPrefetch(t)
-	})
-}
+type APIV1TestSuite struct{}
 
 func (a *APIV1TestSuite) TestDaemonStatus(t *testing.T) {
 
@@ -249,6 +234,5 @@ func (a *APIV1TestSuite) visit(path string) error {
 }
 
 func TestAPI(t *testing.T) {
-	apiV1Tests := APIV1TestSuite{}
-	apiV1Tests.start(t)
+	test.Run(t, &APIV1TestSuite{})
 }

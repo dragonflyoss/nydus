@@ -11,6 +11,7 @@ import (
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/dragonflyoss/image-service/smoke/tests/texture"
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
+	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
 )
@@ -19,49 +20,62 @@ const (
 	paramGzip = "gzip"
 )
 
-func makeZranLayerTest(ctx tool.Context) func(t *testing.T) {
-	return func(t *testing.T) {
-		t.Parallel()
+type ZranTestSuite struct {
+	t *testing.T
+}
 
-		// Prepare work directory
-		ctx.PrepareWorkDir(t)
-		defer ctx.Destroy(t)
+func (z *ZranTestSuite) TestMakeLayers() test.Generator {
 
-		lowerLayer := texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "source"))
-		lowerOCIBlobDigest, lowerRafsBlobDigest := lowerLayer.PackRef(t, ctx, ctx.Env.BlobDir, ctx.Build.OCIRefGzip)
-		mergeOption := converter.MergeOption{
-			BuilderPath:   ctx.Binary.Builder,
-			ChunkDictPath: "",
-			OCIRef:        true,
+	scenarios := tool.DescartesIterator{}
+	scenarios.
+		Dimension(paramGzip, []interface{}{false, true}).
+		Dimension(paramCacheCompressed, []interface{}{true, false}).
+		Dimension(paramEnablePrefetch, []interface{}{false, true})
+
+	return func() (name string, testCase test.Case) {
+
+		if !scenarios.HasNext() {
+			return
 		}
-		actualDigests, lowerBootstrap := tool.MergeLayers(t, ctx, mergeOption, []converter.Layer{
-			{
-				Digest:         lowerRafsBlobDigest,
-				OriginalDigest: &lowerOCIBlobDigest,
-			},
-		})
-		require.Equal(t, []digest.Digest{lowerOCIBlobDigest}, actualDigests)
+		scenario := scenarios.Next()
 
-		// Verify lower layer mounted by nydusd
-		ctx.Env.BootstrapPath = lowerBootstrap
-		tool.Verify(t, ctx, lowerLayer.FileTree)
+		ctx := tool.DefaultContext(z.t)
+		ctx.Build.OCIRefGzip = scenario.GetBool(paramGzip)
+		ctx.Runtime.CacheCompressed = scenario.GetBool(paramCacheCompressed)
+		ctx.Runtime.EnablePrefetch = scenario.GetBool(paramEnablePrefetch)
+
+		return scenario.Str(), func(t *testing.T) {
+			z.testMakeLayers(*ctx, t)
+		}
 	}
 }
 
-func TestZranLayer(t *testing.T) {
-	params := tool.DescartesIterator{}
-	params.
-		Register(paramGzip, []interface{}{false, true}).
-		Register(paramCacheCompressed, []interface{}{true, false}).
-		Register(paramEnablePrefetch, []interface{}{false, true})
+func (z *ZranTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 
-	ctx := tool.DefaultContext(t)
-	for params.HasNext() {
-		param := params.Next()
+	// Prepare work directory
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
 
-		ctx.Build.OCIRefGzip = param.GetBool(paramGzip)
-		ctx.Runtime.CacheCompressed = param.GetBool(paramCacheCompressed)
-		ctx.Runtime.EnablePrefetch = param.GetBool(paramEnablePrefetch)
-		t.Run(param.Str(), makeZranLayerTest(*ctx))
+	lowerLayer := texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "source"))
+	lowerOCIBlobDigest, lowerRafsBlobDigest := lowerLayer.PackRef(t, ctx, ctx.Env.BlobDir, ctx.Build.OCIRefGzip)
+	mergeOption := converter.MergeOption{
+		BuilderPath:   ctx.Binary.Builder,
+		ChunkDictPath: "",
+		OCIRef:        true,
 	}
+	actualDigests, lowerBootstrap := tool.MergeLayers(t, ctx, mergeOption, []converter.Layer{
+		{
+			Digest:         lowerRafsBlobDigest,
+			OriginalDigest: &lowerOCIBlobDigest,
+		},
+	})
+	require.Equal(t, []digest.Digest{lowerOCIBlobDigest}, actualDigests)
+
+	// Verify lower layer mounted by nydusd
+	ctx.Env.BootstrapPath = lowerBootstrap
+	tool.Verify(t, ctx, lowerLayer.FileTree)
+}
+
+func TestZranLayer(t *testing.T) {
+	test.Run(t, &ZranTestSuite{t: t})
 }
