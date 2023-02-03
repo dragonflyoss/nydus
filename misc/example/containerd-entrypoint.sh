@@ -3,8 +3,8 @@
 set -eu
 
 if [ "$#" -eq 0 ]; then
-        /opt/bin/containerd -c /opt/etc/containerd/config.toml -l debug &
-	/opt/bin/containerd-nydus-grpc --nydusd-path /opt/bin/nydusd \
+	/opt/bin/containerd -c /opt/etc/containerd/config.toml -l debug &
+	/opt/bin/containerd-nydus-grpc --nydusd /opt/bin/nydusd \
 		--config-path /opt/etc/nydusd-config.json \
 		--log-level debug \
 		--root /var/lib/containerd-test/io.containerd.snapshotter.v1.nydus \

@@ -89,13 +89,9 @@ make
 mkdir -p /var/lib/containerd-nydus
 
 ./bin/containerd-nydus-grpc \
- --config-path /etc/nydus/nydusd-config.fscache.json \
- --daemon-mode shared \
+ --nydusd-config /etc/nydus/nydusd-config.fscache.json \
  --fs-driver fscache \
- --log-level info \
- --root /var/lib/containerd-nydus \
- --cache-dir /var/lib/nydus/cache \
- --nydusd-path /path/to/nydusd \
+ --nydusd /path/to/nydusd \
  --log-to-stdout
 ```
 
