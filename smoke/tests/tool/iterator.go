@@ -58,8 +58,8 @@ func (d *DescartesItem) Str() string {
 //
 //	products := tool.DescartesIterator{}
 //	products.
-//		Register("name", []interface{}{"foo", "imoer", "morgan"}).
-//		Register("age", []interface{}{"20", "30"}).
+//		Dimension("name", []interface{}{"foo", "imoer", "morgan"}).
+//		Dimension("age", []interface{}{"20", "30"}).
 //		Skip(func(item *tool.DescartesItem) bool {
 //    		// skip ("morgan", "30")
 //    		return item.GetString("name") == "morgan" && param.GetString("age") == "30"
@@ -164,7 +164,7 @@ func (c *DescartesIterator) clearNext() {
 	c.nextItem = nil
 }
 
-func (c *DescartesIterator) Register(name string, vals []interface{}) *DescartesIterator {
+func (c *DescartesIterator) Dimension(name string, vals []interface{}) *DescartesIterator {
 	if c.cursorMap == nil {
 		c.cursorMap = make(map[string]int)
 	}

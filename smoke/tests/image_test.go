@@ -10,81 +10,102 @@ import (
 	"testing"
 
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
+	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
 )
 
 const (
 	paramZran = "zran"
 )
 
-func makeImageTest(t *testing.T, ctx tool.Context, source string) func(t *testing.T) {
-	return func(t *testing.T) {
-		t.Parallel()
+type ImageTestSuite struct {
+	T              *testing.T
+	preparedImages map[string]string
+}
 
-		// Prepare work directory
-		ctx.PrepareWorkDir(t)
-		defer ctx.Destroy(t)
+func (i *ImageTestSuite) TestConvertImages() test.Generator {
 
-		// Prepare options
-		ociRefSuffix := ""
-		enableOCIRef := ""
-		if ctx.Build.OCIRef {
-			ociRefSuffix = "-oci-ref"
-			enableOCIRef = "--oci-ref"
-		}
-		target := fmt.Sprintf("%s-nydus-v%s%s", source, ctx.Build.FSVersion, ociRefSuffix)
-		fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
-		if ctx.Binary.NydusifyOnlySupportV5 {
-			fsVersion = ""
-		}
-		compressor := "--compressor lz4_block"
-		if ctx.Binary.NydusifyNotSupportCompressor {
-			compressor = ""
-		}
+	scenarios := tool.DescartesIterator{}
+	scenarios.
+		Dimension(paramImage, []interface{}{"nginx:latest"}).
+		Dimension(paramFSVersion, []interface{}{"5", "6"}).
+		Dimension(paramZran, []interface{}{false, true}).
+		Skip(
+			func(param *tool.DescartesItem) bool {
+				// Zran not work with rafs v6.
+				return param.GetString(paramFSVersion) == "5" && param.GetBool(paramZran)
+			})
 
-		// Convert image
-		convertCmd := fmt.Sprintf(
-			"%s convert --source %s --target %s %s %s --nydus-image %s --work-dir %s %s",
-			ctx.Binary.Nydusify, source, target, fsVersion, enableOCIRef, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
-		)
-		tool.Run(t, convertCmd)
-
-		// Check image
-		nydusifyPath := ctx.Binary.Nydusify
-		if ctx.Binary.NydusifyChecker != "" {
-			nydusifyPath = ctx.Binary.NydusifyChecker
+	return func() (name string, testCase test.Case) {
+		if !scenarios.HasNext() {
+			return
 		}
-		checkCmd := fmt.Sprintf(
-			"%s check --source %s --target %s --nydus-image %s --nydusd %s --work-dir %s",
-			nydusifyPath, source, target, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
-		)
-		tool.Run(t, checkCmd)
+		scenario := scenarios.Next()
+
+		ctx := tool.DefaultContext(i.T)
+		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
+		ctx.Build.OCIRef = scenario.GetBool(paramZran)
+
+		image := i.prepareImage(i.T, scenario.GetString(paramImage))
+		return scenario.Str(), func(t *testing.T) {
+			i.TestConvertImage(t, *ctx, image)
+		}
 	}
 }
 
-func TestImage(t *testing.T) {
-	params := tool.DescartesIterator{}
-	params.
-		Register(paramImage, []interface{}{"nginx:latest"}).
-		Register(paramFSVersion, []interface{}{"5", "6"}).
-		Register(paramZran, []interface{}{false, true}).
-		Skip(func(param *tool.DescartesItem) bool {
-			// Zran not work with rafs v6.
-			return param.GetString(paramFSVersion) == "5" && param.GetBool(paramZran)
-		})
+func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source string) {
 
-	preparedImages := make(map[string]string)
-	for params.HasNext() {
-		param := params.Next()
+	// Prepare work directory
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
 
-		image := param.GetString(paramImage)
-		if _, ok := preparedImages[image]; !ok {
-			preparedImages[image] = tool.PrepareImage(t, image)
-		}
-
-		ctx := tool.DefaultContext(t)
-		ctx.Build.FSVersion = param.GetString(paramFSVersion)
-		ctx.Build.OCIRef = param.GetBool(paramZran)
-
-		t.Run(param.Str(), makeImageTest(t, *ctx, preparedImages[image]))
+	// Prepare options
+	ociRefSuffix := ""
+	enableOCIRef := ""
+	if ctx.Build.OCIRef {
+		ociRefSuffix = "-oci-ref"
+		enableOCIRef = "--oci-ref"
 	}
+	target := fmt.Sprintf("%s-nydus-v%s%s", source, ctx.Build.FSVersion, ociRefSuffix)
+	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
+	if ctx.Binary.NydusifyOnlySupportV5 {
+		fsVersion = ""
+	}
+	compressor := "--compressor lz4_block"
+	if ctx.Binary.NydusifyNotSupportCompressor {
+		compressor = ""
+	}
+
+	// Convert image
+	convertCmd := fmt.Sprintf(
+		"%s convert --source %s --target %s %s %s --nydus-image %s --work-dir %s %s",
+		ctx.Binary.Nydusify, source, target, fsVersion, enableOCIRef, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
+	)
+	tool.Run(t, convertCmd)
+
+	// Check image
+	nydusifyPath := ctx.Binary.Nydusify
+	if ctx.Binary.NydusifyChecker != "" {
+		nydusifyPath = ctx.Binary.NydusifyChecker
+	}
+	checkCmd := fmt.Sprintf(
+		"%s check --source %s --target %s --nydus-image %s --nydusd %s --work-dir %s",
+		nydusifyPath, source, target, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
+	)
+	tool.Run(t, checkCmd)
+}
+
+func (i *ImageTestSuite) prepareImage(t *testing.T, image string) string {
+	if i.preparedImages == nil {
+		i.preparedImages = make(map[string]string)
+	}
+	loc, ok := i.preparedImages[image]
+	if !ok {
+		loc = tool.PrepareImage(t, image)
+		i.preparedImages[image] = loc
+	}
+	return loc
+}
+
+func TestImage(t *testing.T) {
+	test.Run(t, &ImageTestSuite{T: t})
 }
