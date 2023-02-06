@@ -67,6 +67,7 @@ nydus-rafs = { version = "0.2.0", path = "rafs", features = [
     "backend-registry",
     "backend-oss",
     "backend-s3",
+    "backend-http-proxy",
 ] }
 nydus-storage = { version = "0.6.0", path = "storage" }
 nydus-utils = { version = "0.4.0", path = "utils" }

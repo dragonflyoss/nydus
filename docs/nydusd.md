@@ -293,6 +293,51 @@ Currently, the mirror mode is only tested in the registry backend, and in theory
 }
 ```
 
+#### HTTP proxy backend
+
+The `HttpProxy` backend can access blobs through a http proxy server which can be local (using unix socket) or remote (using `https://` or using `http://`).
+
+`HttpProxy` uses two API endpoints to access the blobs:
+- `HEAD /path/to/blobs` to get the blob size
+- `GET /path/to/blobs` to read the blob
+
+The http proxy server should respect [the `Range` header](https://www.rfc-editor.org/rfc/rfc9110.html#name-range) to compute the offset and length of the blob.
+
+The example config files for the `HttpProxy` backend may be:
+
+```
+// for remote usage
+{
+  "device": {
+      "backend": {
+      "type": "http-proxy",
+      "config": {
+        "addr": "http://127.0.0.1:9977",
+        "path": "/namespace/<repo>/blobs"
+      }
+    }
+  }
+}
+```
+
+or
+
+```
+// for local usage
+{
+  "device": {
+      "backend": {
+      "type": "http-proxy",
+      "config": {
+        "addr": "/path/to/unix.sock",
+      }
+    }
+  }
+}
+```
+
+The `HttpProxy` backend also supports the `Proxy` and `Mirrors` configurations for remote usage like the `Registry backend` described above.
+
 ### Mount Bootstrap Via API
 
 To mount a bootstrap via api, first launch nydusd without a bootstrap:
