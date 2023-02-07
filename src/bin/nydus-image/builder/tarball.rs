@@ -108,7 +108,7 @@ impl<'a> TarballTreeBuilder<'a> {
             }
             ConversionType::EStargzToRef | ConversionType::TargzToRef => {
                 // Use 64K buffer to keep consistence with zlib-random.
-                let mut buf_reader = BufReader::with_capacity(0x10000, file);
+                let mut buf_reader = BufReader::with_capacity(0x10, file);
                 let mut buf = [0u8; 3];
                 if buf_reader.read_exact(&mut buf).is_ok()
                     && buf[0] == 0x1f

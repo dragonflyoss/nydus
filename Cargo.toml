@@ -58,7 +58,7 @@ xattr = "0.2.3"
 # Build static linked openssl library
 openssl = { version = "0.10.45", features = ["vendored"] }
 # pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
-#openssl-src = { version = "111.22" }
+openssl-src = { version = "111.22" }
 
 nydus-api = { version = "0.2.0", path = "api", features = ["handler"] }
 nydus-app = { version = "0.3.2", path = "app" }

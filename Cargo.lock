@@ -1026,6 +1026,7 @@ dependencies = [
  "nydus-storage",
  "nydus-utils",
  "openssl",
+ "openssl-src",
  "rlimit",
  "rust-fsm",
  "serde",

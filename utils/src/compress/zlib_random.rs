@@ -23,7 +23,7 @@ pub const ZRAN_DICT_WIN_SIZE: usize = 1 << 15;
 /// Maximum number of random access slices per compression object.
 pub const ZRAN_MAX_CI_ENTRIES: usize = 1 << 24;
 
-const ZRAN_READER_BUF_SIZE: usize = 64 * 1024;
+const ZRAN_READER_BUF_SIZE: usize = 64;
 const ZRAN_MIN_COMP_SIZE: u64 = 768 * 1024;
 const ZRAN_MAX_COMP_SIZE: u64 = 2048 * 1024;
 const ZRAN_MAX_UNCOMP_SIZE: u64 = 2048 * 1024;
@@ -117,7 +117,6 @@ impl ZranDecoder {
         self.stream.set_dict(dict)?;
 
         self.stream.set_next_in(input);
-        self.stream.set_avail_in(ctx.in_len as uInt);
         self.stream.set_next_out(output);
         self.stream.set_avail_out(ctx.out_len as uInt);
         let ret = self.stream.inflate(true);
@@ -384,8 +383,7 @@ impl<R> ZranReaderState<R> {
     fn new(reader: R) -> Result<Self> {
         let mut stream = ZranStream::new(false)?;
         let input = vec![0u8; ZRAN_READER_BUF_SIZE];
-        stream.set_next_in(&input);
-        stream.set_avail_in(0);
+        stream.set_next_in(&input[0..0]);
 
         Ok(ZranReaderState {
             stream,
@@ -422,14 +420,21 @@ impl<R: Read> Read for ZranReaderState<R> {
         loop {
             // Reload the input buffer when needed.
             if self.stream.avail_in() == 0 {
+                error!("last byte ptr {:x}", self.stream.stream.next_in as usize);
+                if self.stream.stream.next_in > self.input.as_mut_ptr() {
+                    self.stream.last_byte = unsafe { *self.stream.stream.next_in.sub(1) };
+                }
                 let sz = self.reader.read(self.input.as_mut_slice())?;
                 if sz == 0 {
                     return Ok(0);
                 }
                 self.reader_hash.update(&self.input[0..sz]);
                 self.reader_size += sz as u64;
-                self.stream.set_next_in(&self.input);
-                self.stream.set_avail_in(sz as u32);
+                self.stream.set_next_in(&self.input[..sz]);
+                error!(
+                    "zran last byte ptr {:x}",
+                    unsafe { self.stream.stream.next_in.add(sz) } as usize
+                );
             }
 
             match self.stream.inflate(false) {
@@ -475,6 +480,7 @@ struct ZranStream {
     stream: Box<z_stream>,
     total_in: u64,
     total_out: u64,
+    last_byte: u8,
 }
 
 impl ZranStream {
@@ -516,6 +522,7 @@ impl ZranStream {
             stream,
             total_in: 0,
             total_out: 0,
+            last_byte: 0,
         })
     }
 
@@ -543,9 +550,13 @@ impl ZranStream {
     }
 
     fn get_compression_info(&mut self, buf: &[u8], stream_switched: u8) -> ZranCompInfo {
-        let previous_byte = if self.stream.data_type & 0x3f != 0 {
-            assert!(self.stream.next_in as usize > buf.as_ptr() as usize);
-            unsafe { *self.stream.next_in.sub(1) }
+        let previous_byte = if self.stream.data_type & 0x7 != 0 {
+            assert!(self.stream.next_in as usize >= buf.as_ptr() as usize);
+            if self.stream.next_in as usize == buf.as_ptr() as usize {
+                self.last_byte
+            } else {
+                unsafe { *self.stream.next_in.sub(1) }
+            }
         } else {
             0
         };
@@ -554,7 +565,7 @@ impl ZranStream {
             out_pos: self.total_out,
             flags: self.stream.data_type as u32,
             previous_byte,
-            pending_bits: self.stream.data_type as u8 & 0x3f,
+            pending_bits: self.stream.data_type as u8 & 0x7,
             stream_switched,
         }
     }
@@ -604,6 +615,7 @@ impl ZranStream {
 
     fn set_next_in(&mut self, buf: &[u8]) {
         self.stream.next_in = buf.as_ptr() as *mut u8;
+        self.set_avail_in(buf.len() as u32);
     }
 
     fn avail_in(&self) -> u32 {
