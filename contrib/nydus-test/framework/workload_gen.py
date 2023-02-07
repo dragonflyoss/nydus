@@ -402,7 +402,7 @@ class WorkloadGen:
 
                     io_size = WorkloadGen.pick_io_size()
                     logging.debug(
-                        "File %s" % target_file, "Pos %u" % pos, "IO Size %u" % io_size
+                        "File %s , Pos %u, IO Size %u", target_file, pos, io_size
                     )
                     op_cnt += 1
                     total_size += io_size
