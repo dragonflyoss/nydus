@@ -151,6 +151,31 @@ We are working on enabling cloud-hypervisor support for nydus.
 }
 ```
 
+##### Localdisk Backend (Experimental)
+Using this backend enables Nydus to support reading blobs from block devices. This feature will be useful in Confidential Computing or Hybrid Image scenarios.
+
+The localdisk backend adds support for storing images in disks. In this scenario, each layer of the blob is stored in partitions, and multiple partitions are addressed in the local raw disk via the GUID partition table (GPT), which means that this disk stores the entire image.
+
+Currently, generating a localdisk image through nydusify is not supported for the time being. You need to use the nydus-localdisk tool to complete this step.
+Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/README.md
+
+```
+{
+  "device": {
+    "backend": {
+      "type": "localdisk",
+      "config": {
+        // Mounted block device path or original localdisk image file path.
+        "device_path": "/dev/loop1"
+        //"device_path": "/home/user/ubuntu.img"
+      }
+    },
+    ...
+  },
+  ...
+}
+```
+
 ##### OSS backend with blobcache
 
 ```

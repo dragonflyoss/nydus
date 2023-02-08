@@ -765,6 +765,7 @@ mod tests {
                 dir: path.to_str().unwrap().to_string(),
                 alt_dirs: vec![],
             }),
+            localdisk: None,
             oss: None,
             registry: None,
             s3: None,
@@ -817,6 +818,7 @@ mod tests {
             registry: None,
             s3: None,
             http_proxy: None,
+            localdisk: None,
         };
         let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();
         let blob = blob_mgr.get_reader(id).unwrap();
@@ -850,6 +852,7 @@ mod tests {
             oss: None,
             registry: None,
             s3: None,
+            localdisk: None,
             http_proxy: None,
         };
         let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();

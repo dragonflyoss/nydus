@@ -239,6 +239,8 @@ pub struct BackendConfigV2 {
     /// Type of storage backend.
     #[serde(rename = "type")]
     pub backend_type: String,
+    /// Configuration for local disk backend.
+    pub localdisk: Option<LocalDiskConfig>,
     /// Configuration for local filesystem backend.
     pub localfs: Option<LocalFsConfig>,
     /// Configuration for OSS backend.
@@ -255,6 +257,14 @@ impl BackendConfigV2 {
     /// Validate storage backend configuration.
     pub fn validate(&self) -> bool {
         match self.backend_type.as_str() {
+            "localdisk" => match self.localdisk.as_ref() {
+                Some(v) => {
+                    if v.device_path.is_empty() {
+                        return false;
+                    }
+                }
+                None => return false,
+            },
             "localfs" => match self.localfs.as_ref() {
                 Some(v) => {
                     if v.blob_file.is_empty() && v.dir.is_empty() {
@@ -315,6 +325,17 @@ impl BackendConfigV2 {
         true
     }
 
+    /// Get configuration information for localdisk
+    pub fn get_localdisk_config(&self) -> Result<&LocalDiskConfig> {
+        if &self.backend_type != "localdisk" {
+            Err(einval!("backend type is not 'localdisk'"))
+        } else {
+            self.localdisk
+                .as_ref()
+                .ok_or_else(|| einval!("no configuration information for localdisk"))
+        }
+    }
+
     /// Get configuration information for localfs
     pub fn get_localfs_config(&self) -> Result<&LocalFsConfig> {
         if &self.backend_type != "localfs" {
@@ -369,6 +390,14 @@ impl BackendConfigV2 {
                 .ok_or_else(|| einval!("no configuration information for http-proxy"))
         }
     }
+}
+
+/// Configuration information for localdisk storage backend.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LocalDiskConfig {
+    /// Mounted block device path or original localdisk image file path.
+    #[serde(default)]
+    pub device_path: String,
 }
 
 /// Configuration information for localfs storage backend.
@@ -962,7 +991,7 @@ struct BackendConfig {
     #[serde(rename = "type")]
     pub backend_type: String,
     /// Configuration for storage backend.
-    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`.
+    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`, `LocalDiskConfig`.
     #[serde(rename = "config")]
     pub backend_config: Value,
 }
@@ -973,6 +1002,7 @@ impl TryFrom<&BackendConfig> for BackendConfigV2 {
     fn try_from(value: &BackendConfig) -> std::result::Result<Self, Self::Error> {
         let mut config = BackendConfigV2 {
             backend_type: value.backend_type.clone(),
+            localdisk: None,
             localfs: None,
             oss: None,
             s3: None,
@@ -981,6 +1011,9 @@ impl TryFrom<&BackendConfig> for BackendConfigV2 {
         };
 
         match value.backend_type.as_str() {
+            "localdisk" => {
+                config.localdisk = Some(serde_json::from_value(value.backend_config.clone())?);
+            }
             "localfs" => {
                 config.localfs = Some(serde_json::from_value(value.backend_config.clone())?);
             }
@@ -1200,7 +1233,7 @@ pub(crate) struct BlobCacheEntryConfig {
     backend_type: String,
     /// Configuration for storage backend, corresponding to `FactoryConfig::BackendConfig::backend_config`.
     ///
-    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`.
+    /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`, `LocalDiskConfig`.
     backend_config: Value,
     /// Type of blob cache, corresponding to `FactoryConfig::CacheConfig::cache_type`.
     ///
@@ -1454,6 +1487,15 @@ mod tests {
         assert_eq!(config.blob_file, "blob_file");
         assert_eq!(config.dir, "blob_dir");
         assert_eq!(config.alt_dirs, vec!["dir1", "dir2"]);
+    }
+
+    #[test]
+    fn test_localdisk_config() {
+        let content = r#"{
+            "device_path": "device_path"
+        }"#;
+        let config: LocalDiskConfig = serde_json::from_str(content).unwrap();
+        assert_eq!(config.device_path, "device_path");
     }
 
     #[test]
