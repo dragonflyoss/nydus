@@ -1,7 +1,7 @@
 # nydus-storage
 
 The core storage subsystem for [Nydus Image Service](https://nydus.dev/) to:
-- Fetch blob objects from storage backend such as Registry, OSS, S3 and file systems etc.
+- Fetch blob objects from storage backend such as Registry, OSS, S3, local disk and file systems etc.
 - Load data from storage backend on demand.
 - Cache blob objects on local storage.
 

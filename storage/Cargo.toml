@@ -33,6 +33,7 @@ tokio = { version = "1.19.0", features = ["macros", "rt", "rt-multi-thread", "sy
 url = { version = "2.1.1", optional = true }
 vm-memory = "0.9"
 fuse-backend-rs = "0.10"
+gpt = { version = "3.0.0", optional = true }
 
 nydus-api = { version = "0.2", path = "../api" }
 nydus-utils = { version = "0.4", path = "../utils", features = ["zran"] }
@@ -45,6 +46,7 @@ tar = "0.4.38"
 regex = "1.7.0"
 
 [features]
+backend-localdisk = ["gpt"]
 backend-localfs = []
 backend-oss = ["base64", "httpdate", "hmac", "sha1", "reqwest", "url"]
 backend-registry = ["base64", "reqwest", "url"]

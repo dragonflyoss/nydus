@@ -12,6 +12,7 @@
 //! - [LocalFs](localfs/struct.LocalFs.html): backend driver to access blobs on local file system.
 //!   The [LocalFs](localfs/struct.LocalFs.html) storage backend supports backend level data
 //!   prefetching, which is to load data into page cache.
+//! - [LocalDisk](localdisk/struct.LocalDisk.html): backend driver to access blobs on local disk.
 
 use std::fmt;
 use std::io::Read;
@@ -35,6 +36,8 @@ use crate::StorageError;
 pub mod connection;
 #[cfg(feature = "backend-http-proxy")]
 pub mod http_proxy;
+#[cfg(feature = "backend-localdisk")]
+pub mod localdisk;
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
 #[cfg(any(feature = "backend-oss", feature = "backend-s3"))]
@@ -53,6 +56,9 @@ pub enum BackendError {
     Unsupported(String),
     /// Failed to copy data from/into blob.
     CopyData(StorageError),
+    #[cfg(feature = "backend-localdisk")]
+    /// Error from LocalDisk storage backend.
+    LocalDisk(self::localdisk::LocalDiskError),
     #[cfg(feature = "backend-registry")]
     /// Error from Registry storage backend.
     Registry(self::registry::RegistryError),
@@ -78,6 +84,8 @@ impl fmt::Display for BackendError {
             BackendError::LocalFs(e) => write!(f, "{}", e),
             #[cfg(any(feature = "backend-oss", feature = "backend-s3"))]
             BackendError::ObjectStorage(e) => write!(f, "{}", e),
+            #[cfg(feature = "backend-localdisk")]
+            BackendError::LocalDisk(e) => write!(f, "{:?}", e),
             #[cfg(feature = "backend-http-proxy")]
             BackendError::HttpProxy(e) => write!(f, "{}", e),
         }

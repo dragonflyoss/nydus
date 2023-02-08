@@ -43,6 +43,7 @@ backend-oss = ["nydus-storage/backend-oss"]
 backend-s3 = ["nydus-storage/backend-s3"]
 backend-registry = ["nydus-storage/backend-registry"]
 backend-http-proxy = ["nydus-storage/backend-http-proxy"]
+backend-localdisk = ["nydus-storage/backend-localdisk"]
 
 [package.metadata.docs.rs]
 all-features = true

@@ -23,6 +23,8 @@ use tokio::time;
 
 #[cfg(feature = "backend-http-proxy")]
 use crate::backend::http_proxy;
+#[cfg(feature = "backend-localdisk")]
+use crate::backend::localdisk;
 #[cfg(feature = "backend-localfs")]
 use crate::backend::localfs;
 #[cfg(feature = "backend-oss")]
@@ -213,6 +215,11 @@ impl BlobFactory {
             #[cfg(feature = "backend-localfs")]
             "localfs" => Ok(Arc::new(localfs::LocalFs::new(
                 config.get_localfs_config()?,
+                Some(blob_id),
+            )?)),
+            #[cfg(feature = "backend-localdisk")]
+            "localdisk" => Ok(Arc::new(localdisk::LocalDisk::new(
+                config.get_localdisk_config()?,
                 Some(blob_id),
             )?)),
             #[cfg(feature = "backend-http-proxy")]
