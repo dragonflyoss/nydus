@@ -330,6 +330,19 @@ func (rule *FilesystemRule) Validate() error {
 		return nil
 	}
 
+	// Cleanup temporary directories
+	defer func() {
+		if err := os.RemoveAll(rule.SourcePath); err != nil {
+			logrus.WithError(err).Warnf("cleanup source image directory %s", rule.SourcePath)
+		}
+		if err := os.RemoveAll(rule.NydusdConfig.MountPath); err != nil {
+			logrus.WithError(err).Warnf("cleanup nydus image directory %s", rule.NydusdConfig.MountPath)
+		}
+		if err := os.RemoveAll(rule.NydusdConfig.BlobCacheDir); err != nil {
+			logrus.WithError(err).Warnf("cleanup nydus blob cache directory %s", rule.NydusdConfig.BlobCacheDir)
+		}
+	}()
+
 	image, err := rule.mountSourceImage()
 	if err != nil {
 		return err
