@@ -34,7 +34,7 @@ use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::ZranContextGenerator;
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
 use nydus_utils::compact::makedev;
-use nydus_utils::compress::zlib_random::ZranReader;
+use nydus_utils::compress::zlib_random::{ZranReader, ZRAN_READER_BUF_SIZE};
 use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{div_round_up, BufReaderInfo, ByteSize};
@@ -108,7 +108,7 @@ impl<'a> TarballTreeBuilder<'a> {
             }
             ConversionType::EStargzToRef | ConversionType::TargzToRef => {
                 // Use 64K buffer to keep consistence with zlib-random.
-                let mut buf_reader = BufReader::with_capacity(0x10000, file);
+                let mut buf_reader = BufReader::with_capacity(ZRAN_READER_BUF_SIZE, file);
                 let mut buf = [0u8; 3];
                 if buf_reader.read_exact(&mut buf).is_ok()
                     && buf[0] == 0x1f
