@@ -175,19 +175,22 @@ func (rule *FilesystemRule) pullSourceImage() (*tool.Image, error) {
 	layers := rule.SourceParsed.OCIImage.Manifest.Layers
 	worker := utils.NewWorkerPool(WorkerCount, uint(len(layers)))
 
-	for _, l := range layers {
-		layer := l
-		worker.Put(func() error {
-			reader, err := rule.SourceRemote.Pull(context.Background(), layer, true)
-			if err != nil {
-				return errors.Wrap(err, "pull source image layers from the remote registry")
-			}
+	for idx := range layers {
+		worker.Put(func(idx int) func() error {
+			return func() error {
+				layer := layers[idx]
+				reader, err := rule.SourceRemote.Pull(context.Background(), layer, true)
+				if err != nil {
+					return errors.Wrap(err, "pull source image layers from the remote registry")
+				}
 
-			if err = utils.UnpackTargz(context.Background(), filepath.Join(rule.SourcePath, layer.Digest.Encoded()), reader, true); err != nil {
-				return errors.Wrap(err, "unpack source image layers")
+				if err = utils.UnpackTargz(context.Background(), filepath.Join(rule.SourcePath, fmt.Sprintf("layer-%d", idx)), reader, true); err != nil {
+					return errors.Wrap(err, "unpack source image layers")
+				}
+
+				return nil
 			}
-			return nil
-		})
+		}(idx))
 	}
 
 	if err := <-worker.Waiter(); err != nil {

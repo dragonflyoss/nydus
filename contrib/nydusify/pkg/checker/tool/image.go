@@ -60,8 +60,9 @@ func (image *Image) Mount() error {
 
 	var dirs []string
 	count := len(image.Layers)
-	for i := range image.Layers {
-		layerDir := filepath.Join(image.SourcePath, image.Layers[count-i-1].Digest.Encoded())
+	for idx := range image.Layers {
+		layerName := fmt.Sprintf("layer-%d", count-idx-1)
+		layerDir := filepath.Join(image.SourcePath, layerName)
 		dirs = append(dirs, strings.ReplaceAll(layerDir, ":", "\\:"))
 	}
 
