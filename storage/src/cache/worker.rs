@@ -352,15 +352,7 @@ impl AsyncWorkerMgr {
         metrics.prefetch_data_amount.add(size);
 
         if let Some(obj) = cache.get_blob_object() {
-            if let Err(e) = obj.fetch_range_compressed(offset, size) {
-                warn!(
-                    "storage: failed to prefetch data from blob {}, offset {}, size {}, {}, will try resend",
-                    cache.blob_id(),
-                    offset,
-                    size,
-                    e
-                );
-
+            if let Err(_e) = obj.fetch_range_compressed(offset, size, true) {
                 if mgr.retry_times.load(Ordering::Relaxed) > 0 {
                     mgr.retry_times.fetch_sub(1, Ordering::Relaxed);
                     ASYNC_RUNTIME.spawn(async move {
