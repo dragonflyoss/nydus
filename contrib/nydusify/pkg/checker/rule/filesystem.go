@@ -172,19 +172,22 @@ func (rule *FilesystemRule) pullSourceImage() (*tool.Image, error) {
 	layers := rule.SourceParsed.OCIImage.Manifest.Layers
 	worker := utils.NewWorkerPool(WorkerCount, uint(len(layers)))
 
-	for _, l := range layers {
-		layer := l
-		worker.Put(func() error {
-			reader, err := rule.SourceRemote.Pull(context.Background(), layer, true)
-			if err != nil {
-				return errors.Wrap(err, "pull source image layers from the remote registry")
-			}
+	for idx := range layers {
+		worker.Put(func(idx int) func() error {
+			return func() error {
+				layer := layers[idx]
+				reader, err := rule.SourceRemote.Pull(context.Background(), layer, true)
+				if err != nil {
+					return errors.Wrap(err, "pull source image layers from the remote registry")
+				}
 
-			if err = utils.UnpackTargz(context.Background(), filepath.Join(rule.SourcePath, layer.Digest.Encoded()), reader, true); err != nil {
-				return errors.Wrap(err, "unpack source image layers")
+				if err = utils.UnpackTargz(context.Background(), filepath.Join(rule.SourcePath, fmt.Sprintf("layer-%d", idx)), reader, true); err != nil {
+					return errors.Wrap(err, "unpack source image layers")
+				}
+
+				return nil
 			}
-			return nil
-		})
+		}(idx))
 	}
 
 	if err := <-worker.Waiter(); err != nil {
@@ -326,6 +329,19 @@ func (rule *FilesystemRule) Validate() error {
 	if rule.Source == "" {
 		return nil
 	}
+
+	// Cleanup temporary directories
+	defer func() {
+		if err := os.RemoveAll(rule.SourcePath); err != nil {
+			logrus.WithError(err).Warnf("cleanup source image directory %s", rule.SourcePath)
+		}
+		if err := os.RemoveAll(rule.NydusdConfig.MountPath); err != nil {
+			logrus.WithError(err).Warnf("cleanup nydus image directory %s", rule.NydusdConfig.MountPath)
+		}
+		if err := os.RemoveAll(rule.NydusdConfig.BlobCacheDir); err != nil {
+			logrus.WithError(err).Warnf("cleanup nydus blob cache directory %s", rule.NydusdConfig.BlobCacheDir)
+		}
+	}()
 
 	image, err := rule.mountSourceImage()
 	if err != nil {
