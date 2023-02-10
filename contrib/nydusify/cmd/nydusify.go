@@ -176,7 +176,7 @@ func main() {
 		FullTimestamp: true,
 	})
 
-	version := fmt.Sprintf("\nVersion		: %s\nRevision	: %s\nGo version	: %s\nBuild time	: %s", gitVersion, revision, runtime.Version(), buildTime)
+	version := fmt.Sprintf("\nVersion	: %s\nRevision	: %s\nGo version	: %s\nBuild time	: %s", gitVersion, revision, runtime.Version(), buildTime)
 
 	app := &cli.App{
 		Name:    "Nydusify",
@@ -315,7 +315,7 @@ func main() {
 				&cli.BoolFlag{
 					Name:    "merge-platform",
 					Value:   false,
-					Usage:   "Generate an OCI image index with both OCI and Nydus manifests for the image, please ensure that the OCI image exists in the target repository",
+					Usage:   "Generate an OCI image index with both OCI and Nydus manifests for the image",
 					EnvVars: []string{"MERGE_PLATFORM"},
 					Aliases: []string{"multi-platform"},
 				},
