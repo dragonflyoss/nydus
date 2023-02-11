@@ -162,7 +162,7 @@ fn colored_opt_format(
         write!(
             w,
             "[{}] {} {}",
-            style(level).paint(now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK)),
+            style(level).paint(now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK).to_string()),
             style(level).paint(level.to_string()),
             style(level).paint(&record.args().to_string())
         )
@@ -170,7 +170,7 @@ fn colored_opt_format(
         write!(
             w,
             "[{}] {} [{}:{}] {}",
-            style(level).paint(now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK)),
+            style(level).paint(now.format(TS_DASHES_BLANK_COLONS_DOT_BLANK).to_string()),
             style(level).paint(level.to_string()),
             get_file_name(record).unwrap_or("<unnamed>"),
             record.line().unwrap_or(0),

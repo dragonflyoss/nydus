@@ -14,7 +14,7 @@ time = { version = "0.3.14", features = ["formatting"] }
 
 [dependencies]
 regex = "1.5.5"
-flexi_logger = { version = "0.23", features = ["compress"] }
+flexi_logger = { version = "0.25", features = ["compress"] }
 libc = "0.2"
 log = "0.4"
 nix = "0.24"
