@@ -1189,9 +1189,11 @@ impl BlobMetaChunkArray {
 
         // Special handling prefetch for ZRan blobs because they may have holes.
         if prefetch {
-            let entry = &chunks[right];
-            if entry.compressed_offset() > addr {
-                return Ok(right);
+            if right < chunks.len() {
+                let entry = &chunks[right];
+                if entry.compressed_offset() > addr {
+                    return Ok(right);
+                }
             }
             if left < chunks.len() {
                 let entry = &chunks[left];
@@ -1383,7 +1385,6 @@ impl BlobMetaChunkArray {
                 }
                 // Special handling prefetch for ZRan blobs
                 if prefetch && index >= chunk_info_array.len() {
-                    error!("get chunks: last {}", index);
                     return Ok(vec);
                 }
             }
