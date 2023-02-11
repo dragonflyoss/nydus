@@ -357,7 +357,7 @@ mod tests {
               "bandwidth_rate": 10485760
             }
           }"#;
-        let bootstrap = "./tests/texture/bootstrap/nydusd_daemon_test_bootstrap";
+        let bootstrap = "../tests/texture/bootstrap/nydusd_daemon_test_bootstrap";
         if fs_backend_factory(&FsBackendMountCmd {
             fs_type: FsBackendType::Rafs,
             config: config.to_string(),

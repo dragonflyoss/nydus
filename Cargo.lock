@@ -217,9 +217,9 @@ dependencies = [
 
 [[package]]
 name = "clap_lex"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d4198f73e42b4936b35b5bb248d81d2b595ecb170da0bac7655c54eedfa8da8"
+checksum = "783fe232adfca04f90f56201b26d79682d4cd2625e0bc7290b95123afe558ade"
 dependencies = [
  "os_str_bytes",
 ]
@@ -639,9 +639,9 @@ checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 
 [[package]]
 name = "heck"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2540771e65fc8cb83cd6e8a237f70c319bd5c29f78ed1084ba5d50eeac86f7f9"
+checksum = "95505c38b4572b2d910cecb0281560f54b440a19336cbbcb27bf6ce6adc6f5a8"
 
 [[package]]
 name = "hermit-abi"
@@ -1124,6 +1124,7 @@ dependencies = [
  "log",
  "nydus-api",
  "nydus-rafs",
+ "nydus-storage",
 ]
 
 [[package]]
@@ -1185,18 +1186,44 @@ dependencies = [
  "nix",
  "nydus-api",
  "nydus-app",
- "nydus-blobfs",
  "nydus-error",
  "nydus-rafs",
+ "nydus-service",
  "nydus-storage",
  "nydus-utils",
  "openssl",
  "rlimit",
- "rust-fsm",
  "serde",
  "serde_json",
  "sha2",
  "tar",
+ "tokio",
+ "vhost",
+ "vhost-user-backend",
+ "virtio-bindings",
+ "virtio-queue",
+ "vm-memory",
+ "vmm-sys-util",
+ "xattr",
+]
+
+[[package]]
+name = "nydus-service"
+version = "0.1.0"
+dependencies = [
+ "fuse-backend-rs",
+ "libc",
+ "log",
+ "mio",
+ "nix",
+ "nydus-api",
+ "nydus-error",
+ "nydus-rafs",
+ "nydus-storage",
+ "nydus-utils",
+ "rust-fsm",
+ "serde",
+ "serde_json",
  "thiserror",
  "time",
  "tokio",
@@ -1206,7 +1233,6 @@ dependencies = [
  "virtio-queue",
  "vm-memory",
  "vmm-sys-util",
- "xattr",
 ]
 
 [[package]]
@@ -1341,9 +1367,9 @@ dependencies = [
 
 [[package]]
 name = "os_str_bytes"
-version = "6.2.0"
+version = "6.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "648001efe5d5c0102d8cea768e348da85d90af8ba91f0bea908f157951493cd4"
+checksum = "9b7820b9daea5457c9f21c69448905d723fbd21136ccf521748f23fd49e723ee"
 
 [[package]]
 name = "overload"
@@ -1534,9 +1560,9 @@ dependencies = [
 
 [[package]]
 name = "rlimit"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea5c77e0e5e2bfeb5fcf2c084eb20a9ed9d95cab167d88784956c29419342925"
+checksum = "f8a29d87a652dc4d43c586328706bb5cdff211f3f39a530f240b53f7221dab8e"
 dependencies = [
  "libc",
 ]

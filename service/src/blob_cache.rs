@@ -540,7 +540,7 @@ mod tests {
         let tmpdir = TempDir::new().unwrap();
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
-        source_path.push("tests/texture/bootstrap/rafs-v5.boot");
+        source_path.push("../tests/texture/bootstrap/rafs-v5.boot");
 
         let config = r#"
         {

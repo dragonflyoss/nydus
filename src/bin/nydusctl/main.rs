@@ -25,10 +25,11 @@ mod commands;
 use commands::{
     CommandBackend, CommandCache, CommandDaemon, CommandFsStats, CommandMount, CommandUmount,
 };
-use nydus_app::BuildTimeInfo;
+use nydus::get_build_time_info;
+use nydus_api::BuildTimeInfo;
 
 lazy_static! {
-    static ref BTI: BuildTimeInfo = BuildTimeInfo::dump().1;
+    static ref BTI: BuildTimeInfo = get_build_time_info().1;
 }
 
 #[tokio::main]

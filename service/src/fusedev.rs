@@ -33,7 +33,7 @@ use fuse_backend_rs::transport::{FuseChannel, FuseSession};
 use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
-use nydus_app::BuildTimeInfo;
+use nydus_api::BuildTimeInfo;
 use serde::Serialize;
 
 use crate::daemon::{

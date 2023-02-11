@@ -28,11 +28,6 @@ nydus-app = { version = "0.3", path = "../app" }
 
 [features]
 virtiofs = ["fuse-backend-rs/virtiofs", "nydus-rafs/virtio-fs"]
-baekend-s3 = ["nydus-rafs/backend-s3"]
-backend-oss = ["nydus-rafs/backend-oss"]
-backend-registry = ["nydus-rafs/backend-registry"]
-backend-http-proxy = ["nydus-rafs/backend-http-proxy"]
-backend-localdisk = ["nydus-rafs/backend-localdisk"]
 
 [package.metadata.docs.rs]
 all-features = true

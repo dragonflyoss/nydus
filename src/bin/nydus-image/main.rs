@@ -23,8 +23,9 @@ use anyhow::{bail, Context, Result};
 use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
-use nydus_api::ConfigV2;
-use nydus_app::{setup_logging, BuildTimeInfo};
+use nydus::get_build_time_info;
+use nydus_api::{BuildTimeInfo, ConfigV2};
+use nydus_app::setup_logging;
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::factory::BlobFactory;
@@ -592,8 +593,8 @@ fn init_log(matches: &ArgMatches) -> Result<()> {
 }
 
 lazy_static! {
-    static ref BTI_STRING: String = BuildTimeInfo::dump().0;
-    static ref BTI: BuildTimeInfo = BuildTimeInfo::dump().1;
+    static ref BTI_STRING: String = get_build_time_info().0;
+    static ref BTI: BuildTimeInfo = get_build_time_info().1;
 }
 
 fn main() -> Result<()> {

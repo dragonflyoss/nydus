@@ -44,13 +44,10 @@ log = "0.4.8"
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
 nix = "0.24.0"
 rlimit = "0.9.0"
-rust-fsm = "0.6.0"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.51"
 sha2 = "0.10.2"
 tar = "0.4.38"
-thiserror = "1.0"
-time = { version = "0.3.14", features = ["serde-human-readable"] }
 tokio = { version = "1.24", features = ["macros"] }
 vmm-sys-util = "0.10.0"
 xattr = "0.2.3"
@@ -63,17 +60,10 @@ openssl = { version = "0.10.45", features = ["vendored"] }
 nydus-api = { version = "0.2.0", path = "api", features = ["handler"] }
 nydus-app = { version = "0.3.2", path = "app" }
 nydus-error = { version = "0.2.3", path = "error" }
-nydus-rafs = { version = "0.2.0", path = "rafs", features = [
-    "backend-registry",
-    "backend-oss",
-    "backend-s3",
-    "backend-http-proxy",
-    "backend-localdisk",
-] }
+nydus-rafs = { version = "0.2.0", path = "rafs" }
+nydus-service = { version = "0.1.0", path = "service" }
 nydus-storage = { version = "0.6.0", path = "storage" }
 nydus-utils = { version = "0.4.0", path = "utils" }
-
-nydus-blobfs = { version = "0.2.0", path = "blobfs", features = ["virtiofs"], optional = true }
 
 vhost = { version = "0.5.0", features = ["vhost-user-slave"], optional = true }
 vhost-user-backend = { version = "0.7.0", optional = true }
@@ -82,15 +72,28 @@ virtio-queue = { version = "0.6.0", optional = true }
 vm-memory = { version = "0.9.0", features = ["backend-mmap"], optional = true }
 
 [features]
-default = ["fuse-backend-rs/fusedev"]
+default = [
+    "fuse-backend-rs/fusedev",
+    "backend-registry",
+    "backend-oss",
+    "backend-s3",
+    "backend-http-proxy",
+    "backend-localdisk",
+]
 virtiofs = [
-    "fuse-backend-rs/vhost-user-fs",
-    "vm-memory",
+    "nydus-service/virtiofs",
     "vhost",
     "vhost-user-backend",
-    "virtio-queue",
     "virtio-bindings",
+    "virtio-queue",
+    "vm-memory",
 ]
 
+backend-http-proxy = ["nydus-storage/backend-http-proxy"]
+backend-localdisk = ["nydus-storage/backend-localdisk"]
+backend-oss = ["nydus-storage/backend-oss"]
+backend-registry = ["nydus-storage/backend-registry"]
+backend-s3 = ["nydus-storage/backend-s3"]
+
 [workspace]
-members = ["api", "app", "blobfs", "clib", "error", "rafs", "storage", "utils"]
+members = ["api", "app", "blobfs", "clib", "error", "rafs", "storage", "service", "utils"]

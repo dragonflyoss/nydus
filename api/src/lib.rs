@@ -35,3 +35,13 @@ pub(crate) mod http_handler;
 pub use http_handler::{
     extract_query_part, start_http_thread, EndpointHandler, HttpResult, HttpRoutes, HTTP_ROUTES,
 };
+
+/// Application build and version information.
+#[derive(Serialize, Clone)]
+pub struct BuildTimeInfo {
+    pub package_ver: String,
+    pub git_commit: String,
+    pub build_time: String,
+    pub profile: String,
+    pub rustc: String,
+}
