@@ -25,10 +25,11 @@ use rlimit::Resource;
 use nydus::blob_cache::BlobCacheMgr;
 use nydus::daemon::NydusDaemon;
 use nydus::{
-    create_daemon, validate_threads_configuration, Error as NydusError, FsBackendMountCmd,
-    FsService, SubCmdArgs,
+    create_daemon, get_build_time_info, validate_threads_configuration, Error as NydusError,
+    FsBackendMountCmd, FsService, ServiceArgs, SubCmdArgs,
 };
-use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
+use nydus_api::BuildTimeInfo;
+use nydus_app::{dump_program_info, setup_logging};
 
 use crate::api_server_glue::ApiServerController;
 
@@ -44,8 +45,8 @@ const RLIMIT_NOFILE_MAX: u64 = 1_000_000;
 
 lazy_static! {
     static ref DAEMON_CONTROLLER: DaemonController = DaemonController::new();
-    static ref BTI_STRING: String = BuildTimeInfo::dump().0;
-    static ref BTI: BuildTimeInfo = BuildTimeInfo::dump().1;
+    static ref BTI_STRING: String = get_build_time_info().0;
+    static ref BTI: BuildTimeInfo = get_build_time_info().1;
 }
 
 /// Controller to manage registered filesystem/blobcache/fscache services.

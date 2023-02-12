@@ -31,7 +31,7 @@ use nydus::daemon::{
 };
 use nydus::upgrade::UpgradeManager;
 use nydus::{Error, FsBackendCollection, FsBackendMountCmd, FsService, Result};
-use nydus_app::BuildTimeInfo;
+use nydus_api::BuildTimeInfo;
 
 const VIRTIO_F_VERSION_1: u32 = 32;
 const QUEUE_SIZE: usize = 1024;

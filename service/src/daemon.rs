@@ -16,7 +16,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{Builder, JoinHandle};
 
-use nydus_app::BuildTimeInfo;
+use nydus_api::BuildTimeInfo;
 use rust_fsm::*;
 use serde::{self, Serialize};
 

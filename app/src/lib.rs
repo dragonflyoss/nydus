@@ -39,8 +39,6 @@
 extern crate log;
 #[macro_use]
 extern crate nydus_error;
-#[macro_use]
-extern crate serde;
 
 use std::env::current_dir;
 use std::io::Result;
@@ -80,39 +78,6 @@ pub fn dump_program_info() {
         built_info::PROFILE,
         built_info::RUSTC_VERSION,
     );
-}
-
-/// Application build and version information.
-#[derive(Serialize, Clone)]
-pub struct BuildTimeInfo {
-    pub package_ver: String,
-    pub git_commit: String,
-    build_time: String,
-    profile: String,
-    rustc: String,
-}
-
-impl BuildTimeInfo {
-    pub fn dump() -> (String, Self) {
-        let info_string = format!(
-            "\rVersion: \t{}\nGit Commit: \t{}\nBuild Time: \t{}\nProfile: \t{}\nRustc: \t\t{}\n",
-            built_info::GIT_COMMIT_VERSION,
-            built_info::GIT_COMMIT_HASH,
-            built_info::BUILT_TIME_UTC,
-            built_info::PROFILE,
-            built_info::RUSTC_VERSION,
-        );
-
-        let info = Self {
-            package_ver: built_info::GIT_COMMIT_VERSION.to_string(),
-            git_commit: built_info::GIT_COMMIT_HASH.to_string(),
-            build_time: built_info::BUILT_TIME_UTC.to_string(),
-            profile: built_info::PROFILE.to_string(),
-            rustc: built_info::RUSTC_VERSION.to_string(),
-        };
-
-        (info_string, info)
-    }
 }
 
 fn get_file_name<'a>(record: &'a Record) -> Option<&'a str> {
