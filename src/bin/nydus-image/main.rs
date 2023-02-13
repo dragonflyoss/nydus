@@ -814,8 +814,11 @@ impl Command {
                 chunk_size,
                 explicit_uidgid: !repeatable,
             };
+            let rafs_config = Arc::new(build_ctx.configuration.as_ref().clone());
+            // The separate chunk dict bootstrap doesn't support blob accessible.
+            rafs_config.internal.set_blob_accessible(false);
             blob_mgr.set_chunk_dict(timing_tracer!(
-                { import_chunk_dict(chunk_dict_arg, build_ctx.configuration.clone(), &config,) },
+                { import_chunk_dict(chunk_dict_arg, rafs_config, &config,) },
                 "import_chunk_dict"
             )?);
         }
