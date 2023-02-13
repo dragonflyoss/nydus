@@ -57,7 +57,7 @@ openssl = { version = "0.10.45", features = ["vendored"] }
 # pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
 #openssl-src = { version = "111.22" }
 
-nydus-api = { version = "0.2.0", path = "api", features = ["handler"] }
+nydus-api = { version = "0.2.1", path = "api", features = ["handler"] }
 nydus-app = { version = "0.3.2", path = "app" }
 nydus-error = { version = "0.2.3", path = "error" }
 nydus-rafs = { version = "0.2.0", path = "rafs" }
