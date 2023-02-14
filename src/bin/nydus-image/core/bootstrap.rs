@@ -583,7 +583,7 @@ impl Bootstrap {
             EROFS_BLOCK_SIZE as u64,
         );
         let blob_table_entries = blobs.len();
-        assert!(blob_table_entries < u16::MAX as usize);
+        assert!(blob_table_entries < u8::MAX as usize);
         trace!(
             "devtable len {} blob table offset {} blob table size {}",
             devtable_len,
