@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-api"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dbs-uhttp",
  "http",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-rafs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-storage"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "arc-swap",
  "base64",
@@ -1274,7 +1274,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-utils"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "blake3",
  "flate2",
