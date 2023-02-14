@@ -665,6 +665,12 @@ impl Bootstrap {
         Self::rafsv6_align_to_block(bootstrap_ctx)?;
 
         // Prepare device slots.
+        let pos = bootstrap_ctx
+            .writer
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end for chunk table")?;
+        assert_eq!(pos % EROFS_BLOCK_SIZE, 0);
+        let mut mapped_blkaddr = Self::align_mapped_blkaddr((pos / EROFS_BLOCK_SIZE) as u32);
         let mut devtable: Vec<RafsV6Device> = Vec::new();
         let mut block_count = 0u32;
         let mut inlined_chunk_digest = true;
@@ -696,8 +702,10 @@ impl Bootstrap {
             blob_id[..id.len()].copy_from_slice(id);
             devslot.set_blob_id(&blob_id);
             devslot.set_blocks(cnt);
-            devslot.set_mapped_blkaddr(0);
+            devslot.set_mapped_blkaddr(mapped_blkaddr);
             devtable.push(devslot);
+
+            mapped_blkaddr = Self::align_mapped_blkaddr(mapped_blkaddr + cnt);
         }
 
         // Dump super block
@@ -767,5 +775,11 @@ impl Bootstrap {
             .flush()
             .context("failed to flush bootstrap")?;
         Ok(())
+    }
+
+    fn align_mapped_blkaddr(addr: u32) -> u32 {
+        // TODO: define a const in nydus-service for 0x20_0000
+        let blocks = (0x20_0000u64 / EROFS_BLOCK_SIZE) as u32;
+        (addr + blocks - 1) / blocks * blocks
     }
 }
