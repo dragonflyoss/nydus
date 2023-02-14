@@ -62,7 +62,7 @@ nydus-app = { version = "0.3.2", path = "app" }
 nydus-error = { version = "0.2.3", path = "error" }
 nydus-rafs = { version = "0.2.0", path = "rafs" }
 nydus-service = { version = "0.1.0", path = "service" }
-nydus-storage = { version = "0.6.0", path = "storage" }
+nydus-storage = { version = "0.6.1", path = "storage" }
 nydus-utils = { version = "0.4.1", path = "utils" }
 
 vhost = { version = "0.5.0", features = ["vhost-user-slave"], optional = true }
