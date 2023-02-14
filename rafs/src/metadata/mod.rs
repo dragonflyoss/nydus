@@ -273,6 +273,16 @@ bitflags! {
         const COMPRESSION_ZSTD = 0x0000_0080;
         /// Chunk digests are inlined in RAFS v6 data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0100;
+
+        // Reserved for future compatible changes.
+        const PRESERVED_COMPAT_7 = 0x0100_0000;
+        const PRESERVED_COMPAT_6 = 0x0200_0000;
+        const PRESERVED_COMPAT_5 = 0x0400_0000;
+        const PRESERVED_COMPAT_4 = 0x0800_0000;
+        const PRESERVED_COMPAT_3 = 0x1000_0000;
+        const PRESERVED_COMPAT_2 = 0x2000_0000;
+        const PRESERVED_COMPAT_1 = 0x4000_0000;
+        const PRESERVED_COMPAT_0 = 0x8000_0000;
     }
 }
 
