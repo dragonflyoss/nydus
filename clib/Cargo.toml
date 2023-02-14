@@ -17,7 +17,7 @@ libc = "0.2.137"
 log = "0.4.17"
 fuse-backend-rs = "0.10.0"
 nydus-api = { version = "0.2", path = "../api" }
-nydus-rafs = { version = "0.2.0", path = "../rafs" }
+nydus-rafs = { version = "0.2.1", path = "../rafs" }
 nydus-storage = { version = "0.6.1", path = "../storage" }
 
 [features]

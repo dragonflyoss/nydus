@@ -24,7 +24,7 @@ tokio = { version = "1.24", features = ["macros"] }
 
 nydus-api = { version = "0.2.1", path = "../api", features = ["handler"] }
 nydus-error = { version = "0.2.3", path = "../error" }
-nydus-rafs = { version = "0.2.0", path = "../rafs" }
+nydus-rafs = { version = "0.2.1", path = "../rafs" }
 nydus-storage = { version = "0.6.1", path = "../storage" }
 nydus-utils = { version = "0.4.1", path = "../utils" }
 

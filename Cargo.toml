@@ -60,7 +60,7 @@ openssl = { version = "0.10.45", features = ["vendored"] }
 nydus-api = { version = "0.2.1", path = "api", features = ["handler"] }
 nydus-app = { version = "0.3.2", path = "app" }
 nydus-error = { version = "0.2.3", path = "error" }
-nydus-rafs = { version = "0.2.0", path = "rafs" }
+nydus-rafs = { version = "0.2.1", path = "rafs" }
 nydus-service = { version = "0.1.0", path = "service" }
 nydus-storage = { version = "0.6.1", path = "storage" }
 nydus-utils = { version = "0.4.1", path = "utils" }
