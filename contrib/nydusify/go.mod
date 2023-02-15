@@ -128,7 +128,7 @@ require (
 replace github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.2
 
 // It will be updated to official repo once acceleration-service release.
-replace github.com/goharbor/acceleration-service => github.com/imeoer/acceleration-service v0.0.33
+replace github.com/goharbor/acceleration-service => github.com/imeoer/acceleration-service v0.0.34
 
 // It will be updated to official repo once nydus-snapshotter release.
-replace github.com/containerd/nydus-snapshotter => github.com/imeoer/nydus-snapshotter v0.3.31
+replace github.com/containerd/nydus-snapshotter => github.com/imeoer/nydus-snapshotter v0.3.32
