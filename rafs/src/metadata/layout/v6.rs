@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Debug;
@@ -22,7 +23,7 @@ use nydus_utils::{compress, digest, round_up, ByteSize};
 
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::layout::{MetaRange, RafsXAttrs};
-use crate::metadata::{RafsStore, RafsSuperFlags, RafsSuperMeta};
+use crate::metadata::{RafsBlobExtraInfo, RafsStore, RafsSuperFlags, RafsSuperMeta};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
 
 /// EROFS metadata slot size.
@@ -224,6 +225,13 @@ impl RafsV6SuperBlock {
             return Err(einval!(format!(
                 "invalid device table slot offset {} in Rafsv6 superblock",
                 u16::from_le(self.s_devt_slotoff)
+            )));
+        }
+        let devtable_end = devtable_off + u16::from_le(self.s_extra_devices) as u64;
+        if devtable_end > meta_size {
+            return Err(einval!(format!(
+                "invalid device table slot count {} in Rafsv6 superblock",
+                u16::from_le(self.s_extra_devices)
             )));
         }
 
@@ -1225,21 +1233,6 @@ impl RafsV6Device {
         self.blob_id.copy_from_slice(id);
     }
 
-    /// Get number of blocks.
-    pub fn blocks(&self) -> u32 {
-        u32::from_le(self.blocks)
-    }
-
-    /// Set number of blocks.
-    pub fn set_blocks(&mut self, blocks: u32) {
-        self.blocks = blocks.to_le();
-    }
-
-    /// Set mapped block address.
-    pub fn set_mapped_blkaddr(&mut self, addr: u32) {
-        self.mapped_blkaddr = addr.to_le();
-    }
-
     /// Load a `RafsV6Device` from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
@@ -1250,19 +1243,25 @@ impl RafsV6Device {
         match String::from_utf8(self.blob_id.to_vec()) {
             Ok(v) => {
                 if v.len() != BLOB_SHA256_LEN {
-                    return Err(einval!(format!("v.len {} is invalid", v.len())));
+                    return Err(einval!(format!(
+                        "Length of blob_id {} in RAFS v6 device entry is invalid",
+                        v.len()
+                    )));
                 }
             }
-            Err(_) => return Err(einval!("blob_id from_utf8 is invalid")),
+            Err(_) => return Err(einval!("blob_id in RAFS v6 device entry is invalid")),
         }
 
         if self.blocks() == 0 {
-            let msg = format!("invalid blocks {} in Rafs v6 Device", self.blocks());
+            let msg = format!("invalid blocks {} in Rafs v6 device entry", self.blocks());
             return Err(einval!(msg));
         }
 
         Ok(())
     }
+
+    impl_pub_getter_setter!(blocks, set_blocks, blocks, u32);
+    impl_pub_getter_setter!(mapped_blkaddr, set_mapped_blkaddr, mapped_blkaddr, u32);
 }
 
 impl_bootstrap_converter!(RafsV6Device);
@@ -1273,6 +1272,34 @@ impl RafsStore for RafsV6Device {
 
         Ok(self.as_ref().len())
     }
+}
+
+/// Load blob information table from a reader.
+pub fn rafsv6_load_blob_extra_info(
+    meta: &RafsSuperMeta,
+    r: &mut RafsIoReader,
+) -> Result<HashMap<String, RafsBlobExtraInfo>> {
+    let mut infos = HashMap::new();
+    if meta.blob_device_table_count == 0 {
+        return Ok(infos);
+    }
+    r.seek_to_offset(meta.blob_device_table_offset)?;
+    for _idx in 0..meta.blob_device_table_count {
+        let mut devslot = RafsV6Device::new();
+        r.read_exact(devslot.as_mut())?;
+        devslot.validate()?;
+        let id = String::from_utf8(devslot.blob_id.to_vec())
+            .map_err(|e| einval!(format!("invalid blob id, {}", e)))?;
+        let info = RafsBlobExtraInfo {
+            mapped_blkaddr: devslot.mapped_blkaddr(),
+        };
+        if infos.contains_key(&id) {
+            return Err(einval!("duplicated blob id in RAFS v6 device table"));
+        }
+        infos.insert(id, info);
+    }
+
+    Ok(infos)
 }
 
 #[inline]
