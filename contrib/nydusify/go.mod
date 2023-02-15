@@ -9,8 +9,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.13.4
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.11.43
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.29.5
-	github.com/containerd/containerd v1.6.14
-	github.com/docker/cli v20.10.21+incompatible
+	github.com/containerd/containerd v1.6.17
+	github.com/docker/cli v20.10.23+incompatible
 	github.com/docker/distribution v2.8.1+incompatible
 	github.com/goharbor/acceleration-service v0.1.1
 	github.com/google/uuid v1.3.0
@@ -23,9 +23,9 @@ require (
 	github.com/prometheus/client_golang v1.14.0
 	github.com/sirupsen/logrus v1.9.0
 	github.com/stretchr/testify v1.8.1
-	github.com/urfave/cli/v2 v2.23.0
+	github.com/urfave/cli/v2 v2.24.2
 	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
-	golang.org/x/sys v0.2.0
+	golang.org/x/sys v0.4.0
 	lukechampine.com/blake3 v1.1.5
 )
 
@@ -56,7 +56,7 @@ require (
 	github.com/containerd/fifo v1.0.0 // indirect
 	github.com/containerd/nydus-snapshotter v0.3.1 // indirect
 	github.com/containerd/stargz-snapshotter v0.13.0 // indirect
-	github.com/containerd/stargz-snapshotter/estargz v0.13.0 // indirect
+	github.com/containerd/stargz-snapshotter/estargz v0.14.1 // indirect
 	github.com/containerd/ttrpc v1.1.0 // indirect
 	github.com/containerd/typeurl v1.0.2 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
@@ -78,7 +78,7 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway v1.16.0 // indirect
 	github.com/hashicorp/yamux v0.1.1 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
-	github.com/klauspost/compress v1.15.12 // indirect
+	github.com/klauspost/compress v1.15.15 // indirect
 	github.com/klauspost/cpuid v1.3.1 // indirect
 	github.com/lib/pq v1.10.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
@@ -114,9 +114,10 @@ require (
 	go.opentelemetry.io/otel/sdk v1.3.0 // indirect
 	go.opentelemetry.io/otel/trace v1.3.0 // indirect
 	go.opentelemetry.io/proto/otlp v0.11.0 // indirect
-	golang.org/x/net v0.1.1-0.20221027164007-c63010009c80 // indirect
-	golang.org/x/text v0.4.0 // indirect
-	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8 // indirect
+	golang.org/x/mod v0.8.0 // indirect
+	golang.org/x/net v0.5.0 // indirect
+	golang.org/x/text v0.6.0 // indirect
+	golang.org/x/time v0.0.0-20220722155302-e5dcc9cfc0b9 // indirect
 	google.golang.org/genproto v0.0.0-20220927151529-dcaddaf36704 // indirect
 	google.golang.org/grpc v1.50.1 // indirect
 	google.golang.org/protobuf v1.28.1 // indirect
@@ -127,7 +128,7 @@ require (
 replace github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.2
 
 // It will be updated to official repo once acceleration-service release.
-replace github.com/goharbor/acceleration-service => github.com/imeoer/acceleration-service v0.0.30
+replace github.com/goharbor/acceleration-service => github.com/imeoer/acceleration-service v0.0.33
 
 // It will be updated to official repo once nydus-snapshotter release.
-replace github.com/containerd/nydus-snapshotter => github.com/imeoer/nydus-snapshotter v0.3.28
+replace github.com/containerd/nydus-snapshotter => github.com/imeoer/nydus-snapshotter v0.3.31
