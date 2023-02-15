@@ -888,10 +888,10 @@ github.com/imdario/mergo v0.3.8/go.mod h1:2EnlNZ0deacrJVfApfmtdGgDfMuh/nq6Ok1EcJ
 github.com/imdario/mergo v0.3.10/go.mod h1:jmQim1M+e3UYxmgPu/WyfjB3N3VflVyUjjjwH0dnCYA=
 github.com/imdario/mergo v0.3.11/go.mod h1:jmQim1M+e3UYxmgPu/WyfjB3N3VflVyUjjjwH0dnCYA=
 github.com/imdario/mergo v0.3.12/go.mod h1:jmQim1M+e3UYxmgPu/WyfjB3N3VflVyUjjjwH0dnCYA=
-github.com/imeoer/acceleration-service v0.0.33 h1:GEiITKf1atp5oSVN7LYgUuIyOOUx6QXXAcSbTZfgdrA=
-github.com/imeoer/acceleration-service v0.0.33/go.mod h1:tbciUlt68Xf0BzHJ182NxrVyyOKAMh3Fyt6Etxcpszk=
-github.com/imeoer/nydus-snapshotter v0.3.31 h1:83cLhi+4JV2868UkUAr/n7nHwQX9MaberG+hYCmE2ao=
-github.com/imeoer/nydus-snapshotter v0.3.31/go.mod h1:U9m10GYZKisnSKOdgIjfkU8Ad0UTSYJ6CpP3I0SJBD0=
+github.com/imeoer/acceleration-service v0.0.34 h1:suggb+fiQm0rqx2fuIn+GuDUVgAsDe2pNtle7SuveTI=
+github.com/imeoer/acceleration-service v0.0.34/go.mod h1:TieZbvu5DlRwST1+c287Rz1bLKucV8Mu0fEPNA6MqaI=
+github.com/imeoer/nydus-snapshotter v0.3.32 h1:x86wZ9HUwKgR82asme0wU9bRtP4AkotPLrYNIb33afE=
+github.com/imeoer/nydus-snapshotter v0.3.32/go.mod h1:U9m10GYZKisnSKOdgIjfkU8Ad0UTSYJ6CpP3I0SJBD0=
 github.com/inconshreveable/mousetrap v1.0.0/go.mod h1:PxqpIevigyE2G7u3NXJIT2ANytuPF1OarO4DADm73n8=
 github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d/go.mod h1:qj24IKcXYK6Iy9ceXlo3Tc+vtHo9lIhSX5JddghvEPo=
 github.com/intel/goresctrl v0.2.0/go.mod h1:+CZdzouYFn5EsxgqAQTEzMfwKwuc0fVdMrT9FCCAVRQ=
