@@ -539,44 +539,8 @@ impl Bootstrap {
         // |   |         |devslot     |             |                 |         |                  |
         // +---+---------+------------+-------------+----------------------------------------------+
 
-        // get devt_slotoff
-        let mut devtable: Vec<RafsV6Device> = Vec::new();
         let blobs = blob_table.get_all();
-        let mut block_count = 0u32;
-        let mut inlined_chunk_digest = true;
-        for entry in blobs.iter() {
-            let mut devslot = RafsV6Device::new();
-            // blob id is String, which is processed by sha256.finalize().
-            if entry.blob_id().is_empty() {
-                bail!(" blob id is empty");
-            } else if entry.blob_id().len() > 64 {
-                bail!(format!(
-                    "blob id length is bigger than 64 bytes, blob id {:?}",
-                    entry.blob_id()
-                ));
-            } else if entry.uncompressed_size() / EROFS_BLOCK_SIZE > u32::MAX as u64 {
-                bail!(format!(
-                    "uncompressed blob size (0x:{:x}) is too big",
-                    entry.uncompressed_size()
-                ));
-            }
-            if !entry.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
-                inlined_chunk_digest = false;
-            }
-            let cnt = (entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32;
-            assert!(block_count.checked_add(cnt).is_some());
-            block_count += cnt;
-            let id = entry.blob_id();
-            let id = id.as_bytes();
-            let mut blob_id = [0u8; 64];
-            blob_id[..id.len()].copy_from_slice(id);
-            devslot.set_blob_id(&blob_id);
-            devslot.set_blocks(cnt);
-            devslot.set_mapped_blkaddr(0);
-            devtable.push(devslot);
-        }
-
-        let devtable_len = devtable.len() * size_of::<RafsV6Device>();
+        let devtable_len = blobs.len() * size_of::<RafsV6Device>();
         let blob_table_size = blob_table.size() as u64;
         let blob_table_offset = align_offset(
             (EROFS_DEVTABLE_OFFSET as u64) + devtable_len as u64,
@@ -620,22 +584,13 @@ impl Bootstrap {
             orig_meta_addr
         };
 
+        // get devt_slotoff
         let root_nid = calculate_nid(
             bootstrap_ctx.nodes[0].v6_offset + (meta_addr - orig_meta_addr),
             meta_addr,
         );
 
-        // Dump superblock
-        let mut sb = RafsV6SuperBlock::new();
-        sb.set_inos(bootstrap_ctx.nodes.len() as u64);
-        sb.set_blocks(block_count);
-        sb.set_root_nid(root_nid as u16);
-        sb.set_meta_addr(meta_addr);
-        sb.set_extra_devices(blob_table_entries as u16);
-        sb.store(bootstrap_ctx.writer.as_mut())
-            .context("failed to store SB")?;
-
-        // Dump extended superblock
+        // Prepare extended super block
         let ext_sb_offset = bootstrap_ctx.writer.seek_current(0)?;
         let mut ext_sb = RafsV6SuperBlockExt::new();
         ext_sb.set_compressor(ctx.compressor);
@@ -643,38 +598,13 @@ impl Bootstrap {
         ext_sb.set_chunk_size(ctx.chunk_size);
         ext_sb.set_blob_table_offset(blob_table_offset);
         ext_sb.set_blob_table_size(blob_table_size as u32);
-        // we need to write extended_sb until chunk table is dumped.
-        if ctx.explicit_uidgid {
-            ext_sb.set_explicit_uidgid();
-        }
-        if inlined_chunk_digest {
-            ext_sb.set_inlined_chunk_digest();
-        }
-
-        // dump devtslot
-        bootstrap_ctx
-            .writer
-            .seek_offset(EROFS_DEVTABLE_OFFSET as u64)
-            .context("failed to seek devtslot")?;
-        for slot in devtable.iter() {
-            slot.store(bootstrap_ctx.writer.as_mut())
-                .context("failed to store device slot")?;
-        }
-
-        // Dump blob table
-        bootstrap_ctx
-            .writer
-            .seek_offset(blob_table_offset as u64)
-            .context("failed seek for extended blob table offset")?;
-        blob_table
-            .store(bootstrap_ctx.writer.as_mut())
-            .context("failed to store extended blob table")?;
 
         // collect all chunks in this bootstrap.
         // HashChunkDict cannot be used here, because there will be duplicate chunks between layers,
         // but there is no deduplication during the actual construction.
         // Each layer uses the corresponding chunk in the blob of its own layer.
-        // If HashChunkDict is used here, it will cause duplication. The chunks are removed, resulting in incomplete chunk info.
+        // If HashChunkDict is used here, it will cause duplication. The chunks are removed,
+        // resulting in incomplete chunk info.
         let mut chunk_cache = BTreeMap::new();
 
         // Dump bootstrap
@@ -696,12 +626,14 @@ impl Bootstrap {
             "dump_bootstrap",
             Result<()>
         )?;
+        Self::rafsv6_align_to_block(bootstrap_ctx)?;
 
         // `Node` offset might be updated during above inodes dumping. So `get_prefetch_table` after it.
         let prefetch_table = ctx
             .prefetch
             .get_rafsv6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
         if let Some(mut pt) = prefetch_table {
+            assert!(pt.len() * size_of::<u32>() <= prefetch_table_size as usize);
             // Device slots are very close to extended super block.
             ext_sb.set_prefetch_table_offset(prefetch_table_offset);
             ext_sb.set_prefetch_table_size(prefetch_table_size);
@@ -712,18 +644,12 @@ impl Bootstrap {
             pt.store(bootstrap_ctx.writer.as_mut()).unwrap();
         }
 
-        // append chunk info table.
-        // align chunk table to EROFS_BLOCK_SIZE firstly.
-        let pos = bootstrap_ctx
+        // TODO: get rid of the chunk info array.
+        // Dump chunk info array.
+        let chunk_table_offset = bootstrap_ctx
             .writer
             .seek_to_end()
             .context("failed to seek to bootstrap's end for chunk table")?;
-        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
-        bootstrap_ctx
-            .writer
-            .write_all(&WRITE_PADDING_DATA[0..padding as usize])
-            .context("failed to write 0 to padding of bootstrap's end for chunk table")?;
-        let chunk_table_offset = pos + padding;
         let mut chunk_table_size: u64 = 0;
         for (_, chunk) in chunk_cache.iter() {
             let chunk_size = chunk
@@ -736,18 +662,93 @@ impl Bootstrap {
             "chunk_table offset {} size {}",
             chunk_table_offset, chunk_table_size
         );
+        Self::rafsv6_align_to_block(bootstrap_ctx)?;
 
-        // EROFS does not have inode table, so we lose the chance to decide if this
-        // image has xattr. So we have to rewrite extended super block.
+        // Prepare device slots.
+        let mut devtable: Vec<RafsV6Device> = Vec::new();
+        let mut block_count = 0u32;
+        let mut inlined_chunk_digest = true;
+        for entry in blobs.iter() {
+            let mut devslot = RafsV6Device::new();
+            // blob id is String, which is processed by sha256.finalize().
+            if entry.blob_id().is_empty() {
+                bail!(" blob id is empty");
+            } else if entry.blob_id().len() > 64 {
+                bail!(format!(
+                    "blob id length is bigger than 64 bytes, blob id {:?}",
+                    entry.blob_id()
+                ));
+            } else if entry.uncompressed_size() / EROFS_BLOCK_SIZE > u32::MAX as u64 {
+                bail!(format!(
+                    "uncompressed blob size (0x:{:x}) is too big",
+                    entry.uncompressed_size()
+                ));
+            }
+            if !entry.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
+                inlined_chunk_digest = false;
+            }
+            let cnt = (entry.uncompressed_size() / EROFS_BLOCK_SIZE) as u32;
+            assert!(block_count.checked_add(cnt).is_some());
+            block_count += cnt;
+            let id = entry.blob_id();
+            let id = id.as_bytes();
+            let mut blob_id = [0u8; 64];
+            blob_id[..id.len()].copy_from_slice(id);
+            devslot.set_blob_id(&blob_id);
+            devslot.set_blocks(cnt);
+            devslot.set_mapped_blkaddr(0);
+            devtable.push(devslot);
+        }
+
+        // Dump super block
+        let mut sb = RafsV6SuperBlock::new();
+        sb.set_inos(bootstrap_ctx.nodes.len() as u64);
+        sb.set_blocks(block_count);
+        sb.set_root_nid(root_nid as u16);
+        sb.set_meta_addr(meta_addr);
+        sb.set_extra_devices(blob_table_entries as u16);
+        bootstrap_ctx.writer.seek(SeekFrom::Start(0))?;
+        sb.store(bootstrap_ctx.writer.as_mut())
+            .context("failed to store SB")?;
+
+        // Dump extended super block.
+        if ctx.explicit_uidgid {
+            ext_sb.set_explicit_uidgid();
+        }
         if ctx.has_xattr {
             ext_sb.set_has_xattr();
+        }
+        if inlined_chunk_digest {
+            ext_sb.set_inlined_chunk_digest();
         }
         bootstrap_ctx.writer.seek(SeekFrom::Start(ext_sb_offset))?;
         ext_sb
             .store(bootstrap_ctx.writer.as_mut())
-            .context("failed to store extended SB")?;
+            .context("failed to store extended super block")?;
 
-        // Flush remaining data in BufWriter to file
+        // Dump device slots.
+        bootstrap_ctx
+            .writer
+            .seek_offset(EROFS_DEVTABLE_OFFSET as u64)
+            .context("failed to seek devtslot")?;
+        for slot in devtable.iter() {
+            slot.store(bootstrap_ctx.writer.as_mut())
+                .context("failed to store device slot")?;
+        }
+
+        // Dump blob table
+        bootstrap_ctx
+            .writer
+            .seek_offset(blob_table_offset as u64)
+            .context("failed seek for extended blob table offset")?;
+        blob_table
+            .store(bootstrap_ctx.writer.as_mut())
+            .context("failed to store extended blob table")?;
+
+        Ok(())
+    }
+
+    fn rafsv6_align_to_block(bootstrap_ctx: &mut BootstrapContext) -> Result<()> {
         bootstrap_ctx
             .writer
             .flush()
@@ -755,21 +756,16 @@ impl Bootstrap {
         let pos = bootstrap_ctx
             .writer
             .seek_to_end()
-            .context("failed to seek to bootstrap's end")?;
-        debug!(
-            "align bootstrap to 4k {}",
-            align_offset(pos, EROFS_BLOCK_SIZE as u64)
-        );
+            .context("failed to seek to bootstrap's end for chunk table")?;
         let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
         bootstrap_ctx
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
-            .context("failed to write 0 to padding of bootstrap's end")?;
+            .context("failed to write 0 to padding of bootstrap's end for chunk table")?;
         bootstrap_ctx
             .writer
             .flush()
             .context("failed to flush bootstrap")?;
-
         Ok(())
     }
 }
