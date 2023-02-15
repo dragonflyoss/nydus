@@ -14,7 +14,7 @@ use nydus_api::{
     BlobCacheEntry, BlobCacheList, BlobCacheObjectId, ConfigV2, BLOB_CACHE_TYPE_DATA_BLOB,
     BLOB_CACHE_TYPE_META_BLOB,
 };
-use nydus_rafs::metadata::RafsSuper;
+use nydus_rafs::metadata::{RafsBlobExtraInfo, RafsSuper};
 use nydus_storage::device::BlobInfo;
 
 const ID_SPLITTER: &str = "/";
@@ -34,7 +34,8 @@ pub struct BlobCacheConfigMetaBlob {
     scoped_blob_id: String,
     path: PathBuf,
     config: Arc<ConfigV2>,
-    data_blobs: Mutex<Vec<Arc<BlobCacheConfigDataBlob>>>,
+    blobs: Mutex<Vec<Arc<BlobCacheConfigDataBlob>>>,
+    blob_extra_infos: HashMap<String, RafsBlobExtraInfo>,
 }
 
 impl BlobCacheConfigMetaBlob {
@@ -48,15 +49,20 @@ impl BlobCacheConfigMetaBlob {
         &self.config
     }
 
+    /// Get optional extra information associated with a blob object.
+    pub fn get_blob_extra_info(&self, blob_id: &str) -> Option<&RafsBlobExtraInfo> {
+        self.blob_extra_infos.get(blob_id)
+    }
+
     fn add_data_blob(&self, blob: Arc<BlobCacheConfigDataBlob>) {
-        self.data_blobs.lock().unwrap().push(blob);
+        self.blobs.lock().unwrap().push(blob);
     }
 }
 
 /// Configuration information for cached data blob objects.
 pub struct BlobCacheConfigDataBlob {
-    blob_info: Arc<BlobInfo>,
     scoped_blob_id: String,
+    blob_info: Arc<BlobInfo>,
     config: Arc<ConfigV2>,
     ref_count: AtomicU32,
 }
@@ -107,6 +113,7 @@ impl BlobCacheObjectConfig {
         blob_id: String,
         path: PathBuf,
         config: Arc<ConfigV2>,
+        blob_extra_infos: HashMap<String, RafsBlobExtraInfo>,
     ) -> Self {
         let scoped_blob_id = generate_blob_key(&domain_id, &blob_id);
 
@@ -115,7 +122,8 @@ impl BlobCacheObjectConfig {
             scoped_blob_id,
             path,
             config,
-            data_blobs: Mutex::new(Vec::new()),
+            blobs: Mutex::new(Vec::new()),
+            blob_extra_infos,
         }))
     }
 
@@ -191,7 +199,7 @@ impl BlobCacheState {
                 None => return Err(enoent!("blob_cache: cache entry not found")),
                 Some(BlobCacheObjectConfig::MetaBlob(o)) => {
                     is_meta = true;
-                    data_blobs = o.data_blobs.lock().unwrap().clone();
+                    data_blobs = o.blobs.lock().unwrap().clone();
                 }
                 Some(BlobCacheObjectConfig::DataBlob(o)) => {
                     data_blobs.push(o.clone());
@@ -253,18 +261,20 @@ impl BlobCacheMgr {
                         e
                     })
             }
-            BLOB_CACHE_TYPE_DATA_BLOB => {
-                warn!("blob_cache: invalid data blob cache entry: {:?}", entry);
-                Err(einval!("blob_cache: invalid data blob cache entry"))
-            }
-            _ => {
-                warn!("blob_cache: invalid blob cache entry: {:?}", entry);
-                Err(einval!("blob_cache: invalid blob cache entry"))
-            }
+            BLOB_CACHE_TYPE_DATA_BLOB => Err(einval!(format!(
+                "blob_cache: invalid data blob cache entry: {:?}",
+                entry
+            ))),
+            _ => Err(einval!(format!(
+                "blob_cache: invalid blob cache entry, {:?}",
+                entry
+            ))),
         }
     }
 
     /// Add a list of meta/data blobs to be cached by the cache manager.
+    ///
+    /// If failed to add some blob, the blobs already added won't be rolled back.
     pub fn add_blob_list(&self, blobs: &BlobCacheList) -> Result<()> {
         for entry in blobs.blobs.iter() {
             self.add_blob_entry(entry)?;
@@ -289,17 +299,10 @@ impl BlobCacheMgr {
     }
 
     fn get_meta_info(&self, entry: &BlobCacheEntry) -> Result<(PathBuf, Arc<ConfigV2>)> {
-        // Validate type of backend and cache.
         let config = entry
             .blob_config
             .as_ref()
             .ok_or_else(|| einval!("missing blob cache configuration information"))?;
-        if config.cache.cache_type != "fscache" {
-            return Err(einval!(
-                "blob_cache: `config.cache_type` for meta blob is invalid"
-            ));
-        }
-        let cache_config = config.cache.get_fscache_config()?;
 
         if entry.blob_id.contains(ID_SPLITTER) {
             return Err(einval!("blob_cache: `blob_id` for meta blob is invalid"));
@@ -322,15 +325,33 @@ impl BlobCacheMgr {
             ));
         }
 
-        // Validate the working directory for fscache
-        let path2 = Path::new(&cache_config.work_dir);
-        let path2 = path2
-            .canonicalize()
-            .map_err(|_e| eio!("blob_cache: `config.cache_config.work_dir` is invalid"))?;
-        if !path2.is_dir() {
-            return Err(einval!(
-                "blob_cache: `config.cache_config.work_dir` is not a directory"
-            ));
+        // Validate type of backend and cache.
+        if config.cache.is_fscache() {
+            // Validate the working directory for fscache
+            let cache_config = config.cache.get_fscache_config()?;
+            let path2 = Path::new(&cache_config.work_dir);
+            let path2 = path2
+                .canonicalize()
+                .map_err(|_e| eio!("blob_cache: `config.cache_config.work_dir` is invalid"))?;
+            if !path2.is_dir() {
+                return Err(einval!(
+                    "blob_cache: `config.cache_config.work_dir` is not a directory"
+                ));
+            }
+        } else if config.cache.is_filecache() {
+            // Validate the working directory for filecache
+            let cache_config = config.cache.get_filecache_config()?;
+            let path2 = Path::new(&cache_config.work_dir);
+            let path2 = path2
+                .canonicalize()
+                .map_err(|_e| eio!("blob_cache: `config.cache_config.work_dir` is invalid"))?;
+            if !path2.is_dir() {
+                return Err(einval!(
+                    "blob_cache: `config.cache_config.work_dir` is not a directory"
+                ));
+            }
+        } else {
+            return Err(einval!("blob_cache: unknown cache type"));
         }
 
         let config: Arc<ConfigV2> = Arc::new(config.into());
@@ -347,12 +368,15 @@ impl BlobCacheMgr {
         config: Arc<ConfigV2>,
     ) -> Result<()> {
         let (rs, _) = RafsSuper::load_from_file(&path, config.clone(), true, false)?;
+        let blob_extra_infos = rs.superblock.get_blob_extra_infos()?;
         let meta = BlobCacheObjectConfig::new_meta_blob(
             domain_id.to_string(),
             id.to_string(),
             path,
             config,
+            blob_extra_infos,
         );
+        // Safe to unwrap because it's a meta blob object.
         let meta_obj = meta.meta_config().unwrap();
         let mut state = self.get_state();
         state.try_add(meta)?;
@@ -461,7 +485,8 @@ mod tests {
             scoped_blob_id: "domain1".to_string(),
             path: path.clone(),
             config,
-            data_blobs: Mutex::new(Vec::new()),
+            blobs: Mutex::new(Vec::new()),
+            blob_extra_infos: HashMap::new(),
         };
         assert_eq!(blob.path(), &path);
     }
