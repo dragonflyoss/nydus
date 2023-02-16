@@ -6,6 +6,7 @@ package tool
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -23,6 +24,14 @@ var defaultBinary = map[string]string{
 func Run(t *testing.T, cmd string) {
 	_cmd := exec.Command("sh", "-c", cmd)
 	_cmd.Stdout = os.Stdout
+	_cmd.Stderr = os.Stderr
+	err := _cmd.Run()
+	assert.Nil(t, err)
+}
+
+func RunWithoutOutput(t *testing.T, cmd string) {
+	_cmd := exec.Command("sh", "-c", cmd)
+	_cmd.Stdout = io.Discard
 	_cmd.Stderr = os.Stderr
 	err := _cmd.Run()
 	assert.Nil(t, err)

@@ -67,8 +67,10 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 	}
 	target := fmt.Sprintf("%s-nydus-v%s%s", source, ctx.Build.FSVersion, ociRefSuffix)
 	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
+	logLevel := "--log-level warn"
 	if ctx.Binary.NydusifyOnlySupportV5 {
 		fsVersion = ""
+		logLevel = ""
 	}
 	compressor := "--compressor lz4_block"
 	if ctx.Binary.NydusifyNotSupportCompressor {
@@ -77,10 +79,10 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 
 	// Convert image
 	convertCmd := fmt.Sprintf(
-		"%s convert --source %s --target %s %s %s --nydus-image %s --work-dir %s %s",
-		ctx.Binary.Nydusify, source, target, fsVersion, enableOCIRef, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
+		"%s %s convert --source %s --target %s %s %s --nydus-image %s --work-dir %s %s",
+		ctx.Binary.Nydusify, logLevel, source, target, fsVersion, enableOCIRef, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
 	)
-	tool.Run(t, convertCmd)
+	tool.RunWithoutOutput(t, convertCmd)
 
 	// Check image
 	nydusifyPath := ctx.Binary.Nydusify
@@ -88,10 +90,10 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 		nydusifyPath = ctx.Binary.NydusifyChecker
 	}
 	checkCmd := fmt.Sprintf(
-		"%s check --source %s --target %s --nydus-image %s --nydusd %s --work-dir %s",
-		nydusifyPath, source, target, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
+		"%s %s check --source %s --target %s --nydus-image %s --nydusd %s --work-dir %s",
+		nydusifyPath, logLevel, source, target, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
 	)
-	tool.Run(t, checkCmd)
+	tool.RunWithoutOutput(t, checkCmd)
 }
 
 func (i *ImageTestSuite) prepareImage(t *testing.T, image string) string {
