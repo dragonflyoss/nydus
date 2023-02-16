@@ -11,6 +11,7 @@ import (
 
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
+	"github.com/google/uuid"
 )
 
 const (
@@ -59,13 +60,11 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 	defer ctx.Destroy(t)
 
 	// Prepare options
-	ociRefSuffix := ""
 	enableOCIRef := ""
 	if ctx.Build.OCIRef {
-		ociRefSuffix = "-oci-ref"
 		enableOCIRef = "--oci-ref"
 	}
-	target := fmt.Sprintf("%s-nydus-v%s%s", source, ctx.Build.FSVersion, ociRefSuffix)
+	target := fmt.Sprintf("%s-nydus-%s", source, uuid.NewString())
 	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
 	logLevel := "--log-level warn"
 	if ctx.Binary.NydusifyOnlySupportV5 {
