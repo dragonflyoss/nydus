@@ -331,10 +331,11 @@ impl<'a> TarballTreeBuilder<'a> {
             i_mtime_nsec: 0,
             i_reserved: [0; 8],
         };
-        let inode = match self.ctx.fs_version {
+        let mut inode = match self.ctx.fs_version {
             RafsVersion::V5 => InodeWrapper::V5(v5_inode),
             RafsVersion::V6 => InodeWrapper::V6(v5_inode),
         };
+        inode.set_has_xattr(!xattrs.is_empty());
 
         let source = PathBuf::from("/");
         let target = Node::generate_target(path.as_ref(), &source);
