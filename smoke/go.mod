@@ -5,6 +5,7 @@ go 1.18
 require (
 	github.com/containerd/containerd v1.6.17
 	github.com/containerd/nydus-snapshotter v0.0.0-00010101000000-000000000000
+	github.com/google/uuid v1.2.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/pkg/errors v0.9.1
 	github.com/pkg/xattr v0.4.9
