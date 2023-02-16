@@ -31,12 +31,14 @@ impl RafsSuper {
         sb.validate(end)?;
         self.meta.version = RAFS_SUPER_VERSION_V6;
         self.meta.magic = sb.magic();
-        self.meta.meta_blkaddr = sb.s_meta_blkaddr;
-        self.meta.root_nid = sb.s_root_nid;
+        self.meta.meta_blkaddr = sb.meta_addr();
+        self.meta.root_nid = sb.root_nid();
+        self.meta.blob_device_table_count = sb.extra_devices() as u32;
+        self.meta.blob_device_table_offset = sb.device_table_offset();
 
         let mut ext_sb = RafsV6SuperBlockExt::new();
         ext_sb.load(r)?;
-        ext_sb.validate(end)?;
+        ext_sb.validate(end, &self.meta)?;
         self.meta.chunk_size = ext_sb.chunk_size();
         self.meta.blob_table_offset = ext_sb.blob_table_offset();
         self.meta.blob_table_size = ext_sb.blob_table_size();

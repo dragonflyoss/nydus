@@ -21,48 +21,53 @@ use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest, round_up, ByteSize};
 
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
-use crate::metadata::layout::MetaRange;
-use crate::metadata::{layout::RafsXAttrs, RafsStore, RafsSuperFlags};
+use crate::metadata::layout::{MetaRange, RafsXAttrs};
+use crate::metadata::{RafsStore, RafsSuperFlags, RafsSuperMeta};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
 
 /// EROFS metadata slot size.
 pub const EROFS_INODE_SLOT_SIZE: usize = 1 << EROFS_INODE_SLOT_BITS;
+/// Bits of EROFS logical block size.
+pub const EROFS_BLOCK_BITS: u8 = 12;
 /// EROFS logical block size.
 pub const EROFS_BLOCK_SIZE: u64 = 1u64 << EROFS_BLOCK_BITS;
+
+/// Offset of EROFS super block.
+pub const EROFS_SUPER_OFFSET: u16 = 1024;
+/// Size of EROFS super block.
+pub const EROFS_SUPER_BLOCK_SIZE: u16 = 128;
+/// Size of extended super block, used for rafs v6 specific fields
+pub const EROFS_EXT_SUPER_BLOCK_SIZE: u16 = 256;
+/// EROFS device table offset.
+pub const EROFS_DEVTABLE_OFFSET: u16 =
+    EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE;
+
+/// Offseet for inode format flags: compact or extended.
+pub const EROFS_I_VERSION_BIT: u16 = 0;
+/// Number of bits for inode format flags.
+pub const EROFS_I_VERSION_BITS: u16 = 1;
+/// 32-byte on-disk inode
+pub const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;
+/// 64-byte on-disk inode
+pub const EROFS_INODE_LAYOUT_EXTENDED: u16 = 1;
+/// Number of bits for inode data layout.
+pub const EROFS_I_DATALAYOUT_BITS: u16 = 3;
 /// EROFS plain inode.
 pub const EROFS_INODE_FLAT_PLAIN: u16 = 0;
 /// EROFS inline inode.
 pub const EROFS_INODE_FLAT_INLINE: u16 = 2;
 /// EROFS chunked inode.
 pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
-/// EROFS device table offset.
-pub const EROFS_DEVTABLE_OFFSET: u16 =
-    EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE + EROFS_EXT_SUPER_BLOCK_SIZE;
 
-pub const EROFS_I_VERSION_BIT: u16 = 0;
-pub const EROFS_I_VERSION_BITS: u16 = 1;
-pub const EROFS_I_DATALAYOUT_BITS: u16 = 3;
-
-// Offset of EROFS super block.
-pub const EROFS_SUPER_OFFSET: u16 = 1024;
-// Size of EROFS super block.
-pub const EROFS_SUPER_BLOCK_SIZE: u16 = 128;
-// Size of extended super block, used for rafs v6 specific fields
-const EROFS_EXT_SUPER_BLOCK_SIZE: u16 = 256;
 // Magic number for EROFS super block.
 const EROFS_SUPER_MAGIC_V1: u32 = 0xE0F5_E1E2;
-// Bits of EROFS logical block size.
-const EROFS_BLOCK_BITS: u8 = 12;
 // Bits of EROFS metadata slot size.
 const EROFS_INODE_SLOT_BITS: u8 = 5;
-// 32-byte on-disk inode
-const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;
-// 64-byte on-disk inode
-const EROFS_INODE_LAYOUT_EXTENDED: u16 = 1;
 // Bit flag indicating whether the inode is chunked or not.
 const EROFS_CHUNK_FORMAT_INDEXES_FLAG: u16 = 0x0020;
 // Encoded chunk size (log2(chunk_size) - EROFS_BLOCK_BITS).
 const EROFS_CHUNK_FORMAT_SIZE_MASK: u16 = 0x001F;
+
 /// Checksum of superblock, compatible with EROFS versions prior to Linux kernel 5.5.
 #[allow(dead_code)]
 const EROFS_FEATURE_COMPAT_SB_CHKSUM: u32 = 0x0000_0001;
@@ -72,6 +77,7 @@ const EROFS_FEATURE_COMPAT_RAFS_V6: u32 = 0x4000_0000;
 const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 /// Multi-devices, incompatible with EROFS versions prior to Linux kernel 5.16.
 const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
+
 /// Size of SHA256 digest string.
 const BLOB_SHA256_LEN: usize = 64;
 const BLOB_MAX_SIZE_UNCOMPRESSED: u64 = 1u64 << 44;
@@ -97,7 +103,7 @@ pub struct RafsV6SuperBlock {
     s_extslots: u8,
     /// Nid of the root directory.
     /// `root inode offset = s_meta_blkaddr * 4096 + s_root_nid * 32`.
-    pub s_root_nid: u16,
+    s_root_nid: u16,
     /// Total valid ino #
     s_inos: u64,
     /// Timestamp of filesystem creation.
@@ -107,7 +113,7 @@ pub struct RafsV6SuperBlock {
     /// Total size of file system in blocks, used for statfs
     s_blocks: u32,
     /// Start block address of the metadata area.
-    pub s_meta_blkaddr: u32,
+    s_meta_blkaddr: u32,
     /// Start block address of the shared xattr area.
     s_xattr_blkaddr: u32,
     /// 128-bit uuid for volume
@@ -150,11 +156,17 @@ impl RafsV6SuperBlock {
                 meta_size
             )));
         }
-
         if meta_size & (EROFS_BLOCK_SIZE - 1) != 0 {
             return Err(einval!(format!(
                 "invalid Rafs v6 metadata size: bootstrap size {} is not aligned",
                 meta_size
+            )));
+        }
+        let meta_addr = u32::from_le(self.s_meta_blkaddr) as u64 * EROFS_BLOCK_SIZE;
+        if meta_addr > meta_size {
+            return Err(einval!(format!(
+                "invalid Rafs v6 meta block address 0x{:x}, meta file size 0x{:x}",
+                meta_addr, meta_size
             )));
         }
 
@@ -179,12 +191,12 @@ impl RafsV6SuperBlock {
             )));
         }
 
-        if self.s_inos == 0 {
-            return Err(einval!("invalid inode number in Rafsv6 superblock"));
-        }
-
         if self.s_extslots != 0 {
             return Err(einval!("invalid extended slots in Rafsv6 superblock"));
+        }
+
+        if self.s_inos == 0 {
+            return Err(einval!("invalid inode number in Rafsv6 superblock"));
         }
 
         if self.s_u != 0 {
@@ -206,9 +218,9 @@ impl RafsV6SuperBlock {
             return Err(einval!("invalid extra device count in Rafsv6 superblock"));
         }
 
-        if u16::from_le(self.s_devt_slotoff)
-            != (EROFS_DEVTABLE_OFFSET / size_of::<RafsV6Device>() as u16)
-        {
+        let devtable_off =
+            u16::from_le(self.s_devt_slotoff) as u64 * size_of::<RafsV6Device>() as u64;
+        if devtable_off != EROFS_DEVTABLE_OFFSET as u64 {
             return Err(einval!(format!(
                 "invalid device table slot offset {} in Rafsv6 superblock",
                 u16::from_le(self.s_devt_slotoff)
@@ -259,9 +271,19 @@ impl RafsV6SuperBlock {
         self.s_blocks = blocks.to_le();
     }
 
+    /// Get root nid.
+    pub fn root_nid(&self) -> u16 {
+        u16::from_le(self.s_root_nid)
+    }
+
     /// Set EROFS root nid.
     pub fn set_root_nid(&mut self, nid: u16) {
         self.s_root_nid = nid.to_le();
+    }
+
+    /// Get meta block address.
+    pub fn meta_addr(&self) -> u32 {
+        u32::from_le(self.s_meta_blkaddr)
     }
 
     /// Set EROFS meta block address.
@@ -270,12 +292,13 @@ impl RafsV6SuperBlock {
         self.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLOCK_SIZE) as u32);
     }
 
-    /// Set number of extra devices.
-    pub fn set_extra_devices(&mut self, count: u16) {
-        self.s_extra_devices = count.to_le();
+    /// Get device table offset.
+    pub fn device_table_offset(&self) -> u64 {
+        u16::from_le(self.s_devt_slotoff) as u64 * size_of::<RafsV6Device>() as u64
     }
 
     impl_pub_getter_setter!(magic, set_magic, s_magic, u32);
+    impl_pub_getter_setter!(extra_devices, set_extra_devices, s_extra_devices, u16);
 }
 
 impl RafsStore for RafsV6SuperBlock {
@@ -365,7 +388,7 @@ impl RafsV6SuperBlockExt {
     }
 
     /// Validate the Rafs v6 super block.
-    pub fn validate(&self, meta_size: u64) -> Result<()> {
+    pub fn validate(&self, meta_size: u64, meta: &RafsSuperMeta) -> Result<()> {
         let mut flags = self.flags();
         flags &= RafsSuperFlags::COMPRESSION_NONE.bits()
             | RafsSuperFlags::COMPRESSION_LZ4.bits()
@@ -394,10 +417,13 @@ impl RafsV6SuperBlockExt {
             return Err(einval!("invalid chunk size in Rafs v6 extended superblock"));
         }
 
+        let devslot_end = meta.blob_device_table_offset + meta.blob_table_size as u64;
+
         let blob_offset = self.blob_table_offset();
         let blob_size = self.blob_table_size() as u64;
         if blob_offset & (EROFS_BLOCK_SIZE - 1) != 0
             || blob_offset < EROFS_BLOCK_SIZE
+            || blob_offset < devslot_end
             || blob_size % size_of::<RafsV6Blob>() as u64 != 0
             || blob_offset.checked_add(blob_size).is_none()
             || blob_offset + blob_size > meta_size
@@ -409,11 +435,13 @@ impl RafsV6SuperBlockExt {
         }
         let blob_range = MetaRange::new(blob_offset, blob_size, true)?;
 
+        let mut chunk_info_tbl_range = None;
         if self.chunk_table_size() > 0 {
             let chunk_tbl_offset = self.chunk_table_offset();
             let chunk_tbl_size = self.chunk_table_size();
             if chunk_tbl_offset < EROFS_BLOCK_SIZE
                 || chunk_tbl_offset % EROFS_BLOCK_SIZE != 0
+                || chunk_tbl_offset < devslot_end
                 || chunk_tbl_size % size_of::<RafsV5ChunkInfo>() as u64 != 0
                 || chunk_tbl_offset.checked_add(chunk_tbl_size).is_none()
                 || chunk_tbl_offset + chunk_tbl_size > meta_size
@@ -429,6 +457,7 @@ impl RafsV6SuperBlockExt {
                     "blob table intersects with chunk table in Rafs v6 extended superblock",
                 )));
             }
+            chunk_info_tbl_range = Some(chunk_range);
         }
 
         // Legacy RAFS may have zero prefetch table offset but non-zero prefetch table size for
@@ -438,6 +467,7 @@ impl RafsV6SuperBlockExt {
             let tbl_size = self.prefetch_table_size() as u64;
             if tbl_offset < EROFS_BLOCK_SIZE
                 || tbl_size % size_of::<u32>() as u64 != 0
+                || tbl_offset < devslot_end
                 || tbl_offset.checked_add(tbl_size).is_none()
                 || tbl_offset + tbl_size > meta_size
             {
@@ -451,6 +481,13 @@ impl RafsV6SuperBlockExt {
                 return Err(einval!(format!(
                     "blob table intersects with prefetch table in Rafs v6 extended superblock",
                 )));
+            }
+            if let Some(chunk_range) = chunk_info_tbl_range.as_ref() {
+                if chunk_range.intersect_with(&prefetch_range) {
+                    return Err(einval!(format!(
+                    "chunk information table intersects with prefetch table in Rafs v6 extended superblock",
+                )));
+                }
             }
         }
 
@@ -1222,10 +1259,6 @@ impl RafsV6Device {
         if self.blocks() == 0 {
             let msg = format!("invalid blocks {} in Rafs v6 Device", self.blocks());
             return Err(einval!(msg));
-        }
-
-        if u32::from_le(self.mapped_blkaddr) != 0 {
-            return Err(einval!("invalid mapped_addr in Rafs v6 Device"));
         }
 
         Ok(())
