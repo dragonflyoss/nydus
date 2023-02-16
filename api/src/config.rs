@@ -250,6 +250,7 @@ pub struct BackendConfigV2 {
     /// Configuration for container registry backend.
     pub registry: Option<RegistryConfig>,
     /// Configuration for local http proxy.
+    #[serde(rename = "http-proxy")]
     pub http_proxy: Option<HttpProxyConfig>,
 }
 
@@ -1876,6 +1877,16 @@ mod tests {
         "#;
         let config = ConfigV2::from_str(content).unwrap();
         assert_eq!(&config.id, "");
+    }
+
+    #[test]
+    fn test_backend_http_proxy_config() {
+        let config =
+            r#"{"version":2,"backend":{"type":"http-proxy","http-proxy":{"addr":"/tmp"}}}"#;
+        let config = ConfigV2::from_str(config).unwrap();
+        let backend = config.backend.unwrap();
+        assert_eq!(&backend.backend_type, "http-proxy");
+        assert_eq!(&backend.http_proxy.unwrap().addr, "/tmp");
     }
 
     #[test]
