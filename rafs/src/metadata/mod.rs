@@ -423,6 +423,10 @@ pub struct RafsSuperMeta {
     pub extended_blob_table_offset: u64,
     /// Offset of the extended blob information table into the metadata blob.
     pub extended_blob_table_entries: u32,
+    /// Number of RAFS v6 blob device entries in the devslot table.
+    pub blob_device_table_count: u32,
+    /// Offset of the RAFS v6 devslot table.
+    pub blob_device_table_offset: u64,
     /// Offset of the inode prefetch table into the metadata blob.
     pub prefetch_table_offset: u64,
     /// Size of the inode prefetch table.
@@ -520,6 +524,8 @@ impl Default for RafsSuperMeta {
             blob_table_offset: 0,
             extended_blob_table_offset: 0,
             extended_blob_table_entries: 0,
+            blob_device_table_count: 0,
+            blob_device_table_offset: 0,
             prefetch_table_offset: 0,
             prefetch_table_entries: 0,
             attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
