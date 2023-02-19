@@ -130,18 +130,14 @@ impl ConfigV2 {
     /// Get cache working directory.
     pub fn get_cache_working_directory(&self) -> Result<String> {
         let cache = self.get_cache_config()?;
-        match cache.cache_type.as_str() {
-            "blobcache" | "filecache" => {
-                if let Some(c) = cache.file_cache.as_ref() {
-                    return Ok(c.work_dir.clone());
-                }
+        if cache.is_filecache() {
+            if let Some(c) = cache.file_cache.as_ref() {
+                return Ok(c.work_dir.clone());
             }
-            "fscache" => {
-                if let Some(c) = cache.fs_cache.as_ref() {
-                    return Ok(c.work_dir.clone());
-                }
+        } else if cache.is_fscache() {
+            if let Some(c) = cache.fs_cache.as_ref() {
+                return Ok(c.work_dir.clone());
             }
-            _ => {}
         }
 
         Err(Error::new(
@@ -634,25 +630,35 @@ impl CacheConfigV2 {
         true
     }
 
+    /// Check whether the cache type is `filecache`
+    pub fn is_filecache(&self) -> bool {
+        self.cache_type == "blobcache" || self.cache_type == "filecache"
+    }
+
+    /// Check whether the cache type is `fscache`
+    pub fn is_fscache(&self) -> bool {
+        self.cache_type == "fscache"
+    }
+
     /// Get configuration information for file cache.
     pub fn get_filecache_config(&self) -> Result<&FileCacheConfig> {
-        if self.cache_type != "blobcache" && self.cache_type != "filecache" {
-            Err(einval!("cache type is not 'filecache'"))
-        } else {
+        if self.is_filecache() {
             self.file_cache
                 .as_ref()
                 .ok_or_else(|| einval!("no configuration information for filecache"))
+        } else {
+            Err(einval!("cache type is not 'filecache'"))
         }
     }
 
     /// Get configuration information for fscache.
     pub fn get_fscache_config(&self) -> Result<&FsCacheConfig> {
-        if self.cache_type != "fscache" {
-            Err(einval!("cache type is not 'fscache'"))
-        } else {
+        if self.is_fscache() {
             self.fs_cache
                 .as_ref()
                 .ok_or_else(|| einval!("no configuration information for fscache"))
+        } else {
+            Err(einval!("cache type is not 'fscache'"))
         }
     }
 }
