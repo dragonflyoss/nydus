@@ -10,6 +10,7 @@ edition = "2018"
 resolver = "2"
 
 [dependencies]
+dbs-allocator = { version = "0.1.1", optional = true }
 fuse-backend-rs = "0.10.1"
 libc = "0.2"
 log = "0.4.8"
@@ -48,3 +49,4 @@ virtiofs = [
     "virtio-bindings",
 ]
 
+block-device = [ "dbs-allocator", "tokio/fs"]
