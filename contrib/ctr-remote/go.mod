@@ -3,7 +3,7 @@ module github.com/dragonflyoss/image-service/contrib/ctr-remote
 go 1.18
 
 require (
-	github.com/containerd/containerd v1.6.17
+	github.com/containerd/containerd v1.6.18
 	github.com/containerd/nydus-snapshotter v0.5.1
 	github.com/opencontainers/image-spec v1.1.0-rc2
 	github.com/urfave/cli v1.22.12
