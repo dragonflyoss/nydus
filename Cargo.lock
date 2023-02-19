@@ -347,6 +347,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-allocator"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "543711b94b4bc1437d2ebb45f856452e96a45a67ab39f8dcf8c887c2a3701004"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "dbs-uhttp"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1211,6 +1220,7 @@ dependencies = [
 name = "nydus-service"
 version = "0.2.0"
 dependencies = [
+ "dbs-allocator",
  "fuse-backend-rs",
  "libc",
  "log",

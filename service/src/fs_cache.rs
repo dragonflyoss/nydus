@@ -2,7 +2,15 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-//! FsCache manager to cooperate with the Linux fscache subsystem to support EROFS.
+//! Handler to expose RAFSv6 image through EROFS/fscache.
+//!
+//! The [`FsCacheHandler`] is the inter-connection between in kernel EROFS/fscache drivers
+//! and the user space [BlobCacheMgr](https://docs.rs/nydus-service/latest/nydus_service/blob_cache/struct.BlobCacheMgr.html).
+//! The workflow is as below:
+//! - EROFS presents a filesystem structure by parsing a RAFS image metadata blob.
+//! - EROFS sends requests to the fscache subsystem when user reads data from files.
+//! - Fscache subsystem send requests to [FsCacheHandler] if the requested data has been cached yet.
+//! - [FsCacheHandler] reads blob data from the [BlobCacheMgr] and sends back reply messages.
 
 use std::collections::hash_map::Entry::Vacant;
 use std::collections::HashMap;

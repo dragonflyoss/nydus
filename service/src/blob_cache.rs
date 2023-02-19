@@ -49,6 +49,10 @@ impl BlobCacheConfigMetaBlob {
         &self.config
     }
 
+    pub fn get_blobs(&self) -> Vec<Arc<BlobCacheConfigDataBlob>> {
+        self.blobs.lock().unwrap().clone()
+    }
+
     /// Get optional extra information associated with a blob object.
     pub fn get_blob_extra_info(&self, blob_id: &str) -> Option<&RafsBlobExtraInfo> {
         self.blob_extra_infos.get(blob_id)
@@ -368,6 +372,10 @@ impl BlobCacheMgr {
         config: Arc<ConfigV2>,
     ) -> Result<()> {
         let (rs, _) = RafsSuper::load_from_file(&path, config.clone(), true, false)?;
+        if rs.meta.is_v5() {
+            return Err(einval!("blob_cache: RAFSv5 image is not supported"));
+        }
+
         let blob_extra_infos = rs.superblock.get_blob_extra_infos()?;
         let meta = BlobCacheObjectConfig::new_meta_blob(
             domain_id.to_string(),
