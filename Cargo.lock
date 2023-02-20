@@ -1237,6 +1237,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-uring",
  "vhost",
  "vhost-user-backend",
  "virtio-bindings",
