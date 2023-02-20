@@ -24,9 +24,11 @@ use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
 use nydus::get_build_time_info;
-use nydus_api::{BuildTimeInfo, ConfigV2};
+use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_app::setup_logging;
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
+use nydus_storage::backend::localfs::LocalFs;
+use nydus_storage::backend::BlobBackend;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::format_blob_features;
@@ -526,6 +528,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required_unless_present("bootstrap"),
                 )
                 .arg(
+                    Arg::new("backend-config")
+                        .long("backend-config")
+                        .help("config file of backend")
+                        .required(false),
+                )
+                .arg(
                     Arg::new("bootstrap")
                         .short('B')
                         .long("bootstrap")
@@ -955,10 +963,7 @@ impl Command {
             Some(args) => Some(import_chunk_dict(args, config, &rs.meta.get_config())?),
         };
 
-        let cfg_file = matches.get_one::<String>("backend-config").unwrap();
-        let cfg = ConfigV2::from_file(cfg_file)?;
-        let backend_cfg = cfg.get_backend_config()?;
-        let backend = BlobFactory::new_backend(backend_cfg, "compactor")?;
+        let backend = Self::get_backend(matches, "compactor")?;
 
         let config_file_path = matches.get_one::<String>("config").unwrap();
         let file = File::open(config_file_path)
@@ -984,9 +989,25 @@ impl Command {
         if output.is_empty() {
             return Err(anyhow!("invalid empty --output option"));
         }
-        let blob = matches.get_one::<String>("blob").map(|s| s.as_str());
 
-        OCIUnpacker::new(bootstrap, blob, output)
+        let blob = matches.get_one::<String>("blob").map(|s| s.as_str());
+        let backend: Option<Arc<dyn BlobBackend + Send + Sync>> = match blob {
+            Some(blob_path) => {
+                let blob_path = PathBuf::from(blob_path);
+                let local_fs_conf = LocalFsConfig {
+                    blob_file: blob_path.to_str().unwrap().to_owned(),
+                    dir: Default::default(),
+                    alt_dirs: Default::default(),
+                };
+                let local_fs = LocalFs::new(&local_fs_conf, Some("unpacker"))
+                    .with_context(|| format!("fail to create local backend for {:?}", blob_path))?;
+
+                Some(Arc::new(local_fs))
+            }
+            None => Self::get_backend(matches, "unpacker").ok(),
+        };
+
+        OCIUnpacker::new(bootstrap, backend, output)
             .with_context(|| "fail to create unpacker")?
             .unpack(config)
             .with_context(|| "fail to unpack")
@@ -1208,6 +1229,20 @@ impl Command {
         }
 
         Ok(Arc::new(config))
+    }
+
+    fn get_backend(
+        matches: &ArgMatches,
+        blob_id: &str,
+    ) -> Result<Arc<dyn BlobBackend + Send + Sync>> {
+        let cfg_file = matches
+            .get_one::<String>("backend-config")
+            .context("missing backend-config argument")?;
+        let cfg = ConfigV2::from_file(cfg_file)?;
+        let backend_cfg = cfg.get_backend_config()?;
+        let backend = BlobFactory::new_backend(backend_cfg, blob_id)?;
+
+        Ok(backend)
     }
 
     fn get_blob_id(matches: &ArgMatches) -> Result<String> {
