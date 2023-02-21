@@ -377,8 +377,8 @@ pub struct BlobContext {
     pub uncompressed_blob_size: u64,
 
     /// Current blob offset cursor for writing to disk file.
-    pub compressed_offset: u64,
-    pub uncompressed_offset: u64,
+    pub current_compressed_offset: u64,
+    pub current_uncompressed_offset: u64,
 
     /// The number of counts in a blob by the index of blob table.
     pub chunk_count: u32,
@@ -429,8 +429,8 @@ impl BlobContext {
             compressed_blob_size: 0,
             uncompressed_blob_size: 0,
 
-            compressed_offset: blob_offset,
-            uncompressed_offset: 0,
+            current_compressed_offset: blob_offset,
+            current_uncompressed_offset: 0,
 
             chunk_count: 0,
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
@@ -689,6 +689,12 @@ impl BlobContext {
         let header = blob_writer.write_tar_header(name, size)?;
         self.blob_hash.update(header.as_bytes());
         Ok(header)
+    }
+
+    /// Get offset of compressed blob, since current_compressed_offset
+    /// is always >= compressed_blob_size, we can safely subtract here.
+    pub fn compressed_offset(&self) -> u64 {
+        self.current_compressed_offset - self.compressed_blob_size
     }
 }
 

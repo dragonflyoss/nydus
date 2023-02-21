@@ -110,7 +110,7 @@ impl Blob {
                         toc::TOC_ENTRY_BLOB_RAW,
                         compress::Algorithm::None,
                         blob_digest,
-                        blob_ctx.compressed_offset,
+                        blob_ctx.compressed_offset(),
                         blob_ctx.compressed_blob_size,
                         blob_ctx.uncompressed_blob_size,
                     )?;

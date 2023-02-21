@@ -158,15 +158,15 @@ impl ChunkSet {
             // file offset field is useless
             new_chunk.set_index(new_blob_ctx.chunk_count);
             new_chunk.set_blob_index(new_blob_idx);
-            new_chunk.set_compressed_offset(new_blob_ctx.compressed_offset);
-            new_chunk.set_uncompressed_offset(new_blob_ctx.uncompressed_offset);
+            new_chunk.set_compressed_offset(new_blob_ctx.current_compressed_offset);
+            new_chunk.set_uncompressed_offset(new_blob_ctx.current_uncompressed_offset);
             new_blob_ctx.add_chunk_meta_info(&new_chunk, None)?;
             // insert change ops
             chunks_change.push((chunk.clone(), new_chunk));
 
             new_blob_ctx.blob_hash.update(&buf);
             new_blob_ctx.chunk_count += 1;
-            new_blob_ctx.compressed_offset += chunk.compressed_size() as u64;
+            new_blob_ctx.current_compressed_offset += chunk.compressed_size() as u64;
             new_blob_ctx.compressed_blob_size += chunk.compressed_size() as u64;
 
             let aligned_size = if aligned_chunk {
@@ -174,7 +174,7 @@ impl ChunkSet {
             } else {
                 chunk.uncompressed_size() as u64
             };
-            new_blob_ctx.uncompressed_offset += aligned_size;
+            new_blob_ctx.current_uncompressed_offset += aligned_size;
             new_blob_ctx.uncompressed_blob_size += aligned_size;
         }
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
