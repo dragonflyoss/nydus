@@ -10,6 +10,7 @@ edition = "2018"
 resolver = "2"
 
 [dependencies]
+bytes = { version = "1", optional = true }
 dbs-allocator = { version = "0.1.1", optional = true }
 fuse-backend-rs = "0.10.1"
 libc = "0.2"
@@ -51,3 +52,4 @@ virtiofs = [
 ]
 
 block-device = [ "dbs-allocator", "tokio/fs"]
+block-nbd = ["block-device", "bytes"]

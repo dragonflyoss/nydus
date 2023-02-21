@@ -1220,6 +1220,7 @@ dependencies = [
 name = "nydus-service"
 version = "0.2.0"
 dependencies = [
+ "bytes",
  "dbs-allocator",
  "fuse-backend-rs",
  "libc",
