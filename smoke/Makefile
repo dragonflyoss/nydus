@@ -28,8 +28,9 @@ test: build lint
 # NYDUS_BUILDER_v0_1_0=/path/to/v0.1.0/nydus-image \
 # NYDUS_NYDUSD_v0_1_0=/path/to/v0.1.0/nydusd \
 # NYDUS_NYDUSIFY_v0_1_0=/path/to/v0.1.0/nydusify \
-# NYDUS_BUILDER_v2_1_2=/path/to/v2.1.2/nydus-image \
-# NYDUS_NYDUSD_v2_1_2=/path/to/v2.1.2/nydusd \
-# NYDUS_NYDUSIFY_v2_1_2=/path/to/v2.1.2/nydusify
+# NYDUS_BUILDER_v2_1_4=/path/to/v2.1.4/nydus-image \
+# NYDUS_NYDUSD_v2_1_4=/path/to/v2.1.4/nydusd \
+# NYDUS_NYDUSIFY_v2_1_4=/path/to/v2.1.4/nydusify \
+# make test TESTS=TestCompatibility
 test-compatibility: build lint
 	make test TESTS=TestCompatibility
