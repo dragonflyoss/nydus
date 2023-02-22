@@ -237,6 +237,7 @@ impl DaemonStateMachineSubscriber for ServiceController {
 }
 
 /// Create and start a Nydus daemon to host fscache and fusedev services.
+#[allow(clippy::too_many_arguments)]
 pub fn create_daemon(
     id: Option<String>,
     supervisor: Option<String>,
