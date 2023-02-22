@@ -80,7 +80,7 @@ pub struct TocEntry {
     compressed_size: u64,
     /// Size of uncompressed data
     uncompressed_size: u64,
-    reserved2: [u8; 44],
+    reserved2: [u8; 48],
 }
 
 impl Default for TocEntry {
@@ -93,7 +93,7 @@ impl Default for TocEntry {
             compressed_offset: 0,
             compressed_size: 0,
             uncompressed_size: 0,
-            reserved2: [0u8; 44],
+            reserved2: [0u8; 48],
         }
     }
 }
@@ -319,7 +319,7 @@ impl TocEntryList {
             compressed_offset,
             compressed_size,
             uncompressed_size,
-            reserved2: [0u8; 44],
+            reserved2: [0u8; 48],
         };
         entry.set_compressor(compressor)?;
         self.entries.push(entry);
