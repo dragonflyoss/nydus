@@ -19,7 +19,7 @@ use crate::daemon::{
     NydusDaemon,
 };
 use crate::fs_service::FsService;
-use crate::{Error, Result, ServiceArgs};
+use crate::{Error, Result};
 
 #[allow(dead_code)]
 struct ServiceController {
@@ -98,9 +98,10 @@ impl ServiceController {
 
 #[cfg(target_os = "linux")]
 impl ServiceController {
-    fn initialize_fscache_service<T: ServiceArgs>(
+    fn initialize_fscache_service(
         &self,
-        args: &T,
+        tag: Option<&str>,
+        threads: Option<&str>,
         path: &str,
     ) -> std::io::Result<()> {
         // Validate --fscache option value is an existing directory.
@@ -124,9 +125,8 @@ impl ServiceController {
                 return Err(einval!("--fscache option contains invalid characters"));
             }
         };
-        let tag = args.value_of("fscache-tag").map(|s| s.as_str());
 
-        let threads = if let Some(threads_value) = args.value_of("fscache-threads") {
+        let threads = if let Some(threads_value) = threads {
             crate::validate_threads_configuration(threads_value).map_err(|err| einval!(err))?
         } else {
             1usize
@@ -237,26 +237,16 @@ impl DaemonStateMachineSubscriber for ServiceController {
 }
 
 /// Create and start a Nydus daemon to host fscache and fusedev services.
-///
-/// The `args` argument is derived from commandline options and controls services enabled.
-/// The fscache service will be enabled if `args` contains the `--fscache` argument.
-pub fn create_daemon<T: ServiceArgs>(
-    args: &T,
+pub fn create_daemon(
+    id: Option<String>,
+    supervisor: Option<String>,
+    fscache: Option<&str>,
+    tag: Option<&str>,
+    threads: Option<&str>,
+    config: Option<serde_json::Value>,
     bti: BuildTimeInfo,
     waker: Arc<Waker>,
 ) -> std::io::Result<Arc<dyn NydusDaemon>> {
-    let id = args.value_of("id").map(|id| id.to_string());
-    let supervisor = args.value_of("supervisor").map(|s| s.to_string());
-    let config = match args.value_of("config") {
-        None => None,
-        Some(path) => {
-            let config = std::fs::read_to_string(path)?;
-            let config: serde_json::Value = serde_json::from_str(&config)
-                .map_err(|_e| einval!("invalid configuration file"))?;
-            Some(config)
-        }
-    };
-
     let (to_sm, from_client) = channel::<DaemonStateMachineInput>();
     let (to_client, from_sm) = channel::<Result<()>>();
     let service_controller = ServiceController {
@@ -277,8 +267,8 @@ pub fn create_daemon<T: ServiceArgs>(
 
     service_controller.initialize_blob_cache(&config)?;
     #[cfg(target_os = "linux")]
-    if let Some(path) = args.value_of("fscache") {
-        service_controller.initialize_fscache_service(args, path)?;
+    if let Some(path) = fscache {
+        service_controller.initialize_fscache_service(tag, threads, path)?;
     }
 
     let daemon = Arc::new(service_controller);
