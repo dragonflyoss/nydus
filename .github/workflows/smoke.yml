@@ -89,8 +89,8 @@ jobs:
     - name: Prepare Older Binaries
       id: prepare-binaries
       run: |
-        versions=(v0.1.0 v2.1.2)
-        version_archs=(v0.1.0-x86_64 v2.1.2-linux-amd64)
+        versions=(v0.1.0 v2.1.4)
+        version_archs=(v0.1.0-x86_64 v2.1.4-linux-amd64)
         for i in ${!versions[@]}; do
           version=${versions[$i]}
           version_arch=${version_archs[$i]}
@@ -115,8 +115,8 @@ jobs:
         sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/bin/nydus-latest
         sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/bin/nydus-latest
 
-        versions=(v0.1.0 v2.1.2 latest)
-        version_exports=(v0_1_0 v2_1_2 latest)
+        versions=(v0.1.0 v2.1.4 latest)
+        version_exports=(v0_1_0 v2_1_4 latest)
         for i in ${!version_exports[@]}; do
           version=${versions[$i]}
           version_export=${version_exports[$i]}
