@@ -553,8 +553,32 @@ fn process_singleton_arguments(
     _apisock: Option<&str>,
     bti: BuildTimeInfo,
 ) -> Result<()> {
+    let id = subargs.value_of("id").map(|id| id.to_string());
+    let supervisor = subargs.value_of("supervisor").map(|s| s.to_string());
+    let config = match subargs.value_of("config") {
+        None => None,
+        Some(path) => {
+            let config = std::fs::read_to_string(path)?;
+            let config: serde_json::Value = serde_json::from_str(&config)
+                .map_err(|_e| einval!("invalid configuration file"))?;
+            Some(config)
+        }
+    };
+    let fscache = subargs.value_of("fscache").map(|s| s.as_str());
+    let tag = subargs.value_of("fscache-tag").map(|s| s.as_str());
+    let threads = subargs.value_of("fscache-threads").map(|s| s.as_str());
     info!("Start Nydus daemon in singleton mode!");
-    let daemon = create_daemon(subargs, bti, DAEMON_CONTROLLER.alloc_waker()).map_err(|e| {
+    let daemon = create_daemon(
+        id,
+        supervisor,
+        fscache,
+        tag,
+        threads,
+        config,
+        bti,
+        DAEMON_CONTROLLER.alloc_waker(),
+    )
+    .map_err(|e| {
         error!("Failed to start singleton daemon: {}", e);
         e
     })?;
