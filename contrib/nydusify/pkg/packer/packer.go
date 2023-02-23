@@ -55,6 +55,8 @@ type PackRequest struct {
 	SourceDir    string
 	ImageName    string
 	FsVersion    string
+	Compressor   string
+	ChunkSize    string
 	PushToRemote bool
 
 	ChunkDict         string
@@ -248,6 +250,8 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 		OutputJSONPath:      p.outputJSONPath(),
 		RootfsPath:          req.SourceDir,
 		WhiteoutSpec:        "oci",
+		Compressor:          req.Compressor,
+		ChunkSize:           req.ChunkSize,
 		FsVersion:           req.FsVersion,
 	}); err != nil {
 		return PackResult{}, errors.Wrapf(err, "failed to build image from directory %s", req.SourceDir)

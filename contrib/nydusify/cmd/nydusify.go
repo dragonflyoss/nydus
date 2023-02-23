@@ -847,6 +847,8 @@ func main() {
 					ImageName:    c.String("name"),
 					PushToRemote: c.Bool("backend-push"),
 					FsVersion:    c.String("fs-version"),
+					Compressor:   c.String("compressor"),
+					ChunkSize:    c.String("chunk-size"),
 
 					ChunkDict:         c.String("chunk-dict"),
 					Parent:            c.String("parent-bootstrap"),
