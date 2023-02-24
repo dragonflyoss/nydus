@@ -88,6 +88,9 @@ virtiofs = [
     "virtio-queue",
     "vm-memory",
 ]
+block-nbd = [
+    "nydus-service/block-nbd"
+]
 
 backend-http-proxy = ["nydus-storage/backend-http-proxy"]
 backend-localdisk = ["nydus-storage/backend-localdisk"]
