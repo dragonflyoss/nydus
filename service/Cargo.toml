@@ -1,6 +1,6 @@
 [package]
 name = "nydus-service"
-version = "0.1.0"
+version = "0.2.0"
 description = "Nydus Image Service Manager"
 authors = ["The Nydus Developers"]
 license = "Apache-2.0"
@@ -24,8 +24,8 @@ tokio = { version = "1.24", features = ["macros"] }
 
 nydus-api = { version = "0.2.1", path = "../api", features = ["handler"] }
 nydus-error = { version = "0.2.3", path = "../error" }
-nydus-rafs = { version = "0.2.1", path = "../rafs" }
-nydus-storage = { version = "0.6.1", path = "../storage" }
+nydus-rafs = { version = "0.2.2", path = "../rafs" }
+nydus-storage = { version = "0.6.2", path = "../storage" }
 nydus-utils = { version = "0.4.1", path = "../utils" }
 
 vhost = { version = "0.5.0", features = ["vhost-user-slave"], optional = true }

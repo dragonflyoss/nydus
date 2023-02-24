@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-rafs"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fuse-backend-rs",
  "libc",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-storage"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "arc-swap",
  "base64",
