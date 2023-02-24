@@ -12,3 +12,4 @@ ci:
 	bats --show-output-of-passing-tests --formatter tap compile_nydus_snapshotter.bats
 	bats --show-output-of-passing-tests --formatter tap run_container_with_rafs.bats
 	bats --show-output-of-passing-tests --formatter tap run_container_with_zran.bats
+	bats --show-output-of-passing-tests --formatter tap run_container_with_rafs_and_compile_linux.bats
