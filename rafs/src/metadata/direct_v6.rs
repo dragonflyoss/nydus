@@ -408,7 +408,13 @@ impl OndiskInodeWrapper {
                 let block_count = self.blocks_count() as usize;
                 let len = match block_count.cmp(&(block_index + 1)) {
                     Ordering::Greater => (EROFS_BLOCK_SIZE - base) as usize,
-                    Ordering::Equal => (self.size() % EROFS_BLOCK_SIZE - base) as usize,
+                    Ordering::Equal => {
+                        if self.size() % EROFS_BLOCK_SIZE == 0 {
+                            EROFS_BLOCK_SIZE as usize
+                        } else {
+                            (self.size() % EROFS_BLOCK_SIZE - base) as usize
+                        }
+                    }
                     Ordering::Less => return Err(RafsError::InvalidImageData),
                 };
 
