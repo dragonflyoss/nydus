@@ -173,7 +173,9 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
 
     // For backward compatibility.
     /// Set default filesystem service object.
-    fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>>;
+    fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>> {
+        None
+    }
 
     /// Get the optional `BlobCacheMgr` object.
     fn get_blob_cache_mgr(&self) -> Option<Arc<BlobCacheMgr>> {

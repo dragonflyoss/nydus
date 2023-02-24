@@ -10,21 +10,30 @@
 //! exposed as a block device. The [NbdService] exposes a RAFSv6 image as a block device based on
 //! the Linux Network Block Device driver.
 
+use std::any::Any;
 use std::fs::{self, OpenOptions};
-use std::io::Result;
+use std::io::{Error, Result};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use bytes::{Buf, BufMut};
+use mio::Waker;
+use nydus_api::{BlobCacheEntry, BuildTimeInfo};
 use nydus_rafs::metadata::layout::v6::{EROFS_BLOCK_BITS, EROFS_BLOCK_SIZE};
 use nydus_storage::utils::alloc_buf;
 use tokio::sync::broadcast::{channel, Sender};
 use tokio_uring::buf::IoBuf;
 use tokio_uring::net::UnixStream;
 
-use crate::blob_cache::BlobCacheMgr;
+use crate::blob_cache::{generate_blob_key, BlobCacheMgr};
 use crate::block_device::BlockDevice;
+use crate::daemon::{
+    DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
+    NydusDaemon,
+};
+use crate::{Error as NydusError, Result as NydusResult};
 
 const NBD_SET_SOCK: u32 = 0;
 const NBD_SET_BLOCK_SIZE: u32 = 1;
@@ -258,6 +267,270 @@ impl NbdWorker {
 
         Ok(true)
     }
+}
+
+/// A [NydusDaemon] implementation to expose RAFS v6 images as block devices through NBD.
+pub struct NbdDaemon {
+    cache_mgr: Arc<BlobCacheMgr>,
+    service: Arc<NbdService>,
+
+    bti: BuildTimeInfo,
+    id: Option<String>,
+    supervisor: Option<String>,
+
+    nbd_threads: u32,
+    nbd_control_thread: Mutex<Option<JoinHandle<()>>>,
+    nbd_service_threads: Mutex<Vec<JoinHandle<Result<()>>>>,
+    request_sender: Arc<Mutex<std::sync::mpsc::Sender<DaemonStateMachineInput>>>,
+    result_receiver: Mutex<std::sync::mpsc::Receiver<NydusResult<()>>>,
+    state: AtomicI32,
+    state_machine_thread: Mutex<Option<JoinHandle<Result<()>>>>,
+    waker: Arc<Waker>,
+}
+
+impl NbdDaemon {
+    fn new(
+        nbd_path: String,
+        threads: u32,
+        blob_entry: BlobCacheEntry,
+        trigger: std::sync::mpsc::Sender<DaemonStateMachineInput>,
+        receiver: std::sync::mpsc::Receiver<NydusResult<()>>,
+        waker: Arc<Waker>,
+        bti: BuildTimeInfo,
+        id: Option<String>,
+        supervisor: Option<String>,
+    ) -> Result<Self> {
+        let blob_id = generate_blob_key(&blob_entry.domain_id, &blob_entry.blob_id);
+        let cache_mgr = Arc::new(BlobCacheMgr::new());
+        cache_mgr.add_blob_entry(&blob_entry)?;
+        let block_device = BlockDevice::new(blob_id.clone(), cache_mgr.clone())?;
+        let nbd_service = NbdService::new(Arc::new(block_device), nbd_path)?;
+
+        Ok(NbdDaemon {
+            cache_mgr,
+            service: Arc::new(nbd_service),
+
+            bti,
+            id,
+            supervisor,
+
+            nbd_threads: threads,
+            nbd_control_thread: Mutex::new(None),
+            nbd_service_threads: Mutex::new(Vec::new()),
+            state: AtomicI32::new(DaemonState::INIT as i32),
+            request_sender: Arc::new(Mutex::new(trigger)),
+            result_receiver: Mutex::new(receiver),
+            state_machine_thread: Mutex::new(None),
+            waker,
+        })
+    }
+}
+
+impl DaemonStateMachineSubscriber for NbdDaemon {
+    fn on_event(&self, event: DaemonStateMachineInput) -> NydusResult<()> {
+        self.request_sender
+            .lock()
+            .expect("block_nbd: failed to lock request sender!")
+            .send(event)
+            .map_err(NydusError::ChannelSend)?;
+
+        self.result_receiver
+            .lock()
+            .expect("block_nbd: failed to lock result receiver!")
+            .recv()
+            .map_err(NydusError::ChannelReceive)?
+    }
+}
+
+impl NydusDaemon for NbdDaemon {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn id(&self) -> Option<String> {
+        self.id.clone()
+    }
+
+    fn version(&self) -> BuildTimeInfo {
+        self.bti.clone()
+    }
+
+    fn get_state(&self) -> DaemonState {
+        self.state.load(Ordering::Relaxed).into()
+    }
+
+    fn set_state(&self, state: DaemonState) {
+        self.state.store(state as i32, Ordering::Relaxed);
+    }
+
+    fn start(&self) -> NydusResult<()> {
+        info!("start NBD service with {} worker threads", self.nbd_threads);
+        for _ in 0..self.nbd_threads {
+            let waker = self.waker.clone();
+            let worker = self
+                .service
+                .create_worker()
+                .map_err(|e| NydusError::StartService(format!("{}", e)))?;
+            let thread = std::thread::Builder::new()
+                .name("nbd_worker".to_string())
+                .spawn(move || {
+                    tokio_uring::start(async move {
+                        worker.run().await;
+                        // Notify the daemon controller that one working thread has exited.
+                        if let Err(err) = waker.wake() {
+                            error!("block_nbd: fail to exit daemon, error: {:?}", err);
+                        }
+                    });
+                    Ok(())
+                })
+                .map_err(NydusError::ThreadSpawn)?;
+            self.nbd_service_threads.lock().unwrap().push(thread);
+        }
+
+        let nbd = self.service.clone();
+        let thread = std::thread::spawn(move || {
+            if let Err(e) = nbd.run() {
+                error!("block_nbd: failed to run NBD control loop, {e}");
+            }
+        });
+        *self.nbd_control_thread.lock().unwrap() = Some(thread);
+
+        Ok(())
+    }
+
+    fn umount(&self) -> NydusResult<()> {
+        Ok(())
+    }
+
+    fn stop(&self) {
+        self.service.stop();
+    }
+
+    fn wait(&self) -> NydusResult<()> {
+        self.wait_state_machine()?;
+        self.wait_service()
+    }
+
+    fn wait_service(&self) -> NydusResult<()> {
+        loop {
+            let handle = self.nbd_service_threads.lock().unwrap().pop();
+            if let Some(handle) = handle {
+                handle
+                    .join()
+                    .map_err(|e| {
+                        let e = *e
+                            .downcast::<Error>()
+                            .unwrap_or_else(|e| Box::new(eother!(e)));
+                        NydusError::WaitDaemon(e)
+                    })?
+                    .map_err(NydusError::WaitDaemon)?;
+            } else {
+                // No more handles to wait
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn wait_state_machine(&self) -> NydusResult<()> {
+        let mut guard = self.state_machine_thread.lock().unwrap();
+        if let Some(handler) = guard.take() {
+            let result = handler.join().map_err(|e| {
+                let e = *e
+                    .downcast::<Error>()
+                    .unwrap_or_else(|e| Box::new(eother!(e)));
+                NydusError::WaitDaemon(e)
+            })?;
+            result.map_err(NydusError::WaitDaemon)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn supervisor(&self) -> Option<String> {
+        self.supervisor.clone()
+    }
+
+    fn save(&self) -> NydusResult<()> {
+        unimplemented!()
+    }
+
+    fn restore(&self) -> NydusResult<()> {
+        unimplemented!()
+    }
+
+    fn get_blob_cache_mgr(&self) -> Option<Arc<BlobCacheMgr>> {
+        Some(self.cache_mgr.clone())
+    }
+}
+
+/// Create and start a [NbdDaemon] instance to expose a RAFS v6 image as a block device through NBD.
+#[allow(clippy::too_many_arguments)]
+pub fn create_nbd_daemon(
+    device: String,
+    threads: u32,
+    blob_entry: BlobCacheEntry,
+    bti: BuildTimeInfo,
+    id: Option<String>,
+    supervisor: Option<String>,
+    waker: Arc<Waker>,
+) -> Result<Arc<dyn NydusDaemon>> {
+    let (trigger, events_rx) = std::sync::mpsc::channel::<DaemonStateMachineInput>();
+    let (result_sender, result_receiver) = std::sync::mpsc::channel::<NydusResult<()>>();
+    let daemon = NbdDaemon::new(
+        device,
+        threads,
+        blob_entry,
+        trigger,
+        result_receiver,
+        waker,
+        bti,
+        id,
+        supervisor,
+    )?;
+    let daemon = Arc::new(daemon);
+    let machine = DaemonStateMachineContext::new(daemon.clone(), events_rx, result_sender);
+    let machine_thread = machine.kick_state_machine()?;
+    *daemon.state_machine_thread.lock().unwrap() = Some(machine_thread);
+    daemon
+        .on_event(DaemonStateMachineInput::Mount)
+        .map_err(|e| eother!(e))?;
+    daemon
+        .on_event(DaemonStateMachineInput::Start)
+        .map_err(|e| eother!(e))?;
+
+    /*
+    // TODO: support crash recover and hot-upgrade.
+    // Without api socket, nydusd can't do neither live-upgrade nor failover, so the helper
+    // finding a victim is not necessary.
+    if (api_sock.as_ref().is_some() && !upgrade && !is_crashed(&mnt, api_sock.as_ref().unwrap())?)
+        || api_sock.is_none()
+    {
+        if let Some(cmd) = mount_cmd {
+            daemon.service.mount(cmd)?;
+        }
+        daemon
+            .service
+            .session
+            .lock()
+            .unwrap()
+            .mount()
+            .map_err(|e| eother!(e))?;
+        daemon
+            .on_event(DaemonStateMachineInput::Mount)
+            .map_err(|e| eother!(e))?;
+        daemon
+            .on_event(DaemonStateMachineInput::Start)
+            .map_err(|e| eother!(e))?;
+        daemon
+            .service
+            .conn
+            .store(calc_fuse_conn(mnt)?, Ordering::Relaxed);
+    }
+     */
+
+    Ok(daemon)
 }
 
 #[cfg(test)]
