@@ -4,7 +4,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::convert::TryInto;
 use std::io;
 use std::sync::mpsc::{RecvError, SendError};
 
@@ -12,7 +11,7 @@ use nydus_error::error::MetricsError;
 use serde::Deserialize;
 use serde_json::Error as SerdeError;
 
-use crate::{BlobCacheEntryConfig, BlobCacheEntryConfigV2};
+use crate::BlobCacheEntry;
 
 /// Mount a filesystem.
 #[derive(Clone, Deserialize, Debug)]
@@ -41,56 +40,6 @@ pub struct ApiUmountCmd {
 pub struct DaemonConf {
     /// Logging level: Off, Error, Warn, Info, Debug, Trace.
     pub log_level: String,
-}
-
-/// Blob cache object type for nydus/rafs bootstrap blob.
-pub const BLOB_CACHE_TYPE_META_BLOB: &str = "bootstrap";
-/// Blob cache object type for nydus/rafs data blob.
-pub const BLOB_CACHE_TYPE_DATA_BLOB: &str = "datablob";
-
-/// Configuration information for a cached blob.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct BlobCacheEntry {
-    /// Type of blob object, bootstrap or data blob.
-    #[serde(rename = "type")]
-    pub blob_type: String,
-    /// Blob id.
-    #[serde(rename = "id")]
-    pub blob_id: String,
-    /// Configuration information to generate blob cache object.
-    #[serde(default, rename = "config")]
-    pub(crate) blob_config_legacy: Option<BlobCacheEntryConfig>,
-    /// Configuration information to generate blob cache object.
-    #[serde(default, rename = "config_v2")]
-    pub blob_config: Option<BlobCacheEntryConfigV2>,
-    /// Domain id for the blob, which is used to group cached blobs into management domains.
-    #[serde(default)]
-    pub domain_id: String,
-}
-
-impl BlobCacheEntry {
-    pub fn prepare_configuration_info(&mut self) -> bool {
-        if self.blob_config.is_none() {
-            if let Some(legacy) = self.blob_config_legacy.as_ref() {
-                match legacy.try_into() {
-                    Err(_) => return false,
-                    Ok(v) => self.blob_config = Some(v),
-                }
-            }
-        }
-
-        match self.blob_config.as_ref() {
-            None => false,
-            Some(cfg) => cfg.cache.validate() && cfg.backend.validate(),
-        }
-    }
-}
-
-/// Configuration information for a list of cached blob objects.
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct BlobCacheList {
-    /// List of blob configuration information.
-    pub blobs: Vec<BlobCacheEntry>,
 }
 
 /// Identifier for cached blob objects.

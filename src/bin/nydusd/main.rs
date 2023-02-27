@@ -597,6 +597,7 @@ mod nbd {
     use super::*;
     use nydus_api::BlobCacheEntry;
     use nydus_service::block_nbd::create_nbd_daemon;
+    use std::str::FromStr;
 
     pub(super) fn append_nbd_subcmd_options(cmd: Command) -> Command {
         let subcmd = Command::new("nbd")
@@ -642,7 +643,7 @@ mod nbd {
         bti: BuildTimeInfo,
         _apisock: Option<&str>,
     ) -> Result<()> {
-        let content = if let Some(bootstrap) = args.value_of("bootstrap") {
+        let mut entry = if let Some(bootstrap) = args.value_of("bootstrap") {
             let dir = args.value_of("localfs-dir").ok_or_else(|| {
                 einval!("option `-D/--localfs-dir` is required by `--boootstrap`")
             })?;
@@ -669,19 +670,26 @@ mod nbd {
                     "metadata_path": "META_FILE_PATH"
                 }
             }"#;
-            config
+            let config = config
                 .replace("LOCAL_FS_DIR", dir)
-                .replace("META_FILE_PATH", bootstrap)
+                .replace("META_FILE_PATH", bootstrap);
+            BlobCacheEntry::from_str(&config)?
         } else if let Some(v) = args.value_of("config") {
-            std::fs::read_to_string(v)?
+            BlobCacheEntry::from_file(v)?
         } else {
             return Err(einval!(
                 "both option `-C/--config` and `-B/--bootstrap` are missing"
             ));
         };
-        let mut config: BlobCacheEntry = serde_json::from_str(&content).unwrap();
-        if !config.prepare_configuration_info() {
-            return Err(einval!(format!("invalid configuration {}", content)));
+        if !entry.prepare_configuration_info() {
+            return Err(einval!(
+                "invalid blob cache entry configuration information"
+            ));
+        }
+        if entry.validate() == false {
+            return Err(einval!(
+                "invalid blob cache entry configuration information"
+            ));
         }
 
         // Safe to unwrap because `DEVICE` is mandatory option.
@@ -696,7 +704,7 @@ mod nbd {
         let daemon = create_nbd_daemon(
             device,
             threads,
-            config,
+            entry,
             bti,
             id,
             supervisor,
