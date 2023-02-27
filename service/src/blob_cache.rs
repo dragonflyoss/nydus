@@ -328,9 +328,12 @@ impl BlobCacheMgr {
                 "blob_cache: `config.metadata_path` for meta blob is empty"
             ));
         }
-        let path = Path::new(&path)
-            .canonicalize()
-            .map_err(|_e| einval!("blob_cache: `config.metadata_path` for meta blob is invalid"))?;
+        let path = Path::new(&path).canonicalize().map_err(|_e| {
+            einval!(format!(
+                "blob_cache: `config.metadata_path={}` for meta blob is invalid",
+                path
+            ))
+        })?;
         if !path.is_file() {
             return Err(einval!(
                 "blob_cache: `config.metadata_path` for meta blob is not a file"
