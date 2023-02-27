@@ -128,13 +128,15 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --oci-ref \
                  --source $ghcr_repo/$I \
-                 --target $ghcr_repo/$I:nydus-nightly-oci-ref
+                 --target $ghcr_repo/$I:nydus-nightly-oci-ref \
+                 --platform linux/amd64,linux/arm64
 
             # use local registry for speed
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --oci-ref \
                  --source localhost:5000/$I \
-                 --target localhost:5000/$I:nydus-nightly-oci-ref
+                 --target localhost:5000/$I:nydus-nightly-oci-ref \
+                 --platform linux/amd64,linux/arm64
 
             # check zran image and referenced oci image
             sudo rm -rf ./tmp
@@ -178,12 +180,14 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
                  --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v5 \
-                 --fs-version 5
+                 --fs-version 5 \
+                 --platform linux/amd64,linux/arm64
             # use local registry for speed
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
                  --target localhost:5000/$I:nydus-nightly-v5 \
-                 --fs-version 5
+                 --fs-version 5 \
+                 --platform linux/amd64,linux/arm64
 
             sudo rm -rf ./tmp
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
@@ -228,12 +232,14 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
                  --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6 \
-                 --fs-version 6
+                 --fs-version 6 \
+                 --platform linux/amd64,linux/arm64
             # use local registry for speed
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
                  --target localhost:5000/$I:nydus-nightly-v6 \
-                 --fs-version 6
+                 --fs-version 6 \
+                 --platform linux/amd64,linux/arm64
 
             sudo rm -rf ./tmp
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
