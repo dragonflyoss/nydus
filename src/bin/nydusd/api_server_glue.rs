@@ -383,7 +383,7 @@ impl ApiServerController {
         let (to_router, from_handler) = channel();
         let api_server = ApiServer::new(to_router)?;
         let api_handler = ApiServerHandler::new(api_server, from_router)?;
-        let (router_thread, waker) = start_http_thread(apisock, None, to_handler, from_handler)?;
+        let (router_thread, waker) = start_http_thread(apisock, to_handler, from_handler)?;
         let daemon_waker = DAEMON_CONTROLLER.alloc_waker();
 
         info!("HTTP API server running at {}", apisock);
