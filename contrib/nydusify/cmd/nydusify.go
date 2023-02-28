@@ -874,11 +874,6 @@ func main() {
 		},
 	}
 
-	// With linux/arm64 platform, containerd/compression prioritizes `unpigz`
-	// to decompress tar.gz file, which may generate corrupted data somehow.
-	// Keep the same behavior with x86_64 platform by disabling pigz.
-	os.Setenv("CONTAINERD_DISABLE_PIGZ", "1")
-
 	if !utils.IsSupportedArch(runtime.GOARCH) {
 		logrus.Fatal("Nydusify can only work under architecture 'amd64' and 'arm64'")
 	}
