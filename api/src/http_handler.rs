@@ -167,15 +167,11 @@ lazy_static! {
 }
 
 fn kick_api_server(
-    api_notifier: Option<Arc<Waker>>,
     to_api: &Sender<Option<ApiRequest>>,
     from_api: &Receiver<ApiResponse>,
     request: ApiRequest,
 ) -> ApiResponse {
     to_api.send(Some(request)).map_err(ApiError::RequestSend)?;
-    if let Some(waker) = api_notifier {
-        waker.wake().map_err(ApiError::Wakeup)?;
-    }
     from_api.recv().map_err(ApiError::ResponseRecv)?
 }
 
@@ -198,21 +194,14 @@ fn trace_api_end(response: &dbs_uhttp::Response, method: dbs_uhttp::Method, recv
     );
 }
 
-fn exit_api_server(api_notifier: Option<Arc<Waker>>, to_api: &Sender<Option<ApiRequest>>) {
+fn exit_api_server(to_api: &Sender<Option<ApiRequest>>) {
     if to_api.send(None).is_err() {
         error!("failed to send stop request api server");
-        return;
-    }
-    if let Some(waker) = api_notifier {
-        let _ = waker
-            .wake()
-            .map_err(|_e| error!("failed to send notify api server for exit"));
     }
 }
 
 fn handle_http_request(
     request: &Request,
-    api_notifier: Option<Arc<Waker>>,
     to_api: &Sender<Option<ApiRequest>>,
     from_api: &Receiver<ApiResponse>,
 ) -> Response {
@@ -224,9 +213,7 @@ fn handle_http_request(
     let mut response = match uri_parsed {
         Ok(uri) => match HTTP_ROUTES.routes.get(uri.path()) {
             Some(route) => route
-                .handle_request(request, &|r| {
-                    kick_api_server(api_notifier.clone(), to_api, from_api, r)
-                })
+                .handle_request(request, &|r| kick_api_server(to_api, from_api, r))
                 .unwrap_or_else(|err| error_response(err, StatusCode::BadRequest)),
             None => error_response(HttpError::NoRoute, StatusCode::NotFound),
         },
@@ -250,7 +237,6 @@ fn handle_http_request(
 /// The HTTP server sends request by `to_api` channel and wait for response from `from_api` channel.
 pub fn start_http_thread(
     path: &str,
-    api_notifier: Option<Arc<Waker>>,
     to_api: Sender<Option<ApiRequest>>,
     from_api: Receiver<ApiResponse>,
 ) -> Result<(thread::JoinHandle<Result<()>>, Arc<Waker>)> {
@@ -288,7 +274,7 @@ pub fn start_http_thread(
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(e) => {
                         error!("http server poll events failed, {}", e);
-                        exit_api_server(api_notifier, &to_api);
+                        exit_api_server(&to_api);
                         return Err(e);
                     }
                     Ok(_) => {}
@@ -301,12 +287,7 @@ pub fn start_http_thread(
                             Ok(request_vec) => {
                                 for server_request in request_vec {
                                     let reply = server_request.process(|request| {
-                                        handle_http_request(
-                                            request,
-                                            api_notifier.clone(),
-                                            &to_api,
-                                            &from_api,
-                                        )
+                                        handle_http_request(request, &to_api, &from_api)
                                     });
                                     // Ignore error when sending response
                                     server.respond(reply).unwrap_or_else(|e| {
@@ -323,7 +304,7 @@ pub fn start_http_thread(
                 }
 
                 if do_exit {
-                    exit_api_server(api_notifier, &to_api);
+                    exit_api_server(&to_api);
                     break;
                 }
             }
@@ -381,13 +362,10 @@ mod tests {
         let (to_api, from_route) = channel();
         let (to_route, from_api) = channel();
         let request = ApiRequest::GetDaemonInfo;
-        let thread =
-            thread::spawn(
-                move || match kick_api_server(None, &to_api, &from_api, request) {
-                    Err(reply) => matches!(reply, ApiError::ResponsePayloadType),
-                    Ok(_) => panic!("unexpected reply message"),
-                },
-            );
+        let thread = thread::spawn(move || match kick_api_server(&to_api, &from_api, request) {
+            Err(reply) => matches!(reply, ApiError::ResponsePayloadType),
+            Ok(_) => panic!("unexpected reply message"),
+        });
         let req2 = from_route.recv().unwrap();
         matches!(req2.as_ref().unwrap(), ApiRequest::GetDaemonInfo);
         let reply: ApiResponse = Err(ApiError::ResponsePayloadType);
@@ -398,10 +376,10 @@ mod tests {
         let (to_route, from_api) = channel();
         drop(to_route);
         let request = ApiRequest::GetDaemonInfo;
-        assert!(kick_api_server(None, &to_api, &from_api, request).is_err());
+        assert!(kick_api_server(&to_api, &from_api, request).is_err());
         drop(from_route);
         let request = ApiRequest::GetDaemonInfo;
-        assert!(kick_api_server(None, &to_api, &from_api, request).is_err());
+        assert!(kick_api_server(&to_api, &from_api, request).is_err());
     }
 
     #[test]
@@ -422,7 +400,7 @@ mod tests {
         let path = tmpdir.as_path().to_str().unwrap();
         let (to_api, from_route) = channel();
         let (_to_route, from_api) = channel();
-        let (thread, waker) = start_http_thread(path, None, to_api, from_api).unwrap();
+        let (thread, waker) = start_http_thread(path, to_api, from_api).unwrap();
         waker.wake().unwrap();
 
         let msg = from_route.recv().unwrap();
