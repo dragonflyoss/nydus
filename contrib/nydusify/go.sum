@@ -371,6 +371,8 @@ github.com/containerd/imgcrypt v1.1.4/go.mod h1:LorQnPtzL/T0IyCeftcsMEO7AqxUDbdO
 github.com/containerd/nri v0.0.0-20201007170849-eb1350a75164/go.mod h1:+2wGSDGFYfE5+So4M5syatU0N0f0LbWpuqyMi4/BE8c=
 github.com/containerd/nri v0.0.0-20210316161719-dbaa18c31c14/go.mod h1:lmxnXF6oMkbqs39FiCt1s0R2HSMhcLel9vNL3m4AaeY=
 github.com/containerd/nri v0.1.0/go.mod h1:lmxnXF6oMkbqs39FiCt1s0R2HSMhcLel9vNL3m4AaeY=
+github.com/containerd/nydus-snapshotter v0.6.1 h1:G7k7EwnjFa1fUC3ywkldDt2BC3mtBPrt+omFke/Vdhk=
+github.com/containerd/nydus-snapshotter v0.6.1/go.mod h1:U9m10GYZKisnSKOdgIjfkU8Ad0UTSYJ6CpP3I0SJBD0=
 github.com/containerd/stargz-snapshotter v0.13.0 h1:3zr1/IkW1aEo6cMYTQeZ4L2jSuCN+F4kgGfjnuowe4U=
 github.com/containerd/stargz-snapshotter v0.13.0/go.mod h1:01uOvoNzN1T4kV+8HeVt9p29esO5/61x8+VP/KU4fvQ=
 github.com/containerd/stargz-snapshotter/estargz v0.4.1/go.mod h1:x7Q9dg9QYb4+ELgxmo4gBUeJB0tl5dqH1Sdz0nJU1QM=
@@ -708,6 +710,8 @@ github.com/gogo/protobuf v1.3.0/go.mod h1:SlYgWuQ5SjCEi6WLHjHCa1yvBfUnHcTbrrZtXP
 github.com/gogo/protobuf v1.3.1/go.mod h1:SlYgWuQ5SjCEi6WLHjHCa1yvBfUnHcTbrrZtXPKa29o=
 github.com/gogo/protobuf v1.3.2 h1:Ov1cvc58UF3b5XjBnZv7+opcTcQFZebYjWzi34vdm4Q=
 github.com/gogo/protobuf v1.3.2/go.mod h1:P1XiOD3dCwIKUDQYPy72D8LYyHL2YPYrpS2s69NZV8Q=
+github.com/goharbor/acceleration-service v0.2.0 h1:w43fw8bUcQ/pG1TdoGtQwTWRez+OJdq1Akwdv0coy5Y=
+github.com/goharbor/acceleration-service v0.2.0/go.mod h1:FuURkXUgvNhzNfenF9ncXw7/Yj7PJ3t2FqwmFAxkuJk=
 github.com/goharbor/harbor/src v0.0.0-20211021012518-bc6a7f65a6fa h1:ujNsn5vQwII37SnPwVsiqIKDA/ll2mlSTroB6CzCdrY=
 github.com/goharbor/harbor/src v0.0.0-20211021012518-bc6a7f65a6fa/go.mod h1:Fq0yS+a/2ZCqy+mHGOZiTcJOaKvgifn3b4eFHmqyMSw=
 github.com/goji/httpauth v0.0.0-20160601135302-2da839ab0f4d/go.mod h1:nnjvkQ9ptGaCkuDUx6wNykzzlUixGxvkme+H/lnzb+A=
@@ -897,10 +901,6 @@ github.com/imdario/mergo v0.3.8/go.mod h1:2EnlNZ0deacrJVfApfmtdGgDfMuh/nq6Ok1EcJ
 github.com/imdario/mergo v0.3.10/go.mod h1:jmQim1M+e3UYxmgPu/WyfjB3N3VflVyUjjjwH0dnCYA=
 github.com/imdario/mergo v0.3.11/go.mod h1:jmQim1M+e3UYxmgPu/WyfjB3N3VflVyUjjjwH0dnCYA=
 github.com/imdario/mergo v0.3.12/go.mod h1:jmQim1M+e3UYxmgPu/WyfjB3N3VflVyUjjjwH0dnCYA=
-github.com/imeoer/acceleration-service v0.0.35 h1:WvfdfPaqmaAaIP/mJkged9tWlLVDjTdJBQuK1EqXYvw=
-github.com/imeoer/acceleration-service v0.0.35/go.mod h1:JI3wTdN9Sf+YZa39k2GoIrLAwdUtlwmZJBJOFqsR+so=
-github.com/imeoer/nydus-snapshotter v0.3.33 h1:s9YNYOdfNYNZ4LdfR4jt3ZLB4Q8AhT3DZiLwIzSWPEI=
-github.com/imeoer/nydus-snapshotter v0.3.33/go.mod h1:U9m10GYZKisnSKOdgIjfkU8Ad0UTSYJ6CpP3I0SJBD0=
 github.com/inconshreveable/mousetrap v1.0.0/go.mod h1:PxqpIevigyE2G7u3NXJIT2ANytuPF1OarO4DADm73n8=
 github.com/influxdata/influxdb1-client v0.0.0-20191209144304-8bf82d3c094d/go.mod h1:qj24IKcXYK6Iy9ceXlo3Tc+vtHo9lIhSX5JddghvEPo=
 github.com/intel/goresctrl v0.2.0/go.mod h1:+CZdzouYFn5EsxgqAQTEzMfwKwuc0fVdMrT9FCCAVRQ=

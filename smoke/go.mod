@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	github.com/containerd/containerd v1.6.18
-	github.com/containerd/nydus-snapshotter v0.0.0-00010101000000-000000000000
+	github.com/containerd/nydus-snapshotter v0.6.1
 	github.com/google/uuid v1.2.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/pkg/errors v0.9.1
@@ -35,6 +35,3 @@ require (
 	google.golang.org/protobuf v1.28.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// It will be updated to official repo once nydus-snapshotter release.
-replace github.com/containerd/nydus-snapshotter => github.com/imeoer/nydus-snapshotter v0.3.33

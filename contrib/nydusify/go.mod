@@ -12,7 +12,7 @@ require (
 	github.com/containerd/containerd v1.6.18
 	github.com/docker/cli v20.10.23+incompatible
 	github.com/docker/distribution v2.8.1+incompatible
-	github.com/goharbor/acceleration-service v0.1.1
+	github.com/goharbor/acceleration-service v0.2.0
 	github.com/google/uuid v1.3.0
 	github.com/hashicorp/go-hclog v1.3.1
 	github.com/hashicorp/go-plugin v1.4.5
@@ -54,7 +54,7 @@ require (
 	github.com/containerd/cgroups v1.0.4 // indirect
 	github.com/containerd/continuity v0.3.0 // indirect
 	github.com/containerd/fifo v1.0.0 // indirect
-	github.com/containerd/nydus-snapshotter v0.3.1 // indirect
+	github.com/containerd/nydus-snapshotter v0.6.1 // indirect
 	github.com/containerd/stargz-snapshotter v0.13.0 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.14.1 // indirect
 	github.com/containerd/ttrpc v1.1.0 // indirect
@@ -127,9 +127,3 @@ require (
 )
 
 replace github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.2
-
-// It will be updated to official repo once acceleration-service release.
-replace github.com/goharbor/acceleration-service => github.com/imeoer/acceleration-service v0.0.35
-
-// It will be updated to official repo once nydus-snapshotter release.
-replace github.com/containerd/nydus-snapshotter => github.com/imeoer/nydus-snapshotter v0.3.33
