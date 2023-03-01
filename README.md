@@ -137,6 +137,11 @@ The containerd remote snapshotter plugin [nydus-snapshotter](https://github.com/
 
 In the future, `zstd::chunked` can work in this way as well.
 
+## Reuse Nydus Services
+
+Using the key features of nydus as native in your project without preparing and invoking `nydusd` deliberately, [nydus-service](./service/README.md) helps to reuse the core services of nyuds.
+
+
 ## Documentation
 
 Browse the documentation to learn more. Here are some topics you may be interested in:
