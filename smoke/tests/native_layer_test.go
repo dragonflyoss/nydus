@@ -5,6 +5,7 @@
 package tests
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -154,6 +155,65 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 	lowerLayer.Overlay(t, upperLayer)
 	ctx.Env.BootstrapPath = overlayBootstrap
 	tool.Verify(t, ctx, lowerLayer.FileTree)
+}
+
+// specify blob dir and cache dir with option `localfs-dir`
+func (n *NativeLayerTestSuite) TestSharedCacheDirWithBlobDir(t *testing.T) {
+
+	ctx := tool.DefaultContext(t)
+
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	// used by both blob dir and cache dir
+	localFsDir := filepath.Join(ctx.Env.WorkDir, "local-fs-dir")
+	err := os.MkdirAll(localFsDir, 0755)
+	require.NoError(t, err)
+
+	ctx.Env.BlobDir = localFsDir
+	ctx.Env.CacheDir = localFsDir
+
+	rootFs := texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "root-fs"))
+
+	rafs := n.rootFsToRafs(t, ctx, rootFs)
+
+	nydusd, err := tool.NewNydusd(tool.NydusdConfig{
+		NydusdPath:    ctx.Binary.Nydusd,
+		BootstrapPath: rafs,
+		MountPath:     ctx.Env.MountDir,
+		APISockPath:   filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		LocalFsDir:    localFsDir,
+	})
+	require.NoError(t, err)
+
+	err = nydusd.Mount()
+	require.NoError(t, err)
+	defer func() {
+		if err := nydusd.Umount(); err != nil {
+			t.Logf("fail to umount, err %v", err)
+		}
+	}()
+
+	tool.VerifyMountDir(t, ctx.Env.MountDir, rootFs.FileTree)
+}
+
+func (n *NativeLayerTestSuite) rootFsToRafs(t *testing.T, ctx *tool.Context, rootFs *tool.Layer) string {
+	digest := rootFs.Pack(t,
+		converter.PackOption{
+			BuilderPath: ctx.Binary.Builder,
+			Compressor:  ctx.Build.Compressor,
+			FsVersion:   ctx.Build.FSVersion,
+			ChunkSize:   ctx.Build.ChunkSize,
+		},
+		ctx.Env.BlobDir)
+	_, bootstrap := tool.MergeLayers(t, *ctx,
+		converter.MergeOption{
+			BuilderPath: ctx.Binary.Builder,
+		},
+		[]converter.Layer{
+			{Digest: digest},
+		})
+	return bootstrap
 }
 
 func TestNativeLayer(t *testing.T) {

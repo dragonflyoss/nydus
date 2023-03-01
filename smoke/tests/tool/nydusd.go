@@ -69,6 +69,7 @@ type NydusdConfig struct {
 	LatestReadFiles bool
 	AccessPattern   bool
 	PrefetchFiles   []string
+	LocalFsDir      string
 }
 
 type Nydusd struct {
@@ -109,6 +110,10 @@ var configTpl = `
  `
 
 func makeConfig(conf NydusdConfig) error {
+	if len(conf.ConfigPath) == 0 {
+		return nil
+	}
+
 	tpl := template.Must(template.New("").Parse(configTpl))
 
 	var ret bytes.Buffer
@@ -203,6 +208,9 @@ func (nydusd *Nydusd) Mount() error {
 	}
 	if len(nydusd.BootstrapPath) > 0 {
 		args = append(args, "--bootstrap", nydusd.BootstrapPath)
+	}
+	if len(nydusd.LocalFsDir) > 0 {
+		args = append(args, "--localfs-dir", nydusd.LocalFsDir)
 	}
 
 	cmd := exec.Command(nydusd.NydusdPath, args...)

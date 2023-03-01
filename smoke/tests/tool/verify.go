@@ -68,3 +68,32 @@ func Verify(t *testing.T, ctx Context, expectedFiles map[string]*File) {
 		}
 	}
 }
+
+func VerifyMountDir(t *testing.T, mountDir string, expectedFiles map[string]*File) {
+	actualFiles := map[string]*File{}
+	err := filepath.WalkDir(mountDir,
+		func(path string, entry fs.DirEntry, err error) error {
+			require.Nil(t, err)
+
+			targetPath, err := filepath.Rel(mountDir, path)
+			require.NoError(t, err)
+
+			file := NewFile(t, path, targetPath)
+			actualFiles[targetPath] = file
+			if expectedFiles[targetPath] != nil {
+				expectedFiles[targetPath].Compare(t, file)
+			} else {
+				t.Fatalf("not found file %s in OCI layer", targetPath)
+			}
+			return nil
+		})
+	require.NoError(t, err)
+
+	for targetPath, file := range expectedFiles {
+		if actualFiles[targetPath] != nil {
+			actualFiles[targetPath].Compare(t, file)
+		} else {
+			t.Fatalf("not found file %s in nydus layer", targetPath)
+		}
+	}
+}
