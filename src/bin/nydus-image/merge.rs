@@ -254,7 +254,7 @@ impl Merger {
             ctx.chunk_size = chunk_size;
         }
 
-        let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false, false)?;
+        let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false)?;
         let mut bootstrap = Bootstrap::new()?;
         bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
         let blob_table = blob_mgr.to_blob_table(ctx)?;

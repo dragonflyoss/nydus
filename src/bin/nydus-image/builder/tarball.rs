@@ -549,7 +549,7 @@ impl Builder for TarballBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(ctx.blob_inline_meta)?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let layer_idx = u16::from(bootstrap_ctx.layered);
         let mut blob_writer = match self.ty {
             ConversionType::EStargzToRafs
@@ -558,7 +558,7 @@ impl Builder for TarballBuilder {
             | ConversionType::EStargzToRef
             | ConversionType::TargzToRef => {
                 if let Some(blob_stor) = ctx.blob_storage.clone() {
-                    ArtifactWriter::new(blob_stor, ctx.blob_inline_meta)?
+                    ArtifactWriter::new(blob_stor)?
                 } else {
                     return Err(anyhow!("missing configuration for target path"));
                 }
