@@ -105,6 +105,7 @@ fn dump_bootstrap(
     )?;
 
     if ctx.blob_inline_meta {
+        assert_ne!(ctx.conversion_type, ConversionType::TarToTarfs);
         // Ensure the blob object is created in case of no chunks generated for the blob.
         let (_, blob_ctx) = blob_mgr
             .get_or_create_current_blob(ctx)
@@ -159,6 +160,7 @@ fn dump_toc(
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
     if ctx.features.is_enabled(Feature::BlobToc) {
+        assert_ne!(ctx.conversion_type, ConversionType::TarToTarfs);
         let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
         let data = blob_ctx.entry_list.as_bytes().to_vec();
         let toc_size = data.len() as u64;
@@ -178,8 +180,11 @@ fn finalize_blob(
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-        dump_toc(ctx, blob_ctx, blob_writer)?;
+        let is_tarfs = ctx.conversion_type == ConversionType::TarToTarfs;
 
+        if !is_tarfs {
+            dump_toc(ctx, blob_ctx, blob_writer)?;
+        }
         if !ctx.conversion_type.is_to_ref() {
             blob_ctx.compressed_blob_size = blob_writer.pos()?;
         }
@@ -191,7 +196,7 @@ fn finalize_blob(
         let blob_meta_id = if ctx.blob_id.is_empty() {
             format!("{:x}", hash)
         } else {
-            assert!(!ctx.conversion_type.is_to_ref());
+            assert!(!ctx.conversion_type.is_to_ref() || is_tarfs);
             ctx.blob_id.clone()
         };
 
@@ -214,7 +219,8 @@ fn finalize_blob(
                     }
                 }
             }
-            if !ctx.blob_inline_meta {
+            // Tarfs mode only has tar stream and meta blob, there's no data blob.
+            if !ctx.blob_inline_meta && !is_tarfs {
                 blob_ctx.blob_meta_digest = hash.into();
                 blob_ctx.blob_meta_size = blob_writer.pos()?;
             }
@@ -223,7 +229,11 @@ fn finalize_blob(
             blob_ctx.blob_id = blob_meta_id.clone();
         }
 
-        blob_writer.finalize(Some(blob_meta_id))?;
+        // Tarfs mode directly use the tar file as RAFS data blob, so no need to generate the data
+        // blob file.
+        if !is_tarfs {
+            blob_writer.finalize(Some(blob_meta_id))?;
+        }
     }
 
     Ok(())

@@ -182,6 +182,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                             "estargz-ref",
                             "estargztoc-ref",
                             "tar-rafs",
+                            "tar-tarfs",
                             "targz-rafs",
                             "targz-ref",
                             "stargz_index",
@@ -649,7 +650,7 @@ impl Command {
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
-        let aligned_chunk = if version.is_v6() {
+        let aligned_chunk = if version.is_v6() && conversion_type != ConversionType::TarToTarfs {
             true
         } else {
             // get_fs_version makes sure it's either v6 or v5.
@@ -732,6 +733,71 @@ impl Command {
                 if blob_id.trim() != "" {
                     bail!(
                         "conversion type '{}' conflicts with '--blob-id'",
+                        conversion_type
+                    );
+                }
+            }
+            ConversionType::TarToTarfs => {
+                Self::ensure_file(&source_path)?;
+                if matches.value_source("compressor") != Some(ValueSource::DefaultValue)
+                    && compressor != compress::Algorithm::None
+                {
+                    info!(
+                        "only compressor `None` is supported for conversion type {}, use `None` instead of {}",
+                        conversion_type, compressor
+                    );
+                }
+                if matches.value_source("digester") != Some(ValueSource::DefaultValue)
+                    && digester != digest::Algorithm::Sha256
+                {
+                    info!(
+                        "only SHA256 is supported for conversion type {}, use SHA256 instead of {}",
+                        conversion_type, compressor
+                    );
+                }
+                compressor = compress::Algorithm::None;
+                digester = digest::Algorithm::Sha256;
+                if blob_storage.is_none() {
+                    bail!("both --blob and --blob-dir are missing");
+                } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
+                    bail!(
+                        "conversion type {} conflicts with '--prefetch-policy blob'",
+                        conversion_type
+                    );
+                }
+                if version != RafsVersion::V6 {
+                    bail!(
+                        "'--fs-version 5' conflicts with conversion type '{}', only V6 is supported",
+                        conversion_type
+                    );
+                }
+                if matches.get_one::<String>("chunk-dict").is_some() {
+                    bail!(
+                        "conversion type '{}' conflicts with '--chunk-dict'",
+                        conversion_type
+                    );
+                }
+                if parent_path.is_some() {
+                    bail!(
+                        "conversion type '{}' conflicts with '--parent-bootstrap'",
+                        conversion_type
+                    );
+                }
+                if blob_inline_meta {
+                    bail!(
+                        "conversion type '{}' conflicts with '--blob-inline-meta'",
+                        conversion_type
+                    );
+                }
+                if features.is_enabled(Feature::BlobToc) {
+                    bail!(
+                        "conversion type '{}' conflicts with '--features blob-toc'",
+                        conversion_type
+                    );
+                }
+                if aligned_chunk {
+                    bail!(
+                        "conversion type '{}' conflicts with '--aligned-chunk'",
                         conversion_type
                     );
                 }
@@ -850,6 +916,12 @@ impl Command {
                 }
                 build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
                 build_ctx.blob_features.insert(BlobFeatures::SEPARATE);
+                Box::new(TarballBuilder::new(conversion_type))
+            }
+            ConversionType::TarToTarfs => {
+                if version.is_v5() {
+                    bail!("conversion type {} conflicts with RAFS v5", conversion_type);
+                }
                 Box::new(TarballBuilder::new(conversion_type))
             }
             ConversionType::DirectoryToStargz
@@ -1181,15 +1253,21 @@ impl Command {
             .get_one::<String>("blob")
             .map(|b| ArtifactStorage::SingleFile(b.into()))
         {
+            if conversion_type == ConversionType::TarToTarfs {
+                bail!(
+                    "conversion type `{}` conflicts with `--blob`",
+                    conversion_type
+                );
+            }
             Ok(Some(p))
         } else if let Some(d) = matches.get_one::<String>("blob-dir").map(PathBuf::from) {
             if !d.exists() {
-                bail!("Directory to store blobs does not exist")
+                bail!("directory to store blobs does not exist")
             }
             Ok(Some(ArtifactStorage::FileDir(d)))
         } else if let Some(config_json) = matches.get_one::<String>("backend-config") {
             let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
-            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob-dir instead.");
+            warn!("using --backend-type=localfs is DEPRECATED. Use --blob-dir instead.");
             if let Some(bf) = config.get("blob_file") {
                 // Even unwrap, it is caused by invalid json. Image creation just can't start.
                 let b: PathBuf = bf

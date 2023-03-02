@@ -166,7 +166,11 @@ impl RafsV6SuperBlock {
                 meta_size
             )));
         }
-        let meta_addr = u32::from_le(self.s_meta_blkaddr) as u64 * EROFS_BLOCK_SIZE_4096;
+        let meta_addr = if self.s_blkszbits == EROFS_BLOCK_BITS_9 {
+            u32::from_le(self.s_meta_blkaddr) as u64 * EROFS_BLOCK_SIZE_512
+        } else {
+            u32::from_le(self.s_meta_blkaddr) as u64 * EROFS_BLOCK_SIZE_4096
+        };
         if meta_addr > meta_size {
             return Err(einval!(format!(
                 "invalid Rafs v6 meta block address 0x{:x}, meta file size 0x{:x}",
@@ -299,8 +303,15 @@ impl RafsV6SuperBlock {
 
     /// Set EROFS meta block address.
     pub fn set_meta_addr(&mut self, meta_addr: u64) {
-        assert!((meta_addr / EROFS_BLOCK_SIZE_4096) <= u32::MAX as u64);
-        self.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLOCK_SIZE_4096) as u32);
+        if self.s_blkszbits == EROFS_BLOCK_BITS_12 {
+            assert!((meta_addr / EROFS_BLOCK_SIZE_4096) <= u32::MAX as u64);
+            self.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLOCK_SIZE_4096) as u32);
+        } else if self.s_blkszbits == EROFS_BLOCK_BITS_9 {
+            assert!((meta_addr / EROFS_BLOCK_SIZE_512) <= u32::MAX as u64);
+            self.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLOCK_SIZE_512) as u32);
+        } else {
+            error!("v6: unsupported block bits {}", self.s_blkszbits);
+        }
     }
 
     /// Get device table offset.
@@ -537,6 +548,12 @@ impl RafsV6SuperBlockExt {
     /// Set flag indicating that chunk digest is inlined in the data blob.
     pub fn set_inlined_chunk_digest(&mut self) {
         self.s_flags |= RafsSuperFlags::INLINED_CHUNK_DIGEST.bits();
+    }
+
+    /// Enable `tarfs` mode, which directly use a tar stream/file as RAFS data blob and do not
+    /// generate any blob meta data.
+    pub fn set_tarfs_mode(&mut self) {
+        self.s_flags |= RafsSuperFlags::TARTFS_MODE.bits();
     }
 
     /// Set message digest algorithm to handle chunk of the Rafs filesystem.
@@ -1086,11 +1103,16 @@ impl RafsV6InodeChunkHeader {
     /// If all chunks are continous in uncompressed cache file, the `chunk_size` will set to
     /// `inode.size().next_power_of_two()`, so EROFS can optimize page cache in this case.
     /// Otherwise `chunk_size` is set to RAFS filesystem's chunk size.
-    pub fn new(chunk_size: u64) -> Self {
+    pub fn new(chunk_size: u64, block_size: u64) -> Self {
         assert!(chunk_size.is_power_of_two());
+        assert!(block_size == EROFS_BLOCK_SIZE_4096 || block_size == EROFS_BLOCK_SIZE_512);
         let chunk_bits = chunk_size.trailing_zeros() as u16;
         assert!(chunk_bits >= EROFS_BLOCK_BITS_12 as u16);
-        let chunk_bits = chunk_bits - EROFS_BLOCK_BITS_12 as u16;
+        let chunk_bits = if block_size == EROFS_BLOCK_SIZE_4096 {
+            chunk_bits - EROFS_BLOCK_BITS_12 as u16
+        } else {
+            chunk_bits - EROFS_BLOCK_BITS_9 as u16
+        };
         assert!(chunk_bits <= EROFS_CHUNK_FORMAT_SIZE_MASK);
         let format = EROFS_CHUNK_FORMAT_INDEXES_FLAG | chunk_bits;
 
@@ -1471,7 +1493,7 @@ impl RafsV6Blob {
         })
     }
 
-    fn validate(&self, blob_index: u32, chunk_size: u32, _flags: RafsSuperFlags) -> bool {
+    fn validate(&self, blob_index: u32, chunk_size: u32, flags: RafsSuperFlags) -> bool {
         match String::from_utf8(self.blob_id.to_vec()) {
             Ok(v) => {
                 if v.len() != BLOB_SHA256_LEN {
@@ -1554,12 +1576,20 @@ impl RafsV6Blob {
             Ok(v) => v,
             Err(_) => return false,
         };
-        if !blob_features.contains(BlobFeatures::ALIGNED) {
-            error!(
-                "RafsV6Blob: idx {} should have 4K-aligned feature bit",
-                blob_index
-            );
-            return false;
+        let tarfs_mode = flags.contains(RafsSuperFlags::TARTFS_MODE);
+        match (blob_features.contains(BlobFeatures::ALIGNED), tarfs_mode) {
+            (false, false) => {
+                error!(
+                    "RafsV6Blob: idx {} should have `ALIGNED` feature bit set",
+                    blob_index
+                );
+                return false;
+            }
+            (true, true) => {
+                error!("RafsV6Blob: `ALIGNED` flag should not be set for `TARFS` mode");
+                return false;
+            }
+            _ => {}
         }
 
         let ci_offset = u64::from_le(self.ci_offset);
@@ -1599,7 +1629,9 @@ impl RafsV6Blob {
                 blob_features.bits()
             );
             return false;
-        } else if ci_uncompr_size != count * size_of::<BlobChunkInfoV1Ondisk>() as u64 {
+        } else if !tarfs_mode
+            && ci_uncompr_size != count * size_of::<BlobChunkInfoV1Ondisk>() as u64
+        {
             error!(
                 "RafsV6Blob: idx {} invalid fields, ci_d_size {:x}, chunk_count {:x}",
                 blob_index, ci_uncompr_size, chunk_count
@@ -2134,7 +2166,7 @@ mod tests {
     #[test]
     fn test_rafs_v6_chunk_header() {
         let chunk_size: u32 = 1024 * 1024;
-        let header = RafsV6InodeChunkHeader::new(chunk_size as u64);
+        let header = RafsV6InodeChunkHeader::new(chunk_size as u64, EROFS_BLOCK_SIZE_4096);
         let target = EROFS_CHUNK_FORMAT_INDEXES_FLAG | (20 - 12) as u16;
         assert_eq!(u16::from_le(header.format), target);
     }

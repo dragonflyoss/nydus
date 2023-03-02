@@ -286,6 +286,8 @@ bitflags! {
         const COMPRESSION_ZSTD = 0x0000_0080;
         /// Chunk digests are inlined in RAFS v6 data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0100;
+        /// RAFS works in Tarfs mode, which directly uses tar streams as data blobs.
+        const TARTFS_MODE = 0x0000_0200;
 
         // Reserved for future compatible changes.
         const PRESERVED_COMPAT_7 = 0x0100_0000;

@@ -30,7 +30,7 @@ use nydus_storage::meta::{
     BlobMetaChunkInfo, ZranContextGenerator,
 };
 use nydus_utils::digest::DigestData;
-use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
+use nydus_utils::{compress, digest, div_round_up, round_down, BufReaderInfo};
 
 use super::node::{ChunkSource, Node};
 use crate::builder::{
@@ -62,6 +62,7 @@ pub enum ConversionType {
     TarToStargz,
     TarToRafs,
     TarToRef,
+    TarToTarfs,
 }
 
 impl Default for ConversionType {
@@ -85,6 +86,7 @@ impl FromStr for ConversionType {
             "targz-ref" => Ok(Self::TargzToRef),
             "tar-rafs" => Ok(Self::TarToRafs),
             "tar-stargz" => Ok(Self::TarToStargz),
+            "tar-tarfs" => Ok(Self::TarToTarfs),
             // kept for backward compatibility
             "directory" => Ok(Self::DirectoryToRafs),
             "stargz_index" => Ok(Self::EStargzIndexToRef),
@@ -106,8 +108,9 @@ impl fmt::Display for ConversionType {
             ConversionType::TargzToStargz => write!(f, "targz-ref"),
             ConversionType::TargzToRef => write!(f, "targz-ref"),
             ConversionType::TarToRafs => write!(f, "tar-rafs"),
-            ConversionType::TarToStargz => write!(f, "tar-stargz"),
             ConversionType::TarToRef => write!(f, "tar-ref"),
+            ConversionType::TarToStargz => write!(f, "tar-stargz"),
+            ConversionType::TarToTarfs => write!(f, "tar-tarfs"),
         }
     }
 }
@@ -120,6 +123,7 @@ impl ConversionType {
                 | ConversionType::EStargzIndexToRef
                 | ConversionType::TargzToRef
                 | ConversionType::TarToRef
+                | ConversionType::TarToTarfs
         )
     }
 }
@@ -703,6 +707,7 @@ impl BlobContext {
     /// Get offset of compressed blob, since current_compressed_offset
     /// is always >= compressed_blob_size, we can safely subtract here.
     pub fn compressed_offset(&self) -> u64 {
+        assert!(self.current_compressed_offset >= self.compressed_blob_size);
         self.current_compressed_offset - self.compressed_blob_size
     }
 }
@@ -745,7 +750,9 @@ impl BlobManager {
             ctx.digester,
         );
         blob_ctx.set_chunk_size(ctx.chunk_size);
-        blob_ctx.set_meta_info_enabled(ctx.fs_version == RafsVersion::V6);
+        blob_ctx.set_meta_info_enabled(
+            ctx.fs_version == RafsVersion::V6 && ctx.conversion_type != ConversionType::TarToTarfs,
+        );
 
         Ok(blob_ctx)
     }
@@ -990,19 +997,22 @@ impl BootstrapContext {
     // Try to find an used block with no less than `size` space left.
     // If found it, return the offset where we can store data.
     // If not, return 0.
-    pub(crate) fn allocate_available_block(&mut self, size: u64) -> u64 {
-        if size >= EROFS_BLOCK_SIZE_4096 {
+    pub(crate) fn allocate_available_block(&mut self, size: u64, block_size: u64) -> u64 {
+        if size >= block_size {
             return 0;
         }
 
         let min_idx = div_round_up(size, EROFS_INODE_SLOT_SIZE as u64) as usize;
-        let max_idx = div_round_up(EROFS_BLOCK_SIZE_4096, EROFS_INODE_SLOT_SIZE as u64) as usize;
+        let max_idx = div_round_up(block_size, EROFS_INODE_SLOT_SIZE as u64) as usize;
 
         for idx in min_idx..max_idx {
             let blocks = &mut self.v6_available_blocks[idx];
             if let Some(mut offset) = blocks.pop_front() {
-                offset += EROFS_BLOCK_SIZE_4096 - (idx * EROFS_INODE_SLOT_SIZE) as u64;
-                self.append_available_block(offset + (min_idx * EROFS_INODE_SLOT_SIZE) as u64);
+                offset += block_size - (idx * EROFS_INODE_SLOT_SIZE) as u64;
+                self.append_available_block(
+                    offset + (min_idx * EROFS_INODE_SLOT_SIZE) as u64,
+                    block_size,
+                );
                 return offset;
             }
         }
@@ -1011,11 +1021,11 @@ impl BootstrapContext {
     }
 
     // Append the block that `offset` belongs to corresponding deque.
-    pub(crate) fn append_available_block(&mut self, offset: u64) {
-        if offset % EROFS_BLOCK_SIZE_4096 != 0 {
-            let avail = EROFS_BLOCK_SIZE_4096 - offset % EROFS_BLOCK_SIZE_4096;
+    pub(crate) fn append_available_block(&mut self, offset: u64, block_size: u64) {
+        if offset % block_size != 0 {
+            let avail = block_size - offset % block_size;
             let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
-            self.v6_available_blocks[idx].push_back(round_down_4k(offset));
+            self.v6_available_blocks[idx].push_back(round_down(offset, block_size));
         }
     }
 }

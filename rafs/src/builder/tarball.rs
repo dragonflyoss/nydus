@@ -103,7 +103,6 @@ impl<'a> TarballTreeBuilder<'a> {
             .context("tarball: can not open source file for conversion")?;
 
         let reader = match self.ty {
-            ConversionType::TarToRafs => TarReader::File(file),
             ConversionType::EStargzToRafs | ConversionType::TargzToRafs => {
                 TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
             }
@@ -130,12 +129,21 @@ impl<'a> TarballTreeBuilder<'a> {
                     TarReader::Buf(reader)
                 }
             }
+            ConversionType::TarToRafs => TarReader::File(file),
             ConversionType::TarToRef => {
                 let reader = BufReaderInfo::from_buf_reader(BufReader::new(file));
                 self.ctx.blob_tar_reader = Some(reader.clone());
                 TarReader::Buf(reader)
             }
-            _ => return Err(anyhow!("unsupported image conversion type")),
+            ConversionType::TarToTarfs => {
+                let mut reader = BufReaderInfo::from_buf_reader(BufReader::new(file));
+                self.ctx.blob_tar_reader = Some(reader.clone());
+                if !self.ctx.blob_id.is_empty() {
+                    reader.enable_digest_calculation(false);
+                }
+                TarReader::Buf(reader)
+            }
+            _ => return Err(anyhow!("tarball: unsupported image conversion type")),
         };
         let mut tar = Archive::new(reader);
         tar.set_ignore_zeros(true);
@@ -551,7 +559,6 @@ impl<'a> TarballTreeBuilder<'a> {
     // The Landmark file MUST be a regular file entry with 4 bits contents 0xf in eStargz.
     // It MUST be recorded to TOC as a TOCEntry. Prefetch landmark MUST be named .prefetch.landmark.
     // No-prefetch landmark MUST be named .no.prefetch.landmark.
-    // TODO: check "a regular file entry with 4 bits contents 0xf"
     fn is_special_files(&self, path: &Path) -> bool {
         (self.ty == ConversionType::EStargzToRafs || self.ty == ConversionType::EStargzToRef)
             && (path == Path::new("/stargz.index.json")
@@ -588,7 +595,8 @@ impl Builder for TarballBuilder {
             | ConversionType::EStargzToRef
             | ConversionType::TargzToRafs
             | ConversionType::TargzToRef
-            | ConversionType::TarToRafs => {
+            | ConversionType::TarToRafs
+            | ConversionType::TarToTarfs => {
                 if let Some(blob_stor) = ctx.blob_storage.clone() {
                     ArtifactWriter::new(blob_stor)?
                 } else {
