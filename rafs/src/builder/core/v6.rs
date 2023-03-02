@@ -16,7 +16,7 @@ use storage::device::BlobFeatures;
 
 use super::chunk_dict::DigestWithBlobIndex;
 use super::node::Node;
-use crate::builder::{Bootstrap, BootstrapContext, BuildContext, ConversionType, Tree};
+use crate::builder::{Bootstrap, BootstrapContext, BuildContext, ConversionType, Feature, Tree};
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::layout::v6::{
     align_offset, calculate_nid, new_v6_inode, RafsV6BlobTable, RafsV6Device, RafsV6Dirent,
@@ -40,7 +40,7 @@ impl Node {
         f_bootstrap: &mut dyn RafsIoWrite,
         orig_meta_addr: u64,
         meta_addr: u64,
-        chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
+        chunk_cache: Option<&mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>>,
     ) -> Result<()> {
         let xattr_inline_count = self.info.xattrs.count_v6();
         ensure!(
@@ -68,7 +68,9 @@ impl Node {
         if self.is_dir() {
             self.v6_dump_dir(ctx, f_bootstrap, meta_addr, meta_offset, &mut inode)?;
         } else if self.is_reg() {
-            self.v6_dump_file(ctx, f_bootstrap, chunk_cache, &mut inode)?;
+            if let Some(chunk_cache) = chunk_cache {
+                self.v6_dump_file(ctx, f_bootstrap, chunk_cache, &mut inode)?;
+            }
         } else if self.is_symlink() {
             self.v6_dump_symlink(ctx, f_bootstrap, &mut inode)?;
         } else {
@@ -709,7 +711,11 @@ impl Bootstrap {
         // Each layer uses the corresponding chunk in the blob of its own layer.
         // If HashChunkDict is used here, it will cause duplication. The chunks are removed,
         // resulting in incomplete chunk info.
-        let mut chunk_cache = BTreeMap::new();
+        let mut chunk_cache = if ctx.features.is_enabled(Feature::BlobToc) {
+            None
+        } else {
+            Some(BTreeMap::new())
+        };
 
         // Dump bootstrap
         timing_tracer!(
@@ -720,7 +726,7 @@ impl Bootstrap {
                         bootstrap_ctx.writer.as_mut(),
                         orig_meta_addr,
                         meta_addr,
-                        &mut chunk_cache,
+                        chunk_cache.as_mut(),
                     )
                     .context("failed to dump bootstrap")?;
                 }
@@ -751,24 +757,26 @@ impl Bootstrap {
         }
 
         // TODO: get rid of the chunk info array.
-        // Dump chunk info array.
-        let chunk_table_offset = bootstrap_ctx
-            .writer
-            .seek_to_end()
-            .context("failed to seek to bootstrap's end for chunk table")?;
-        let mut chunk_table_size: u64 = 0;
-        for (_, chunk) in chunk_cache.iter() {
-            let chunk_size = chunk
-                .store(bootstrap_ctx.writer.as_mut())
-                .context("failed to dump chunk table")?;
-            chunk_table_size += chunk_size as u64;
+        if let Some(chunk_cache) = chunk_cache.as_ref() {
+            // Dump chunk info array.
+            let chunk_table_offset = bootstrap_ctx
+                .writer
+                .seek_to_end()
+                .context("failed to seek to bootstrap's end for chunk table")?;
+            let mut chunk_table_size: u64 = 0;
+            for (_, chunk) in chunk_cache.iter() {
+                let chunk_size = chunk
+                    .store(bootstrap_ctx.writer.as_mut())
+                    .context("failed to dump chunk table")?;
+                chunk_table_size += chunk_size as u64;
+            }
+            ext_sb.set_chunk_table(chunk_table_offset, chunk_table_size);
+            debug!(
+                "chunk_table offset {} size {}",
+                chunk_table_offset, chunk_table_size
+            );
+            Self::v6_align_to_4k(bootstrap_ctx)?;
         }
-        ext_sb.set_chunk_table(chunk_table_offset, chunk_table_size);
-        debug!(
-            "chunk_table offset {} size {}",
-            chunk_table_offset, chunk_table_size
-        );
-        Self::v6_align_to_4k(bootstrap_ctx)?;
 
         // Prepare device slots.
         let mut pos = bootstrap_ctx

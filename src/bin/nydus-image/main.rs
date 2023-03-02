@@ -1077,9 +1077,9 @@ impl Command {
         };
         let config =
             Self::get_configuration(matches).context("failed to get configuration information")?;
-        config
-            .internal
-            .set_blob_accessible(matches.get_one::<String>("config").is_some());
+        let blob_accessible = matches.get_one::<String>("config").is_some()
+            || matches.get_one::<String>("blob-dir").is_some();
+        config.internal.set_blob_accessible(blob_accessible);
         let mut ctx = BuildContext {
             prefetch: Self::get_prefetch(matches)?,
             ..Default::default()
