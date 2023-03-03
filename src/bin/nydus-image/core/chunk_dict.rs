@@ -163,7 +163,7 @@ impl HashChunkDict {
 
         for idx in 0..(size / unit_size) {
             let chunk = rs.superblock.get_chunk_info(idx)?;
-            self.add_chunk(ChunkWrapper::from_chunk_info(chunk.as_ref()), self.digester);
+            self.add_chunk(ChunkWrapper::from_chunk_info(chunk), self.digester);
         }
 
         Ok(())

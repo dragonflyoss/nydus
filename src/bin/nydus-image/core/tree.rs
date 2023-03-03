@@ -307,7 +307,7 @@ impl<'a> MetadataTreeBuilder<'a> {
                 let cki = inode.get_chunk_info(i)?;
                 chunks.push(NodeChunk {
                     source: ChunkSource::Parent,
-                    inner: ChunkWrapper::from_chunk_info(cki.as_ref()),
+                    inner: ChunkWrapper::from_chunk_info(cki),
                 });
             }
             chunks

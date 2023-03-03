@@ -79,6 +79,7 @@ impl ChunkKey {
         match c {
             ChunkWrapper::V5(_) => Self::Digest(*c.id()),
             ChunkWrapper::V6(_) => Self::Offset(c.blob_index(), c.compressed_offset()),
+            ChunkWrapper::Ref(_) => unimplemented!("unsupport ChunkWrapper::Ref(c)"),
         }
     }
 }
