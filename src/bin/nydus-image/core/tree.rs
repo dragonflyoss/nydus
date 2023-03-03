@@ -17,8 +17,8 @@
 
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
@@ -51,8 +51,7 @@ impl Tree {
     pub fn from_bootstrap<T: ChunkDict>(rs: &RafsSuper, chunk_dict: &mut T) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(rs);
         let root_inode = rs.get_extended_inode(rs.superblock.root_ino(), true)?;
-        let root_node =
-            MetadataTreeBuilder::parse_node(rs, root_inode.deref(), PathBuf::from("/"))?;
+        let root_node = MetadataTreeBuilder::parse_node(rs, root_inode, PathBuf::from("/"))?;
         let mut tree = Tree::new(root_node);
 
         tree.children = timing_tracer!(
@@ -276,7 +275,7 @@ impl<'a> MetadataTreeBuilder<'a> {
             let child = inode.get_child_by_index(idx)?;
             let child_ino = child.ino();
             let child_path = parent_path.join(child.name());
-            let child = Self::parse_node(self.rs, child.deref(), child_path)?;
+            let child = Self::parse_node(self.rs, child.clone(), child_path)?;
 
             if child.is_reg() {
                 for chunk in &child.chunks {
@@ -299,7 +298,7 @@ impl<'a> MetadataTreeBuilder<'a> {
     }
 
     /// Convert a `RafsInode` object to an in-memory `Node` object.
-    pub fn parse_node(rs: &RafsSuper, inode: &dyn RafsInodeExt, path: PathBuf) -> Result<Node> {
+    pub fn parse_node(rs: &RafsSuper, inode: Arc<dyn RafsInodeExt>, path: PathBuf) -> Result<Node> {
         let chunks = if inode.is_reg() {
             let chunk_count = inode.get_chunk_count();
             let mut chunks = Vec::with_capacity(chunk_count as usize);
@@ -332,7 +331,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         // to avoid breaking hardlink detecting logic.
         let src_dev = u64::MAX;
 
-        let inode_wrapper = InodeWrapper::from_inode_info(inode);
+        let inode_wrapper = InodeWrapper::from_inode_info(inode.clone());
         let source = PathBuf::from("/");
         let target = Node::generate_target(&path, &source);
         let target_vec = Node::generate_target_vec(&target);

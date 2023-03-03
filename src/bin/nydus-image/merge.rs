@@ -4,7 +4,6 @@
 
 use std::collections::HashSet;
 use std::convert::TryFrom;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -209,9 +208,9 @@ impl Merger {
                 rs.walk_directory::<PathBuf>(
                     rs.superblock.root_ino(),
                     None,
-                    &mut |inode: &dyn RafsInodeExt, path: &Path| -> Result<()> {
+                    &mut |inode: Arc<dyn RafsInodeExt>, path: &Path| -> Result<()> {
                         let mut node =
-                            MetadataTreeBuilder::parse_node(&rs, inode.deref(), path.to_path_buf())
+                            MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
                                 .context(format!(
                                     "parse node from bootstrap {:?}",
                                     bootstrap_path
