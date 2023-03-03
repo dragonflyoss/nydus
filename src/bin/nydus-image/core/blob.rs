@@ -95,7 +95,9 @@ impl Blob {
         blob_mgr: &mut BlobManager,
         blob_writer: &mut ArtifactWriter,
     ) -> Result<()> {
-        if ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc) {
+        if !ctx.blob_features.contains(BlobFeatures::SEPARATE)
+            && (ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc))
+        {
             if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                 blob_ctx.write_tar_header(
                     blob_writer,
