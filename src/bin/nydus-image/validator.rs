@@ -9,10 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use nydus_api::ConfigV2;
+use nydus_rafs::builder::Tree;
 use nydus_rafs::metadata::RafsSuper;
 use nydus_storage::device::BlobInfo;
-
-use crate::tree::Tree;
 
 pub struct Validator {
     sb: RafsSuper,

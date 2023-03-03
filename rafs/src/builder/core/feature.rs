@@ -2,25 +2,30 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::{bail, Result};
 use std::collections::HashSet;
 use std::convert::TryFrom;
 
 const ERR_UNSUPPORTED_FEATURE: &str = "unsupported feature";
 
+/// Feature bits for RAFS filesystem builder.
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum Feature {
-    // Enable to append TOC footer to rafs blob.
+    /// Enable to append TOC footer to rafs blob.
     BlobToc,
 }
 
+/// Feature set for RAFS filesystem builder.
 pub struct Features(HashSet<Feature>);
 
 impl Features {
+    /// Create a new instance of [Features].
     pub fn new() -> Self {
         Self(HashSet::new())
     }
 
-    pub fn from(features: &str) -> anyhow::Result<Self> {
+    /// Create a new instance of [Features] from a string.
+    pub fn from(features: &str) -> Result<Self> {
         let mut list = Features::new();
         let features = features.trim();
         if features.is_empty() {
@@ -42,7 +47,7 @@ impl Features {
 impl TryFrom<&str> for Feature {
     type Error = anyhow::Error;
 
-    fn try_from(f: &str) -> std::result::Result<Self, Self::Error> {
+    fn try_from(f: &str) -> Result<Self> {
         match f {
             "blob-toc" => Ok(Self::BlobToc),
             _ => bail!(

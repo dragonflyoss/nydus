@@ -16,19 +16,12 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::{fmt, fs};
 
-use anyhow::{Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
 use nydus_api::ConfigV2;
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
-use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
-use nydus_rafs::metadata::layout::RafsBlobTable;
-use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
-use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
-use nydus_rafs::RafsIoWrite;
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::toc::{TocEntryList, TocLocation};
@@ -43,6 +36,13 @@ use super::chunk_dict::{ChunkDict, HashChunkDict};
 use super::feature::{Feature, Features};
 use super::node::{ChunkSource, Node, WhiteoutSpec};
 use super::prefetch::{Prefetch, PrefetchPolicy};
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::layout::v5::RafsV5BlobTable;
+use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
+use crate::metadata::layout::RafsBlobTable;
+use crate::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
+use crate::metadata::{RafsSuperFlags, RafsVersion};
+use crate::RafsIoWrite;
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
@@ -792,6 +792,10 @@ impl BlobManager {
 
     pub fn len(&self) -> usize {
         self.blobs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blobs.is_empty()
     }
 
     /// Get all blob contexts (include the blob context that does not have a blob).

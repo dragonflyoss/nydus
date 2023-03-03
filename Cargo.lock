@@ -99,9 +99,9 @@ dependencies = [
 
 [[package]]
 name = "base64"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
+checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
 
 [[package]]
 name = "base64"
@@ -1189,11 +1189,13 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "assert_matches",
- "base64 0.13.0",
+ "base64 0.13.1",
  "bitflags",
  "blake3",
  "fuse-backend-rs",
  "futures",
+ "hex",
+ "indexmap",
  "lazy_static",
  "libc",
  "log",
@@ -1205,9 +1207,12 @@ dependencies = [
  "nydus-utils",
  "serde",
  "serde_json",
+ "sha2",
  "spmc",
+ "tar",
  "vm-memory",
  "vmm-sys-util",
+ "xattr",
 ]
 
 [[package]]
@@ -1215,13 +1220,11 @@ name = "nydus-rs"
 version = "0.0.0-git"
 dependencies = [
  "anyhow",
- "base64 0.13.0",
  "clap",
  "fuse-backend-rs",
  "hex",
  "hyper",
  "hyperlocal",
- "indexmap",
  "lazy_static",
  "libc",
  "log",
@@ -1238,7 +1241,6 @@ dependencies = [
  "rlimit",
  "serde",
  "serde_json",
- "sha2",
  "tar",
  "tokio",
  "vhost",
@@ -1246,8 +1248,6 @@ dependencies = [
  "virtio-bindings",
  "virtio-queue",
  "vm-memory",
- "vmm-sys-util",
- "xattr",
 ]
 
 [[package]]
@@ -1283,7 +1283,7 @@ name = "nydus-storage"
 version = "0.6.2"
 dependencies = [
  "arc-swap",
- "base64 0.13.0",
+ "base64 0.13.1",
  "bitflags",
  "fuse-backend-rs",
  "gpt",

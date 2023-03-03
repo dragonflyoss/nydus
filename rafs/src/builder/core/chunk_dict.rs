@@ -8,33 +8,37 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use nydus_api::ConfigV2;
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::layout::v5::RafsV5ChunkInfo;
-use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig};
 use nydus_storage::device::BlobInfo;
 use nydus_utils::digest::{self, RafsDigest};
 
-use crate::core::tree::Tree;
+use super::tree::Tree;
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::layout::v5::RafsV5ChunkInfo;
+use crate::metadata::{RafsSuper, RafsSuperConfig};
 
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct DigestWithBlobIndex(pub RafsDigest, pub u32);
 
 pub trait ChunkDict: Sync + Send + 'static {
-    fn add_chunk(&mut self, chunk: ChunkWrapper, digester: digest::Algorithm);
-    fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&ChunkWrapper>;
+    fn add_chunk(&mut self, chunk: Arc<ChunkWrapper>, digester: digest::Algorithm);
+    fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&Arc<ChunkWrapper>>;
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>>;
-    fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo>;
+    fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&Arc<BlobInfo>>;
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32);
     fn get_real_blob_idx(&self, inner_idx: u32) -> Option<u32>;
     fn digester(&self) -> digest::Algorithm;
 }
 
 impl ChunkDict for () {
-    fn add_chunk(&mut self, _chunk: ChunkWrapper, _digester: digest::Algorithm) {}
+    fn add_chunk(&mut self, _chunk: Arc<ChunkWrapper>, _digester: digest::Algorithm) {}
 
-    fn get_chunk(&self, _digest: &RafsDigest, _uncompressed_size: u32) -> Option<&ChunkWrapper> {
+    fn get_chunk(
+        &self,
+        _digest: &RafsDigest,
+        _uncompressed_size: u32,
+    ) -> Option<&Arc<ChunkWrapper>> {
         None
     }
 
@@ -42,7 +46,7 @@ impl ChunkDict for () {
         Vec::new()
     }
 
-    fn get_blob_by_inner_idx(&self, _idx: u32) -> Option<&BlobInfo> {
+    fn get_blob_by_inner_idx(&self, _idx: u32) -> Option<&Arc<BlobInfo>> {
         None
     }
 
@@ -60,14 +64,14 @@ impl ChunkDict for () {
 }
 
 pub struct HashChunkDict {
-    pub m: HashMap<RafsDigest, (ChunkWrapper, AtomicU32)>,
+    m: HashMap<RafsDigest, (Arc<ChunkWrapper>, AtomicU32)>,
     blobs: Vec<Arc<BlobInfo>>,
     blob_idx_m: Mutex<BTreeMap<u32, u32>>,
     digester: digest::Algorithm,
 }
 
 impl ChunkDict for HashChunkDict {
-    fn add_chunk(&mut self, chunk: ChunkWrapper, digester: digest::Algorithm) {
+    fn add_chunk(&mut self, chunk: Arc<ChunkWrapper>, digester: digest::Algorithm) {
         if self.digester == digester {
             if let Some(e) = self.m.get(chunk.id()) {
                 e.1.fetch_add(1, Ordering::AcqRel);
@@ -78,7 +82,7 @@ impl ChunkDict for HashChunkDict {
         }
     }
 
-    fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&ChunkWrapper> {
+    fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&Arc<ChunkWrapper>> {
         if let Some((chunk, _)) = self.m.get(digest) {
             if chunk.uncompressed_size() == 0 || chunk.uncompressed_size() == uncompressed_size {
                 return Some(chunk);
@@ -91,8 +95,8 @@ impl ChunkDict for HashChunkDict {
         self.blobs.clone()
     }
 
-    fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo> {
-        self.blobs.get(idx as usize).map(|b| b.as_ref())
+    fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&Arc<BlobInfo>> {
+        self.blobs.get(idx as usize)
     }
 
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32) {
@@ -116,6 +120,10 @@ impl HashChunkDict {
             blob_idx_m: Mutex::new(Default::default()),
             digester,
         }
+    }
+
+    pub fn hashmap(&self) -> &HashMap<RafsDigest, (Arc<ChunkWrapper>, AtomicU32)> {
+        &self.m
     }
 
     fn from_bootstrap_file(
@@ -163,7 +171,8 @@ impl HashChunkDict {
 
         for idx in 0..(size / unit_size) {
             let chunk = rs.superblock.get_chunk_info(idx)?;
-            self.add_chunk(ChunkWrapper::from_chunk_info(chunk), self.digester);
+            let chunk_info = Arc::new(ChunkWrapper::from_chunk_info(chunk));
+            self.add_chunk(chunk_info, self.digester);
         }
 
         Ok(())
@@ -197,7 +206,7 @@ pub fn parse_chunk_dict_arg(arg: &str) -> Result<PathBuf> {
 }
 
 /// Load a chunk dictionary from external source.
-pub(crate) fn import_chunk_dict(
+pub fn import_chunk_dict(
     arg: &str,
     config: Arc<ConfigV2>,
     rafs_config: &RafsSuperConfig,
@@ -210,7 +219,7 @@ pub(crate) fn import_chunk_dict(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_rafs::metadata::RafsVersion;
+    use crate::metadata::RafsVersion;
     use nydus_utils::{compress, digest};
     use std::path::PathBuf;
 
@@ -218,7 +227,7 @@ mod tests {
     fn test_null_dict() {
         let mut dict = Box::new(()) as Box<dyn ChunkDict>;
 
-        let chunk = ChunkWrapper::new(RafsVersion::V5);
+        let chunk = Arc::new(ChunkWrapper::new(RafsVersion::V5));
         dict.add_chunk(chunk.clone(), digest::Algorithm::Sha256);
         assert!(dict.get_chunk(chunk.id(), 0).is_none());
         assert_eq!(dict.get_blobs().len(), 0);

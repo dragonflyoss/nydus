@@ -10,12 +10,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use nydus_api::ConfigV2;
+use nydus_rafs::builder::{ChunkDict, HashChunkDict, Tree};
 use nydus_rafs::metadata::RafsSuper;
 use nydus_utils::digest;
 use serde::Serialize;
-
-use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
-use crate::core::tree::Tree;
 
 #[derive(Copy, Clone, Default, Serialize)]
 struct DedupInfo {
@@ -205,7 +203,7 @@ impl ImageStat {
         })?;
 
         if is_base {
-            for entry in dict.m.values() {
+            for entry in dict.hashmap().values() {
                 image.own_chunks += 1;
                 image.own_comp_size += entry.0.compressed_size() as u64;
                 image.own_uncomp_size += entry.0.uncompressed_size() as u64;
@@ -213,7 +211,7 @@ impl ImageStat {
                     .add_chunk(entry.0.clone(), rs.meta.get_digester());
             }
         } else {
-            for entry in dict.m.values() {
+            for entry in dict.hashmap().values() {
                 if self
                     .dedup_dict
                     .get_chunk(entry.0.id(), entry.0.uncompressed_size())
@@ -241,7 +239,7 @@ impl ImageStat {
         }
 
         if self.dedup_enabled {
-            for entry in self.dedup_dict.m.values() {
+            for entry in self.dedup_dict.hashmap().values() {
                 let count = entry.1.load(Ordering::Relaxed);
                 let thresh = std::cmp::min(self.dedup_info.len(), count as usize);
                 for idx in 0..thresh {

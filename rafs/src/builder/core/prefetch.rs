@@ -6,12 +6,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use indexmap::IndexMap;
-use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
-use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
-use crate::node::Node;
+use super::node::Node;
+use crate::metadata::layout::v5::RafsV5PrefetchTable;
+use crate::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {

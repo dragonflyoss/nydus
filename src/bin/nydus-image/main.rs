@@ -26,6 +26,11 @@ use nix::unistd::{getegid, geteuid};
 use nydus::get_build_time_info;
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_app::setup_logging;
+use nydus_rafs::builder::{
+    import_chunk_dict, parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager,
+    BootstrapManager, BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder,
+    Feature, Features, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+};
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
@@ -33,28 +38,14 @@ use nydus_storage::device::BlobFeatures;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::format_blob_features;
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
-use nydus_utils::{compress, digest};
+use nydus_utils::trace::{EventTracerClass, TimingTracerClass, TraceClass};
+use nydus_utils::{compress, digest, event_tracer, register_tracer, root_tracer, timing_tracer};
 use serde::{Deserialize, Serialize};
 
-use crate::builder::{Builder, DirectoryBuilder, StargzBuilder, TarballBuilder};
-use crate::core::blob_compact::BlobCompactor;
-use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
-use crate::core::context::{
-    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
-};
-use crate::core::feature::{Feature, Features};
-use crate::core::node::{self, WhiteoutSpec};
-use crate::core::prefetch::{Prefetch, PrefetchPolicy};
-use crate::core::tree;
 use crate::merge::Merger;
-use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
-#[macro_use]
-mod trace;
-mod builder;
-mod core;
 mod inspect;
 mod merge;
 mod stat;

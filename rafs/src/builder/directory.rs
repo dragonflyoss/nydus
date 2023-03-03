@@ -5,15 +5,16 @@
 use std::fs;
 use std::fs::DirEntry;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use nydus_utils::{event_tracer, root_tracer, timing_tracer};
 
-use crate::builder::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
-use crate::core::blob::Blob;
-use crate::core::context::{
+use super::core::blob::Blob;
+use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
 };
-use crate::core::node::{Node, Overlay};
-use crate::core::tree::Tree;
+use super::core::node::{Node, Overlay};
+use super::core::tree::Tree;
+use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
 
 struct FilesystemTreeBuilder {}
 
@@ -74,7 +75,7 @@ impl FilesystemTreeBuilder {
     }
 }
 
-pub(crate) struct DirectoryBuilder {}
+pub struct DirectoryBuilder {}
 
 impl DirectoryBuilder {
     pub fn new() -> Self {

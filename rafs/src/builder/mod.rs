@@ -2,30 +2,37 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Context, Result};
+//! Builder to create RAFS filesystems from directories and tarballs.
+use anyhow::{anyhow, Context, Result};
 use nydus_storage::meta::toc;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
-use nydus_utils::{compress, digest};
+use nydus_utils::{compress, digest, root_tracer, timing_tracer};
 use sha2::Digest;
 
-use crate::core::bootstrap::Bootstrap;
-use crate::core::context::{
-    ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
-    BuildOutput,
+pub use self::compact::BlobCompactor;
+pub use self::core::bootstrap::Bootstrap;
+pub use self::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
+pub use self::core::chunk_dict::{ChunkDict, HashChunkDict};
+pub use self::core::context::{
+    ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager,
+    BuildContext, BuildOutput, ConversionType,
 };
-use crate::core::feature::Feature;
-use crate::core::tree::Tree;
+pub use self::core::feature::{Feature, Features};
+pub use self::core::node::{ChunkSource, Overlay, WhiteoutSpec};
+pub use self::core::prefetch::{Prefetch, PrefetchPolicy};
+pub use self::core::tree::{MetadataTreeBuilder, Tree};
+pub use self::directory::DirectoryBuilder;
+pub use self::stargz::StargzBuilder;
+pub use self::tarball::TarballBuilder;
 
-pub(crate) use self::directory::DirectoryBuilder;
-pub(crate) use self::stargz::StargzBuilder;
-pub(crate) use self::tarball::TarballBuilder;
-
+pub mod compact;
+mod core;
 mod directory;
 mod stargz;
 mod tarball;
 
 /// Trait to generate a RAFS filesystem from the source.
-pub(crate) trait Builder {
+pub trait Builder {
     fn build(
         &mut self,
         build_ctx: &mut BuildContext,

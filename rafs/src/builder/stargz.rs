@@ -11,30 +11,31 @@ use std::fs::File;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use serde::{Deserialize, Serialize};
 
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::inode::InodeWrapper;
-use nydus_rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
-use nydus_rafs::metadata::layout::RafsXAttrs;
-use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobChunkFlags;
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::compact::makedev;
 use nydus_utils::compress::compute_compressed_gzip_size;
 use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
-use nydus_utils::{compress, try_round_up_4k, ByteSize};
+use nydus_utils::{compress, root_tracer, timing_tracer, try_round_up_4k, ByteSize};
 
-use crate::builder::{build_bootstrap, Builder};
-use crate::core::blob::Blob;
-use crate::core::context::{
+use super::core::blob::Blob;
+use super::core::context::{
     ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
     BuildOutput,
 };
-use crate::core::node::{ChunkSource, Node, NodeChunk, Overlay};
-use crate::core::tree::Tree;
+use super::core::node::{ChunkSource, Node, NodeChunk, Overlay};
+use super::core::tree::Tree;
+use super::{build_bootstrap, Builder};
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::inode::InodeWrapper;
+use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
+use crate::metadata::layout::RafsXAttrs;
+use crate::metadata::{Inode, RafsVersion};
 
 type RcTocEntry = Rc<RefCell<TocEntry>>;
 
@@ -387,8 +388,8 @@ impl StargzTreeBuilder {
                 let chunk = NodeChunk {
                     source: ChunkSource::Build,
                     inner: match ctx.fs_version {
-                        RafsVersion::V5 => v5_chunk_info,
-                        RafsVersion::V6 => v5_chunk_info,
+                        RafsVersion::V5 => Arc::new(v5_chunk_info),
+                        RafsVersion::V6 => Arc::new(v5_chunk_info),
                     },
                 };
 
@@ -649,7 +650,7 @@ impl StargzTreeBuilder {
     }
 }
 
-pub(crate) struct StargzBuilder {
+pub struct StargzBuilder {
     blob_size: u64,
 }
 
@@ -722,16 +723,14 @@ impl StargzBuilder {
                     max_gzip_size
                 );
             }
-            blob_chunks[idx]
-                .inner
-                .set_compressed_size(max_gzip_size as u32);
+            blob_chunks[idx].set_compressed_size(max_gzip_size as u32);
         }
 
         let mut chunk_map = HashMap::new();
         for chunk in &mut blob_chunks {
             if !chunk_map.contains_key(chunk.inner.id()) {
                 let chunk_index = blob_ctx.alloc_chunk_index()?;
-                chunk.inner.set_index(chunk_index);
+                chunk.set_index(chunk_index);
                 blob_ctx.add_chunk_meta_info(&chunk.inner, None)?;
                 chunk_map.insert(*chunk.inner.id(), chunk_index);
             } else {
@@ -758,9 +757,9 @@ impl StargzBuilder {
                 let chunk_index = *chunk_map.get(chunk.inner.id()).unwrap();
                 let prepared = &blob_chunks[chunk_index as usize];
                 let file_offset = chunk.inner.file_offset();
-                chunk.inner.copy_from(&prepared.inner);
-                chunk.inner.set_file_offset(file_offset);
-                chunk.inner.set_blob_index(blob_index);
+                chunk.copy_from(&prepared.inner);
+                chunk.set_file_offset(file_offset);
+                chunk.set_blob_index(blob_index);
 
                 // This method is used here to calculate uncompressed_blob_size to
                 // be compatible with the possible 4k alignment requirement of

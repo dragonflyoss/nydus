@@ -48,6 +48,7 @@ use std::sync::Arc;
 
 use crate::metadata::{RafsInodeExt, RafsSuper};
 
+pub mod builder;
 pub mod fs;
 pub mod metadata;
 #[cfg(test)]

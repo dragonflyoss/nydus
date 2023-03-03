@@ -7,7 +7,6 @@ use std::io::Write;
 use std::slice;
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{toc, BlobMetaChunkArray};
 use nydus_utils::compress;
@@ -18,6 +17,7 @@ use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, Con
 use super::feature::Feature;
 use super::layout::BlobLayout;
 use super::node::Node;
+use crate::metadata::RAFS_MAX_CHUNK_SIZE;
 
 pub struct Blob {}
 

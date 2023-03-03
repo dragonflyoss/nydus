@@ -23,13 +23,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use tar::{Archive, Entry, EntryType, Header};
 
-use nydus_rafs::metadata::inode::InodeWrapper;
-use nydus_rafs::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
-use nydus_rafs::metadata::layout::RafsXAttrs;
-use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::ZranContextGenerator;
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
@@ -37,15 +33,19 @@ use nydus_utils::compact::makedev;
 use nydus_utils::compress::zlib_random::{ZranReader, ZRAN_READER_BUF_SIZE};
 use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
-use nydus_utils::{div_round_up, BufReaderInfo, ByteSize};
+use nydus_utils::{div_round_up, root_tracer, timing_tracer, BufReaderInfo, ByteSize};
 
-use crate::builder::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
-use crate::core::blob::Blob;
-use crate::core::context::{
+use super::core::blob::Blob;
+use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
-use crate::core::node::{Node, Overlay};
-use crate::core::tree::Tree;
+use super::core::node::{Node, Overlay};
+use super::core::tree::Tree;
+use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
+use crate::metadata::inode::InodeWrapper;
+use crate::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
+use crate::metadata::layout::RafsXAttrs;
+use crate::metadata::{Inode, RafsVersion};
 
 enum TarReader {
     File(File),

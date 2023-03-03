@@ -8,29 +8,30 @@ use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::mem::size_of;
 
-use anyhow::{Context, Error, Result};
-use nydus_rafs::metadata::layout::v5::{
-    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
-};
-use nydus_rafs::metadata::layout::v6::{
-    align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6SuperBlock,
-    RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
-};
-use nydus_rafs::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
-use nydus_rafs::metadata::{RafsStore, RafsSuper, RafsSuperConfig};
+use anyhow::{bail, Context, Error, Result};
 use nydus_storage::device::BlobFeatures;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
+use nydus_utils::{root_tracer, timing_tracer};
 
 use super::context::{
     ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
 };
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use super::tree::Tree;
+use crate::metadata::layout::v5::{
+    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
+};
+use crate::metadata::layout::v6::{
+    align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6SuperBlock,
+    RafsV6SuperBlockExt, EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_SLOT_SIZE,
+};
+use crate::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
+use crate::metadata::{RafsStore, RafsSuper, RafsSuperConfig};
 
 pub(crate) const STARGZ_DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
 const WRITE_PADDING_DATA: [u8; 4096] = [0u8; 4096];
 
-pub(crate) struct Bootstrap {}
+pub struct Bootstrap {}
 
 impl Bootstrap {
     /// Create a new instance of `Bootstrap`.

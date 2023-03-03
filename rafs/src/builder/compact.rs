@@ -5,30 +5,31 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::io::Write;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::utils::alloc_buf;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{digest, try_round_up_4k};
 
-use crate::core::blob::Blob;
-use crate::core::bootstrap::Bootstrap;
-use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
-use crate::core::context::{
+use super::core::blob::Blob;
+use super::core::bootstrap::Bootstrap;
+use super::core::chunk_dict::{ChunkDict, HashChunkDict};
+use super::core::context::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
     BuildOutput, ConversionType,
 };
-use crate::core::feature::Features;
-use crate::core::node::{Node, WhiteoutSpec};
-use crate::core::tree::Tree;
+use super::core::feature::Features;
+use super::core::node::{Node, WhiteoutSpec};
+use super::core::tree::Tree;
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::{RafsSuper, RafsVersion};
 
 const DEFAULT_COMPACT_BLOB_SIZE: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_COMPACT_SIZE: usize = 100 * 1024 * 1024;
@@ -304,9 +305,13 @@ impl BlobCompactor {
                     if let Some(c) =
                         chunk_dict.get_chunk(chunk.inner.id(), chunk.inner.uncompressed_size())
                     {
-                        apply_chunk_change(c, &mut chunk.inner)?;
+                        let mut chunk_inner = chunk.inner.deref().clone();
+                        apply_chunk_change(c, &mut chunk_inner)?;
+                        chunk.inner = Arc::new(chunk_inner);
                     } else if let Some(c) = all_chunks.get_chunk(&chunk_key) {
-                        apply_chunk_change(c, &mut chunk.inner)?;
+                        let mut chunk_inner = chunk.inner.deref().clone();
+                        apply_chunk_change(c, &mut chunk_inner)?;
+                        chunk.inner = Arc::new(chunk_inner);
                     } else {
                         all_chunks.add_chunk(&chunk.inner);
                         // add to per blob ChunkSet
@@ -357,9 +362,7 @@ impl BlobCompactor {
                     self.nodes[*node_idx].chunks[*chunk_idx].inner.blob_index() == from,
                     "unexpected blob_index of chunk"
                 );
-                self.nodes[*node_idx].chunks[*chunk_idx]
-                    .inner
-                    .set_blob_index(to);
+                self.nodes[*node_idx].chunks[*chunk_idx].set_blob_index(to);
             }
         }
         Ok(())
@@ -368,7 +371,10 @@ impl BlobCompactor {
     fn apply_chunk_change(&mut self, c: &(ChunkWrapper, ChunkWrapper)) -> Result<()> {
         if let Some(idx_list) = self.c2nodes.get(&ChunkKey::from(&c.0)) {
             for (node_idx, chunk_idx) in idx_list.iter() {
-                apply_chunk_change(&c.1, &mut self.nodes[*node_idx].chunks[*chunk_idx].inner)?;
+                let chunk = &mut self.nodes[*node_idx].chunks[*chunk_idx];
+                let mut chunk_inner = chunk.inner.deref().clone();
+                apply_chunk_change(&c.1, &mut chunk_inner)?;
+                chunk.inner = Arc::new(chunk_inner);
             }
         }
         Ok(())

@@ -9,6 +9,7 @@ use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
 use std::io::{Read, SeekFrom, Write};
 use std::mem::size_of;
+use std::ops::Deref;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
 #[cfg(target_os = "macos")]
@@ -16,30 +17,32 @@ use std::os::macos::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
-use anyhow::{Context, Error, Result};
-use sha2::digest::Digest;
-
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::inode::{new_v6_inode, InodeWrapper};
-use nydus_rafs::metadata::layout::v5::RafsV5InodeWrapper;
-use nydus_rafs::metadata::layout::v6::{
-    align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
-    RafsV6OndiskInode, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
-    EROFS_INODE_FLAT_PLAIN,
-};
-use nydus_rafs::metadata::layout::RafsXAttrs;
-use nydus_rafs::metadata::{Inode, RafsStore, RafsVersion};
-use nydus_rafs::RafsIoWrite;
+use anyhow::{anyhow, bail, ensure, Context, Error, Result};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::compress;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
-use nydus_utils::{div_round_up, round_down_4k, round_up, try_round_up_4k, ByteSize};
+use nydus_utils::{
+    div_round_up, event_tracer, root_tracer, round_down_4k, round_up, try_round_up_4k, ByteSize,
+};
+use sha2::digest::Digest;
 
 use super::chunk_dict::{ChunkDict, DigestWithBlobIndex};
 use super::context::{ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BuildContext};
 use super::tree::Tree;
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::inode::{new_v6_inode, InodeWrapper};
+use crate::metadata::layout::v5::RafsV5InodeWrapper;
+use crate::metadata::layout::v6::{
+    align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
+    RafsV6OndiskInode, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+    EROFS_INODE_FLAT_PLAIN,
+};
+use crate::metadata::layout::RafsXAttrs;
+use crate::metadata::{Inode, RafsStore, RafsVersion};
+use crate::RafsIoWrite;
 
 // Filesystem may have different algorithms to calculate `i_size` for directory entries,
 // which may break "repeatable build". To support repeatable build, instead of reuse the value
@@ -160,18 +163,6 @@ impl Display for Overlay {
     }
 }
 
-#[derive(Clone)]
-pub struct NodeChunk {
-    pub source: ChunkSource,
-    pub inner: ChunkWrapper,
-}
-
-impl Display for NodeChunk {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.inner,)
-    }
-}
-
 /// Where the chunk data is actually stored.
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum ChunkSource {
@@ -190,6 +181,50 @@ impl Display for ChunkSource {
             Self::Dict => write!(f, "dict"),
             Self::Parent => write!(f, "parent"),
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct NodeChunk {
+    pub source: ChunkSource,
+    pub inner: Arc<ChunkWrapper>,
+}
+
+impl Display for NodeChunk {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.inner,)
+    }
+}
+
+impl NodeChunk {
+    pub fn set_index(&mut self, index: u32) {
+        let mut chunk = self.inner.deref().clone();
+        chunk.set_index(index);
+        self.inner = Arc::new(chunk);
+    }
+
+    pub fn copy_from(&mut self, other: &ChunkWrapper) {
+        let mut chunk = self.inner.deref().clone();
+        chunk.copy_from(other);
+        self.inner = Arc::new(chunk);
+    }
+
+    pub fn set_file_offset(&mut self, offset: u64) {
+        let mut chunk = self.inner.deref().clone();
+        chunk.set_file_offset(offset);
+        self.inner = Arc::new(chunk);
+    }
+
+    pub fn set_blob_index(&mut self, index: u32) {
+        let mut chunk = self.inner.deref().clone();
+        chunk.set_blob_index(index);
+        self.inner = Arc::new(chunk);
+    }
+
+    pub fn set_compressed_size(&mut self, size: u32) {
+        let mut chunk = self.inner.deref().clone();
+        chunk.set_compressed_size(size);
+        self.inner = Arc::new(chunk);
     }
 }
 
@@ -414,6 +449,7 @@ impl Node {
             chunk.set_file_offset(file_offset);
             self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?;
 
+            let chunk = Arc::new(chunk);
             blob_size += chunk.compressed_size() as u64;
             blob_ctx.add_chunk_meta_info(&chunk, chunk_info)?;
             blob_mgr
@@ -674,7 +710,7 @@ impl Node {
         };
         self.chunks.push(NodeChunk {
             source,
-            inner: chunk,
+            inner: Arc::new(chunk),
         });
 
         Ok(None)
@@ -899,7 +935,7 @@ impl Node {
         f_bootstrap: &mut dyn RafsIoWrite,
         orig_meta_addr: u64,
         meta_addr: u64,
-        chunk_cache: &mut BTreeMap<DigestWithBlobIndex, ChunkWrapper>,
+        chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
     ) -> Result<()> {
         let xattr_inline_count = self.xattrs.count_v6();
         ensure!(
@@ -1273,7 +1309,7 @@ impl Node {
         &mut self,
         ctx: &mut BuildContext,
         f_bootstrap: &mut dyn RafsIoWrite,
-        chunk_cache: &mut BTreeMap<DigestWithBlobIndex, ChunkWrapper>,
+        chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
         inode: &mut Box<dyn RafsV6OndiskInode>,
     ) -> Result<()> {
         let mut is_continuous = true;
@@ -1446,9 +1482,9 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::context::{ArtifactStorage, BootstrapContext};
-    use nydus_rafs::metadata::layout::v6::{EROFS_INODE_CHUNK_BASED, EROFS_INODE_SLOT_SIZE};
-    use nydus_rafs::metadata::RAFS_DEFAULT_CHUNK_SIZE;
+    use crate::builder::core::context::{ArtifactStorage, BootstrapContext};
+    use crate::metadata::layout::v6::{EROFS_INODE_CHUNK_BASED, EROFS_INODE_SLOT_SIZE};
+    use crate::metadata::RAFS_DEFAULT_CHUNK_SIZE;
     use std::fs::File;
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 
