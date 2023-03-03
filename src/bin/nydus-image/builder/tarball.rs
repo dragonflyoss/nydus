@@ -149,7 +149,7 @@ impl<'a> TarballTreeBuilder<'a> {
 
         // Generate the root node in advance, it may be overwritten by entries from the tar stream.
         let mut nodes = Vec::with_capacity(10240);
-        let root = self.create_directory(Path::new("/"), &nodes)?;
+        let root = self.create_directory(Path::new("/"), 0)?;
         nodes.push(root.clone());
 
         // Generate RAFS node for each tar entry, and optionally adding missing parents.
@@ -192,10 +192,13 @@ impl<'a> TarballTreeBuilder<'a> {
     ) -> Result<Node> {
         let header = entry.header();
         let entry_type = header.entry_type();
-        assert!(!entry_type.is_gnu_longname());
-        assert!(!entry_type.is_gnu_longlink());
-        assert!(!entry_type.is_pax_local_extensions());
-        if entry_type.is_pax_global_extensions() {
+        if entry_type.is_gnu_longname() {
+            return Err(anyhow!("unsupported gnu_longname from tar header"));
+        } else if entry_type.is_gnu_longlink() {
+            return Err(anyhow!("unsupported gnu_longlink from tar header"));
+        } else if entry_type.is_pax_local_extensions() {
+            return Err(anyhow!("unsupported pax_local_extensions from tar header"));
+        } else if entry_type.is_pax_global_extensions() {
             return Err(anyhow!("unsupported pax_global_extensions from tar header"));
         } else if entry_type.is_contiguous() {
             return Err(anyhow!("unsupported contiguous entry type from tar header"));
@@ -455,7 +458,7 @@ impl<'a> TarballTreeBuilder<'a> {
         if let Some(parent_path) = path.as_ref().parent() {
             if !self.path_inode_map.contains_key(parent_path) {
                 self.make_lost_dirs(parent_path, nodes)?;
-                let node = self.create_directory(parent_path, nodes)?;
+                let node = self.create_directory(parent_path, nodes.len())?;
                 nodes.push(node);
             }
         }
@@ -463,7 +466,7 @@ impl<'a> TarballTreeBuilder<'a> {
         Ok(())
     }
 
-    fn create_directory(&mut self, path: &Path, nodes: &[Node]) -> Result<Node> {
+    fn create_directory(&mut self, path: &Path, nodes_index: usize) -> Result<Node> {
         let ino = (self.path_inode_map.len() + 1) as Inode;
         let name = Self::get_file_name(path)?;
         let mut inode = InodeWrapper::new(self.ctx.fs_version);
@@ -502,7 +505,7 @@ impl<'a> TarballTreeBuilder<'a> {
         };
 
         self.path_inode_map
-            .insert(path.to_path_buf(), (ino, nodes.len()));
+            .insert(path.to_path_buf(), (ino, nodes_index));
 
         Ok(node)
     }
@@ -530,11 +533,13 @@ impl<'a> TarballTreeBuilder<'a> {
     }
 }
 
-pub(crate) struct TarballBuilder {
+/// Builder to create RAFS filesystems from tarballs.
+pub struct TarballBuilder {
     ty: ConversionType,
 }
 
 impl TarballBuilder {
+    /// Create a new instance of [TarballBuilder] to build a RAFS filesystem from a tarball.
     pub fn new(conversion_type: ConversionType) -> Self {
         Self {
             ty: conversion_type,
