@@ -434,7 +434,7 @@ impl Node {
                 dict.set_real_blob_idx(chunk.blob_index(), blob_idx);
                 if let Some(blob) = dict.get_blob_by_inner_idx(chunk.blob_index()) {
                     let ctx = BlobContext::from(ctx, blob, ChunkSource::Dict)?;
-                    blob_mgr.add(ctx);
+                    blob_mgr.add_blob(ctx);
                 }
                 blob_idx
             };

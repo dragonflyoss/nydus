@@ -5,8 +5,7 @@
 use anyhow::Result;
 
 use super::node::Node;
-use super::overlay::Overlay;
-use crate::builder::Prefetch;
+use crate::builder::{Overlay, Prefetch};
 
 #[derive(Clone)]
 pub struct BlobLayout {}

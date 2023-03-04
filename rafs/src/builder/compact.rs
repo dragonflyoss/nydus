@@ -514,7 +514,7 @@ impl BlobCompactor {
                     if blob_idx != idx as u32 {
                         self.apply_blob_move(idx as u32, blob_idx)?;
                     }
-                    self.new_blob_mgr.add(ctx);
+                    self.new_blob_mgr.add_blob(ctx);
                 }
                 State::Delete => {
                     info!("delete blob {}", ori_blob_ids[idx]);
@@ -543,7 +543,7 @@ impl BlobCompactor {
                         self.apply_chunk_change(change_chunk)?;
                     }
                     info!("rebuild blob {} successfully", blob_ctx.blob_id);
-                    self.new_blob_mgr.add(blob_ctx);
+                    self.new_blob_mgr.add_blob(blob_ctx);
                 }
             }
         }

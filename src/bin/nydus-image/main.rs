@@ -14,6 +14,7 @@ extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
 
+use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -27,9 +28,9 @@ use nydus::get_build_time_info;
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_app::setup_logging;
 use nydus_rafs::builder::{
-    import_chunk_dict, parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager,
-    BootstrapManager, BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder,
-    Feature, Features, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+    parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager, BootstrapManager,
+    BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder, Feature, Features,
+    HashChunkDict, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
 };
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
@@ -769,7 +770,7 @@ impl Command {
             }
         }
 
-        let features = Features::from(
+        let features = Features::try_from(
             matches
                 .get_one::<String>("features")
                 .map(|s| s.as_str())
@@ -817,7 +818,7 @@ impl Command {
             // The separate chunk dict bootstrap doesn't support blob accessible.
             rafs_config.internal.set_blob_accessible(false);
             blob_mgr.set_chunk_dict(timing_tracer!(
-                { import_chunk_dict(chunk_dict_arg, rafs_config, &config,) },
+                { HashChunkDict::from_commandline_arg(chunk_dict_arg, rafs_config, &config,) },
                 "import_chunk_dict"
             )?);
         }
@@ -950,7 +951,11 @@ impl Command {
         info!("load bootstrap {:?} successfully", bootstrap_path);
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,
-            Some(args) => Some(import_chunk_dict(args, config, &rs.meta.get_config())?),
+            Some(args) => Some(HashChunkDict::from_commandline_arg(
+                args,
+                config,
+                &rs.meta.get_config(),
+            )?),
         };
 
         let backend = Self::get_backend(matches, "compactor")?;

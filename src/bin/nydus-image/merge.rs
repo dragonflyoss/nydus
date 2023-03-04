@@ -195,7 +195,7 @@ impl Merger {
                 }
                 if !found {
                     blob_idx_map.push(blob_mgr.len() as u32);
-                    blob_mgr.add(blob_ctx);
+                    blob_mgr.add_blob(blob_ctx);
                 }
             }
 
