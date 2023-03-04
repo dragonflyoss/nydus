@@ -840,7 +840,7 @@ impl Builder for StargzBuilder {
         // Dump blob meta
         Blob::dump_meta_data(ctx, &mut blob_ctx, blob_writer.as_mut().unwrap())?;
         if blob_ctx.uncompressed_blob_size > 0 {
-            blob_mgr.add(blob_ctx);
+            blob_mgr.add_blob(blob_ctx);
         }
 
         // Dump bootstrap file

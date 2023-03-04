@@ -21,13 +21,27 @@ use crate::metadata::{RafsSuper, RafsSuperConfig};
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct DigestWithBlobIndex(pub RafsDigest, pub u32);
 
+/// Trait to manage chunk cache for chunk deduplication.
 pub trait ChunkDict: Sync + Send + 'static {
+    /// Add a chunk into the cache.
     fn add_chunk(&mut self, chunk: Arc<ChunkWrapper>, digester: digest::Algorithm);
+
+    /// Get a cached chunk from the cache.
     fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&Arc<ChunkWrapper>>;
+
+    /// Get all `BlobInfo` objects referenced by cached chunks.
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>>;
+
+    /// Get the `BlobInfo` object with inner index `idx`.
     fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&Arc<BlobInfo>>;
+
+    /// Associate an external index with the inner index.
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32);
+
+    /// Get the external index associated with an inner index.
     fn get_real_blob_idx(&self, inner_idx: u32) -> Option<u32>;
+
+    /// Get the digest algorithm used to generate chunk digest.
     fn digester(&self) -> digest::Algorithm;
 }
 
@@ -63,6 +77,7 @@ impl ChunkDict for () {
     }
 }
 
+/// An implementation of [ChunkDict] based on [HashMap].
 pub struct HashChunkDict {
     m: HashMap<RafsDigest, (Arc<ChunkWrapper>, AtomicU32)>,
     blobs: Vec<Arc<BlobInfo>>,
@@ -113,6 +128,7 @@ impl ChunkDict for HashChunkDict {
 }
 
 impl HashChunkDict {
+    /// Create a new instance of [HashChunkDict].
     pub fn new(digester: digest::Algorithm) -> Self {
         HashChunkDict {
             m: Default::default(),
@@ -122,11 +138,24 @@ impl HashChunkDict {
         }
     }
 
+    /// Get an immutable reference to the internal `HashMap`.
     pub fn hashmap(&self) -> &HashMap<RafsDigest, (Arc<ChunkWrapper>, AtomicU32)> {
         &self.m
     }
 
-    fn from_bootstrap_file(
+    /// Parse commandline argument for chunk dictionary and load chunks into the dictionary.
+    pub fn from_commandline_arg(
+        arg: &str,
+        config: Arc<ConfigV2>,
+        rafs_config: &RafsSuperConfig,
+    ) -> Result<Arc<dyn ChunkDict>> {
+        let file_path = parse_chunk_dict_arg(arg)?;
+        HashChunkDict::from_bootstrap_file(&file_path, config, rafs_config)
+            .map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
+    }
+
+    /// Load chunks from the RAFS filesystem into the chunk dictionary.
+    pub fn from_bootstrap_file(
         path: &Path,
         config: Arc<ConfigV2>,
         rafs_config: &RafsSuperConfig,
@@ -205,17 +234,6 @@ pub fn parse_chunk_dict_arg(arg: &str) -> Result<PathBuf> {
     }
 }
 
-/// Load a chunk dictionary from external source.
-pub fn import_chunk_dict(
-    arg: &str,
-    config: Arc<ConfigV2>,
-    rafs_config: &RafsSuperConfig,
-) -> Result<Arc<dyn ChunkDict>> {
-    let file_path = parse_chunk_dict_arg(arg)?;
-    HashChunkDict::from_bootstrap_file(&file_path, config, rafs_config)
-        .map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,7 +265,9 @@ mod tests {
             chunk_size: 0x100000,
             explicit_uidgid: true,
         };
-        let dict = import_chunk_dict(path, Arc::new(ConfigV2::default()), &rafs_config).unwrap();
+        let dict =
+            HashChunkDict::from_commandline_arg(path, Arc::new(ConfigV2::default()), &rafs_config)
+                .unwrap();
 
         assert!(dict.get_chunk(&RafsDigest::default(), 0).is_none());
         assert_eq!(dict.get_blobs().len(), 18);

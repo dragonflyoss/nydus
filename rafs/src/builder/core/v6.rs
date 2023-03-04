@@ -695,7 +695,7 @@ impl Bootstrap {
         // `Node` offset might be updated during above inodes dumping. So `get_prefetch_table` after it.
         let prefetch_table = ctx
             .prefetch
-            .get_rafsv6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
+            .get_v6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
         if let Some(mut pt) = prefetch_table {
             assert!(pt.len() * size_of::<u32>() <= prefetch_table_size as usize);
             // Device slots are very close to extended super block.

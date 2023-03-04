@@ -153,7 +153,7 @@ impl Bootstrap {
 
         // Set prefetch table
         let (prefetch_table_size, prefetch_table_entries) = if let Some(prefetch_table) =
-            ctx.prefetch.get_rafsv5_prefetch_table(&bootstrap_ctx.nodes)
+            ctx.prefetch.get_v5_prefetch_table(&bootstrap_ctx.nodes)
         {
             (prefetch_table.size(), prefetch_table.len() as u32)
         } else {
@@ -230,9 +230,7 @@ impl Bootstrap {
             .context("failed to store inode table")?;
 
         // Dump prefetch table
-        if let Some(mut prefetch_table) =
-            ctx.prefetch.get_rafsv5_prefetch_table(&bootstrap_ctx.nodes)
-        {
+        if let Some(mut prefetch_table) = ctx.prefetch.get_v5_prefetch_table(&bootstrap_ctx.nodes) {
             prefetch_table
                 .store(bootstrap_ctx.writer.as_mut())
                 .context("failed to store prefetch table")?;

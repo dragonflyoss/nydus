@@ -20,11 +20,12 @@ use crate::builder::{
 };
 use crate::metadata::RAFS_MAX_CHUNK_SIZE;
 
-pub struct Blob {}
+/// Generator for RAFS data blob.
+pub(crate) struct Blob {}
 
 impl Blob {
     /// Dump blob file and generate chunks
-    pub fn dump(
+    pub(crate) fn dump(
         ctx: &BuildContext,
         nodes: &mut [Node],
         blob_mgr: &mut BlobManager,
@@ -202,7 +203,7 @@ impl Blob {
             )?;
         }
 
-        // Generate ToC entry for `blob.meta`.
+        // Generate ToC entry for `blob.meta` and write chunk digest array.
         if ctx.features.is_enabled(Feature::BlobToc) {
             let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
             let ci_data = if ctx.blob_features.contains(BlobFeatures::ZRAN) {
