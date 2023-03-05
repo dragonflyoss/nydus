@@ -1,5 +1,5 @@
 // Copyright 2020 Ant Group. All rights reserved.
-// Copyright (C) 2021 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2021-2023 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, bail, Context, Error, Result};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::compress;
@@ -24,9 +24,7 @@ use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
 use sha2::digest::Digest;
 
-use super::chunk_dict::ChunkDict;
-use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext};
-use super::overlay::Overlay;
+use crate::builder::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ChunkDict, Overlay};
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::inode::InodeWrapper;
 use crate::metadata::layout::v6::EROFS_INODE_FLAT_PLAIN;
@@ -34,9 +32,9 @@ use crate::metadata::layout::RafsXAttrs;
 use crate::metadata::{Inode, RafsVersion};
 
 /// Filesystem root path for Unix OSs.
-pub const ROOT_PATH_NAME: &[u8] = &[b'/'];
+const ROOT_PATH_NAME: &[u8] = &[b'/'];
 
-/// Where the chunk data is actually stored.
+/// Source of chunk data: chunk dictionary, parent filesystem or builder.
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum ChunkSource {
     /// Chunk is stored in data blob owned by current image.
@@ -57,6 +55,7 @@ impl Display for ChunkSource {
     }
 }
 
+/// Chunk information for RAFS filesystem builder.
 #[derive(Clone)]
 pub struct NodeChunk {
     pub source: ChunkSource,
@@ -70,30 +69,35 @@ impl Display for NodeChunk {
 }
 
 impl NodeChunk {
+    /// Copy all chunk information from another `ChunkWrapper` object.
     pub fn copy_from(&mut self, other: &ChunkWrapper) {
         let mut chunk = self.inner.deref().clone();
         chunk.copy_from(other);
         self.inner = Arc::new(chunk);
     }
 
+    /// Set chunk index.
     pub fn set_index(&mut self, index: u32) {
         let mut chunk = self.inner.deref().clone();
         chunk.set_index(index);
         self.inner = Arc::new(chunk);
     }
 
+    /// Set blob index.
     pub fn set_blob_index(&mut self, index: u32) {
         let mut chunk = self.inner.deref().clone();
         chunk.set_blob_index(index);
         self.inner = Arc::new(chunk);
     }
 
+    /// Set chunk compressed size.
     pub fn set_compressed_size(&mut self, size: u32) {
         let mut chunk = self.inner.deref().clone();
         chunk.set_compressed_size(size);
         self.inner = Arc::new(chunk);
     }
 
+    /// Set file offset of chunk.
     pub fn set_file_offset(&mut self, offset: u64) {
         let mut chunk = self.inner.deref().clone();
         chunk.set_file_offset(offset);
@@ -101,7 +105,7 @@ impl NodeChunk {
     }
 }
 
-/// Immutable information for a [Node] object.
+/// Struct to host sharable fields of [Node].
 #[derive(Clone, Default, Debug)]
 pub struct NodeInfo {
     /// Last status change time of the file, in nanoseconds.
@@ -157,10 +161,10 @@ pub struct Node {
     pub v6_datalayout: u16,
     /// V6: offset to calculate nid.
     pub v6_offset: u64,
-    /// V6: information to build directory entries.
-    pub v6_dirents: Vec<(u64, OsString, u32)>,
     /// V6: offset to build directory entries.
     pub v6_dirents_offset: u64,
+    /// V6: information to build directory entries.
+    pub v6_dirents: Vec<(u64, OsString, u32)>,
 }
 
 impl Display for Node {
@@ -190,56 +194,7 @@ impl Display for Node {
 }
 
 impl Node {
-    pub fn new(
-        version: RafsVersion,
-        source: PathBuf,
-        path: PathBuf,
-        overlay: Overlay,
-        chunk_size: u32,
-        explicit_uidgid: bool,
-        v6_force_extended_inode: bool,
-    ) -> Result<Node> {
-        let target = Self::generate_target(&path, &source);
-        let target_vec = Self::generate_target_vec(&target);
-        let info = NodeInfo {
-            ctime: 0,
-            explicit_uidgid,
-            src_ino: 0,
-            src_dev: u64::MAX,
-            rdev: u64::MAX,
-            source,
-            target,
-            path,
-            target_vec,
-            symlink: None,
-            xattrs: RafsXAttrs::default(),
-            v6_force_extended_inode,
-        };
-        let mut node = Node {
-            info: Arc::new(info),
-            index: 0,
-            layer_idx: 0,
-            overlay,
-            inode: InodeWrapper::new(version),
-            chunks: Vec::new(),
-            v6_datalayout: EROFS_INODE_FLAT_PLAIN,
-            v6_compact_inode: false,
-            v6_offset: 0,
-            v6_dirents: Vec::new(),
-            v6_dirents_offset: 0,
-        };
-
-        node.build_inode(chunk_size)
-            .context("failed to build inode")?;
-        if version.is_v6() {
-            node.v6_set_inode_compact();
-        }
-
-        Ok(node)
-    }
-
-    /// Dump data from the file assoicated with the node into the data blob, and generate chunk
-    /// information.
+    /// Dump node data into the data blob, and generate chunk information.
     ///
     /// # Arguments
     /// - blob_writer: optional writer to write data into the data blob.
@@ -354,108 +309,6 @@ impl Node {
         Ok(blob_size)
     }
 
-    fn build_inode_xattr(&mut self) -> Result<()> {
-        let file_xattrs = match xattr::list(self.path()) {
-            Ok(x) => x,
-            Err(e) => {
-                if e.raw_os_error() == Some(libc::EOPNOTSUPP) {
-                    return Ok(());
-                } else {
-                    return Err(anyhow!("failed to list xattr of {:?}", self.path()));
-                }
-            }
-        };
-
-        let mut info = self.info.deref().clone();
-        for key in file_xattrs {
-            let value = xattr::get(self.path(), &key).context(format!(
-                "failed to get xattr {:?} of {:?}",
-                key,
-                self.path()
-            ))?;
-            info.xattrs.add(key, value.unwrap_or_default())?;
-        }
-        if !info.xattrs.is_empty() {
-            self.inode.set_has_xattr(true);
-        }
-        self.info = Arc::new(info);
-
-        Ok(())
-    }
-
-    fn build_inode_stat(&mut self) -> Result<()> {
-        let meta = self.meta()?;
-        let mut info = self.info.deref().clone();
-
-        info.src_ino = meta.st_ino();
-        info.src_dev = meta.st_dev();
-        info.rdev = meta.st_rdev();
-        info.ctime = meta.st_ctime();
-
-        self.inode.set_mode(meta.st_mode());
-        if info.explicit_uidgid {
-            self.inode.set_uid(meta.st_uid());
-            self.inode.set_gid(meta.st_gid());
-        }
-
-        // Usually the root directory is created by the build tool (nydusify/buildkit/acceld)
-        // and the mtime of the root directory is different for each build, which makes it
-        // completely impossible to achieve repeatable builds, especially in a tar build scenario
-        // (blob + bootstrap in one tar layer), which causes the layer hash to change and wastes
-        // registry storage space, so the mtime of the root directory is forced to be ignored here.
-        let ignore_mtime = self.is_root();
-        if !ignore_mtime {
-            self.inode.set_mtime(meta.st_mtime() as u64);
-            self.inode.set_mtime_nsec(meta.st_mtime_nsec() as u32);
-        }
-        self.inode.set_projid(0);
-        self.inode.set_rdev(meta.st_rdev() as u32);
-        // Ignore actual nlink value and calculate from rootfs directory instead
-        self.inode.set_nlink(1);
-
-        // Different filesystem may have different algorithms to calculate size/blocks for
-        // directory entries, so let's ignore the value provided by source filesystem and
-        // calculate it later by ourself.
-        if !self.is_dir() {
-            self.inode.set_size(meta.st_size());
-            self.set_inode_blocks();
-        }
-        self.info = Arc::new(info);
-
-        Ok(())
-    }
-
-    fn build_inode(&mut self, chunk_size: u32) -> Result<()> {
-        self.inode.set_name_size(self.name().byte_size());
-
-        // NOTE: Always retrieve xattr before attr so that we can know the size of xattr pairs.
-        self.build_inode_xattr()?;
-        self.build_inode_stat()
-            .with_context(|| format!("failed to build inode {:?}", self.path()))?;
-
-        if self.is_reg() {
-            // Reuse `child_count` to store `chunk_count` for normal files.
-            self.inode
-                .set_child_count(self.chunk_count(chunk_size as u64));
-        } else if self.is_symlink() {
-            let target_path = fs::read_link(self.path())?;
-            let symlink: OsString = target_path.into();
-            let size = symlink.byte_size();
-            self.inode.set_symlink_size(size);
-            let mut info = self.info.deref().clone();
-            info.symlink = Some(symlink);
-            self.info = Arc::new(info);
-        }
-
-        Ok(())
-    }
-
-    fn meta(&self) -> Result<impl MetadataExt> {
-        self.path()
-            .symlink_metadata()
-            .with_context(|| format!("failed to get metadata from {:?}", self.path()))
-    }
-
     fn read_file_chunk<R: Read>(
         &self,
         ctx: &BuildContext,
@@ -490,8 +343,7 @@ impl Node {
                 .with_context(|| format!("failed to read node file {:?}", self.path()))?;
         }
 
-        let chunk_id = RafsDigest::from_buf(buf, ctx.digester);
-        chunk.set_id(chunk_id);
+        chunk.set_id(RafsDigest::from_buf(buf, ctx.digester));
         Ok((chunk, chunk_info))
     }
 
@@ -610,6 +462,169 @@ impl Node {
     }
 }
 
+// build node object from a filesystem object.
+impl Node {
+    /// Create a new instance of [Node] from a filesystem object.
+    pub fn from_fs_object(
+        version: RafsVersion,
+        source: PathBuf,
+        path: PathBuf,
+        overlay: Overlay,
+        chunk_size: u32,
+        explicit_uidgid: bool,
+        v6_force_extended_inode: bool,
+    ) -> Result<Node> {
+        let target = Self::generate_target(&path, &source);
+        let target_vec = Self::generate_target_vec(&target);
+        let info = NodeInfo {
+            ctime: 0,
+            explicit_uidgid,
+            src_ino: 0,
+            src_dev: u64::MAX,
+            rdev: u64::MAX,
+            source,
+            target,
+            path,
+            target_vec,
+            symlink: None,
+            xattrs: RafsXAttrs::default(),
+            v6_force_extended_inode,
+        };
+        let mut node = Node {
+            info: Arc::new(info),
+            index: 0,
+            layer_idx: 0,
+            overlay,
+            inode: InodeWrapper::new(version),
+            chunks: Vec::new(),
+            v6_datalayout: EROFS_INODE_FLAT_PLAIN,
+            v6_compact_inode: false,
+            v6_offset: 0,
+            v6_dirents_offset: 0,
+            v6_dirents: Vec::new(),
+        };
+
+        node.build_inode(chunk_size)
+            .context("failed to build Node from fs object")?;
+        if version.is_v6() {
+            node.v6_set_inode_compact();
+        }
+
+        Ok(node)
+    }
+
+    fn build_inode_xattr(&mut self) -> Result<()> {
+        let file_xattrs = match xattr::list(self.path()) {
+            Ok(x) => x,
+            Err(e) => {
+                if e.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                    return Ok(());
+                } else {
+                    return Err(anyhow!(
+                        "failed to list xattr of {}, {}",
+                        self.path().display(),
+                        e
+                    ));
+                }
+            }
+        };
+
+        let mut info = self.info.deref().clone();
+        for key in file_xattrs {
+            let value = xattr::get(self.path(), &key).with_context(|| {
+                format!("failed to get xattr {:?} of {}", key, self.path().display())
+            })?;
+            info.xattrs.add(key, value.unwrap_or_default())?;
+        }
+        if !info.xattrs.is_empty() {
+            self.inode.set_has_xattr(true);
+        }
+        self.info = Arc::new(info);
+
+        Ok(())
+    }
+
+    fn build_inode_stat(&mut self) -> Result<()> {
+        let meta = self
+            .meta()
+            .with_context(|| format!("failed to get metadata of {}", self.path().display()))?;
+        let mut info = self.info.deref().clone();
+
+        info.src_ino = meta.st_ino();
+        info.src_dev = meta.st_dev();
+        info.rdev = meta.st_rdev();
+        info.ctime = meta.st_ctime();
+
+        self.inode.set_mode(meta.st_mode());
+        if info.explicit_uidgid {
+            self.inode.set_uid(meta.st_uid());
+            self.inode.set_gid(meta.st_gid());
+        }
+
+        // Usually the root directory is created by the build tool (nydusify/buildkit/acceld)
+        // and the mtime of the root directory is different for each build, which makes it
+        // completely impossible to achieve repeatable builds, especially in a tar build scenario
+        // (blob + bootstrap in one tar layer), which causes the layer hash to change and wastes
+        // registry storage space, so the mtime of the root directory is forced to be ignored here.
+        let ignore_mtime = self.is_root();
+        if !ignore_mtime {
+            self.inode.set_mtime(meta.st_mtime() as u64);
+            self.inode.set_mtime_nsec(meta.st_mtime_nsec() as u32);
+        }
+        self.inode.set_projid(0);
+        self.inode.set_rdev(meta.st_rdev() as u32);
+        // Ignore actual nlink value and calculate from rootfs directory instead
+        self.inode.set_nlink(1);
+
+        // Different filesystem may have different algorithms to calculate size/blocks for
+        // directory entries, so let's ignore the value provided by source filesystem and
+        // calculate it later by ourself.
+        if !self.is_dir() {
+            self.inode.set_size(meta.st_size());
+            self.set_inode_blocks();
+        }
+        self.info = Arc::new(info);
+
+        Ok(())
+    }
+
+    fn build_inode(&mut self, chunk_size: u32) -> Result<()> {
+        self.inode.set_name_size(self.name().byte_size());
+
+        // NOTE: Always retrieve xattr before attr so that we can know the size of xattr pairs.
+        self.build_inode_xattr()
+            .with_context(|| format!("failed to get xattr for {}", self.path().display()))?;
+        self.build_inode_stat()
+            .with_context(|| format!("failed to build inode {}", self.path().display()))?;
+
+        if self.is_reg() {
+            let chunk_count = self.chunk_count(chunk_size as u64).with_context(|| {
+                format!("failed to get chunk count for {}", self.path().display())
+            })?;
+            self.inode.set_child_count(chunk_count);
+        } else if self.is_symlink() {
+            let target_path = fs::read_link(self.path()).with_context(|| {
+                format!(
+                    "failed to read symlink target for {}",
+                    self.path().display()
+                )
+            })?;
+            let symlink: OsString = target_path.into();
+            let size = symlink.byte_size();
+            self.inode.set_symlink_size(size);
+            self.set_symlink(symlink);
+        }
+
+        Ok(())
+    }
+
+    fn meta(&self) -> Result<impl MetadataExt> {
+        self.path()
+            .symlink_metadata()
+            .with_context(|| format!("failed to get metadata of {}", self.path().display()))
+    }
+}
+
 // Access Methods
 impl Node {
     pub fn is_root(&self) -> bool {
@@ -636,13 +651,16 @@ impl Node {
         self.inode.is_special()
     }
 
-    pub fn chunk_count(&self, chunk_size: u64) -> u32 {
+    pub fn chunk_count(&self, chunk_size: u64) -> Result<u32> {
         if self.is_reg() {
             let chunks = div_round_up(self.inode.size(), chunk_size);
-            debug_assert!(chunks < u32::MAX as u64);
-            chunks as u32
+            if chunks > u32::MAX as u64 {
+                bail!("file size 0x{:x} is too big", self.inode.size())
+            } else {
+                Ok(chunks as u32)
+            }
         } else {
-            0
+            Ok(0)
         }
     }
 
@@ -733,6 +751,13 @@ impl Node {
                 512,
             ));
         }
+    }
+
+    /// Set symlink target for the node.
+    pub fn set_symlink(&mut self, symlink: OsString) {
+        let mut info = self.info.deref().clone();
+        info.symlink = Some(symlink);
+        self.info = Arc::new(info);
     }
 
     /// Set extended attributes for the node.

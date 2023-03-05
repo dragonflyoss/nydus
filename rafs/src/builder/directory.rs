@@ -45,7 +45,7 @@ impl FilesystemTreeBuilder {
         event_tracer!("load_from_directory", +children.len());
         for child in children {
             let path = child.path();
-            let mut child = Node::new(
+            let mut child = Node::from_fs_object(
                 ctx.fs_version,
                 ctx.source_path.clone(),
                 path.clone(),
@@ -91,7 +91,7 @@ impl DirectoryBuilder {
         bootstrap_ctx: &mut BootstrapContext,
         layer_idx: u16,
     ) -> Result<Tree> {
-        let node = Node::new(
+        let node = Node::from_fs_object(
             ctx.fs_version,
             ctx.source_path.clone(),
             ctx.source_path.clone(),

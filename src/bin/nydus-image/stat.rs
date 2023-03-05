@@ -192,7 +192,10 @@ impl ImageStat {
                 }
 
                 for sz in 12..=20 {
-                    image.chunk_sizes[sz - 12] += node.chunk_count(1 << sz);
+                    match node.chunk_count(1 << sz) {
+                        Ok(v) => image.chunk_sizes[sz - 12] += v,
+                        Err(e) => error!("failed to get chunk size of inode, {}", e),
+                    }
                 }
             } else if node.is_dir() {
                 image.dirs += 1;

@@ -75,7 +75,67 @@ impl Node {
         Ok(())
     }
 
-    pub fn v6_dir_d_size(&self, tree: &Tree) -> Result<u64> {
+    pub fn v6_set_inode_compact(&mut self) {
+        if self.info.v6_force_extended_inode
+            || self.inode.uid() > u16::MAX as u32
+            || self.inode.gid() > u16::MAX as u32
+            || self.inode.nlink() > u16::MAX as u32
+            || self.inode.size() > u32::MAX as u64
+            || self.path().extension() == Some(OsStr::new("pyc"))
+        {
+            self.v6_compact_inode = false;
+        } else {
+            self.v6_compact_inode = true;
+        }
+    }
+
+    /// Set node offset in bootstrap and return the next position.
+    pub fn v6_set_offset(
+        &mut self,
+        bootstrap_ctx: &mut BootstrapContext,
+        v6_hardlink_offset: Option<u64>,
+    ) {
+        if self.is_reg() {
+            if let Some(v6_hardlink_offset) = v6_hardlink_offset {
+                self.v6_offset = v6_hardlink_offset;
+            } else {
+                let size = self.v6_size_with_xattr();
+                let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
+                // We first try to allocate space from used blocks.
+                // If no available used block exists, we allocate sequentially.
+                let total_size = round_up(size, unit) + self.inode.child_count() as u64 * unit;
+                self.v6_offset = bootstrap_ctx.allocate_available_block(total_size);
+                if self.v6_offset == 0 {
+                    self.v6_offset = bootstrap_ctx.offset;
+                    bootstrap_ctx.offset += size;
+                    bootstrap_ctx.align_offset(unit);
+                    bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
+                }
+            }
+            self.v6_datalayout = EROFS_INODE_CHUNK_BASED;
+        } else if self.is_symlink() {
+            self.v6_set_offset_with_tail(bootstrap_ctx, self.inode.size());
+        } else {
+            self.v6_offset = bootstrap_ctx.offset;
+            bootstrap_ctx.offset += self.v6_size_with_xattr();
+        }
+    }
+
+    pub fn v6_set_dir_offset(
+        &mut self,
+        bootstrap_ctx: &mut BootstrapContext,
+        d_size: u64,
+    ) -> Result<()> {
+        ensure!(self.is_dir(), "{} is not a directory", self);
+
+        // Dir isize is the total bytes of 'dirents + names'.
+        self.inode.set_size(d_size);
+        self.v6_set_offset_with_tail(bootstrap_ctx, d_size);
+
+        Ok(())
+    }
+
+    pub fn v6_dirent_size(&self, tree: &Tree) -> Result<u64> {
         ensure!(self.is_dir(), "{} is not a directory", self);
         // Use length in byte, instead of length in character.
         let mut d_size: u64 = (".".as_bytes().len()
@@ -95,55 +155,9 @@ impl Node {
         Ok(d_size)
     }
 
-    /// Set node offset in bootstrap and return the next position.
-    pub fn v6_set_offset(
-        &mut self,
-        bootstrap_ctx: &mut BootstrapContext,
-        v6_hardlink_offset: Option<u64>,
-    ) {
-        if self.is_reg() {
-            if let Some(v6_hardlink_offset) = v6_hardlink_offset {
-                self.v6_offset = v6_hardlink_offset;
-            } else {
-                let size = self.v6_size_with_xattr() as u64;
-                let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
-                // We first try to allocate space from used blocks.
-                // If no available used block exists, we allocate sequentially.
-                let total_size = round_up(size, unit) + self.inode.child_count() as u64 * unit;
-                self.v6_offset = bootstrap_ctx.allocate_available_block(total_size);
-                if self.v6_offset == 0 {
-                    self.v6_offset = bootstrap_ctx.offset;
-                    bootstrap_ctx.offset += size;
-                    bootstrap_ctx.align_offset(unit);
-                    bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
-                }
-            }
-            self.v6_datalayout = EROFS_INODE_CHUNK_BASED;
-        } else if self.is_symlink() {
-            self.v6_set_offset_with_tail(bootstrap_ctx, self.inode.size());
-        } else {
-            self.v6_offset = bootstrap_ctx.offset;
-            bootstrap_ctx.offset += self.v6_size_with_xattr() as u64;
-        }
-    }
-
-    pub fn v6_set_dir_offset(
-        &mut self,
-        bootstrap_ctx: &mut BootstrapContext,
-        d_size: u64,
-    ) -> Result<()> {
-        ensure!(self.is_dir(), "{} is not a directory", self);
-
-        // Dir isize is the total bytes of 'dirents + names'.
-        self.inode.set_size(d_size);
-        self.v6_set_offset_with_tail(bootstrap_ctx, d_size);
-
-        Ok(())
-    }
-
-    fn v6_size_with_xattr(&self) -> usize {
+    fn v6_size_with_xattr(&self) -> u64 {
         self.inode
-            .get_inode_size_with_xattr(&self.info.xattrs, self.v6_compact_inode)
+            .get_inode_size_with_xattr(&self.info.xattrs, self.v6_compact_inode) as u64
     }
 
     // For DIR inode, size is the total bytes of 'dirents + names'.
@@ -186,7 +200,7 @@ impl Node {
         //          |         inode                   |
         //
         //
-        let inode_size = self.v6_size_with_xattr() as u64;
+        let inode_size = self.v6_size_with_xattr();
         let tail: u64 = d_size % EROFS_BLOCK_SIZE;
 
         // We use a simple inline strategy here:
@@ -256,20 +270,6 @@ impl Node {
             self.v6_dirents_offset,
             self.v6_datalayout
         );
-    }
-
-    pub fn v6_set_inode_compact(&mut self) {
-        if self.info.v6_force_extended_inode
-            || self.inode.uid() > u16::MAX as u32
-            || self.inode.gid() > u16::MAX as u32
-            || self.inode.nlink() > u16::MAX as u32
-            || self.inode.size() > u32::MAX as u64
-            || self.path().extension() == Some(OsStr::new("pyc"))
-        {
-            self.v6_compact_inode = false;
-        } else {
-            self.v6_compact_inode = true;
-        }
     }
 
     fn v6_store_xattrs(
@@ -390,7 +390,7 @@ impl Node {
             }
 
             let tail_off = match self.v6_datalayout {
-                EROFS_INODE_FLAT_INLINE => self.v6_offset + self.v6_size_with_xattr() as u64,
+                EROFS_INODE_FLAT_INLINE => self.v6_offset + self.v6_size_with_xattr(),
                 EROFS_INODE_FLAT_PLAIN => dirent_off,
                 _ => bail!("unsupported RAFS v6 inode layout for directory"),
             };
@@ -455,7 +455,7 @@ impl Node {
 
         // Dump chunk indexes
         let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
-        let chunk_off = align_offset(self.v6_offset + self.v6_size_with_xattr() as u64, unit);
+        let chunk_off = align_offset(self.v6_offset + self.v6_size_with_xattr(), unit);
         f_bootstrap
             .seek(SeekFrom::Start(chunk_off))
             .context("failed seek for dir inode")?;
@@ -485,7 +485,7 @@ impl Node {
         // write symlink.
         if let Some(symlink) = &self.info.symlink {
             let tail_off = match self.v6_datalayout {
-                EROFS_INODE_FLAT_INLINE => self.v6_offset + self.v6_size_with_xattr() as u64,
+                EROFS_INODE_FLAT_INLINE => self.v6_offset + self.v6_size_with_xattr(),
                 EROFS_INODE_FLAT_PLAIN => data_off,
                 _ => bail!("unsupported RAFS v5 inode layout for symlink"),
             };
@@ -515,7 +515,7 @@ mod tests {
     fn test_set_v6_offset() {
         let pa = TempDir::new().unwrap();
         let pa_aa = TempFile::new_in(pa.as_path()).unwrap();
-        let mut node = Node::new(
+        let mut node = Node::from_fs_object(
             RafsVersion::V6,
             pa.as_path().to_path_buf(),
             pa_aa.as_path().to_path_buf(),
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(bootstrap_ctx.offset, 32);
 
         // symlink and dir are handled in the same way.
-        let mut dir_node = Node::new(
+        let mut dir_node = Node::from_fs_object(
             RafsVersion::V6,
             pa.as_path().to_path_buf(),
             pa.as_path().to_path_buf(),
@@ -637,7 +637,7 @@ mod tests {
         let pa_pyc = pa.as_path().join("foo.pyc");
         let _ = File::create(&pa_pyc).unwrap();
 
-        let reg_node = Node::new(
+        let reg_node = Node::from_fs_object(
             RafsVersion::V6,
             pa.as_path().to_path_buf(),
             pa_reg.as_path().to_path_buf(),
@@ -650,7 +650,7 @@ mod tests {
 
         assert!(reg_node.v6_compact_inode);
 
-        let pyc_node = Node::new(
+        let pyc_node = Node::from_fs_object(
             RafsVersion::V6,
             pa.as_path().to_path_buf(),
             pa_pyc.as_path().to_path_buf(),
