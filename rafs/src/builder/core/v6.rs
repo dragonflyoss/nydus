@@ -281,6 +281,7 @@ impl Node {
             bootstrap_ctx.align_offset(block_size);
             self.v6_dirents_offset = bootstrap_ctx.offset;
             bootstrap_ctx.offset += d_size;
+            bootstrap_ctx.append_available_block(bootstrap_ctx.offset, block_size);
             bootstrap_ctx.align_offset(block_size);
 
             EROFS_INODE_FLAT_PLAIN
