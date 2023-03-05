@@ -13,11 +13,11 @@ use nydus_storage::device::BlobFeatures;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::{root_tracer, timing_tracer};
 
-use super::context::{
-    ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
-};
 use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
-use super::tree::Tree;
+use crate::builder::{
+    ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
+    Tree,
+};
 use crate::metadata::layout::v5::{
     RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5SuperBlock, RafsV5XAttrsTable,
 };
@@ -174,8 +174,8 @@ impl Bootstrap {
             let mut v6_hardlink_offset: Option<u64> = None;
             if let Some(indexes) = bootstrap_ctx.inode_map.get_mut(&(
                 child.node.layer_idx,
-                child.node.src_ino,
-                child.node.src_dev,
+                child.node.info.src_ino,
+                child.node.info.src_dev,
             )) {
                 let nlink = indexes.len() as u32 + 1;
                 let first_index = indexes[0];
@@ -193,7 +193,11 @@ impl Bootstrap {
                 child.node.inode.set_nlink(1);
                 // Store inode real ino
                 bootstrap_ctx.inode_map.insert(
-                    (child.node.layer_idx, child.node.src_ino, child.node.src_dev),
+                    (
+                        child.node.layer_idx,
+                        child.node.info.src_ino,
+                        child.node.info.src_dev,
+                    ),
                     vec![child.node.index],
                 );
             }
@@ -462,9 +466,10 @@ impl Bootstrap {
             inode_offset += node.inode.inode_size() as u32;
             if node.inode.has_xattr() {
                 has_xattr = true;
-                if !node.xattrs.is_empty() {
-                    inode_offset +=
-                        (size_of::<RafsV5XAttrsTable>() + node.xattrs.aligned_size_v5()) as u32;
+                if !node.info.xattrs.is_empty() {
+                    inode_offset += (size_of::<RafsV5XAttrsTable>()
+                        + node.info.xattrs.aligned_size_v5())
+                        as u32;
                 }
             }
             // Add chunks size
@@ -558,11 +563,11 @@ impl Bootstrap {
 
         let (prefetch_table_offset, prefetch_table_size) =
             // If blob_table_size equal to 0, there is no prefetch.
-            if ctx.prefetch.len() > 0 && blob_table_size > 0 {
+            if ctx.prefetch.fs_prefetch_rule_count() > 0 && blob_table_size > 0 {
                 // Prefetch table is very close to blob devices table
                 let offset = blob_table_offset + blob_table_size;
                 // Each prefetched file has is nid of `u32` filled into prefetch table.
-                let size = ctx.prefetch.len() * size_of::<u32>() as u32;
+                let size = ctx.prefetch.fs_prefetch_rule_count() * size_of::<u32>() as u32;
                 trace!("prefetch table locates at offset {} size {}", offset, size);
                 (offset, size)
             } else {

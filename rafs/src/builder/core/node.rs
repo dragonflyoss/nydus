@@ -197,21 +197,15 @@ impl Display for NodeChunk {
 }
 
 impl NodeChunk {
-    pub fn set_index(&mut self, index: u32) {
-        let mut chunk = self.inner.deref().clone();
-        chunk.set_index(index);
-        self.inner = Arc::new(chunk);
-    }
-
     pub fn copy_from(&mut self, other: &ChunkWrapper) {
         let mut chunk = self.inner.deref().clone();
         chunk.copy_from(other);
         self.inner = Arc::new(chunk);
     }
 
-    pub fn set_file_offset(&mut self, offset: u64) {
+    pub fn set_index(&mut self, index: u32) {
         let mut chunk = self.inner.deref().clone();
-        chunk.set_file_offset(offset);
+        chunk.set_index(index);
         self.inner = Arc::new(chunk);
     }
 
@@ -226,13 +220,22 @@ impl NodeChunk {
         chunk.set_compressed_size(size);
         self.inner = Arc::new(chunk);
     }
+
+    pub fn set_file_offset(&mut self, offset: u64) {
+        let mut chunk = self.inner.deref().clone();
+        chunk.set_file_offset(offset);
+        self.inner = Arc::new(chunk);
+    }
 }
 
-/// An in-memory representation of RAFS inode for image building and inspection.
-#[derive(Clone)]
-pub struct Node {
-    /// Assigned RAFS inode number.
-    pub index: u64,
+/// Immutable information for a [Node] object.
+#[derive(Clone, Default, Debug)]
+pub struct NodeInfo {
+    /// Last status change time of the file, in nanoseconds.
+    pub ctime: i64,
+    /// Whether the explicit UID/GID feature is enabled or not.
+    pub explicit_uidgid: bool,
+
     /// Device id associated with the source inode.
     ///
     /// A source directory may contain multiple partitions from different hard disk, so
@@ -242,18 +245,6 @@ pub struct Node {
     pub src_ino: Inode,
     /// Device ID for special files, describing the device that this inode represents.
     pub rdev: u64,
-    /// Define a disk inode structure to persist to disk.
-    pub inode: InodeWrapper,
-    /// Chunks info list of regular file
-    pub chunks: Vec<NodeChunk>,
-    /// Extended attributes.
-    pub xattrs: RafsXAttrs,
-    /// Symlink info of symlink file
-    pub symlink: Option<OsString>,
-    /// Overlay type for layered build
-    pub overlay: Overlay,
-    /// Whether the explicit UID/GID feature is enabled or not.
-    pub explicit_uidgid: bool,
     /// Absolute path of the source root directory.
     pub source: PathBuf,
     /// Absolute path of the source file/directory.
@@ -262,15 +253,33 @@ pub struct Node {
     pub target: PathBuf,
     /// Parsed version of `target`.
     pub target_vec: Vec<OsString>,
+    /// Symlink info of symlink file
+    pub symlink: Option<OsString>,
+    /// Extended attributes.
+    pub xattrs: RafsXAttrs,
+
+    /// V6: whether it's forced to use an extended inode.
+    pub v6_force_extended_inode: bool,
+}
+
+/// An in-memory representation of RAFS inode for image building and inspection.
+#[derive(Clone)]
+pub struct Node {
+    /// Immutable fields of a Node object.
+    pub info: Arc<NodeInfo>,
+    /// Assigned RAFS inode number.
+    pub index: u64,
+    /// Define a disk inode structure to persist to disk.
+    pub inode: InodeWrapper,
+    /// Chunks info list of regular file
+    pub chunks: Vec<NodeChunk>,
     /// Layer index where node is located.
     pub layer_idx: u16,
-    /// Last status change time of the file, in nanoseconds.
-    pub ctime: i64,
+    /// Overlay type for layered build
+    pub overlay: Overlay,
 
     /// V6: whether it's a compact inode or an extended inode.
     pub v6_compact_inode: bool,
-    /// V6: whether it's forced to use an extended inode.
-    pub v6_force_extended_inode: bool,
     /// V6: inode data layout.
     pub v6_datalayout: u16,
     /// V6: offset to calculate nid.
@@ -290,7 +299,7 @@ impl Display for Node {
             self.target(),
             self.index,
             self.inode.ino(),
-            self.src_ino,
+            self.info.src_ino,
             self.inode.parent(),
             self.inode.child_index(),
             self.inode.child_count(),
@@ -300,7 +309,7 @@ impl Display for Node {
             self.inode.name_size(),
             self.inode.symlink_size(),
             self.inode.has_xattr(),
-            self.symlink,
+            self.info.symlink,
             self.inode.mtime(),
             self.inode.mtime_nsec(),
         )
@@ -319,8 +328,9 @@ impl Node {
     ) -> Result<Node> {
         let target = Self::generate_target(&path, &source);
         let target_vec = Self::generate_target_vec(&target);
-        let mut node = Node {
-            index: 0,
+        let info = NodeInfo {
+            ctime: 0,
+            explicit_uidgid,
             src_ino: 0,
             src_dev: u64::MAX,
             rdev: u64::MAX,
@@ -328,19 +338,21 @@ impl Node {
             target,
             path,
             target_vec,
+            symlink: None,
+            xattrs: RafsXAttrs::default(),
+            v6_force_extended_inode,
+        };
+        let mut node = Node {
+            info: Arc::new(info),
+            index: 0,
+            layer_idx: 0,
             overlay,
             inode: InodeWrapper::new(version),
             chunks: Vec::new(),
-            symlink: None,
-            xattrs: RafsXAttrs::default(),
-            explicit_uidgid,
-            layer_idx: 0,
-            ctime: 0,
+            v6_datalayout: EROFS_INODE_FLAT_PLAIN,
+            v6_compact_inode: false,
             v6_offset: 0,
             v6_dirents: Vec::new(),
-            v6_datalayout: EROFS_INODE_FLAT_PLAIN,
-            v6_force_extended_inode,
-            v6_compact_inode: false,
             v6_dirents_offset: 0,
         };
 
@@ -367,8 +379,8 @@ impl Node {
         chunk_data_buf: &mut [u8],
     ) -> Result<u64> {
         let mut reader = if self.is_reg() {
-            let file = File::open(&self.path)
-                .with_context(|| format!("failed to open node file {:?}", self.path))?;
+            let file = File::open(&self.path())
+                .with_context(|| format!("failed to open node file {:?}", self.path()))?;
             Some(file)
         } else {
             None
@@ -394,7 +406,7 @@ impl Node {
         if self.is_dir() {
             return Ok(0);
         } else if self.is_symlink() {
-            if let Some(symlink) = self.symlink.as_ref() {
+            if let Some(symlink) = self.info.symlink.as_ref() {
                 self.inode
                     .set_digest(RafsDigest::from_buf(symlink.as_bytes(), ctx.digester));
                 return Ok(0);
@@ -470,40 +482,45 @@ impl Node {
     }
 
     fn build_inode_xattr(&mut self) -> Result<()> {
-        let file_xattrs = match xattr::list(&self.path) {
+        let file_xattrs = match xattr::list(self.path()) {
             Ok(x) => x,
             Err(e) => {
                 if e.raw_os_error() == Some(libc::EOPNOTSUPP) {
                     return Ok(());
                 } else {
-                    return Err(anyhow!("failed to list xattr of {:?}", self.path));
+                    return Err(anyhow!("failed to list xattr of {:?}", self.path()));
                 }
             }
         };
 
+        let mut info = self.info.deref().clone();
         for key in file_xattrs {
-            let value = xattr::get(&self.path, &key)
-                .context(format!("failed to get xattr {:?} of {:?}", key, self.path))?;
-            self.xattrs.add(key, value.unwrap_or_default())?;
+            let value = xattr::get(self.path(), &key).context(format!(
+                "failed to get xattr {:?} of {:?}",
+                key,
+                self.path()
+            ))?;
+            info.xattrs.add(key, value.unwrap_or_default())?;
         }
-
-        if !self.xattrs.is_empty() {
+        if !info.xattrs.is_empty() {
             self.inode.set_has_xattr(true);
         }
+        self.info = Arc::new(info);
 
         Ok(())
     }
 
     fn build_inode_stat(&mut self) -> Result<()> {
         let meta = self.meta()?;
+        let mut info = self.info.deref().clone();
 
-        self.src_ino = meta.st_ino();
-        self.src_dev = meta.st_dev();
-        self.rdev = meta.st_rdev();
-        self.ctime = meta.st_ctime();
+        info.src_ino = meta.st_ino();
+        info.src_dev = meta.st_dev();
+        info.rdev = meta.st_rdev();
+        info.ctime = meta.st_ctime();
 
         self.inode.set_mode(meta.st_mode());
-        if self.explicit_uidgid {
+        if info.explicit_uidgid {
             self.inode.set_uid(meta.st_uid());
             self.inode.set_gid(meta.st_gid());
         }
@@ -530,6 +547,7 @@ impl Node {
             self.inode.set_size(meta.st_size());
             self.set_inode_blocks();
         }
+        self.info = Arc::new(info);
 
         Ok(())
     }
@@ -540,27 +558,29 @@ impl Node {
         // NOTE: Always retrieve xattr before attr so that we can know the size of xattr pairs.
         self.build_inode_xattr()?;
         self.build_inode_stat()
-            .with_context(|| format!("failed to build inode {:?}", self.path))?;
+            .with_context(|| format!("failed to build inode {:?}", self.path()))?;
 
         if self.is_reg() {
             // Reuse `child_count` to store `chunk_count` for normal files.
             self.inode
                 .set_child_count(self.chunk_count(chunk_size as u64));
         } else if self.is_symlink() {
-            let target_path = fs::read_link(&self.path)?;
+            let target_path = fs::read_link(self.path())?;
             let symlink: OsString = target_path.into();
             let size = symlink.byte_size();
             self.inode.set_symlink_size(size);
-            self.symlink = Some(symlink);
+            let mut info = self.info.deref().clone();
+            info.symlink = Some(symlink);
+            self.info = Arc::new(info);
         }
 
         Ok(())
     }
 
     fn meta(&self) -> Result<impl MetadataExt> {
-        self.path
+        self.path()
             .symlink_metadata()
-            .with_context(|| format!("failed to get metadata from {:?}", self.path))
+            .with_context(|| format!("failed to get metadata from {:?}", self.path()))
     }
 
     fn read_file_chunk<R: Read>(
@@ -576,7 +596,7 @@ impl Node {
             zran.start_chunk(ctx.chunk_size as u64)?;
             reader
                 .read_exact(buf)
-                .with_context(|| format!("failed to read node file {:?}", self.path))?;
+                .with_context(|| format!("failed to read node file {:?}", self.path()))?;
             let info = zran.finish_chunk()?;
             chunk.set_compressed_offset(info.compressed_offset());
             chunk.set_compressed_size(info.compressed_size());
@@ -590,11 +610,11 @@ impl Node {
             chunk.set_compressed(false);
             reader
                 .read_exact(buf)
-                .with_context(|| format!("failed to read node file {:?}", self.path))?;
+                .with_context(|| format!("failed to read node file {:?}", self.path()))?;
         } else {
             reader
                 .read_exact(buf)
-                .with_context(|| format!("failed to read node file {:?}", self.path))?;
+                .with_context(|| format!("failed to read node file {:?}", self.path()))?;
         }
 
         let chunk_id = RafsDigest::from_buf(buf, ctx.digester);
@@ -629,7 +649,7 @@ impl Node {
         } else {
             // For other case which needs to write chunk data to data blobs.
             let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
-                .with_context(|| format!("failed to compress node file {:?}", self.path))?;
+                .with_context(|| format!("failed to compress node file {:?}", self.path()))?;
             let compressed_size = compressed.len() as u32;
             let pre_compressed_offset = blob_ctx.current_compressed_offset;
             blob_writer
@@ -774,17 +794,17 @@ impl Node {
 
     /// Get filename of the inode.
     pub fn name(&self) -> &OsStr {
-        if self.path == self.source {
+        if self.path() == &self.info.source {
             OsStr::from_bytes(ROOT_PATH_NAME)
         } else {
             // Safe to unwrap because `path` is returned from `path()` which is canonicalized
-            self.path.file_name().unwrap()
+            self.path().file_name().unwrap()
         }
     }
 
     /// Get path of the inode
     pub fn path(&self) -> &PathBuf {
-        &self.path
+        &self.info.path
     }
 
     /// Generate cached components of the target file path.
@@ -801,7 +821,7 @@ impl Node {
 
     /// Get cached components of the target file path.
     pub fn target_vec(&self) -> &[OsString] {
-        &self.target_vec
+        &self.info.target_vec
     }
 
     /// Generate target path by stripping the `root` prefix.
@@ -822,7 +842,7 @@ impl Node {
 
     /// Get the absolute path of the inode within the RAFS filesystem.
     pub fn target(&self) -> &PathBuf {
-        &self.target
+        &self.info.target
     }
 
     /// Calculate and set `i_blocks` for inode.
@@ -836,18 +856,27 @@ impl Node {
         // Set inode blocks for RAFS v5 inode, v6 will calculate it at runtime.
         if let InodeWrapper::V5(_) = self.inode {
             self.inode.set_blocks(div_round_up(
-                self.inode.size() + self.xattrs.aligned_size_v5() as u64,
+                self.inode.size() + self.info.xattrs.aligned_size_v5() as u64,
                 512,
             ));
         }
     }
 
+    /// Set extended attributes for the node.
+    pub fn set_xattr(&mut self, xattr: RafsXAttrs) {
+        let mut info = self.info.deref().clone();
+        info.xattrs = xattr;
+        self.info = Arc::new(info);
+    }
+
     /// Delete an extend attribute with id `key`.
     pub fn remove_xattr(&mut self, key: &OsStr) {
-        self.xattrs.remove(key);
-        if self.xattrs.is_empty() {
+        let mut info = self.info.deref().clone();
+        info.xattrs.remove(key);
+        if info.xattrs.is_empty() {
             self.inode.set_has_xattr(false);
         }
+        self.info = Arc::new(info);
     }
 }
 
@@ -866,7 +895,7 @@ impl Node {
             let name = self.name();
             let inode = RafsV5InodeWrapper {
                 name,
-                symlink: self.symlink.as_deref(),
+                symlink: self.info.symlink.as_deref(),
                 inode: raw_inode,
             };
             inode
@@ -874,8 +903,9 @@ impl Node {
                 .context("failed to dump inode to bootstrap")?;
 
             // Dump inode xattr
-            if !self.xattrs.is_empty() {
-                self.xattrs
+            if !self.info.xattrs.is_empty() {
+                self.info
+                    .xattrs
                     .store_v5(f_bootstrap)
                     .context("failed to dump xattr to bootstrap")?;
                 ctx.has_xattr = true;
@@ -937,7 +967,7 @@ impl Node {
         meta_addr: u64,
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
     ) -> Result<()> {
-        let xattr_inline_count = self.xattrs.count_v6();
+        let xattr_inline_count = self.info.xattrs.count_v6();
         ensure!(
             xattr_inline_count <= u16::MAX as usize,
             "size of extended attributes is too big"
@@ -1044,7 +1074,7 @@ impl Node {
 
     fn v6_size_with_xattr(&self) -> usize {
         self.inode
-            .get_inode_size_with_xattr(&self.xattrs, self.v6_compact_inode)
+            .get_inode_size_with_xattr(&self.info.xattrs, self.v6_compact_inode)
     }
 
     // For DIR inode, size is the total bytes of 'dirents + names'.
@@ -1160,12 +1190,12 @@ impl Node {
     }
 
     fn v6_set_inode_compact(&mut self) {
-        if self.v6_force_extended_inode
+        if self.info.v6_force_extended_inode
             || self.inode.uid() > u16::MAX as u32
             || self.inode.gid() > u16::MAX as u32
             || self.inode.nlink() > u16::MAX as u32
             || self.inode.size() > u32::MAX as u64
-            || self.path.extension() == Some(OsStr::new("pyc"))
+            || self.path().extension() == Some(OsStr::new("pyc"))
         {
             self.v6_compact_inode = false;
         } else {
@@ -1178,8 +1208,9 @@ impl Node {
         ctx: &mut BuildContext,
         f_bootstrap: &mut dyn RafsIoWrite,
     ) -> Result<()> {
-        if !self.xattrs.is_empty() {
-            self.xattrs
+        if !self.info.xattrs.is_empty() {
+            self.info
+                .xattrs
                 .store_v6(f_bootstrap)
                 .context("failed to dump xattr to bootstrap")?;
             ctx.has_xattr = true;
@@ -1200,7 +1231,7 @@ impl Node {
         inode.set_u((dirent_off / EROFS_BLOCK_SIZE) as u32);
 
         // Dump inode
-        trace!("{:?} dir inode: offset {}", self.target, self.v6_offset);
+        trace!("{:?} dir inode: offset {}", self.target(), self.v6_offset);
         f_bootstrap
             .seek(SeekFrom::Start(self.v6_offset))
             .context("failed seek for dir inode")?;
@@ -1216,7 +1247,7 @@ impl Node {
 
         trace!(
             "{:?} self.dirents.len {}",
-            self.target,
+            self.target(),
             self.v6_dirents.len()
         );
         // fill dir blocks one by one
@@ -1272,7 +1303,7 @@ impl Node {
 
         trace!(
             "{:?} used {} dir size {}",
-            self.target,
+            self.target(),
             used,
             self.inode.size()
         );
@@ -1383,7 +1414,7 @@ impl Node {
         self.v6_store_xattrs(ctx, f_bootstrap)?;
 
         // write symlink.
-        if let Some(symlink) = &self.symlink {
+        if let Some(symlink) = &self.info.symlink {
             let tail_off = match self.v6_datalayout {
                 EROFS_INODE_FLAT_INLINE => self.v6_offset + self.v6_size_with_xattr() as u64,
                 EROFS_INODE_FLAT_PLAIN => data_off,
@@ -1410,8 +1441,8 @@ impl Node {
             return false;
         }
         self.inode.is_chrdev()
-            && nydus_utils::compact::major_dev(self.rdev) == 0
-            && nydus_utils::compact::minor_dev(self.rdev) == 0
+            && nydus_utils::compact::major_dev(self.info.rdev) == 0
+            && nydus_utils::compact::minor_dev(self.info.rdev) == 0
     }
 
     /// Check whether the inode (directory) is a overlayfs whiteout opaque.
@@ -1421,7 +1452,11 @@ impl Node {
         }
 
         // A directory is made opaque by setting the xattr "trusted.overlay.opaque" to "y".
-        if let Some(v) = self.xattrs.get(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE)) {
+        if let Some(v) = self
+            .info
+            .xattrs
+            .get(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE))
+        {
             if let Ok(v) = std::str::from_utf8(v.as_slice()) {
                 return v == "y";
             }

@@ -28,7 +28,7 @@ use super::core::context::{
     ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
     BuildOutput,
 };
-use super::core::node::{ChunkSource, Node, NodeChunk, Overlay};
+use super::core::node::{ChunkSource, Node, NodeChunk, NodeInfo, Overlay};
 use super::core::tree::Tree;
 use super::{build_bootstrap, Builder};
 use crate::metadata::chunk::ChunkWrapper;
@@ -622,29 +622,32 @@ impl StargzTreeBuilder {
         let source = PathBuf::from("/");
         let target = Node::generate_target(&path, &source);
         let target_vec = Node::generate_target_vec(&target);
-
-        Ok(Node {
-            index: 0,
+        let info = NodeInfo {
+            ctime: 0,
+            explicit_uidgid,
             src_ino: ino,
             src_dev: u64::MAX,
             rdev: entry.rdev() as u64,
-            overlay: Overlay::UpperAddition,
-            explicit_uidgid,
             source,
             target,
             path,
             target_vec,
-            inode,
-            chunks: Vec::new(),
             symlink,
             xattrs,
+            v6_force_extended_inode: false,
+        };
+
+        Ok(Node {
+            info: Arc::new(info),
+            index: 0,
+            overlay: Overlay::UpperAddition,
+            inode,
+            chunks: Vec::new(),
             layer_idx,
-            ctime: 0,
             v6_offset: 0,
             v6_dirents: Vec::<(u64, OsString, u32)>::new(),
             v6_datalayout: 0,
             v6_compact_inode: false,
-            v6_force_extended_inode: false,
             v6_dirents_offset: 0,
         })
     }
@@ -780,7 +783,7 @@ impl StargzBuilder {
             if let Some(h) = inode_hasher {
                 let digest = if node.is_symlink() {
                     RafsDigest::from_buf(
-                        node.symlink.as_ref().unwrap().as_bytes(),
+                        node.info.symlink.as_ref().unwrap().as_bytes(),
                         digest::Algorithm::Sha256,
                     )
                 } else {

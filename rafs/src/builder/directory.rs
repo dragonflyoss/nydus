@@ -50,7 +50,7 @@ impl FilesystemTreeBuilder {
                 path.clone(),
                 Overlay::UpperAddition,
                 ctx.chunk_size,
-                parent.explicit_uidgid,
+                parent.info.explicit_uidgid,
                 true,
             )
             .with_context(|| format!("failed to create node {:?}", path))?;
@@ -75,6 +75,7 @@ impl FilesystemTreeBuilder {
     }
 }
 
+#[derive(Default)]
 pub struct DirectoryBuilder {}
 
 impl DirectoryBuilder {

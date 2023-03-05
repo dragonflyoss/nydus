@@ -13,10 +13,11 @@ use nydus_utils::compress;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use sha2::digest::Digest;
 
-use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType};
-use super::feature::Feature;
 use super::layout::BlobLayout;
 use super::node::Node;
+use crate::builder::{
+    ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType, Feature,
+};
 use crate::metadata::RAFS_MAX_CHUNK_SIZE;
 
 pub struct Blob {}

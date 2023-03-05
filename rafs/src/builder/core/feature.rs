@@ -18,6 +18,12 @@ pub enum Feature {
 /// Feature set for RAFS filesystem builder.
 pub struct Features(HashSet<Feature>);
 
+impl Default for Features {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Features {
     /// Create a new instance of [Features].
     pub fn new() -> Self {

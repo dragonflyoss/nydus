@@ -22,8 +22,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use nydus_utils::{event_tracer, root_tracer, timing_tracer};
 
-use super::chunk_dict::ChunkDict;
-use super::node::{ChunkSource, Node, NodeChunk, Overlay, WhiteoutSpec, WhiteoutType};
+use super::node::{ChunkSource, Node, NodeChunk, NodeInfo, Overlay, WhiteoutSpec, WhiteoutType};
+use crate::builder::ChunkDict;
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::inode::InodeWrapper;
 use crate::metadata::layout::{bytes_to_os_str, RafsXAttrs};
@@ -337,29 +337,32 @@ impl<'a> MetadataTreeBuilder<'a> {
         let source = PathBuf::from("/");
         let target = Node::generate_target(&path, &source);
         let target_vec = Node::generate_target_vec(&target);
-
-        Ok(Node {
-            index: 0,
+        let info = NodeInfo {
+            ctime: 0,
+            explicit_uidgid: rs.meta.explicit_uidgid(),
             src_ino: inode.ino(),
             src_dev,
             rdev,
-            overlay: Overlay::Lower,
-            explicit_uidgid: rs.meta.explicit_uidgid(),
             path,
             source,
             target,
             target_vec,
-            inode,
-            chunks,
             symlink,
             xattrs,
+            v6_force_extended_inode: false,
+        };
+
+        Ok(Node {
+            info: Arc::new(info),
+            index: 0,
             layer_idx: 0,
-            ctime: 0,
+            overlay: Overlay::Lower,
+            inode,
+            chunks,
             v6_offset: 0,
             v6_dirents: Vec::new(),
             v6_datalayout: 0,
             v6_compact_inode: false,
-            v6_force_extended_inode: false,
             v6_dirents_offset: 0,
         })
     }

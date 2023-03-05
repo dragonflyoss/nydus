@@ -165,7 +165,7 @@ impl Prefetch {
         self.files.values().copied().collect()
     }
 
-    pub fn len(&self) -> u32 {
+    pub fn fs_prefetch_rule_count(&self) -> u32 {
         if self.policy == PrefetchPolicy::Fs {
             self.patterns.values().len() as u32
         } else {

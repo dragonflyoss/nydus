@@ -611,7 +611,7 @@ impl BlobCompactor {
         )?;
         compactor.compact(cfg)?;
         compactor.dump_new_blobs(&build_ctx, &cfg.blobs_dir, build_ctx.aligned_chunk)?;
-        if compactor.new_blob_mgr.len() == 0 {
+        if compactor.new_blob_mgr.is_empty() {
             info!("blobs of source bootstrap have already been optimized");
             return Ok(None);
         }
