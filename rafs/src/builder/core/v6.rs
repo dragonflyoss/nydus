@@ -155,20 +155,45 @@ impl Node {
     /// Calculate space needed to store dirents of the directory inode.
     pub fn v6_dirent_size(&self, ctx: &mut BuildContext, tree: &Tree) -> Result<u64> {
         ensure!(self.is_dir(), "{} is not a directory", self);
-        // Use length in byte, instead of length in character.
-        let mut d_size: u64 = (".".as_bytes().len()
-            + size_of::<RafsV6Dirent>()
-            + "..".as_bytes().len()
-            + size_of::<RafsV6Dirent>()) as u64;
         let block_size = ctx.v6_block_size();
+        let mut d_size = 0;
 
-        for child in tree.children.iter() {
-            let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
-            // erofs disk format requires dirent to be aligned to block size.
-            if (d_size % block_size) + len as u64 > block_size {
-                d_size = round_up(d_size as u64, block_size);
+        // Sort all children if "." and ".." are not at the head after sorting.
+        if !tree.children.is_empty() && tree.children[0].node.name() < ".." {
+            let mut children = Vec::with_capacity(tree.children.len() + 2);
+            let dot = OsString::from(".");
+            let dotdot = OsString::from("..");
+            children.push(dot.as_os_str());
+            children.push(dotdot.as_os_str());
+            for child in tree.children.iter() {
+                children.push(child.node.name());
             }
-            d_size += len as u64;
+            children.sort_unstable();
+
+            for c in children {
+                // Use length in byte, instead of length in character.
+                let len = c.as_bytes().len() + size_of::<RafsV6Dirent>();
+                // erofs disk format requires dirent to be aligned to block size.
+                if (d_size % block_size) + len as u64 > block_size {
+                    d_size = round_up(d_size as u64, block_size);
+                }
+                d_size += len as u64;
+            }
+        } else {
+            // Avoid sorting again if "." and ".." are at the head after sorting due to that
+            // `tree.children` has already been sorted.
+            d_size = (".".as_bytes().len()
+                + size_of::<RafsV6Dirent>()
+                + "..".as_bytes().len()
+                + size_of::<RafsV6Dirent>()) as u64;
+            for child in tree.children.iter() {
+                let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
+                // erofs disk format requires dirent to be aligned to block size.
+                if (d_size % block_size) + len as u64 > block_size {
+                    d_size = round_up(d_size as u64, block_size);
+                }
+                d_size += len as u64;
+            }
         }
 
         Ok(d_size)
@@ -593,7 +618,7 @@ impl Bootstrap {
             }
         }
         node.v6_dirents
-            .sort_unstable_by(|a, b| a.1.as_os_str().cmp(b.1.as_os_str()) as std::cmp::Ordering);
+            .sort_unstable_by(|a, b| a.1.as_os_str().cmp(b.1.as_os_str()));
 
         for dir in dirs {
             Self::v6_update_dirents(nodes, dir, node_offset);
