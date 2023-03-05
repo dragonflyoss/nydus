@@ -28,7 +28,8 @@ use super::core::context::{
     ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
     BuildOutput,
 };
-use super::core::node::{ChunkSource, Node, NodeChunk, NodeInfo, Overlay};
+use super::core::node::{ChunkSource, Node, NodeChunk, NodeInfo};
+use super::core::overlay::Overlay;
 use super::core::tree::Tree;
 use super::{build_bootstrap, Builder};
 use crate::metadata::chunk::ChunkWrapper;

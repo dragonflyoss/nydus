@@ -20,14 +20,11 @@ use nydus_utils::{digest, try_round_up_4k};
 
 use super::core::blob::Blob;
 use super::core::bootstrap::Bootstrap;
-use super::core::chunk_dict::{ChunkDict, HashChunkDict};
-use super::core::context::{
+use super::core::node::Node;
+use crate::builder::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
-    BuildOutput, ConversionType,
+    BuildOutput, ChunkDict, ConversionType, Features, HashChunkDict, Tree, WhiteoutSpec,
 };
-use super::core::feature::Features;
-use super::core::node::{Node, WhiteoutSpec};
-use super::core::tree::Tree;
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::{RafsSuper, RafsVersion};
 

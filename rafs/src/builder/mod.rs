@@ -18,7 +18,8 @@ pub use self::core::context::{
     BuildContext, BuildOutput, ConversionType,
 };
 pub use self::core::feature::{Feature, Features};
-pub use self::core::node::{ChunkSource, Overlay, WhiteoutSpec};
+pub use self::core::node::ChunkSource;
+pub use self::core::overlay::{Overlay, WhiteoutSpec};
 pub use self::core::prefetch::{Prefetch, PrefetchPolicy};
 pub use self::core::tree::{MetadataTreeBuilder, Tree};
 pub use self::directory::DirectoryBuilder;

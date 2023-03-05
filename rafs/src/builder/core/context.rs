@@ -32,8 +32,10 @@ use nydus_storage::meta::{
 use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
 
-use super::node::{ChunkSource, Node, WhiteoutSpec};
-use crate::builder::{ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolicy};
+use super::node::{ChunkSource, Node};
+use crate::builder::{
+    ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolicy, WhiteoutSpec,
+};
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::layout::v5::RafsV5BlobTable;
 use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};

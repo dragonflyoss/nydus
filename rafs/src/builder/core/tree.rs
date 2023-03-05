@@ -22,8 +22,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use nydus_utils::{event_tracer, root_tracer, timing_tracer};
 
-use super::node::{ChunkSource, Node, NodeChunk, NodeInfo, Overlay, WhiteoutSpec, WhiteoutType};
-use crate::builder::ChunkDict;
+use super::node::{ChunkSource, Node, NodeChunk, NodeInfo};
+use super::overlay::{Overlay, WhiteoutType};
+use crate::builder::{ChunkDict, WhiteoutSpec};
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::inode::InodeWrapper;
 use crate::metadata::layout::{bytes_to_os_str, RafsXAttrs};

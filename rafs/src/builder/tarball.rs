@@ -39,7 +39,8 @@ use super::core::blob::Blob;
 use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
-use super::core::node::{Node, NodeInfo, Overlay};
+use super::core::node::{Node, NodeInfo};
+use super::core::overlay::Overlay;
 use super::core::tree::Tree;
 use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
 use crate::metadata::inode::InodeWrapper;

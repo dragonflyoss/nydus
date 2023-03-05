@@ -13,7 +13,7 @@ use nydus_api::ConfigV2;
 use nydus_storage::device::BlobInfo;
 use nydus_utils::digest::{self, RafsDigest};
 
-use super::tree::Tree;
+use crate::builder::Tree;
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::{RafsSuper, RafsSuperConfig};

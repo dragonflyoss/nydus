@@ -12,7 +12,8 @@ use super::core::blob::Blob;
 use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
 };
-use super::core::node::{Node, Overlay};
+use super::core::node::Node;
+use super::core::overlay::Overlay;
 use super::core::tree::Tree;
 use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
 

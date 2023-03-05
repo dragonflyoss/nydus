@@ -4,7 +4,8 @@
 
 use anyhow::Result;
 
-use super::node::{Node, Overlay};
+use super::node::Node;
+use super::overlay::Overlay;
 use crate::builder::Prefetch;
 
 #[derive(Clone)]

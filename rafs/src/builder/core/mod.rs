@@ -9,5 +9,6 @@ pub(crate) mod context;
 pub(crate) mod feature;
 pub(crate) mod layout;
 pub(crate) mod node;
+pub(crate) mod overlay;
 pub(crate) mod prefetch;
 pub(crate) mod tree;

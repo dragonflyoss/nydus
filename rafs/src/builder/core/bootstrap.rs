@@ -13,7 +13,8 @@ use nydus_storage::device::BlobFeatures;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::{root_tracer, timing_tracer};
 
-use super::node::{Node, WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
+use super::node::Node;
+use super::overlay::{WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use crate::builder::{
     ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, ConversionType,
     Tree,
