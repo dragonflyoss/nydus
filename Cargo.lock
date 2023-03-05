@@ -1248,6 +1248,8 @@ dependencies = [
  "virtio-bindings",
  "virtio-queue",
  "vm-memory",
+ "vmm-sys-util",
+ "xattr",
 ]
 
 [[package]]
