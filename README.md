@@ -90,6 +90,8 @@ Build Nydus image from directory source: [Nydus Image Builder](./docs/nydus-imag
 
 Convert OCIv1 image to Nydus image: [Nydusify](./docs/nydusify.md), [Acceld](https://github.com/goharbor/acceleration-service) or [Nerdctl](https://github.com/containerd/nerdctl/blob/master/docs/nydus.md#build-nydus-image-using-nerdctl-image-convert).
 
+Optionally, a containerd(>=1.7) NRI plugin - [container image optimizer](https://github.com/containerd/nydus-snapshotter/blob/main/docs/optimize_nydus_image.md) - can be leveraged to build an optimized nydus image which will reduce the container startup time further.
+
 ## Nydus Snapshotter
 
 Nydus-snapshotter is a non-core sub-project of containerd.
