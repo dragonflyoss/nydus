@@ -51,9 +51,10 @@ impl Node {
         let meta_offset = meta_addr - orig_meta_addr;
         // update all the inodes's offset according to the new 'meta_addr'.
         self.v6_offset += meta_offset;
-        // The EROFS_INODE_FLAT_INLINE layout is valid for directory and symlink only, so
-        // `dirents_offset` is useful for these two types too, otherwise `dirents_offset` should
-        // always be zero. Enforce the check to avoid overflow of `dirents_offset`.
+        // The EROFS_INODE_FLAT_INLINE layout is valid for directory and symlink only,
+        // so `dirents_offset` is useful for these two types too, otherwise `dirents_offset`
+        // should always be zero.
+        // Enforce the check to avoid overflow of `dirents_offset`.
         if self.is_dir() || self.is_symlink() {
             self.v6_dirents_offset += meta_offset;
         }
@@ -75,6 +76,7 @@ impl Node {
         Ok(())
     }
 
+    /// Update whether compact mode can be used for this inode or not.
     pub fn v6_set_inode_compact(&mut self) {
         if self.info.v6_force_extended_inode
             || self.inode.uid() > u16::MAX as u32
@@ -89,27 +91,25 @@ impl Node {
         }
     }
 
-    /// Set node offset in bootstrap and return the next position.
+    /// Layout the normal inode (except directory inode) into the meta blob.
     pub fn v6_set_offset(
         &mut self,
         bootstrap_ctx: &mut BootstrapContext,
         v6_hardlink_offset: Option<u64>,
-    ) {
+    ) -> Result<()> {
+        ensure!(!self.is_dir(), "{} is a directory", self.path().display());
         if self.is_reg() {
             if let Some(v6_hardlink_offset) = v6_hardlink_offset {
                 self.v6_offset = v6_hardlink_offset;
             } else {
                 let size = self.v6_size_with_xattr();
                 let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
-                // We first try to allocate space from used blocks.
-                // If no available used block exists, we allocate sequentially.
                 let total_size = round_up(size, unit) + self.inode.child_count() as u64 * unit;
+                // First try to allocate from fragments of dirent pages.
                 self.v6_offset = bootstrap_ctx.allocate_available_block(total_size);
                 if self.v6_offset == 0 {
                     self.v6_offset = bootstrap_ctx.offset;
-                    bootstrap_ctx.offset += size;
-                    bootstrap_ctx.align_offset(unit);
-                    bootstrap_ctx.offset += self.inode.child_count() as u64 * unit;
+                    bootstrap_ctx.offset += total_size;
                 }
             }
             self.v6_datalayout = EROFS_INODE_CHUNK_BASED;
@@ -119,14 +119,21 @@ impl Node {
             self.v6_offset = bootstrap_ctx.offset;
             bootstrap_ctx.offset += self.v6_size_with_xattr();
         }
+
+        Ok(())
     }
 
+    /// Layout the directory inode and its dirents into meta blob.
     pub fn v6_set_dir_offset(
         &mut self,
         bootstrap_ctx: &mut BootstrapContext,
         d_size: u64,
     ) -> Result<()> {
-        ensure!(self.is_dir(), "{} is not a directory", self);
+        ensure!(
+            self.is_dir(),
+            "{} is not a directory",
+            self.path().display()
+        );
 
         // Dir isize is the total bytes of 'dirents + names'.
         self.inode.set_size(d_size);
@@ -135,6 +142,7 @@ impl Node {
         Ok(())
     }
 
+    /// Calculate space needed to store dirents of the directory inode.
     pub fn v6_dirent_size(&self, tree: &Tree) -> Result<u64> {
         ensure!(self.is_dir(), "{} is not a directory", self);
         // Use length in byte, instead of length in character.
@@ -160,11 +168,11 @@ impl Node {
             .get_inode_size_with_xattr(&self.info.xattrs, self.v6_compact_inode) as u64
     }
 
+    // Layout symlink or directory inodes into the meta blob.
+    //
     // For DIR inode, size is the total bytes of 'dirents + names'.
     // For symlink, size is the length of symlink name.
     fn v6_set_offset_with_tail(&mut self, bootstrap_ctx: &mut BootstrapContext, d_size: u64) {
-        // TODO: a hashmap of non-full blocks
-
         //          |    avail       |
         // +--------+-----------+----+ +-----------------------+
         // |        |inode+tail | free |   dirents+names       |
@@ -297,15 +305,12 @@ impl Node {
     ) -> Result<()> {
         // the 1st 4k block after dir inode.
         let mut dirent_off = self.v6_dirents_offset;
-        inode.set_u((dirent_off / EROFS_BLOCK_SIZE) as u32);
-
-        // Dump inode
-        trace!("{:?} dir inode: offset {}", self.target(), self.v6_offset);
-        f_bootstrap
-            .seek(SeekFrom::Start(self.v6_offset))
-            .context("failed seek for dir inode")?;
-        inode.store(f_bootstrap).context("failed to store inode")?;
-        self.v6_store_xattrs(ctx, f_bootstrap)?;
+        let blk_addr = ctx
+            .v6_block_addr(dirent_off)
+            .with_context(|| format!("failed to compute blk_addr for offset 0x{:x}", dirent_off))?;
+        inode.set_u(blk_addr);
+        self.v6_dump_inode(ctx, f_bootstrap, inode)
+            .context("failed to dump inode for directory")?;
 
         // Dump dirents
         let mut dir_data: Vec<u8> = Vec::new();
@@ -339,10 +344,10 @@ impl Node {
 
                 f_bootstrap
                     .seek(SeekFrom::Start(dirent_off as u64))
-                    .context("failed seek for dir inode")?;
+                    .context("failed seek file position for writing dirent")?;
                 f_bootstrap
                     .write(dir_data.as_slice())
-                    .context("failed to store dirents")?;
+                    .context("failed to write dirent data to meta blob")?;
 
                 dir_data.clear();
                 entry_names.clear();
@@ -418,24 +423,30 @@ impl Node {
         // write chunk indexes, chunk contents has been written to blob file.
         let mut chunks: Vec<u8> = Vec::new();
         for chunk in self.chunks.iter() {
-            let uncompressed_offset = chunk.inner.uncompressed_offset();
+            let offset = chunk.inner.uncompressed_offset();
+            let blk_addr = ctx.v6_block_addr(offset).with_context(|| {
+                format!(
+                    "failed to compute blk_addr for chunk with uncompressed offset 0x{:x}",
+                    offset
+                )
+            })?;
             let blob_idx = chunk.inner.blob_index();
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
             v6_chunk.set_blob_index(blob_idx);
             v6_chunk.set_blob_ci_index(chunk.inner.index());
-            v6_chunk.set_block_addr((uncompressed_offset / EROFS_BLOCK_SIZE) as u32);
+            v6_chunk.set_block_addr(blk_addr);
+
             chunks.extend(v6_chunk.as_ref());
             chunk_cache.insert(
                 DigestWithBlobIndex(*chunk.inner.id(), chunk.inner.blob_index() + 1),
                 chunk.inner.clone(),
             );
-
             if let Some((prev_idx, prev_pos)) = prev {
-                if prev_pos + ctx.chunk_size as u64 != uncompressed_offset || prev_idx != blob_idx {
+                if prev_pos + ctx.chunk_size as u64 != offset || prev_idx != blob_idx {
                     is_continuous = false;
                 }
             }
-            prev = Some((blob_idx, uncompressed_offset));
+            prev = Some((blob_idx, offset));
         }
 
         // Special optimization to enable page cache sharing for EROFS.
@@ -446,22 +457,17 @@ impl Node {
         };
         let info = RafsV6InodeChunkHeader::new(chunk_size);
         inode.set_u(info.to_u32());
+        self.v6_dump_inode(ctx, f_bootstrap, inode)
+            .context("failed to dump inode for file")?;
 
-        f_bootstrap
-            .seek(SeekFrom::Start(self.v6_offset))
-            .context("failed seek for dir inode")?;
-        inode.store(f_bootstrap).context("failed to store inode")?;
-        self.v6_store_xattrs(ctx, f_bootstrap)?;
-
-        // Dump chunk indexes
         let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
-        let chunk_off = align_offset(self.v6_offset + self.v6_size_with_xattr(), unit);
+        let offset = align_offset(self.v6_offset + self.v6_size_with_xattr(), unit);
         f_bootstrap
-            .seek(SeekFrom::Start(chunk_off))
-            .context("failed seek for dir inode")?;
+            .seek(SeekFrom::Start(offset))
+            .with_context(|| format!("failed to seek to 0x{:x} for writing chunk data", offset))?;
         f_bootstrap
             .write(chunks.as_slice())
-            .context("failed to write chunkindexes")?;
+            .context("failed to write chunk data for file")?;
 
         Ok(())
     }
@@ -472,24 +478,17 @@ impl Node {
         f_bootstrap: &mut dyn RafsIoWrite,
         inode: &mut Box<dyn RafsV6OndiskInode>,
     ) -> Result<()> {
-        let data_off = self.v6_dirents_offset;
-        // TODO: check whether 'i_u' is used at all in case of inline symlink.
-        inode.set_u((data_off / EROFS_BLOCK_SIZE) as u32);
+        let blk_addr = ctx.v6_block_addr(self.v6_dirents_offset)?;
+        inode.set_u(blk_addr);
+        self.v6_dump_inode(ctx, f_bootstrap, inode)
+            .context("failed to dump inode for symlink")?;
 
-        f_bootstrap
-            .seek(SeekFrom::Start(self.v6_offset))
-            .context("failed seek for symlink inode")?;
-        inode.store(f_bootstrap).context("failed to store inode")?;
-        self.v6_store_xattrs(ctx, f_bootstrap)?;
-
-        // write symlink.
         if let Some(symlink) = &self.info.symlink {
             let tail_off = match self.v6_datalayout {
                 EROFS_INODE_FLAT_INLINE => self.v6_offset + self.v6_size_with_xattr(),
-                EROFS_INODE_FLAT_PLAIN => data_off,
+                EROFS_INODE_FLAT_PLAIN => self.v6_dirents_offset,
                 _ => bail!("unsupported RAFS v5 inode layout for symlink"),
             };
-            trace!("symlink write_off {}", tail_off);
             f_bootstrap
                 .seek(SeekFrom::Start(tail_off))
                 .context("failed seek for dir inode")?;
@@ -499,6 +498,37 @@ impl Node {
         }
 
         Ok(())
+    }
+
+    fn v6_dump_inode(
+        &mut self,
+        ctx: &mut BuildContext,
+        f_bootstrap: &mut dyn RafsIoWrite,
+        inode: &mut Box<dyn RafsV6OndiskInode>,
+    ) -> Result<()> {
+        f_bootstrap
+            .seek(SeekFrom::Start(self.v6_offset))
+            .context("failed to seek file position for writing inode")?;
+        inode
+            .store(f_bootstrap)
+            .context("failed to write inode to meta blob")?;
+        self.v6_store_xattrs(ctx, f_bootstrap)
+            .context("failed to write extended attributes for inode")
+    }
+}
+
+impl BuildContext {
+    pub fn v6_block_size(&self) -> u64 {
+        EROFS_BLOCK_SIZE
+    }
+
+    pub fn v6_block_addr(&self, offset: u64) -> Result<u32> {
+        let blk_addr = offset / self.v6_block_size();
+        if blk_addr > u32::MAX as u64 {
+            bail!("v6 block address 0x{:x} is too big", blk_addr)
+        } else {
+            Ok(blk_addr as u32)
+        }
     }
 }
 
@@ -534,7 +564,7 @@ mod tests {
         // reg file.
         // "1" is used only for testing purpose, in practice
         // it's always aligned to 32 bytes.
-        node.v6_set_offset(&mut bootstrap_ctx, None);
+        node.v6_set_offset(&mut bootstrap_ctx, None).unwrap();
         assert_eq!(node.v6_offset, 0);
         assert_eq!(node.v6_datalayout, EROFS_INODE_CHUNK_BASED);
         assert!(node.v6_compact_inode);

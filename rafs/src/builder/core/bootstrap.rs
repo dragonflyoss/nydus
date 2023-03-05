@@ -205,7 +205,9 @@ impl Bootstrap {
 
             // update bootstrap_ctx.offset for rafs v6.
             if !child.node.is_dir() && ctx.fs_version.is_v6() {
-                child.node.v6_set_offset(bootstrap_ctx, v6_hardlink_offset);
+                child
+                    .node
+                    .v6_set_offset(bootstrap_ctx, v6_hardlink_offset)?;
                 bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
             }
 
