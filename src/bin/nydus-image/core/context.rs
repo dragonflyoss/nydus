@@ -8,12 +8,13 @@ use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
-use std::fmt;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Read, Seek, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Display, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::{fmt, fs};
 
 use anyhow::{Context, Error, Result};
 use sha2::{Digest, Sha256};
@@ -245,15 +246,18 @@ impl Write for ArtifactWriter {
 }
 
 impl ArtifactWriter {
-    pub fn new(storage: ArtifactStorage, fifo: bool) -> Result<Self> {
+    pub fn new(storage: ArtifactStorage) -> Result<Self> {
         match storage {
             ArtifactStorage::SingleFile(ref p) => {
                 let mut opener = &mut OpenOptions::new();
                 opener = opener.write(true).create(true);
-                // Make it as the writer side of FIFO file, no truncate flag because it has
-                // been created by the reader side.
-                if !fifo {
-                    opener = opener.truncate(true);
+                if let Ok(md) = fs::metadata(p) {
+                    let ty = md.file_type();
+                    // Make it as the writer side of FIFO file, no truncate flag because it has
+                    // been created by the reader side.
+                    if !ty.is_fifo() {
+                        opener = opener.truncate(true);
+                    }
                 }
                 let b = BufWriter::with_capacity(
                     BUF_WRITER_CAPACITY,
@@ -938,10 +942,9 @@ pub struct BootstrapContext {
 }
 
 impl BootstrapContext {
-    pub fn new(storage: Option<ArtifactStorage>, layered: bool, fifo: bool) -> Result<Self> {
+    pub fn new(storage: Option<ArtifactStorage>, layered: bool) -> Result<Self> {
         let writer = if let Some(storage) = storage {
-            Box::new(ArtifactFileWriter(ArtifactWriter::new(storage, fifo)?))
-                as Box<dyn RafsIoWrite>
+            Box::new(ArtifactFileWriter(ArtifactWriter::new(storage)?)) as Box<dyn RafsIoWrite>
         } else {
             Box::<ArtifactMemoryWriter>::default() as Box<dyn RafsIoWrite>
         };
@@ -1013,12 +1016,8 @@ impl BootstrapManager {
         }
     }
 
-    pub fn create_ctx(&self, fifo: bool) -> Result<BootstrapContext> {
-        BootstrapContext::new(
-            self.bootstrap_storage.clone(),
-            self.f_parent_path.is_some(),
-            fifo,
-        )
+    pub fn create_ctx(&self) -> Result<BootstrapContext> {
+        BootstrapContext::new(self.bootstrap_storage.clone(), self.f_parent_path.is_some())
     }
 }
 

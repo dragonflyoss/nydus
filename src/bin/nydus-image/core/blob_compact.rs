@@ -129,7 +129,7 @@ impl ChunkSet {
         aligned_chunk: bool,
         backend: &Arc<dyn BlobBackend + Send + Sync>,
     ) -> Result<Vec<(ChunkWrapper, ChunkWrapper)>> {
-        let mut blob_writer = ArtifactWriter::new(blob_storage, build_ctx.blob_inline_meta)?;
+        let mut blob_writer = ArtifactWriter::new(blob_storage)?;
 
         // sort chunks first, don't break order in original blobs
         let mut chunks = self.chunks.values().collect::<Vec<&ChunkWrapper>>();
@@ -578,7 +578,7 @@ impl BlobCompactor {
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let mut ori_blob_mgr = BlobManager::new(rs.meta.get_digester());
         ori_blob_mgr.extend_from_blob_table(&build_ctx, rs.superblock.get_blob_infos())?;
         if let Some(dict) = chunk_dict {

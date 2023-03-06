@@ -869,10 +869,9 @@ impl Command {
         )?;
 
         // Some operations like listing xattr pairs of certain namespace need the process
-        // to be privileged. Therefore, trace what euid and egid are
+        // to be privileged. Therefore, trace what euid and egid are.
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
-
         info!("successfully built RAFS filesystem: \n{}", build_output);
         OutputSerializer::dump(matches, build_output, build_info)
     }
@@ -1284,9 +1283,12 @@ impl Command {
                 }
             }
             Some(v) => {
-                let param = v.trim_start_matches("0x").trim_start_matches("0X");
-                let chunk_size =
-                    u32::from_str_radix(param, 16).context(format!("invalid chunk size {}", v))?;
+                let chunk_size = if v.starts_with("0x") || v.starts_with("0X") {
+                    u32::from_str_radix(&v[2..], 16).context(format!("invalid chunk size {}", v))?
+                } else {
+                    v.parse::<u32>()
+                        .context(format!("invalid chunk size {}", v))?
+                };
                 if chunk_size as u64 > RAFS_MAX_CHUNK_SIZE
                     || chunk_size < 0x1000
                     || !chunk_size.is_power_of_two()
