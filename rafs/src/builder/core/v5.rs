@@ -3,13 +3,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{bail, Context, Result};
-use nydus_utils::try_round_up_4k;
+use std::convert::TryFrom;
+use std::mem::size_of;
 
+use anyhow::{bail, Context, Result};
+use nydus_utils::digest::{DigestHasher, RafsDigest};
+use nydus_utils::{root_tracer, timing_tracer, try_round_up_4k};
+
+use super::bootstrap::STARGZ_DEFAULT_BLOCK_SIZE;
 use super::node::Node;
-use crate::builder::{BuildContext, Tree};
+use crate::builder::{Bootstrap, BootstrapContext, BuildContext, ConversionType, Tree};
 use crate::metadata::inode::InodeWrapper;
-use crate::metadata::layout::v5::RafsV5InodeWrapper;
+use crate::metadata::layout::v5::{
+    RafsV5BlobTable, RafsV5ChunkInfo, RafsV5InodeTable, RafsV5InodeWrapper, RafsV5SuperBlock,
+    RafsV5XAttrsTable,
+};
 use crate::metadata::{RafsStore, RafsVersion};
 use crate::RafsIoWrite;
 
@@ -95,5 +103,165 @@ impl Node {
             self.inode.set_size(try_round_up_4k(d_size).unwrap());
         }
         self.set_inode_blocks();
+    }
+}
+
+impl Bootstrap {
+    /// Calculate inode digest for directory.
+    fn v5_digest_node(
+        &self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        index: usize,
+    ) {
+        let node = &bootstrap_ctx.nodes[index];
+
+        // We have set digest for non-directory inode in the previous dump_blob workflow.
+        if node.is_dir() {
+            let child_index = node.inode.child_index();
+            let child_count = node.inode.child_count();
+            let mut inode_hasher = RafsDigest::hasher(ctx.digester);
+
+            for idx in child_index..child_index + child_count {
+                let child = &bootstrap_ctx.nodes[(idx - 1) as usize];
+                inode_hasher.digest_update(child.inode.digest().as_ref());
+            }
+
+            bootstrap_ctx.nodes[index]
+                .inode
+                .set_digest(inode_hasher.digest_finalize());
+        }
+    }
+
+    /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
+    pub(crate) fn v5_dump(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_table: &RafsV5BlobTable,
+    ) -> Result<()> {
+        // Set inode digest, use reverse iteration order to reduce repeated digest calculations.
+        for idx in (0..bootstrap_ctx.nodes.len()).rev() {
+            self.v5_digest_node(ctx, bootstrap_ctx, idx);
+        }
+
+        // Set inode table
+        let super_block_size = size_of::<RafsV5SuperBlock>();
+        let inode_table_entries = bootstrap_ctx.nodes.len() as u32;
+        let mut inode_table = RafsV5InodeTable::new(inode_table_entries as usize);
+        let inode_table_size = inode_table.size();
+
+        // Set prefetch table
+        let (prefetch_table_size, prefetch_table_entries) = if let Some(prefetch_table) =
+            ctx.prefetch.get_rafsv5_prefetch_table(&bootstrap_ctx.nodes)
+        {
+            (prefetch_table.size(), prefetch_table.len() as u32)
+        } else {
+            (0, 0u32)
+        };
+
+        // Set blob table, use sha256 string (length 64) as blob id if not specified
+        let prefetch_table_offset = super_block_size + inode_table_size;
+        let blob_table_offset = prefetch_table_offset + prefetch_table_size;
+        let blob_table_size = blob_table.size();
+        let extended_blob_table_offset = blob_table_offset + blob_table_size;
+        let extended_blob_table_size = blob_table.extended.size();
+        let extended_blob_table_entries = blob_table.extended.entries();
+
+        // Set super block
+        let mut super_block = RafsV5SuperBlock::new();
+        let inodes_count = bootstrap_ctx.inode_map.len() as u64;
+        super_block.set_inodes_count(inodes_count);
+        super_block.set_inode_table_offset(super_block_size as u64);
+        super_block.set_inode_table_entries(inode_table_entries);
+        super_block.set_blob_table_offset(blob_table_offset as u64);
+        super_block.set_blob_table_size(blob_table_size as u32);
+        super_block.set_extended_blob_table_offset(extended_blob_table_offset as u64);
+        super_block.set_extended_blob_table_entries(u32::try_from(extended_blob_table_entries)?);
+        super_block.set_prefetch_table_offset(prefetch_table_offset as u64);
+        super_block.set_prefetch_table_entries(prefetch_table_entries);
+        super_block.set_compressor(ctx.compressor);
+        super_block.set_digester(ctx.digester);
+        super_block.set_chunk_size(ctx.chunk_size);
+        if ctx.explicit_uidgid {
+            super_block.set_explicit_uidgid();
+        }
+        if ctx.conversion_type == ConversionType::EStargzIndexToRef {
+            super_block.set_block_size(STARGZ_DEFAULT_BLOCK_SIZE);
+        }
+
+        // Set inodes and chunks
+        let mut inode_offset = (super_block_size
+            + inode_table_size
+            + prefetch_table_size
+            + blob_table_size
+            + extended_blob_table_size) as u32;
+
+        let mut has_xattr = false;
+        for node in &mut bootstrap_ctx.nodes {
+            inode_table.set(node.index, inode_offset)?;
+            // Add inode size
+            inode_offset += node.inode.inode_size() as u32;
+            if node.inode.has_xattr() {
+                has_xattr = true;
+                if !node.info.xattrs.is_empty() {
+                    inode_offset += (size_of::<RafsV5XAttrsTable>()
+                        + node.info.xattrs.aligned_size_v5())
+                        as u32;
+                }
+            }
+            // Add chunks size
+            if node.is_reg() {
+                inode_offset += node.inode.child_count() * size_of::<RafsV5ChunkInfo>() as u32;
+            }
+        }
+        if has_xattr {
+            super_block.set_has_xattr();
+        }
+
+        // Dump super block
+        super_block
+            .store(bootstrap_ctx.writer.as_mut())
+            .context("failed to store superblock")?;
+
+        // Dump inode table
+        inode_table
+            .store(bootstrap_ctx.writer.as_mut())
+            .context("failed to store inode table")?;
+
+        // Dump prefetch table
+        if let Some(mut prefetch_table) =
+            ctx.prefetch.get_rafsv5_prefetch_table(&bootstrap_ctx.nodes)
+        {
+            prefetch_table
+                .store(bootstrap_ctx.writer.as_mut())
+                .context("failed to store prefetch table")?;
+        }
+
+        // Dump blob table
+        blob_table
+            .store(bootstrap_ctx.writer.as_mut())
+            .context("failed to store blob table")?;
+
+        // Dump extended blob table
+        blob_table
+            .store_extended(bootstrap_ctx.writer.as_mut())
+            .context("failed to store extended blob table")?;
+
+        // Dump inodes and chunks
+        timing_tracer!(
+            {
+                for node in &bootstrap_ctx.nodes {
+                    node.dump_bootstrap_v5(ctx, bootstrap_ctx.writer.as_mut())
+                        .context("failed to dump bootstrap")?;
+                }
+
+                Ok(())
+            },
+            "dump_bootstrap",
+            Result<()>
+        )?;
+
+        Ok(())
     }
 }

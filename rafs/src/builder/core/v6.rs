@@ -11,19 +11,25 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use anyhow::{bail, ensure, Context, Result};
-use nydus_utils::{div_round_up, round_down_4k, round_up};
+use nydus_utils::{div_round_up, root_tracer, round_down_4k, round_up, timing_tracer};
+use storage::device::BlobFeatures;
 
 use super::chunk_dict::DigestWithBlobIndex;
 use super::node::Node;
-use crate::builder::{BootstrapContext, BuildContext, Tree};
+use crate::builder::{Bootstrap, BootstrapContext, BuildContext, Tree};
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::inode::new_v6_inode;
 use crate::metadata::layout::v6::{
-    align_offset, calculate_nid, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeChunkHeader,
-    RafsV6OndiskInode, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
-    EROFS_INODE_FLAT_PLAIN,
+    align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6Dirent, RafsV6InodeChunkAddr,
+    RafsV6InodeChunkHeader, RafsV6OndiskInode, RafsV6SuperBlock, RafsV6SuperBlockExt,
+    EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+    EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_SUPER_BLOCK_SIZE, EROFS_SUPER_OFFSET,
 };
+use crate::metadata::RafsStore;
 use crate::RafsIoWrite;
+
+const WRITE_PADDING_DATA: [u8; 4096] = [0u8; 4096];
+const V6_BLOCK_SEG_ALIGNMENT: u64 = 0x20_0000;
 
 // Rafs v6 dedicated methods
 impl Node {
@@ -119,6 +125,7 @@ impl Node {
             self.v6_offset = bootstrap_ctx.offset;
             bootstrap_ctx.offset += self.v6_size_with_xattr();
         }
+        bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
 
         Ok(())
     }
@@ -138,6 +145,7 @@ impl Node {
         // Dir isize is the total bytes of 'dirents + names'.
         self.inode.set_size(d_size);
         self.v6_set_offset_with_tail(bootstrap_ctx, d_size);
+        bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
 
         Ok(())
     }
@@ -532,6 +540,327 @@ impl BuildContext {
     }
 }
 
+impl Bootstrap {
+    pub(crate) fn v6_update_dirents(nodes: &mut Vec<Node>, tree: &Tree, parent_offset: u64) {
+        let node = &mut nodes[tree.node.index as usize - 1];
+        let node_offset = node.v6_offset;
+        if !node.is_dir() {
+            return;
+        }
+
+        // dot & dotdot
+        // Type of libc::S_IFDIR is u16 on macos, so it need a conversion
+        // but compiler will report useless conversion on linux platform,
+        // so we add an allow annotation here.
+        #[allow(clippy::useless_conversion)]
+        {
+            node.v6_dirents
+                .push((node_offset, OsString::from("."), libc::S_IFDIR.into()));
+            node.v6_dirents
+                .push((parent_offset, OsString::from(".."), libc::S_IFDIR.into()));
+        }
+
+        let mut dirs: Vec<&Tree> = Vec::new();
+        for child in tree.children.iter() {
+            trace!(
+                "{:?} child {:?} offset {}, mode {}",
+                node.name(),
+                child.node.name(),
+                child.node.v6_offset,
+                child.node.inode.mode()
+            );
+            node.v6_dirents.push((
+                child.node.v6_offset,
+                child.node.name().to_os_string(),
+                child.node.inode.mode(),
+            ));
+            if child.node.is_dir() {
+                dirs.push(child);
+            }
+        }
+        node.v6_dirents
+            .sort_unstable_by(|a, b| a.1.as_os_str().cmp(b.1.as_os_str()) as std::cmp::Ordering);
+
+        for dir in dirs {
+            Self::v6_update_dirents(nodes, dir, node_offset);
+        }
+    }
+
+    /// Dump bootstrap and blob file, return (Vec<blob_id>, blob_size)
+    pub(crate) fn v6_dump(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_ctx: &mut BootstrapContext,
+        blob_table: &RafsV6BlobTable,
+    ) -> Result<()> {
+        // Rafs v6 disk layout
+        //
+        //  EROFS_SUPER_OFFSET
+        //     |
+        // +---+---------+------------+-------------+----------------------------------------------+
+        // |   |         |            |             |                 |         |                  |
+        // |1k |super    |extended    | blob table  |  prefetch table | inodes  | chunk info table |
+        // |   |block    |superblock+ |             |                 |         |                  |
+        // |   |         |devslot     |             |                 |         |                  |
+        // +---+---------+------------+-------------+----------------------------------------------+
+
+        let blobs = blob_table.get_all();
+        let devtable_len = blobs.len() * size_of::<RafsV6Device>();
+        let blob_table_size = blob_table.size() as u64;
+        let blob_table_offset = align_offset(
+            (EROFS_DEVTABLE_OFFSET as u64) + devtable_len as u64,
+            EROFS_BLOCK_SIZE as u64,
+        );
+        let blob_table_entries = blobs.len();
+        assert!(blob_table_entries < u8::MAX as usize);
+        trace!(
+            "devtable len {} blob table offset {} blob table size {}",
+            devtable_len,
+            blob_table_offset,
+            blob_table_size
+        );
+
+        let (prefetch_table_offset, prefetch_table_size) =
+            // If blob_table_size equal to 0, there is no prefetch.
+            if ctx.prefetch.fs_prefetch_rule_count() > 0 && blob_table_size > 0 {
+                // Prefetch table is very close to blob devices table
+                let offset = blob_table_offset + blob_table_size;
+                // Each prefetched file has is nid of `u32` filled into prefetch table.
+                let size = ctx.prefetch.fs_prefetch_rule_count() * size_of::<u32>() as u32;
+                trace!("prefetch table locates at offset {} size {}", offset, size);
+                (offset, size)
+            } else {
+                (0, 0)
+            };
+
+        // Make the superblock's meta_blkaddr one block ahead of the inode table,
+        // to avoid using 0 as root nid.
+        // inode offset = meta_blkaddr * block_size + 32 * nid
+        // When using nid 0 as root nid,
+        // the root directory will not be shown by glibc's getdents/readdir.
+        // Because in some OS, ino == 0 represents corresponding file is deleted.
+        let orig_meta_addr = bootstrap_ctx.nodes[0].v6_offset - EROFS_BLOCK_SIZE;
+        let meta_addr = if blob_table_size > 0 {
+            align_offset(
+                blob_table_offset + blob_table_size + prefetch_table_size as u64,
+                EROFS_BLOCK_SIZE as u64,
+            )
+        } else {
+            orig_meta_addr
+        };
+
+        // get devt_slotoff
+        let root_nid = calculate_nid(
+            bootstrap_ctx.nodes[0].v6_offset + (meta_addr - orig_meta_addr),
+            meta_addr,
+        );
+
+        // Prepare extended super block
+        let mut ext_sb = RafsV6SuperBlockExt::new();
+        ext_sb.set_compressor(ctx.compressor);
+        ext_sb.set_digester(ctx.digester);
+        ext_sb.set_chunk_size(ctx.chunk_size);
+        ext_sb.set_blob_table_offset(blob_table_offset);
+        ext_sb.set_blob_table_size(blob_table_size as u32);
+
+        // collect all chunks in this bootstrap.
+        // HashChunkDict cannot be used here, because there will be duplicate chunks between layers,
+        // but there is no deduplication during the actual construction.
+        // Each layer uses the corresponding chunk in the blob of its own layer.
+        // If HashChunkDict is used here, it will cause duplication. The chunks are removed,
+        // resulting in incomplete chunk info.
+        let mut chunk_cache = BTreeMap::new();
+
+        // Dump bootstrap
+        timing_tracer!(
+            {
+                for node in &mut bootstrap_ctx.nodes {
+                    node.dump_bootstrap_v6(
+                        ctx,
+                        bootstrap_ctx.writer.as_mut(),
+                        orig_meta_addr,
+                        meta_addr,
+                        &mut chunk_cache,
+                    )
+                    .context("failed to dump bootstrap")?;
+                }
+
+                Ok(())
+            },
+            "dump_bootstrap",
+            Result<()>
+        )?;
+        Self::v6_align_to_block(bootstrap_ctx)?;
+
+        // `Node` offset might be updated during above inodes dumping. So `get_prefetch_table` after it.
+        let prefetch_table = ctx
+            .prefetch
+            .get_rafsv6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
+        if let Some(mut pt) = prefetch_table {
+            assert!(pt.len() * size_of::<u32>() <= prefetch_table_size as usize);
+            // Device slots are very close to extended super block.
+            ext_sb.set_prefetch_table_offset(prefetch_table_offset);
+            ext_sb.set_prefetch_table_size(prefetch_table_size);
+            bootstrap_ctx
+                .writer
+                .seek_offset(prefetch_table_offset as u64)
+                .context("failed seek prefetch table offset")?;
+            pt.store(bootstrap_ctx.writer.as_mut()).unwrap();
+        }
+
+        // TODO: get rid of the chunk info array.
+        // Dump chunk info array.
+        let chunk_table_offset = bootstrap_ctx
+            .writer
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end for chunk table")?;
+        let mut chunk_table_size: u64 = 0;
+        for (_, chunk) in chunk_cache.iter() {
+            let chunk_size = chunk
+                .store(bootstrap_ctx.writer.as_mut())
+                .context("failed to dump chunk table")?;
+            chunk_table_size += chunk_size as u64;
+        }
+        ext_sb.set_chunk_table(chunk_table_offset, chunk_table_size);
+        debug!(
+            "chunk_table offset {} size {}",
+            chunk_table_offset, chunk_table_size
+        );
+        Self::v6_align_to_block(bootstrap_ctx)?;
+
+        // Prepare device slots.
+        let mut pos = bootstrap_ctx
+            .writer
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end for chunk table")?;
+        assert_eq!(pos % EROFS_BLOCK_SIZE, 0);
+        let mut devtable: Vec<RafsV6Device> = Vec::new();
+        let mut block_count = 0u32;
+        let mut inlined_chunk_digest = true;
+        for entry in blobs.iter() {
+            let mut devslot = RafsV6Device::new();
+            // blob id is String, which is processed by sha256.finalize().
+            if entry.blob_id().is_empty() {
+                bail!(" blob id is empty");
+            } else if entry.blob_id().len() > 64 {
+                bail!(format!(
+                    "blob id length is bigger than 64 bytes, blob id {:?}",
+                    entry.blob_id()
+                ));
+            } else if entry.uncompressed_size() / ctx.v6_block_size() > u32::MAX as u64 {
+                bail!(format!(
+                    "uncompressed blob size (0x:{:x}) is too big",
+                    entry.uncompressed_size()
+                ));
+            }
+            if !entry.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
+                inlined_chunk_digest = false;
+            }
+            let cnt = (entry.uncompressed_size() / ctx.v6_block_size()) as u32;
+            if block_count.checked_add(cnt).is_none() {
+                bail!("Too many data blocks in RAFS filesystem, block size 0x{:x}, block count 0x{:x}", ctx.v6_block_size(), block_count as u64 + cnt as u64);
+            }
+            let mapped_blkaddr = Self::v6_align_mapped_blkaddr(ctx, pos)?;
+            pos += cnt as u64 * ctx.v6_block_size();
+            block_count += cnt;
+
+            let id = entry.blob_id();
+            let id = id.as_bytes();
+            let mut blob_id = [0u8; 64];
+            blob_id[..id.len()].copy_from_slice(id);
+            devslot.set_blob_id(&blob_id);
+            devslot.set_blocks(cnt);
+            devslot.set_mapped_blkaddr(mapped_blkaddr);
+            devtable.push(devslot);
+        }
+
+        // Dump super block
+        let mut sb = RafsV6SuperBlock::new();
+        sb.set_inos(bootstrap_ctx.nodes.len() as u64);
+        sb.set_blocks(block_count);
+        sb.set_root_nid(root_nid as u16);
+        sb.set_meta_addr(meta_addr);
+        sb.set_extra_devices(blob_table_entries as u16);
+        bootstrap_ctx.writer.seek(SeekFrom::Start(0))?;
+        sb.store(bootstrap_ctx.writer.as_mut())
+            .context("failed to store SB")?;
+
+        // Dump extended super block.
+        if ctx.explicit_uidgid {
+            ext_sb.set_explicit_uidgid();
+        }
+        if ctx.has_xattr {
+            ext_sb.set_has_xattr();
+        }
+        if inlined_chunk_digest {
+            ext_sb.set_inlined_chunk_digest();
+        }
+        bootstrap_ctx
+            .writer
+            .seek_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)
+            .context("failed to seek for extended super block")?;
+        ext_sb
+            .store(bootstrap_ctx.writer.as_mut())
+            .context("failed to store extended super block")?;
+
+        // Dump device slots.
+        bootstrap_ctx
+            .writer
+            .seek_offset(EROFS_DEVTABLE_OFFSET as u64)
+            .context("failed to seek devtslot")?;
+        for slot in devtable.iter() {
+            slot.store(bootstrap_ctx.writer.as_mut())
+                .context("failed to store device slot")?;
+        }
+
+        // Dump blob table
+        bootstrap_ctx
+            .writer
+            .seek_offset(blob_table_offset as u64)
+            .context("failed seek for extended blob table offset")?;
+        blob_table
+            .store(bootstrap_ctx.writer.as_mut())
+            .context("failed to store extended blob table")?;
+
+        Ok(())
+    }
+
+    fn v6_align_to_block(bootstrap_ctx: &mut BootstrapContext) -> Result<()> {
+        bootstrap_ctx
+            .writer
+            .flush()
+            .context("failed to flush bootstrap")?;
+        let pos = bootstrap_ctx
+            .writer
+            .seek_to_end()
+            .context("failed to seek to bootstrap's end for chunk table")?;
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
+        bootstrap_ctx
+            .writer
+            .write_all(&WRITE_PADDING_DATA[0..padding as usize])
+            .context("failed to write 0 to padding of bootstrap's end for chunk table")?;
+        bootstrap_ctx
+            .writer
+            .flush()
+            .context("failed to flush bootstrap")?;
+        Ok(())
+    }
+
+    fn v6_align_mapped_blkaddr(ctx: &BuildContext, addr: u64) -> Result<u32> {
+        match addr.checked_add(V6_BLOCK_SEG_ALIGNMENT - 1) {
+            None => bail!("address 0x{:x} is too big", addr),
+            Some(v) => {
+                let v = (v & !(V6_BLOCK_SEG_ALIGNMENT - 1)) / ctx.v6_block_size();
+                if v > u32::MAX as u64 {
+                    bail!("address 0x{:x} is too big", addr);
+                } else {
+                    Ok(v as u32)
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -642,7 +971,7 @@ mod tests {
         assert_eq!(dir_node.v6_offset, 8192 + 4096 + 8192 + 8192 + 4096 + 8192);
         assert_eq!(
             bootstrap_ctx.offset,
-            8192 + 4096 + 8192 + 8192 + 4096 + 8192 + 32 + 1985
+            8192 + 4096 + 8192 + 8192 + 4096 + 8192 + 32 + 1985 + 31
         );
 
         bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);

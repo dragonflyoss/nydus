@@ -55,7 +55,7 @@ fn build_bootstrap(
         let origin_bootstarp_offset = bootstrap_ctx.offset;
         // Disable prefetch and bootstrap.apply() will reset the prefetch enable/disable flag.
         ctx.prefetch.disable();
-        bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
+        bootstrap.build(ctx, bootstrap_ctx, tree)?;
         tree = bootstrap.apply(ctx, bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
         bootstrap_ctx.offset = origin_bootstarp_offset;
         bootstrap_ctx.layered = false;
@@ -63,7 +63,7 @@ fn build_bootstrap(
 
     // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
     timing_tracer!(
-        { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
+        { bootstrap.build(ctx, bootstrap_ctx, tree) },
         "build_bootstrap"
     )?;
 

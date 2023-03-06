@@ -535,7 +535,6 @@ impl RafsV6SuperBlockExt {
 
 impl RafsStore for RafsV6SuperBlockExt {
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
-        w.seek_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
         w.write_all(self.as_ref())?;
         w.seek_offset(EROFS_BLOCK_SIZE as u64)?;
 

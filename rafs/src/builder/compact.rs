@@ -593,9 +593,9 @@ impl BlobCompactor {
             return Ok(None);
         }
         let mut _dict = HashChunkDict::new(build_ctx.digester);
-        let mut tree = Tree::from_bootstrap(&rs, &mut _dict)?;
+        let tree = Tree::from_bootstrap(&rs, &mut _dict)?;
         let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(&mut build_ctx, &mut bootstrap_ctx, &mut tree)?;
+        bootstrap.build(&mut build_ctx, &mut bootstrap_ctx, tree)?;
         let mut nodes = Vec::new();
         // move out nodes
         std::mem::swap(&mut bootstrap_ctx.nodes, &mut nodes);

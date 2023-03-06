@@ -243,7 +243,7 @@ impl Merger {
         }
 
         // Safe to unwrap because there is at least one source bootstrap.
-        let mut tree = tree.unwrap();
+        let tree = tree.unwrap();
         ctx.fs_version = fs_version;
         if let Some(chunk_size) = chunk_size {
             ctx.chunk_size = chunk_size;
@@ -251,7 +251,7 @@ impl Merger {
 
         let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false)?;
         let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
+        bootstrap.build(ctx, &mut bootstrap_ctx, tree)?;
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         let mut bootstrap_storage = Some(target.clone());
         bootstrap
