@@ -10,7 +10,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use mio::Waker;
-use nydus_api::http::BlobCacheList;
+use nydus_api::config::BlobCacheList;
 use nydus_api::BuildTimeInfo;
 
 use crate::blob_cache::BlobCacheMgr;

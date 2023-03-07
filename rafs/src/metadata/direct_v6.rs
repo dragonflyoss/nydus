@@ -38,15 +38,16 @@ use nydus_utils::{digest::RafsDigest, div_round_up, round_up};
 
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::layout::v6::{
-    recover_namespace, RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeCompact,
-    RafsV6InodeExtended, RafsV6OndiskInode, RafsV6XattrEntry, RafsV6XattrIbodyHeader,
-    EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
-    EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
+    rafsv6_load_blob_extra_info, recover_namespace, RafsV6BlobTable, RafsV6Dirent,
+    RafsV6InodeChunkAddr, RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode,
+    RafsV6XattrEntry, RafsV6XattrIbodyHeader, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED,
+    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE,
+    EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
 };
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrName, XattrValue};
 use crate::metadata::{
-    Attr, Entry, Inode, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsSuperBlock,
-    RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
+    Attr, Entry, Inode, RafsBlobExtraInfo, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler,
+    RafsSuperBlock, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
 };
 use crate::{MetaType, RafsError, RafsInodeExt, RafsIoReader, RafsResult};
 
@@ -63,6 +64,7 @@ fn err_invalidate_data(rafs_err: RafsError) -> std::io::Error {
 struct DirectMappingState {
     meta: Arc<RafsSuperMeta>,
     blob_table: RafsV6BlobTable,
+    blob_extra_infos: HashMap<String, RafsBlobExtraInfo>,
     map: FileMapState,
 }
 
@@ -71,6 +73,7 @@ impl DirectMappingState {
         DirectMappingState {
             meta: Arc::new(*meta),
             blob_table: RafsV6BlobTable::default(),
+            blob_extra_infos: HashMap::new(),
             map: FileMapState::default(),
         }
     }
@@ -187,11 +190,13 @@ impl DirectSuperBlockV6 {
         let meta = &old_state.meta;
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
         blob_table.load(r, meta.blob_table_size, meta.chunk_size, meta.flags)?;
+        let blob_extra_infos = rafsv6_load_blob_extra_info(meta, r)?;
 
         let file_map = FileMapState::new(file, 0, len as usize, false)?;
         let state = DirectMappingState {
             meta: old_state.meta.clone(),
             blob_table,
+            blob_extra_infos,
             map: file_map,
         };
 
@@ -281,6 +286,10 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
 
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>> {
         self.state.load().blob_table.get_all()
+    }
+
+    fn get_blob_extra_infos(&self) -> Result<HashMap<String, RafsBlobExtraInfo>> {
+        Ok(self.state.load().blob_extra_infos.clone())
     }
 
     fn root_ino(&self) -> u64 {

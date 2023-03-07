@@ -31,6 +31,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeError;
 
 pub mod blob_cache;
+#[cfg(feature = "block-device")]
+pub mod block_device;
+#[cfg(feature = "block-nbd")]
+pub mod block_nbd;
 pub mod daemon;
 #[cfg(target_os = "linux")]
 mod fs_cache;

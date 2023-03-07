@@ -6,7 +6,7 @@
 //! Enums, Structs and Traits to access and manage Rafs filesystem metadata.
 
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
@@ -68,6 +68,14 @@ pub const DOTDOT: &str = "..";
 /// Type for RAFS filesystem inode number.
 pub type Inode = u64;
 
+#[derive(Debug, Clone)]
+pub struct RafsBlobExtraInfo {
+    /// Mapped block address from RAFS v6 devslot table.
+    ///
+    /// It's the offset of the uncompressed blob used to convert an image into a disk.
+    pub mapped_blkaddr: u32,
+}
+
 /// Trait to access filesystem inodes managed by a RAFS filesystem.
 pub trait RafsSuperInodes {
     /// Get the maximum inode number managed by the RAFS filesystem.
@@ -94,6 +102,11 @@ pub trait RafsSuperBlock: RafsSuperInodes + Send + Sync {
 
     /// Get all blob objects referenced by the RAFS filesystem.
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>>;
+
+    /// Get extra information associated with blob objects.
+    fn get_blob_extra_infos(&self) -> Result<HashMap<String, RafsBlobExtraInfo>> {
+        Ok(HashMap::new())
+    }
 
     /// Get the inode number of the RAFS filesystem root.
     fn root_ino(&self) -> u64;
@@ -423,6 +436,10 @@ pub struct RafsSuperMeta {
     pub extended_blob_table_offset: u64,
     /// Offset of the extended blob information table into the metadata blob.
     pub extended_blob_table_entries: u32,
+    /// Number of RAFS v6 blob device entries in the devslot table.
+    pub blob_device_table_count: u32,
+    /// Offset of the RAFS v6 devslot table.
+    pub blob_device_table_offset: u64,
     /// Offset of the inode prefetch table into the metadata blob.
     pub prefetch_table_offset: u64,
     /// Size of the inode prefetch table.
@@ -520,6 +537,8 @@ impl Default for RafsSuperMeta {
             blob_table_offset: 0,
             extended_blob_table_offset: 0,
             extended_blob_table_entries: 0,
+            blob_device_table_count: 0,
+            blob_device_table_offset: 0,
             prefetch_table_offset: 0,
             prefetch_table_entries: 0,
             attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),

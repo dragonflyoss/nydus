@@ -285,6 +285,8 @@ fn prepare_commandline_options() -> Command {
     let cmdline = append_fuse_subcmd_options(cmdline);
     #[cfg(feature = "virtiofs")]
     let cmdline = append_virtiofs_subcmd_options(cmdline);
+    #[cfg(feature = "block-nbd")]
+    let cmdline = self::nbd::append_nbd_subcmd_options(cmdline);
     append_singleton_subcmd_options(cmdline)
 }
 
@@ -590,6 +592,138 @@ fn process_singleton_arguments(
     Ok(())
 }
 
+#[cfg(feature = "block-nbd")]
+mod nbd {
+    use super::*;
+    use nydus_api::BlobCacheEntry;
+    use nydus_service::block_nbd::create_nbd_daemon;
+    use std::str::FromStr;
+
+    pub(super) fn append_nbd_subcmd_options(cmd: Command) -> Command {
+        let subcmd = Command::new("nbd")
+            .about("Export a RAFS v6 image as a block device through NBD (Experiment)");
+        let subcmd = subcmd
+            .arg(
+                Arg::new("DEVICE")
+                    .help("NBD device node to attach the block device")
+                    .required(true)
+                    .num_args(1),
+            )
+            .arg(
+                Arg::new("bootstrap")
+                    .long("bootstrap")
+                    .short('B')
+                    .help("Path to the RAFS filesystem metadata file")
+                    .requires("localfs-dir")
+                    .conflicts_with("config"),
+            )
+            .arg(
+                Arg::new("localfs-dir")
+                    .long("localfs-dir")
+                    .requires("bootstrap")
+                    .short('D')
+                    .help(
+                        "Path to the `localfs` working directory, which also enables the `localfs` storage backend"
+                    )
+                    .conflicts_with("config"),
+            )
+            .arg(
+                Arg::new("threads")
+                    .long("threads")
+                    .default_value("4")
+                    .help("Number of worker threads to serve NBD requests")
+                    .value_parser(thread_validator)
+                    .required(false),
+            );
+        cmd.subcommand(subcmd)
+    }
+
+    pub(super) fn process_nbd_service(
+        args: SubCmdArgs,
+        bti: BuildTimeInfo,
+        _apisock: Option<&str>,
+    ) -> Result<()> {
+        let mut entry = if let Some(bootstrap) = args.value_of("bootstrap") {
+            let dir = args.value_of("localfs-dir").ok_or_else(|| {
+                einval!("option `-D/--localfs-dir` is required by `--boootstrap`")
+            })?;
+            let config = r#"
+            {
+                "type": "bootstrap",
+                "id": "disk-default",
+                "domain_id": "block-nbd",
+                "config_v2": {
+                    "version": 2,
+                    "id": "block-nbd-factory",
+                    "backend": {
+                        "type": "localfs",
+                        "localfs": {
+                            "dir": "LOCAL_FS_DIR"
+                        }
+                    },
+                    "cache": {
+                        "type": "filecache",
+                        "filecache": {
+                            "work_dir": "LOCAL_FS_DIR"
+                        }
+                    },
+                    "metadata_path": "META_FILE_PATH"
+                }
+            }"#;
+            let config = config
+                .replace("LOCAL_FS_DIR", dir)
+                .replace("META_FILE_PATH", bootstrap);
+            BlobCacheEntry::from_str(&config)?
+        } else if let Some(v) = args.value_of("config") {
+            BlobCacheEntry::from_file(v)?
+        } else {
+            return Err(einval!(
+                "both option `-C/--config` and `-B/--bootstrap` are missing"
+            ));
+        };
+        if !entry.prepare_configuration_info() {
+            return Err(einval!(
+                "invalid blob cache entry configuration information"
+            ));
+        }
+        if entry.validate() == false {
+            return Err(einval!(
+                "invalid blob cache entry configuration information"
+            ));
+        }
+
+        // Safe to unwrap because `DEVICE` is mandatory option.
+        let device = args.value_of("DEVICE").unwrap().to_string();
+        let id = args.value_of("id").map(|id| id.to_string());
+        let supervisor = args.value_of("supervisor").map(|s| s.to_string());
+        let threads: u32 = args
+            .value_of("threads")
+            .map(|n| n.parse().unwrap_or(1))
+            .unwrap_or(1);
+
+        let daemon = create_nbd_daemon(
+            device,
+            threads,
+            entry,
+            bti,
+            id,
+            supervisor,
+            DAEMON_CONTROLLER.alloc_waker(),
+        )
+        .map(|d| {
+            info!("NBD daemon started!");
+            d
+        })
+        .map_err(|e| {
+            error!("Failed in starting NBD daemon: {}", e);
+            e
+        })?;
+        DAEMON_CONTROLLER.set_daemon(daemon);
+
+        Ok(())
+    }
+}
+
 extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
     DAEMON_CONTROLLER.shutdown();
 }
@@ -639,6 +773,13 @@ fn main() -> Result<()> {
             let subargs = args.subcommand_matches("virtiofs").unwrap();
             let subargs = SubCmdArgs::new(&args, subargs);
             process_fs_service(subargs, bti, apisock, false)?;
+        }
+        #[cfg(feature = "block-nbd")]
+        Some("nbd") => {
+            // Safe to unwrap because the subcommand is `nbd`.
+            let subargs = args.subcommand_matches("nbd").unwrap();
+            let subargs = SubCmdArgs::new(&args, subargs);
+            self::nbd::process_nbd_service(subargs, bti, apisock)?;
         }
         _ => {
             let subargs = SubCmdArgs::new(&args, &args);
