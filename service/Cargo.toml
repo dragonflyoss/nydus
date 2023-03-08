@@ -25,7 +25,7 @@ time = { version = "0.3.14", features = ["serde-human-readable"] }
 tokio = { version = "1.24", features = ["macros"] }
 tokio-uring = "0.4"
 
-nydus-api = { version = "0.2.2", path = "../api", features = ["handler"] }
+nydus-api = { version = "0.2.2", path = "../api"}
 nydus-error = { version = "0.2.3", path = "../error" }
 nydus-rafs = { version = "0.2.2", path = "../rafs" }
 nydus-storage = { version = "0.6.2", path = "../storage" }
