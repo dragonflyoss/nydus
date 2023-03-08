@@ -5,15 +5,17 @@
 use std::fs;
 use std::fs::DirEntry;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use nydus_utils::{event_tracer, root_tracer, timing_tracer};
 
-use crate::builder::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
-use crate::core::blob::Blob;
-use crate::core::context::{
+use super::core::blob::Blob;
+use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
 };
-use crate::core::node::{Node, Overlay};
-use crate::core::tree::Tree;
+use super::core::node::Node;
+use super::core::overlay::Overlay;
+use super::core::tree::Tree;
+use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
 
 struct FilesystemTreeBuilder {}
 
@@ -43,13 +45,13 @@ impl FilesystemTreeBuilder {
         event_tracer!("load_from_directory", +children.len());
         for child in children {
             let path = child.path();
-            let mut child = Node::new(
+            let mut child = Node::from_fs_object(
                 ctx.fs_version,
                 ctx.source_path.clone(),
                 path.clone(),
                 Overlay::UpperAddition,
                 ctx.chunk_size,
-                parent.explicit_uidgid,
+                parent.info.explicit_uidgid,
                 true,
             )
             .with_context(|| format!("failed to create node {:?}", path))?;
@@ -74,7 +76,8 @@ impl FilesystemTreeBuilder {
     }
 }
 
-pub(crate) struct DirectoryBuilder {}
+#[derive(Default)]
+pub struct DirectoryBuilder {}
 
 impl DirectoryBuilder {
     pub fn new() -> Self {
@@ -88,7 +91,7 @@ impl DirectoryBuilder {
         bootstrap_ctx: &mut BootstrapContext,
         layer_idx: u16,
     ) -> Result<Tree> {
-        let node = Node::new(
+        let node = Node::from_fs_object(
             ctx.fs_version,
             ctx.source_path.clone(),
             ctx.source_path.clone(),

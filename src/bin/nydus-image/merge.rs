@@ -4,23 +4,18 @@
 
 use std::collections::HashSet;
 use std::convert::TryFrom;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use hex::FromHex;
 use nydus_api::ConfigV2;
+use nydus_rafs::builder::{
+    ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
+    BuildOutput, ChunkSource, HashChunkDict, MetadataTreeBuilder, Overlay, Tree, WhiteoutSpec,
+};
 use nydus_rafs::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-
-use crate::core::bootstrap::Bootstrap;
-use crate::core::chunk_dict::HashChunkDict;
-use crate::core::context::{
-    ArtifactStorage, BlobContext, BlobManager, BootstrapContext, BuildContext, BuildOutput,
-};
-use crate::core::node::{ChunkSource, Overlay, WhiteoutSpec};
-use crate::core::tree::{MetadataTreeBuilder, Tree};
 
 /// Struct to generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
 ///
@@ -200,7 +195,7 @@ impl Merger {
                 }
                 if !found {
                     blob_idx_map.push(blob_mgr.len() as u32);
-                    blob_mgr.add(blob_ctx);
+                    blob_mgr.add_blob(blob_ctx);
                 }
             }
 
@@ -209,9 +204,9 @@ impl Merger {
                 rs.walk_directory::<PathBuf>(
                     rs.superblock.root_ino(),
                     None,
-                    &mut |inode: &dyn RafsInodeExt, path: &Path| -> Result<()> {
+                    &mut |inode: Arc<dyn RafsInodeExt>, path: &Path| -> Result<()> {
                         let mut node =
-                            MetadataTreeBuilder::parse_node(&rs, inode.deref(), path.to_path_buf())
+                            MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
                                 .context(format!(
                                     "parse node from bootstrap {:?}",
                                     bootstrap_path
@@ -219,7 +214,7 @@ impl Merger {
                         for chunk in &mut node.chunks {
                             let origin_blob_index = chunk.inner.blob_index() as usize;
                             // Set the blob index of chunk to real index in blob table of final bootstrap.
-                            chunk.inner.set_blob_index(blob_idx_map[origin_blob_index]);
+                            chunk.set_blob_index(blob_idx_map[origin_blob_index]);
                         }
                         // Set node's layer index to distinguish same inode number (from bootstrap)
                         // between different layers.
@@ -248,7 +243,7 @@ impl Merger {
         }
 
         // Safe to unwrap because there is at least one source bootstrap.
-        let mut tree = tree.unwrap();
+        let tree = tree.unwrap();
         ctx.fs_version = fs_version;
         if let Some(chunk_size) = chunk_size {
             ctx.chunk_size = chunk_size;
@@ -256,7 +251,7 @@ impl Merger {
 
         let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false)?;
         let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
+        bootstrap.build(ctx, &mut bootstrap_ctx, tree)?;
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         let mut bootstrap_storage = Some(target.clone());
         bootstrap

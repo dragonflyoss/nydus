@@ -16,19 +16,12 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::{fmt, fs};
 
-use anyhow::{Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
 use nydus_api::ConfigV2;
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
-use nydus_rafs::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
-use nydus_rafs::metadata::layout::RafsBlobTable;
-use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
-use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
-use nydus_rafs::RafsIoWrite;
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::toc::{TocEntryList, TocLocation};
@@ -39,14 +32,22 @@ use nydus_storage::meta::{
 use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down_4k, BufReaderInfo};
 
-use super::chunk_dict::{ChunkDict, HashChunkDict};
-use super::feature::{Feature, Features};
-use super::node::{ChunkSource, Node, WhiteoutSpec};
-use super::prefetch::{Prefetch, PrefetchPolicy};
+use super::node::{ChunkSource, Node};
+use crate::builder::{
+    ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolicy, WhiteoutSpec,
+};
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::layout::v5::RafsV5BlobTable;
+use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
+use crate::metadata::layout::RafsBlobTable;
+use crate::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
+use crate::metadata::{RafsSuperFlags, RafsVersion};
+use crate::RafsIoWrite;
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
 
+/// Filesystem conversion type supported by RAFS builder.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversionType {
     DirectoryToRafs,
@@ -123,6 +124,7 @@ impl ConversionType {
     }
 }
 
+/// Filesystem based storage configuration for artifacts.
 #[derive(Debug, Clone)]
 pub enum ArtifactStorage {
     // Won't rename user's specification
@@ -132,6 +134,7 @@ pub enum ArtifactStorage {
 }
 
 impl ArtifactStorage {
+    /// Show file path to store the generated artifacts.
     pub fn display(&self) -> Display {
         match self {
             ArtifactStorage::SingleFile(p) => p.display(),
@@ -148,7 +151,7 @@ impl Default for ArtifactStorage {
 
 /// ArtifactMemoryWriter provides a writer to allow writing bootstrap
 /// data to a byte slice in memory.
-pub struct ArtifactMemoryWriter(Cursor<Vec<u8>>);
+struct ArtifactMemoryWriter(Cursor<Vec<u8>>);
 
 impl Default for ArtifactMemoryWriter {
     fn default() -> Self {
@@ -183,7 +186,7 @@ impl Write for ArtifactMemoryWriter {
     }
 }
 
-pub struct ArtifactFileWriter(ArtifactWriter);
+struct ArtifactFileWriter(ArtifactWriter);
 
 impl RafsIoWrite for ArtifactFileWriter {
     fn as_any(&self) -> &dyn Any {
@@ -246,6 +249,7 @@ impl Write for ArtifactWriter {
 }
 
 impl ArtifactWriter {
+    /// Create a new instance of [ArtifactWriter] from a [ArtifactStorage] configuration object.
     pub fn new(storage: ArtifactStorage) -> Result<Self> {
         match storage {
             ArtifactStorage::SingleFile(ref p) => {
@@ -298,6 +302,7 @@ impl ArtifactWriter {
         }
     }
 
+    /// Get the current write position.
     pub fn pos(&self) -> Result<u64> {
         Ok(self.pos as u64)
     }
@@ -305,15 +310,12 @@ impl ArtifactWriter {
     // The `inline-bootstrap` option merges the blob and bootstrap into one
     // file. We need some header to index the location of the blob and bootstrap,
     // write_tar_header uses tar header that arranges the data as follows:
-
     // data | tar_header | data | tar_header
-
     // This is a tar-like structure, except that we put the tar header after the
     // data. The advantage is that we do not need to determine the size of the data
     // first, so that we can write the blob data by stream without seek to improve
     // the performance of the blob dump by using fifo.
-    pub fn write_tar_header(&mut self, name: &str, size: u64) -> Result<Header> {
-        debug!("dump rafs blob tar header {} {}", name, size);
+    fn write_tar_header(&mut self, name: &str, size: u64) -> Result<Header> {
         let mut header = Header::new_gnu();
         header.set_path(Path::new(name))?;
         header.set_entry_type(EntryType::Regular);
@@ -407,6 +409,7 @@ pub struct BlobContext {
 }
 
 impl BlobContext {
+    /// Create a new instance of [BlobContext].
     pub fn new(
         blob_id: String,
         blob_offset: u64,
@@ -479,6 +482,7 @@ impl BlobContext {
         blob_ctx
     }
 
+    /// Create a new instance of [BlobContext] from `BlobInfo` object.
     pub fn from(ctx: &BuildContext, blob: &BlobInfo, chunk_source: ChunkSource) -> Result<Self> {
         let mut compressed_blob_size = blob.compressed_size();
         let mut blob_meta_size = blob.blob_meta_size();
@@ -594,6 +598,7 @@ impl BlobContext {
         Ok(blob_ctx)
     }
 
+    /// Set chunk size for the blob.
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
         self.chunk_size = chunk_size;
     }
@@ -713,14 +718,15 @@ pub struct BlobManager {
     current_blob_index: Option<u32>,
     /// Chunk dictionary to hold chunks from an extra chunk dict file.
     /// Used for chunk data de-duplication within the whole image.
-    pub global_chunk_dict: Arc<dyn ChunkDict>,
+    pub(crate) global_chunk_dict: Arc<dyn ChunkDict>,
     /// Chunk dictionary to hold chunks from all layers.
     /// Used for chunk data de-duplication between layers (with `--parent-bootstrap`)
     /// or within layer (with `--inline-bootstrap`).
-    pub layered_chunk_dict: HashChunkDict,
+    pub(crate) layered_chunk_dict: HashChunkDict,
 }
 
 impl BlobManager {
+    /// Create a new instance of [BlobManager].
     pub fn new(digester: digest::Algorithm) -> Self {
         Self {
             blobs: Vec::new(),
@@ -744,6 +750,7 @@ impl BlobManager {
         Ok(blob_ctx)
     }
 
+    /// Get the current blob object or create one if no current blob available.
     pub fn get_or_create_current_blob(
         &mut self,
         ctx: &BuildContext,
@@ -751,12 +758,13 @@ impl BlobManager {
         if self.current_blob_index.is_none() {
             let blob_ctx = Self::new_blob_ctx(ctx)?;
             self.current_blob_index = Some(self.alloc_index()?);
-            self.add(blob_ctx);
+            self.add_blob(blob_ctx);
         }
         // Safe to unwrap because the blob context has been added.
         Ok(self.get_current_blob().unwrap())
     }
 
+    /// Get the current blob object.
     pub fn get_current_blob(&mut self) -> Option<(u32, &mut BlobContext)> {
         if let Some(idx) = self.current_blob_index {
             Some((idx, &mut self.blobs[idx as usize]))
@@ -765,10 +773,12 @@ impl BlobManager {
         }
     }
 
+    /// Set the global chunk dictionary for chunk deduplication.
     pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
         self.global_chunk_dict = dict
     }
 
+    /// Get the global chunk dictionary for chunk deduplication.
     pub fn get_chunk_dict(&self) -> Arc<dyn ChunkDict> {
         self.global_chunk_dict.clone()
     }
@@ -783,15 +793,21 @@ impl BlobManager {
             .with_context(|| Error::msg("too many blobs"))
     }
 
+    /// Get number of blobs managed by the manager.
+    pub fn len(&self) -> usize {
+        self.blobs.len()
+    }
+
+    /// Check whether there's managed blobs.
+    pub fn is_empty(&self) -> bool {
+        self.blobs.is_empty()
+    }
+
     /// Add a blob context to manager
     ///
     /// This should be paired with Self::alloc_index() and keep in consistence.
-    pub fn add(&mut self, blob_ctx: BlobContext) {
+    pub fn add_blob(&mut self, blob_ctx: BlobContext) {
         self.blobs.push(blob_ctx);
-    }
-
-    pub fn len(&self) -> usize {
-        self.blobs.len()
     }
 
     /// Get all blob contexts (include the blob context that does not have a blob).
@@ -860,7 +876,7 @@ impl BlobManager {
             } else {
                 let idx = self.alloc_index()?;
                 let ctx = BlobContext::from(ctx, blob.as_ref(), ChunkSource::Dict)?;
-                self.add(ctx);
+                self.add_blob(ctx);
                 self.global_chunk_dict
                     .set_real_blob_idx(blob.blob_index(), idx);
             }
@@ -869,6 +885,7 @@ impl BlobManager {
         Ok(())
     }
 
+    /// Generate a [RafsBlobTable] from all blobs managed by the manager.
     pub fn to_blob_table(&self, build_ctx: &BuildContext) -> Result<RafsBlobTable> {
         let mut blob_table = match build_ctx.fs_version {
             RafsVersion::V5 => RafsBlobTable::V5(RafsV5BlobTable::new()),
@@ -926,22 +943,23 @@ impl BlobManager {
     }
 }
 
-/// BootstrapContext is used to hold inmemory data of bootstrap during build.
+/// BootstrapContext is used to hold in memory data of bootstrap during build.
 pub struct BootstrapContext {
     /// This build has a parent bootstrap.
     pub layered: bool,
     /// Cache node index for hardlinks, HashMap<(layer_index, real_inode, dev), Vec<index>>.
-    pub inode_map: HashMap<(u16, Inode, u64), Vec<u64>>,
-    /// Store all nodes in ascendant ordor, indexed by (node.index - 1).
+    pub(crate) inode_map: HashMap<(u16, Inode, u64), Vec<u64>>,
+    /// Store all nodes in ascendant order, indexed by (node.index - 1).
     pub nodes: Vec<Node>,
     /// Current position to write in f_bootstrap
-    pub offset: u64,
-    pub writer: Box<dyn RafsIoWrite>,
+    pub(crate) offset: u64,
+    pub(crate) writer: Box<dyn RafsIoWrite>,
     /// Not fully used blocks
-    pub v6_available_blocks: Vec<VecDeque<u64>>,
+    pub(crate) v6_available_blocks: Vec<VecDeque<u64>>,
 }
 
 impl BootstrapContext {
+    /// Create a new instance of [BootstrapContext].
     pub fn new(storage: Option<ArtifactStorage>, layered: bool) -> Result<Self> {
         let writer = if let Some(storage) = storage {
             Box::new(ArtifactFileWriter(ArtifactWriter::new(storage)?)) as Box<dyn RafsIoWrite>
@@ -961,6 +979,7 @@ impl BootstrapContext {
         })
     }
 
+    /// Align the write position.
     pub fn align_offset(&mut self, align_size: u64) {
         if self.offset % align_size > 0 {
             self.offset = div_round_up(self.offset, align_size) * align_size;
@@ -971,7 +990,7 @@ impl BootstrapContext {
     // Try to find an used block with no less than `size` space left.
     // If found it, return the offset where we can store data.
     // If not, return 0.
-    pub fn allocate_available_block(&mut self, size: u64) -> u64 {
+    pub(crate) fn allocate_available_block(&mut self, size: u64) -> u64 {
         if size >= EROFS_BLOCK_SIZE {
             return 0;
         }
@@ -992,7 +1011,7 @@ impl BootstrapContext {
     }
 
     // Append the block that `offset` belongs to corresponding deque.
-    pub fn append_available_block(&mut self, offset: u64) {
+    pub(crate) fn append_available_block(&mut self, offset: u64) {
         if offset % EROFS_BLOCK_SIZE != 0 {
             let avail = EROFS_BLOCK_SIZE - offset % EROFS_BLOCK_SIZE;
             let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
@@ -1001,14 +1020,14 @@ impl BootstrapContext {
     }
 }
 
-/// BootstrapManager is used to hold the parent bootstrap reader and create
-/// new bootstrap context.
+/// BootstrapManager is used to hold the parent bootstrap reader and create new bootstrap context.
 pub struct BootstrapManager {
-    pub f_parent_path: Option<PathBuf>,
-    pub bootstrap_storage: Option<ArtifactStorage>,
+    pub(crate) f_parent_path: Option<PathBuf>,
+    pub(crate) bootstrap_storage: Option<ArtifactStorage>,
 }
 
 impl BootstrapManager {
+    /// Create a new instance of [BootstrapManager]
     pub fn new(bootstrap_storage: Option<ArtifactStorage>, f_parent_path: Option<String>) -> Self {
         Self {
             f_parent_path: f_parent_path.map(PathBuf::from),
@@ -1016,6 +1035,7 @@ impl BootstrapManager {
         }
     }
 
+    /// Create a new instance of [BootstrapContext]
     pub fn create_ctx(&self) -> Result<BootstrapContext> {
         BootstrapContext::new(self.bootstrap_storage.clone(), self.f_parent_path.is_some())
     }
@@ -1195,6 +1215,7 @@ impl fmt::Display for BuildOutput {
 }
 
 impl BuildOutput {
+    /// Create a new instance of [BuildOutput].
     pub fn new(
         blob_mgr: &BlobManager,
         bootstrap_storage: &Option<ArtifactStorage>,

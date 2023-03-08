@@ -431,7 +431,7 @@ RAFS Blob Size:         {rafs_size}
         self.rafs_meta.walk_directory::<PathBuf>(
             self.rafs_meta.superblock.root_ino(),
             None,
-            &mut |inode: &dyn RafsInodeExt, _path: &Path| -> anyhow::Result<()> {
+            &mut |inode: Arc<dyn RafsInodeExt>, _path: &Path| -> anyhow::Result<()> {
                 // only regular file has data chunks
                 if !inode.is_reg() {
                     return Ok(());

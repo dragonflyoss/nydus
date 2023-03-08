@@ -7,23 +7,25 @@ use std::io::Write;
 use std::slice;
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{toc, BlobMetaChunkArray};
 use nydus_utils::compress;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use sha2::digest::Digest;
 
-use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType};
-use super::feature::Feature;
 use super::layout::BlobLayout;
 use super::node::Node;
+use crate::builder::{
+    ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType, Feature,
+};
+use crate::metadata::RAFS_MAX_CHUNK_SIZE;
 
-pub struct Blob {}
+/// Generator for RAFS data blob.
+pub(crate) struct Blob {}
 
 impl Blob {
     /// Dump blob file and generate chunks
-    pub fn dump(
+    pub(crate) fn dump(
         ctx: &BuildContext,
         nodes: &mut [Node],
         blob_mgr: &mut BlobManager,
@@ -201,7 +203,7 @@ impl Blob {
             )?;
         }
 
-        // Generate ToC entry for `blob.meta`.
+        // Generate ToC entry for `blob.meta` and write chunk digest array.
         if ctx.features.is_enabled(Feature::BlobToc) {
             let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
             let ci_data = if ctx.blob_features.contains(BlobFeatures::ZRAN) {

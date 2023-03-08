@@ -21,15 +21,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use tar::{Archive, Entry, EntryType, Header};
 
-use nydus_rafs::metadata::inode::InodeWrapper;
-use nydus_rafs::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
-use nydus_rafs::metadata::layout::RafsXAttrs;
-use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::ZranContextGenerator;
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
@@ -37,15 +33,20 @@ use nydus_utils::compact::makedev;
 use nydus_utils::compress::zlib_random::{ZranReader, ZRAN_READER_BUF_SIZE};
 use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
-use nydus_utils::{div_round_up, BufReaderInfo, ByteSize};
+use nydus_utils::{div_round_up, root_tracer, timing_tracer, BufReaderInfo, ByteSize};
 
-use crate::builder::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
-use crate::core::blob::Blob;
-use crate::core::context::{
+use super::core::blob::Blob;
+use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
-use crate::core::node::{Node, Overlay};
-use crate::core::tree::Tree;
+use super::core::node::{Node, NodeInfo};
+use super::core::overlay::Overlay;
+use super::core::tree::Tree;
+use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
+use crate::metadata::inode::InodeWrapper;
+use crate::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
+use crate::metadata::layout::RafsXAttrs;
+use crate::metadata::{Inode, RafsVersion};
 
 enum TarReader {
     File(File),
@@ -343,28 +344,31 @@ impl<'a> TarballTreeBuilder<'a> {
         let source = PathBuf::from("/");
         let target = Node::generate_target(path.as_ref(), &source);
         let target_vec = Node::generate_target_vec(&target);
-        let mut node = Node {
-            index: 0,
+        let info = NodeInfo {
+            ctime: 0,
+            explicit_uidgid: self.ctx.explicit_uidgid,
             src_ino: ino,
             src_dev: u64::MAX,
             rdev: rdev as u64,
-            overlay: Overlay::UpperAddition,
-            explicit_uidgid: self.ctx.explicit_uidgid,
             path: path.as_ref().to_path_buf(),
             source,
             target,
             target_vec,
-            inode,
-            chunks: Vec::new(),
             symlink,
             xattrs,
+            v6_force_extended_inode: false,
+        };
+        let mut node = Node {
+            info: Arc::new(info),
+            index: 0,
+            overlay: Overlay::UpperAddition,
+            inode,
+            chunks: Vec::new(),
             layer_idx: self.layer_idx,
-            ctime: 0,
             v6_offset: 0,
             v6_dirents: Vec::<(u64, OsString, u32)>::new(),
             v6_datalayout: 0,
             v6_compact_inode: false,
-            v6_force_extended_inode: false,
             v6_dirents_offset: 0,
         };
 
@@ -377,7 +381,7 @@ impl<'a> TarballTreeBuilder<'a> {
             node.inode.set_size(n.inode.size());
             node.inode.set_child_count(n.inode.child_count());
             node.chunks = n.chunks.clone();
-            node.xattrs = n.xattrs.clone();
+            node.set_xattr(n.info.xattrs.clone());
         } else {
             node.dump_node_data_with_reader(
                 self.ctx,
@@ -479,28 +483,31 @@ impl<'a> TarballTreeBuilder<'a> {
         let source = PathBuf::from("/");
         let target = Node::generate_target(path, &source);
         let target_vec = Node::generate_target_vec(&target);
-        let node = Node {
-            index: 0,
+        let info = NodeInfo {
+            ctime: 0,
+            explicit_uidgid: self.ctx.explicit_uidgid,
             src_ino: ino,
             src_dev: u64::MAX,
             rdev: u64::MAX,
-            overlay: Overlay::UpperAddition,
-            explicit_uidgid: self.ctx.explicit_uidgid,
             path: path.to_path_buf(),
             source,
             target,
             target_vec,
-            inode,
-            chunks: Vec::new(),
             symlink: None,
             xattrs: RafsXAttrs::new(),
+            v6_force_extended_inode: false,
+        };
+        let node = Node {
+            info: Arc::new(info),
+            index: 0,
+            overlay: Overlay::UpperAddition,
+            inode,
+            chunks: Vec::new(),
             layer_idx: self.layer_idx,
-            ctime: 0,
             v6_offset: 0,
             v6_dirents: Vec::<(u64, OsString, u32)>::new(),
             v6_datalayout: 0,
             v6_compact_inode: false,
-            v6_force_extended_inode: false,
             v6_dirents_offset: 0,
         };
 

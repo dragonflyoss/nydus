@@ -12,7 +12,6 @@ use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::OpenOptions;
 use std::io::{Error, ErrorKind, Result};
-use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -67,6 +66,7 @@ pub const DOTDOT: &str = "..";
 
 /// Type for RAFS filesystem inode number.
 pub type Inode = u64;
+pub type ArcRafsInodeExt = Arc<dyn RafsInodeExt>;
 
 #[derive(Debug, Clone)]
 pub struct RafsBlobExtraInfo {
@@ -1020,32 +1020,32 @@ impl RafsSuper {
         &self,
         ino: Inode,
         parent: Option<P>,
-        cb: &mut dyn FnMut(&dyn RafsInodeExt, &Path) -> anyhow::Result<()>,
+        cb: &mut dyn FnMut(ArcRafsInodeExt, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let inode = self.get_extended_inode(ino, false)?;
         if !inode.is_dir() {
             bail!("inode {} is not a directory", ino);
         }
-        self.do_walk_directory(inode.deref(), parent, cb)
+        self.do_walk_directory(inode, parent, cb)
     }
 
     #[allow(clippy::only_used_in_recursion)]
     fn do_walk_directory<P: AsRef<Path>>(
         &self,
-        inode: &dyn RafsInodeExt,
+        inode: Arc<dyn RafsInodeExt>,
         parent: Option<P>,
-        cb: &mut dyn FnMut(&dyn RafsInodeExt, &Path) -> anyhow::Result<()>,
+        cb: &mut dyn FnMut(ArcRafsInodeExt, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let path = if let Some(parent) = parent {
             parent.as_ref().join(inode.name())
         } else {
             PathBuf::from("/")
         };
-        cb(inode, &path)?;
+        cb(inode.clone(), &path)?;
         if inode.is_dir() {
             for idx in 0..inode.get_child_count() {
                 let child = inode.get_child_by_index(idx)?;
-                self.do_walk_directory(child.deref(), Some(&path), cb)?;
+                self.do_walk_directory(child, Some(&path), cb)?;
             }
         }
         Ok(())
