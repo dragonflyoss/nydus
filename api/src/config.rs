@@ -1045,7 +1045,7 @@ impl BlobCacheEntry {
         if self.blob_type != BLOB_CACHE_TYPE_META_BLOB
             && self.blob_type != BLOB_CACHE_TYPE_DATA_BLOB
         {
-            warn!("invalid blob type {} for blob cache entry", self.blob_type);
+            log::warn!("invalid blob type {} for blob cache entry", self.blob_type);
             return false;
         }
         if let Some(config) = self.blob_config.as_ref() {
