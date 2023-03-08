@@ -718,21 +718,11 @@ impl RafsSuper {
             // Old converters extracts bootstraps from data blobs with inlined bootstrap
             // use blob digest as the bootstrap file name. The last blob in the blob table from
             // the bootstrap has wrong blod id, so we need to fix it.
-            let mut fixed = false;
             let blobs = rs.superblock.get_blob_infos();
             for blob in blobs.iter() {
                 // Fix blob id for new images with old converters.
                 if blob.has_feature(BlobFeatures::INLINED_FS_META) {
                     blob.set_blob_id_from_meta_path(path.as_ref())?;
-                    fixed = true;
-                }
-            }
-            if !fixed && !blob_accessible && !blobs.is_empty() {
-                // Fix blob id for old images with old converters.
-                let last = blobs.len() - 1;
-                let blob = &blobs[last];
-                if !blob.has_feature(BlobFeatures::CAP_TAR_TOC) {
-                    rs.set_blob_id_from_meta_path(path.as_ref())?;
                 }
             }
         }
