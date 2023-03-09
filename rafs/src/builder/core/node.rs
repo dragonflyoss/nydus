@@ -235,15 +235,19 @@ impl Node {
             return Ok(0);
         } else if self.is_symlink() {
             if let Some(symlink) = self.info.symlink.as_ref() {
-                self.inode
-                    .set_digest(RafsDigest::from_buf(symlink.as_bytes(), ctx.digester));
+                if self.inode.is_v5() {
+                    self.inode
+                        .set_digest(RafsDigest::from_buf(symlink.as_bytes(), ctx.digester));
+                }
                 return Ok(0);
             } else {
                 return Err(Error::msg("inode's symblink is invalid."));
             }
         } else if self.is_special() {
-            self.inode
-                .set_digest(RafsDigest::hasher(ctx.digester).digest_finalize());
+            if self.inode.is_v5() {
+                self.inode
+                    .set_digest(RafsDigest::hasher(ctx.digester).digest_finalize());
+            }
             return Ok(0);
         }
 
@@ -581,7 +585,7 @@ impl Node {
         // calculate it later by ourself.
         if !self.is_dir() {
             self.inode.set_size(meta.st_size());
-            self.set_inode_blocks();
+            self.v5_set_inode_blocks();
         }
         self.info = Arc::new(info);
 
@@ -734,23 +738,6 @@ impl Node {
     /// Get the absolute path of the inode within the RAFS filesystem.
     pub fn target(&self) -> &PathBuf {
         &self.info.target
-    }
-
-    /// Calculate and set `i_blocks` for inode.
-    ///
-    /// In order to support repeatable build, we can't reuse `i_blocks` from source filesystems,
-    /// so let's calculate it by ourself for stable `i_block`.
-    ///
-    /// Normal filesystem includes the space occupied by Xattr into the directory size,
-    /// let's follow the normal behavior.
-    pub fn set_inode_blocks(&mut self) {
-        // Set inode blocks for RAFS v5 inode, v6 will calculate it at runtime.
-        if let InodeWrapper::V5(_) = self.inode {
-            self.inode.set_blocks(div_round_up(
-                self.inode.size() + self.info.xattrs.aligned_size_v5() as u64,
-                512,
-            ));
-        }
     }
 
     /// Set symlink target for the node.

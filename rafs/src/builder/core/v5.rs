@@ -8,7 +8,7 @@ use std::mem::size_of;
 
 use anyhow::{bail, Context, Result};
 use nydus_utils::digest::{DigestHasher, RafsDigest};
-use nydus_utils::{root_tracer, timing_tracer, try_round_up_4k};
+use nydus_utils::{div_round_up, root_tracer, timing_tracer, try_round_up_4k};
 
 use super::bootstrap::STARGZ_DEFAULT_BLOCK_SIZE;
 use super::node::Node;
@@ -102,7 +102,24 @@ impl Node {
             // Safe to unwrap() because we have u32 for child count.
             self.inode.set_size(try_round_up_4k(d_size).unwrap());
         }
-        self.set_inode_blocks();
+        self.v5_set_inode_blocks();
+    }
+
+    /// Calculate and set `i_blocks` for inode.
+    ///
+    /// In order to support repeatable build, we can't reuse `i_blocks` from source filesystems,
+    /// so let's calculate it by ourself for stable `i_block`.
+    ///
+    /// Normal filesystem includes the space occupied by Xattr into the directory size,
+    /// let's follow the normal behavior.
+    pub fn v5_set_inode_blocks(&mut self) {
+        // Set inode blocks for RAFS v5 inode, v6 will calculate it at runtime.
+        if let InodeWrapper::V5(_) = self.inode {
+            self.inode.set_blocks(div_round_up(
+                self.inode.size() + self.info.xattrs.aligned_size_v5() as u64,
+                512,
+            ));
+        }
     }
 }
 

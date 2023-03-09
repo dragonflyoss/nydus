@@ -399,8 +399,8 @@ impl<'a> TarballTreeBuilder<'a> {
         }
 
         // Update inode.i_blocks for RAFS v5.
-        if !entry_type.is_dir() {
-            node.set_inode_blocks();
+        if self.ctx.fs_version == RafsVersion::V5 && !entry_type.is_dir() {
+            node.v5_set_inode_blocks();
         }
 
         Ok(node)
@@ -466,10 +466,24 @@ impl<'a> TarballTreeBuilder<'a> {
 
     fn make_lost_dirs<P: AsRef<Path>>(&mut self, path: P, nodes: &mut Vec<Node>) -> Result<()> {
         if let Some(parent_path) = path.as_ref().parent() {
-            if !self.path_inode_map.contains_key(parent_path) {
-                self.make_lost_dirs(parent_path, nodes)?;
-                let node = self.create_directory(parent_path, nodes.len())?;
-                nodes.push(node);
+            match self.path_inode_map.get(parent_path) {
+                Some((i, idx)) => {
+                    if !nodes[*idx].is_dir() {
+                        bail!(
+                            "tarball: existing inode is not a directory {} {} {}",
+                            i,
+                            nodes.len(),
+                            nodes[*idx].is_dir()
+                        );
+                    }
+                }
+                None => {
+                    if !self.path_inode_map.contains_key(parent_path) {
+                        self.make_lost_dirs(parent_path, nodes)?;
+                        let node = self.create_directory(parent_path, nodes.len())?;
+                        nodes.push(node);
+                    }
+                }
             }
         }
 
