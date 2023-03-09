@@ -38,7 +38,7 @@ use crate::builder::{
 };
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::layout::v5::RafsV5BlobTable;
-use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE};
+use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE_4096, EROFS_INODE_SLOT_SIZE};
 use crate::metadata::layout::RafsBlobTable;
 use crate::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
 use crate::metadata::{RafsSuperFlags, RafsVersion};
@@ -970,11 +970,11 @@ impl BootstrapContext {
             layered,
             inode_map: HashMap::new(),
             nodes: Vec::new(),
-            offset: EROFS_BLOCK_SIZE,
+            offset: EROFS_BLOCK_SIZE_4096,
             writer,
             v6_available_blocks: vec![
                 VecDeque::new();
-                EROFS_BLOCK_SIZE as usize / EROFS_INODE_SLOT_SIZE
+                EROFS_BLOCK_SIZE_4096 as usize / EROFS_INODE_SLOT_SIZE
             ],
         })
     }
@@ -991,17 +991,17 @@ impl BootstrapContext {
     // If found it, return the offset where we can store data.
     // If not, return 0.
     pub(crate) fn allocate_available_block(&mut self, size: u64) -> u64 {
-        if size >= EROFS_BLOCK_SIZE {
+        if size >= EROFS_BLOCK_SIZE_4096 {
             return 0;
         }
 
         let min_idx = div_round_up(size, EROFS_INODE_SLOT_SIZE as u64) as usize;
-        let max_idx = div_round_up(EROFS_BLOCK_SIZE, EROFS_INODE_SLOT_SIZE as u64) as usize;
+        let max_idx = div_round_up(EROFS_BLOCK_SIZE_4096, EROFS_INODE_SLOT_SIZE as u64) as usize;
 
         for idx in min_idx..max_idx {
             let blocks = &mut self.v6_available_blocks[idx];
             if let Some(mut offset) = blocks.pop_front() {
-                offset += EROFS_BLOCK_SIZE - (idx * EROFS_INODE_SLOT_SIZE) as u64;
+                offset += EROFS_BLOCK_SIZE_4096 - (idx * EROFS_INODE_SLOT_SIZE) as u64;
                 self.append_available_block(offset + (min_idx * EROFS_INODE_SLOT_SIZE) as u64);
                 return offset;
             }
@@ -1012,8 +1012,8 @@ impl BootstrapContext {
 
     // Append the block that `offset` belongs to corresponding deque.
     pub(crate) fn append_available_block(&mut self, offset: u64) {
-        if offset % EROFS_BLOCK_SIZE != 0 {
-            let avail = EROFS_BLOCK_SIZE - offset % EROFS_BLOCK_SIZE;
+        if offset % EROFS_BLOCK_SIZE_4096 != 0 {
+            let avail = EROFS_BLOCK_SIZE_4096 - offset % EROFS_BLOCK_SIZE_4096;
             let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
             self.v6_available_blocks[idx].push_back(round_down_4k(offset));
         }

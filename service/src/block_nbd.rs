@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 use bytes::{Buf, BufMut};
 use mio::Waker;
 use nydus_api::{BlobCacheEntry, BuildTimeInfo};
-use nydus_rafs::metadata::layout::v6::{EROFS_BLOCK_BITS, EROFS_BLOCK_SIZE};
+use nydus_rafs::metadata::layout::v6::{EROFS_BLOCK_BITS_12, EROFS_BLOCK_SIZE_4096};
 use nydus_storage::utils::alloc_buf;
 use tokio::sync::broadcast::{channel, Sender};
 use tokio_uring::buf::IoBuf;
@@ -85,7 +85,11 @@ impl NbdService {
                 error!("block_nbd: failed to open NBD device {}", nbd_path);
                 e
             })?;
-        nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_BLOCK_SIZE, EROFS_BLOCK_SIZE)?;
+        nbd_ioctl(
+            nbd_dev.as_raw_fd(),
+            NBD_SET_BLOCK_SIZE,
+            EROFS_BLOCK_SIZE_4096,
+        )?;
         nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_BLOCKS, device.blocks() as u64)?;
         nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_TIMEOUT, 60)?;
         nbd_ioctl(nbd_dev.as_raw_fd(), NBD_CLEAR_SOCK, 0)?;
@@ -225,8 +229,8 @@ impl NbdWorker {
         let mut code = NBD_OK;
         let mut data_buf = alloc_buf(len as usize);
         if magic != NBD_REQUEST_MAGIC
-            || pos % EROFS_BLOCK_SIZE != 0
-            || len as u64 % EROFS_BLOCK_SIZE != 0
+            || pos % EROFS_BLOCK_SIZE_4096 != 0
+            || len as u64 % EROFS_BLOCK_SIZE_4096 != 0
         {
             warn!(
                 "block_nbd: invalid request magic 0x{:x}, type {}, pos 0x{:x}, len 0x{:x}",
@@ -234,8 +238,8 @@ impl NbdWorker {
             );
             code = NBD_EINVAL;
         } else if ty == NBD_CMD_READ {
-            let start = (pos >> EROFS_BLOCK_BITS) as u32;
-            let count = len >> EROFS_BLOCK_BITS;
+            let start = (pos >> EROFS_BLOCK_BITS_12) as u32;
+            let count = len >> EROFS_BLOCK_BITS_12;
             let (res, buf) = device.async_read(start, count, data_buf).await;
             data_buf = buf;
             match res {

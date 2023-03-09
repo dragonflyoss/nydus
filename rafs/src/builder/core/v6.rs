@@ -22,7 +22,7 @@ use crate::metadata::inode::new_v6_inode;
 use crate::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6Dirent, RafsV6InodeChunkAddr,
     RafsV6InodeChunkHeader, RafsV6OndiskInode, RafsV6SuperBlock, RafsV6SuperBlockExt,
-    EROFS_BLOCK_SIZE, EROFS_DEVTABLE_OFFSET, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+    EROFS_BLOCK_SIZE_4096, EROFS_DEVTABLE_OFFSET, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
     EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_SUPER_BLOCK_SIZE, EROFS_SUPER_OFFSET,
 };
 use crate::metadata::RafsStore;
@@ -162,8 +162,8 @@ impl Node {
         for child in tree.children.iter() {
             let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
             // erofs disk format requires dirent to be aligned with 4096.
-            if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
-                d_size = div_round_up(d_size as u64, EROFS_BLOCK_SIZE) * EROFS_BLOCK_SIZE;
+            if (d_size % EROFS_BLOCK_SIZE_4096) + len as u64 > EROFS_BLOCK_SIZE_4096 {
+                d_size = div_round_up(d_size as u64, EROFS_BLOCK_SIZE_4096) * EROFS_BLOCK_SIZE_4096;
             }
             d_size += len as u64;
         }
@@ -217,7 +217,7 @@ impl Node {
         //
         //
         let inode_size = self.v6_size_with_xattr();
-        let tail: u64 = d_size % EROFS_BLOCK_SIZE;
+        let tail: u64 = d_size % EROFS_BLOCK_SIZE_4096;
 
         // We use a simple inline strategy here:
         // If the inode size with xattr + tail data size <= EROFS_BLOCK_SIZE,
@@ -229,7 +229,7 @@ impl Node {
         // since it contain only single blocks with some unused space, the available space can only
         // be smaller than EROFS_BLOCK_SIZE, therefore we can't use our used blocks to store the
         // inode plus the tail data bigger than EROFS_BLOCK_SIZE.
-        let should_inline = tail != 0 && (inode_size + tail) <= EROFS_BLOCK_SIZE;
+        let should_inline = tail != 0 && (inode_size + tail) <= EROFS_BLOCK_SIZE_4096;
 
         // If should inline, we first try to allocate space for the inode together with tail data
         // using used blocks.
@@ -240,10 +240,11 @@ impl Node {
         self.v6_datalayout = if should_inline {
             self.v6_offset = bootstrap_ctx.allocate_available_block(inode_size + tail);
             if self.v6_offset == 0 {
-                let available = EROFS_BLOCK_SIZE - bootstrap_ctx.offset % EROFS_BLOCK_SIZE;
+                let available =
+                    EROFS_BLOCK_SIZE_4096 - bootstrap_ctx.offset % EROFS_BLOCK_SIZE_4096;
                 if available < inode_size + tail {
                     bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-                    bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
+                    bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE_4096);
                 }
 
                 self.v6_offset = bootstrap_ctx.offset;
@@ -252,7 +253,7 @@ impl Node {
 
             if d_size != tail {
                 bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-                bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
+                bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE_4096);
             }
             self.v6_dirents_offset = bootstrap_ctx.offset;
             bootstrap_ctx.offset += round_down_4k(d_size);
@@ -269,10 +270,10 @@ impl Node {
             }
 
             bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
+            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE_4096);
             self.v6_dirents_offset = bootstrap_ctx.offset;
             bootstrap_ctx.offset += d_size;
-            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE);
+            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE_4096);
 
             EROFS_INODE_FLAT_PLAIN
         };
@@ -336,7 +337,7 @@ impl Node {
         for (offset, name, file_type) in self.v6_dirents.iter() {
             let len = name.len() + size_of::<RafsV6Dirent>();
             // write to bootstrap when it will exceed EROFS_BLOCK_SIZE
-            if used + len as u64 > EROFS_BLOCK_SIZE {
+            if used + len as u64 > EROFS_BLOCK_SIZE_4096 {
                 for (entry, name) in dirents.iter_mut() {
                     trace!("{:?} nameoff {}", name, nameoff);
                     entry.set_name_offset(nameoff as u16);
@@ -363,7 +364,7 @@ impl Node {
                 nameoff = 0;
                 used = 0;
                 // track where we're going to write.
-                dirent_off += EROFS_BLOCK_SIZE;
+                dirent_off += EROFS_BLOCK_SIZE_4096;
             }
 
             trace!(
@@ -527,7 +528,7 @@ impl Node {
 
 impl BuildContext {
     pub fn v6_block_size(&self) -> u64 {
-        EROFS_BLOCK_SIZE
+        EROFS_BLOCK_SIZE_4096
     }
 
     pub fn v6_block_addr(&self, offset: u64) -> Result<u32> {
@@ -609,7 +610,7 @@ impl Bootstrap {
         let blob_table_size = blob_table.size() as u64;
         let blob_table_offset = align_offset(
             (EROFS_DEVTABLE_OFFSET as u64) + devtable_len as u64,
-            EROFS_BLOCK_SIZE as u64,
+            EROFS_BLOCK_SIZE_4096 as u64,
         );
         let blob_table_entries = blobs.len();
         assert!(blob_table_entries < u8::MAX as usize);
@@ -639,11 +640,11 @@ impl Bootstrap {
         // When using nid 0 as root nid,
         // the root directory will not be shown by glibc's getdents/readdir.
         // Because in some OS, ino == 0 represents corresponding file is deleted.
-        let orig_meta_addr = bootstrap_ctx.nodes[0].v6_offset - EROFS_BLOCK_SIZE;
+        let orig_meta_addr = bootstrap_ctx.nodes[0].v6_offset - EROFS_BLOCK_SIZE_4096;
         let meta_addr = if blob_table_size > 0 {
             align_offset(
                 blob_table_offset + blob_table_size + prefetch_table_size as u64,
-                EROFS_BLOCK_SIZE as u64,
+                EROFS_BLOCK_SIZE_4096 as u64,
             )
         } else {
             orig_meta_addr
@@ -733,7 +734,7 @@ impl Bootstrap {
             .writer
             .seek_to_end()
             .context("failed to seek to bootstrap's end for chunk table")?;
-        assert_eq!(pos % EROFS_BLOCK_SIZE, 0);
+        assert_eq!(pos % EROFS_BLOCK_SIZE_4096, 0);
         let mut devtable: Vec<RafsV6Device> = Vec::new();
         let mut block_count = 0u32;
         let mut inlined_chunk_digest = true;
@@ -834,7 +835,7 @@ impl Bootstrap {
             .writer
             .seek_to_end()
             .context("failed to seek to bootstrap's end for chunk table")?;
-        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE_4096 as u64) - pos;
         bootstrap_ctx
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])

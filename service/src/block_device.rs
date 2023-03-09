@@ -16,7 +16,7 @@ use std::io::Result;
 use std::sync::Arc;
 
 use dbs_allocator::{Constraint, IntervalTree, NodeState, Range};
-use nydus_rafs::metadata::layout::v6::EROFS_BLOCK_BITS;
+use nydus_rafs::metadata::layout::v6::EROFS_BLOCK_BITS_12;
 use tokio_uring::buf::IoBufMut;
 
 use crate::blob_cache::{BlobCacheMgr, BlobConfig, DataBlob, MetaBlob};
@@ -108,7 +108,7 @@ impl BlockDevice {
                 ranges.update(&range, BlockRange::Hole);
             }
 
-            let blocks = blob_info.uncompressed_size() >> EROFS_BLOCK_BITS;
+            let blocks = blob_info.uncompressed_size() >> EROFS_BLOCK_BITS_12;
             if blocks > u32::MAX as u64
                 || blocks + extra_info.mapped_blkaddr as u64 > u32::MAX as u64
             {
@@ -163,7 +163,7 @@ impl BlockDevice {
         mut buf: T,
     ) -> (Result<usize>, T) {
         if start.checked_add(blocks).is_none()
-            || (blocks as u64) << EROFS_BLOCK_BITS > buf.bytes_total() as u64
+            || (blocks as u64) << EROFS_BLOCK_BITS_12 > buf.bytes_total() as u64
         {
             return (
                 Err(einval!("block_device: invalid parameters to read()")),
@@ -171,7 +171,7 @@ impl BlockDevice {
             );
         }
 
-        let total_size = (blocks as usize) << EROFS_BLOCK_BITS;
+        let total_size = (blocks as usize) << EROFS_BLOCK_BITS_12;
         let mut pos = 0;
         while blocks > 0 {
             let (range, node) = match self.ranges.get_superset(&Range::new_point(start)) {
@@ -189,7 +189,7 @@ impl BlockDevice {
 
             if let NodeState::Valued(r) = node {
                 let count = min(range.max as u32 - start + 1, blocks);
-                let sz = (count as usize) << EROFS_BLOCK_BITS as usize;
+                let sz = (count as usize) << EROFS_BLOCK_BITS_12 as usize;
                 let mut s = buf.slice(pos..pos + sz);
                 let (res, s) = match r {
                     BlockRange::Hole => {
@@ -197,11 +197,11 @@ impl BlockDevice {
                         (Ok(sz), s)
                     }
                     BlockRange::MetaBlob(m) => {
-                        m.async_read((start as u64) << EROFS_BLOCK_BITS, s).await
+                        m.async_read((start as u64) << EROFS_BLOCK_BITS_12, s).await
                     }
                     BlockRange::DataBlob(d) => {
                         let offset = start as u64 - range.min;
-                        d.async_read(offset << EROFS_BLOCK_BITS, s).await
+                        d.async_read(offset << EROFS_BLOCK_BITS_12, s).await
                     }
                 };
 
