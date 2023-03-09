@@ -32,6 +32,9 @@ pub const EROFS_INODE_SLOT_SIZE: usize = 1 << EROFS_INODE_SLOT_BITS;
 pub const EROFS_BLOCK_BITS_12: u8 = 12;
 /// EROFS logical block size.
 pub const EROFS_BLOCK_SIZE_4096: u64 = 1u64 << EROFS_BLOCK_BITS_12;
+pub const EROFS_BLOCK_BITS_9: u8 = 9;
+/// EROFS logical block size.
+pub const EROFS_BLOCK_SIZE_512: u64 = 1u64 << EROFS_BLOCK_BITS_9;
 
 /// Offset of EROFS super block.
 pub const EROFS_SUPER_OFFSET: u16 = 1024;
@@ -97,7 +100,7 @@ pub struct RafsV6SuperBlock {
     s_checksum: u32,
     /// Compatible filesystem features.
     s_feature_compat: u32,
-    /// Bits of block size. Only 12 is supported, thus block_size == PAGE_SIZE(4096).
+    /// Bits of block size, 4K or 512 bytes.
     s_blkszbits: u8,
     /// Number of extended superblock slots, ignored by Rafs v6.
     /// `superblock size = 128(size of RafsV6SuperBlock) + s_extslots * 16`.
@@ -185,7 +188,7 @@ impl RafsV6SuperBlock {
             )));
         }
 
-        if self.s_blkszbits != EROFS_BLOCK_BITS_12 {
+        if self.s_blkszbits != EROFS_BLOCK_BITS_12 && self.s_blkszbits != EROFS_BLOCK_BITS_9 {
             return Err(einval!(format!(
                 "invalid block size bits {} in Rafsv6 superblock",
                 self.s_blkszbits
@@ -303,6 +306,12 @@ impl RafsV6SuperBlock {
     /// Get device table offset.
     pub fn device_table_offset(&self) -> u64 {
         u16::from_le(self.s_devt_slotoff) as u64 * size_of::<RafsV6Device>() as u64
+    }
+
+    /// Set bits of block size.
+    pub fn set_block_bits(&mut self, block_bits: u8) {
+        assert!(block_bits == EROFS_BLOCK_BITS_12 || block_bits == EROFS_BLOCK_BITS_9);
+        self.s_blkszbits = block_bits;
     }
 
     impl_pub_getter_setter!(magic, set_magic, s_magic, u32);

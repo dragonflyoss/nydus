@@ -1369,3 +1369,64 @@ impl BlobV5ChunkInfo for DirectChunkInfoV6 {
     impl_chunkinfo_getter!(file_offset, u64);
     impl_chunkinfo_getter!(flags, BlobChunkFlags);
 }
+
+/// Rafs v6 fake ChunkInfo for Tarfs.
+pub(crate) struct TarfsChunkInfo {
+    blob_index: u32,
+    chunk_index: u32,
+    offset: u64,
+    size: u32,
+}
+
+impl TarfsChunkInfo {
+    /// Create a new instance of [TarfsChunkInfo].
+    #[allow(unused)]
+    pub fn new(blob_index: u32, chunk_index: u32, offset: u64, size: u32) -> Self {
+        TarfsChunkInfo {
+            blob_index,
+            chunk_index,
+            offset,
+            size,
+        }
+    }
+}
+
+const TARFS_DIGEST: RafsDigest = RafsDigest { data: [0u8; 32] };
+
+impl BlobChunkInfo for TarfsChunkInfo {
+    fn chunk_id(&self) -> &RafsDigest {
+        &TARFS_DIGEST
+    }
+
+    fn id(&self) -> u32 {
+        self.chunk_index
+    }
+
+    fn blob_index(&self) -> u32 {
+        self.blob_index
+    }
+
+    fn compressed_offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn compressed_size(&self) -> u32 {
+        self.size
+    }
+
+    fn uncompressed_offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn uncompressed_size(&self) -> u32 {
+        self.size
+    }
+
+    fn is_compressed(&self) -> bool {
+        false
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
