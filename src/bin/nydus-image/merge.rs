@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,7 @@ impl Merger {
 
     pub fn merge(
         ctx: &mut BuildContext,
+        parent_bootstrap_path: Option<&str>,
         sources: Vec<PathBuf>,
         target: PathBuf,
         chunk_dict: Option<PathBuf>,
@@ -72,6 +73,22 @@ impl Merger {
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new();
         let mut flags: Option<Flags> = None;
+
+        // Load parent bootstrap
+        let mut blob_idx_map = HashMap::new();
+        let mut parent_layers = 0;
+        if let Some(parent_bootstrap_path) = &parent_bootstrap_path {
+            let rs = RafsSuper::load_from_metadata(parent_bootstrap_path, RafsMode::Direct, true)
+                .context(format!("load parent bootstrap {:?}", parent_bootstrap_path))?;
+            tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
+            let blobs = rs.superblock.get_blob_infos();
+            for blob in &blobs {
+                let blob_ctx = BlobContext::from(ctx, blob, ChunkSource::Parent);
+                blob_idx_map.insert(blob_ctx.blob_id.clone(), blob_mgr.len());
+                blob_mgr.add(blob_ctx);
+            }
+            parent_layers = blobs.len();
+        }
 
         // Get the blobs come from chunk dict bootstrap.
         let mut chunk_dict_blobs = HashSet::new();
@@ -117,7 +134,6 @@ impl Merger {
 
             let parent_blobs = rs.superblock.get_blob_infos();
             let blob_hash = Self::get_blob_hash(bootstrap_path)?;
-            let mut blob_idx_map = Vec::new();
             let mut parent_blob_added = false;
 
             for blob in &parent_blobs {
@@ -135,8 +151,10 @@ impl Merger {
                     chunk_size = Some(blob_ctx.chunk_size);
                     parent_blob_added = true;
                 }
-                blob_idx_map.push(blob_mgr.len() as u32);
-                blob_mgr.add(blob_ctx);
+                if !blob_idx_map.contains_key(blob.blob_id()) {
+                    blob_idx_map.insert(blob.blob_id().to_string(), blob_mgr.len());
+                    blob_mgr.add(blob_ctx);
+                }
             }
 
             if let Some(tree) = &mut tree {
@@ -153,8 +171,11 @@ impl Merger {
                                 ))?;
                         for chunk in &mut node.chunks {
                             let origin_blob_index = chunk.inner.blob_index() as usize;
-                            // Set the blob index of chunk to real index in blob table of final bootstrap.
-                            chunk.inner.set_blob_index(blob_idx_map[origin_blob_index]);
+                            let blob_ctx = parent_blobs[origin_blob_index].as_ref();
+                            if let Some(blob_index) = blob_idx_map.get(blob_ctx.blob_id()) {
+                                // Set the blob index of chunk to real index in blob table of final bootstrap.
+                                chunk.inner.set_blob_index(*blob_index as u32);
+                            }
                         }
                         // Set node's layer index to distinguish same inode number (from bootstrap)
                         // between different layers.
@@ -162,7 +183,7 @@ impl Merger {
                             "too many layers {}, limited to {}",
                             layer_idx,
                             u16::MAX
-                        ))?;
+                        ))? + parent_layers as u16;
                         node.overlay = Overlay::UpperAddition;
                         match node.whiteout_type(WhiteoutSpec::Oci) {
                             Some(_) => {
