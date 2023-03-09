@@ -66,7 +66,7 @@ impl Read for TarReader {
     }
 }
 
-pub(crate) struct TarballTreeBuilder<'a> {
+struct TarballTreeBuilder<'a> {
     ty: ConversionType,
     layer_idx: u16,
     ctx: &'a mut BuildContext,
@@ -100,7 +100,7 @@ impl<'a> TarballTreeBuilder<'a> {
         let file = OpenOptions::new()
             .read(true)
             .open(self.ctx.source_path.clone())
-            .with_context(|| "can not open source file for conversion")?;
+            .context("tarball: can not open source file for conversion")?;
 
         let reader = match self.ty {
             ConversionType::TarToRafs => TarReader::File(file),
@@ -156,12 +156,12 @@ impl<'a> TarballTreeBuilder<'a> {
         // Generate RAFS node for each tar entry, and optionally adding missing parents.
         let entries = tar
             .entries()
-            .with_context(|| "failed to read entries from tar")?;
+            .context("tarball: failed to read entries from tar")?;
         for entry in entries {
-            let mut entry = entry.with_context(|| "failed to read entry from tar")?;
+            let mut entry = entry.context("tarball: failed to read entry from tar")?;
             let path = entry
                 .path()
-                .with_context(|| "failed to to get path from tar entry")?;
+                .context("tarball: failed to to get path from tar entry")?;
             let path = PathBuf::from("/").join(path);
             let path = path.components().as_path();
             if !self.is_special_files(path) {
@@ -194,18 +194,24 @@ impl<'a> TarballTreeBuilder<'a> {
         let header = entry.header();
         let entry_type = header.entry_type();
         if entry_type.is_gnu_longname() {
-            return Err(anyhow!("unsupported gnu_longname from tar header"));
+            return Err(anyhow!("tarball: unsupported gnu_longname from tar header"));
         } else if entry_type.is_gnu_longlink() {
-            return Err(anyhow!("unsupported gnu_longlink from tar header"));
+            return Err(anyhow!("tarball: unsupported gnu_longlink from tar header"));
         } else if entry_type.is_pax_local_extensions() {
-            return Err(anyhow!("unsupported pax_local_extensions from tar header"));
+            return Err(anyhow!(
+                "tarball: unsupported pax_local_extensions from tar header"
+            ));
         } else if entry_type.is_pax_global_extensions() {
-            return Err(anyhow!("unsupported pax_global_extensions from tar header"));
+            return Err(anyhow!(
+                "tarball: unsupported pax_global_extensions from tar header"
+            ));
         } else if entry_type.is_contiguous() {
-            return Err(anyhow!("unsupported contiguous entry type from tar header"));
+            return Err(anyhow!(
+                "tarball: unsupported contiguous entry type from tar header"
+            ));
         } else if entry_type.is_gnu_sparse() {
             return Err(anyhow!(
-                "unsupported gnu sparse file extension from tar header"
+                "tarball: unsupported gnu sparse file extension from tar header"
             ));
         }
 
@@ -226,12 +232,12 @@ impl<'a> TarballTreeBuilder<'a> {
         {
             let major = header
                 .device_major()
-                .with_context(|| "failed to get device major from tar entry")?
-                .ok_or_else(|| anyhow!("failed to get major device from tar entry"))?;
+                .context("tarball: failed to get device major from tar entry")?
+                .ok_or_else(|| anyhow!("tarball: failed to get major device from tar entry"))?;
             let minor = header
                 .device_minor()
-                .with_context(|| "failed to get device major from tar entry")?
-                .ok_or_else(|| anyhow!("failed to get minor device from tar entry"))?;
+                .context("tarball: failed to get device major from tar entry")?
+                .ok_or_else(|| anyhow!("tarball: failed to get minor device from tar entry"))?;
             makedev(major as u64, minor as u64) as u32
         } else {
             u32::MAX
@@ -241,11 +247,11 @@ impl<'a> TarballTreeBuilder<'a> {
         let (symlink, symlink_size) = if entry_type.is_symlink() {
             let symlink_link_path = entry
                 .link_name()
-                .with_context(|| "failed to get target path for tar symlink entry")?
-                .ok_or_else(|| anyhow!("failed to get symlink target tor tar entry"))?;
+                .context("tarball: failed to get target path for tar symlink entry")?
+                .ok_or_else(|| anyhow!("tarball: failed to get symlink target tor tar entry"))?;
             let symlink_size = symlink_link_path.as_os_str().byte_size();
             if symlink_size > u16::MAX as usize {
-                bail!("symlink target from tar entry is too big");
+                bail!("tarball: symlink target from tar entry is too big");
             }
             file_size = symlink_size as u64;
             flags |= RafsV5InodeFlags::SYMLINK;
@@ -261,7 +267,7 @@ impl<'a> TarballTreeBuilder<'a> {
         if entry_type.is_file() {
             child_count = div_round_up(file_size, self.ctx.chunk_size as u64);
             if child_count > RAFS_MAX_CHUNKS_PER_BLOB as u64 {
-                bail!("file size 0x{:x} is too big", file_size);
+                bail!("tarball: file size 0x{:x} is too big", file_size);
             }
         }
 
@@ -271,8 +277,8 @@ impl<'a> TarballTreeBuilder<'a> {
         if entry_type.is_hard_link() {
             let link_path = entry
                 .link_name()
-                .with_context(|| "failed to get target path for tar symlink entry")?
-                .ok_or_else(|| anyhow!("failed to get symlink target tor tar entry"))?;
+                .context("tarball: failed to get target path for tar symlink entry")?
+                .ok_or_else(|| anyhow!("tarball: failed to get symlink target tor tar entry"))?;
             let link_path = PathBuf::from("/").join(link_path);
             let link_path = link_path.components().as_path();
             if let Some((_ino, _index)) = self.path_inode_map.get(link_path) {
@@ -280,7 +286,7 @@ impl<'a> TarballTreeBuilder<'a> {
                 index = *_index;
             } else {
                 bail!(
-                    "unknown target {} for hardlink {}",
+                    "tarball: unknown target {} for hardlink {}",
                     link_path.display(),
                     path.as_ref().display()
                 );
@@ -306,7 +312,7 @@ impl<'a> TarballTreeBuilder<'a> {
                     }
                     Err(e) => {
                         return Err(anyhow!(
-                            "failed to parse PaxExtension from tar header, {}",
+                            "tarball: failed to parse PaxExtension from tar header, {}",
                             e
                         ))
                     }
@@ -413,7 +419,7 @@ impl<'a> TarballTreeBuilder<'a> {
         };
         if uid > u32::MAX as u64 || gid > u32::MAX as u64 {
             bail!(
-                "uid {:x} or gid {:x} from tar entry is out of range",
+                "tarball: uid {:x} or gid {:x} from tar entry is out of range",
                 uid,
                 gid
             );
@@ -425,7 +431,7 @@ impl<'a> TarballTreeBuilder<'a> {
     fn get_mode(header: &Header) -> Result<u32> {
         let mode = header
             .mode()
-            .with_context(|| "failed to get permission/mode from tar entry")?;
+            .context("tarball: failed to get permission/mode from tar entry")?;
         let ty = match header.entry_type() {
             EntryType::Regular | EntryType::Link => libc::S_IFREG,
             EntryType::Directory => libc::S_IFDIR,
@@ -433,7 +439,7 @@ impl<'a> TarballTreeBuilder<'a> {
             EntryType::Block => libc::S_IFBLK,
             EntryType::Char => libc::S_IFCHR,
             EntryType::Fifo => libc::S_IFIFO,
-            _ => bail!("unsupported tar entry type"),
+            _ => bail!("tarball: unsupported tar entry type"),
         };
         Ok((mode & !libc::S_IFMT as u32) | ty as u32)
     }
@@ -444,14 +450,14 @@ impl<'a> TarballTreeBuilder<'a> {
         } else {
             path.file_name().ok_or_else(|| {
                 anyhow!(
-                    "failed to get file name from tar entry with path {}",
+                    "tarball: failed to get file name from tar entry with path {}",
                     path.display()
                 )
             })?
         };
         if name.len() > u16::MAX as usize {
             bail!(
-                "file name {} from tar entry is too long",
+                "tarball: file name {} from tar entry is too long",
                 name.to_str().unwrap_or_default()
             );
         }
@@ -565,17 +571,22 @@ impl Builder for TarballBuilder {
         let layer_idx = u16::from(bootstrap_ctx.layered);
         let mut blob_writer = match self.ty {
             ConversionType::EStargzToRafs
-            | ConversionType::TargzToRafs
-            | ConversionType::TarToRafs
             | ConversionType::EStargzToRef
-            | ConversionType::TargzToRef => {
+            | ConversionType::TargzToRafs
+            | ConversionType::TargzToRef
+            | ConversionType::TarToRafs => {
                 if let Some(blob_stor) = ctx.blob_storage.clone() {
                     ArtifactWriter::new(blob_stor)?
                 } else {
-                    return Err(anyhow!("missing configuration for target path"));
+                    return Err(anyhow!("tarball: missing configuration for target path"));
                 }
             }
-            _ => return Err(anyhow!("unsupported image conversion type '{}'", self.ty)),
+            _ => {
+                return Err(anyhow!(
+                    "tarball: unsupported image conversion type '{}'",
+                    self.ty
+                ))
+            }
         };
 
         let mut tree_builder =
