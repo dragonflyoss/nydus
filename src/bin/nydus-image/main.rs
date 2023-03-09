@@ -332,10 +332,17 @@ fn prepare_cmd_args(bti_string: String) -> ArgMatches<'static> {
             SubCommand::with_name("merge")
                 .about("Merge multiple bootstraps into a overlaid bootstrap")
                 .arg(
+                    Arg::with_name("parent-bootstrap")
+                    .long("parent-bootstrap")
+                    .help("File path of the parent/referenced RAFS metadata blob (optional)")
+                    .required(false)
+                    .takes_value(true),
+                )
+                .arg(
                     Arg::with_name("bootstrap")
                         .long("bootstrap")
                         .short("B")
-                        .help("output path of nydus overlaid bootstrap")
+                        .help("Output path of nydus overlaid bootstrap")
                         .required(true)
                         .takes_value(true),
                 )
@@ -704,8 +711,12 @@ impl Command {
             prefetch: Self::get_prefetch(matches)?,
             ..Default::default()
         };
+
+        let parent_bootstrap_path = matches.value_of("parent-bootstrap");
+
         let output = Merger::merge(
             &mut ctx,
+            parent_bootstrap_path,
             source_bootstrap_paths,
             target_bootstrap_path.to_path_buf(),
             chunk_dict_path,
