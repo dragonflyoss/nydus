@@ -482,6 +482,9 @@ impl BlobContext {
         blob_ctx
             .blob_meta_header
             .set_cap_tar_toc(features.contains(BlobFeatures::CAP_TAR_TOC));
+        blob_ctx
+            .blob_meta_header
+            .set_tarfs(features.contains(BlobFeatures::TARFS));
 
         blob_ctx
     }
@@ -1123,6 +1126,9 @@ impl BuildContext {
         if features.is_enabled(Feature::BlobToc) {
             blob_features |= BlobFeatures::HAS_TOC;
             blob_features |= BlobFeatures::HAS_TAR_HEADER;
+        }
+        if conversion_type == ConversionType::TarToTarfs {
+            blob_features |= BlobFeatures::TARFS;
         }
 
         BuildContext {
