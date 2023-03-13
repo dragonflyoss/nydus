@@ -671,6 +671,12 @@ impl Command {
             .unwrap_or_default()
             .parse()?;
         let blob_data_size = Self::get_blob_size(matches, conversion_type)?;
+        let features = Features::try_from(
+            matches
+                .get_one::<String>("features")
+                .map(|s| s.as_str())
+                .unwrap_or_default(),
+        )?;
 
         match conversion_type {
             ConversionType::DirectoryToRafs => {
@@ -776,12 +782,6 @@ impl Command {
             }
         }
 
-        let features = Features::try_from(
-            matches
-                .get_one::<String>("features")
-                .map(|s| s.as_str())
-                .unwrap_or_default(),
-        )?;
         if features.is_enabled(Feature::BlobToc) && version == RafsVersion::V5 {
             bail!("`--features blob-toc` can't be used with `--version 5` ");
         }

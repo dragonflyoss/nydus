@@ -29,9 +29,9 @@ use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, Rafs
 /// EROFS metadata slot size.
 pub const EROFS_INODE_SLOT_SIZE: usize = 1 << EROFS_INODE_SLOT_BITS;
 /// Bits of EROFS logical block size.
-pub const EROFS_BLOCK_BITS: u8 = 12;
+pub const EROFS_BLOCK_BITS_12: u8 = 12;
 /// EROFS logical block size.
-pub const EROFS_BLOCK_SIZE: u64 = 1u64 << EROFS_BLOCK_BITS;
+pub const EROFS_BLOCK_SIZE_4096: u64 = 1u64 << EROFS_BLOCK_BITS_12;
 
 /// Offset of EROFS super block.
 pub const EROFS_SUPER_OFFSET: u16 = 1024;
@@ -151,19 +151,19 @@ impl RafsV6SuperBlock {
 
     /// Validate the Rafs v6 super block.
     pub fn validate(&self, meta_size: u64) -> Result<()> {
-        if meta_size < EROFS_BLOCK_SIZE {
+        if meta_size < EROFS_BLOCK_SIZE_4096 {
             return Err(einval!(format!(
                 "invalid Rafs v6 metadata size: {}",
                 meta_size
             )));
         }
-        if meta_size & (EROFS_BLOCK_SIZE - 1) != 0 {
+        if meta_size & (EROFS_BLOCK_SIZE_4096 - 1) != 0 {
             return Err(einval!(format!(
                 "invalid Rafs v6 metadata size: bootstrap size {} is not aligned",
                 meta_size
             )));
         }
-        let meta_addr = u32::from_le(self.s_meta_blkaddr) as u64 * EROFS_BLOCK_SIZE;
+        let meta_addr = u32::from_le(self.s_meta_blkaddr) as u64 * EROFS_BLOCK_SIZE_4096;
         if meta_addr > meta_size {
             return Err(einval!(format!(
                 "invalid Rafs v6 meta block address 0x{:x}, meta file size 0x{:x}",
@@ -185,7 +185,7 @@ impl RafsV6SuperBlock {
             )));
         }
 
-        if self.s_blkszbits != EROFS_BLOCK_BITS {
+        if self.s_blkszbits != EROFS_BLOCK_BITS_12 {
             return Err(einval!(format!(
                 "invalid block size bits {} in Rafsv6 superblock",
                 self.s_blkszbits
@@ -296,8 +296,8 @@ impl RafsV6SuperBlock {
 
     /// Set EROFS meta block address.
     pub fn set_meta_addr(&mut self, meta_addr: u64) {
-        assert!((meta_addr / EROFS_BLOCK_SIZE) <= u32::MAX as u64);
-        self.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLOCK_SIZE) as u32);
+        assert!((meta_addr / EROFS_BLOCK_SIZE_4096) <= u32::MAX as u64);
+        self.s_meta_blkaddr = u32::to_le((meta_addr / EROFS_BLOCK_SIZE_4096) as u32);
     }
 
     /// Get device table offset.
@@ -313,15 +313,17 @@ impl RafsStore for RafsV6SuperBlock {
     // This method must be called before RafsV6SuperBlockExt::store(), otherwise data written by
     // RafsV6SuperBlockExt::store() will be overwritten.
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
-        debug_assert!(((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64) < EROFS_BLOCK_SIZE);
+        debug_assert!(
+            ((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64) < EROFS_BLOCK_SIZE_4096
+        );
         w.write_all(&[0u8; EROFS_SUPER_OFFSET as usize])?;
         w.write_all(self.as_ref())?;
         w.write_all(
-            &[0u8; (EROFS_BLOCK_SIZE as usize
+            &[0u8; (EROFS_BLOCK_SIZE_4096 as usize
                 - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)],
         )?;
 
-        Ok(EROFS_BLOCK_SIZE as usize)
+        Ok(EROFS_BLOCK_SIZE_4096 as usize)
     }
 }
 
@@ -332,7 +334,7 @@ impl Default for RafsV6SuperBlock {
             s_magic: u32::to_le(EROFS_SUPER_MAGIC_V1),
             s_checksum: 0,
             s_feature_compat: u32::to_le(EROFS_FEATURE_COMPAT_RAFS_V6),
-            s_blkszbits: EROFS_BLOCK_BITS,
+            s_blkszbits: EROFS_BLOCK_BITS_12,
             s_extslots: 0u8,
             s_root_nid: 0,
             s_inos: 0,
@@ -390,7 +392,7 @@ impl RafsV6SuperBlockExt {
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
         r.read_exact(self.as_mut())?;
-        r.seek_to_offset(EROFS_BLOCK_SIZE as u64)?;
+        r.seek_to_offset(EROFS_BLOCK_SIZE_4096 as u64)?;
 
         Ok(())
     }
@@ -420,7 +422,7 @@ impl RafsV6SuperBlockExt {
 
         let chunk_size = u32::from_le(self.s_chunk_size) as u64;
         if !chunk_size.is_power_of_two()
-            || !(EROFS_BLOCK_SIZE..=RAFS_MAX_CHUNK_SIZE).contains(&chunk_size)
+            || !(EROFS_BLOCK_SIZE_4096..=RAFS_MAX_CHUNK_SIZE).contains(&chunk_size)
         {
             return Err(einval!("invalid chunk size in Rafs v6 extended superblock"));
         }
@@ -429,8 +431,8 @@ impl RafsV6SuperBlockExt {
 
         let blob_offset = self.blob_table_offset();
         let blob_size = self.blob_table_size() as u64;
-        if blob_offset & (EROFS_BLOCK_SIZE - 1) != 0
-            || blob_offset < EROFS_BLOCK_SIZE
+        if blob_offset & (EROFS_BLOCK_SIZE_4096 - 1) != 0
+            || blob_offset < EROFS_BLOCK_SIZE_4096
             || blob_offset < devslot_end
             || blob_size % size_of::<RafsV6Blob>() as u64 != 0
             || blob_offset.checked_add(blob_size).is_none()
@@ -447,8 +449,8 @@ impl RafsV6SuperBlockExt {
         if self.chunk_table_size() > 0 {
             let chunk_tbl_offset = self.chunk_table_offset();
             let chunk_tbl_size = self.chunk_table_size();
-            if chunk_tbl_offset < EROFS_BLOCK_SIZE
-                || chunk_tbl_offset % EROFS_BLOCK_SIZE != 0
+            if chunk_tbl_offset < EROFS_BLOCK_SIZE_4096
+                || chunk_tbl_offset % EROFS_BLOCK_SIZE_4096 != 0
                 || chunk_tbl_offset < devslot_end
                 || chunk_tbl_size % size_of::<RafsV5ChunkInfo>() as u64 != 0
                 || chunk_tbl_offset.checked_add(chunk_tbl_size).is_none()
@@ -473,7 +475,7 @@ impl RafsV6SuperBlockExt {
         if self.prefetch_table_size() > 0 && self.prefetch_table_offset() != 0 {
             let tbl_offset = self.prefetch_table_offset();
             let tbl_size = self.prefetch_table_size() as u64;
-            if tbl_offset < EROFS_BLOCK_SIZE
+            if tbl_offset < EROFS_BLOCK_SIZE_4096
                 || tbl_size % size_of::<u32>() as u64 != 0
                 || tbl_offset < devslot_end
                 || tbl_offset.checked_add(tbl_size).is_none()
@@ -581,9 +583,9 @@ impl RafsV6SuperBlockExt {
 impl RafsStore for RafsV6SuperBlockExt {
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
-        w.seek_offset(EROFS_BLOCK_SIZE as u64)?;
+        w.seek_offset(EROFS_BLOCK_SIZE_4096 as u64)?;
 
-        Ok(EROFS_BLOCK_SIZE as usize - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)
+        Ok(EROFS_BLOCK_SIZE_4096 as usize - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)
     }
 }
 
@@ -1043,7 +1045,7 @@ impl RafsV6Dirent {
 
     /// Set name offset of the dirent.
     pub fn set_name_offset(&mut self, offset: u16) {
-        assert!(offset < EROFS_BLOCK_SIZE as u16);
+        assert!(offset < EROFS_BLOCK_SIZE_4096 as u16);
         self.e_nameoff = u16::to_le(offset);
     }
 
@@ -1078,8 +1080,8 @@ impl RafsV6InodeChunkHeader {
     pub fn new(chunk_size: u64) -> Self {
         assert!(chunk_size.is_power_of_two());
         let chunk_bits = chunk_size.trailing_zeros() as u16;
-        assert!(chunk_bits >= EROFS_BLOCK_BITS as u16);
-        let chunk_bits = chunk_bits - EROFS_BLOCK_BITS as u16;
+        assert!(chunk_bits >= EROFS_BLOCK_BITS_12 as u16);
+        let chunk_bits = chunk_bits - EROFS_BLOCK_BITS_12 as u16;
         assert!(chunk_bits <= EROFS_CHUNK_FORMAT_SIZE_MASK);
         let format = EROFS_CHUNK_FORMAT_INDEXES_FLAG | chunk_bits;
 
@@ -1492,7 +1494,7 @@ impl RafsV6Blob {
 
         let c_size = u32::from_le(self.chunk_size) as u64;
         if c_size.count_ones() != 1
-            || !(EROFS_BLOCK_SIZE..=RAFS_MAX_CHUNK_SIZE).contains(&c_size)
+            || !(EROFS_BLOCK_SIZE_4096..=RAFS_MAX_CHUNK_SIZE).contains(&c_size)
             || c_size != chunk_size as u64
         {
             error!(

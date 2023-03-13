@@ -40,7 +40,7 @@ use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::layout::v6::{
     rafsv6_load_blob_extra_info, recover_namespace, RafsV6BlobTable, RafsV6Dirent,
     RafsV6InodeChunkAddr, RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode,
-    RafsV6XattrEntry, RafsV6XattrIbodyHeader, EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED,
+    RafsV6XattrEntry, RafsV6XattrIbodyHeader, EROFS_BLOCK_SIZE_4096, EROFS_INODE_CHUNK_BASED,
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE,
     EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
 };
@@ -100,7 +100,7 @@ impl DirectSuperBlockV6 {
     /// Create a new instance of `DirectSuperBlockV6`.
     pub fn new(meta: &RafsSuperMeta) -> Self {
         let state = DirectMappingState::new(meta);
-        let meta_offset = meta.meta_blkaddr as usize * EROFS_BLOCK_SIZE as usize;
+        let meta_offset = meta.meta_blkaddr as usize * EROFS_BLOCK_SIZE_4096 as usize;
         let info = DirectCachedInfo {
             meta_offset,
             root_ino: meta.root_nid as Inode,
@@ -170,8 +170,11 @@ impl DirectSuperBlockV6 {
         let file = clone_file(r.as_raw_fd())?;
         let md = file.metadata()?;
         let len = md.len();
-        let md_range =
-            MetaRange::new(EROFS_BLOCK_SIZE as u64, len - EROFS_BLOCK_SIZE as u64, true)?;
+        let md_range = MetaRange::new(
+            EROFS_BLOCK_SIZE_4096 as u64,
+            len - EROFS_BLOCK_SIZE_4096 as u64,
+            true,
+        )?;
 
         // Validate blob table layout as blob_table_start and blob_table_offset is read from bootstrap.
         let old_state = self.state.load();
@@ -227,7 +230,7 @@ impl DirectSuperBlockV6 {
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
             v6_chunk.set_blob_index(chunk.blob_index());
             v6_chunk.set_blob_ci_index(chunk.id());
-            v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
+            v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE_4096) as u32);
             chunk_map.insert(v6_chunk, idx);
         }
 
@@ -238,7 +241,7 @@ impl DirectSuperBlockV6 {
 impl RafsSuperInodes for DirectSuperBlockV6 {
     fn get_max_ino(&self) -> Inode {
         // The maximum inode number supported by RAFSv6 is smaller than limit of fuse-backend-rs.
-        (0xffff_ffffu64) * EROFS_BLOCK_SIZE / EROFS_INODE_SLOT_SIZE as u64
+        (0xffff_ffffu64) * EROFS_BLOCK_SIZE_4096 / EROFS_INODE_SLOT_SIZE as u64
     }
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
@@ -323,7 +326,7 @@ impl OndiskInodeWrapper {
         offset: usize,
     ) -> Result<Self> {
         let inode = DirectSuperBlockV6::disk_inode(state, offset)?;
-        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
+        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE_4096);
 
         Ok(OndiskInodeWrapper {
             mapping,
@@ -358,7 +361,7 @@ impl OndiskInodeWrapper {
         index: usize,
     ) -> RafsResult<&'a RafsV6Dirent> {
         let offset = self.data_block_offset(inode, block_index)?;
-        if size_of::<RafsV6Dirent>() * (index + 1) >= EROFS_BLOCK_SIZE as usize {
+        if size_of::<RafsV6Dirent>() * (index + 1) >= EROFS_BLOCK_SIZE_4096 as usize {
             Err(RafsError::InvalidImageData)
         } else if let Some(offset) = offset.checked_add(size_of::<RafsV6Dirent>() * index) {
             state
@@ -386,7 +389,7 @@ impl OndiskInodeWrapper {
         let buf: &[u8] = match index.cmp(&(max_entries - 1)) {
             Ordering::Less => {
                 let next_de = self.get_entry(state, inode, block_index, index + 1)?;
-                if next_de.e_nameoff as u64 >= EROFS_BLOCK_SIZE {
+                if next_de.e_nameoff as u64 >= EROFS_BLOCK_SIZE_4096 {
                     return Err(RafsError::InvalidImageData);
                 }
                 let len = next_de.e_nameoff.checked_sub(de.e_nameoff).ok_or_else(|| {
@@ -407,7 +410,7 @@ impl OndiskInodeWrapper {
             }
             Ordering::Equal => {
                 let base = de.e_nameoff as u64;
-                if base >= EROFS_BLOCK_SIZE {
+                if base >= EROFS_BLOCK_SIZE_4096 {
                     return Err(RafsError::InvalidImageData);
                 }
 
@@ -416,12 +419,12 @@ impl OndiskInodeWrapper {
                 // Because the other blocks should be fully used, while the last may not.
                 let block_count = self.blocks_count() as usize;
                 let len = match block_count.cmp(&(block_index + 1)) {
-                    Ordering::Greater => (EROFS_BLOCK_SIZE - base) as usize,
+                    Ordering::Greater => (EROFS_BLOCK_SIZE_4096 - base) as usize,
                     Ordering::Equal => {
-                        if self.size() % EROFS_BLOCK_SIZE == 0 {
-                            EROFS_BLOCK_SIZE as usize
+                        if self.size() % EROFS_BLOCK_SIZE_4096 == 0 {
+                            EROFS_BLOCK_SIZE_4096 as usize
                         } else {
-                            (self.size() % EROFS_BLOCK_SIZE - base) as usize
+                            (self.size() % EROFS_BLOCK_SIZE_4096 - base) as usize
                         }
                     }
                     Ordering::Less => return Err(RafsError::InvalidImageData),
@@ -486,7 +489,7 @@ impl OndiskInodeWrapper {
         if base.checked_add(index).is_none() || base + index > u32::MAX as usize {
             Err(RafsError::InvalidImageData)
         } else {
-            Ok((base + index) * EROFS_BLOCK_SIZE as usize)
+            Ok((base + index) * EROFS_BLOCK_SIZE_4096 as usize)
         }
     }
 
@@ -671,7 +674,9 @@ impl OndiskInodeWrapper {
             .get_entry(&state, inode, block_index, 0)
             .map_err(err_invalidate_data)?;
         let name_offset = head_entry.e_nameoff as usize;
-        if name_offset as u64 >= EROFS_BLOCK_SIZE || name_offset % size_of::<RafsV6Dirent>() != 0 {
+        if name_offset as u64 >= EROFS_BLOCK_SIZE_4096
+            || name_offset % size_of::<RafsV6Dirent>() != 0
+        {
             Err(enoent!(format!(
                 "v6: invalid e_nameoff {} from directory entry",
                 name_offset
@@ -689,7 +694,7 @@ impl RafsInode for OndiskInodeWrapper {
         let max_inode = self.mapping.get_max_ino();
 
         if self.ino() > max_inode
-            || self.offset > (u32::MAX as usize) * EROFS_BLOCK_SIZE as usize
+            || self.offset > (u32::MAX as usize) * EROFS_BLOCK_SIZE_4096 as usize
             || inode.nlink() == 0
             || self.get_name_size() as usize > (RAFS_MAX_NAME + 1)
         {
@@ -989,7 +994,7 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_symlink(&self) -> Result<OsString> {
         let state = self.state();
         let inode = self.disk_inode(&state);
-        if inode.size() > EROFS_BLOCK_SIZE {
+        if inode.size() > EROFS_BLOCK_SIZE_4096 {
             return Err(einval!(format!(
                 "v6: invalid symlink size {}",
                 inode.size()

@@ -16,7 +16,7 @@ use nydus_api::{
     BlobCacheEntry, BlobCacheList, BlobCacheObjectId, ConfigV2, BLOB_CACHE_TYPE_DATA_BLOB,
     BLOB_CACHE_TYPE_META_BLOB,
 };
-use nydus_rafs::metadata::layout::v6::{EROFS_BLOCK_BITS, EROFS_BLOCK_SIZE};
+use nydus_rafs::metadata::layout::v6::{EROFS_BLOCK_BITS_12, EROFS_BLOCK_SIZE_4096};
 use nydus_rafs::metadata::{RafsBlobExtraInfo, RafsSuper};
 use nydus_storage::cache::BlobCache;
 use nydus_storage::device::BlobInfo;
@@ -460,7 +460,7 @@ impl MetaBlob {
             e
         })?;
         let size = md.len();
-        if size % EROFS_BLOCK_SIZE != 0 || (size >> EROFS_BLOCK_BITS) > u32::MAX as u64 {
+        if size % EROFS_BLOCK_SIZE_4096 != 0 || (size >> EROFS_BLOCK_BITS_12) > u32::MAX as u64 {
             return Err(einval!(format!(
                 "blob_cache: metadata blob size (0x{:x}) is invalid",
                 size
@@ -475,7 +475,7 @@ impl MetaBlob {
 
     /// Get number of blocks in unit of EROFS_BLOCK_SIZE.
     pub fn blocks(&self) -> u32 {
-        (self.size >> EROFS_BLOCK_BITS) as u32
+        (self.size >> EROFS_BLOCK_BITS_12) as u32
     }
 
     /// Read data from the cached metadata blob in asynchronous mode.
