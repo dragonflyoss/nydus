@@ -30,7 +30,7 @@ use nydus_app::setup_logging;
 use nydus_rafs::builder::{
     parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager, BootstrapManager,
     BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder, Feature, Features,
-    HashChunkDict, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+    HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
 };
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
@@ -43,12 +43,10 @@ use nydus_utils::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use nydus_utils::{compress, digest, event_tracer, register_tracer, root_tracer, timing_tracer};
 use serde::{Deserialize, Serialize};
 
-use crate::merge::Merger;
 use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
 mod inspect;
-mod merge;
 mod stat;
 mod unpack;
 mod validator;

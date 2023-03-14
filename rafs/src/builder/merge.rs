@@ -8,15 +8,16 @@ use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use hex::FromHex;
 use nydus_api::ConfigV2;
-use nydus_rafs::builder::{
+use nydus_storage::device::{BlobFeatures, BlobInfo};
+
+use super::{
     ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
     BuildOutput, ChunkSource, HashChunkDict, MetadataTreeBuilder, Overlay, Tree, WhiteoutSpec,
 };
-use nydus_rafs::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
-use nydus_storage::device::{BlobFeatures, BlobInfo};
+use crate::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
 
 /// Struct to generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
 ///
