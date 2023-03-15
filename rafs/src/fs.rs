@@ -102,7 +102,7 @@ impl Rafs {
             initialized: false,
             digest_validate: rafs_cfg.validate,
             fs_prefetch: rafs_cfg.prefetch.enable,
-            amplify_io: rafs_cfg.prefetch.batch_size as u32,
+            amplify_io: rafs_cfg.batch_size as u32,
             prefetch_all: rafs_cfg.prefetch.prefetch_all,
             xattr_enabled: rafs_cfg.enable_xattr,
 
