@@ -17,6 +17,8 @@ import (
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
+
+	// nolint:staticcheck
 	"github.com/containerd/containerd/remotes/docker/schema1"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -44,6 +46,7 @@ func fetch(ctx context.Context, store content.Store, rCtx *containerd.RemoteCont
 		limiter       *semaphore.Weighted
 	)
 
+	// nolint:staticcheck
 	if desc.MediaType == images.MediaTypeDockerSchema1Manifest && rCtx.ConvertSchema1 {
 		schema1Converter := schema1.NewConverter(store, fetcher)
 
