@@ -340,7 +340,11 @@ func main() {
 					Value:   false,
 					Usage:   "Convert Docker media types to OCI media types",
 					EnvVars: []string{"OCI"},
-					Aliases: []string{"docker-v2-format"},
+				},
+				&cli.BoolFlag{
+					Name:   "docker-v2-format",
+					Value:  false,
+					Hidden: true,
 				},
 				&cli.StringFlag{
 					Name:        "fs-version",
@@ -446,6 +450,14 @@ func main() {
 					}
 				}
 
+				docker2OCI := false
+				if c.Bool("docker-v2-format") {
+					logrus.Warn("the option `--docker-v2-format` has been deprecated, use `--oci` instead")
+					docker2OCI = false
+				} else if c.Bool("oci") {
+					docker2OCI = true
+				}
+
 				opt := converter.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
@@ -469,7 +481,7 @@ func main() {
 
 					PrefetchPatterns: prefetchPatterns,
 					MergePlatform:    c.Bool("merge-platform"),
-					Docker2OCI:       c.Bool("oci"),
+					Docker2OCI:       docker2OCI,
 					FsVersion:        fsVersion,
 					FsAlignChunk:     c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
 					Compressor:       c.String("compressor"),
