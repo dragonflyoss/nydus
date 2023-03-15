@@ -48,12 +48,12 @@ type Opt struct {
 }
 
 func Convert(ctx context.Context, opt Opt) error {
-	pvd, err := provider.New(opt.WorkDir, hosts(opt))
+	platformMC, err := platformutil.ParsePlatforms(opt.AllPlatforms, opt.Platforms)
 	if err != nil {
 		return err
 	}
 
-	platformMC, err := platformutil.ParsePlatforms(opt.AllPlatforms, opt.Platforms)
+	pvd, err := provider.New(opt.WorkDir, hosts(opt), platformMC)
 	if err != nil {
 		return err
 	}
