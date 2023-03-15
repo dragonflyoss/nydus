@@ -52,10 +52,12 @@ type withCredentialFunc = func(string) (string, string, error)
 func withRemote(ref string, insecure bool, credFunc withCredentialFunc) (*remote.Remote, error) {
 	resolverFunc := func(retryWithHTTP bool) remotes.Resolver {
 		registryHosts := docker.ConfigureDefaultRegistries(
-			docker.WithAuthorizer(docker.NewAuthorizer(
-				newDefaultClient(insecure),
-				credFunc,
-			)),
+			docker.WithAuthorizer(
+				docker.NewDockerAuthorizer(
+					docker.WithAuthClient(newDefaultClient(insecure)),
+					docker.WithAuthCreds(credFunc),
+				),
+			),
 			docker.WithClient(newDefaultClient(insecure)),
 			docker.WithPlainHTTP(func(host string) (bool, error) {
 				return retryWithHTTP, nil

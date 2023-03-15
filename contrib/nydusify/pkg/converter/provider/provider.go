@@ -12,6 +12,7 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
 	"github.com/goharbor/acceleration-service/pkg/remote"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -23,18 +24,20 @@ type Provider struct {
 	images       map[string]*ocispec.Descriptor
 	store        content.Store
 	hosts        remote.HostFunc
+	platformMC   platforms.MatchComparer
 }
 
-func New(root string, hosts remote.HostFunc) (*Provider, error) {
+func New(root string, hosts remote.HostFunc, platformMC platforms.MatchComparer) (*Provider, error) {
 	store, err := local.NewLabeledStore(root, newMemoryLabelStore())
 	if err != nil {
 		return nil, err
 	}
 
 	return &Provider{
-		images: make(map[string]*ocispec.Descriptor),
-		store:  store,
-		hosts:  hosts,
+		images:     make(map[string]*ocispec.Descriptor),
+		store:      store,
+		hosts:      hosts,
+		platformMC: platformMC,
 	}, nil
 }
 
@@ -56,7 +59,8 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 		return err
 	}
 	rc := &containerd.RemoteContext{
-		Resolver: resolver,
+		Resolver:        resolver,
+		PlatformMatcher: pvd.platformMC,
 	}
 
 	img, err := fetch(ctx, pvd.store, rc, ref, 0)
@@ -77,7 +81,8 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 		return err
 	}
 	rc := &containerd.RemoteContext{
-		Resolver: resolver,
+		Resolver:        resolver,
+		PlatformMatcher: pvd.platformMC,
 	}
 
 	return push(ctx, pvd.store, rc, desc, ref)
