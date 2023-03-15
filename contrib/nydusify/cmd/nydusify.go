@@ -458,6 +458,12 @@ func main() {
 					docker2OCI = true
 				}
 
+				// Forcibly enable `--oci` option when `--oci-ref` be enabled.
+				if c.Bool("oci-ref") {
+					logrus.Warn("forcibly enabled `--oci` option when `--oci-ref` be enabled")
+					docker2OCI = true
+				}
+
 				opt := converter.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
