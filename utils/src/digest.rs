@@ -19,10 +19,11 @@ pub const RAFS_DIGEST_LENGTH: usize = 32;
 /// Type alias for digest data.
 pub type DigestData = [u8; RAFS_DIGEST_LENGTH];
 
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Algorithm {
-    Blake3,
-    Sha256,
+    Blake3 = 0,
+    Sha256 = 1,
 }
 
 impl Default for Algorithm {
