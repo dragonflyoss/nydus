@@ -16,7 +16,9 @@ use std::io::Result;
 use std::sync::Arc;
 
 use dbs_allocator::{Constraint, IntervalTree, NodeState, Range};
-use nydus_rafs::metadata::layout::v6::EROFS_BLOCK_BITS_12;
+use nydus_rafs::metadata::layout::v6::{
+    EROFS_BLOCK_BITS_12, EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512,
+};
 use tokio_uring::buf::IoBufMut;
 
 use crate::blob_cache::{BlobCacheMgr, BlobConfig, DataBlob, MetaBlob};
@@ -40,6 +42,7 @@ pub struct BlockDevice {
     blob_id: String,
     cache_mgr: Arc<BlobCacheMgr>,
     ranges: IntervalTree<BlockRange>,
+    is_tarfs_mode: bool,
 }
 
 impl BlockDevice {
@@ -63,11 +66,15 @@ impl BlockDevice {
             }
             Some(BlobConfig::MetaBlob(v)) => v,
         };
+        let is_tarfs_mode = meta_blob_config.is_tarfs_mode();
         let meta_blob = MetaBlob::new(meta_blob_config.path())?;
         let meta_blob = Arc::new(meta_blob);
-        let constraint = Constraint::new(meta_blob.blocks())
-            .min(0u32)
-            .max(meta_blob.blocks() - 1);
+        let blocks = if is_tarfs_mode {
+            meta_blob.blocks() * 8
+        } else {
+            meta_blob.blocks()
+        };
+        let constraint = Constraint::new(blocks).min(0u32).max(blocks - 1);
         let range = ranges.allocate(&constraint).ok_or_else(|| {
             enoent!(format!(
                 "block_device: failed to allocate address range for meta blob {}",
@@ -76,7 +83,7 @@ impl BlockDevice {
         })?;
         ranges.update(&range, BlockRange::MetaBlob(meta_blob.clone()));
 
-        let mut pos = meta_blob.blocks();
+        let mut pos = blocks;
         let data_blobs = meta_blob_config.get_blobs();
         for blob in data_blobs.iter() {
             let blob_info = blob.blob_info();
@@ -97,6 +104,13 @@ impl BlockDevice {
                 );
                 return Err(einval!(msg));
             }
+            if is_tarfs_mode != blob_info.features().is_tarfs() {
+                let msg = format!(
+                    "block_device: inconsistent `TARFS` mode from meta and data blob {}",
+                    blob_id
+                );
+                return Err(einval!(msg));
+            }
 
             if pos < extra_info.mapped_blkaddr {
                 let constraint = Constraint::new(extra_info.mapped_blkaddr - pos)
@@ -108,7 +122,11 @@ impl BlockDevice {
                 ranges.update(&range, BlockRange::Hole);
             }
 
-            let blocks = blob_info.uncompressed_size() >> EROFS_BLOCK_BITS_12;
+            let blocks = if is_tarfs_mode {
+                blob_info.uncompressed_size() >> EROFS_BLOCK_BITS_9
+            } else {
+                blob_info.uncompressed_size() >> EROFS_BLOCK_BITS_12
+            };
             if blocks > u32::MAX as u64
                 || blocks + extra_info.mapped_blkaddr as u64 > u32::MAX as u64
             {
@@ -137,6 +155,7 @@ impl BlockDevice {
             blob_id,
             cache_mgr,
             ranges,
+            is_tarfs_mode,
         })
     }
 
@@ -155,6 +174,33 @@ impl BlockDevice {
         self.blocks
     }
 
+    /// Get block size of block device.
+    pub fn block_size(&self) -> u64 {
+        if self.is_tarfs_mode {
+            EROFS_BLOCK_SIZE_512
+        } else {
+            EROFS_BLOCK_SIZE_4096
+        }
+    }
+
+    /// Convert data size to number of blocks.
+    pub fn size_to_blocks(&self, sz: u64) -> u64 {
+        if self.is_tarfs_mode {
+            sz >> EROFS_BLOCK_BITS_9
+        } else {
+            sz >> EROFS_BLOCK_BITS_12
+        }
+    }
+
+    /// Convert number of blocks to data size.
+    pub fn blocks_to_size(&self, blocks: u32) -> u64 {
+        if self.is_tarfs_mode {
+            (blocks as u64) << EROFS_BLOCK_BITS_9
+        } else {
+            (blocks as u64) << EROFS_BLOCK_BITS_12
+        }
+    }
+
     /// Read block range [start, start + blocks) from the block device.
     pub async fn async_read<T: IoBufMut>(
         &self,
@@ -162,16 +208,15 @@ impl BlockDevice {
         mut blocks: u32,
         mut buf: T,
     ) -> (Result<usize>, T) {
-        if start.checked_add(blocks).is_none()
-            || (blocks as u64) << EROFS_BLOCK_BITS_12 > buf.bytes_total() as u64
-        {
+        let sz = self.blocks_to_size(blocks);
+        if start.checked_add(blocks).is_none() || sz > buf.bytes_total() as u64 {
             return (
                 Err(einval!("block_device: invalid parameters to read()")),
                 buf,
             );
         }
 
-        let total_size = (blocks as usize) << EROFS_BLOCK_BITS_12;
+        let total_size = sz as usize;
         let mut pos = 0;
         while blocks > 0 {
             let (range, node) = match self.ranges.get_superset(&Range::new_point(start)) {
@@ -189,7 +234,7 @@ impl BlockDevice {
 
             if let NodeState::Valued(r) = node {
                 let count = min(range.max as u32 - start + 1, blocks);
-                let sz = (count as usize) << EROFS_BLOCK_BITS_12 as usize;
+                let sz = self.blocks_to_size(count) as usize;
                 let mut s = buf.slice(pos..pos + sz);
                 let (res, s) = match r {
                     BlockRange::Hole => {
@@ -197,11 +242,13 @@ impl BlockDevice {
                         (Ok(sz), s)
                     }
                     BlockRange::MetaBlob(m) => {
-                        m.async_read((start as u64) << EROFS_BLOCK_BITS_12, s).await
+                        let offset = self.blocks_to_size(start);
+                        m.async_read(offset, s).await
                     }
                     BlockRange::DataBlob(d) => {
-                        let offset = start as u64 - range.min;
-                        d.async_read(offset << EROFS_BLOCK_BITS_12, s).await
+                        let offset = start - range.min as u32;
+                        let offset = self.blocks_to_size(offset);
+                        d.async_read(offset, s).await
                     }
                 };
 

@@ -63,6 +63,13 @@ pub fn round_down_4k(x: u64) -> u64 {
     x & (!4095u64)
 }
 
+/// Round down the value `n` to by `d`.
+pub fn round_down(n: u64, d: u64) -> u64 {
+    debug_assert!(d != 0);
+    debug_assert!(d.is_power_of_two());
+    n / d * d
+}
+
 pub enum DelayType {
     Fixed,
     // an exponential delay between each attempts

@@ -55,6 +55,7 @@ impl Blob {
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
             }
             ConversionType::TarToRef
+            | ConversionType::TarToTarfs
             | ConversionType::TargzToRef
             | ConversionType::EStargzToRef => {
                 // Use `sha256(tarball)` as `blob_id` for ref-type conversions.
@@ -68,6 +69,9 @@ impl Blob {
                         }
                     } else if let Some(tar_reader) = &ctx.blob_tar_reader {
                         blob_ctx.compressed_blob_size = tar_reader.position();
+                        if ctx.conversion_type == ConversionType::TarToTarfs {
+                            blob_ctx.uncompressed_blob_size = blob_ctx.compressed_blob_size;
+                        }
                         if blob_ctx.blob_id.is_empty() {
                             let hash = tar_reader.get_hash_object();
                             blob_ctx.blob_id = format!("{:x}", hash.finalize());

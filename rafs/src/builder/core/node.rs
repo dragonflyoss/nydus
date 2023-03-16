@@ -24,7 +24,9 @@ use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
 use sha2::digest::Digest;
 
-use crate::builder::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ChunkDict, Overlay};
+use crate::builder::{
+    ArtifactWriter, BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay,
+};
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::inode::InodeWrapper;
 use crate::metadata::layout::v6::EROFS_INODE_FLAT_PLAIN;
@@ -270,35 +272,45 @@ impl Node {
             };
 
             let chunk_data = &mut data_buf[0..uncompressed_size as usize];
-            let (chunk, chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
+            let (mut chunk, chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
             if let Some(h) = inode_hasher.as_mut() {
                 h.digest_update(chunk.id().as_ref());
             }
 
-            let mut chunk = match self.deduplicate_chunk(
-                ctx,
-                blob_mgr,
-                file_offset,
-                uncompressed_size,
-                chunk,
-            )? {
-                None => continue,
-                Some(c) => c,
-            };
+            // No need to perform chunk deduplication for tar-tarfs case.
+            if ctx.conversion_type != ConversionType::TarToTarfs {
+                chunk = match self.deduplicate_chunk(
+                    ctx,
+                    blob_mgr,
+                    file_offset,
+                    uncompressed_size,
+                    chunk,
+                )? {
+                    None => continue,
+                    Some(c) => c,
+                };
+            }
 
             let (blob_index, blob_ctx) = blob_mgr.get_or_create_current_blob(ctx)?;
             let chunk_index = blob_ctx.alloc_chunk_index()?;
             chunk.set_blob_index(blob_index);
             chunk.set_index(chunk_index);
             chunk.set_file_offset(file_offset);
-            self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?;
+            if ctx.conversion_type == ConversionType::TarToTarfs {
+                chunk.set_uncompressed_offset(chunk.compressed_offset());
+                chunk.set_uncompressed_size(chunk.compressed_size());
+            } else {
+                self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?;
+            }
 
             let chunk = Arc::new(chunk);
             blob_size += chunk.compressed_size() as u64;
-            blob_ctx.add_chunk_meta_info(&chunk, chunk_info)?;
-            blob_mgr
-                .layered_chunk_dict
-                .add_chunk(chunk.clone(), ctx.digester);
+            if ctx.conversion_type != ConversionType::TarToTarfs {
+                blob_ctx.add_chunk_meta_info(&chunk, chunk_info)?;
+                blob_mgr
+                    .layered_chunk_dict
+                    .add_chunk(chunk.clone(), ctx.digester);
+            }
             self.chunks.push(NodeChunk {
                 source: ChunkSource::Build,
                 inner: chunk,
@@ -347,7 +359,11 @@ impl Node {
                 .with_context(|| format!("failed to read node file {:?}", self.path()))?;
         }
 
-        chunk.set_id(RafsDigest::from_buf(buf, ctx.digester));
+        // For tar-tarfs case, no need to compute chunk id.
+        if ctx.conversion_type != ConversionType::TarToTarfs {
+            chunk.set_id(RafsDigest::from_buf(buf, ctx.digester));
+        }
+
         Ok((chunk, chunk_info))
     }
 

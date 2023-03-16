@@ -152,6 +152,7 @@ impl Bootstrap {
         let index = nodes.len() as u32 + 1;
         let parent = &mut nodes[tree.node.index as usize - 1];
         let parent_ino = parent.inode.ino();
+        let block_size = ctx.v6_block_size();
 
         // Maybe the parent is not a directory in multi-layers build scenario, so we check here.
         if parent.is_dir() {
@@ -162,7 +163,8 @@ impl Bootstrap {
             parent.inode.set_child_index(index);
             parent.inode.set_child_count(tree.children.len() as u32);
             if ctx.fs_version.is_v6() {
-                parent.v6_set_dir_offset(bootstrap_ctx, tree.node.v6_dirent_size(tree)?)?;
+                let d_size = tree.node.v6_dirent_size(ctx, tree)?;
+                parent.v6_set_dir_offset(bootstrap_ctx, d_size, block_size)?;
             }
         }
 
@@ -216,7 +218,7 @@ impl Bootstrap {
             if !child.node.is_dir() && ctx.fs_version.is_v6() {
                 child
                     .node
-                    .v6_set_offset(bootstrap_ctx, v6_hardlink_offset)?;
+                    .v6_set_offset(bootstrap_ctx, v6_hardlink_offset, block_size)?;
             }
 
             // Store node for bootstrap & blob dump.

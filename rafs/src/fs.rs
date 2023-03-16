@@ -39,7 +39,7 @@ use nydus_utils::{
 };
 
 use crate::metadata::{
-    Inode, RafsInode, RafsInodeWalkAction, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
+    Inode, RafsInode, RafsInodeWalkAction, RafsSuper, RafsSuperFlags, RafsSuperMeta, DOT, DOTDOT,
 };
 use crate::{RafsError, RafsIoReader, RafsResult};
 
@@ -616,6 +616,10 @@ impl FileSystem for Rafs {
         }
 
         let real_size = cmp::min(size as u64, inode_size - offset);
+        if self.sb.meta.flags.contains(RafsSuperFlags::TARTFS_MODE) {
+            return Err(enosys!("rafs: `TARFS` mode is not supported by FUSE yet"));
+        }
+
         let mut result = 0;
         let mut descs = inode.alloc_bio_vecs(&self.device, offset, real_size as usize, true)?;
         assert!(!descs.is_empty() && !descs[0].is_empty());

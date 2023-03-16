@@ -16,7 +16,9 @@ use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
-use crate::cache::state::{BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap};
+use crate::cache::state::{
+    BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap, NoopChunkMap,
+};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
@@ -171,6 +173,7 @@ impl FileCacheEntry {
         workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {
         let is_separate_meta = blob_info.has_feature(BlobFeatures::SEPARATE);
+        let is_tarfs = blob_info.features().is_tarfs();
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
         let blob_id = blob_info.blob_id();
         let blob_meta_id = if is_separate_meta {
@@ -193,69 +196,96 @@ impl FileCacheEntry {
             reader.clone()
         };
 
-        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
-        let (chunk_map, is_direct_chunkmap) =
-            Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
-
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
         let blob_uncompressed_size = blob_info.uncompressed_size();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
-        // Validation is supported by RAFS v5 (which has no meta_ci) or v6 with chunk digest array.
-        let validation_supported = !blob_info.meta_ci_is_valid()
-            || blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
-        let need_validation =
-            ((mgr.validate && validation_supported) || !is_direct_chunkmap) && !is_legacy_stargz;
+
+        let (
+            file,
+            meta,
+            chunk_map,
+            is_direct_chunkmap,
+            is_get_blob_object_supported,
+            need_validation,
+        ) = if is_tarfs {
+            let blob_file_path = format!("{}/{}", mgr.work_dir, blob_id);
+            let file = OpenOptions::new()
+                .create(false)
+                .write(false)
+                .read(true)
+                .open(&blob_file_path)?;
+            let chunk_map =
+                Arc::new(BlobStateMap::from(NoopChunkMap::new(true))) as Arc<dyn ChunkMap>;
+            (file, None, chunk_map, true, true, false)
+        } else {
+            let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
+            let (chunk_map, is_direct_chunkmap) =
+                Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
+            // Validation is supported by RAFS v5 (which has no meta_ci) or v6 with chunk digest array.
+            let validation_supported = !blob_info.meta_ci_is_valid()
+                || blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
+            let need_validation = ((mgr.validate && validation_supported) || !is_direct_chunkmap)
+                && !is_legacy_stargz;
+            // Set cache file to its expected size.
+            let suffix = if mgr.cache_raw_data {
+                ".blob.raw"
+            } else {
+                ".blob.data"
+            };
+            let blob_data_file_path = blob_file_path.clone() + suffix;
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .read(true)
+                .open(&blob_data_file_path)?;
+            let file_size = file.metadata()?.len();
+            let cached_file_size = if mgr.cache_raw_data {
+                blob_info.compressed_data_size()
+            } else {
+                blob_info.uncompressed_size()
+            };
+            if file_size == 0 {
+                file.set_len(cached_file_size)?;
+            } else if cached_file_size != 0 && file_size != cached_file_size {
+                let msg = format!(
+                    "blob data file size doesn't match: got 0x{:x}, expect 0x{:x}",
+                    file_size, cached_file_size
+                );
+                return Err(einval!(msg));
+            }
+            let meta = if blob_info.meta_ci_is_valid() {
+                let meta = FileCacheMeta::new(
+                    blob_file_path,
+                    blob_info.clone(),
+                    Some(blob_meta_reader),
+                    Some(runtime.clone()),
+                    false,
+                    need_validation,
+                )?;
+                Some(meta)
+            } else {
+                None
+            };
+            let is_get_blob_object_supported = meta.is_some() && is_direct_chunkmap;
+            (
+                file,
+                meta,
+                chunk_map,
+                is_direct_chunkmap,
+                is_get_blob_object_supported,
+                need_validation,
+            )
+        };
+
         trace!(
-            "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, separate_meta {}, zran {}",
+            "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, separate_meta {}, tarfs {}, zran {}",
             mgr.cache_raw_data,
             is_direct_chunkmap,
             is_legacy_stargz,
             is_separate_meta,
+            is_tarfs,
             is_zran,
         );
-
-        // Set cache file to its expected size.
-        let suffix = if mgr.cache_raw_data {
-            ".blob.raw"
-        } else {
-            ".blob.data"
-        };
-        let blob_data_file_path = blob_file_path.clone() + suffix;
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .open(&blob_data_file_path)?;
-        let file_size = file.metadata()?.len();
-        let cached_file_size = if mgr.cache_raw_data {
-            blob_info.compressed_data_size()
-        } else {
-            blob_info.uncompressed_size()
-        };
-        if file_size == 0 {
-            file.set_len(cached_file_size)?;
-        } else if cached_file_size != 0 && file_size != cached_file_size {
-            let msg = format!(
-                "blob data file size doesn't match: got 0x{:x}, expect 0x{:x}",
-                file_size, cached_file_size
-            );
-            return Err(einval!(msg));
-        }
-        let meta = if blob_info.meta_ci_is_valid() {
-            let meta = FileCacheMeta::new(
-                blob_file_path,
-                blob_info.clone(),
-                Some(blob_meta_reader),
-                Some(runtime.clone()),
-                false,
-                need_validation,
-            )?;
-            Some(meta)
-        } else {
-            None
-        };
-        let is_get_blob_object_supported = meta.is_some() && is_direct_chunkmap;
-
         Ok(FileCacheEntry {
             blob_id,
             blob_info,
@@ -274,6 +304,7 @@ impl FileCacheEntry {
             is_raw_data: mgr.cache_raw_data,
             is_direct_chunkmap,
             is_legacy_stargz,
+            is_tarfs,
             is_zran,
             dio_enabled: false,
             need_validation,

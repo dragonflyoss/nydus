@@ -11,19 +11,20 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use anyhow::{bail, ensure, Context, Result};
-use nydus_utils::{div_round_up, root_tracer, round_down_4k, round_up, timing_tracer};
+use nydus_utils::{root_tracer, round_down, round_up, timing_tracer};
 use storage::device::BlobFeatures;
 
 use super::chunk_dict::DigestWithBlobIndex;
 use super::node::Node;
-use crate::builder::{Bootstrap, BootstrapContext, BuildContext, Tree};
+use crate::builder::{Bootstrap, BootstrapContext, BuildContext, ConversionType, Tree};
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::inode::new_v6_inode;
 use crate::metadata::layout::v6::{
     align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6Dirent, RafsV6InodeChunkAddr,
     RafsV6InodeChunkHeader, RafsV6OndiskInode, RafsV6SuperBlock, RafsV6SuperBlockExt,
-    EROFS_BLOCK_SIZE_4096, EROFS_DEVTABLE_OFFSET, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
-    EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_SUPER_BLOCK_SIZE, EROFS_SUPER_OFFSET,
+    EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512, EROFS_DEVTABLE_OFFSET,
+    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+    EROFS_INODE_SLOT_SIZE, EROFS_SUPER_BLOCK_SIZE, EROFS_SUPER_OFFSET,
 };
 use crate::metadata::RafsStore;
 use crate::RafsIoWrite;
@@ -102,6 +103,7 @@ impl Node {
         &mut self,
         bootstrap_ctx: &mut BootstrapContext,
         v6_hardlink_offset: Option<u64>,
+        block_size: u64,
     ) -> Result<()> {
         ensure!(!self.is_dir(), "{} is a directory", self.path().display());
         if self.is_reg() {
@@ -112,7 +114,7 @@ impl Node {
                 let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
                 let total_size = round_up(size, unit) + self.inode.child_count() as u64 * unit;
                 // First try to allocate from fragments of dirent pages.
-                self.v6_offset = bootstrap_ctx.allocate_available_block(total_size);
+                self.v6_offset = bootstrap_ctx.allocate_available_block(total_size, block_size);
                 if self.v6_offset == 0 {
                     self.v6_offset = bootstrap_ctx.offset;
                     bootstrap_ctx.offset += total_size;
@@ -120,7 +122,7 @@ impl Node {
             }
             self.v6_datalayout = EROFS_INODE_CHUNK_BASED;
         } else if self.is_symlink() {
-            self.v6_set_offset_with_tail(bootstrap_ctx, self.inode.size());
+            self.v6_set_offset_with_tail(bootstrap_ctx, self.inode.size(), block_size);
         } else {
             self.v6_offset = bootstrap_ctx.offset;
             bootstrap_ctx.offset += self.v6_size_with_xattr();
@@ -135,6 +137,7 @@ impl Node {
         &mut self,
         bootstrap_ctx: &mut BootstrapContext,
         d_size: u64,
+        block_size: u64,
     ) -> Result<()> {
         ensure!(
             self.is_dir(),
@@ -144,26 +147,27 @@ impl Node {
 
         // Dir isize is the total bytes of 'dirents + names'.
         self.inode.set_size(d_size);
-        self.v6_set_offset_with_tail(bootstrap_ctx, d_size);
+        self.v6_set_offset_with_tail(bootstrap_ctx, d_size, block_size);
         bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
 
         Ok(())
     }
 
     /// Calculate space needed to store dirents of the directory inode.
-    pub fn v6_dirent_size(&self, tree: &Tree) -> Result<u64> {
+    pub fn v6_dirent_size(&self, ctx: &mut BuildContext, tree: &Tree) -> Result<u64> {
         ensure!(self.is_dir(), "{} is not a directory", self);
         // Use length in byte, instead of length in character.
         let mut d_size: u64 = (".".as_bytes().len()
             + size_of::<RafsV6Dirent>()
             + "..".as_bytes().len()
             + size_of::<RafsV6Dirent>()) as u64;
+        let block_size = ctx.v6_block_size();
 
         for child in tree.children.iter() {
             let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
-            // erofs disk format requires dirent to be aligned with 4096.
-            if (d_size % EROFS_BLOCK_SIZE_4096) + len as u64 > EROFS_BLOCK_SIZE_4096 {
-                d_size = div_round_up(d_size as u64, EROFS_BLOCK_SIZE_4096) * EROFS_BLOCK_SIZE_4096;
+            // erofs disk format requires dirent to be aligned to block size.
+            if (d_size % block_size) + len as u64 > block_size {
+                d_size = round_up(d_size as u64, block_size);
             }
             d_size += len as u64;
         }
@@ -180,7 +184,12 @@ impl Node {
     //
     // For DIR inode, size is the total bytes of 'dirents + names'.
     // For symlink, size is the length of symlink name.
-    fn v6_set_offset_with_tail(&mut self, bootstrap_ctx: &mut BootstrapContext, d_size: u64) {
+    fn v6_set_offset_with_tail(
+        &mut self,
+        bootstrap_ctx: &mut BootstrapContext,
+        d_size: u64,
+        block_size: u64,
+    ) {
         //          |    avail       |
         // +--------+-----------+----+ +-----------------------+
         // |        |inode+tail | free |   dirents+names       |
@@ -217,7 +226,7 @@ impl Node {
         //
         //
         let inode_size = self.v6_size_with_xattr();
-        let tail: u64 = d_size % EROFS_BLOCK_SIZE_4096;
+        let tail: u64 = d_size % block_size;
 
         // We use a simple inline strategy here:
         // If the inode size with xattr + tail data size <= EROFS_BLOCK_SIZE,
@@ -229,7 +238,7 @@ impl Node {
         // since it contain only single blocks with some unused space, the available space can only
         // be smaller than EROFS_BLOCK_SIZE, therefore we can't use our used blocks to store the
         // inode plus the tail data bigger than EROFS_BLOCK_SIZE.
-        let should_inline = tail != 0 && (inode_size + tail) <= EROFS_BLOCK_SIZE_4096;
+        let should_inline = tail != 0 && (inode_size + tail) <= block_size;
 
         // If should inline, we first try to allocate space for the inode together with tail data
         // using used blocks.
@@ -238,13 +247,12 @@ impl Node {
         // and we allocate space from the next block.
         // For the remaining data, we allocate space for it sequentially.
         self.v6_datalayout = if should_inline {
-            self.v6_offset = bootstrap_ctx.allocate_available_block(inode_size + tail);
+            self.v6_offset = bootstrap_ctx.allocate_available_block(inode_size + tail, block_size);
             if self.v6_offset == 0 {
-                let available =
-                    EROFS_BLOCK_SIZE_4096 - bootstrap_ctx.offset % EROFS_BLOCK_SIZE_4096;
+                let available = block_size - bootstrap_ctx.offset % block_size;
                 if available < inode_size + tail {
-                    bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-                    bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE_4096);
+                    bootstrap_ctx.append_available_block(bootstrap_ctx.offset, block_size);
+                    bootstrap_ctx.align_offset(block_size);
                 }
 
                 self.v6_offset = bootstrap_ctx.offset;
@@ -252,28 +260,28 @@ impl Node {
             }
 
             if d_size != tail {
-                bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-                bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE_4096);
+                bootstrap_ctx.append_available_block(bootstrap_ctx.offset, block_size);
+                bootstrap_ctx.align_offset(block_size);
             }
             self.v6_dirents_offset = bootstrap_ctx.offset;
-            bootstrap_ctx.offset += round_down_4k(d_size);
+            bootstrap_ctx.offset += round_down(d_size, block_size);
 
             EROFS_INODE_FLAT_INLINE
         } else {
             // Otherwise, we first try to allocate space for the inode from used blocks.
             // If no available used block exists, we allocate space sequentially.
             // Then we allocate space for all data.
-            self.v6_offset = bootstrap_ctx.allocate_available_block(inode_size);
+            self.v6_offset = bootstrap_ctx.allocate_available_block(inode_size, block_size);
             if self.v6_offset == 0 {
                 self.v6_offset = bootstrap_ctx.offset;
                 bootstrap_ctx.offset += inode_size;
             }
 
-            bootstrap_ctx.append_available_block(bootstrap_ctx.offset);
-            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE_4096);
+            bootstrap_ctx.append_available_block(bootstrap_ctx.offset, block_size);
+            bootstrap_ctx.align_offset(block_size);
             self.v6_dirents_offset = bootstrap_ctx.offset;
             bootstrap_ctx.offset += d_size;
-            bootstrap_ctx.align_offset(EROFS_BLOCK_SIZE_4096);
+            bootstrap_ctx.align_offset(block_size);
 
             EROFS_INODE_FLAT_PLAIN
         };
@@ -327,6 +335,7 @@ impl Node {
         let mut dirents: Vec<(RafsV6Dirent, &OsString)> = Vec::new();
         let mut nameoff: u64 = 0;
         let mut used: u64 = 0;
+        let block_size = ctx.v6_block_size();
 
         trace!(
             "{:?} self.dirents.len {}",
@@ -337,7 +346,7 @@ impl Node {
         for (offset, name, file_type) in self.v6_dirents.iter() {
             let len = name.len() + size_of::<RafsV6Dirent>();
             // write to bootstrap when it will exceed EROFS_BLOCK_SIZE
-            if used + len as u64 > EROFS_BLOCK_SIZE_4096 {
+            if used + len as u64 > block_size {
                 for (entry, name) in dirents.iter_mut() {
                     trace!("{:?} nameoff {}", name, nameoff);
                     entry.set_name_offset(nameoff as u16);
@@ -358,13 +367,13 @@ impl Node {
                     .write(dir_data.as_slice())
                     .context("failed to write dirent data to meta blob")?;
 
+                // track where we're going to write.
+                dirent_off += round_up(used, block_size);
+                used = 0;
+                nameoff = 0;
                 dir_data.clear();
                 entry_names.clear();
                 dirents.clear();
-                nameoff = 0;
-                used = 0;
-                // track where we're going to write.
-                dirent_off += EROFS_BLOCK_SIZE_4096;
             }
 
             trace!(
@@ -464,7 +473,7 @@ impl Node {
         } else {
             ctx.chunk_size as u64
         };
-        let info = RafsV6InodeChunkHeader::new(chunk_size);
+        let info = RafsV6InodeChunkHeader::new(chunk_size, ctx.v6_block_size());
         inode.set_u(info.to_u32());
         self.v6_dump_inode(ctx, f_bootstrap, inode)
             .context("failed to dump inode for file")?;
@@ -528,7 +537,12 @@ impl Node {
 
 impl BuildContext {
     pub fn v6_block_size(&self) -> u64 {
-        EROFS_BLOCK_SIZE_4096
+        if self.conversion_type == ConversionType::TarToTarfs {
+            // Tar stream is 512-byte aligned.
+            EROFS_BLOCK_SIZE_512
+        } else {
+            EROFS_BLOCK_SIZE_4096
+        }
     }
 
     pub fn v6_block_addr(&self, offset: u64) -> Result<u32> {
@@ -605,12 +619,13 @@ impl Bootstrap {
         // |   |         |devslot     |             |                 |         |                  |
         // +---+---------+------------+-------------+----------------------------------------------+
 
+        let block_size = ctx.v6_block_size();
         let blobs = blob_table.get_all();
         let devtable_len = blobs.len() * size_of::<RafsV6Device>();
         let blob_table_size = blob_table.size() as u64;
         let blob_table_offset = align_offset(
             (EROFS_DEVTABLE_OFFSET as u64) + devtable_len as u64,
-            EROFS_BLOCK_SIZE_4096 as u64,
+            EROFS_BLOCK_SIZE_4096,
         );
         let blob_table_entries = blobs.len();
         assert!(blob_table_entries < u8::MAX as usize);
@@ -644,7 +659,7 @@ impl Bootstrap {
         let meta_addr = if blob_table_size > 0 {
             align_offset(
                 blob_table_offset + blob_table_size + prefetch_table_size as u64,
-                EROFS_BLOCK_SIZE_4096 as u64,
+                EROFS_BLOCK_SIZE_4096,
             )
         } else {
             orig_meta_addr
@@ -691,7 +706,7 @@ impl Bootstrap {
             "dump_bootstrap",
             Result<()>
         )?;
-        Self::v6_align_to_block(bootstrap_ctx)?;
+        Self::v6_align_to_4k(bootstrap_ctx)?;
 
         // `Node` offset might be updated during above inodes dumping. So `get_prefetch_table` after it.
         let prefetch_table = ctx
@@ -727,14 +742,14 @@ impl Bootstrap {
             "chunk_table offset {} size {}",
             chunk_table_offset, chunk_table_size
         );
-        Self::v6_align_to_block(bootstrap_ctx)?;
+        Self::v6_align_to_4k(bootstrap_ctx)?;
 
         // Prepare device slots.
         let mut pos = bootstrap_ctx
             .writer
             .seek_to_end()
             .context("failed to seek to bootstrap's end for chunk table")?;
-        assert_eq!(pos % EROFS_BLOCK_SIZE_4096, 0);
+        assert_eq!(pos % block_size, 0);
         let mut devtable: Vec<RafsV6Device> = Vec::new();
         let mut block_count = 0u32;
         let mut inlined_chunk_digest = true;
@@ -761,7 +776,7 @@ impl Bootstrap {
             if block_count.checked_add(cnt).is_none() {
                 bail!("Too many data blocks in RAFS filesystem, block size 0x{:x}, block count 0x{:x}", ctx.v6_block_size(), block_count as u64 + cnt as u64);
             }
-            let mapped_blkaddr = Self::v6_align_mapped_blkaddr(ctx, pos)?;
+            let mapped_blkaddr = Self::v6_align_mapped_blkaddr(block_size, pos)?;
             pos += cnt as u64 * ctx.v6_block_size();
             block_count += cnt;
 
@@ -777,6 +792,9 @@ impl Bootstrap {
 
         // Dump super block
         let mut sb = RafsV6SuperBlock::new();
+        if ctx.conversion_type == ConversionType::TarToTarfs {
+            sb.set_block_bits(EROFS_BLOCK_BITS_9);
+        }
         sb.set_inos(bootstrap_ctx.nodes.len() as u64);
         sb.set_blocks(block_count);
         sb.set_root_nid(root_nid as u16);
@@ -795,6 +813,9 @@ impl Bootstrap {
         }
         if inlined_chunk_digest {
             ext_sb.set_inlined_chunk_digest();
+        }
+        if ctx.conversion_type == ConversionType::TarToTarfs {
+            ext_sb.set_tarfs_mode();
         }
         bootstrap_ctx
             .writer
@@ -826,7 +847,7 @@ impl Bootstrap {
         Ok(())
     }
 
-    fn v6_align_to_block(bootstrap_ctx: &mut BootstrapContext) -> Result<()> {
+    fn v6_align_to_4k(bootstrap_ctx: &mut BootstrapContext) -> Result<()> {
         bootstrap_ctx
             .writer
             .flush()
@@ -835,7 +856,7 @@ impl Bootstrap {
             .writer
             .seek_to_end()
             .context("failed to seek to bootstrap's end for chunk table")?;
-        let padding = align_offset(pos, EROFS_BLOCK_SIZE_4096 as u64) - pos;
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE_4096) - pos;
         bootstrap_ctx
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
@@ -847,11 +868,11 @@ impl Bootstrap {
         Ok(())
     }
 
-    fn v6_align_mapped_blkaddr(ctx: &BuildContext, addr: u64) -> Result<u32> {
+    fn v6_align_mapped_blkaddr(block_size: u64, addr: u64) -> Result<u32> {
         match addr.checked_add(V6_BLOCK_SEG_ALIGNMENT - 1) {
             None => bail!("address 0x{:x} is too big", addr),
             Some(v) => {
-                let v = (v & !(V6_BLOCK_SEG_ALIGNMENT - 1)) / ctx.v6_block_size();
+                let v = (v & !(V6_BLOCK_SEG_ALIGNMENT - 1)) / block_size;
                 if v > u32::MAX as u64 {
                     bail!("address 0x{:x} is too big", addr);
                 } else {
@@ -894,7 +915,8 @@ mod tests {
         // reg file.
         // "1" is used only for testing purpose, in practice
         // it's always aligned to 32 bytes.
-        node.v6_set_offset(&mut bootstrap_ctx, None).unwrap();
+        node.v6_set_offset(&mut bootstrap_ctx, None, EROFS_BLOCK_SIZE_4096)
+            .unwrap();
         assert_eq!(node.v6_offset, 0);
         assert_eq!(node.v6_datalayout, EROFS_INODE_CHUNK_BASED);
         assert!(node.v6_compact_inode);
@@ -913,14 +935,14 @@ mod tests {
         .unwrap();
 
         dir_node
-            .v6_set_dir_offset(&mut bootstrap_ctx, 4064)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 4064, EROFS_BLOCK_SIZE_4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
         assert_eq!(dir_node.v6_offset, 4096);
         assert_eq!(bootstrap_ctx.offset, 8192);
 
         dir_node
-            .v6_set_dir_offset(&mut bootstrap_ctx, 4096)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 4096, EROFS_BLOCK_SIZE_4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
         assert_eq!(dir_node.v6_offset, 32);
@@ -928,7 +950,7 @@ mod tests {
         assert_eq!(bootstrap_ctx.offset, 8192 + 4096);
 
         dir_node
-            .v6_set_dir_offset(&mut bootstrap_ctx, 8160)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 8160, EROFS_BLOCK_SIZE_4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
         assert_eq!(dir_node.v6_offset, 8192 + 4096);
@@ -936,7 +958,7 @@ mod tests {
         assert_eq!(bootstrap_ctx.offset, 8192 + 4096 + 8192);
 
         dir_node
-            .v6_set_dir_offset(&mut bootstrap_ctx, 8161)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 8161, EROFS_BLOCK_SIZE_4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_PLAIN);
         assert_eq!(dir_node.v6_offset, 64);
@@ -944,7 +966,7 @@ mod tests {
         assert_eq!(bootstrap_ctx.offset, 8192 + 4096 + 8192 + 8192);
 
         dir_node
-            .v6_set_dir_offset(&mut bootstrap_ctx, 4096 + 3968)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 4096 + 3968, EROFS_BLOCK_SIZE_4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
         assert_eq!(dir_node.v6_offset, 96);
@@ -952,7 +974,7 @@ mod tests {
         assert_eq!(bootstrap_ctx.offset, 8192 + 4096 + 8192 + 8192 + 4096);
 
         dir_node
-            .v6_set_dir_offset(&mut bootstrap_ctx, 4096 + 2048)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 4096 + 2048, EROFS_BLOCK_SIZE_4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
         assert_eq!(dir_node.v6_offset, 8192 + 4096 + 8192 + 8192 + 4096);
@@ -966,7 +988,7 @@ mod tests {
         );
 
         dir_node
-            .v6_set_dir_offset(&mut bootstrap_ctx, 1985)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 1985, EROFS_BLOCK_SIZE_4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
         assert_eq!(dir_node.v6_offset, 8192 + 4096 + 8192 + 8192 + 4096 + 8192);
@@ -977,7 +999,7 @@ mod tests {
 
         bootstrap_ctx.align_offset(EROFS_INODE_SLOT_SIZE as u64);
         dir_node
-            .v6_set_dir_offset(&mut bootstrap_ctx, 1984)
+            .v6_set_dir_offset(&mut bootstrap_ctx, 1984, EROFS_BLOCK_SIZE_4096)
             .unwrap();
         assert_eq!(dir_node.v6_datalayout, EROFS_INODE_FLAT_INLINE);
         assert_eq!(

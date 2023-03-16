@@ -17,7 +17,7 @@ use nydus_api::{
     BLOB_CACHE_TYPE_META_BLOB,
 };
 use nydus_rafs::metadata::layout::v6::{EROFS_BLOCK_BITS_12, EROFS_BLOCK_SIZE_4096};
-use nydus_rafs::metadata::{RafsBlobExtraInfo, RafsSuper};
+use nydus_rafs::metadata::{RafsBlobExtraInfo, RafsSuper, RafsSuperFlags};
 use nydus_storage::cache::BlobCache;
 use nydus_storage::device::BlobInfo;
 use nydus_storage::factory::BLOB_FACTORY;
@@ -43,6 +43,7 @@ pub struct MetaBlobConfig {
     config: Arc<ConfigV2>,
     blobs: Mutex<Vec<Arc<DataBlobConfig>>>,
     blob_extra_infos: HashMap<String, RafsBlobExtraInfo>,
+    is_tarfs_mode: bool,
 }
 
 impl MetaBlobConfig {
@@ -68,6 +69,11 @@ impl MetaBlobConfig {
     /// Get optional extra information associated with a blob object.
     pub fn get_blob_extra_info(&self, blob_id: &str) -> Option<&RafsBlobExtraInfo> {
         self.blob_extra_infos.get(blob_id)
+    }
+
+    /// Check whether the filesystem is in `TARFS` mode.
+    pub fn is_tarfs_mode(&self) -> bool {
+        self.is_tarfs_mode
     }
 
     fn add_data_blob(&self, blob: Arc<DataBlobConfig>) {
@@ -130,6 +136,7 @@ impl BlobConfig {
         path: PathBuf,
         config: Arc<ConfigV2>,
         blob_extra_infos: HashMap<String, RafsBlobExtraInfo>,
+        is_tarfs_mode: bool,
     ) -> Self {
         let scoped_blob_id = generate_blob_key(&domain_id, &blob_id);
 
@@ -140,6 +147,7 @@ impl BlobConfig {
             config,
             blobs: Mutex::new(Vec::new()),
             blob_extra_infos,
+            is_tarfs_mode,
         }))
     }
 
@@ -394,6 +402,7 @@ impl BlobCacheMgr {
             path,
             config,
             blob_extra_infos,
+            rs.meta.flags.contains(RafsSuperFlags::TARTFS_MODE),
         );
         // Safe to unwrap because it's a meta blob object.
         let meta_obj = meta.meta_config().unwrap();
@@ -612,6 +621,7 @@ mod tests {
             config,
             blobs: Mutex::new(Vec::new()),
             blob_extra_infos: HashMap::new(),
+            is_tarfs_mode: false,
         };
         assert_eq!(blob.path(), &path);
     }
