@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::io::SeekFrom;
 use std::mem::size_of;
@@ -556,7 +556,7 @@ impl BuildContext {
 }
 
 impl Bootstrap {
-    pub(crate) fn v6_update_dirents(nodes: &mut Vec<Node>, tree: &Tree, parent_offset: u64) {
+    pub(crate) fn v6_update_dirents(nodes: &mut VecDeque<Node>, tree: &Tree, parent_offset: u64) {
         let node = &mut nodes[tree.node.index as usize - 1];
         let node_offset = node.v6_offset;
         if !node.is_dir() {

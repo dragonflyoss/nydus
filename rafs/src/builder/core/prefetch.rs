@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -181,7 +181,7 @@ impl Prefetch {
     }
 
     /// Generate filesystem layer prefetch list for RAFS v5.
-    pub fn get_v5_prefetch_table(&mut self, nodes: &[Node]) -> Option<RafsV5PrefetchTable> {
+    pub fn get_v5_prefetch_table(&mut self, nodes: &VecDeque<Node>) -> Option<RafsV5PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV5PrefetchTable::new();
             for i in self.patterns.values().filter_map(|v| *v) {
@@ -199,7 +199,7 @@ impl Prefetch {
     /// Generate filesystem layer prefetch list for RAFS v6.
     pub fn get_v6_prefetch_table(
         &mut self,
-        nodes: &[Node],
+        nodes: &VecDeque<Node>,
         meta_addr: u64,
     ) -> Option<RafsV6PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {

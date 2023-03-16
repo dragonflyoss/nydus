@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -219,7 +218,7 @@ impl Merger {
             }
 
             if let Some(tree) = &mut tree {
-                let mut nodes = Vec::new();
+                let mut nodes = VecDeque::new();
                 rs.walk_directory::<PathBuf>(
                     rs.superblock.root_ino(),
                     None,
@@ -249,8 +248,8 @@ impl Merger {
                         match node.whiteout_type(WhiteoutSpec::Oci) {
                             // Insert whiteouts at the head, so they will be handled first when
                             // applying to lower layer.
-                            Some(_) => nodes.insert(0, node),
-                            _ => nodes.push(node),
+                            Some(_) => nodes.push_front(node),
+                            _ => nodes.push_back(node),
                         }
                         Ok(())
                     },

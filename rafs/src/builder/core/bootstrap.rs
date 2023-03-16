@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 
 use anyhow::{Context, Error, Result};
@@ -52,7 +53,7 @@ impl Bootstrap {
     ) -> Result<()> {
         // used to compute nid(ino) for v6
         let root_offset = bootstrap_ctx.offset;
-        let mut nodes = Vec::with_capacity(0x10000);
+        let mut nodes = VecDeque::with_capacity(0x10000);
 
         // Special handling of the root inode
         assert!(tree.node.is_dir());
@@ -63,7 +64,7 @@ impl Bootstrap {
             tree.node.inode.set_ino(RAFS_V5_ROOT_INODE);
         }
         ctx.prefetch.insert_if_need(&tree.node);
-        nodes.push(tree.node.clone());
+        nodes.push_back(tree.node.clone());
 
         Self::build_rafs(ctx, bootstrap_ctx, &mut tree, &mut nodes)?;
         if ctx.fs_version.is_v6() && !bootstrap_ctx.layered {
@@ -147,7 +148,7 @@ impl Bootstrap {
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
         tree: &mut Tree,
-        nodes: &mut Vec<Node>,
+        nodes: &mut VecDeque<Node>,
     ) -> Result<()> {
         let index = nodes.len() as u32 + 1;
         let parent = &mut nodes[tree.node.index as usize - 1];
@@ -231,14 +232,14 @@ impl Bootstrap {
                 (true, Some(whiteout_type)) => {
                     // Insert removal operations at the head, so they will be handled first when
                     // applying to lower layer.
-                    nodes.insert(0, child.node.clone());
+                    nodes.push_front(child.node.clone());
                     if whiteout_type == WhiteoutType::OverlayFsOpaque {
                         // For the overlayfs opaque, we need to remove the lower node that has the
                         // same name first, then apply upper node to the node tree of lower layer.
                         child
                             .node
                             .remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
-                        nodes.push(child.node.clone());
+                        nodes.push_back(child.node.clone());
                     }
                 }
                 (false, Some(whiteout_type)) => {
@@ -248,9 +249,9 @@ impl Bootstrap {
                             .node
                             .remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
                     }
-                    nodes.push(child.node.clone());
+                    nodes.push_back(child.node.clone());
                 }
-                _ => nodes.push(child.node.clone()),
+                _ => nodes.push_back(child.node.clone()),
             }
 
             ctx.prefetch.insert_if_need(&child.node);
