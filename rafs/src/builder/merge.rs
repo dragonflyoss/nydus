@@ -112,7 +112,7 @@ impl Merger {
         // Load parent bootstrap
         if let Some(parent_bootstrap_path) = &parent_bootstrap_path {
             let (rs, _) =
-                RafsSuper::load_from_file(parent_bootstrap_path, config_v2.clone(), false, false)
+                RafsSuper::load_from_file(parent_bootstrap_path, config_v2.clone(), false)
                     .context(format!("load parent bootstrap {:?}", parent_bootstrap_path))?;
             tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
             let blobs = rs.superblock.get_blob_infos();
@@ -128,9 +128,8 @@ impl Merger {
         let mut chunk_dict_blobs = HashSet::new();
         let mut config = None;
         if let Some(chunk_dict_path) = &chunk_dict {
-            let (rs, _) =
-                RafsSuper::load_from_file(chunk_dict_path, config_v2.clone(), true, false)
-                    .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
+            let (rs, _) = RafsSuper::load_from_file(chunk_dict_path, config_v2.clone(), false)
+                .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
             config = Some(rs.meta.get_config());
             for blob in rs.superblock.get_blob_infos() {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
@@ -141,7 +140,7 @@ impl Merger {
         let mut chunk_size = None;
 
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
-            let (rs, _) = RafsSuper::load_from_file(bootstrap_path, config_v2.clone(), true, false)
+            let (rs, _) = RafsSuper::load_from_file(bootstrap_path, config_v2.clone(), false)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
             config
                 .get_or_insert_with(|| rs.meta.get_config())

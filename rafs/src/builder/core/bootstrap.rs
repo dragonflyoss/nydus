@@ -287,8 +287,7 @@ impl Bootstrap {
         blob_mgr: &mut BlobManager,
     ) -> Result<Tree> {
         let rs = if let Some(path) = bootstrap_mgr.f_parent_path.as_ref() {
-            RafsSuper::load_from_file(path, ctx.configuration.clone(), true, false)
-                .map(|(rs, _)| rs)?
+            RafsSuper::load_from_file(path, ctx.configuration.clone(), false).map(|(rs, _)| rs)?
         } else {
             return Err(Error::msg("bootstrap context's parent bootstrap is null"));
         };

@@ -390,7 +390,7 @@ impl BlobCacheMgr {
         path: PathBuf,
         config: Arc<ConfigV2>,
     ) -> Result<()> {
-        let (rs, _) = RafsSuper::load_from_file(&path, config.clone(), true, false)?;
+        let (rs, _) = RafsSuper::load_from_file(&path, config.clone(), false)?;
         if rs.meta.is_v5() {
             return Err(einval!("blob_cache: RAFSv5 image is not supported"));
         }
