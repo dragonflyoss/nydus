@@ -18,8 +18,9 @@ use nydus_utils::{digest::RafsDigest, ByteSize};
 
 use super::mock_chunk::MockChunkInfo;
 use super::mock_super::CHUNK_SIZE;
+use crate::metadata::inode::RafsInodeFlags;
 use crate::metadata::layout::v5::{
-    rafsv5_alloc_bio_vecs, RafsV5BlobTable, RafsV5InodeChunkOps, RafsV5InodeFlags, RafsV5InodeOps,
+    rafsv5_alloc_bio_vecs, RafsV5BlobTable, RafsV5InodeChunkOps, RafsV5InodeOps,
 };
 use crate::metadata::{
     layout::{XattrName, XattrValue},
@@ -38,7 +39,7 @@ pub struct MockInode {
     i_projid: u32,
     i_uid: u32,
     i_gid: u32,
-    i_flags: RafsV5InodeFlags,
+    i_flags: RafsInodeFlags,
     i_size: u64,
     i_blocks: u64,
     i_nlink: u32,
@@ -158,7 +159,7 @@ impl RafsInode for MockInode {
     }
 
     fn has_xattr(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::XATTR)
+        self.i_flags.contains(RafsInodeFlags::XATTR)
     }
 
     #[inline]

@@ -173,13 +173,12 @@ impl Display for Node {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(
             f,
-            "{} {:?}: index {} ino {} real_ino {} i_parent {} child_index {} child_count {} i_nlink {} i_size {} i_blocks {} i_name_size {} i_symlink_size {} has_xattr {} link {:?} i_mtime {} i_mtime_nsec {}",
+            "{} {:?}: index {} ino {} real_ino {} child_index {} child_count {} i_nlink {} i_size {} i_blocks {} i_name_size {} i_symlink_size {} has_xattr {} link {:?} i_mtime {} i_mtime_nsec {}",
             self.file_type(),
             self.target(),
             self.index,
             self.inode.ino(),
             self.info.src_ino,
-            self.inode.parent(),
             self.inode.child_index(),
             self.inode.child_count(),
             self.inode.nlink(),
@@ -609,7 +608,11 @@ impl Node {
     }
 
     fn build_inode(&mut self, chunk_size: u32) -> Result<()> {
-        self.inode.set_name_size(self.name().byte_size());
+        let size = self.name().byte_size();
+        if size > u16::MAX as usize {
+            bail!("file name length 0x{:x} is too big", size,);
+        }
+        self.inode.set_name_size(size);
 
         // NOTE: Always retrieve xattr before attr so that we can know the size of xattr pairs.
         self.build_inode_xattr()
@@ -631,6 +634,9 @@ impl Node {
             })?;
             let symlink: OsString = target_path.into();
             let size = symlink.byte_size();
+            if size > u16::MAX as usize {
+                bail!("symlink content size 0x{:x} is too big", size);
+            }
             self.inode.set_symlink_size(size);
             self.set_symlink(symlink);
         }
