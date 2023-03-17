@@ -883,6 +883,7 @@ impl Command {
                 digester,
                 chunk_size,
                 explicit_uidgid: !repeatable,
+                is_tarfs_mode: false,
             };
             let rafs_config = Arc::new(build_ctx.configuration.as_ref().clone());
             // The separate chunk dict bootstrap doesn't support blob accessible.

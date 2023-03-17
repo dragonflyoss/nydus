@@ -369,6 +369,8 @@ pub struct RafsSuperConfig {
     pub chunk_size: u32,
     /// Whether `explicit_uidgid` enabled or not.
     pub explicit_uidgid: bool,
+    /// RAFS in TARFS mode.
+    pub is_tarfs_mode: bool,
 }
 
 impl RafsSuperConfig {
@@ -403,6 +405,11 @@ impl RafsSuperConfig {
                 self.digester,
                 meta.get_digester()
             )));
+        }
+
+        let is_tarfs_mode = meta.flags.contains(RafsSuperFlags::TARTFS_MODE);
+        if is_tarfs_mode != self.is_tarfs_mode {
+            return Err(einval!(format!("Using inconsistent RAFS TARFS mode")));
         }
 
         Ok(())
@@ -519,6 +526,7 @@ impl RafsSuperMeta {
             digester: self.get_digester(),
             chunk_size: self.chunk_size,
             explicit_uidgid: self.explicit_uidgid(),
+            is_tarfs_mode: self.flags.contains(RafsSuperFlags::TARTFS_MODE),
         }
     }
 }

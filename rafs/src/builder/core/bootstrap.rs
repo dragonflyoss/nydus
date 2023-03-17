@@ -15,7 +15,7 @@ use crate::builder::{
     ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, Tree,
 };
 use crate::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
-use crate::metadata::{RafsSuper, RafsSuperConfig};
+use crate::metadata::{RafsSuper, RafsSuperConfig, RafsSuperFlags};
 
 pub(crate) const STARGZ_DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
 
@@ -295,6 +295,7 @@ impl Bootstrap {
             chunk_size: ctx.chunk_size,
             explicit_uidgid: ctx.explicit_uidgid,
             version: ctx.fs_version,
+            is_tarfs_mode: rs.meta.flags.contains(RafsSuperFlags::TARTFS_MODE),
         };
         config.check_compatibility(&rs.meta)?;
 

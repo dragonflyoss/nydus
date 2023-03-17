@@ -15,7 +15,8 @@ use nydus_storage::device::{BlobFeatures, BlobInfo};
 
 use super::{
     ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
-    BuildOutput, ChunkSource, HashChunkDict, MetadataTreeBuilder, Overlay, Tree, WhiteoutSpec,
+    BuildOutput, ChunkSource, ConversionType, HashChunkDict, MetadataTreeBuilder, Overlay, Tree,
+    WhiteoutSpec,
 };
 use crate::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
 
@@ -151,6 +152,10 @@ impl Merger {
             ctx.compressor = rs.meta.get_compressor();
             ctx.digester = rs.meta.get_digester();
             ctx.explicit_uidgid = rs.meta.explicit_uidgid();
+            if config.as_ref().unwrap().is_tarfs_mode {
+                ctx.conversion_type = ConversionType::TarToTarfs;
+                ctx.blob_features |= BlobFeatures::TARFS;
+            }
 
             let mut parent_blob_added = false;
             let blobs = &rs.superblock.get_blob_infos();
@@ -256,6 +261,15 @@ impl Merger {
             } else {
                 let mut dict = HashChunkDict::new(rs.meta.get_digester());
                 tree = Some(Tree::from_bootstrap(&rs, &mut dict)?);
+            }
+        }
+
+        if ctx.conversion_type == ConversionType::TarToTarfs {
+            if parent_layers > 0 {
+                bail!("merging RAFS in TARFS mode conflicts with `--parent-bootstrap`");
+            }
+            if !chunk_dict_blobs.is_empty() {
+                bail!("merging RAFS in TARFS mode conflicts with `--chunk-dict`");
             }
         }
 

@@ -1466,3 +1466,21 @@ impl BlobChunkInfo for TarfsChunkInfo {
         self
     }
 }
+
+impl BlobV5ChunkInfo for TarfsChunkInfo {
+    fn index(&self) -> u32 {
+        self.chunk_index
+    }
+
+    fn file_offset(&self) -> u64 {
+        0
+    }
+
+    fn flags(&self) -> BlobChunkFlags {
+        BlobChunkFlags::empty()
+    }
+
+    fn as_base(&self) -> &dyn BlobChunkInfo {
+        self
+    }
+}
