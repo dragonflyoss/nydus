@@ -1292,7 +1292,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
             } else {
                 self.chunk_size()
             };
-            let chunk = TarfsChunkInfo::new(blob_index, chunk_index, offset, size);
+            let chunk = PlainChunkInfoV6::new(blob_index, chunk_index, offset, size);
             Ok(Arc::new(chunk))
         } else {
             let mut chunk_map = self.mapping.info.chunk_map.lock().unwrap();
@@ -1408,17 +1408,17 @@ impl BlobV5ChunkInfo for DirectChunkInfoV6 {
 }
 
 /// Rafs v6 fake ChunkInfo for Tarfs.
-pub(crate) struct TarfsChunkInfo {
+pub(crate) struct PlainChunkInfoV6 {
     blob_index: u32,
     chunk_index: u32,
     offset: u64,
     size: u32,
 }
 
-impl TarfsChunkInfo {
-    /// Create a new instance of [TarfsChunkInfo].
+impl PlainChunkInfoV6 {
+    /// Create a new instance of [PlainChunkInfoV6].
     pub fn new(blob_index: u32, chunk_index: u32, offset: u64, size: u32) -> Self {
-        TarfsChunkInfo {
+        PlainChunkInfoV6 {
             blob_index,
             chunk_index,
             offset,
@@ -1429,7 +1429,7 @@ impl TarfsChunkInfo {
 
 const TARFS_DIGEST: RafsDigest = RafsDigest { data: [0u8; 32] };
 
-impl BlobChunkInfo for TarfsChunkInfo {
+impl BlobChunkInfo for PlainChunkInfoV6 {
     fn chunk_id(&self) -> &RafsDigest {
         &TARFS_DIGEST
     }
@@ -1467,7 +1467,7 @@ impl BlobChunkInfo for TarfsChunkInfo {
     }
 }
 
-impl BlobV5ChunkInfo for TarfsChunkInfo {
+impl BlobV5ChunkInfo for PlainChunkInfoV6 {
     fn index(&self) -> u32 {
         self.chunk_index
     }
