@@ -40,7 +40,7 @@ impl RafsInspector {
         request_mode: bool,
         config: Arc<ConfigV2>,
     ) -> Result<Self, anyhow::Error> {
-        let (rafs_meta, f) = RafsSuper::load_from_file(bootstrap_path, config, false, false)?;
+        let (rafs_meta, f) = RafsSuper::load_from_file(bootstrap_path, config, false)?;
         let root_ino = rafs_meta.superblock.root_ino();
 
         Ok(RafsInspector {

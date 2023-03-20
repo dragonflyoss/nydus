@@ -1027,7 +1027,7 @@ impl Command {
             Some(s) => PathBuf::from(s),
         };
 
-        let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, config.clone(), true, false)?;
+        let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, config.clone(), false)?;
         info!("load bootstrap {:?} successfully", bootstrap_path);
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,

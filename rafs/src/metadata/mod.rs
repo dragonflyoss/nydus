@@ -691,9 +691,13 @@ impl RafsSuper {
     pub fn load_from_file<P: AsRef<Path>>(
         path: P,
         config: Arc<ConfigV2>,
-        validate_digest: bool,
         is_chunk_dict: bool,
     ) -> Result<(Self, RafsIoReader)> {
+        let validate_digest = config
+            .rafs
+            .as_ref()
+            .map(|rafs| rafs.validate)
+            .unwrap_or_default();
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
             validate_digest,
