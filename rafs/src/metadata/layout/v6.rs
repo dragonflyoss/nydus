@@ -21,9 +21,10 @@ use nydus_storage::meta::{
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{compress, digest, round_up, ByteSize};
 
+use crate::metadata::inode::InodeWrapper;
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::layout::{MetaRange, RafsXAttrs};
-use crate::metadata::{RafsBlobExtraInfo, RafsStore, RafsSuperFlags, RafsSuperMeta};
+use crate::metadata::{Inode, RafsBlobExtraInfo, RafsStore, RafsSuperFlags, RafsSuperMeta};
 use crate::{impl_bootstrap_converter, impl_pub_getter_setter, RafsIoReader, RafsIoWrite};
 
 /// EROFS metadata slot size.
@@ -1024,6 +1025,34 @@ impl RafsStore for RafsV6InodeExtended {
         w.write_all(self.as_ref())?;
         Ok(self.as_ref().len())
     }
+}
+
+/// Create RAFS v6 on-disk inode object.
+pub fn new_v6_inode(
+    inode: &InodeWrapper,
+    datalayout: u16,
+    xattr_inline_count: u16,
+    compact: bool,
+) -> Box<dyn RafsV6OndiskInode> {
+    let mut i: Box<dyn RafsV6OndiskInode> = match compact {
+        true => Box::new(RafsV6InodeCompact::new()),
+        false => Box::new(RafsV6InodeExtended::new()),
+    };
+
+    assert!(inode.ino() <= i32::MAX as Inode);
+    i.set_ino(inode.ino() as u32);
+    i.set_size(inode.size());
+    i.set_uidgid(inode.uid(), inode.gid());
+    i.set_mtime(inode.mtime(), inode.mtime_nsec());
+    i.set_nlink(inode.nlink());
+    i.set_mode(inode.mode() as u16);
+    i.set_data_layout(datalayout);
+    i.set_xattr_inline_count(xattr_inline_count);
+    if inode.is_special() {
+        i.set_rdev(inode.rdev() as u32);
+    }
+
+    i
 }
 
 /// Dirent sorted in alphabet order to improve performance by binary search.

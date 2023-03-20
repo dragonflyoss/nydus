@@ -160,9 +160,10 @@ impl Bootstrap {
             // binary search.
             tree.children
                 .sort_by_key(|child| child.node.name().to_os_string());
-            parent.inode.set_child_index(index);
             parent.inode.set_child_count(tree.children.len() as u32);
-            if ctx.fs_version.is_v6() {
+            if ctx.fs_version.is_v5() {
+                parent.inode.set_child_index(index);
+            } else if ctx.fs_version.is_v6() {
                 let d_size = tree.node.v6_dirent_size(ctx, tree)?;
                 parent.v6_set_dir_offset(bootstrap_ctx, d_size, block_size)?;
             }
@@ -177,7 +178,9 @@ impl Bootstrap {
         for child in tree.children.iter_mut() {
             let index = nodes.len() as u64 + 1;
             child.node.index = index;
-            child.node.inode.set_parent(parent_ino);
+            if ctx.fs_version.is_v5() {
+                child.node.inode.set_parent(parent_ino);
+            }
 
             // Handle hardlink.
             // All hardlink nodes' ino and nlink should be the same.

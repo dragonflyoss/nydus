@@ -33,8 +33,8 @@ use super::core::overlay::Overlay;
 use super::core::tree::Tree;
 use super::{build_bootstrap, Builder};
 use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::inode::InodeWrapper;
-use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeFlags};
+use crate::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
+use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode};
 use crate::metadata::layout::RafsXAttrs;
 use crate::metadata::{Inode, RafsVersion};
 
@@ -543,8 +543,8 @@ impl StargzTreeBuilder {
         let entry_path = entry.path()?;
         let mut file_size = entry.size;
         let mut flags = match version {
-            RafsVersion::V5 => RafsV5InodeFlags::default(),
-            RafsVersion::V6 => RafsV5InodeFlags::default(),
+            RafsVersion::V5 => RafsInodeFlags::default(),
+            RafsVersion::V6 => RafsInodeFlags::default(),
         };
 
         // Parse symlink
@@ -552,7 +552,7 @@ impl StargzTreeBuilder {
             let symlink_link_path = entry.symlink_link_path();
             let symlink_size = symlink_link_path.byte_size() as u16;
             file_size = symlink_size.into();
-            flags |= RafsV5InodeFlags::SYMLINK;
+            flags |= RafsInodeFlags::SYMLINK;
             (Some(symlink_link_path.as_os_str().to_owned()), symlink_size)
         } else {
             (None, 0)
@@ -562,7 +562,7 @@ impl StargzTreeBuilder {
         let mut xattrs = RafsXAttrs::new();
         if entry.has_xattr() {
             for (name, value) in entry.xattrs.iter() {
-                flags |= RafsV5InodeFlags::XATTR;
+                flags |= RafsInodeFlags::XATTR;
                 let value = base64::decode(value).with_context(|| {
                     format!(
                         "parse xattr name {:?} of file {:?} failed",
@@ -576,7 +576,7 @@ impl StargzTreeBuilder {
         // Handle hardlink ino
         let mut ino = (self.path_inode_map.len() + 1) as Inode;
         if entry.is_hardlink() {
-            flags |= RafsV5InodeFlags::HARDLINK;
+            flags |= RafsInodeFlags::HARDLINK;
             if let Some(_ino) = self.path_inode_map.get(&entry.hardlink_link_path()) {
                 ino = *_ino;
             } else {
@@ -591,32 +591,47 @@ impl StargzTreeBuilder {
         let uid = if explicit_uidgid { entry.uid } else { 0 };
         let gid = if explicit_uidgid { entry.gid } else { 0 };
 
-        // Parse inode info
-        let v5_inode = RafsV5Inode {
-            i_digest: RafsDigest::default(),
-            i_parent: 0,
-            i_ino: ino,
-            i_projid: 0,
-            i_uid: uid,
-            i_gid: gid,
-            i_mode: entry.mode(),
-            i_size: file_size,
-            i_nlink: entry.num_link,
-            i_blocks: 0,
-            i_flags: flags,
-            i_child_index: 0,
-            i_child_count: 0,
-            i_name_size: name_size,
-            i_symlink_size: symlink_size,
-            i_rdev: entry.rdev(),
-            // TODO: add mtime from entry.ModTime()
-            i_mtime: 0,
-            i_mtime_nsec: 0,
-            i_reserved: [0; 8],
-        };
         let inode = match version {
-            RafsVersion::V5 => InodeWrapper::V5(v5_inode),
-            RafsVersion::V6 => InodeWrapper::V6(v5_inode),
+            RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode {
+                i_digest: RafsDigest::default(),
+                i_parent: 0,
+                i_ino: ino,
+                i_projid: 0,
+                i_uid: uid,
+                i_gid: gid,
+                i_mode: entry.mode(),
+                i_size: file_size,
+                i_nlink: entry.num_link,
+                i_blocks: 0,
+                i_flags: flags,
+                i_child_index: 0,
+                i_child_count: 0,
+                i_name_size: name_size,
+                i_symlink_size: symlink_size,
+                i_rdev: entry.rdev(),
+                // TODO: add mtime from entry.ModTime()
+                i_mtime: 0,
+                i_mtime_nsec: 0,
+                i_reserved: [0; 8],
+            }),
+            RafsVersion::V6 => InodeWrapper::V6(RafsV6Inode {
+                i_ino: ino,
+                i_projid: 0,
+                i_uid: uid,
+                i_gid: gid,
+                i_mode: entry.mode(),
+                i_size: file_size,
+                i_nlink: entry.num_link,
+                i_blocks: 0,
+                i_flags: flags,
+                i_child_count: 0,
+                i_name_size: name_size,
+                i_symlink_size: symlink_size,
+                i_rdev: entry.rdev(),
+                // TODO: add mtime from entry.ModTime()
+                i_mtime: 0,
+                i_mtime_nsec: 0,
+            }),
         };
 
         let path = entry.path()?;

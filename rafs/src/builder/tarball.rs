@@ -43,8 +43,8 @@ use super::core::node::{Node, NodeInfo};
 use super::core::overlay::Overlay;
 use super::core::tree::Tree;
 use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
-use crate::metadata::inode::InodeWrapper;
-use crate::metadata::layout::v5::{RafsV5Inode, RafsV5InodeFlags};
+use crate::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
+use crate::metadata::layout::v5::RafsV5Inode;
 use crate::metadata::layout::RafsXAttrs;
 use crate::metadata::{Inode, RafsVersion};
 
@@ -229,8 +229,8 @@ impl<'a> TarballTreeBuilder<'a> {
         let (uid, gid) = Self::get_uid_gid(self.ctx, header)?;
         let mtime = header.mtime().unwrap_or_default();
         let mut flags = match self.ctx.fs_version {
-            RafsVersion::V5 => RafsV5InodeFlags::default(),
-            RafsVersion::V6 => RafsV5InodeFlags::default(),
+            RafsVersion::V5 => RafsInodeFlags::default(),
+            RafsVersion::V6 => RafsInodeFlags::default(),
         };
 
         // Parse special files
@@ -262,7 +262,7 @@ impl<'a> TarballTreeBuilder<'a> {
                 bail!("tarball: symlink target from tar entry is too big");
             }
             file_size = symlink_size as u64;
-            flags |= RafsV5InodeFlags::SYMLINK;
+            flags |= RafsInodeFlags::SYMLINK;
             (
                 Some(symlink_link_path.as_os_str().to_owned()),
                 symlink_size as u16,
@@ -299,7 +299,7 @@ impl<'a> TarballTreeBuilder<'a> {
                     path.as_ref().display()
                 );
             }
-            flags |= RafsV5InodeFlags::HARDLINK;
+            flags |= RafsInodeFlags::HARDLINK;
         } else {
             self.path_inode_map
                 .insert(path.as_ref().to_path_buf(), (ino, nodes.len()));
@@ -328,30 +328,45 @@ impl<'a> TarballTreeBuilder<'a> {
             }
         }
 
-        let v5_inode = RafsV5Inode {
-            i_digest: RafsDigest::default(),
-            i_parent: 0,
-            i_ino: ino,
-            i_projid: 0,
-            i_uid: uid,
-            i_gid: gid,
-            i_mode: mode,
-            i_size: file_size,
-            i_nlink: 1,
-            i_blocks: 0,
-            i_flags: flags,
-            i_child_index: 0,
-            i_child_count: child_count as u32,
-            i_name_size: name.len() as u16,
-            i_symlink_size: symlink_size,
-            i_rdev: rdev,
-            i_mtime: mtime,
-            i_mtime_nsec: 0,
-            i_reserved: [0; 8],
-        };
         let mut inode = match self.ctx.fs_version {
-            RafsVersion::V5 => InodeWrapper::V5(v5_inode),
-            RafsVersion::V6 => InodeWrapper::V6(v5_inode),
+            RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode {
+                i_digest: RafsDigest::default(),
+                i_parent: 0,
+                i_ino: ino,
+                i_projid: 0,
+                i_uid: uid,
+                i_gid: gid,
+                i_mode: mode,
+                i_size: file_size,
+                i_nlink: 1,
+                i_blocks: 0,
+                i_flags: flags,
+                i_child_index: 0,
+                i_child_count: child_count as u32,
+                i_name_size: name.len() as u16,
+                i_symlink_size: symlink_size,
+                i_rdev: rdev,
+                i_mtime: mtime,
+                i_mtime_nsec: 0,
+                i_reserved: [0; 8],
+            }),
+            RafsVersion::V6 => InodeWrapper::V6(RafsV6Inode {
+                i_ino: ino,
+                i_projid: 0,
+                i_uid: uid,
+                i_gid: gid,
+                i_mode: mode,
+                i_size: file_size,
+                i_nlink: 1,
+                i_blocks: 0,
+                i_flags: flags,
+                i_child_count: child_count as u32,
+                i_name_size: name.len() as u16,
+                i_symlink_size: symlink_size,
+                i_rdev: rdev,
+                i_mtime: mtime,
+                i_mtime_nsec: 0,
+            }),
         };
         inode.set_has_xattr(!xattrs.is_empty());
 
@@ -391,7 +406,9 @@ impl<'a> TarballTreeBuilder<'a> {
         // the associated regular file.
         if entry_type.is_hard_link() {
             let n = &nodes[index];
-            node.inode.set_digest(*n.inode.digest());
+            if n.inode.is_v5() {
+                node.inode.set_digest(*n.inode.digest());
+            }
             node.inode.set_size(n.inode.size());
             node.inode.set_child_count(n.inode.child_count());
             node.chunks = n.chunks.clone();

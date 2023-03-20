@@ -18,13 +18,12 @@ use super::chunk_dict::DigestWithBlobIndex;
 use super::node::Node;
 use crate::builder::{Bootstrap, BootstrapContext, BuildContext, ConversionType, Tree};
 use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::inode::new_v6_inode;
 use crate::metadata::layout::v6::{
-    align_offset, calculate_nid, RafsV6BlobTable, RafsV6Device, RafsV6Dirent, RafsV6InodeChunkAddr,
-    RafsV6InodeChunkHeader, RafsV6OndiskInode, RafsV6SuperBlock, RafsV6SuperBlockExt,
-    EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512, EROFS_DEVTABLE_OFFSET,
-    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
-    EROFS_INODE_SLOT_SIZE, EROFS_SUPER_BLOCK_SIZE, EROFS_SUPER_OFFSET,
+    align_offset, calculate_nid, new_v6_inode, RafsV6BlobTable, RafsV6Device, RafsV6Dirent,
+    RafsV6InodeChunkAddr, RafsV6InodeChunkHeader, RafsV6OndiskInode, RafsV6SuperBlock,
+    RafsV6SuperBlockExt, EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512,
+    EROFS_DEVTABLE_OFFSET, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+    EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_SUPER_BLOCK_SIZE, EROFS_SUPER_OFFSET,
 };
 use crate::metadata::RafsStore;
 use crate::RafsIoWrite;

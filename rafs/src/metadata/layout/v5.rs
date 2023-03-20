@@ -54,6 +54,7 @@ use nydus_storage::device::{
     BlobChunkFlags, BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoVec,
 };
 
+use crate::metadata::inode::RafsInodeFlags;
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, RafsXAttrs, RAFS_SUPER_VERSION_V5};
 use crate::metadata::md_v5::V5IoChunk;
 use crate::metadata::{
@@ -860,26 +861,6 @@ impl RafsStore for RafsV5ExtBlobTable {
     }
 }
 
-bitflags! {
-    /// Rafs v5 inode flags.
-    pub struct RafsV5InodeFlags: u64 {
-        /// Inode is a symlink.
-        const SYMLINK = 0x0000_0001;
-        /// Inode has hardlinks.
-        const HARDLINK = 0x0000_0002;
-        /// Inode has extended attributes.
-        const XATTR = 0x0000_0004;
-        /// Inode chunks has holes.
-        const HAS_HOLE = 0x0000_0008;
-   }
-}
-
-impl Default for RafsV5InodeFlags {
-    fn default() -> Self {
-        RafsV5InodeFlags::empty()
-    }
-}
-
 /// Rafs v5 inode on disk metadata.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
@@ -896,7 +877,7 @@ pub struct RafsV5Inode {
     pub i_mode: u32, // 64
     pub i_size: u64,
     pub i_blocks: u64,
-    pub i_flags: RafsV5InodeFlags,
+    pub i_flags: RafsInodeFlags,
     pub i_nlink: u32,
     /// for dir, child start index
     pub i_child_index: u32, // 96
@@ -1005,19 +986,19 @@ impl RafsV5Inode {
 
     /// Get inode flags
     pub fn has_hardlink(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::HARDLINK)
+        self.i_flags.contains(RafsInodeFlags::HARDLINK)
     }
 
     /// Mark the inode as having extended attributes.
     #[inline]
     pub fn has_xattr(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::XATTR)
+        self.i_flags.contains(RafsInodeFlags::XATTR)
     }
 
     /// Mark the inode as having hole chunks.
     #[inline]
     pub fn has_hole(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
+        self.i_flags.contains(RafsInodeFlags::HAS_HOLE)
     }
 
     /// Load an inode from a reader.
@@ -1035,6 +1016,34 @@ impl RafsV5Inode {
 }
 
 impl_bootstrap_converter!(RafsV5Inode);
+
+impl From<&dyn RafsInodeExt> for RafsV5Inode {
+    fn from(inode: &dyn RafsInodeExt) -> Self {
+        let attr = inode.get_attr();
+
+        RafsV5Inode {
+            i_digest: inode.get_digest(),
+            i_parent: inode.parent(),
+            i_ino: attr.ino,
+            i_uid: attr.uid,
+            i_gid: attr.gid,
+            i_projid: inode.projid(),
+            i_mode: attr.mode,
+            i_size: attr.size,
+            i_blocks: attr.blocks,
+            i_flags: RafsInodeFlags::from_bits_truncate(inode.flags()),
+            i_nlink: attr.nlink,
+            i_child_index: inode.get_child_index().unwrap_or(0),
+            i_child_count: inode.get_child_count(),
+            i_name_size: inode.get_name_size(),
+            i_symlink_size: inode.get_symlink_size(),
+            i_rdev: attr.rdev,
+            i_mtime_nsec: attr.mtimensec,
+            i_mtime: attr.mtime,
+            i_reserved: [0u8; 8],
+        }
+    }
+}
 
 /// A in-memory wrapper of a Rafs v5 inode.
 pub struct RafsV5InodeWrapper<'a> {
@@ -1881,7 +1890,7 @@ pub mod tests {
         inode.i_child_index = 20;
         inode.set_name_size(4);
         inode.set_symlink_size(6);
-        inode.i_flags = RafsV5InodeFlags::SYMLINK;
+        inode.i_flags = RafsInodeFlags::SYMLINK;
 
         let name = OsString::from_str("test").unwrap();
         let symlink = OsString::from_str("/test12").unwrap();
