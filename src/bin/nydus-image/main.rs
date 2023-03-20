@@ -18,14 +18,15 @@ use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
-use nydus::get_build_time_info;
-use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
+use nydus::{get_build_time_info, SubCmdArgs};
+use nydus_api::{BlobCacheEntry, BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_app::setup_logging;
 use nydus_rafs::builder::{
     parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager, BootstrapManager,
@@ -33,6 +34,8 @@ use nydus_rafs::builder::{
     HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
 };
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
+use nydus_service::block_device::BlockDevice;
+use nydus_service::{validate_threads_configuration, ServiceArgs};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::device::BlobFeatures;
@@ -430,6 +433,55 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
     );
 
     let app = app.subcommand(
+            App::new("export")
+                .about("Export RAFS filesystems as raw block disk images or tar files")
+                .arg(
+                    Arg::new("block")
+                        .long("block")
+                        .action(ArgAction::SetTrue)
+                        .required(true)
+                        .help("Export RAFS filesystems as raw block disk images")
+                )
+                .arg(
+                    Arg::new("bootstrap")
+                        .long("bootstrap")
+                        .short('B')
+                        .help("Bootstrap of the RAFS filesystem to be exported")
+                        .requires("localfs-dir")
+                )
+                .arg(Arg::new("config")
+                    .long("config")
+                    .short('C')
+                    .help("Configuration file containing a `BlobCacheEntry` object")
+                    .required(false))
+                .arg(
+                    Arg::new("localfs-dir")
+                        .long("localfs-dir")
+                        .short('D')
+                        .help(
+                            "Path to the `localfs` working directory, which also enables the `localfs` storage backend"
+                        )
+                        .requires("bootstrap")
+                        .conflicts_with("config"),
+                )
+                .arg(
+                    Arg::new("threads")
+                        .long("threads")
+                        .default_value("4")
+                        .help("Number of worker threads to execute export operation, valid values: [1-32]")
+                        .value_parser(thread_validator)
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("output")
+                        .long("output")
+                        .short('O')
+                        .help("File path for saving the exported content")
+                        .required_unless_present("localfs-dir")
+                )
+        );
+
+    let app = app.subcommand(
         App::new("inspect")
             .about("Inspect RAFS filesystem metadata in interactive or request mode")
             .arg(
@@ -624,6 +676,8 @@ fn main() -> Result<()> {
         Command::merge(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("check") {
         Command::check(matches, &build_info)
+    } else if let Some(matches) = cmd.subcommand_matches("export") {
+        Command::export(&cmd, matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("inspect") {
         Command::inspect(matches)
     } else if let Some(matches) = cmd.subcommand_matches("stat") {
@@ -1128,6 +1182,16 @@ impl Command {
         Ok(())
     }
 
+    fn export(args: &ArgMatches, subargs: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+        let subargs = SubCmdArgs::new(args, subargs);
+        if subargs.is_present("block") {
+            Self::export_block(&subargs, build_info)?;
+        } else {
+            bail!("unknown export type");
+        }
+        Ok(())
+    }
+
     fn inspect(matches: &ArgMatches) -> Result<()> {
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let mut config = Self::get_configuration(matches)?;
@@ -1443,4 +1507,63 @@ impl Command {
         );
         Ok(())
     }
+
+    fn export_block(subargs: &SubCmdArgs, _bti: &BuildTimeInfo) -> Result<()> {
+        let mut localfs_dir = None;
+        let mut entry = if let Some(dir) = subargs.value_of("localfs-dir") {
+            // Safe to unwrap because `--block` requires `--bootstrap`.
+            let bootstrap = subargs.value_of("bootstrap").unwrap();
+            let config = format!(
+                r#"
+            {{
+                "type": "bootstrap",
+                "id": "disk-default",
+                "domain_id": "block-nbd",
+                "config_v2": {{
+                    "version": 2,
+                    "id": "block-nbd-factory",
+                    "backend": {{
+                        "type": "localfs",
+                        "localfs": {{
+                            "dir": "{}"
+                        }}
+                    }},
+                    "cache": {{
+                        "type": "filecache",
+                        "filecache": {{
+                            "work_dir": "{}"
+                        }}
+                    }},
+                    "metadata_path": "{}"
+                }}
+            }}"#,
+                dir, dir, bootstrap
+            );
+            localfs_dir = Some(dir.to_string());
+            BlobCacheEntry::from_str(&config)?
+        } else if let Some(v) = subargs.value_of("config") {
+            BlobCacheEntry::from_file(v)?
+        } else {
+            bail!("both option `-C/--config` and `-D/--localfs-dir` are missing");
+        };
+        if !entry.prepare_configuration_info() {
+            bail!("invalid blob cache entry configuration information");
+        }
+        if !entry.validate() {
+            bail!("invalid blob cache entry configuration information");
+        }
+
+        let threads: u32 = subargs
+            .value_of("threads")
+            .map(|n| n.parse().unwrap_or(1))
+            .unwrap_or(1);
+        let output = subargs.value_of("output").map(|v| v.to_string());
+
+        BlockDevice::export(entry, output, localfs_dir, threads)
+            .context("failed to export RAFS filesystem as raw block device image")
+    }
+}
+
+fn thread_validator(v: &str) -> std::result::Result<String, String> {
+    validate_threads_configuration(v).map(|s| s.to_string())
 }
