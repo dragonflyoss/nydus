@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use std::collections::VecDeque;
 
 use super::node::Node;
 use crate::builder::{Overlay, Prefetch};
@@ -11,7 +12,10 @@ use crate::builder::{Overlay, Prefetch};
 pub struct BlobLayout {}
 
 impl BlobLayout {
-    pub fn layout_blob_simple(prefetch: &Prefetch, nodes: &[Node]) -> Result<(Vec<usize>, usize)> {
+    pub fn layout_blob_simple(
+        prefetch: &Prefetch,
+        nodes: &VecDeque<Node>,
+    ) -> Result<(Vec<usize>, usize)> {
         let mut inodes = Vec::with_capacity(nodes.len());
 
         // Put all prefetch inodes at the head

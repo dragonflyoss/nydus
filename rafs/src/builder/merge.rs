@@ -2,21 +2,22 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use hex::FromHex;
 use nydus_api::ConfigV2;
-use nydus_rafs::builder::{
-    ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
-    BuildOutput, ChunkSource, HashChunkDict, MetadataTreeBuilder, Overlay, Tree, WhiteoutSpec,
-};
-use nydus_rafs::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
+
+use super::{
+    ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
+    BuildOutput, ChunkSource, ConversionType, MetadataTreeBuilder, Overlay, Tree, WhiteoutSpec,
+};
+use crate::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
 
 /// Struct to generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
 ///
@@ -49,7 +50,7 @@ impl Merger {
         })
     }
 
-    /// Generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
+    /// Overlay multiple RAFS filesystems into a merged RAFS filesystem.
     ///
     /// # Arguments
     /// - sources: contains one or more per layer bootstraps in order of lower to higher.
@@ -78,19 +79,19 @@ impl Merger {
                 sources.len(),
             );
         }
-        if let Some(toc_digests) = blob_toc_digests.as_ref() {
-            ensure!(
-                toc_digests.len() == sources.len(),
-                "number of toc digest entries {} doesn't match number of sources {}",
-                toc_digests.len(),
-                sources.len(),
-            );
-        }
         if let Some(sizes) = blob_sizes.as_ref() {
             ensure!(
                 sizes.len() == sources.len(),
                 "number of blob size entries {} doesn't match number of sources {}",
                 sizes.len(),
+                sources.len(),
+            );
+        }
+        if let Some(toc_digests) = blob_toc_digests.as_ref() {
+            ensure!(
+                toc_digests.len() == sources.len(),
+                "number of toc digest entries {} doesn't match number of sources {}",
+                toc_digests.len(),
                 sources.len(),
             );
         }
@@ -105,10 +106,10 @@ impl Merger {
 
         let mut tree: Option<Tree> = None;
         let mut blob_mgr = BlobManager::new(ctx.digester);
-
-        // Load parent bootstrap
         let mut blob_idx_map = HashMap::new();
         let mut parent_layers = 0;
+
+        // Load parent bootstrap
         if let Some(parent_bootstrap_path) = &parent_bootstrap_path {
             let (rs, _) =
                 RafsSuper::load_from_file(parent_bootstrap_path, config_v2.clone(), false, false)
@@ -123,7 +124,7 @@ impl Merger {
             parent_layers = blobs.len();
         }
 
-        // Get the blobs come from chunk dict bootstrap.
+        // Get the blobs come from chunk dictionary.
         let mut chunk_dict_blobs = HashSet::new();
         let mut config = None;
         if let Some(chunk_dict_path) = &chunk_dict {
@@ -150,6 +151,10 @@ impl Merger {
             ctx.compressor = rs.meta.get_compressor();
             ctx.digester = rs.meta.get_digester();
             ctx.explicit_uidgid = rs.meta.explicit_uidgid();
+            if config.as_ref().unwrap().is_tarfs_mode {
+                ctx.conversion_type = ConversionType::TarToTarfs;
+                ctx.blob_features |= BlobFeatures::TARFS;
+            }
 
             let mut parent_blob_added = false;
             let blobs = &rs.superblock.get_blob_infos();
@@ -166,7 +171,7 @@ impl Merger {
                 } else {
                     chunk_size = Some(blob_ctx.chunk_size);
                 }
-                if chunk_dict_blobs.get(&blob.blob_id()).is_none() {
+                if !chunk_dict_blobs.contains(&blob.blob_id()) {
                     // It is assumed that the `nydus-image create` at each layer and `nydus-image merge` commands
                     // use the same chunk dict bootstrap. So the parent bootstrap includes multiple blobs, but
                     // only at most one new blob, the other blobs should be from the chunk dict image.
@@ -206,14 +211,14 @@ impl Merger {
                     }
                 }
 
-                if !blob_idx_map.contains_key(&blob.blob_id()) {
-                    blob_idx_map.insert(blob.blob_id().clone(), blob_mgr.len());
+                if let Entry::Vacant(e) = blob_idx_map.entry(blob.blob_id()) {
+                    e.insert(blob_mgr.len());
                     blob_mgr.add_blob(blob_ctx);
                 }
             }
 
             if let Some(tree) = &mut tree {
-                let mut nodes = Vec::new();
+                let mut nodes = VecDeque::new();
                 rs.walk_directory::<PathBuf>(
                     rs.superblock.root_ino(),
                     None,
@@ -234,17 +239,21 @@ impl Merger {
                         }
                         // Set node's layer index to distinguish same inode number (from bootstrap)
                         // between different layers.
-                        node.layer_idx = u16::try_from(layer_idx).context(format!(
+                        let idx = u16::try_from(layer_idx).context(format!(
                             "too many layers {}, limited to {}",
                             layer_idx,
                             u16::MAX
-                        ))? + parent_layers as u16;
+                        ))?;
+                        if parent_layers + idx as usize > u16::MAX as usize {
+                            bail!("too many layers {}, limited to {}", layer_idx, u16::MAX);
+                        }
+                        node.layer_idx = idx + parent_layers as u16;
                         node.overlay = Overlay::UpperAddition;
                         match node.whiteout_type(WhiteoutSpec::Oci) {
                             // Insert whiteouts at the head, so they will be handled first when
                             // applying to lower layer.
-                            Some(_) => nodes.insert(0, node),
-                            _ => nodes.push(node),
+                            Some(_) => nodes.push_front(node),
+                            _ => nodes.push_back(node),
                         }
                         Ok(())
                     },
@@ -253,8 +262,16 @@ impl Merger {
                     tree.apply(node, true, WhiteoutSpec::Oci)?;
                 }
             } else {
-                let mut dict = HashChunkDict::new(rs.meta.get_digester());
-                tree = Some(Tree::from_bootstrap(&rs, &mut dict)?);
+                tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
+            }
+        }
+
+        if ctx.conversion_type == ConversionType::TarToTarfs {
+            if parent_layers > 0 {
+                bail!("merging RAFS in TARFS mode conflicts with `--parent-bootstrap`");
+            }
+            if !chunk_dict_blobs.is_empty() {
+                bail!("merging RAFS in TARFS mode conflicts with `--chunk-dict`");
             }
         }
 

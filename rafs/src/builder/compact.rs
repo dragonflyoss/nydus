@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::ops::Deref;
 use std::path::PathBuf;
@@ -252,7 +252,7 @@ pub struct BlobCompactor {
     /// new blobs
     new_blob_mgr: BlobManager,
     /// inode list
-    nodes: Vec<Node>,
+    nodes: VecDeque<Node>,
     /// chunk --> list<node_idx, chunk_idx in node>
     c2nodes: HashMap<ChunkKey, Vec<(usize, usize)>>,
     /// original blob index --> list<node_idx, chunk_idx in node>
@@ -265,7 +265,7 @@ impl BlobCompactor {
     pub fn new(
         version: RafsVersion,
         ori_blob_mgr: BlobManager,
-        nodes: Vec<Node>,
+        nodes: VecDeque<Node>,
         backend: Arc<dyn BlobBackend + Send + Sync>,
         digester: digest::Algorithm,
     ) -> Result<Self> {
@@ -596,7 +596,7 @@ impl BlobCompactor {
         let tree = Tree::from_bootstrap(&rs, &mut _dict)?;
         let mut bootstrap = Bootstrap::new()?;
         bootstrap.build(&mut build_ctx, &mut bootstrap_ctx, tree)?;
-        let mut nodes = Vec::new();
+        let mut nodes = VecDeque::new();
         // move out nodes
         std::mem::swap(&mut bootstrap_ctx.nodes, &mut nodes);
         let mut compactor = Self::new(

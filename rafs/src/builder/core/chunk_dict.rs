@@ -264,6 +264,7 @@ mod tests {
             digester: digest::Algorithm::Blake3,
             chunk_size: 0x100000,
             explicit_uidgid: true,
+            is_tarfs_mode: false,
         };
         let dict =
             HashChunkDict::from_commandline_arg(path, Arc::new(ConfigV2::default()), &rafs_config)

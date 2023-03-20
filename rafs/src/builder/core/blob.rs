@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::slice;
 
@@ -27,7 +28,7 @@ impl Blob {
     /// Dump blob file and generate chunks
     pub(crate) fn dump(
         ctx: &BuildContext,
-        nodes: &mut [Node],
+        nodes: &mut VecDeque<Node>,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut ArtifactWriter,
     ) -> Result<()> {

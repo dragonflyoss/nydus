@@ -22,12 +22,14 @@ pub use self::core::overlay::{Overlay, WhiteoutSpec};
 pub use self::core::prefetch::{Prefetch, PrefetchPolicy};
 pub use self::core::tree::{MetadataTreeBuilder, Tree};
 pub use self::directory::DirectoryBuilder;
+pub use self::merge::Merger;
 pub use self::stargz::StargzBuilder;
 pub use self::tarball::TarballBuilder;
 
-pub mod compact;
+mod compact;
 mod core;
 mod directory;
+mod merge;
 mod stargz;
 mod tarball;
 

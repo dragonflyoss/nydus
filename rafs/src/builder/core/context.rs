@@ -960,7 +960,7 @@ pub struct BootstrapContext {
     /// Cache node index for hardlinks, HashMap<(layer_index, real_inode, dev), Vec<index>>.
     pub(crate) inode_map: HashMap<(u16, Inode, u64), Vec<u64>>,
     /// Store all nodes in ascendant order, indexed by (node.index - 1).
-    pub nodes: Vec<Node>,
+    pub nodes: VecDeque<Node>,
     /// Current position to write in f_bootstrap
     pub(crate) offset: u64,
     pub(crate) writer: Box<dyn RafsIoWrite>,
@@ -979,7 +979,7 @@ impl BootstrapContext {
         Ok(Self {
             layered,
             inode_map: HashMap::new(),
-            nodes: Vec::new(),
+            nodes: VecDeque::new(),
             offset: EROFS_BLOCK_SIZE_4096,
             writer,
             v6_available_blocks: vec![
