@@ -40,8 +40,8 @@ use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::layout::v6::{
     rafsv6_load_blob_extra_info, recover_namespace, RafsV6BlobTable, RafsV6Dirent,
     RafsV6InodeChunkAddr, RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode,
-    RafsV6XattrEntry, RafsV6XattrIbodyHeader, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512,
-    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+    RafsV6XattrEntry, RafsV6XattrIbodyHeader, EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096,
+    EROFS_BLOCK_SIZE_512, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
     EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
 };
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrName, XattrValue};
@@ -525,6 +525,7 @@ impl OndiskInodeWrapper {
         i.mode() as u32 & libc::S_IFMT as u32
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_chunk_io(
         &self,
         state: &Guard<Arc<DirectMappingState>>,
@@ -533,6 +534,8 @@ impl OndiskInodeWrapper {
         content_offset: u32,
         content_len: u32,
         user_io: bool,
+        is_tarfs_mode: bool,
+        is_tail: bool,
     ) -> Option<BlobIoDesc> {
         let blob_index = chunk_addr.blob_index();
         let chunk_index = chunk_addr.blob_ci_index();
@@ -545,9 +548,29 @@ impl OndiskInodeWrapper {
                 );
                 None
             }
-            Ok(blob) => device
-                .create_io_chunk(blob.blob_index(), chunk_index)
-                .map(|v| BlobIoDesc::new(blob, v, content_offset, content_len, user_io)),
+            Ok(blob) => {
+                if is_tarfs_mode {
+                    let offset = (chunk_addr.block_addr() as u64) << EROFS_BLOCK_BITS_9;
+                    let size = if is_tail {
+                        (self.size() % self.chunk_size() as u64) as u32
+                    } else {
+                        self.chunk_size()
+                    };
+                    let chunk = PlainChunkInfoV6::new(blob_index, chunk_index, offset, size);
+                    let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
+                    Some(BlobIoDesc::new(
+                        blob,
+                        chunk.into(),
+                        content_offset,
+                        content_len,
+                        user_io,
+                    ))
+                } else {
+                    device
+                        .create_io_chunk(blob.blob_index(), chunk_index)
+                        .map(|v| BlobIoDesc::new(blob, v, content_offset, content_len, user_io))
+                }
+            }
         }
     }
 
@@ -777,6 +800,9 @@ impl RafsInode for OndiskInodeWrapper {
             return Ok(vec);
         }
 
+        let mut curr_chunk_index = head_chunk_index as u32;
+        let tail_chunk_index = self.get_chunk_count() - 1;
+        let is_tarfs_mode = state.is_tarfs();
         let content_offset = (offset % chunk_size as u64) as u32;
         let mut left = std::cmp::min(self.size() - offset, size as u64) as u32;
         let mut content_len = std::cmp::min(chunk_size - content_offset, left);
@@ -788,6 +814,8 @@ impl RafsInode for OndiskInodeWrapper {
                 content_offset,
                 content_len,
                 user_io,
+                is_tarfs_mode,
+                curr_chunk_index == tail_chunk_index,
             )
             .ok_or_else(|| einval!("failed to get chunk information"))?;
 
@@ -797,9 +825,19 @@ impl RafsInode for OndiskInodeWrapper {
         if left != 0 {
             // Handle the rest of chunks since they shares the same content length = 0.
             for c in chunks.iter().skip(1) {
+                curr_chunk_index += 1;
                 content_len = std::cmp::min(chunk_size, left);
                 let desc = self
-                    .make_chunk_io(&state, device, c, 0, content_len, user_io)
+                    .make_chunk_io(
+                        &state,
+                        device,
+                        c,
+                        0,
+                        content_len,
+                        user_io,
+                        is_tarfs_mode,
+                        curr_chunk_index == tail_chunk_index,
+                    )
                     .ok_or_else(|| einval!("failed to get chunk information"))?;
                 if desc.blob.blob_index() != descs.blob_index() {
                     vec.push(descs);
@@ -1286,13 +1324,13 @@ impl RafsInodeExt for OndiskInodeWrapper {
         } else if state.is_tarfs() {
             let blob_index = chunk_addr.blob_index();
             let chunk_index = chunk_addr.blob_ci_index();
-            let offset = (chunk_addr.block_addr() as u64) << 9;
+            let offset = (chunk_addr.block_addr() as u64) << EROFS_BLOCK_BITS_9;
             let size = if idx == self.get_chunk_count() - 1 {
                 (self.size() % self.chunk_size() as u64) as u32
             } else {
                 self.chunk_size()
             };
-            let chunk = TarfsChunkInfo::new(blob_index, chunk_index, offset, size);
+            let chunk = PlainChunkInfoV6::new(blob_index, chunk_index, offset, size);
             Ok(Arc::new(chunk))
         } else {
             let mut chunk_map = self.mapping.info.chunk_map.lock().unwrap();
@@ -1408,17 +1446,17 @@ impl BlobV5ChunkInfo for DirectChunkInfoV6 {
 }
 
 /// Rafs v6 fake ChunkInfo for Tarfs.
-pub(crate) struct TarfsChunkInfo {
+pub(crate) struct PlainChunkInfoV6 {
     blob_index: u32,
     chunk_index: u32,
     offset: u64,
     size: u32,
 }
 
-impl TarfsChunkInfo {
-    /// Create a new instance of [TarfsChunkInfo].
+impl PlainChunkInfoV6 {
+    /// Create a new instance of [PlainChunkInfoV6].
     pub fn new(blob_index: u32, chunk_index: u32, offset: u64, size: u32) -> Self {
-        TarfsChunkInfo {
+        PlainChunkInfoV6 {
             blob_index,
             chunk_index,
             offset,
@@ -1429,7 +1467,7 @@ impl TarfsChunkInfo {
 
 const TARFS_DIGEST: RafsDigest = RafsDigest { data: [0u8; 32] };
 
-impl BlobChunkInfo for TarfsChunkInfo {
+impl BlobChunkInfo for PlainChunkInfoV6 {
     fn chunk_id(&self) -> &RafsDigest {
         &TARFS_DIGEST
     }
@@ -1467,7 +1505,7 @@ impl BlobChunkInfo for TarfsChunkInfo {
     }
 }
 
-impl BlobV5ChunkInfo for TarfsChunkInfo {
+impl BlobV5ChunkInfo for PlainChunkInfoV6 {
     fn index(&self) -> u32 {
         self.chunk_index
     }
