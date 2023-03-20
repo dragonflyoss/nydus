@@ -153,11 +153,30 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
         .help("Configuration file for storage backend, cache and RAFS FUSE filesystem.")
         .required(false);
 
-    App::new("")
+    let app = App::new("")
         .version(bti_string)
         .author(crate_authors!())
         .about("Build, analyze, inspect or validate RAFS filesystems/Nydus accelerated container images")
-        .subcommand(
+        .arg(
+            Arg::new("log-file")
+                .long("log-file")
+                .short('L')
+                .help("Log file path")
+                .required(false)
+                .global(true),
+        )
+        .arg(
+            Arg::new("log-level")
+                .long("log-level")
+                .short('l')
+                .help("Log level:")
+                .default_value("info")
+                .value_parser(["trace", "debug", "info", "warn", "error"])
+                .required(false)
+                .global(true),
+        );
+
+    let app = app.subcommand(
             App::new("create")
                 .about("Create RAFS filesystems from directories, tar files or OCI images")
                 .arg(
@@ -314,138 +333,138 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     arg_output_json.clone(),
                 )
-        )
-        .subcommand(
-            App::new("merge")
-                .about("Merge multiple bootstraps into a overlaid bootstrap")
-                .arg(
-                    Arg::new("parent-bootstrap")
-                        .long("parent-bootstrap")
-                        .help("File path of the parent/referenced RAFS metadata blob (optional)")
-                        .required(false),
-                )
-                .arg(
-                    Arg::new("bootstrap")
-                        .long("bootstrap")
-                        .short('B')
-                        .help("Output path of nydus overlaid bootstrap"),
-                )
-                .arg(
-                    Arg::new("blob-dir")
-                        .long("blob-dir")
-                        .short('D')
-                        .help("Directory path to save generated RAFS metadata and data blobs"),
-                )
-                .arg(
-                    arg_chunk_dict.clone(),
-                )
-                .arg(
-                    arg_prefetch_policy,
-                )
-                .arg(
-                    arg_output_json.clone(),
-                )
-                .arg(
-                    Arg::new("blob-digests")
+        );
+
+    let app = app.subcommand(
+        App::new("merge")
+            .about("Merge multiple bootstraps into a overlaid bootstrap")
+            .arg(
+                Arg::new("parent-bootstrap")
+                    .long("parent-bootstrap")
+                    .help("File path of the parent/referenced RAFS metadata blob (optional)")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("bootstrap")
+                    .long("bootstrap")
+                    .short('B')
+                    .help("Output path of nydus overlaid bootstrap"),
+            )
+            .arg(
+                Arg::new("blob-dir")
+                    .long("blob-dir")
+                    .short('D')
+                    .help("Directory path to save generated RAFS metadata and data blobs"),
+            )
+            .arg(arg_chunk_dict.clone())
+            .arg(arg_prefetch_policy)
+            .arg(arg_output_json.clone())
+            .arg(
+                Arg::new("blob-digests")
                     .long("blob-digests")
-                        .required(false)
-                        .help("RAFS blob digest list separated by comma"),
-                )
-                .arg(
-                    Arg::new("blob-sizes")
+                    .required(false)
+                    .help("RAFS blob digest list separated by comma"),
+            )
+            .arg(
+                Arg::new("blob-sizes")
                     .long("blob-sizes")
-                        .required(false)
-                        .help("RAFS blob size list separated by comma"),
-                )
-                .arg(
-                    Arg::new("blob-toc-digests")
-                        .long("blob-toc-digests")
-                        .required(false)
-                        .help("RAFS blob toc digest list separated by comma"),
-                )
-                .arg(
-                    Arg::new("blob-toc-sizes")
-                        .long("blob-toc-sizes")
-                        .required(false)
-                        .help("RAFS blob toc size list separated by comma"),
-                )
-                .arg(arg_config.clone())
-                .arg(
-                    Arg::new("SOURCE")
-                        .help("bootstrap paths (allow one or more)")
-                        .required(true)
-                        .num_args(1..),
-                )
-        )
-        .subcommand(
-            App::new("check")
-                .about("Validate RAFS filesystem metadata")
-                .arg(
-                    Arg::new("BOOTSTRAP")
-                        .help("File path of RAFS metadata")
-                        .required_unless_present("bootstrap"),
-                )
-                .arg(
-                    Arg::new("bootstrap")
-                        .short('B')
-                        .long("bootstrap")
-                        .help("[Deprecated] File path of RAFS meta blob/bootstrap")
-                        .conflicts_with("BOOTSTRAP")
-                        .required(false),
-                )
-                .arg(
-                    Arg::new("blob-dir")
-                        .long("blob-dir")
-                        .short('D')
-                        .conflicts_with("config")
-                        .help("Directory for localfs storage backend, hosting data blobs and cache files"),
-                )
-                .arg(arg_config.clone())
-                .arg(
-                    Arg::new("verbose")
-                        .long("verbose")
-                        .short('v')
-                        .help("Output message in verbose mode")
-                        .action(ArgAction::SetTrue)
-                        .required(false),
-                )
-                .arg(
-                    arg_output_json.clone(),
-                )
-        )
-        .subcommand(
-            App::new("inspect")
-                .about("Inspect RAFS filesystem metadata in interactive or request mode")
-                .arg(
-                    Arg::new("BOOTSTRAP")
-                        .help("File path of RAFS metadata")
-                        .required_unless_present("bootstrap"),
-                )
-                .arg(
-                    Arg::new("bootstrap")
-                        .short('B')
-                        .long("bootstrap")
-                        .help("[Deprecated] File path of RAFS meta blob/bootstrap")
-                        .conflicts_with("BOOTSTRAP")
-                        .required(false),
-                )
-                .arg(
-                    Arg::new("blob-dir")
-                        .long("blob-dir")
-                        .short('D')
-                        .conflicts_with("config")
-                        .help("Directory for localfs storage backend, hosting data blobs and cache files"),
-                )
-                .arg(arg_config.clone())
-                .arg(
-                    Arg::new("request")
-                        .long("request")
-                        .short('R')
-                        .help("Inspect RAFS filesystem metadata in request mode")
-                        .required(false),
-                )
-        )
-        .subcommand(
+                    .required(false)
+                    .help("RAFS blob size list separated by comma"),
+            )
+            .arg(
+                Arg::new("blob-toc-digests")
+                    .long("blob-toc-digests")
+                    .required(false)
+                    .help("RAFS blob toc digest list separated by comma"),
+            )
+            .arg(
+                Arg::new("blob-toc-sizes")
+                    .long("blob-toc-sizes")
+                    .required(false)
+                    .help("RAFS blob toc size list separated by comma"),
+            )
+            .arg(arg_config.clone())
+            .arg(
+                Arg::new("SOURCE")
+                    .help("bootstrap paths (allow one or more)")
+                    .required(true)
+                    .num_args(1..),
+            ),
+    );
+
+    let app = app.subcommand(
+        App::new("check")
+            .about("Validate RAFS filesystem metadata")
+            .arg(
+                Arg::new("BOOTSTRAP")
+                    .help("File path of RAFS metadata")
+                    .required_unless_present("bootstrap"),
+            )
+            .arg(
+                Arg::new("bootstrap")
+                    .short('B')
+                    .long("bootstrap")
+                    .help("[Deprecated] File path of RAFS meta blob/bootstrap")
+                    .conflicts_with("BOOTSTRAP")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("blob-dir")
+                    .long("blob-dir")
+                    .short('D')
+                    .conflicts_with("config")
+                    .help(
+                        "Directory for localfs storage backend, hosting data blobs and cache files",
+                    ),
+            )
+            .arg(arg_config.clone())
+            .arg(
+                Arg::new("verbose")
+                    .long("verbose")
+                    .short('v')
+                    .help("Output message in verbose mode")
+                    .action(ArgAction::SetTrue)
+                    .required(false),
+            )
+            .arg(arg_output_json.clone()),
+    );
+
+    let app = app.subcommand(
+        App::new("inspect")
+            .about("Inspect RAFS filesystem metadata in interactive or request mode")
+            .arg(
+                Arg::new("BOOTSTRAP")
+                    .help("File path of RAFS metadata")
+                    .required_unless_present("bootstrap"),
+            )
+            .arg(
+                Arg::new("bootstrap")
+                    .short('B')
+                    .long("bootstrap")
+                    .help("[Deprecated] File path of RAFS meta blob/bootstrap")
+                    .conflicts_with("BOOTSTRAP")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("blob-dir")
+                    .long("blob-dir")
+                    .short('D')
+                    .conflicts_with("config")
+                    .help(
+                        "Directory for localfs storage backend, hosting data blobs and cache files",
+                    ),
+            )
+            .arg(arg_config.clone())
+            .arg(
+                Arg::new("request")
+                    .long("request")
+                    .short('R')
+                    .help("Inspect RAFS filesystem metadata in request mode")
+                    .required(false),
+            ),
+    );
+
+    let app = app.subcommand(
             App::new("stat")
                 .about("Generate statistics information for RAFS filesystems")
                 .arg(
@@ -481,8 +500,9 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     arg_output_json.clone(),
                 )
-        )
-        .subcommand(
+        );
+
+    let app = app.subcommand(
             App::new("compact")
                 .about("(experimental)Compact specific nydus image, remove unused chunks in blobs, merge small blobs")
                 .arg(
@@ -515,69 +535,54 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     arg_output_json,
                 )
-        )
-        .subcommand(
-            App::new("unpack")
+        );
+
+    app.subcommand(
+        App::new("unpack")
             .about("Unpack a RAFS filesystem to a tar file")
-                .arg(
-                    Arg::new("BOOTSTRAP")
-                        .help("File path of RAFS metadata")
-                        .required_unless_present("bootstrap"),
-                )
-                .arg(
-                    Arg::new("backend-config")
-                        .long("backend-config")
-                        .help("config file of backend")
-                        .required(false),
-                )
-                .arg(
-                    Arg::new("bootstrap")
-                        .short('B')
-                        .long("bootstrap")
-                        .help("[Deprecated] File path of RAFS meta blob/bootstrap")
-                        .conflicts_with("BOOTSTRAP")
-                        .required(false),
-                )
+            .arg(
+                Arg::new("BOOTSTRAP")
+                    .help("File path of RAFS metadata")
+                    .required_unless_present("bootstrap"),
+            )
+            .arg(
+                Arg::new("backend-config")
+                    .long("backend-config")
+                    .help("config file of backend")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("bootstrap")
+                    .short('B')
+                    .long("bootstrap")
+                    .help("[Deprecated] File path of RAFS meta blob/bootstrap")
+                    .conflicts_with("BOOTSTRAP")
+                    .required(false),
+            )
             .arg(
                 Arg::new("blob")
-                .long("blob")
-                .short('b')
-                .help("path to RAFS data blob file")
-                .required(false),
-                )
+                    .long("blob")
+                    .short('b')
+                    .help("path to RAFS data blob file")
+                    .required(false),
+            )
             .arg(
                 Arg::new("blob-dir")
                     .long("blob-dir")
                     .short('D')
                     .conflicts_with("config")
-                    .help("Directory for localfs storage backend, hosting data blobs and cache files"),
+                    .help(
+                        "Directory for localfs storage backend, hosting data blobs and cache files",
+                    ),
             )
             .arg(arg_config)
             .arg(
                 Arg::new("output")
-                .long("output")
-                .help("path for output tar file")
-                .required(true),
-                )
-        )
-        .arg(
-            Arg::new("log-file")
-                .long("log-file")
-                .short('L')
-                .help("Log file path")
-                .required(false)
-                .global(true),
-        )
-        .arg(
-            Arg::new("log-level")
-                .long("log-level")
-                .short('l')
-                .help("Log level:")
-                .default_value("info")
-                .value_parser(["trace", "debug", "info", "warn", "error"])
-                .required(false)
-                .global(true),
-        )
+                    .long("output")
+                    .help("path for output tar file")
+                    .required(true),
+            ),
+    )
 }
 
 fn init_log(matches: &ArgMatches) -> Result<()> {
