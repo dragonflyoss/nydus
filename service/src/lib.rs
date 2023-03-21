@@ -36,6 +36,7 @@ mod fusedev;
 mod singleton;
 pub mod upgrade;
 
+pub use blob_cache::BlobCacheMgr;
 pub use fs_service::{FsBackendCollection, FsBackendMountCmd, FsBackendUmountCmd, FsService};
 pub use fusedev::{create_fuse_daemon, FusedevDaemon};
 pub use singleton::create_daemon;
@@ -49,8 +50,6 @@ pub mod block_nbd;
 #[cfg(target_os = "linux")]
 mod fs_cache;
 
-#[cfg(target_os = "linux")]
-pub use blob_cache::BlobCacheMgr;
 #[cfg(target_os = "linux")]
 pub use fs_cache::FsCacheHandler;
 
@@ -228,24 +227,33 @@ pub trait ServiceArgs {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub struct BlobCacheMgr {}
+mod blob_cache {
+    use super::*;
 
-#[cfg(not(target_os = "linux"))]
-impl BlobCacheMgr {
-    pub fn new() -> Self {
-        BlobCacheMgr {}
+    pub struct BlobCacheMgr {}
+
+    impl Default for BlobCacheMgr {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
-    pub fn add_blob_list(&self, _blobs: &nydus_api::BlobCacheList) -> std::io::Result<()> {
-        unimplemented!()
-    }
+    impl BlobCacheMgr {
+        pub fn new() -> Self {
+            BlobCacheMgr {}
+        }
 
-    pub fn add_blob_entry(&self, _entry: &nydus_api::BlobCacheEntry) -> Result<()> {
-        unimplemented!()
-    }
+        pub fn add_blob_list(&self, _blobs: &nydus_api::BlobCacheList) -> io::Result<()> {
+            unimplemented!()
+        }
 
-    pub fn remove_blob_entry(&self, _param: &nydus_api::BlobCacheObjectId) -> Result<()> {
-        unimplemented!()
+        pub fn add_blob_entry(&self, _entry: &nydus_api::BlobCacheEntry) -> Result<()> {
+            unimplemented!()
+        }
+
+        pub fn remove_blob_entry(&self, _param: &nydus_api::BlobCacheObjectId) -> Result<()> {
+            unimplemented!()
+        }
     }
 }
 
