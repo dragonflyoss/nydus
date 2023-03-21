@@ -708,19 +708,21 @@ impl Bootstrap {
         Self::v6_align_to_4k(bootstrap_ctx)?;
 
         // `Node` offset might be updated during above inodes dumping. So `get_prefetch_table` after it.
-        let prefetch_table = ctx
-            .prefetch
-            .get_v6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
-        if let Some(mut pt) = prefetch_table {
-            assert!(pt.len() * size_of::<u32>() <= prefetch_table_size as usize);
-            // Device slots are very close to extended super block.
-            ext_sb.set_prefetch_table_offset(prefetch_table_offset);
-            ext_sb.set_prefetch_table_size(prefetch_table_size);
-            bootstrap_ctx
-                .writer
-                .seek_offset(prefetch_table_offset as u64)
-                .context("failed seek prefetch table offset")?;
-            pt.store(bootstrap_ctx.writer.as_mut()).unwrap();
+        if prefetch_table_size > 0 {
+            let prefetch_table = ctx
+                .prefetch
+                .get_v6_prefetch_table(&bootstrap_ctx.nodes, meta_addr);
+            if let Some(mut pt) = prefetch_table {
+                assert!(pt.len() * size_of::<u32>() <= prefetch_table_size as usize);
+                // Device slots are very close to extended super block.
+                ext_sb.set_prefetch_table_offset(prefetch_table_offset);
+                ext_sb.set_prefetch_table_size(prefetch_table_size);
+                bootstrap_ctx
+                    .writer
+                    .seek_offset(prefetch_table_offset as u64)
+                    .context("failed seek prefetch table offset")?;
+                pt.store(bootstrap_ctx.writer.as_mut()).unwrap();
+            }
         }
 
         // TODO: get rid of the chunk info array.
