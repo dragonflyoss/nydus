@@ -338,7 +338,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.i_mtime,
             InodeWrapper::V6(i) => i.i_mtime,
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.get_attr().mtime,
         }
     }
 
@@ -357,7 +357,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.i_mtime_nsec,
             InodeWrapper::V6(i) => i.i_mtime_nsec,
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.get_attr().mtimensec,
         }
     }
 
@@ -376,7 +376,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.i_blocks,
             InodeWrapper::V6(i) => i.i_blocks,
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.get_attr().blocks,
         }
     }
 
@@ -424,7 +424,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.i_nlink,
             InodeWrapper::V6(i) => i.i_nlink,
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.get_attr().nlink,
         }
     }
 
@@ -506,7 +506,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.i_child_index,
             InodeWrapper::V6(_i) => u32::MAX,
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.get_child_index().unwrap_or(u32::MAX),
         }
     }
 
