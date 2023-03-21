@@ -22,9 +22,8 @@ use nydus_api::BuildTimeInfo;
 use rust_fsm::*;
 use serde::{self, Serialize};
 
-use crate::blob_cache::BlobCacheMgr;
 use crate::fs_service::{FsBackendCollection, FsService};
-use crate::{Error, Result};
+use crate::{BlobCacheMgr, Error, Result};
 
 /// Nydus daemon working states.
 #[allow(clippy::upper_case_acronyms)]

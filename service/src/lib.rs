@@ -30,24 +30,29 @@ use nydus_rafs::RafsError;
 use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeError;
 
-pub mod blob_cache;
-#[cfg(feature = "block-device")]
-pub mod block_device;
-#[cfg(feature = "block-nbd")]
-pub mod block_nbd;
 pub mod daemon;
-#[cfg(target_os = "linux")]
-mod fs_cache;
 mod fs_service;
 mod fusedev;
 mod singleton;
 pub mod upgrade;
 
-#[cfg(target_os = "linux")]
-pub use fs_cache::FsCacheHandler;
 pub use fs_service::{FsBackendCollection, FsBackendMountCmd, FsBackendUmountCmd, FsService};
 pub use fusedev::{create_fuse_daemon, FusedevDaemon};
 pub use singleton::create_daemon;
+
+#[cfg(target_os = "linux")]
+pub mod blob_cache;
+#[cfg(all(target_os = "linux", feature = "block-device"))]
+pub mod block_device;
+#[cfg(all(target_os = "linux", feature = "block-nbd"))]
+pub mod block_nbd;
+#[cfg(target_os = "linux")]
+mod fs_cache;
+
+#[cfg(target_os = "linux")]
+pub use blob_cache::BlobCacheMgr;
+#[cfg(target_os = "linux")]
+pub use fs_cache::FsCacheHandler;
 
 /// Error code related to Nydus library.
 #[derive(thiserror::Error, Debug)]
@@ -220,6 +225,28 @@ pub trait ServiceArgs {
 
     /// Check whether commandline optio `key` is present.
     fn is_present(&self, key: &str) -> bool;
+}
+
+#[cfg(not(target_os = "linux"))]
+pub struct BlobCacheMgr {}
+
+#[cfg(not(target_os = "linux"))]
+impl BlobCacheMgr {
+    pub fn new() -> Self {
+        BlobCacheMgr {}
+    }
+
+    pub fn add_blob_list(&self, _blobs: &nydus_api::BlobCacheList) -> std::io::Result<()> {
+        unimplemented!()
+    }
+
+    pub fn add_blob_entry(&self, _entry: &nydus_api::BlobCacheEntry) -> Result<()> {
+        unimplemented!()
+    }
+
+    pub fn remove_blob_entry(&self, _param: &nydus_api::BlobCacheObjectId) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 #[cfg(test)]
