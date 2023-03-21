@@ -6,10 +6,12 @@ package converter
 
 import (
 	"context"
+	"os"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/goharbor/acceleration-service/pkg/converter"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
+	"github.com/pkg/errors"
 )
 
 type Opt struct {
@@ -53,10 +55,27 @@ func Convert(ctx context.Context, opt Opt) error {
 		return err
 	}
 
-	pvd, err := provider.New(opt.WorkDir, hosts(opt), platformMC)
+	if _, err := os.Stat(opt.WorkDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.MkdirAll(opt.WorkDir, 0755); err != nil {
+				return errors.Wrap(err, "prepare work directory")
+			}
+			// We should only clean up when the work directory not exists
+			// before, otherwise it may delete user data by mistake.
+			defer os.RemoveAll(opt.WorkDir)
+		} else {
+			return errors.Wrap(err, "stat work directory")
+		}
+	}
+	tmpDir, err := os.MkdirTemp(opt.WorkDir, "nydusify-")
+	if err != nil {
+		return errors.Wrap(err, "create temp directory")
+	}
+	pvd, err := provider.New(tmpDir, hosts(opt), platformMC)
 	if err != nil {
 		return err
 	}
+	defer os.RemoveAll(tmpDir)
 
 	cvt, err := converter.New(
 		converter.WithProvider(pvd),
