@@ -179,7 +179,9 @@ impl Merger {
                     }
                     parent_blob_added = true;
 
-                    if ctx.configuration.internal.blob_accessible() {
+                    if ctx.configuration.internal.blob_accessible()
+                        || ctx.conversion_type == ConversionType::TarToTarfs
+                    {
                         // `blob.blob_id()` should have been fixed when loading the bootstrap.
                         blob_ctx.blob_id = blob.blob_id();
                     } else {
