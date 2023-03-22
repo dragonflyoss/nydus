@@ -86,5 +86,6 @@ func Convert(ctx context.Context, opt Opt) error {
 		return err
 	}
 
-	return cvt.Convert(ctx, opt.Source, opt.Target)
+	_, err = cvt.Convert(ctx, opt.Source, opt.Target)
+	return err
 }
