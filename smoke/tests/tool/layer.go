@@ -164,7 +164,7 @@ func (l *Layer) PackRef(t *testing.T, ctx Context, blobDir string, compress bool
 	return ociBlobDigest, rafsBlobDigest
 }
 
-func (l *Layer) Overlay(t *testing.T, upper *Layer) {
+func (l *Layer) Overlay(t *testing.T, upper *Layer) *Layer {
 	// Handle whiteout/opaque files
 	for upperName := range upper.FileTree {
 		name := filepath.Base(upperName)
@@ -198,6 +198,8 @@ func (l *Layer) Overlay(t *testing.T, upper *Layer) {
 			}
 		}
 	}
+
+	return l
 }
 
 func (l *Layer) recordFileTree(t *testing.T) {

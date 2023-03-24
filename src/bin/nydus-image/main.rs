@@ -328,10 +328,16 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             App::new("merge")
                 .about("Merge multiple bootstraps into a overlaid bootstrap")
                 .arg(
+                    Arg::new("parent-bootstrap")
+                        .long("parent-bootstrap")
+                        .help("File path of the parent/referenced RAFS metadata blob (optional)")
+                        .required(false),
+                )
+                .arg(
                     Arg::new("bootstrap")
                         .long("bootstrap")
                         .short('B')
-                        .help("output path of nydus overlaid bootstrap"),
+                        .help("Output path of nydus overlaid bootstrap"),
                 )
                 .arg(
                     Arg::new("blob-dir")
@@ -930,8 +936,11 @@ impl Command {
         };
         ctx.configuration = config.clone();
 
+        let parent_bootstrap_path = Self::get_parent_bootstrap(matches)?;
+
         let output = Merger::merge(
             &mut ctx,
+            parent_bootstrap_path,
             source_bootstrap_paths,
             blob_digests,
             blob_sizes,
