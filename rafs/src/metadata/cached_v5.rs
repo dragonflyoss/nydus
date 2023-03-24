@@ -26,9 +26,10 @@ use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo, BlobDevice, BlobInfo}
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::ByteSize;
 
+use crate::metadata::inode::RafsInodeFlags;
 use crate::metadata::layout::v5::{
     rafsv5_alloc_bio_vecs, rafsv5_validate_inode, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode,
-    RafsV5InodeChunkOps, RafsV5InodeFlags, RafsV5InodeOps, RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
+    RafsV5InodeChunkOps, RafsV5InodeOps, RafsV5XAttrsTable, RAFSV5_ALIGNMENT,
 };
 use crate::metadata::layout::{bytes_to_os_str, parse_xattr, RAFS_V5_ROOT_INODE};
 use crate::metadata::{
@@ -236,7 +237,7 @@ pub struct CachedInodeV5 {
     i_projid: u32,
     i_uid: u32,
     i_gid: u32,
-    i_flags: RafsV5InodeFlags,
+    i_flags: RafsInodeFlags,
     i_size: u64,
     i_blocks: u64,
     i_nlink: u32,
@@ -481,7 +482,7 @@ impl RafsInode for CachedInodeV5 {
 
     #[inline]
     fn has_xattr(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::XATTR)
+        self.i_flags.contains(RafsInodeFlags::XATTR)
     }
 
     #[inline]
@@ -664,7 +665,7 @@ impl RafsV5InodeOps for CachedInodeV5 {
     }
 
     fn has_hole(&self) -> bool {
-        self.i_flags.contains(RafsV5InodeFlags::HAS_HOLE)
+        self.i_flags.contains(RafsInodeFlags::HAS_HOLE)
     }
 }
 

@@ -2,17 +2,18 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Result};
 use indexmap::IndexMap;
-use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
-use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
-use crate::node::Node;
+use super::node::Node;
+use crate::metadata::layout::v5::RafsV5PrefetchTable;
+use crate::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
+/// Filesystem data prefetch policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {
     None,
@@ -99,6 +100,7 @@ fn generate_patterns(input: Vec<String>) -> Result<IndexMap<PathBuf, Option<u64>
     Ok(patterns)
 }
 
+/// Manage filesystem data prefetch configuration and state for builder.
 #[derive(Default, Clone)]
 pub struct Prefetch {
     pub policy: PrefetchPolicy,
@@ -115,6 +117,7 @@ pub struct Prefetch {
 }
 
 impl Prefetch {
+    /// Create a new instance of [Prefetch].
     pub fn new(policy: PrefetchPolicy) -> Result<Self> {
         let patterns = if policy != PrefetchPolicy::None {
             get_patterns().context("failed to get prefetch patterns")?
@@ -130,6 +133,7 @@ impl Prefetch {
         })
     }
 
+    /// Insert node into the prefetch list if it matches prefetch rules.
     pub fn insert_if_need(&mut self, node: &Node) {
         let path = node.target();
         let index = node.index;
@@ -157,15 +161,18 @@ impl Prefetch {
         }
     }
 
+    /// Check whether the node is in the prefetch list.
     pub fn contains(&self, node: &Node) -> bool {
         self.files.contains_key(node.target())
     }
 
+    /// Get node index array of files in the prefetch list.
     pub fn get_file_indexes(&self) -> Vec<u64> {
         self.files.values().copied().collect()
     }
 
-    pub fn len(&self) -> u32 {
+    /// Get number of prefetch rules.
+    pub fn fs_prefetch_rule_count(&self) -> u32 {
         if self.policy == PrefetchPolicy::Fs {
             self.patterns.values().len() as u32
         } else {
@@ -174,7 +181,7 @@ impl Prefetch {
     }
 
     /// Generate filesystem layer prefetch list for RAFS v5.
-    pub fn get_rafsv5_prefetch_table(&mut self, nodes: &[Node]) -> Option<RafsV5PrefetchTable> {
+    pub fn get_v5_prefetch_table(&mut self, nodes: &VecDeque<Node>) -> Option<RafsV5PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV5PrefetchTable::new();
             for i in self.patterns.values().filter_map(|v| *v) {
@@ -190,9 +197,9 @@ impl Prefetch {
     }
 
     /// Generate filesystem layer prefetch list for RAFS v6.
-    pub fn get_rafsv6_prefetch_table(
+    pub fn get_v6_prefetch_table(
         &mut self,
-        nodes: &[Node],
+        nodes: &VecDeque<Node>,
         meta_addr: u64,
     ) -> Option<RafsV6PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
@@ -222,10 +229,12 @@ impl Prefetch {
         }
     }
 
+    /// Disable filesystem data prefetch.
     pub fn disable(&mut self) {
         self.disabled = true;
     }
 
+    /// Reset to initialization state.
     pub fn clear(&mut self) {
         self.disabled = false;
         self.files.clear();

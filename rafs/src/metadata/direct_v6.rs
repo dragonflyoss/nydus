@@ -38,15 +38,17 @@ use nydus_utils::{digest::RafsDigest, div_round_up, round_up};
 
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::layout::v6::{
-    recover_namespace, RafsV6BlobTable, RafsV6Dirent, RafsV6InodeChunkAddr, RafsV6InodeCompact,
-    RafsV6InodeExtended, RafsV6OndiskInode, RafsV6XattrEntry, RafsV6XattrIbodyHeader,
-    EROFS_BLOCK_SIZE, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+    rafsv6_load_blob_extra_info, recover_namespace, RafsV6BlobTable, RafsV6Dirent,
+    RafsV6InodeChunkAddr, RafsV6InodeCompact, RafsV6InodeExtended, RafsV6OndiskInode,
+    RafsV6XattrEntry, RafsV6XattrIbodyHeader, EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096,
+    EROFS_BLOCK_SIZE_512, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
     EROFS_INODE_SLOT_SIZE, EROFS_I_DATALAYOUT_BITS, EROFS_I_VERSION_BIT, EROFS_I_VERSION_BITS,
 };
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrName, XattrValue};
 use crate::metadata::{
-    Attr, Entry, Inode, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsSuperBlock,
-    RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME,
+    Attr, Entry, Inode, RafsBlobExtraInfo, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler,
+    RafsSuperBlock, RafsSuperFlags, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
+    RAFS_MAX_NAME,
 };
 use crate::{MetaType, RafsError, RafsInodeExt, RafsIoReader, RafsResult};
 
@@ -63,6 +65,7 @@ fn err_invalidate_data(rafs_err: RafsError) -> std::io::Error {
 struct DirectMappingState {
     meta: Arc<RafsSuperMeta>,
     blob_table: RafsV6BlobTable,
+    blob_extra_infos: HashMap<String, RafsBlobExtraInfo>,
     map: FileMapState,
 }
 
@@ -71,7 +74,20 @@ impl DirectMappingState {
         DirectMappingState {
             meta: Arc::new(*meta),
             blob_table: RafsV6BlobTable::default(),
+            blob_extra_infos: HashMap::new(),
             map: FileMapState::default(),
+        }
+    }
+
+    fn is_tarfs(&self) -> bool {
+        self.meta.flags.contains(RafsSuperFlags::TARTFS_MODE)
+    }
+
+    fn block_size(&self) -> u64 {
+        if self.is_tarfs() {
+            EROFS_BLOCK_SIZE_512
+        } else {
+            EROFS_BLOCK_SIZE_4096
         }
     }
 }
@@ -97,7 +113,8 @@ impl DirectSuperBlockV6 {
     /// Create a new instance of `DirectSuperBlockV6`.
     pub fn new(meta: &RafsSuperMeta) -> Self {
         let state = DirectMappingState::new(meta);
-        let meta_offset = meta.meta_blkaddr as usize * EROFS_BLOCK_SIZE as usize;
+        let block_size = state.block_size();
+        let meta_offset = meta.meta_blkaddr as usize * block_size as usize;
         let info = DirectCachedInfo {
             meta_offset,
             root_ino: meta.root_nid as Inode,
@@ -167,8 +184,11 @@ impl DirectSuperBlockV6 {
         let file = clone_file(r.as_raw_fd())?;
         let md = file.metadata()?;
         let len = md.len();
-        let md_range =
-            MetaRange::new(EROFS_BLOCK_SIZE as u64, len - EROFS_BLOCK_SIZE as u64, true)?;
+        let md_range = MetaRange::new(
+            EROFS_BLOCK_SIZE_4096 as u64,
+            len - EROFS_BLOCK_SIZE_4096 as u64,
+            true,
+        )?;
 
         // Validate blob table layout as blob_table_start and blob_table_offset is read from bootstrap.
         let old_state = self.state.load();
@@ -187,11 +207,13 @@ impl DirectSuperBlockV6 {
         let meta = &old_state.meta;
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
         blob_table.load(r, meta.blob_table_size, meta.chunk_size, meta.flags)?;
+        let blob_extra_infos = rafsv6_load_blob_extra_info(meta, r)?;
 
         let file_map = FileMapState::new(file, 0, len as usize, false)?;
         let state = DirectMappingState {
             meta: old_state.meta.clone(),
             blob_table,
+            blob_extra_infos,
             map: file_map,
         };
 
@@ -212,6 +234,7 @@ impl DirectSuperBlockV6 {
             return Ok(chunk_map);
         }
 
+        let block_size = state.block_size();
         let unit_size = size_of::<RafsV5ChunkInfo>();
         if size % unit_size != 0 {
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
@@ -222,7 +245,7 @@ impl DirectSuperBlockV6 {
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
             v6_chunk.set_blob_index(chunk.blob_index());
             v6_chunk.set_blob_ci_index(chunk.id());
-            v6_chunk.set_block_addr((chunk.uncompressed_offset() / EROFS_BLOCK_SIZE) as u32);
+            v6_chunk.set_block_addr((chunk.uncompressed_offset() / block_size) as u32);
             chunk_map.insert(v6_chunk, idx);
         }
 
@@ -232,8 +255,9 @@ impl DirectSuperBlockV6 {
 
 impl RafsSuperInodes for DirectSuperBlockV6 {
     fn get_max_ino(&self) -> Inode {
+        let state = self.state.load();
         // The maximum inode number supported by RAFSv6 is smaller than limit of fuse-backend-rs.
-        (0xffff_ffffu64) * EROFS_BLOCK_SIZE / EROFS_INODE_SLOT_SIZE as u64
+        (0xffff_ffffu64) * state.block_size() / EROFS_INODE_SLOT_SIZE as u64
     }
 
     /// Find inode offset by ino from inode table and mmap to OndiskInode.
@@ -283,6 +307,10 @@ impl RafsSuperBlock for DirectSuperBlockV6 {
         self.state.load().blob_table.get_all()
     }
 
+    fn get_blob_extra_infos(&self) -> Result<HashMap<String, RafsBlobExtraInfo>> {
+        Ok(self.state.load().blob_extra_infos.clone())
+    }
+
     fn root_ino(&self) -> u64 {
         self.info.root_ino
     }
@@ -314,7 +342,7 @@ impl OndiskInodeWrapper {
         offset: usize,
     ) -> Result<Self> {
         let inode = DirectSuperBlockV6::disk_inode(state, offset)?;
-        let blocks_count = div_round_up(inode.size(), EROFS_BLOCK_SIZE);
+        let blocks_count = div_round_up(inode.size(), state.block_size());
 
         Ok(OndiskInodeWrapper {
             mapping,
@@ -348,8 +376,8 @@ impl OndiskInodeWrapper {
         block_index: usize,
         index: usize,
     ) -> RafsResult<&'a RafsV6Dirent> {
-        let offset = self.data_block_offset(inode, block_index)?;
-        if size_of::<RafsV6Dirent>() * (index + 1) >= EROFS_BLOCK_SIZE as usize {
+        let offset = self.data_block_offset(state, inode, block_index)?;
+        if size_of::<RafsV6Dirent>() * (index + 1) >= state.block_size() as usize {
             Err(RafsError::InvalidImageData)
         } else if let Some(offset) = offset.checked_add(size_of::<RafsV6Dirent>() * index) {
             state
@@ -372,12 +400,13 @@ impl OndiskInodeWrapper {
         max_entries: usize,
     ) -> RafsResult<&'a OsStr> {
         assert!(max_entries > 0);
-        let offset = self.data_block_offset(inode, block_index)?;
+        let block_size = state.block_size();
+        let offset = self.data_block_offset(state, inode, block_index)?;
         let de = self.get_entry(state, inode, block_index, index)?;
         let buf: &[u8] = match index.cmp(&(max_entries - 1)) {
             Ordering::Less => {
                 let next_de = self.get_entry(state, inode, block_index, index + 1)?;
-                if next_de.e_nameoff as u64 >= EROFS_BLOCK_SIZE {
+                if next_de.e_nameoff as u64 >= block_size {
                     return Err(RafsError::InvalidImageData);
                 }
                 let len = next_de.e_nameoff.checked_sub(de.e_nameoff).ok_or_else(|| {
@@ -398,7 +427,7 @@ impl OndiskInodeWrapper {
             }
             Ordering::Equal => {
                 let base = de.e_nameoff as u64;
-                if base >= EROFS_BLOCK_SIZE {
+                if base >= block_size {
                     return Err(RafsError::InvalidImageData);
                 }
 
@@ -407,12 +436,12 @@ impl OndiskInodeWrapper {
                 // Because the other blocks should be fully used, while the last may not.
                 let block_count = self.blocks_count() as usize;
                 let len = match block_count.cmp(&(block_index + 1)) {
-                    Ordering::Greater => (EROFS_BLOCK_SIZE - base) as usize,
+                    Ordering::Greater => (block_size - base) as usize,
                     Ordering::Equal => {
-                        if self.size() % EROFS_BLOCK_SIZE == 0 {
-                            EROFS_BLOCK_SIZE as usize
+                        if self.size() % block_size == 0 {
+                            block_size as usize
                         } else {
-                            (self.size() % EROFS_BLOCK_SIZE - base) as usize
+                            (self.size() % block_size - base) as usize
                         }
                     }
                     Ordering::Less => return Err(RafsError::InvalidImageData),
@@ -450,7 +479,12 @@ impl OndiskInodeWrapper {
     // 3 - inode compression D: inode, [xattrs], map_header, extents ... | ...
     // 4 - inode chunk-based E: inode, [xattrs], chunk indexes ... | ...
     // 5~7 - reserved
-    fn data_block_offset(&self, inode: &dyn RafsV6OndiskInode, index: usize) -> RafsResult<usize> {
+    fn data_block_offset<'a>(
+        &self,
+        state: &'a Guard<Arc<DirectMappingState>>,
+        inode: &dyn RafsV6OndiskInode,
+        index: usize,
+    ) -> RafsResult<usize> {
         const VALID_MODE_BITS: u16 = ((1 << EROFS_I_DATALAYOUT_BITS) - 1) << EROFS_I_VERSION_BITS
             | ((1 << EROFS_I_VERSION_BITS) - 1);
         if inode.format() & !VALID_MODE_BITS != 0 || index > u32::MAX as usize {
@@ -459,9 +493,9 @@ impl OndiskInodeWrapper {
 
         let layout = inode.format() >> EROFS_I_VERSION_BITS;
         match layout {
-            EROFS_INODE_FLAT_PLAIN => Self::flat_data_block_offset(inode, index),
+            EROFS_INODE_FLAT_PLAIN => Self::flat_data_block_offset(state, inode, index),
             EROFS_INODE_FLAT_INLINE => match self.blocks_count().cmp(&(index as u64 + 1)) {
-                Ordering::Greater => Self::flat_data_block_offset(inode, index),
+                Ordering::Greater => Self::flat_data_block_offset(state, inode, index),
                 Ordering::Equal => {
                     Ok(self.offset as usize + Self::inode_size(inode) + Self::xattr_size(inode))
                 }
@@ -471,13 +505,17 @@ impl OndiskInodeWrapper {
         }
     }
 
-    fn flat_data_block_offset(inode: &dyn RafsV6OndiskInode, index: usize) -> RafsResult<usize> {
+    fn flat_data_block_offset(
+        state: &Guard<Arc<DirectMappingState>>,
+        inode: &dyn RafsV6OndiskInode,
+        index: usize,
+    ) -> RafsResult<usize> {
         // `i_u` points to the Nth block
         let base = inode.union() as usize;
         if base.checked_add(index).is_none() || base + index > u32::MAX as usize {
             Err(RafsError::InvalidImageData)
         } else {
-            Ok((base + index) * EROFS_BLOCK_SIZE as usize)
+            Ok((base + index) * state.block_size() as usize)
         }
     }
 
@@ -487,6 +525,7 @@ impl OndiskInodeWrapper {
         i.mode() as u32 & libc::S_IFMT as u32
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_chunk_io(
         &self,
         state: &Guard<Arc<DirectMappingState>>,
@@ -495,6 +534,8 @@ impl OndiskInodeWrapper {
         content_offset: u32,
         content_len: u32,
         user_io: bool,
+        is_tarfs_mode: bool,
+        is_tail: bool,
     ) -> Option<BlobIoDesc> {
         let blob_index = chunk_addr.blob_index();
         let chunk_index = chunk_addr.blob_ci_index();
@@ -507,9 +548,29 @@ impl OndiskInodeWrapper {
                 );
                 None
             }
-            Ok(blob) => device
-                .create_io_chunk(blob.blob_index(), chunk_index)
-                .map(|v| BlobIoDesc::new(blob, v, content_offset, content_len, user_io)),
+            Ok(blob) => {
+                if is_tarfs_mode {
+                    let offset = (chunk_addr.block_addr() as u64) << EROFS_BLOCK_BITS_9;
+                    let size = if is_tail {
+                        (self.size() % self.chunk_size() as u64) as u32
+                    } else {
+                        self.chunk_size()
+                    };
+                    let chunk = PlainChunkInfoV6::new(blob_index, chunk_index, offset, size);
+                    let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
+                    Some(BlobIoDesc::new(
+                        blob,
+                        chunk.into(),
+                        content_offset,
+                        content_len,
+                        user_io,
+                    ))
+                } else {
+                    device
+                        .create_io_chunk(blob.blob_index(), chunk_index)
+                        .map(|v| BlobIoDesc::new(blob, v, content_offset, content_len, user_io))
+                }
+            }
         }
     }
 
@@ -662,7 +723,9 @@ impl OndiskInodeWrapper {
             .get_entry(&state, inode, block_index, 0)
             .map_err(err_invalidate_data)?;
         let name_offset = head_entry.e_nameoff as usize;
-        if name_offset as u64 >= EROFS_BLOCK_SIZE || name_offset % size_of::<RafsV6Dirent>() != 0 {
+        if name_offset as u64 >= EROFS_BLOCK_SIZE_4096
+            || name_offset % size_of::<RafsV6Dirent>() != 0
+        {
             Err(enoent!(format!(
                 "v6: invalid e_nameoff {} from directory entry",
                 name_offset
@@ -680,7 +743,7 @@ impl RafsInode for OndiskInodeWrapper {
         let max_inode = self.mapping.get_max_ino();
 
         if self.ino() > max_inode
-            || self.offset > (u32::MAX as usize) * EROFS_BLOCK_SIZE as usize
+            || self.offset > (u32::MAX as usize) * EROFS_BLOCK_SIZE_4096 as usize
             || inode.nlink() == 0
             || self.get_name_size() as usize > (RAFS_MAX_NAME + 1)
         {
@@ -737,6 +800,9 @@ impl RafsInode for OndiskInodeWrapper {
             return Ok(vec);
         }
 
+        let mut curr_chunk_index = head_chunk_index as u32;
+        let tail_chunk_index = self.get_chunk_count() - 1;
+        let is_tarfs_mode = state.is_tarfs();
         let content_offset = (offset % chunk_size as u64) as u32;
         let mut left = std::cmp::min(self.size() - offset, size as u64) as u32;
         let mut content_len = std::cmp::min(chunk_size - content_offset, left);
@@ -748,6 +814,8 @@ impl RafsInode for OndiskInodeWrapper {
                 content_offset,
                 content_len,
                 user_io,
+                is_tarfs_mode,
+                curr_chunk_index == tail_chunk_index,
             )
             .ok_or_else(|| einval!("failed to get chunk information"))?;
 
@@ -757,9 +825,19 @@ impl RafsInode for OndiskInodeWrapper {
         if left != 0 {
             // Handle the rest of chunks since they shares the same content length = 0.
             for c in chunks.iter().skip(1) {
+                curr_chunk_index += 1;
                 content_len = std::cmp::min(chunk_size, left);
                 let desc = self
-                    .make_chunk_io(&state, device, c, 0, content_len, user_io)
+                    .make_chunk_io(
+                        &state,
+                        device,
+                        c,
+                        0,
+                        content_len,
+                        user_io,
+                        is_tarfs_mode,
+                        curr_chunk_index == tail_chunk_index,
+                    )
                     .ok_or_else(|| einval!("failed to get chunk information"))?;
                 if desc.blob.blob_index() != descs.blob_index() {
                     vec.push(descs);
@@ -980,14 +1058,14 @@ impl RafsInode for OndiskInodeWrapper {
     fn get_symlink(&self) -> Result<OsString> {
         let state = self.state();
         let inode = self.disk_inode(&state);
-        if inode.size() > EROFS_BLOCK_SIZE {
+        if inode.size() > EROFS_BLOCK_SIZE_4096 {
             return Err(einval!(format!(
                 "v6: invalid symlink size {}",
                 inode.size()
             )));
         }
         let offset = self
-            .data_block_offset(inode, 0)
+            .data_block_offset(&state, inode, 0)
             .map_err(err_invalidate_data)?;
         let buf: &[u8] = state.map.get_slice(offset, inode.size() as usize)?;
         Ok(bytes_to_os_str(buf).to_os_string())
@@ -1243,6 +1321,17 @@ impl RafsInodeExt for OndiskInodeWrapper {
                         blob_index, chunk_index
                     ))
                 })
+        } else if state.is_tarfs() {
+            let blob_index = chunk_addr.blob_index();
+            let chunk_index = chunk_addr.blob_ci_index();
+            let offset = (chunk_addr.block_addr() as u64) << EROFS_BLOCK_BITS_9;
+            let size = if idx == self.get_chunk_count() - 1 {
+                (self.size() % self.chunk_size() as u64) as u32
+            } else {
+                self.chunk_size()
+            };
+            let chunk = PlainChunkInfoV6::new(blob_index, chunk_index, offset, size);
+            Ok(Arc::new(chunk))
         } else {
             let mut chunk_map = self.mapping.info.chunk_map.lock().unwrap();
             if chunk_map.is_none() {
@@ -1354,4 +1443,82 @@ impl BlobV5ChunkInfo for DirectChunkInfoV6 {
     impl_chunkinfo_getter!(index, u32);
     impl_chunkinfo_getter!(file_offset, u64);
     impl_chunkinfo_getter!(flags, BlobChunkFlags);
+}
+
+/// Rafs v6 fake ChunkInfo for Tarfs.
+pub(crate) struct PlainChunkInfoV6 {
+    blob_index: u32,
+    chunk_index: u32,
+    offset: u64,
+    size: u32,
+}
+
+impl PlainChunkInfoV6 {
+    /// Create a new instance of [PlainChunkInfoV6].
+    pub fn new(blob_index: u32, chunk_index: u32, offset: u64, size: u32) -> Self {
+        PlainChunkInfoV6 {
+            blob_index,
+            chunk_index,
+            offset,
+            size,
+        }
+    }
+}
+
+const TARFS_DIGEST: RafsDigest = RafsDigest { data: [0u8; 32] };
+
+impl BlobChunkInfo for PlainChunkInfoV6 {
+    fn chunk_id(&self) -> &RafsDigest {
+        &TARFS_DIGEST
+    }
+
+    fn id(&self) -> u32 {
+        self.chunk_index
+    }
+
+    fn blob_index(&self) -> u32 {
+        self.blob_index
+    }
+
+    fn compressed_offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn compressed_size(&self) -> u32 {
+        self.size
+    }
+
+    fn uncompressed_offset(&self) -> u64 {
+        self.offset
+    }
+
+    fn uncompressed_size(&self) -> u32 {
+        self.size
+    }
+
+    fn is_compressed(&self) -> bool {
+        false
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl BlobV5ChunkInfo for PlainChunkInfoV6 {
+    fn index(&self) -> u32 {
+        self.chunk_index
+    }
+
+    fn file_offset(&self) -> u64 {
+        0
+    }
+
+    fn flags(&self) -> BlobChunkFlags {
+        BlobChunkFlags::empty()
+    }
+
+    fn as_base(&self) -> &dyn BlobChunkInfo {
+        self
+    }
 }

@@ -74,3 +74,15 @@ func MakeUpperLayer(t *testing.T, workDir string) *tool.Layer {
 
 	return layer
 }
+
+func MakeMatrixLayer(t *testing.T, workDir, id string) *tool.Layer {
+	layer := tool.NewLayer(t, workDir)
+
+	// Create regular file
+	file1 := fmt.Sprintf("matrix-file-%s-1", id)
+	file2 := fmt.Sprintf("matrix-file-%s-2", id)
+	layer.CreateFile(t, file1, []byte(file1))
+	layer.CreateFile(t, file2, []byte(file2))
+
+	return layer
+}

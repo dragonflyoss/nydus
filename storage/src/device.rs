@@ -44,7 +44,7 @@ use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
 
 pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
-pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_003f;
+pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_007f;
 
 bitflags! {
     /// Features bits for blob management.
@@ -61,6 +61,8 @@ bitflags! {
         const SEPARATE = 0x0000_0010;
         /// Chunk digest array is inlined in the data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0020;
+        /// Blob is for RAFS filesystems in TARFS mode.
+        const TARFS = 0x0000_0040;
         /// Blob has TAR headers to separate contents.
         const HAS_TAR_HEADER = 0x1000_0000;
         /// Blob has Table of Content (ToC) at the tail.
@@ -76,6 +78,13 @@ bitflags! {
 impl Default for BlobFeatures {
     fn default() -> Self {
         BlobFeatures::empty()
+    }
+}
+
+impl BlobFeatures {
+    /// Check whether the blob is for RAFS filesystems in TARFS mode.
+    pub fn is_tarfs(&self) -> bool {
+        self.contains(BlobFeatures::CAP_TAR_TOC) && self.contains(BlobFeatures::TARFS)
     }
 }
 

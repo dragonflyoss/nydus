@@ -4,7 +4,9 @@
 
 package converter
 
-import "strconv"
+import (
+	"strconv"
+)
 
 func getConfig(opt Opt) map[string]string {
 	cfg := map[string]string{}
@@ -17,7 +19,7 @@ func getConfig(opt Opt) map[string]string {
 	cfg["backend_force_push"] = strconv.FormatBool(opt.BackendForcePush)
 
 	cfg["chunk_dict_ref"] = opt.ChunkDictRef
-	cfg["docker2oci"] = strconv.FormatBool(!opt.Docker2OCI)
+	cfg["docker2oci"] = strconv.FormatBool(opt.Docker2OCI)
 	cfg["merge_manifest"] = strconv.FormatBool(opt.MergePlatform)
 	cfg["oci_ref"] = strconv.FormatBool(opt.OCIRef)
 

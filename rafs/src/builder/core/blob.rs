@@ -3,29 +3,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::slice;
 
 use anyhow::{Context, Result};
-use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{toc, BlobMetaChunkArray};
 use nydus_utils::compress;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use sha2::digest::Digest;
 
-use super::context::{ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType};
-use super::feature::Feature;
 use super::layout::BlobLayout;
 use super::node::Node;
+use crate::builder::{
+    ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType, Feature,
+};
+use crate::metadata::RAFS_MAX_CHUNK_SIZE;
 
-pub struct Blob {}
+/// Generator for RAFS data blob.
+pub(crate) struct Blob {}
 
 impl Blob {
     /// Dump blob file and generate chunks
-    pub fn dump(
+    pub(crate) fn dump(
         ctx: &BuildContext,
-        nodes: &mut [Node],
+        nodes: &mut VecDeque<Node>,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut ArtifactWriter,
     ) -> Result<()> {
@@ -53,6 +56,7 @@ impl Blob {
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
             }
             ConversionType::TarToRef
+            | ConversionType::TarToTarfs
             | ConversionType::TargzToRef
             | ConversionType::EStargzToRef => {
                 // Use `sha256(tarball)` as `blob_id` for ref-type conversions.
@@ -66,6 +70,9 @@ impl Blob {
                         }
                     } else if let Some(tar_reader) = &ctx.blob_tar_reader {
                         blob_ctx.compressed_blob_size = tar_reader.position();
+                        if ctx.conversion_type == ConversionType::TarToTarfs {
+                            blob_ctx.uncompressed_blob_size = blob_ctx.compressed_blob_size;
+                        }
                         if blob_ctx.blob_id.is_empty() {
                             let hash = tar_reader.get_hash_object();
                             blob_ctx.blob_id = format!("{:x}", hash.finalize());
@@ -95,7 +102,9 @@ impl Blob {
         blob_mgr: &mut BlobManager,
         blob_writer: &mut ArtifactWriter,
     ) -> Result<()> {
-        if ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc) {
+        if !ctx.blob_features.contains(BlobFeatures::SEPARATE)
+            && (ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc))
+        {
             if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                 blob_ctx.write_tar_header(
                     blob_writer,
@@ -199,7 +208,7 @@ impl Blob {
             )?;
         }
 
-        // Generate ToC entry for `blob.meta`.
+        // Generate ToC entry for `blob.meta` and write chunk digest array.
         if ctx.features.is_enabled(Feature::BlobToc) {
             let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
             let ci_data = if ctx.blob_features.contains(BlobFeatures::ZRAN) {

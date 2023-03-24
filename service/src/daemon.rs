@@ -22,9 +22,8 @@ use nydus_api::BuildTimeInfo;
 use rust_fsm::*;
 use serde::{self, Serialize};
 
-use crate::blob_cache::BlobCacheMgr;
 use crate::fs_service::{FsBackendCollection, FsService};
-use crate::{Error, Result};
+use crate::{BlobCacheMgr, Error, Result};
 
 /// Nydus daemon working states.
 #[allow(clippy::upper_case_acronyms)]
@@ -173,7 +172,9 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
 
     // For backward compatibility.
     /// Set default filesystem service object.
-    fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>>;
+    fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>> {
+        None
+    }
 
     /// Get the optional `BlobCacheMgr` object.
     fn get_blob_cache_mgr(&self) -> Option<Arc<BlobCacheMgr>> {

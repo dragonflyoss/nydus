@@ -130,18 +130,14 @@ impl ConfigV2 {
     /// Get cache working directory.
     pub fn get_cache_working_directory(&self) -> Result<String> {
         let cache = self.get_cache_config()?;
-        match cache.cache_type.as_str() {
-            "blobcache" | "filecache" => {
-                if let Some(c) = cache.file_cache.as_ref() {
-                    return Ok(c.work_dir.clone());
-                }
+        if cache.is_filecache() {
+            if let Some(c) = cache.file_cache.as_ref() {
+                return Ok(c.work_dir.clone());
             }
-            "fscache" => {
-                if let Some(c) = cache.fs_cache.as_ref() {
-                    return Ok(c.work_dir.clone());
-                }
+        } else if cache.is_fscache() {
+            if let Some(c) = cache.fs_cache.as_ref() {
+                return Ok(c.work_dir.clone());
             }
-            _ => {}
         }
 
         Err(Error::new(
@@ -634,25 +630,35 @@ impl CacheConfigV2 {
         true
     }
 
+    /// Check whether the cache type is `filecache`
+    pub fn is_filecache(&self) -> bool {
+        self.cache_type == "blobcache" || self.cache_type == "filecache"
+    }
+
+    /// Check whether the cache type is `fscache`
+    pub fn is_fscache(&self) -> bool {
+        self.cache_type == "fscache"
+    }
+
     /// Get configuration information for file cache.
     pub fn get_filecache_config(&self) -> Result<&FileCacheConfig> {
-        if self.cache_type != "blobcache" && self.cache_type != "filecache" {
-            Err(einval!("cache type is not 'filecache'"))
-        } else {
+        if self.is_filecache() {
             self.file_cache
                 .as_ref()
                 .ok_or_else(|| einval!("no configuration information for filecache"))
+        } else {
+            Err(einval!("cache type is not 'filecache'"))
         }
     }
 
     /// Get configuration information for fscache.
     pub fn get_fscache_config(&self) -> Result<&FsCacheConfig> {
-        if self.cache_type != "fscache" {
-            Err(einval!("cache type is not 'fscache'"))
-        } else {
+        if self.is_fscache() {
             self.fs_cache
                 .as_ref()
                 .ok_or_else(|| einval!("no configuration information for fscache"))
+        } else {
+            Err(einval!("cache type is not 'fscache'"))
         }
     }
 }
@@ -884,9 +890,52 @@ pub struct BlobCacheEntryConfigV2 {
     /// Configuration information for local cache system.
     #[serde(default)]
     pub cache: CacheConfigV2,
-    /// Optional file path for metadata blobs.
+    /// Optional file path for metadata blob.
     #[serde(default)]
     pub metadata_path: Option<String>,
+}
+
+impl BlobCacheEntryConfigV2 {
+    /// Read configuration information from a file.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let md = fs::metadata(path.as_ref())?;
+        if md.len() > 0x100000 {
+            return Err(eother!("configuration file size is too big"));
+        }
+        let content = fs::read_to_string(path)?;
+        Self::from_str(&content)
+    }
+
+    /// Validate the configuration object.
+    pub fn validate(&self) -> bool {
+        if self.version != 2 {
+            return false;
+        }
+        let config: ConfigV2 = self.into();
+        config.validate()
+    }
+}
+
+impl FromStr for BlobCacheEntryConfigV2 {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<BlobCacheEntryConfigV2> {
+        if let Ok(v) = serde_json::from_str::<BlobCacheEntryConfigV2>(s) {
+            return if v.validate() {
+                Ok(v)
+            } else {
+                Err(einval!("invalid configuration"))
+            };
+        }
+        if let Ok(v) = toml::from_str::<BlobCacheEntryConfigV2>(s) {
+            return if v.validate() {
+                Ok(v)
+            } else {
+                Err(einval!("invalid configuration"))
+            };
+        }
+        Err(einval!("failed to parse configuration information"))
+    }
 }
 
 impl From<&BlobCacheEntryConfigV2> for ConfigV2 {
@@ -935,6 +984,106 @@ impl ConfigV2Internal {
     pub fn set_blob_accessible(&self, accessible: bool) {
         self.blob_accessible.store(accessible, Ordering::Relaxed);
     }
+}
+
+/// Blob cache object type for nydus/rafs bootstrap blob.
+pub const BLOB_CACHE_TYPE_META_BLOB: &str = "bootstrap";
+/// Blob cache object type for nydus/rafs data blob.
+pub const BLOB_CACHE_TYPE_DATA_BLOB: &str = "datablob";
+
+/// Configuration information for a cached blob.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BlobCacheEntry {
+    /// Type of blob object, bootstrap or data blob.
+    #[serde(rename = "type")]
+    pub blob_type: String,
+    /// Blob id.
+    #[serde(rename = "id")]
+    pub blob_id: String,
+    /// Configuration information to generate blob cache object.
+    #[serde(default, rename = "config")]
+    pub(crate) blob_config_legacy: Option<BlobCacheEntryConfig>,
+    /// Configuration information to generate blob cache object.
+    #[serde(default, rename = "config_v2")]
+    pub blob_config: Option<BlobCacheEntryConfigV2>,
+    /// Domain id for the blob, which is used to group cached blobs into management domains.
+    #[serde(default)]
+    pub domain_id: String,
+}
+
+impl BlobCacheEntry {
+    pub fn prepare_configuration_info(&mut self) -> bool {
+        if self.blob_config.is_none() {
+            if let Some(legacy) = self.blob_config_legacy.as_ref() {
+                match legacy.try_into() {
+                    Err(_) => return false,
+                    Ok(v) => self.blob_config = Some(v),
+                }
+            }
+        }
+
+        match self.blob_config.as_ref() {
+            None => false,
+            Some(cfg) => cfg.cache.validate() && cfg.backend.validate(),
+        }
+    }
+}
+
+impl BlobCacheEntry {
+    /// Read configuration information from a file.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let md = fs::metadata(path.as_ref())?;
+        if md.len() > 0x100000 {
+            return Err(eother!("configuration file size is too big"));
+        }
+        let content = fs::read_to_string(path)?;
+        Self::from_str(&content)
+    }
+
+    /// Validate the configuration object.
+    pub fn validate(&self) -> bool {
+        if self.blob_type != BLOB_CACHE_TYPE_META_BLOB
+            && self.blob_type != BLOB_CACHE_TYPE_DATA_BLOB
+        {
+            log::warn!("invalid blob type {} for blob cache entry", self.blob_type);
+            return false;
+        }
+        if let Some(config) = self.blob_config.as_ref() {
+            if !config.validate() {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl FromStr for BlobCacheEntry {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<BlobCacheEntry> {
+        if let Ok(v) = serde_json::from_str::<BlobCacheEntry>(s) {
+            return if v.validate() {
+                Ok(v)
+            } else {
+                Err(einval!("invalid configuration"))
+            };
+        }
+        if let Ok(v) = toml::from_str::<BlobCacheEntry>(s) {
+            return if v.validate() {
+                Ok(v)
+            } else {
+                Err(einval!("invalid configuration"))
+            };
+        }
+        Err(einval!("failed to parse configuration information"))
+    }
+}
+
+/// Configuration information for a list of cached blob objects.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct BlobCacheList {
+    /// List of blob configuration information.
+    pub blobs: Vec<BlobCacheEntry>,
 }
 
 fn default_true() -> bool {

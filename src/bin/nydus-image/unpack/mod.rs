@@ -60,12 +60,7 @@ impl OCIUnpacker {
     }
 
     fn load_rafs(&self, config: Arc<ConfigV2>) -> Result<RafsSuper> {
-        let (rs, _) = RafsSuper::load_from_file(
-            self.bootstrap.as_path(),
-            config.clone(),
-            config.is_chunk_validation_enabled(),
-            false,
-        )?;
+        let (rs, _) = RafsSuper::load_from_file(self.bootstrap.as_path(), config, false)?;
         Ok(rs)
     }
 }
@@ -84,7 +79,7 @@ impl Unpacker for OCIUnpacker {
             .create(&rafs, &self.blob_backend, &self.output)?;
 
         for (node, path) in RafsIterator::new(&rafs) {
-            builder.append(&*node, &path)?;
+            builder.append(node, &path)?;
         }
 
         Ok(())
@@ -92,7 +87,7 @@ impl Unpacker for OCIUnpacker {
 }
 
 trait TarBuilder {
-    fn append(&mut self, node: &dyn RafsInodeExt, path: &Path) -> Result<()>;
+    fn append(&mut self, node: Arc<dyn RafsInodeExt>, path: &Path) -> Result<()>;
 }
 
 struct TarSection {
@@ -101,8 +96,8 @@ struct TarSection {
 }
 
 trait SectionBuilder {
-    fn can_handle(&mut self, inode: &dyn RafsInodeExt, path: &Path) -> bool;
-    fn build(&self, inode: &dyn RafsInodeExt, path: &Path) -> Result<Vec<TarSection>>;
+    fn can_handle(&mut self, inode: Arc<dyn RafsInodeExt>, path: &Path) -> bool;
+    fn build(&self, inode: Arc<dyn RafsInodeExt>, path: &Path) -> Result<Vec<TarSection>>;
 }
 
 struct OCITarBuilderFactory {}
@@ -218,14 +213,14 @@ impl OCITarBuilder {
 }
 
 impl TarBuilder for OCITarBuilder {
-    fn append(&mut self, inode: &dyn RafsInodeExt, path: &Path) -> Result<()> {
+    fn append(&mut self, inode: Arc<dyn RafsInodeExt>, path: &Path) -> Result<()> {
         for builder in &mut self.builders {
             // Useless one, just go !!!!!
-            if !builder.can_handle(inode, path) {
+            if !builder.can_handle(inode.clone(), path) {
                 continue;
             }
 
-            for sect in builder.build(inode, path)? {
+            for sect in builder.build(inode.clone(), path)? {
                 self.writer.append(&sect.header, sect.data)?;
             }
 

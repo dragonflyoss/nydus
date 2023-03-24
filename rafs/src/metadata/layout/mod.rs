@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::{OsStr, OsString};
+use std::fmt::{Debug, Formatter};
 use std::io::Result;
 use std::mem::size_of;
 use std::os::unix::ffi::OsStrExt;
@@ -226,6 +227,12 @@ pub const RAFS_XATTR_PREFIXES: [&str; 5] = [
 #[derive(Clone, Default)]
 pub struct RafsXAttrs {
     pairs: HashMap<OsString, XattrValue>,
+}
+
+impl Debug for RafsXAttrs {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "extended attributes[...]")
+    }
 }
 
 impl RafsXAttrs {

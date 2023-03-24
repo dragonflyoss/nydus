@@ -9,7 +9,7 @@ setup() {
 }
 
 @test "compile nydus snapshotter" {
-        docker run --rm -v /tmp/nydus-snapshotter:/nydus-snapshotter $compile_image bash -c 'cd /nydus-snapshotter && make clear && make'
+        docker run --rm -v /tmp/nydus-snapshotter:/nydus-snapshotter $compile_image bash -c 'cd /nydus-snapshotter && make clean && make'
         if [ -f "/tmp/nydus-snapshotter/bin/containerd-nydus-grpc" ]; then
                 /usr/bin/cp -f /tmp/nydus-snapshotter/bin/containerd-nydus-grpc /usr/local/bin/
                 echo "nydus-snapshotter version"

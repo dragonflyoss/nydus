@@ -340,7 +340,11 @@ func main() {
 					Value:   false,
 					Usage:   "Convert Docker media types to OCI media types",
 					EnvVars: []string{"OCI"},
-					Aliases: []string{"docker-v2-format"},
+				},
+				&cli.BoolFlag{
+					Name:   "docker-v2-format",
+					Value:  false,
+					Hidden: true,
 				},
 				&cli.StringFlag{
 					Name:        "fs-version",
@@ -446,6 +450,20 @@ func main() {
 					}
 				}
 
+				docker2OCI := false
+				if c.Bool("docker-v2-format") {
+					logrus.Warn("the option `--docker-v2-format` has been deprecated, use `--oci` instead")
+					docker2OCI = false
+				} else if c.Bool("oci") {
+					docker2OCI = true
+				}
+
+				// Forcibly enable `--oci` option when `--oci-ref` be enabled.
+				if c.Bool("oci-ref") {
+					logrus.Warn("forcibly enabled `--oci` option when `--oci-ref` be enabled")
+					docker2OCI = true
+				}
+
 				opt := converter.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
@@ -469,7 +487,7 @@ func main() {
 
 					PrefetchPatterns: prefetchPatterns,
 					MergePlatform:    c.Bool("merge-platform"),
-					Docker2OCI:       c.Bool("oci"),
+					Docker2OCI:       docker2OCI,
 					FsVersion:        fsVersion,
 					FsAlignChunk:     c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
 					Compressor:       c.String("compressor"),
@@ -862,11 +880,6 @@ func main() {
 			},
 		},
 	}
-
-	// With linux/arm64 platform, containerd/compression prioritizes `unpigz`
-	// to decompress tar.gz file, which may generate corrupted data somehow.
-	// Keep the same behavior with x86_64 platform by disabling pigz.
-	os.Setenv("CONTAINERD_DISABLE_PIGZ", "1")
 
 	if !utils.IsSupportedArch(runtime.GOARCH) {
 		logrus.Fatal("Nydusify can only work under architecture 'amd64' and 'arm64'")

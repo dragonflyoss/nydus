@@ -1,4 +1,5 @@
 // Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2023 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -16,18 +17,19 @@
 //! - Traverse the merged tree (OverlayTree) to dump bootstrap and data blobs.
 
 use std::ffi::OsStr;
-use std::ffi::OsString;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::inode::InodeWrapper;
-use nydus_rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
-use nydus_rafs::metadata::{Inode, RafsInodeExt, RafsSuper};
+use nydus_utils::{event_tracer, root_tracer, timing_tracer};
 
-use super::chunk_dict::ChunkDict;
-use super::node::{ChunkSource, Node, NodeChunk, Overlay, WhiteoutSpec, WhiteoutType};
+use super::node::{ChunkSource, Node, NodeChunk, NodeInfo};
+use super::overlay::{Overlay, WhiteoutType};
+use crate::builder::{ChunkDict, WhiteoutSpec};
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::inode::InodeWrapper;
+use crate::metadata::layout::{bytes_to_os_str, RafsXAttrs};
+use crate::metadata::{Inode, RafsInodeExt, RafsSuper};
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.
 #[derive(Clone)]
@@ -51,12 +53,18 @@ impl Tree {
     pub fn from_bootstrap<T: ChunkDict>(rs: &RafsSuper, chunk_dict: &mut T) -> Result<Self> {
         let tree_builder = MetadataTreeBuilder::new(rs);
         let root_inode = rs.get_extended_inode(rs.superblock.root_ino(), true)?;
-        let root_node =
-            MetadataTreeBuilder::parse_node(rs, root_inode.deref(), PathBuf::from("/"))?;
+        let root_node = MetadataTreeBuilder::parse_node(rs, root_inode, PathBuf::from("/"))?;
         let mut tree = Tree::new(root_node);
 
         tree.children = timing_tracer!(
-            { tree_builder.load_children(rs.superblock.root_ino(), None, chunk_dict, true) },
+            {
+                tree_builder.load_children(
+                    rs.superblock.root_ino(),
+                    Option::<PathBuf>::None,
+                    chunk_dict,
+                    true,
+                )
+            },
             "load_tree_from_bootstrap"
         )?;
 
@@ -89,7 +97,7 @@ impl Tree {
         handle_whiteout: bool,
         whiteout_spec: WhiteoutSpec,
     ) -> Result<bool> {
-        // Handle whiteout file
+        // Handle whiteout objects
         if handle_whiteout {
             if let Some(whiteout_type) = target.whiteout_type(whiteout_spec) {
                 let origin_name = target.origin_name(whiteout_type);
@@ -122,7 +130,6 @@ impl Tree {
 
         // Don't search if path recursive depth out of target path
         if depth < target_paths_len {
-            // TODO: Search child by binary search
             for child in self.children.iter_mut() {
                 // Skip if path component name not match
                 if target_paths[depth] != child.node.name() {
@@ -188,7 +195,6 @@ impl Tree {
             return Ok(true);
         }
 
-        // TODO: Search child by binary search
         for idx in 0..self.children.len() {
             let child = &mut self.children[idx];
 
@@ -248,10 +254,10 @@ impl<'a> MetadataTreeBuilder<'a> {
     }
 
     /// Build node tree by loading bootstrap file
-    fn load_children<T: ChunkDict>(
+    fn load_children<T: ChunkDict, P: AsRef<Path>>(
         &self,
         ino: Inode,
-        parent: Option<&PathBuf>,
+        parent: Option<P>,
         chunk_dict: &mut T,
         validate_digest: bool,
     ) -> Result<Vec<Tree>> {
@@ -261,7 +267,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         }
 
         let parent_path = if let Some(parent) = parent {
-            parent.join(inode.name())
+            parent.as_ref().join(inode.name())
         } else {
             PathBuf::from("/")
         };
@@ -269,14 +275,11 @@ impl<'a> MetadataTreeBuilder<'a> {
         let blobs = self.rs.superblock.get_blob_infos();
         let child_count = inode.get_child_count();
         let mut children = Vec::with_capacity(child_count as usize);
-        event_tracer!("load_from_parent_bootstrap", +child_count);
-        // TODO(chge): Implement `Iterator` for both V5 and V6 Inodes. Then we don't need
-        // `get_child_count` and `get_child_by_index` thus to get rid of concept `index`.
         for idx in 0..child_count {
             let child = inode.get_child_by_index(idx)?;
             let child_ino = child.ino();
             let child_path = parent_path.join(child.name());
-            let child = Self::parse_node(self.rs, child.deref(), child_path)?;
+            let child = Self::parse_node(self.rs, child.clone(), child_path)?;
 
             if child.is_reg() {
                 for chunk in &child.chunks {
@@ -299,7 +302,7 @@ impl<'a> MetadataTreeBuilder<'a> {
     }
 
     /// Convert a `RafsInode` object to an in-memory `Node` object.
-    pub fn parse_node(rs: &RafsSuper, inode: &dyn RafsInodeExt, path: PathBuf) -> Result<Node> {
+    pub fn parse_node(rs: &RafsSuper, inode: Arc<dyn RafsInodeExt>, path: PathBuf) -> Result<Node> {
         let chunks = if inode.is_reg() {
             let chunk_count = inode.get_chunk_count();
             let mut chunks = Vec::with_capacity(chunk_count as usize);
@@ -307,7 +310,7 @@ impl<'a> MetadataTreeBuilder<'a> {
                 let cki = inode.get_chunk_info(i)?;
                 chunks.push(NodeChunk {
                     source: ChunkSource::Parent,
-                    inner: ChunkWrapper::from_chunk_info(cki.as_ref()),
+                    inner: Arc::new(ChunkWrapper::from_chunk_info(cki)),
                 });
             }
             chunks
@@ -331,34 +334,37 @@ impl<'a> MetadataTreeBuilder<'a> {
         // Nodes loaded from bootstrap will only be used as `Overlay::Lower`, so make `dev` invalid
         // to avoid breaking hardlink detecting logic.
         let src_dev = u64::MAX;
-
-        let inode_wrapper = InodeWrapper::from_inode_info(inode);
+        let rdev = inode.rdev() as u64;
+        let inode = InodeWrapper::from_inode_info(inode.clone());
         let source = PathBuf::from("/");
         let target = Node::generate_target(&path, &source);
         let target_vec = Node::generate_target_vec(&target);
-
-        Ok(Node {
-            index: 0,
-            src_ino: inode_wrapper.ino(),
-            src_dev,
-            rdev: inode.rdev() as u64,
-            overlay: Overlay::Lower,
+        let info = NodeInfo {
+            ctime: 0,
             explicit_uidgid: rs.meta.explicit_uidgid(),
+            src_ino: inode.ino(),
+            src_dev,
+            rdev,
+            path,
             source,
             target,
-            path,
             target_vec,
-            inode: inode_wrapper,
-            chunks,
             symlink,
             xattrs,
+            v6_force_extended_inode: false,
+        };
+
+        Ok(Node {
+            info: Arc::new(info),
+            index: 0,
             layer_idx: 0,
-            ctime: 0,
+            overlay: Overlay::Lower,
+            inode,
+            chunks,
             v6_offset: 0,
-            v6_dirents: Vec::<(u64, OsString, u32)>::new(),
+            v6_dirents: Vec::new(),
             v6_datalayout: 0,
             v6_compact_inode: false,
-            v6_force_extended_inode: false,
             v6_dirents_offset: 0,
         })
     }

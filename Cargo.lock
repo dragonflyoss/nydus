@@ -99,9 +99,15 @@ dependencies = [
 
 [[package]]
 name = "base64"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "904dfeac50f3cdaba28fc6f57fdcddb75f49ed61346676a78c4ffe55877802fd"
+checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
+
+[[package]]
+name = "base64"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4a4ddaa51a5bc52a6948f74c06d20aaaddb71924eab79b8c97a8c556e942d6a"
 
 [[package]]
 name = "bitflags"
@@ -347,6 +353,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-allocator"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "543711b94b4bc1437d2ebb45f856452e96a45a67ab39f8dcf8c887c2a3701004"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "dbs-uhttp"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -374,6 +389,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9852635589dc9f9ea1b6fe9f05b50ef208c85c834a562f0c6abb1c475736ec2b"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "errno"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f639046355ee4f37944e44f60642c6f3a7efa3cf6b78c78a0d989a8ce6c396a1"
+dependencies = [
+ "errno-dragonfly",
+ "libc",
+ "winapi",
+]
+
+[[package]]
+name = "errno-dragonfly"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa68f1b12764fab894d2755d2518754e71b4fd80ecfb822714a1206c2aab39bf"
+dependencies = [
+ "cc",
+ "libc",
 ]
 
 [[package]]
@@ -458,9 +494,9 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91aa2575daf333bef77ad5026d28d5ebdb04ec8e5d7a4ac9b1bb03976c2d673a"
+checksum = "08af89cb80a7c5693bd63a2b1ee7ac31a307670977c18fda036b3aa94be8c47f"
 dependencies = [
  "arc-swap",
  "bitflags",
@@ -806,6 +842,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-lifetimes"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7d6c6f8c91b4b9ed43484ad1a938e393caf35960fce7f82a040497207bd8e9e"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "io-uring"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -889,6 +935,12 @@ checksum = "ecd207c9c713c34f95a097a5b029ac2ce6010530c7b49d7fea24d977dede04f5"
 dependencies = [
  "cc",
 ]
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f051f77a7c8e6957c0696eac88f26b0117e54f52d3fc682ab19397a8812846a4"
 
 [[package]]
 name = "lock_api"
@@ -989,9 +1041,9 @@ dependencies = [
 
 [[package]]
 name = "native-tls"
-version = "0.2.10"
+version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd7e2f3618557f980e0b17e8856252eee3c97fa12c54dff0ca290fb6266ca4a9"
+checksum = "07226173c32f2926027b63cce4bcd8076c3552846cbe7925f3aaffeac0a3b92e"
 dependencies = [
  "lazy_static",
  "libc",
@@ -1067,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-api"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dbs-uhttp",
  "http",
@@ -1146,11 +1198,13 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "assert_matches",
- "base64",
+ "base64 0.13.1",
  "bitflags",
  "blake3",
  "fuse-backend-rs",
  "futures",
+ "hex",
+ "indexmap",
  "lazy_static",
  "libc",
  "log",
@@ -1162,9 +1216,12 @@ dependencies = [
  "nydus-utils",
  "serde",
  "serde_json",
+ "sha2",
  "spmc",
+ "tar",
  "vm-memory",
  "vmm-sys-util",
+ "xattr",
 ]
 
 [[package]]
@@ -1172,13 +1229,11 @@ name = "nydus-rs"
 version = "0.0.0-git"
 dependencies = [
  "anyhow",
- "base64",
  "clap",
  "fuse-backend-rs",
  "hex",
  "hyper",
  "hyperlocal",
- "indexmap",
  "lazy_static",
  "libc",
  "log",
@@ -1195,7 +1250,6 @@ dependencies = [
  "rlimit",
  "serde",
  "serde_json",
- "sha2",
  "tar",
  "tokio",
  "vhost",
@@ -1211,6 +1265,8 @@ dependencies = [
 name = "nydus-service"
 version = "0.2.0"
 dependencies = [
+ "bytes",
+ "dbs-allocator",
  "fuse-backend-rs",
  "libc",
  "log",
@@ -1227,6 +1283,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-uring",
  "vhost",
  "vhost-user-backend",
  "virtio-bindings",
@@ -1240,7 +1297,7 @@ name = "nydus-storage"
 version = "0.6.2"
 dependencies = [
  "arc-swap",
- "base64",
+ "base64 0.13.1",
  "bitflags",
  "fuse-backend-rs",
  "gpt",
@@ -1286,6 +1343,7 @@ dependencies = [
  "lz4-sys",
  "nix",
  "nydus-error",
+ "openssl",
  "serde",
  "serde_json",
  "sha2",
@@ -1513,21 +1571,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3f87b73ce11b1619a3c6332f45341e0047173771e8b8b73f87bfeefb7b56244"
 
 [[package]]
-name = "remove_dir_all"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3acd125665422973a33ac9d3dd2df85edad0f4ae9b00dafb1a05e43a9f5ef8e7"
-dependencies = [
- "winapi",
-]
-
-[[package]]
 name = "reqwest"
-version = "0.11.11"
+version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b75aa69a3f06bbcc66ede33af2af253c6f7a86b1ca0033f60c580a27074fbf92"
+checksum = "21eed90ec8570952d53b772ecf8f206aa1ec9a3d76b2521c56c42973f2d91ee9"
 dependencies = [
- "base64",
+ "base64 0.21.0",
  "bytes",
  "encoding_rs",
  "futures-core",
@@ -1539,10 +1588,10 @@ dependencies = [
  "hyper-tls",
  "ipnet",
  "js-sys",
- "lazy_static",
  "log",
  "mime",
  "native-tls",
+ "once_cell",
  "percent-encoding",
  "pin-project-lite",
  "serde",
@@ -1591,6 +1640,20 @@ name = "rustc-demangle"
 version = "0.1.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef03e0a2b150c7a90d01faf6254c9c48a41e95fb2a8c2ac1c6f0d2b9aefc342"
+
+[[package]]
+name = "rustix"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4fdebc4b395b7fbb9ab11e462e20ed9051e7b16e42d24042c776eca0ac81b03"
+dependencies = [
+ "bitflags",
+ "errno",
+ "io-lifetimes",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys",
+]
 
 [[package]]
 name = "ryu"
@@ -1780,16 +1843,15 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.3.0"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cdb1ef4eaeeaddc8fbd371e5017057064af0911902ef36b39801f67cc6d79e4"
+checksum = "af18f7ae1acd354b992402e9ec5864359d693cd8a79dcbef59f76891701c1e95"
 dependencies = [
  "cfg-if",
  "fastrand",
- "libc",
  "redox_syscall",
- "remove_dir_all",
- "winapi",
+ "rustix",
+ "windows-sys",
 ]
 
 [[package]]

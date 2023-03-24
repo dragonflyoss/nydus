@@ -6,13 +6,12 @@
 //! Enums, Structs and Traits to access and manage Rafs filesystem metadata.
 
 use std::any::Any;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::OpenOptions;
 use std::io::{Error, ErrorKind, Result};
-use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -67,6 +66,15 @@ pub const DOTDOT: &str = "..";
 
 /// Type for RAFS filesystem inode number.
 pub type Inode = u64;
+pub type ArcRafsInodeExt = Arc<dyn RafsInodeExt>;
+
+#[derive(Debug, Clone)]
+pub struct RafsBlobExtraInfo {
+    /// Mapped block address from RAFS v6 devslot table.
+    ///
+    /// It's the offset of the uncompressed blob used to convert an image into a disk.
+    pub mapped_blkaddr: u32,
+}
 
 /// Trait to access filesystem inodes managed by a RAFS filesystem.
 pub trait RafsSuperInodes {
@@ -94,6 +102,11 @@ pub trait RafsSuperBlock: RafsSuperInodes + Send + Sync {
 
     /// Get all blob objects referenced by the RAFS filesystem.
     fn get_blob_infos(&self) -> Vec<Arc<BlobInfo>>;
+
+    /// Get extra information associated with blob objects.
+    fn get_blob_extra_infos(&self) -> Result<HashMap<String, RafsBlobExtraInfo>> {
+        Ok(HashMap::new())
+    }
 
     /// Get the inode number of the RAFS filesystem root.
     fn root_ino(&self) -> u64;
@@ -273,6 +286,8 @@ bitflags! {
         const COMPRESSION_ZSTD = 0x0000_0080;
         /// Chunk digests are inlined in RAFS v6 data blob.
         const INLINED_CHUNK_DIGEST = 0x0000_0100;
+        /// RAFS works in Tarfs mode, which directly uses tar streams as data blobs.
+        const TARTFS_MODE = 0x0000_0200;
 
         // Reserved for future compatible changes.
         const PRESERVED_COMPAT_7 = 0x0100_0000;
@@ -354,6 +369,8 @@ pub struct RafsSuperConfig {
     pub chunk_size: u32,
     /// Whether `explicit_uidgid` enabled or not.
     pub explicit_uidgid: bool,
+    /// RAFS in TARFS mode.
+    pub is_tarfs_mode: bool,
 }
 
 impl RafsSuperConfig {
@@ -390,6 +407,11 @@ impl RafsSuperConfig {
             )));
         }
 
+        let is_tarfs_mode = meta.flags.contains(RafsSuperFlags::TARTFS_MODE);
+        if is_tarfs_mode != self.is_tarfs_mode {
+            return Err(einval!(format!("Using inconsistent RAFS TARFS mode")));
+        }
+
         Ok(())
     }
 }
@@ -423,6 +445,10 @@ pub struct RafsSuperMeta {
     pub extended_blob_table_offset: u64,
     /// Offset of the extended blob information table into the metadata blob.
     pub extended_blob_table_entries: u32,
+    /// Number of RAFS v6 blob device entries in the devslot table.
+    pub blob_device_table_count: u32,
+    /// Offset of the RAFS v6 devslot table.
+    pub blob_device_table_offset: u64,
     /// Offset of the inode prefetch table into the metadata blob.
     pub prefetch_table_offset: u64,
     /// Size of the inode prefetch table.
@@ -500,6 +526,7 @@ impl RafsSuperMeta {
             digester: self.get_digester(),
             chunk_size: self.chunk_size,
             explicit_uidgid: self.explicit_uidgid(),
+            is_tarfs_mode: self.flags.contains(RafsSuperFlags::TARTFS_MODE),
         }
     }
 }
@@ -520,6 +547,8 @@ impl Default for RafsSuperMeta {
             blob_table_offset: 0,
             extended_blob_table_offset: 0,
             extended_blob_table_entries: 0,
+            blob_device_table_count: 0,
+            blob_device_table_offset: 0,
             prefetch_table_offset: 0,
             prefetch_table_entries: 0,
             attr_timeout: Duration::from_secs(RAFS_DEFAULT_ATTR_TIMEOUT),
@@ -662,9 +691,13 @@ impl RafsSuper {
     pub fn load_from_file<P: AsRef<Path>>(
         path: P,
         config: Arc<ConfigV2>,
-        validate_digest: bool,
         is_chunk_dict: bool,
     ) -> Result<(Self, RafsIoReader)> {
+        let validate_digest = config
+            .rafs
+            .as_ref()
+            .map(|rafs| rafs.validate)
+            .unwrap_or_default();
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,
             validate_digest,
@@ -699,21 +732,11 @@ impl RafsSuper {
             // Old converters extracts bootstraps from data blobs with inlined bootstrap
             // use blob digest as the bootstrap file name. The last blob in the blob table from
             // the bootstrap has wrong blod id, so we need to fix it.
-            let mut fixed = false;
             let blobs = rs.superblock.get_blob_infos();
             for blob in blobs.iter() {
                 // Fix blob id for new images with old converters.
                 if blob.has_feature(BlobFeatures::INLINED_FS_META) {
                     blob.set_blob_id_from_meta_path(path.as_ref())?;
-                    fixed = true;
-                }
-            }
-            if !fixed && !blob_accessible && !blobs.is_empty() {
-                // Fix blob id for old images with old converters.
-                let last = blobs.len() - 1;
-                let blob = &blobs[last];
-                if !blob.has_feature(BlobFeatures::CAP_TAR_TOC) {
-                    rs.set_blob_id_from_meta_path(path.as_ref())?;
                 }
             }
         }
@@ -1001,32 +1024,32 @@ impl RafsSuper {
         &self,
         ino: Inode,
         parent: Option<P>,
-        cb: &mut dyn FnMut(&dyn RafsInodeExt, &Path) -> anyhow::Result<()>,
+        cb: &mut dyn FnMut(ArcRafsInodeExt, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let inode = self.get_extended_inode(ino, false)?;
         if !inode.is_dir() {
             bail!("inode {} is not a directory", ino);
         }
-        self.do_walk_directory(inode.deref(), parent, cb)
+        self.do_walk_directory(inode, parent, cb)
     }
 
     #[allow(clippy::only_used_in_recursion)]
     fn do_walk_directory<P: AsRef<Path>>(
         &self,
-        inode: &dyn RafsInodeExt,
+        inode: Arc<dyn RafsInodeExt>,
         parent: Option<P>,
-        cb: &mut dyn FnMut(&dyn RafsInodeExt, &Path) -> anyhow::Result<()>,
+        cb: &mut dyn FnMut(ArcRafsInodeExt, &Path) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let path = if let Some(parent) = parent {
             parent.as_ref().join(inode.name())
         } else {
             PathBuf::from("/")
         };
-        cb(inode, &path)?;
+        cb(inode.clone(), &path)?;
         if inode.is_dir() {
             for idx in 0..inode.get_child_count() {
                 let child = inode.get_child_by_index(idx)?;
-                self.do_walk_directory(child.deref(), Some(&path), cb)?;
+                self.do_walk_directory(child, Some(&path), cb)?;
             }
         }
         Ok(())

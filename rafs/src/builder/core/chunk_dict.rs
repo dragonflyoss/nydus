@@ -8,33 +8,51 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use nydus_api::ConfigV2;
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::layout::v5::RafsV5ChunkInfo;
-use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig};
 use nydus_storage::device::BlobInfo;
 use nydus_utils::digest::{self, RafsDigest};
 
-use crate::core::tree::Tree;
+use crate::builder::Tree;
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::layout::v5::RafsV5ChunkInfo;
+use crate::metadata::{RafsSuper, RafsSuperConfig};
 
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct DigestWithBlobIndex(pub RafsDigest, pub u32);
 
+/// Trait to manage chunk cache for chunk deduplication.
 pub trait ChunkDict: Sync + Send + 'static {
-    fn add_chunk(&mut self, chunk: ChunkWrapper, digester: digest::Algorithm);
-    fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&ChunkWrapper>;
+    /// Add a chunk into the cache.
+    fn add_chunk(&mut self, chunk: Arc<ChunkWrapper>, digester: digest::Algorithm);
+
+    /// Get a cached chunk from the cache.
+    fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&Arc<ChunkWrapper>>;
+
+    /// Get all `BlobInfo` objects referenced by cached chunks.
     fn get_blobs(&self) -> Vec<Arc<BlobInfo>>;
-    fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo>;
+
+    /// Get the `BlobInfo` object with inner index `idx`.
+    fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&Arc<BlobInfo>>;
+
+    /// Associate an external index with the inner index.
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32);
+
+    /// Get the external index associated with an inner index.
     fn get_real_blob_idx(&self, inner_idx: u32) -> Option<u32>;
+
+    /// Get the digest algorithm used to generate chunk digest.
     fn digester(&self) -> digest::Algorithm;
 }
 
 impl ChunkDict for () {
-    fn add_chunk(&mut self, _chunk: ChunkWrapper, _digester: digest::Algorithm) {}
+    fn add_chunk(&mut self, _chunk: Arc<ChunkWrapper>, _digester: digest::Algorithm) {}
 
-    fn get_chunk(&self, _digest: &RafsDigest, _uncompressed_size: u32) -> Option<&ChunkWrapper> {
+    fn get_chunk(
+        &self,
+        _digest: &RafsDigest,
+        _uncompressed_size: u32,
+    ) -> Option<&Arc<ChunkWrapper>> {
         None
     }
 
@@ -42,7 +60,7 @@ impl ChunkDict for () {
         Vec::new()
     }
 
-    fn get_blob_by_inner_idx(&self, _idx: u32) -> Option<&BlobInfo> {
+    fn get_blob_by_inner_idx(&self, _idx: u32) -> Option<&Arc<BlobInfo>> {
         None
     }
 
@@ -59,15 +77,16 @@ impl ChunkDict for () {
     }
 }
 
+/// An implementation of [ChunkDict] based on [HashMap].
 pub struct HashChunkDict {
-    pub m: HashMap<RafsDigest, (ChunkWrapper, AtomicU32)>,
+    m: HashMap<RafsDigest, (Arc<ChunkWrapper>, AtomicU32)>,
     blobs: Vec<Arc<BlobInfo>>,
     blob_idx_m: Mutex<BTreeMap<u32, u32>>,
     digester: digest::Algorithm,
 }
 
 impl ChunkDict for HashChunkDict {
-    fn add_chunk(&mut self, chunk: ChunkWrapper, digester: digest::Algorithm) {
+    fn add_chunk(&mut self, chunk: Arc<ChunkWrapper>, digester: digest::Algorithm) {
         if self.digester == digester {
             if let Some(e) = self.m.get(chunk.id()) {
                 e.1.fetch_add(1, Ordering::AcqRel);
@@ -78,7 +97,7 @@ impl ChunkDict for HashChunkDict {
         }
     }
 
-    fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&ChunkWrapper> {
+    fn get_chunk(&self, digest: &RafsDigest, uncompressed_size: u32) -> Option<&Arc<ChunkWrapper>> {
         if let Some((chunk, _)) = self.m.get(digest) {
             if chunk.uncompressed_size() == 0 || chunk.uncompressed_size() == uncompressed_size {
                 return Some(chunk);
@@ -91,8 +110,8 @@ impl ChunkDict for HashChunkDict {
         self.blobs.clone()
     }
 
-    fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&BlobInfo> {
-        self.blobs.get(idx as usize).map(|b| b.as_ref())
+    fn get_blob_by_inner_idx(&self, idx: u32) -> Option<&Arc<BlobInfo>> {
+        self.blobs.get(idx as usize)
     }
 
     fn set_real_blob_idx(&self, inner_idx: u32, out_idx: u32) {
@@ -109,6 +128,7 @@ impl ChunkDict for HashChunkDict {
 }
 
 impl HashChunkDict {
+    /// Create a new instance of [HashChunkDict].
     pub fn new(digester: digest::Algorithm) -> Self {
         HashChunkDict {
             m: Default::default(),
@@ -118,12 +138,29 @@ impl HashChunkDict {
         }
     }
 
-    fn from_bootstrap_file(
+    /// Get an immutable reference to the internal `HashMap`.
+    pub fn hashmap(&self) -> &HashMap<RafsDigest, (Arc<ChunkWrapper>, AtomicU32)> {
+        &self.m
+    }
+
+    /// Parse commandline argument for chunk dictionary and load chunks into the dictionary.
+    pub fn from_commandline_arg(
+        arg: &str,
+        config: Arc<ConfigV2>,
+        rafs_config: &RafsSuperConfig,
+    ) -> Result<Arc<dyn ChunkDict>> {
+        let file_path = parse_chunk_dict_arg(arg)?;
+        HashChunkDict::from_bootstrap_file(&file_path, config, rafs_config)
+            .map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
+    }
+
+    /// Load chunks from the RAFS filesystem into the chunk dictionary.
+    pub fn from_bootstrap_file(
         path: &Path,
         config: Arc<ConfigV2>,
         rafs_config: &RafsSuperConfig,
     ) -> Result<Self> {
-        let (rs, _) = RafsSuper::load_from_file(path, config, true, true)
+        let (rs, _) = RafsSuper::load_from_file(path, config, true)
             .with_context(|| format!("failed to open bootstrap file {:?}", path))?;
         let mut d = HashChunkDict {
             m: HashMap::new(),
@@ -163,7 +200,8 @@ impl HashChunkDict {
 
         for idx in 0..(size / unit_size) {
             let chunk = rs.superblock.get_chunk_info(idx)?;
-            self.add_chunk(ChunkWrapper::from_chunk_info(chunk.as_ref()), self.digester);
+            let chunk_info = Arc::new(ChunkWrapper::from_chunk_info(chunk));
+            self.add_chunk(chunk_info, self.digester);
         }
 
         Ok(())
@@ -196,21 +234,10 @@ pub fn parse_chunk_dict_arg(arg: &str) -> Result<PathBuf> {
     }
 }
 
-/// Load a chunk dictionary from external source.
-pub(crate) fn import_chunk_dict(
-    arg: &str,
-    config: Arc<ConfigV2>,
-    rafs_config: &RafsSuperConfig,
-) -> Result<Arc<dyn ChunkDict>> {
-    let file_path = parse_chunk_dict_arg(arg)?;
-    HashChunkDict::from_bootstrap_file(&file_path, config, rafs_config)
-        .map(|d| Arc::new(d) as Arc<dyn ChunkDict>)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_rafs::metadata::RafsVersion;
+    use crate::metadata::RafsVersion;
     use nydus_utils::{compress, digest};
     use std::path::PathBuf;
 
@@ -218,7 +245,7 @@ mod tests {
     fn test_null_dict() {
         let mut dict = Box::new(()) as Box<dyn ChunkDict>;
 
-        let chunk = ChunkWrapper::new(RafsVersion::V5);
+        let chunk = Arc::new(ChunkWrapper::new(RafsVersion::V5));
         dict.add_chunk(chunk.clone(), digest::Algorithm::Sha256);
         assert!(dict.get_chunk(chunk.id(), 0).is_none());
         assert_eq!(dict.get_blobs().len(), 0);
@@ -229,7 +256,7 @@ mod tests {
     fn test_chunk_dict() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
-        source_path.push("tests/texture/bootstrap/rafs-v5.boot");
+        source_path.push("../tests/texture/bootstrap/rafs-v5.boot");
         let path = source_path.to_str().unwrap();
         let rafs_config = RafsSuperConfig {
             version: RafsVersion::V5,
@@ -237,8 +264,11 @@ mod tests {
             digester: digest::Algorithm::Blake3,
             chunk_size: 0x100000,
             explicit_uidgid: true,
+            is_tarfs_mode: false,
         };
-        let dict = import_chunk_dict(path, Arc::new(ConfigV2::default()), &rafs_config).unwrap();
+        let dict =
+            HashChunkDict::from_commandline_arg(path, Arc::new(ConfigV2::default()), &rafs_config)
+                .unwrap();
 
         assert!(dict.get_chunk(&RafsDigest::default(), 0).is_none());
         assert_eq!(dict.get_blobs().len(), 18);

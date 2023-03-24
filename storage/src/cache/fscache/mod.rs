@@ -201,6 +201,10 @@ impl FileCacheEntry {
         if blob_info.has_feature(BlobFeatures::_V5_NO_EXT_BLOB_TABLE) {
             return Err(einval!("fscache does not support Rafs v5 blobs"));
         }
+        let is_tarfs = blob_info.features().is_tarfs();
+        if is_tarfs {
+            return Err(einval!("fscache does not support RAFS in tarfs mode"));
+        }
 
         let file = blob_info
             .get_fscache_file()
@@ -273,6 +277,7 @@ impl FileCacheEntry {
             is_raw_data: false,
             is_direct_chunkmap: true,
             is_legacy_stargz: blob_info.is_legacy_stargz(),
+            is_tarfs,
             is_zran,
             dio_enabled: true,
             need_validation,

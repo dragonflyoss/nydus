@@ -14,6 +14,7 @@ extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
 
+use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,11 @@ use nix::unistd::{getegid, geteuid};
 use nydus::get_build_time_info;
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_app::setup_logging;
+use nydus_rafs::builder::{
+    parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager, BootstrapManager,
+    BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder, Feature, Features,
+    HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+};
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
@@ -33,30 +39,14 @@ use nydus_storage::device::BlobFeatures;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::format_blob_features;
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
-use nydus_utils::{compress, digest};
+use nydus_utils::trace::{EventTracerClass, TimingTracerClass, TraceClass};
+use nydus_utils::{compress, digest, event_tracer, register_tracer, root_tracer, timing_tracer};
 use serde::{Deserialize, Serialize};
 
-use crate::builder::{Builder, DirectoryBuilder, StargzBuilder, TarballBuilder};
-use crate::core::blob_compact::BlobCompactor;
-use crate::core::chunk_dict::{import_chunk_dict, parse_chunk_dict_arg};
-use crate::core::context::{
-    ArtifactStorage, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
-};
-use crate::core::feature::{Feature, Features};
-use crate::core::node::{self, WhiteoutSpec};
-use crate::core::prefetch::{Prefetch, PrefetchPolicy};
-use crate::core::tree;
-use crate::merge::Merger;
-use crate::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
-#[macro_use]
-mod trace;
-mod builder;
-mod core;
 mod inspect;
-mod merge;
 mod stat;
 mod unpack;
 mod validator;
@@ -190,6 +180,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                             "estargz-ref",
                             "estargztoc-ref",
                             "tar-rafs",
+                            "tar-tarfs",
                             "targz-rafs",
                             "targz-ref",
                             "stargz_index",
@@ -328,10 +319,16 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             App::new("merge")
                 .about("Merge multiple bootstraps into a overlaid bootstrap")
                 .arg(
+                    Arg::new("parent-bootstrap")
+                        .long("parent-bootstrap")
+                        .help("File path of the parent/referenced RAFS metadata blob (optional)")
+                        .required(false),
+                )
+                .arg(
                     Arg::new("bootstrap")
                         .long("bootstrap")
                         .short('B')
-                        .help("output path of nydus overlaid bootstrap"),
+                        .help("Output path of nydus overlaid bootstrap"),
                 )
                 .arg(
                     Arg::new("blob-dir")
@@ -651,7 +648,7 @@ impl Command {
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
-        let aligned_chunk = if version.is_v6() {
+        let aligned_chunk = if version.is_v6() && conversion_type != ConversionType::TarToTarfs {
             true
         } else {
             // get_fs_version makes sure it's either v6 or v5.
@@ -673,6 +670,12 @@ impl Command {
             .unwrap_or_default()
             .parse()?;
         let blob_data_size = Self::get_blob_size(matches, conversion_type)?;
+        let features = Features::try_from(
+            matches
+                .get_one::<String>("features")
+                .map(|s| s.as_str())
+                .unwrap_or_default(),
+        )?;
 
         match conversion_type {
             ConversionType::DirectoryToRafs => {
@@ -732,6 +735,71 @@ impl Command {
                     );
                 }
             }
+            ConversionType::TarToTarfs => {
+                Self::ensure_file(&source_path)?;
+                if matches.value_source("compressor") != Some(ValueSource::DefaultValue)
+                    && compressor != compress::Algorithm::None
+                {
+                    info!(
+                        "only compressor `None` is supported for conversion type {}, use `None` instead of {}",
+                        conversion_type, compressor
+                    );
+                }
+                if matches.value_source("digester") != Some(ValueSource::DefaultValue)
+                    && digester != digest::Algorithm::Sha256
+                {
+                    info!(
+                        "only SHA256 is supported for conversion type {}, use SHA256 instead of {}",
+                        conversion_type, compressor
+                    );
+                }
+                compressor = compress::Algorithm::None;
+                digester = digest::Algorithm::Sha256;
+                if blob_storage.is_none() {
+                    bail!("both --blob and --blob-dir are missing");
+                } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
+                    bail!(
+                        "conversion type {} conflicts with '--prefetch-policy blob'",
+                        conversion_type
+                    );
+                }
+                if version != RafsVersion::V6 {
+                    bail!(
+                        "'--fs-version 5' conflicts with conversion type '{}', only V6 is supported",
+                        conversion_type
+                    );
+                }
+                if matches.get_one::<String>("chunk-dict").is_some() {
+                    bail!(
+                        "conversion type '{}' conflicts with '--chunk-dict'",
+                        conversion_type
+                    );
+                }
+                if parent_path.is_some() {
+                    bail!(
+                        "conversion type '{}' conflicts with '--parent-bootstrap'",
+                        conversion_type
+                    );
+                }
+                if blob_inline_meta {
+                    bail!(
+                        "conversion type '{}' conflicts with '--blob-inline-meta'",
+                        conversion_type
+                    );
+                }
+                if features.is_enabled(Feature::BlobToc) {
+                    bail!(
+                        "conversion type '{}' conflicts with '--features blob-toc'",
+                        conversion_type
+                    );
+                }
+                if aligned_chunk {
+                    bail!(
+                        "conversion type '{}' conflicts with '--aligned-chunk'",
+                        conversion_type
+                    );
+                }
+            }
             ConversionType::EStargzIndexToRef => {
                 Self::ensure_file(&source_path)?;
                 if matches.value_source("compressor") != Some(ValueSource::DefaultValue)
@@ -778,12 +846,6 @@ impl Command {
             }
         }
 
-        let features = Features::from(
-            matches
-                .get_one::<String>("features")
-                .map(|s| s.as_str())
-                .unwrap_or_default(),
-        )?;
         if features.is_enabled(Feature::BlobToc) && version == RafsVersion::V5 {
             bail!("`--features blob-toc` can't be used with `--version 5` ");
         }
@@ -821,12 +883,13 @@ impl Command {
                 digester,
                 chunk_size,
                 explicit_uidgid: !repeatable,
+                is_tarfs_mode: false,
             };
             let rafs_config = Arc::new(build_ctx.configuration.as_ref().clone());
             // The separate chunk dict bootstrap doesn't support blob accessible.
             rafs_config.internal.set_blob_accessible(false);
             blob_mgr.set_chunk_dict(timing_tracer!(
-                { import_chunk_dict(chunk_dict_arg, rafs_config, &config,) },
+                { HashChunkDict::from_commandline_arg(chunk_dict_arg, rafs_config, &config,) },
                 "import_chunk_dict"
             )?);
         }
@@ -854,6 +917,12 @@ impl Command {
                 build_ctx.blob_features.insert(BlobFeatures::SEPARATE);
                 Box::new(TarballBuilder::new(conversion_type))
             }
+            ConversionType::TarToTarfs => {
+                if version.is_v5() {
+                    bail!("conversion type {} conflicts with RAFS v5", conversion_type);
+                }
+                Box::new(TarballBuilder::new(conversion_type))
+            }
             ConversionType::DirectoryToStargz
             | ConversionType::DirectoryToTargz
             | ConversionType::TarToStargz
@@ -869,10 +938,9 @@ impl Command {
         )?;
 
         // Some operations like listing xattr pairs of certain namespace need the process
-        // to be privileged. Therefore, trace what euid and egid are
+        // to be privileged. Therefore, trace what euid and egid are.
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
-
         info!("successfully built RAFS filesystem: \n{}", build_output);
         OutputSerializer::dump(matches, build_output, build_info)
     }
@@ -930,8 +998,11 @@ impl Command {
         };
         ctx.configuration = config.clone();
 
+        let parent_bootstrap_path = Self::get_parent_bootstrap(matches)?;
+
         let output = Merger::merge(
             &mut ctx,
+            parent_bootstrap_path,
             source_bootstrap_paths,
             blob_digests,
             blob_sizes,
@@ -956,11 +1027,15 @@ impl Command {
             Some(s) => PathBuf::from(s),
         };
 
-        let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, config.clone(), true, false)?;
+        let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, config.clone(), false)?;
         info!("load bootstrap {:?} successfully", bootstrap_path);
         let chunk_dict = match matches.get_one::<String>("chunk-dict") {
             None => None,
-            Some(args) => Some(import_chunk_dict(args, config, &rs.meta.get_config())?),
+            Some(args) => Some(HashChunkDict::from_commandline_arg(
+                args,
+                config,
+                &rs.meta.get_config(),
+            )?),
         };
 
         let backend = Self::get_backend(matches, "compactor")?;
@@ -1177,15 +1252,21 @@ impl Command {
             .get_one::<String>("blob")
             .map(|b| ArtifactStorage::SingleFile(b.into()))
         {
+            if conversion_type == ConversionType::TarToTarfs {
+                bail!(
+                    "conversion type `{}` conflicts with `--blob`",
+                    conversion_type
+                );
+            }
             Ok(Some(p))
         } else if let Some(d) = matches.get_one::<String>("blob-dir").map(PathBuf::from) {
             if !d.exists() {
-                bail!("Directory to store blobs does not exist")
+                bail!("directory to store blobs does not exist")
             }
             Ok(Some(ArtifactStorage::FileDir(d)))
         } else if let Some(config_json) = matches.get_one::<String>("backend-config") {
             let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
-            warn!("Using --backend-type=localfs is DEPRECATED. Use --blob-dir instead.");
+            warn!("using --backend-type=localfs is DEPRECATED. Use --blob-dir instead.");
             if let Some(bf) = config.get("blob_file") {
                 // Even unwrap, it is caused by invalid json. Image creation just can't start.
                 let b: PathBuf = bf
@@ -1284,9 +1365,12 @@ impl Command {
                 }
             }
             Some(v) => {
-                let param = v.trim_start_matches("0x").trim_start_matches("0X");
-                let chunk_size =
-                    u32::from_str_radix(param, 16).context(format!("invalid chunk size {}", v))?;
+                let chunk_size = if v.starts_with("0x") || v.starts_with("0X") {
+                    u32::from_str_radix(&v[2..], 16).context(format!("invalid chunk size {}", v))?
+                } else {
+                    v.parse::<u32>()
+                        .context(format!("invalid chunk size {}", v))?
+                };
                 if chunk_size as u64 > RAFS_MAX_CHUNK_SIZE
                     || chunk_size < 0x1000
                     || !chunk_size.is_power_of_two()

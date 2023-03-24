@@ -2,30 +2,39 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Context, Result};
+//! Builder to create RAFS filesystems from directories and tarballs.
+use anyhow::{anyhow, Context, Result};
 use nydus_storage::meta::toc;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
-use nydus_utils::{compress, digest};
+use nydus_utils::{compress, digest, root_tracer, timing_tracer};
 use sha2::Digest;
 
-use crate::core::bootstrap::Bootstrap;
-use crate::core::context::{
-    ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
-    BuildOutput,
+pub use self::compact::BlobCompactor;
+pub use self::core::bootstrap::Bootstrap;
+pub use self::core::chunk_dict::{parse_chunk_dict_arg, ChunkDict, HashChunkDict};
+pub use self::core::context::{
+    ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager,
+    BuildContext, BuildOutput, ConversionType,
 };
-use crate::core::feature::Feature;
-use crate::core::tree::Tree;
+pub use self::core::feature::{Feature, Features};
+pub use self::core::node::{ChunkSource, NodeChunk};
+pub use self::core::overlay::{Overlay, WhiteoutSpec};
+pub use self::core::prefetch::{Prefetch, PrefetchPolicy};
+pub use self::core::tree::{MetadataTreeBuilder, Tree};
+pub use self::directory::DirectoryBuilder;
+pub use self::merge::Merger;
+pub use self::stargz::StargzBuilder;
+pub use self::tarball::TarballBuilder;
 
-pub(crate) use self::directory::DirectoryBuilder;
-pub(crate) use self::stargz::StargzBuilder;
-pub(crate) use self::tarball::TarballBuilder;
-
+mod compact;
+mod core;
 mod directory;
+mod merge;
 mod stargz;
 mod tarball;
 
 /// Trait to generate a RAFS filesystem from the source.
-pub(crate) trait Builder {
+pub trait Builder {
     fn build(
         &mut self,
         build_ctx: &mut BuildContext,
@@ -47,7 +56,7 @@ fn build_bootstrap(
         let origin_bootstarp_offset = bootstrap_ctx.offset;
         // Disable prefetch and bootstrap.apply() will reset the prefetch enable/disable flag.
         ctx.prefetch.disable();
-        bootstrap.build(ctx, bootstrap_ctx, &mut tree)?;
+        bootstrap.build(ctx, bootstrap_ctx, tree)?;
         tree = bootstrap.apply(ctx, bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
         bootstrap_ctx.offset = origin_bootstarp_offset;
         bootstrap_ctx.layered = false;
@@ -55,7 +64,7 @@ fn build_bootstrap(
 
     // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
     timing_tracer!(
-        { bootstrap.build(ctx, bootstrap_ctx, &mut tree) },
+        { bootstrap.build(ctx, bootstrap_ctx, tree) },
         "build_bootstrap"
     )?;
 
@@ -98,6 +107,7 @@ fn dump_bootstrap(
     )?;
 
     if ctx.blob_inline_meta {
+        assert_ne!(ctx.conversion_type, ConversionType::TarToTarfs);
         // Ensure the blob object is created in case of no chunks generated for the blob.
         let (_, blob_ctx) = blob_mgr
             .get_or_create_current_blob(ctx)
@@ -152,6 +162,7 @@ fn dump_toc(
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
     if ctx.features.is_enabled(Feature::BlobToc) {
+        assert_ne!(ctx.conversion_type, ConversionType::TarToTarfs);
         let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
         let data = blob_ctx.entry_list.as_bytes().to_vec();
         let toc_size = data.len() as u64;
@@ -171,8 +182,11 @@ fn finalize_blob(
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-        dump_toc(ctx, blob_ctx, blob_writer)?;
+        let is_tarfs = ctx.conversion_type == ConversionType::TarToTarfs;
 
+        if !is_tarfs {
+            dump_toc(ctx, blob_ctx, blob_writer)?;
+        }
         if !ctx.conversion_type.is_to_ref() {
             blob_ctx.compressed_blob_size = blob_writer.pos()?;
         }
@@ -184,7 +198,7 @@ fn finalize_blob(
         let blob_meta_id = if ctx.blob_id.is_empty() {
             format!("{:x}", hash)
         } else {
-            assert!(!ctx.conversion_type.is_to_ref());
+            assert!(!ctx.conversion_type.is_to_ref() || is_tarfs);
             ctx.blob_id.clone()
         };
 
@@ -207,7 +221,8 @@ fn finalize_blob(
                     }
                 }
             }
-            if !ctx.blob_inline_meta {
+            // Tarfs mode only has tar stream and meta blob, there's no data blob.
+            if !ctx.blob_inline_meta && !is_tarfs {
                 blob_ctx.blob_meta_digest = hash.into();
                 blob_ctx.blob_meta_size = blob_writer.pos()?;
             }
@@ -216,7 +231,11 @@ fn finalize_blob(
             blob_ctx.blob_id = blob_meta_id.clone();
         }
 
-        blob_writer.finalize(Some(blob_meta_id))?;
+        // Tarfs mode directly use the tar file as RAFS data blob, so no need to generate the data
+        // blob file.
+        if !is_tarfs {
+            blob_writer.finalize(Some(blob_meta_id))?;
+        }
     }
 
     Ok(())

@@ -2,25 +2,22 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use hex::FromHex;
 use nydus_api::ConfigV2;
-use nydus_rafs::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 
-use crate::core::bootstrap::Bootstrap;
-use crate::core::chunk_dict::HashChunkDict;
-use crate::core::context::{
-    ArtifactStorage, BlobContext, BlobManager, BootstrapContext, BuildContext, BuildOutput,
+use super::{
+    ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
+    BuildOutput, ChunkSource, ConversionType, MetadataTreeBuilder, Overlay, Tree, WhiteoutSpec,
 };
-use crate::core::node::{ChunkSource, Overlay, WhiteoutSpec};
-use crate::core::tree::{MetadataTreeBuilder, Tree};
+use crate::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
 
 /// Struct to generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
 ///
@@ -53,7 +50,7 @@ impl Merger {
         })
     }
 
-    /// Generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
+    /// Overlay multiple RAFS filesystems into a merged RAFS filesystem.
     ///
     /// # Arguments
     /// - sources: contains one or more per layer bootstraps in order of lower to higher.
@@ -61,6 +58,7 @@ impl Merger {
     #[allow(clippy::too_many_arguments)]
     pub fn merge(
         ctx: &mut BuildContext,
+        parent_bootstrap_path: Option<String>,
         sources: Vec<PathBuf>,
         blob_digests: Option<Vec<String>>,
         blob_sizes: Option<Vec<u64>>,
@@ -81,19 +79,19 @@ impl Merger {
                 sources.len(),
             );
         }
-        if let Some(toc_digests) = blob_toc_digests.as_ref() {
-            ensure!(
-                toc_digests.len() == sources.len(),
-                "number of toc digest entries {} doesn't match number of sources {}",
-                toc_digests.len(),
-                sources.len(),
-            );
-        }
         if let Some(sizes) = blob_sizes.as_ref() {
             ensure!(
                 sizes.len() == sources.len(),
                 "number of blob size entries {} doesn't match number of sources {}",
                 sizes.len(),
+                sources.len(),
+            );
+        }
+        if let Some(toc_digests) = blob_toc_digests.as_ref() {
+            ensure!(
+                toc_digests.len() == sources.len(),
+                "number of toc digest entries {} doesn't match number of sources {}",
+                toc_digests.len(),
                 sources.len(),
             );
         }
@@ -106,13 +104,32 @@ impl Merger {
             );
         }
 
-        // Get the blobs come from chunk dict bootstrap.
+        let mut tree: Option<Tree> = None;
+        let mut blob_mgr = BlobManager::new(ctx.digester);
+        let mut blob_idx_map = HashMap::new();
+        let mut parent_layers = 0;
+
+        // Load parent bootstrap
+        if let Some(parent_bootstrap_path) = &parent_bootstrap_path {
+            let (rs, _) =
+                RafsSuper::load_from_file(parent_bootstrap_path, config_v2.clone(), false)
+                    .context(format!("load parent bootstrap {:?}", parent_bootstrap_path))?;
+            tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
+            let blobs = rs.superblock.get_blob_infos();
+            for blob in &blobs {
+                let blob_ctx = BlobContext::from(ctx, &blob, ChunkSource::Parent)?;
+                blob_idx_map.insert(blob_ctx.blob_id.clone(), blob_mgr.len());
+                blob_mgr.add_blob(blob_ctx);
+            }
+            parent_layers = blobs.len();
+        }
+
+        // Get the blobs come from chunk dictionary.
         let mut chunk_dict_blobs = HashSet::new();
         let mut config = None;
         if let Some(chunk_dict_path) = &chunk_dict {
-            let (rs, _) =
-                RafsSuper::load_from_file(chunk_dict_path, config_v2.clone(), true, false)
-                    .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
+            let (rs, _) = RafsSuper::load_from_file(chunk_dict_path, config_v2.clone(), false)
+                .context(format!("load chunk dict bootstrap {:?}", chunk_dict_path))?;
             config = Some(rs.meta.get_config());
             for blob in rs.superblock.get_blob_infos() {
                 chunk_dict_blobs.insert(blob.blob_id().to_string());
@@ -121,11 +138,9 @@ impl Merger {
 
         let mut fs_version = RafsVersion::V6;
         let mut chunk_size = None;
-        let mut tree: Option<Tree> = None;
-        let mut blob_mgr = BlobManager::new(ctx.digester);
 
         for (layer_idx, bootstrap_path) in sources.iter().enumerate() {
-            let (rs, _) = RafsSuper::load_from_file(bootstrap_path, config_v2.clone(), true, false)
+            let (rs, _) = RafsSuper::load_from_file(bootstrap_path, config_v2.clone(), false)
                 .context(format!("load bootstrap {:?}", bootstrap_path))?;
             config
                 .get_or_insert_with(|| rs.meta.get_config())
@@ -135,10 +150,14 @@ impl Merger {
             ctx.compressor = rs.meta.get_compressor();
             ctx.digester = rs.meta.get_digester();
             ctx.explicit_uidgid = rs.meta.explicit_uidgid();
+            if config.as_ref().unwrap().is_tarfs_mode {
+                ctx.conversion_type = ConversionType::TarToTarfs;
+                ctx.blob_features |= BlobFeatures::TARFS;
+            }
 
-            let mut blob_idx_map = Vec::new();
             let mut parent_blob_added = false;
-            for blob in rs.superblock.get_blob_infos() {
+            let blobs = &rs.superblock.get_blob_infos();
+            for blob in blobs {
                 let mut blob_ctx = BlobContext::from(ctx, &blob, ChunkSource::Parent)?;
                 if let Some(chunk_size) = chunk_size {
                     ensure!(
@@ -151,7 +170,7 @@ impl Merger {
                 } else {
                     chunk_size = Some(blob_ctx.chunk_size);
                 }
-                if chunk_dict_blobs.get(&blob.blob_id()).is_none() {
+                if !chunk_dict_blobs.contains(&blob.blob_id()) {
                     // It is assumed that the `nydus-image create` at each layer and `nydus-image merge` commands
                     // use the same chunk dict bootstrap. So the parent bootstrap includes multiple blobs, but
                     // only at most one new blob, the other blobs should be from the chunk dict image.
@@ -160,7 +179,9 @@ impl Merger {
                     }
                     parent_blob_added = true;
 
-                    if ctx.configuration.internal.blob_accessible() {
+                    if ctx.configuration.internal.blob_accessible()
+                        || ctx.conversion_type == ConversionType::TarToTarfs
+                    {
                         // `blob.blob_id()` should have been fixed when loading the bootstrap.
                         blob_ctx.blob_id = blob.blob_id();
                     } else {
@@ -191,49 +212,49 @@ impl Merger {
                     }
                 }
 
-                let mut found = false;
-                for (idx, blob) in blob_mgr.get_blobs().iter().enumerate() {
-                    if blob.blob_id == blob_ctx.blob_id {
-                        blob_idx_map.push(idx as u32);
-                        found = true;
-                    }
-                }
-                if !found {
-                    blob_idx_map.push(blob_mgr.len() as u32);
-                    blob_mgr.add(blob_ctx);
+                if let Entry::Vacant(e) = blob_idx_map.entry(blob.blob_id()) {
+                    e.insert(blob_mgr.len());
+                    blob_mgr.add_blob(blob_ctx);
                 }
             }
 
             if let Some(tree) = &mut tree {
-                let mut nodes = Vec::new();
+                let mut nodes = VecDeque::new();
                 rs.walk_directory::<PathBuf>(
                     rs.superblock.root_ino(),
                     None,
-                    &mut |inode: &dyn RafsInodeExt, path: &Path| -> Result<()> {
+                    &mut |inode: Arc<dyn RafsInodeExt>, path: &Path| -> Result<()> {
                         let mut node =
-                            MetadataTreeBuilder::parse_node(&rs, inode.deref(), path.to_path_buf())
+                            MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
                                 .context(format!(
                                     "parse node from bootstrap {:?}",
                                     bootstrap_path
                                 ))?;
                         for chunk in &mut node.chunks {
                             let origin_blob_index = chunk.inner.blob_index() as usize;
-                            // Set the blob index of chunk to real index in blob table of final bootstrap.
-                            chunk.inner.set_blob_index(blob_idx_map[origin_blob_index]);
+                            let blob_ctx = blobs[origin_blob_index].as_ref();
+                            if let Some(blob_index) = blob_idx_map.get(&blob_ctx.blob_id()) {
+                                // Set the blob index of chunk to real index in blob table of final bootstrap.
+                                chunk.set_blob_index(*blob_index as u32);
+                            }
                         }
                         // Set node's layer index to distinguish same inode number (from bootstrap)
                         // between different layers.
-                        node.layer_idx = u16::try_from(layer_idx).context(format!(
+                        let idx = u16::try_from(layer_idx).context(format!(
                             "too many layers {}, limited to {}",
                             layer_idx,
                             u16::MAX
                         ))?;
+                        if parent_layers + idx as usize > u16::MAX as usize {
+                            bail!("too many layers {}, limited to {}", layer_idx, u16::MAX);
+                        }
+                        node.layer_idx = idx + parent_layers as u16;
                         node.overlay = Overlay::UpperAddition;
                         match node.whiteout_type(WhiteoutSpec::Oci) {
                             // Insert whiteouts at the head, so they will be handled first when
                             // applying to lower layer.
-                            Some(_) => nodes.insert(0, node),
-                            _ => nodes.push(node),
+                            Some(_) => nodes.push_front(node),
+                            _ => nodes.push_back(node),
                         }
                         Ok(())
                     },
@@ -242,21 +263,29 @@ impl Merger {
                     tree.apply(node, true, WhiteoutSpec::Oci)?;
                 }
             } else {
-                let mut dict = HashChunkDict::new(rs.meta.get_digester());
-                tree = Some(Tree::from_bootstrap(&rs, &mut dict)?);
+                tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
+            }
+        }
+
+        if ctx.conversion_type == ConversionType::TarToTarfs {
+            if parent_layers > 0 {
+                bail!("merging RAFS in TARFS mode conflicts with `--parent-bootstrap`");
+            }
+            if !chunk_dict_blobs.is_empty() {
+                bail!("merging RAFS in TARFS mode conflicts with `--chunk-dict`");
             }
         }
 
         // Safe to unwrap because there is at least one source bootstrap.
-        let mut tree = tree.unwrap();
+        let tree = tree.unwrap();
         ctx.fs_version = fs_version;
         if let Some(chunk_size) = chunk_size {
             ctx.chunk_size = chunk_size;
         }
 
-        let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false, false)?;
+        let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false)?;
         let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(ctx, &mut bootstrap_ctx, &mut tree)?;
+        bootstrap.build(ctx, &mut bootstrap_ctx, tree)?;
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         let mut bootstrap_storage = Some(target.clone());
         bootstrap

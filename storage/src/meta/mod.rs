@@ -309,6 +309,15 @@ impl BlobCompressionContextHeader {
         }
     }
 
+    /// Set flag indicating the blob is for RAFS filesystem in TARFS mode.
+    pub fn set_tarfs(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::TARFS.bits();
+        } else {
+            self.s_features &= !BlobFeatures::TARFS.bits();
+        }
+    }
+
     /// Get blob meta feature flags.
     pub fn features(&self) -> u32 {
         self.s_features

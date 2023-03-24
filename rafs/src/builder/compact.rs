@@ -3,32 +3,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::utils::alloc_buf;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{digest, try_round_up_4k};
 
-use crate::core::blob::Blob;
-use crate::core::bootstrap::Bootstrap;
-use crate::core::chunk_dict::{ChunkDict, HashChunkDict};
-use crate::core::context::{
+use super::core::blob::Blob;
+use super::core::bootstrap::Bootstrap;
+use super::core::node::Node;
+use crate::builder::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
-    BuildOutput, ConversionType,
+    BuildOutput, ChunkDict, ConversionType, Features, HashChunkDict, Tree, WhiteoutSpec,
 };
-use crate::core::feature::Features;
-use crate::core::node::{Node, WhiteoutSpec};
-use crate::core::tree::Tree;
+use crate::metadata::chunk::ChunkWrapper;
+use crate::metadata::{RafsSuper, RafsVersion};
 
 const DEFAULT_COMPACT_BLOB_SIZE: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_COMPACT_SIZE: usize = 100 * 1024 * 1024;
@@ -79,6 +77,7 @@ impl ChunkKey {
         match c {
             ChunkWrapper::V5(_) => Self::Digest(*c.id()),
             ChunkWrapper::V6(_) => Self::Offset(c.blob_index(), c.compressed_offset()),
+            ChunkWrapper::Ref(_) => unimplemented!("unsupport ChunkWrapper::Ref(c)"),
         }
     }
 }
@@ -129,7 +128,7 @@ impl ChunkSet {
         aligned_chunk: bool,
         backend: &Arc<dyn BlobBackend + Send + Sync>,
     ) -> Result<Vec<(ChunkWrapper, ChunkWrapper)>> {
-        let mut blob_writer = ArtifactWriter::new(blob_storage, build_ctx.blob_inline_meta)?;
+        let mut blob_writer = ArtifactWriter::new(blob_storage)?;
 
         // sort chunks first, don't break order in original blobs
         let mut chunks = self.chunks.values().collect::<Vec<&ChunkWrapper>>();
@@ -253,7 +252,7 @@ pub struct BlobCompactor {
     /// new blobs
     new_blob_mgr: BlobManager,
     /// inode list
-    nodes: Vec<Node>,
+    nodes: VecDeque<Node>,
     /// chunk --> list<node_idx, chunk_idx in node>
     c2nodes: HashMap<ChunkKey, Vec<(usize, usize)>>,
     /// original blob index --> list<node_idx, chunk_idx in node>
@@ -266,7 +265,7 @@ impl BlobCompactor {
     pub fn new(
         version: RafsVersion,
         ori_blob_mgr: BlobManager,
-        nodes: Vec<Node>,
+        nodes: VecDeque<Node>,
         backend: Arc<dyn BlobBackend + Send + Sync>,
         digester: digest::Algorithm,
     ) -> Result<Self> {
@@ -303,9 +302,13 @@ impl BlobCompactor {
                     if let Some(c) =
                         chunk_dict.get_chunk(chunk.inner.id(), chunk.inner.uncompressed_size())
                     {
-                        apply_chunk_change(c, &mut chunk.inner)?;
+                        let mut chunk_inner = chunk.inner.deref().clone();
+                        apply_chunk_change(c, &mut chunk_inner)?;
+                        chunk.inner = Arc::new(chunk_inner);
                     } else if let Some(c) = all_chunks.get_chunk(&chunk_key) {
-                        apply_chunk_change(c, &mut chunk.inner)?;
+                        let mut chunk_inner = chunk.inner.deref().clone();
+                        apply_chunk_change(c, &mut chunk_inner)?;
+                        chunk.inner = Arc::new(chunk_inner);
                     } else {
                         all_chunks.add_chunk(&chunk.inner);
                         // add to per blob ChunkSet
@@ -356,9 +359,7 @@ impl BlobCompactor {
                     self.nodes[*node_idx].chunks[*chunk_idx].inner.blob_index() == from,
                     "unexpected blob_index of chunk"
                 );
-                self.nodes[*node_idx].chunks[*chunk_idx]
-                    .inner
-                    .set_blob_index(to);
+                self.nodes[*node_idx].chunks[*chunk_idx].set_blob_index(to);
             }
         }
         Ok(())
@@ -367,7 +368,10 @@ impl BlobCompactor {
     fn apply_chunk_change(&mut self, c: &(ChunkWrapper, ChunkWrapper)) -> Result<()> {
         if let Some(idx_list) = self.c2nodes.get(&ChunkKey::from(&c.0)) {
             for (node_idx, chunk_idx) in idx_list.iter() {
-                apply_chunk_change(&c.1, &mut self.nodes[*node_idx].chunks[*chunk_idx].inner)?;
+                let chunk = &mut self.nodes[*node_idx].chunks[*chunk_idx];
+                let mut chunk_inner = chunk.inner.deref().clone();
+                apply_chunk_change(&c.1, &mut chunk_inner)?;
+                chunk.inner = Arc::new(chunk_inner);
             }
         }
         Ok(())
@@ -510,7 +514,7 @@ impl BlobCompactor {
                     if blob_idx != idx as u32 {
                         self.apply_blob_move(idx as u32, blob_idx)?;
                     }
-                    self.new_blob_mgr.add(ctx);
+                    self.new_blob_mgr.add_blob(ctx);
                 }
                 State::Delete => {
                     info!("delete blob {}", ori_blob_ids[idx]);
@@ -539,7 +543,7 @@ impl BlobCompactor {
                         self.apply_chunk_change(change_chunk)?;
                     }
                     info!("rebuild blob {} successfully", blob_ctx.blob_id);
-                    self.new_blob_mgr.add(blob_ctx);
+                    self.new_blob_mgr.add_blob(blob_ctx);
                 }
             }
         }
@@ -578,7 +582,7 @@ impl BlobCompactor {
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx(false)?;
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let mut ori_blob_mgr = BlobManager::new(rs.meta.get_digester());
         ori_blob_mgr.extend_from_blob_table(&build_ctx, rs.superblock.get_blob_infos())?;
         if let Some(dict) = chunk_dict {
@@ -589,10 +593,10 @@ impl BlobCompactor {
             return Ok(None);
         }
         let mut _dict = HashChunkDict::new(build_ctx.digester);
-        let mut tree = Tree::from_bootstrap(&rs, &mut _dict)?;
+        let tree = Tree::from_bootstrap(&rs, &mut _dict)?;
         let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(&mut build_ctx, &mut bootstrap_ctx, &mut tree)?;
-        let mut nodes = Vec::new();
+        bootstrap.build(&mut build_ctx, &mut bootstrap_ctx, tree)?;
+        let mut nodes = VecDeque::new();
         // move out nodes
         std::mem::swap(&mut bootstrap_ctx.nodes, &mut nodes);
         let mut compactor = Self::new(
@@ -604,7 +608,7 @@ impl BlobCompactor {
         )?;
         compactor.compact(cfg)?;
         compactor.dump_new_blobs(&build_ctx, &cfg.blobs_dir, build_ctx.aligned_chunk)?;
-        if compactor.new_blob_mgr.len() == 0 {
+        if compactor.new_blob_mgr.is_empty() {
             info!("blobs of source bootstrap have already been optimized");
             return Ok(None);
         }

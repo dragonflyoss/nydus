@@ -172,3 +172,7 @@ Duplicate `./misc/config/config.yaml.nydus.tmpl` configuration file as `path/to/
 1. Pull Nydus / OCI wordpress images
 
 [![asciicast](https://asciinema.org/a/1a6aQA6rOFsoAgivDh9mBV0lE.svg)](https://asciinema.org/a/1a6aQA6rOFsoAgivDh9mBV0lE?speed=2)
+
+2. Pull ZRAN-indexed OCI / OCI wordpress images
+
+[![asciicast](https://asciinema.org/a/7IOWhUk8Rna0Ju1avcamu7T5f.svg)](https://asciinema.org/a/7IOWhUk8Rna0Ju1avcamu7T5f?speed=2)

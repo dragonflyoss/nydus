@@ -22,6 +22,8 @@ pub use self::types::*;
 pub mod async_helper;
 pub mod compact;
 pub mod compress;
+#[cfg(feature = "encryption")]
+pub mod crypt;
 pub mod digest;
 pub mod exec;
 pub mod filemap;
@@ -29,6 +31,7 @@ pub mod inode_bitmap;
 pub mod metrics;
 pub mod mpmc;
 pub mod reader;
+pub mod trace;
 pub mod types;
 
 /// Round up and divide the value `n` by `d`.
@@ -58,6 +61,13 @@ pub fn try_round_up_4k<U: TryFrom<u64>, T: Into<u64>>(x: T) -> Option<U> {
 
 pub fn round_down_4k(x: u64) -> u64 {
     x & (!4095u64)
+}
+
+/// Round down the value `n` to by `d`.
+pub fn round_down(n: u64, d: u64) -> u64 {
+    debug_assert!(d != 0);
+    debug_assert!(d.is_power_of_two());
+    n / d * d
 }
 
 pub enum DelayType {

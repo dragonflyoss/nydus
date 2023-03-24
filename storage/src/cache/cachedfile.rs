@@ -148,6 +148,8 @@ pub(crate) struct FileCacheEntry {
     pub(crate) is_direct_chunkmap: bool,
     // The blob is for an stargz image.
     pub(crate) is_legacy_stargz: bool,
+    // The blob is for an RAFS filesystem in `TARFS` mode.
+    pub(crate) is_tarfs: bool,
     // The blob is based on ZRan decompression algorithm.
     pub(crate) is_zran: bool,
     // True if direct IO is enabled for the `self.file`, supported for fscache only.
@@ -624,7 +626,10 @@ impl BlobObject for FileCacheEntry {
     }
 
     fn is_all_data_ready(&self) -> bool {
-        if let Some(b) = self.chunk_map.as_range_map() {
+        // Assume data from tar file is always ready.
+        if self.is_tarfs {
+            true
+        } else if let Some(b) = self.chunk_map.as_range_map() {
             b.is_range_all_ready()
         } else {
             false
@@ -632,6 +637,11 @@ impl BlobObject for FileCacheEntry {
     }
 
     fn fetch_range_compressed(&self, offset: u64, size: u64, prefetch: bool) -> Result<()> {
+        // Assume data from tar file is always ready.
+        if self.is_tarfs {
+            return Ok(());
+        }
+
         let meta = self.meta.as_ref().ok_or_else(|| enoent!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let mut chunks =
@@ -654,6 +664,11 @@ impl BlobObject for FileCacheEntry {
     }
 
     fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<()> {
+        // Assume data from tar file is always ready.
+        if self.is_tarfs {
+            return Ok(());
+        }
+
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
         let mut chunks = meta.get_chunks_uncompressed(offset, size, self.ondemand_batch_size())?;
@@ -668,6 +683,11 @@ impl BlobObject for FileCacheEntry {
     }
 
     fn prefetch_chunks(&self, range: &BlobIoRange) -> Result<()> {
+        // Assume data from tar file is always ready.
+        if self.is_tarfs {
+            return Ok(());
+        }
+
         let chunks_extended;
         let mut chunks = &range.chunks;
         if let Some(v) = self.extend_pending_chunks(chunks, self.prefetch_batch_size())? {

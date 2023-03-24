@@ -10,16 +10,15 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use mio::Waker;
-use nydus_api::http::BlobCacheList;
+use nydus_api::config::BlobCacheList;
 use nydus_api::BuildTimeInfo;
 
-use crate::blob_cache::BlobCacheMgr;
 use crate::daemon::{
     DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
     NydusDaemon,
 };
 use crate::fs_service::FsService;
-use crate::{Error, Result};
+use crate::{BlobCacheMgr, Error, Result};
 
 #[allow(dead_code)]
 struct ServiceController {

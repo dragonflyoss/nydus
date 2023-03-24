@@ -2,7 +2,15 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-//! FsCache manager to cooperate with the Linux fscache subsystem to support EROFS.
+//! Handler to expose RAFSv6 image through EROFS/fscache.
+//!
+//! The [`FsCacheHandler`] is the inter-connection between in kernel EROFS/fscache drivers
+//! and the user space [BlobCacheMgr](https://docs.rs/nydus-service/latest/nydus_service/blob_cache/struct.BlobCacheMgr.html).
+//! The workflow is as below:
+//! - EROFS presents a filesystem structure by parsing a RAFS image metadata blob.
+//! - EROFS sends requests to the fscache subsystem when user reads data from files.
+//! - Fscache subsystem send requests to [FsCacheHandler] if the requested data has been cached yet.
+//! - [FsCacheHandler] reads blob data from the [BlobCacheMgr] and sends back reply messages.
 
 use std::collections::hash_map::Entry::Vacant;
 use std::collections::HashMap;
@@ -25,8 +33,7 @@ use nydus_storage::device::BlobPrefetchRequest;
 use nydus_storage::factory::{ASYNC_RUNTIME, BLOB_FACTORY};
 
 use crate::blob_cache::{
-    generate_blob_key, BlobCacheConfigDataBlob, BlobCacheConfigMetaBlob, BlobCacheMgr,
-    BlobCacheObjectConfig,
+    generate_blob_key, BlobCacheMgr, BlobConfig, DataBlobConfig, MetaBlobConfig,
 };
 
 nix::ioctl_write_int!(fscache_cread, 0x98, 1);
@@ -208,7 +215,7 @@ struct FsCacheBootstrap {
 
 struct FsCacheBlobCache {
     cache: Option<Arc<dyn BlobCache>>,
-    config: Arc<BlobCacheConfigDataBlob>,
+    config: Arc<DataBlobConfig>,
     file: Arc<File>,
 }
 
@@ -232,7 +239,7 @@ enum FsCacheObject {
 #[derive(Default)]
 struct FsCacheState {
     id_to_object_map: HashMap<u32, (FsCacheObject, u32)>,
-    id_to_config_map: HashMap<u32, Arc<BlobCacheConfigDataBlob>>,
+    id_to_config_map: HashMap<u32, Arc<DataBlobConfig>>,
     blob_cache_mgr: Arc<BlobCacheMgr>,
 }
 
@@ -434,11 +441,11 @@ impl FsCacheHandler {
                 self.reply(&format!("copen {},{}", hdr.msg_id, -libc::ENOENT));
             }
             Some(cfg) => match cfg {
-                BlobCacheObjectConfig::DataBlob(config) => {
+                BlobConfig::DataBlob(config) => {
                     let reply = self.handle_open_data_blob(hdr, msg, config);
                     self.reply(&reply);
                 }
-                BlobCacheObjectConfig::MetaBlob(config) => {
+                BlobConfig::MetaBlob(config) => {
                     self.handle_open_bootstrap(hdr, msg, config);
                 }
             },
@@ -449,7 +456,7 @@ impl FsCacheHandler {
         &self,
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
-        config: Arc<BlobCacheConfigDataBlob>,
+        config: Arc<DataBlobConfig>,
     ) -> String {
         let mut state = self.state.lock().unwrap();
         if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {
@@ -501,7 +508,7 @@ impl FsCacheHandler {
         });
     }
 
-    fn do_prefetch(cfg: &BlobCacheConfigDataBlob, blob: Arc<dyn BlobCache>) -> Result<()> {
+    fn do_prefetch(cfg: &DataBlobConfig, blob: Arc<dyn BlobCache>) -> Result<()> {
         let blob_info = cfg.blob_info().deref();
         let cache_cfg = cfg.config_v2().get_cache_config()?;
         if !cache_cfg.prefetch.enable {
@@ -546,7 +553,7 @@ impl FsCacheHandler {
     /// the chunk map file will be managed by the userspace daemon. We need to figure out the
     /// way to share blob/chunkamp files with filecache manager.
     fn create_data_blob_object(
-        config: &BlobCacheConfigDataBlob,
+        config: &DataBlobConfig,
         file: Arc<File>,
     ) -> Result<Arc<dyn BlobCache>> {
         let mut blob_info = config.blob_info().deref().clone();
@@ -572,7 +579,7 @@ impl FsCacheHandler {
         &self,
         hdr: &FsCacheMsgHeader,
         msg: &FsCacheMsgOpen,
-        config: Arc<BlobCacheConfigMetaBlob>,
+        config: Arc<MetaBlobConfig>,
     ) {
         let path = config.path().display();
         let condvar = Arc::new((Mutex::new(false), Condvar::new()));
@@ -928,7 +935,7 @@ impl FsCacheHandler {
     }
 
     #[inline]
-    fn get_config(&self, key: &str) -> Option<BlobCacheObjectConfig> {
+    fn get_config(&self, key: &str) -> Option<BlobConfig> {
         self.get_state().blob_cache_mgr.get_config(key)
     }
 }

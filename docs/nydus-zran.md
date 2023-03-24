@@ -48,3 +48,9 @@ Follow the [documentation](https://github.com/dragonflyoss/image-service/blob/ma
 # Run nydus zran artifact
 sudo nerdctl --snapshotter nydus run --rm -it docker.io/hsiangkao/node:18-nydus-oci-ref node -v
 ```
+
+## Recording
+
+Pull ZRAN-indexed OCI / OCI wordpress images
+
+[![asciicast](https://asciinema.org/a/7IOWhUk8Rna0Ju1avcamu7T5f.svg)](https://asciinema.org/a/7IOWhUk8Rna0Ju1avcamu7T5f?speed=2)

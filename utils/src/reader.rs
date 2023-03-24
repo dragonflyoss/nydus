@@ -51,6 +51,7 @@ struct BufReaderState<R: Read> {
 
 /// A wrapper over `BufReader` to track current position.
 pub struct BufReaderInfo<R: Read> {
+    calc_digest: bool,
     state: Arc<Mutex<BufReaderState<R>>>,
 }
 
@@ -63,6 +64,7 @@ impl<R: Read> BufReaderInfo<R> {
             hash: Sha256::default(),
         };
         Self {
+            calc_digest: true,
             state: Arc::new(Mutex::new(state)),
         }
     }
@@ -76,6 +78,11 @@ impl<R: Read> BufReaderInfo<R> {
     pub fn get_hash_object(&self) -> Sha256 {
         self.state.lock().unwrap().hash.clone()
     }
+
+    /// Enable or disable blob digest calculation.
+    pub fn enable_digest_calculation(&mut self, enable: bool) {
+        self.calc_digest = enable;
+    }
 }
 
 impl<R: Read> Read for BufReaderInfo<R> {
@@ -83,7 +90,7 @@ impl<R: Read> Read for BufReaderInfo<R> {
         let mut state = self.state.lock().unwrap();
         state.reader.read(buf).map(|v| {
             state.pos += v as u64;
-            if v > 0 {
+            if v > 0 && self.calc_digest {
                 state.hash.digest_update(&buf[..v]);
             }
             v
@@ -94,6 +101,7 @@ impl<R: Read> Read for BufReaderInfo<R> {
 impl<R: Read> Clone for BufReaderInfo<R> {
     fn clone(&self) -> Self {
         Self {
+            calc_digest: self.calc_digest,
             state: self.state.clone(),
         }
     }

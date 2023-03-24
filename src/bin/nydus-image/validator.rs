@@ -9,10 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use nydus_api::ConfigV2;
+use nydus_rafs::builder::Tree;
 use nydus_rafs::metadata::RafsSuper;
 use nydus_storage::device::BlobInfo;
-
-use crate::tree::Tree;
 
 pub struct Validator {
     sb: RafsSuper,
@@ -20,7 +19,7 @@ pub struct Validator {
 
 impl Validator {
     pub fn new(bootstrap_path: &Path, config: Arc<ConfigV2>) -> Result<Self> {
-        let (sb, _) = RafsSuper::load_from_file(bootstrap_path, config, true, false)?;
+        let (sb, _) = RafsSuper::load_from_file(bootstrap_path, config, false)?;
 
         Ok(Self { sb })
     }

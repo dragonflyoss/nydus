@@ -40,7 +40,7 @@ impl RafsInspector {
         request_mode: bool,
         config: Arc<ConfigV2>,
     ) -> Result<Self, anyhow::Error> {
-        let (rafs_meta, f) = RafsSuper::load_from_file(bootstrap_path, config, false, false)?;
+        let (rafs_meta, f) = RafsSuper::load_from_file(bootstrap_path, config, false)?;
         let root_ino = rafs_meta.superblock.root_ino();
 
         Ok(RafsInspector {
@@ -217,13 +217,12 @@ impl RafsInspector {
                 }
 
                 let child_inode = dir_inode.get_child_by_name(&child_name)?;
-                let mut chunks = Vec::<Arc<dyn BlobChunkInfo>>::new();
-
                 // only reg_file can get and print chunk info
                 if !child_inode.is_reg() {
                     return Ok(RafsInodeWalkAction::Break);
                 }
 
+                let mut chunks = Vec::<Arc<dyn BlobChunkInfo>>::new();
                 let chunk_count = child_inode.get_chunk_count();
                 for idx in 0..chunk_count {
                     let cur_chunk = child_inode.get_chunk_info(idx)?;
@@ -431,7 +430,7 @@ RAFS Blob Size:         {rafs_size}
         self.rafs_meta.walk_directory::<PathBuf>(
             self.rafs_meta.superblock.root_ino(),
             None,
-            &mut |inode: &dyn RafsInodeExt, _path: &Path| -> anyhow::Result<()> {
+            &mut |inode: Arc<dyn RafsInodeExt>, _path: &Path| -> anyhow::Result<()> {
                 // only regular file has data chunks
                 if !inode.is_reg() {
                     return Ok(());

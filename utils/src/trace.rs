@@ -164,6 +164,7 @@ lazy_static! {
     };
 }
 
+#[macro_export]
 macro_rules! root_tracer {
     () => {
         &$crate::trace::BUILDING_RECORDER as &$crate::trace::BuildRootTracer

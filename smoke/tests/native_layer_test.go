@@ -78,7 +78,6 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 }
 
 func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
-
 	packOption := converter.PackOption{
 		BuilderPath: ctx.Binary.Builder,
 		Compressor:  ctx.Build.Compressor,
@@ -154,6 +153,60 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 	lowerLayer.Overlay(t, upperLayer)
 	ctx.Env.BootstrapPath = overlayBootstrap
 	tool.Verify(t, ctx, lowerLayer.FileTree)
+
+	// Make base layers (use as a parent bootstrap)
+	packOption.ChunkDictPath = ""
+	baseLayer1 := texture.MakeMatrixLayer(t, filepath.Join(ctx.Env.WorkDir, "source-base-1"), "1")
+	baseLayer1BlobDigest := baseLayer1.Pack(t, packOption, ctx.Env.BlobDir)
+
+	baseLayer2 := texture.MakeMatrixLayer(t, filepath.Join(ctx.Env.WorkDir, "source-base-2"), "2")
+	baseLayer2BlobDigest := baseLayer2.Pack(t, packOption, ctx.Env.BlobDir)
+
+	lowerLayer = texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "source-lower-1"))
+	lowerBlobDigest = lowerLayer.Pack(t, packOption, ctx.Env.BlobDir)
+
+	upperLayer = texture.MakeUpperLayer(t, filepath.Join(ctx.Env.WorkDir, "source-upper-1"))
+	upperBlobDigest = upperLayer.Pack(t, packOption, ctx.Env.BlobDir)
+
+	mergeOption = converter.MergeOption{
+		BuilderPath: ctx.Binary.Builder,
+	}
+	baseLayerDigests, baseBootstrap := tool.MergeLayers(t, ctx, mergeOption, []converter.Layer{
+		{
+			Digest: baseLayer1BlobDigest,
+		},
+		{
+			Digest: baseLayer2BlobDigest,
+		},
+	})
+	ctx.Env.BootstrapPath = baseBootstrap
+	require.Equal(t, []digest.Digest{baseLayer1BlobDigest, baseLayer2BlobDigest}, baseLayerDigests)
+
+	// Test merge from a parent bootstrap
+	mergeOption = converter.MergeOption{
+		ParentBootstrapPath: baseBootstrap,
+		ChunkDictPath:       baseBootstrap,
+		BuilderPath:         ctx.Binary.Builder,
+	}
+	actualDigests, overlayBootstrap = tool.MergeLayers(t, ctx, mergeOption, []converter.Layer{
+		{
+			Digest: lowerBlobDigest,
+		},
+		{
+			Digest: upperBlobDigest,
+		},
+	})
+
+	require.Equal(t, []digest.Digest{
+		baseLayer1BlobDigest,
+		baseLayer2BlobDigest,
+		lowerBlobDigest,
+		upperBlobDigest,
+	}, actualDigests)
+
+	ctx.Env.BootstrapPath = overlayBootstrap
+	baseLayer1.Overlay(t, baseLayer2).Overlay(t, lowerLayer).Overlay(t, upperLayer)
+	tool.Verify(t, ctx, baseLayer1.FileTree)
 }
 
 func TestNativeLayer(t *testing.T) {

@@ -17,12 +17,13 @@ pub mod zlib_random;
 const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
 /// Supported compression algorithms.
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Algorithm {
-    None,
-    Lz4Block,
-    GZip,
-    Zstd,
+    None = 0,
+    Lz4Block = 1,
+    GZip = 2,
+    Zstd = 3,
 }
 
 impl Default for Algorithm {
