@@ -479,6 +479,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("File path for saving the exported content")
                         .required_unless_present("localfs-dir")
                 )
+                .arg(
+                    Arg::new("verity")
+                        .long("verity")
+                        .help("Generate dm-verity data for block device")
+                        .action(ArgAction::SetTrue)
+                        .required(false)
+                        .requires("block")
+                )
         );
 
     let app = app.subcommand(
@@ -1558,8 +1566,9 @@ impl Command {
             .map(|n| n.parse().unwrap_or(1))
             .unwrap_or(1);
         let output = subargs.value_of("output").map(|v| v.to_string());
+        let verity = subargs.is_present("verity");
 
-        BlockDevice::export(entry, output, localfs_dir, threads)
+        BlockDevice::export(entry, output, localfs_dir, threads, verity)
             .context("failed to export RAFS filesystem as raw block device image")
     }
 }

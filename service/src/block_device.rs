@@ -15,7 +15,7 @@ use std::cmp::{max, min};
 use std::fs::OpenOptions;
 use std::io::Result;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -25,6 +25,9 @@ use nydus_rafs::metadata::layout::v6::{
     EROFS_BLOCK_BITS_12, EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512,
 };
 use nydus_storage::utils::alloc_buf;
+use nydus_utils::digest::{self, RafsDigest};
+use nydus_utils::round_up;
+use nydus_utils::verity::VerityGenerator;
 use tokio_uring::buf::IoBufMut;
 
 use crate::blob_cache::{generate_blob_key, BlobCacheMgr, BlobConfig, DataBlob, MetaBlob};
@@ -287,6 +290,7 @@ impl BlockDevice {
         output: Option<String>,
         localfs_dir: Option<String>,
         threads: u32,
+        verity: bool,
     ) -> Result<()> {
         let cache_mgr = Arc::new(BlobCacheMgr::new());
         cache_mgr.add_blob_entry(&blob_entry).map_err(|e| {
@@ -303,6 +307,7 @@ impl BlockDevice {
             ))
         })?;
         let block_device = Arc::new(block_device);
+        let blocks = block_device.blocks();
 
         let path = match output {
             Some(v) => PathBuf::from(v),
@@ -353,7 +358,27 @@ impl BlockDevice {
             })?;
         let output_file = Arc::new(tokio_uring::fs::File::from_std(output_file));
 
-        let blocks = block_device.blocks();
+        let mut verity_offset = 0;
+        let generator = if verity {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| {
+                    eother!(format!(
+                        "block_device: failed to create output file {}, {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+            verity_offset = round_up(block_device.blocks_to_size(blocks), 4096);
+            let mut generator = VerityGenerator::new(file, verity_offset, blocks)?;
+            generator.initialize()?;
+            Some(Arc::new(Mutex::new(generator)))
+        } else {
+            None
+        };
+
         let batch_size = BLOCK_DEVICE_EXPORT_BATCH_SIZE as u32 / block_device.block_size() as u32;
         assert_eq!(batch_size.count_ones(), 1);
         let threads = max(threads, 1);
@@ -363,8 +388,10 @@ impl BlockDevice {
         }
 
         if threads == 1 {
+            let generator = generator.clone();
+            let block_device = block_device.clone();
             tokio_uring::start(async move {
-                Self::do_export(block_device.clone(), output_file, 0, block_device.blocks()).await
+                Self::do_export(block_device, output_file, 0, blocks, generator).await
             })?;
         } else {
             let mut thread_handlers: Vec<JoinHandle<Result<()>>> =
@@ -377,6 +404,7 @@ impl BlockDevice {
                 let mgr = cache_mgr.clone();
                 let id = blob_id.clone();
                 let path = path.to_path_buf();
+                let generator = generator.clone();
 
                 let handler = thread::spawn(move || {
                     let output_file = OpenOptions::new()
@@ -399,9 +427,9 @@ impl BlockDevice {
                     })?;
                     let device = Arc::new(block_device);
 
-                    tokio_uring::start(
-                        async move { Self::do_export(device, file, pos, count).await },
-                    )?;
+                    tokio_uring::start(async move {
+                        Self::do_export(device, file, pos, count, generator).await
+                    })?;
                     Ok(())
                 });
                 pos += count;
@@ -424,6 +452,21 @@ impl BlockDevice {
                     })?;
             }
         }
+
+        if let Some(generator) = generator.as_ref() {
+            let mut guard = generator.lock().unwrap();
+            let root_digest = guard.generate_all_digests()?;
+            let root_digest: String = root_digest
+                .data
+                .iter()
+                .map(|v| format!("{:02x}", v))
+                .collect();
+            println!(
+                "dm-verity options: --no-superblock --format=1 -s \"\" --hash=sha256 --data-block-size={} --hash-block-size=4096 --data-blocks {} --hash-offset {} {}",
+                block_device.block_size(), blocks, verity_offset, root_digest
+            );
+        }
+
         Ok(())
     }
 
@@ -432,8 +475,10 @@ impl BlockDevice {
         output_file: Arc<tokio_uring::fs::File>,
         start: u32,
         mut blocks: u32,
+        generator: Option<Arc<Mutex<VerityGenerator>>>,
     ) -> Result<()> {
         let batch_size = BLOCK_DEVICE_EXPORT_BATCH_SIZE as u32 / block_device.block_size() as u32;
+        let block_size = block_device.block_size() as usize;
         let mut pos = start;
         let mut buf = alloc_buf(BLOCK_DEVICE_EXPORT_BATCH_SIZE);
 
@@ -441,7 +486,7 @@ impl BlockDevice {
             let count = min(batch_size, blocks);
             let (res, buf1) = block_device.async_read(pos, count, buf).await;
             let sz = res?;
-            if sz != count as usize * block_device.block_size() as usize {
+            if sz != count as usize * block_size {
                 return Err(eio!(
                     "block_device: failed to read data, got less data than requested"
                 ));
@@ -461,6 +506,22 @@ impl BlockDevice {
                 ));
             }
             buf = buf2;
+
+            // Generate Merkle tree leaf nodes.
+            if let Some(generator) = generator.as_ref() {
+                let mut page_idx = (block_device.blocks_to_size(pos) / block_size as u64) as u32;
+                let mut offset = 0;
+                while offset < buf.len() {
+                    let digest = RafsDigest::from_buf(
+                        &buf[offset..offset + block_size],
+                        digest::Algorithm::Sha256,
+                    );
+                    let mut guard = generator.lock().unwrap();
+                    guard.set_digest(1, page_idx, &digest.data)?;
+                    offset += block_size;
+                    page_idx += 1;
+                }
+            }
 
             pos += count;
             blocks -= count;
