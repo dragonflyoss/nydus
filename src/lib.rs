@@ -40,7 +40,8 @@ impl<'a> ServiceArgs for SubCmdArgs<'a> {
     }
 
     fn is_present(&self, key: &str) -> bool {
-        self.subargs.get_flag(key) || self.args.get_flag(key)
+        matches!(self.subargs.try_get_one::<bool>(key), Ok(Some(true)))
+            || matches!(self.args.try_get_one::<bool>(key), Ok(Some(true)))
     }
 }
 
