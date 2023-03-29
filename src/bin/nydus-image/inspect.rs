@@ -275,6 +275,11 @@ impl RafsInspector {
     // Implement command "blobs"
     fn cmd_list_blobs(&self) -> Result<Option<Value>, anyhow::Error> {
         let blob_infos = self.rafs_meta.superblock.get_blob_infos();
+        let extra_infos = self
+            .rafs_meta
+            .superblock
+            .get_blob_extra_infos()
+            .unwrap_or_default();
 
         let mut value = json!([]);
         for blob_info in blob_infos.iter() {
@@ -286,6 +291,10 @@ impl RafsInspector {
                                     "compressed_size": blob_info.compressed_size(),});
                 value.as_array_mut().unwrap().push(v);
             } else {
+                let mapped_blkaddr = extra_infos
+                    .get(&blob_info.blob_id())
+                    .map(|v| v.mapped_blkaddr)
+                    .unwrap_or_default();
                 print!(
                     r#"
 Blob Index:             {blob_index}
@@ -294,6 +303,7 @@ Raw Blob ID:            {raw_blob_id}
 Blob Size:              {blob_size}
 Compressed Data Size:   {compressed_size}
 Uncompressed Data Size: {uncompressed_size}
+Mapped Block Address:   {mapped_blkaddr}
 Features:               {features:?}
 Compressor:             {compressor}
 Digester:               {digester}
