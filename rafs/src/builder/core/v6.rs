@@ -29,7 +29,7 @@ use crate::metadata::RafsStore;
 use crate::RafsIoWrite;
 
 const WRITE_PADDING_DATA: [u8; 4096] = [0u8; 4096];
-const V6_BLOCK_SEG_ALIGNMENT: u64 = 0x20_0000;
+const V6_BLOCK_SEG_ALIGNMENT: u64 = 0x8_0000;
 
 // Rafs v6 dedicated methods
 impl Node {
