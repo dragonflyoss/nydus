@@ -216,10 +216,12 @@ impl RegistryState {
                         return false;
                     }
                     let msg = err.to_string().to_lowercase();
-                    // As far as we can observe, if we try to establish a tls connection
-                    // with the http registry server, we will encounter this type of error:
+                    // If we attempt to establish a TLS connection with the HTTP registry server,
+                    // we are likely to encounter these types of error:
                     // https://github.com/openssl/openssl/blob/6b3d28757620e0781bb1556032bb6961ee39af63/crypto/err/openssl.txt#L1574
-                    let fallback = msg.contains("wrong version number");
+                    // https://github.com/containerd/nerdctl/blob/225a70bdc3b93cdb00efac7db1ceb50c098a8a16/pkg/cmd/image/push.go#LL135C66-L135C66
+                    let fallback =
+                        msg.contains("wrong version number") || msg.contains("connection refused");
                     if fallback {
                         warn!("fallback to http due to tls connection error: {}", err);
                     }
