@@ -30,6 +30,7 @@ use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
+use crate::context::CipherContext;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
     BlobObject, BlobPrefetchRequest,
@@ -131,6 +132,7 @@ pub(crate) struct FileCacheEntry {
     pub(crate) blob_id: String,
     pub(crate) blob_info: Arc<BlobInfo>,
     pub(crate) cache_cipher_object: Arc<Cipher>,
+    pub(crate) cache_cipher_context: Arc<CipherContext>,
     pub(crate) chunk_map: Arc<dyn ChunkMap>,
     pub(crate) file: Arc<File>,
     pub(crate) meta: Option<FileCacheMeta>,

@@ -290,6 +290,7 @@ impl FileCacheEntry {
             blob_id,
             blob_info,
             cache_cipher_object: Default::default(),
+            cache_cipher_context: Default::default(),
             chunk_map,
             file: Arc::new(file),
             meta,

@@ -265,6 +265,7 @@ impl FileCacheEntry {
             blob_id,
             blob_info: blob_info.clone(),
             cache_cipher_object: Default::default(),
+            cache_cipher_context: Default::default(),
             chunk_map,
             file,
             meta: Some(meta),
