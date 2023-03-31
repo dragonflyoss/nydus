@@ -289,6 +289,7 @@ impl FileCacheEntry {
         Ok(FileCacheEntry {
             blob_id,
             blob_info,
+            cache_cipher_object: Default::default(),
             chunk_map,
             file: Arc::new(file),
             meta,
@@ -302,6 +303,7 @@ impl FileCacheEntry {
             blob_uncompressed_size,
             is_get_blob_object_supported,
             is_raw_data: mgr.cache_raw_data,
+            is_cache_encrypted: false,
             is_direct_chunkmap,
             is_legacy_stargz,
             is_tarfs,

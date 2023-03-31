@@ -23,6 +23,7 @@ use std::time::Instant;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_utils::compress::zlib_random::ZranDecoder;
+use nydus_utils::crypt::{self, Cipher};
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
@@ -148,6 +149,12 @@ pub trait BlobCache: Send + Sync {
 
     /// Get data compression algorithm to handle chunks in the blob.
     fn blob_compressor(&self) -> compress::Algorithm;
+
+    /// Get data encryption algorithm to handle chunks in the blob.
+    fn blob_cipher(&self) -> crypt::Algorithm;
+
+    /// Cipher object to encrypt/decrypt chunk data.
+    fn blob_cipher_object(&self) -> Arc<Cipher>;
 
     /// Get message digest algorithm to handle chunks in the blob.
     fn blob_digester(&self) -> digest::Algorithm;

@@ -23,20 +23,20 @@ pub enum Algorithm {
 
 impl Algorithm {
     /// Create a new cipher object.
-    pub fn new_crypter(&self) -> Result<Crypter, Error> {
+    pub fn new_cipher(&self) -> Result<Cipher, Error> {
         match self {
-            Algorithm::None => Ok(Crypter::None),
+            Algorithm::None => Ok(Cipher::None),
             Algorithm::Aes128Xts => {
                 let cipher = symm::Cipher::aes_128_xts();
-                Ok(Crypter::Aes128Xts(cipher))
+                Ok(Cipher::Aes128Xts(cipher))
             }
             Algorithm::Aes256Xts => {
                 let cipher = symm::Cipher::aes_256_xts();
-                Ok(Crypter::Aes256Xts(cipher))
+                Ok(Cipher::Aes256Xts(cipher))
             }
             Algorithm::Aes256Gcm => {
                 let cipher = symm::Cipher::aes_256_gcm();
-                Ok(Crypter::Aes256Gcm(cipher))
+                Ok(Cipher::Aes256Gcm(cipher))
             }
         }
     }
@@ -129,32 +129,32 @@ impl TryFrom<u64> for Algorithm {
     }
 }
 
-/// Support encryptor and decryptor.
-pub enum Crypter {
+/// Cipher object to encrypt/decrypt data.
+pub enum Cipher {
     None,
     Aes128Xts(symm::Cipher),
     Aes256Xts(symm::Cipher),
     Aes256Gcm(symm::Cipher),
 }
 
-impl Default for Crypter {
+impl Default for Cipher {
     fn default() -> Self {
-        Crypter::None
+        Cipher::None
     }
 }
 
-impl Debug for Crypter {
+impl Debug for Cipher {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Crypter::None => write!(f, "cipher: none"),
-            Crypter::Aes128Xts(_) => write!(f, "cypher: aes128_xts"),
-            Crypter::Aes256Xts(_) => write!(f, "cypher: aes256_xts"),
-            Crypter::Aes256Gcm(_) => write!(f, "cipher: aes256_gcm"),
+            Cipher::None => write!(f, "cipher: none"),
+            Cipher::Aes128Xts(_) => write!(f, "cypher: aes128_xts"),
+            Cipher::Aes256Xts(_) => write!(f, "cypher: aes256_xts"),
+            Cipher::Aes256Gcm(_) => write!(f, "cipher: aes256_gcm"),
         }
     }
 }
 
-impl Crypter {
+impl Cipher {
     /// Encrypt plaintext with optional IV and return the encrypted data.
     ///
     /// For XTS, the caller needs to ensure that the top half of key is not identical to the
@@ -166,8 +166,8 @@ impl Crypter {
         data: &'a [u8],
     ) -> Result<Cow<'a, [u8]>, Error> {
         match self {
-            Crypter::None => Ok(Cow::from(data)),
-            Crypter::Aes128Xts(cipher) => {
+            Cipher::None => Ok(Cow::from(data)),
+            Cipher::Aes128Xts(cipher) => {
                 assert_eq!(key.len(), 32);
                 let mut buf;
                 let data = if data.len() >= 16 {
@@ -180,11 +180,11 @@ impl Crypter {
                     buf[..data.len()].copy_from_slice(data);
                     &buf
                 };
-                Self::cipher(cipher.clone(), symm::Mode::Encrypt, key, iv, data)
-                    .map(|v| Cow::from(v))
+                Self::cipher(*cipher, symm::Mode::Encrypt, key, iv, data)
+                    .map(Cow::from)
                     .map_err(|e| eother!(format!("failed to encrypt data, {}", e)))
             }
-            Crypter::Aes256Xts(cipher) => {
+            Cipher::Aes256Xts(cipher) => {
                 assert_eq!(key.len(), 64);
                 let mut buf;
                 let data = if data.len() >= 16 {
@@ -197,12 +197,12 @@ impl Crypter {
                     buf[..data.len()].copy_from_slice(data);
                     &buf
                 };
-                Self::cipher(cipher.clone(), symm::Mode::Encrypt, key, iv, data)
-                    .map(|v| Cow::from(v))
+                Self::cipher(*cipher, symm::Mode::Encrypt, key, iv, data)
+                    .map(Cow::from)
                     .map_err(|e| eother!(format!("failed to encrypt data, {}", e)))
             }
-            Crypter::Aes256Gcm(_cipher) => {
-                Err(einval!("Crypter::entrypt() doesn't support Aes256Gcm"))
+            Cipher::Aes256Gcm(_cipher) => {
+                Err(einval!("Cipher::entrypt() doesn't support Aes256Gcm"))
             }
         }
     }
@@ -216,29 +216,25 @@ impl Crypter {
         size: usize,
     ) -> Result<Vec<u8>, Error> {
         let mut data = match self {
-            Crypter::None => Ok(data.to_vec()),
-            Crypter::Aes128Xts(cipher) => {
-                Self::cipher(cipher.clone(), symm::Mode::Decrypt, key, iv, data)
-                    .map_err(|e| eother!(format!("failed to decrypt data, {}", e)))
-            }
-            Crypter::Aes256Xts(cipher) => {
-                Self::cipher(cipher.clone(), symm::Mode::Decrypt, key, iv, data)
-                    .map_err(|e| eother!(format!("failed to decrypt data, {}", e)))
-            }
-            Crypter::Aes256Gcm(_cipher) => {
-                Err(einval!("Crypter::detrypt() doesn't support Aes256Gcm"))
+            Cipher::None => Ok(data.to_vec()),
+            Cipher::Aes128Xts(cipher) => Self::cipher(*cipher, symm::Mode::Decrypt, key, iv, data)
+                .map_err(|e| eother!(format!("failed to decrypt data, {}", e))),
+            Cipher::Aes256Xts(cipher) => Self::cipher(*cipher, symm::Mode::Decrypt, key, iv, data)
+                .map_err(|e| eother!(format!("failed to decrypt data, {}", e))),
+            Cipher::Aes256Gcm(_cipher) => {
+                Err(einval!("Cipher::detrypt() doesn't support Aes256Gcm"))
             }
         }?;
 
         // Trim possible padding.
         if data.len() > size {
             if data.len() != 16 {
-                return Err(einval!("Crypter::decrypt: invalid padding data"));
+                return Err(einval!("Cipher::decrypt: invalid padding data"));
             }
             let val = (16 - size) as u8;
-            for idx in size..data.len() {
-                if data[idx] != val {
-                    return Err(einval!("Crypter::decrypt: invalid padding data"));
+            for item in data.iter().skip(size) {
+                if *item != val {
+                    return Err(einval!("Cipher::decrypt: invalid padding data"));
                 }
             }
             data.truncate(size);
@@ -256,10 +252,8 @@ impl Crypter {
         tag: &mut [u8],
     ) -> Result<Vec<u8>, Error> {
         match self {
-            Crypter::Aes256Gcm(cipher) => {
-                symm::encrypt_aead(cipher.clone(), key, iv, &[], data, tag)
-                    .map_err(|e| eother!(format!("failed to encrypt data, {}", e)))
-            }
+            Cipher::Aes256Gcm(cipher) => symm::encrypt_aead(*cipher, key, iv, &[], data, tag)
+                .map_err(|e| eother!(format!("failed to encrypt data, {}", e))),
             _ => Err(einval!("invalid algorithm for encrypt_aead()")),
         }
     }
@@ -273,10 +267,8 @@ impl Crypter {
         tag: &[u8],
     ) -> Result<Vec<u8>, Error> {
         match self {
-            Crypter::Aes256Gcm(cipher) => {
-                symm::decrypt_aead(cipher.clone(), key, iv, &[], data, tag)
-                    .map_err(|e| eother!(format!("failed to encrypt data, {}", e)))
-            }
+            Cipher::Aes256Gcm(cipher) => symm::decrypt_aead(*cipher, key, iv, &[], data, tag)
+                .map_err(|e| eother!(format!("failed to encrypt data, {}", e))),
             _ => Err(einval!("invalid algorithm for decrypt_aead()")),
         }
     }
@@ -284,7 +276,7 @@ impl Crypter {
     /// Get size of tag associated with encrypted data.
     pub fn tag_size(&self) -> usize {
         match self {
-            Crypter::Aes256Gcm(_) => 12,
+            Cipher::Aes256Gcm(_) => 12,
             _ => 0,
         }
     }
@@ -292,15 +284,15 @@ impl Crypter {
     /// Get size of ciphertext from size of plaintext.
     pub fn encrypted_size(&self, plaintext_size: usize) -> usize {
         match self {
-            Crypter::None => plaintext_size,
-            Crypter::Aes128Xts(_) | Crypter::Aes256Xts(_) => {
+            Cipher::None => plaintext_size,
+            Cipher::Aes128Xts(_) | Cipher::Aes256Xts(_) => {
                 if plaintext_size < 16 {
                     16
                 } else {
                     plaintext_size
                 }
             }
-            Crypter::Aes256Gcm(_) => {
+            Cipher::Aes256Gcm(_) => {
                 assert!(plaintext_size.checked_add(12).is_some());
                 plaintext_size + 12
             }
@@ -358,7 +350,7 @@ mod tests {
         let mut key = [0xcu8; 32];
         key[31] = 0xa;
 
-        let cipher = Algorithm::Aes128Xts.new_crypter().unwrap();
+        let cipher = Algorithm::Aes128Xts.new_cipher().unwrap();
         assert_eq!(cipher.encrypted_size(1), 16);
         assert_eq!(cipher.encrypted_size(16), 16);
         assert_eq!(cipher.encrypted_size(17), 17);
@@ -395,7 +387,7 @@ mod tests {
         let mut key = [0xcu8; 64];
         key[31] = 0xa;
 
-        let cipher = Algorithm::Aes256Xts.new_crypter().unwrap();
+        let cipher = Algorithm::Aes256Xts.new_cipher().unwrap();
         let ciphertext1 = cipher
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"1")
             .unwrap();
@@ -428,7 +420,7 @@ mod tests {
         let mut key = [0xcu8; 32];
         key[31] = 0xa;
 
-        let cipher = Algorithm::Aes128Xts.new_crypter().unwrap();
+        let cipher = Algorithm::Aes128Xts.new_cipher().unwrap();
         let ciphertext1 = cipher
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"1")
             .unwrap();
@@ -459,7 +451,7 @@ mod tests {
         let mut key = [0xcu8; 64];
         key[31] = 0xa;
 
-        let cipher = Algorithm::Aes256Xts.new_crypter().unwrap();
+        let cipher = Algorithm::Aes256Xts.new_cipher().unwrap();
         let ciphertext1 = cipher
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"1")
             .unwrap();
@@ -490,7 +482,7 @@ mod tests {
         let key = [0xcu8; 32];
         let mut tag = vec![0u8; 12];
 
-        let cipher = Algorithm::Aes256Gcm.new_crypter().unwrap();
+        let cipher = Algorithm::Aes256Gcm.new_cipher().unwrap();
         assert_eq!(cipher.tag_size(), 12);
         assert_eq!(cipher.encrypted_size(1), 13);
 
@@ -539,12 +531,12 @@ mod tests {
     #[test]
     fn test_tweak_key_for_xts() {
         let buf = vec![0x0; 32];
-        let buf2 = Crypter::tweak_key_for_xts(&buf);
+        let buf2 = Cipher::tweak_key_for_xts(&buf);
         assert_eq!(buf2[0], 0xa5);
         assert_eq!(buf2[16], 0x0);
 
         let buf = vec![0xa5; 32];
-        let buf2 = Crypter::tweak_key_for_xts(&buf);
+        let buf2 = Cipher::tweak_key_for_xts(&buf);
         assert_eq!(buf2[0], 0x5a);
         assert_eq!(buf2[16], 0xa5);
     }

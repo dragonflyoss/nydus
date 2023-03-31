@@ -21,6 +21,7 @@ use std::time::Duration;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 use nydus_utils::compress::Decoder;
+use nydus_utils::crypt::{self, Cipher};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::{compress, digest, DelayType, Delayer, FileRangeReader};
 use tokio::runtime::Runtime;
@@ -129,6 +130,7 @@ impl FileCacheMeta {
 pub(crate) struct FileCacheEntry {
     pub(crate) blob_id: String,
     pub(crate) blob_info: Arc<BlobInfo>,
+    pub(crate) cache_cipher_object: Arc<Cipher>,
     pub(crate) chunk_map: Arc<dyn ChunkMap>,
     pub(crate) file: Arc<File>,
     pub(crate) meta: Option<FileCacheMeta>,
@@ -144,6 +146,8 @@ pub(crate) struct FileCacheEntry {
     pub(crate) is_get_blob_object_supported: bool,
     // Cache raw data from backend instead of decompressed/decrypted plaintext.
     pub(crate) is_raw_data: bool,
+    // The data in cache file is uncompressed and encrypted.
+    pub(crate) is_cache_encrypted: bool,
     // Whether direct chunkmap is used.
     pub(crate) is_direct_chunkmap: bool,
     // The blob is for an stargz image.
@@ -396,6 +400,14 @@ impl BlobCache for FileCacheEntry {
 
     fn blob_compressor(&self) -> compress::Algorithm {
         self.blob_info.compressor()
+    }
+
+    fn blob_cipher(&self) -> crypt::Algorithm {
+        self.blob_info.cipher()
+    }
+
+    fn blob_cipher_object(&self) -> Arc<Cipher> {
+        self.blob_info.cipher_object()
     }
 
     fn blob_digester(&self) -> digest::Algorithm {
