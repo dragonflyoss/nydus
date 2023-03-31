@@ -75,6 +75,7 @@ require (
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/klauspost/compress v1.16.0 // indirect
 	github.com/klauspost/cpuid v1.3.1 // indirect
+	github.com/kr/pretty v0.3.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
@@ -84,7 +85,7 @@ require (
 	github.com/moby/sys/sequential v0.5.0 // indirect
 	github.com/moby/sys/signal v0.7.0 // indirect
 	github.com/oklog/run v1.1.0 // indirect
-	github.com/opencontainers/runc v1.1.4 // indirect
+	github.com/opencontainers/runc v1.1.5 // indirect
 	github.com/opencontainers/runtime-spec v1.1.0-rc.1 // indirect
 	github.com/opencontainers/selinux v1.11.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
@@ -108,5 +109,3 @@ require (
 	google.golang.org/protobuf v1.29.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/opencontainers/runc => github.com/opencontainers/runc v1.1.2
