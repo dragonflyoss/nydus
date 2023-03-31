@@ -149,6 +149,28 @@ impl FileMapState {
         Ok(unsafe { std::slice::from_raw_parts(start as *const T, count) })
     }
 
+    /// Get a mutable slice of 'T' at 'offset' with 'count' entries.
+    pub fn get_slice_mut<T>(&mut self, offset: usize, count: usize) -> Result<&mut [T]> {
+        let start = self.base.wrapping_add(offset);
+        if count.checked_mul(size_of::<T>()).is_none() {
+            bail_einval!("count 0x{count:x} to validate_slice() is too big");
+        }
+        let size = count * size_of::<T>();
+        if size.checked_add(start as usize).is_none() {
+            bail_einval!(
+                "invalid parameter to validate_slice(), offset 0x{offset:x}, count 0x{count:x}"
+            );
+        }
+        let end = start.wrapping_add(size);
+        if start > end || start < self.base || end < self.base || end > self.end {
+            bail_einval!(
+                "invalid range in validate_slice, base 0x{:p}, start 0x{start:p}, end 0x{end:p}",
+                self.base
+            );
+        }
+        Ok(unsafe { std::slice::from_raw_parts_mut(start as *mut T, count) })
+    }
+
     /// Check whether the range [offset, offset + size) is valid and return the start address.
     pub fn validate_range(&self, offset: usize, size: usize) -> Result<*const u8> {
         let start = self.base.wrapping_add(offset);
