@@ -23,7 +23,7 @@ use nix::sys::uio;
 use nydus_utils::compress::Decoder;
 use nydus_utils::crypt::{self, Cipher};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
-use nydus_utils::{compress, digest, DelayType, Delayer, FileRangeReader};
+use nydus_utils::{compress, digest, round_up_usize, DelayType, Delayer, FileRangeReader};
 use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
@@ -41,6 +41,7 @@ use crate::{StorageError, StorageResult, RAFS_BATCH_SIZE_TO_GAP_SHIFT, RAFS_DEFA
 
 const DOWNLOAD_META_RETRY_COUNT: u32 = 5;
 const DOWNLOAD_META_RETRY_DELAY: u64 = 400;
+const ENCRYPTION_PAGE_SIZE: usize = 4096;
 
 #[derive(Default, Clone)]
 pub(crate) struct FileCacheMeta {
@@ -178,26 +179,64 @@ impl FileCacheEntry {
         Ok(size)
     }
 
-    fn delay_persist_chunk_data(
-        &self,
-        chunk: Arc<dyn BlobChunkInfo>,
-        buffer: Arc<DataBuffer>,
-        is_raw_data: bool,
-    ) {
-        assert_eq!(self.is_raw_data, is_raw_data);
+    fn delay_persist_chunk_data(&self, chunk: Arc<dyn BlobChunkInfo>, buffer: Arc<DataBuffer>) {
         let delayed_chunk_map = self.chunk_map.clone();
         let file = self.file.clone();
         let metrics = self.metrics.clone();
+        let is_raw_data = self.is_raw_data;
+        let is_cache_encrypted = self.is_cache_encrypted;
+        let cipher_object = self.cache_cipher_object.clone();
+        let cipher_context = self.cache_cipher_context.clone();
 
         metrics.buffered_backend_size.add(buffer.size() as u64);
         self.runtime.spawn_blocking(move || {
             metrics.buffered_backend_size.sub(buffer.size() as u64);
+            let mut t_buf;
+            let buf = if !is_raw_data && is_cache_encrypted {
+                let (key, iv) = cipher_context.get_chunk_cipher_context(chunk.as_ref());
+                let buf = buffer.slice();
+                t_buf = alloc_buf(round_up_usize(buf.len(), ENCRYPTION_PAGE_SIZE));
+
+                let mut pos = 0;
+                while pos < buf.len() {
+                    let mut s_buf;
+                    // Padding to buffer to 4096 bytes if needed.
+                    let buf = if pos + ENCRYPTION_PAGE_SIZE > buf.len() {
+                        s_buf = buf[pos..].to_vec();
+                        s_buf.resize(ENCRYPTION_PAGE_SIZE, 0);
+                        &s_buf
+                    } else {
+                        &buf[pos..pos + ENCRYPTION_PAGE_SIZE]
+                    };
+
+                    assert_eq!(buf.len(), ENCRYPTION_PAGE_SIZE);
+                    match cipher_object.encrypt(key, Some(&iv), buf) {
+                        Ok(buf2) => {
+                            assert_eq!(buf2.len(), ENCRYPTION_PAGE_SIZE);
+                            t_buf[pos..pos + ENCRYPTION_PAGE_SIZE].copy_from_slice(buf2.as_ref());
+                            pos += ENCRYPTION_PAGE_SIZE;
+                        }
+                        Err(_) => {
+                            Self::_update_chunk_pending_status(
+                                &delayed_chunk_map,
+                                chunk.as_ref(),
+                                false,
+                            );
+                            return;
+                        }
+                    }
+                }
+                &t_buf
+            } else {
+                buffer.slice()
+            };
+
             let offset = if is_raw_data {
                 chunk.compressed_offset()
             } else {
                 chunk.uncompressed_offset()
             };
-            let res = Self::persist_cached_data(&file, offset, buffer.slice());
+            let res = Self::persist_cached_data(&file, offset, buf);
             Self::_update_chunk_pending_status(&delayed_chunk_map, chunk.as_ref(), res.is_ok());
         });
     }
@@ -923,7 +962,8 @@ impl FileCacheEntry {
             // - the chunk is ready in the file cache
             // - data in the file cache is plaintext.
             // - data validation is disabled
-            if is_ready && !self.is_raw_data && !self.need_validation() {
+            if is_ready && !self.is_raw_data && !self.is_cache_encrypted && !self.need_validation()
+            {
                 // Internal IO should not be committed to local cache region, just
                 // commit this region without pushing any chunk to avoid discontinuous
                 // chunks in a region.
@@ -1111,7 +1151,7 @@ impl FileCacheEntry {
                 buffer_holder.push(d.clone());
             }
             if !self.is_raw_data {
-                self.delay_persist_chunk_data(region.chunks[i].clone(), d, false);
+                self.delay_persist_chunk_data(region.chunks[i].clone(), d);
             }
         }
         for d in buffer_holder.iter() {
@@ -1184,18 +1224,18 @@ impl FileCacheEntry {
                 match c {
                     Some(v) => {
                         let buf = Arc::new(DataBuffer::Allocated(v));
-                        self.delay_persist_chunk_data(chunk.clone(), buf, true);
+                        self.delay_persist_chunk_data(chunk.clone(), buf);
                         &d
                     }
                     None => {
                         buffer_holder = Arc::new(d.convert_to_owned_buffer());
-                        self.delay_persist_chunk_data(chunk.clone(), buffer_holder.clone(), true);
+                        self.delay_persist_chunk_data(chunk.clone(), buffer_holder.clone());
                         buffer_holder.as_ref()
                     }
                 }
             } else {
                 buffer_holder = Arc::new(d.convert_to_owned_buffer());
-                self.delay_persist_chunk_data(chunk.clone(), buffer_holder.clone(), false);
+                self.delay_persist_chunk_data(chunk.clone(), buffer_holder.clone());
                 buffer_holder.as_ref()
             }
         };
@@ -1242,6 +1282,34 @@ impl FileCacheEntry {
             } else {
                 let mut decoder = Decoder::new(reader, self.blob_compressor())?;
                 decoder.read_exact(buffer)?;
+            }
+        } else if self.is_cache_encrypted {
+            let offset = chunk.uncompressed_offset();
+            let size = chunk.uncompressed_size() as usize;
+            let cipher_object = self.cache_cipher_object.clone();
+            let cipher_context = self.cache_cipher_context.clone();
+            let (key, iv) = cipher_context.get_chunk_cipher_context(chunk);
+
+            let align_size = round_up_usize(size, ENCRYPTION_PAGE_SIZE);
+            let mut buf = alloc_buf(align_size);
+            FileRangeReader::new(&self.file, offset, align_size as u64).read_exact(&mut buf)?;
+
+            let mut pos = 0;
+            while pos < buffer.len() {
+                assert!(pos + ENCRYPTION_PAGE_SIZE <= buf.len());
+                match cipher_object.decrypt(
+                    key,
+                    Some(&iv),
+                    &buf[pos..pos + ENCRYPTION_PAGE_SIZE],
+                    ENCRYPTION_PAGE_SIZE,
+                ) {
+                    Ok(buf2) => {
+                        let len = std::cmp::min(buffer.len() - pos, ENCRYPTION_PAGE_SIZE);
+                        buffer[pos..pos + len].copy_from_slice(&buf2[..len]);
+                        pos += ENCRYPTION_PAGE_SIZE;
+                    }
+                    Err(_) => return Err(eother!("failed to decrypt data from cache file")),
+                }
             }
         } else {
             let offset = chunk.uncompressed_offset();
