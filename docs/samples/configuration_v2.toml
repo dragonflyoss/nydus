@@ -120,6 +120,12 @@ type = "filecache"
 compressed = true
 # Whether to validate data read from the cache.
 validate = true
+# Enable encryption data written to the cache file.
+enable_encryption = true
+# Enable convergent encryption for chunk deduplication.
+enable_convergent_encryption = true
+# Key for data encryption, a heximal representation of [u8; 32].
+encryption_key = "fc4a7db5614afc2f400e9478bebed1aefdbc9d7cd03210b84f144683a7a6fd1a"
 
 [cache.filecache]
 work_dir = "."
