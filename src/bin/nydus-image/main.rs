@@ -18,15 +18,14 @@ use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
-use nydus::{get_build_time_info, SubCmdArgs};
-use nydus_api::{BlobCacheEntry, BuildTimeInfo, ConfigV2, LocalFsConfig};
+use nydus::get_build_time_info;
+use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_app::setup_logging;
 use nydus_rafs::builder::{
     parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager, BootstrapManager,
@@ -34,8 +33,6 @@ use nydus_rafs::builder::{
     HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
 };
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
-use nydus_service::block_device::BlockDevice;
-use nydus_service::{validate_threads_configuration, ServiceArgs};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::device::BlobFeatures;
@@ -48,6 +45,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
+
+#[cfg(target_os = "linux")]
+use nydus_service::ServiceArgs;
+#[cfg(target_os = "linux")]
+use std::str::FromStr;
 
 mod inspect;
 mod stat;
@@ -432,6 +434,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             .arg(arg_output_json.clone()),
     );
 
+    #[cfg(target_os = "linux")]
     let app = app.subcommand(
             App::new("export")
                 .about("Export RAFS filesystems as raw block disk images or tar files")
@@ -469,7 +472,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("threads")
                         .default_value("4")
                         .help("Number of worker threads to execute export operation, valid values: [1-32]")
-                        .value_parser(thread_validator)
+                        .value_parser(Command::thread_validator)
                         .required(false),
                 )
                 .arg(
@@ -1190,16 +1193,6 @@ impl Command {
         Ok(())
     }
 
-    fn export(args: &ArgMatches, subargs: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
-        let subargs = SubCmdArgs::new(args, subargs);
-        if subargs.is_present("block") {
-            Self::export_block(&subargs, build_info)?;
-        } else {
-            bail!("unknown export type");
-        }
-        Ok(())
-    }
-
     fn inspect(matches: &ArgMatches) -> Result<()> {
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let mut config = Self::get_configuration(matches)?;
@@ -1515,8 +1508,32 @@ impl Command {
         );
         Ok(())
     }
+}
 
-    fn export_block(subargs: &SubCmdArgs, _bti: &BuildTimeInfo) -> Result<()> {
+#[cfg(not(target_os = "linux"))]
+impl Command {
+    fn export(
+        _args: &ArgMatches,
+        _subargs: &ArgMatches,
+        _build_info: &BuildTimeInfo,
+    ) -> Result<()> {
+        unimplemented!()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Command {
+    fn export(args: &ArgMatches, subargs: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+        let subargs = nydus::SubCmdArgs::new(args, subargs);
+        if subargs.is_present("block") {
+            Self::export_block(&subargs, build_info)?;
+        } else {
+            bail!("unknown export type");
+        }
+        Ok(())
+    }
+
+    fn export_block(subargs: &nydus::SubCmdArgs, _bti: &BuildTimeInfo) -> Result<()> {
         let mut localfs_dir = None;
         let mut entry = if let Some(dir) = subargs.value_of("localfs-dir") {
             // Safe to unwrap because `--block` requires `--bootstrap`.
@@ -1548,9 +1565,9 @@ impl Command {
                 dir, dir, bootstrap
             );
             localfs_dir = Some(dir.to_string());
-            BlobCacheEntry::from_str(&config)?
+            nydus_api::BlobCacheEntry::from_str(&config)?
         } else if let Some(v) = subargs.value_of("config") {
-            BlobCacheEntry::from_file(v)?
+            nydus_api::BlobCacheEntry::from_file(v)?
         } else {
             bail!("both option `-C/--config` and `-D/--localfs-dir` are missing");
         };
@@ -1568,11 +1585,17 @@ impl Command {
         let output = subargs.value_of("output").map(|v| v.to_string());
         let verity = subargs.is_present("verity");
 
-        BlockDevice::export(entry, output, localfs_dir, threads, verity)
-            .context("failed to export RAFS filesystem as raw block device image")
+        nydus_service::block_device::BlockDevice::export(
+            entry,
+            output,
+            localfs_dir,
+            threads,
+            verity,
+        )
+        .context("failed to export RAFS filesystem as raw block device image")
     }
-}
 
-fn thread_validator(v: &str) -> std::result::Result<String, String> {
-    validate_threads_configuration(v).map(|s| s.to_string())
+    fn thread_validator(v: &str) -> std::result::Result<String, String> {
+        nydus_service::validate_threads_configuration(v).map(|s| s.to_string())
+    }
 }
