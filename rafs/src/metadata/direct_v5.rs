@@ -842,6 +842,10 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
             .contains(BlobChunkFlags::COMPRESSED)
     }
 
+    fn is_encrypted(&self) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

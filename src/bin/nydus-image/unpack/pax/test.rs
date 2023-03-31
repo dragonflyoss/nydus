@@ -70,31 +70,11 @@ impl MockChunkInfo {
 }
 
 impl BlobChunkInfo for MockChunkInfo {
-    fn is_compressed(&self) -> bool {
-        self.is_compressed
-    }
-
-    fn uncompressed_size(&self) -> u32 {
-        self.uncompress_size
-    }
-
-    fn uncompressed_offset(&self) -> u64 {
-        self.uncompress_offset
-    }
-
-    fn compressed_size(&self) -> u32 {
-        self.compress_size
-    }
-
-    fn compressed_offset(&self) -> u64 {
-        self.compress_offset
-    }
-
-    fn id(&self) -> u32 {
+    fn chunk_id(&self) -> &nydus_utils::digest::RafsDigest {
         todo!();
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn id(&self) -> u32 {
         todo!();
     }
 
@@ -102,7 +82,31 @@ impl BlobChunkInfo for MockChunkInfo {
         todo!();
     }
 
-    fn chunk_id(&self) -> &nydus_utils::digest::RafsDigest {
+    fn compressed_offset(&self) -> u64 {
+        self.compress_offset
+    }
+
+    fn compressed_size(&self) -> u32 {
+        self.compress_size
+    }
+
+    fn uncompressed_offset(&self) -> u64 {
+        self.uncompress_offset
+    }
+
+    fn uncompressed_size(&self) -> u32 {
+        self.uncompress_size
+    }
+
+    fn is_compressed(&self) -> bool {
+        self.is_compressed
+    }
+
+    fn is_encrypted(&self) -> bool {
+        false
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
         todo!();
     }
 }

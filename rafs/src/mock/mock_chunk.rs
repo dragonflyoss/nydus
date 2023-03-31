@@ -50,16 +50,20 @@ impl MockChunkInfo {
 }
 
 impl BlobChunkInfo for MockChunkInfo {
-    fn is_compressed(&self) -> bool {
-        self.c_flags.contains(BlobChunkFlags::COMPRESSED)
-    }
-
     fn chunk_id(&self) -> &RafsDigest {
         &self.c_block_id
     }
 
     fn id(&self) -> u32 {
         self.c_index
+    }
+
+    fn is_compressed(&self) -> bool {
+        self.c_flags.contains(BlobChunkFlags::COMPRESSED)
+    }
+
+    fn is_encrypted(&self) -> bool {
+        false
     }
 
     fn as_any(&self) -> &dyn Any {

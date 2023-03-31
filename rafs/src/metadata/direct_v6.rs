@@ -1424,6 +1424,13 @@ impl BlobChunkInfo for DirectChunkInfoV6 {
             .contains(BlobChunkFlags::COMPRESSED)
     }
 
+    fn is_encrypted(&self) -> bool {
+        let state = self.state();
+        self.v5_chunk(&state)
+            .flags
+            .contains(BlobChunkFlags::ENCYPTED)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1497,6 +1504,10 @@ impl BlobChunkInfo for PlainChunkInfoV6 {
     }
 
     fn is_compressed(&self) -> bool {
+        false
+    }
+
+    fn is_encrypted(&self) -> bool {
         false
     }
 

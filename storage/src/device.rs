@@ -521,6 +521,8 @@ bitflags! {
         const COMPRESSED = 0x0000_0001;
         /// Chunk is a hole, with all data as zero.
         const _HOLECHUNK = 0x0000_0002;
+        /// Chunk data is encrypted.
+        const ENCYPTED = 0x0000_0004;
     }
 }
 
@@ -582,6 +584,9 @@ pub trait BlobChunkInfo: Any + Sync + Send {
     /// data may be stored in the compressed data blob for those chunks.
     fn is_compressed(&self) -> bool;
 
+    /// Check whether the chunk is encrypted or not.
+    fn is_encrypted(&self) -> bool;
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -629,6 +634,10 @@ impl BlobChunkInfo for BlobIoChunk {
 
     fn is_compressed(&self) -> bool {
         self.0.is_compressed()
+    }
+
+    fn is_encrypted(&self) -> bool {
+        self.0.is_encrypted()
     }
 
     fn as_any(&self) -> &dyn Any {

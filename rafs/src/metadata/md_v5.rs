@@ -241,6 +241,10 @@ impl BlobChunkInfo for V5IoChunk {
         self.flags.contains(BlobChunkFlags::COMPRESSED)
     }
 
+    fn is_encrypted(&self) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
