@@ -29,7 +29,7 @@ use crate::metadata::RafsStore;
 use crate::RafsIoWrite;
 
 const WRITE_PADDING_DATA: [u8; 4096] = [0u8; 4096];
-const V6_BLOCK_SEG_ALIGNMENT: u64 = 0x20_0000;
+const V6_BLOCK_SEG_ALIGNMENT: u64 = 0x8_0000;
 
 // Rafs v6 dedicated methods
 impl Node {
@@ -764,7 +764,7 @@ impl Bootstrap {
                     "blob id length is bigger than 64 bytes, blob id {:?}",
                     entry.blob_id()
                 ));
-            } else if entry.uncompressed_size() / ctx.v6_block_size() > u32::MAX as u64 {
+            } else if entry.uncompressed_size() / block_size > u32::MAX as u64 {
                 bail!(format!(
                     "uncompressed blob size (0x:{:x}) is too big",
                     entry.uncompressed_size()
@@ -773,12 +773,12 @@ impl Bootstrap {
             if !entry.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST) {
                 inlined_chunk_digest = false;
             }
-            let cnt = (entry.uncompressed_size() / ctx.v6_block_size()) as u32;
+            let cnt = (entry.uncompressed_size() / block_size) as u32;
             if block_count.checked_add(cnt).is_none() {
-                bail!("Too many data blocks in RAFS filesystem, block size 0x{:x}, block count 0x{:x}", ctx.v6_block_size(), block_count as u64 + cnt as u64);
+                bail!("Too many data blocks in RAFS filesystem, block size 0x{:x}, block count 0x{:x}", block_size, block_count as u64 + cnt as u64);
             }
             let mapped_blkaddr = Self::v6_align_mapped_blkaddr(block_size, pos)?;
-            pos += cnt as u64 * ctx.v6_block_size();
+            pos = (mapped_blkaddr + cnt) as u64 * block_size;
             block_count += cnt;
 
             let id = entry.blob_id();
