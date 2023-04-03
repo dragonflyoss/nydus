@@ -63,7 +63,7 @@ Please refer to the nydusd [doc](./nydusd.md) to learn more options.
 - The `device.backend.config.scheme` is the URL scheme for the registry. Leave it empty for automatic detection, or specify `https` or `http` depending on your registry server configuration.
 - The `device.backend.config.auth` is the base64 encoded `username:password` required by nydusd to lazily pull image data from an authenticated registry. The nydus snapshotter will automatically read the authentication information from the `$HOME/.docker/config.json` configuration file. If you are using a registry that requires authentication, you should replace `YOUR_LOGIN_AUTH=` with your own login information.
 - The `device.backend.config.skip_verify` allows you to skip the insecure https certificate checks for the registry, only set it to `true` when necessary. Note that enabling this option is a security risk for the connection to registry, so you should only use this when you are sure it is safe.
-- The `fs_prefetch.enable` option enables nydusd to prefetch image data in a background thread, which can make container startup faster when it needs to read a large amount of image data. Set this to `false` if you don't need this functionality.
+- The `fs_prefetch.enable` option enables nydusd to prefetch image data in background, which can make container startup faster when it needs to read a large amount of image data. Set this to `false` if you don't need this functionality when it brings disk and network pressure.
 
 2. [Optional] Cleanup snapshotter environment:
 
@@ -74,21 +74,22 @@ sudo rm -rf /var/lib/containerd-nydus
 ```
 
 3. Start `containerd-nydus-grpc` (nydus snapshotter):
+Optionally, a TOML based nydus-snapshotter configuration file can be provided by appending `--config <CONFIG>` when starting nydus-snapshotter if you want fine-grained control items. An example configuration file can be found [here](https://github.com/containerd/nydus-snapshotter/blob/main/misc/snapshotter/config.toml)
 
 ```bash
 sudo /usr/bin/containerd-nydus-grpc \
-    --config-path /etc/nydus/nydusd-config.fusedev.json \
+    --nydusd-config /etc/nydus/nydusd-config.fusedev.json \
     --log-to-stdout
 ```
 
 ## Configure and Start Containerd
 
-Nydus uses two features of containerd:
+Nydus depends on two features of Containerd:
 
-- remote snapshotter
-- snapshotter annotations
+- Support remote snapshotter plugin
+- Support passing annotations to remote snapshotter
 
-To set them up, first add something like the following to your `containerd` configuration (default to `/etc/containerd/config.toml`):
+To enable them, add below configuration items to your `containerd` configuration file (default path is `/etc/containerd/config.toml`):
 
 ```toml
 [proxy_plugins]
@@ -97,7 +98,7 @@ To set them up, first add something like the following to your `containerd` conf
     address = "/run/containerd-nydus/containerd-nydus-grpc.sock"
 ```
 
-Next you should change default snapshotter to `nydus` and enable snapshot annotations like below:
+When working with Kubernetes CRI, please change the default snapshotter to `nydus` and enable snapshot annotations like below:
 
 For version 1 containerd config format:
 
@@ -130,11 +131,11 @@ To make it easier to convert and run nydus images next, we can run a local regis
 sudo docker run -d --restart=always -p 5000:5000 registry
 ```
 
-## Convert an Image to Nydus Format
+## Convert/Build an Image to Nydus Format
 
-Currently, nydus image must be created by converting from an existed OCI or docker v2 image.
+Nydus image can be created by converting from an existing OCI or docker v2 image stored in container registry or directly built from Dockerfile(with [Buildkit](https://github.com/moby/buildkit/blob/master/docs/nydus.md))
 
-Note: For private registry repo, please make sure you are authorized to pull and push the target registry. The basic method is to use `docker pull` and `docker push` to validate your access to the target registry.
+Note: For private registry repo, please make sure you are authorized to pull and push the target registry. The basic method is to use `docker pull` and `docker push` to verify your access to the source or target registry.
 
 ```bash
 sudo nydusify convert --source ubuntu --target localhost:5000/ubuntu-nydus
