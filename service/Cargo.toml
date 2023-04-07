@@ -55,3 +55,8 @@ virtiofs = [
 
 block-device = [ "dbs-allocator", "tokio/fs"]
 block-nbd = ["block-device", "bytes"]
+
+coco = [
+    "fuse-backend-rs/fusedev",
+    "nydus-storage/backend-registry",
+]
