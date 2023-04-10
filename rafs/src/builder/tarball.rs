@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read};
+use std::io::{stdin, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -50,7 +50,7 @@ use crate::metadata::{Inode, RafsVersion};
 
 enum TarReader {
     File(File),
-    Buf(BufReaderInfo<File>),
+    Buf(BufReaderInfo<Box<dyn Read>>),
     TarGz(Box<ZlibDecoder<File>>),
     Zran(ZranReader<File>),
 }
@@ -97,53 +97,74 @@ impl<'a> TarballTreeBuilder<'a> {
     }
 
     fn build_tree(&mut self) -> Result<Tree> {
-        let file = OpenOptions::new()
-            .read(true)
-            .open(self.ctx.source_path.clone())
-            .context("tarball: can not open source file for conversion")?;
-
         let reader = match self.ty {
-            ConversionType::EStargzToRafs | ConversionType::TargzToRafs => {
-                TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
-            }
-            ConversionType::EStargzToRef | ConversionType::TargzToRef => {
-                // Use 64K buffer to keep consistence with zlib-random.
-                let mut buf_reader = BufReader::with_capacity(ZRAN_READER_BUF_SIZE, file);
-                let mut buf = [0u8; 3];
-                if buf_reader.read_exact(&mut buf).is_ok()
-                    && buf[0] == 0x1f
-                    && buf[1] == 0x8b
-                    && buf[2] == 0x08
-                {
-                    buf_reader.seek_relative(-3).unwrap();
-                    let generator = ZranContextGenerator::from_buf_reader(buf_reader)?;
-                    let reader = generator.reader();
-                    self.ctx.blob_zran_generator = Some(Mutex::new(generator));
-                    self.ctx.blob_features.insert(BlobFeatures::ZRAN);
-                    TarReader::Zran(reader)
-                } else {
-                    buf_reader.seek_relative(-3).unwrap();
-                    self.ty = ConversionType::TarToRef;
-                    let reader = BufReaderInfo::from_buf_reader(buf_reader);
-                    self.ctx.blob_tar_reader = Some(reader.clone());
-                    TarReader::Buf(reader)
-                }
-            }
-            ConversionType::TarToRafs => TarReader::File(file),
-            ConversionType::TarToRef => {
-                let reader = BufReaderInfo::from_buf_reader(BufReader::new(file));
-                self.ctx.blob_tar_reader = Some(reader.clone());
-                TarReader::Buf(reader)
-            }
             ConversionType::TarToTarfs => {
-                let mut reader = BufReaderInfo::from_buf_reader(BufReader::new(file));
-                self.ctx.blob_tar_reader = Some(reader.clone());
+                let mut breader = if self.ctx.blob_stdin_tar_stream {
+                    BufReaderInfo::from_buf_reader(BufReader::new(
+                        Box::new(stdin()) as Box<dyn Read>
+                    ))
+                } else {
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .open(self.ctx.source_path.clone())
+                        .context("tarball: can not open source file for conversion")?;
+                    BufReaderInfo::from_buf_reader(BufReader::new(Box::new(file) as Box<dyn Read>))
+                };
+                self.ctx.blob_tar_reader = Some(breader.clone());
                 if !self.ctx.blob_id.is_empty() {
-                    reader.enable_digest_calculation(false);
+                    breader.enable_digest_calculation(false);
                 }
-                TarReader::Buf(reader)
+                TarReader::Buf(breader)
             }
-            _ => return Err(anyhow!("tarball: unsupported image conversion type")),
+            _ => {
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .open(self.ctx.source_path.clone())
+                    .context("tarball: can not open source file for conversion")?;
+
+                match self.ty {
+                    ConversionType::EStargzToRafs | ConversionType::TargzToRafs => {
+                        TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
+                    }
+                    ConversionType::EStargzToRef | ConversionType::TargzToRef => {
+                        let mut buf = [0u8; 3];
+                        if file.read(&mut buf).is_ok()
+                            && buf[0] == 0x1f
+                            && buf[1] == 0x8b
+                            && buf[2] == 0x08
+                        {
+                            file.seek(SeekFrom::Current(-3))?;
+                            let generator = ZranContextGenerator::from_buf_reader(
+                                // Use 64K buffer to keep consistence with zlib-random.
+                                BufReader::with_capacity(ZRAN_READER_BUF_SIZE, file),
+                            )?;
+                            let reader = generator.reader();
+                            self.ctx.blob_zran_generator = Some(Mutex::new(generator));
+                            self.ctx.blob_features.insert(BlobFeatures::ZRAN);
+                            TarReader::Zran(reader)
+                        } else {
+                            file.seek(SeekFrom::Current(-3))?;
+                            self.ty = ConversionType::TarToRef;
+                            // Use 64K buffer to keep consistence with zlib-random.
+                            let reader = BufReaderInfo::from_buf_reader(BufReader::with_capacity(
+                                ZRAN_READER_BUF_SIZE,
+                                Box::new(file) as Box<dyn Read>,
+                            ));
+                            self.ctx.blob_tar_reader = Some(reader.clone());
+                            TarReader::Buf(reader)
+                        }
+                    }
+                    ConversionType::TarToRafs => TarReader::File(file),
+                    ConversionType::TarToRef => {
+                        let reader = BufReaderInfo::from_buf_reader(BufReader::new(
+                            Box::new(file) as Box<dyn Read>
+                        ));
+                        self.ctx.blob_tar_reader = Some(reader.clone());
+                        TarReader::Buf(reader)
+                    }
+                    _ => return Err(anyhow!("tarball: unsupported image conversion type")),
+                }
+            }
         };
         let mut tar = Archive::new(reader);
         tar.set_ignore_zeros(true);

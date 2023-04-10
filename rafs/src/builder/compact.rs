@@ -578,6 +578,7 @@ impl BlobCompactor {
             Default::default(),
             None,
             false,
+            false,
             Features::new(),
         );
         let mut bootstrap_mgr =

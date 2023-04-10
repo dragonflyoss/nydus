@@ -1092,9 +1092,10 @@ pub struct BuildContext {
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
     pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
-    pub blob_tar_reader: Option<BufReaderInfo<File>>,
+    pub blob_tar_reader: Option<BufReaderInfo<Box<dyn Read>>>,
     pub blob_features: BlobFeatures,
     pub blob_inline_meta: bool,
+    pub blob_stdin_tar_stream: bool,
 
     pub features: Features,
     pub configuration: Arc<ConfigV2>,
@@ -1115,6 +1116,7 @@ impl BuildContext {
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
         blob_inline_meta: bool,
+        blob_stdin_tar_stream: bool,
         features: Features,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
@@ -1152,6 +1154,7 @@ impl BuildContext {
             blob_tar_reader: None,
             blob_features,
             blob_inline_meta,
+            blob_stdin_tar_stream,
             has_xattr: false,
 
             features,
@@ -1196,6 +1199,7 @@ impl Default for BuildContext {
             blob_features: BlobFeatures::empty(),
             has_xattr: true,
             blob_inline_meta: false,
+            blob_stdin_tar_stream: false,
             features: Features::new(),
             configuration: Arc::new(ConfigV2::default()),
         }

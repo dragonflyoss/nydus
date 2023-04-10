@@ -183,11 +183,11 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
 
     let app = app.subcommand(
             App::new("create")
-                .about("Create RAFS filesystems from directories, tar files or OCI images")
+                .about("Create RAFS filesystems from directories, tar files, tar stream or OCI images")
                 .arg(
                     Arg::new("SOURCE")
                         .help("source from which to build the RAFS filesystem")
-                        .required(true)
+                        .required_unless_present("blob-stdin-tar-stream")
                         .num_args(1),
                 )
                 .arg(
@@ -238,6 +238,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .help("Inline RAFS metadata and blob metadata into the data blob")
                         .action(ArgAction::SetTrue)
                         .conflicts_with("blob-id")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("blob-stdin-tar-stream")
+                        .long("blob-stdin-tar-stream")
+                        .help("create tarfs bootstrap from tar stream via stdin")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("SOURCE")
                         .required(false),
                 )
                 .arg(
@@ -711,10 +719,11 @@ impl Command {
         let blob_offset = Self::get_blob_offset(matches)?;
         let parent_path = Self::get_parent_bootstrap(matches)?;
         let prefetch = Self::get_prefetch(matches)?;
-        let source_path = PathBuf::from(matches.get_one::<String>("SOURCE").unwrap());
+        let source_path = Self::get_source(matches);
         let conversion_type: ConversionType = matches.get_one::<String>("type").unwrap().parse()?;
         let blob_storage = Self::get_blob_storage(matches, conversion_type)?;
         let blob_inline_meta = matches.get_flag("blob-inline-meta");
+        let blob_stdin_tar_stream = matches.get_flag("blob-stdin-tar-stream");
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
@@ -746,6 +755,10 @@ impl Command {
                 .map(|s| s.as_str())
                 .unwrap_or_default(),
         )?;
+
+        if conversion_type != ConversionType::TarToTarfs && blob_stdin_tar_stream {
+            bail!("only tar-tarfs support '--blob-stdin-tar-stream'");
+        }
 
         match conversion_type {
             ConversionType::DirectoryToRafs => {
@@ -806,7 +819,9 @@ impl Command {
                 }
             }
             ConversionType::TarToTarfs => {
-                Self::ensure_file(&source_path)?;
+                if !blob_stdin_tar_stream {
+                    Self::ensure_file(&source_path)?;
+                }
                 if matches.value_source("compressor") != Some(ValueSource::DefaultValue)
                     && compressor != compress::Algorithm::None
                 {
@@ -933,6 +948,7 @@ impl Command {
             prefetch,
             blob_storage,
             blob_inline_meta,
+            blob_stdin_tar_stream,
             features,
         );
         build_ctx.set_fs_version(version);
@@ -1483,6 +1499,13 @@ impl Command {
                     bail!("invalid fs-version: {}", v);
                 }
             }
+        }
+    }
+
+    fn get_source(matches: &ArgMatches) -> PathBuf {
+        match matches.get_one::<String>("SOURCE") {
+            None => PathBuf::from(""),
+            Some(v) => PathBuf::from(v),
         }
     }
 
