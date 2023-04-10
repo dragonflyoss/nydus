@@ -51,31 +51,30 @@ func (d *DescartesItem) Str() string {
 //
 // An example is below:
 //
-//	import (
-//        "fmt"
-//        "github.com/dragonflyoss/image-service/smoke/tests/tool"
-//    )
+//		import (
+//	       "fmt"
+//	       "github.com/dragonflyoss/image-service/smoke/tests/tool"
+//	   )
 //
-//	products := tool.DescartesIterator{}
-//	products.
-//		Dimension("name", []interface{}{"foo", "imoer", "morgan"}).
-//		Dimension("age", []interface{}{"20", "30"}).
-//		Skip(func(item *tool.DescartesItem) bool {
-//    		// skip ("morgan", "30")
-//    		return item.GetString("name") == "morgan" && param.GetString("age") == "30"
-//		})
+//		products := tool.DescartesIterator{}
+//		products.
+//			Dimension("name", []interface{}{"foo", "imoer", "morgan"}).
+//			Dimension("age", []interface{}{"20", "30"}).
+//			Skip(func(item *tool.DescartesItem) bool {
+//	   		// skip ("morgan", "30")
+//	   		return item.GetString("name") == "morgan" && param.GetString("age") == "30"
+//			})
 //
-//    // output:
-//    //       age: 20, name: foo
-//    //       age: 20, name: imoer
-//    //       age: 20, name: morgan
-//    //       age: 30, name: foo
-//    //       age: 30, name: imoer
-//    for products.HasNext(){
-//        item := products.Next()
-//        fmt.Println(item.Str())
-//    }
-//
+//	   // output:
+//	   //       age: 20, name: foo
+//	   //       age: 20, name: imoer
+//	   //       age: 20, name: morgan
+//	   //       age: 30, name: foo
+//	   //       age: 30, name: imoer
+//	   for products.HasNext(){
+//	       item := products.Next()
+//	       fmt.Println(item.Str())
+//	   }
 type DescartesIterator struct {
 	cursores  []int
 	valLists  [][]interface{}
