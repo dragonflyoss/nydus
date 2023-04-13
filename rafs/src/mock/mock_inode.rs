@@ -14,7 +14,7 @@ use fuse_backend_rs::abi::fuse_abi;
 use fuse_backend_rs::api::filesystem::Entry;
 use nydus_utils::{digest::RafsDigest, ByteSize};
 
-use storage::device::{BlobChunkInfo, BlobInfo, BlobIoVec};
+use storage::device::{BlobChunkInfo, BlobDevice, BlobInfo, BlobIoVec};
 
 use super::mock_chunk::MockChunkInfo;
 use super::mock_super::CHUNK_SIZE;
@@ -237,7 +237,13 @@ impl RafsInode for MockInode {
         Ok(0)
     }
 
-    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+    fn alloc_bio_vecs(
+        &self,
+        _device: &BlobDevice,
+        offset: u64,
+        size: usize,
+        user_io: bool,
+    ) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 

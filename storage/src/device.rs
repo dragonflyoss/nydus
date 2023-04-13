@@ -409,34 +409,22 @@ pub trait BlobChunkInfo: Any + Sync + Send {
 /// This helps to feed unified IO description to storage subsystem from both rafs v6 and v5 since
 /// rafs v6 have a different ChunkInfo definition on bootstrap.
 #[derive(Clone)]
-pub enum BlobIoChunk {
-    // For rafs v6 to pass chunk info to storage module.
-    // (blob_index, chunk_index) since it can't load chunks info from bootstrap
-    Address(u32, u32),
-    Base(Arc<dyn BlobChunkInfo>),
-}
+pub struct BlobIoChunk(pub Arc<dyn BlobChunkInfo>);
 
 impl BlobIoChunk {
     /// Convert a [BlobIoChunk] to a reference to [BlobChunkInfo] trait object.
     pub fn as_base(&self) -> &(dyn BlobChunkInfo) {
-        match self {
-            BlobIoChunk::Base(v) => v.as_ref(),
-            _ => panic!("Chunk is not fully loaded"),
-        }
+        self.0.as_ref()
     }
 
     pub fn inner(&self) -> Arc<dyn BlobChunkInfo> {
-        match self {
-            BlobIoChunk::Base(v) => v.clone(),
-            // TODO: Don't panic?
-            _ => panic!("Chunk is not fully loaded"),
-        }
+        self.0.clone()
     }
 }
 
 impl From<Arc<dyn BlobChunkInfo>> for BlobIoChunk {
     fn from(v: Arc<dyn BlobChunkInfo>) -> Self {
-        BlobIoChunk::Base(v)
+        BlobIoChunk(v)
     }
 }
 
@@ -446,13 +434,7 @@ impl BlobChunkInfo for BlobIoChunk {
     }
 
     fn id(&self) -> u32 {
-        // BlobIoChunk::Address is a medium type to pass chunk IO description
-        // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
-        // causes panic. So this is a workaround to avoid panic.
-        match self {
-            Self::Address(_, index) => *index,
-            _ => self.as_base().id(),
-        }
+        self.0.id()
     }
 
     fn blob_index(&self) -> u32 {
@@ -460,13 +442,7 @@ impl BlobChunkInfo for BlobIoChunk {
     }
 
     fn compressed_offset(&self) -> u64 {
-        // BlobIoChunk::Address is a medium type to pass chunk IO description
-        // for rafs v6. It can't implement BlobChunkInfo and calling `as_base`
-        // causes panic. So this is a workaround to avoid panic.
-        match self {
-            Self::Address(_, _) => 0,
-            _ => self.as_base().compressed_offset(),
-        }
+        self.0.compressed_offset()
     }
 
     fn compressed_size(&self) -> u32 {
@@ -864,6 +840,7 @@ pub trait BlobObject: AsRawFd {
 ///
 /// All blob Io requests are actually served by the underlying [BlobCache] object. A new method
 /// [update()]() is added to switch the storage backend on demand.
+#[derive(Default)]
 pub struct BlobDevice {
     //meta: ArcSwap<Arc<dyn BlobCache>>,
     blobs: ArcSwap<Vec<Arc<dyn BlobCache>>>,
@@ -1017,6 +994,17 @@ impl BlobDevice {
         }
 
         true
+    }
+
+    /// RAFS V6: create a `BlobIoChunk` for chunk with index `chunk_index`.
+    pub fn create_io_chunk(&self, blob_index: u32, chunk_index: u32) -> Option<BlobIoChunk> {
+        if (blob_index as usize) < self.blob_count {
+            let state = self.blobs.load();
+            let blob = &state[blob_index as usize];
+            blob.get_chunk_info(chunk_index).map(|v| v.into())
+        } else {
+            None
+        }
     }
 
     fn get_blob_by_iovec(&self, iovec: &BlobIoVec) -> Option<Arc<dyn BlobCache>> {

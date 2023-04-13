@@ -1319,7 +1319,7 @@ fn add_chunk_to_bio_desc(
 
     let bio = BlobIoDesc::new(
         blob,
-        BlobIoChunk::Base(io_chunk),
+        BlobIoChunk(io_chunk),
         chunk_start as u32,
         (chunk_end - chunk_start) as u32,
         user_io,
