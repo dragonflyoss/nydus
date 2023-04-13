@@ -45,6 +45,8 @@ bitflags! {
         const COMPRESSION_ZSTD = 0x0002;
         /// Entry data is compressed with lz4.
         const COMPRESSION_LZ4_BLOCK = 0x0004;
+        /// Bit mask for compression algorithms.
+        const COMPRESSION_MASK = 0x000f;
     }
 }
 
@@ -129,23 +131,23 @@ impl TocEntry {
     }
 
     /// Get compression algorithm to process entry  data.
-    pub fn compressor(&self) -> compress::Algorithm {
-        if self.flags & TocEntryFlags::COMPRESSION_ZSTD.bits() != 0 {
-            compress::Algorithm::Zstd
-        } else if self.flags & TocEntryFlags::COMPRESSION_LZ4_BLOCK.bits() != 0 {
-            compress::Algorithm::Lz4Block
-        } else {
-            compress::Algorithm::None
-        }
+    pub fn compressor(&self) -> Result<compress::Algorithm> {
+        let flags = TocEntryFlags::from_bits(self.flags)
+            .ok_or_else(|| einval!("unknown compression algorithm for TOC entry"))?;
+        let algo = match flags & TocEntryFlags::COMPRESSION_MASK {
+            TocEntryFlags::COMPRESSION_ZSTD => compress::Algorithm::Zstd,
+            TocEntryFlags::COMPRESSION_LZ4_BLOCK => compress::Algorithm::Lz4Block,
+            TocEntryFlags::COMPRESSION_NONE => compress::Algorithm::None,
+            _ => return Err(einval!("unknown compression algorithm for TOC entry")),
+        };
+        Ok(algo)
     }
 
     /// Set compression algorithm to process entry data.
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) -> Result<()> {
         let c: TocEntryFlags = compressor.try_into()?;
 
-        self.flags &= !TocEntryFlags::COMPRESSION_NONE.bits();
-        self.flags &= !TocEntryFlags::COMPRESSION_ZSTD.bits();
-        self.flags &= !TocEntryFlags::COMPRESSION_LZ4_BLOCK.bits();
+        self.flags &= !TocEntryFlags::COMPRESSION_MASK.bits();
         self.flags |= c.bits();
 
         Ok(())
@@ -528,7 +530,8 @@ impl TocEntryList {
             let bootstrap = self
                 .get_entry(TOC_ENTRY_BOOTSTRAP)
                 .ok_or_else(|| enoent!("`image.boot` doesn't exist in the ToC list"))?;
-            if bootstrap.compressor() == compress::Algorithm::None
+            let compressor = bootstrap.compressor()?;
+            if compressor == compress::Algorithm::None
                 && bootstrap.compressed_size() != bootstrap.uncompressed_size()
             {
                 return Err(einval!("invalid ToC entry for `image.boot`"));
@@ -569,7 +572,8 @@ impl TocEntryList {
             let cda = self
                 .get_entry(TOC_ENTRY_BLOB_DIGEST)
                 .ok_or_else(|| enoent!("`blob.digest` doesn't exist in the ToC list"))?;
-            if cda.compressor() == compress::Algorithm::None
+            let compressor = cda.compressor()?;
+            if compressor == compress::Algorithm::None
                 && cda.compressed_size() != cda.uncompressed_size()
             {
                 return Err(einval!("invalid ToC entry for `blob.digest`"));
@@ -876,5 +880,16 @@ mod tests {
         list.extract_from_blob(blob.clone(), Some(path.as_path()), None)
             .unwrap();
         assert_eq!(path.metadata().unwrap().len(), 20480);
+    }
+
+    #[test]
+    fn test_toc_entry_flags() {
+        let flags = TocEntryFlags::try_from(compress::Algorithm::None).unwrap();
+        assert_eq!(flags, TocEntryFlags::COMPRESSION_NONE);
+        let flags = TocEntryFlags::try_from(compress::Algorithm::Lz4Block).unwrap();
+        assert_eq!(flags, TocEntryFlags::COMPRESSION_LZ4_BLOCK);
+        let flags = TocEntryFlags::try_from(compress::Algorithm::Zstd).unwrap();
+        assert_eq!(flags, TocEntryFlags::COMPRESSION_ZSTD);
+        let _e = TocEntryFlags::try_from(compress::Algorithm::GZip).unwrap_err();
     }
 }
