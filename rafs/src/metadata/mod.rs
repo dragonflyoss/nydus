@@ -24,7 +24,7 @@ use fuse_backend_rs::api::filesystem::Entry;
 use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
 use serde::Serialize;
-use storage::device::{BlobChunkInfo, BlobInfo, BlobIoMerge, BlobIoVec};
+use storage::device::{BlobChunkInfo, BlobDevice, BlobInfo, BlobIoMerge, BlobIoVec};
 
 use self::layout::v5::RafsV5PrefetchTable;
 use self::layout::v6::RafsV6PrefetchTable;
@@ -211,7 +211,13 @@ pub trait RafsInode: Any {
     ) -> Result<usize>;
 
     /// Allocate blob io vectors to read file data in range [offset, offset + size).
-    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>>;
+    fn alloc_bio_vecs(
+        &self,
+        device: &BlobDevice,
+        offset: u64,
+        size: usize,
+        user_io: bool,
+    ) -> Result<Vec<BlobIoVec>>;
 
     fn as_any(&self) -> &dyn Any;
 
@@ -651,6 +657,7 @@ impl RafsSuper {
     /// Return Ok(true) means root inode is found during performing prefetching and all files should be prefetched.
     pub fn prefetch_files(
         &self,
+        device: &BlobDevice,
         r: &mut RafsIoReader,
         root_ino: Inode,
         files: Option<Vec<Inode>>,
@@ -662,7 +669,7 @@ impl RafsSuper {
             let mut hardlinks: HashSet<u64> = HashSet::new();
             let mut state = BlobIoMerge::default();
             for f_ino in files {
-                self.prefetch_data(f_ino, &mut state, &mut hardlinks, fetcher)
+                self.prefetch_data(f_ino, device, &mut state, &mut hardlinks, fetcher)
                     .map_err(|e| RafsError::Prefetch(e.to_string()))?;
             }
             for (_id, mut desc) in state.drain() {
@@ -671,9 +678,9 @@ impl RafsSuper {
             // Flush the pending prefetch requests.
             Ok(false)
         } else if self.meta.is_v5() {
-            self.prefetch_data_v5(r, root_ino, fetcher)
+            self.prefetch_data_v5(device, r, root_ino, fetcher)
         } else if self.meta.is_v6() {
-            self.prefetch_data_v6(r, root_ino, fetcher)
+            self.prefetch_data_v6(device, r, root_ino, fetcher)
         } else {
             Err(RafsError::Prefetch(
                 "Unknown filesystem version, prefetch disabled".to_string(),
@@ -684,6 +691,7 @@ impl RafsSuper {
     #[inline]
     fn prefetch_inode<F>(
         inode: &Arc<dyn RafsInode>,
+        device: &BlobDevice,
         state: &mut BlobIoMerge,
         hardlinks: &mut HashSet<u64>,
         prefetcher: F,
@@ -700,7 +708,7 @@ impl RafsSuper {
             }
         }
 
-        let descs = inode.alloc_bio_vecs(0, inode.size() as usize, false)?;
+        let descs = inode.alloc_bio_vecs(device, 0, inode.size() as usize, false)?;
         for desc in descs {
             state.append(desc);
             prefetcher(state);
@@ -712,6 +720,7 @@ impl RafsSuper {
     fn prefetch_data<F>(
         &self,
         ino: u64,
+        device: &BlobDevice,
         state: &mut BlobIoMerge,
         hardlinks: &mut HashSet<u64>,
         fetcher: F,
@@ -741,7 +750,7 @@ impl RafsSuper {
             let mut descendants = Vec::new();
             let _ = inode.collect_descendants_inodes(&mut descendants)?;
             for i in descendants.iter() {
-                Self::prefetch_inode(i, state, hardlinks, try_prefetch)?;
+                Self::prefetch_inode(i, device, state, hardlinks, try_prefetch)?;
             }
         } else if !inode.is_empty_size() && inode.is_reg() {
             // An empty regular file will also be packed into nydus image,
@@ -749,7 +758,7 @@ impl RafsSuper {
             // Moreover, for rafs v5, symlink has size of zero but non-zero size
             // for symlink size. For rafs v6, symlink size is also represented by i_size.
             // So we have to restrain the condition here.
-            Self::prefetch_inode(&inode, state, hardlinks, try_prefetch)?;
+            Self::prefetch_inode(&inode, device, state, hardlinks, try_prefetch)?;
         }
 
         Ok(())

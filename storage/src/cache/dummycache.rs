@@ -80,6 +80,10 @@ impl BlobCache for DummyCache {
         &self.chunk_map
     }
 
+    fn get_chunk_info(&self, _chunk_index: u32) -> Option<Arc<dyn BlobChunkInfo>> {
+        None
+    }
+
     fn prefetch(
         &self,
         _blob_cache: Arc<dyn BlobCache>,

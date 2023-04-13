@@ -23,7 +23,7 @@ use fuse_backend_rs::api::filesystem::Entry;
 use nydus_utils::digest::Algorithm;
 use nydus_utils::{digest::RafsDigest, ByteSize};
 use storage::device::v5::BlobV5ChunkInfo;
-use storage::device::{BlobChunkFlags, BlobChunkInfo, BlobInfo};
+use storage::device::{BlobChunkFlags, BlobChunkInfo, BlobDevice, BlobInfo};
 
 use crate::metadata::layout::v5::{
     rafsv5_alloc_bio_vecs, rafsv5_validate_digest, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode,
@@ -598,7 +598,13 @@ impl RafsInode for CachedInodeV5 {
         Ok(0)
     }
 
-    fn alloc_bio_vecs(&self, offset: u64, size: usize, user_io: bool) -> Result<Vec<BlobIoVec>> {
+    fn alloc_bio_vecs(
+        &self,
+        _device: &BlobDevice,
+        offset: u64,
+        size: usize,
+        user_io: bool,
+    ) -> Result<Vec<BlobIoVec>> {
         rafsv5_alloc_bio_vecs(self, offset, size, user_io)
     }
 
@@ -774,7 +780,7 @@ mod cached_tests {
     use std::sync::Arc;
 
     use nydus_utils::ByteSize;
-    use storage::device::BlobFeatures;
+    use storage::device::{BlobDevice, BlobFeatures};
 
     use crate::metadata::cached_v5::{CachedInodeV5, CachedSuperBlockV5};
     use crate::metadata::layout::v5::{
@@ -952,7 +958,8 @@ mod cached_tests {
         );
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();
-        let descs = cached_inode.alloc_bio_vecs(0, 100, true).unwrap();
+        let device = BlobDevice::default();
+        let descs = cached_inode.alloc_bio_vecs(&device, 0, 100, true).unwrap();
         let desc1 = &descs[0];
         assert_eq!(desc1.bi_size, 100);
         assert_eq!(desc1.bi_vec.len(), 1);
@@ -960,7 +967,7 @@ mod cached_tests {
         assert_eq!(desc1.bi_vec[0].blob.blob_id(), "123333");
 
         let descs = cached_inode
-            .alloc_bio_vecs(1024 * 1024 - 100, 200, true)
+            .alloc_bio_vecs(&device, 1024 * 1024 - 100, 200, true)
             .unwrap();
         let desc2 = &descs[0];
         assert_eq!(desc2.bi_size, 200);
@@ -971,7 +978,7 @@ mod cached_tests {
         assert_eq!(desc2.bi_vec[1].size, 100);
 
         let descs = cached_inode
-            .alloc_bio_vecs(1024 * 1024 + 8192, 1024 * 1024 * 4, true)
+            .alloc_bio_vecs(&device, 1024 * 1024 + 8192, 1024 * 1024 * 4, true)
             .unwrap();
         let desc3 = &descs[0];
         assert_eq!(desc3.bi_size, 1024 * 1024 * 2);

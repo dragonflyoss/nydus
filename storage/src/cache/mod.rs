@@ -148,6 +148,9 @@ pub trait BlobCache: Send + Sync {
     /// Get the underlying `ChunkMap` object.
     fn get_chunk_map(&self) -> &Arc<dyn ChunkMap>;
 
+    /// Get the `BlobChunkInfo` object corresponding to `chunk_index`.
+    fn get_chunk_info(&self, chunk_index: u32) -> Option<Arc<dyn BlobChunkInfo>>;
+
     /// Get a `BlobObject` instance to directly access uncompressed blob file.
     fn get_blob_object(&self) -> Option<&dyn BlobObject> {
         None

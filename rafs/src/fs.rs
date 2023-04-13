@@ -554,7 +554,7 @@ impl Rafs {
             // - prefetch listed passed in by user
             // - or file prefetch list in metadata
             let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
-            let res = sb.prefetch_files(&mut reader, root_ino, inodes, &|desc| {
+            let res = sb.prefetch_files(&device, &mut reader, root_ino, inodes, &|desc| {
                 if desc.bi_size > 0 {
                     device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                         warn!("Prefetch error, {:?}", e);
@@ -603,7 +603,7 @@ impl Rafs {
                 }
             } else {
                 let root = vec![root_ino];
-                let res = sb.prefetch_files(&mut reader, root_ino, Some(root), &|desc| {
+                let res = sb.prefetch_files(&device, &mut reader, root_ino, Some(root), &|desc| {
                     if desc.bi_size > 0 {
                         device.prefetch(&[desc], &[]).unwrap_or_else(|e| {
                             warn!("Prefetch error, {:?}", e);
@@ -761,7 +761,7 @@ impl FileSystem for Rafs {
 
         let real_size = cmp::min(size as u64, inode_size - offset);
         let mut result = 0;
-        let mut descs = inode.alloc_bio_vecs(offset, real_size as usize, true)?;
+        let mut descs = inode.alloc_bio_vecs(&self.device, offset, real_size as usize, true)?;
         debug_assert!(!descs.is_empty() && !descs[0].bi_vec.is_empty());
 
         // Try to amplify user io for Rafs v5, to improve performance.
@@ -775,6 +775,7 @@ impl FileSystem for Rafs {
                 if actual_size < self.amplify_io as u64 {
                     let window_size = self.amplify_io as u64 - actual_size;
                     self.sb.amplify_io(
+                        &self.device,
                         self.amplify_io,
                         &mut descs,
                         &inode,
