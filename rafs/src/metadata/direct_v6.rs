@@ -535,7 +535,7 @@ impl OndiskInodeWrapper {
                 let len = if div_round_up(self.size(), EROFS_BLOCK_SIZE) as usize == block_index + 1
                 {
                     if self.size() % EROFS_BLOCK_SIZE == 0 {
-                        EROFS_BLOCK_SIZE as usize
+                        (EROFS_BLOCK_SIZE - s) as usize
                     } else {
                         (self.size() % EROFS_BLOCK_SIZE - s) as usize
                     }
