@@ -410,7 +410,7 @@ impl OndiskInodeWrapper {
                     Ordering::Greater => (EROFS_BLOCK_SIZE - base) as usize,
                     Ordering::Equal => {
                         if self.size() % EROFS_BLOCK_SIZE == 0 {
-                            EROFS_BLOCK_SIZE as usize
+                            (EROFS_BLOCK_SIZE - base) as usize
                         } else {
                             (self.size() % EROFS_BLOCK_SIZE - base) as usize
                         }
