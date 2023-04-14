@@ -1101,20 +1101,44 @@ impl Node {
 
     pub fn v6_dir_d_size(&self, tree: &Tree) -> Result<u64> {
         ensure!(self.is_dir(), "{} is not a directory", self);
-        // Use length in byte, instead of length in character.
-        let mut d_size: u64 = (".".as_bytes().len()
-            + size_of::<RafsV6Dirent>()
-            + "..".as_bytes().len()
-            + size_of::<RafsV6Dirent>()) as u64;
+        let mut d_size = 0;
 
-        // Safe as we have check tree above.
-        for child in tree.children.iter() {
-            let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
-            // erofs disk format requires dirent to be aligned with 4096.
-            if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
-                d_size = div_round_up(d_size as u64, EROFS_BLOCK_SIZE) * EROFS_BLOCK_SIZE;
+        // Sort all children if "." and ".." are not at the head after sorting.
+        if !tree.children.is_empty() && tree.children[0].node.name() < ".." {
+            let mut children = Vec::with_capacity(tree.children.len() + 2);
+            let dot = OsString::from(".");
+            let dotdot = OsString::from("..");
+            children.push(dot.as_os_str());
+            children.push(dotdot.as_os_str());
+            for child in tree.children.iter() {
+                children.push(child.node.name());
             }
-            d_size += len as u64;
+            children.sort_unstable();
+
+            for c in children {
+                // Use length in byte, instead of length in character.
+                let len = c.as_bytes().len() + size_of::<RafsV6Dirent>();
+                // erofs disk format requires dirent to be aligned to block size.
+                if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
+                    d_size = round_up(d_size as u64, EROFS_BLOCK_SIZE);
+                }
+                d_size += len as u64;
+            }
+        } else {
+            // Avoid sorting again if "." and ".." are at the head after sorting due to that
+            // `tree.children` has already been sorted.
+            d_size = (".".as_bytes().len()
+                + size_of::<RafsV6Dirent>()
+                + "..".as_bytes().len()
+                + size_of::<RafsV6Dirent>()) as u64;
+            for child in tree.children.iter() {
+                let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
+                // erofs disk format requires dirent to be aligned to block size.
+                if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
+                    d_size = round_up(d_size as u64, EROFS_BLOCK_SIZE);
+                }
+                d_size += len as u64;
+            }
         }
 
         Ok(d_size)
