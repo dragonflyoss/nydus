@@ -14,7 +14,6 @@ extern crate nydus_error;
 
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
-use std::sync::Arc;
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use nix::sys::signal;
@@ -25,8 +24,8 @@ use nydus_api::BuildTimeInfo;
 use nydus_app::{dump_program_info, setup_logging};
 use nydus_service::daemon::DaemonController;
 use nydus_service::{
-    create_daemon, create_fuse_daemon, validate_threads_configuration, Error as NydusError,
-    FsBackendMountCmd, FsBackendType, ServiceArgs,
+    create_daemon, create_fuse_daemon, create_vfs_backend, validate_threads_configuration,
+    Error as NydusError, FsBackendMountCmd, FsBackendType, ServiceArgs,
 };
 
 use crate::api_server_glue::ApiServerController;
@@ -378,7 +377,7 @@ fn process_fs_service(
     // safe as virtual_mountpoint default to "/"
     let virtual_mnt = args.value_of("virtual-mountpoint").unwrap();
 
-    let mut opts = fuse_backend_rs::api::VfsOptions::default();
+    let mut fs_type = FsBackendType::PassthroughFs;
     let mount_cmd = if let Some(shared_dir) = shared_dir {
         let cmd = FsBackendMountCmd {
             fs_type: FsBackendType::PassthroughFs,
@@ -387,11 +386,6 @@ fn process_fs_service(
             mountpoint: virtual_mnt.to_string(),
             prefetch_files: None,
         };
-
-        // passthroughfs requires !no_open
-        opts.no_open = false;
-        opts.no_opendir = false;
-        opts.killpriv_v2 = true;
 
         Some(cmd)
     } else if let Some(b) = bootstrap {
@@ -467,23 +461,14 @@ fn process_fs_service(
             prefetch_files,
         };
 
-        // rafs can be readonly and skip open
-        opts.no_open = true;
+        fs_type = FsBackendType::Rafs;
 
         Some(cmd)
     } else {
         None
     };
 
-    // Enable all options required by passthroughfs
-    if !is_fuse && args.is_present("hybrid-mode") {
-        opts.no_open = false;
-        opts.no_opendir = false;
-        opts.killpriv_v2 = true;
-    }
-
-    let vfs = fuse_backend_rs::api::Vfs::new(opts);
-    let vfs = Arc::new(vfs);
+    let vfs = create_vfs_backend(fs_type, is_fuse, args.is_present("hybrid-mode"))?;
     // Basically, below two arguments are essential for live-upgrade/failover/ and external management.
     let daemon_id = args.value_of("id").map(|id| id.to_string());
     let supervisor = args.value_of("supervisor").map(|s| s.to_string());
