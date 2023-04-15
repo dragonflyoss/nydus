@@ -42,7 +42,7 @@ use crate::daemon::{
 };
 use crate::fs_service::{FsBackendCollection, FsBackendMountCmd, FsService};
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
-use crate::{Error as NydusError, Result as NydusResult};
+use crate::{Error as NydusError, FsBackendType, Result as NydusResult};
 
 #[derive(Serialize)]
 struct FuseOp {
@@ -613,4 +613,34 @@ pub fn create_fuse_daemon(
     }
 
     Ok(daemon)
+}
+
+/// Create vfs backend with rafs or passthrough as the fuse filesystem driver
+pub fn create_vfs_backend(
+    fs_type: FsBackendType,
+    is_fuse: bool,
+    hybrid_mode: bool,
+) -> Result<Arc<Vfs>> {
+    let mut opts = fuse_backend_rs::api::VfsOptions::default();
+    match fs_type {
+        FsBackendType::PassthroughFs => {
+            // passthroughfs requires !no_open
+            opts.no_open = false;
+            opts.no_opendir = false;
+            opts.killpriv_v2 = true;
+        }
+        FsBackendType::Rafs => {
+            // rafs can be readonly and skip open
+            opts.no_open = true;
+        }
+    };
+
+    if !is_fuse && hybrid_mode {
+        opts.no_open = false;
+        opts.no_opendir = false;
+        opts.killpriv_v2 = true;
+    }
+
+    let vfs = fuse_backend_rs::api::Vfs::new(opts);
+    Ok(Arc::new(vfs))
 }

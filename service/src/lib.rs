@@ -38,7 +38,7 @@ pub mod upgrade;
 
 pub use blob_cache::BlobCacheMgr;
 pub use fs_service::{FsBackendCollection, FsBackendMountCmd, FsBackendUmountCmd, FsService};
-pub use fusedev::{create_fuse_daemon, FusedevDaemon};
+pub use fusedev::{create_fuse_daemon, create_vfs_backend, FusedevDaemon};
 pub use singleton::create_daemon;
 
 #[cfg(target_os = "linux")]
