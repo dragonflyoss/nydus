@@ -1005,6 +1005,7 @@ impl BlobMetaChunkArray {
     }
 
     /// Add an entry of v2 chunk compression information into the array.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_v2(
         &mut self,
         compressed_offset: u64,
@@ -1012,6 +1013,7 @@ impl BlobMetaChunkArray {
         uncompressed_offset: u64,
         uncompressed_size: u32,
         compressed: bool,
+        is_batch: bool,
         data: u64,
     ) {
         match self {
@@ -1022,6 +1024,7 @@ impl BlobMetaChunkArray {
                 meta.set_uncompressed_offset(uncompressed_offset);
                 meta.set_uncompressed_size(uncompressed_size);
                 meta.set_compressed(compressed);
+                meta.set_batch(is_batch);
                 meta.set_data(data);
                 v.push(meta);
             }

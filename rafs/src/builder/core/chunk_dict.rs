@@ -263,6 +263,7 @@ mod tests {
             compressor: compress::Algorithm::Lz4Block,
             digester: digest::Algorithm::Blake3,
             chunk_size: 0x100000,
+            batch_size: 0,
             explicit_uidgid: true,
             is_tarfs_mode: false,
         };

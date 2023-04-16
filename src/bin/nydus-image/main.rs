@@ -18,7 +18,7 @@ use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use clap::parser::ValueSource;
@@ -37,7 +37,7 @@ use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::factory::BlobFactory;
-use nydus_storage::meta::format_blob_features;
+use nydus_storage::meta::{format_blob_features, BatchContextGenerator};
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::trace::{EventTracerClass, TimingTracerClass, TraceClass};
 use nydus_utils::{compress, digest, event_tracer, register_tracer, root_tracer, timing_tracer};
@@ -263,6 +263,13 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("chunk-size")
                         .help("Set the size of data chunks, must be power of two and between 0x1000-0x1000000:")
                         .required(false),
+                )
+                .arg(
+                    Arg::new("batch-size")
+                        .long("batch-size")
+                        .help("Set the batch size to merge small chunks, must be power of two, between 0x1000-0x1000000 or be zero:")
+                        .required(false)
+                        .default_value("0"),
                 )
                 .arg(
                     Arg::new("compressor")
@@ -718,6 +725,7 @@ impl Command {
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
+        let batch_size = Self::get_batch_size(matches, version, conversion_type, chunk_size)?;
         let aligned_chunk = if version.is_v6() && conversion_type != ConversionType::TarToTarfs {
             true
         } else {
@@ -937,6 +945,7 @@ impl Command {
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
+        build_ctx.set_batch_size(batch_size);
 
         let mut config = Self::get_configuration(matches)?;
         if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
@@ -952,6 +961,7 @@ impl Command {
                 compressor,
                 digester,
                 chunk_size,
+                batch_size,
                 explicit_uidgid: !repeatable,
                 is_tarfs_mode: false,
             };
@@ -970,6 +980,14 @@ impl Command {
             let bootstrap_path = Self::get_bootstrap_storage(matches)?;
             BootstrapManager::new(Some(bootstrap_path), parent_path)
         };
+
+        // Legality has been checked and filtered by `get_batch_size()`.
+        if build_ctx.batch_size > 0 {
+            let generator = BatchContextGenerator::new(build_ctx.batch_size)?;
+            build_ctx.blob_batch_generator = Some(Mutex::new(generator));
+            build_ctx.blob_features.insert(BlobFeatures::BATCH);
+            build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
+        }
 
         let mut builder: Box<dyn Builder> = match conversion_type {
             ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
@@ -1448,6 +1466,52 @@ impl Command {
                     bail!("invalid chunk size: {}", chunk_size);
                 }
                 Ok(chunk_size)
+            }
+        }
+    }
+
+    fn get_batch_size(
+        matches: &ArgMatches,
+        version: RafsVersion,
+        ty: ConversionType,
+        chunk_size: u32,
+    ) -> Result<u32> {
+        match matches.get_one::<String>("batch-size") {
+            None => Ok(0),
+            Some(v) => {
+                let batch_size = if v.starts_with("0x") || v.starts_with("0X") {
+                    u32::from_str_radix(&v[2..], 16).context(format!("invalid batch size {}", v))?
+                } else {
+                    v.parse::<u32>()
+                        .context(format!("invalid chunk size {}", v))?
+                };
+                if batch_size > 0 {
+                    if version.is_v5() {
+                        bail!("`--batch-size` with non-zero value conflicts with `--fs-version 5`");
+                    }
+                    match ty {
+                        ConversionType::DirectoryToRafs
+                        | ConversionType::EStargzToRafs
+                        | ConversionType::TargzToRafs
+                        | ConversionType::TarToRafs => {
+                            if batch_size as u64 > RAFS_MAX_CHUNK_SIZE
+                                || batch_size < 0x1000
+                                || !batch_size.is_power_of_two()
+                            {
+                                bail!("invalid batch size: {}", batch_size);
+                            }
+                            if batch_size > chunk_size {
+                                bail!(
+                                    "batch size 0x{:x} is bigger than chunk size 0x{:x}",
+                                    batch_size,
+                                    chunk_size
+                                );
+                            }
+                        }
+                        _ => bail!("unsupported ConversionType for batch chunk: {}", ty),
+                    }
+                }
+                Ok(batch_size)
             }
         }
     }

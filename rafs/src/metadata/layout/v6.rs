@@ -1634,7 +1634,8 @@ impl RafsV6Blob {
 
         let count = chunk_count as u64;
         if blob_features.contains(BlobFeatures::CHUNK_INFO_V2)
-            && blob_features.contains(BlobFeatures::ZRAN)
+            && (blob_features.contains(BlobFeatures::BATCH)
+                || blob_features.contains(BlobFeatures::ZRAN))
         {
             if ci_uncompr_size < count * size_of::<BlobChunkInfoV2Ondisk>() as u64 {
                 error!(
@@ -1651,7 +1652,9 @@ impl RafsV6Blob {
                 );
                 return false;
             }
-        } else if blob_features.contains(BlobFeatures::ZRAN) {
+        } else if blob_features.contains(BlobFeatures::BATCH)
+            || blob_features.contains(BlobFeatures::ZRAN)
+        {
             error!(
                 "RafsV6Blob: idx {} invalid feature bits {}",
                 blob_index,

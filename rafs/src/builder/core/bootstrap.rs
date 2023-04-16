@@ -296,6 +296,7 @@ impl Bootstrap {
             compressor: ctx.compressor,
             digester: ctx.digester,
             chunk_size: ctx.chunk_size,
+            batch_size: ctx.batch_size,
             explicit_uidgid: ctx.explicit_uidgid,
             version: ctx.fs_version,
             is_tarfs_mode: rs.meta.flags.contains(RafsSuperFlags::TARTFS_MODE),

@@ -367,6 +367,8 @@ pub struct RafsSuperConfig {
     pub digester: digest::Algorithm,
     /// Size of data chunks.
     pub chunk_size: u32,
+    /// Size of batch data chunks.
+    pub batch_size: u32,
     /// Whether `explicit_uidgid` enabled or not.
     pub explicit_uidgid: bool,
     /// RAFS in TARFS mode.
@@ -429,6 +431,8 @@ pub struct RafsSuperMeta {
     pub root_inode: Inode,
     /// Chunk size.
     pub chunk_size: u32,
+    /// Batch chunk size.
+    pub batch_size: u32,
     /// Number of inodes in the filesystem.
     pub inodes_count: u64,
     /// V5: superblock flags for Rafs v5.
@@ -525,6 +529,7 @@ impl RafsSuperMeta {
             compressor: self.get_compressor(),
             digester: self.get_digester(),
             chunk_size: self.chunk_size,
+            batch_size: self.batch_size,
             explicit_uidgid: self.explicit_uidgid(),
             is_tarfs_mode: self.flags.contains(RafsSuperFlags::TARTFS_MODE),
         }
@@ -540,6 +545,7 @@ impl Default for RafsSuperMeta {
             inodes_count: 0,
             root_inode: 0,
             chunk_size: 0,
+            batch_size: 0,
             flags: RafsSuperFlags::empty(),
             inode_table_entries: 0,
             inode_table_offset: 0,
