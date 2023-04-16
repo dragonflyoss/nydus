@@ -271,7 +271,7 @@ impl Node {
             };
 
             let chunk_data = &mut data_buf[0..uncompressed_size as usize];
-            let (mut chunk, chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
+            let (mut chunk, mut chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
             if let Some(h) = inode_hasher.as_mut() {
                 h.digest_update(chunk.id().as_ref());
             }
@@ -298,8 +298,10 @@ impl Node {
             if ctx.conversion_type == ConversionType::TarToTarfs {
                 chunk.set_uncompressed_offset(chunk.compressed_offset());
                 chunk.set_uncompressed_size(chunk.compressed_size());
-            } else {
-                self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?;
+            } else if let Some(info) =
+                self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?
+            {
+                chunk_info = Some(info);
             }
 
             let chunk = Arc::new(chunk);
@@ -366,6 +368,8 @@ impl Node {
         Ok((chunk, chunk_info))
     }
 
+    /// Dump a chunk from u8 slice into the data blob.
+    /// Return `BlobChunkInfoV2Ondisk` when the chunk is added into a batch chunk.
     fn dump_file_chunk(
         &self,
         ctx: &BuildContext,
@@ -373,7 +377,7 @@ impl Node {
         blob_writer: &mut ArtifactWriter,
         chunk_data: &[u8],
         chunk: &mut ChunkWrapper,
-    ) -> Result<()> {
+    ) -> Result<Option<BlobChunkInfoV2Ondisk>> {
         let uncompressed_size = chunk_data.len() as u32;
         let aligned_chunk_size = if ctx.aligned_chunk {
             // Safe to unwrap because `chunk_size` is much less than u32::MAX.
@@ -387,7 +391,36 @@ impl Node {
         chunk.set_uncompressed_offset(pre_uncompressed_offset);
         chunk.set_uncompressed_size(uncompressed_size);
 
-        if !ctx.blob_features.contains(BlobFeatures::SEPARATE) {
+        let mut chunk_info = None;
+
+        if self.inode.child_count() == 1
+            && uncompressed_size < ctx.batch_size / 2
+            && ctx.blob_batch_generator.is_some()
+        {
+            // This chunk will be added into a batch chunk.
+            let mut batch = ctx.blob_batch_generator.as_ref().unwrap().lock().unwrap();
+
+            if batch.chunk_data_buf_len() as u32 + uncompressed_size < ctx.batch_size {
+                // Add into current batch chunk directly.
+                chunk_info =
+                    Some(batch.generate_chunk_info(pre_uncompressed_offset, uncompressed_size)?);
+                batch.append_chunk_data_buf(chunk_data);
+            } else {
+                // Dump current batch chunk if exists, and then add into a new batch chunk.
+                if !batch.chunk_data_buf_is_empty() {
+                    // Dump current batch chunk.
+                    let (pre_compressed_offset, compressed_size, _) =
+                        Self::write_chunk_data(ctx, blob_ctx, blob_writer, batch.chunk_data_buf())?;
+                    batch.add_context(pre_compressed_offset, compressed_size);
+                    batch.clear_chunk_data_buf();
+                }
+
+                // Add into a new batch chunk.
+                chunk_info =
+                    Some(batch.generate_chunk_info(pre_uncompressed_offset, uncompressed_size)?);
+                batch.append_chunk_data_buf(chunk_data);
+            }
+        } else if !ctx.blob_features.contains(BlobFeatures::SEPARATE) {
             // For other case which needs to write chunk data to data blobs.
             let (pre_compressed_offset, compressed_size, is_compressed) =
                 Self::write_chunk_data(ctx, blob_ctx, blob_writer, chunk_data)
@@ -399,7 +432,7 @@ impl Node {
 
         event_tracer!("blob_uncompressed_size", +uncompressed_size);
 
-        Ok(())
+        Ok(chunk_info)
     }
 
     pub fn write_chunk_data(

@@ -248,6 +248,27 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set flag for whether chunk is batch chunk.
+    pub fn set_batch(&mut self, batch: bool) {
+        self.ensure_owned();
+        match self {
+            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::BATCH, batch),
+            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::BATCH, batch),
+            ChunkWrapper::Ref(_c) => panic!("unexpected"),
+        }
+    }
+
+    /// Check whether the chunk is batch chunk or not.
+    pub fn is_batch(&self) -> bool {
+        match self {
+            ChunkWrapper::V5(c) => c.flags.contains(BlobChunkFlags::BATCH),
+            ChunkWrapper::V6(c) => c.flags.contains(BlobChunkFlags::BATCH),
+            ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref())
+                .flags()
+                .contains(BlobChunkFlags::BATCH),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Set a group of chunk information fields.
     pub fn set_chunk_info(

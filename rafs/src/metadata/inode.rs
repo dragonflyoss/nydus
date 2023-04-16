@@ -276,7 +276,7 @@ impl InodeWrapper {
         }
     }
 
-    /// Set inode content size of regular file, directory and symlink.
+    /// Get inode content size of regular file, directory and symlink.
     pub fn size(&self) -> u64 {
         match self {
             InodeWrapper::V5(i) => i.i_size,
@@ -285,7 +285,7 @@ impl InodeWrapper {
         }
     }
 
-    /// Get inode content size.
+    /// Set inode content size.
     pub fn set_size(&mut self, size: u64) {
         self.ensure_owned();
         match self {

@@ -26,8 +26,8 @@ use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::toc::{TocEntryList, TocLocation};
 use nydus_storage::meta::{
-    toc, BlobChunkInfoV2Ondisk, BlobCompressionContextHeader, BlobMetaChunkArray,
-    BlobMetaChunkInfo, ZranContextGenerator,
+    toc, BatchContextGenerator, BlobChunkInfoV2Ondisk, BlobCompressionContextHeader,
+    BlobMetaChunkArray, BlobMetaChunkInfo, ZranContextGenerator,
 };
 use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down, BufReaderInfo};
@@ -466,6 +466,9 @@ impl BlobContext {
             .set_chunk_info_v2(features.contains(BlobFeatures::CHUNK_INFO_V2));
         blob_ctx
             .blob_meta_header
+            .set_ci_batch(features.contains(BlobFeatures::BATCH));
+        blob_ctx
+            .blob_meta_header
             .set_ci_zran(features.contains(BlobFeatures::ZRAN));
         blob_ctx
             .blob_meta_header
@@ -653,6 +656,7 @@ impl BlobContext {
                             chunk.uncompressed_offset(),
                             chunk.uncompressed_size(),
                             chunk.is_compressed(),
+                            chunk.is_batch(),
                             0,
                         );
                     }
@@ -1074,6 +1078,8 @@ pub struct BuildContext {
     pub whiteout_spec: WhiteoutSpec,
     /// Chunk slice size.
     pub chunk_size: u32,
+    /// Batch chunk data size.
+    pub batch_size: u32,
     /// Version number of output metadata and data blob.
     pub fs_version: RafsVersion,
     /// Whether any directory/file has extended attributes.
@@ -1092,6 +1098,7 @@ pub struct BuildContext {
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
     pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
+    pub blob_batch_generator: Option<Mutex<BatchContextGenerator>>,
     pub blob_tar_reader: Option<BufReaderInfo<File>>,
     pub blob_features: BlobFeatures,
     pub blob_inline_meta: bool,
@@ -1141,6 +1148,7 @@ impl BuildContext {
             whiteout_spec,
 
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
+            batch_size: 0,
             fs_version: RafsVersion::default(),
 
             conversion_type,
@@ -1149,6 +1157,7 @@ impl BuildContext {
             prefetch,
             blob_storage,
             blob_zran_generator: None,
+            blob_batch_generator: None,
             blob_tar_reader: None,
             blob_features,
             blob_inline_meta,
@@ -1165,6 +1174,10 @@ impl BuildContext {
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
         self.chunk_size = chunk_size;
+    }
+
+    pub fn set_batch_size(&mut self, batch_size: u32) {
+        self.batch_size = batch_size;
     }
 
     pub fn set_configuration(&mut self, config: Arc<ConfigV2>) {
@@ -1184,6 +1197,7 @@ impl Default for BuildContext {
             whiteout_spec: WhiteoutSpec::default(),
 
             chunk_size: RAFS_DEFAULT_CHUNK_SIZE as u32,
+            batch_size: 0,
             fs_version: RafsVersion::default(),
 
             conversion_type: ConversionType::default(),
@@ -1192,6 +1206,7 @@ impl Default for BuildContext {
             prefetch: Prefetch::default(),
             blob_storage: None,
             blob_zran_generator: None,
+            blob_batch_generator: None,
             blob_tar_reader: None,
             blob_features: BlobFeatures::empty(),
             has_xattr: true,
