@@ -143,23 +143,19 @@ impl Blob {
         // Prepare blob meta information data.
         let blob_meta_info = &blob_ctx.blob_meta_info;
         let mut ci_data = blob_meta_info.as_byte_slice();
-        let mut zran_buf = Vec::new();
+        let mut inflate_buf = Vec::new();
         let mut header = blob_ctx.blob_meta_header;
         if let Some(ref zran) = ctx.blob_zran_generator {
-            let (zran_data, zran_count) = zran.lock().unwrap().to_vec()?;
-            header.set_ci_zran_count(zran_count);
+            let (inflate_data, inflate_count) = zran.lock().unwrap().to_vec()?;
+            header.set_ci_zran_count(inflate_count);
             header.set_ci_zran_offset(ci_data.len() as u64);
-            header.set_ci_zran_size(zran_data.len() as u64);
+            header.set_ci_zran_size(inflate_data.len() as u64);
             header.set_ci_zran(true);
             header.set_separate_blob(true);
-            zran_buf = [ci_data, &zran_data].concat();
-            ci_data = &zran_buf;
+            inflate_buf = [ci_data, &inflate_data].concat();
+            ci_data = &inflate_buf;
         } else if ctx.blob_tar_reader.is_some() {
             header.set_separate_blob(true);
-            header.set_ci_zran(false);
-        } else {
-            header.set_separate_blob(false);
-            header.set_ci_zran(false);
         };
 
         let mut compressor = compress::Algorithm::Zstd;
@@ -212,7 +208,7 @@ impl Blob {
         if ctx.features.is_enabled(Feature::BlobToc) {
             let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
             let ci_data = if ctx.blob_features.contains(BlobFeatures::ZRAN) {
-                zran_buf.as_slice()
+                inflate_buf.as_slice()
             } else {
                 blob_ctx.blob_meta_info.as_byte_slice()
             };
