@@ -173,9 +173,9 @@ impl<R: Read> ZranContextGenerator<R> {
         chunk.set_compressed_size(info.in_len);
         chunk.set_uncompressed_offset(self.uncomp_pos);
         chunk.set_uncompressed_size(info.ci_len);
+        chunk.set_zran(true);
         chunk.set_zran_index(info.ci_index);
         chunk.set_zran_offset(info.ci_offset);
-        chunk.set_zran(true);
         chunk.set_compressed(true);
 
         self.uncomp_pos += round_up_4k(info.ci_len as u64);
@@ -183,7 +183,7 @@ impl<R: Read> ZranContextGenerator<R> {
         Ok(chunk)
     }
 
-    /// Save the zlib/gzip random access information to a file.
+    /// Convert all the zlib/gzip random access information to a u8 vector.
     pub fn to_vec(&self) -> Result<(Vec<u8>, u32)> {
         let mut data = Vec::new();
         let records = self.generator.get_compression_ctx_array();
