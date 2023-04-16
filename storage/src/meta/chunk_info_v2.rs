@@ -61,13 +61,15 @@ impl BlobChunkInfoV2Ondisk {
     }
 
     pub(crate) fn set_zran_index(&mut self, index: u32) {
-        let mut data = u64::from_le(self.data) & !0xffff_ffff_0000_0000;
+        assert!(self.is_zran());
+        let mut data = u64::from_le(self.data) & 0x0000_0000_ffff_ffff;
         data |= (index as u64) << 32;
         self.data = u64::to_le(data);
     }
 
     pub(crate) fn set_zran_offset(&mut self, offset: u32) {
-        let mut data = u64::from_le(self.data) & !0x0000_0000_ffff_ffff;
+        assert!(self.is_zran());
+        let mut data = u64::from_le(self.data) & 0xffff_ffff_0000_0000;
         data |= offset as u64;
         self.data = u64::to_le(data);
     }
