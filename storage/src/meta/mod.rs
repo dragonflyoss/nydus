@@ -55,6 +55,9 @@ pub mod toc;
 mod zran;
 pub use zran::{ZranContextGenerator, ZranInflateContext};
 
+mod batch;
+pub use batch::{BatchContextGenerator, BatchInflateContext};
+
 const BLOB_CCT_MAGIC: u32 = 0xb10bb10bu32;
 const BLOB_CCT_HEADER_SIZE: u64 = 0x1000u64;
 const BLOB_CCT_CHUNK_SIZE_MASK: u64 = 0xff_ffff;
@@ -270,6 +273,15 @@ impl BlobCompressionContextHeader {
             self.s_features |= BlobFeatures::SEPARATE.bits();
         } else {
             self.s_features &= !BlobFeatures::SEPARATE.bits();
+        }
+    }
+
+    /// Set flag indicating whether it's a blob for batch chunk or not.
+    pub fn set_ci_batch(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::BATCH.bits();
+        } else {
+            self.s_features &= !BlobFeatures::BATCH.bits();
         }
     }
 
@@ -1686,6 +1698,9 @@ pub trait BlobMetaChunkInfo {
     /// compressed.
     fn is_compressed(&self) -> bool;
 
+    /// Check whether the chunk has associated Batch context data.
+    fn is_batch(&self) -> bool;
+
     /// Check whether the chunk has associated ZRan context data.
     fn is_zran(&self) -> bool;
 
@@ -1694,6 +1709,12 @@ pub trait BlobMetaChunkInfo {
 
     /// Get offset to get context data from the associated ZRan context.
     fn get_zran_offset(&self) -> u32;
+
+    /// Get index of the Batch context data associated with the chunk.
+    fn get_batch_index(&self) -> u32;
+
+    /// Get offset of uncompressed chunk data inside the batch chunk.
+    fn get_uncompressed_offset_in_batch_buf(&self) -> u32;
 
     /// Get data associated with the entry. V2 only, V1 just returns zero.
     fn get_data(&self) -> u64;
@@ -1707,6 +1728,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     let mut output = String::new();
     if features.contains(BlobFeatures::ALIGNED) {
         output += "aligned ";
+    }
+    if features.contains(BlobFeatures::BATCH) {
+        output += "batch ";
     }
     if features.contains(BlobFeatures::CAP_TAR_TOC) {
         output += "cap_toc ";
