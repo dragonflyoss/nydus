@@ -387,32 +387,39 @@ impl Node {
         chunk.set_uncompressed_offset(pre_uncompressed_offset);
         chunk.set_uncompressed_size(uncompressed_size);
 
-        let compressed_size = if ctx.blob_features.contains(BlobFeatures::SEPARATE) {
-            // For `tar-ref`, `targz-ref`, `estargz-ref` and `estargzindex-ref`.
-            chunk.compressed_size()
-        } else {
+        if !ctx.blob_features.contains(BlobFeatures::SEPARATE) {
             // For other case which needs to write chunk data to data blobs.
-            let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
-                .with_context(|| format!("failed to compress node file {:?}", self.path()))?;
-            let compressed_size = compressed.len() as u32;
-            let pre_compressed_offset = blob_ctx.current_compressed_offset;
-            blob_writer
-                .write_all(&compressed)
-                .context("failed to write blob")?;
-            blob_ctx.blob_hash.update(&compressed);
-            blob_ctx.current_compressed_offset += compressed_size as u64;
-            blob_ctx.compressed_blob_size += compressed_size as u64;
-
+            let (pre_compressed_offset, compressed_size, is_compressed) =
+                Self::write_chunk_data(ctx, blob_ctx, blob_writer, chunk_data)
+                    .with_context(|| format!("failed to write chunk data {:?}", self.path()))?;
             chunk.set_compressed_offset(pre_compressed_offset);
             chunk.set_compressed_size(compressed_size);
             chunk.set_compressed(is_compressed);
-            compressed_size
-        };
+        }
 
         event_tracer!("blob_uncompressed_size", +uncompressed_size);
-        event_tracer!("blob_compressed_size", +compressed_size);
 
         Ok(())
+    }
+
+    pub fn write_chunk_data(
+        ctx: &BuildContext,
+        blob_ctx: &mut BlobContext,
+        blob_writer: &mut ArtifactWriter,
+        chunk_data: &[u8],
+    ) -> Result<(u64, u32, bool)> {
+        let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
+            .with_context(|| "failed to compress node file".to_string())?;
+        let compressed_size = compressed.len() as u32;
+        let pre_compressed_offset = blob_ctx.current_compressed_offset;
+        blob_writer
+            .write_all(&compressed)
+            .context("failed to write blob")?;
+        blob_ctx.blob_hash.update(&compressed);
+        blob_ctx.current_compressed_offset += compressed_size as u64;
+        blob_ctx.compressed_blob_size += compressed_size as u64;
+
+        Ok((pre_compressed_offset, compressed_size, is_compressed))
     }
 
     fn deduplicate_chunk(
