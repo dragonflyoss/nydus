@@ -45,7 +45,7 @@ use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
 
 pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
-pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_007f;
+pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_00ff;
 
 bitflags! {
     /// Features bits for blob management.
@@ -64,6 +64,8 @@ bitflags! {
         const INLINED_CHUNK_DIGEST = 0x0000_0020;
         /// Blob is for RAFS filesystems in TARFS mode.
         const TARFS = 0x0000_0040;
+        /// Small file chunk are merged into batch chunk.
+        const BATCH = 0x0000_0080;
         /// Blob has TAR headers to separate contents.
         const HAS_TAR_HEADER = 0x1000_0000;
         /// Blob has Table of Content (ToC) at the tail.
@@ -546,6 +548,8 @@ bitflags! {
         const _HOLECHUNK = 0x0000_0002;
         /// Chunk data is encrypted.
         const ENCYPTED = 0x0000_0004;
+        /// Chunk data is merged into a batch chunk.
+        const BATCH = 0x0000_0008;
     }
 }
 

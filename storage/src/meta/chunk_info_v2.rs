@@ -16,7 +16,8 @@ const CHUNK_V2_FLAG_MASK: u64 = 0xff << 56;
 const CHUNK_V2_FLAG_COMPRESSED: u64 = 0x1 << 56;
 const CHUNK_V2_FLAG_ENCRYPTED: u64 = 0x2 << 56;
 const CHUNK_V2_FLAG_ZRAN: u64 = 0x2 << 56;
-const CHUNK_V2_FLAG_VALID: u64 = 0x3 << 56;
+const CHUNK_V2_FLAG_BATCH: u64 = 0x4 << 56;
+const CHUNK_V2_FLAG_VALID: u64 = 0x7 << 56;
 
 /// Chunk compression information on disk format V2.
 #[repr(C, packed)]
@@ -56,6 +57,14 @@ impl BlobChunkInfoV2Ondisk {
         }
     }
 
+    pub(crate) fn set_batch(&mut self, batch: bool) {
+        if batch {
+            self.uncomp_info |= u64::to_le(CHUNK_V2_FLAG_BATCH);
+        } else {
+            self.uncomp_info &= u64::to_le(!CHUNK_V2_FLAG_BATCH);
+        }
+    }
+
     pub(crate) fn set_data(&mut self, data: u64) {
         self.data = u64::to_le(data);
     }
@@ -69,6 +78,20 @@ impl BlobChunkInfoV2Ondisk {
 
     pub(crate) fn set_zran_offset(&mut self, offset: u32) {
         assert!(self.is_zran());
+        let mut data = u64::from_le(self.data) & 0xffff_ffff_0000_0000;
+        data |= offset as u64;
+        self.data = u64::to_le(data);
+    }
+
+    pub(crate) fn set_batch_index(&mut self, index: u32) {
+        assert!(self.is_batch());
+        let mut data = u64::from_le(self.data) & 0x0000_0000_ffff_ffff;
+        data |= (index as u64) << 32;
+        self.data = u64::to_le(data);
+    }
+
+    pub(crate) fn set_uncompressed_offset_in_batch_buf(&mut self, offset: u32) {
+        assert!(self.is_batch());
         let mut data = u64::from_le(self.data) & 0xffff_ffff_0000_0000;
         data |= offset as u64;
         self.data = u64::to_le(data);
@@ -142,6 +165,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         u64::from_le(self.uncomp_info) & CHUNK_V2_FLAG_ZRAN != 0
     }
 
+    fn is_batch(&self) -> bool {
+        u64::from_le(self.uncomp_info) & CHUNK_V2_FLAG_BATCH != 0
+    }
+
     fn get_zran_index(&self) -> u32 {
         assert!(self.is_zran());
         (u64::from_le(self.data) >> 32) as u32
@@ -149,6 +176,16 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
 
     fn get_zran_offset(&self) -> u32 {
         assert!(self.is_zran());
+        u64::from_le(self.data) as u32
+    }
+
+    fn get_batch_index(&self) -> u32 {
+        assert!(self.is_batch());
+        (u64::from_le(self.data) >> 32) as u32
+    }
+
+    fn get_uncompressed_offset_in_batch_buf(&self) -> u32 {
+        assert!(self.is_batch());
         u64::from_le(self.data) as u32
     }
 

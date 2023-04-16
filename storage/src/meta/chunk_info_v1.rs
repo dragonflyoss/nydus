@@ -95,11 +95,23 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
         false
     }
 
+    fn is_batch(&self) -> bool {
+        false
+    }
+
     fn get_zran_index(&self) -> u32 {
         unimplemented!()
     }
 
     fn get_zran_offset(&self) -> u32 {
+        unimplemented!()
+    }
+
+    fn get_batch_index(&self) -> u32 {
+        unimplemented!()
+    }
+
+    fn get_uncompressed_offset_in_batch_buf(&self) -> u32 {
         unimplemented!()
     }
 
