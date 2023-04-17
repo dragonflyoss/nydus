@@ -711,7 +711,9 @@ impl Node {
 
     /// Get filename of the inode.
     pub fn name(&self) -> &OsStr {
-        if self.path() == &self.info.source {
+        if let Some(name) = self.target_vec().last() {
+            name
+        } else if self.path() == &self.info.source {
             OsStr::from_bytes(ROOT_PATH_NAME)
         } else {
             // Safe to unwrap because `path` is returned from `path()` which is canonicalized
