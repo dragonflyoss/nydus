@@ -10,6 +10,9 @@ echo "Install BATS from sources"
 rm -rf $LOCAL_DIR
 mkdir -p $LOCAL_DIR
 pushd "${LOCAL_DIR}"
+git config pull.rebase false
+git config pull.rebase true
+git config pull.ff only
 git clone "${BATS_REPO}" || true
 cd bats-core
 sh -c "./install.sh /usr"
