@@ -1159,6 +1159,13 @@ impl BlobMetaChunkArray {
         }
     }
 
+    fn is_encrypted(&self, index: usize) -> bool {
+        match self {
+            BlobMetaChunkArray::V1(v) => v[index].is_encrypted(),
+            BlobMetaChunkArray::V2(v) => v[index].is_encrypted(),
+        }
+    }
+
     fn _get_chunk_index_nocheck<T: BlobMetaChunkInfo>(
         chunks: &[T],
         addr: u64,
@@ -1597,6 +1604,10 @@ impl BlobChunkInfo for BlobMetaChunk {
         self.meta.chunk_info_array.is_compressed(self.chunk_index)
     }
 
+    fn is_encrypted(&self) -> bool {
+        self.meta.chunk_info_array.is_encrypted(self.chunk_index)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1665,6 +1676,9 @@ pub trait BlobMetaChunkInfo {
     fn aligned_uncompressed_end(&self) -> u64 {
         round_up_4k(self.uncompressed_end())
     }
+
+    /// Check whether chunk data is encrypted or not.
+    fn is_encrypted(&self) -> bool;
 
     /// Check whether the blob chunk is compressed or not.
     ///

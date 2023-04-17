@@ -83,6 +83,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
         self.uncomp_info = u64::to_le(size_low | offset | size_high);
     }
 
+    fn is_encrypted(&self) -> bool {
+        false
+    }
+
     fn is_compressed(&self) -> bool {
         self.compressed_size() != self.uncompressed_size()
     }

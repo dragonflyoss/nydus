@@ -125,6 +125,9 @@ validate = true
 
 [cache.filecache]
 work_dir = "."
+enable_encryption = true
+enable_convergent_encryption = true
+encryption_key = "fc4a7db5614afc2f400e9478bebed1aefdbc9d7cd03210b84f144683a7a6fd1a"
 
 [cache.fscache]
 work_dir = "."

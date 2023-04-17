@@ -12,6 +12,7 @@ use std::sync::{Arc, RwLock};
 use tokio::runtime::Runtime;
 
 use nydus_api::CacheConfigV2;
+use nydus_utils::crypt;
 use nydus_utils::metrics::BlobcacheMetrics;
 
 use crate::backend::BlobBackend;
@@ -21,6 +22,7 @@ use crate::cache::state::{
 };
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
+use crate::context::CipherContext;
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
@@ -38,6 +40,9 @@ pub struct FileCacheMgr {
     validate: bool,
     disable_indexed_map: bool,
     cache_raw_data: bool,
+    cache_encrypted: bool,
+    cache_convergent_encryption: bool,
+    cache_encryption_key: String,
     closed: Arc<AtomicBool>,
 }
 
@@ -66,6 +71,9 @@ impl FileCacheMgr {
             disable_indexed_map: blob_cfg.disable_indexed_map,
             validate: config.cache_validate,
             cache_raw_data: config.cache_compressed,
+            cache_encrypted: blob_cfg.enable_encryption,
+            cache_convergent_encryption: blob_cfg.enable_convergent_encryption,
+            cache_encryption_key: blob_cfg.encryption_key.clone(),
             closed: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -277,6 +285,16 @@ impl FileCacheEntry {
             )
         };
 
+        let (cache_cipher_object, cache_cipher_context) = if mgr.cache_encrypted {
+            let key = hex::decode(mgr.cache_encryption_key.clone())
+                .map_err(|_e| einval!("invalid cache file encryption key"))?;
+            let cipher = crypt::Algorithm::Aes128Xts.new_cipher()?;
+            let ctx = CipherContext::new(key, mgr.cache_convergent_encryption)?;
+            (Arc::new(cipher), Arc::new(ctx))
+        } else {
+            (Default::default(), Default::default())
+        };
+
         trace!(
             "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, separate_meta {}, tarfs {}, zran {}",
             mgr.cache_raw_data,
@@ -289,6 +307,8 @@ impl FileCacheEntry {
         Ok(FileCacheEntry {
             blob_id,
             blob_info,
+            cache_cipher_object,
+            cache_cipher_context,
             chunk_map,
             file: Arc::new(file),
             meta,
@@ -302,6 +322,7 @@ impl FileCacheEntry {
             blob_uncompressed_size,
             is_get_blob_object_supported,
             is_raw_data: mgr.cache_raw_data,
+            is_cache_encrypted: mgr.cache_encrypted,
             is_direct_chunkmap,
             is_legacy_stargz,
             is_tarfs,

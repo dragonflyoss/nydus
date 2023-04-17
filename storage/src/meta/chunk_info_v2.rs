@@ -14,6 +14,7 @@ const CHUNK_V2_UNCOMP_OFFSET_SHIFT: u64 = 12;
 const CHUNK_V2_UNCOMP_SIZE_SHIFT: u64 = 32;
 const CHUNK_V2_FLAG_MASK: u64 = 0xff << 56;
 const CHUNK_V2_FLAG_COMPRESSED: u64 = 0x1 << 56;
+const CHUNK_V2_FLAG_ENCRYPTED: u64 = 0x2 << 56;
 const CHUNK_V2_FLAG_ZRAN: u64 = 0x2 << 56;
 const CHUNK_V2_FLAG_VALID: u64 = 0x3 << 56;
 
@@ -35,6 +36,15 @@ impl BlobChunkInfoV2Ondisk {
             self.uncomp_info |= u64::to_le(CHUNK_V2_FLAG_COMPRESSED);
         } else {
             self.uncomp_info &= u64::to_le(!CHUNK_V2_FLAG_COMPRESSED);
+        }
+    }
+
+    #[allow(unused)]
+    pub(crate) fn set_encrypted(&mut self, encrypted: bool) {
+        if encrypted {
+            self.uncomp_info |= u64::to_le(CHUNK_V2_FLAG_ENCRYPTED);
+        } else {
+            self.uncomp_info &= u64::to_le(!CHUNK_V2_FLAG_ENCRYPTED);
         }
     }
 
@@ -116,6 +126,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         assert!(size != 0 && size - 1 <= BLOB_CCT_CHUNK_SIZE_MASK);
         self.uncomp_info &= u64::to_le(!(BLOB_CCT_CHUNK_SIZE_MASK << CHUNK_V2_UNCOMP_SIZE_SHIFT));
         self.uncomp_info |= u64::to_le((size - 1) << CHUNK_V2_UNCOMP_SIZE_SHIFT);
+    }
+
+    fn is_encrypted(&self) -> bool {
+        u64::from_le(self.uncomp_info) & CHUNK_V2_FLAG_ENCRYPTED != 0
     }
 
     fn is_compressed(&self) -> bool {

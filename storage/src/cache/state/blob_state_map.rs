@@ -432,6 +432,10 @@ pub(crate) mod tests {
             unimplemented!();
         }
 
+        fn is_encrypted(&self) -> bool {
+            false
+        }
+
         fn as_any(&self) -> &dyn Any {
             self
         }

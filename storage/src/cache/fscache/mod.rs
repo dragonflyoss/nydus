@@ -211,6 +211,8 @@ impl FileCacheEntry {
             .ok_or_else(|| einval!("No fscache file associated with the blob_info"))?;
         let is_separate_meta = blob_info.has_feature(BlobFeatures::SEPARATE);
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
+        let cache_cipher = blob_info.cipher();
+        let is_cache_encrypted = cache_cipher.is_encryption_enabled();
         let blob_id = blob_info.blob_id();
         let blob_meta_id = if is_separate_meta {
             blob_info.get_blob_meta_id()?
@@ -262,6 +264,8 @@ impl FileCacheEntry {
         Ok(FileCacheEntry {
             blob_id,
             blob_info: blob_info.clone(),
+            cache_cipher_object: Default::default(),
+            cache_cipher_context: Default::default(),
             chunk_map,
             file,
             meta: Some(meta),
@@ -276,6 +280,7 @@ impl FileCacheEntry {
             is_get_blob_object_supported: true,
             is_raw_data: false,
             is_direct_chunkmap: true,
+            is_cache_encrypted,
             is_legacy_stargz: blob_info.is_legacy_stargz(),
             is_tarfs,
             is_zran,

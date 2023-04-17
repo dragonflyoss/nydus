@@ -38,6 +38,7 @@ use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 
 use nydus_api::ConfigV2;
 use nydus_utils::compress;
+use nydus_utils::crypt::{self, Cipher};
 use nydus_utils::digest::{self, RafsDigest};
 
 use crate::cache::BlobCache;
@@ -127,6 +128,8 @@ pub struct BlobInfo {
     chunk_count: u32,
     /// Compression algorithm to process the blob.
     compressor: compress::Algorithm,
+    /// Chunk data encryption algorithm.
+    cipher: crypt::Algorithm,
     /// Message digest algorithm to process the blob.
     digester: digest::Algorithm,
     /// Starting offset of the data to prefetch.
@@ -161,6 +164,8 @@ pub struct BlobInfo {
     fs_cache_file: Option<Arc<File>>,
     /// V6: support inlined-meta
     meta_path: Arc<Mutex<String>>,
+    /// V6: support data encryption.
+    cipher_object: Arc<Cipher>,
 }
 
 impl BlobInfo {
@@ -185,6 +190,7 @@ impl BlobInfo {
             chunk_count,
 
             compressor: compress::Algorithm::None,
+            cipher: crypt::Algorithm::None,
             digester: digest::Algorithm::Blake3,
             prefetch_offset: 0,
             prefetch_size: 0,
@@ -201,6 +207,7 @@ impl BlobInfo {
 
             fs_cache_file: None,
             meta_path: Arc::new(Mutex::new(String::new())),
+            cipher_object: Default::default(),
         };
 
         blob_info.compute_features();
@@ -291,6 +298,22 @@ impl BlobInfo {
     pub fn set_compressor(&mut self, compressor: compress::Algorithm) {
         self.compressor = compressor;
         self.compute_features();
+    }
+
+    /// Get the cipher algorithm to handle chunk data.
+    pub fn cipher(&self) -> crypt::Algorithm {
+        self.cipher
+    }
+
+    /// Get the cipher object to encrypt/decrypt chunk data.
+    pub fn cipher_object(&self) -> Arc<Cipher> {
+        self.cipher_object.clone()
+    }
+
+    /// Set the cipher algorithm to handle chunk data.
+    pub fn set_cipher_info(&mut self, cipher: crypt::Algorithm, cipher_object: Arc<Cipher>) {
+        self.cipher = cipher;
+        self.cipher_object = cipher_object;
     }
 
     /// Get the message digest algorithm for the blob.
@@ -521,6 +544,8 @@ bitflags! {
         const COMPRESSED = 0x0000_0001;
         /// Chunk is a hole, with all data as zero.
         const _HOLECHUNK = 0x0000_0002;
+        /// Chunk data is encrypted.
+        const ENCYPTED = 0x0000_0004;
     }
 }
 
@@ -582,6 +607,9 @@ pub trait BlobChunkInfo: Any + Sync + Send {
     /// data may be stored in the compressed data blob for those chunks.
     fn is_compressed(&self) -> bool;
 
+    /// Check whether the chunk is encrypted or not.
+    fn is_encrypted(&self) -> bool;
+
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -629,6 +657,10 @@ impl BlobChunkInfo for BlobIoChunk {
 
     fn is_compressed(&self) -> bool {
         self.0.is_compressed()
+    }
+
+    fn is_encrypted(&self) -> bool {
+        self.0.is_encrypted()
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -672,6 +672,15 @@ pub struct FileCacheConfig {
     /// Deprecated: disable index mapping, keep it as false when possible.
     #[serde(default)]
     pub disable_indexed_map: bool,
+    /// Enable encryption data written to the cache file.
+    #[serde(default)]
+    pub enable_encryption: bool,
+    /// Enable convergent encryption for chunk deduplication.
+    #[serde(default)]
+    pub enable_convergent_encryption: bool,
+    /// Key for data encryption, a heximal representation of [u8; 32].
+    #[serde(default)]
+    pub encryption_key: String,
 }
 
 impl FileCacheConfig {
