@@ -39,7 +39,8 @@ Or you can generate one by `nydusify` tool:
 # Convert the existing OCI image `your-registry.com/node:19.0` to `your-registry.com/node:19.0-nydus-oci-ref`:
 sudo nydusify convert --oci-ref --source your-registry.com/node:19.0 --target your-registry.com/node:19.0-nydus-oci-ref
 ```
-
+**Tips**: 
+- Nydus ZRAN artifacts must be in the same namespace with the OCI image.
 ## Run nydus zran artifact:
 
 Follow the [documentation](https://github.com/dragonflyoss/image-service/blob/master/docs/containerd-env-setup.md) to configure `containerd` and `nydus-snapshotter` (containerd-nydus-grpc):
