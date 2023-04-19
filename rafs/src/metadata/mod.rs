@@ -569,18 +569,13 @@ impl Default for RafsSuperMeta {
 }
 
 /// RAFS filesystem versions.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum RafsVersion {
     /// RAFS v5
+    #[default]
     V5,
     /// RAFS v6
     V6,
-}
-
-impl Default for RafsVersion {
-    fn default() -> Self {
-        RafsVersion::V5
-    }
 }
 
 impl TryFrom<u32> for RafsVersion {
@@ -618,18 +613,13 @@ impl RafsVersion {
 }
 
 /// Rafs metadata working mode.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum RafsMode {
     /// Directly mapping and accessing metadata into process by mmap().
+    #[default]
     Direct,
     /// Read metadata into memory before using, for RAFS v5.
     Cached,
-}
-
-impl Default for RafsMode {
-    fn default() -> Self {
-        RafsMode::Direct
-    }
 }
 
 impl FromStr for RafsMode {

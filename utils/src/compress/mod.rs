@@ -18,18 +18,13 @@ const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
 /// Supported compression algorithms.
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Algorithm {
+    #[default]
     None = 0,
     Lz4Block = 1,
     GZip = 2,
     Zstd = 3,
-}
-
-impl Default for Algorithm {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl fmt::Display for Algorithm {

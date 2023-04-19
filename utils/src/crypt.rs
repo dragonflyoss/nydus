@@ -13,8 +13,9 @@ use openssl::symm;
 
 /// Supported cipher algorithms.
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Algorithm {
+    #[default]
     None = 0,
     Aes128Xts = 1,
     Aes256Xts = 2,
@@ -64,12 +65,6 @@ impl Algorithm {
             Algorithm::Aes256Xts => 0,
             Algorithm::Aes256Gcm => 12,
         }
-    }
-}
-
-impl Default for Algorithm {
-    fn default() -> Self {
-        Algorithm::None
     }
 }
 
@@ -130,17 +125,13 @@ impl TryFrom<u64> for Algorithm {
 }
 
 /// Cipher object to encrypt/decrypt data.
+#[derive(Default)]
 pub enum Cipher {
+    #[default]
     None,
     Aes128Xts(symm::Cipher),
     Aes256Xts(symm::Cipher),
     Aes256Gcm(symm::Cipher),
-}
-
-impl Default for Cipher {
-    fn default() -> Self {
-        Cipher::None
-    }
 }
 
 impl Debug for Cipher {
