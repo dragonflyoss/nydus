@@ -20,16 +20,11 @@ pub const RAFS_DIGEST_LENGTH: usize = 32;
 pub type DigestData = [u8; RAFS_DIGEST_LENGTH];
 
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Algorithm {
+    #[default]
     Blake3 = 0,
     Sha256 = 1,
-}
-
-impl Default for Algorithm {
-    fn default() -> Self {
-        Self::Blake3
-    }
 }
 
 impl fmt::Display for Algorithm {

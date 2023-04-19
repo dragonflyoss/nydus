@@ -479,9 +479,9 @@ impl OndiskInodeWrapper {
     // 3 - inode compression D: inode, [xattrs], map_header, extents ... | ...
     // 4 - inode chunk-based E: inode, [xattrs], chunk indexes ... | ...
     // 5~7 - reserved
-    fn data_block_offset<'a>(
+    fn data_block_offset(
         &self,
-        state: &'a Guard<Arc<DirectMappingState>>,
+        state: &Guard<Arc<DirectMappingState>>,
         inode: &dyn RafsV6OndiskInode,
         index: usize,
     ) -> RafsResult<usize> {
@@ -713,9 +713,9 @@ impl OndiskInodeWrapper {
         Ok(())
     }
 
-    fn get_entry_count<'a>(
+    fn get_entry_count(
         &self,
-        state: &'a Guard<Arc<DirectMappingState>>,
+        state: &Guard<Arc<DirectMappingState>>,
         inode: &dyn RafsV6OndiskInode,
         block_index: usize,
     ) -> Result<usize> {

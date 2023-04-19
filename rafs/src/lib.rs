@@ -114,7 +114,7 @@ pub trait RafsIoWrite: Write + Seek + 'static {
 
     fn validate_alignment(&mut self, size: usize, alignment: usize) -> Result<usize> {
         if alignment != 0 {
-            let cur = self.seek(SeekFrom::Current(0))?;
+            let cur = self.stream_position()?;
 
             if (size & (alignment - 1) != 0) || (cur & (alignment as u64 - 1) != 0) {
                 return Err(einval!("unaligned data"));
