@@ -44,6 +44,33 @@ func (l *Layer) CreateFile(t *testing.T, name string, data []byte) {
 	require.NoError(t, err)
 }
 
+func (l *Layer) CreateLargeFile(t *testing.T, name string, sizeMB int) {
+	f, err := os.Create(filepath.Join(l.workDir, name))
+	require.NoError(t, err)
+	defer func() {
+		f.Close()
+	}()
+
+	for b := 1; b <= sizeMB; b++ {
+		_, err := f.Write(bytes.Repeat([]byte{byte(b)}, 1024*1024))
+		require.NoError(t, err)
+	}
+}
+
+func (l *Layer) CreateHoledFile(t *testing.T, name string, data []byte, offset, fileSize int64) {
+	f, err := os.Create(filepath.Join(l.workDir, name))
+	require.NoError(t, err)
+	defer func() {
+		f.Close()
+	}()
+
+	err = f.Truncate(fileSize)
+	require.NoError(t, err)
+
+	_, err = f.WriteAt(data, offset)
+	require.NoError(t, err)
+}
+
 func (l *Layer) CreateDir(t *testing.T, name string) {
 	err := os.MkdirAll(filepath.Join(l.workDir, name), 0755)
 	require.NoError(t, err)
