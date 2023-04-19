@@ -30,10 +30,10 @@ type File struct {
 
 func GetXattrs(t *testing.T, path string) map[string]string {
 	xattrs := map[string]string{}
-	names, err := xattr.List(path)
+	names, err := xattr.LList(path)
 	require.NoError(t, err)
 	for _, name := range names {
-		data, err := xattr.Get(path, name)
+		data, err := xattr.LGet(path, name)
 		require.NoError(t, err)
 		xattrs[name] = string(data)
 	}
@@ -41,7 +41,7 @@ func GetXattrs(t *testing.T, path string) map[string]string {
 }
 
 func NewFile(t *testing.T, path, target string) *File {
-	stat, err := os.Stat(path)
+	stat, err := os.Lstat(path)
 	require.NoError(t, err)
 
 	xattrs := GetXattrs(t, path)
