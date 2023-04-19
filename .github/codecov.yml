@@ -1,0 +1,25 @@
+coverage:
+  status:
+    project:
+      default:
+        enabled: yes
+        target: auto  # auto compares coverage to the previous base commit
+        # adjust accordingly based on how flaky your tests are
+        # this allows a 1% drop from the previous base commit coverage
+        threshold: 1%
+    patch:
+      default:
+        target: 25%   # the required coverage value in each patch
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false # if true: only post the comment if coverage changes
+
+codecov:
+  require_ci_to_pass: false
+  notify:
+    wait_for_ci: false
+
+# When modifying this file, please validate using
+# curl -X POST --data-binary @codecov.yml https://codecov.io/validate
