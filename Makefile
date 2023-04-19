@@ -15,6 +15,7 @@ INSTALL_DIR_PREFIX ?= "/usr/local/bin"
 DOCKER ?= "true"
 
 CARGO ?= $(shell which cargo)
+RUSTUP ?= $(shell which rustup)
 CARGO_BUILD_GEARS = -v ~/.ssh/id_rsa:/root/.ssh/id_rsa -v ~/.cargo/git:/root/.cargo/git -v ~/.cargo/registry:/root/.cargo/registry
 SUDO = $(shell which sudo)
 CARGO_COMMON ?= 
@@ -111,6 +112,19 @@ install: release
 ut: .release_version
 	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) RUST_BACKTRACE=1 ${CARGO} test --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) -- --skip integration --nocapture --test-threads=8
 
+# install test dependencies
+pre-coverage:
+	${CARGO} +stable install cargo-llvm-cov --locked
+	${RUSTUP} component add llvm-tools-preview
+
+# print unit test coverage to console
+coverage: pre-coverage
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) ${CARGO} llvm-cov --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) -- --skip integration --nocapture  --test-threads=8
+
+# write unit teset coverage to codecov.json, used for Github CI
+coverage-codecov:
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) ${CARGO} llvm-cov --codecov --output-path codecov.json --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) -- --skip integration --nocapture  --test-threads=8
+	
 smoke-only:
 	make -C smoke test
 
