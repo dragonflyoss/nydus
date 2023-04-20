@@ -121,7 +121,7 @@ impl Tree {
         let depth = self.node.target_vec().len();
 
         // Handle root node modification
-        if target.path() == Path::new("/") {
+        if target_paths_len == 1 && target.path() == Path::new("/") {
             let mut node = target.clone();
             node.overlay = Overlay::UpperModification;
             self.node = node;
@@ -130,7 +130,8 @@ impl Tree {
 
         // Don't search if path recursive depth out of target path
         if depth < target_paths_len {
-            for child in self.children.iter_mut() {
+            for idx in 0..self.children.len() {
+                let child = &mut self.children[idx];
                 // Skip if path component name not match
                 if target_paths[depth] != child.node.name() {
                     continue;
