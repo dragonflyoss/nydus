@@ -16,7 +16,7 @@
 //!   lower tree (MetadataTree).
 //! - Traverse the merged tree (OverlayTree) to dump bootstrap and data blobs.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,6 +36,7 @@ use crate::metadata::{Inode, RafsInodeExt, RafsSuper};
 pub struct Tree {
     /// Filesystem node.
     pub node: Node,
+    pub name: OsString,
     /// Children tree nodes.
     pub children: Vec<Tree>,
 }
@@ -43,8 +44,10 @@ pub struct Tree {
 impl Tree {
     /// Create a new instance of `Tree` from a filesystem node.
     pub fn new(node: Node) -> Self {
+        let name = node.name().to_owned();
         Tree {
             node,
+            name,
             children: Vec::new(),
         }
     }
@@ -84,6 +87,17 @@ impl Tree {
         }
 
         Ok(())
+    }
+
+    /// Get index of child node with specified `name`.
+    #[allow(clippy::manual_find)]
+    pub fn get_child_idx(&self, name: &OsStr) -> Option<usize> {
+        for idx in 0..self.children.len() {
+            if self.children[idx].name == name {
+                return Some(idx);
+            }
+        }
+        None
     }
 
     /// Apply new node (upper layer) to node tree (lower layer).
@@ -133,7 +147,7 @@ impl Tree {
             for idx in 0..self.children.len() {
                 let child = &mut self.children[idx];
                 // Skip if path component name not match
-                if target_paths[depth] != child.node.name() {
+                if target_paths[depth] != child.name {
                     continue;
                 }
                 // Modifications: Replace the node
@@ -154,13 +168,10 @@ impl Tree {
         }
 
         // Additions: Add new node to children
-        if depth == target_paths_len - 1 && target_paths[depth - 1] == self.node.name() {
+        if depth == target_paths_len - 1 && target_paths[depth - 1] == self.name {
             let mut node = target.clone();
             node.overlay = Overlay::UpperAddition;
-            self.children.push(Tree {
-                node,
-                children: Vec::new(),
-            });
+            self.children.push(Tree::new(node));
             return Ok(true);
         }
 
@@ -202,7 +213,7 @@ impl Tree {
             // Handle Removals
             if depth == target_paths_len - 1
                 && whiteout_type.is_removal()
-                && origin_name == Some(child.node.name())
+                && origin_name == Some(&child.name)
             {
                 // Remove the whole lower node
                 self.children.remove(idx);
@@ -215,7 +226,7 @@ impl Tree {
                 && depth == target_paths_len - 2
             {
                 if let Some(parent_name) = parent_name {
-                    if parent_name == child.node.name() {
+                    if parent_name == child.name {
                         child.node.overlay = Overlay::UpperOpaque;
                         // Remove children of the lower node
                         child.children.clear();
@@ -224,7 +235,7 @@ impl Tree {
                 }
             } else if whiteout_type == WhiteoutType::OverlayFsOpaque
                 && depth == target_paths_len - 1
-                && target.name() == child.node.name()
+                && target.name() == child.name
             {
                 // Remove all children under the opaque directory
                 child.node.overlay = Overlay::UpperOpaque;

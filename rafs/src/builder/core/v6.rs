@@ -159,14 +159,14 @@ impl Node {
         let mut d_size = 0;
 
         // Sort all children if "." and ".." are not at the head after sorting.
-        if !tree.children.is_empty() && tree.children[0].node.name() < ".." {
+        if !tree.children.is_empty() && tree.children[0].name < *".." {
             let mut children = Vec::with_capacity(tree.children.len() + 2);
             let dot = OsString::from(".");
             let dotdot = OsString::from("..");
             children.push(dot.as_os_str());
             children.push(dotdot.as_os_str());
             for child in tree.children.iter() {
-                children.push(child.node.name());
+                children.push(&child.name);
             }
             children.sort_unstable();
 
@@ -187,7 +187,7 @@ impl Node {
                 + "..".as_bytes().len()
                 + size_of::<RafsV6Dirent>()) as u64;
             for child in tree.children.iter() {
-                let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
+                let len = child.name.as_bytes().len() + size_of::<RafsV6Dirent>();
                 // erofs disk format requires dirent to be aligned to block size.
                 if (d_size % block_size) + len as u64 > block_size {
                     d_size = round_up(d_size as u64, block_size);
@@ -604,13 +604,13 @@ impl Bootstrap {
             trace!(
                 "{:?} child {:?} offset {}, mode {}",
                 node.name(),
-                child.node.name(),
+                child.name,
                 child.node.v6_offset,
                 child.node.inode.mode()
             );
             node.v6_dirents.push((
                 child.node.v6_offset,
-                child.node.name().to_os_string(),
+                child.name.to_os_string(),
                 child.node.inode.mode(),
             ));
             if child.node.is_dir() {
