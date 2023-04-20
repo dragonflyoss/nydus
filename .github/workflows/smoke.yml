@@ -426,11 +426,11 @@ jobs:
           path: benchmark-nydus-filelist-prefetch
       - name: Save Result
         run: |
-          sudo install -m 755 benchmark-oci/wordpress.csv benchmark-oci.csv
-          sudo install -m 755 benchmark-zran-all-prefetch/wordpress.csv benchmark-zran-all-prefetch.csv
-          sudo install -m 755 benchmark-nydus-no-prefetch/wordpress.csv benchmark-nydus-no-prefetch.csv
-          sudo install -m 755 benchmark-nydus-all-prefetch/wordpress.csv benchmark-nydus-all-prefetch.csv
-          sudo install -m 755 benchmark-nydus-filelist-prefetch/wordpress.csv benchmark-nydus-filelist-prefetch.csv
+          sudo install -m 755 benchmark-oci/wordpress.csv oci.csv
+          sudo install -m 755 benchmark-zran-all-prefetch/wordpress.csv zran-all-prefetch.csv
+          sudo install -m 755 benchmark-nydus-no-prefetch/wordpress.csv nydus-no-prefetch.csv
+          sudo install -m 755 benchmark-nydus-all-prefetch/wordpress.csv nydus-all-prefetch.csv
+          sudo install -m 755 benchmark-nydus-filelist-prefetch/wordpress.csv nydus-filelist-prefetch.csv
 
           echo "| benchmark-result | pull-elapsed(s) | create-elapsed(s) | run-elapsed(s) | total-elapsed(s) |" > result.md
           echo "|:-------|:-----------------:|:-------------------:|:----------------:|:------------------:|" >> result.md
