@@ -4,7 +4,7 @@ on:
   push:
     branches: ["**", "stable/**"]
     paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
-  pull_request_target:
+  pull_request:
     branches: ["**", "stable/**"]
     paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
   schedule:
