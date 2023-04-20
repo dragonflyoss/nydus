@@ -453,15 +453,33 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const markdownFilePath = './result.md';
+            const markdownFilePath = 'result.md';
             const markdownContent = fs.readFileSync(markdownFilePath, 'utf8');
-            
-            github.rest.issues.createComment({
+
+            const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: markdownContent
-            })
+            });
+
+            const existingComment = comments.find((comment) => comment.user.login === 'github-actions[bot]');
+
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                comment_id: existingComment.id,
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: markdownContent,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: markdownContent,
+              });
+            }
 
   nydus-unit-test:
     runs-on: ubuntu-latest
