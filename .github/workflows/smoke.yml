@@ -4,7 +4,7 @@ on:
   push:
     branches: ["**", "stable/**"]
     paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
-  pull_request_target:
+  pull_request:
     branches: ["**", "stable/**"]
     paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
   schedule:
@@ -396,7 +396,7 @@ jobs:
 
   benchmark-result:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request_target'
+    if: github.event_name == 'pull_request'
     needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch]
     steps:
       - name: Download benchmark-oci
@@ -432,8 +432,8 @@ jobs:
           sudo install -m 755 benchmark-nydus-all-prefetch/wordpress.csv nydus-all-prefetch.csv
           sudo install -m 755 benchmark-nydus-filelist-prefetch/wordpress.csv nydus-filelist-prefetch.csv
 
-          echo "| benchmark-result | pull-elapsed(s) | create-elapsed(s) | run-elapsed(s) | total-elapsed(s) |" > result.md
-          echo "|:-------|:-----------------:|:-------------------:|:----------------:|:------------------:|" >> result.md
+          echo "| benchmark-result | pull-elapsed(s) | create-elapsed(s) | run-elapsed(s) | total-elapsed(s) |" > $GITHUB_STEP_SUMMARY
+          echo "|:-------|:-----------------:|:-------------------:|:----------------:|:------------------:|" >> $GITHUB_STEP_SUMMARY
           
           for file in *.csv; do
             if ! [ -f "$file" ]; then
@@ -446,23 +446,8 @@ jobs:
               run=$(echo "$line" | cut -d ',' -f 4)
               total=$(echo "$line" | cut -d ',' -f 5)
               printf "| %s | %s | %s | %s | %s |\n" "$filename" "$pull" "$create" "$run" "$total"
-            done >> result.md
+            done >> $GITHUB_STEP_SUMMARY
           done
-      - name: Comment
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            const markdownFilePath = './result.md';
-            const markdownContent = fs.readFileSync(markdownFilePath, 'utf8');
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: markdownContent
-            })
-
   nydus-unit-test:
     runs-on: ubuntu-latest
     steps:
