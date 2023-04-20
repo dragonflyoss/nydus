@@ -392,6 +392,12 @@ func main() {
 					Aliases: []string{"chunk-size"},
 				},
 				&cli.StringFlag{
+					Name:    "batch-size",
+					Value:   "0",
+					Usage:   "size of batch data chunks, must be power of two, between 0x1000-0x1000000 or zero, [default: 0]",
+					EnvVars: []string{"BATCH_SIZE"},
+				},
+				&cli.StringFlag{
 					Name:    "work-dir",
 					Value:   "./tmp",
 					Usage:   "Working directory for image conversion",
@@ -492,6 +498,7 @@ func main() {
 					FsAlignChunk:     c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
 					Compressor:       c.String("compressor"),
 					ChunkSize:        c.String("chunk-size"),
+					BatchSize:        c.String("batch-size"),
 
 					OCIRef:       c.Bool("oci-ref"),
 					AllPlatforms: c.Bool("all-platforms"),

@@ -28,6 +28,7 @@ func getConfig(opt Opt) map[string]string {
 	cfg["fs_version"] = opt.FsVersion
 	cfg["fs_align_chunk"] = strconv.FormatBool(opt.FsAlignChunk)
 	cfg["fs_chunk_size"] = opt.ChunkSize
+	cfg["batch_size"] = opt.BatchSize
 
 	// FIXME: still needs to be supported by acceld converter package.
 	cfg["cache_ref"] = opt.CacheRef

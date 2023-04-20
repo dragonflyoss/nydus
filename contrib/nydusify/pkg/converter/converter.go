@@ -42,6 +42,7 @@ type Opt struct {
 	FsAlignChunk     bool
 	Compressor       string
 	ChunkSize        string
+	BatchSize        string
 	PrefetchPatterns string
 	OCIRef           bool
 

@@ -41,9 +41,10 @@ type Nydusify struct {
 	chunkDictArgs string
 	fsVersion     string
 	workDir       string
+	batchSize     string
 }
 
-func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string, fsVersion string) *Nydusify {
+func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs string, fsVersion string, batchSize string) *Nydusify {
 	backendType := ""
 	if os.Getenv("BACKEND_TYPE") != "" {
 		backendType = os.Getenv("BACKEND_TYPE")
@@ -61,6 +62,10 @@ func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs
 		workDir = os.Getenv("WORKDIR")
 	}
 
+	if len(batchSize) == 0 {
+		batchSize = "0"
+	}
+
 	return &Nydusify{
 		Registry:      registry,
 		Source:        source,
@@ -71,6 +76,7 @@ func NewNydusify(registry *Registry, source, target, cache string, chunkDictArgs
 		chunkDictArgs: chunkDictArgs,
 		fsVersion:     fsVersion,
 		workDir:       workDir,
+		batchSize:     batchSize,
 	}
 }
 
@@ -104,6 +110,8 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 		BackendConfig: nydusify.backendConfig,
 
 		FsVersion: nydusify.fsVersion,
+
+		BatchSize: nydusify.batchSize,
 	}
 
 	err := converter.Convert(context.Background(), opt)

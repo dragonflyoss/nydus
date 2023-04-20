@@ -41,7 +41,7 @@ func convert(t *testing.T, ref string, fsVersion string) {
 	registry := NewRegistry(t)
 	defer registry.Destroy(t)
 	transfer(t, ref)
-	nydusify := NewNydusify(registry, ref, fmt.Sprintf("%s-nydus", ref), "", "", fsVersion)
+	nydusify := NewNydusify(registry, ref, fmt.Sprintf("%s-nydus", ref), "", "", fsVersion, "")
 	nydusify.Convert(t)
 	nydusify.Check(t)
 }
