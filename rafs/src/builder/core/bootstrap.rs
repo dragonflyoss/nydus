@@ -159,8 +159,7 @@ impl Bootstrap {
         if parent.is_dir() {
             // Sort children list by name, so that we can improve performance in fs read_dir using
             // binary search.
-            tree.children
-                .sort_by_key(|child| child.node.name().to_os_string());
+            tree.children.sort_by_key(|child| child.name.clone());
             parent.inode.set_child_count(tree.children.len() as u32);
             if ctx.fs_version.is_v5() {
                 parent.inode.set_child_index(index);
