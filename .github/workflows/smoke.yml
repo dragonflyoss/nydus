@@ -2,10 +2,10 @@ name: Smoke Test
 
 on:
   push:
-    branches: ["**/?**"]
+    branches: ["**", "stable/**"]
     paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
   pull_request_target:
-    branches: ["**/?**"]
+    branches: ["**", "stable/**"]
     paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
   schedule:
     # Run daily sanity check at 03:00 clock UTC
