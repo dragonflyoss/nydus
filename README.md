@@ -17,6 +17,7 @@
 [![Image Conversion](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml)
 [![Integration Test](https://github.com/dragonflyoss/image-service/actions/workflows/integration.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/integration.yml)
 [![Release Test Daily](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml)
+[![Coverage](https://codecov.io/gh/dragonflyoss/image-service/branch/master/graph/badge.svg)](https://codecov.io/gh/dragonflyoss/image-service)
 
 ## Introduction
 Nydus implements a content-addressable file system on the RAFS format, which enhances the current OCI image specification by improving container launch speed, image space and network bandwidth efficiency, and data integrity.
