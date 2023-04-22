@@ -10,6 +10,7 @@ import string
 import subprocess
 import time
 import urllib.request
+from typing import Tuple
 
 """
 define some file path, and sock api url
@@ -18,6 +19,7 @@ LOG_DIR = "log"
 TEMP_DIR = "tmp"
 URL_PREFIX = "http://localhost/api"
 ACCESS_PATTERN_METRICS = "/v1/metrics/pattern"
+BACKEND_METRICS = "/v1/metrics/backend"
 BOOTSTRAP_DIR = "/var/lib/containerd-nydus/snapshots"
 API_DIR = "/var/lib/containerd-nydus/socket"
 
@@ -189,6 +191,16 @@ def get_access_pattern(sock, bootstap_data):
     return access_pattern_list
 
 
+def get_backend_metrics(sock) -> dict:
+    """
+    get the backend metrics from the sock
+    """
+    with open(send_request(sock, BACKEND_METRICS), 'r') as file:
+        content = file.read()
+
+    return eval(content)
+
+
 def random_string():
     """
     generate a random string of fixed length
@@ -248,12 +260,28 @@ def init():
     os.mkdir(TEMP_DIR)
 
 
-def collect(local_registry, insecure_local_registry, image) -> str:
+def collect_access(local_registry, insecure_local_registry, image) -> str:
     """
-    serve for benchmark.py
+    collect access pattern for benchmark.py
     """
     init()
     cfg = {"registry": local_registry, "insecure_registry": insecure_local_registry, "image": image}
     file = MetricsCollector(cfg).start_collet()
     shutil.rmtree(TEMP_DIR)
     return file
+
+
+def collect_backend() -> Tuple[str, str]:
+    """
+    collect backend metrics for benchmark.py
+
+    return (Read Amount, Read Count)
+    """
+    init()
+    socket = search_file(API_DIR, "api.sock")
+    if socket == None:
+        print("can't find the api.sock")
+        exit(1)
+    backend = get_backend_metrics(socket)
+    shutil.rmtree(TEMP_DIR)
+    return round(backend["read_amount_total"] / 1024 / 1024, 2), backend["read_count"]
