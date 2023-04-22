@@ -40,8 +40,6 @@ def main():
             exit(-1)
     # bench
     start_bench(cfg, cfg["image"], mode)
-    util.show_csv(util.image_repo(cfg["image"]) + ".csv")
-
 
 def collect_metrics(cfg: dict, image: str) -> str:
     """

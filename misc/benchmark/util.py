@@ -59,13 +59,5 @@ def image_nydus_prefetch(ref: str) -> str:
     return image_repo(ref) + ":" + image_tag(ref) + "_nydus_prefetch"
 
 
-def show_csv(file_path: str):
-    with open(file_path, mode='r') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            formatted_row = [f'{cell}' for cell in row]
-            print(','.join(formatted_row))
-
-
 def enable_wondersphaper(bandwith: int):
     os.system("sudo wondershaper -a docker0 -u " + str(bandwith) + " -d" + str(bandwith))
