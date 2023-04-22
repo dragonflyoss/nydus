@@ -3,4 +3,4 @@ insecure_source_registry: False
 local_registry: localhost:5000
 insecure_local_registry: True
 bandwith: 81920
-image: wordpress:latest
+image: wordpress:6.1.1
