@@ -14,10 +14,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  SNAPSHOOTER_VERSION: 0.7.3
-  NERDCTL_VERSION: 1.3.0
-  CNI_PLUGINS_VERSION: 1.2.0
   IMAGE: wordpress
+  TAG: 6.1.1
 
 jobs:
   contrib-build:
@@ -148,23 +146,11 @@ jobs:
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
-    - name: Prepare Nerdctl Environment
+    - name: Prepare OCI Environment
       run: |
-        sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
-        sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/local/bin
-        sudo wget https://github.com/containerd/nerdctl/releases/download/v${{env.NERDCTL_VERSION}}/nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz
-        sudo tar -xzvf nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz -C /usr/local/bin
-        sudo mkdir -p /opt/cni/bin
-        sudo wget https://github.com/containernetworking/plugins/releases/download/v${{env.CNI_PLUGINS_VERSION}}/cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz 
-        sudo tar -xzvf cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz -C /opt/cni/bin
-        sudo install -D misc/benchmark/cni_bridge.conf /etc/cni/net.d/bridge.conf
-    - name: Prepare OCI Registry Environment
-      run: |
-        sudo docker run -d --restart=always -p 5000:5000 --name registry registry
-        sudo docker pull ${{env.IMAGE}} && docker tag ${{env.IMAGE}}:latest localhost:5000/${{env.IMAGE}}:latest
-        sudo docker push localhost:5000/${{env.IMAGE}}:latest
-        git clone https://github.com/magnific0/wondershaper.git
-        sudo install -D -m 755 wondershaper/wondershaper /usr/local/bin
+        sudo bash misc/benchmark/prepare_env.sh oci
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
     - name: BenchMark Test
       run: |
         cd misc/benchmark
@@ -193,32 +179,11 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Environment
       run: |
-        sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
-        sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/local/bin
-        wget https://github.com/containerd/nydus-snapshotter/releases/download/v${{env.SNAPSHOOTER_VERSION}}/nydus-snapshotter-v${{env.SNAPSHOOTER_VERSION}}-x86_64.tgz
-        tar zxvf nydus-snapshotter-v${{env.SNAPSHOOTER_VERSION}}-x86_64.tgz
-        sudo install -D -m 755 nydus-snapshotter/containerd-nydus-grpc /usr/local/bin/
-        sudo wget https://github.com/containerd/nerdctl/releases/download/v${{env.NERDCTL_VERSION}}/nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz
-        sudo tar -xzvf nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz -C /usr/local/bin
-        sudo mkdir -p /opt/cni/bin
-        sudo wget https://github.com/containernetworking/plugins/releases/download/v${{env.CNI_PLUGINS_VERSION}}/cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz 
-        sudo tar -xzvf cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz -C /opt/cni/bin
-        sudo install -D misc/benchmark/cni_bridge.conf /etc/cni/net.d/bridge.conf
-        sudo install -D misc/benchmark/nydusd_config.json /etc/nydus/config.json
-        sudo install -D misc/benchmark/containerd_config.toml /etc/containerd/config.toml
-        sudo systemctl restart containerd
-        sudo install -D misc/benchmark/nydus-snapshotter.service /etc/systemd/system/nydus-snapshotter.service
-        sudo systemctl start nydus-snapshotter
-    - name: Prepare Nydus Registry Environment
-      run: |
-        sudo docker run -d --restart=always -p 5000:5000 --name registry registry
+        sudo bash misc/benchmark/prepare_env.sh nydus
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{env.IMAGE}}:latest \
-          --target localhost:5000/${{env.IMAGE}}:latest_nydus \
-          --fs-version 6 \
-          --platform linux/amd64,linux/arm64
-        git clone https://github.com/magnific0/wondershaper.git
-        sudo install -D -m 755 wondershaper/wondershaper /usr/local/bin
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
     - name: BenchMark Test
       run: |
         cd misc/benchmark
@@ -227,6 +192,41 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: benchmark-nydus-no-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-zran-no-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-no-prefetch
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-zran-no-prefetch
         path: misc/benchmark/${{env.IMAGE}}.csv
 
   benchmark-nydus-all-prefetch:
@@ -247,32 +247,11 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Environment
       run: |
-        sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
-        sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/local/bin
-        wget https://github.com/containerd/nydus-snapshotter/releases/download/v${{env.SNAPSHOOTER_VERSION}}/nydus-snapshotter-v${{env.SNAPSHOOTER_VERSION}}-x86_64.tgz
-        tar zxvf nydus-snapshotter-v${{env.SNAPSHOOTER_VERSION}}-x86_64.tgz
-        sudo install -D -m 755 nydus-snapshotter/containerd-nydus-grpc /usr/local/bin/
-        sudo wget https://github.com/containerd/nerdctl/releases/download/v${{env.NERDCTL_VERSION}}/nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz
-        sudo tar -xzvf nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz -C /usr/local/bin
-        sudo mkdir -p /opt/cni/bin
-        sudo wget https://github.com/containernetworking/plugins/releases/download/v${{env.CNI_PLUGINS_VERSION}}/cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz 
-        sudo tar -xzvf cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz -C /opt/cni/bin
-        sudo install -D misc/benchmark/cni_bridge.conf /etc/cni/net.d/bridge.conf
-        sudo install -D misc/benchmark/nydusd_config.json /etc/nydus/config.json
-        sudo install -D misc/benchmark/containerd_config.toml /etc/containerd/config.toml
-        sudo systemctl restart containerd
-        sudo install -D misc/benchmark/nydus-snapshotter.service /etc/systemd/system/nydus-snapshotter.service
-        sudo systemctl start nydus-snapshotter
-    - name: Prepare Nydus Registry Environment
-      run: |
-        sudo docker run -d --restart=always -p 5000:5000 --name registry registry
+        sudo bash misc/benchmark/prepare_env.sh nydus
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{env.IMAGE}}:latest \
-          --target localhost:5000/${{env.IMAGE}}:latest_nydus \
-          --fs-version 6 \
-          --platform linux/amd64,linux/arm64
-        git clone https://github.com/magnific0/wondershaper.git
-        sudo install -D -m 755 wondershaper/wondershaper /usr/local/bin
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
     - name: BenchMark Test
       run: |
         cd misc/benchmark
@@ -301,35 +280,14 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Environment
       run: |
-        sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
-        sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/local/bin
-        wget https://github.com/containerd/nydus-snapshotter/releases/download/v${{env.SNAPSHOOTER_VERSION}}/nydus-snapshotter-v${{env.SNAPSHOOTER_VERSION}}-x86_64.tgz
-        tar zxvf nydus-snapshotter-v${{env.SNAPSHOOTER_VERSION}}-x86_64.tgz
-        sudo install -D -m 755 nydus-snapshotter/containerd-nydus-grpc /usr/local/bin/
-        sudo wget https://github.com/containerd/nerdctl/releases/download/v${{env.NERDCTL_VERSION}}/nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz
-        sudo tar -xzvf nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz -C /usr/local/bin
-        sudo mkdir -p /opt/cni/bin
-        sudo wget https://github.com/containernetworking/plugins/releases/download/v${{env.CNI_PLUGINS_VERSION}}/cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz 
-        sudo tar -xzvf cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz -C /opt/cni/bin
-        sudo install -D misc/benchmark/cni_bridge.conf /etc/cni/net.d/bridge.conf
-        sudo install -D misc/benchmark/nydusd_config.json /etc/nydus/config.json
-        sudo install -D misc/benchmark/containerd_config.toml /etc/containerd/config.toml
-        sudo systemctl restart containerd
-        sudo install -D misc/benchmark/nydus-snapshotter.service /etc/systemd/system/nydus-snapshotter.service
-        sudo systemctl start nydus-snapshotter
-    - name: Prepare Nydus Registry Environment
-      run: |
-        sudo docker run -d --restart=always -p 5000:5000 --name registry registry
-        sudo docker pull ${{env.IMAGE}} && docker tag ${{env.IMAGE}}:latest localhost:5000/${{env.IMAGE}}:latest
-        sudo docker push localhost:5000/${{env.IMAGE}}:latest
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source localhost:5000/${{env.IMAGE}}:latest \
-          --target localhost:5000/${{env.IMAGE}}:latest_nydus \
+          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
           --fs-version 6 \
-          --oci-ref \
-          --platform linux/amd64,linux/arm64
-        git clone https://github.com/magnific0/wondershaper.git
-        sudo install -D -m 755 wondershaper/wondershaper /usr/local/bin
+          --oci-ref
     - name: BenchMark Test
       run: |
         cd misc/benchmark
@@ -358,32 +316,11 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Environment
       run: |
-        sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
-        sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/local/bin
-        wget https://github.com/containerd/nydus-snapshotter/releases/download/v${{env.SNAPSHOOTER_VERSION}}/nydus-snapshotter-v${{env.SNAPSHOOTER_VERSION}}-x86_64.tgz
-        tar zxvf nydus-snapshotter-v${{env.SNAPSHOOTER_VERSION}}-x86_64.tgz
-        sudo install -D -m 755 nydus-snapshotter/containerd-nydus-grpc /usr/local/bin/
-        sudo wget https://github.com/containerd/nerdctl/releases/download/v${{env.NERDCTL_VERSION}}/nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz
-        sudo tar -xzvf nerdctl-${{env.NERDCTL_VERSION}}-linux-amd64.tar.gz -C /usr/local/bin
-        sudo mkdir -p /opt/cni/bin
-        sudo wget https://github.com/containernetworking/plugins/releases/download/v${{env.CNI_PLUGINS_VERSION}}/cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz 
-        sudo tar -xzvf cni-plugins-linux-amd64-v${{env.CNI_PLUGINS_VERSION}}.tgz -C /opt/cni/bin
-        sudo install -D misc/benchmark/cni_bridge.conf /etc/cni/net.d/bridge.conf
-        sudo install -D misc/benchmark/nydusd_config.json /etc/nydus/config.json
-        sudo install -D misc/benchmark/containerd_config.toml /etc/containerd/config.toml
-        sudo systemctl restart containerd
-        sudo install -D misc/benchmark/nydus-snapshotter.service /etc/systemd/system/nydus-snapshotter.service
-        sudo systemctl start nydus-snapshotter
-    - name: Prepare Nydus Registry Environment
-      run: |
-        sudo docker run -d --restart=always -p 5000:5000 --name registry registry
+        sudo bash misc/benchmark/prepare_env.sh nydus
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{env.IMAGE}}:latest \
-          --target localhost:5000/${{env.IMAGE}}:latest_nydus \
-          --fs-version 6 \
-          --platform linux/amd64,linux/arm64
-        git clone https://github.com/magnific0/wondershaper.git
-        sudo install -D -m 755 wondershaper/wondershaper /usr/local/bin
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
     - name: BenchMark Test
       run: |
         cd misc/benchmark
@@ -396,58 +333,18 @@ jobs:
 
   benchmark-result:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch]
+    needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-zran-no-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch]
     steps:
-      - name: Download benchmark-oci
-        uses: actions/download-artifact@master
+      - name: Checkout
+        uses: actions/checkout@v3
+      - uses: actions/download-artifact@v3
+      - uses: geekyeggo/delete-artifact@v2
         with:
-          name: benchmark-oci
-          path: benchmark-oci
-      - name: Download benchmark-zran-all-prefetch
-        uses: actions/download-artifact@master
-        with:
-          name: benchmark-zran-all-prefetch
-          path: benchmark-zran-all-prefetch
-      - name: Download benchmark-nydus-no-prefetch
-        uses: actions/download-artifact@master
-        with:
-          name: benchmark-nydus-no-prefetch
-          path: benchmark-nydus-no-prefetch
-      - name: Download benchmark-nydus-all-prefetch
-        uses: actions/download-artifact@master
-        with:
-          name: benchmark-nydus-all-prefetch
-          path: benchmark-nydus-all-prefetch
-      - name: Download benchmark-nydus-filelist-prefetch
-        uses: actions/download-artifact@master
-        with:
-          name: benchmark-nydus-filelist-prefetch
-          path: benchmark-nydus-filelist-prefetch
+          name: '*'
       - name: Save Result
         run: |
-          sudo install -m 755 benchmark-oci/wordpress.csv oci.csv
-          sudo install -m 755 benchmark-zran-all-prefetch/wordpress.csv zran-all-prefetch.csv
-          sudo install -m 755 benchmark-nydus-no-prefetch/wordpress.csv nydus-no-prefetch.csv
-          sudo install -m 755 benchmark-nydus-all-prefetch/wordpress.csv nydus-all-prefetch.csv
-          sudo install -m 755 benchmark-nydus-filelist-prefetch/wordpress.csv nydus-filelist-prefetch.csv
+          sudo bash misc/benchmark/benchmark_summary.sh > $GITHUB_STEP_SUMMARY
 
-          echo "| benchmark-result | pull-elapsed(s) | create-elapsed(s) | run-elapsed(s) | total-elapsed(s) |" > $GITHUB_STEP_SUMMARY
-          echo "|:-------|:-----------------:|:-------------------:|:----------------:|:------------------:|" >> $GITHUB_STEP_SUMMARY
-          
-          for file in *.csv; do
-            if ! [ -f "$file" ]; then
-              continue
-            fi
-            filename=$(basename "$file" .csv)
-            tail -n +2 "$file" | while read line; do
-              pull=$(echo "$line" | cut -d ',' -f 2)
-              create=$(echo "$line" | cut -d ',' -f 3)
-              run=$(echo "$line" | cut -d ',' -f 4)
-              total=$(echo "$line" | cut -d ',' -f 5)
-              printf "| %s | %s | %s | %s | %s |\n" "$filename" "$pull" "$create" "$run" "$total"
-            done >> $GITHUB_STEP_SUMMARY
-          done
   nydus-unit-test:
     runs-on: ubuntu-latest
     steps:
