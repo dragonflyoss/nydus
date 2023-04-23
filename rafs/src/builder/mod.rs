@@ -3,11 +3,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Builder to create RAFS filesystems from directories and tarballs.
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
 use anyhow::{anyhow, Context, Result};
 use nydus_storage::meta::toc;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{compress, digest, root_tracer, timing_tracer};
 use sha2::Digest;
+
+use crate::builder::core::node::{Node, NodeInfo};
+use crate::metadata::inode::InodeWrapper;
+use crate::metadata::layout::RafsXAttrs;
+use crate::metadata::{Inode, RafsVersion};
 
 pub use self::compact::BlobCompactor;
 pub use self::core::bootstrap::Bootstrap;
@@ -20,7 +29,7 @@ pub use self::core::feature::{Feature, Features};
 pub use self::core::node::{ChunkSource, NodeChunk};
 pub use self::core::overlay::{Overlay, WhiteoutSpec};
 pub use self::core::prefetch::{Prefetch, PrefetchPolicy};
-pub use self::core::tree::{MetadataTreeBuilder, Tree};
+pub use self::core::tree::{MetadataTreeBuilder, Tree, TreeNode};
 pub use self::directory::DirectoryBuilder;
 pub use self::merge::Merger;
 pub use self::stargz::StargzBuilder;
@@ -50,23 +59,15 @@ fn build_bootstrap(
     blob_mgr: &mut BlobManager,
     mut tree: Tree,
 ) -> Result<Bootstrap> {
-    let mut bootstrap = Bootstrap::new()?;
-    // Merge with lower layer if there's one.
+    // For multi-layer build, merge the upper layer and lower layer with overlay whiteout applied.
     if bootstrap_ctx.layered {
-        let origin_bootstarp_offset = bootstrap_ctx.offset;
-        // Disable prefetch and bootstrap.apply() will reset the prefetch enable/disable flag.
-        ctx.prefetch.disable();
-        bootstrap.build(ctx, bootstrap_ctx, tree)?;
-        tree = bootstrap.apply(ctx, bootstrap_ctx, bootstrap_mgr, blob_mgr, None)?;
-        bootstrap_ctx.offset = origin_bootstarp_offset;
-        bootstrap_ctx.layered = false;
+        let mut parent = Bootstrap::load_parent_bootstrap(ctx, bootstrap_mgr, blob_mgr)?;
+        timing_tracer!({ parent.merge_overaly(ctx, tree) }, "merge_bootstrap")?;
+        tree = parent;
     }
 
-    // Convert the hierarchy tree into an array, stored in `bootstrap_ctx.nodes`.
-    timing_tracer!(
-        { bootstrap.build(ctx, bootstrap_ctx, tree) },
-        "build_bootstrap"
-    )?;
+    let mut bootstrap = Bootstrap::new(tree)?;
+    timing_tracer!({ bootstrap.build(ctx, bootstrap_ctx) }, "build_bootstrap")?;
 
     Ok(bootstrap)
 }
@@ -79,8 +80,8 @@ fn dump_bootstrap(
     blob_mgr: &mut BlobManager,
     blob_writer: &mut ArtifactWriter,
 ) -> Result<()> {
+    // Make sure blob id is updated according to blob hash if not specified by user.
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-        // Make sure blob id is updated according to blob hash if not specified by user.
         if blob_ctx.blob_id.is_empty() {
             // `Blob::dump()` should have set `blob_ctx.blob_id` to referenced OCI tarball for
             // ref-type conversion.
@@ -99,13 +100,10 @@ fn dump_bootstrap(
 
     // Dump bootstrap file
     let blob_table = blob_mgr.to_blob_table(ctx)?;
-    bootstrap.dump(
-        ctx,
-        &mut bootstrap_mgr.bootstrap_storage,
-        bootstrap_ctx,
-        &blob_table,
-    )?;
+    let storage = &mut bootstrap_mgr.bootstrap_storage;
+    bootstrap.dump(ctx, storage, bootstrap_ctx, &blob_table)?;
 
+    // Dump RAFS meta to data blob if inline meta is enabled.
     if ctx.blob_inline_meta {
         assert_ne!(ctx.conversion_type, ConversionType::TarToTarfs);
         // Ensure the blob object is created in case of no chunks generated for the blob.
@@ -239,4 +237,110 @@ fn finalize_blob(
     }
 
     Ok(())
+}
+
+/// Helper for TarballBuilder/StargzBuilder to build the filesystem tree.
+pub struct TarBuilder {
+    pub explicit_uidgid: bool,
+    pub layer_idx: u16,
+    pub version: RafsVersion,
+    next_ino: Inode,
+}
+
+impl TarBuilder {
+    /// Create a new instance of [TarBuilder].
+    pub fn new(explicit_uidgid: bool, layer_idx: u16, version: RafsVersion) -> Self {
+        TarBuilder {
+            explicit_uidgid,
+            layer_idx,
+            next_ino: 0,
+            version,
+        }
+    }
+
+    /// Allocate an inode number.
+    pub fn next_ino(&mut self) -> Inode {
+        self.next_ino += 1;
+        self.next_ino
+    }
+
+    /// Insert a node into the tree, creating any missing intermediate directories.
+    pub fn insert_into_tree(&mut self, tree: &mut Tree, node: Node) -> Result<()> {
+        let target_paths = node.target_vec();
+        let target_paths_len = target_paths.len();
+
+        if target_paths_len == 1 {
+            // Handle root node modification
+            assert_eq!(node.path(), Path::new("/"));
+            tree.set_node(node);
+        } else {
+            let mut tmp_tree = tree;
+            for idx in 1..target_paths.len() {
+                match tmp_tree.get_child_idx(target_paths[idx].as_bytes()) {
+                    Some(i) => {
+                        if idx == target_paths_len - 1 {
+                            tmp_tree.children[i].set_node(node);
+                            break;
+                        } else {
+                            tmp_tree = &mut tmp_tree.children[i];
+                        }
+                    }
+                    None => {
+                        if idx == target_paths_len - 1 {
+                            tmp_tree.insert_child(Tree::new(node));
+                            break;
+                        } else {
+                            let node = self.create_directory(&target_paths[..=idx])?;
+                            tmp_tree.insert_child(Tree::new(node));
+                            let last_idx = tmp_tree.children.len() - 1;
+                            tmp_tree = &mut tmp_tree.children[last_idx];
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create a new node for a directory.
+    pub fn create_directory(&mut self, target_paths: &[OsString]) -> Result<Node> {
+        let ino = self.next_ino();
+        let name = &target_paths[target_paths.len() - 1];
+        let mut inode = InodeWrapper::new(self.version);
+        inode.set_ino(ino);
+        inode.set_mode(0o755 | libc::S_IFDIR as u32);
+        inode.set_nlink(2);
+        inode.set_name_size(name.len());
+        inode.set_rdev(u32::MAX);
+
+        let source = PathBuf::from("/");
+        let target_vec = target_paths.to_vec();
+        let mut target = PathBuf::new();
+        for name in target_paths.iter() {
+            target = target.join(name);
+        }
+        let info = NodeInfo {
+            explicit_uidgid: self.explicit_uidgid,
+            src_ino: ino,
+            src_dev: u64::MAX,
+            rdev: u64::MAX,
+            path: target.clone(),
+            source,
+            target,
+            target_vec,
+            symlink: None,
+            xattrs: RafsXAttrs::new(),
+            v6_force_extended_inode: false,
+        };
+
+        Ok(Node::new(inode, info, self.layer_idx))
+    }
+
+    /// Check whether the path is a eStargz special file.
+    pub fn is_stargz_special_files(&self, path: &Path) -> bool {
+        path == Path::new("/stargz.index.json")
+            || path == Path::new("/.prefetch.landmark")
+            || path == Path::new("/.no.prefetch.landmark")
+    }
 }

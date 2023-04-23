@@ -1,8 +1,9 @@
 // Copyright 2020 Ant Group. All rights reserved.
+// Copyright (C) 2023 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -10,6 +11,7 @@ use anyhow::{anyhow, Context, Error, Result};
 use indexmap::IndexMap;
 
 use super::node::Node;
+use crate::builder::core::tree::TreeNode;
 use crate::metadata::layout::v5::RafsV5PrefetchTable;
 use crate::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
@@ -52,7 +54,7 @@ impl FromStr for PrefetchPolicy {
 ///
 /// It does not guarantee that specified path exist in local filesystem because the specified path
 /// may exist in parent image/layers.
-fn get_patterns() -> Result<IndexMap<PathBuf, Option<u64>>> {
+fn get_patterns() -> Result<IndexMap<PathBuf, Option<TreeNode>>> {
     let stdin = std::io::stdin();
     let mut patterns = Vec::new();
 
@@ -68,7 +70,7 @@ fn get_patterns() -> Result<IndexMap<PathBuf, Option<u64>>> {
     }
 }
 
-fn generate_patterns(input: Vec<String>) -> Result<IndexMap<PathBuf, Option<u64>>> {
+fn generate_patterns(input: Vec<String>) -> Result<IndexMap<PathBuf, Option<TreeNode>>> {
     let mut patterns = IndexMap::new();
 
     for (idx, file) in input.iter().enumerate() {
@@ -109,11 +111,11 @@ pub struct Prefetch {
 
     // Patterns to generate prefetch inode array, which will be put into the prefetch array
     // in the RAFS bootstrap. It may access directory or file inodes.
-    patterns: IndexMap<PathBuf, Option<u64>>,
+    patterns: IndexMap<PathBuf, Option<TreeNode>>,
 
     // File list to help optimizing layout of data blobs.
     // Files from this list may be put at the head of data blob for better prefetch performance.
-    files: BTreeMap<PathBuf, u64>,
+    files: BTreeMap<PathBuf, TreeNode>,
 }
 
 impl Prefetch {
@@ -134,10 +136,7 @@ impl Prefetch {
     }
 
     /// Insert node into the prefetch list if it matches prefetch rules.
-    pub fn insert_if_need(&mut self, node: &Node) {
-        let path = node.target();
-        let index = node.index;
-
+    pub fn insert_if_need(&mut self, obj: &TreeNode, node: &Node) {
         // Newly created root inode of this rafs has zero size
         if self.policy == PrefetchPolicy::None
             || self.disabled
@@ -146,17 +145,18 @@ impl Prefetch {
             return;
         }
 
+        let path = node.target();
         for (f, v) in self.patterns.iter_mut() {
             // As path is canonicalized, it should be reliable.
             if path == f {
                 if self.policy == PrefetchPolicy::Fs {
-                    *v = Some(index);
+                    *v = Some(obj.clone());
                 }
                 if node.is_reg() {
-                    self.files.insert(path.clone(), index);
+                    self.files.insert(path.clone(), obj.clone());
                 }
             } else if path.starts_with(f) && node.is_reg() {
-                self.files.insert(path.clone(), index);
+                self.files.insert(path.clone(), obj.clone());
             }
         }
     }
@@ -167,8 +167,8 @@ impl Prefetch {
     }
 
     /// Get node index array of files in the prefetch list.
-    pub fn get_file_indexes(&self) -> Vec<u64> {
-        self.files.values().copied().collect()
+    pub fn get_file_nodes(&self) -> Vec<TreeNode> {
+        self.files.values().cloned().collect()
     }
 
     /// Get number of prefetch rules.
@@ -181,14 +181,13 @@ impl Prefetch {
     }
 
     /// Generate filesystem layer prefetch list for RAFS v5.
-    pub fn get_v5_prefetch_table(&mut self, nodes: &VecDeque<Node>) -> Option<RafsV5PrefetchTable> {
+    pub fn get_v5_prefetch_table(&mut self) -> Option<RafsV5PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV5PrefetchTable::new();
-            for i in self.patterns.values().filter_map(|v| *v) {
-                // Rafs v5 has inode number equal to index if it is not hardlink.
-                if i < u32::MAX as u64 {
-                    prefetch_table.add_entry(nodes[i as usize - 1].inode.ino() as u32);
-                }
+            for i in self.patterns.values().filter_map(|v| v.clone()) {
+                let node = i.lock().unwrap();
+                assert!(node.inode.ino() < u32::MAX as u64);
+                prefetch_table.add_entry(node.inode.ino() as u32);
             }
             Some(prefetch_table)
         } else {
@@ -197,30 +196,25 @@ impl Prefetch {
     }
 
     /// Generate filesystem layer prefetch list for RAFS v6.
-    pub fn get_v6_prefetch_table(
-        &mut self,
-        nodes: &VecDeque<Node>,
-        meta_addr: u64,
-    ) -> Option<RafsV6PrefetchTable> {
+    pub fn get_v6_prefetch_table(&mut self, meta_addr: u64) -> Option<RafsV6PrefetchTable> {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV6PrefetchTable::new();
-            for i in self.patterns.values().filter_map(|v| *v) {
-                debug_assert!(i > 0);
-                // i holds the Node.index, which starts at 1, so it needs to be converted to the
-                // index of the Node array to index the corresponding Node
-                let array_index = i as usize - 1;
-                let nid = calculate_nid(nodes[array_index].v6_offset, meta_addr);
-                trace!(
-                    "v6 prefetch table: map node index {} to offset {} nid {} path {:?} name {:?}",
-                    i,
-                    nodes[array_index].v6_offset,
-                    nid,
-                    nodes[array_index].path(),
-                    nodes[array_index].name()
-                );
+            for i in self.patterns.values().filter_map(|v| v.clone()) {
+                let node = i.lock().unwrap();
+                let ino = node.inode.ino();
+                debug_assert!(ino > 0);
+                let nid = calculate_nid(node.v6_offset, meta_addr);
                 // 32bit nid can represent 128GB bootstrap, it is large enough, no need
                 // to worry about casting here
                 assert!(nid < u32::MAX as u64);
+                trace!(
+                    "v6 prefetch table: map node index {} to offset {} nid {} path {:?} name {:?}",
+                    ino,
+                    node.v6_offset,
+                    nid,
+                    node.path(),
+                    node.name()
+                );
                 prefetch_table.add_entry(nid as u32);
             }
             Some(prefetch_table)
@@ -266,5 +260,17 @@ mod tests {
         assert!(!patterns.contains_key(&PathBuf::from("/a/b/d")));
         assert!(!patterns.contains_key(&PathBuf::from("/a/b/d/e")));
         assert!(!patterns.contains_key(&PathBuf::from("/k")));
+    }
+
+    #[test]
+    fn test_prefetch_policy() {
+        let policy = PrefetchPolicy::from_str("fs").unwrap();
+        assert_eq!(policy, PrefetchPolicy::Fs);
+        let policy = PrefetchPolicy::from_str("blob").unwrap();
+        assert_eq!(policy, PrefetchPolicy::Blob);
+        let policy = PrefetchPolicy::from_str("none").unwrap();
+        assert_eq!(policy, PrefetchPolicy::None);
+        PrefetchPolicy::from_str("").unwrap_err();
+        PrefetchPolicy::from_str("invalid").unwrap_err();
     }
 }

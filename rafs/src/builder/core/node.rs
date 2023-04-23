@@ -110,8 +110,6 @@ impl NodeChunk {
 /// Struct to host sharable fields of [Node].
 #[derive(Clone, Default, Debug)]
 pub struct NodeInfo {
-    /// Last status change time of the file, in nanoseconds.
-    pub ctime: i64,
     /// Whether the explicit UID/GID feature is enabled or not.
     pub explicit_uidgid: bool,
 
@@ -195,6 +193,23 @@ impl Display for Node {
 }
 
 impl Node {
+    /// Create a new instance of [Node].
+    pub fn new(inode: InodeWrapper, info: NodeInfo, layer_idx: u16) -> Self {
+        Node {
+            info: Arc::new(info),
+            index: 0,
+            overlay: Overlay::UpperAddition,
+            inode,
+            chunks: Vec::new(),
+            layer_idx,
+            v6_offset: 0,
+            v6_dirents: Vec::<(u64, OsString, u32)>::new(),
+            v6_datalayout: 0,
+            v6_compact_inode: false,
+            v6_dirents_offset: 0,
+        }
+    }
+
     /// Dump node data into the data blob, and generate chunk information.
     ///
     /// # Arguments
@@ -536,7 +551,6 @@ impl Node {
         let target = Self::generate_target(&path, &source);
         let target_vec = Self::generate_target_vec(&target);
         let info = NodeInfo {
-            ctime: 0,
             explicit_uidgid,
             src_ino: 0,
             src_dev: u64::MAX,
@@ -612,7 +626,6 @@ impl Node {
         info.src_ino = meta.st_ino();
         info.src_dev = meta.st_dev();
         info.rdev = meta.st_rdev();
-        info.ctime = meta.st_ctime();
 
         self.inode.set_mode(meta.st_mode());
         if info.explicit_uidgid {
