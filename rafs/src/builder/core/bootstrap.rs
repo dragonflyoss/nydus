@@ -34,7 +34,9 @@ impl Bootstrap {
         let mut root_node = self.tree.lock_node();
         assert!(root_node.is_dir());
         let index = bootstrap_ctx.generate_next_ino();
+        // 0 is reserved and 1 also matches RAFS_V5_ROOT_INODE.
         assert_eq!(index, RAFS_V5_ROOT_INODE);
+        root_node.index = index;
         root_node.inode.set_ino(index);
         ctx.prefetch
             .insert_if_need(&self.tree.node, root_node.deref());
@@ -107,6 +109,7 @@ impl Bootstrap {
             let child_node = child.node.clone();
             let mut child_node = child_node.lock().unwrap();
             let index = bootstrap_ctx.generate_next_ino();
+            child_node.index = index;
             if ctx.fs_version.is_v5() {
                 child_node.inode.set_parent(parent_ino);
             }

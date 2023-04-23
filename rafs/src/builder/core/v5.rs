@@ -200,7 +200,7 @@ impl Bootstrap {
         let mut has_xattr = false;
         self.tree.walk_dfs_pre(&mut |t| {
             let node = t.lock_node();
-            inode_table.set(node.inode.ino(), inode_offset)?;
+            inode_table.set(node.index, inode_offset)?;
             // Add inode size
             inode_offset += node.inode.inode_size() as u32;
             if node.inode.has_xattr() {

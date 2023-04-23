@@ -144,6 +144,8 @@ pub struct NodeInfo {
 pub struct Node {
     /// Immutable fields of a Node object.
     pub info: Arc<NodeInfo>,
+    /// Assigned RAFS inode number.
+    pub index: u64,
     /// Define a disk inode structure to persist to disk.
     pub inode: InodeWrapper,
     /// Chunks info list of regular file
@@ -169,9 +171,10 @@ impl Display for Node {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(
             f,
-            "{} {:?}: ino {} real_ino {} child_index {} child_count {} i_nlink {} i_size {} i_blocks {} i_name_size {} i_symlink_size {} has_xattr {} link {:?} i_mtime {} i_mtime_nsec {}",
+            "{} {:?}: index {} ino {} real_ino {} child_index {} child_count {} i_nlink {} i_size {} i_blocks {} i_name_size {} i_symlink_size {} has_xattr {} link {:?} i_mtime {} i_mtime_nsec {}",
             self.file_type(),
             self.target(),
+            self.index,
             self.inode.ino(),
             self.info.src_ino,
             self.inode.child_index(),
@@ -194,6 +197,7 @@ impl Node {
     pub fn new(inode: InodeWrapper, info: NodeInfo, layer_idx: u16) -> Self {
         Node {
             info: Arc::new(info),
+            index: 0,
             overlay: Overlay::UpperAddition,
             inode,
             chunks: Vec::new(),
@@ -561,6 +565,7 @@ impl Node {
         };
         let mut node = Node {
             info: Arc::new(info),
+            index: 0,
             layer_idx: 0,
             overlay,
             inode: InodeWrapper::new(version),

@@ -362,6 +362,7 @@ impl<'a> MetadataTreeBuilder<'a> {
 
         Ok(Node {
             info: Arc::new(info),
+            index: 0,
             layer_idx: 0,
             overlay: Overlay::Lower,
             inode,
