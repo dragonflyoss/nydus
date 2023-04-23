@@ -29,10 +29,14 @@ plugin:
 test: build build-smoke
 	@go vet $(PACKAGES)
 	golangci-lint run
-	@go test -count=1 -v -timeout 20m -race ./pkg/...
+	@go test -covermode=atomic -coverprofile=coverage.out -count=1 -v -timeout 20m -race ./pkg/... ./cmd/...
+
+coverage: test
+	@go tool cover -func=coverage.out
 
 clean:
 	rm -f cmd/nydusify
+	rm -f coverage.out
 
 build-smoke:
 	${PROXY} go test -race -v -c -o ./nydusify-smoke ./tests
