@@ -21,12 +21,14 @@ import (
 	"os"
 
 	"github.com/containerd/containerd/cmd/ctr/app"
-	"github.com/containerd/containerd/pkg/seed"
+	"github.com/containerd/containerd/pkg/seed" //nolint:staticcheck // Global math/rand seed is deprecated, but still used by external dependencies
 	"github.com/dragonflyoss/image-service/contrib/ctr-remote/commands"
 	"github.com/urfave/cli"
 )
 
 func init() {
+	// From https://github.com/containerd/containerd/blob/f7f2be732159a411eae46b78bfdb479b133a823b/cmd/ctr/main.go
+	//nolint:staticcheck // Global math/rand seed is deprecated, but still used by external dependencies
 	seed.WithTimeAndRand()
 }
 
