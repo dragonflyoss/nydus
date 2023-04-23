@@ -391,9 +391,13 @@ impl RafsV5InodeTable {
     /// Set inode offset in the metadata blob for an inode.
     pub fn set(&mut self, ino: Inode, offset: u32) -> Result<()> {
         if ino == 0 || ino > self.data.len() as u64 {
-            return Err(einval!("invalid inode number"));
+            return Err(einval!(format!(
+                "invalid inode number {}, max {}",
+                ino,
+                self.data.len()
+            )));
         } else if offset as usize <= RAFSV5_SUPERBLOCK_SIZE || offset & 0x7 != 0 {
-            return Err(einval!("invalid inode offset"));
+            return Err(einval!(format!("invalid inode offset 0x{:x}", offset)));
         }
 
         // The offset is aligned with 8 bytes to make it easier to validate RafsV5Inode.
@@ -411,7 +415,10 @@ impl RafsV5InodeTable {
 
         let offset = u32::from_le(self.data[(ino - 1) as usize]) as usize;
         if offset <= (RAFSV5_SUPERBLOCK_SIZE >> 3) || offset >= (1usize << 29) {
-            return Err(einval!("invalid inode offset"));
+            return Err(einval!(format!(
+                "invalid offset 0x{:x} for inode {}",
+                offset, ino
+            )));
         }
 
         Ok((offset << 3) as u32)

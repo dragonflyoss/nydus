@@ -201,6 +201,28 @@ impl InodeWrapper {
         }
     }
 
+    /// Set whether the inode has HARDLINK flag set.
+    pub fn set_has_hardlink(&mut self, enable: bool) {
+        self.ensure_owned();
+        match self {
+            InodeWrapper::V5(i) => {
+                if enable {
+                    i.i_flags |= RafsInodeFlags::HARDLINK;
+                } else {
+                    i.i_flags &= !RafsInodeFlags::HARDLINK;
+                }
+            }
+            InodeWrapper::V6(i) => {
+                if enable {
+                    i.i_flags |= RafsInodeFlags::HARDLINK;
+                } else {
+                    i.i_flags &= !RafsInodeFlags::HARDLINK;
+                }
+            }
+            InodeWrapper::Ref(_i) => unimplemented!(),
+        }
+    }
+
     /// Check whether the inode has associated xattrs.
     pub fn has_xattr(&self) -> bool {
         match self {

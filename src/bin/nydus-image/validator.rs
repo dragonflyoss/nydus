@@ -28,15 +28,17 @@ impl Validator {
         let err = "failed to load bootstrap for validator";
         let tree = Tree::from_bootstrap(&self.sb, &mut ()).context(err)?;
 
-        tree.iterate(&mut |node| {
+        let pre = &mut |t: &Tree| -> Result<()> {
+            let node = t.lock_node();
             if verbosity {
                 println!("inode: {}", node);
                 for chunk in &node.chunks {
                     println!("\t chunk: {}", chunk);
                 }
             }
-            true
-        })?;
+            Ok(())
+        };
+        tree.walk_dfs_pre(pre)?;
 
         Ok(self.sb.superblock.get_blob_infos())
     }

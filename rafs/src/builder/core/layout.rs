@@ -3,43 +3,40 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use std::collections::VecDeque;
+use std::ops::Deref;
 
 use super::node::Node;
-use crate::builder::{Overlay, Prefetch};
+use crate::builder::{Overlay, Prefetch, Tree, TreeNode};
 
 #[derive(Clone)]
 pub struct BlobLayout {}
 
 impl BlobLayout {
-    pub fn layout_blob_simple(
-        prefetch: &Prefetch,
-        nodes: &VecDeque<Node>,
-    ) -> Result<(Vec<usize>, usize)> {
-        let mut inodes = Vec::with_capacity(nodes.len());
+    pub fn layout_blob_simple(prefetch: &Prefetch, tree: &Tree) -> Result<(Vec<TreeNode>, usize)> {
+        let mut inodes = Vec::with_capacity(10000);
 
         // Put all prefetch inodes at the head
         // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
         // belonging to the same directory arranged in adjacent in blob file. Together with
         // BFS style collecting descendants inodes, it will have a higher merging possibility.
         // Later, we might write chunks of data one by one according to inode number order.
-        let prefetches = prefetch.get_file_indexes();
-        for index in prefetches {
-            let index = index as usize - 1;
-            let node = &nodes[index];
-            if Self::should_dump_node(node) {
-                inodes.push(index);
+        let prefetches = prefetch.get_file_nodes();
+        for n in prefetches {
+            let node = n.lock().unwrap();
+            if Self::should_dump_node(node.deref()) {
+                inodes.push(n.clone());
             }
         }
         let prefetch_entries = inodes.len();
 
-        // Put all other non-prefetch inode at the tail
-        for (index, node) in nodes.iter().enumerate() {
+        tree.walk_bfs(true, &mut |n| -> Result<()> {
+            let node = n.lock_node();
             // Ignore lower layer node when dump blob
-            if !prefetch.contains(node) && Self::should_dump_node(node) {
-                inodes.push(index);
+            if !prefetch.contains(node.deref()) && Self::should_dump_node(node.deref()) {
+                inodes.push(n.node.clone());
             }
-        }
+            Ok(())
+        })?;
 
         Ok((inodes, prefetch_entries))
     }

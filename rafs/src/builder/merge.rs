@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -15,9 +15,9 @@ use nydus_storage::device::{BlobFeatures, BlobInfo};
 
 use super::{
     ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
-    BuildOutput, ChunkSource, ConversionType, MetadataTreeBuilder, Overlay, Tree, WhiteoutSpec,
+    BuildOutput, ChunkSource, ConversionType, Overlay, Tree,
 };
-use crate::metadata::{RafsInodeExt, RafsSuper, RafsVersion};
+use crate::metadata::{RafsSuper, RafsVersion};
 
 /// Struct to generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
 ///
@@ -114,7 +114,6 @@ impl Merger {
             let (rs, _) =
                 RafsSuper::load_from_file(parent_bootstrap_path, config_v2.clone(), false)
                     .context(format!("load parent bootstrap {:?}", parent_bootstrap_path))?;
-            tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
             let blobs = rs.superblock.get_blob_infos();
             for blob in &blobs {
                 let blob_ctx = BlobContext::from(ctx, &blob, ChunkSource::Parent)?;
@@ -122,6 +121,7 @@ impl Merger {
                 blob_mgr.add_blob(blob_ctx);
             }
             parent_layers = blobs.len();
+            tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
         }
 
         // Get the blobs come from chunk dictionary.
@@ -218,52 +218,36 @@ impl Merger {
                 }
             }
 
-            if let Some(tree) = &mut tree {
-                let mut nodes = VecDeque::new();
-                rs.walk_directory::<PathBuf>(
-                    rs.superblock.root_ino(),
-                    None,
-                    &mut |inode: Arc<dyn RafsInodeExt>, path: &Path| -> Result<()> {
-                        let mut node =
-                            MetadataTreeBuilder::parse_node(&rs, inode, path.to_path_buf())
-                                .context(format!(
-                                    "parse node from bootstrap {:?}",
-                                    bootstrap_path
-                                ))?;
-                        for chunk in &mut node.chunks {
-                            let origin_blob_index = chunk.inner.blob_index() as usize;
-                            let blob_ctx = blobs[origin_blob_index].as_ref();
-                            if let Some(blob_index) = blob_idx_map.get(&blob_ctx.blob_id()) {
-                                // Set the blob index of chunk to real index in blob table of final bootstrap.
-                                chunk.set_blob_index(*blob_index as u32);
-                            }
-                        }
-                        // Set node's layer index to distinguish same inode number (from bootstrap)
-                        // between different layers.
-                        let idx = u16::try_from(layer_idx).context(format!(
-                            "too many layers {}, limited to {}",
-                            layer_idx,
-                            u16::MAX
-                        ))?;
-                        if parent_layers + idx as usize > u16::MAX as usize {
-                            bail!("too many layers {}, limited to {}", layer_idx, u16::MAX);
-                        }
-                        node.layer_idx = idx + parent_layers as u16;
-                        node.overlay = Overlay::UpperAddition;
-                        match node.whiteout_type(WhiteoutSpec::Oci) {
-                            // Insert whiteouts at the head, so they will be handled first when
-                            // applying to lower layer.
-                            Some(_) => nodes.push_front(node),
-                            _ => nodes.push_back(node),
-                        }
-                        Ok(())
-                    },
-                )?;
-                for node in &nodes {
-                    tree.apply(node, true, WhiteoutSpec::Oci)?;
+            let upper = Tree::from_bootstrap(&rs, &mut ())?;
+            upper.walk_bfs(true, &mut |n| {
+                let mut node = n.lock_node();
+                for chunk in &mut node.chunks {
+                    let origin_blob_index = chunk.inner.blob_index() as usize;
+                    let blob_ctx = blobs[origin_blob_index].as_ref();
+                    if let Some(blob_index) = blob_idx_map.get(&blob_ctx.blob_id()) {
+                        // Set the blob index of chunk to real index in blob table of final bootstrap.
+                        chunk.set_blob_index(*blob_index as u32);
+                    }
                 }
+                // Set node's layer index to distinguish same inode number (from bootstrap)
+                // between different layers.
+                let idx = u16::try_from(layer_idx).context(format!(
+                    "too many layers {}, limited to {}",
+                    layer_idx,
+                    u16::MAX
+                ))?;
+                if parent_layers + idx as usize > u16::MAX as usize {
+                    bail!("too many layers {}, limited to {}", layer_idx, u16::MAX);
+                }
+                node.layer_idx = idx + parent_layers as u16;
+                node.overlay = Overlay::UpperAddition;
+                Ok(())
+            })?;
+
+            if let Some(tree) = &mut tree {
+                tree.merge_overaly(ctx, upper)?;
             } else {
-                tree = Some(Tree::from_bootstrap(&rs, &mut ())?);
+                tree = Some(upper);
             }
         }
 
@@ -284,8 +268,8 @@ impl Merger {
         }
 
         let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false)?;
-        let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(ctx, &mut bootstrap_ctx, tree)?;
+        let mut bootstrap = Bootstrap::new(tree)?;
+        bootstrap.build(ctx, &mut bootstrap_ctx)?;
         let blob_table = blob_mgr.to_blob_table(ctx)?;
         let mut bootstrap_storage = Some(target.clone());
         bootstrap

@@ -111,8 +111,6 @@ impl WhiteoutType {
 pub enum Overlay {
     Lower,
     UpperAddition,
-    UpperOpaque,
-    UpperRemoval,
     UpperModification,
 }
 
@@ -127,8 +125,6 @@ impl Display for Overlay {
         match self {
             Overlay::Lower => write!(f, "LOWER"),
             Overlay::UpperAddition => write!(f, "ADDED"),
-            Overlay::UpperOpaque => write!(f, "OPAQUED"),
-            Overlay::UpperRemoval => write!(f, "REMOVED"),
             Overlay::UpperModification => write!(f, "MODIFIED"),
         }
     }

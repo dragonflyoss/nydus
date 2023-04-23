@@ -990,7 +990,9 @@ impl Command {
 
         let mut builder: Box<dyn Builder> = match conversion_type {
             ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
-            ConversionType::EStargzIndexToRef => Box::new(StargzBuilder::new(blob_data_size)),
+            ConversionType::EStargzIndexToRef => {
+                Box::new(StargzBuilder::new(blob_data_size, &build_ctx))
+            }
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
             | ConversionType::TarToRafs => Box::new(TarballBuilder::new(conversion_type)),
@@ -1134,7 +1136,7 @@ impl Command {
             .with_context(|| format!("invalid config file {}", config_file_path))?;
 
         if let Some(build_output) =
-            BlobCompactor::do_compact(rs, dst_bootstrap, chunk_dict, backend, &config)?
+            BlobCompactor::compact(rs, dst_bootstrap, chunk_dict, backend, &config)?
         {
             OutputSerializer::dump(matches, build_output, build_info)?;
         }

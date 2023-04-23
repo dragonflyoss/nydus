@@ -3,126 +3,60 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::VecDeque;
-use std::ffi::OsString;
-
 use anyhow::{Context, Error, Result};
 use nydus_utils::digest::{self, RafsDigest};
-use nydus_utils::{root_tracer, timing_tracer};
+use std::ops::Deref;
 
-use super::node::Node;
-use super::overlay::{WhiteoutType, OVERLAYFS_WHITEOUT_OPAQUE};
 use crate::builder::{
     ArtifactStorage, BlobManager, BootstrapContext, BootstrapManager, BuildContext, Tree,
 };
 use crate::metadata::layout::{RafsBlobTable, RAFS_V5_ROOT_INODE};
 use crate::metadata::{RafsSuper, RafsSuperConfig, RafsSuperFlags};
 
-pub(crate) const STARGZ_DEFAULT_BLOCK_SIZE: u32 = 4 << 20;
-
-/// RAFS bootstrap/meta blob builder.
-pub struct Bootstrap {}
+/// RAFS bootstrap/meta builder.
+pub struct Bootstrap {
+    pub(crate) tree: Tree,
+}
 
 impl Bootstrap {
     /// Create a new instance of [Bootstrap].
-    pub fn new() -> Result<Self> {
-        Ok(Self {})
+    pub fn new(tree: Tree) -> Result<Self> {
+        Ok(Self { tree })
     }
 
-    /// Generate inode array with all information, such as ino, child index/count etc, filled.
-    ///
-    /// The generated inode array is stored in `bootstrap_ctx.nodes`.
-    ///
-    /// When used to prepare diff operations for merging, the `tree` object is built from the upper
-    /// layer, which will be merged with the lower layer by `apply()` to form the final filesystem
-    /// view. So the upper layer `tree` is converted into an array of diff-apply operations.
-    /// The diff operation arrays contains two parts:
-    /// - files/directories to be removed from the lower layer, at the head of the array. The order
-    ///   of removal operations are bottom-up, that means child files/directories is in front of its
-    ///   parent.
-    /// - files/directories to added/modified into the lower layer, at the tail of the array.
-    ///   The order of addition/modification operations are top-down, that means directories is
-    ///   ahead its children.
-    ///
-    /// It may also be used to generate the final inode array for an RAFS filesystem.
+    /// Build the final view of the RAFS filesystem meta from the hierarchy `tree`.
     pub fn build(
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
-        mut tree: Tree,
     ) -> Result<()> {
-        // used to compute nid(ino) for v6
-        let root_offset = bootstrap_ctx.offset;
-        let mut nodes = VecDeque::with_capacity(0x10000);
-
         // Special handling of the root inode
-        assert!(tree.node.is_dir());
+        let mut root_node = self.tree.lock_node();
+        assert!(root_node.is_dir());
+        let index = bootstrap_ctx.generate_next_ino();
         // 0 is reserved and 1 also matches RAFS_V5_ROOT_INODE.
-        tree.node.index = 1;
-        // Rafs v6 root inode number can't be decided until the end of dumping.
-        if ctx.fs_version.is_v5() {
-            tree.node.inode.set_ino(RAFS_V5_ROOT_INODE);
-        }
-        ctx.prefetch.insert_if_need(&tree.node);
-        nodes.push_back(tree.node.clone());
+        assert_eq!(index, RAFS_V5_ROOT_INODE);
+        root_node.index = index;
+        root_node.inode.set_ino(index);
+        ctx.prefetch
+            .insert_if_need(&self.tree.node, root_node.deref());
         bootstrap_ctx.inode_map.insert(
             (
-                tree.node.layer_idx,
-                tree.node.info.src_ino,
-                tree.node.info.src_dev,
+                root_node.layer_idx,
+                root_node.info.src_ino,
+                root_node.info.src_dev,
             ),
-            vec![tree.node.index],
+            vec![self.tree.node.clone()],
         );
+        drop(root_node);
 
-        Self::build_rafs(ctx, bootstrap_ctx, &mut tree, &mut nodes)?;
-        if ctx.fs_version.is_v6() && !bootstrap_ctx.layered {
-            // generate on-disk metadata layout for v6
-            Self::v6_update_dirents(&mut nodes, &tree, root_offset);
+        Self::build_rafs(ctx, bootstrap_ctx, &mut self.tree)?;
+        if ctx.fs_version.is_v6() {
+            // Sort directory entries to keep them ordered.
+            Self::v6_update_dirents(&self.tree, bootstrap_ctx.offset);
         }
-        bootstrap_ctx.nodes = nodes;
 
         Ok(())
-    }
-
-    /// Apply diff operations to the base tree (lower layer) and return the merged `Tree` object.
-    ///
-    /// If `tree` is none, the base tree will be loaded from the parent bootstrap.
-    pub fn apply(
-        &mut self,
-        ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
-        bootstrap_mgr: &mut BootstrapManager,
-        blob_mgr: &mut BlobManager,
-        tree: Option<Tree>,
-    ) -> Result<Tree> {
-        let mut tree = match tree {
-            Some(v) => v,
-            None => self.load_parent_bootstrap(ctx, bootstrap_mgr, blob_mgr)?,
-        };
-
-        // Apply new node (upper layer) to node tree (lower layer)
-        timing_tracer!(
-            {
-                for node in &bootstrap_ctx.nodes {
-                    tree.apply(node, true, ctx.whiteout_spec)
-                        .context("failed to apply tree")?;
-                }
-                Ok(true)
-            },
-            "apply_tree",
-            Result<bool>
-        )?;
-
-        // Clear all cached states for next upper layer build.
-        bootstrap_ctx.inode_map.clear();
-        bootstrap_ctx.nodes.clear();
-        bootstrap_ctx
-            .v6_available_blocks
-            .iter_mut()
-            .for_each(|v| v.clear());
-        ctx.prefetch.clear();
-
-        Ok(tree)
     }
 
     /// Dump the RAFS filesystem meta information to meta blob.
@@ -156,38 +90,36 @@ impl Bootstrap {
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
         tree: &mut Tree,
-        nodes: &mut VecDeque<Node>,
     ) -> Result<()> {
-        let index = nodes.len() as u32 + 1;
-        let parent = &mut nodes[tree.node.index as usize - 1];
-        let parent_ino = parent.inode.ino();
+        let parent_node = tree.node.clone();
+        let mut parent_node = parent_node.lock().unwrap();
+        let parent_ino = parent_node.inode.ino();
         let block_size = ctx.v6_block_size();
 
-        // Maybe the parent is not a directory in multi-layers build scenario, so we check here.
-        if parent.is_dir() {
-            // Sort children list by name, so that we can improve performance in fs read_dir using
-            // binary search.
-            tree.children.sort_by_key(|child| child.name.clone());
-            parent.inode.set_child_count(tree.children.len() as u32);
+        // In case of multi-layer building, it's possible that the parent node is not a directory.
+        if parent_node.is_dir() {
+            parent_node
+                .inode
+                .set_child_count(tree.children.len() as u32);
             if ctx.fs_version.is_v5() {
-                parent.inode.set_child_index(index);
+                parent_node
+                    .inode
+                    .set_child_index(bootstrap_ctx.get_next_ino() as u32);
             } else if ctx.fs_version.is_v6() {
-                let d_size = tree.node.v6_dirent_size(ctx, tree)?;
-                parent.v6_set_dir_offset(bootstrap_ctx, d_size, block_size)?;
+                // Layout directory entries for v6.
+                let d_size = parent_node.v6_dirent_size(ctx, tree)?;
+                parent_node.v6_set_dir_offset(bootstrap_ctx, d_size, block_size)?;
             }
         }
 
-        if ctx.fs_version.is_v6() {
-            tree.node.v6_offset = parent.v6_offset;
-        }
-
-        // Cache dir tree for BFS walk
         let mut dirs: Vec<&mut Tree> = Vec::new();
         for child in tree.children.iter_mut() {
-            let index = nodes.len() as u64 + 1;
-            child.node.index = index;
+            let child_node = child.node.clone();
+            let mut child_node = child_node.lock().unwrap();
+            let index = bootstrap_ctx.generate_next_ino();
+            child_node.index = index;
             if ctx.fs_version.is_v5() {
-                child.node.inode.set_parent(parent_ino);
+                child_node.inode.set_parent(parent_ino);
             }
 
             // Handle hardlink.
@@ -195,100 +127,60 @@ impl Bootstrap {
             // We need to find hardlink node index list in the layer where the node is located
             // because the real_ino may be different among different layers,
             let mut v6_hardlink_offset: Option<u64> = None;
-            if let Some(indexes) = bootstrap_ctx.inode_map.get_mut(&(
-                child.node.layer_idx,
-                child.node.info.src_ino,
-                child.node.info.src_dev,
-            )) {
+            let key = (
+                child_node.layer_idx,
+                child_node.info.src_ino,
+                child_node.info.src_dev,
+            );
+            if let Some(indexes) = bootstrap_ctx.inode_map.get_mut(&key) {
                 let nlink = indexes.len() as u32 + 1;
-                let first_index = indexes[0];
-                child.node.inode.set_ino(first_index);
-                child.node.inode.set_nlink(nlink);
                 // Update nlink for previous hardlink inodes
-                for idx in indexes.iter() {
-                    nodes[*idx as usize - 1].inode.set_nlink(nlink);
+                for n in indexes.iter() {
+                    n.lock().unwrap().inode.set_nlink(nlink);
                 }
-                indexes.push(index);
+
+                let (first_ino, first_offset) = {
+                    let first_node = indexes[0].lock().unwrap();
+                    (first_node.inode.ino(), first_node.v6_offset)
+                };
                 // set offset for rafs v6 hardlinks
-                v6_hardlink_offset = Some(nodes[first_index as usize - 1].v6_offset);
+                v6_hardlink_offset = Some(first_offset);
+                child_node.inode.set_nlink(nlink);
+                child_node.inode.set_ino(first_ino);
+                indexes.push(child.node.clone());
             } else {
-                child.node.inode.set_ino(index);
-                child.node.inode.set_nlink(1);
+                child_node.inode.set_ino(index);
+                child_node.inode.set_nlink(1);
                 // Store inode real ino
-                bootstrap_ctx.inode_map.insert(
-                    (
-                        child.node.layer_idx,
-                        child.node.info.src_ino,
-                        child.node.info.src_dev,
-                    ),
-                    vec![child.node.index],
-                );
+                bootstrap_ctx
+                    .inode_map
+                    .insert(key, vec![child.node.clone()]);
             }
 
-            // update bootstrap_ctx.offset for rafs v6.
-            if !child.node.is_dir() && ctx.fs_version.is_v6() {
-                child
-                    .node
-                    .v6_set_offset(bootstrap_ctx, v6_hardlink_offset, block_size)?;
+            // update bootstrap_ctx.offset for rafs v6 non-dir nodes.
+            if !child_node.is_dir() && ctx.fs_version.is_v6() {
+                child_node.v6_set_offset(bootstrap_ctx, v6_hardlink_offset, block_size)?;
             }
-
-            // Store node for bootstrap & blob dump.
-            // Put the whiteout file of upper layer in the front of node list for layered build,
-            // so that it can be applied to the node tree of lower layer first than other files of upper layer.
-            match (
-                bootstrap_ctx.layered,
-                child.node.whiteout_type(ctx.whiteout_spec),
-            ) {
-                (true, Some(whiteout_type)) => {
-                    // Insert removal operations at the head, so they will be handled first when
-                    // applying to lower layer.
-                    nodes.push_front(child.node.clone());
-                    if whiteout_type == WhiteoutType::OverlayFsOpaque {
-                        // For the overlayfs opaque, we need to remove the lower node that has the
-                        // same name first, then apply upper node to the node tree of lower layer.
-                        child
-                            .node
-                            .remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
-                        nodes.push_back(child.node.clone());
-                    }
-                }
-                (false, Some(whiteout_type)) => {
-                    // Remove overlayfs opaque xattr for single layer build
-                    if whiteout_type == WhiteoutType::OverlayFsOpaque {
-                        child
-                            .node
-                            .remove_xattr(&OsString::from(OVERLAYFS_WHITEOUT_OPAQUE));
-                    }
-                    nodes.push_back(child.node.clone());
-                }
-                _ => nodes.push_back(child.node.clone()),
-            }
-
-            ctx.prefetch.insert_if_need(&child.node);
-
-            if child.node.is_dir() {
+            ctx.prefetch.insert_if_need(&child.node, child_node.deref());
+            if child_node.is_dir() {
                 dirs.push(child);
             }
         }
 
-        // According to filesystem semantics, a parent dir should have nlink equal to
-        // 2 plus the number of its child directory. And in case of layered build,
-        // updating parent directory's nlink here is reliable since builder re-constructs
-        // the entire tree and intends to layout all inodes into a plain array fetching
-        // from the previously applied tree.
-        let parent = &mut nodes[tree.node.index as usize - 1];
-        if parent.is_dir() {
-            parent.inode.set_nlink((2 + dirs.len()) as u32);
+        // According to filesystem semantics, a parent directory should have nlink equal to
+        // the number of its child directories plus 2.
+        if parent_node.is_dir() {
+            parent_node.inode.set_nlink((2 + dirs.len()) as u32);
         }
         for dir in dirs {
-            Self::build_rafs(ctx, bootstrap_ctx, dir, nodes)?;
+            Self::build_rafs(ctx, bootstrap_ctx, dir)?;
         }
 
         Ok(())
     }
 
-    fn load_parent_bootstrap(
-        &mut self,
+    /// Load a parent RAFS bootstrap and return the `Tree` object representing the filesystem.
+    pub fn load_parent_bootstrap(
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
@@ -316,9 +208,7 @@ impl Bootstrap {
 
         // Build node tree of lower layer from a bootstrap file, and add chunks
         // of lower node to layered_chunk_dict for chunk deduplication on next.
-        let tree = Tree::from_bootstrap(&rs, &mut blob_mgr.layered_chunk_dict)
-            .context("failed to build tree from bootstrap")?;
-
-        Ok(tree)
+        Tree::from_bootstrap(&rs, &mut blob_mgr.layered_chunk_dict)
+            .context("failed to build tree from bootstrap")
     }
 }
