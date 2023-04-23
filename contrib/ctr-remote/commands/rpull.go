@@ -34,6 +34,7 @@ const (
 	remoteSnapshotterName = "nydus"
 )
 
+// RpullCommand is a subcommand to pull an image from a registry levaraging nydus snapshotter
 var RpullCommand = cli.Command{
 	Name:      "rpull",
 	Usage:     "pull an image from a registry leveraging nydus-snapshotter",
@@ -91,7 +92,6 @@ func pull(ctx context.Context, client *containerd.Client, ref string, config *rP
 		containerd.WithPullLabels(configLabels),
 		containerd.WithResolver(config.Resolver),
 		containerd.WithImageHandler(h),
-		containerd.WithSchema1Conversion,
 		containerd.WithPullUnpack,
 		containerd.WithPullSnapshotter(remoteSnapshotterName),
 		containerd.WithImageHandlerWrapper(label.AppendLabelsHandlerWrapper(ref)),
