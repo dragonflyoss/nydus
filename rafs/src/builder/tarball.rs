@@ -20,7 +20,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use tar::{Archive, Entry, EntryType, Header};
@@ -39,13 +39,12 @@ use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
 use super::core::node::{Node, NodeInfo};
-use super::core::overlay::Overlay;
 use super::core::tree::Tree;
-use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
+use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder, TarBuilder};
 use crate::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
 use crate::metadata::layout::v5::RafsV5Inode;
 use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::{Inode, RafsVersion};
+use crate::metadata::RafsVersion;
 
 enum TarReader {
     File(File),
@@ -67,12 +66,11 @@ impl Read for TarReader {
 
 struct TarballTreeBuilder<'a> {
     ty: ConversionType,
-    layer_idx: u16,
     ctx: &'a mut BuildContext,
     blob_mgr: &'a mut BlobManager,
     blob_writer: &'a mut ArtifactWriter,
     buf: Vec<u8>,
-    next_ino: Inode,
+    builder: TarBuilder,
 }
 
 impl<'a> TarballTreeBuilder<'a> {
@@ -84,14 +82,14 @@ impl<'a> TarballTreeBuilder<'a> {
         blob_writer: &'a mut ArtifactWriter,
         layer_idx: u16,
     ) -> Self {
+        let builder = TarBuilder::new(ctx.explicit_uidgid, layer_idx, ctx.fs_version);
         Self {
             ty,
-            layer_idx,
             ctx,
             blob_mgr,
             buf: Vec::new(),
             blob_writer,
-            next_ino: 0,
+            builder,
         }
     }
 
@@ -156,7 +154,7 @@ impl<'a> TarballTreeBuilder<'a> {
         }
 
         // Generate the root node in advance, it may be overwritten by entries from the tar stream.
-        let root = self.create_directory(&[OsString::from("/")])?;
+        let root = self.builder.create_directory(&[OsString::from("/")])?;
         let mut tree = Tree::new(root);
 
         // Generate RAFS node for each tar entry, and optionally adding missing parents.
@@ -170,7 +168,7 @@ impl<'a> TarballTreeBuilder<'a> {
                 .context("tarball: failed to to get path from tar entry")?;
             let path = PathBuf::from("/").join(path);
             let path = path.components().as_path();
-            if !self.is_special_files(path) {
+            if !self.builder.is_stargz_special_files(path) {
                 self.parse_entry(&mut tree, &mut entry, path)?;
             }
         }
@@ -271,7 +269,7 @@ impl<'a> TarballTreeBuilder<'a> {
 
         // Handle hardlink ino
         let mut hardlink_target = None;
-        if entry_type.is_hard_link() {
+        let ino = if entry_type.is_hard_link() {
             let link_path = entry
                 .link_name()
                 .context("tarball: failed to get target path for tar symlink entry")?
@@ -282,7 +280,7 @@ impl<'a> TarballTreeBuilder<'a> {
             assert!(!targets.is_empty());
             let mut tmp_tree: &Tree = tree;
             for name in &targets[1..] {
-                match tmp_tree.get_child_idx(name) {
+                match tmp_tree.get_child_idx(name.as_bytes()) {
                     Some(idx) => tmp_tree = &tmp_tree.children[idx],
                     None => {
                         bail!(
@@ -293,7 +291,8 @@ impl<'a> TarballTreeBuilder<'a> {
                     }
                 }
             }
-            if !tmp_tree.node.is_reg() {
+            let mut tmp_node = tmp_tree.lock_node();
+            if !tmp_node.is_reg() {
                 bail!(
                     "tarball: target {} for hardlink {} is not a regular file",
                     link_path.display(),
@@ -302,7 +301,11 @@ impl<'a> TarballTreeBuilder<'a> {
             }
             hardlink_target = Some(tmp_tree);
             flags |= RafsInodeFlags::HARDLINK;
-        }
+            tmp_node.inode.set_has_hardlink(true);
+            tmp_node.inode.ino()
+        } else {
+            self.builder.next_ino()
+        };
 
         // Parse xattrs
         let mut xattrs = RafsXAttrs::new();
@@ -327,11 +330,6 @@ impl<'a> TarballTreeBuilder<'a> {
             }
         }
 
-        let ino = if let Some(t) = hardlink_target {
-            t.node.inode.ino()
-        } else {
-            self.next_ino()
-        };
         let mut inode = match self.ctx.fs_version {
             RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode {
                 i_digest: RafsDigest::default(),
@@ -378,7 +376,6 @@ impl<'a> TarballTreeBuilder<'a> {
         let target = Node::generate_target(path, &source);
         let target_vec = Node::generate_target_vec(&target);
         let info = NodeInfo {
-            ctime: 0,
             explicit_uidgid: self.ctx.explicit_uidgid,
             src_ino: ino,
             src_dev: u64::MAX,
@@ -391,25 +388,13 @@ impl<'a> TarballTreeBuilder<'a> {
             xattrs,
             v6_force_extended_inode: false,
         };
-        let mut node = Node {
-            info: Arc::new(info),
-            index: 0,
-            overlay: Overlay::UpperAddition,
-            inode,
-            chunks: Vec::new(),
-            layer_idx: self.layer_idx,
-            v6_offset: 0,
-            v6_dirents: Vec::<(u64, OsString, u32)>::new(),
-            v6_datalayout: 0,
-            v6_compact_inode: false,
-            v6_dirents_offset: 0,
-        };
+        let mut node = Node::new(inode, info, self.builder.layer_idx);
 
         // Special handling of hardlink.
         // Tar hardlink header has zero file size and no file data associated, so copy value from
         // the associated regular file.
         if let Some(t) = hardlink_target {
-            let n = &t.node;
+            let n = t.lock_node();
             if n.inode.is_v5() {
                 node.inode.set_digest(n.inode.digest().to_owned());
             }
@@ -432,45 +417,7 @@ impl<'a> TarballTreeBuilder<'a> {
             node.v5_set_inode_blocks();
         }
 
-        self.insert_into_tree(tree, node)
-    }
-
-    fn insert_into_tree(&mut self, tree: &mut Tree, node: Node) -> Result<()> {
-        let target_paths = node.target_vec();
-        let target_paths_len = target_paths.len();
-
-        if target_paths_len == 1 {
-            // Handle root node modification
-            assert_eq!(node.path(), Path::new("/"));
-            tree.node = node;
-        } else {
-            let mut tmp_tree = tree;
-            for idx in 1..target_paths.len() {
-                match tmp_tree.get_child_idx(&target_paths[idx]) {
-                    Some(i) => {
-                        if idx == target_paths_len - 1 {
-                            tmp_tree.children[i].node = node;
-                            break;
-                        } else {
-                            tmp_tree = &mut tmp_tree.children[i];
-                        }
-                    }
-                    None => {
-                        if idx == target_paths_len - 1 {
-                            tmp_tree.children.push(Tree::new(node));
-                            break;
-                        } else {
-                            let node = self.create_directory(&target_paths[..=idx])?;
-                            tmp_tree.children.push(Tree::new(node));
-                            let last_idx = tmp_tree.children.len() - 1;
-                            tmp_tree = &mut tmp_tree.children[last_idx];
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        self.builder.insert_into_tree(tree, node)
     }
 
     fn get_uid_gid(ctx: &BuildContext, header: &Header) -> Result<(u32, u32)> {
@@ -531,77 +478,12 @@ impl<'a> TarballTreeBuilder<'a> {
         Ok(name)
     }
 
-    fn create_directory(&mut self, target_paths: &[OsString]) -> Result<Node> {
-        let ino = self.next_ino();
-        let name = &target_paths[target_paths.len() - 1];
-        let mut inode = InodeWrapper::new(self.ctx.fs_version);
-        inode.set_ino(ino);
-        inode.set_mode(0o755 | libc::S_IFDIR as u32);
-        inode.set_nlink(2);
-        inode.set_name_size(name.len());
-        inode.set_rdev(u32::MAX);
-
-        let source = PathBuf::from("/");
-        let target_vec = target_paths.to_vec();
-        let mut target = PathBuf::new();
-        for name in target_paths.iter() {
-            target = target.join(name);
-        }
-        let info = NodeInfo {
-            ctime: 0,
-            explicit_uidgid: self.ctx.explicit_uidgid,
-            src_ino: ino,
-            src_dev: u64::MAX,
-            rdev: u64::MAX,
-            path: target.clone(),
-            source,
-            target,
-            target_vec,
-            symlink: None,
-            xattrs: RafsXAttrs::new(),
-            v6_force_extended_inode: false,
-        };
-        let node = Node {
-            info: Arc::new(info),
-            index: 0,
-            overlay: Overlay::UpperAddition,
-            inode,
-            chunks: Vec::new(),
-            layer_idx: self.layer_idx,
-            v6_offset: 0,
-            v6_dirents: Vec::<(u64, OsString, u32)>::new(),
-            v6_datalayout: 0,
-            v6_compact_inode: false,
-            v6_dirents_offset: 0,
-        };
-
-        Ok(node)
-    }
-
     fn set_v5_dir_size(tree: &mut Tree) {
         for c in &mut tree.children {
             Self::set_v5_dir_size(c);
         }
-        tree.node.v5_set_dir_size(RafsVersion::V5, &tree.children);
-    }
-
-    // Filter out special files of estargz.
-    //
-    // TOC MUST be a JSON file contained as the last tar entry and MUST be named stargz.index.json.
-    //
-    // The Landmark file MUST be a regular file entry with 4 bits contents 0xf in eStargz.
-    // It MUST be recorded to TOC as a TOCEntry. Prefetch landmark MUST be named .prefetch.landmark.
-    // No-prefetch landmark MUST be named .no.prefetch.landmark.
-    fn is_special_files(&self, path: &Path) -> bool {
-        (self.ty == ConversionType::EStargzToRafs || self.ty == ConversionType::EStargzToRef)
-            && (path == Path::new("/stargz.index.json")
-                || path == Path::new("/.prefetch.landmark")
-                || path == Path::new("/.no.prefetch.landmark"))
-    }
-
-    fn next_ino(&mut self) -> Inode {
-        self.next_ino += 1;
-        self.next_ino
+        let mut node = tree.lock_node();
+        node.v5_set_dir_size(RafsVersion::V5, &tree.children);
     }
 }
 
@@ -661,7 +543,7 @@ impl Builder for TarballBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer) },
+            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, &mut blob_writer) },
             "dump_blob"
         )?;
 

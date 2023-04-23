@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
-use std::collections::VecDeque;
 use std::io::Write;
 use std::slice;
 
@@ -17,7 +16,7 @@ use sha2::digest::Digest;
 use super::layout::BlobLayout;
 use super::node::Node;
 use crate::builder::{
-    ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType, Feature,
+    ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType, Feature, Tree,
 };
 use crate::metadata::RAFS_MAX_CHUNK_SIZE;
 
@@ -28,17 +27,17 @@ impl Blob {
     /// Dump blob file and generate chunks
     pub(crate) fn dump(
         ctx: &BuildContext,
-        nodes: &mut VecDeque<Node>,
+        tree: &Tree,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut ArtifactWriter,
     ) -> Result<()> {
         match ctx.conversion_type {
             ConversionType::DirectoryToRafs => {
-                let (inodes, prefetch_entries) =
-                    BlobLayout::layout_blob_simple(&ctx.prefetch, nodes)?;
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
-                for (idx, inode) in inodes.iter().enumerate() {
-                    let node = &mut nodes[*inode];
+                let (inodes, prefetch_entries) =
+                    BlobLayout::layout_blob_simple(&ctx.prefetch, tree)?;
+                for (idx, node) in inodes.iter().enumerate() {
+                    let mut node = node.lock().unwrap();
                     let size = node
                         .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf)
                         .context("failed to dump blob chunks")?;
@@ -55,8 +54,8 @@ impl Blob {
             | ConversionType::EStargzToRafs => {
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
             }
-            ConversionType::TarToRef
-            | ConversionType::TarToTarfs
+            ConversionType::TarToTarfs
+            | ConversionType::TarToRef
             | ConversionType::TargzToRef
             | ConversionType::EStargzToRef => {
                 // Use `sha256(tarball)` as `blob_id` for ref-type conversions.
@@ -81,10 +80,12 @@ impl Blob {
                 }
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
             }
+            ConversionType::EStargzIndexToRef => {
+                Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
+            }
             ConversionType::TarToStargz
             | ConversionType::DirectoryToTargz
             | ConversionType::DirectoryToStargz
-            | ConversionType::EStargzIndexToRef
             | ConversionType::TargzToStargz => {
                 unimplemented!()
             }
@@ -118,6 +119,7 @@ impl Blob {
                 }
             }
         }
+
         if !ctx.blob_features.contains(BlobFeatures::SEPARATE)
             && (ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc))
         {

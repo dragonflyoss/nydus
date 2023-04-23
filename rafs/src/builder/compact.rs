@@ -1,29 +1,29 @@
 // Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2023 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::Write;
+use std::mem;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, ensure, Result};
-use serde::{Deserialize, Serialize};
-use sha2::Digest;
-
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::utils::alloc_buf;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{digest, try_round_up_4k};
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use super::core::blob::Blob;
 use super::core::bootstrap::Bootstrap;
-use super::core::node::Node;
-use crate::builder::{
+use super::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
-    BuildOutput, ChunkDict, ConversionType, Features, HashChunkDict, Tree, WhiteoutSpec,
+    BuildOutput, ChunkDict, ConversionType, Features, Tree, TreeNode, WhiteoutSpec,
 };
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::{RafsSuper, RafsVersion};
@@ -85,16 +85,13 @@ impl ChunkKey {
 #[derive(Clone, Debug)]
 struct ChunkSet {
     chunks: HashMap<ChunkKey, ChunkWrapper>,
-    #[allow(unused)]
-    version: RafsVersion,
     total_size: usize,
 }
 
 impl ChunkSet {
-    fn new(version: RafsVersion) -> Self {
+    fn new() -> Self {
         Self {
             chunks: Default::default(),
-            version,
             total_size: 0,
         }
     }
@@ -129,9 +126,8 @@ impl ChunkSet {
         backend: &Arc<dyn BlobBackend + Send + Sync>,
     ) -> Result<Vec<(ChunkWrapper, ChunkWrapper)>> {
         let mut blob_writer = ArtifactWriter::new(blob_storage)?;
-
-        // sort chunks first, don't break order in original blobs
         let mut chunks = self.chunks.values().collect::<Vec<&ChunkWrapper>>();
+        // sort chunks first, don't break order in original blobs
         chunks.sort_by(|a, b| {
             if (*a).blob_index() == (*b).blob_index() {
                 (*a).compressed_offset().cmp(&(*b).compressed_offset())
@@ -139,7 +135,8 @@ impl ChunkSet {
                 (*a).blob_index().cmp(&(*b).blob_index())
             }
         });
-        let mut chunks_change = Vec::new();
+
+        let mut changed_chunks = Vec::new();
         for chunk in chunks {
             let blob_idx = chunk.blob_index();
             // get data from backend
@@ -161,7 +158,7 @@ impl ChunkSet {
             new_chunk.set_uncompressed_offset(new_blob_ctx.current_uncompressed_offset);
             new_blob_ctx.add_chunk_meta_info(&new_chunk, None)?;
             // insert change ops
-            chunks_change.push((chunk.clone(), new_chunk));
+            changed_chunks.push((chunk.clone(), new_chunk));
 
             new_blob_ctx.blob_hash.update(&buf);
             new_blob_ctx.chunk_count += 1;
@@ -177,20 +174,24 @@ impl ChunkSet {
             new_blob_ctx.uncompressed_blob_size += aligned_size;
         }
         new_blob_ctx.blob_id = format!("{:x}", new_blob_ctx.blob_hash.clone().finalize());
+
         // dump blob meta for v6
         Blob::dump_meta_data(build_ctx, new_blob_ctx, &mut blob_writer)?;
         let blob_id = new_blob_ctx.blob_id();
         blob_writer.finalize(blob_id)?;
-        Ok(chunks_change)
+
+        Ok(changed_chunks)
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 enum State {
-    Original(ChunkSet),
     ChunkDict,
     /// delete this blob
     Delete,
+    #[default]
+    Invalid,
+    Original(ChunkSet),
     /// output chunks as a new blob file
     Rebuild(ChunkSet),
 }
@@ -198,6 +199,14 @@ enum State {
 impl State {
     fn is_rebuild(&self) -> bool {
         matches!(self, Self::Rebuild(_))
+    }
+
+    fn is_from_dict(&self) -> bool {
+        matches!(self, Self::ChunkDict)
+    }
+
+    fn is_invalid(&self) -> bool {
+        matches!(self, Self::Invalid)
     }
 
     fn merge_blob(&mut self, other: Self) -> Result<()> {
@@ -242,62 +251,63 @@ fn apply_chunk_change(from: &ChunkWrapper, to: &mut ChunkWrapper) -> Result<()> 
     Ok(())
 }
 
+/// RAFS blob compactor to compact multiple small blobs into one blob.
 pub struct BlobCompactor {
     /// v5 or v6
     version: RafsVersion,
     /// states
-    states: Vec<Option<State>>,
+    states: Vec<State>,
     /// original blobs
     ori_blob_mgr: BlobManager,
     /// new blobs
     new_blob_mgr: BlobManager,
-    /// inode list
-    nodes: VecDeque<Node>,
-    /// chunk --> list<node_idx, chunk_idx in node>
-    c2nodes: HashMap<ChunkKey, Vec<(usize, usize)>>,
-    /// original blob index --> list<node_idx, chunk_idx in node>
-    b2nodes: HashMap<u32, Vec<(usize, usize)>>,
+    /// chunk --> list<tree_node, chunk_idx in node>
+    c2nodes: HashMap<ChunkKey, Vec<(TreeNode, usize)>>,
+    /// original blob index --> list<tree_node, chunk_idx in node>
+    b2nodes: HashMap<u32, Vec<(TreeNode, usize)>>,
     /// blobs backend
     backend: Arc<dyn BlobBackend + Send + Sync>,
 }
 
 impl BlobCompactor {
-    pub fn new(
+    /// Create a new instance of [BlobCompactor].
+    fn new(
         version: RafsVersion,
         ori_blob_mgr: BlobManager,
-        nodes: VecDeque<Node>,
         backend: Arc<dyn BlobBackend + Send + Sync>,
         digester: digest::Algorithm,
+        bootstrap: &Bootstrap,
     ) -> Result<Self> {
         let ori_blobs_number = ori_blob_mgr.len();
         let mut compactor = Self {
             version,
-            states: vec![None; ori_blobs_number],
+            states: vec![Default::default(); ori_blobs_number],
             ori_blob_mgr,
             new_blob_mgr: BlobManager::new(digester),
-            nodes,
             c2nodes: HashMap::new(),
             b2nodes: HashMap::new(),
             backend,
         };
         compactor.load_chunk_dict_blobs();
-        compactor.load_and_dedup_chunks()?;
+        compactor.load_and_dedup_chunks(bootstrap)?;
         Ok(compactor)
     }
 
-    pub fn is_v6(&self) -> bool {
+    fn is_v6(&self) -> bool {
         self.version.is_v6()
     }
 
-    fn load_and_dedup_chunks(&mut self) -> Result<()> {
-        let mut all_chunks = ChunkSet::new(self.version);
+    fn load_and_dedup_chunks(&mut self, bootstrap: &Bootstrap) -> Result<()> {
+        let mut all_chunks = ChunkSet::new();
         let chunk_dict = self.get_chunk_dict();
-        for node_idx in 0..self.nodes.len() {
-            let node = &mut self.nodes[node_idx];
+
+        let cb = &mut |n: &Tree| -> Result<()> {
+            let mut node = n.lock_node();
             for chunk_idx in 0..node.chunks.len() {
                 let chunk = &mut node.chunks[chunk_idx];
                 let chunk_key = ChunkKey::from(&chunk.inner);
-                if let Some(State::ChunkDict) = self.states[chunk.inner.blob_index() as usize] {
+
+                if self.states[chunk.inner.blob_index() as usize].is_from_dict() {
                     // dedup by chunk dict
                     if let Some(c) =
                         chunk_dict.get_chunk(chunk.inner.id(), chunk.inner.uncompressed_size())
@@ -313,11 +323,10 @@ impl BlobCompactor {
                         all_chunks.add_chunk(&chunk.inner);
                         // add to per blob ChunkSet
                         let blob_index = chunk.inner.blob_index() as usize;
-                        if self.states[blob_index].is_none() {
-                            self.states[blob_index]
-                                .replace(State::Original(ChunkSet::new(self.version)));
+                        if self.states[blob_index].is_invalid() {
+                            self.states[blob_index] = State::Original(ChunkSet::new());
                         }
-                        if let Some(State::Original(cs)) = &mut self.states[blob_index] {
+                        if let State::Original(cs) = &mut self.states[blob_index] {
                             cs.add_chunk(&chunk.inner);
                         }
                     }
@@ -327,15 +336,16 @@ impl BlobCompactor {
                 self.c2nodes
                     .entry(chunk_key)
                     .or_default()
-                    .push((node_idx, chunk_idx));
+                    .push((n.node.clone(), chunk_idx));
                 self.b2nodes
                     .entry(chunk.inner.blob_index())
                     .or_default()
-                    .push((node_idx, chunk_idx));
+                    .push((n.node.clone(), chunk_idx));
             }
-        }
+            Ok(())
+        };
 
-        Ok(())
+        bootstrap.tree.walk_bfs(false, cb)
     }
 
     fn get_chunk_dict(&self) -> Arc<dyn ChunkDict> {
@@ -347,28 +357,30 @@ impl BlobCompactor {
         let blobs = chunk_dict.get_blobs();
         for i in 0..blobs.len() {
             if let Some(real_blob_idx) = chunk_dict.get_real_blob_idx(i as u32) {
-                self.states[real_blob_idx as usize].replace(State::ChunkDict);
+                self.states[real_blob_idx as usize] = State::ChunkDict;
             }
         }
     }
 
     fn apply_blob_move(&mut self, from: u32, to: u32) -> Result<()> {
         if let Some(idx_list) = self.b2nodes.get(&from) {
-            for (node_idx, chunk_idx) in idx_list.iter() {
+            for (n, chunk_idx) in idx_list.iter() {
+                let mut node = n.lock().unwrap();
                 ensure!(
-                    self.nodes[*node_idx].chunks[*chunk_idx].inner.blob_index() == from,
+                    node.chunks[*chunk_idx].inner.blob_index() == from,
                     "unexpected blob_index of chunk"
                 );
-                self.nodes[*node_idx].chunks[*chunk_idx].set_blob_index(to);
+                node.chunks[*chunk_idx].set_blob_index(to);
             }
         }
         Ok(())
     }
 
     fn apply_chunk_change(&mut self, c: &(ChunkWrapper, ChunkWrapper)) -> Result<()> {
-        if let Some(idx_list) = self.c2nodes.get(&ChunkKey::from(&c.0)) {
-            for (node_idx, chunk_idx) in idx_list.iter() {
-                let chunk = &mut self.nodes[*node_idx].chunks[*chunk_idx];
+        if let Some(chunks) = self.c2nodes.get(&ChunkKey::from(&c.0)) {
+            for (n, chunk_idx) in chunks.iter() {
+                let mut node = n.lock().unwrap();
+                let chunk = &mut node.chunks[*chunk_idx];
                 let mut chunk_inner = chunk.inner.deref().clone();
                 apply_chunk_change(&c.1, &mut chunk_inner)?;
                 chunk.inner = Arc::new(chunk_inner);
@@ -379,44 +391,47 @@ impl BlobCompactor {
 
     fn delete_unused_blobs(&mut self) {
         for i in 0..self.states.len() {
-            if self.states[i].is_none() {
+            if self.states[i].is_invalid() {
                 info!(
-                    "delete unused blob {}",
+                    "compactor: delete unused blob {}",
                     self.ori_blob_mgr.get_blob(i).unwrap().blob_id
                 );
-                self.states[i].replace(State::Delete);
+                self.states[i] = State::Delete;
             }
         }
     }
 
     fn prepare_to_rebuild(&mut self, idx: usize) -> Result<()> {
-        if self.states[idx].as_ref().unwrap().is_rebuild() {
+        if !self.states[idx].is_rebuild() {
             return Ok(());
         }
-        if let Some(cs) = self.states[idx].take() {
-            match cs {
-                State::Original(cs) => {
-                    self.states[idx].replace(State::Rebuild(cs));
-                }
-                _ => bail!("invalid state"),
-            }
+
+        let mut old = State::Invalid;
+        mem::swap(&mut self.states[idx], &mut old);
+        if let State::Original(cs) = old {
+            self.states[idx] = State::Rebuild(cs);
+        } else {
+            mem::swap(&mut self.states[idx], &mut old);
+            bail!("invalid state");
         }
+
         Ok(())
     }
 
-    fn try_rebuild_blobs(&mut self, ratio: u8) {
+    fn try_rebuild_blobs(&mut self, ratio: u8) -> Result<()> {
         for idx in 0..self.ori_blob_mgr.len() {
             let blob_info = self.ori_blob_mgr.get_blob(idx).unwrap();
-            // calculate ratio
-            let used_ratio = match self.states[idx].as_ref().unwrap() {
+            let used_ratio = match &self.states[idx] {
                 State::Original(cs) => {
                     let compressed_blob_size = if blob_info.compressed_blob_size == 0 {
-                        // get blob compressed size of blob from backend
-                        self.backend
-                            .get_reader(&blob_info.blob_id)
-                            .expect("get blob failed")
-                            .blob_size()
-                            .expect("get blob size failed")
+                        let reader = match self.backend.get_reader(&blob_info.blob_id) {
+                            Ok(r) => r,
+                            Err(e) => bail!("compactor: failed to get blob reader, {}", e),
+                        };
+                        match reader.blob_size() {
+                            Ok(sz) => sz,
+                            Err(e) => bail!("compactor: failed to get blob size, {}", e),
+                        }
                     } else {
                         blob_info.compressed_blob_size
                     };
@@ -424,16 +439,23 @@ impl BlobCompactor {
                 }
                 _ => 100_u8,
             };
-            info!("blob {} used ratio {}%", blob_info.blob_id, used_ratio);
+
+            info!(
+                "compactor: original blob size {}, used data ratio {}%",
+                blob_info.blob_id, used_ratio
+            );
             if used_ratio < ratio {
-                self.prepare_to_rebuild(idx).unwrap();
+                self.prepare_to_rebuild(idx)?;
             }
         }
+
+        Ok(())
     }
 
     fn merge_blob(&mut self, from: usize, to: usize) -> Result<()> {
-        let s = self.states[from].replace(State::Delete).unwrap();
-        self.states[to].as_mut().unwrap().merge_blob(s)
+        let mut old = State::Delete;
+        mem::swap(&mut self.states[from], &mut old);
+        self.states[to].merge_blob(old)
     }
 
     /// use greedy algorithm to merge small blobs(<low)
@@ -441,7 +463,7 @@ impl BlobCompactor {
         let mut need_merge_blobs = Vec::new();
         for idx in 0..self.states.len() {
             let blob_info = self.ori_blob_mgr.get_blob(idx).unwrap();
-            match self.states[idx].as_ref().unwrap() {
+            match &self.states[idx] {
                 State::Original(cs) => {
                     let blob_size = if blob_info.compressed_blob_size == 0 {
                         cs.total_size
@@ -449,14 +471,17 @@ impl BlobCompactor {
                         blob_info.compressed_blob_size as usize
                     };
                     if blob_size < low {
-                        info!("blob {} size {}, try merge", blob_info.blob_id, blob_size);
+                        info!(
+                            "compactor: try to merge blob {} size {}",
+                            blob_info.blob_id, blob_size
+                        );
                         need_merge_blobs.push((idx, blob_size));
                     }
                 }
                 State::Rebuild(cs) => {
                     if cs.total_size < low {
                         info!(
-                            "blob {} size {}, try merge",
+                            "compactor: try to merge blob {} size {}",
                             blob_info.blob_id, cs.total_size
                         );
                         need_merge_blobs.push((idx, cs.total_size));
@@ -471,13 +496,11 @@ impl BlobCompactor {
         if need_merge_blobs.len() < 2 {
             return Ok(());
         }
+
         let mut merge_to = need_merge_blobs[0].0;
         for (blob_idx, _) in need_merge_blobs.iter().skip(1) {
-            let before_size = self.states[merge_to].as_ref().unwrap().chunk_total_size()?;
-            let append_size = self.states[*blob_idx]
-                .as_ref()
-                .unwrap()
-                .chunk_total_size()?;
+            let before_size = self.states[merge_to].chunk_total_size()?;
+            let append_size = self.states[*blob_idx].chunk_total_size()?;
             if before_size + append_size <= max {
                 self.prepare_to_rebuild(merge_to)?;
                 self.merge_blob(*blob_idx, merge_to)?;
@@ -485,6 +508,7 @@ impl BlobCompactor {
                 merge_to = *blob_idx;
             }
         }
+
         Ok(())
     }
 
@@ -496,7 +520,7 @@ impl BlobCompactor {
             .collect()
     }
 
-    pub fn dump_new_blobs(
+    fn dump_new_blobs(
         &mut self,
         build_ctx: &BuildContext,
         dir: &str,
@@ -504,10 +528,11 @@ impl BlobCompactor {
     ) -> Result<()> {
         let ori_blob_ids = self.original_blob_ids();
         ensure!(self.states.len() == self.ori_blob_mgr.len());
+
         for idx in 0..self.states.len() {
-            match self.states[idx].as_ref().unwrap() {
+            match &self.states[idx] {
                 State::Original(_) | State::ChunkDict => {
-                    info!("do nothing to blob {}", ori_blob_ids[idx]);
+                    info!("compactor: keep original data blob {}", ori_blob_ids[idx]);
                     // already exists, no need to dump
                     let ctx = self.ori_blob_mgr.take_blob(idx);
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
@@ -517,7 +542,7 @@ impl BlobCompactor {
                     self.new_blob_mgr.add_blob(ctx);
                 }
                 State::Delete => {
-                    info!("delete blob {}", ori_blob_ids[idx]);
+                    info!("compactor: delete compacted blob {}", ori_blob_ids[idx]);
                 }
                 State::Rebuild(cs) => {
                     let blob_storage = ArtifactStorage::FileDir(PathBuf::from(dir));
@@ -542,22 +567,25 @@ impl BlobCompactor {
                     for change_chunk in new_chunks.iter() {
                         self.apply_chunk_change(change_chunk)?;
                     }
-                    info!("rebuild blob {} successfully", blob_ctx.blob_id);
+                    info!("compactor: successfully rebuild blob {}", blob_ctx.blob_id);
                     self.new_blob_mgr.add_blob(blob_ctx);
                 }
+                State::Invalid => bail!("compactor: invalid state for blob {}", ori_blob_ids[idx]),
             }
         }
+
         Ok(())
     }
 
-    pub fn compact(&mut self, cfg: &Config) -> Result<()> {
+    fn do_compact(&mut self, cfg: &Config) -> Result<()> {
         self.delete_unused_blobs();
-        self.try_rebuild_blobs(cfg.min_used_ratio);
+        self.try_rebuild_blobs(cfg.min_used_ratio)?;
         self.try_merge_blobs(cfg.compact_blob_size, cfg.max_compact_size)?;
         Ok(())
     }
 
-    pub fn do_compact(
+    /// Compact multiple small data blobs into one to reduce number of blobs.
+    pub fn compact(
         rs: RafsSuper,
         d_bootstrap: PathBuf,
         chunk_dict: Option<Arc<dyn ChunkDict>>,
@@ -571,8 +599,7 @@ impl BlobCompactor {
             rs.meta.get_compressor(),
             rs.meta.get_digester(),
             rs.meta.explicit_uidgid(),
-            // useless args
-            WhiteoutSpec::Oci,
+            WhiteoutSpec::None,
             ConversionType::DirectoryToRafs,
             PathBuf::from(""),
             Default::default(),
@@ -592,37 +619,34 @@ impl BlobCompactor {
         if ori_blob_mgr.len() < cfg.layers_to_compact {
             return Ok(None);
         }
-        let mut _dict = HashChunkDict::new(build_ctx.digester);
-        let tree = Tree::from_bootstrap(&rs, &mut _dict)?;
-        let mut bootstrap = Bootstrap::new()?;
-        bootstrap.build(&mut build_ctx, &mut bootstrap_ctx, tree)?;
-        let mut nodes = VecDeque::new();
-        // move out nodes
-        std::mem::swap(&mut bootstrap_ctx.nodes, &mut nodes);
+
+        let tree = Tree::from_bootstrap(&rs, &mut ())?;
+        let mut bootstrap = Bootstrap::new(tree)?;
         let mut compactor = Self::new(
             build_ctx.fs_version,
             ori_blob_mgr,
-            nodes,
             backend.clone(),
             rs.meta.get_digester(),
+            &bootstrap,
         )?;
-        compactor.compact(cfg)?;
+        compactor.do_compact(cfg)?;
         compactor.dump_new_blobs(&build_ctx, &cfg.blobs_dir, build_ctx.aligned_chunk)?;
         if compactor.new_blob_mgr.is_empty() {
-            info!("blobs of source bootstrap have already been optimized");
+            info!("compactor: no chance to compact data blobs");
             return Ok(None);
         }
-        info!("compact blob successfully");
-        // give back nodes
-        std::mem::swap(&mut bootstrap_ctx.nodes, &mut compactor.nodes);
+
+        info!("compatctor: successfully compacted blob");
         // blobs have already been dumped, dump bootstrap only
         let blob_table = compactor.new_blob_mgr.to_blob_table(&build_ctx)?;
+        bootstrap.build(&mut build_ctx, &mut bootstrap_ctx)?;
         bootstrap.dump(
             &mut build_ctx,
             &mut bootstrap_mgr.bootstrap_storage,
             &mut bootstrap_ctx,
             &blob_table,
         )?;
+
         Ok(Some(BuildOutput::new(
             &compactor.new_blob_mgr,
             &bootstrap_mgr.bootstrap_storage,

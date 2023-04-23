@@ -13,9 +13,7 @@ use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
 };
 use super::core::node::Node;
-use super::core::overlay::Overlay;
-use super::core::tree::Tree;
-use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder};
+use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder, Overlay, Tree, TreeNode};
 
 struct FilesystemTreeBuilder {}
 
@@ -30,10 +28,11 @@ impl FilesystemTreeBuilder {
         &self,
         ctx: &mut BuildContext,
         bootstrap_ctx: &mut BootstrapContext,
-        parent: &mut Node,
+        parent: &TreeNode,
         layer_idx: u16,
     ) -> Result<Vec<Tree>> {
         let mut result = Vec::new();
+        let parent = parent.lock().unwrap();
         if !parent.is_dir() {
             return Ok(result);
         }
@@ -67,8 +66,10 @@ impl FilesystemTreeBuilder {
             }
 
             let mut child = Tree::new(child);
-            child.children = self.load_children(ctx, bootstrap_ctx, &mut child.node, layer_idx)?;
-            child.node.v5_set_dir_size(ctx.fs_version, &child.children);
+            child.children = self.load_children(ctx, bootstrap_ctx, &child.node, layer_idx)?;
+            child
+                .lock_node()
+                .v5_set_dir_size(ctx.fs_version, &child.children);
             result.push(child);
         }
 
@@ -104,10 +105,11 @@ impl DirectoryBuilder {
         let tree_builder = FilesystemTreeBuilder::new();
 
         tree.children = timing_tracer!(
-            { tree_builder.load_children(ctx, bootstrap_ctx, &mut tree.node, layer_idx) },
+            { tree_builder.load_children(ctx, bootstrap_ctx, &tree.node, layer_idx) },
             "load_from_directory"
         )?;
-        tree.node.v5_set_dir_size(ctx.fs_version, &tree.children);
+        tree.lock_node()
+            .v5_set_dir_size(ctx.fs_version, &tree.children);
 
         Ok(tree)
     }
@@ -144,7 +146,7 @@ impl Builder for DirectoryBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &mut bootstrap_ctx.nodes, blob_mgr, &mut blob_writer,) },
+            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, &mut blob_writer,) },
             "dump_blob"
         )?;
 

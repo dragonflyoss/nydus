@@ -32,7 +32,8 @@ use nydus_storage::meta::{
 use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down, BufReaderInfo};
 
-use super::node::{ChunkSource, Node};
+use super::node::ChunkSource;
+use crate::builder::core::tree::TreeNode;
 use crate::builder::{
     ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolicy, WhiteoutSpec,
 };
@@ -116,6 +117,7 @@ impl fmt::Display for ConversionType {
 }
 
 impl ConversionType {
+    /// Check whether the generated image references the original OCI image data.
     pub fn is_to_ref(&self) -> bool {
         matches!(
             self,
@@ -962,14 +964,14 @@ pub struct BootstrapContext {
     /// This build has a parent bootstrap.
     pub layered: bool,
     /// Cache node index for hardlinks, HashMap<(layer_index, real_inode, dev), Vec<index>>.
-    pub(crate) inode_map: HashMap<(u16, Inode, u64), Vec<u64>>,
-    /// Store all nodes in ascendant order, indexed by (node.index - 1).
-    pub nodes: VecDeque<Node>,
+    pub(crate) inode_map: HashMap<(u16, Inode, u64), Vec<TreeNode>>,
     /// Current position to write in f_bootstrap
     pub(crate) offset: u64,
     pub(crate) writer: Box<dyn RafsIoWrite>,
     /// Not fully used blocks
     pub(crate) v6_available_blocks: Vec<VecDeque<u64>>,
+
+    next_ino: Inode,
 }
 
 impl BootstrapContext {
@@ -980,10 +982,11 @@ impl BootstrapContext {
         } else {
             Box::<ArtifactMemoryWriter>::default() as Box<dyn RafsIoWrite>
         };
+
         Ok(Self {
             layered,
             inode_map: HashMap::new(),
-            nodes: VecDeque::new(),
+            next_ino: 1,
             offset: EROFS_BLOCK_SIZE_4096,
             writer,
             v6_available_blocks: vec![
@@ -998,6 +1001,18 @@ impl BootstrapContext {
         if self.offset % align_size > 0 {
             self.offset = div_round_up(self.offset, align_size) * align_size;
         }
+    }
+
+    /// Get the next available inode number.
+    pub(crate) fn get_next_ino(&self) -> Inode {
+        self.next_ino
+    }
+
+    /// Generate next inode number.
+    pub(crate) fn generate_next_ino(&mut self) -> Inode {
+        let ino = self.next_ino;
+        self.next_ino += 1;
+        ino
     }
 
     // Only used to allocate space for metadata(inode / inode + inline data).

@@ -4,60 +4,73 @@
 
 //! Generate a RAFS filesystem bootstrap from an stargz layer, reusing the stargz layer as data blob.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
+use std::io::{Seek, SeekFrom};
+use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use serde::{Deserialize, Serialize};
-
+use nix::NixPath;
 use nydus_storage::device::BlobChunkFlags;
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::compact::makedev;
-use nydus_utils::compress::compute_compressed_gzip_size;
-use nydus_utils::digest::{self, Algorithm, DigestHasher, RafsDigest};
-use nydus_utils::{compress, root_tracer, timing_tracer, try_round_up_4k, ByteSize};
+use nydus_utils::compress::{self, compute_compressed_gzip_size};
+use nydus_utils::digest::{self, DigestData, RafsDigest};
+use nydus_utils::{root_tracer, timing_tracer, try_round_up_4k, ByteSize};
+use serde::{Deserialize, Serialize};
 
 use super::core::blob::Blob;
 use super::core::context::{
-    ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager, BuildContext,
-    BuildOutput,
+    ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput,
 };
 use super::core::node::{ChunkSource, Node, NodeChunk, NodeInfo};
-use super::core::overlay::Overlay;
-use super::core::tree::Tree;
-use super::{build_bootstrap, Builder};
+use super::{
+    build_bootstrap, dump_bootstrap, finalize_blob, Bootstrap, Builder, TarBuilder, Tree, TreeNode,
+};
 use crate::metadata::chunk::ChunkWrapper;
 use crate::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
-use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode};
+use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::{Inode, RafsVersion};
-
-type RcTocEntry = Rc<RefCell<TocEntry>>;
+use crate::metadata::RafsVersion;
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 struct TocEntry {
-    /// Name is the tar entry's name. It is the complete path
-    /// stored in the tar file, not just the base name.
+    /// This REQUIRED property contains the name of the tar entry.
+    ///
+    /// This MUST be the complete path stored in the tar file.
     pub name: PathBuf,
 
-    /// Type is one of "dir", "reg", "symlink", "hardlink", "char",
-    /// "block", "fifo", or "chunk".
-    /// The "chunk" type is used for regular file data chunks past the first
-    /// TOCEntry; the 2nd chunk and on have only Type ("chunk"), Offset,
-    /// ChunkOffset, and ChunkSize populated.
+    /// This REQUIRED property contains the type of tar entry.
+    ///
+    /// This MUST be either of the following.
+    /// - dir: directory
+    /// - reg: regular file
+    /// - symlink: symbolic link
+    /// - hardlink: hard link
+    /// - char: character device
+    /// - block: block device
+    /// - fifo: fifo
+    /// - chunk: a chunk of regular file data As described in the above section,
+    /// a regular file can be divided into several chunks. TOCEntry MUST be created for each chunk.
+    /// TOCEntry of the first chunk of that file MUST be typed as reg. TOCEntry of each chunk after
+    /// 2nd MUST be typed as chunk. chunk TOCEntry MUST set offset, chunkOffset and chunkSize
+    /// properties.
     #[serde(rename = "type")]
     pub toc_type: String,
 
-    /// Size, for regular files, is the logical size of the file.
+    /// This OPTIONAL property contains the uncompressed size of the regular file.
+    ///
+    /// Non-empty reg file MUST set this property.
     #[serde(default)]
     pub size: u64,
 
+    // This OPTIONAL property contains the modification time of the tar entry.
+    //
+    // Empty means zero or unknown. Otherwise, the value is in UTC RFC3339 format.
     // // ModTime3339 is the modification time of the tar entry. Empty
     // // means zero or unknown. Otherwise it's in UTC RFC3339
     // // format. Use the ModTime method to access the time.Time value.
@@ -65,90 +78,100 @@ struct TocEntry {
     // mod_time_3339: String,
     // #[serde(skip)]
     // mod_time: Time,
-    /// LinkName, for symlinks and hardlinks, is the link target.
+    /// This OPTIONAL property contains the link target.
+    ///
+    /// Symlink and hardlink MUST set this property.
     #[serde(default, rename = "linkName")]
     pub link_name: PathBuf,
 
-    /// Mode is the permission and mode bits.
+    /// This REQUIRED property contains the permission and mode bits.
     #[serde(default)]
     pub mode: u32,
 
-    /// Uid is the user ID of the owner.
+    /// This REQUIRED property contains the user ID of the owner of this file.
     #[serde(default)]
     pub uid: u32,
 
-    /// Gid is the group ID of the owner.
+    /// This REQUIRED property contains the group ID of the owner of this file.
     #[serde(default)]
     pub gid: u32,
 
-    /// Uname is the username of the owner.
+    /// This OPTIONAL property contains the username of the owner.
     ///
     /// In the serialized JSON, this field may only be present for
     /// the first entry with the same Uid.
     #[serde(default, rename = "userName")]
     pub uname: String,
 
-    /// Gname is the group name of the owner.
+    /// This OPTIONAL property contains the groupname of the owner.
     ///
     /// In the serialized JSON, this field may only be present for
     /// the first entry with the same Gid.
     #[serde(default, rename = "groupName")]
     pub gname: String,
 
-    /// Offset, for regular files, provides the offset in the
-    /// stargz file to the file's data bytes. See ChunkOffset and
-    /// ChunkSize.
-    #[serde(default)]
-    pub offset: u64,
-
-    /// the Offset of the next entry with a non-zero Offset
-    #[allow(unused)]
-    #[serde(skip)]
-    pub next_offset: u64,
-
-    // DevMajor is the major device number for "char" and "block" types.
+    /// This OPTIONAL property contains the major device number of device files.
+    ///
+    /// char and block files MUST set this property.
     #[serde(default, rename = "devMajor")]
     pub dev_major: u64,
 
-    // DevMinor is the major device number for "char" and "block" types.
+    /// This OPTIONAL property contains the minor device number of device files.
+    ///
+    /// char and block files MUST set this property.
     #[serde(default, rename = "devMinor")]
     pub dev_minor: u64,
 
-    // NumLink is the number of entry names pointing to this entry.
-    // Zero means one name references this entry.
-    #[serde(skip)]
-    pub num_link: u32,
-
-    // Xattrs are the extended attribute for the entry.
+    /// This OPTIONAL property contains the extended attribute for the tar entry.
     #[serde(default)]
     pub xattrs: HashMap<String, String>,
 
-    // Digest stores the OCI checksum for regular files payload.
-    // It has the form "sha256:abcdef01234....".
+    /// This OPTIONAL property contains the digest of the regular file contents.
+    ///
+    /// It has the form "sha256:abcdef01234....".
     #[serde(default)]
     pub digest: String,
 
-    // ChunkOffset is non-zero if this is a chunk of a large,
-    // regular file. If so, the Offset is where the gzip header of
-    // ChunkSize bytes at ChunkOffset in Name begin.
-    //
-    // In serialized form, a "chunkSize" JSON field of zero means
-    // that the chunk goes to the end of the file. After reading
-    // from the stargz TOC, though, the ChunkSize is initialized
-    // to a non-zero file for when Type is either "reg" or
-    // "chunk".
+    /// This OPTIONAL property contains the offset of the gzip header of the regular file or chunk
+    /// in the blob.
+    ///
+    /// TOCEntries of non-empty reg and chunk MUST set this property.
+    #[serde(default)]
+    pub offset: u64,
+
+    /// This OPTIONAL property contains the offset of this chunk in the decompressed regular file
+    /// payload. TOCEntries of chunk type MUST set this property.
+    ///
+    /// ChunkOffset is non-zero if this is a chunk of a large, regular file.
+    /// If so, the Offset is where the gzip header of ChunkSize bytes at ChunkOffset in Name begin.
+    ///
+    /// In serialized form, a "chunkSize" JSON field of zero means that the chunk goes to the end
+    /// of the file. After reading from the stargz TOC, though, the ChunkSize is initialized to
+    /// a non-zero file for when Type is either "reg" or "chunk".
     #[serde(default, rename = "chunkOffset")]
     pub chunk_offset: u64,
+
+    /// This OPTIONAL property contains the decompressed size of this chunk.
+    ///
+    /// The last chunk in a reg file or reg file that isn't chunked MUST set this property to zero.
+    /// Other reg and chunk MUST set this property.
     #[serde(default, rename = "chunkSize")]
     pub chunk_size: u64,
 
-    #[allow(unused)]
-    #[serde(skip)]
-    pub children: Vec<RcTocEntry>,
+    /// This OPTIONAL property contains a digest of this chunk.
+    ///
+    /// TOCEntries of non-empty reg and chunk MUST set this property. This MAY be used for verifying
+    /// the data of the chunk.
+    #[serde(default, rename = "chunkDigest")]
+    pub chunk_digest: String,
 
-    #[allow(unused)]
-    #[serde(skip)]
-    pub inode: u64,
+    /// This OPTIONAL property indicates the uncompressed offset of the "reg" or "chunk" entry
+    /// payload in a stream starts from offset field.
+    ///
+    /// `innerOffset` enables to put multiple "reg" or "chunk" payloads in one gzip stream starts
+    /// from offset.
+    #[serde(default, rename = "innerOffset")]
+    pub inner_offset: u64,
 }
 
 impl TocEntry {
@@ -197,6 +220,10 @@ impl TocEntry {
         self.is_blockdev() || self.is_chardev() || self.is_fifo()
     }
 
+    pub fn is_supported(&self) -> bool {
+        self.is_dir() || self.is_reg() || self.is_symlink() || self.is_hardlink() || self.is_chunk()
+    }
+
     /// Check whether the `TocEntry` has associated extended attributes.
     pub fn has_xattr(&self) -> bool {
         !self.xattrs.is_empty()
@@ -219,7 +246,7 @@ impl TocEntry {
             mode |= libc::S_IFIFO;
         }
 
-        self.mode | mode as u32
+        self.mode & !libc::S_IFMT | mode as u32
     }
 
     /// Get real device id associated with the `TocEntry`.
@@ -231,74 +258,92 @@ impl TocEntry {
         }
     }
 
-    /// Get file name of the `TocEntry` from the assoicated path.
+    /// Get content size of the entry.
+    pub fn size(&self) -> u64 {
+        if self.is_reg() {
+            self.size
+        } else {
+            0
+        }
+    }
+
+    /// Get file name of the `TocEntry` from the associated path.
     ///
     /// For example: `` to `/`, `/` to `/`, `a/b` to `b`, `a/b/` to `b`
-    pub fn name(&self) -> Result<PathBuf> {
-        let path = self.path()?;
-        let root_path = PathBuf::from("/");
-        if path == root_path {
-            return Ok(root_path);
-        }
-        let name = path
-            .file_name()
-            .ok_or_else(|| anyhow!("invalid entry name"))?;
-        Ok(PathBuf::from(name))
+    pub fn name(&self) -> Result<&OsStr> {
+        let name = if self.name == Path::new("/") {
+            OsStr::new("/")
+        } else {
+            self.name
+                .file_name()
+                .ok_or_else(|| anyhow!("stargz: invalid entry name {}", self.name.display()))?
+        };
+        Ok(name)
     }
 
     /// Get absolute path for the `TocEntry`.
     ///
     /// For example: `` to `/`, `a/b` to `/a/b`, `a/b/` to `/a/b`
-    pub fn path(&self) -> Result<PathBuf> {
-        let root_path = PathBuf::from("/");
-        let empty_path = Path::new("");
-        if self.name == empty_path || self.name == root_path {
-            Ok(root_path)
-        } else {
-            let path = root_path.join(&self.name);
-            if path.file_name().is_none() {
-                Err(anyhow!("invalid entry name"))
-            } else {
-                Ok(path)
+    pub fn path(&self) -> &Path {
+        &self.name
+    }
+
+    /// Convert link path of hardlink entry to rootfs absolute path
+    ///
+    /// For example: `a/b` to `/a/b`
+    pub fn hardlink_link_path(&self) -> &Path {
+        assert!(self.is_hardlink());
+        &self.link_name
+    }
+
+    /// Get target of symlink.
+    pub fn symlink_link_path(&self) -> &Path {
+        assert!(self.is_symlink());
+        &self.link_name
+    }
+
+    pub fn block_id(&self) -> Result<RafsDigest> {
+        if self.chunk_digest.len() != 71 || !self.chunk_digest.starts_with("sha256:") {
+            bail!("stargz: invalid chunk digest {}", self.chunk_digest);
+        }
+        match hex::decode(&self.chunk_digest[7..]) {
+            Err(_e) => bail!("stargz: invalid chunk digest {}", self.chunk_digest),
+            Ok(v) => {
+                let mut data = DigestData::default();
+                data.copy_from_slice(&v[..32]);
+                Ok(RafsDigest { data })
             }
         }
     }
 
-    // Convert link path of hardlink entry to rootfs absolute path
-    // For example: `a/b` to `/a/b`
-    pub fn hardlink_link_path(&self) -> PathBuf {
-        PathBuf::from("/").join(&self.link_name)
-    }
-
-    pub fn symlink_link_path(&self) -> PathBuf {
-        self.link_name.clone()
-    }
-
-    pub fn is_supported(&self) -> bool {
-        self.is_dir() || self.is_reg() || self.is_symlink() || self.is_hardlink() || self.is_chunk()
-    }
-
-    // TODO: think about chunk deduplicate
-    pub fn block_id(&self, blob_id: &str) -> Result<RafsDigest> {
-        if !self.is_reg() && !self.is_chunk() {
-            bail!("only support chunk or reg entry");
+    fn normalize(&mut self) -> Result<()> {
+        if self.name.is_empty() {
+            bail!("stargz: invalid TocEntry with empty name");
         }
-        let data = serde_json::to_string(self).context("block id calculation failed")?;
+        self.name = PathBuf::from("/").join(&self.name);
 
-        Ok(RafsDigest::from_buf(
-            (data + blob_id).as_bytes(),
-            Algorithm::Sha256,
-        ))
-    }
-
-    pub fn new_dir(path: PathBuf) -> Self {
-        TocEntry {
-            name: path,
-            toc_type: String::from("dir"),
-            mode: 0o755,
-            num_link: 2,
-            ..Default::default()
+        if !self.is_supported() && !self.is_special() {
+            bail!("stargz: invalid type {} for TocEntry", self.toc_type);
         }
+
+        if (self.is_symlink() || self.is_hardlink()) && self.link_name.is_empty() {
+            bail!("stargz: empty link target");
+        }
+        if self.is_hardlink() {
+            self.link_name = PathBuf::from("/").join(&self.link_name);
+        }
+
+        if (self.is_reg() || self.is_chunk())
+            && (self.digest.is_empty() || self.chunk_digest.is_empty())
+        {
+            bail!("stargz: missing digest or chunk digest");
+        }
+
+        if self.is_chunk() && self.chunk_offset == 0 {
+            bail!("stargz: chunk offset is zero");
+        }
+
+        Ok(())
     }
 }
 
@@ -309,100 +354,122 @@ struct TocIndex {
 }
 
 impl TocIndex {
-    fn load(path: &Path) -> Result<TocIndex> {
-        let index_file = File::open(path)
-            .with_context(|| format!("failed to open stargz index file {:?}", path))?;
-        let mut toc_index: TocIndex = serde_json::from_reader(index_file)
-            .with_context(|| format!("invalid stargz index file {:?}", path))?;
+    fn load(path: &Path, offset: u64) -> Result<TocIndex> {
+        let mut index_file = File::open(path)
+            .with_context(|| format!("stargz: failed to open index file {:?}", path))?;
+        let pos = index_file
+            .seek(SeekFrom::Start(offset))
+            .context("stargz: failed to seek to start of TOC")?;
+        if pos != offset {
+            bail!("stargz: failed to seek file position to start of TOC");
+        }
+        let mut toc_index: TocIndex = serde_json::from_reader(index_file).with_context(|| {
+            format!(
+                "stargz: failed to deserialize stargz TOC index file {:?}",
+                path
+            )
+        })?;
 
         if toc_index.version != 1 {
             return Err(Error::msg(format!(
-                "unsupported index version {}",
+                "stargz: unsupported index version {}",
                 toc_index.version
             )));
         }
 
-        // Append root directory entry if not exists.
-        if !toc_index.entries.is_empty() && toc_index.entries[0].name()? != PathBuf::from("/") {
-            let root_entry = TocEntry {
-                toc_type: String::from("dir"),
-                ..Default::default()
-            };
-            toc_index.entries.insert(0, root_entry);
+        for entry in toc_index.entries.iter_mut() {
+            entry.normalize()?;
         }
 
         Ok(toc_index)
     }
 }
 
-struct StargzTreeBuilder {
-    path_inode_map: HashMap<PathBuf, Inode>,
+/// Build RAFS filesystems from eStargz images.
+pub struct StargzBuilder {
+    blob_size: u64,
+    builder: TarBuilder,
+    file_chunk_map: HashMap<PathBuf, (u64, Vec<NodeChunk>)>,
+    hardlink_map: HashMap<PathBuf, TreeNode>,
+    uncompressed_offset: u64,
 }
 
-impl StargzTreeBuilder {
-    fn new() -> Self {
+impl StargzBuilder {
+    /// Create a new instance of [StargzBuilder].
+    pub fn new(blob_size: u64, ctx: &BuildContext) -> Self {
         Self {
-            path_inode_map: HashMap::new(),
+            blob_size,
+            builder: TarBuilder::new(ctx.explicit_uidgid, 0, ctx.fs_version),
+            file_chunk_map: HashMap::new(),
+            hardlink_map: HashMap::new(),
+            uncompressed_offset: 0,
         }
     }
 
-    fn build(&mut self, ctx: &mut BuildContext, layer_idx: u16) -> Result<Tree> {
-        let toc_index = TocIndex::load(&ctx.source_path)?;
+    fn build_tree(&mut self, ctx: &mut BuildContext, layer_idx: u16) -> Result<Tree> {
+        let toc_index = TocIndex::load(&ctx.source_path, 0)?;
         if toc_index.version != 1 {
-            bail!("stargz version {} is unsupported", toc_index.version);
+            bail!("stargz: TOC version {} is unsupported", toc_index.version);
         } else if toc_index.entries.is_empty() {
-            bail!("stargz TOC array is empty");
+            bail!("stargz: TOC array is empty");
         }
 
-        // Map hardlink path to linked path: HashMap<<hardlink_path>, <linked_path>>
-        let mut hardlink_map: HashMap<PathBuf, PathBuf> = HashMap::new();
-        // Map regular file path to chunks: HashMap<<file_path>, <(file_size, chunks)>>
-        let mut file_chunk_map: HashMap<PathBuf, (u64, Vec<NodeChunk>)> = HashMap::new();
-        let mut nodes = Vec::new();
-        let mut tree: Option<Tree> = None;
-        let mut last_reg_entry: Option<&TocEntry> = None;
-        let mut uncompress_offset = 0;
+        self.builder.layer_idx = layer_idx;
+        let root = self.builder.create_directory(&[OsString::from("/")])?;
+        let mut tree = Tree::new(root);
 
+        // Map regular file path to chunks: HashMap<<file_path>, <(file_size, chunks)>>
+        let mut last_reg_entry: Option<&TocEntry> = None;
         for entry in toc_index.entries.iter() {
-            // Only support directory, symlink, hardlink, regular file and file chunk
+            let path = entry.path();
+
+            // TODO: support chardev/blockdev/fifo
             if !entry.is_supported() {
+                warn!(
+                    "stargz: unsupported {} with type {}",
+                    path.display(),
+                    entry.toc_type
+                );
+                continue;
+            } else if self.builder.is_stargz_special_files(path) {
+                // skip estargz special files.
                 continue;
             }
 
-            let path = entry.path()?;
+            // Build RAFS chunk info from eStargz regular file or chunk data record.
             let uncompress_size = Self::get_content_size(ctx, entry, &mut last_reg_entry)?;
             if (entry.is_reg() || entry.is_chunk()) && uncompress_size != 0 {
-                let block_id = entry.block_id(&ctx.blob_id)?;
-                // blob_index and compressed_size will be fixed later
-                let v5_chunk_info = ChunkWrapper::V5(RafsV5ChunkInfo {
+                let block_id = entry
+                    .block_id()
+                    .context("stargz: failed to get chunk digest")?;
+                // blob_index, index and compressed_size will be fixed later
+                let chunk_info = ChunkWrapper::V6(RafsV5ChunkInfo {
                     block_id,
                     blob_index: 0,
                     flags: BlobChunkFlags::COMPRESSED,
                     compressed_size: 0,
                     uncompressed_size: uncompress_size as u32,
                     compressed_offset: entry.offset as u64,
-                    uncompressed_offset: uncompress_offset,
+                    uncompressed_offset: self.uncompressed_offset,
                     file_offset: entry.chunk_offset as u64,
                     index: 0,
                     reserved: 0,
                 });
                 let chunk = NodeChunk {
                     source: ChunkSource::Build,
-                    inner: match ctx.fs_version {
-                        RafsVersion::V5 => Arc::new(v5_chunk_info),
-                        RafsVersion::V6 => Arc::new(v5_chunk_info),
-                    },
+                    inner: Arc::new(chunk_info),
                 };
 
-                if let Some((size, chunks)) = file_chunk_map.get_mut(&path) {
+                if let Some((size, chunks)) = self.file_chunk_map.get_mut(path) {
                     chunks.push(chunk);
                     if entry.is_reg() {
                         *size = entry.size;
                     }
                 } else if entry.is_reg() {
-                    file_chunk_map.insert(path.clone(), (entry.size, vec![chunk]));
+                    self.file_chunk_map
+                        .insert(path.to_path_buf(), (entry.size, vec![chunk]));
                 } else {
-                    bail!("stargz file chunk lacks of corresponding head regular file entry");
+                    bail!("stargz: file chunk lacks of corresponding head regular file entry");
                 }
 
                 let aligned_chunk_size = if ctx.aligned_chunk {
@@ -411,39 +478,16 @@ impl StargzTreeBuilder {
                 } else {
                     uncompress_size
                 };
-                uncompress_offset += aligned_chunk_size;
+                self.uncompressed_offset += aligned_chunk_size;
             }
 
-            if entry.is_chunk() {
-                continue;
-            } else if entry.is_hardlink() {
-                hardlink_map.insert(path.clone(), entry.hardlink_link_path());
+            if !entry.is_chunk() && !self.builder.is_stargz_special_files(path) {
+                self.parse_entry(&mut tree, entry, path)?;
             }
-
-            let mut lost_dirs = Vec::new();
-            self.make_lost_dirs(entry, &mut lost_dirs)?;
-            for dir in &lost_dirs {
-                let node = self.parse_node(dir, ctx.explicit_uidgid, ctx.fs_version, layer_idx)?;
-                nodes.push(node);
-            }
-            let node = self.parse_node(entry, ctx.explicit_uidgid, ctx.fs_version, layer_idx)?;
-            if path == Path::new("/") {
-                tree = Some(Tree::new(node.clone()));
-            }
-            nodes.push(node);
         }
 
-        let mut tree = tree.ok_or_else(|| anyhow!("stargz index has no root TOC entry"))?;
-        for node in &mut nodes {
-            let node_path = node.path();
-            let path = hardlink_map.get(node_path).unwrap_or(node_path);
-            if let Some((size, ref mut chunks)) = file_chunk_map.get_mut(path) {
-                Self::sort_and_validate_chunks(chunks, *size)?;
-                node.inode.set_size(*size);
-                node.inode.set_child_count(chunks.len() as u32);
-                node.chunks = chunks.to_vec();
-            }
-            tree.apply(node, false, ctx.whiteout_spec)?;
+        for (size, ref mut chunks) in self.file_chunk_map.values_mut() {
+            Self::sort_and_validate_chunks(chunks, *size)?;
         }
 
         Ok(tree)
@@ -455,36 +499,51 @@ impl StargzTreeBuilder {
         entry: &'a TocEntry,
         last_reg_entry: &mut Option<&'a TocEntry>,
     ) -> Result<u64> {
-        if entry.chunk_offset % ctx.chunk_size as u64 != 0 {
-            bail!(
-                "stargz chunk offset (0x{:x}) is not aligned to 0x{:x}",
-                entry.chunk_offset,
-                ctx.chunk_size
-            );
-        }
-
         if entry.is_reg() {
             // Regular file without chunk
             if entry.chunk_offset == 0 && entry.chunk_size == 0 {
                 Ok(entry.size)
+            } else if entry.chunk_offset % ctx.chunk_size as u64 != 0 {
+                bail!(
+                    "stargz: chunk offset (0x{:x}) is not aligned to 0x{:x}",
+                    entry.chunk_offset,
+                    ctx.chunk_size
+                );
             } else if entry.chunk_size != ctx.chunk_size as u64 {
-                bail!("stargz first chunk size is not 0x{:x}", ctx.chunk_size);
+                bail!("stargz: first chunk size is not 0x{:x}", ctx.chunk_size);
             } else {
                 *last_reg_entry = Some(entry);
                 Ok(entry.chunk_size)
             }
         } else if entry.is_chunk() {
-            if entry.chunk_size == 0 {
+            if entry.chunk_offset % ctx.chunk_size as u64 != 0 {
+                bail!(
+                    "stargz: chunk offset (0x{:x}) is not aligned to 0x{:x}",
+                    entry.chunk_offset,
+                    ctx.chunk_size
+                );
+            } else if entry.chunk_size == 0 {
                 // Figure out content size for the last chunk entry of regular file
                 if let Some(reg_entry) = last_reg_entry {
                     let size = reg_entry.size - entry.chunk_offset;
+                    if size > ctx.chunk_size as u64 {
+                        bail!(
+                            "stargz: size of last chunk 0x{:x} is bigger than chunk size 0x {:x}",
+                            size,
+                            ctx.chunk_size
+                        );
+                    }
                     *last_reg_entry = None;
                     Ok(size)
                 } else {
-                    bail!("stargz tailer chunk lacks of corresponding head chunk");
+                    bail!("stargz: tailer chunk lacks of corresponding head chunk");
                 }
             } else if entry.chunk_size != ctx.chunk_size as u64 {
-                bail!("stargz chunk size is not 0x{:x}", ctx.chunk_size);
+                bail!(
+                    "stargz: chunk size 0x{:x} is not 0x{:x}",
+                    entry.chunk_size,
+                    ctx.chunk_size
+                );
             } else {
                 Ok(entry.chunk_size)
             }
@@ -493,69 +552,67 @@ impl StargzTreeBuilder {
         }
     }
 
-    // Create middle directory nodes which is not in entry list,
-    // for example `/a/b/c`, we need to create `/a`, `/a/b` nodes first.
-    fn make_lost_dirs(&mut self, entry: &TocEntry, dirs: &mut Vec<TocEntry>) -> Result<()> {
-        if let Some(parent_path) = entry.path()?.parent() {
-            if !self.path_inode_map.contains_key(parent_path) {
-                let dir_entry = TocEntry::new_dir(parent_path.to_path_buf());
-                self.make_lost_dirs(&dir_entry, dirs)?;
-                dirs.push(dir_entry);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn sort_and_validate_chunks(chunks: &mut [NodeChunk], size: u64) -> Result<()> {
-        if chunks.len() > RAFS_MAX_CHUNKS_PER_BLOB as usize {
-            bail!("stargz file has two many chunks");
-        }
-
-        chunks.sort_unstable_by_key(|v| v.inner.file_offset());
-
-        for idx in 0..chunks.len() - 1 {
-            let next = chunks[idx]
-                .inner
-                .file_offset()
-                .checked_add(chunks[idx].inner.uncompressed_size() as u64);
-            if next.is_none() || next.unwrap() != chunks[idx + 1].inner.file_offset() {
-                bail!("stargz has gaps between chunks");
-            }
-        }
-
-        let last = &chunks[chunks.len() - 1];
-        if last.inner.file_offset() + last.inner.uncompressed_size() as u64 != size {
-            bail!("stargz file size and sum of chunk size doesn't match");
-        }
-
-        Ok(())
-    }
-
-    /// Parse stargz toc entry to Node in builder
-    fn parse_node(
-        &mut self,
-        entry: &TocEntry,
-        explicit_uidgid: bool,
-        version: RafsVersion,
-        layer_idx: u16,
-    ) -> Result<Node> {
-        let entry_path = entry.path()?;
-        let mut file_size = entry.size;
-        let mut flags = match version {
-            RafsVersion::V5 => RafsInodeFlags::default(),
-            RafsVersion::V6 => RafsInodeFlags::default(),
+    fn parse_entry(&mut self, tree: &mut Tree, entry: &TocEntry, path: &Path) -> Result<()> {
+        let name_size = entry.name()?.byte_size() as u16;
+        let uid = if self.builder.explicit_uidgid {
+            entry.uid
+        } else {
+            0
         };
+        let gid = if self.builder.explicit_uidgid {
+            entry.gid
+        } else {
+            0
+        };
+        let mut file_size = entry.size();
+        let mut flags = RafsInodeFlags::default();
 
         // Parse symlink
         let (symlink, symlink_size) = if entry.is_symlink() {
             let symlink_link_path = entry.symlink_link_path();
-            let symlink_size = symlink_link_path.byte_size() as u16;
+            let symlink_size = symlink_link_path.as_os_str().byte_size() as u16;
             file_size = symlink_size.into();
             flags |= RafsInodeFlags::SYMLINK;
             (Some(symlink_link_path.as_os_str().to_owned()), symlink_size)
         } else {
             (None, 0)
+        };
+
+        // Handle hardlink ino
+        let ino = if entry.is_hardlink() {
+            let link_path = entry.hardlink_link_path();
+            let link_path = link_path.components().as_path();
+            let targets = Node::generate_target_vec(link_path);
+            assert!(!targets.is_empty());
+            let mut tmp_tree: &Tree = tree;
+            for name in &targets[1..] {
+                match tmp_tree.get_child_idx(name.as_bytes()) {
+                    Some(idx) => tmp_tree = &tmp_tree.children[idx],
+                    None => {
+                        bail!(
+                            "stargz: unknown target {} for hardlink {}",
+                            link_path.display(),
+                            path.display(),
+                        );
+                    }
+                }
+            }
+
+            let mut tmp_node = tmp_tree.lock_node();
+            if !tmp_node.is_reg() {
+                bail!(
+                    "stargz: target {} for hardlink {} is not a regular file",
+                    link_path.display(),
+                    path.display()
+                );
+            }
+            self.hardlink_map
+                .insert(path.to_path_buf(), tmp_tree.node.clone());
+            flags |= RafsInodeFlags::HARDLINK;
+            tmp_node.inode.set_has_hardlink(true);
+            tmp_node.inode.ino()
+        } else {
+            self.builder.next_ino()
         };
 
         // Parse xattrs
@@ -565,151 +622,112 @@ impl StargzTreeBuilder {
                 flags |= RafsInodeFlags::XATTR;
                 let value = base64::decode(value).with_context(|| {
                     format!(
-                        "parse xattr name {:?} of file {:?} failed",
-                        entry_path, name
+                        "stargz: failed to parse xattr {:?} for entry {:?}",
+                        path, name
                     )
                 })?;
                 xattrs.add(OsString::from(name), value)?;
             }
         }
 
-        // Handle hardlink ino
-        let mut ino = (self.path_inode_map.len() + 1) as Inode;
-        if entry.is_hardlink() {
-            flags |= RafsInodeFlags::HARDLINK;
-            if let Some(_ino) = self.path_inode_map.get(&entry.hardlink_link_path()) {
-                ino = *_ino;
-            } else {
-                self.path_inode_map.insert(entry.path()?, ino);
-            }
-        } else {
-            self.path_inode_map.insert(entry.path()?, ino);
-        }
+        let mut inode = InodeWrapper::V6(RafsV6Inode {
+            i_ino: ino,
+            i_projid: 0,
+            i_uid: uid,
+            i_gid: gid,
+            i_mode: entry.mode(),
+            i_size: file_size,
+            i_nlink: 1,
+            i_blocks: 0,
+            i_flags: flags,
+            i_child_count: 0,
+            i_name_size: name_size,
+            i_symlink_size: symlink_size,
+            i_rdev: entry.rdev(),
+            // TODO: add mtime from entry.ModTime()
+            i_mtime: 0,
+            i_mtime_nsec: 0,
+        });
+        inode.set_has_xattr(!xattrs.is_empty());
 
-        // Get file name size
-        let name_size = entry.name()?.as_os_str().byte_size() as u16;
-        let uid = if explicit_uidgid { entry.uid } else { 0 };
-        let gid = if explicit_uidgid { entry.gid } else { 0 };
-
-        let inode = match version {
-            RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode {
-                i_digest: RafsDigest::default(),
-                i_parent: 0,
-                i_ino: ino,
-                i_projid: 0,
-                i_uid: uid,
-                i_gid: gid,
-                i_mode: entry.mode(),
-                i_size: file_size,
-                i_nlink: entry.num_link,
-                i_blocks: 0,
-                i_flags: flags,
-                i_child_index: 0,
-                i_child_count: 0,
-                i_name_size: name_size,
-                i_symlink_size: symlink_size,
-                i_rdev: entry.rdev(),
-                // TODO: add mtime from entry.ModTime()
-                i_mtime: 0,
-                i_mtime_nsec: 0,
-                i_reserved: [0; 8],
-            }),
-            RafsVersion::V6 => InodeWrapper::V6(RafsV6Inode {
-                i_ino: ino,
-                i_projid: 0,
-                i_uid: uid,
-                i_gid: gid,
-                i_mode: entry.mode(),
-                i_size: file_size,
-                i_nlink: entry.num_link,
-                i_blocks: 0,
-                i_flags: flags,
-                i_child_count: 0,
-                i_name_size: name_size,
-                i_symlink_size: symlink_size,
-                i_rdev: entry.rdev(),
-                // TODO: add mtime from entry.ModTime()
-                i_mtime: 0,
-                i_mtime_nsec: 0,
-            }),
-        };
-
-        let path = entry.path()?;
         let source = PathBuf::from("/");
         let target = Node::generate_target(&path, &source);
         let target_vec = Node::generate_target_vec(&target);
         let info = NodeInfo {
-            ctime: 0,
-            explicit_uidgid,
+            explicit_uidgid: self.builder.explicit_uidgid,
             src_ino: ino,
             src_dev: u64::MAX,
             rdev: entry.rdev() as u64,
             source,
             target,
-            path,
+            path: path.to_path_buf(),
             target_vec,
             symlink,
             xattrs,
             v6_force_extended_inode: false,
         };
+        let node = Node::new(inode, info, self.builder.layer_idx);
 
-        Ok(Node {
-            info: Arc::new(info),
-            index: 0,
-            overlay: Overlay::UpperAddition,
-            inode,
-            chunks: Vec::new(),
-            layer_idx,
-            v6_offset: 0,
-            v6_dirents: Vec::<(u64, OsString, u32)>::new(),
-            v6_datalayout: 0,
-            v6_compact_inode: false,
-            v6_dirents_offset: 0,
-        })
-    }
-}
-
-pub struct StargzBuilder {
-    blob_size: u64,
-}
-
-impl StargzBuilder {
-    pub fn new(blob_size: u64) -> Self {
-        Self { blob_size }
+        self.builder.insert_into_tree(tree, node)
     }
 
-    fn generate_nodes(
-        &mut self,
-        ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
-        blob_ctx: &mut BlobContext,
-        blob_mgr: &mut BlobManager,
-    ) -> Result<()> {
-        if ctx.fs_version == RafsVersion::V6 {
-            /*
-            let mut header = BlobMetaHeaderOndisk::default();
-            header.set_4k_aligned(true);
-            header.set_ci_separate(ctx.blob_meta_features & BLOB_META_FEATURE_SEPARATE != 0);
-            header.set_chunk_info_v2(ctx.blob_meta_features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0);
-            header.set_ci_zran(ctx.blob_meta_features & BLOB_META_FEATURE_ZRAN != 0);
-            blob_ctx.blob_meta_header = header;
-             */
-            blob_ctx.set_meta_info_enabled(true);
-        } else {
-            blob_ctx.set_meta_info_enabled(false);
+    fn sort_and_validate_chunks(chunks: &mut [NodeChunk], size: u64) -> Result<()> {
+        if chunks.len() > RAFS_MAX_CHUNKS_PER_BLOB as usize {
+            bail!("stargz: file has two many chunks");
         }
-        blob_ctx.set_chunk_size(ctx.chunk_size);
 
-        // Ensure that the chunks in the blob meta are sorted by uncompressed_offset
-        // and ordered by chunk index so that they can be found quickly at runtime
-        // with a binary search.
-        let mut blob_chunks = Vec::new();
-        for node in &bootstrap_ctx.nodes {
-            if node.overlay.is_lower_layer() || node.inode.has_hardlink() {
-                continue;
+        if chunks.len() > 1 {
+            chunks.sort_unstable_by_key(|v| v.inner.file_offset());
+            for idx in 0..chunks.len() - 2 {
+                let curr = &chunks[idx].inner;
+                let pos = curr
+                    .file_offset()
+                    .checked_add(curr.uncompressed_size() as u64);
+                match pos {
+                    Some(pos) => {
+                        if pos != chunks[idx + 1].inner.file_offset() {
+                            bail!("stargz: unexpected holes between data chunks");
+                        }
+                    }
+                    None => {
+                        bail!(
+                            "stargz: invalid chunk offset 0x{:x} or size 0x{:x}",
+                            curr.file_offset(),
+                            curr.uncompressed_size()
+                        )
+                    }
+                }
             }
-            for chunk in node.chunks.iter() {
-                blob_chunks.push(chunk.clone());
+        }
+
+        if !chunks.is_empty() {
+            let last = &chunks[chunks.len() - 1];
+            if last.inner.file_offset() + last.inner.uncompressed_size() as u64 != size {
+                bail!("stargz: file size and sum of chunk size doesn't match");
+            }
+        } else if size != 0 {
+            bail!("stargz: file size and sum of chunk size doesn't match");
+        }
+
+        Ok(())
+    }
+
+    fn fix_chunk_info(&mut self, ctx: &mut BuildContext, blob_mgr: &mut BlobManager) -> Result<()> {
+        /*
+        let mut header = BlobMetaHeaderOndisk::default();
+        header.set_4k_aligned(true);
+        header.set_ci_separate(ctx.blob_meta_features & BLOB_META_FEATURE_SEPARATE != 0);
+        header.set_chunk_info_v2(ctx.blob_meta_features & BLOB_META_FEATURE_CHUNK_INFO_V2 != 0);
+        header.set_ci_zran(ctx.blob_meta_features & BLOB_META_FEATURE_ZRAN != 0);
+        blob_ctx.blob_meta_header = header;
+        */
+
+        // Ensure that the chunks in the blob meta are sorted by uncompressed_offset and ordered
+        // by chunk index so that they can be found quickly at runtime with a binary search.
+        let mut blob_chunks: Vec<&mut NodeChunk> = Vec::with_capacity(10240);
+        for (_, chunks) in self.file_chunk_map.values_mut() {
+            for chunk in chunks.iter_mut() {
+                blob_chunks.push(chunk);
             }
         }
         blob_chunks.sort_unstable_by(|a, b| {
@@ -717,9 +735,14 @@ impl StargzBuilder {
                 .uncompressed_offset()
                 .cmp(&b.inner.uncompressed_offset())
         });
+        if blob_chunks.is_empty() {
+            return Ok(());
+        }
 
         // Compute compressed_size for chunks.
+        let (blob_index, blob_ctx) = blob_mgr.get_or_create_current_blob(ctx)?;
         let chunk_count = blob_chunks.len();
+        let mut compressed_blob_size = 0u64;
         for idx in 0..chunk_count {
             let curr = blob_chunks[idx].inner.compressed_offset();
             let next = if idx == chunk_count - 1 {
@@ -728,97 +751,68 @@ impl StargzBuilder {
                 blob_chunks[idx + 1].inner.compressed_offset()
             };
             if curr >= next {
-                bail!("stargz compressed offset is out of order");
+                bail!("stargz: compressed offset is out of order");
             } else if next - curr > RAFS_MAX_CHUNK_SIZE {
-                bail!("stargz compressed size is too big");
+                bail!("stargz: compressed size is too big");
             }
-            let uncomp_size = blob_chunks[idx].inner.uncompressed_size() as usize;
+
+            let mut chunk = blob_chunks[idx].inner.deref().clone();
+            let uncomp_size = chunk.uncompressed_size() as usize;
             let max_size = (next - curr) as usize;
             let max_gzip_size = compute_compressed_gzip_size(uncomp_size, max_size);
-            if max_gzip_size < max_size {
-                trace!(
-                    "shrink max gzip size from {} to {}",
-                    max_size,
-                    max_gzip_size
-                );
-            }
-            blob_chunks[idx].set_compressed_size(max_gzip_size as u32);
+            let chunk_index = blob_ctx.alloc_chunk_index()?;
+            chunk.set_index(chunk_index);
+            chunk.set_blob_index(blob_index);
+            chunk.set_compressed_size(max_gzip_size as u32);
+            blob_ctx.add_chunk_meta_info(&chunk, None)?;
+            compressed_blob_size = std::cmp::max(
+                compressed_blob_size,
+                chunk.compressed_offset() + chunk.compressed_size() as u64,
+            );
+            assert_eq!(Arc::strong_count(&blob_chunks[idx].inner), 1);
+            blob_chunks[idx].inner = Arc::new(chunk);
         }
 
-        let mut chunk_map = HashMap::new();
-        for chunk in &mut blob_chunks {
-            if !chunk_map.contains_key(chunk.inner.id()) {
-                let chunk_index = blob_ctx.alloc_chunk_index()?;
-                chunk.set_index(chunk_index);
-                blob_ctx.add_chunk_meta_info(&chunk.inner, None)?;
-                chunk_map.insert(*chunk.inner.id(), chunk_index);
-            } else {
-                bail!("stargz unexpected duplicated data chunk");
-            }
-        }
-
-        let blob_index = blob_mgr.alloc_index()?;
-        let mut uncompressed_blob_size = 0u64;
-        let mut compressed_blob_size = 0u64;
-        for node in &mut bootstrap_ctx.nodes {
-            if node.overlay.is_lower_layer() {
-                continue;
-            }
-
-            let mut inode_hasher = if ctx.fs_version == RafsVersion::V5 {
-                Some(RafsDigest::hasher(digest::Algorithm::Sha256))
-            } else {
-                None
-            };
-
-            for chunk in node.chunks.iter_mut() {
-                // All chunks should exist in the map, we have just added them.
-                let chunk_index = *chunk_map.get(chunk.inner.id()).unwrap();
-                let prepared = &blob_chunks[chunk_index as usize];
-                let file_offset = chunk.inner.file_offset();
-                chunk.copy_from(&prepared.inner);
-                chunk.set_file_offset(file_offset);
-                chunk.set_blob_index(blob_index);
-
-                // This method is used here to calculate uncompressed_blob_size to
-                // be compatible with the possible 4k alignment requirement of
-                // uncompressed_offset (RAFS v6).
-                uncompressed_blob_size = std::cmp::max(
-                    chunk.inner.uncompressed_offset() + chunk.inner.uncompressed_size() as u64,
-                    uncompressed_blob_size,
-                );
-                compressed_blob_size = std::cmp::max(
-                    compressed_blob_size,
-                    chunk.inner.compressed_offset() + chunk.inner.compressed_size() as u64,
-                );
-                if let Some(h) = inode_hasher.as_mut() {
-                    h.digest_update(chunk.inner.id().as_ref());
-                }
-            }
-
-            if let Some(h) = inode_hasher {
-                let digest = if node.is_symlink() {
-                    RafsDigest::from_buf(
-                        node.info.symlink.as_ref().unwrap().as_bytes(),
-                        digest::Algorithm::Sha256,
-                    )
-                } else {
-                    h.digest_finalize()
-                };
-                node.inode.set_digest(digest);
-            }
-        }
-
-        blob_ctx.uncompressed_blob_size = uncompressed_blob_size;
+        blob_ctx.uncompressed_blob_size = self.uncompressed_offset;
         blob_ctx.compressed_blob_size = compressed_blob_size;
 
         Ok(())
     }
 
-    fn build_tree(&mut self, ctx: &mut BuildContext, layer_idx: u16) -> Result<Tree> {
-        StargzTreeBuilder::new()
-            .build(ctx, layer_idx)
-            .context("failed to build tree from stargz index")
+    fn fix_nodes(&mut self, bootstrap: &mut Bootstrap) -> Result<()> {
+        bootstrap
+            .tree
+            .walk_bfs(true, &mut |n| {
+                let mut node = n.lock_node();
+                let node_path = node.path();
+                if let Some((size, ref mut chunks)) = self.file_chunk_map.get_mut(node_path) {
+                    node.inode.set_size(*size);
+                    node.inode.set_child_count(chunks.len() as u32);
+                    node.chunks = chunks.to_vec();
+                }
+
+                Ok(())
+            })
+            .context("stargz: failed to update chunk info array for nodes")?;
+
+        for (k, v) in self.hardlink_map.iter() {
+            match bootstrap.tree.get_node(k) {
+                Some(n) => {
+                    let mut node = n.lock_node();
+                    let target = v.lock().unwrap();
+                    node.inode.set_size(target.inode.size());
+                    node.inode.set_child_count(target.inode.child_count());
+                    node.chunks = target.chunks.clone();
+                    node.set_xattr(target.info.xattrs.clone());
+                }
+                None => bail!(
+                    "stargz: failed to get target node for hardlink {}",
+                    k.display()
+                ),
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -829,44 +823,121 @@ impl Builder for StargzBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
-        let layer_idx = u16::from(bootstrap_ctx.layered);
+        if ctx.fs_version != RafsVersion::V6 {
+            bail!(
+                "stargz: unsupported filesystem version {:?}",
+                ctx.fs_version
+            );
+        } else if ctx.compressor != compress::Algorithm::GZip {
+            bail!("stargz: invalid compression algorithm {:?}", ctx.compressor);
+        } else if ctx.digester != digest::Algorithm::Sha256 {
+            bail!("stargz: invalid digest algorithm {:?}", ctx.digester);
+        }
         let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
-            Some(ArtifactWriter::new(blob_stor)?)
+            ArtifactWriter::new(blob_stor)?
         } else {
             return Err(anyhow!("missing configuration for target path"));
         };
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
+        let layer_idx = u16::from(bootstrap_ctx.layered);
 
         // Build filesystem tree from the stargz TOC.
         let tree = timing_tracer!({ self.build_tree(ctx, layer_idx) }, "build_tree")?;
-        let mut bootstrap =
-            build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree)?;
 
-        // Generate node chunks and digest
-        let mut blob_ctx = BlobContext::new(
-            ctx.blob_id.clone(),
-            0,
-            ctx.blob_features,
-            compress::Algorithm::GZip,
-            digest::Algorithm::Sha256,
-        );
-        self.generate_nodes(ctx, &mut bootstrap_ctx, &mut blob_ctx, blob_mgr)?;
-
-        // Dump blob meta
-        Blob::dump_meta_data(ctx, &mut blob_ctx, blob_writer.as_mut().unwrap())?;
-        if blob_ctx.uncompressed_blob_size > 0 {
-            blob_mgr.add_blob(blob_ctx);
-        }
-
-        // Dump bootstrap file
-        let blob_table = blob_mgr.to_blob_table(ctx)?;
-        bootstrap.dump(
-            ctx,
-            &mut bootstrap_mgr.bootstrap_storage,
-            &mut bootstrap_ctx,
-            &blob_table,
+        // Build bootstrap
+        let mut bootstrap = timing_tracer!(
+            { build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree) },
+            "build_bootstrap"
         )?;
 
+        self.fix_chunk_info(ctx, blob_mgr)?;
+        self.fix_nodes(&mut bootstrap)?;
+
+        // Dump blob file
+        timing_tracer!(
+            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, &mut blob_writer) },
+            "dump_blob"
+        )?;
+
+        // Dump blob meta information
+        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+            Blob::dump_meta_data(ctx, blob_ctx, &mut blob_writer)?;
+        }
+
+        // Dump RAFS meta/bootstrap and finalize the data blob.
+        if ctx.blob_inline_meta {
+            timing_tracer!(
+                {
+                    dump_bootstrap(
+                        ctx,
+                        bootstrap_mgr,
+                        &mut bootstrap_ctx,
+                        &mut bootstrap,
+                        blob_mgr,
+                        &mut blob_writer,
+                    )
+                },
+                "dump_bootstrap"
+            )?;
+            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+        } else {
+            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            timing_tracer!(
+                {
+                    dump_bootstrap(
+                        ctx,
+                        bootstrap_mgr,
+                        &mut bootstrap_ctx,
+                        &mut bootstrap,
+                        blob_mgr,
+                        &mut blob_writer,
+                    )
+                },
+                "dump_bootstrap"
+            )?;
+        }
+
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder::{ArtifactStorage, ConversionType, Features, Prefetch, WhiteoutSpec};
+
+    #[ignore]
+    #[test]
+    fn test_build_stargz_toc() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let tmp_dir = tmp_dir.as_path().to_path_buf();
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let source_path =
+            PathBuf::from(root_dir).join("../tests/texture/stargz/estargz_sample.json");
+        let prefetch = Prefetch::default();
+        let mut ctx = BuildContext::new(
+            "".to_string(),
+            true,
+            0,
+            compress::Algorithm::GZip,
+            digest::Algorithm::Sha256,
+            true,
+            WhiteoutSpec::Oci,
+            ConversionType::EStargzIndexToRef,
+            source_path,
+            prefetch,
+            Some(ArtifactStorage::FileDir(tmp_dir.clone())),
+            false,
+            Features::new(),
+        );
+        ctx.fs_version = RafsVersion::V6;
+        let mut bootstrap_mgr =
+            BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        let mut builder = StargzBuilder::new(0x1000000, &ctx);
+
+        builder
+            .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
+            .unwrap();
     }
 }
