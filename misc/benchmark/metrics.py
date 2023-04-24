@@ -227,7 +227,6 @@ def send_request(sock_path, url):
     file_path = random_string()
     cmd = ["sudo", "curl", "--unix-socket", sock_path]
     cmd.extend(["-X", "GET", URL_PREFIX + url])
-    # caruon
     with open(TEMP_DIR + "/" + file_path, 'w') as f:
         _ = run_cmd(
             cmd,
@@ -285,3 +284,43 @@ def collect_backend() -> Tuple[str, str]:
     backend = get_backend_metrics(socket)
     shutil.rmtree(TEMP_DIR)
     return round(backend["read_amount_total"] / 1024 / 1024, 2), backend["read_count"]
+
+
+def collect_size(repo: str, tag: str):
+    """
+    collect image size for benchmark
+
+    return the image size
+    """
+    init()
+    file_path = random_string()
+    cmd = ["sudo", "curl", "-H", "'Accept: application/vnd.docker.distribution.manifest.v2+json'"]
+    cmd.extend([f"localhost:5000/v2/{repo}/manifests/{tag}"])
+    with open(TEMP_DIR + "/" + file_path, 'w') as f:
+        _ = run_cmd(
+            cmd,
+            shell=True,
+            stdout=f,
+            stderr=subprocess.PIPE
+        )
+    with open(TEMP_DIR + "/" + file_path, 'r') as file:
+        content = file.read()
+        if "errors" in content:
+            file_path_zran = random_string()
+            cmd = ["sudo", "curl", "-H", "'Accept: application/vnd.oci.image.manifest.v1+json'"]
+            cmd.extend([f"localhost:5000/v2/{repo}/manifests/{tag}"])
+            with open(TEMP_DIR + "/" + file_path_zran, 'w') as f:
+                _ = run_cmd(
+                    cmd,
+                    shell=True,
+                    stdout=f,
+                    stderr=subprocess.PIPE
+                )
+            with open(TEMP_DIR + "/" + file_path_zran, 'r') as file_zran:
+                content = file_zran.read()
+    manifest = json.loads(content)
+    size = 0
+    for item in manifest["layers"]:
+        size += item["size"]
+    shutil.rmtree(TEMP_DIR)
+    return round(size / 1024 / 1024, 2)

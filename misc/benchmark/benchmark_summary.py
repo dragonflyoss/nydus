@@ -37,11 +37,11 @@ FILE_LIST_COMPARE = [
     "zran-all-prefetch-master.csv",
     "zran-all-prefetch.csv",
     "nydus-no-prefetch-master.csv",
-    "nydus-no-prefetch-master.csv",
-    "zran-no-prefetch.csv",
+    "nydus-no-prefetch.csv",
     "zran-no-prefetch-master.csv",
-    "nydus-filelist-prefetch.csv",
-    "nydus-filelist-prefetch-master.csv"
+    "zran-no-prefetch.csv",
+    "nydus-filelist-prefetch-master.csv",
+    "nydus-filelist-prefetch.csv"
 ]
 
 
@@ -51,8 +51,8 @@ class BenchmarkSummary:
 
     def summary(self):
         self.prepare_csv()
-        print("| bench-result | pull-elapsed(s) | create-elapsed(s) | run-elapsed(s) | total-elapsed(s) |read-amount(MB) |read-count |")
-        print("|:-------------|:---------------:|:-----------------:|:--------------:|:----------------:|:--------------:|:---------:|")
+        print("| bench-result | pull-elapsed(s) | create-elapsed(s) | run-elapsed(s) | total-elapsed(s) | image-size(MB) | read-amount(MB) | read-count |")
+        print("|:-------------|:---------------:|:-----------------:|:--------------:|:----------------:|:--------------:|:---------------:|:----------:|")
         if self.mode == "benchmark-result":
             self.print_csv_result()
         else:
@@ -81,10 +81,9 @@ def print_csv(file: str):
     with open(file, 'r', newline='') as f:
         filename = file.rstrip(".csv")
         rows = csv.reader(f)
-        next(rows)  # we don't need header
         for row in rows:
-            _, pull_elapsed, create_elapsed, run_elapsed, total_elapsed, read_amount, read_count = row
-            print(f"|{filename}|{pull_elapsed}|{create_elapsed}|{run_elapsed}|{total_elapsed}|{read_amount}|{read_count}|")
+            pull_elapsed, create_elapsed, run_elapsed, total_elapsed, image_size, read_amount, read_count = row
+            print(f"|{filename}|{pull_elapsed}|{create_elapsed}|{run_elapsed}|{total_elapsed}|{image_size}|{read_amount}|{read_count}|")
 
 
 def main():
