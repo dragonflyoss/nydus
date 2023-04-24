@@ -50,7 +50,7 @@ pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_00ff;
 bitflags! {
     /// Features bits for blob management.
     pub struct BlobFeatures: u32 {
-        /// Uncompressed chunk data is 4K aligned.
+        /// Uncompressed chunk data is aligned.
         const ALIGNED = 0x0000_0001;
         /// RAFS meta data is inlined in the data blob.
         const INLINED_FS_META = 0x0000_0002;
