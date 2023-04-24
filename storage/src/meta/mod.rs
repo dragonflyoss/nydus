@@ -231,8 +231,8 @@ impl BlobCompressionContextHeader {
         self.has_feature(BlobFeatures::ALIGNED)
     }
 
-    /// Set flag indicating whether uncompressed chunks are 4k aligned.
-    pub fn set_4k_aligned(&mut self, aligned: bool) {
+    /// Set flag indicating whether uncompressed chunks are aligned.
+    pub fn set_aligned(&mut self, aligned: bool) {
         if aligned {
             self.s_features |= BlobFeatures::ALIGNED.bits();
         } else {
