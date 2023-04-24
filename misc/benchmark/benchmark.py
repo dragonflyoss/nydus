@@ -41,6 +41,7 @@ def main():
     # bench
     start_bench(cfg, cfg["image"], mode)
 
+
 def collect_metrics(cfg: dict, image: str) -> str:
     """
     collect container access metrics
@@ -53,9 +54,6 @@ def start_bench(cfg: dict, image: str, mode: str):
     bench oci, nydus without prefetch, nydus with all prefetch, nydus witch prefetch file list
     """
     f = open(util.image_repo(image) + ".csv", "w")
-    csv_headers = "repo,pull_elapsed(s),create_elapsed(s),run_elapsed(s),total_elapsed(s),read_amount(MB),read_count"
-    f.writelines(csv_headers + "\n")
-    f.flush()
     if mode == "oci":
         util.enable_wondersphaper(cfg["bandwith"])
         bench.bench_image(cfg["local_registry"], cfg["insecure_local_registry"], image, f)

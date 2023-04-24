@@ -184,13 +184,16 @@ class BenchRunner:
         run_elapsed = datetime.timestamp(end_run) - datetime.timestamp(start_run)
 
         print("Run time: %f s" % run_elapsed)
+
         read_amount, read_count = "-", "-"
         if self.snapshotter == "nydus":
             read_amount, read_count = metrics.collect_backend()
+        image_size = metrics.collect_size(image_repo(repo), image_tag(repo))
+
         if self.cleanup:
             self.clean_up(image_ref, container_id)
 
-        return pull_elapsed, create_elapsed, run_elapsed, read_amount, read_count
+        return pull_elapsed, create_elapsed, run_elapsed, image_size, read_amount, read_count
 
     def pull_cmd(self, image_ref):
         insecure_flag = "--insecure-registry" if self.insecure_registry else ""
@@ -253,11 +256,11 @@ def bench_image(local_registry, insecure_local_registry, image, f: TextIOWrapper
         cleanup=True,
         insecure_registry=insecure_local_registry,
     )
-    pull_elapsed, create_elapsed, run_elapsed, read_amount, read_count = runner.run(bench)
+    pull_elapsed, create_elapsed, run_elapsed, image_size, read_amount, read_count = runner.run(bench)
     total_elapsed = f"{pull_elapsed + create_elapsed + run_elapsed: .6f}"
     pull_elapsed = f"{pull_elapsed: .6f}"
     create_elapsed = f"{create_elapsed: .6f}"
     run_elapsed = f"{run_elapsed: .6f}"
-    line = f"{bench.name},{pull_elapsed},{create_elapsed},{run_elapsed},{total_elapsed},{read_amount},{read_count}"
+    line = f"{pull_elapsed},{create_elapsed},{run_elapsed},{total_elapsed},{image_size},{read_amount},{read_count}"
     f.writelines(line + "\n")
     f.flush()
