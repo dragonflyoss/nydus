@@ -457,7 +457,7 @@ impl BlobContext {
 
         blob_ctx
             .blob_meta_header
-            .set_4k_aligned(features.contains(BlobFeatures::ALIGNED));
+            .set_aligned(features.contains(BlobFeatures::ALIGNED));
         blob_ctx
             .blob_meta_header
             .set_inlined_fs_meta(features.contains(BlobFeatures::INLINED_FS_META));
