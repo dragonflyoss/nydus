@@ -12,12 +12,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
+
+	"github.com/stretchr/testify/require"
 )
 
 var nydusImagePath string
@@ -96,19 +96,19 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	}
 
 	logger, err := provider.DefaultLogger()
-	assert.Nil(t, err)
+	require.Nil(t, err)
 
 	sourceRemote, err := provider.DefaultRemote(host+"/"+nydusify.Source, true)
-	assert.Nil(t, err)
+	require.Nil(t, err)
 
 	targetRemote, err := provider.DefaultRemote(host+"/"+nydusify.Target, true)
-	assert.Nil(t, err)
+	require.Nil(t, err)
 
 	var cacheRemote *remote.Remote
 	if buildCache != "" {
 		buildCache = host + "/" + nydusify.Cache
 		cacheRemote, err = provider.DefaultRemote(buildCache, true)
-		assert.Nil(t, err)
+		require.Nil(t, err)
 	}
 
 	opt := converter.Opt{
@@ -140,10 +140,10 @@ func (nydusify *Nydusify) Convert(t *testing.T) {
 	}
 
 	cvt, err := converter.New(opt)
-	assert.Nil(t, err)
+	require.Nil(t, err)
 
 	err = cvt.Convert(context.Background())
-	assert.Nil(t, err)
+	require.Nil(t, err)
 }
 
 func (nydusify *Nydusify) Check(t *testing.T) {
@@ -158,8 +158,8 @@ func (nydusify *Nydusify) Check(t *testing.T) {
 		NydusdPath:     nydusdPath,
 		ExpectedArch:   "amd64",
 	})
-	assert.Nil(t, err)
+	require.Nil(t, err)
 
 	err = checker.Check(context.Background())
-	assert.Nil(t, err)
+	require.Nil(t, err)
 }
