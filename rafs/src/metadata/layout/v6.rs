@@ -1197,8 +1197,13 @@ impl RafsV6InodeChunkAddr {
     /// The index in BlobInfo grows from 0, so when using this method to index the corresponding blob,
     /// the index always needs to be minus 1
     /// Get the blob index of the chunk.
-    pub fn blob_index(&self) -> u32 {
-        (u16::from_le(self.c_blob_addr_hi) & 0x00ff) as u32 - 1
+    pub fn blob_index(&self) -> Result<u32> {
+        let idx = (u16::from_le(self.c_blob_addr_hi) & 0x00ff) as u32;
+        if idx == 0 {
+            Err(einval!("invalid zero blob index from RafsV6InodeChunkAddr"))
+        } else {
+            Ok(idx - 1)
+        }
     }
 
     /// Set the blob index of the chunk.
@@ -2228,7 +2233,7 @@ mod tests {
         writer.flush().unwrap();
         let mut chunk2 = RafsV6InodeChunkAddr::new();
         chunk2.load(&mut reader).unwrap();
-        assert_eq!(chunk2.blob_index(), 3);
+        assert_eq!(chunk2.blob_index().unwrap(), 3);
         assert_eq!(chunk2.blob_ci_index(), 0x123456);
         assert_eq!(chunk2.block_addr(), 0xa5a53412);
         assert!(chunk2.validate(4));
@@ -2356,5 +2361,21 @@ mod tests {
         } else {
             assert!(entry2 == target1);
         }
+    }
+
+    #[test]
+    fn test_invalid_blob_idx_from_chunk_addr() {
+        let mut addr = RafsV6InodeChunkAddr::new();
+        assert!(addr.blob_index().is_err());
+        addr.set_blob_index(8);
+        assert_eq!(addr.blob_index().unwrap(), 8);
+
+        assert_eq!(addr.blob_ci_index(), 0);
+        addr.set_blob_ci_index(131);
+        assert_eq!(addr.blob_ci_index(), 131);
+
+        assert_eq!(addr.block_addr(), 0);
+        addr.set_block_addr(179);
+        assert_eq!(addr.block_addr(), 179);
     }
 }

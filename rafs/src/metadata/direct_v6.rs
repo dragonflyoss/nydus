@@ -537,7 +537,16 @@ impl OndiskInodeWrapper {
         is_tarfs_mode: bool,
         is_tail: bool,
     ) -> Option<BlobIoDesc> {
-        let blob_index = chunk_addr.blob_index();
+        let blob_index = match chunk_addr.blob_index() {
+            Err(e) => {
+                warn!(
+                    "failed to get blob index for chunk address {:?}, {}",
+                    chunk_addr, e
+                );
+                return None;
+            }
+            Ok(v) => v,
+        };
 
         match state.blob_table.get(blob_index) {
             Err(e) => {
@@ -554,7 +563,7 @@ impl OndiskInodeWrapper {
                     } else {
                         self.chunk_size()
                     };
-                    let chunk = TarfsChunkInfoV6::from_chunk_addr(chunk_addr, size);
+                    let chunk = TarfsChunkInfoV6::from_chunk_addr(chunk_addr, size).ok()?;
                     let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
                     Some(BlobIoDesc::new(
                         blob,
@@ -1309,7 +1318,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
         let has_device = self.mapping.device.lock().unwrap().has_device();
 
         if state.meta.has_inlined_chunk_digest() && has_device {
-            let blob_index = chunk_addr.blob_index();
+            let blob_index = chunk_addr.blob_index()?;
             let chunk_index = chunk_addr.blob_ci_index();
             let device = self.mapping.device.lock().unwrap();
             device
@@ -1326,9 +1335,8 @@ impl RafsInodeExt for OndiskInodeWrapper {
             } else {
                 self.chunk_size()
             };
-            Ok(Arc::new(TarfsChunkInfoV6::from_chunk_addr(
-                chunk_addr, size,
-            )))
+            let chunk_info = TarfsChunkInfoV6::from_chunk_addr(chunk_addr, size)?;
+            Ok(Arc::new(chunk_info))
         } else {
             let mut chunk_map = self.mapping.info.chunk_map.lock().unwrap();
             if chunk_map.is_none() {
@@ -1337,7 +1345,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
             match chunk_map.as_ref().unwrap().get(chunk_addr) {
                 None => Err(enoent!(format!(
                     "failed to get chunk info for chunk {}/{}/{}",
-                    chunk_addr.blob_index(),
+                    chunk_addr.blob_index().unwrap_or_default(),
                     chunk_addr.blob_ci_index(),
                     chunk_addr.block_addr()
                 ))),
@@ -1468,11 +1476,11 @@ impl TarfsChunkInfoV6 {
         }
     }
 
-    fn from_chunk_addr(chunk_addr: &RafsV6InodeChunkAddr, size: u32) -> Self {
-        let blob_index = chunk_addr.blob_index();
+    fn from_chunk_addr(chunk_addr: &RafsV6InodeChunkAddr, size: u32) -> Result<Self> {
+        let blob_index = chunk_addr.blob_index()?;
         let chunk_index = chunk_addr.blob_ci_index();
         let offset = (chunk_addr.block_addr() as u64) << EROFS_BLOCK_BITS_9;
-        TarfsChunkInfoV6::new(blob_index, chunk_index, offset, size)
+        Ok(TarfsChunkInfoV6::new(blob_index, chunk_index, offset, size))
     }
 }
 
