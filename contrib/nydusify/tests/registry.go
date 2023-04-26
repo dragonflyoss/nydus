@@ -5,17 +5,14 @@
 package tests
 
 import (
-	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var registryPort = 5051
@@ -26,7 +23,7 @@ func run(t *testing.T, cmd string, ignoreStatus bool) {
 	_cmd.Stderr = os.Stderr
 	err := _cmd.Run()
 	if !ignoreStatus {
-		assert.Nil(t, err)
+		require.Nil(t, err)
 	}
 }
 
@@ -34,7 +31,7 @@ func runWithOutput(t *testing.T, cmd string) string {
 	_cmd := exec.Command("sh", "-c", cmd)
 	_cmd.Stderr = os.Stderr
 	output, err := _cmd.Output()
-	assert.Nil(t, err)
+	require.Nil(t, err)
 	return string(output)
 }
 
@@ -43,37 +40,6 @@ type Registry struct {
 	host       string
 	authFile   string
 	configFile string
-}
-
-func NewAuthRegistry(t *testing.T) *Registry {
-	err := os.Mkdir("auth", 0755)
-	assert.Nil(t, err)
-	authString := runWithOutput(t, "docker run --rm --entrypoint htpasswd httpd:2 -Bbn testuser testpassword")
-	authFile, _ := filepath.Abs(filepath.Join("auth", "htpasswd"))
-	err = ioutil.WriteFile(authFile, []byte(authString), 0644)
-	assert.Nil(t, err)
-
-	err = os.Mkdir(".docker", 0755)
-	assert.Nil(t, err)
-	configString := fmt.Sprintf(`{"auths": { "localhost:%d": { "auth": "%s" }}}`,
-		registryPort, base64.StdEncoding.EncodeToString([]byte("testuser:testpassword")))
-	configFile, _ := filepath.Abs(filepath.Join(".docker", "config.json"))
-	err = os.Setenv("DOCKER_CONFIG", path.Dir(configFile))
-	assert.Nil(t, err)
-	err = ioutil.WriteFile(configFile, []byte(configString), 0644)
-	assert.Nil(t, err)
-
-	containerID := runWithOutput(t, fmt.Sprintf("docker run -p %d:5000 --rm -d  -v %s:/auth "+
-		`-e "REGISTRY_AUTH=htpasswd" -e "REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm" `+
-		"-e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd registry:2", registryPort, path.Dir(authFile)))
-	time.Sleep(time.Second * 2)
-
-	return &Registry{
-		id:         containerID,
-		host:       fmt.Sprintf("localhost:%d", registryPort),
-		authFile:   authFile,
-		configFile: configFile,
-	}
 }
 
 func NewRegistry(t *testing.T) *Registry {
