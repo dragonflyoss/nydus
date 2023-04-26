@@ -257,10 +257,10 @@ def bench_image(local_registry, insecure_local_registry, image, f: TextIOWrapper
         insecure_registry=insecure_local_registry,
     )
     pull_elapsed, create_elapsed, run_elapsed, image_size, read_amount, read_count = runner.run(bench)
-    total_elapsed = f"{pull_elapsed + create_elapsed + run_elapsed: .6f}"
-    pull_elapsed = f"{pull_elapsed: .6f}"
-    create_elapsed = f"{create_elapsed: .6f}"
-    run_elapsed = f"{run_elapsed: .6f}"
+    total_elapsed = f"{pull_elapsed + create_elapsed + run_elapsed: .2f}"
+    pull_elapsed = f"{pull_elapsed: .2f}"
+    create_elapsed = f"{create_elapsed: .2f}"
+    run_elapsed = f"{run_elapsed: .2f}"
     line = f"{pull_elapsed},{create_elapsed},{run_elapsed},{total_elapsed},{image_size},{read_amount},{read_count}"
     f.writelines(line + "\n")
     f.flush()
