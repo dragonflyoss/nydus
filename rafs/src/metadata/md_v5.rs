@@ -172,12 +172,12 @@ impl RafsSuper {
             if let Ok(ni) = self.get_inode(next_ino, false) {
                 if ni.is_reg() {
                     let next_size = ni.size();
-                    let next_size = if next_size < window_size {
+                    let next_size = if next_size == 0 {
+                        continue;
+                    } else if next_size < window_size {
                         next_size
                     } else if window_size >= self.meta.chunk_size as u64 {
                         window_size / self.meta.chunk_size as u64 * self.meta.chunk_size as u64
-                    } else if next_size == 0 {
-                        continue;
                     } else {
                         break;
                     };
