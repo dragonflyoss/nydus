@@ -32,7 +32,7 @@ use nydus_utils::compact::makedev;
 use nydus_utils::compress::zlib_random::{ZranReader, ZRAN_READER_BUF_SIZE};
 use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
-use nydus_utils::{div_round_up, root_tracer, timing_tracer, BufReaderInfo, ByteSize};
+use nydus_utils::{div_round_up, lazy_drop, root_tracer, timing_tracer, BufReaderInfo, ByteSize};
 
 use super::core::blob::Blob;
 use super::core::context::{
@@ -584,6 +584,8 @@ impl Builder for TarballBuilder {
                 "dump_bootstrap"
             )?;
         }
+
+        lazy_drop(bootstrap_ctx);
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
     }

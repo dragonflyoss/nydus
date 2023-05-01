@@ -110,6 +110,21 @@ impl Delayer {
     }
 }
 
+struct LazyDrop<T> {
+    v: T,
+}
+
+unsafe impl<T> Send for LazyDrop<T> {}
+
+/// Lazy drop of object.
+pub fn lazy_drop<T: 'static>(v: T) {
+    let v = LazyDrop { v };
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(600));
+        let _ = v.v;
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,7 +6,7 @@ use std::fs;
 use std::fs::DirEntry;
 
 use anyhow::{anyhow, Context, Result};
-use nydus_utils::{event_tracer, root_tracer, timing_tracer};
+use nydus_utils::{event_tracer, lazy_drop, root_tracer, timing_tracer};
 
 use super::core::blob::Blob;
 use super::core::context::{
@@ -189,6 +189,8 @@ impl Builder for DirectoryBuilder {
                 "dump_bootstrap"
             )?;
         }
+
+        lazy_drop(bootstrap_ctx);
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
     }

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
-use nydus_utils::{root_tracer, timing_tracer};
+use nydus_utils::{lazy_drop, root_tracer, timing_tracer};
 
 use super::node::{ChunkSource, Node, NodeChunk, NodeInfo};
 use super::overlay::{Overlay, WhiteoutType};
@@ -180,8 +180,10 @@ impl Tree {
         // Handle the root node.
         upper.lock_node().overlay = Overlay::UpperModification;
         self.node = upper.node.clone();
+        self.merge_children(ctx, &upper)?;
+        lazy_drop(upper);
 
-        self.merge_children(ctx, &upper)
+        Ok(())
     }
 
     fn merge_children(&mut self, ctx: &BuildContext, upper: &Tree) -> Result<()> {
