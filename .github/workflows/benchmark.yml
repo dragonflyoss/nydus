@@ -1,0 +1,297 @@
+name: Benchmark
+
+on:
+  schedule:
+    # Run at 03:00 clock UTC on Monday and Wednesday
+    - cron: "0 03 * * 1,3"
+  workflow_dispatch:
+
+env:
+  IMAGE: wordpress
+  TAG: 6.1.1
+
+jobs:
+  contrib-build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Setup Golang
+      uses: actions/setup-go@v3
+      with:
+        go-version: ~1.18
+    - name: Golang Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-golang-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-golang-
+    - name: Build Contrib
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/local/bin v1.51.2
+        make -e DOCKER=false nydusify-release
+    - name: Upload Nydusify
+      uses: actions/upload-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd/nydusify
+
+  nydus-build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2.2.0
+      with:
+        cache-on-failure: true
+    - name: Build Nydus
+      run: |
+        rustup component add rustfmt clippy
+        make
+    - name: Upload Nydus Binaries
+      uses: actions/upload-artifact@master
+      with:
+        name: nydus-artifact
+        path: |
+          target/release/nydus-image
+          target/release/nydusd
+
+  benchmark-oci:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare OCI Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh oci
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode oci
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-oci
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-no-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-no-prefetch
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-no-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-zran-no-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6 \
+          --oci-ref
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-no-prefetch
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-zran-no-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-all-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-all-prefetch
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-all-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-zran-all-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6 \
+          --oci-ref
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-all-prefetch
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-zran-all-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-filelist-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-filelist-prefetch
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-filelist-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-result:
+    runs-on: ubuntu-latest
+    needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-zran-no-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Get Date
+      id: get-date
+      run: |
+        echo "date=$(date  +%s)" >> $GITHUB_OUTPUT
+      shell: bash
+    - name: Restore benchmark result
+      uses: actions/cache/restore@v3
+      with:
+        path: benchmark-result
+        key: benchmark-${{ steps.get-date.outputs.date }}
+        restore-keys: |
+         benchmark-
+    - uses: actions/download-artifact@v3
+    - uses: geekyeggo/delete-artifact@v2
+      with:
+        name: '*'
+    - name: Benchmark
+      run: |
+        if [ ! -d "benchmark-result" ]; then
+          mkdir benchmark-result
+        fi
+        sudo python3 misc/benchmark/benchmark_summary.py --mode benchmark-schedule > $GITHUB_STEP_SUMMARY
+    - name: Save Benchmark Result
+      uses: actions/cache/save@v3
+      with:
+        path: benchmark-result
+        key: benchmark-${{ steps.get-date.outputs.date }}
