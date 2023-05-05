@@ -26,8 +26,16 @@ def main():
         required=True,
         help="The mode of benchmark. Available modes are: oci, nydus-none_prefetch, nydus-all-prefetch, nydus-filelist-prefetch."
     )
+    parser.add_argument(
+        "--image",
+        dest="image",
+        type=str,
+        required=True,
+        help="The benchmark image."
+    )
     args = parser.parse_args()
     mode = args.mode
+    image = args.image
 
     # read config.yml
     cfg = {}
@@ -39,7 +47,7 @@ def main():
             print(inst)
             exit(-1)
     # bench
-    start_bench(cfg, cfg["image"], mode)
+    start_bench(cfg, image, mode)
 
 
 def collect_metrics(cfg: dict, image: str) -> str:
