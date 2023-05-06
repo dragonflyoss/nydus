@@ -90,7 +90,7 @@ jobs:
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode oci
+        sudo python3 benchmark.py --mode oci --image ${{env.IMAGE}}:${{env.TAG}}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
@@ -123,7 +123,7 @@ jobs:
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-no-prefetch
+        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
@@ -159,7 +159,7 @@ jobs:
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-no-prefetch
+        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
@@ -192,7 +192,7 @@ jobs:
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-all-prefetch
+        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
@@ -228,7 +228,7 @@ jobs:
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-all-prefetch
+        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
@@ -261,7 +261,7 @@ jobs:
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-filelist-prefetch
+        sudo python3 benchmark.py --mode nydus-filelist-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
