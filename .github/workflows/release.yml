@@ -21,7 +21,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v1
+      uses: Swatinem/rust-cache@v2.2.0
       with:
         target-dir: |
           ./target
@@ -57,7 +57,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v1
+      uses: Swatinem/rust-cache@v2.2.0
       with:
         target-dir: |
           ./target
