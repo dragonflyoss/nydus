@@ -85,7 +85,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@v2.2.0
       with:
         cache-on-failure: true
         shared-key: nydus-build
@@ -602,7 +602,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@v2.2.0
       with:
         cache-on-failure: true
         shared-key: nydus-build
@@ -619,7 +619,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.2.0
         with:
           cache-on-failure: true
       - name: Install cargo-llvm-cov

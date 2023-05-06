@@ -43,7 +43,7 @@ jobs:
         with:
           ref: ${{ matrix.branch }}
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v1
+        uses: Swatinem/rust-cache@v2.2.0
         with:
           target-dir: |
             ./target
