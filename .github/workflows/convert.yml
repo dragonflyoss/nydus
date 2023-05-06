@@ -51,6 +51,7 @@ jobs:
       uses: Swatinem/rust-cache@v2.2.0
       with:
         cache-on-failure: true
+        shared-key: nydus-build
     - name: Build Nydus
       run: |
         rustup component add rustfmt clippy
