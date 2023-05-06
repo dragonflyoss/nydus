@@ -89,8 +89,14 @@ def timer(cmd):
 
 class RunArgs:
     def __init__(
-        self, waitURL=""
+        self, env={}, arg="", stdin="", stdin_sh="sh", waitline="", mount=[], waitURL=""
     ):
+        self.env = env
+        self.arg = arg
+        self.stdin = stdin
+        self.stdin_sh = stdin_sh
+        self.waitline = waitline
+        self.mount = mount
         self.waitURL = waitURL
 
 
@@ -109,12 +115,39 @@ class Bench:
 class BenchRunner:
     CMD_URL_WAIT = {
         "wordpress": RunArgs(waitURL="http://localhost:80"),
+        "node": RunArgs(
+            arg="node /src/index.js",
+            mount=[("node", "/src")],
+            waitURL="http://localhost:80",
+        ),
     }
 
-    # complete listing
+    CMD_STDIN = {
+        "golang": RunArgs(
+            stdin="cd /src; go run main.go", mount=[("go", "/src")]
+        ),
+        "amazoncorretto": RunArgs(
+            stdin="cd /src; javac Main.java; java Main", mount=[("java", "/src")]
+        ),
+        "ruby": RunArgs(stdin='ruby -e "puts \\"hello\\""')
+    }
+
+    CMD_ARG = {
+        "python": RunArgs(arg="python -c 'print(\"hello\")'"),
+    }
+
+    # support images
     ALL = dict(
         [
-            ("wordpress", Bench("wordpress", "web-framework")),
+            (b.name, b)
+            for b in [
+                Bench("golang", "language"),
+                Bench("python", "language"),
+                Bench("ruby", "language"),
+                Bench("amazoncorretto", "language"),
+                Bench("node", "web-framework"),
+                Bench("wordpress", "web-framework"),
+            ]
         ]
     )
 
@@ -140,9 +173,11 @@ class BenchRunner:
     def run(self, bench):
         repo = image_repo(bench.name)
         if repo in BenchRunner.CMD_URL_WAIT:
-            return self.run_cmd_url_wait(
-                repo=bench.name, runargs=BenchRunner.CMD_URL_WAIT[repo]
-            )
+            return self.run_cmd_url_wait(repo=bench.name, runargs=BenchRunner.CMD_URL_WAIT[repo])
+        elif repo in BenchRunner.CMD_ARG:
+            return self.run_cmd_arg(repo=bench.name, runargs=BenchRunner.CMD_ARG[repo])
+        elif repo in BenchRunner.CMD_STDIN:
+            return self.run_cmd_stdin(repo=bench.name, runargs=BenchRunner.CMD_STDIN[repo])
         else:
             print("Unknown bench: " + repo)
             sys.exit(1)
@@ -188,10 +223,110 @@ class BenchRunner:
         read_amount, read_count = "-", "-"
         if self.snapshotter == "nydus":
             read_amount, read_count = metrics.collect_backend()
-        image_size = metrics.collect_size(image_repo(repo), image_tag(repo))
+        try:
+            image_size = metrics.collect_size(image_repo(repo), image_tag(repo))
+        except Exception:
+            image_size = 0
 
         if self.cleanup:
             self.clean_up(image_ref, container_id)
+
+        return pull_elapsed, create_elapsed, run_elapsed, image_size, read_amount, read_count
+
+    def run_cmd_arg(self, repo, runargs):
+        assert len(runargs.mount) == 0
+
+        image_ref = self.image_ref(repo)
+        container_name = repo.replace(":", "-")
+
+        pull_cmd = self.pull_cmd(image_ref)
+        print(pull_cmd)
+
+        print("Pulling image %s ..." % image_ref)
+        with timer(pull_cmd) as t:
+            pull_elapsed = t
+
+        create_cmd = self.create_cmd_arg_cmd(image_ref, container_name, runargs)
+        print(create_cmd)
+
+        print("Creating container for image %s ..." % image_ref)
+        with timer(create_cmd) as t:
+            create_elapsed = t
+
+        run_cmd = self.task_start_cmd(container_name, iteration=False)
+        print(run_cmd)
+
+        with timer(run_cmd) as t:
+            run_elapsed = t
+
+        print("Run time: %f s" % run_elapsed)
+
+        read_amount, read_count = "-", "-"
+        if self.snapshotter == "nydus":
+            read_amount, read_count = metrics.collect_backend()
+        try:
+            image_size = metrics.collect_size(image_repo(repo), image_tag(repo))
+        except Exception:
+            image_size = 0
+
+        if self.cleanup:
+            self.clean_up(image_ref, container_name)
+
+        return pull_elapsed, create_elapsed, run_elapsed, image_size, read_amount, read_count
+
+    def run_cmd_stdin(self, repo, runargs):
+        image_ref = self.image_ref(repo)
+        container_name = repo.replace(":", "-")
+
+        pull_cmd = self.pull_cmd(image_ref)
+        print(pull_cmd)
+
+        print("Pulling image %s ..." % image_ref)
+        with timer(pull_cmd) as t:
+            pull_elapsed = t
+
+        create_cmd = self.create_cmd_stdin_cmd(image_ref, container_name, runargs)
+        print(create_cmd)
+
+        print("Creating container for image %s ..." % image_ref)
+        with timer(create_cmd) as t:
+            create_elapsed = t
+
+        run_cmd = self.task_start_cmd(container_name, iteration=True)
+        print(run_cmd)
+
+        print("Running container %s ..." % container_name)
+        start_run = datetime.now()
+
+        p = subprocess.Popen(
+            run_cmd,
+            shell=True,
+            stdin=subprocess.PIPE,
+            stdout=sys.stdout,
+            stderr=sys.stdout,
+            bufsize=0,
+        )
+
+        print(runargs.stdin)
+        stdin = runargs.stdin + "\nexit\n"
+        p.communicate(stdin.encode())
+        end_run = datetime.now()
+        run_elapsed = datetime.timestamp(end_run) - datetime.timestamp(start_run)
+        print("p.returncode:", p.returncode)
+        # assert(p.returncode == 0)
+
+        print("Run time: %f s" % run_elapsed)
+
+        read_amount, read_count = "-", "-"
+        if self.snapshotter == "nydus":
+            read_amount, read_count = metrics.collect_backend()
+        try:
+            image_size = metrics.collect_size(image_repo(repo), image_tag(repo))
+        except Exception:
+            image_size = 0
+
+        if self.cleanup:
+            self.clean_up(image_ref, container_name)
 
         return pull_elapsed, create_elapsed, run_elapsed, image_size, read_amount, read_count
 
@@ -203,6 +338,23 @@ class BenchRunner:
 
     def create_cmd_url_wait_cmd(self, image_ref, container_id, runargs):
         cmd = f"sudo nerdctl --snapshotter {self.snapshotter} create --net=host "
+        for a, b in runargs.mount:
+            a = os.path.join(os.path.dirname(os.path.abspath(__file__)), a)
+            cmd += f"--volume {a}:{b} "
+        cmd += f"--name={container_id} {image_ref}"
+        if len(runargs.arg) > 0:
+            cmd += f" -- {runargs.arg} "
+        return cmd
+
+    def create_cmd_arg_cmd(self, image_ref, container_id, runargs):
+        cmd = f"sudo nerdctl --snapshotter {self.snapshotter} create --net=host --name={container_id} {image_ref} "
+        return cmd + runargs.arg
+
+    def create_cmd_stdin_cmd(self, image_ref, container_id, runargs):
+        cmd = f"sudo nerdctl --snapshotter {self.snapshotter} create --net=host "
+        for a, b in runargs.mount:
+            a = os.path.join(os.path.dirname(os.path.abspath(__file__)), a)
+            cmd += f"--volume {a}:{b} "
         cmd += f"--name={container_id} {image_ref}"
         return cmd
 

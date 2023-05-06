@@ -90,17 +90,21 @@ class MetricsCollector:
 
     def collect(self, repo) -> str:
         """
-            TODO: update to the condition, here is just for wait the wordpress up
+            collect the access files
         """
         # wait wordpress response in 80 port
-        while True:
-            try:
-                req = urllib.request.urlopen("http://localhost:80")
-                print(req.status)
-                req.close()
-                break
-            except:
-                time.sleep(0.01)
+        if self.image == "wordpress":
+            while True:
+                try:
+                    req = urllib.request.urlopen("http://localhost:80")
+                    print(req.status)
+                    req.close()
+                    break
+                except:
+                    time.sleep(0.01)
+        # TODO: support more images
+        else:
+            time.sleep(10)
         socket = search_file(API_DIR, "api.sock")
         if socket == None:
             print("can't find the api.sock")
