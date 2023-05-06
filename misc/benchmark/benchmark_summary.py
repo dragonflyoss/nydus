@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 import csv
-import subprocess
 import os
+import subprocess
 from argparse import ArgumentParser
 
 COMMANDS_BENCHMARK = [
@@ -72,10 +72,10 @@ class BenchmarkSummary:
                 print_compare(item[0], item[1])
 
     def print_csv_schedule(self):
-        print("| bench-result(current vs last) | pull(s) | create(s) | run(s) | total(s) | size(MB) | read-amount(MB) | read-count |")
-        print("|:------------------------------|:-------:|:---------:|:------:|:--------:|:--------:|:---------------:|:----------:|")
         data = []
         if os.path.exists(BENCHMARK_CACHE):
+            print("| bench-result(current vs last) | pull(s) | create(s) | run(s) | total(s) | size(MB) | read-amount(MB) | read-count |")
+            print("|:------------------------------|:-------:|:---------:|:------:|:--------:|:--------:|:---------------:|:----------:|")
             with open(BENCHMARK_CACHE, "r", newline='') as f:
                 reader = csv.reader(f, delimiter='|')
                 next(reader)  # head
@@ -83,11 +83,13 @@ class BenchmarkSummary:
                 next(reader)  # oci
                 for row in reader:
                     data.append(row[2:-1])
-        for index, file in enumerate(FILE_LIST):
-            if(file == "oci.csv") or index > len(data):
-                print_schedule(file)
-            else:
-                print_schedule(file, data[index-1])
+            for index, file in enumerate(FILE_LIST):
+                if (file == "oci.csv"):
+                    print_schedule(file)
+                else:
+                    print_schedule(file, data[index-1])
+        else:
+            self.print_csv_result()
         self.save_cache()
 
     def prepare_csv(self):
