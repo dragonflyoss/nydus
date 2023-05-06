@@ -4,6 +4,10 @@ on:
   schedule:
     # Run at 03:00 clock UTC on Monday and Wednesday
     - cron: "0 03 * * 1,3"
+  pull_request:
+    paths:
+      - '.github/workflows/benchmark.yml'
+      - 'misc/benchmark/*'
   workflow_dispatch:
 
 env:
