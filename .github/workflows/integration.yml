@@ -45,11 +45,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2.2.0
         with:
-          target-dir: |
-            ./target
           cache-on-failure: true
           key: ${{ runner.os }}-cargo-${{ matrix.arch }}
-
       - name: Build nydus-rs
         run: |
           declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl")
