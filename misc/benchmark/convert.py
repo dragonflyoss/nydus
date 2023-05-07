@@ -50,6 +50,7 @@ class Image:
         convert oci image to nydus image (prefetchfile is optional)
         """
         print(self.convert_cmd())
+        rc = os.system(f"sudo cat {self.prefetch}")
         rc = os.system(self.convert_cmd())
         assert rc == 0
 
