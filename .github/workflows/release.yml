@@ -23,8 +23,6 @@ jobs:
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2.2.0
       with:
-        target-dir: |
-          ./target
         cache-on-failure: true
         key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: Build nydus-rs
@@ -59,8 +57,6 @@ jobs:
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2.2.0
       with:
-        target-dir: |
-          ./target
         cache-on-failure: true
         key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: build
