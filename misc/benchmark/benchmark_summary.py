@@ -6,20 +6,20 @@ import subprocess
 from argparse import ArgumentParser
 
 COMMANDS_BENCHMARK = [
-    "sudo install -m 755 benchmark-oci/wordpress.csv oci.csv",
-    "sudo install -m 755 benchmark-nydus-all-prefetch/wordpress.csv nydus-all-prefetch.csv",
-    "sudo install -m 755 benchmark-nydus-no-prefetch/wordpress.csv nydus-no-prefetch.csv",
-    "sudo install -m 755 benchmark-zran-all-prefetch/wordpress.csv zran-all-prefetch.csv",
-    "sudo install -m 755 benchmark-zran-no-prefetch/wordpress.csv zran-no-prefetch.csv",
-    "sudo install -m 755 benchmark-nydus-filelist-prefetch/wordpress.csv nydus-filelist-prefetch.csv"
+    "sudo install -m 755 benchmark-oci/*.csv oci.csv",
+    "sudo install -m 755 benchmark-nydus-all-prefetch/*.csv nydus-all-prefetch.csv",
+    "sudo install -m 755 benchmark-nydus-no-prefetch/*.csv nydus-no-prefetch.csv",
+    "sudo install -m 755 benchmark-zran-all-prefetch/*.csv zran-all-prefetch.csv",
+    "sudo install -m 755 benchmark-zran-no-prefetch/*.csv zran-no-prefetch.csv",
+    "sudo install -m 755 benchmark-nydus-filelist-prefetch/*.csv nydus-filelist-prefetch.csv"
 ]
 
 COMMANDS_BENCHMARK_COMPARE = [
-    "sudo install -m 755 benchmark-zran-all-prefetch-master/wordpress.csv zran-all-prefetch-master.csv",
-    "sudo install -m 755 benchmark-zran-no-prefetch-master/wordpress.csv zran-no-prefetch-master.csv",
-    "sudo install -m 755 benchmark-nydus-no-prefetch-master/wordpress.csv nydus-no-prefetch-master.csv",
-    "sudo install -m 755 benchmark-nydus-all-prefetch-master/wordpress.csv nydus-all-prefetch-master.csv",
-    "sudo install -m 755 benchmark-nydus-filelist-prefetch-master/wordpress.csv nydus-filelist-prefetch-master.csv"
+    "sudo install -m 755 benchmark-zran-all-prefetch-master/*.csv zran-all-prefetch-master.csv",
+    "sudo install -m 755 benchmark-zran-no-prefetch-master/*.csv zran-no-prefetch-master.csv",
+    "sudo install -m 755 benchmark-nydus-no-prefetch-master/*.csv nydus-no-prefetch-master.csv",
+    "sudo install -m 755 benchmark-nydus-all-prefetch-master/*.csv nydus-all-prefetch-master.csv",
+    "sudo install -m 755 benchmark-nydus-filelist-prefetch-master/*.csv nydus-filelist-prefetch-master.csv"
 ]
 
 FILE_LIST = [

@@ -8,9 +8,12 @@ import re
 import shutil
 import string
 import subprocess
+import sys
 import time
 import urllib.request
 from typing import Tuple
+
+import bench
 
 """
 define some file path, and sock api url
@@ -30,7 +33,12 @@ class MetricsCollector:
         self.insecure_registry = cfg["insecure_registry"]
         self.image = cfg["image"]
 
-    def start_collet(self, arg="") -> str:
+    def start_collet(self) -> str:
+        runner = bench.BenchRunner(
+            registry=self.registry,
+            snapshotter="nydus",
+            insecure_registry=self.insecure_registry,
+        )
         image_ref = self.image_ref(self.image)
         container_name = self.image.replace(":", "-") + random_string()
         pull_cmd = self.pull_cmd(image_ref)
@@ -38,16 +46,16 @@ class MetricsCollector:
         print("Pulling image %s ..." % image_ref)
         rc = os.system(pull_cmd)
         assert rc == 0
-        create_cmd = self.create_container_cmd(image_ref, container_name, arg)
-        print(create_cmd)
-        print("Creating container for image %s ..." % image_ref)
-        rc = os.system(create_cmd)
-        assert rc == 0
-        run_cmd = self.start_container_cmd(container_name)
-        print(run_cmd)
-        print("Running container %s ..." % container_name)
-        rc = os.system(run_cmd)
-        assert rc == 0
+        repo = bench.image_repo(self.image)
+        if repo in bench.BenchRunner.CMD_URL_WAIT:
+            self.run_cmd_url_wait(runner=runner, runargs=bench.BenchRunner.CMD_URL_WAIT[repo], image_ref=image_ref, container_name=container_name)
+        elif repo in bench.BenchRunner.CMD_ARG:
+            self.run_cmd_arg(runner=runner, runargs=bench.BenchRunner.CMD_ARG[repo], image_ref=image_ref, container_name=container_name)
+        elif repo in bench.BenchRunner.CMD_STDIN:
+            self.run_cmd_stdin(runner=runner, runargs=bench.BenchRunner.CMD_STDIN[repo], image_ref=image_ref, container_name=container_name)
+        else:
+            print("Unknown bench: " + repo)
+            os.exit(1)
         file = self.collect(self.image)
         self.clean_up(image_ref, container_name)
         return file
@@ -61,17 +69,75 @@ class MetricsCollector:
             f"sudo nerdctl --snapshotter nydus pull {insecure_flag} {image_ref}"
         )
 
-    def create_container_cmd(self, image_ref, container_id, arg=""):
-        if arg == "":
-            return f"sudo nerdctl --snapshotter nydus create --net=host --name={container_id} {image_ref}"
-        else:
-            return f"sudo nerdctl --snapshotter nydus create --net=host {arg} --name={container_id} {image_ref}"
-
-    def start_container_cmd(self, container_id):
-        return f"sudo nerdctl --snapshotter nydus start {container_id}"
-
     def stop_container_cmd(self, container_id):
         return f"sudo nerdctl --snapshotter nydus stop {container_id}"
+
+    def run_cmd_url_wait(self, runner, runargs, image_ref, container_name):
+
+        create_cmd = runner.create_cmd_url_wait_cmd(image_ref, container_name, runargs)
+        print(create_cmd)
+
+        print("Creating container for image %s ..." % image_ref)
+        rc = os.system(create_cmd)
+        assert rc == 0
+
+        run_cmd = runner.task_start_cmd(container_name, iteration=False)
+        print(run_cmd)
+
+        print("Running container %s ..." % container_name)
+
+        _ = subprocess.Popen(run_cmd, shell=True)
+        while True:
+            try:
+                req = urllib.request.urlopen(runargs.waitURL)
+                print(req.status)
+                req.close()
+                break
+            except:
+                time.sleep(0.01)
+
+    def run_cmd_arg(self, runner, runargs, image_ref, container_name):
+        assert len(runargs.mount) == 0
+
+        create_cmd = runner.create_cmd_arg_cmd(image_ref, container_name, runargs)
+        print(create_cmd)
+
+        print("Creating container for image %s ..." % image_ref)
+        rc = os.system(create_cmd)
+        assert rc == 0
+
+        run_cmd = runner.task_start_cmd(container_name, iteration=False)
+        print(run_cmd)
+        rc = os.system(run_cmd)
+        assert rc == 0
+
+    def run_cmd_stdin(self, runner, runargs, image_ref, container_name):
+
+        create_cmd = runner.create_cmd_stdin_cmd(image_ref, container_name, runargs)
+        print(create_cmd)
+
+        print("Creating container for image %s ..." % image_ref)
+        rc = os.system(create_cmd)
+        assert rc == 0
+
+        run_cmd = runner.task_start_cmd(container_name, iteration=True)
+        print(run_cmd)
+
+        print("Running container %s ..." % container_name)
+
+        p = subprocess.Popen(
+            run_cmd,
+            shell=True,
+            stdin=subprocess.PIPE,
+            stdout=sys.stdout,
+            stderr=sys.stdout,
+            bufsize=0,
+        )
+
+        print(runargs.stdin)
+        stdin = runargs.stdin + "\nexit\n"
+        p.communicate(stdin.encode())
+        assert p.returncode == 0
 
     def clean_up(self, image_ref, container_id):
         print("Cleaning up environment for %s ..." % container_id)
@@ -92,19 +158,6 @@ class MetricsCollector:
         """
             collect the access files
         """
-        # wait wordpress response in 80 port
-        if self.image == "wordpress":
-            while True:
-                try:
-                    req = urllib.request.urlopen("http://localhost:80")
-                    print(req.status)
-                    req.close()
-                    break
-                except:
-                    time.sleep(0.01)
-        # TODO: support more images
-        else:
-            time.sleep(10)
         socket = search_file(API_DIR, "api.sock")
         if socket == None:
             print("can't find the api.sock")
