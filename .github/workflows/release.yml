@@ -19,7 +19,7 @@ jobs:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2.2.0
       with:
@@ -38,7 +38,7 @@ jobs:
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}
         path: |
@@ -53,7 +53,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2.2.0
       with:
@@ -66,7 +66,7 @@ jobs:
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: nydus-artifacts-darwin-${{ matrix.arch }}
         path: |
@@ -83,12 +83,12 @@ jobs:
     env:
       DOCKER: false
     steps:
-    - uses: actions/checkout@v2
-    - uses: actions/setup-go@v2
+    - uses: actions/checkout@v3
+    - uses: actions/setup-go@v3
       with:
         go-version: '1.18'
     - name: cache go mod
-      uses: actions/cache@v2
+      uses: actions/cache@v3
       with:
         path: /go/pkg/mod
         key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
@@ -101,7 +101,7 @@ jobs:
         sudo mv contrib/nydusify/cmd/nydusify .
         sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
     - name: store-artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}
         path: |
@@ -119,7 +119,7 @@ jobs:
     needs: [nydus-linux, contrib-linux]
     steps:
     - name: download artifacts
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v3
       with:
         name: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}
         path: nydus-static
@@ -135,7 +135,7 @@ jobs:
         sha256sum $tarball > $shasum
         echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: nydus-release-tarball
         path: |
@@ -152,7 +152,7 @@ jobs:
     needs: [nydus-macos]
     steps:
     - name: download artifacts
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v3
       with:
         name: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}
         path: nydus-static
@@ -168,7 +168,7 @@ jobs:
         sha256sum $tarball > $shasum
         echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v3
       with:
         name: nydus-release-tarball
         path: |
@@ -180,7 +180,7 @@ jobs:
     needs: [prepare-tarball-linux, prepare-tarball-darwin]
     steps:
     - name: download artifacts
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v3
       with:
         name: nydus-release-tarball
         path: nydus-tarball
