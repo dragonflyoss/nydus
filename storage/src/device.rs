@@ -522,11 +522,15 @@ impl Debug for BlobIoDesc {
 
 impl BlobIoDesc {
     /// Check whether the `other` BlobIoDesc is continuous to current one.
-    pub fn is_continuous(&self, prev: &BlobIoDesc) -> bool {
+    pub fn is_continuous(&self, prev: &BlobIoDesc, max_gap: u64) -> bool {
         let offset = self.chunkinfo.compressed_offset();
         let prev_size = prev.chunkinfo.compressed_size() as u64;
         if let Some(prev_end) = prev.chunkinfo.compressed_offset().checked_add(prev_size) {
-            prev_end == offset && self.blob.blob_index() == prev.blob.blob_index()
+            if self.blob.blob_index() == prev.blob.blob_index() && prev_end <= offset {
+                offset - prev_end <= max_gap
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -747,13 +751,19 @@ impl BlobIoRange {
 
     /// Merge an `BlobIoDesc` into the `BlobIoRange` object.
     pub fn merge(&mut self, bio: &BlobIoDesc) {
+        let end = self.blob_offset + self.blob_size;
+        let offset = bio.chunkinfo.compressed_offset();
+        let size = bio.chunkinfo.compressed_size() as u64;
+        let size = if end == offset {
+            size
+        } else {
+            size + (offset - end)
+        };
+        assert!(end.checked_add(size).is_some());
+
+        self.blob_size += size;
         self.tags.push(Self::tag_from_desc(bio));
         self.chunks.push(bio.chunkinfo.inner());
-        debug_assert!(
-            self.blob_offset.checked_add(self.blob_size) == Some(bio.chunkinfo.compressed_offset())
-        );
-        self.blob_size += bio.chunkinfo.compressed_size() as u64;
-        debug_assert!(self.blob_offset.checked_add(self.blob_size).is_some());
     }
 
     /// Check the `BlobIoRange` object is valid.

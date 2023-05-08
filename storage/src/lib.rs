@@ -72,6 +72,8 @@ macro_rules! impl_getter {
 pub const RAFS_DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
 /// Maximum blob chunk size, 16MB.
 pub const RAFS_MAX_CHUNK_SIZE: u64 = 1024 * 1024 * 16;
+/// Generate maximum gap between chunks from merging size.
+pub const RAFS_BATCH_SIZE_TO_GAP_SHIFT: u64 = 7;
 
 /// Error codes related to storage subsystem.
 #[derive(Debug)]

@@ -9,6 +9,7 @@
 //! performance. It may be used by both the userspace `FileCacheMgr` or the `FsCacheMgr` based
 //! on the in-kernel fscache system.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{ErrorKind, Result, Seek, SeekFrom};
 use std::mem::ManuallyDrop;
@@ -35,7 +36,7 @@ use crate::device::{
 };
 use crate::meta::{BlobMetaChunk, BlobMetaInfo};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
-use crate::{StorageError, StorageResult, RAFS_DEFAULT_CHUNK_SIZE};
+use crate::{StorageError, StorageResult, RAFS_BATCH_SIZE_TO_GAP_SHIFT, RAFS_DEFAULT_CHUNK_SIZE};
 
 const DOWNLOAD_META_RETRY_COUNT: u32 = 5;
 const DOWNLOAD_META_RETRY_DELAY: u64 = 400;
@@ -221,11 +222,20 @@ impl BlobCache for FileCacheEntry {
         }
 
         // Then handle fs prefetch
-        let merging_size = self.prefetch_config.merging_size;
-        BlobIoMergeState::merge_and_issue(&bios, merging_size, |req: BlobIoRange| {
-            let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
-            let _ = self.workers.send_prefetch_message(msg);
-        });
+        let merging_size = if self.prefetch_config.merging_size < 0x2_0000 {
+            self.prefetch_config.merging_size
+        } else {
+            0x2_0000
+        };
+        BlobIoMergeState::merge_and_issue(
+            &bios,
+            merging_size,
+            merging_size as u64 >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
+            |req: BlobIoRange| {
+                let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
+                let _ = self.workers.send_prefetch_message(msg);
+            },
+        );
 
         Ok(0)
     }
@@ -731,7 +741,72 @@ impl FileCacheEntry {
         Ok(total_read)
     }
 
-    fn dispatch_backend(&self, mem_cursor: &mut MemSliceCursor, region: &Region) -> Result<usize> {
+    fn extend_pending_chunks(
+        &self,
+        chunks: &[Arc<dyn BlobChunkInfo>],
+        max_size: u64,
+    ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
+        let batch_end = chunks[0].compressed_offset() + max_size;
+        let mut last_idx = chunks[chunks.len() - 1].id() as usize;
+        let mut vec = Vec::with_capacity(128);
+
+        let bm = if let Some(meta) = self.meta.as_ref() {
+            if let Some(bm) = meta.get_blob_meta() {
+                bm
+            } else {
+                info!("extend_pending_chunks: get blob meta failed");
+                return Ok(vec);
+            }
+        } else {
+            info!("extend_pending_chunks: get meta failed");
+            return Ok(vec);
+        };
+        let infos = &*bm.state.chunks;
+
+        for idx in 0..chunks.len() - 1 {
+            let chunk = &chunks[idx];
+            let next = &chunks[idx + 1];
+            let next_end = next.compressed_offset() + next.compressed_size() as u64;
+            vec.push(chunk.clone());
+            if chunk.id() + 1 != next.id() && next_end <= batch_end {
+                for i in chunk.id() + 1..next.id() {
+                    let entry = &infos[i as usize];
+                    if bm.validate_chunk(entry).is_ok() {
+                        vec.push(BlobMetaChunk::new(i as usize, &bm.state));
+                    }
+                }
+            }
+        }
+        vec.push(chunks[chunks.len() - 1].clone());
+
+        last_idx += 1;
+        while last_idx < infos.len() {
+            let entry = &infos[last_idx];
+            // Avoid read amplification if next chunk is too big.
+            if bm.validate_chunk(entry).is_err()
+                || entry.compressed_offset() + entry.compressed_size() as u64 > batch_end
+            {
+                break;
+            }
+            vec.push(BlobMetaChunk::new(last_idx, &bm.state));
+            last_idx += 1;
+        }
+
+        while !vec.is_empty() {
+            let chunk = &vec[vec.len() - 1];
+            if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true)) {
+                vec.pop();
+            } else {
+                break;
+            }
+        }
+        Ok(vec)
+    }
+
+    fn dispatch_backend(&self, mem_cursor: &mut MemSliceCursor, r: &Region) -> Result<usize> {
+        let mut region = r;
+        let merging_size = RAFS_DEFAULT_CHUNK_SIZE;
+
         if region.chunks.is_empty() {
             return Ok(0);
         } else if !region.has_user_io() {
@@ -740,6 +815,45 @@ impl FileCacheEntry {
                 self.chunk_map.clear_pending(c.as_ref());
             }
             return Ok(0);
+        }
+        if region.chunks.len() > 1 {
+            for idx in 0..region.chunks.len() - 1 {
+                let end = region.chunks[idx].compressed_offset()
+                    + region.chunks[idx].compressed_size() as u64;
+                let start = region.chunks[idx + 1].compressed_offset();
+                assert!(end <= start);
+                assert!(start - end <= merging_size >> RAFS_BATCH_SIZE_TO_GAP_SHIFT);
+                assert!(region.chunks[idx].id() < region.chunks[idx + 1].id());
+            }
+        }
+
+        // Try to extend requests.
+        let mut region_hold;
+
+        if let Ok(v) = self.extend_pending_chunks(&region.chunks, merging_size) {
+            if v.len() > r.chunks.len() {
+                let mut tag_set = HashSet::new();
+                for (idx, chunk) in region.chunks.iter().enumerate() {
+                    if region.tags[idx] {
+                        tag_set.insert(chunk.id());
+                    }
+                }
+                region_hold = Region::with(region, v);
+                for (idx, c) in region_hold.chunks.iter().enumerate() {
+                    if tag_set.contains(&c.id()) {
+                        region_hold.tags[idx] = true;
+                    }
+                }
+                region = &region_hold;
+                trace!(
+                    "extended blob request from 0x{:x}/0x{:x} to 0x{:x}/0x{:x} with {} chunks",
+                    r.blob_address,
+                    r.blob_len,
+                    region_hold.blob_address,
+                    region_hold.blob_len,
+                    region_hold.chunks.len(),
+                );
+            }
         }
 
         let blob_size = region.blob_len as usize;
@@ -989,9 +1103,14 @@ impl FileCacheEntry {
     ) -> Option<Vec<BlobIoRange>> {
         let mut requests: Vec<BlobIoRange> = Vec::with_capacity(bios.len());
 
-        BlobIoMergeState::merge_and_issue(bios, merging_size, |mr: BlobIoRange| {
-            requests.push(mr);
-        });
+        BlobIoMergeState::merge_and_issue(
+            bios,
+            merging_size,
+            merging_size as u64 >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
+            |mr: BlobIoRange| {
+                requests.push(mr);
+            },
+        );
 
         if requests.is_empty() {
             None
@@ -1049,7 +1168,7 @@ impl DataBuffer {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Copy, Clone)]
 enum RegionStatus {
     Init,
     Open,
@@ -1103,6 +1222,27 @@ impl Region {
         }
     }
 
+    fn with(region: &Region, chunks: Vec<Arc<dyn BlobChunkInfo>>) -> Self {
+        assert!(!chunks.is_empty());
+        let len = chunks.len();
+        let blob_address = chunks[0].compressed_offset();
+        let last = &chunks[len - 1];
+        let sz = last.compressed_offset() - blob_address;
+        assert!(sz < u32::MAX as u64);
+        let blob_len = sz as u32 + last.compressed_size();
+
+        Region {
+            r#type: region.r#type,
+            status: region.status,
+            count: len as u32,
+            chunks,
+            tags: vec![false; len],
+            blob_address,
+            blob_len,
+            seg: region.seg.clone(),
+        }
+    }
+
     fn append(
         &mut self,
         start: u64,
@@ -1118,13 +1258,13 @@ impl Region {
             self.blob_len = len;
             self.count = 1;
         } else {
-            debug_assert!(self.status == RegionStatus::Open);
-            if self.blob_address + self.blob_len as u64 != start
-                || start.checked_add(len as u64).is_none()
-            {
+            assert_eq!(self.status, RegionStatus::Open);
+            let end = self.blob_address + self.blob_len as u64;
+            if end + RAFS_DEFAULT_CHUNK_SIZE < start || start.checked_add(len as u64).is_none() {
                 return Err(StorageError::NotContinuous);
             }
-            self.blob_len += len;
+            let sz = start + len as u64 - end;
+            self.blob_len += sz as u32;
             self.count += 1;
         }
 
@@ -1193,6 +1333,7 @@ impl FileIoMergeState {
 
     fn reset(&mut self) {
         self.regions.truncate(0);
+        self.last_region_joinable = true;
     }
 
     #[inline]
@@ -1264,10 +1405,10 @@ mod tests {
         assert!(region.has_user_io());
 
         let tag = BlobIoTag::User(BlobIoSegment {
-            offset: 0x4000,
+            offset: 0x0000,
             len: 0x2000,
         });
-        region.append(0x4000, 0x2000, tag, None).unwrap_err();
+        region.append(0x100004000, 0x2000, tag, None).unwrap_err();
         assert_eq!(region.status, RegionStatus::Open);
         assert_eq!(region.blob_address, 0x1000);
         assert_eq!(region.blob_len, 0x2000);
@@ -1278,13 +1419,13 @@ mod tests {
         assert!(region.has_user_io());
 
         let tag = BlobIoTag::User(BlobIoSegment {
-            offset: 0x3000,
+            offset: 0x0000,
             len: 0x2000,
         });
-        region.append(0x3000, 0x2000, tag, None).unwrap();
+        region.append(0x4000, 0x2000, tag, None).unwrap();
         assert_eq!(region.status, RegionStatus::Open);
         assert_eq!(region.blob_address, 0x1000);
-        assert_eq!(region.blob_len, 0x4000);
+        assert_eq!(region.blob_len, 0x5000);
         assert_eq!(region.seg.offset, 0x1800);
         assert_eq!(region.seg.len, 0x3800);
         assert_eq!(region.chunks.len(), 0);

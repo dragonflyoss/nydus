@@ -621,7 +621,7 @@ impl BlobMetaInfo {
     }
 
     #[inline]
-    fn validate_chunk(&self, entry: &BlobChunkInfoOndisk) -> Result<()> {
+    pub fn validate_chunk(&self, entry: &BlobChunkInfoOndisk) -> Result<()> {
         // For stargz blob, self.state.compressed_size == 0, so don't validate it.
         if (!self.state.is_stargz && entry.compressed_end() > self.state.compressed_size)
             || entry.uncompressed_end() > self.state.uncompressed_size
@@ -711,7 +711,7 @@ pub struct BlobMetaState {
     // chunks, it usually refers to a blob file in cache(e.g. filecache).
     uncompressed_size: u64,
     chunk_count: u32,
-    chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
+    pub chunks: ManuallyDrop<Vec<BlobChunkInfoOndisk>>,
     base: *const u8,
     unmap_len: usize,
     /// The blob meta is for an stargz image.
