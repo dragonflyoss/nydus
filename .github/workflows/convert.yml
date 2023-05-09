@@ -42,6 +42,24 @@ jobs:
         name: nydusify-artifact
         path: contrib/nydusify/cmd/nydusify
 
+  convert-build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Setup Golang
+      uses: actions/setup-go@v3
+      with:
+        go-version: ~1.18
+    - name: Build Convert Tool
+      run: |
+        cd misc/convert; make build
+    - name: Upload Convert Tool
+      uses: actions/upload-artifact@master
+      with:
+        name: convert-artifact
+        path: misc/convert/convert
+
   nydus-build:
     runs-on: ubuntu-latest
     steps:
@@ -84,7 +102,7 @@ jobs:
 
   convert-zran:
     runs-on: ubuntu-latest
-    needs: [nydusify-build, nydus-build, fsck-erofs-build]
+    needs: [nydusify-build, nydus-build, fsck-erofs-build, convert-build]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -109,49 +127,35 @@ jobs:
         with:
           name: fsck-erofs-artifact
           path: /usr/local/bin
+      - name: Download Convert Tool
+        uses: actions/download-artifact@master
+        with:
+          name: convert-artifact
+          path: /usr/local/bin
       - name: Convert and check zran images
         run: |
           sudo chmod +x /usr/local/bin/nydus*
           sudo chmod +x /usr/local/bin/fsck.erofs
+          sudo chmod +x /usr/local/bin/convert
           sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-oci-ref"
             ghcr_repo=${{ env.REGISTRY }}/${{ env.ORGANIZATION }}
-
             # push oci image to ghcr/local for zran reference
             sudo docker pull $I:latest
             sudo docker tag $I:latest $ghcr_repo/$I
             sudo docker tag $I:latest localhost:5000/$I
             sudo DOCKER_CONFIG=$HOME/.docker docker push $ghcr_repo/$I
             sudo docker push localhost:5000/$I
-
-            # for pre-built images
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-                 --oci-ref \
-                 --source $ghcr_repo/$I \
-                 --target $ghcr_repo/$I:nydus-nightly-oci-ref \
-                 --platform linux/amd64,linux/arm64
-
-            # use local registry for speed
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-                 --oci-ref \
-                 --source localhost:5000/$I \
-                 --target localhost:5000/$I:nydus-nightly-oci-ref \
-                 --platform linux/amd64,linux/arm64
-
-            # check zran image and referenced oci image
-            sudo rm -rf ./tmp
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify check \
-                --source localhost:5000/$I \
-                --target localhost:5000/$I:nydus-nightly-oci-ref
-
+            # convert and check
+            sudo convert --image $I --remote-registry $ghcr_repo --oci-ref
             sudo fsck.erofs -d1 output/nydus_bootstrap
             sudo rm -rf ./output
           done
 
   convert-native-v5:
     runs-on: ubuntu-latest
-    needs: [nydusify-build, nydus-build]
+    needs: [nydusify-build, nydus-build, convert-build]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -171,33 +175,26 @@ jobs:
         with:
           name: nydusify-artifact
           path: /usr/local/bin
+      - name: Download Convert Tool
+        uses: actions/download-artifact@master
+        with:
+          name: convert-artifact
+          path: /usr/local/bin
       - name: Convert and check RAFS v5 images
         run: |
           sudo chmod +x /usr/local/bin/nydus*
+          sudo chmod +x /usr/local/bin/convert
           sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v5"
-            # for pre-built images
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-                 --source $I:latest \
-                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v5 \
-                 --fs-version 5 \
-                 --platform linux/amd64,linux/arm64
-            # use local registry for speed
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-                 --source $I:latest \
-                 --target localhost:5000/$I:nydus-nightly-v5 \
-                 --fs-version 5 \
-                 --platform linux/amd64,linux/arm64
-
-            sudo rm -rf ./tmp
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
-                --target localhost:5000/$I:nydus-nightly-v5
+            ghcr_repo=${{ env.REGISTRY }}/${{ env.ORGANIZATION }}
+            # convert and check
+            sudo convert --image $I --remote-registry $ghcr_repo --fs-version 5
           done
 
   convert-native-v6:
     runs-on: ubuntu-latest
-    needs: [nydusify-build, nydus-build, fsck-erofs-build]
+    needs: [nydusify-build, nydus-build, fsck-erofs-build, convert-build]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -222,30 +219,22 @@ jobs:
         with:
           name: fsck-erofs-artifact
           path: /usr/local/bin
+      - name: Download Convert Tool
+        uses: actions/download-artifact@master
+        with:
+          name: convert-artifact
+          path: /usr/local/bin
       - name: Convert and check RAFS v6 images
         run: |
           sudo chmod +x /usr/local/bin/nydus*
           sudo chmod +x /usr/local/bin/fsck.erofs
+          sudo chmod +x /usr/local/bin/convert
           sudo docker run -d --restart=always -p 5000:5000 registry
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v6"
-            # for pre-built images
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-                 --source $I:latest \
-                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6 \
-                 --fs-version 6 \
-                 --platform linux/amd64,linux/arm64
-            # use local registry for speed
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-                 --source $I:latest \
-                 --target localhost:5000/$I:nydus-nightly-v6 \
-                 --fs-version 6 \
-                 --platform linux/amd64,linux/arm64
-
-            sudo rm -rf ./tmp
-            sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
-                --target localhost:5000/$I:nydus-nightly-v6
-
+            ghcr_repo=${{ env.REGISTRY }}/${{ env.ORGANIZATION }}
+            # convert and check
+            sudo convert --image $I --remote-registry $ghcr_repo --fs-version 6
             sudo fsck.erofs -d1 output/nydus_bootstrap
             sudo rm -rf ./output
           done
