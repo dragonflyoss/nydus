@@ -8,27 +8,41 @@ Get `nydusd` binary from [release](https://github.com/dragonflyoss/image-service
 
 ## Run Nydusd Daemon
 
-``` shell
+```shell
 # Prepare nydusd configuration
-cat /path/to/config-localfs.json
+sudo tee /etc/nydus/nydusd-config.localfs.json > /dev/null << EOF
 {
   "device": {
     "backend": {
       "type": "localfs",
       "config": {
-        "dir": "/path/to/blobs",
+        "dir": "/var/lib/nydus/blobs"
+      }
+    },
+    "cache": {
+      "type": "blobcache",
+      "config": {
+        "work_dir": "/var/lib/nydus/cache"
       }
     }
-  }
+  },
+  "mode": "direct",
+  "digest_validate": false,
+  "iostats_files": false,
+  "enable_xattr": true
 }
+
+EOF
 ```
 
 ### Run With FUSE
 If no `/path/to/bootstrap` is available, please refer to [nydus-image.md](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md) for more details.
 
 ``` shell
+sudo mkdir -p /var/lib/nydus/blobs/
+sudo mkdir -p /var/lib/nydus/cache/
 sudo nydusd \
-  --config /path/to/config-localfs.json \
+  --config /etc/nydus/nydusd-config.localfs.json \
   --mountpoint /path/to/mnt \
   --bootstrap /path/to/bootstrap \
   --log-level info
@@ -41,7 +55,7 @@ Virtio-fs is supported by both [QEMU](https://www.qemu.org/) and [Cloud-hypervis
 
 ``` shell
 sudo nydusd \
-  --config /path/to/config-localfs.json \
+  --config /etc/nydus/nydusd-config.localfs.json \
   --sock /path/to/vhost-user-fs.sock \
   --bootstrap /path/to/bootstrap \
   --log-level info
