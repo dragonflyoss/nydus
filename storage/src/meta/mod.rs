@@ -1080,6 +1080,9 @@ mod tests {
         let pos = 0;
         w.write_all(data).unwrap();
 
+        let header = BlobMetaHeaderOndisk::default();
+        w.write_all(header.as_bytes()).unwrap();
+
         let mut blob_info = BlobInfo::new(
             0,
             "dummy".to_string(),
@@ -1097,14 +1100,15 @@ mod tests {
             compress::Algorithm::None as u32,
         );
 
-        let mut buffer = alloc_buf(data.len());
+        let mut buffer =
+            alloc_buf(round_up_4k(data.len()) + std::mem::size_of::<BlobMetaHeaderOndisk>());
         let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,
         });
         BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
 
-        assert_eq!(buffer, data);
+        assert_eq!(&buffer[0..data.len()], data);
     }
 
     #[test]
@@ -1144,6 +1148,8 @@ mod tests {
 
         let pos = 0;
         w.write_all(&buf).unwrap();
+        let header = BlobMetaHeaderOndisk::default();
+        w.write_all(header.as_bytes()).unwrap();
 
         let compressed_size = buf.len();
         let uncompressed_size = data.len();
@@ -1164,13 +1170,14 @@ mod tests {
             compress::Algorithm::Lz4Block as u32,
         );
 
-        let mut buffer = alloc_buf(uncompressed_size);
+        let mut buffer =
+            alloc_buf(round_up_4k(uncompressed_size) + std::mem::size_of::<BlobMetaHeaderOndisk>());
         let reader: Arc<dyn BlobReader> = Arc::new(DummyBlobReader {
             metrics: BackendMetrics::new("dummy", "localfs"),
             file: r,
         });
         BlobMetaInfo::read_metadata(&blob_info, &reader, &mut buffer).unwrap();
 
-        assert_eq!(buffer, data);
+        assert_eq!(&buffer[0..uncompressed_size], data);
     }
 }
