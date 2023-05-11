@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 from argparse import ArgumentParser
 
 import bench as bench
@@ -82,6 +83,7 @@ def start_bench(cfg: dict, image: str, mode: str):
         file = collect_metrics(cfg, image)
         # generate prefetch list
         _ = alg.get_prefetch_list(file)
+        os.remove(file)
         # rebuild
         cvt.convert_nydus_prefetch(cfg["source_registry"], cfg["insecure_source_registry"], cfg["local_registry"], cfg["insecure_local_registry"], image, PREFETCH_FILE_LIST)
         # open prefetch enable
