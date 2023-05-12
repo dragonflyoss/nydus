@@ -11,7 +11,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.30.6
 	github.com/containerd/containerd v1.7.0
 	github.com/docker/cli v23.0.1+incompatible
-	github.com/docker/distribution v2.8.1+incompatible
+	github.com/docker/distribution v2.8.2+incompatible
 	github.com/goharbor/acceleration-service v0.2.2
 	github.com/google/uuid v1.3.0
 	github.com/hashicorp/go-hclog v1.3.1
