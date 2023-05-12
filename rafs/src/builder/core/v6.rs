@@ -138,6 +138,7 @@ impl Node {
         d_size: u64,
         block_size: u64,
     ) -> Result<()> {
+        debug!("Class: Node, Fn: v6_set_dir_offset");
         ensure!(
             self.is_dir(),
             "{} is not a directory",
@@ -249,6 +250,7 @@ impl Node {
         //          |         inode                   |
         //
         //
+        debug!("Class: Node, Fn: v6_set_offset_with_tail");
         let inode_size = self.v6_size_with_xattr();
         let tail: u64 = d_size % block_size;
 
@@ -581,6 +583,7 @@ impl BuildContext {
 
 impl Bootstrap {
     pub(crate) fn v6_update_dirents(nodes: &mut VecDeque<Node>, tree: &Tree, parent_offset: u64) {
+        debug!("Class: Bootstrap, Fn v6_update_dirents");
         let node = &mut nodes[tree.node.index as usize - 1];
         let node_offset = node.v6_offset;
         if !node.is_dir() {

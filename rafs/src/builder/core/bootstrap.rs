@@ -51,6 +51,7 @@ impl Bootstrap {
         bootstrap_ctx: &mut BootstrapContext,
         mut tree: Tree,
     ) -> Result<()> {
+        debug!("Class: Bootstrap, Fn: build");
         // used to compute nid(ino) for v6
         let root_offset = bootstrap_ctx.offset;
         let mut nodes = VecDeque::with_capacity(0x10000);
@@ -150,6 +151,7 @@ impl Bootstrap {
         tree: &mut Tree,
         nodes: &mut VecDeque<Node>,
     ) -> Result<()> {
+        debug!("Class: Bootstrap, Fn: build_rafs");
         let index = nodes.len() as u32 + 1;
         let parent = &mut nodes[tree.node.index as usize - 1];
         let parent_ino = parent.inode.ino();

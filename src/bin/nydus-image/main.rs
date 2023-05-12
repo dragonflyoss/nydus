@@ -78,11 +78,15 @@ impl OutputSerializer {
         build_output: BuildOutput,
         build_info: &BuildTimeInfo,
     ) -> Result<()> {
+        debug!("Class: OutputSerializer, Function: dump");
         let output_json: Option<PathBuf> = matches
             .get_one::<String>("output-json")
             .map(|o| o.to_string().into());
 
+        debug!("output_json: {:?}", output_json);
+        debug!("build_output: {:?}", build_output);
         if let Some(ref f) = output_json {
+            debug!("if let Some(ref f) = output_json run");
             let w = OpenOptions::new()
                 .truncate(true)
                 .create(true)
@@ -102,6 +106,7 @@ impl OutputSerializer {
                 .context("failed to write result to output file")?;
         }
 
+        debug!("end to write output to file");
         Ok(())
     }
 
@@ -134,6 +139,7 @@ impl OutputSerializer {
             serde_json::to_writer(w, &output).context("failed to write result to output file")?;
         }
 
+        debug!("end to write output to file");
         Ok(())
     }
 }
@@ -678,9 +684,11 @@ lazy_static! {
 }
 
 fn main() -> Result<()> {
+    // let _ = sqlite_demo::main();
     let build_info = BTI.to_owned();
     let mut app = prepare_cmd_args(BTI_STRING.as_str());
     let usage = app.render_usage();
+    // init config
     let cmd = app.get_matches();
 
     init_log(&cmd)?;
@@ -690,6 +698,8 @@ fn main() -> Result<()> {
 
     if let Some(matches) = cmd.subcommand_matches("create") {
         Command::create(matches, &build_info)
+    } else if let Some(matches) = cmd.subcommand_matches("chunkdict") {
+        Command::chunkdict(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("merge") {
         Command::merge(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("check") {
@@ -714,6 +724,7 @@ struct Command {}
 
 impl Command {
     fn create(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+        // debug!("create command matches: {:#?}", matches);
         let blob_id = Self::get_blob_id(matches)?;
         let blob_offset = Self::get_blob_offset(matches)?;
         let parent_path = Self::get_parent_bootstrap(matches)?;
@@ -755,6 +766,24 @@ impl Command {
                 .unwrap_or_default(),
         )?;
 
+        // debug 打印所有变量
+        debug!("blob_id: {:?}", blob_id);
+        debug!("blob_offset: {:?}", blob_offset);
+        debug!("parent_path: {:?}", parent_path);
+        // debug!("prefetch: {:?}", prefetch);
+        debug!("source_path: {:?}", source_path);
+        debug!("conversion_type: {:?}", conversion_type);
+        debug!("blob_storage: {:?}", blob_storage);
+        debug!("blob_inline_meta: {:?}", blob_inline_meta);
+        debug!("repeatable: {:?}", repeatable);
+        debug!("version: {:?}", version);
+        debug!("chunk_size: {:?}", chunk_size);
+        debug!("aligned_chunk: {:?}", aligned_chunk);
+        // debug!("whiteout_spec: {:?}", whiteout_spec);
+        debug!("compressor: {:?}", compressor);
+        debug!("digester: {:?}", digester);
+        debug!("blob_data_size: {:?}", blob_data_size);
+        debug!("features: {:?}", features);
         match conversion_type {
             ConversionType::DirectoryToRafs => {
                 Self::ensure_directory(&source_path)?;
@@ -924,6 +953,11 @@ impl Command {
             }
         }
 
+        // debug feature 信息
+        debug!(
+            "features.is_enabled: {:?}",
+            features.is_enabled(Feature::BlobToc)
+        );
         if features.is_enabled(Feature::BlobToc) && version == RafsVersion::V5 {
             bail!("`--features blob-toc` can't be used with `--version 5` ");
         }
@@ -943,6 +977,25 @@ impl Command {
             blob_inline_meta,
             features,
         );
+        // debug build_ctx 信息
+        debug!("build_ctx");
+        debug!("build_ctx.blob_id: {:?}", build_ctx.blob_id);
+        debug!("build_ctx.aligned_chunk: {:?}", build_ctx.aligned_chunk);
+        debug!("build_ctx.blob_offset: {:?}", build_ctx.blob_offset);
+        debug!("build_ctx.compressor: {:?}", build_ctx.compressor);
+        debug!("build_ctx.digester: {:?}", build_ctx.digester);
+        debug!("build_ctx.explicit_uidgid: {:?}", build_ctx.explicit_uidgid);
+        // debug!("build_ctx.whiteout_spec: {:?}", build_ctx.whiteout_spec);
+        debug!("build_ctx.conversion_type: {:?}", build_ctx.conversion_type);
+        debug!("build_ctx.source_path: {:?}", build_ctx.source_path);
+        // debug!("build_ctx.prefetch: {:?}", build_ctx.prefetch);
+        debug!("build_ctx.blob_storage: {:?}", build_ctx.blob_storage);
+        debug!(
+            "build_ctx.blob_inline_meta: {:?}",
+            build_ctx.blob_inline_meta
+        );
+        debug!("build_ctx.features: {:?}", build_ctx.features);
+        debug!("fs_version: {:?}", version);
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
         build_ctx.set_batch_size(batch_size);
@@ -952,9 +1005,11 @@ impl Command {
             cache.cache_validate = true;
         }
         config.internal.set_blob_accessible(true);
+        debug!("config: {:#?}", config);
         build_ctx.set_configuration(config.clone());
 
         let mut blob_mgr = BlobManager::new(digester);
+        // 这一块 chunk-dict 是否能够复用???
         if let Some(chunk_dict_arg) = matches.get_one::<String>("chunk-dict") {
             let config = RafsSuperConfig {
                 version,
@@ -969,6 +1024,8 @@ impl Command {
             // The separate chunk dict bootstrap doesn't support blob accessible.
             rafs_config.internal.set_blob_accessible(false);
             blob_mgr.set_chunk_dict(timing_tracer!(
+                // load chunk dict
+                // debug
                 { HashChunkDict::from_commandline_arg(chunk_dict_arg, rafs_config, &config,) },
                 "import_chunk_dict"
             )?);
@@ -1018,6 +1075,7 @@ impl Command {
         };
         let build_output = timing_tracer!(
             {
+                debug!("builder.build start");
                 builder
                     .build(&mut build_ctx, &mut bootstrap_mgr, &mut blob_mgr)
                     .context("build failed")
@@ -1025,6 +1083,7 @@ impl Command {
             "total_build"
         )?;
 
+        debug!("builder end");
         // Some operations like listing xattr pairs of certain namespace need the process
         // to be privileged. Therefore, trace what euid and egid are.
         event_tracer!("euid", "{}", geteuid());
@@ -1177,6 +1236,8 @@ impl Command {
     }
 
     fn check(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
+        debug!("Start check");
+        debug!("Get bootstrap path");
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let verbose = matches.get_flag("verbose");
         let config = Self::get_configuration(matches)?;
@@ -1190,6 +1251,7 @@ impl Command {
             .check(verbose)
             .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
 
+        debug!("Print blob info");
         println!("RAFS filesystem metadata is valid, referenced data blobs: ");
         let mut blob_ids = Vec::new();
         for (idx, blob) in blobs.iter().enumerate() {
@@ -1444,11 +1506,15 @@ impl Command {
     }
 
     fn get_chunk_size(matches: &ArgMatches, ty: ConversionType) -> Result<u32> {
+        debug!("get_chunk_size");
         match matches.get_one::<String>("chunk-size") {
             None => {
+                debug!("get_chunk_size: None");
                 if ty == ConversionType::EStargzIndexToRef {
+                    debug!("get_chunk_size: default EStargzIndexToRef");
                     Ok(0x400000u32)
                 } else {
+                    debug!("get_chunk_size: Default");
                     Ok(RAFS_DEFAULT_CHUNK_SIZE as u32)
                 }
             }

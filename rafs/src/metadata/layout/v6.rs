@@ -1451,6 +1451,7 @@ impl_bootstrap_converter!(RafsV6Blob);
 impl RafsV6Blob {
     #[allow(clippy::wrong_self_convention)]
     fn to_blob_info(&self) -> Result<BlobInfo> {
+        debug!("RafsV6Blob chunk count: {}", self.chunk_count);
         // debug_assert!(RAFS_DIGEST_LENGTH == 32);
         debug_assert!(size_of::<RafsV6Blob>() == 256);
 
@@ -1740,6 +1741,7 @@ impl RafsV6BlobTable {
             blob_features,
         );
 
+        debug!("Class: RaftV6BlobTable, Fn: add");
         blob_info.set_compressor(flags.into());
         blob_info.set_digester(flags.into());
         blob_info.set_prefetch_info(prefetch_offset as u64, prefetch_size as u64);

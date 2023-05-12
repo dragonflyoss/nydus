@@ -271,7 +271,7 @@ impl Node {
             };
 
             let chunk_data = &mut data_buf[0..uncompressed_size as usize];
-            let (mut chunk, mut chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
+            let (mut chunk, chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
             if let Some(h) = inode_hasher.as_mut() {
                 h.digest_update(chunk.id().as_ref());
             }
@@ -405,7 +405,7 @@ impl Node {
                 chunk_info =
                     Some(batch.generate_chunk_info(pre_uncompressed_offset, uncompressed_size)?);
                 batch.append_chunk_data_buf(chunk_data);
-            } else {
+        } else {
                 // Dump current batch chunk if exists, and then add into a new batch chunk.
                 if !batch.chunk_data_buf_is_empty() {
                     // Dump current batch chunk.
@@ -441,16 +441,16 @@ impl Node {
         blob_writer: &mut ArtifactWriter,
         chunk_data: &[u8],
     ) -> Result<(u64, u32, bool)> {
-        let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
-            .with_context(|| "failed to compress node file".to_string())?;
-        let compressed_size = compressed.len() as u32;
-        let pre_compressed_offset = blob_ctx.current_compressed_offset;
-        blob_writer
-            .write_all(&compressed)
-            .context("failed to write blob")?;
-        blob_ctx.blob_hash.update(&compressed);
-        blob_ctx.current_compressed_offset += compressed_size as u64;
-        blob_ctx.compressed_blob_size += compressed_size as u64;
+            let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
+                .with_context(|| format!("failed to compress node file {:?}", self.path()))?;
+            let compressed_size = compressed.len() as u32;
+            let pre_compressed_offset = blob_ctx.current_compressed_offset;
+            blob_writer
+                .write_all(&compressed)
+                .context("failed to write blob")?;
+            blob_ctx.blob_hash.update(&compressed);
+            blob_ctx.current_compressed_offset += compressed_size as u64;
+            blob_ctx.compressed_blob_size += compressed_size as u64;
 
         Ok((pre_compressed_offset, compressed_size, is_compressed))
     }
@@ -464,6 +464,13 @@ impl Node {
         mut chunk: ChunkWrapper,
     ) -> Result<Option<ChunkWrapper>> {
         let dict = &blob_mgr.global_chunk_dict;
+        debug!("Class: Node, Fn: deduplicate_chunk");
+        debug!("chunk: {:?}", chunk);
+        // 去重，根据chunk id 去除一些chunk
+        // 新建 chunk dict，用于存储chunk
+        // 如何chunk id 不在 chunk dict 中，那么就是新的chunk，需要添加到chunk dict中
+        // deduplication between layers
+        let dict: &Arc<dyn ChunkDict> = &blob_mgr.global_chunk_dict;
         let mut cached_chunk = dict.get_chunk(chunk.id(), uncompressed_size);
         let from_dict = cached_chunk.is_some();
         if cached_chunk.is_none() {
@@ -486,6 +493,7 @@ impl Node {
 
         // Only add actually referenced data blobs from chunk dictionary to the blob table.
         if from_dict {
+            debug!("is from dict: True");
             let blob_index = if let Some(blob_idx) = dict.get_real_blob_idx(chunk.blob_index()) {
                 blob_idx
             } else {
@@ -506,10 +514,13 @@ impl Node {
             ctx.compressor
         );
         let source = if from_dict {
+            debug!("from_dict: True");
             ChunkSource::Dict
         } else if Some(chunk.blob_index()) != blob_mgr.get_current_blob().map(|(u, _)| u) {
+            debug!("from_dict: False, blob_index: {:?}", chunk.blob_index());
             ChunkSource::Parent
         } else {
+            debug!("from_dict: False");
             ChunkSource::Build
         };
         self.chunks.push(NodeChunk {
@@ -533,8 +544,12 @@ impl Node {
         explicit_uidgid: bool,
         v6_force_extended_inode: bool,
     ) -> Result<Node> {
+        // 这两个函数的区别理解不深刻
+        debug!("Class: Node, Fn: from_fs_object");
         let target = Self::generate_target(&path, &source);
+        debug!("target: {:?}", target);
         let target_vec = Self::generate_target_vec(&target);
+        debug!("target_vec: {:?}", target_vec);
         let info = NodeInfo {
             ctime: 0,
             explicit_uidgid,
@@ -648,6 +663,7 @@ impl Node {
     }
 
     fn build_inode(&mut self, chunk_size: u32) -> Result<()> {
+        debug!("Class: Node, Fn: build_inode");
         let size = self.name().byte_size();
         if size > u16::MAX as usize {
             bail!("file name length 0x{:x} is too big", size,);
