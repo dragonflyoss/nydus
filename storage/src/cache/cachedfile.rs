@@ -207,10 +207,6 @@ impl BlobCache for FileCacheEntry {
         prefetches: &[BlobPrefetchRequest],
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
-        let mut bios = bios.to_vec();
-        bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
-        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
-
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
             let msg = AsyncPrefetchMessage::new_blob_prefetch(
@@ -227,6 +223,9 @@ impl BlobCache for FileCacheEntry {
         } else {
             0x2_0000
         };
+        let mut bios = bios.to_vec();
+        bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
+        self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
         BlobIoMergeState::merge_and_issue(
             &bios,
             merging_size,
@@ -399,14 +398,41 @@ impl BlobObject for FileCacheEntry {
     fn fetch_range_compressed(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| enoent!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
-        let chunks = meta.get_chunks_compressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
+        let merging_size = if self.prefetch_config.merging_size < 0x2_0000 {
+            0x2_0000
+        } else {
+            self.prefetch_config.merging_size as u64
+        };
+        let mut chunks = meta.get_chunks_compressed(offset, size, merging_size)?;
         debug_assert!(!chunks.is_empty());
-        self.do_fetch_chunks(&chunks, true)
+        if !chunks.is_empty() {
+            chunks = self.strip_ready_chunks(chunks);
+        } else {
+            return Err(einval!(format!(
+                "fetch_range_compressed offset 0x{:x}, size 0x{:x}",
+                offset, size
+            )));
+        }
+        if chunks.is_empty() {
+            Ok(0)
+        } else {
+            let mut size = 0;
+            for c in chunks.iter() {
+                size += c.compressed_size();
+            }
+            debug!(
+                "fetch range compressed chunks len: {}, size: {}",
+                chunks.len(),
+                size
+            );
+            self.do_fetch_chunks(&chunks, true)
+        }
     }
 
     fn fetch_range_uncompressed(&self, offset: u64, size: u64) -> Result<usize> {
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
+
         let chunks = meta.get_chunks_uncompressed(offset, size, RAFS_DEFAULT_CHUNK_SIZE * 2)?;
         debug_assert!(!chunks.is_empty());
         self.do_fetch_chunks(&chunks, false)
@@ -417,6 +443,10 @@ impl BlobObject for FileCacheEntry {
         if chunks.is_empty() {
             return Ok(0);
         }
+        debug!(
+            "prefetch chunks in blob offset: {} size: {}",
+            range.blob_offset, range.blob_size
+        );
 
         let mut ready_or_pending = matches!(
             self.chunk_map.is_ready_or_pending(chunks[0].as_ref()),
@@ -496,7 +526,6 @@ impl FileCacheEntry {
             .ok_or_else(|| einval!("invalid chunk_map for do_fetch_chunks()"))?;
         let chunk_index = chunks[0].id();
         let count = chunks.len() as u32;
-
         // Get chunks not ready yet, also marking them as inflight.
         let pending = match bitmap.check_range_ready_and_mark_pending(chunk_index, count)? {
             None => return Ok(0),
@@ -741,6 +770,21 @@ impl FileCacheEntry {
         Ok(total_read)
     }
 
+    fn strip_ready_chunks(
+        &self,
+        mut extended_chunks: Vec<Arc<dyn BlobChunkInfo>>,
+    ) -> Vec<Arc<dyn BlobChunkInfo>> {
+        while !extended_chunks.is_empty() {
+            let chunk = &extended_chunks[extended_chunks.len() - 1];
+            if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true)) {
+                extended_chunks.pop();
+            } else {
+                break;
+            }
+        }
+        extended_chunks
+    }
+
     fn extend_pending_chunks(
         &self,
         chunks: &[Arc<dyn BlobChunkInfo>],
@@ -792,15 +836,7 @@ impl FileCacheEntry {
             last_idx += 1;
         }
 
-        while !vec.is_empty() {
-            let chunk = &vec[vec.len() - 1];
-            if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true)) {
-                vec.pop();
-            } else {
-                break;
-            }
-        }
-        Ok(vec)
+        Ok(self.strip_ready_chunks(vec))
     }
 
     fn dispatch_backend(&self, mem_cursor: &mut MemSliceCursor, r: &Region) -> Result<usize> {
