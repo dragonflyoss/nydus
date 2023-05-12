@@ -15,6 +15,7 @@
 //! optimize the communication between blob manager and blob manager clients such as virtiofsd.
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::fs::OpenOptions;
 use std::io::Result;
 use std::mem::{size_of, ManuallyDrop};
@@ -380,12 +381,8 @@ impl BlobMetaInfo {
             }
 
             let buffer = unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
-            buffer[info_size..].fill(0);
-            Self::read_metadata(
-                blob_info,
-                reader.as_ref().unwrap(),
-                &mut buffer[..info_size],
-            )?;
+            buffer[0..].fill(0);
+            Self::read_metadata(blob_info, reader.as_ref().unwrap(), buffer)?;
             header.s_features = u32::to_le(blob_info.meta_flags());
             header.s_ci_offset = u64::to_le(blob_info.meta_ci_offset());
             header.s_ci_compressed_size = u64::to_le(blob_info.meta_ci_compressed_size());
@@ -516,7 +513,12 @@ impl BlobMetaInfo {
         size: u64,
         batch_size: u64,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
-        let end = start.checked_add(size).ok_or_else(|| einval!())?;
+        let end = start.checked_add(size).ok_or_else(|| {
+            einval!(einval!(format!(
+                "get_chunks_compressed: invalid start {}/size {}",
+                start, size
+            )))
+        })?;
         if end > self.state.compressed_size {
             return Err(einval!(format!(
                 "get_chunks_compressed: end {} compressed_size {}",
@@ -652,30 +654,28 @@ impl BlobMetaInfo {
             blob_info.meta_ci_uncompressed_size(),
         );
 
-        if blob_info.meta_ci_compressor() == compress::Algorithm::None {
-            let size = reader
-                .read(buffer, blob_info.meta_ci_offset())
-                .map_err(|e| {
-                    eio!(format!(
-                        "failed to read metadata from backend(compressor is none), {:?}",
-                        e
-                    ))
-                })?;
-            if size as u64 != blob_info.meta_ci_uncompressed_size() {
-                return Err(eio!(
-                    "failed to read blob metadata from backend(compressor is None)"
-                ));
-            }
-        } else {
-            let compressed_size = blob_info.meta_ci_compressed_size();
-            let mut buf = alloc_buf(compressed_size as usize);
-            let size = reader
-                .read(&mut buf, blob_info.meta_ci_offset())
-                .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
-            if size as u64 != compressed_size {
-                return Err(eio!("failed to read blob metadata from backend"));
-            }
+        let compressed_size = blob_info.meta_ci_compressed_size();
+        let uncompressed_size = blob_info.meta_ci_uncompressed_size();
+        let aligned_uncompressed_size = round_up_4k(uncompressed_size);
+        let expected_raw_size = (compressed_size + BLOB_METADATA_HEADER_SIZE) as usize;
+        let mut raw_data = alloc_buf(expected_raw_size);
 
+        let read_size = reader
+            .read(&mut raw_data, blob_info.meta_ci_offset())
+            .map_err(|e| eio!(format!("failed to read metadata from backend, {:?}", e)))?;
+        if read_size != expected_raw_size {
+            return Err(eio!(format!(
+                "failed to read blob metadata from backend, compressor {}",
+                blob_info.meta_ci_compressor()
+            )));
+        }
+
+        let (uncompressed, header) = if blob_info.meta_ci_compressor() == compress::Algorithm::None
+        {
+            let uncompressed = &raw_data[0..uncompressed_size as usize];
+            let header = &raw_data[uncompressed_size as usize..expected_raw_size];
+            (Cow::Borrowed(uncompressed), header)
+        } else {
             // Lz4 does not support concurrent decompression of the same data into
             // the same piece of memory. There will be multiple containers mmap the
             // same file, causing the buffer to be shared between different
@@ -688,16 +688,25 @@ impl BlobMetaInfo {
             // execute the process once when the blob.meta is created for the first
             // time, the memory consumption and performance impact are relatively
             // small.
-            let mut uncom_buf = vec![0u8; buffer.len()];
-            compress::decompress(&buf, None, &mut uncom_buf, blob_info.meta_ci_compressor())
-                .map_err(|e| {
-                    error!("failed to decompress metadata: {}", e);
-                    e
-                })?;
-            buffer.copy_from_slice(&uncom_buf);
-        }
+            let mut uncompressed = vec![0u8; uncompressed_size as usize];
+            let header = &raw_data[compressed_size as usize..expected_raw_size];
+            compress::decompress(
+                &raw_data[0..compressed_size as usize],
+                None,
+                &mut uncompressed,
+                blob_info.meta_ci_compressor(),
+            )
+            .map_err(|e| {
+                error!("failed to decompress metadata: {}", e);
+                e
+            })?;
+            (Cow::Owned(uncompressed), header)
+        };
 
-        // TODO: validate metadata
+        buffer[0..uncompressed_size as usize].copy_from_slice(&uncompressed);
+        buffer[aligned_uncompressed_size as usize
+            ..(aligned_uncompressed_size + BLOB_METADATA_HEADER_SIZE) as usize]
+            .copy_from_slice(header);
 
         Ok(())
     }
