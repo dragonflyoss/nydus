@@ -65,6 +65,14 @@ impl Bootstrap {
         }
         ctx.prefetch.insert_if_need(&tree.node);
         nodes.push_back(tree.node.clone());
+        bootstrap_ctx.inode_map.insert(
+            (
+                tree.node.layer_idx,
+                tree.node.info.src_ino,
+                tree.node.info.src_dev,
+            ),
+            vec![tree.node.index],
+        );
 
         Self::build_rafs(ctx, bootstrap_ctx, &mut tree, &mut nodes)?;
         if ctx.fs_version.is_v6() && !bootstrap_ctx.layered {
