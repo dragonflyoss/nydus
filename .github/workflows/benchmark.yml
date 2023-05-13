@@ -12,8 +12,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  IMAGE: wordpress
-  TAG: 6.1.1
 
 jobs:
   contrib-build:
@@ -69,6 +67,21 @@ jobs:
   benchmark-oci:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+          - image: node
+            tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -85,21 +98,36 @@ jobs:
     - name: Prepare OCI Environment
       run: |
         sudo bash misc/benchmark/prepare_env.sh oci
-        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
-        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker pull ${{ matrix.image }}:${{ matrix.tag }} && docker tag ${{ matrix.image }}:${{ matrix.tag }} localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
+        sudo docker push localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode oci --image ${{env.IMAGE}}:${{env.TAG}}
+        sudo python3 benchmark.py --mode oci --image ${{ matrix.image }}:${{ matrix.tag }}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
-        name: benchmark-oci
-        path: misc/benchmark/${{env.IMAGE}}.csv
+        name: benchmark-oci-${{ matrix.image }}
+        path: misc/benchmark/${{ matrix.image }}.csv
 
   benchmark-nydus-no-prefetch:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+          - image: node
+            tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -117,22 +145,37 @@ jobs:
       run: |
         sudo bash misc/benchmark/prepare_env.sh nydus
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{env.IMAGE}}:${{env.TAG}} \
-          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --source ${{ matrix.image }}:${{ matrix.tag }} \
+          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
           --fs-version 6
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
-        name: benchmark-nydus-no-prefetch
-        path: misc/benchmark/${{env.IMAGE}}.csv
+        name: benchmark-nydus-no-prefetch-${{matrix.image}}
+        path: misc/benchmark/${{matrix.image}}.csv
 
   benchmark-zran-no-prefetch:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+          - image: node
+            tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -149,26 +192,41 @@ jobs:
     - name: Prepare Nydus Environment
       run: |
         sudo bash misc/benchmark/prepare_env.sh nydus
-        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
-        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker pull ${{ matrix.image }}:${{ matrix.tag }} && docker tag ${{ matrix.image }}:${{ matrix.tag }} localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
+        sudo docker push localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
-          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --source localhost:5000/${{ matrix.image }}:${{ matrix.tag }} \
+          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
           --fs-version 6 \
           --oci-ref
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
-        name: benchmark-zran-no-prefetch
-        path: misc/benchmark/${{env.IMAGE}}.csv
+        name: benchmark-zran-no-prefetch-${{matrix.image}}
+        path: misc/benchmark/${{matrix.image}}.csv
 
   benchmark-nydus-all-prefetch:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+          - image: node
+            tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -186,22 +244,37 @@ jobs:
       run: |
         sudo bash misc/benchmark/prepare_env.sh nydus
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{env.IMAGE}}:${{env.TAG}} \
-          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --source ${{ matrix.image }}:${{ matrix.tag }} \
+          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
           --fs-version 6
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
-        name: benchmark-nydus-all-prefetch
-        path: misc/benchmark/${{env.IMAGE}}.csv
+        name: benchmark-nydus-all-prefetch-${{matrix.image}}
+        path: misc/benchmark/${{matrix.image}}.csv
 
   benchmark-zran-all-prefetch:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+          - image: node
+            tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -218,26 +291,41 @@ jobs:
     - name: Prepare Nydus Environment
       run: |
         sudo bash misc/benchmark/prepare_env.sh nydus
-        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
-        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker pull ${{ matrix.image }}:${{ matrix.tag }} && docker tag ${{ matrix.image }}:${{ matrix.tag }} localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
+        sudo docker push localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
-          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --source localhost:5000/${{ matrix.image }}:${{ matrix.tag }} \
+          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
           --fs-version 6 \
           --oci-ref
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
-        name: benchmark-zran-all-prefetch
-        path: misc/benchmark/${{env.IMAGE}}.csv
+        name: benchmark-zran-all-prefetch-${{matrix.image}}
+        path: misc/benchmark/${{matrix.image}}.csv
 
   benchmark-nydus-filelist-prefetch:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+          - image: node
+            tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -255,22 +343,37 @@ jobs:
       run: |
         sudo bash misc/benchmark/prepare_env.sh nydus
         sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{env.IMAGE}}:${{env.TAG}} \
-          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --source ${{ matrix.image }}:${{ matrix.tag }} \
+          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
           --fs-version 6
     - name: BenchMark Test
       run: |
         cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-filelist-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+        sudo python3 benchmark.py --mode nydus-filelist-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
     - name: Save Test Result
       uses: actions/upload-artifact@v3
       with:
-        name: benchmark-nydus-filelist-prefetch
-        path: misc/benchmark/${{env.IMAGE}}.csv
+        name: benchmark-nydus-filelist-prefetch-${{matrix.image}}
+        path: misc/benchmark/${{matrix.image}}.csv
 
   benchmark-result:
     runs-on: ubuntu-latest
     needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-zran-no-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+          - image: node
+            tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -283,13 +386,42 @@ jobs:
       uses: actions/cache/restore@v3
       with:
         path: benchmark-result
-        key: benchmark-${{ steps.get-date.outputs.date }}
+        key: benchmark-${{matrix.image}}-${{ steps.get-date.outputs.date }}
         restore-keys: |
-         benchmark-
-    - uses: actions/download-artifact@v3
+         benchmark-${{matrix.image}}
+    - name: Download benchmark-oci
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-oci-${{matrix.image}}
+        path: benchmark-oci
+    - name: Download benchmark-nydus-no-prefetch
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-nydus-no-prefetch-${{matrix.image}}
+        path: benchmark-nydus-no-prefetch
+    - name: Download benchmark-zran-no-prefetch
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-zran-no-prefetch-${{matrix.image}}
+        path: benchmark-zran-no-prefetch
+    - name: Download benchmark-nydus-all-prefetch
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-nydus-all-prefetch-${{matrix.image}}
+        path: benchmark-nydus-all-prefetch
+    - name: Download benchmark-zran-all-prefetch
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-zran-all-prefetch-${{matrix.image}}
+        path: benchmark-zran-all-prefetch
+    - name: Download benchmark-nydus-filelist-prefetch
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-nydus-filelist-prefetch-${{matrix.image}}
+        path: benchmark-nydus-filelist-prefetch
     - uses: geekyeggo/delete-artifact@v2
       with:
-        name: '*'
+        name: "*-${{matrix.image}}"
     - name: Benchmark
       run: |
         if [ ! -d "benchmark-result" ]; then
@@ -300,4 +432,4 @@ jobs:
       uses: actions/cache/save@v3
       with:
         path: benchmark-result
-        key: benchmark-${{ steps.get-date.outputs.date }}
+        key: benchmark-${{matrix.image}}-${{ steps.get-date.outputs.date }}
