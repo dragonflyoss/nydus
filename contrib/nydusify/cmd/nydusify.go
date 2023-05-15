@@ -409,6 +409,12 @@ func main() {
 					Usage:   "Path to the nydus-image binary, default to search in PATH",
 					EnvVars: []string{"NYDUS_IMAGE"},
 				},
+				&cli.BoolFlag{
+					Name:    "output-json",
+					Value:   false,
+					Usage:   "Enable saving the metrics collected during conversion in JSON file output.json",
+					EnvVars: []string{"OUTPUT_JSON"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -503,6 +509,8 @@ func main() {
 					OCIRef:       c.Bool("oci-ref"),
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
+
+					OutputJSON: c.Bool("output-json"),
 				}
 
 				return converter.Convert(context.Background(), opt)
