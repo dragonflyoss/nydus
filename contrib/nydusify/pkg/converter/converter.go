@@ -48,6 +48,8 @@ type Opt struct {
 
 	AllPlatforms bool
 	Platforms    string
+
+	OutputJSON bool
 }
 
 func Convert(ctx context.Context, opt Opt) error {
@@ -87,6 +89,9 @@ func Convert(ctx context.Context, opt Opt) error {
 		return err
 	}
 
-	_, err = cvt.Convert(ctx, opt.Source, opt.Target)
+	metric, err := cvt.Convert(ctx, opt.Source, opt.Target)
+	if opt.OutputJSON {
+		dumpMetric(metric, opt.WorkDir)
+	}
 	return err
 }
