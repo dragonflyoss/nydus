@@ -9,16 +9,12 @@ endif
 build:
 	go test -o smoke.test -c -race -v -cover ./tests
 
-lint:
-	@go vet $(PACKAGES)
-	golangci-lint run
-
 # WORK_DIR=/tmp \
 # NYDUS_BUILDER=/path/to/latest/nydus-image \
 # NYDUS_NYDUSD=/path/to/latest/nydusd \
 # NYDUS_NYDUSIFY=/path/to/latest/nydusify \
 # make test
-test: build lint
+test: build
 	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=8 -test.run=$(TESTS)
 
 # WORK_DIR=/tmp \
@@ -32,5 +28,5 @@ test: build lint
 # NYDUS_NYDUSD_v2_1_4=/path/to/v2.1.4/nydusd \
 # NYDUS_NYDUSIFY_v2_1_4=/path/to/v2.1.4/nydusify \
 # make test TESTS=TestCompatibility
-test-compatibility: build lint
+test-compatibility: build
 	make test TESTS=TestCompatibility
