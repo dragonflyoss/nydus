@@ -494,9 +494,9 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08af89cb80a7c5693bd63a2b1ee7ac31a307670977c18fda036b3aa94be8c47f"
+checksum = "58a8f2394690faff745335f120fad1d7d8bd737069690c856c11befa7bca1b18"
 dependencies = [
  "arc-swap",
  "bitflags",
