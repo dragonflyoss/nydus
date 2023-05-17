@@ -114,6 +114,7 @@ jobs:
           sudo chmod +x /usr/local/bin/nydus*
           sudo chmod +x /usr/local/bin/fsck.erofs
           sudo docker run -d --restart=always -p 5000:5000 registry
+          sudo mkdir convert-zran
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-oci-ref"
             ghcr_repo=${{ env.REGISTRY }}/${{ env.ORGANIZATION }}
@@ -137,7 +138,8 @@ jobs:
                  --oci-ref \
                  --source localhost:5000/$I \
                  --target localhost:5000/$I:nydus-nightly-oci-ref \
-                 --platform linux/amd64,linux/arm64
+                 --platform linux/amd64,linux/arm64 \
+                 --output-json convert-zran/${I}.json
 
             # check zran image and referenced oci image
             sudo rm -rf ./tmp
@@ -148,6 +150,11 @@ jobs:
             sudo fsck.erofs -d1 output/nydus_bootstrap
             sudo rm -rf ./output
           done
+      - name: Save Nydusify Metric
+        uses: actions/upload-artifact@v3
+        with:
+          name: convert-zran-metric
+          path: convert-zran
 
   convert-native-v5:
     runs-on: ubuntu-latest
@@ -175,6 +182,7 @@ jobs:
         run: |
           sudo chmod +x /usr/local/bin/nydus*
           sudo docker run -d --restart=always -p 5000:5000 registry
+          sudo mkdir convert-native-v5
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v5"
             # for pre-built images
@@ -183,17 +191,24 @@ jobs:
                  --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v5 \
                  --fs-version 5 \
                  --platform linux/amd64,linux/arm64
+
             # use local registry for speed
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
                  --target localhost:5000/$I:nydus-nightly-v5 \
                  --fs-version 5 \
-                 --platform linux/amd64,linux/arm64
+                 --platform linux/amd64,linux/arm64 \
+                 --output-json convert-native-v5/${I}.json
 
             sudo rm -rf ./tmp
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
                 --target localhost:5000/$I:nydus-nightly-v5
           done
+      - name: Save Nydusify Metric
+        uses: actions/upload-artifact@v3
+        with:
+          name: convert-native-v5-metric
+          path: convert-native-v5
 
   convert-native-v6:
     runs-on: ubuntu-latest
@@ -227,6 +242,7 @@ jobs:
           sudo chmod +x /usr/local/bin/nydus*
           sudo chmod +x /usr/local/bin/fsck.erofs
           sudo docker run -d --restart=always -p 5000:5000 registry
+          sudo mkdir convert-native-v6
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             echo "converting $I:latest to $I:nydus-nightly-v6"
             # for pre-built images
@@ -235,12 +251,14 @@ jobs:
                  --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6 \
                  --fs-version 6 \
                  --platform linux/amd64,linux/arm64
+
             # use local registry for speed
             sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
                  --source $I:latest \
                  --target localhost:5000/$I:nydus-nightly-v6 \
                  --fs-version 6 \
-                 --platform linux/amd64,linux/arm64
+                 --platform linux/amd64,linux/arm64 \
+                 --output-json convert-native-v6/${I}.json
 
             sudo rm -rf ./tmp
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
@@ -249,3 +267,56 @@ jobs:
             sudo fsck.erofs -d1 output/nydus_bootstrap
             sudo rm -rf ./output
           done
+      - name: Save Nydusify Metric
+        uses: actions/upload-artifact@v3
+        with:
+          name: convert-native-v6-metric
+          path: convert-native-v6
+
+  convert-metric:
+    runs-on: ubuntu-latest
+    needs: [convert-zran, convert-native-v5, convert-native-v6]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Download Zran Metric
+        uses: actions/download-artifact@master
+        with:
+          name: convert-zran-metric
+          path: convert-zran
+      - name: Download V5 Metric
+        uses: actions/download-artifact@master
+        with:
+          name: convert-native-v5-metric
+          path: convert-native-v5
+      - name: Download V6 Metric
+        uses: actions/download-artifact@master
+        with:
+          name: convert-native-v6-metric
+          path: convert-native-v6
+      - name: Summary
+        run: |
+          echo "## Image Size(MB)" > $GITHUB_STEP_SUMMARY
+          echo "|image name|nydus-zran|nydus-v5|nydus-v6|" >> $GITHUB_STEP_SUMMARY
+          echo "|:---:|:--:|:-------:|:-------:|" >> $GITHUB_STEP_SUMMARY
+          for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            zranSourceImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.SourceImageSize' convert-zran/${I}.json) / 1048576")")
+            zranTargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-zran/${I}.json) / 1048576")")
+            v5SourceImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.SourceImageSize' convert-native-v5/${I}.json) / 1048576")")
+            v5TargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-native-v5/${I}.json) / 1048576")")
+            v6SourceImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.SourceImageSize' convert-native-v6/${I}.json) / 1048576")")
+            v6TargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-native-v6/${I}.json) / 1048576")")
+            echo "|${I}|${zranSourceImageSize}/${zranTargetImageSize}|${v5SourceImageSize}/${v5TargetImageSize}|${v6SourceImageSize}/${v6TargetImageSize}|" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "## Conversion Time(ms)" >> $GITHUB_STEP_SUMMARY
+          echo "|image name|nydus-zran|nydus-v5|nydus-v6|" >> $GITHUB_STEP_SUMMARY
+          echo "|:---:|:--:|:-------:|:-------:|" >> $GITHUB_STEP_SUMMARY
+          for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            zranConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-zran/${I}.json) / 1000000")")
+            v5ConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-native-v5/${I}.json) / 1000000")")
+            v6ConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-native-v6/${I}.json) / 1000000")")
+            echo "|${I}|${zranConversionElapsed}|${v5ConversionElapsed}|${v6ConversionElapsed}|" >> $GITHUB_STEP_SUMMARY
+          done
+      - uses: geekyeggo/delete-artifact@v2
+        with:
+          name: '*'
