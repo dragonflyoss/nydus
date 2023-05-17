@@ -409,10 +409,10 @@ func main() {
 					Usage:   "Path to the nydus-image binary, default to search in PATH",
 					EnvVars: []string{"NYDUS_IMAGE"},
 				},
-				&cli.BoolFlag{
+				&cli.StringFlag{
 					Name:    "output-json",
-					Value:   false,
-					Usage:   "Enable saving the metrics collected during conversion in JSON file output.json",
+					Value:   "",
+					Usage:   "File path to save the metrics collected during conversion in JSON format, for example: './output.json'",
 					EnvVars: []string{"OUTPUT_JSON"},
 				},
 			},
@@ -510,7 +510,7 @@ func main() {
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
 
-					OutputJSON: c.Bool("output-json"),
+					OutputJSON: c.String("output-json"),
 				}
 
 				return converter.Convert(context.Background(), opt)

@@ -7,14 +7,13 @@ package converter
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 
 	"github.com/goharbor/acceleration-service/pkg/converter"
 	"github.com/pkg/errors"
 )
 
-func dumpMetric(metric *converter.Metric, workDir string) error {
-	file, err := os.Create(filepath.Join(workDir, "output.json"))
+func dumpMetric(metric *converter.Metric, path string) error {
+	file, err := os.Create(path)
 	if err != nil {
 		return errors.Wrap(err, "Create file for metric")
 	}
