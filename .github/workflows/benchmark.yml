@@ -356,6 +356,16 @@ jobs:
         name: benchmark-nydus-filelist-prefetch-${{matrix.image}}
         path: misc/benchmark/${{matrix.image}}.csv
 
+  benchmark-description:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Description
+      run: |
+        echo "## Benchmark Environment" > $GITHUB_STEP_SUMMARY
+        echo "| operating system | cpu | memory |bandwidth|" >> $GITHUB_STEP_SUMMARY
+        echo "|:----------------:|:---:|:------:|:--------:|" >> $GITHUB_STEP_SUMMARY
+        echo "| ubuntu-22.04 | 2-core CPU (x86_64) | 7GB |10MB|" >> $GITHUB_STEP_SUMMARY
+
   benchmark-result:
     runs-on: ubuntu-latest
     needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-zran-no-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch]
@@ -422,12 +432,35 @@ jobs:
     - uses: geekyeggo/delete-artifact@v2
       with:
         name: "*-${{matrix.image}}"
+    - name: Benchmark Workload
+      run: |
+        case ${{matrix.image}} in
+          "wordpress")
+              echo "### workload: wait the 80 port response" > $GITHUB_STEP_SUMMARY
+            ;;
+          "node")
+              echo "### workload: node index.js; wait the 80 port response" > $GITHUB_STEP_SUMMARY
+            ;;
+          "python")
+              echo "### workload: python -c 'print("hello")'" > $GITHUB_STEP_SUMMARY
+            ;;
+          "golang")
+              echo "### workload: go run main.go" > $GITHUB_STEP_SUMMARY
+            ;;
+          "ruby")
+              echo "### workload: ruby -e "puts \"hello\""" > $GITHUB_STEP_SUMMARY
+            ;;
+          "amazoncorretto")
+              echo "### workload: javac Main.java; java Main" > $GITHUB_STEP_SUMMARY
+            ;;
+        esac
+
     - name: Benchmark
       run: |
         if [ ! -d "benchmark-result" ]; then
           mkdir benchmark-result
         fi
-        sudo python3 misc/benchmark/benchmark_summary.py --mode benchmark-schedule > $GITHUB_STEP_SUMMARY
+        sudo python3 misc/benchmark/benchmark_summary.py --mode benchmark-schedule >> $GITHUB_STEP_SUMMARY
     - name: Save Benchmark Result
       uses: actions/cache/save@v3
       with:
