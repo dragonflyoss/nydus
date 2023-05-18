@@ -308,7 +308,6 @@ mod tests {
     use super::*;
     use fuse_backend_rs::abi::virtio_fs;
     use fuse_backend_rs::transport::FsCacheReqHandler;
-    use nydus_app::setup_logging;
     use std::os::unix::prelude::RawFd;
 
     struct DummyCacheReq {}
@@ -333,7 +332,6 @@ mod tests {
     // #[test]
     // #[cfg(feature = "virtiofs")]
     // fn test_blobfs_new() {
-    //     setup_logging(None, log::LevelFilter::Trace, 0).unwrap();
     //     let config = r#"
     //     {
     //         "device": {
@@ -431,7 +429,6 @@ mod tests {
 
     #[test]
     fn test_blobfs_setupmapping() {
-        setup_logging(None, log::LevelFilter::Trace, 0).unwrap();
         let config = r#"
     {
             "rafs_conf": {

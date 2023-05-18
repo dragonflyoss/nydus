@@ -2,11 +2,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate nydus_error;
+
 use clap::parser::ValuesRef;
 use clap::ArgMatches;
 use nydus_api::BuildTimeInfo;
 
+pub use logger::{log_level_to_verbosity, setup_logging};
 pub use nydus_service::*;
+pub use signal::register_signal_handler;
+
+mod logger;
+mod signal;
 
 /// Helper to access commandline options.
 pub struct SubCmdArgs<'a> {
@@ -45,22 +55,42 @@ impl<'a> ServiceArgs for SubCmdArgs<'a> {
     }
 }
 
+pub mod built_info {
+    pub const PROFILE: &str = env!("PROFILE");
+    pub const RUSTC_VERSION: &str = env!("RUSTC_VERSION");
+    pub const BUILT_TIME_UTC: &str = env!("BUILT_TIME_UTC");
+    pub const GIT_COMMIT_VERSION: &str = env!("GIT_COMMIT_VERSION");
+    pub const GIT_COMMIT_HASH: &str = env!("GIT_COMMIT_HASH");
+}
+
+/// Dump program build and version information.
+pub fn dump_program_info() {
+    info!(
+        "Program Version: {}, Git Commit: {:?}, Build Time: {:?}, Profile: {:?}, Rustc Version: {:?}",
+        built_info::GIT_COMMIT_VERSION,
+        built_info::GIT_COMMIT_HASH,
+        built_info::BUILT_TIME_UTC,
+        built_info::PROFILE,
+        built_info::RUSTC_VERSION,
+    );
+}
+
 pub fn get_build_time_info() -> (String, BuildTimeInfo) {
     let info_string = format!(
         "\rVersion: \t{}\nGit Commit: \t{}\nBuild Time: \t{}\nProfile: \t{}\nRustc: \t\t{}\n",
-        nydus_app::built_info::GIT_COMMIT_VERSION,
-        nydus_app::built_info::GIT_COMMIT_HASH,
-        nydus_app::built_info::BUILT_TIME_UTC,
-        nydus_app::built_info::PROFILE,
-        nydus_app::built_info::RUSTC_VERSION,
+        built_info::GIT_COMMIT_VERSION,
+        built_info::GIT_COMMIT_HASH,
+        built_info::BUILT_TIME_UTC,
+        built_info::PROFILE,
+        built_info::RUSTC_VERSION,
     );
 
     let info = BuildTimeInfo {
-        package_ver: nydus_app::built_info::GIT_COMMIT_VERSION.to_string(),
-        git_commit: nydus_app::built_info::GIT_COMMIT_HASH.to_string(),
-        build_time: nydus_app::built_info::BUILT_TIME_UTC.to_string(),
-        profile: nydus_app::built_info::PROFILE.to_string(),
-        rustc: nydus_app::built_info::RUSTC_VERSION.to_string(),
+        package_ver: built_info::GIT_COMMIT_VERSION.to_string(),
+        git_commit: built_info::GIT_COMMIT_HASH.to_string(),
+        build_time: built_info::BUILT_TIME_UTC.to_string(),
+        profile: built_info::PROFILE.to_string(),
+        rustc: built_info::RUSTC_VERSION.to_string(),
     };
 
     (info_string, info)
