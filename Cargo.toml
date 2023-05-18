@@ -106,4 +106,4 @@ backend-registry = ["nydus-storage/backend-registry"]
 backend-s3 = ["nydus-storage/backend-s3"]
 
 [workspace]
-members = ["api", "blobfs", "clib", "error", "rafs", "storage", "service", "utils"]
+members = ["api", "clib", "error", "rafs", "storage", "service", "utils"]

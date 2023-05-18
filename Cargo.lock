@@ -1136,22 +1136,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nydus-blobfs"
-version = "0.2.0"
-dependencies = [
- "fuse-backend-rs",
- "libc",
- "log",
- "nydus-api",
- "nydus-error",
- "nydus-rafs",
- "nydus-storage",
- "serde",
- "serde_json",
- "vm-memory",
-]
-
-[[package]]
 name = "nydus-clib"
 version = "0.1.0"
 dependencies = [
