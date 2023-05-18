@@ -10,6 +10,7 @@ repository = "https://github.com/dragonflyoss/image-service"
 exclude = ["contrib/", "smoke/", "tests/"]
 edition = "2018"
 resolver = "2"
+build = "build.rs"
 
 [profile.release]
 panic = "abort"
@@ -33,6 +34,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4.0.18", features = ["derive", "cargo"] }
+flexi_logger = { version = "0.25", features = ["compress"] }
 fuse-backend-rs = "0.10.1"
 hex = "0.4.3"
 hyper = "0.14.11"
@@ -40,6 +42,7 @@ hyperlocal = "0.8.0"
 lazy_static = "1"
 libc = "0.2"
 log = "0.4.8"
+log-panics = { version = "2.1.0", features = ["with-backtrace"] }
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
 nix = "0.24.0"
 rlimit = "0.9.0"
@@ -54,7 +57,6 @@ openssl = { version = "0.10.48", features = ["vendored"] }
 #openssl-src = { version = "111.22" }
 
 nydus-api = { version = "0.2.2", path = "api", features = ["handler"] }
-nydus-app = { version = "0.3.2", path = "app" }
 nydus-error = { version = "0.2.3", path = "error" }
 nydus-rafs = { version = "0.2.2", path = "rafs", features = ["builder"] }
 nydus-service = { version = "0.2.0", path = "service", features = ["block-device"] }
@@ -67,6 +69,9 @@ virtio-bindings = { version = "0.1", features = ["virtio-v5_0_0"], optional = tr
 virtio-queue = { version = "0.6.0", optional = true }
 vm-memory = { version = "0.9.0", features = ["backend-mmap"], optional = true }
 vmm-sys-util = { version = "0.10.0", optional = true }
+
+[build-dependencies]
+time = { version = "0.3.14", features = ["formatting"] }
 
 [dev-dependencies]
 xattr = "0.2.3"
@@ -101,4 +106,4 @@ backend-registry = ["nydus-storage/backend-registry"]
 backend-s3 = ["nydus-storage/backend-s3"]
 
 [workspace]
-members = ["api", "app", "blobfs", "clib", "error", "rafs", "storage", "service", "utils"]
+members = ["api", "blobfs", "clib", "error", "rafs", "storage", "service", "utils"]

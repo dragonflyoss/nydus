@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use nydus_app::setup_logging;
+use nydus::setup_logging;
 use nydus_utils::exec;
 use vmm_sys_util::tempdir::TempDir;
 

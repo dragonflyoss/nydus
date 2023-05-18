@@ -24,9 +24,8 @@ use anyhow::{bail, Context, Result};
 use clap::parser::ValueSource;
 use clap::{Arg, ArgAction, ArgMatches, Command as App};
 use nix::unistd::{getegid, geteuid};
-use nydus::get_build_time_info;
+use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
-use nydus_app::setup_logging;
 use nydus_rafs::builder::{
     parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager, BootstrapManager,
     BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder, Feature, Features,

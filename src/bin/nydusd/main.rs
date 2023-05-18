@@ -19,9 +19,8 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use nix::sys::signal;
 use rlimit::Resource;
 
-use nydus::{get_build_time_info, SubCmdArgs};
+use nydus::{dump_program_info, get_build_time_info, setup_logging, SubCmdArgs};
 use nydus_api::BuildTimeInfo;
-use nydus_app::{dump_program_info, setup_logging};
 use nydus_service::daemon::DaemonController;
 use nydus_service::{
     create_daemon, create_fuse_daemon, create_vfs_backend, validate_threads_configuration,
@@ -734,8 +733,8 @@ fn main() -> Result<()> {
     setup_logging(logging_file, level, rotation_size)?;
 
     // Initialize and run the daemon controller event loop.
-    nydus_app::signal::register_signal_handler(signal::SIGINT, sig_exit);
-    nydus_app::signal::register_signal_handler(signal::SIGTERM, sig_exit);
+    nydus::register_signal_handler(signal::SIGINT, sig_exit);
+    nydus::register_signal_handler(signal::SIGTERM, sig_exit);
 
     dump_program_info();
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;

@@ -23,9 +23,6 @@ nydus-storage = { version = "0.6", path = "../storage", features = [
     "backend-localfs",
 ] }
 
-[dev-dependencies]
-nydus-app = { version = "0.3", path = "../app" }
-
 [features]
 virtiofs = ["fuse-backend-rs/virtiofs", "nydus-rafs/virtio-fs"]
 

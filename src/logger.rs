@@ -3,43 +3,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Application framework and utilities for Nydus.
-//!
-//! The `nydus-app` crates provides common helpers and utilities to support Nydus application:
-//! - Application Building Information: [`struct BuildTimeInfo`](struct.BuildTimeInfo.html) and
-//!   [`fn dump_program_info()`](fn.dump_program_info.html).
-//! - Logging helpers: [`fn setup_logging()`](fn.setup_logging.html) and
-//!   [`fn log_level_to_verbosity()`](fn.log_level_to_verbosity.html).
-//! - Signal handling: [`fn register_signal_handler()`](signal/fn.register_signal_handler.html).
-//!
-//! ```rust,ignore
-//! #[macro_use(crate_authors, crate_version)]
-//! extern crate clap;
-//!
-//! use clap::App;
-//! use nydus_app::{BuildTimeInfo, setup_logging};
-//! # use std::io::Result;
-//!
-//! fn main() -> Result<()> {
-//!     let level = cmd.value_of("log-level").unwrap().parse().unwrap();
-//!     let (bti_string, build_info) = BuildTimeInfo::dump();
-//!     let _cmd = App::new("")
-//!                 .version(bti_string.as_str())
-//!                 .author(crate_authors!())
-//!                 .get_matches();
-//!
-//!     setup_logging(None, level, 0)?;
-//!     print!("{}", build_info);
-//!
-//!     Ok(())
-//! }
-//! ```
-
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate nydus_error;
-
 use std::env::current_dir;
 use std::io::Result;
 use std::path::PathBuf;
@@ -50,34 +13,12 @@ use flexi_logger::{
 };
 use log::{Level, LevelFilter, Record};
 
-pub mod signal;
-
 pub fn log_level_to_verbosity(level: log::LevelFilter) -> usize {
     if level == log::LevelFilter::Off {
         0
     } else {
         level as usize - 1
     }
-}
-
-pub mod built_info {
-    pub const PROFILE: &str = env!("PROFILE");
-    pub const RUSTC_VERSION: &str = env!("RUSTC_VERSION");
-    pub const BUILT_TIME_UTC: &str = env!("BUILT_TIME_UTC");
-    pub const GIT_COMMIT_VERSION: &str = env!("GIT_COMMIT_VERSION");
-    pub const GIT_COMMIT_HASH: &str = env!("GIT_COMMIT_HASH");
-}
-
-/// Dump program build and version information.
-pub fn dump_program_info() {
-    info!(
-        "Program Version: {}, Git Commit: {:?}, Build Time: {:?}, Profile: {:?}, Rustc Version: {:?}",
-        built_info::GIT_COMMIT_VERSION,
-        built_info::GIT_COMMIT_HASH,
-        built_info::BUILT_TIME_UTC,
-        built_info::PROFILE,
-        built_info::RUSTC_VERSION,
-    );
 }
 
 fn get_file_name<'a>(record: &'a Record) -> Option<&'a str> {

@@ -1136,21 +1136,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nydus-app"
-version = "0.3.2"
-dependencies = [
- "flexi_logger",
- "libc",
- "log",
- "log-panics",
- "nix",
- "nydus-error",
- "regex",
- "serde",
- "time",
-]
-
-[[package]]
 name = "nydus-blobfs"
 version = "0.2.0"
 dependencies = [
@@ -1158,7 +1143,6 @@ dependencies = [
  "libc",
  "log",
  "nydus-api",
- "nydus-app",
  "nydus-error",
  "nydus-rafs",
  "nydus-storage",
@@ -1230,6 +1214,7 @@ version = "0.0.0-git"
 dependencies = [
  "anyhow",
  "clap",
+ "flexi_logger",
  "fuse-backend-rs",
  "hex",
  "hyper",
@@ -1237,10 +1222,10 @@ dependencies = [
  "lazy_static",
  "libc",
  "log",
+ "log-panics",
  "mio",
  "nix",
  "nydus-api",
- "nydus-app",
  "nydus-error",
  "nydus-rafs",
  "nydus-service",
@@ -1251,6 +1236,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tar",
+ "time",
  "tokio",
  "vhost",
  "vhost-user-backend",
