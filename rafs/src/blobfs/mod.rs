@@ -20,7 +20,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread;
 
 use fuse_backend_rs::api::{filesystem::*, BackendFileSystem, VFS_MAX_INO};
@@ -85,12 +85,12 @@ struct RafsHandle {
 struct BootstrapArgs {
     #[allow(unused)]
     blob_cache_dir: String,
-    rafs_handle: Mutex<RafsHandle>,
+    rafs_handle: RwLock<RafsHandle>,
 }
 
 impl BootstrapArgs {
     fn get_rafs_handle(&self) -> io::Result<()> {
-        let mut rafs_handle = self.rafs_handle.lock().unwrap();
+        let mut rafs_handle = self.rafs_handle.write().unwrap();
 
         if let Some(handle) = rafs_handle.thread.take() {
             match handle.join() {
@@ -201,7 +201,7 @@ impl BlobFs {
         };
 
         Ok(BootstrapArgs {
-            rafs_handle: Mutex::new(rafs_handle),
+            rafs_handle: RwLock::new(rafs_handle),
             blob_cache_dir: blob_ondemand_conf.blob_cache_dir.clone(),
         })
     }
