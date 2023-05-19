@@ -24,7 +24,7 @@ const MAPPING_UNIT_SIZE: u64 = 0x200000;
 
 impl BootstrapArgs {
     fn fetch_range_sync(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
-        let rafs_handle = self.rafs_handle.lock().unwrap();
+        let rafs_handle = self.rafs_handle.read().unwrap();
         match rafs_handle.rafs.as_ref() {
             Some(rafs) => rafs.fetch_range_synchronous(prefetches),
             None => Err(einval!("blobfs: failed to initialize RAFS filesystem.")),
