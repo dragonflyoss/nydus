@@ -15,6 +15,7 @@ use fuse_backend_rs::api::filesystem::{
 };
 use fuse_backend_rs::transport::FsCacheReqHandler;
 use nydus_error::eacces;
+use nydus_utils::{round_down, round_up};
 
 use super::*;
 use crate::fs::Handle;
@@ -35,21 +36,21 @@ impl BlobfsState {
 impl BlobFs {
     // prepare BlobPrefetchRequest and call device.prefetch().
     // Make sure prefetch doesn't use delay_persist as we need the data immediately.
-    fn load_chunks_on_demand(&self, inode: Inode, offset: u64) -> io::Result<()> {
+    fn load_chunks_on_demand(&self, inode: Inode, offset: u64, len: u64) -> io::Result<()> {
         let (blob_id, size) = self.get_blob_id_and_size(inode)?;
-        let offset = offset & !(MAPPING_UNIT_SIZE - 1);
-        if size <= offset {
+        if size <= offset || offset.checked_add(len).is_none() {
             return Err(einval!(format!(
                 "blobfs: blob_id {:?}, offset {:?} is larger than size {:?}",
                 blob_id, offset, size
             )));
         }
 
-        let len = size - offset;
+        let end = std::cmp::min(offset + len, size);
+        let len = end - offset;
         let req = BlobPrefetchRequest {
             blob_id,
             offset,
-            len: std::cmp::min(len, MAPPING_UNIT_SIZE), // 2M range
+            len,
         };
 
         self.state.fetch_range_sync(&[req]).map_err(|e| {
@@ -193,16 +194,18 @@ impl FileSystem for BlobFs {
 
     fn read(
         &self,
-        _ctx: &Context,
-        _inode: Inode,
-        _handle: Handle,
-        _w: &mut dyn ZeroCopyWriter,
-        _size: u32,
-        _offset: u64,
-        _lock_owner: Option<u64>,
-        _flags: u32,
+        ctx: &Context,
+        inode: Inode,
+        handle: Handle,
+        w: &mut dyn ZeroCopyWriter,
+        size: u32,
+        offset: u64,
+        lock_owner: Option<u64>,
+        flags: u32,
     ) -> io::Result<usize> {
-        Err(eacces!("Read request is not allowed in blobfs"))
+        self.load_chunks_on_demand(inode, offset, size as u64)?;
+        self.pfs
+            .read(ctx, inode, handle, w, size, offset, lock_owner, flags)
     }
 
     fn write(
@@ -376,7 +379,18 @@ impl FileSystem for BlobFs {
         if (flags & virtio_fs::SetupmappingFlags::WRITE.bits()) != 0 {
             return Err(eacces!("blob file cannot write in dax"));
         }
-        self.load_chunks_on_demand(inode, foffset)?;
+        if foffset.checked_add(len).is_none() || foffset + len > u64::MAX - MAPPING_UNIT_SIZE {
+            return Err(einval!(format!(
+                "blobfs: blob_id {:?}, offset {:?} is larger than size {:?}",
+                blob_id, offset, size
+            )));
+        }
+
+        let end = round_up(foffset + len, MAPPING_UNIT_SIZE);
+        let offset = round_down(foffset, MAPPING_UNIT_SIZE);
+        let len = end - offset;
+        self.load_chunks_on_demand(inode, offset, len)?;
+
         self.pfs
             .setupmapping(_ctx, inode, _handle, foffset, len, flags, moffset, vu_req)
     }
