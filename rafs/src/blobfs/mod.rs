@@ -12,6 +12,7 @@
 //! with heavy modification/enhancements from Alibaba Cloud OS team.
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::fs::{create_dir_all, File};
 use std::io;
@@ -20,7 +21,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 use fuse_backend_rs::api::{filesystem::*, BackendFileSystem, VFS_MAX_INO};
@@ -82,13 +83,14 @@ struct RafsHandle {
     thread: Option<thread::JoinHandle<Result<Rafs, RafsError>>>,
 }
 
-struct BootstrapArgs {
+struct BlobfsState {
     #[allow(unused)]
     blob_cache_dir: String,
     rafs_handle: RwLock<RafsHandle>,
+    inode_map: Mutex<HashMap<Inode, (u64, String)>>,
 }
 
-impl BootstrapArgs {
+impl BlobfsState {
     fn get_rafs_handle(&self) -> io::Result<()> {
         let mut rafs_handle = self.rafs_handle.write().unwrap();
 
@@ -128,7 +130,7 @@ impl BootstrapArgs {
 /// directory ends up as the root of the file system process. One way to accomplish this is via a
 /// combination of mount namespaces and the pivot_root system call.
 pub struct BlobFs {
-    bootstrap_args: BootstrapArgs,
+    state: BlobfsState,
     pfs: PassthroughFs,
 }
 
@@ -140,7 +142,7 @@ impl BlobFs {
 
         Ok(BlobFs {
             pfs,
-            bootstrap_args,
+            state: bootstrap_args,
         })
     }
 
@@ -163,7 +165,7 @@ impl BlobFs {
         Ok(())
     }
 
-    fn load_bootstrap(cfg: &Config) -> io::Result<BootstrapArgs> {
+    fn load_bootstrap(cfg: &Config) -> io::Result<BlobfsState> {
         let blob_ondemand_conf = BlobOndemandConfig::from_str(&cfg.blob_ondemand_cfg)?;
         if !blob_ondemand_conf.rafs_conf.validate() {
             return Err(einval!("blobfs: invlidate configuration for blobfs"));
@@ -200,54 +202,55 @@ impl BlobFs {
             thread: Some(rafs_join_handle),
         };
 
-        Ok(BootstrapArgs {
-            rafs_handle: RwLock::new(rafs_handle),
+        Ok(BlobfsState {
             blob_cache_dir: blob_ondemand_conf.blob_cache_dir.clone(),
+            rafs_handle: RwLock::new(rafs_handle),
+            inode_map: Mutex::new(HashMap::new()),
         })
     }
 
     fn get_blob_id_and_size(&self, inode: Inode) -> io::Result<(String, u64)> {
-        // locate blob file that the inode refers to
-        let blob_id_full_path = self.pfs.readlinkat_proc_file(inode)?;
-        let parent = blob_id_full_path
-            .parent()
-            .ok_or_else(|| einval!("blobfs: failed to find parent"))?;
+        let mut map = self.state.inode_map.lock().unwrap();
+        match map.entry(inode) {
+            std::collections::hash_map::Entry::Occupied(v) => {
+                let (sz, blob_id) = v.get();
+                Ok((blob_id.to_string(), *sz))
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                // locate blob file that the inode refers to
+                let blob_id_full_path = self.pfs.readlinkat_proc_file(inode)?;
+                let blob_file = Self::open_file(
+                    libc::AT_FDCWD,
+                    blob_id_full_path.as_path(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    0,
+                )
+                .map_err(|e| einval!(e))?;
+                let st = Self::stat(&blob_file).map_err(|e| {
+                    error!("get_blob_id_and_size: stat failed {:?}", e);
+                    e
+                })?;
+                if st.st_size < 0 {
+                    return Err(einval!(format!(
+                        "load_chunks_on_demand: blob_id {:?}, size: {:?} is less than 0",
+                        blob_id_full_path.display(),
+                        st.st_size
+                    )));
+                }
 
-        trace!(
-            "parent: {:?}, blob id path: {:?}",
-            parent,
-            blob_id_full_path
-        );
+                let blob_id = blob_id_full_path
+                    .file_name()
+                    .ok_or_else(|| einval!("blobfs: failed to find blob file"))?;
+                let blob_id = blob_id
+                    .to_os_string()
+                    .into_string()
+                    .map_err(|_e| einval!("blobfs: failed to get blob id from file name"))?;
+                trace!("load_chunks_on_demand: blob_id {}", blob_id);
+                entry.insert((st.st_size as u64, blob_id.clone()));
 
-        let blob_file = Self::open_file(
-            libc::AT_FDCWD,
-            blob_id_full_path.as_path(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0,
-        )
-        .map_err(|e| einval!(e))?;
-        let st = Self::stat(&blob_file).map_err(|e| {
-            error!("get_blob_id_and_size: stat failed {:?}", e);
-            e
-        })?;
-        if st.st_size < 0 {
-            return Err(einval!(format!(
-                "load_chunks_on_demand: blob_id {:?}, size: {:?} is less than 0",
-                blob_id_full_path.display(),
-                st.st_size
-            )));
+                Ok((blob_id, st.st_size as u64))
+            }
         }
-
-        let blob_id = blob_id_full_path
-            .file_name()
-            .ok_or_else(|| einval!("blobfs: failed to find blob file"))?;
-        let blob_id = blob_id
-            .to_os_string()
-            .into_string()
-            .map_err(|_e| einval!("blobfs: failed to get blob id from file name"))?;
-        trace!("load_chunks_on_demand: blob_id {}", blob_id);
-
-        Ok((blob_id, st.st_size as u64))
     }
 
     fn stat(f: &File) -> io::Result<libc::stat64> {

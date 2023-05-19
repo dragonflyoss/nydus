@@ -22,7 +22,7 @@ use crate::metadata::Inode;
 
 const MAPPING_UNIT_SIZE: u64 = 0x200000;
 
-impl BootstrapArgs {
+impl BlobfsState {
     fn fetch_range_sync(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
         let rafs_handle = self.rafs_handle.read().unwrap();
         match rafs_handle.rafs.as_ref() {
@@ -52,7 +52,7 @@ impl BlobFs {
             len: std::cmp::min(len, MAPPING_UNIT_SIZE), // 2M range
         };
 
-        self.bootstrap_args.fetch_range_sync(&[req]).map_err(|e| {
+        self.state.fetch_range_sync(&[req]).map_err(|e| {
             warn!("blobfs: failed to load data, {:?}", e);
             e
         })
@@ -64,7 +64,7 @@ impl FileSystem for BlobFs {
     type Handle = Handle;
 
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
-        self.bootstrap_args.get_rafs_handle()?;
+        self.state.get_rafs_handle()?;
         self.pfs.init(capable)
     }
 
