@@ -9,7 +9,7 @@ repository = "https://github.com/dragonflyoss/image-service"
 edition = "2018"
 
 [dependencies]
-fuse-backend-rs = "0.10"
+fuse-backend-rs = "^0.10.3"
 libc = "0.2"
 log = "0.4.8"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
