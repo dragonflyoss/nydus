@@ -22,7 +22,8 @@ jobs:
           go-version: 1.18
       - name: Setup pytest
         run: |
-          sudo apt install --no-install-recommends -y attr libattr1-dev fio pkg-config libssl-dev python3
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y attr libattr1-dev fio pkg-config libssl-dev python3
           sudo python3 -m pip install --upgrade pip
           sudo pip3 install pytest xattr requests psutil requests_unixsocket libconf py-splice fallocate pytest-repeat PyYAML six docker toml
       - name: containerd runc and crictl
