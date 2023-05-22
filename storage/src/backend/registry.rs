@@ -260,7 +260,7 @@ impl RegistryState {
 
         let token_resp = connection
             .call::<&[u8]>(
-                Method::GET,
+                Method::POST,
                 auth.realm.as_str(),
                 Some(&query),
                 Some(ReqBody::Form(form)),
