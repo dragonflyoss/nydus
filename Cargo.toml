@@ -57,7 +57,6 @@ openssl = { version = "0.10.48", features = ["vendored"] }
 #openssl-src = { version = "111.22" }
 
 nydus-api = { version = "0.2.2", path = "api", features = ["handler"] }
-nydus-error = { version = "0.2.3", path = "error" }
 nydus-rafs = { version = "0.2.2", path = "rafs", features = ["builder"] }
 nydus-service = { version = "0.2.0", path = "service", features = ["block-device"] }
 nydus-storage = { version = "0.6.2", path = "storage" }
@@ -106,4 +105,4 @@ backend-registry = ["nydus-storage/backend-registry"]
 backend-s3 = ["nydus-storage/backend-s3"]
 
 [workspace]
-members = ["api", "clib", "error", "rafs", "storage", "service", "utils"]
+members = ["api", "clib", "rafs", "storage", "service", "utils"]

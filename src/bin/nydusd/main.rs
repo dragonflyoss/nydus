@@ -10,7 +10,7 @@ extern crate log;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
-extern crate nydus_error;
+extern crate nydus_api;
 
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};

@@ -5,7 +5,7 @@
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate nydus_error;
+extern crate nydus_api;
 
 use clap::parser::ValuesRef;
 use clap::ArgMatches;

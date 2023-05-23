@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime};
 
-use nydus_error::error::MetricsError;
-use nydus_error::logger::ErrorHolder;
+use nydus_api::http::MetricsError;
 
+use crate::logger::ErrorHolder;
 use crate::InodeBitmap;
 
 /// Type of `inode`.

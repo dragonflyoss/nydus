@@ -83,7 +83,10 @@ impl ConfigV2 {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let md = fs::metadata(path.as_ref())?;
         if md.len() > 0x100000 {
-            return Err(eother!("configuration file size is too big"));
+            return Err(Error::new(
+                ErrorKind::Other,
+                "configuration file size is too big",
+            ));
         }
         let content = fs::read_to_string(path)?;
         Self::from_str(&content)
@@ -115,16 +118,22 @@ impl ConfigV2 {
 
     /// Get configuration information for storage backend.
     pub fn get_backend_config(&self) -> Result<&BackendConfigV2> {
-        self.backend
-            .as_ref()
-            .ok_or_else(|| einval!("no configuration information for backend"))
+        self.backend.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "no configuration information for backend",
+            )
+        })
     }
 
     /// Get configuration information for cache subsystem.
     pub fn get_cache_config(&self) -> Result<&CacheConfigV2> {
-        self.cache
-            .as_ref()
-            .ok_or_else(|| einval!("no configuration information for cache"))
+        self.cache.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "no configuration information for cache",
+            )
+        })
     }
 
     /// Get cache working directory.
@@ -208,14 +217,14 @@ impl FromStr for ConfigV2 {
             return if v.validate() {
                 Ok(v)
             } else {
-                Err(einval!("invalid configuration"))
+                Err(Error::new(ErrorKind::InvalidInput, "invalid configuration"))
             };
         }
         if let Ok(v) = toml::from_str::<ConfigV2>(s) {
             return if v.validate() {
                 Ok(v)
             } else {
-                Err(einval!("invalid configuration"))
+                Err(Error::new(ErrorKind::InvalidInput, "invalid configuration"))
             };
         }
         if let Ok(v) = serde_json::from_str::<RafsConfig>(s) {
@@ -225,7 +234,10 @@ impl FromStr for ConfigV2 {
                 }
             }
         }
-        Err(einval!("failed to parse configuration information"))
+        Err(Error::new(
+            ErrorKind::InvalidInput,
+            "failed to parse configuration information",
+        ))
     }
 }
 
@@ -325,66 +337,102 @@ impl BackendConfigV2 {
     /// Get configuration information for localdisk
     pub fn get_localdisk_config(&self) -> Result<&LocalDiskConfig> {
         if &self.backend_type != "localdisk" {
-            Err(einval!("backend type is not 'localdisk'"))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                "backend type is not 'localdisk'",
+            ))
         } else {
-            self.localdisk
-                .as_ref()
-                .ok_or_else(|| einval!("no configuration information for localdisk"))
+            self.localdisk.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "no configuration information for localdisk",
+                )
+            })
         }
     }
 
     /// Get configuration information for localfs
     pub fn get_localfs_config(&self) -> Result<&LocalFsConfig> {
         if &self.backend_type != "localfs" {
-            Err(einval!("backend type is not 'localfs'"))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                "backend type is not 'localfs'",
+            ))
         } else {
-            self.localfs
-                .as_ref()
-                .ok_or_else(|| einval!("no configuration information for localfs"))
+            self.localfs.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "no configuration information for localfs",
+                )
+            })
         }
     }
 
     /// Get configuration information for OSS
     pub fn get_oss_config(&self) -> Result<&OssConfig> {
         if &self.backend_type != "oss" {
-            Err(einval!("backend type is not 'oss'"))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                "backend type is not 'oss'",
+            ))
         } else {
-            self.oss
-                .as_ref()
-                .ok_or_else(|| einval!("no configuration information for OSS"))
+            self.oss.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "no configuration information for OSS",
+                )
+            })
         }
     }
 
     /// Get configuration information for S3
     pub fn get_s3_config(&self) -> Result<&S3Config> {
         if &self.backend_type != "s3" {
-            Err(einval!("backend type is not 's3'"))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                "backend type is not 's3'",
+            ))
         } else {
-            self.s3
-                .as_ref()
-                .ok_or_else(|| einval!("no configuration information for s3"))
+            self.s3.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "no configuration information for s3",
+                )
+            })
         }
     }
 
     /// Get configuration information for Registry
     pub fn get_registry_config(&self) -> Result<&RegistryConfig> {
         if &self.backend_type != "registry" {
-            Err(einval!("backend type is not 'registry'"))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                "backend type is not 'registry'",
+            ))
         } else {
-            self.registry
-                .as_ref()
-                .ok_or_else(|| einval!("no configuration information for registry"))
+            self.registry.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "no configuration information for registry",
+                )
+            })
         }
     }
 
     /// Get configuration information for http proxy
     pub fn get_http_proxy_config(&self) -> Result<&HttpProxyConfig> {
         if &self.backend_type != "http-proxy" {
-            Err(einval!("backend type is not 'http-proxy'"))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                "backend type is not 'http-proxy'",
+            ))
         } else {
-            self.http_proxy
-                .as_ref()
-                .ok_or_else(|| einval!("no configuration information for http-proxy"))
+            self.http_proxy.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "no configuration information for http-proxy",
+                )
+            })
         }
     }
 }
@@ -643,22 +691,34 @@ impl CacheConfigV2 {
     /// Get configuration information for file cache.
     pub fn get_filecache_config(&self) -> Result<&FileCacheConfig> {
         if self.is_filecache() {
-            self.file_cache
-                .as_ref()
-                .ok_or_else(|| einval!("no configuration information for filecache"))
+            self.file_cache.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "no configuration information for filecache",
+                )
+            })
         } else {
-            Err(einval!("cache type is not 'filecache'"))
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                "cache type is not 'filecache'",
+            ))
         }
     }
 
     /// Get configuration information for fscache.
     pub fn get_fscache_config(&self) -> Result<&FsCacheConfig> {
         if self.is_fscache() {
-            self.fs_cache
-                .as_ref()
-                .ok_or_else(|| einval!("no configuration information for fscache"))
+            self.fs_cache.as_ref().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "no configuration information for fscache",
+                )
+            })
         } else {
-            Err(einval!("cache type is not 'fscache'"))
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cache type is not 'fscache'",
+            ))
         }
     }
 }
@@ -692,19 +752,17 @@ impl FileCacheConfig {
                 fs::metadata(&self.work_dir)
             })
             .map_err(|e| {
-                last_error!(format!(
-                    "fail to stat filecache work_dir {}: {}",
-                    self.work_dir, e
-                ))
+                log::error!("fail to stat filecache work_dir {}: {}", self.work_dir, e);
+                e
             })?;
 
         if path.is_dir() {
             Ok(&self.work_dir)
         } else {
-            Err(enoent!(format!(
-                "filecache work_dir {} is not a directory",
-                self.work_dir
-            )))
+            Err(Error::new(
+                ErrorKind::NotFound,
+                format!("filecache work_dir {} is not a directory", self.work_dir),
+            ))
         }
     }
 }
@@ -726,19 +784,17 @@ impl FsCacheConfig {
                 fs::metadata(&self.work_dir)
             })
             .map_err(|e| {
-                last_error!(format!(
-                    "fail to stat fscache work_dir {}: {}",
-                    self.work_dir, e
-                ))
+                log::error!("fail to stat fscache work_dir {}: {}", self.work_dir, e);
+                e
             })?;
 
         if path.is_dir() {
             Ok(&self.work_dir)
         } else {
-            Err(enoent!(format!(
-                "fscache work_dir {} is not a directory",
-                self.work_dir
-            )))
+            Err(Error::new(
+                ErrorKind::NotFound,
+                format!("fscache work_dir {} is not a directory", self.work_dir),
+            ))
         }
     }
 }
@@ -909,7 +965,10 @@ impl BlobCacheEntryConfigV2 {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let md = fs::metadata(path.as_ref())?;
         if md.len() > 0x100000 {
-            return Err(eother!("configuration file size is too big"));
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "configuration file size is too big",
+            ));
         }
         let content = fs::read_to_string(path)?;
         Self::from_str(&content)
@@ -933,17 +992,20 @@ impl FromStr for BlobCacheEntryConfigV2 {
             return if v.validate() {
                 Ok(v)
             } else {
-                Err(einval!("invalid configuration"))
+                Err(Error::new(ErrorKind::InvalidInput, "invalid configuration"))
             };
         }
         if let Ok(v) = toml::from_str::<BlobCacheEntryConfigV2>(s) {
             return if v.validate() {
                 Ok(v)
             } else {
-                Err(einval!("invalid configuration"))
+                Err(Error::new(ErrorKind::InvalidInput, "invalid configuration"))
             };
         }
-        Err(einval!("failed to parse configuration information"))
+        Err(Error::new(
+            ErrorKind::InvalidInput,
+            "failed to parse configuration information",
+        ))
     }
 }
 
@@ -1043,7 +1105,10 @@ impl BlobCacheEntry {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let md = fs::metadata(path.as_ref())?;
         if md.len() > 0x100000 {
-            return Err(eother!("configuration file size is too big"));
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "configuration file size is too big",
+            ));
         }
         let content = fs::read_to_string(path)?;
         Self::from_str(&content)
@@ -1074,17 +1139,20 @@ impl FromStr for BlobCacheEntry {
             return if v.validate() {
                 Ok(v)
             } else {
-                Err(einval!("invalid configuration"))
+                Err(Error::new(ErrorKind::InvalidInput, "invalid configuration"))
             };
         }
         if let Ok(v) = toml::from_str::<BlobCacheEntry>(s) {
             return if v.validate() {
                 Ok(v)
             } else {
-                Err(einval!("invalid configuration"))
+                Err(Error::new(ErrorKind::InvalidInput, "invalid configuration"))
             };
         }
-        Err(einval!("failed to parse configuration information"))
+        Err(Error::new(
+            ErrorKind::InvalidInput,
+            "failed to parse configuration information",
+        ))
     }
 }
 
@@ -1185,7 +1253,12 @@ impl TryFrom<&BackendConfig> for BackendConfigV2 {
             "registry" => {
                 config.registry = Some(serde_json::from_value(value.backend_config.clone())?);
             }
-            v => return Err(einval!(format!("unsupported backend type '{}'", v))),
+            v => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("unsupported backend type '{}'", v),
+                ))
+            }
         }
 
         Ok(config)
@@ -1233,7 +1306,12 @@ impl TryFrom<&CacheConfig> for CacheConfigV2 {
                 config.fs_cache = Some(serde_json::from_value(v.cache_config.clone())?);
             }
             "" => {}
-            t => return Err(einval!(format!("unsupported cache type '{}'", t))),
+            t => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("unsupported cache type '{}'", t),
+                ))
+            }
         }
 
         Ok(config)

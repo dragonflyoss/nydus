@@ -34,7 +34,6 @@ vmm-sys-util = { version = "0.10.0", optional = true }
 xattr = { version = "0.2.3", optional = true }
 
 nydus-api = { version = "0.2", path = "../api" }
-nydus-error = { version = "0.2", path = "../error" }
 nydus-storage = { version = "0.6", path = "../storage", features = ["backend-localfs"] }
 nydus-utils = { version = "0.4", path = "../utils" }
 
