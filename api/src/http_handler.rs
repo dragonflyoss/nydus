@@ -12,12 +12,12 @@ use dbs_uhttp::{Body, HttpServer, MediaType, Request, Response, ServerError, Sta
 use http::uri::Uri;
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
-use nydus_error::error::MetricsError;
 use serde::Deserialize;
 use url::Url;
 
 use crate::http::{
-    ApiError, ApiRequest, ApiResponse, DaemonErrorKind, ErrorMessage, HttpError, MetricsErrorKind,
+    ApiError, ApiRequest, ApiResponse, DaemonErrorKind, ErrorMessage, HttpError, MetricsError,
+    MetricsErrorKind,
 };
 use crate::http_endpoint_common::{
     EventsHandler, ExitHandler, MetricsBackendHandler, MetricsBlobcacheHandler, MountHandler,

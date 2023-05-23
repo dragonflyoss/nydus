@@ -5,15 +5,14 @@
 use std::env;
 use std::fmt::Debug;
 
-use backtrace::Backtrace;
-use serde_json::Error as SerdeError;
+use log::error;
 
 /// Display error messages with line number, file path and optional backtrace.
 pub fn make_error(err: std::io::Error, raw: impl Debug, file: &str, line: u32) -> std::io::Error {
     if cfg!(debug_assertions) {
         if let Ok(val) = env::var("RUST_BACKTRACE") {
             if val.trim() != "0" {
-                error!("Stack:\n{:?}", Backtrace::new());
+                error!("Stack:\n{:?}", backtrace::Backtrace::new());
                 error!("Error:\n\t{:?}\n\tat {}:{}", raw, file, line);
                 return err;
             }
@@ -81,15 +80,6 @@ macro_rules! bail_eio {
 // Add more custom error macro here if necessary
 define_error_macro!(last_error, std::io::Error::last_os_error());
 define_error_macro!(eother, std::io::Error::new(std::io::ErrorKind::Other, ""));
-
-/// Errors related to Metrics.
-#[derive(Debug)]
-pub enum MetricsError {
-    /// Non-exist counter.
-    NoCounter,
-    /// Failed to serialize message.
-    Serialize(SerdeError),
-}
 
 #[cfg(test)]
 mod tests {

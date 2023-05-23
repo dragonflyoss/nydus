@@ -14,11 +14,11 @@ extern crate serde;
 #[cfg(feature = "handler")]
 #[macro_use]
 extern crate lazy_static;
-#[macro_use]
-extern crate nydus_error;
 
 pub mod config;
 pub use config::*;
+#[macro_use]
+pub mod error;
 pub mod http;
 pub use self::http::*;
 

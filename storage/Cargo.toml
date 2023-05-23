@@ -37,7 +37,6 @@ gpt = { version = "3.0.0", optional = true }
 
 nydus-api = { version = "0.2", path = "../api" }
 nydus-utils = { version = "0.4", path = "../utils", features = ["encryption", "zran"] }
-nydus-error = { version = "0.2", path = "../error" }
 sha1 = { version = "0.10.5", optional = true }
 
 [dev-dependencies]

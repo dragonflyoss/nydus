@@ -1121,13 +1121,13 @@ dependencies = [
 name = "nydus-api"
 version = "0.2.2"
 dependencies = [
+ "backtrace",
  "dbs-uhttp",
  "http",
  "lazy_static",
  "libc",
  "log",
  "mio",
- "nydus-error",
  "serde",
  "serde_json",
  "toml",
@@ -1145,18 +1145,6 @@ dependencies = [
  "nydus-api",
  "nydus-rafs",
  "nydus-storage",
-]
-
-[[package]]
-name = "nydus-error"
-version = "0.2.3"
-dependencies = [
- "backtrace",
- "httpdate",
- "libc",
- "log",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1179,7 +1167,6 @@ dependencies = [
  "lz4-sys",
  "nix",
  "nydus-api",
- "nydus-error",
  "nydus-storage",
  "nydus-utils",
  "serde",
@@ -1210,7 +1197,6 @@ dependencies = [
  "mio",
  "nix",
  "nydus-api",
- "nydus-error",
  "nydus-rafs",
  "nydus-service",
  "nydus-storage",
@@ -1243,7 +1229,6 @@ dependencies = [
  "mio",
  "nix",
  "nydus-api",
- "nydus-error",
  "nydus-rafs",
  "nydus-storage",
  "nydus-utils",
@@ -1283,7 +1268,6 @@ dependencies = [
  "log",
  "nix",
  "nydus-api",
- "nydus-error",
  "nydus-utils",
  "regex",
  "reqwest",
@@ -1305,6 +1289,7 @@ version = "0.4.1"
 dependencies = [
  "blake3",
  "flate2",
+ "httpdate",
  "lazy_static",
  "libc",
  "libz-sys",
@@ -1312,7 +1297,7 @@ dependencies = [
  "lz4",
  "lz4-sys",
  "nix",
- "nydus-error",
+ "nydus-api",
  "openssl",
  "serde",
  "serde_json",

@@ -33,7 +33,7 @@ extern crate log;
 #[macro_use]
 extern crate bitflags;
 #[macro_use]
-extern crate nydus_error;
+extern crate nydus_api;
 #[macro_use]
 extern crate nydus_storage as storage;
 

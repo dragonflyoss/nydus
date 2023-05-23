@@ -5,11 +5,11 @@
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate nydus_error;
-#[macro_use]
 extern crate serde;
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate nydus_api;
 
 use std::convert::{Into, TryFrom, TryInto};
 use std::time::Duration;
@@ -28,6 +28,7 @@ pub mod digest;
 pub mod exec;
 pub mod filemap;
 pub mod inode_bitmap;
+pub mod logger;
 pub mod metrics;
 pub mod mpmc;
 pub mod reader;

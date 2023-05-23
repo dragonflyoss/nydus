@@ -7,11 +7,19 @@
 use std::io;
 use std::sync::mpsc::{RecvError, SendError};
 
-use nydus_error::error::MetricsError;
 use serde::Deserialize;
 use serde_json::Error as SerdeError;
 
 use crate::BlobCacheEntry;
+
+/// Errors related to Metrics.
+#[derive(Debug)]
+pub enum MetricsError {
+    /// Non-exist counter.
+    NoCounter,
+    /// Failed to serialize message.
+    Serialize(SerdeError),
+}
 
 /// Mount a filesystem.
 #[derive(Clone, Deserialize, Debug)]
