@@ -61,8 +61,11 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: build
       run: |
-        declare -A rust_target_map=( ["amd64"]="x86_64-apple-darwin" ["arm64"]="aarch64-apple-darwin")
-        RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
+        if [[ "${{matrix.arch}}" == "amd64" ]]; then
+          RUST_TARGET="x86_64-apple-darwin"
+        else
+          RUST_TARGET="aarch64-apple-darwin"
+        fi
         cargo install --version 0.2.4 cross
         rustup target add ${RUST_TARGET}
         rustup component add rustfmt clippy
