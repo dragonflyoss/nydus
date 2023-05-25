@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::{Arc, Mutex};
@@ -95,6 +95,15 @@ impl<R: Read> Read for BufReaderInfo<R> {
             }
             v
         })
+    }
+}
+
+impl<R: Read + Seek> Seek for BufReaderInfo<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let mut state = self.state.lock().unwrap();
+        let pos = state.reader.seek(pos)?;
+        state.pos = pos;
+        Ok(pos)
     }
 }
 
