@@ -17,7 +17,7 @@
 //! - dump the RAFS filesystem tree into RAFS metadata blob
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use anyhow::{anyhow, bail, Context, Result};
 use tar::{Archive, Entry, EntryType, Header};
 
+use nydus_api::enosys;
 use nydus_rafs::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
 use nydus_rafs::metadata::layout::v5::RafsV5Inode;
 use nydus_rafs::metadata::layout::RafsXAttrs;
@@ -46,20 +47,41 @@ use super::core::node::{Node, NodeInfo};
 use super::core::tree::Tree;
 use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder, TarBuilder};
 
+enum CompressionType {
+    None,
+    Gzip,
+}
+
 enum TarReader {
     File(File),
-    Buf(BufReaderInfo<File>),
-    TarGz(Box<ZlibDecoder<File>>),
-    Zran(ZranReader<File>),
+    BufReader(BufReader<File>),
+    BufReaderInfo(BufReaderInfo<File>),
+    BufReaderInfoSeekable(BufReaderInfo<File>),
+    TarGzFile(Box<ZlibDecoder<File>>),
+    TarGzBufReader(Box<ZlibDecoder<BufReader<File>>>),
+    ZranReader(ZranReader<File>),
 }
 
 impl Read for TarReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             TarReader::File(f) => f.read(buf),
-            TarReader::Buf(b) => b.read(buf),
-            TarReader::TarGz(f) => f.read(buf),
-            TarReader::Zran(f) => f.read(buf),
+            TarReader::BufReader(f) => f.read(buf),
+            TarReader::BufReaderInfo(b) => b.read(buf),
+            TarReader::BufReaderInfoSeekable(b) => b.read(buf),
+            TarReader::TarGzFile(f) => f.read(buf),
+            TarReader::TarGzBufReader(b) => b.read(buf),
+            TarReader::ZranReader(f) => f.read(buf),
+        }
+    }
+}
+
+impl Seek for TarReader {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        match self {
+            TarReader::File(f) => f.seek(pos),
+            TarReader::BufReaderInfoSeekable(b) => b.seek(pos),
+            _ => Err(enosys!("seek() not supported!")),
         }
     }
 }
@@ -98,47 +120,66 @@ impl<'a> TarballTreeBuilder<'a> {
             .read(true)
             .open(self.ctx.source_path.clone())
             .context("tarball: can not open source file for conversion")?;
+        let mut is_file = match file.metadata() {
+            Ok(md) => md.file_type().is_file(),
+            Err(_) => false,
+        };
 
         let reader = match self.ty {
-            ConversionType::EStargzToRafs | ConversionType::TargzToRafs => {
-                TarReader::TarGz(Box::new(ZlibDecoder::new(file)))
-            }
-            ConversionType::EStargzToRef | ConversionType::TargzToRef => {
-                // Use 64K buffer to keep consistence with zlib-random.
-                let mut buf_reader = BufReader::with_capacity(ZRAN_READER_BUF_SIZE, file);
-                let mut buf = [0u8; 3];
-                if buf_reader.read_exact(&mut buf).is_ok()
-                    && buf[0] == 0x1f
-                    && buf[1] == 0x8b
-                    && buf[2] == 0x08
-                {
-                    buf_reader.seek_relative(-3).unwrap();
+            ConversionType::EStargzToRef
+            | ConversionType::TargzToRef
+            | ConversionType::TarToRef => match Self::detect_compression_algo(file)? {
+                (CompressionType::Gzip, buf_reader) => {
                     let generator = ZranContextGenerator::from_buf_reader(buf_reader)?;
                     let reader = generator.reader();
                     self.ctx.blob_zran_generator = Some(Mutex::new(generator));
                     self.ctx.blob_features.insert(BlobFeatures::ZRAN);
-                    TarReader::Zran(reader)
-                } else {
-                    buf_reader.seek_relative(-3).unwrap();
+                    TarReader::ZranReader(reader)
+                }
+                (CompressionType::None, buf_reader) => {
                     self.ty = ConversionType::TarToRef;
                     let reader = BufReaderInfo::from_buf_reader(buf_reader);
                     self.ctx.blob_tar_reader = Some(reader.clone());
-                    TarReader::Buf(reader)
+                    TarReader::BufReaderInfo(reader)
                 }
-            }
-            ConversionType::TarToRafs => TarReader::File(file),
-            ConversionType::TarToRef => {
-                let reader = BufReaderInfo::from_buf_reader(BufReader::new(file));
-                self.ctx.blob_tar_reader = Some(reader.clone());
-                TarReader::Buf(reader)
-            }
+            },
+            ConversionType::EStargzToRafs
+            | ConversionType::TargzToRafs
+            | ConversionType::TarToRafs => match Self::detect_compression_algo(file)? {
+                (CompressionType::Gzip, buf_reader) => {
+                    if is_file {
+                        let mut file = buf_reader.into_inner();
+                        file.seek(SeekFrom::Start(0))?;
+                        TarReader::TarGzFile(Box::new(ZlibDecoder::new(file)))
+                    } else {
+                        TarReader::TarGzBufReader(Box::new(ZlibDecoder::new(buf_reader)))
+                    }
+                }
+                (CompressionType::None, buf_reader) => {
+                    if is_file {
+                        let mut file = buf_reader.into_inner();
+                        file.seek(SeekFrom::Start(0))?;
+                        TarReader::File(file)
+                    } else {
+                        TarReader::BufReader(buf_reader)
+                    }
+                }
+            },
             ConversionType::TarToTarfs => {
                 let mut reader = BufReaderInfo::from_buf_reader(BufReader::new(file));
                 self.ctx.blob_tar_reader = Some(reader.clone());
                 if !self.ctx.blob_id.is_empty() {
                     reader.enable_digest_calculation(false);
+                } else {
+                    // Disable seek when need to calculate hash value.
+                    is_file = false;
                 }
-                TarReader::Buf(reader)
+                // only enable seek when hash computing is disabled.
+                if is_file {
+                    TarReader::BufReaderInfoSeekable(reader)
+                } else {
+                    TarReader::BufReaderInfo(reader)
+                }
             }
             _ => return Err(anyhow!("tarball: unsupported image conversion type")),
         };
@@ -158,9 +199,13 @@ impl<'a> TarballTreeBuilder<'a> {
         let mut tree = Tree::new(root);
 
         // Generate RAFS node for each tar entry, and optionally adding missing parents.
-        let entries = tar
-            .entries()
-            .context("tarball: failed to read entries from tar")?;
+        let entries = if is_file {
+            tar.entries_with_seek()
+                .context("tarball: failed to read entries from tar")?
+        } else {
+            tar.entries()
+                .context("tarball: failed to read entries from tar")?
+        };
         for entry in entries {
             let mut entry = entry.context("tarball: failed to read entry from tar")?;
             let path = entry
@@ -484,6 +529,20 @@ impl<'a> TarballTreeBuilder<'a> {
         }
         let mut node = tree.lock_node();
         node.v5_set_dir_size(RafsVersion::V5, &tree.children);
+    }
+
+    fn detect_compression_algo(file: File) -> Result<(CompressionType, BufReader<File>)> {
+        // Use 64K buffer to keep consistence with zlib-random.
+        let mut buf_reader = BufReader::with_capacity(ZRAN_READER_BUF_SIZE, file);
+        let mut buf = [0u8; 3];
+        buf_reader.read_exact(&mut buf)?;
+        if buf[0] == 0x1f && buf[1] == 0x8b && buf[2] == 0x08 {
+            buf_reader.seek_relative(-3).unwrap();
+            Ok((CompressionType::Gzip, buf_reader))
+        } else {
+            buf_reader.seek_relative(-3).unwrap();
+            Ok((CompressionType::None, buf_reader))
+        }
     }
 }
 
