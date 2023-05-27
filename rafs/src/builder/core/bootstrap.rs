@@ -52,8 +52,8 @@ impl Bootstrap {
 
         Self::build_rafs(ctx, bootstrap_ctx, &mut self.tree)?;
         if ctx.fs_version.is_v6() {
-            // Sort directory entries to keep them ordered.
-            Self::v6_update_dirents(&self.tree, bootstrap_ctx.offset);
+            let root_offset = self.tree.node.lock().unwrap().v6_offset;
+            Self::v6_update_dirents(&self.tree, root_offset);
         }
 
         Ok(())
