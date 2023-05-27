@@ -64,6 +64,8 @@ impl Node {
         if self.is_dir() || self.is_symlink() {
             self.v6_dirents_offset += meta_offset;
         }
+        let nid = calculate_nid(self.v6_offset, meta_addr);
+        self.inode.set_ino(nid);
 
         if self.is_dir() {
             self.v6_dump_dir(ctx, f_bootstrap, meta_addr, meta_offset, &mut inode)?;
