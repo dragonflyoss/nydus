@@ -1,0 +1,53 @@
+[package]
+name = "nydus-rafs"
+version = "0.2.2"
+description = "The RAFS filesystem format for Nydus Image Service"
+authors = ["The Nydus Developers"]
+license = "Apache-2.0 OR BSD-3-Clause"
+homepage = "https://nydus.dev/"
+repository = "https://github.com/dragonflyoss/image-service"
+edition = "2018"
+
+[dependencies]
+anyhow = "1.0.35"
+arc-swap = "1.5"
+base64 = { version = "0.13.0", optional = true }
+bitflags = "1.2.1"
+blake3 = "1.0"
+futures = "0.3"
+lazy_static = "1.4.0"
+libc = "0.2"
+log = "0.4"
+lz4-sys = "1.9.4"
+nix = "0.24"
+serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
+serde_json = "1.0.53"
+spmc = "0.3.0"
+vm-memory = "0.9"
+fuse-backend-rs = "^0.10.3"
+
+hex = { version = "0.4.3", optional = true }
+indexmap = { version = "1", optional = true }
+sha2 = { version = "0.10.2", optional = true }
+tar = { version = "0.4.38", optional = true }
+vmm-sys-util = { version = "0.10.0", optional = true }
+xattr = { version = "0.2.3", optional = true }
+
+nydus-api = { version = "0.2", path = "../api" }
+nydus-storage = { version = "0.6", path = "../storage", features = ["backend-localfs"] }
+nydus-utils = { version = "0.4", path = "../utils" }
+
+[dev-dependencies]
+vmm-sys-util = "0.10"
+assert_matches = "1.5.0"
+
+[features]
+fusedev = ["fuse-backend-rs/fusedev"]
+virtio-fs = ["fuse-backend-rs/virtiofs", "vm-memory/backend-mmap"]
+vhost-user-fs = ["fuse-backend-rs/vhost-user-fs"]
+
+builder = ["base64", "hex", "indexmap", "sha2", "tar", "vmm-sys-util", "xattr"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin"]

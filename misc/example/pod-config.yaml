@@ -1,0 +1,11 @@
+metadata:
+  attempt: 1
+  name: nydus-sandbox
+  namespace: default
+log_directory: /tmp
+linux:
+  security_context:
+    namespace_options:
+      network: 2
+annotations:
+  "io.containerd.osfeature": "nydus.remoteimage.v1"

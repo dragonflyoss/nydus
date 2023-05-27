@@ -1,0 +1,641 @@
+name: Smoke Test
+
+on:
+  push:
+    branches: ["**", "stable/**"]
+    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
+  pull_request:
+    branches: ["**", "stable/**"]
+    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
+  schedule:
+    # Run daily sanity check at 03:00 clock UTC
+    - cron: "0 03 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE: wordpress
+  TAG: 6.1.1
+
+jobs:
+  contrib-build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Setup Golang
+      uses: actions/setup-go@v3
+      with:
+        go-version: ~1.18
+    - name: Golang Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-golang-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-golang-
+    - name: Build Contrib
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.51.2
+        make -e DOCKER=false nydusify-release
+        make -e DOCKER=false contrib-test
+    - name: Upload Nydusify
+      uses: actions/upload-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+
+  contrib-build-master:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        ref: master
+    - name: Setup Golang
+      uses: actions/setup-go@v3
+      with:
+        go-version: ~1.18
+    - name: Golang Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-golang-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-golang-
+    - name: Build Contrib
+      run: |
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.51.2
+        make -e DOCKER=false nydusify-release
+        make -e DOCKER=false contrib-test
+    - name: Upload Nydusify
+      uses: actions/upload-artifact@master
+      with:
+        name: nydusify-artifact-master
+        path: contrib/nydusify/cmd
+
+  nydus-build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2.2.0
+      with:
+        cache-on-failure: true
+        shared-key: nydus-build
+    - name: Build Nydus
+      run: |
+        rustup component add rustfmt clippy
+        make
+    - name: Upload Nydus Binaries
+      uses: actions/upload-artifact@master
+      with:
+        name: nydus-artifact
+        path: |
+          target/release/nydus-image
+          target/release/nydusd
+
+  nydus-build-master:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        ref: master
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2.2.0
+      with:
+        cache-on-failure: true
+        shared-key: nydus-build
+    - name: Build Nydus
+      run: |
+        rustup component add rustfmt clippy
+        make
+    - name: Upload Nydus Binaries
+      uses: actions/upload-artifact@master
+      with:
+        name: nydus-artifact-master
+        path: |
+          target/release/nydus-image
+          target/release/nydusd
+
+  nydus-integration-test:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Docker Cache
+      uses: jpribyl/action-docker-layer-caching@v0.1.0
+      continue-on-error: true
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: |
+          target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Older Binaries
+      id: prepare-binaries
+      run: |
+        versions=(v0.1.0 v2.1.6)
+        version_archs=(v0.1.0-x86_64 v2.1.6-linux-amd64)
+        for i in ${!versions[@]}; do
+          version=${versions[$i]}
+          version_arch=${version_archs[$i]}
+
+          wget -q https://github.com/dragonflyoss/image-service/releases/download/$version/nydus-static-$version_arch.tgz
+          sudo mkdir nydus-$version /usr/bin/nydus-$version
+          sudo tar xzf nydus-static-$version_arch.tgz -C nydus-$version
+          sudo cp -r nydus-$version/nydus-static/* /usr/bin/nydus-$version/
+        done
+    - name: Golang Cache
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-golang-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-golang-
+    - name: Integration Test
+      run: |
+        sudo mkdir -p /usr/bin/nydus-latest /home/runner/work/workdir
+        sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/bin/nydus-latest
+        sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/bin/nydus-latest
+
+        versions=(v0.1.0 v2.1.6 latest)
+        version_exports=(v0_1_0 v2_1_6 latest)
+        for i in ${!version_exports[@]}; do
+          version=${versions[$i]}
+          version_export=${version_exports[$i]}
+          export NYDUS_BUILDER_$version_export=/usr/bin/nydus-$version/nydus-image
+          export NYDUS_NYDUSD_$version_export=/usr/bin/nydus-$version/nydusd
+          export NYDUS_NYDUSIFY_$version_export=/usr/bin/nydus-$version/nydusify
+        done
+
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.51.2
+        sudo -E make smoke-only
+
+  benchmark-oci:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare OCI Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh oci
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode oci --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-oci
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-no-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-no-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-no-prefetch-master:
+    runs-on: ubuntu-latest
+    needs: [contrib-build-master, nydus-build-master]
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact-master
+        path: target/release
+    - name: Download Nydusify Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact-master
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-no-prefetch-master
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-zran-no-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6 \
+          --oci-ref
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-zran-no-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-zran-no-prefetch-master:
+    runs-on: ubuntu-latest
+    needs: [contrib-build-master, nydus-build-master]
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact-master
+        path: target/release
+    - name: Download Nydusify Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact-master
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6 \
+          --oci-ref
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-zran-no-prefetch-master
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-all-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-all-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-all-prefetch-master:
+    runs-on: ubuntu-latest
+    needs: [contrib-build-master, nydus-build-master]
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact-master
+        path: target/release
+    - name: Download Nydusify Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact-master
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-all-prefetch-master
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-zran-all-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6 \
+          --oci-ref
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-zran-all-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-zran-all-prefetch-master:
+    runs-on: ubuntu-latest
+    needs: [contrib-build-master, nydus-build-master]
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact-master
+        path: target/release
+    - name: Download Nydusify Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact-master
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo docker pull ${{env.IMAGE}}:${{env.TAG}} && docker tag ${{env.IMAGE}}:${{env.TAG}} localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo docker push localhost:5000/${{env.IMAGE}}:${{env.TAG}}
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source localhost:5000/${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6 \
+          --oci-ref
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-zran-all-prefetch-master
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-filelist-prefetch:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-filelist-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-filelist-prefetch
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-nydus-filelist-prefetch-master:
+    runs-on: ubuntu-latest
+    needs: [contrib-build-master, nydus-build-master]
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact-master
+        path: target/release
+    - name: Download Nydusify Master
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact-master
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Environment
+      run: |
+        sudo bash misc/benchmark/prepare_env.sh nydus
+        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+          --source ${{env.IMAGE}}:${{env.TAG}} \
+          --target localhost:5000/${{env.IMAGE}}:${{env.TAG}}_nydus \
+          --fs-version 6
+    - name: BenchMark Test
+      run: |
+        cd misc/benchmark
+        sudo python3 benchmark.py --mode nydus-filelist-prefetch --image ${{env.IMAGE}}:${{env.TAG}}
+    - name: Save Test Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-nydus-filelist-prefetch-master
+        path: misc/benchmark/${{env.IMAGE}}.csv
+
+  benchmark-result:
+    runs-on: ubuntu-latest
+    needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-zran-no-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch]
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - uses: actions/download-artifact@v3
+      - uses: geekyeggo/delete-artifact@v2
+        with:
+          name: '*'
+      - name: Save Result
+        run: |
+          sudo python3 misc/benchmark/benchmark_summary.py --mode benchmark-result > $GITHUB_STEP_SUMMARY
+
+  benchmark-compare:
+    runs-on: ubuntu-latest
+    needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-zran-no-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch, benchmark-zran-all-prefetch-master, benchmark-zran-no-prefetch-master, benchmark-nydus-no-prefetch-master, benchmark-nydus-all-prefetch-master, benchmark-nydus-filelist-prefetch-master]
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+      - uses: actions/download-artifact@v3
+      - uses: geekyeggo/delete-artifact@v2
+        with:
+          name: '*'
+      - name: Save Result
+        run: |
+          sudo python3 misc/benchmark/benchmark_summary.py --mode benchmark-compare > $GITHUB_STEP_SUMMARY
+
+  nydus-unit-test:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2.2.0
+      with:
+        cache-on-failure: true
+        shared-key: nydus-build
+    - name: Install cargo nextest
+      uses: taiki-e/install-action@nextest
+    - name: Unit Test
+      run: |
+        make ut-nextest
+
+  nydus-unit-test-coverage:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v3
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.2.0
+        with:
+          cache-on-failure: true
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate code coverage
+        run: make coverage-codecov
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: codecov.json
+          fail_ci_if_error: true
+
+  nydus-cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
+      - uses: EmbarkStudios/cargo-deny-action@v1

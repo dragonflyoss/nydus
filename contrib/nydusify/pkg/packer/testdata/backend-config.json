@@ -1,0 +1,8 @@
+{
+  "endpoint": "mock.aliyuncs.com",
+  "access_key_id": "testid",
+  "access_key_secret": "testkey",
+  "bucket_name": "testbucket",
+  "meta_prefix": "test/",
+  "blob_prefix": ""
+}

@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags:
+     - v[0-9]+.[0-9]+.[0-9]+*
+  schedule:
+    # Run daily sanity check at 22:08 clock UTC
+    - cron: "8 22 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  nydus-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64, ppc64le, riscv64]
+    steps:
+    - uses: actions/checkout@v3
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2.2.0
+      with:
+        cache-on-failure: true
+        key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+    - name: Build nydus-rs
+      run: |
+        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
+        RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
+        cargo install --version 0.2.4 cross
+        rustup component add rustfmt clippy
+        make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
+        sudo mv target/$RUST_TARGET/release/nydusd nydusd
+        sudo mv target/$RUST_TARGET/release/nydus-image .
+        sudo mv target/$RUST_TARGET/release/nydusctl .
+        sudo cp -r misc/configs .
+        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
+    - name: store-artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: nydus-artifacts-linux-${{ matrix.arch }}
+        path: |
+          nydusd
+          nydus-image
+          nydusctl
+          configs
+
+  nydus-macos:
+    runs-on: macos-11
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+    - uses: actions/checkout@v3
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2.2.0
+      with:
+        cache-on-failure: true
+        key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+    - name: build
+      run: |
+        rustup component add rustfmt clippy
+        make -e INSTALL_DIR_PREFIX=. install
+        sudo cp -r misc/configs .
+        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
+    - name: store-artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: nydus-artifacts-darwin-${{ matrix.arch }}
+        path: |
+          nydusctl
+          nydusd
+          nydus-image
+          configs
+
+  contrib-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64, ppc64le, riscv64]
+    env:
+      DOCKER: false
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-go@v3
+      with:
+        go-version: '1.18'
+    - name: cache go mod
+      uses: actions/cache@v3
+      with:
+        path: /go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/contrib/nydusify/go.sum', '**/contrib/ctr-remote/go.sum', '**/contrib/nydus-overlayfs/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go
+    - name: build contrib go components
+      run: |
+        make -e GOARCH=${{ matrix.arch }} contrib-release
+        sudo mv contrib/ctr-remote/bin/ctr-remote .
+        sudo mv contrib/nydusify/cmd/nydusify .
+        sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
+    - name: store-artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: nydus-artifacts-linux-${{ matrix.arch }}
+        path: |
+          ctr-remote
+          nydusify
+          nydus-overlayfs
+          containerd-nydus-grpc
+
+  prepare-tarball-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64, ppc64le, riscv64]
+        os: [linux]
+    needs: [nydus-linux, contrib-linux]
+    steps:
+    - name: download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}
+        path: nydus-static
+    - name: prepare release tarball
+      run: |
+        tag=$(echo $GITHUB_REF | cut -d/ -f3-)
+        tarball="nydus-static-$tag-${{ matrix.os }}-${{ matrix.arch }}.tgz"
+        chmod +x nydus-static/*
+        tar cf - nydus-static | gzip > ${tarball}
+        echo "tarball=${tarball}" >> $GITHUB_ENV
+
+        shasum="$tarball.sha256sum"
+        sha256sum $tarball > $shasum
+        echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
+    - name: store-artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: nydus-release-tarball
+        path: |
+          ${{ env.tarball }}
+          ${{ env.tarball_shasum }}
+
+  # use a seperate job for darwin because github action if: condition cannot handle && properly.
+  prepare-tarball-darwin:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64]
+        os: [darwin]
+    needs: [nydus-macos]
+    steps:
+    - name: download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}
+        path: nydus-static
+    - name: prepare release tarball
+      run: |
+        tag=$(echo $GITHUB_REF | cut -d/ -f3-)
+        tarball="nydus-static-$tag-${{ matrix.os }}-${{ matrix.arch }}.tgz"
+        chmod +x nydus-static/*
+        tar cf - nydus-static | gzip > ${tarball}
+        echo "tarball=${tarball}" >> $GITHUB_ENV
+
+        shasum="$tarball.sha256sum"
+        sha256sum $tarball > $shasum
+        echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
+    - name: store-artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: nydus-release-tarball
+        path: |
+          ${{ env.tarball }}
+          ${{ env.tarball_shasum }}
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: [prepare-tarball-linux, prepare-tarball-darwin]
+    steps:
+    - name: download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: nydus-release-tarball
+        path: nydus-tarball
+    - name: prepare release env
+      run: |
+        echo "tarballs<<EOF" >> $GITHUB_ENV
+        for I in $(ls nydus-tarball);do echo "nydus-tarball/${I}" >> $GITHUB_ENV; done
+        echo "EOF" >> $GITHUB_ENV
+        tag=$(echo $GITHUB_REF | cut -d/ -f3-)
+        echo "tag=${tag}" >> $GITHUB_ENV
+        cat $GITHUB_ENV
+    - name: push release
+      if: github.event_name == 'push'
+      uses: softprops/action-gh-release@v1
+      with:
+        name: "Nydus Image Service ${{ env.tag }}"
+        body: |
+          Binaries download mirror (sync within a few hours): https://registry.npmmirror.com/binary.html?path=nydus/${{ env.tag }}/
+        generate_release_notes: true
+        files: |
+          ${{ env.tarballs }}

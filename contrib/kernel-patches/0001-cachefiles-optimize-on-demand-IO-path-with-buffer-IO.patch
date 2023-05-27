@@ -1,0 +1,132 @@
+From 304939a8dca54edd9833b27f1ca48435ade2ed49 Mon Sep 17 00:00:00 2001
+From: Xin Yin <yinxin.x@bytedance.com>
+Date: Thu, 8 Sep 2022 10:52:08 +0800
+Subject: [PATCH] cachefiles: optimize on-demand IO path with buffer IO
+
+The cachefiles framework use dio for local cache files filling
+and reading, which may affects the performance for on-demand IO
+path.
+
+Change to use buffer IO for cache files filling, and first try
+to find data in the pagecache during cache files reading. After
+the pagecache for cache files is recycled, we will not suffer from
+double caching issue.
+
+Signed-off-by: Xin Yin <yinxin.x@bytedance.com>
+---
+ fs/cachefiles/io.c | 74 ++++++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 72 insertions(+), 2 deletions(-)
+
+diff --git a/fs/cachefiles/io.c b/fs/cachefiles/io.c
+index 000a28f46e59..636491806ff8 100644
+--- a/fs/cachefiles/io.c
++++ b/fs/cachefiles/io.c
+@@ -11,9 +11,11 @@
+ #include <linux/uio.h>
+ #include <linux/falloc.h>
+ #include <linux/sched/mm.h>
++#include <linux/pagevec.h>
+ #include <trace/events/fscache.h>
+ #include "internal.h"
+ 
++
+ struct cachefiles_kiocb {
+ 	struct kiocb		iocb;
+ 	refcount_t		ki_refcnt;
+@@ -67,6 +69,60 @@ static void cachefiles_read_complete(struct kiocb *iocb, long ret)
+ 	cachefiles_put_kiocb(ki);
+ }
+ 
++static void cachefiles_page_copy(struct cachefiles_kiocb *ki, struct iov_iter *iter)
++{
++	struct address_space *mapping =  ki->iocb.ki_filp->f_mapping;
++	struct kiocb *iocb = &ki->iocb;
++	loff_t isize = i_size_read(mapping->host);
++	loff_t end = min_t(loff_t, isize, iocb->ki_pos + iov_iter_count(iter));
++	struct pagevec pv;
++	pgoff_t index;
++	unsigned int i;
++	bool writably_mapped;
++	int error = 0;
++
++	while (iocb->ki_pos < end && !error) {
++		index = iocb->ki_pos >> PAGE_SHIFT;
++		pv.nr = find_get_pages_contig(mapping, index, PAGEVEC_SIZE, pv.pages);
++
++		if (pv.nr == 0)
++			break;
++
++		writably_mapped = mapping_writably_mapped(mapping);
++
++		for (i = 0; i < pv.nr; i++) {
++			struct page *page = pv.pages[i];
++			unsigned int offset = iocb->ki_pos & ~PAGE_MASK;
++			unsigned int bytes = min_t(loff_t, end - iocb->ki_pos,
++						   PAGE_SIZE - offset);
++			unsigned int copied;
++
++			if (page->index * PAGE_SIZE >= end)
++				break;
++
++			if (!PageUptodate(page)) {
++				error = -EFAULT;
++				break;
++			}
++
++			if (writably_mapped)
++				flush_dcache_page(page);
++
++			copied = copy_page_to_iter(page, offset, bytes, iter);
++
++			iocb->ki_pos += copied;
++			if (copied < bytes) {
++				error = -EFAULT;
++				break;
++			}
++		}
++
++		for (i = 0; i < pv.nr; i++)
++			put_page(pv.pages[i]);
++	}
++
++}
++
+ /*
+  * Initiate a read from the cache.
+  */
+@@ -155,8 +211,19 @@ static int cachefiles_read(struct netfs_cache_resources *cres,
+ 	trace_cachefiles_read(object, file_inode(file), ki->iocb.ki_pos, len - skipped);
+ 	old_nofs = memalloc_nofs_save();
+ 	ret = cachefiles_inject_read_error();
+-	if (ret == 0)
++	if (ret == 0) {
++		// for ondemand mode try to fill iter form pagecache first
++		if (cachefiles_in_ondemand_mode(object->volume->cache)) {
++			cachefiles_page_copy(ki, iter);
++			if (!iov_iter_count(iter)) {
++				memalloc_nofs_restore(old_nofs);
++				ki->was_async = false;
++				cachefiles_read_complete(&ki->iocb, len - skipped);
++				goto in_progress;
++			}
++		}
+ 		ret = vfs_iocb_iter_read(file, &ki->iocb, iter);
++	}
+ 	memalloc_nofs_restore(old_nofs);
+ 	switch (ret) {
+ 	case -EIOCBQUEUED:
+@@ -308,7 +375,10 @@ int __cachefiles_write(struct cachefiles_object *object,
+ 	refcount_set(&ki->ki_refcnt, 2);
+ 	ki->iocb.ki_filp	= file;
+ 	ki->iocb.ki_pos		= start_pos;
+-	ki->iocb.ki_flags	= IOCB_DIRECT | IOCB_WRITE;
++	if (cachefiles_in_ondemand_mode(cache))
++		ki->iocb.ki_flags	= IOCB_WRITE;
++	else
++		ki->iocb.ki_flags	= IOCB_DIRECT | IOCB_WRITE;
+ 	ki->iocb.ki_ioprio	= get_current_ioprio();
+ 	ki->object		= object;
+ 	ki->start		= start_pos;
+-- 
+2.11.0
+

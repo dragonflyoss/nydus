@@ -1,0 +1,21 @@
+diff --git a/lib/super.c b/lib/super.c
+index f486eb7..2c83a77 100644
+--- a/lib/super.c
++++ b/lib/super.c
+@@ -36,11 +36,11 @@ static int erofs_init_devices(struct erofs_sb_info *sbi,
+ 	else
+ 		ondisk_extradevs = le16_to_cpu(dsb->extra_devices);
+ 
+-	if (ondisk_extradevs != sbi->extra_devices) {
+-		erofs_err("extra devices don't match (ondisk %u, given %u)",
+-			  ondisk_extradevs, sbi->extra_devices);
+-		return -EINVAL;
+-	}
++	// if (ondisk_extradevs != sbi->extra_devices) {
++	//	erofs_err("extra devices don't match (ondisk %u, given %u)",
++	//		  ondisk_extradevs, sbi->extra_devices);
++	//	return -EINVAL;
++	// }
+ 	if (!ondisk_extradevs)
+ 		return 0;
+ 

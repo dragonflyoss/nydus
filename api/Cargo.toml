@@ -1,0 +1,28 @@
+[package]
+name = "nydus-api"
+version = "0.2.2"
+description = "APIs for Nydus Image Service"
+authors = ["The Nydus Developers"]
+license = "Apache-2.0 OR BSD-3-Clause"
+homepage = "https://nydus.dev/"
+repository = "https://github.com/dragonflyoss/image-service"
+edition = "2018"
+
+[dependencies]
+backtrace = "0.3"
+dbs-uhttp = { version = "0.3.0", optional = true }
+http = { version = "0.2.1", optional = true }
+lazy_static = { version = "1.4.0", optional = true }
+libc = "0.2"
+log = "0.4.8"
+mio = { version = "0.8", features = ["os-poll", "os-ext"], optional = true }
+serde = { version = "1.0.110", features = ["rc", "serde_derive"] }
+serde_json = "1.0.53"
+toml = "0.5"
+url = { version = "2.1.1", optional = true }
+
+[dev-dependencies]
+vmm-sys-util = { version = "0.10" }
+
+[features]
+handler = ["dbs-uhttp", "http", "lazy_static", "mio", "url"]

@@ -1,0 +1,28 @@
+[package]
+name = "nydus-clib"
+version = "0.1.0"
+description = "C wrapper library for Nydus SDK"
+authors = ["The Nydus Developers"]
+license = "Apache-2.0"
+homepage = "https://nydus.dev/"
+repository = "https://github.com/dragonflyoss/image-service"
+edition = "2021"
+
+[lib]
+name = "nydus_clib"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+libc = "0.2.137"
+log = "0.4.17"
+fuse-backend-rs = "^0.10.3"
+nydus-api = { version = "0.2", path = "../api" }
+nydus-rafs = { version = "0.2.2", path = "../rafs" }
+nydus-storage = { version = "0.6.2", path = "../storage" }
+
+[features]
+baekend-s3 = ["nydus-storage/backend-s3"]
+backend-oss = ["nydus-storage/backend-oss"]
+backend-registry = ["nydus-storage/backend-registry"]
+backend-http-proxy = ["nydus-storage/backend-http-proxy"]
+backend-localdisk = ["nydus-storage/backend-localdisk"]
