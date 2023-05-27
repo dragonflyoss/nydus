@@ -246,7 +246,7 @@ impl TocEntry {
             mode |= libc::S_IFIFO;
         }
 
-        self.mode & !libc::S_IFMT | mode as u32
+        self.mode & !libc::S_IFMT as u32 | mode as u32
     }
 
     /// Get real device id associated with the `TocEntry`.
