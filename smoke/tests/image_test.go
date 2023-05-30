@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	paramZran = "zran"
+	paramZran  = "zran"
+	paramBatch = "batch"
 )
 
 type ImageTestSuite struct {
@@ -30,10 +31,16 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 		Dimension(paramImage, []interface{}{"nginx:latest"}).
 		Dimension(paramFSVersion, []interface{}{"5", "6"}).
 		Dimension(paramZran, []interface{}{false, true}).
+		Dimension(paramBatch, []interface{}{"0", "0x100000"}).
 		Skip(
 			func(param *tool.DescartesItem) bool {
-				// Zran not work with rafs v6.
-				return param.GetString(paramFSVersion) == "5" && param.GetBool(paramZran)
+				// Zran and Batch not work with rafs v5.
+				if param.GetString(paramFSVersion) == "5" && (param.GetBool(paramZran) || param.GetString(paramBatch) != "0") {
+					return true
+				}
+
+				// Zran and Batch can not work together.
+				return param.GetBool(paramZran) && param.GetString(paramBatch) != "0"
 			})
 
 	return func() (name string, testCase test.Case) {
@@ -45,6 +52,7 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 		ctx := tool.DefaultContext(i.T)
 		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
 		ctx.Build.OCIRef = scenario.GetBool(paramZran)
+		ctx.Build.BatchSize = scenario.GetString(paramBatch)
 
 		image := i.prepareImage(i.T, scenario.GetString(paramImage))
 		return scenario.Str(), func(t *testing.T) {
@@ -64,6 +72,12 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 	if ctx.Build.OCIRef {
 		enableOCIRef = "--oci-ref"
 	}
+
+	enableBatchSize := ""
+	if ctx.Build.BatchSize != "0" {
+		enableBatchSize = "--batch-size " + ctx.Build.BatchSize
+	}
+
 	target := fmt.Sprintf("%s-nydus-%s", source, uuid.NewString())
 	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
 	logLevel := "--log-level warn"
@@ -78,8 +92,8 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 
 	// Convert image
 	convertCmd := fmt.Sprintf(
-		"%s %s convert --source %s --target %s %s %s --nydus-image %s --work-dir %s %s",
-		ctx.Binary.Nydusify, logLevel, source, target, fsVersion, enableOCIRef, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
+		"%s %s convert --source %s --target %s %s %s %s --nydus-image %s --work-dir %s %s",
+		ctx.Binary.Nydusify, logLevel, source, target, fsVersion, enableOCIRef, enableBatchSize, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
 	)
 	tool.RunWithoutOutput(t, convertCmd)
 

@@ -77,6 +77,7 @@ func (c *CompatibilityTestSuite) TestConvertImages() test.Generator {
 		ctx.Build.Compressor = "lz4_block"
 		ctx.Build.ChunkSize = "0x100000"
 		ctx.Build.OCIRef = false
+		ctx.Build.BatchSize = "0"
 
 		image := c.prepareImage(c.t, scenario.GetString(paramImage))
 		return scenario.Str(), func(t *testing.T) {
