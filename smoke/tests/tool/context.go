@@ -28,6 +28,7 @@ type BuildContext struct {
 	ChunkSize  string
 	OCIRef     bool
 	OCIRefGzip bool
+	BatchSize  string
 }
 
 type RuntimeContext struct {

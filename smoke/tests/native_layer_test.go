@@ -41,6 +41,7 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 		Dimension(paramCacheCompressed, []interface{}{true, false}).
 		Dimension(paramRafsMode, []interface{}{"direct", "cached"}).
 		Dimension(paramEnablePrefetch, []interface{}{false, true}).
+		Dimension(paramBatch, []interface{}{"0", "0x100000"}).
 		Skip(func(param *tool.DescartesItem) bool {
 
 			// rafs v6 not support cached mode nor dummy cache
@@ -50,6 +51,11 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 
 			// dummy cache not support prefetch
 			if param.GetString(paramCacheType) == "" && param.GetBool(paramEnablePrefetch) {
+				return true
+			}
+
+			// Batch not work with rafs v5.
+			if param.GetString(paramFSVersion) == "5" && param.GetString(paramBatch) != "0" {
 				return true
 			}
 
