@@ -406,6 +406,18 @@ impl FileCacheEntry {
                 .ok_or_else(|| einval!("failed to get ZRan context for chunk"))?;
             let blob_end = ctx.in_offset + ctx.in_len as u64;
             (blob_start, blob_end)
+        } else if self.is_batch {
+            let meta = self
+                .get_blob_meta_info()?
+                .ok_or_else(|| einval!("failed to get blob meta object"))?;
+
+            let (c_offset, _) = meta.get_compressed_info(chunks[0].id())?;
+            let blob_start = c_offset;
+
+            let (c_offset, c_size) = meta.get_compressed_info(chunks[chunks.len() - 1].id())?;
+            let blob_end = c_offset + c_size as u64;
+
+            (blob_start, blob_end)
         } else {
             let last = chunks.len() - 1;
             (chunks[0].compressed_offset(), chunks[last].compressed_end())
