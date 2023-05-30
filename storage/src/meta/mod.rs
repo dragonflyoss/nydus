@@ -943,7 +943,8 @@ impl BlobCompressionContext {
     }
 
     fn get_chunk_index(&self, addr: u64) -> Result<usize> {
-        self.chunk_info_array.get_chunk_index_nocheck(addr, false)
+        self.chunk_info_array
+            .get_chunk_index_nocheck(self, addr, false)
     }
 
     /// Get whether chunk at `chunk_index` is batch chunk.
@@ -1167,10 +1168,19 @@ impl BlobMetaChunkArray {
         }
     }
 
-    fn get_chunk_index_nocheck(&self, addr: u64, compressed: bool) -> Result<usize> {
+    fn get_chunk_index_nocheck(
+        &self,
+        state: &BlobCompressionContext,
+        addr: u64,
+        compressed: bool,
+    ) -> Result<usize> {
         match self {
-            BlobMetaChunkArray::V1(v) => Self::_get_chunk_index_nocheck(v, addr, compressed, false),
-            BlobMetaChunkArray::V2(v) => Self::_get_chunk_index_nocheck(v, addr, compressed, false),
+            BlobMetaChunkArray::V1(v) => {
+                Self::_get_chunk_index_nocheck(state, v, addr, compressed, false)
+            }
+            BlobMetaChunkArray::V2(v) => {
+                Self::_get_chunk_index_nocheck(state, v, addr, compressed, false)
+            }
         }
     }
 
@@ -1301,6 +1311,7 @@ impl BlobMetaChunkArray {
     }
 
     fn _get_chunk_index_nocheck<T: BlobMetaChunkInfo>(
+        state: &BlobCompressionContext,
         chunks: &[T],
         addr: u64,
         compressed: bool,
@@ -1319,8 +1330,9 @@ impl BlobMetaChunkArray {
             // - `mid < size`: `mid` is limited by `[left; right)` bound.
             let entry = &chunks[mid];
             if compressed {
-                start = entry.compressed_offset();
-                end = entry.compressed_end();
+                // Capabale of handling both batch and non-batch chunks.
+                let (c_offset, c_size) = state.get_compressed_info(mid)?;
+                (start, end) = (c_offset, c_offset + c_size as u64);
             } else {
                 start = entry.uncompressed_offset();
                 end = entry.uncompressed_end();
@@ -1331,7 +1343,12 @@ impl BlobMetaChunkArray {
             } else if end <= addr {
                 left = mid + 1;
             } else {
-                return Ok(mid);
+                // Find the first chunk in the batch.
+                if entry.is_batch() && entry.get_uncompressed_offset_in_batch_buf() > 0 {
+                    right = mid;
+                } else {
+                    return Ok(mid);
+                }
             }
 
             size = right - left;
@@ -1369,7 +1386,8 @@ impl BlobMetaChunkArray {
         batch_size: u64,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         let mut vec = Vec::with_capacity(512);
-        let mut index = Self::_get_chunk_index_nocheck(chunk_info_array, start, false, false)?;
+        let mut index =
+            Self::_get_chunk_index_nocheck(state, chunk_info_array, start, false, false)?;
         let entry = Self::get_chunk_entry(state, chunk_info_array, index)?;
         trace!(
             "get_chunks_uncompressed: entry {} {}",
@@ -1486,7 +1504,8 @@ impl BlobMetaChunkArray {
         prefetch: bool,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         let mut vec = Vec::with_capacity(512);
-        let mut index = Self::_get_chunk_index_nocheck(chunk_info_array, start, true, prefetch)?;
+        let mut index =
+            Self::_get_chunk_index_nocheck(state, chunk_info_array, start, true, prefetch)?;
         let entry = Self::get_chunk_entry(state, chunk_info_array, index)?;
 
         // Special handling of ZRan chunks

@@ -223,42 +223,42 @@ mod tests {
         assert_eq!(
             state
                 .chunk_info_array
-                .get_chunk_index_nocheck(0, false)
+                .get_chunk_index_nocheck(&state, 0, false)
                 .unwrap(),
             0
         );
         assert_eq!(
             state
                 .chunk_info_array
-                .get_chunk_index_nocheck(0x1fff, false)
+                .get_chunk_index_nocheck(&state, 0x1fff, false)
                 .unwrap(),
             0
         );
         assert_eq!(
             state
                 .chunk_info_array
-                .get_chunk_index_nocheck(0x100000, false)
+                .get_chunk_index_nocheck(&state, 0x100000, false)
                 .unwrap(),
             1
         );
         assert_eq!(
             state
                 .chunk_info_array
-                .get_chunk_index_nocheck(0x101fff, false)
+                .get_chunk_index_nocheck(&state, 0x101fff, false)
                 .unwrap(),
             1
         );
         state
             .chunk_info_array
-            .get_chunk_index_nocheck(0x2000, false)
+            .get_chunk_index_nocheck(&state, 0x2000, false)
             .unwrap_err();
         state
             .chunk_info_array
-            .get_chunk_index_nocheck(0xfffff, false)
+            .get_chunk_index_nocheck(&state, 0xfffff, false)
             .unwrap_err();
         state
             .chunk_info_array
-            .get_chunk_index_nocheck(0x102000, false)
+            .get_chunk_index_nocheck(&state, 0x102000, false)
             .unwrap_err();
     }
 
