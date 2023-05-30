@@ -182,6 +182,7 @@ impl FileCacheEntry {
     ) -> Result<Self> {
         let is_separate_meta = blob_info.has_feature(BlobFeatures::SEPARATE);
         let is_tarfs = blob_info.features().is_tarfs();
+        let is_batch = blob_info.has_feature(BlobFeatures::BATCH);
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
         let blob_id = blob_info.blob_id();
         let blob_meta_id = if is_separate_meta {
@@ -296,12 +297,13 @@ impl FileCacheEntry {
         };
 
         trace!(
-            "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, separate_meta {}, tarfs {}, zran {}",
+            "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, separate_meta {}, tarfs {}, batch {}, zran {}",
             mgr.cache_raw_data,
             is_direct_chunkmap,
             is_legacy_stargz,
             is_separate_meta,
             is_tarfs,
+            is_batch,
             is_zran,
         );
         Ok(FileCacheEntry {
@@ -326,6 +328,7 @@ impl FileCacheEntry {
             is_direct_chunkmap,
             is_legacy_stargz,
             is_tarfs,
+            is_batch,
             is_zran,
             dio_enabled: false,
             need_validation,

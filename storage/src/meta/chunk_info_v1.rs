@@ -148,8 +148,6 @@ mod tests {
     use std::sync::Arc;
 
     use nydus_utils::compress;
-    use nydus_utils::digest::RafsDigest;
-    use nydus_utils::filemap::FileMapState;
     use nydus_utils::metrics::BackendMetrics;
     use vmm_sys_util::tempfile::TempFile;
 
@@ -209,10 +207,6 @@ mod tests {
     #[test]
     fn test_get_chunk_index_with_hole() {
         let state = BlobCompressionContext {
-            blob_index: 0,
-            blob_features: 0,
-            compressed_size: 0,
-            uncompressed_size: 0,
             chunk_info_array: ManuallyDrop::new(BlobMetaChunkArray::V1(vec![
                 BlobChunkInfoV1Ondisk {
                     uncomp_info: u64::to_le(0x01ff_f000_0000_0000),
@@ -223,12 +217,7 @@ mod tests {
                     comp_info: u64::to_le(0x00ff_f000_0010_0000),
                 },
             ])),
-            chunk_digest_array: Default::default(),
-            zran_info_array: Default::default(),
-            zran_dict_table: Default::default(),
-            blob_meta_file_map: FileMapState::default(),
-            chunk_digest_file_map: FileMapState::default(),
-            chunk_digest_default: RafsDigest::default(),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -302,12 +291,7 @@ mod tests {
                     comp_info: u64::to_le(0x00ff_f000_0000_5000),
                 },
             ])),
-            chunk_digest_array: Default::default(),
-            zran_info_array: Default::default(),
-            zran_dict_table: Default::default(),
-            blob_meta_file_map: FileMapState::default(),
-            chunk_digest_file_map: FileMapState::default(),
-            chunk_digest_default: RafsDigest::default(),
+            ..Default::default()
         };
         let info = BlobCompressionContextInfo {
             state: Arc::new(state),
