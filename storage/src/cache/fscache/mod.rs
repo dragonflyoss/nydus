@@ -210,6 +210,7 @@ impl FileCacheEntry {
             .get_fscache_file()
             .ok_or_else(|| einval!("No fscache file associated with the blob_info"))?;
         let is_separate_meta = blob_info.has_feature(BlobFeatures::SEPARATE);
+        let is_batch = blob_info.has_feature(BlobFeatures::BATCH);
         let is_zran = blob_info.has_feature(BlobFeatures::ZRAN);
         let cache_cipher = blob_info.cipher();
         let is_cache_encrypted = cache_cipher.is_encryption_enabled();
@@ -283,6 +284,7 @@ impl FileCacheEntry {
             is_cache_encrypted,
             is_legacy_stargz: blob_info.is_legacy_stargz(),
             is_tarfs,
+            is_batch,
             is_zran,
             dio_enabled: true,
             need_validation,

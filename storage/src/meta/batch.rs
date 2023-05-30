@@ -45,6 +45,16 @@ impl BatchInflateContext {
         self.compressed_size = u32::to_le(compressed_size);
     }
 
+    /// Get compressed offset of the end of the whole batch chunk data.
+    pub fn compressed_end(&self) -> u64 {
+        self.compressed_offset() + self.compressed_size() as u64
+    }
+
+    /// Get uncompressed size of the whole batch chunk data.
+    pub fn uncompressed_batch_size(&self) -> u32 {
+        u32::from_le(self.uncompressed_batch_size)
+    }
+
     /// Convert to an immutable u8 slice.
     pub fn as_slice(&self) -> &[u8] {
         unsafe {

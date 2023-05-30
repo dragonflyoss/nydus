@@ -183,6 +183,11 @@ pub trait BlobCache: Send + Sync {
         false
     }
 
+    /// Check whether the blob is Batch based.
+    fn is_batch(&self) -> bool {
+        false
+    }
+
     /// Check whether need to validate the data chunk by digest value.
     fn need_validation(&self) -> bool;
 
@@ -288,7 +293,7 @@ pub trait BlobCache: Send + Sync {
         let offset = chunk.compressed_offset();
         let mut c_buf = None;
 
-        if self.is_zran() {
+        if self.is_zran() || self.is_batch() {
             return Err(enosys!("read_chunk_from_backend"));
         } else if chunk.is_compressed() {
             let c_size = if self.is_legacy_stargz() {
@@ -344,7 +349,12 @@ pub trait BlobCache: Send + Sync {
                 e
             })?;
             if ret != buffer.len() {
-                return Err(eother!("size of decompressed data doesn't match expected"));
+                return Err(einval!(format!(
+                    "size of decompressed data doesn't match expected, {} vs {}, raw_buffer: {}",
+                    ret,
+                    buffer.len(),
+                    raw_buffer.len()
+                )));
             }
         } else if raw_buffer.as_ptr() != buffer.as_ptr() {
             // raw_chunk and chunk may point to the same buffer, so only copy data when needed.

@@ -157,6 +157,8 @@ pub(crate) struct FileCacheEntry {
     pub(crate) is_legacy_stargz: bool,
     // The blob is for an RAFS filesystem in `TARFS` mode.
     pub(crate) is_tarfs: bool,
+    // The blob contains batch chunks.
+    pub(crate) is_batch: bool,
     // The blob is based on ZRan decompression algorithm.
     pub(crate) is_zran: bool,
     // True if direct IO is enabled for the `self.file`, supported for fscache only.
@@ -457,6 +459,10 @@ impl BlobCache for FileCacheEntry {
 
     fn is_legacy_stargz(&self) -> bool {
         self.is_legacy_stargz
+    }
+
+    fn is_batch(&self) -> bool {
+        self.is_batch
     }
 
     fn is_zran(&self) -> bool {
