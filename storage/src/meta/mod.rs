@@ -1587,6 +1587,7 @@ impl BlobMetaChunkArray {
         chunks: &[Arc<dyn BlobChunkInfo>],
         max_size: u64,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
+        // `batch_end` is only valid for non-batch chunk.
         let batch_end = chunks[0].compressed_offset() + max_size;
         let first_idx = chunks[0].id() as usize;
         let first_entry = Self::get_chunk_entry(state, chunk_info_array, first_idx)?;
@@ -1595,7 +1596,7 @@ impl BlobMetaChunkArray {
         let mut vec = Vec::with_capacity(128);
 
         // Special handling of ZRan chunks
-        if last_entry.is_zran() {
+        if first_entry.is_zran() {
             let first_zran_idx = first_entry.get_zran_index();
             let mut last_zran_idx = last_entry.get_zran_index();
             let mut index = first_idx;
@@ -1629,7 +1630,46 @@ impl BlobMetaChunkArray {
                 }
                 index += 1;
             }
+        } else if first_entry.is_batch() {
+            // Assert each entry in chunks is Batch chunk.
+
+            let first_batch_idx = first_entry.get_batch_index();
+            let last_batch_idx = last_entry.get_batch_index();
+            let mut index = first_idx;
+            if first_batch_idx != last_batch_idx {
+                return Err(einval!(
+                    "a single region cannot include multiple batch chunks"
+                ));
+            }
+
+            while index > 0 {
+                let entry = Self::get_chunk_entry(state, chunk_info_array, index - 1)?;
+                if !entry.is_batch() || entry.get_batch_index() != first_batch_idx {
+                    // Reach the previous non-batch chunk,
+                    // or reach the header chunk associated with the same Batch context.
+                    break;
+                } else {
+                    index -= 1;
+                }
+            }
+
+            for entry in &chunk_info_array[index..] {
+                if entry.validate(state).is_err() {
+                    return Err(einval!("invalid Batch compression information data"));
+                } else if !entry.is_batch() {
+                    return Err(einval!(
+                        "non-batch chunks cannot be inside the range of batch chunks"
+                    ));
+                } else if entry.get_batch_index() > last_batch_idx {
+                    return Ok(vec);
+                } else {
+                    vec.push(BlobMetaChunk::new(index, state));
+                }
+                index += 1;
+            }
         } else {
+            // Assert each entry in chunks is not Batch chunk.
+
             for idx in 0..chunks.len() - 1 {
                 let chunk = &chunks[idx];
                 let next = &chunks[idx + 1];
@@ -1653,7 +1693,9 @@ impl BlobMetaChunkArray {
                 if entry.validate(state).is_err() || entry.compressed_end() > batch_end {
                     break;
                 }
-                vec.push(BlobMetaChunk::new(last_idx, state));
+                if !entry.is_batch() {
+                    vec.push(BlobMetaChunk::new(last_idx, state));
+                }
                 last_idx += 1;
             }
         }

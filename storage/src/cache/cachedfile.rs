@@ -1010,14 +1010,15 @@ impl FileCacheEntry {
                 } else {
                     BlobIoTag::Internal
                 };
+
+                let (start, len) = if let Ok(Some(meta)) = self.get_blob_meta_info() {
+                    meta.get_compressed_info(chunk.id())?
+                } else {
+                    (chunk.compressed_offset(), chunk.compressed_size())
+                };
+
                 // NOTE: Only this request region can read more chunks from backend with user io.
-                state.push(
-                    RegionType::Backend,
-                    chunk.compressed_offset(),
-                    chunk.compressed_size(),
-                    tag,
-                    Some(chunk.clone()),
-                )?;
+                state.push(RegionType::Backend, start, len, tag, Some(chunk.clone()))?;
             }
         }
 
@@ -1099,7 +1100,8 @@ impl FileCacheEntry {
                         tag_set.insert(chunk.id());
                     }
                 }
-                region_hold = Region::with(region, v);
+
+                region_hold = Region::with(self, region, v)?;
                 for (idx, c) in region_hold.chunks.iter().enumerate() {
                     if tag_set.contains(&c.id()) {
                         region_hold.tags[idx] = true;
@@ -1453,16 +1455,30 @@ impl Region {
         }
     }
 
-    fn with(region: &Region, chunks: Vec<Arc<dyn BlobChunkInfo>>) -> Self {
+    fn with(
+        ctx: &FileCacheEntry,
+        region: &Region,
+        chunks: Vec<Arc<dyn BlobChunkInfo>>,
+    ) -> Result<Self> {
         assert!(!chunks.is_empty());
         let len = chunks.len();
-        let blob_address = chunks[0].compressed_offset();
-        let last = &chunks[len - 1];
-        let sz = last.compressed_offset() - blob_address;
-        assert!(sz < u32::MAX as u64);
-        let blob_len = sz as u32 + last.compressed_size();
 
-        Region {
+        let meta = ctx
+            .get_blob_meta_info()?
+            .ok_or_else(|| einval!("failed to get blob meta object"))?;
+        let (blob_address, blob_len) = if ctx.is_batch && meta.is_batch_chunk(chunks[0].id()) {
+            // Assert all chunks are in the same batch.
+            meta.get_compressed_info(chunks[0].id())?
+        } else {
+            let ba = chunks[0].compressed_offset();
+            let last = &chunks[len - 1];
+            let sz = last.compressed_offset() - ba;
+            assert!(sz < u32::MAX as u64);
+
+            (ba, sz as u32 + last.compressed_size())
+        };
+
+        Ok(Region {
             r#type: region.r#type,
             status: region.status,
             count: len as u32,
@@ -1471,7 +1487,7 @@ impl Region {
             blob_address,
             blob_len,
             seg: region.seg.clone(),
-        }
+        })
     }
 
     fn append(
