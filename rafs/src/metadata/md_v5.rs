@@ -27,7 +27,7 @@ impl RafsSuper {
         self.meta.sb_size = sb.sb_size();
         self.meta.chunk_size = sb.block_size();
         self.meta.flags = RafsSuperFlags::from_bits(sb.flags())
-            .ok_or_else(|| einval!(format!("invalid super flags {:x}", sb.flags())))?;
+            .ok_or_else(|| einval!(format!("invalid super flags 0x{:x}", sb.flags())))?;
         info!("RAFS v5 super block features: {}", self.meta.flags);
 
         self.meta.inodes_count = sb.inodes_count();
