@@ -13,7 +13,7 @@ jobs:
       matrix:
         arch: [amd64]
         fs_version: [5, 6]
-        branch: [stable/v2.2]
+        branch: ["u2.2-fix"]
     steps:
       - name: Set up Go
         uses: actions/setup-go@v3
@@ -43,6 +43,7 @@ jobs:
           ref: ${{ matrix.branch }}
       - name: Build nydus-rs
         run: |
+          git log -n 20 --pretty=oneline
           declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl")
           RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
           cargo install --version 0.2.1 cross
