@@ -1,9 +1,8 @@
 name: Integration Test
 
 on:
-  schedule:
-    # Do conversion every day at 00:03 clock UTC
-    - cron: "3 0 * * *"
+  pull_request:
+    branches: ["**", "stable/**"]
   workflow_dispatch:
 
 jobs:
@@ -14,7 +13,7 @@ jobs:
       matrix:
         arch: [amd64]
         fs_version: [5, 6]
-        branch: [master, stable/v2.1, stable/v2.2]
+        branch: [stable/v2.2]
     steps:
       - name: Set up Go
         uses: actions/setup-go@v3
