@@ -43,6 +43,7 @@ use crate::daemon::{
 use crate::fs_service::{FsBackendCollection, FsBackendMountCmd, FsService};
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
 use crate::{Error as NydusError, Result as NydusResult};
+use nydus_rafs::fs::FUSE_BUF_SIZE;
 
 #[derive(Serialize)]
 struct FuseOp {
@@ -121,6 +122,7 @@ impl FuseServer {
                     format!("failed to get fuse request from /dev/fuse, {}", e),
                 )
             })? {
+                FUSE_BUF_SIZE.store(writer.available_bytes() as u32, Ordering::Relaxed);
                 if let Err(e) =
                     self.server
                         .handle_message(reader, writer.into(), None, Some(metrics_hook))
