@@ -53,6 +53,7 @@ jobs:
           sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
           pwd
           ls -lh target/$RUST_TARGET/release
+          target/$RUST_TARGET/release/nydusd --version
       - name: Set up anchor file
         env:
           OSS_AK_ID: ${{ secrets.OSS_TEST_AK_ID }}
