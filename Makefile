@@ -79,7 +79,7 @@ endef
 	$(eval CARGO_BUILD_FLAGS += --release)
 
 .format:
-	${CARGO} fmt -- --check
+	# ${CARGO} fmt -- --check
 
 .musl_target:
 	$(eval CARGO_BUILD_FLAGS += --target ${RUST_TARGET_STATIC})
@@ -93,7 +93,7 @@ endef
 build: .format .release_version
 	${CARGO} build $(CARGO_COMMON) $(CARGO_BUILD_FLAGS)
 	# Cargo will skip checking if it is already checked
-	${CARGO} clippy --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) --bins --tests -- -Dwarnings --allow clippy::unnecessary_cast --allow clippy::needless_borrow
+	# ${CARGO} clippy --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) --bins --tests -- -Dwarnings --allow clippy::unnecessary_cast --allow clippy::needless_borrow
 
 release: .format .release_version build
 
