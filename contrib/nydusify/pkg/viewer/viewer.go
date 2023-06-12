@@ -62,23 +62,17 @@ func New(opt Opt) (*FsViewer, error) {
 	}
 
 	mode := "cached"
-	digestValidate := true
-	if opt.FsVersion == "6" {
-		mode = "direct"
-		digestValidate = false
-	}
 
 	nydusdConfig := tool.NydusdConfig{
-		NydusdPath:     opt.NydusdPath,
-		BackendType:    opt.BackendType,
-		BackendConfig:  opt.BackendConfig,
-		BootstrapPath:  filepath.Join(opt.WorkDir, "nydus_bootstrap"),
-		ConfigPath:     filepath.Join(opt.WorkDir, "fs/nydusd_config.json"),
-		BlobCacheDir:   filepath.Join(opt.WorkDir, "fs/nydus_blobs"),
-		MountPath:      opt.MountPath,
-		APISockPath:    filepath.Join(opt.WorkDir, "fs/nydus_api.sock"),
-		Mode:           mode,
-		DigestValidate: digestValidate,
+		NydusdPath:    opt.NydusdPath,
+		BackendType:   opt.BackendType,
+		BackendConfig: opt.BackendConfig,
+		BootstrapPath: filepath.Join(opt.WorkDir, "nydus_bootstrap"),
+		ConfigPath:    filepath.Join(opt.WorkDir, "fs/nydusd_config.json"),
+		BlobCacheDir:  filepath.Join(opt.WorkDir, "fs/nydus_blobs"),
+		MountPath:     opt.MountPath,
+		APISockPath:   filepath.Join(opt.WorkDir, "fs/nydus_api.sock"),
+		Mode:          mode,
 	}
 
 	fsViewer := &FsViewer{
@@ -158,6 +152,18 @@ func (fsViewer *FsViewer) MountImage() error {
 // It includes two steps, pull the boostrap of the image, and mount the
 // image under specified path.
 func (fsViewer *FsViewer) View(ctx context.Context) error {
+	if err := fsViewer.view(ctx); err != nil {
+		if utils.RetryWithHTTP(err) {
+			fsViewer.Parser.Remote.MaybeWithHTTP(err)
+			return fsViewer.view(ctx)
+		}
+		return err
+
+	}
+	return nil
+}
+
+func (fsViewer *FsViewer) view(ctx context.Context) error {
 	// Pull bootstrap
 	targetParsed, err := fsViewer.Parser.Parse(ctx)
 	if err != nil {
@@ -166,6 +172,18 @@ func (fsViewer *FsViewer) View(ctx context.Context) error {
 	err = fsViewer.PullBootstrap(ctx, targetParsed)
 	if err != nil {
 		return errors.Wrap(err, "failed to pull Nydus image bootstrap")
+	}
+
+	// Adjust nydused parameters(DigestValidate) according to rafs format
+	nydusManifest := parser.FindNydusBootstrapDesc(&targetParsed.NydusImage.Manifest)
+	if nydusManifest != nil {
+		v := utils.GetNydusFsVersionOrDefault(nydusManifest.Annotations, utils.V5)
+		if v == utils.V5 {
+			// Digest validate is not currently supported for v6,
+			// but v5 supports it. In order to make the check more sufficient,
+			// this validate needs to be turned on for v5.
+			fsViewer.NydusdConfig.DigestValidate = true
+		}
 	}
 
 	err = fsViewer.MountImage()
