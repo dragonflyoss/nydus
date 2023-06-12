@@ -741,18 +741,15 @@ func main() {
 						skipVerify = true
 					}
 					scheme := "http"
-					// if rule.PlainHTTP {
-					// 	scheme = "http"
-					// }
 
-					backendConfig_struct := RegistryBackendConfig{scheme, host, repo, auth, skipVerify}
+
+					backendConfigStruct := RegistryBackendConfig{scheme, host, repo, auth, skipVerify}
 					bytes, err := json.Marshal(backendConfig_struct)
 					if err != nil {
 						return errors.Wrap(err, "parse registry backend config")
 					}
 					backendConfig = string(bytes)
 
-					//return errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
