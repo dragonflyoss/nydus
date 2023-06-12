@@ -742,7 +742,7 @@ func main() {
 
 
 					backendConfigStruct := RegistryBackendConfig{scheme, host, repo, auth, skipVerify}
-					bytes, err := json.Marshal(backendConfig_struct)
+					bytes, err := json.Marshal(backendConfigStruct)
 					if err != nil {
 						return errors.Wrap(err, "parse registry backend config")
 					}
