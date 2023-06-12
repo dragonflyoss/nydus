@@ -26,6 +26,11 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/viewer"
+
+	"encoding/base64"
+	"encoding/json"
+	dockerconfig "github.com/docker/cli/cli/config"
+	"github.com/docker/distribution/reference"
 )
 
 var (
@@ -169,6 +174,14 @@ func getPrefetchPatterns(c *cli.Context) (string, error) {
 	}
 
 	return patterns, nil
+}
+
+type RegistryBackendConfig struct {
+	Scheme     string `json:"scheme"`
+	Host       string `json:"host"`
+	Repo       string `json:"repo"`
+	Auth       string `json:"auth,omitempty"`
+	SkipVerify bool   `json:"skip_verify,omitempty"`
 }
 
 func main() {
@@ -650,7 +663,7 @@ func main() {
 				&cli.StringFlag{
 					Name:     "backend-type",
 					Value:    "",
-					Required: true,
+					Required: false,
 					Usage:    "Type of storage backend, possible values: 'oss', 's3'",
 					EnvVars:  []string{"BACKEND_TYPE"},
 				},
@@ -701,7 +714,45 @@ func main() {
 					return err
 				} else if backendConfig == "" {
 					// TODO get auth from docker configuration file
-					return errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
+					// parsed, err := reference.ParseNormalizedNamed(rule.Target)
+
+					backendType = "registry"
+					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
+
+					if err != nil {
+						return err
+					}
+
+					host := reference.Domain(parsed)
+					repo := reference.Path(parsed)
+
+					config := dockerconfig.LoadDefaultConfigFile(os.Stderr)
+					authConfig, err := config.GetAuthConfig(host)
+					if err != nil {
+						return errors.Wrap(err, "get docker registry auth config")
+					}
+
+					var auth string
+					if authConfig.Username != "" && authConfig.Password != "" {
+						auth = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", authConfig.Username, authConfig.Password)))
+					}
+					skipVerify := false
+					if c.Bool("target-insecure") {
+						skipVerify = true
+					}
+					scheme := "http"
+					// if rule.PlainHTTP {
+					// 	scheme = "http"
+					// }
+
+					backendConfig_struct := RegistryBackendConfig{scheme, host, repo, auth, skipVerify}
+					bytes, err := json.Marshal(backendConfig_struct)
+					if err != nil {
+						return errors.Wrap(err, "parse registry backend config")
+					}
+					backendConfig = string(bytes)
+
+					//return errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
