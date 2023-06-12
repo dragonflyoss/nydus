@@ -224,6 +224,28 @@ func (rule *FilesystemRule) mountSourceImage() (*tool.Image, error) {
 	return image, nil
 }
 
+func NewRegistryBackendConfig(parsed reference.Named) (RegistryBackendConfig, error) {
+
+	backendConfig := RegistryBackendConfig{
+		Scheme: "https",
+		Host:   reference.Domain(parsed),
+		Repo:   reference.Path(parsed),
+	}
+
+	config := dockerconfig.LoadDefaultConfigFile(os.Stderr)
+	authConfig, err := config.GetAuthConfig(backendConfig.Host)
+	if err != nil {
+		return backendConfig, errors.Wrap(err, "get docker registry auth config")
+	}
+	var auth string
+	if authConfig.Username != "" && authConfig.Password != "" {
+		auth = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", authConfig.Username, authConfig.Password)))
+	}
+	backendConfig.Auth = auth
+
+	return backendConfig, nil
+}
+
 func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
 	logrus.Infof("Mounting Nydus image to %s", rule.NydusdConfig.MountPath)
 
@@ -240,32 +262,23 @@ func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
 		return nil, err
 	}
 
-	host := reference.Domain(parsed)
-	repo := reference.Path(parsed)
 	if rule.NydusdConfig.BackendType == "" {
 		rule.NydusdConfig.BackendType = "registry"
 
 		if rule.NydusdConfig.BackendConfig == "" {
-			config := dockerconfig.LoadDefaultConfigFile(os.Stderr)
-			authConfig, err := config.GetAuthConfig(host)
+			backendConfig, err := NewRegistryBackendConfig(parsed)
 			if err != nil {
-				return nil, errors.Wrap(err, "get docker registry auth config")
+				return nil, errors.Wrap(err, "failed to parse backend configuration")
 			}
 
-			var auth string
-			if authConfig.Username != "" && authConfig.Password != "" {
-				auth = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", authConfig.Username, authConfig.Password)))
-			}
-			skipVerify := false
 			if rule.TargetInsecure {
-				skipVerify = true
-			}
-			scheme := "https"
-			if rule.PlainHTTP {
-				scheme = "http"
+				backendConfig.SkipVerify = true
 			}
 
-			backendConfig := RegistryBackendConfig{scheme, host, repo, auth, skipVerify}
+			if rule.PlainHTTP {
+				backendConfig.Scheme = "http"
+			}
+
 			bytes, err := json.Marshal(backendConfig)
 			if err != nil {
 				return nil, errors.Wrap(err, "parse registry backend config")
