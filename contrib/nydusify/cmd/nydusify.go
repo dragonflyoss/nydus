@@ -713,8 +713,6 @@ func main() {
 				if err != nil {
 					return err
 				} else if backendConfig == "" {
-					// TODO get auth from docker configuration file
-					// parsed, err := reference.ParseNormalizedNamed(rule.Target)
 
 					backendType = "registry"
 					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
