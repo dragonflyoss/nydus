@@ -740,7 +740,6 @@ func main() {
 					}
 					scheme := "http"
 
-
 					backendConfigStruct := RegistryBackendConfig{scheme, host, repo, auth, skipVerify}
 					bytes, err := json.Marshal(backendConfigStruct)
 					if err != nil {
