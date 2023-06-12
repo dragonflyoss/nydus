@@ -18,8 +18,7 @@ import (
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-
-	// "github.com/urfave/cli/v2"
+	"github.com/urfave/cli/v2"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/rule"
