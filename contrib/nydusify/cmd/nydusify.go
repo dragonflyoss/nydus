@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -17,11 +18,13 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/reference/docker"
+	"github.com/docker/distribution/reference"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/rule"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics"
@@ -629,8 +632,13 @@ func main() {
 				&cli.StringFlag{
 					Name:     "backend-type",
 					Value:    "",
+<<<<<<< HEAD
 					Required: true,
 					Usage:    "Type of storage backend, possible values: 'registry', 'oss'",
+=======
+					Required: false,
+					Usage:    "Type of storage backend, possible values: 'oss', 's3'",
+>>>>>>> 66761f2d... Nydusify: fix some bug about the subcommand mount of nydusify
 					EnvVars:  []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -679,8 +687,26 @@ func main() {
 				if err != nil {
 					return err
 				} else if backendConfig == "" {
-					// TODO get auth from docker configuration file
-					return errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
+
+					backendType = "registry"
+					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
+					if err != nil {
+						return err
+					}
+
+					backendConfigStruct, err := rule.NewRegistryBackendConfig(parsed)
+					if err != nil {
+						return errors.Wrap(err, "parse registry backend configuration")
+					}
+
+					backendConfigStruct.SkipVerify = c.Bool("target-insecure")
+
+					bytes, err := json.Marshal(backendConfigStruct)
+					if err != nil {
+						return errors.Wrap(err, "marshal registry backend configuration")
+					}
+					backendConfig = string(bytes)
+
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
