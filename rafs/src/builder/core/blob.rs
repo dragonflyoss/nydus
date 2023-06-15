@@ -184,7 +184,11 @@ impl Blob {
             header.set_separate_blob(true);
         };
 
-        let mut compressor = compress::Algorithm::Zstd;
+        let mut compressor = if ctx.conversion_type.is_to_ref() {
+            compress::Algorithm::Zstd
+        } else {
+            ctx.compressor
+        };
         let (compressed_data, compressed) = compress::compress(ci_data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
         if !compressed {
