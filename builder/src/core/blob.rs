@@ -7,6 +7,7 @@ use std::io::Write;
 use std::slice;
 
 use anyhow::{Context, Result};
+use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{toc, BlobMetaChunkArray};
 use nydus_utils::compress;
@@ -15,10 +16,9 @@ use sha2::digest::Digest;
 
 use super::layout::BlobLayout;
 use super::node::Node;
-use crate::builder::{
+use crate::{
     ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType, Feature, Tree,
 };
-use crate::metadata::RAFS_MAX_CHUNK_SIZE;
 
 /// Generator for RAFS data blob.
 pub(crate) struct Blob {}

@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, ensure, Result};
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::utils::alloc_buf;
 use nydus_utils::digest::RafsDigest;
@@ -25,8 +27,6 @@ use super::{
     ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapManager, BuildContext,
     BuildOutput, ChunkDict, ConversionType, Features, Tree, TreeNode, WhiteoutSpec,
 };
-use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::{RafsSuper, RafsVersion};
 
 const DEFAULT_COMPACT_BLOB_SIZE: usize = 10 * 1024 * 1024;
 const DEFAULT_MAX_COMPACT_SIZE: usize = 100 * 1024 * 1024;

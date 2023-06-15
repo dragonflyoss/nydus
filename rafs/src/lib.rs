@@ -50,8 +50,6 @@ use crate::metadata::{RafsInodeExt, RafsSuper};
 
 #[cfg(feature = "virtio-fs")]
 pub mod blobfs;
-#[cfg(feature = "builder")]
-pub mod builder;
 pub mod fs;
 pub mod metadata;
 #[cfg(test)]

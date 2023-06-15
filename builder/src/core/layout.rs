@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::ops::Deref;
 
 use super::node::Node;
-use crate::builder::{Overlay, Prefetch, Tree, TreeNode};
+use crate::{Overlay, Prefetch, Tree, TreeNode};
 
 #[derive(Clone)]
 pub struct BlobLayout {}

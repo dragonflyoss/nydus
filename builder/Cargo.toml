@@ -1,38 +1,32 @@
 [package]
-name = "nydus-rafs"
-version = "0.3.0"
-description = "The RAFS filesystem format for Nydus Image Service"
+name = "nydus-builder"
+version = "0.1.0"
+description = "Nydus Image Builder"
 authors = ["The Nydus Developers"]
-license = "Apache-2.0 OR BSD-3-Clause"
+license = "Apache-2.0"
 homepage = "https://nydus.dev/"
 repository = "https://github.com/dragonflyoss/image-service"
 edition = "2018"
 
 [dependencies]
 anyhow = "1.0.35"
-arc-swap = "1.5"
-bitflags = "1.2.1"
-lazy_static = "1.4.0"
+base64 = "0.13.0"
+hex = "0.4.3"
+indexmap = "1"
 libc = "0.2"
 log = "0.4"
 nix = "0.24"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
-vm-memory = "0.9"
-fuse-backend-rs = "^0.10.3"
+sha2 = "0.10.2"
+tar = "0.4.38"
+vmm-sys-util = "0.10.0"
+xattr = "0.2.3"
 
 nydus-api = { version = "0.2", path = "../api" }
+nydus-rafs = { version = "0.3", path = "../rafs" }
 nydus-storage = { version = "0.6", path = "../storage", features = ["backend-localfs"] }
 nydus-utils = { version = "0.4", path = "../utils" }
-
-[dev-dependencies]
-vmm-sys-util = "0.10"
-assert_matches = "1.5.0"
-
-[features]
-fusedev = ["fuse-backend-rs/fusedev"]
-virtio-fs = ["fuse-backend-rs/virtiofs", "vm-memory/backend-mmap"]
-vhost-user-fs = ["fuse-backend-rs/vhost-user-fs"]
 
 [package.metadata.docs.rs]
 all-features = true

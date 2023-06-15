@@ -10,13 +10,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use nydus_api::ConfigV2;
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::layout::v5::RafsV5ChunkInfo;
+use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig};
 use nydus_storage::device::BlobInfo;
 use nydus_utils::digest::{self, RafsDigest};
 
-use crate::builder::Tree;
-use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::layout::v5::RafsV5ChunkInfo;
-use crate::metadata::{RafsSuper, RafsSuperConfig};
+use crate::Tree;
 
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct DigestWithBlobIndex(pub RafsDigest, pub u32);
@@ -237,7 +237,7 @@ pub fn parse_chunk_dict_arg(arg: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::RafsVersion;
+    use nydus_rafs::metadata::RafsVersion;
     use nydus_utils::{compress, digest};
     use std::path::PathBuf;
 

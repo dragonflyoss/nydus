@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use nydus_api::ConfigV2;
-use nydus_rafs::builder::{ChunkDict, HashChunkDict, Tree};
+use nydus_builder::{ChunkDict, HashChunkDict, Tree};
 use nydus_rafs::metadata::RafsSuper;
 use nydus_utils::digest;
 use serde::Serialize;

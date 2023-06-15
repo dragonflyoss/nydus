@@ -17,6 +17,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::inode::InodeWrapper;
+use nydus_rafs::metadata::layout::v6::EROFS_INODE_FLAT_PLAIN;
+use nydus_rafs::metadata::layout::RafsXAttrs;
+use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::compress;
@@ -24,14 +29,9 @@ use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
 use sha2::digest::Digest;
 
-use crate::builder::{
+use crate::{
     ArtifactWriter, BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay,
 };
-use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::inode::InodeWrapper;
-use crate::metadata::layout::v6::EROFS_INODE_FLAT_PLAIN;
-use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::{Inode, RafsVersion};
 
 /// Filesystem root path for Unix OSs.
 const ROOT_PATH_NAME: &[u8] = &[b'/'];

@@ -11,13 +11,13 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use hex::FromHex;
 use nydus_api::ConfigV2;
+use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 
 use super::{
     ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
     BuildOutput, ChunkSource, ConversionType, Overlay, Tree,
 };
-use crate::metadata::{RafsSuper, RafsVersion};
 
 /// Struct to generate the merged RAFS bootstrap for an image from per layer RAFS bootstraps.
 ///

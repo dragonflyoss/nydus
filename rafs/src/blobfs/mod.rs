@@ -27,8 +27,7 @@ use std::thread;
 use fuse_backend_rs::api::{filesystem::*, BackendFileSystem, VFS_MAX_INO};
 use fuse_backend_rs::{passthrough::Config as PassthroughConfig, passthrough::PassthroughFs};
 use nix::NixPath;
-use nydus_api::ConfigV2;
-use nydus_error::einval;
+use nydus_api::{einval, ConfigV2};
 use nydus_storage::device::BlobPrefetchRequest;
 use serde::Deserialize;
 
@@ -309,7 +308,6 @@ impl BackendFileSystem for BlobFs {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::metadata::{RafsMode, RafsSuper};
     use crate::{RafsIoRead, RafsIoReader, RafsIoWrite, RafsIterator};
     use std::fs::OpenOptions;

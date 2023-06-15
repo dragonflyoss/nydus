@@ -15,6 +15,11 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use nix::NixPath;
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
+use nydus_rafs::metadata::layout::v5::RafsV5ChunkInfo;
+use nydus_rafs::metadata::layout::RafsXAttrs;
+use nydus_rafs::metadata::RafsVersion;
 use nydus_storage::device::BlobChunkFlags;
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::compact::makedev;
@@ -31,11 +36,6 @@ use super::core::node::{ChunkSource, Node, NodeChunk, NodeInfo};
 use super::{
     build_bootstrap, dump_bootstrap, finalize_blob, Bootstrap, Builder, TarBuilder, Tree, TreeNode,
 };
-use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
-use crate::metadata::layout::v5::RafsV5ChunkInfo;
-use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::RafsVersion;
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]
 struct TocEntry {
@@ -906,7 +906,7 @@ impl Builder for StargzBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{ArtifactStorage, ConversionType, Features, Prefetch, WhiteoutSpec};
+    use crate::{ArtifactStorage, ConversionType, Features, Prefetch, WhiteoutSpec};
 
     #[ignore]
     #[test]

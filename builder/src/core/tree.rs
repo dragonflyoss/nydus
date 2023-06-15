@@ -22,16 +22,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::inode::InodeWrapper;
+use nydus_rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
+use nydus_rafs::metadata::{Inode, RafsInodeExt, RafsSuper};
 use nydus_utils::{lazy_drop, root_tracer, timing_tracer};
 
 use super::node::{ChunkSource, Node, NodeChunk, NodeInfo};
 use super::overlay::{Overlay, WhiteoutType};
-use crate::builder::core::overlay::OVERLAYFS_WHITEOUT_OPAQUE;
-use crate::builder::{BuildContext, ChunkDict};
-use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::inode::InodeWrapper;
-use crate::metadata::layout::{bytes_to_os_str, RafsXAttrs};
-use crate::metadata::{Inode, RafsInodeExt, RafsSuper};
+use crate::core::overlay::OVERLAYFS_WHITEOUT_OPAQUE;
+use crate::{BuildContext, ChunkDict};
 
 /// Type alias for tree internal node.
 pub type TreeNode = Arc<Mutex<Node>>;
@@ -382,8 +382,8 @@ impl<'a> MetadataTreeBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::RafsVersion;
-    use storage::RAFS_DEFAULT_CHUNK_SIZE;
+    use nydus_rafs::metadata::RafsVersion;
+    use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
     use vmm_sys_util::tempdir::TempDir;
     use vmm_sys_util::tempfile::TempFile;
 

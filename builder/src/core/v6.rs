@@ -11,22 +11,22 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use anyhow::{bail, ensure, Context, Result};
-use nydus_utils::{root_tracer, round_down, round_up, timing_tracer};
-use storage::device::BlobFeatures;
-
-use super::chunk_dict::DigestWithBlobIndex;
-use super::node::Node;
-use crate::builder::{Bootstrap, BootstrapContext, BuildContext, ConversionType, Tree};
-use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::layout::v6::{
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::layout::v6::{
     align_offset, calculate_nid, new_v6_inode, RafsV6BlobTable, RafsV6Device, RafsV6Dirent,
     RafsV6InodeChunkAddr, RafsV6InodeChunkHeader, RafsV6OndiskInode, RafsV6SuperBlock,
     RafsV6SuperBlockExt, EROFS_BLOCK_BITS_9, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512,
     EROFS_DEVTABLE_OFFSET, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
     EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE, EROFS_SUPER_BLOCK_SIZE, EROFS_SUPER_OFFSET,
 };
-use crate::metadata::RafsStore;
-use crate::RafsIoWrite;
+use nydus_rafs::metadata::RafsStore;
+use nydus_rafs::RafsIoWrite;
+use nydus_storage::device::BlobFeatures;
+use nydus_utils::{root_tracer, round_down, round_up, timing_tracer};
+
+use super::chunk_dict::DigestWithBlobIndex;
+use super::node::Node;
+use crate::{Bootstrap, BootstrapContext, BuildContext, ConversionType, Tree};
 
 const WRITE_PADDING_DATA: [u8; 4096] = [0u8; 4096];
 const V6_BLOCK_SEG_ALIGNMENT: u64 = 0x8_0000;
@@ -899,9 +899,9 @@ impl Bootstrap {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{ArtifactStorage, BootstrapContext, Overlay};
-    use crate::metadata::layout::v6::{EROFS_INODE_CHUNK_BASED, EROFS_INODE_SLOT_SIZE};
-    use crate::metadata::{RafsVersion, RAFS_DEFAULT_CHUNK_SIZE};
+    use crate::{ArtifactStorage, BootstrapContext, Overlay};
+    use nydus_rafs::metadata::layout::v6::{EROFS_INODE_CHUNK_BASED, EROFS_INODE_SLOT_SIZE};
+    use nydus_rafs::metadata::{RafsVersion, RAFS_DEFAULT_CHUNK_SIZE};
     use std::fs::File;
     use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
 
