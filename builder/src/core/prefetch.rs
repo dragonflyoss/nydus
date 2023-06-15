@@ -9,11 +9,11 @@ use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Error, Result};
 use indexmap::IndexMap;
+use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
+use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
 use super::node::Node;
-use crate::builder::core::tree::TreeNode;
-use crate::metadata::layout::v5::RafsV5PrefetchTable;
-use crate::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
+use crate::core::tree::TreeNode;
 
 /// Filesystem data prefetch policy.
 #[derive(Clone, Copy, Debug, PartialEq)]

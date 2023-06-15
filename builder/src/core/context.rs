@@ -22,6 +22,15 @@ use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
 
 use nydus_api::ConfigV2;
+use nydus_rafs::metadata::chunk::ChunkWrapper;
+use nydus_rafs::metadata::layout::v5::RafsV5BlobTable;
+use nydus_rafs::metadata::layout::v6::{
+    RafsV6BlobTable, EROFS_BLOCK_SIZE_4096, EROFS_INODE_SLOT_SIZE,
+};
+use nydus_rafs::metadata::layout::RafsBlobTable;
+use nydus_rafs::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
+use nydus_rafs::metadata::{RafsSuperFlags, RafsVersion};
+use nydus_rafs::RafsIoWrite;
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::toc::{TocEntryList, TocLocation};
@@ -33,17 +42,8 @@ use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down, BufReaderInfo};
 
 use super::node::ChunkSource;
-use crate::builder::core::tree::TreeNode;
-use crate::builder::{
-    ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolicy, WhiteoutSpec,
-};
-use crate::metadata::chunk::ChunkWrapper;
-use crate::metadata::layout::v5::RafsV5BlobTable;
-use crate::metadata::layout::v6::{RafsV6BlobTable, EROFS_BLOCK_SIZE_4096, EROFS_INODE_SLOT_SIZE};
-use crate::metadata::layout::RafsBlobTable;
-use crate::metadata::{Inode, RAFS_DEFAULT_CHUNK_SIZE};
-use crate::metadata::{RafsSuperFlags, RafsVersion};
-use crate::RafsIoWrite;
+use crate::core::tree::TreeNode;
+use crate::{ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolicy, WhiteoutSpec};
 
 // TODO: select BufWriter capacity by performance testing.
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;

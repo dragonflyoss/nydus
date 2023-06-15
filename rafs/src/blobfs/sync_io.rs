@@ -14,7 +14,7 @@ use fuse_backend_rs::api::filesystem::{
     ZeroCopyWriter,
 };
 use fuse_backend_rs::transport::FsCacheReqHandler;
-use nydus_error::eacces;
+use nydus_api::eacces;
 use nydus_utils::{round_down, round_up};
 
 use super::*;
@@ -381,8 +381,8 @@ impl FileSystem for BlobFs {
         }
         if foffset.checked_add(len).is_none() || foffset + len > u64::MAX - MAPPING_UNIT_SIZE {
             return Err(einval!(format!(
-                "blobfs: blob_id {:?}, offset {:?} is larger than size {:?}",
-                blob_id, offset, size
+                "blobfs: invalid offset 0x{:x} and len 0x{:x}",
+                foffset, len
             )));
         }
 

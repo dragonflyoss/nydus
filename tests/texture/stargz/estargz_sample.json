@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "name": "bin/",
+      "type": "dir",
+      "modtime": "2019-08-20T10:30:43Z",
+      "mode": 16877,
+      "NumLink": 0
+    },
+    {
+      "name": "bin/busybox",
+      "type": "reg",
+      "size": 833104,
+      "modtime": "2019-06-12T17:52:45Z",
+      "mode": 33261,
+      "offset": 126,
+      "NumLink": 0,
+      "digest": "sha256:8b7c559b8cccca0d30d01bc4b5dc944766208a53d18a03aa8afe97252207521f",
+      "chunkDigest": "sha256:8b7c559b8cccca0d30d01bc4b5dc944766208a53d18a03aa8afe97252207521f"
+    },
+    {
+      "name": "bin/busybox2",
+      "type": "hardlink",
+      "linkName": "bin/busybox",
+      "modtime": "2019-06-12T17:52:45Z",
+      "mode": 33261
+    },
+    {
+      "name": "lib/ld-musl-x86_64.so.1",
+      "type": "reg",
+      "size": 580144,
+      "modtime": "2019-08-07T07:15:30Z",
+      "mode": 33261,
+      "offset": 512427,
+      "NumLink": 0,
+      "digest": "sha256:45c6ee3bd1862697eab8058ec0e462f5a760927331c709d7d233da8ffee40e9e",
+      "chunkDigest": "sha256:45c6ee3bd1862697eab8058ec0e462f5a760927331c709d7d233da8ffee40e9e"
+    },
+    {
+      "name": ".prefetch.landmark",
+      "type": "reg",
+      "size": 1,
+      "offset": 886633,
+      "NumLink": 0,
+      "digest": "sha256:dc0e9c3658a1a3ed1ec94274d8b19925c93e1abb7ddba294923ad9bde30f8cb8",
+      "chunkDigest": "sha256:dc0e9c3658a1a3ed1ec94274d8b19925c93e1abb7ddba294923ad9bde30f8cb8"
+    }
+  ]
+}  

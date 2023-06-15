@@ -25,6 +25,10 @@ use std::sync::Mutex;
 use anyhow::{anyhow, bail, Context, Result};
 use tar::{Archive, Entry, EntryType, Header};
 
+use nydus_rafs::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
+use nydus_rafs::metadata::layout::v5::RafsV5Inode;
+use nydus_rafs::metadata::layout::RafsXAttrs;
+use nydus_rafs::metadata::RafsVersion;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::ZranContextGenerator;
 use nydus_storage::RAFS_MAX_CHUNKS_PER_BLOB;
@@ -41,10 +45,6 @@ use super::core::context::{
 use super::core::node::{Node, NodeInfo};
 use super::core::tree::Tree;
 use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder, TarBuilder};
-use crate::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
-use crate::metadata::layout::v5::RafsV5Inode;
-use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::RafsVersion;
 
 enum TarReader {
     File(File),
@@ -594,7 +594,7 @@ impl Builder for TarballBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{ArtifactStorage, Features, Prefetch, WhiteoutSpec};
+    use crate::{ArtifactStorage, Features, Prefetch, WhiteoutSpec};
     use nydus_utils::{compress, digest};
 
     #[test]

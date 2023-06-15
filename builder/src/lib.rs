@@ -3,20 +3,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Builder to create RAFS filesystems from directories and tarballs.
+
+#[macro_use]
+extern crate log;
+
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use nydus_rafs::metadata::inode::InodeWrapper;
+use nydus_rafs::metadata::layout::RafsXAttrs;
+use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::meta::toc;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{compress, digest, root_tracer, timing_tracer};
 use sha2::Digest;
 
-use crate::builder::core::node::{Node, NodeInfo};
-use crate::metadata::inode::InodeWrapper;
-use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::{Inode, RafsVersion};
+use self::core::node::{Node, NodeInfo};
 
 pub use self::compact::BlobCompactor;
 pub use self::core::bootstrap::Bootstrap;
