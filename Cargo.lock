@@ -1234,7 +1234,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-storage"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "arc-swap",
  "base64 0.13.1",
