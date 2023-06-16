@@ -18,7 +18,7 @@ log = "0.4.17"
 fuse-backend-rs = "^0.10.3"
 nydus-api = { version = "0.3", path = "../api" }
 nydus-rafs = { version = "0.3.0", path = "../rafs" }
-nydus-storage = { version = "0.6.2", path = "../storage" }
+nydus-storage = { version = "0.6.3", path = "../storage" }
 
 [features]
 baekend-s3 = ["nydus-storage/backend-s3"]

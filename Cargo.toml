@@ -60,7 +60,7 @@ nydus-api = { version = "0.3.0", path = "api", features = ["handler"] }
 nydus-builder = { version = "0.1.0", path = "builder" }
 nydus-rafs = { version = "0.3.0", path = "rafs" }
 nydus-service = { version = "0.2.0", path = "service", features = ["block-device"] }
-nydus-storage = { version = "0.6.2", path = "storage" }
+nydus-storage = { version = "0.6.3", path = "storage" }
 nydus-utils = { version = "0.4.2", path = "utils" }
 
 vhost = { version = "0.5.0", features = ["vhost-user-slave"], optional = true }
