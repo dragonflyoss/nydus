@@ -1,6 +1,6 @@
 [package]
 name = "nydus-storage"
-version = "0.6.2"
+version = "0.6.3"
 description = "Storage subsystem for Nydus Image Service"
 authors = ["The Nydus Developers"]
 license = "Apache-2.0 OR BSD-3-Clause"
@@ -35,7 +35,7 @@ vm-memory = "0.9"
 fuse-backend-rs = "^0.10.3"
 gpt = { version = "3.0.0", optional = true }
 
-nydus-api = { version = "0.2", path = "../api" }
+nydus-api = { version = "0.3", path = "../api" }
 nydus-utils = { version = "0.4", path = "../utils", features = ["encryption", "zran"] }
 sha1 = { version = "0.10.5", optional = true }
 
