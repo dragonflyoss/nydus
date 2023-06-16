@@ -1143,7 +1143,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-rafs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "arc-swap",
