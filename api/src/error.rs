@@ -2,26 +2,29 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::env;
 use std::fmt::Debug;
 
-use log::error;
-
 /// Display error messages with line number, file path and optional backtrace.
-pub fn make_error(err: std::io::Error, raw: impl Debug, file: &str, line: u32) -> std::io::Error {
-    if cfg!(debug_assertions) {
-        if let Ok(val) = env::var("RUST_BACKTRACE") {
+pub fn make_error(
+    err: std::io::Error,
+    _raw: impl Debug,
+    _file: &str,
+    _line: u32,
+) -> std::io::Error {
+    #[cfg(all(debug_assertions, feature = "error-backtrace"))]
+    {
+        if let Ok(val) = std::env::var("RUST_BACKTRACE") {
             if val.trim() != "0" {
-                error!("Stack:\n{:?}", backtrace::Backtrace::new());
-                error!("Error:\n\t{:?}\n\tat {}:{}", raw, file, line);
+                log::error!("Stack:\n{:?}", backtrace::Backtrace::new());
+                log::error!("Error:\n\t{:?}\n\tat {}:{}", _raw, _file, _line);
                 return err;
             }
         }
+        log::error!(
+            "Error:\n\t{:?}\n\tat {}:{}\n\tnote: enable `RUST_BACKTRACE=1` env to display a backtrace",
+            _raw, _file, _line
+        );
     }
-    error!(
-        "Error:\n\t{:?}\n\tat {}:{}\n\tnote: enable `RUST_BACKTRACE=1` env to display a backtrace",
-        raw, file, line
-    );
     err
 }
 
