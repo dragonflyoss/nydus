@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fmt, thread};
 
 use arc_swap::ArcSwapOption;
+use base64::Engine;
 use reqwest::blocking::Response;
 pub use reqwest::header::HeaderMap;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH};
@@ -763,12 +764,14 @@ impl Registry {
 
     fn get_authorization_info(auth: &Option<String>) -> Result<(String, String)> {
         if let Some(auth) = &auth {
-            let auth: Vec<u8> = base64::decode(auth.as_bytes()).map_err(|e| {
-                einval!(format!(
-                    "Invalid base64 encoded registry auth config: {:?}",
-                    e
-                ))
-            })?;
+            let auth: Vec<u8> = base64::engine::general_purpose::STANDARD
+                .decode(auth.as_bytes())
+                .map_err(|e| {
+                    einval!(format!(
+                        "Invalid base64 encoded registry auth config: {:?}",
+                        e
+                    ))
+                })?;
             let auth = std::str::from_utf8(&auth).map_err(|e| {
                 einval!(format!(
                     "Invalid utf-8 encoded registry auth config: {:?}",

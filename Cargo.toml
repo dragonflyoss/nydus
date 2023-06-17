@@ -31,7 +31,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-base64 = "0.13.0"
+base64 = "0.21"
 clap = { version = "4.0.18", features = ["derive", "cargo"] }
 fuse-backend-rs = "0.10.1"
 hex = "0.4.3"

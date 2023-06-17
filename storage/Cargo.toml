@@ -10,26 +10,35 @@ edition = "2018"
 
 [dependencies]
 arc-swap = "1.5"
-base64 = { version = "0.13.0", optional = true }
+base64 = { version = "0.21", optional = true }
 bitflags = "1.2.1"
 hex = "0.4.3"
 hmac = { version = "0.12.1", optional = true }
 http = { version = "0.2.8", optional = true }
 httpdate = { version = "1.0", optional = true }
-hyper = {version = "0.14.11", optional =  true}
-hyperlocal = {version = "0.8.0", optional = true}
+hyper = { version = "0.14.11", optional = true }
+hyperlocal = { version = "0.8.0", optional = true }
 lazy_static = "1.4.0"
 leaky-bucket = "0.12.1"
 libc = "0.2"
 log = "0.4.8"
 nix = "0.24"
-reqwest = { version = "0.11.14", features = ["blocking", "json"], optional = true }
+reqwest = { version = "0.11.14", features = [
+  "blocking",
+  "json",
+], optional = true }
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 sha2 = { version = "0.10.2", optional = true }
 tar = "0.4.38"
 time = { version = "0.3.14", features = ["formatting"], optional = true }
-tokio = { version = "1.19.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.19.0", features = [
+  "macros",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
 url = { version = "2.1.1", optional = true }
 vm-memory = "0.9"
 fuse-backend-rs = "0.10"
@@ -55,4 +64,8 @@ backend-http-proxy = ["hyper", "hyperlocal", "http", "reqwest", "url"]
 
 [package.metadata.docs.rs]
 all-features = true
-targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin"]
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+]
