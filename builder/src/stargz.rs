@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
+use base64::Engine;
 use nix::NixPath;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::{InodeWrapper, RafsInodeFlags, RafsV6Inode};
@@ -620,12 +621,14 @@ impl StargzBuilder {
         if entry.has_xattr() {
             for (name, value) in entry.xattrs.iter() {
                 flags |= RafsInodeFlags::XATTR;
-                let value = base64::decode(value).with_context(|| {
-                    format!(
-                        "stargz: failed to parse xattr {:?} for entry {:?}",
-                        path, name
-                    )
-                })?;
+                let value = base64::engine::general_purpose::STANDARD
+                    .decode(value)
+                    .with_context(|| {
+                        format!(
+                            "stargz: failed to parse xattr {:?} for entry {:?}",
+                            path, name
+                        )
+                    })?;
                 xattrs.add(OsString::from(name), value)?;
             }
         }

@@ -8,6 +8,7 @@ use std::io::Result;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use base64::Engine;
 use hmac::{Hmac, Mac};
 use reqwest::header::HeaderMap;
 use reqwest::Method;
@@ -99,7 +100,7 @@ impl ObjectStorageState for OssState {
             .chain_update(data.as_bytes())
             .finalize()
             .into_bytes();
-        let signature = base64::encode(&hmac);
+        let signature = base64::engine::general_purpose::STANDARD.encode(&hmac);
 
         let authorization = format!("OSS {}:{}", self.access_key_id, signature);
 
