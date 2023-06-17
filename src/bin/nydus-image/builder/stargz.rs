@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use nydus_rafs::metadata::chunk::ChunkWrapper;
@@ -561,12 +562,14 @@ impl StargzTreeBuilder {
         if entry.has_xattr() {
             for (name, value) in entry.xattrs.iter() {
                 flags |= RafsV5InodeFlags::XATTR;
-                let value = base64::decode(value).with_context(|| {
-                    format!(
-                        "parse xattr name {:?} of file {:?} failed",
-                        entry_path, name
-                    )
-                })?;
+                let value = base64::engine::general_purpose::STANDARD
+                    .decode(value)
+                    .with_context(|| {
+                        format!(
+                            "parse xattr name {:?} of file {:?} failed",
+                            entry_path, name
+                        )
+                    })?;
                 xattrs.add(OsString::from(name), value)?;
             }
         }
