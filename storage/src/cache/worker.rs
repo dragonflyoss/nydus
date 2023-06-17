@@ -9,7 +9,6 @@ use std::sync::{Arc, Once};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use leaky_bucket::RateLimiter;
 use nydus_api::PrefetchConfigV2;
 use nydus_utils::async_helper::with_runtime;
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
@@ -19,7 +18,6 @@ use tokio::sync::Semaphore;
 
 use crate::cache::{BlobCache, BlobIoRange};
 use crate::factory::ASYNC_RUNTIME;
-use crate::RAFS_MAX_CHUNK_SIZE;
 
 /// Configuration information for asynchronous workers.
 pub(crate) struct AsyncPrefetchConfig {
@@ -30,6 +28,7 @@ pub(crate) struct AsyncPrefetchConfig {
     /// Window size to merge/amplify requests.
     pub merging_size: usize,
     /// Network bandwidth for prefetch, in unit of Bytes and Zero means no rate limit is set.
+    #[allow(unused)]
     pub bandwidth_rate: u32,
 }
 
@@ -83,10 +82,12 @@ pub(crate) struct AsyncWorkerMgr {
     prefetch_sema: Arc<Semaphore>,
     prefetch_channel: Arc<Channel<AsyncPrefetchMessage>>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
+    #[allow(unused)]
     prefetch_delayed: AtomicU64,
     prefetch_inflight: AtomicU32,
     prefetch_consumed: AtomicUsize,
-    prefetch_limiter: Option<Arc<RateLimiter>>,
+    #[cfg(feature = "prefetch-rate-limit")]
+    prefetch_limiter: Option<Arc<leaky_bucket::RateLimiter>>,
 }
 
 impl AsyncWorkerMgr {
@@ -95,14 +96,15 @@ impl AsyncWorkerMgr {
         metrics: Arc<BlobcacheMetrics>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
     ) -> Result<Self> {
+        #[cfg(feature = "prefetch-rate-limit")]
         let prefetch_limiter = match prefetch_config.bandwidth_rate {
             0 => None,
             v => {
                 // If the given value is less than maximum blob chunk size, it exceeds burst size of the
                 // limiter ending up with throttling all throughput, so ensure bandwidth is bigger than
                 // the maximum chunk size.
-                let limit = std::cmp::max(RAFS_MAX_CHUNK_SIZE as usize, v as usize);
-                let limiter = RateLimiter::builder()
+                let limit = std::cmp::max(crate::RAFS_MAX_CHUNK_SIZE as usize, v as usize);
+                let limiter = leaky_bucket::RateLimiter::builder()
                     .initial(limit)
                     .refill(limit / 10)
                     .interval(Duration::from_millis(100))
@@ -126,6 +128,7 @@ impl AsyncWorkerMgr {
             prefetch_delayed: AtomicU64::new(0),
             prefetch_inflight: AtomicU32::new(0),
             prefetch_consumed: AtomicUsize::new(0),
+            #[cfg(feature = "prefetch-rate-limit")]
             prefetch_limiter,
         })
     }
@@ -291,10 +294,11 @@ impl AsyncWorkerMgr {
         }
     }
 
-    async fn handle_prefetch_rate_limit(&self, msg: &AsyncPrefetchMessage) {
+    async fn handle_prefetch_rate_limit(&self, _msg: &AsyncPrefetchMessage) {
+        #[cfg(feature = "prefetch-rate-limit")]
         // Allocate network bandwidth budget
         if let Some(limiter) = &self.prefetch_limiter {
-            let size = match msg {
+            let size = match _msg {
                 AsyncPrefetchMessage::BlobPrefetch(blob_cache, _offset, size, _) => {
                     if blob_cache.is_prefetch_active() {
                         *size
@@ -465,6 +469,7 @@ mod tests {
             .is_err());
     }
 
+    #[cfg(feature = "prefetch-rate-limit")]
     #[test]
     fn test_worker_mgr_rate_limiter() {
         let tmpdir = TempDir::new().unwrap();
