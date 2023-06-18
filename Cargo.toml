@@ -100,7 +100,7 @@ block-nbd = [
 ]
 
 backend-http-proxy = ["nydus-storage/backend-http-proxy"]
-backend-localdisk = ["nydus-storage/backend-localdisk"]
+backend-localdisk = ["nydus-storage/backend-localdisk", "nydus-storage/backend-localdisk-gpt"]
 backend-oss = ["nydus-storage/backend-oss"]
 backend-registry = ["nydus-storage/backend-registry"]
 backend-s3 = ["nydus-storage/backend-s3"]

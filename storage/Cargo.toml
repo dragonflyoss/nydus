@@ -45,7 +45,8 @@ tar = "0.4.38"
 regex = "1.7.0"
 
 [features]
-backend-localdisk = ["gpt"]
+backend-localdisk = []
+backend-localdisk-gpt = ["gpt", "backend-localdisk"]
 backend-localfs = []
 backend-oss = ["base64", "httpdate", "hmac", "sha1", "reqwest", "url"]
 backend-registry = ["base64", "reqwest", "url"]
