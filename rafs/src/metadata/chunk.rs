@@ -15,7 +15,7 @@ use nydus_utils::digest::RafsDigest;
 
 use crate::metadata::cached_v5::CachedChunkInfoV5;
 use crate::metadata::direct_v5::DirectChunkInfoV5;
-use crate::metadata::direct_v6::{DirectChunkInfoV6, PlainChunkInfoV6};
+use crate::metadata::direct_v6::{DirectChunkInfoV6, TarfsChunkInfoV6};
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::{RafsStore, RafsVersion};
 use crate::RafsIoWrite;
@@ -352,7 +352,7 @@ impl ChunkWrapper {
                 *self = Self::V6(to_rafs_v5_chunk_info(cki_v6));
             } else if let Some(cki_v6) = cki.as_any().downcast_ref::<DirectChunkInfoV6>() {
                 *self = Self::V6(to_rafs_v5_chunk_info(cki_v6));
-            } else if let Some(cki_v6) = cki.as_any().downcast_ref::<PlainChunkInfoV6>() {
+            } else if let Some(cki_v6) = cki.as_any().downcast_ref::<TarfsChunkInfoV6>() {
                 *self = Self::V6(to_rafs_v5_chunk_info(cki_v6));
             } else if let Some(cki_v5) = cki.as_any().downcast_ref::<CachedChunkInfoV5>() {
                 *self = Self::V5(to_rafs_v5_chunk_info(cki_v5));
@@ -370,7 +370,7 @@ fn as_blob_v5_chunk_info(cki: &dyn BlobChunkInfo) -> &dyn BlobV5ChunkInfo {
         cki_v6
     } else if let Some(cki_v6) = cki.as_any().downcast_ref::<DirectChunkInfoV6>() {
         cki_v6
-    } else if let Some(cki_v6) = cki.as_any().downcast_ref::<PlainChunkInfoV6>() {
+    } else if let Some(cki_v6) = cki.as_any().downcast_ref::<TarfsChunkInfoV6>() {
         cki_v6
     } else if let Some(cki_v5) = cki.as_any().downcast_ref::<CachedChunkInfoV5>() {
         cki_v5
