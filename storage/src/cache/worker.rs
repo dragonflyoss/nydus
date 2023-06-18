@@ -52,7 +52,7 @@ pub(crate) enum AsyncPrefetchMessage {
     #[cfg_attr(not(test), allow(unused))]
     /// Ping for test.
     Ping,
-    #[cfg_attr(not(test), allow(unused))]
+    #[allow(unused)]
     RateLimiter(u64),
 }
 

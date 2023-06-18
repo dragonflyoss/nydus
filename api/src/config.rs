@@ -443,6 +443,9 @@ pub struct LocalDiskConfig {
     /// Mounted block device path or original localdisk image file path.
     #[serde(default)]
     pub device_path: String,
+    /// Disable discover blob objects by scanning GPT table.
+    #[serde(default)]
+    pub disable_gpt: bool,
 }
 
 /// Configuration information for localfs storage backend.
