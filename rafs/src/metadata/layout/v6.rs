@@ -161,17 +161,18 @@ impl RafsV6SuperBlock {
                 meta_size
             )));
         }
-        if meta_size & (EROFS_BLOCK_SIZE_4096 - 1) != 0 {
+        let block_size = if self.s_blkszbits == EROFS_BLOCK_BITS_9 {
+            EROFS_BLOCK_SIZE_512
+        } else {
+            EROFS_BLOCK_SIZE_4096
+        };
+        if meta_size & (block_size - 1) != 0 {
             return Err(einval!(format!(
                 "invalid Rafs v6 metadata size: bootstrap size {} is not aligned",
                 meta_size
             )));
         }
-        let meta_addr = if self.s_blkszbits == EROFS_BLOCK_BITS_9 {
-            u32::from_le(self.s_meta_blkaddr) as u64 * EROFS_BLOCK_SIZE_512
-        } else {
-            u32::from_le(self.s_meta_blkaddr) as u64 * EROFS_BLOCK_SIZE_4096
-        };
+        let meta_addr = u32::from_le(self.s_meta_blkaddr) as u64 * block_size;
         if meta_addr > meta_size {
             return Err(einval!(format!(
                 "invalid Rafs v6 meta block address 0x{:x}, meta file size 0x{:x}",
