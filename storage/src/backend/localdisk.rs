@@ -13,9 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
-use gpt;
 use nix::sys::uio;
-
 use nydus_api::LocalDiskConfig;
 use nydus_utils::metrics::BackendMetrics;
 
@@ -23,8 +21,6 @@ use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 use crate::utils::{readv, MemSliceCursor};
 
 type LocalDiskResult<T> = std::result::Result<T, LocalDiskError>;
-
-const LOCALDISK_BLOB_ID_LEN: usize = 32;
 
 /// Error codes related to localdisk storage backend.
 #[derive(Debug)]
@@ -48,40 +44,44 @@ impl From<LocalDiskError> for BackendError {
     }
 }
 
-/// Each LocalDiskPartition corresponds to a partition on the disk
 #[derive(Debug)]
-struct LocalDiskPartition {
-    // The blob id corresponding to the partition
-    blob_id: String,
+struct LocalDiskBlob {
     // The file descriptor of the disk
     device_fd: i32,
     // Start offset of the partition
-    base_offset: u64,
-    // Last offset of the partition
-    last_offset: u64,
+    blob_offset: u64,
     // Length of the partition
-    length: u64,
+    blob_length: u64,
+    // The identifier for the corresponding blob.
+    blob_id: String,
     // Metrics collector.
     metrics: Arc<BackendMetrics>,
 }
 
-impl BlobReader for LocalDiskPartition {
+impl BlobReader for LocalDiskBlob {
     fn blob_size(&self) -> BackendResult<u64> {
-        Ok(self.length)
+        Ok(self.blob_length)
     }
 
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        let actual_offset = self.base_offset + offset;
-
-        debug!(
-            "localdisk blob reading: offset={}, size={}, from={}",
-            actual_offset,
-            buf.len(),
-            self.blob_id,
+        let msg = format!(
+            "localdisk: invalid offset 0x{:x}, base 0x{:x}, length 0x{:x}",
+            offset, self.blob_offset, self.blob_length
         );
+        if offset > self.blob_length {
+            return Err(LocalDiskError::ReadBlob(msg).into());
+        }
+        let actual_offset = self
+            .blob_offset
+            .checked_add(offset)
+            .ok_or(LocalDiskError::ReadBlob(msg))?;
+        let sz = std::cmp::min(self.blob_length - offset, buf.len() as u64) as usize;
 
-        uio::pread(self.device_fd, buf, actual_offset as i64).map_err(|e| {
-            let msg = format!("failed to read data from blob {}, {}", self.blob_id, e);
+        uio::pread(self.device_fd, &mut buf[..sz], actual_offset as i64).map_err(|e| {
+            let msg = format!(
+                "localdisk: failed to read data from blob {}, {}",
+                self.blob_id, e
+            );
             LocalDiskError::ReadBlob(msg).into()
         })
     }
@@ -92,27 +92,39 @@ impl BlobReader for LocalDiskPartition {
         offset: u64,
         max_size: usize,
     ) -> BackendResult<usize> {
+        let msg = format!(
+            "localdisk: invalid offset 0x{:x}, base 0x{:x}, length 0x{:x}",
+            offset, self.blob_offset, self.blob_length
+        );
+        if offset > self.blob_length {
+            return Err(LocalDiskError::ReadBlob(msg).into());
+        }
+        let actual_offset = self
+            .blob_offset
+            .checked_add(offset)
+            .ok_or(LocalDiskError::ReadBlob(msg))?;
+
         let mut c = MemSliceCursor::new(bufs);
         let mut iovec = c.consume(max_size);
-
-        let actual_offset = self.base_offset + offset;
-
         let mut len = 0;
         for buf in bufs {
             len += buf.len();
         }
 
         // Guarantees that reads do not exceed the size of the blob
-        if len as u64 > self.length {
+        if offset.checked_add(len as u64).is_none() || offset + len as u64 > self.blob_length {
             let msg = format!(
-                "failed to read data from blob {}, this read exceeds the blob size",
-                self.blob_id
+                "localdisk: invalid offset 0x{:x}, base 0x{:x}, length 0x{:x}",
+                offset, self.blob_offset, self.blob_length
             );
             return Err(LocalDiskError::ReadBlob(msg).into());
         }
 
         readv(self.device_fd, &mut iovec, actual_offset).map_err(|e| {
-            let msg = format!("failed to read data from blob {}, {}", self.blob_id, e);
+            let msg = format!(
+                "localdisk: failed to read data from blob {}, {}",
+                self.blob_id, e
+            );
             LocalDiskError::ReadBlob(msg).into()
         })
     }
@@ -128,138 +140,153 @@ pub struct LocalDisk {
     device_file: File,
     // The disk device path specified by the user
     device_path: String,
+    // Blobs are discovered by scanning GPT or not.
+    is_gpt_mode: bool,
     // Metrics collector.
     metrics: Arc<BackendMetrics>,
     // Hashmap to map blob id to disk entry.
-    entries: RwLock<HashMap<String, Arc<LocalDiskPartition>>>,
+    entries: RwLock<HashMap<String, Arc<LocalDiskBlob>>>,
 }
 
 impl LocalDisk {
     pub fn new(config: &LocalDiskConfig, id: Option<&str>) -> Result<LocalDisk> {
-        let id = id.ok_or_else(|| einval!("LocalDisk requires blob_id"))?;
-        let path = config.device_path.clone();
-
-        if path.is_empty() {
-            error!("device path is required");
-            return Err(einval!("device path is required"));
-        }
-
-        let path_buf = Path::new(&path).to_path_buf().canonicalize().map_err(|e| {
-            error!("failed to parse path {}: {:?}", path, e);
-            LocalDiskError::BlobFile(format!("invalid file path {}, {}", path, e));
-            e
+        let id = id.ok_or_else(|| einval!("localDisk: argument `id` is empty"))?;
+        let path = &config.device_path;
+        let path_buf = Path::new(path).to_path_buf().canonicalize().map_err(|e| {
+            einval!(format!(
+                "localdisk: invalid disk device path {}, {}",
+                path, e
+            ))
         })?;
-
-        let file = OpenOptions::new().read(true).open(&path_buf).map_err(|e| {
-            error!("failed to open localdisk image at {}: {:?}", path, e);
-            LocalDiskError::BlobFile(format!("failed to open localdisk image at {}, {}", path, e));
-            e
+        let device_file = OpenOptions::new().read(true).open(&path_buf).map_err(|e| {
+            einval!(format!(
+                "localdisk: can not open disk device at {}, {}",
+                path, e
+            ))
         })?;
-
-        let local_disk = LocalDisk {
-            device_file: file,
+        let mut local_disk = LocalDisk {
+            device_file,
             device_path: path.clone(),
+            is_gpt_mode: false,
             metrics: BackendMetrics::new(id, "localdisk"),
             entries: RwLock::new(HashMap::new()),
         };
 
-        local_disk.init().map_err(|e| {
-            error!("load localdisk image failed at {}: {:?}", path, e);
-            LocalDiskError::BlobFile(format!("load localdisk image failed at {}: {}", path, e));
-            e
-        })?;
+        local_disk.scan_blobs_by_gpt()?;
 
         Ok(local_disk)
     }
 
-    pub fn init(&self) -> Result<()> {
-        let mut table_guard = self.entries.write().unwrap();
+    fn get_blob(&self, blob_id: &str) -> LocalDiskResult<Arc<dyn BlobReader>> {
+        // Don't expect poisoned lock here.
+        if let Some(entry) = self.entries.read().unwrap().get(blob_id) {
+            Ok(entry.clone())
+        } else {
+            self.search_blob_from_gpt(blob_id)
+        }
+    }
+}
 
+#[cfg(feature = "backend-localdisk-gpt")]
+impl LocalDisk {
+    // Disk names in GPT tables cannot store full 64-byte blob ids, so we should truncate them to 32 bytes.
+    fn truncate_blob_id(blob_id: &str) -> Option<&str> {
+        const LOCALDISK_BLOB_ID_LEN: usize = 32;
+        if blob_id.len() >= LOCALDISK_BLOB_ID_LEN {
+            let new_blob_id = &blob_id[0..LOCALDISK_BLOB_ID_LEN];
+            Some(new_blob_id)
+        } else {
+            None
+        }
+    }
+
+    fn search_blob_from_gpt(&self, blob_id: &str) -> LocalDiskResult<Arc<dyn BlobReader>> {
+        if self.is_gpt_mode {
+            if let Some(localdisk_blob_id) = LocalDisk::truncate_blob_id(blob_id) {
+                // Don't expect poisoned lock here.
+                if let Some(entry) = self.entries.read().unwrap().get(localdisk_blob_id) {
+                    return Ok(entry.clone());
+                }
+            }
+        }
+
+        let msg = format!("localdisk: can not find such blob: {}", blob_id);
+        Err(LocalDiskError::ReadBlob(msg))
+    }
+
+    fn scan_blobs_by_gpt(&mut self) -> Result<()> {
         // Open disk image.
         let cfg = gpt::GptConfig::new().writable(false);
-        let disk = cfg.open(self.device_path.clone())?;
+        let disk = cfg.open(&self.device_path)?;
         let partitions = disk.partitions();
         let sector_size = gpt::disk::DEFAULT_SECTOR_SIZE;
         info!(
-            "Localdisk backend initialized at {}, has {} patitions, GUID: {}",
+            "Localdisk initializing storage backend for device {} with {} partitions, GUID: {}",
             self.device_path,
             partitions.len(),
             disk.guid()
         );
 
+        let mut table_guard = self.entries.write().unwrap();
         for (k, v) in partitions {
             let length = v.bytes_len(sector_size)?;
             let base_offset = v.bytes_start(sector_size)?;
             if base_offset.checked_add(length).is_none() {
-                let msg = format!("partition {} ends with an invalid offset", v.part_guid);
-                return Err(eio!(msg));
+                let msg = format!(
+                    "localdisk: partition {} with invalid offset and length",
+                    v.part_guid
+                );
+                return Err(einval!(msg));
             };
-            let last_offset = base_offset + length;
             let guid = v.part_guid;
+            let mut is_gpt_mode = false;
             let name = if v.part_type_guid == gpt::partition_types::BASIC {
-                v.name.clone() // Compatible with old versions of localdisk image
+                is_gpt_mode = true;
+                // Compatible with old versions of localdisk image
+                v.name.clone()
             } else {
-                v.name.clone() + guid.to_simple().to_string().as_str() // The 64-byte blob_id is stored in two parts
+                // The 64-byte blob_id is stored in two parts
+                v.name.clone() + guid.to_simple().to_string().as_str()
             };
 
             if name.is_empty() {
-                let msg = format!("partition {} does not record an blob id", v.part_guid);
-                return Err(eio!(msg));
+                let msg = format!("localdisk: partition {} has empty blob id", v.part_guid);
+                return Err(einval!(msg));
             }
 
-            let partition = Arc::new(LocalDiskPartition {
+            let partition = Arc::new(LocalDiskBlob {
                 blob_id: name.clone(),
                 device_fd: self.device_file.as_raw_fd(),
-                base_offset,
-                last_offset,
-                length,
+                blob_offset: base_offset,
+                blob_length: length,
                 metrics: self.metrics.clone(),
             });
 
             debug!(
-                "Localdisk partition {} initialized, blob id: {}, offset from {} to {}, length {}",
-                k,
-                partition.blob_id,
-                partition.base_offset,
-                partition.last_offset,
-                partition.length
+                "Localdisk partition {} initialized, blob id: {}, offset {}, length {}",
+                k, partition.blob_id, partition.blob_offset, partition.blob_length
             );
             table_guard.insert(name, partition);
+            if is_gpt_mode {
+                self.is_gpt_mode = true;
+            }
         }
 
         Ok(())
     }
+}
 
-    // Disk names in GPT tables cannot store full 64-byte blob ids, so we should truncate them to 32 bytes.
-    fn truncate_blob_id(blob_id: &str) -> LocalDiskResult<&str> {
-        if blob_id.len() >= LOCALDISK_BLOB_ID_LEN {
-            let new_blob_id = &blob_id[0..LOCALDISK_BLOB_ID_LEN];
-            Ok(new_blob_id)
-        } else {
-            let msg = format!("invalid blob_id: {}", blob_id);
-            Err(LocalDiskError::BlobFile(msg))
-        }
+#[cfg(not(feature = "backend-localdisk-gpt"))]
+impl LocalDisk {
+    fn search_blob_from_gpt(&self, blob_id: &str) -> LocalDiskResult<Arc<dyn BlobReader>> {
+        Err(LocalDiskError::ReadBlob(format!(
+            "can not find such blob: {}, this image might be corrupted",
+            blob_id
+        )))
     }
 
-    #[allow(clippy::mutex_atomic)]
-    fn get_blob(&self, blob_id: &str) -> LocalDiskResult<Arc<dyn BlobReader>> {
-        // Try to read the full length blob_id from the hashMap, if that doesn't work, read the older version's truncated blob_id.
-        let localdisk_blob_id = if self.entries.read().unwrap().contains_key(blob_id) {
-            blob_id
-        } else {
-            LocalDisk::truncate_blob_id(blob_id)?
-        };
-
-        // Don't expect poisoned lock here.
-        if let Some(entry) = self.entries.read().unwrap().get(localdisk_blob_id) {
-            Ok(entry.clone())
-        } else {
-            let msg = format!(
-                "can not find such blob: {}, this image might be corrupted",
-                blob_id
-            );
-            Err(LocalDiskError::ReadBlob(msg))
-        }
+    fn scan_blobs_by_gpt(&mut self) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -298,6 +325,7 @@ mod tests {
         assert!(LocalDisk::new(&config, None).is_err());
     }
 
+    #[cfg(feature = "backend-localdisk-gpt")]
     #[test]
     fn test_truncate_blob_id() {
         let guid = "50ad3c8243e0a08ecdebde0ef8afcc6f2abca44498ad15491acbe58c83acb66f";
