@@ -10,7 +10,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/json"
 	"fmt"
+	"io"
 	"io"
 	"os"
 	"runtime"
@@ -18,14 +20,17 @@ import (
 
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/docker/distribution/reference"
+	"github.com/docker/distribution/reference"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/rule"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/rule"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/packer"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/viewer"
@@ -245,6 +250,8 @@ func main() {
 					Name:    "backend-type",
 					Value:   "",
 					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
+					Value:   "",
+					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
 					EnvVars: []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -317,7 +324,16 @@ func main() {
 
 				&cli.BoolFlag{
 					Name:    "merge-platform",
+					Name:    "merge-platform",
 					Value:   false,
+					Usage:   "Generate an OCI image index with both OCI and Nydus manifests for the image",
+					EnvVars: []string{"MERGE_PLATFORM"},
+					Aliases: []string{"multi-platform"},
+				},
+				&cli.BoolFlag{
+					Name:  "all-platforms",
+					Value: false,
+					Usage: "Convert images for all platforms, conflicts with --platform",
 					Usage:   "Generate an OCI image index with both OCI and Nydus manifests for the image",
 					EnvVars: []string{"MERGE_PLATFORM"},
 					Aliases: []string{"multi-platform"},
@@ -331,10 +347,25 @@ func main() {
 					Name:  "platform",
 					Value: "linux/" + runtime.GOARCH,
 					Usage: "Convert images for specific platforms, for example: 'linux/amd64,linux/arm64'",
+					Usage: "Convert images for specific platforms, for example: 'linux/amd64,linux/arm64'",
 				},
 				&cli.BoolFlag{
 					Name:    "oci-ref",
+					Name:    "oci-ref",
 					Value:   false,
+					Usage:   "Convert to OCI-referenced nydus zran image",
+					EnvVars: []string{"OCI_REF"},
+				},
+				&cli.BoolFlag{
+					Name:    "oci",
+					Value:   false,
+					Usage:   "Convert Docker media types to OCI media types",
+					EnvVars: []string{"OCI"},
+				},
+				&cli.BoolFlag{
+					Name:   "docker-v2-format",
+					Value:  false,
+					Hidden: true,
 					Usage:   "Convert to OCI-referenced nydus zran image",
 					EnvVars: []string{"OCI_REF"},
 				},
@@ -352,6 +383,8 @@ func main() {
 				&cli.StringFlag{
 					Name:        "fs-version",
 					Required:    false,
+					Value:       "6",
+					DefaultText: "V6 nydus image format",
 					Value:       "6",
 					DefaultText: "V6 nydus image format",
 					Usage:       "Nydus image format version number, possible values: 5, 6",
@@ -373,6 +406,7 @@ func main() {
 					Name:    "prefetch-dir",
 					Value:   "",
 					Usage:   "Specify an absolute path within the image for prefetch",
+					Usage:   "Specify an absolute path within the image for prefetch",
 					EnvVars: []string{"PREFETCH_DIR"},
 				},
 				&cli.BoolFlag{
@@ -389,8 +423,11 @@ func main() {
 				},
 				&cli.StringFlag{
 					Name:    "fs-chunk-size",
+					Name:    "fs-chunk-size",
 					Value:   "0x100000",
 					Usage:   "size of nydus image data chunk, must be power of two and between 0x1000-0x100000, [default: 0x100000]",
+					EnvVars: []string{"FS_CHUNK_SIZE"},
+					Aliases: []string{"chunk-size"},
 					EnvVars: []string{"FS_CHUNK_SIZE"},
 					Aliases: []string{"chunk-size"},
 				},
@@ -416,10 +453,12 @@ func main() {
 				}
 
 				backendType, backendConfig, err := getBackendConfig(c, false)
+				backendType, backendConfig, err := getBackendConfig(c, false)
 				if err != nil {
 					return err
 				}
 
+				cacheRef, err := getCacheReference(c, targetRef)
 				cacheRef, err := getCacheReference(c, targetRef)
 				if err != nil {
 					return err
@@ -440,10 +479,18 @@ func main() {
 				}
 
 				prefetchPatterns, err := getPrefetchPatterns(c)
+				prefetchPatterns, err := getPrefetchPatterns(c)
 				if err != nil {
 					return err
 				}
 
+				chunkDictRef := ""
+				chunkDict := c.String("chunk-dict")
+				if chunkDict != "" {
+					_, _, chunkDictRef, err = converter.ParseChunkDictArgs(chunkDict)
+					if err != nil {
+						return errors.Wrap(err, "parse chunk dict arguments")
+					}
 				chunkDictRef := ""
 				chunkDict := c.String("chunk-dict")
 				if chunkDict != "" {
@@ -459,8 +506,18 @@ func main() {
 					docker2OCI = false
 				} else if c.Bool("oci") {
 					docker2OCI = true
+				docker2OCI := false
+				if c.Bool("docker-v2-format") {
+					logrus.Warn("the option `--docker-v2-format` has been deprecated, use `--oci` instead")
+					docker2OCI = false
+				} else if c.Bool("oci") {
+					docker2OCI = true
 				}
 
+				// Forcibly enable `--oci` option when `--oci-ref` be enabled.
+				if c.Bool("oci-ref") {
+					logrus.Warn("forcibly enabled `--oci` option when `--oci-ref` be enabled")
+					docker2OCI = true
 				// Forcibly enable `--oci` option when `--oci-ref` be enabled.
 				if c.Bool("oci-ref") {
 					logrus.Warn("forcibly enabled `--oci` option when `--oci-ref` be enabled")
@@ -470,7 +527,13 @@ func main() {
 				opt := converter.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
+					WorkDir:        c.String("work-dir"),
+					NydusImagePath: c.String("nydus-image"),
 
+					Source:         c.String("source"),
+					Target:         targetRef,
+					SourceInsecure: c.Bool("source-insecure"),
+					TargetInsecure: c.Bool("target-insecure"),
 					Source:         c.String("source"),
 					Target:         targetRef,
 					SourceInsecure: c.Bool("source-insecure"),
@@ -479,11 +542,19 @@ func main() {
 					BackendType:      backendType,
 					BackendConfig:    backendConfig,
 					BackendForcePush: c.Bool("backend-force-push"),
+					BackendType:      backendType,
+					BackendConfig:    backendConfig,
+					BackendForcePush: c.Bool("backend-force-push"),
 
+					CacheRef:        cacheRef,
+					CacheInsecure:   c.Bool("build-cache-insecure"),
 					CacheRef:        cacheRef,
 					CacheInsecure:   c.Bool("build-cache-insecure"),
 					CacheMaxRecords: cacheMaxRecords,
 					CacheVersion:    cacheVersion,
+
+					ChunkDictRef:      chunkDictRef,
+					ChunkDictInsecure: c.Bool("chunk-dict-insecure"),
 
 					ChunkDictRef:      chunkDictRef,
 					ChunkDictInsecure: c.Bool("chunk-dict-insecure"),
@@ -495,12 +566,22 @@ func main() {
 					FsAlignChunk:     c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
 					Compressor:       c.String("compressor"),
 					ChunkSize:        c.String("chunk-size"),
+					MergePlatform:    c.Bool("merge-platform"),
+					Docker2OCI:       docker2OCI,
+					FsVersion:        fsVersion,
+					FsAlignChunk:     c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
+					Compressor:       c.String("compressor"),
+					ChunkSize:        c.String("chunk-size"),
 
+					OCIRef:       c.Bool("oci-ref"),
+					AllPlatforms: c.Bool("all-platforms"),
+					Platforms:    c.String("platform"),
 					OCIRef:       c.Bool("oci-ref"),
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
 				}
 
+				return converter.Convert(context.Background(), opt)
 				return converter.Convert(context.Background(), opt)
 			},
 		},
@@ -536,6 +617,7 @@ func main() {
 				&cli.StringFlag{
 					Name:    "backend-type",
 					Value:   "",
+					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified, possible values: 'oss', 's3'",
 					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified, possible values: 'oss', 's3'",
 					EnvVars: []string{"BACKEND_TYPE"},
 				},
@@ -686,9 +768,49 @@ func main() {
 				setupLogLevel(c)
 
 				backendType, backendConfig, err := getBackendConfig(c, false)
+				backendType, backendConfig, err := getBackendConfig(c, false)
 				if err != nil {
 					return err
 				} else if backendConfig == "" {
+
+					backendType = "registry"
+					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
+					if err != nil {
+						return err
+					}
+
+					backendConfigStruct, err := rule.NewRegistryBackendConfig(parsed)
+					if err != nil {
+						return errors.Wrap(err, "parse registry backend configuration")
+					}
+
+					backendConfigStruct.SkipVerify = c.Bool("target-insecure")
+
+					bytes, err := json.Marshal(backendConfigStruct)
+					if err != nil {
+						return errors.Wrap(err, "marshal registry backend configuration")
+					}
+					backendConfig = string(bytes)
+
+					backendType = "registry"
+					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
+					if err != nil {
+						return err
+					}
+
+					backendConfigStruct, err := rule.NewRegistryBackendConfig(parsed)
+					if err != nil {
+						return errors.Wrap(err, "parse registry backend configuration")
+					}
+
+					backendConfigStruct.SkipVerify = c.Bool("target-insecure")
+
+					bytes, err := json.Marshal(backendConfigStruct)
+					if err != nil {
+						return errors.Wrap(err, "marshal registry backend configuration")
+					}
+					backendConfig = string(bytes)
+
 
 					backendType = "registry"
 					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
@@ -790,6 +912,7 @@ func main() {
 					Value:       "oss",
 					DefaultText: "oss",
 					Usage:       "Type of storage backend, possible values: 'oss', 's3'",
+					Usage:       "Type of storage backend, possible values: 'oss', 's3'",
 					EnvVars:     []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
@@ -834,6 +957,8 @@ func main() {
 					Required:    false,
 					Usage:       "Nydus image format version number, possible values: 5, 6",
 					EnvVars:     []string{"FS_VERSION"},
+					Value:       "6",
+					DefaultText: "V6 nydus image format",
 					Value:       "6",
 					DefaultText: "V6 nydus image format",
 				},
@@ -886,9 +1011,12 @@ func main() {
 					}
 					// we can verify the _backendType in the `packer.ParseBackendConfigString` function
 					cfg, err := packer.ParseBackendConfigString(_backendType, _backendConfig)
+					// we can verify the _backendType in the `packer.ParseBackendConfigString` function
+					cfg, err := packer.ParseBackendConfigString(_backendType, _backendConfig)
 					if err != nil {
 						return errors.Errorf("failed to parse backend-config '%s', err = %v", _backendConfig, err)
 					}
+					backendConfig = cfg
 					backendConfig = cfg
 				}
 
@@ -906,6 +1034,8 @@ func main() {
 					ImageName:    c.String("name"),
 					PushToRemote: c.Bool("backend-push"),
 					FsVersion:    c.String("fs-version"),
+					Compressor:   c.String("compressor"),
+					ChunkSize:    c.String("chunk-size"),
 					Compressor:   c.String("compressor"),
 					ChunkSize:    c.String("chunk-size"),
 
