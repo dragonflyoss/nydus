@@ -707,6 +707,25 @@ func main() {
 					}
 					backendConfig = string(bytes)
 
+					backendType = "registry"
+					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
+					if err != nil {
+						return err
+					}
+
+					backendConfigStruct, err := rule.NewRegistryBackendConfig(parsed)
+					if err != nil {
+						return errors.Wrap(err, "parse registry backend configuration")
+					}
+
+					backendConfigStruct.SkipVerify = c.Bool("target-insecure")
+
+					bytes, err := json.Marshal(backendConfigStruct)
+					if err != nil {
+						return errors.Wrap(err, "marshal registry backend configuration")
+					}
+					backendConfig = string(bytes)
+
 				}
 
 				_, arch, err := provider.ExtractOsArch(c.String("platform"))
