@@ -173,9 +173,7 @@ struct BlobCacheState {
 
 impl BlobCacheState {
     fn new() -> Self {
-        Self {
-            id_to_config_map: HashMap::new(),
-        }
+        Self::default()
     }
 
     fn try_add(&mut self, config: BlobConfig) -> Result<()> {
@@ -322,7 +320,7 @@ impl BlobCacheMgr {
         let config = entry
             .blob_config
             .as_ref()
-            .ok_or_else(|| einval!("missing blob cache configuration information"))?;
+            .ok_or_else(|| einval!("blob_cache: missing blob cache configuration information"))?;
 
         if entry.blob_id.contains(ID_SPLITTER) {
             return Err(einval!("blob_cache: `blob_id` for meta blob is invalid"));

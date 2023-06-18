@@ -160,16 +160,18 @@ pub struct NbdWorker {
 impl NbdWorker {
     /// Run the event loop to handle NBD requests from kernel in asynchronous mode.
     pub async fn run(self) {
-        let device = match BlockDevice::new(self.blob_id.clone(), self.cache_mgr.clone()) {
-            Ok(v) => v,
-            Err(e) => {
-                error!(
-                    "block_nbd: failed to create block device for {}, {}",
-                    self.blob_id, e
-                );
-                return;
-            }
-        };
+        let device =
+            match BlockDevice::new_with_cache_manager(self.blob_id.clone(), self.cache_mgr.clone())
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                        "block_nbd: failed to create block device for {}, {}",
+                        self.blob_id, e
+                    );
+                    return;
+                }
+            };
 
         // Safe because the RawFd is valid during the lifetime of run().
         let mut sock = unsafe { UnixStream::from_raw_fd(self.sock_user.as_raw_fd()) };
@@ -300,7 +302,7 @@ impl NbdDaemon {
         let blob_id = generate_blob_key(&blob_entry.domain_id, &blob_entry.blob_id);
         let cache_mgr = Arc::new(BlobCacheMgr::new());
         cache_mgr.add_blob_entry(&blob_entry)?;
-        let block_device = BlockDevice::new(blob_id.clone(), cache_mgr.clone())?;
+        let block_device = BlockDevice::new_with_cache_manager(blob_id.clone(), cache_mgr.clone())?;
         let nbd_service = NbdService::new(Arc::new(block_device), nbd_path)?;
 
         Ok(NbdDaemon {
@@ -591,7 +593,7 @@ mod tests {
         assert!(mgr.get_config(&key).is_some());
 
         let mgr = Arc::new(mgr);
-        let device = BlockDevice::new(blob_id.clone(), mgr).unwrap();
+        let device = BlockDevice::new_with_cache_manager(blob_id.clone(), mgr).unwrap();
 
         Ok(Arc::new(device))
     }

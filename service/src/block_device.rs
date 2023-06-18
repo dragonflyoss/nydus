@@ -58,9 +58,23 @@ pub struct BlockDevice {
 
 impl BlockDevice {
     /// Create a new instance of [BlockDevice].
-    pub fn new(blob_id: String, cache_mgr: Arc<BlobCacheMgr>) -> Result<Self> {
+    pub fn new(blob_entry: BlobCacheEntry) -> Result<Self> {
+        let cache_mgr = Arc::new(BlobCacheMgr::new());
+        cache_mgr.add_blob_entry(&blob_entry).map_err(|e| {
+            eother!(format!(
+                "block_device: failed to add blob into CacheMgr, {}",
+                e
+            ))
+        })?;
+        let blob_id = generate_blob_key(&blob_entry.domain_id, &blob_entry.blob_id);
+
+        BlockDevice::new_with_cache_manager(blob_id, cache_mgr)
+    }
+
+    /// Create a new instance of [BlockDevice] with provided blob cache manager.
+    pub fn new_with_cache_manager(blob_id: String, cache_mgr: Arc<BlobCacheMgr>) -> Result<Self> {
         let mut ranges = IntervalTree::new();
-        ranges.insert(Range::new(0, u32::MAX), None);
+        ranges.insert(Range::new(0, u32::MAX - 1), None);
 
         let meta_blob_config = match cache_mgr.get_config(&blob_id) {
             None => {
@@ -288,31 +302,19 @@ impl BlockDevice {
     pub fn export(
         blob_entry: BlobCacheEntry,
         output: Option<String>,
-        localfs_dir: Option<String>,
+        data_dir: Option<String>,
         threads: u32,
         verity: bool,
     ) -> Result<()> {
-        let cache_mgr = Arc::new(BlobCacheMgr::new());
-        cache_mgr.add_blob_entry(&blob_entry).map_err(|e| {
-            eother!(format!(
-                "block_device: failed to add blob into CacheMgr, {}",
-                e
-            ))
-        })?;
-        let blob_id = generate_blob_key(&blob_entry.domain_id, &blob_entry.blob_id);
-        let block_device = BlockDevice::new(blob_id.clone(), cache_mgr.clone()).map_err(|e| {
-            eother!(format!(
-                "block_device: failed to create block device object, {}",
-                e
-            ))
-        })?;
+        let block_device = BlockDevice::new(blob_entry)?;
         let block_device = Arc::new(block_device);
         let blocks = block_device.blocks();
+        let blob_id = block_device.meta_blob_id();
 
         let path = match output {
             Some(v) => PathBuf::from(v),
             None => {
-                let path = match cache_mgr.get_config(&blob_id) {
+                let path = match block_device.cache_mgr.get_config(&blob_id) {
                     Some(BlobConfig::MetaBlob(meta)) => meta.path().to_path_buf(),
                     _ => return Err(enoent!("block_device: failed to get meta blob")),
                 };
@@ -337,15 +339,15 @@ impl BlockDevice {
                             path.display()
                         ))
                     })?;
-                let dir = localfs_dir
-                    .ok_or_else(|| einval!("block_device: parameter `localfs_dir` is missing"))?;
+                let dir = data_dir
+                    .ok_or_else(|| einval!("block_device: parameter `data_dir` is missing"))?;
                 let path = PathBuf::from(dir);
                 path.join(name.to_string() + ".disk")
             }
         };
 
         let output_file = OpenOptions::new()
-            .create_new(true)
+            .create(true)
             .read(true)
             .write(true)
             .open(&path)
@@ -401,8 +403,8 @@ impl BlockDevice {
 
             for _i in 0..threads {
                 let count = min(blocks - pos, step);
-                let mgr = cache_mgr.clone();
-                let id = blob_id.clone();
+                let mgr = block_device.cache_mgr.clone();
+                let id = blob_id.to_string();
                 let path = path.to_path_buf();
                 let generator = generator.clone();
 
@@ -419,12 +421,13 @@ impl BlockDevice {
                             ))
                         })?;
                     let file = Arc::new(tokio_uring::fs::File::from_std(output_file));
-                    let block_device = BlockDevice::new(id, mgr).map_err(|e| {
-                        eother!(format!(
-                            "block_device: failed to create block device object, {}",
-                            e
-                        ))
-                    })?;
+                    let block_device =
+                        BlockDevice::new_with_cache_manager(id, mgr).map_err(|e| {
+                            eother!(format!(
+                                "block_device: failed to create block device object, {}",
+                                e
+                            ))
+                        })?;
                     let device = Arc::new(block_device);
 
                     tokio_uring::start(async move {
@@ -594,7 +597,7 @@ mod tests {
         assert!(mgr.get_config(&key).is_some());
 
         let mgr = Arc::new(mgr);
-        let device = BlockDevice::new(blob_id, mgr).unwrap();
+        let device = BlockDevice::new_with_cache_manager(blob_id, mgr).unwrap();
         assert_eq!(device.blocks(), 0x209);
 
         tokio_uring::start(async move {
