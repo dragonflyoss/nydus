@@ -170,13 +170,35 @@ nydusify check \
   --backend-config-file /path/to/backend-config.json
 ```
 
+
+## Mount the nydus image as a filesystem
+
+The nydusify mount command can mount a nydus image stored in the backend as a filesystem. Now  the  supported backend types include Registry (default backend), s3 and oss. 
+
+When using Registy as the backend, you don't need specify the `--backend-type` .
+
+``` shell
+nydusify mount \
+  --target myregistry/repo:tag-nydus
+```
+
+Specify `--backend-type` and `--backend-config` options to mount for other backends::
+
+``` shell
+nydusify mount \
+  --target mybackend/repo:tag-nydus \
+  --backend-type oss \
+  --backend-config-file /path/to/backend-config.json
+```
+
+
 ## More Nydusify Options
 
-See `nydusify convert/check --help`
+See `nydusify convert/check/mount --help`
 
 ## Use Nydusify as a package
 
-``` golang
+``` 
 See `contrib/nydusify/examples/converter/main.go`
 ```
 
