@@ -297,8 +297,9 @@ jobs:
       - name: Summary
         run: |
           echo "## Image Size(MB)" > $GITHUB_STEP_SUMMARY
-          echo "|image name|nydus-zran|nydus-v5|nydus-v6|" >> $GITHUB_STEP_SUMMARY
-          echo "|:---:|:--:|:-------:|:-------:|" >> $GITHUB_STEP_SUMMARY
+          echo "> Compare the size of OCI image and Nydus image."
+          echo "|image name|oci/nydus-zran|oci/nydus-v5|oci/nydus-v6|" >> $GITHUB_STEP_SUMMARY
+          echo "|:--------:|:------------:|:----------:|:----------:|" >> $GITHUB_STEP_SUMMARY
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             zranSourceImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.SourceImageSize' convert-zran/${I}.json) / 1048576")")
             zranTargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-zran/${I}.json) / 1048576")")
@@ -306,16 +307,17 @@ jobs:
             v5TargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-native-v5/${I}.json) / 1048576")")
             v6SourceImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.SourceImageSize' convert-native-v6/${I}.json) / 1048576")")
             v6TargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-native-v6/${I}.json) / 1048576")")
-            echo "|${I}|${zranSourceImageSize}/${zranTargetImageSize}|${v5SourceImageSize}/${v5TargetImageSize}|${v6SourceImageSize}/${v6TargetImageSize}|" >> $GITHUB_STEP_SUMMARY
+            echo "|${I}:latest|${zranSourceImageSize}/${zranTargetImageSize}|${v5SourceImageSize}/${v5TargetImageSize}|${v6SourceImageSize}/${v6TargetImageSize}|" >> $GITHUB_STEP_SUMMARY
           done
           echo "## Conversion Time(ms)" >> $GITHUB_STEP_SUMMARY
+          echo "> Time elapsed to convert OCI image to Nydus image."
           echo "|image name|nydus-zran|nydus-v5|nydus-v6|" >> $GITHUB_STEP_SUMMARY
           echo "|:---:|:--:|:-------:|:-------:|" >> $GITHUB_STEP_SUMMARY
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             zranConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-zran/${I}.json) / 1000000")")
             v5ConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-native-v5/${I}.json) / 1000000")")
             v6ConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-native-v6/${I}.json) / 1000000")")
-            echo "|${I}|${zranConversionElapsed}|${v5ConversionElapsed}|${v6ConversionElapsed}|" >> $GITHUB_STEP_SUMMARY
+            echo "|${I}:latest|${zranConversionElapsed}|${v5ConversionElapsed}|${v6ConversionElapsed}|" >> $GITHUB_STEP_SUMMARY
           done
       - uses: geekyeggo/delete-artifact@v2
         with:
