@@ -47,7 +47,7 @@ impl From<LocalDiskError> for BackendError {
 #[derive(Debug)]
 struct LocalDiskBlob {
     // The file descriptor of the disk
-    device_fd: i32,
+    device_file: File,
     // Start offset of the partition
     blob_offset: u64,
     // Length of the partition
@@ -77,7 +77,12 @@ impl BlobReader for LocalDiskBlob {
             .ok_or(LocalDiskError::ReadBlob(msg))?;
         let sz = std::cmp::min(self.blob_length - offset, buf.len() as u64) as usize;
 
-        uio::pread(self.device_fd, &mut buf[..sz], actual_offset as i64).map_err(|e| {
+        uio::pread(
+            self.device_file.as_raw_fd(),
+            &mut buf[..sz],
+            actual_offset as i64,
+        )
+        .map_err(|e| {
             let msg = format!(
                 "localdisk: failed to read data from blob {}, {}",
                 self.blob_id, e
@@ -120,7 +125,7 @@ impl BlobReader for LocalDiskBlob {
             return Err(LocalDiskError::ReadBlob(msg).into());
         }
 
-        readv(self.device_fd, &mut iovec, actual_offset).map_err(|e| {
+        readv(self.device_file.as_raw_fd(), &mut iovec, actual_offset).map_err(|e| {
             let msg = format!(
                 "localdisk: failed to read data from blob {}, {}",
                 self.blob_id, e
@@ -254,9 +259,10 @@ impl LocalDisk {
                 return Err(einval!(msg));
             }
 
+            let device_file = self.device_file.try_clone()?;
             let partition = Arc::new(LocalDiskBlob {
                 blob_id: name.clone(),
-                device_fd: self.device_file.as_raw_fd(),
+                device_file,
                 blob_offset: base_offset,
                 blob_length: length,
                 metrics: self.metrics.clone(),
