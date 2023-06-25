@@ -769,7 +769,6 @@ impl BlobIoVec {
 
     /// Append another blob io vector to current one.
     pub fn append(&mut self, mut vec: BlobIoVec) {
-        assert_eq!(self.bi_blob.blob_index(), vec.bi_blob.blob_index());
         assert_eq!(self.bi_blob.blob_id(), vec.bi_blob.blob_id());
         assert!(self.bi_size.checked_add(vec.bi_size).is_some());
         self.bi_vec.append(vec.bi_vec.as_mut());
@@ -1480,5 +1479,59 @@ mod tests {
         assert!(!desc2.is_continuous(&desc3, 0x400));
         assert!(desc2.is_continuous(&desc3, 0x800));
         assert!(desc2.is_continuous(&desc3, 0x1000));
+    }
+
+    #[test]
+    fn test_append_same_blob_with_diff_index() {
+        let blob1 = Arc::new(BlobInfo::new(
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
+        ));
+        let chunk1 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0,
+            uncompress_offset: 0,
+            file_offset: 0,
+            index: 0,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let mut iovec = BlobIoVec::new(blob1.clone());
+        iovec.push(BlobIoDesc::new(blob1, BlobIoChunk(chunk1), 0, 0x1000, true));
+
+        let blob2 = Arc::new(BlobInfo::new(
+            2,                  // different index
+            "test1".to_owned(), // same id
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
+        ));
+        let chunk2 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 2,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x800,
+            uncompress_offset: 0x1000,
+            file_offset: 0x1000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let mut iovec2 = BlobIoVec::new(blob2.clone());
+        iovec2.push(BlobIoDesc::new(blob2, BlobIoChunk(chunk2), 0, 0x1000, true));
+
+        iovec.append(iovec2);
+        assert_eq!(0x2000, iovec.bi_size);
     }
 }
