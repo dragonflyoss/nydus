@@ -80,6 +80,20 @@ func (rule *ManifestRule) Validate() error {
 
 	// Check Nydus image config with OCI image
 	if rule.SourceParsed.OCIImage != nil {
+
+		//nolint:staticcheck
+		// ignore static check SA1019 here. We have to assign deprecated field.
+		//
+		// Skip ArgsEscaped's Check
+		//
+		//   This field is present only for legacy compatibility with Docker and
+		// should not be used by new image builders. Nydusify (1.6 and above)
+		// ignores it, which is an expected behavior.
+		//   Also ignore it in check.
+		//
+		//   Addition: [ArgsEscaped in spec](https://github.com/opencontainers/image-spec/pull/892)
+		rule.TargetParsed.NydusImage.Config.Config.ArgsEscaped = rule.SourceParsed.OCIImage.Config.Config.ArgsEscaped
+
 		ociConfig, err := json.Marshal(rule.SourceParsed.OCIImage.Config.Config)
 		if err != nil {
 			return errors.New("marshal oci image config")
