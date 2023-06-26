@@ -176,6 +176,18 @@ pub trait RafsInode: Any {
     /// Posix: get project id associated with the inode.
     fn projid(&self) -> u32;
 
+    /// Mode: check whether the inode is a block device.
+    fn is_blkdev(&self) -> bool;
+
+    /// Mode: check whether the inode is a char device.
+    fn is_chrdev(&self) -> bool;
+
+    /// Mode: check whether the inode is a sock.
+    fn is_sock(&self) -> bool;
+
+    /// Mode: check whether the inode is a fifo.
+    fn is_fifo(&self) -> bool;
+
     /// Mode: check whether the inode is a directory.
     fn is_dir(&self) -> bool;
 

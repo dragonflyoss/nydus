@@ -184,7 +184,7 @@ impl OCITarBuilderFactory {
                     .as_deref()
                     .with_context(|| "both blob path or blob backend config are not specified")?;
                 let reader = blob_backend
-                    .get_reader("unpacker")
+                    .get_reader(blob.blob_id().as_str())
                     .map_err(|err| anyhow!("fail to get reader, error {:?}", err))?;
 
                 let compressor = blob.compressor();

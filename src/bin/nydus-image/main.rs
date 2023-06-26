@@ -1172,7 +1172,13 @@ impl Command {
 
                 Some(Arc::new(local_fs))
             }
-            None => Self::get_backend(matches, "unpacker").ok(),
+            None => {
+                Some(BlobFactory::new_backend(
+                    config.backend.as_ref().unwrap(),
+                    "unpacker",
+                )?)
+                // Self::get_backend(matches, "unpacker").ok()
+            }
         };
 
         OCIUnpacker::new(bootstrap, backend, output)
