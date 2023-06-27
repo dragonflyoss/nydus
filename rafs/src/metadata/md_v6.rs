@@ -48,7 +48,7 @@ impl RafsSuper {
 
         self.meta.flags = RafsSuperFlags::from_bits(ext_sb.flags())
             .ok_or_else(|| einval!(format!("invalid RAFS flags 0x{:x}", ext_sb.flags())))?;
-        info!("RAFS features: {}", self.meta.flags);
+        debug!("RAFS features: {}", self.meta.flags);
 
         self.meta.prefetch_table_entries = ext_sb.prefetch_table_size() / size_of::<u32>() as u32;
         self.meta.prefetch_table_offset = ext_sb.prefetch_table_offset();
