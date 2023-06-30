@@ -21,6 +21,7 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/chunkdict/generator"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/packer"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/provider"
@@ -627,6 +628,68 @@ func main() {
 				}
 
 				return checker.Check(context.Background())
+			},
+		},
+		{
+			Name:  "chunkdict",
+			Usage: "Deduplicate RAFS filesystem metadata",
+			Subcommands: []*cli.Command{
+				{
+					Name:  "generate",
+					Usage: "Save chunk and blob information of Multi-image into the database (experimental)",
+					Flags: []cli.Flag{
+						&cli.StringFlag{
+							Name:     "sources",
+							Required: true,
+							Usage:    "One or more Nydus image reference",
+							EnvVars:  []string{"SOURCES"},
+						},
+						&cli.BoolFlag{
+							Name:     "source-insecure",
+							Required: false,
+							Usage:    "Skip verifying server certs for HTTPS source registry",
+							EnvVars:  []string{"SOURCE_INSECURE"},
+						},
+						&cli.StringFlag{
+							Name:    "work-dir",
+							Value:   "./output",
+							Usage:   "Working directory for generating chunkdict image",
+							EnvVars: []string{"WORK_DIR"},
+						},
+						&cli.StringFlag{
+							Name:    "nydus-image",
+							Value:   "nydus-image",
+							Usage:   "Path to the nydus-image binary, default to search in PATH",
+							EnvVars: []string{"NYDUS_IMAGE"},
+						},
+						&cli.StringFlag{
+							Name:  "platform",
+							Value: "linux/" + runtime.GOARCH,
+							Usage: "Specify platform identifier to choose image manifest, possible values: 'linux/amd64' and 'linux/arm64'",
+						},
+					},
+					Action: func(c *cli.Context) error {
+						setupLogLevel(c)
+
+						_, arch, err := provider.ExtractOsArch(c.String("platform"))
+						if err != nil {
+							return err
+						}
+						sources := strings.Split(c.String("sources"), ",")
+						generator, err := generator.New(generator.Opt{
+							WorkDir:        c.String("work-dir"),
+							Sources:        sources,
+							SourceInsecure: c.Bool("source-insecure"),
+							NydusImagePath: c.String("nydus-image"),
+							ExpectedArch:   arch,
+						})
+						if err != nil {
+							return err
+						}
+
+						return generator.Generate(context.Background())
+					},
+				},
 			},
 		},
 		{
