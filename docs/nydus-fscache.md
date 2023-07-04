@@ -4,6 +4,7 @@ This guide shows you how to use fscache-based EROFS nydus image service to launc
 
 ## Prepare the kernel
 
+### (1) Compile kernel by yourself
 Be aware of using the fscache-enabled EROFS kernel (Linux 5.19+), it can be built with the following steps:
 
 1.  ``git clone git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git`` \
@@ -29,6 +30,33 @@ CONFIG_EROFS_FS_ONDEMAND=y
 8. ``modprobe cachefiles`` if cachefiles is built as module
 
 9.  ``[ -c /dev/cachefiles ] && echo ok``
+
+### (2) Use OpenAnolis kernel
+If you want to use an existing kernel, you could use [OpenAnolis](https://openanolis.cn/download?lang=en), it adds support for fscache mode since kernel version 4.19.91-27 or 5.10.134-12.
+
+Update the kernel to 4.19.91-27 on OpenAnolis 8 as an example:
+
+```
+$ sudo yum list --showduplicate kernel --enablerepo Plus
+
+Installed Packages
+kernel.x86_64                                   4.19.91-26.an8
+Available Packages
+kernel.x86_64                                   4.18.0-372.32.1.an8_6
+kernel.x86_64                                   4.18.0-425.13.1.0.1.an8
+kernel.x86_64                                   4.18.0-425.19.2.0.1.an8
+kernel.x86_64                                   4.18.0-477.10.1.0.1.an8
+kernel.x86_64                                   4.18.0-477.13.1.0.1.an8
+kernel.x86_64                                   4.19.91-27.an8
+kernel.x86_64                                   4.19.91-27.1.an8
+kernel.x86_64                                   4.19.91-27.2.an8
+kernel.x86_64                                   4.19.91-27.3.an8
+kernel.x86_64                                   4.19.91-27.4.an8
+
+$ sudo yum update kernel --enablerepo Plus
+
+$ sudo reboot
+```
 
 ## Get ctr-remote and the fscache-supported nydusd
 
