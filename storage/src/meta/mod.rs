@@ -33,10 +33,11 @@ use std::ops::{Add, BitAnd, Not};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use nydus_utils::compress;
 use nydus_utils::compress::zlib_random::ZranContext;
+use nydus_utils::crypt::decrypt_with_context;
 use nydus_utils::digest::{DigestData, RafsDigest};
 use nydus_utils::filemap::FileMapState;
+use nydus_utils::{compress, crypt};
 
 use crate::backend::BlobReader;
 use crate::device::v5::BlobV5ChunkInfo;
@@ -327,6 +328,15 @@ impl BlobCompressionContextHeader {
             self.s_features |= BlobFeatures::TARFS.bits();
         } else {
             self.s_features &= !BlobFeatures::TARFS.bits();
+        }
+    }
+
+    /// Set flag indicating the blob is encrypted.
+    pub fn set_encrypted(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::ENCRYPTED.bits();
+        } else {
+            self.s_features &= !BlobFeatures::ENCRYPTED.bits();
         }
     }
 
@@ -753,12 +763,38 @@ impl BlobCompressionContextInfo {
             )));
         }
 
-        let (uncompressed, header) = if blob_info.meta_ci_compressor() == compress::Algorithm::None
-        {
-            let uncompressed = &raw_data[0..uncompressed_size as usize];
-            let header = &raw_data[uncompressed_size as usize..expected_raw_size];
-            (Cow::Borrowed(uncompressed), header)
-        } else {
+        let decrypted = match decrypt_with_context(
+            &raw_data[0..compressed_size as usize],
+            &blob_info.cipher_object(),
+            &blob_info.cipher_context(),
+            blob_info.cipher() != crypt::Algorithm::None,
+        ){
+            Ok(data) => data,
+            Err(e) => return Err(eio!(format!(
+                "failed to decrypt metadata for blob {} from backend, cipher {}, encrypted data size {}, {}",
+                blob_info.blob_id(),
+                blob_info.cipher(),
+                compressed_size,
+                e
+            ))),
+        };
+        let header = match decrypt_with_context(
+            &raw_data[compressed_size as usize..expected_raw_size],
+            &blob_info.cipher_object(),
+            &blob_info.cipher_context(),
+            blob_info.cipher() != crypt::Algorithm::None,
+        ){
+            Ok(data) => data,
+            Err(e) => return Err(eio!(format!(
+                "failed to decrypt meta header for blob {} from backend, cipher {}, encrypted data size {}, {}",
+                blob_info.blob_id(),
+                blob_info.cipher(),
+                compressed_size,
+                e
+            ))),
+        };
+
+        let uncompressed = if blob_info.meta_ci_compressor() != compress::Algorithm::None {
             // Lz4 does not support concurrent decompression of the same data into
             // the same piece of memory. There will be multiple containers mmap the
             // same file, causing the buffer to be shared between different
@@ -772,9 +808,8 @@ impl BlobCompressionContextInfo {
             // time, the memory consumption and performance impact are relatively
             // small.
             let mut uncompressed = vec![0u8; uncompressed_size as usize];
-            let header = &raw_data[compressed_size as usize..expected_raw_size];
             compress::decompress(
-                &raw_data[0..compressed_size as usize],
+                &decrypted,
                 &mut uncompressed,
                 blob_info.meta_ci_compressor(),
             )
@@ -782,14 +817,14 @@ impl BlobCompressionContextInfo {
                 error!("failed to decompress blob meta data: {}", e);
                 e
             })?;
-            (Cow::Owned(uncompressed), header)
+            Cow::Owned(uncompressed)
+        } else {
+            decrypted
         };
-
         buffer[0..uncompressed_size as usize].copy_from_slice(&uncompressed);
         buffer[aligned_uncompressed_size as usize
             ..(aligned_uncompressed_size + BLOB_CCT_HEADER_SIZE) as usize]
-            .copy_from_slice(header);
-
+            .copy_from_slice(&header);
         Ok(())
     }
 
@@ -1020,6 +1055,10 @@ impl BlobCompressionContext {
     pub(crate) fn is_separate(&self) -> bool {
         self.blob_features & BlobFeatures::SEPARATE.bits() != 0
     }
+
+    pub(crate) fn is_encrypted(&self) -> bool {
+        self.blob_features & BlobFeatures::ENCRYPTED.bits() != 0
+    }
 }
 
 /// A customized array to host chunk information table for a blob.
@@ -1112,6 +1151,7 @@ impl BlobMetaChunkArray {
         uncompressed_offset: u64,
         uncompressed_size: u32,
         compressed: bool,
+        encrypted: bool,
         is_batch: bool,
         data: u64,
     ) {
@@ -1123,6 +1163,7 @@ impl BlobMetaChunkArray {
                 meta.set_uncompressed_offset(uncompressed_offset);
                 meta.set_uncompressed_size(uncompressed_size);
                 meta.set_compressed(compressed);
+                meta.set_encrypted(encrypted);
                 meta.set_batch(is_batch);
                 meta.set_data(data);
                 v.push(meta);
@@ -1938,6 +1979,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     }
     if features.contains(BlobFeatures::ZRAN) {
         output += "zran ";
+    }
+    if features.contains(BlobFeatures::ENCRYPTED) {
+        output += "encrypted ";
     }
     output.trim_end().to_string()
 }

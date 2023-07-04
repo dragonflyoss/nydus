@@ -552,6 +552,9 @@ impl BlobCompactor {
                         build_ctx.blob_features,
                         build_ctx.compressor,
                         build_ctx.digester,
+                        build_ctx.cipher,
+                        Default::default(),
+                        None,
                     );
                     blob_ctx.set_meta_info_enabled(self.is_v6());
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
@@ -606,6 +609,7 @@ impl BlobCompactor {
             None,
             false,
             Features::new(),
+            false,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);

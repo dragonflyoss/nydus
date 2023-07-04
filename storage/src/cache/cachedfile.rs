@@ -21,7 +21,7 @@ use std::time::Duration;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 use nydus_utils::compress::Decoder;
-use nydus_utils::crypt::{self, Cipher};
+use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::{compress, digest, round_up_usize, DelayType, Delayer, FileRangeReader};
 use tokio::runtime::Runtime;
@@ -30,7 +30,6 @@ use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
-use crate::context::CipherContext;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
     BlobObject, BlobPrefetchRequest,
@@ -195,7 +194,7 @@ impl FileCacheEntry {
             metrics.buffered_backend_size.sub(buffer.size() as u64);
             let mut t_buf;
             let buf = if !is_raw_data && is_cache_encrypted {
-                let (key, iv) = cipher_context.get_chunk_cipher_context(chunk.as_ref());
+                let (key, iv) = cipher_context.generate_cipher_meta(&chunk.chunk_id().data);
                 let buf = buffer.slice();
                 t_buf = alloc_buf(round_up_usize(buf.len(), ENCRYPTION_PAGE_SIZE));
 
@@ -463,6 +462,10 @@ impl BlobCache for FileCacheEntry {
 
     fn blob_cipher_object(&self) -> Arc<Cipher> {
         self.blob_info.cipher_object()
+    }
+
+    fn blob_cipher_context(&self) -> Option<CipherContext> {
+        self.blob_info.cipher_context()
     }
 
     fn blob_digester(&self) -> digest::Algorithm {
@@ -1308,7 +1311,7 @@ impl FileCacheEntry {
             let size = chunk.uncompressed_size() as usize;
             let cipher_object = self.cache_cipher_object.clone();
             let cipher_context = self.cache_cipher_context.clone();
-            let (key, iv) = cipher_context.get_chunk_cipher_context(chunk);
+            let (key, iv) = cipher_context.generate_cipher_meta(&chunk.chunk_id().data);
 
             let align_size = round_up_usize(size, ENCRYPTION_PAGE_SIZE);
             let mut buf = alloc_buf(align_size);
@@ -1317,12 +1320,7 @@ impl FileCacheEntry {
             let mut pos = 0;
             while pos < buffer.len() {
                 assert!(pos + ENCRYPTION_PAGE_SIZE <= buf.len());
-                match cipher_object.decrypt(
-                    key,
-                    Some(&iv),
-                    &buf[pos..pos + ENCRYPTION_PAGE_SIZE],
-                    ENCRYPTION_PAGE_SIZE,
-                ) {
+                match cipher_object.decrypt(key, Some(&iv), &buf[pos..pos + ENCRYPTION_PAGE_SIZE]) {
                     Ok(buf2) => {
                         let len = std::cmp::min(buffer.len() - pos, ENCRYPTION_PAGE_SIZE);
                         buffer[pos..pos + len].copy_from_slice(&buf2[..len]);

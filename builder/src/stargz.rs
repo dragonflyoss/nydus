@@ -934,6 +934,7 @@ mod tests {
             Some(ArtifactStorage::FileDir(tmp_dir.clone())),
             false,
             Features::new(),
+            false,
         );
         ctx.fs_version = RafsVersion::V6;
         let mut bootstrap_mgr =

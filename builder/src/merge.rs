@@ -13,6 +13,7 @@ use hex::FromHex;
 use nydus_api::ConfigV2;
 use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
+use nydus_utils::crypt;
 
 use super::{
     ArtifactStorage, BlobContext, BlobManager, Bootstrap, BootstrapContext, BuildContext,
@@ -149,6 +150,12 @@ impl Merger {
                 .context("failed to get RAFS version number")?;
             ctx.compressor = rs.meta.get_compressor();
             ctx.digester = rs.meta.get_digester();
+            // If any RAFS filesystems are encrypted, the merged boostrap will be marked as encrypted.
+            match rs.meta.get_cipher() {
+                crypt::Algorithm::None => (),
+                crypt::Algorithm::Aes128Xts => ctx.cipher = crypt::Algorithm::Aes128Xts,
+                _ => bail!("invalid per layer bootstrap, only supports aes-128-xts"),
+            }
             ctx.explicit_uidgid = rs.meta.explicit_uidgid();
             if config.as_ref().unwrap().is_tarfs_mode {
                 ctx.conversion_type = ConversionType::TarToTarfs;

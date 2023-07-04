@@ -248,6 +248,27 @@ impl ChunkWrapper {
         }
     }
 
+    /// Check whether the chunk is encrypted or not.
+    pub fn is_encrypted(&self) -> bool {
+        match self {
+            ChunkWrapper::V5(c) => c.flags.contains(BlobChunkFlags::ENCYPTED),
+            ChunkWrapper::V6(c) => c.flags.contains(BlobChunkFlags::ENCYPTED),
+            ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref())
+                .flags()
+                .contains(BlobChunkFlags::ENCYPTED),
+        }
+    }
+
+    /// Set flag for whether chunk is encrypted.
+    pub fn set_encrypted(&mut self, encrypted: bool) {
+        self.ensure_owned();
+        match self {
+            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::ENCYPTED, encrypted),
+            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::ENCYPTED, encrypted),
+            ChunkWrapper::Ref(_c) => panic!("unexpected"),
+        }
+    }
+
     /// Set flag for whether chunk is batch chunk.
     pub fn set_batch(&mut self, batch: bool) {
         self.ensure_owned();
@@ -281,6 +302,7 @@ impl ChunkWrapper {
         compressed_offset: u64,
         compressed_size: u32,
         is_compressed: bool,
+        is_encrypted: bool,
     ) -> Result<()> {
         self.ensure_owned();
         match self {
@@ -306,6 +328,9 @@ impl ChunkWrapper {
                 c.uncompressed_size = uncompressed_size;
                 if is_compressed {
                     c.flags |= BlobChunkFlags::COMPRESSED;
+                }
+                if is_encrypted {
+                    c.flags |= BlobChunkFlags::ENCYPTED;
                 }
             }
             ChunkWrapper::Ref(_c) => panic!("unexpected"),

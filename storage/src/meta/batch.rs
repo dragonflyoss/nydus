@@ -126,6 +126,7 @@ impl BatchContextGenerator {
         &mut self,
         uncompressed_offset: u64,
         uncompressed_size: u32,
+        encrypted: bool,
     ) -> Result<BlobChunkInfoV2Ondisk> {
         let mut chunk = BlobChunkInfoV2Ondisk::default();
         chunk.set_compressed_offset(0);
@@ -136,6 +137,7 @@ impl BatchContextGenerator {
         chunk.set_batch_index(self.contexts.len() as u32);
         chunk.set_uncompressed_offset_in_batch_buf(self.chunk_data_buf_len() as u32);
         chunk.set_compressed(true);
+        chunk.set_encrypted(encrypted);
 
         Ok(chunk)
     }

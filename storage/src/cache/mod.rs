@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_utils::compress::zlib_random::ZranDecoder;
-use nydus_utils::crypt::{self, Cipher};
+use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
@@ -156,6 +156,9 @@ pub trait BlobCache: Send + Sync {
     /// Cipher object to encrypt/decrypt chunk data.
     fn blob_cipher_object(&self) -> Arc<Cipher>;
 
+    /// Cipher context to encrypt/decrypt chunk data.
+    fn blob_cipher_context(&self) -> Option<CipherContext>;
+
     /// Get message digest algorithm to handle chunks in the blob.
     fn blob_digester(&self) -> digest::Algorithm;
 
@@ -282,8 +285,8 @@ pub trait BlobCache: Send + Sync {
 
     /// Read a whole chunk directly from the storage backend.
     ///
-    /// The fetched chunk data may be compressed or not, which depends on chunk information from
-    /// `chunk`.Moreover, chunk data from backend storage may be validated per user's configuration.
+    /// The fetched chunk data may be compressed or encrypted or not, which depends on chunk information
+    /// from `chunk`. Moreover, chunk data from backend storage may be validated per user's configuration.
     fn read_chunk_from_backend(
         &self,
         chunk: &dyn BlobChunkInfo,
@@ -295,7 +298,12 @@ pub trait BlobCache: Send + Sync {
 
         if self.is_zran() || self.is_batch() {
             return Err(enosys!("read_chunk_from_backend"));
-        } else if chunk.is_compressed() {
+        } else if !chunk.is_compressed() && !chunk.is_encrypted() {
+            let size = self.reader().read(buffer, offset).map_err(|e| eio!(e))?;
+            if size != buffer.len() {
+                return Err(eio!("storage backend returns less data than requested"));
+            }
+        } else {
             let c_size = if self.is_legacy_stargz() {
                 self.get_legacy_stargz_size(offset, buffer.len())?
             } else {
@@ -309,13 +317,14 @@ pub trait BlobCache: Send + Sync {
             if size != raw_buffer.len() {
                 return Err(eio!("storage backend returns less data than requested"));
             }
-            self.decompress_chunk_data(&raw_buffer, buffer, true)?;
+            let decrypted_buffer = crypt::decrypt_with_context(
+                &raw_buffer,
+                &self.blob_cipher_object(),
+                &self.blob_cipher_context(),
+                chunk.is_encrypted(),
+            )?;
+            self.decompress_chunk_data(&decrypted_buffer, buffer, chunk.is_compressed())?;
             c_buf = Some(raw_buffer);
-        } else {
-            let size = self.reader().read(buffer, offset).map_err(|e| eio!(e))?;
-            if size != buffer.len() {
-                return Err(eio!("storage backend returns less data than requested"));
-            }
         }
 
         let duration = Instant::now().duration_since(start).as_millis();
@@ -447,10 +456,16 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
 
         let c_offset = (c_offset - self.blob_offset) as usize;
         let input = &self.c_buf[c_offset..c_offset + c_size as usize];
+        let decrypted_buffer = crypt::decrypt_with_context(
+            input,
+            &self.cache.blob_cipher_object(),
+            &self.cache.blob_cipher_context(),
+            meta.state.is_encrypted(),
+        )?;
         let mut output = alloc_buf(d_size as usize);
 
         self.cache
-            .decompress_chunk_data(input, &mut output, c_size != d_size)?;
+            .decompress_chunk_data(&decrypted_buffer, &mut output, c_size != d_size)?;
 
         if output.len() != d_size as usize {
             return Err(einval!(format!(
@@ -571,10 +586,15 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
 
         let offset_merged = (c_offset - self.blob_offset) as usize;
         let end_merged = offset_merged + c_size as usize;
-        let buf = &self.c_buf[offset_merged..end_merged];
+        let decrypted_buffer = crypt::decrypt_with_context(
+            &self.c_buf[offset_merged..end_merged],
+            &self.cache.blob_cipher_object(),
+            &self.cache.blob_cipher_context(),
+            chunk.is_encrypted(),
+        )?;
         let mut buffer = alloc_buf(d_size);
         self.cache
-            .decompress_chunk_data(buf, &mut buffer, chunk.is_compressed())?;
+            .decompress_chunk_data(&decrypted_buffer, &mut buffer, chunk.is_compressed())?;
         self.cache
             .validate_chunk_data(chunk, &buffer, false)
             .map_err(|e| {

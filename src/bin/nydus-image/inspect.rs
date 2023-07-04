@@ -307,6 +307,7 @@ Mapped Block Address:   {mapped_blkaddr}
 Features:               {features:?}
 Compressor:             {compressor}
 Digester:               {digester}
+Cipher:                 {cipher}
 Chunk Size:             0x{chunk_size:x}
 Chunk Count:            {chunk_count}
 Prefetch Table Offset:  {prefetch_tbl_offset}
@@ -331,6 +332,7 @@ RAFS Blob Size:         {rafs_size}
                     chunk_count = blob_info.chunk_count(),
                     compressor = blob_info.compressor(),
                     digester = blob_info.digester(),
+                    cipher = blob_info.cipher(),
                     prefetch_tbl_offset = blob_info.prefetch_offset(),
                     prefetch_tbl_size = blob_info.prefetch_size(),
                     meta_compressor = blob_info.meta_ci_compressor(),

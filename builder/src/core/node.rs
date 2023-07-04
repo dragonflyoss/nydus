@@ -24,8 +24,8 @@ use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
-use nydus_utils::compress;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
+use nydus_utils::{compress, crypt};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
 use sha2::digest::Digest;
 
@@ -380,6 +380,10 @@ impl Node {
             chunk.set_id(RafsDigest::from_buf(buf, ctx.digester));
         }
 
+        if ctx.cipher != crypt::Algorithm::None {
+            chunk.set_encrypted(true);
+        }
+
         Ok((chunk, chunk_info))
     }
 
@@ -407,6 +411,7 @@ impl Node {
         chunk.set_uncompressed_size(d_size);
 
         let mut chunk_info = None;
+        let encrypted = blob_ctx.blob_cipher != crypt::Algorithm::None;
 
         if self.inode.child_count() == 1
             && d_size < ctx.batch_size / 2
@@ -417,7 +422,7 @@ impl Node {
 
             if batch.chunk_data_buf_len() as u32 + d_size < ctx.batch_size {
                 // Add into current batch chunk directly.
-                chunk_info = Some(batch.generate_chunk_info(pre_d_offset, d_size)?);
+                chunk_info = Some(batch.generate_chunk_info(pre_d_offset, d_size, encrypted)?);
                 batch.append_chunk_data_buf(chunk_data);
             } else {
                 // Dump current batch chunk if exists, and then add into a new batch chunk.
@@ -430,7 +435,7 @@ impl Node {
                 }
 
                 // Add into a new batch chunk.
-                chunk_info = Some(batch.generate_chunk_info(pre_d_offset, d_size)?);
+                chunk_info = Some(batch.generate_chunk_info(pre_d_offset, d_size, encrypted)?);
                 batch.append_chunk_data_buf(chunk_data);
             }
         } else if !ctx.blob_features.contains(BlobFeatures::SEPARATE) {
@@ -470,12 +475,18 @@ impl Node {
     ) -> Result<(u64, u32, bool)> {
         let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
             .with_context(|| "failed to compress node file".to_string())?;
-        let compressed_size = compressed.len() as u32;
+        let encrypted = crypt::encrypt_with_context(
+            &compressed,
+            &blob_ctx.cipher_object,
+            &blob_ctx.cipher_ctx,
+            blob_ctx.blob_cipher != crypt::Algorithm::None,
+        )?;
+        let compressed_size = encrypted.len() as u32;
         let pre_compressed_offset = blob_ctx.current_compressed_offset;
         blob_writer
-            .write_all(&compressed)
+            .write_all(&encrypted)
             .context("failed to write blob")?;
-        blob_ctx.blob_hash.update(&compressed);
+        blob_ctx.blob_hash.update(&encrypted);
         blob_ctx.current_compressed_offset += compressed_size as u64;
         blob_ctx.compressed_blob_size += compressed_size as u64;
 
