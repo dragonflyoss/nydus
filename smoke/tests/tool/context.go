@@ -29,6 +29,7 @@ type BuildContext struct {
 	OCIRef     bool
 	OCIRefGzip bool
 	BatchSize  string
+	Encrypt    bool
 }
 
 type RuntimeContext struct {

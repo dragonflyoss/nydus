@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	paramZran  = "zran"
-	paramBatch = "batch"
+	paramZran    = "zran"
+	paramBatch   = "batch"
+	paramEncrypt = "encrypt"
 )
 
 type ImageTestSuite struct {
@@ -32,15 +33,19 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 		Dimension(paramFSVersion, []interface{}{"5", "6"}).
 		Dimension(paramZran, []interface{}{false, true}).
 		Dimension(paramBatch, []interface{}{"0", "0x100000"}).
+		Dimension(paramEncrypt, []interface{}{false, true}).
 		Skip(
 			func(param *tool.DescartesItem) bool {
 				// Zran and Batch not work with rafs v5.
-				if param.GetString(paramFSVersion) == "5" && (param.GetBool(paramZran) || param.GetString(paramBatch) != "0") {
+				if param.GetString(paramFSVersion) == "5" && (param.GetBool(paramZran)) ||
+					param.GetString(paramBatch) != "0" || (param.GetBool(paramEncrypt)) {
 					return true
 				}
 
 				// Zran and Batch can not work together.
-				return param.GetBool(paramZran) && param.GetString(paramBatch) != "0"
+				// Zran and Encrpt can not work together.
+				return (param.GetBool(paramZran) && param.GetString(paramBatch) != "0") ||
+					(param.GetBool(paramZran) && param.GetBool(paramEncrypt))
 			})
 
 	return func() (name string, testCase test.Case) {
@@ -53,6 +58,7 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
 		ctx.Build.OCIRef = scenario.GetBool(paramZran)
 		ctx.Build.BatchSize = scenario.GetString(paramBatch)
+		ctx.Build.Encrypt = scenario.GetBool(paramEncrypt)
 
 		image := i.prepareImage(i.T, scenario.GetString(paramImage))
 		return scenario.Str(), func(t *testing.T) {
@@ -78,6 +84,11 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 		enableBatchSize = "--batch-size " + ctx.Build.BatchSize
 	}
 
+	enableEncrypt := ""
+	if ctx.Build.Encrypt {
+		enableEncrypt = "--encrypt"
+	}
+
 	target := fmt.Sprintf("%s-nydus-%s", source, uuid.NewString())
 	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
 	logLevel := "--log-level warn"
@@ -92,8 +103,8 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 
 	// Convert image
 	convertCmd := fmt.Sprintf(
-		"%s %s convert --source %s --target %s %s %s %s --nydus-image %s --work-dir %s %s",
-		ctx.Binary.Nydusify, logLevel, source, target, fsVersion, enableOCIRef, enableBatchSize, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
+		"%s %s convert --source %s --target %s %s %s %s %s --nydus-image %s --work-dir %s %s",
+		ctx.Binary.Nydusify, logLevel, source, target, fsVersion, enableOCIRef, enableBatchSize, enableEncrypt, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
 	)
 	tool.RunWithoutOutput(t, convertCmd)
 
