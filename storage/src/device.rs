@@ -38,14 +38,14 @@ use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 
 use nydus_api::ConfigV2;
 use nydus_utils::compress;
-use nydus_utils::crypt::{self, Cipher};
+use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::digest::{self, RafsDigest};
 
 use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
 
 pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
-pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_00ff;
+pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_0fff;
 
 bitflags! {
     /// Features bits for blob management.
@@ -66,6 +66,8 @@ bitflags! {
         const TARFS = 0x0000_0040;
         /// Small file chunk are merged into batch chunk.
         const BATCH = 0x0000_0080;
+        /// Whether the Blob is encrypted.
+        const ENCRYPTED = 0x0000_0100;
         /// Blob has TAR headers to separate contents.
         const HAS_TAR_HEADER = 0x1000_0000;
         /// Blob has Table of Content (ToC) at the tail.
@@ -168,6 +170,8 @@ pub struct BlobInfo {
     meta_path: Arc<Mutex<String>>,
     /// V6: support data encryption.
     cipher_object: Arc<Cipher>,
+    /// Cipher context for encryption.
+    cipher_ctx: Option<CipherContext>,
 }
 
 impl BlobInfo {
@@ -210,6 +214,7 @@ impl BlobInfo {
             fs_cache_file: None,
             meta_path: Arc::new(Mutex::new(String::new())),
             cipher_object: Default::default(),
+            cipher_ctx: None,
         };
 
         blob_info.compute_features();
@@ -307,15 +312,31 @@ impl BlobInfo {
         self.cipher
     }
 
+    /// Set encryption algorithm for the blob.
+    pub fn set_cipher(&mut self, cipher: crypt::Algorithm) {
+        self.cipher = cipher;
+    }
+
     /// Get the cipher object to encrypt/decrypt chunk data.
     pub fn cipher_object(&self) -> Arc<Cipher> {
         self.cipher_object.clone()
     }
 
-    /// Set the cipher algorithm to handle chunk data.
-    pub fn set_cipher_info(&mut self, cipher: crypt::Algorithm, cipher_object: Arc<Cipher>) {
+    /// Get the cipher context.
+    pub fn cipher_context(&self) -> Option<CipherContext> {
+        self.cipher_ctx.clone()
+    }
+
+    /// Set the cipher info, including cipher algo, cipher object and cipher context.
+    pub fn set_cipher_info(
+        &mut self,
+        cipher: crypt::Algorithm,
+        cipher_object: Arc<Cipher>,
+        cipher_ctx: Option<CipherContext>,
+    ) {
         self.cipher = cipher;
         self.cipher_object = cipher_object;
+        self.cipher_ctx = cipher_ctx;
     }
 
     /// Get the message digest algorithm for the blob.
@@ -536,6 +557,15 @@ impl BlobInfo {
             hex::encode(&self.blob_meta_digest)
         };
         Ok(id)
+    }
+
+    /// Get the cipher info, including cipher algo, cipher object and cipher context.
+    pub fn get_cipher_info(&self) -> (crypt::Algorithm, Arc<Cipher>, Option<CipherContext>) {
+        (
+            self.cipher,
+            self.cipher_object.clone(),
+            self.cipher_ctx.clone(),
+        )
     }
 }
 

@@ -177,6 +177,7 @@ impl<R: Read> ZranContextGenerator<R> {
         chunk.set_zran_index(info.ci_index);
         chunk.set_zran_offset(info.ci_offset);
         chunk.set_compressed(true);
+        chunk.set_encrypted(false);
 
         self.uncomp_pos += round_up_4k(info.ci_len as u64);
 

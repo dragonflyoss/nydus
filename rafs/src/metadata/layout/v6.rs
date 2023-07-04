@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::convert::TryFrom;
+use std::convert::{TryFrom, TryInto};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Debug;
 use std::io::{Read, Result};
@@ -19,6 +19,7 @@ use nydus_storage::meta::{
     BlobChunkInfoV1Ondisk, BlobChunkInfoV2Ondisk, BlobCompressionContextHeader,
 };
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
+use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::{compress, digest, round_up, ByteSize};
 
 use crate::metadata::inode::InodeWrapper;
@@ -571,6 +572,15 @@ impl RafsV6SuperBlockExt {
     pub fn set_chunk_table(&mut self, offset: u64, size: u64) {
         self.set_chunk_table_offset(offset);
         self.set_chunk_table_size(size);
+    }
+
+    /// Set encryption algorithm to encrypt chunks of the Rafs filesystem.
+    pub fn set_cipher(&mut self, cipher: crypt::Algorithm) {
+        let c: RafsSuperFlags = cipher.into();
+
+        self.s_flags &= !RafsSuperFlags::ENCRYPTION_NONE.bits();
+        self.s_flags &= !RafsSuperFlags::ENCRYPTION_ASE_128_XTS.bits();
+        self.s_flags |= c.bits();
     }
 
     impl_pub_getter_setter!(
@@ -1418,11 +1428,23 @@ struct RafsV6Blob {
     // SHA256 digest of RAFS blob for ZRAN, containing `blob.meta`, `blob.digest` `blob.toc` and
     // optionally 'image.boot`. It's all zero for ZRAN blobs with inlined-meta, so need special
     // handling.
+    // When using encryption mod, it's reused for saving encryption key.
     blob_meta_digest: [u8; 32],
     // Size of RAFS blob for ZRAN. It's zero ZRAN blobs with inlined-meta.
+    // When using encryption mod, it's reused for saving encryption iv first 8 bytes.
     blob_meta_size: u64,
+    // When using encryption mod, used for cipher_iv last 8 bytes.
+    // 0                  7                 15
+    // +------------------+------------------+
+    // |  blob_meta_size  | cipher_iv[8..16] |
+    // |     8bytes       |      8bytes      |
+    // +------------------+------------------+
+    //  \_         cipher_iv[0..16]        _/
+    cipher_iv: [u8; 8],
+    // Crypt algorithm for chunks in the blob.
+    cipher_algo: u32,
 
-    reserved2: [u8; 48],
+    reserved2: [u8; 36],
 }
 
 impl Default for RafsV6Blob {
@@ -1446,8 +1468,10 @@ impl Default for RafsV6Blob {
             blob_meta_digest: [0u8; 32],
             blob_meta_size: 0,
             blob_toc_size: 0u32,
+            cipher_iv: [0u8; 8],
+            cipher_algo: (crypt::Algorithm::None as u32).to_le(),
 
-            reserved2: [0u8; 48],
+            reserved2: [0u8; 36],
         }
     }
 }
@@ -1479,6 +1503,32 @@ impl RafsV6Blob {
         let digest = digest::Algorithm::try_from(u32::from_le(self.digest_algo))
             .map_err(|_| einval!("invalid digest algorithm in Rafs v6 blob entry"))?;
         blob_info.set_digester(digest);
+        let cipher = crypt::Algorithm::try_from(u32::from_le(self.cipher_algo))
+            .map_err(|_| einval!("invalid cipher algorithm in Rafs v6 blob entry"))?;
+        let cipher_object = cipher
+            .new_cipher()
+            .map_err(|e| einval!(format!("failed to create new cipher object {}", e)))?;
+        let cipher_context = match cipher {
+            crypt::Algorithm::None => None,
+            crypt::Algorithm::Aes128Xts => {
+                let mut cipher_iv = [0u8; 16];
+                cipher_iv[..8].copy_from_slice(&self.blob_meta_size.to_le_bytes());
+                cipher_iv[8..].copy_from_slice(&self.cipher_iv);
+                Some(CipherContext::new(
+                    self.blob_meta_digest.to_vec(),
+                    cipher_iv.to_vec(),
+                    false,
+                    cipher,
+                )?)
+            }
+            _ => {
+                return Err(einval!(format!(
+                    "invalid cipher algorithm {:?} when creating cipher context",
+                    cipher
+                )))
+            }
+        };
+        blob_info.set_cipher_info(cipher, Arc::new(cipher_object), cipher_context);
         blob_info.set_blob_meta_info(
             u64::from_le(self.ci_offset),
             u64::from_le(self.ci_compressed_size),
@@ -1504,6 +1554,38 @@ impl RafsV6Blob {
         let mut blob_id = [0u8; BLOB_SHA256_LEN];
         blob_id[..id.len()].copy_from_slice(id);
 
+        let (blob_meta_digest, blob_meta_size, cipher_iv) = match blob_info.cipher() {
+            crypt::Algorithm::None => (
+                *blob_info.blob_meta_digest(),
+                blob_info.blob_meta_size(),
+                [0u8; 8],
+            ),
+            crypt::Algorithm::Aes128Xts => {
+                let cipher_ctx = match blob_info.cipher_context() {
+                    Some(ctx) => ctx,
+                    None => {
+                        return Err(einval!(
+                            "cipher context is unset while using Aes128Xts encryption algorithm"
+                        ))
+                    }
+                };
+                let cipher_key: [u8; 32] = cipher_ctx.get_cipher_meta().0.try_into().unwrap();
+                let (cipher_iv_top_half, cipher_iv_bottom_half) =
+                    cipher_ctx.get_cipher_meta().1.split_at(8);
+                (
+                    cipher_key,
+                    u64::from_le_bytes(cipher_iv_top_half.try_into().unwrap()),
+                    cipher_iv_bottom_half.try_into().unwrap(),
+                )
+            }
+            _ => {
+                return Err(einval!(format!(
+                    "invalid cipher algorithm type {:?} in blob info",
+                    blob_info.cipher()
+                )))
+            }
+        };
+
         Ok(RafsV6Blob {
             blob_id,
             blob_index: blob_info.blob_index().to_le(),
@@ -1520,11 +1602,13 @@ impl RafsV6Blob {
             ci_uncompressed_size: blob_info.meta_ci_uncompressed_size().to_le(),
 
             blob_toc_digest: *blob_info.blob_toc_digest(),
-            blob_meta_digest: *blob_info.blob_meta_digest(),
-            blob_meta_size: blob_info.blob_meta_size(),
+            blob_meta_digest,
+            blob_meta_size,
             blob_toc_size: blob_info.blob_toc_size(),
+            cipher_iv,
+            cipher_algo: (blob_info.cipher() as u32).to_le(),
 
-            reserved2: [0u8; 48],
+            reserved2: [0u8; 36],
         })
     }
 
@@ -1582,10 +1666,11 @@ impl RafsV6Blob {
         if compress::Algorithm::try_from(u32::from_le(self.compression_algo)).is_err()
             || compress::Algorithm::try_from(u32::from_le(self.ci_compressor)).is_err()
             || digest::Algorithm::try_from(u32::from_le(self.digest_algo)).is_err()
+            || crypt::Algorithm::try_from(self.cipher_algo).is_err()
         {
             error!(
-                "RafsV6Blob: idx {} invalid compression_algo {} ci_compressor {} digest_algo {}",
-                blob_index, self.compression_algo, self.ci_compressor, self.digest_algo
+                "RafsV6Blob: idx {} invalid compression_algo {} ci_compressor {} digest_algo {} cipher_algo {}",
+                blob_index, self.compression_algo, self.ci_compressor, self.digest_algo, self.cipher_algo,
             );
             return false;
         }
@@ -1641,7 +1726,8 @@ impl RafsV6Blob {
         let count = chunk_count as u64;
         if blob_features.contains(BlobFeatures::CHUNK_INFO_V2)
             && (blob_features.contains(BlobFeatures::BATCH)
-                || blob_features.contains(BlobFeatures::ZRAN))
+                || blob_features.contains(BlobFeatures::ZRAN)
+                || blob_features.contains(BlobFeatures::ENCRYPTED))
         {
             if ci_uncompr_size < count * size_of::<BlobChunkInfoV2Ondisk>() as u64 {
                 error!(
@@ -1660,6 +1746,7 @@ impl RafsV6Blob {
             }
         } else if blob_features.contains(BlobFeatures::BATCH)
             || blob_features.contains(BlobFeatures::ZRAN)
+            || blob_features.contains(BlobFeatures::ENCRYPTED)
         {
             error!(
                 "RafsV6Blob: idx {} invalid feature bits {}",
@@ -1733,6 +1820,8 @@ impl RafsV6BlobTable {
         blob_meta_size: u64,
         blob_toc_size: u32,
         header: BlobCompressionContextHeader,
+        cipher_object: Arc<Cipher>,
+        cipher_context: Option<CipherContext>,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         let blob_features = BlobFeatures::try_from(header.features()).unwrap();
@@ -1748,6 +1837,7 @@ impl RafsV6BlobTable {
 
         blob_info.set_compressor(flags.into());
         blob_info.set_digester(flags.into());
+        blob_info.set_cipher(flags.into());
         blob_info.set_prefetch_info(prefetch_offset as u64, prefetch_size as u64);
         blob_info.set_blob_meta_info(
             header.ci_compressed_offset(),
@@ -1759,6 +1849,7 @@ impl RafsV6BlobTable {
         blob_info.set_blob_toc_digest(blob_toc_digest);
         blob_info.set_blob_meta_size(blob_meta_size);
         blob_info.set_blob_toc_size(blob_toc_size);
+        blob_info.set_cipher_info(flags.into(), cipher_object, cipher_context);
 
         self.entries.push(Arc::new(blob_info));
 

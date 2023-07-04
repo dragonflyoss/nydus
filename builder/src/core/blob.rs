@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{toc, BlobMetaChunkArray};
-use nydus_utils::compress;
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
+use nydus_utils::{compress, crypt};
 use sha2::digest::Digest;
 
 use super::layout::BlobLayout;
@@ -159,6 +159,9 @@ impl Blob {
         }
 
         // Prepare blob meta information data.
+        let encrypt = ctx.cipher != crypt::Algorithm::None;
+        let cipher_obj = &blob_ctx.cipher_object;
+        let cipher_ctx = &blob_ctx.cipher_ctx;
         let blob_meta_info = &blob_ctx.blob_meta_info;
         let mut ci_data = blob_meta_info.as_byte_slice();
         let mut inflate_buf = Vec::new();
@@ -194,8 +197,11 @@ impl Blob {
         if !compressed {
             compressor = compress::Algorithm::None;
         }
+
+        let encrypted_ci_data =
+            crypt::encrypt_with_context(&compressed_data, cipher_obj, cipher_ctx, encrypt)?;
         let compressed_offset = blob_writer.pos()?;
-        let compressed_size = compressed_data.len() as u64;
+        let compressed_size = encrypted_ci_data.len() as u64;
         let uncompressed_size = ci_data.len() as u64;
 
         header.set_ci_compressor(compressor);
@@ -212,18 +218,20 @@ impl Blob {
             header.set_inlined_chunk_digest(true);
         }
 
-        let header_size = header.as_bytes().len();
         blob_ctx.blob_meta_header = header;
+        let encrypted_header =
+            crypt::encrypt_with_context(header.as_bytes(), cipher_obj, cipher_ctx, encrypt)?;
+        let header_size = encrypted_header.len();
 
         // Write blob meta data and header
-        match compressed_data {
+        match encrypted_ci_data {
             Cow::Owned(v) => blob_ctx.write_data(blob_writer, &v)?,
             Cow::Borrowed(v) => {
                 let buf = v.to_vec();
                 blob_ctx.write_data(blob_writer, &buf)?;
             }
         }
-        blob_ctx.write_data(blob_writer, header.as_bytes())?;
+        blob_ctx.write_data(blob_writer, &encrypted_header)?;
 
         // Write tar header for `blob.meta`.
         if ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc) {

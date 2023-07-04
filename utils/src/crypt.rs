@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2022-2023 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,8 +8,37 @@ use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::io::Error;
 use std::str::FromStr;
+use std::sync::Arc;
 
-use openssl::symm;
+use openssl::{rand, symm};
+
+// The length of the data unit to be encrypted.
+pub const DATA_UNIT_LENGTH: usize = 16;
+// The length of thd iv (Initialization Vector) to do AES-XTS encryption.
+pub const AES_XTS_IV_LENGTH: usize = 16;
+// The length of the key to do AES-128-XTS encryption.
+pub const AES_128_XTS_KEY_LENGTH: usize = 32;
+// The length of the key to do AES-256-XTS encryption.
+pub const AES_256_XTS_KEY_LENGTH: usize = 64;
+// The length of the key to do AES-256-GCM encryption.
+pub const AES_256_GCM_KEY_LENGTH: usize = 32;
+
+// The padding magic end.
+pub const PADDING_MAGIC_END: [u8; 2] = [0x78, 0x90];
+// DATA_UNIT_LENGTH + length of PADDING_MAGIC_END.
+pub const PADDING_LENGTH: usize = 18;
+// Openssl rejects keys with identical first and second halves for xts.
+// Use a default key for such cases.
+const DEFAULT_CE_KEY: [u8; 32] = [
+    0xac, 0xed, 0x14, 0x69, 0x94, 0x23, 0x1e, 0xca, 0x44, 0x8c, 0xed, 0x2f, 0x6b, 0x40, 0x0c, 0x00,
+    0xfd, 0xbb, 0x3f, 0xac, 0xdd, 0xc7, 0xd9, 0xee, 0x83, 0xf6, 0x5c, 0xd9, 0x3c, 0xaa, 0x28, 0x7c,
+];
+const DEFAULT_CE_KEY_64: [u8; 64] = [
+    0xac, 0xed, 0x14, 0x69, 0x94, 0x23, 0x1e, 0xca, 0x44, 0x8c, 0xed, 0x2f, 0x6b, 0x40, 0x0c, 0x00,
+    0xfd, 0xbb, 0x3f, 0xac, 0xdd, 0xc7, 0xd9, 0xee, 0x83, 0xf6, 0x5c, 0xd9, 0x3c, 0xaa, 0x28, 0x7c,
+    0xfd, 0xbb, 0x3f, 0xac, 0xdd, 0xc7, 0xd9, 0xee, 0x83, 0xf6, 0x5c, 0xd9, 0x3c, 0xaa, 0x28, 0x7c,
+    0xac, 0xed, 0x14, 0x69, 0x94, 0x23, 0x1e, 0xca, 0x44, 0x8c, 0xed, 0x2f, 0x6b, 0x40, 0x0c, 0x00,
+];
 
 /// Supported cipher algorithms.
 #[repr(u32)]
@@ -64,6 +93,16 @@ impl Algorithm {
             Algorithm::Aes128Xts => 0,
             Algorithm::Aes256Xts => 0,
             Algorithm::Aes256Gcm => 12,
+        }
+    }
+
+    /// Get key size of the encryption algorithm.
+    pub fn key_length(&self) -> usize {
+        match self {
+            Algorithm::None => 0,
+            Algorithm::Aes128Xts => AES_128_XTS_KEY_LENGTH,
+            Algorithm::Aes256Xts => AES_256_XTS_KEY_LENGTH,
+            Algorithm::Aes256Gcm => AES_256_GCM_KEY_LENGTH,
         }
     }
 }
@@ -159,16 +198,18 @@ impl Cipher {
         match self {
             Cipher::None => Ok(Cow::from(data)),
             Cipher::Aes128Xts(cipher) => {
-                assert_eq!(key.len(), 32);
+                assert_eq!(key.len(), AES_128_XTS_KEY_LENGTH);
                 let mut buf;
-                let data = if data.len() >= 16 {
+                let data = if data.len() >= DATA_UNIT_LENGTH {
                     data
                 } else {
                     // CMS (Cryptographic Message Syntax).
-                    // This pads with the same value as the number of padding bytes.
-                    let val = (16 - data.len()) as u8;
-                    buf = [val; 16];
+                    // This pads with the same value as the number of padding bytes
+                    // and appends the magic padding end.
+                    let val = (DATA_UNIT_LENGTH - data.len()) as u8;
+                    buf = [val; PADDING_LENGTH];
                     buf[..data.len()].copy_from_slice(data);
+                    buf[DATA_UNIT_LENGTH..PADDING_LENGTH].copy_from_slice(&PADDING_MAGIC_END);
                     &buf
                 };
                 Self::cipher(*cipher, symm::Mode::Encrypt, key, iv, data)
@@ -176,16 +217,15 @@ impl Cipher {
                     .map_err(|e| eother!(format!("failed to encrypt data, {}", e)))
             }
             Cipher::Aes256Xts(cipher) => {
-                assert_eq!(key.len(), 64);
+                assert_eq!(key.len(), AES_256_XTS_KEY_LENGTH);
                 let mut buf;
-                let data = if data.len() >= 16 {
+                let data = if data.len() >= DATA_UNIT_LENGTH {
                     data
                 } else {
-                    // CMS (Cryptographic Message Syntax).
-                    // This pads with the same value as the number of padding bytes.
-                    let val = (16 - data.len()) as u8;
-                    buf = [val; 16];
+                    let val = (DATA_UNIT_LENGTH - data.len()) as u8;
+                    buf = [val; PADDING_LENGTH];
                     buf[..data.len()].copy_from_slice(data);
+                    buf[DATA_UNIT_LENGTH..PADDING_LENGTH].copy_from_slice(&PADDING_MAGIC_END);
                     &buf
                 };
                 Self::cipher(*cipher, symm::Mode::Encrypt, key, iv, data)
@@ -199,13 +239,7 @@ impl Cipher {
     }
 
     /// Decrypt encrypted data with optional IV and return the decrypted data.
-    pub fn decrypt(
-        &self,
-        key: &[u8],
-        iv: Option<&[u8]>,
-        data: &[u8],
-        size: usize,
-    ) -> Result<Vec<u8>, Error> {
+    pub fn decrypt(&self, key: &[u8], iv: Option<&[u8]>, data: &[u8]) -> Result<Vec<u8>, Error> {
         let mut data = match self {
             Cipher::None => Ok(data.to_vec()),
             Cipher::Aes128Xts(cipher) => Self::cipher(*cipher, symm::Mode::Decrypt, key, iv, data)
@@ -218,18 +252,19 @@ impl Cipher {
         }?;
 
         // Trim possible padding.
-        if data.len() > size {
-            if data.len() != 16 {
-                return Err(einval!("Cipher::decrypt: invalid padding data"));
+        if data.len() == PADDING_LENGTH
+            && data[PADDING_LENGTH - PADDING_MAGIC_END.len()..PADDING_LENGTH] == PADDING_MAGIC_END
+        {
+            let val = data[DATA_UNIT_LENGTH - 1] as usize;
+            if val < DATA_UNIT_LENGTH {
+                data.truncate(DATA_UNIT_LENGTH - val);
+            } else {
+                return Err(einval!(format!(
+                    "Cipher::decrypt: invalid padding data, value {}",
+                    val,
+                )));
             }
-            let val = (16 - size) as u8;
-            for item in data.iter().skip(size) {
-                if *item != val {
-                    return Err(einval!("Cipher::decrypt: invalid padding data"));
-                }
-            }
-            data.truncate(size);
-        }
+        };
 
         Ok(data)
     }
@@ -277,8 +312,8 @@ impl Cipher {
         match self {
             Cipher::None => plaintext_size,
             Cipher::Aes128Xts(_) | Cipher::Aes256Xts(_) => {
-                if plaintext_size < 16 {
-                    16
+                if plaintext_size < DATA_UNIT_LENGTH {
+                    DATA_UNIT_LENGTH
                 } else {
                     plaintext_size
                 }
@@ -320,6 +355,90 @@ impl Cipher {
         out.truncate(count + rest);
         Ok(out)
     }
+
+    pub fn generate_random_key(cipher_algo: Algorithm) -> Result<Vec<u8>, Error> {
+        let length = cipher_algo.key_length();
+        let mut buf = vec![0u8; length];
+        if let Err(e) = rand::rand_bytes(&mut buf) {
+            Err(eother!(format!(
+                "failed to generate key for {}, {}",
+                cipher_algo, e
+            )))
+        } else {
+            Ok(Self::tweak_key_for_xts(&buf).to_vec())
+        }
+    }
+
+    pub fn generate_random_iv() -> Result<Vec<u8>, Error> {
+        let mut buf = vec![0u8; AES_XTS_IV_LENGTH];
+        if let Err(e) = rand::rand_bytes(&mut buf) {
+            Err(eother!(format!("failed to generate iv, {}", e)))
+        } else {
+            Ok(buf)
+        }
+    }
+}
+
+/// Struct to provide context information for data encryption/decryption.
+#[derive(Default, Debug, Clone)]
+pub struct CipherContext {
+    key: Vec<u8>,
+    iv: Vec<u8>,
+    convergent_encryption: bool,
+    cipher_algo: Algorithm,
+}
+
+impl CipherContext {
+    /// Create a new instance of [CipherContext].
+    pub fn new(
+        key: Vec<u8>,
+        iv: Vec<u8>,
+        convergent_encryption: bool,
+        cipher_algo: Algorithm,
+    ) -> Result<Self, Error> {
+        let key_length = key.len();
+        if key_length != cipher_algo.key_length() {
+            return Err(einval!(format!(
+                "invalid key length {} for {} encryption",
+                key_length, cipher_algo
+            )));
+        } else if key[0..key_length >> 1] == key[key_length >> 1..key_length] {
+            return Err(einval!("invalid symmetry key for encryption"));
+        }
+
+        Ok(CipherContext {
+            key,
+            iv,
+            convergent_encryption,
+            cipher_algo,
+        })
+    }
+
+    /// Generate context information from data for encryption/decryption.
+    pub fn generate_cipher_meta<'a>(&'a self, data: &'a [u8]) -> (&'a [u8], Vec<u8>) {
+        let length = data.len();
+        assert_eq!(length, self.cipher_algo.key_length());
+        let iv = vec![0u8; AES_XTS_IV_LENGTH];
+        if self.convergent_encryption {
+            if length == AES_128_XTS_KEY_LENGTH && data[0..length >> 1] == data[length >> 1..length]
+            {
+                (&DEFAULT_CE_KEY, iv)
+            } else if length == AES_256_XTS_KEY_LENGTH
+                && data[0..length >> 1] == data[length >> 1..length]
+            {
+                (&DEFAULT_CE_KEY_64, iv)
+            } else {
+                (data, iv)
+            }
+        } else {
+            (&self.key, iv)
+        }
+    }
+
+    /// Get context information for meta data encryption/decryption.
+    pub fn get_cipher_meta(&self) -> (&[u8], &[u8]) {
+        (&self.key, &self.iv)
+    }
 }
 
 /// A customized buf allocator that avoids zeroing
@@ -330,6 +449,44 @@ fn alloc_buf(size: usize) -> Vec<u8> {
         .pad_to_align();
     let ptr = unsafe { alloc(layout) };
     unsafe { Vec::from_raw_parts(ptr, size, layout.size()) }
+}
+
+// Encrypt data with Cipher and CipherContext.
+pub fn encrypt_with_context<'a>(
+    data: &'a [u8],
+    cipher_obj: &Arc<Cipher>,
+    cipher_ctx: &Option<CipherContext>,
+    encrypted: bool,
+) -> Result<Cow<'a, [u8]>, Error> {
+    if encrypted {
+        if let Some(cipher_ctx) = cipher_ctx {
+            let (key, iv) = cipher_ctx.get_cipher_meta();
+            Ok(cipher_obj.encrypt(key, Some(iv), data)?)
+        } else {
+            Err(einval!("the encrypt context can not be none"))
+        }
+    } else {
+        Ok(Cow::Borrowed(data))
+    }
+}
+
+// Decrypt data with Cipher and CipherContext.
+pub fn decrypt_with_context<'a>(
+    data: &'a [u8],
+    cipher_obj: &Arc<Cipher>,
+    cipher_ctx: &Option<CipherContext>,
+    encrypted: bool,
+) -> Result<Cow<'a, [u8]>, Error> {
+    if encrypted {
+        if let Some(cipher_ctx) = cipher_ctx {
+            let (key, iv) = cipher_ctx.get_cipher_meta();
+            Ok(Cow::from(cipher_obj.decrypt(key, Some(iv), data)?))
+        } else {
+            Err(einval!("the decrypt context can not be none"))
+        }
+    } else {
+        Ok(Cow::Borrowed(data))
+    }
 }
 
 #[cfg(test)]
@@ -353,7 +510,7 @@ mod tests {
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"1")
             .unwrap();
         assert_eq!(ciphertext1, ciphertext2);
-        assert_eq!(ciphertext2.len(), 16);
+        assert_eq!(ciphertext2.len(), PADDING_LENGTH);
 
         let ciphertext3 = cipher
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"11111111111111111")
@@ -386,7 +543,7 @@ mod tests {
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"1")
             .unwrap();
         assert_eq!(ciphertext1, ciphertext2);
-        assert_eq!(ciphertext2.len(), 16);
+        assert_eq!(ciphertext2.len(), PADDING_LENGTH);
 
         let ciphertext3 = cipher
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"11111111111111111")
@@ -416,7 +573,7 @@ mod tests {
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"1")
             .unwrap();
         let plaintext1 = cipher
-            .decrypt(key.as_slice(), Some(&[0u8; 16]), &ciphertext1, 1)
+            .decrypt(key.as_slice(), Some(&[0u8; 16]), &ciphertext1)
             .unwrap();
         assert_eq!(&plaintext1, b"1");
 
@@ -424,7 +581,7 @@ mod tests {
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"11111111111111111")
             .unwrap();
         let plaintext2 = cipher
-            .decrypt(key.as_slice(), Some(&[0u8; 16]), &ciphertext2, 17)
+            .decrypt(key.as_slice(), Some(&[0u8; 16]), &ciphertext2)
             .unwrap();
         assert_eq!(&plaintext2, b"11111111111111111");
 
@@ -432,7 +589,7 @@ mod tests {
             .encrypt(key.as_slice(), Some(&[1u8; 16]), b"11111111111111111")
             .unwrap();
         let plaintext3 = cipher
-            .decrypt(key.as_slice(), Some(&[1u8; 16]), &ciphertext3, 17)
+            .decrypt(key.as_slice(), Some(&[1u8; 16]), &ciphertext3)
             .unwrap();
         assert_eq!(&plaintext3, b"11111111111111111");
     }
@@ -447,7 +604,7 @@ mod tests {
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"1")
             .unwrap();
         let plaintext1 = cipher
-            .decrypt(key.as_slice(), Some(&[0u8; 16]), &ciphertext1, 1)
+            .decrypt(key.as_slice(), Some(&[0u8; 16]), &ciphertext1)
             .unwrap();
         assert_eq!(&plaintext1, b"1");
 
@@ -455,7 +612,7 @@ mod tests {
             .encrypt(key.as_slice(), Some(&[0u8; 16]), b"11111111111111111")
             .unwrap();
         let plaintext2 = cipher
-            .decrypt(key.as_slice(), Some(&[0u8; 16]), &ciphertext2, 17)
+            .decrypt(key.as_slice(), Some(&[0u8; 16]), &ciphertext2)
             .unwrap();
         assert_eq!(&plaintext2, b"11111111111111111");
 
@@ -463,7 +620,7 @@ mod tests {
             .encrypt(key.as_slice(), Some(&[1u8; 16]), b"11111111111111111")
             .unwrap();
         let plaintext3 = cipher
-            .decrypt(key.as_slice(), Some(&[1u8; 16]), &ciphertext3, 17)
+            .decrypt(key.as_slice(), Some(&[1u8; 16]), &ciphertext3)
             .unwrap();
         assert_eq!(&plaintext3, b"11111111111111111");
     }

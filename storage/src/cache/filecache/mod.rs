@@ -22,7 +22,6 @@ use crate::cache::state::{
 };
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
-use crate::context::CipherContext;
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
@@ -290,7 +289,12 @@ impl FileCacheEntry {
             let key = hex::decode(mgr.cache_encryption_key.clone())
                 .map_err(|_e| einval!("invalid cache file encryption key"))?;
             let cipher = crypt::Algorithm::Aes128Xts.new_cipher()?;
-            let ctx = CipherContext::new(key, mgr.cache_convergent_encryption)?;
+            let ctx = crypt::CipherContext::new(
+                key,
+                [0u8; 16].to_vec(),
+                mgr.cache_convergent_encryption,
+                crypt::Algorithm::Aes128Xts,
+            )?;
             (Arc::new(cipher), Arc::new(ctx))
         } else {
             (Default::default(), Default::default())

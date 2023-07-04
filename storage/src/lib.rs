@@ -48,7 +48,6 @@ use std::fmt::{Display, Formatter};
 
 pub mod backend;
 pub mod cache;
-pub mod context;
 pub mod device;
 pub mod factory;
 pub mod meta;

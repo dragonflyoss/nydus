@@ -346,6 +346,14 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     arg_output_json.clone(),
                 )
+                .arg(
+                    Arg::new("encrypt")
+                        .long("encrypt")
+                        .short('E')
+                        .help("Encrypt the generated RAFS metadata and data blobs")
+                        .action(ArgAction::SetTrue)
+                        .required(false)
+                )
         );
 
     let app = app.subcommand(
@@ -755,7 +763,7 @@ impl Command {
                 .map(|s| s.as_str())
                 .unwrap_or_default(),
         )?;
-
+        let encrypt = matches.get_flag("encrypt");
         match conversion_type {
             ConversionType::DirectoryToRafs => {
                 Self::ensure_directory(&source_path)?;
@@ -812,6 +820,12 @@ impl Command {
                         "conversion type '{}' conflicts with '--blob-id'",
                         conversion_type
                     );
+                }
+                if encrypt {
+                    bail!(
+                        "conversion type '{}' conflicts with '--encrypt'",
+                        conversion_type
+                    )
                 }
             }
             ConversionType::TarToTarfs => {
@@ -878,6 +892,12 @@ impl Command {
                         conversion_type
                     );
                 }
+                if encrypt {
+                    bail!(
+                        "conversion type '{}' conflicts with '--encrypt'",
+                        conversion_type
+                    )
+                }
             }
             ConversionType::EStargzIndexToRef => {
                 Self::ensure_file(&source_path)?;
@@ -914,6 +934,12 @@ impl Command {
                 if blob_id.trim() == "" {
                     bail!("'--blob-id' is missing for '--type stargz_index'");
                 }
+                if encrypt {
+                    bail!(
+                        "conversion type '{}' conflicts with '--encrypt'",
+                        conversion_type
+                    )
+                }
             }
             ConversionType::DirectoryToStargz
             | ConversionType::TargzToStargz
@@ -943,6 +969,7 @@ impl Command {
             blob_storage,
             blob_inline_meta,
             features,
+            encrypt,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
@@ -991,13 +1018,25 @@ impl Command {
         }
 
         let mut builder: Box<dyn Builder> = match conversion_type {
-            ConversionType::DirectoryToRafs => Box::new(DirectoryBuilder::new()),
+            ConversionType::DirectoryToRafs => {
+                if encrypt {
+                    build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
+                    build_ctx.blob_features.insert(BlobFeatures::ENCRYPTED);
+                }
+                Box::new(DirectoryBuilder::new())
+            }
             ConversionType::EStargzIndexToRef => {
                 Box::new(StargzBuilder::new(blob_data_size, &build_ctx))
             }
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
-            | ConversionType::TarToRafs => Box::new(TarballBuilder::new(conversion_type)),
+            | ConversionType::TarToRafs => {
+                if encrypt {
+                    build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
+                    build_ctx.blob_features.insert(BlobFeatures::ENCRYPTED);
+                }
+                Box::new(TarballBuilder::new(conversion_type))
+            }
             ConversionType::EStargzToRef
             | ConversionType::TargzToRef
             | ConversionType::TarToRef => {

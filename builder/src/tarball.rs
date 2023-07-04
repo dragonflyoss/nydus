@@ -618,6 +618,39 @@ mod tests {
             Some(ArtifactStorage::FileDir(tmp_dir.clone())),
             false,
             Features::new(),
+            false,
+        );
+        let mut bootstrap_mgr =
+            BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        let mut builder = TarballBuilder::new(ConversionType::TarToTarfs);
+        builder
+            .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_build_encrypted_tarfs() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let tmp_dir = tmp_dir.as_path().to_path_buf();
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let source_path = PathBuf::from(root_dir).join("../tests/texture/tar/all-entry-type.tar");
+        let prefetch = Prefetch::default();
+        let mut ctx = BuildContext::new(
+            "test".to_string(),
+            true,
+            0,
+            compress::Algorithm::None,
+            digest::Algorithm::Sha256,
+            true,
+            WhiteoutSpec::Oci,
+            ConversionType::TarToTarfs,
+            source_path,
+            prefetch,
+            Some(ArtifactStorage::FileDir(tmp_dir.clone())),
+            false,
+            Features::new(),
+            true,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);

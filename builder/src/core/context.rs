@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::{fmt, fs};
 
 use anyhow::{anyhow, Context, Error, Result};
+use nydus_utils::crypt::{self, Cipher, CipherContext};
 use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 use vmm_sys_util::tempfile::TempFile;
@@ -373,6 +374,7 @@ pub struct BlobContext {
     pub blob_hash: Sha256,
     pub blob_compressor: compress::Algorithm,
     pub blob_digester: digest::Algorithm,
+    pub blob_cipher: crypt::Algorithm,
     pub blob_prefetch_size: u64,
     /// Whether to generate blob metadata information.
     pub blob_meta_info_enabled: bool,
@@ -412,16 +414,23 @@ pub struct BlobContext {
     pub blob_toc_size: u32,
 
     pub entry_list: toc::TocEntryList,
+    /// Cipher to encrypt the RAFS blobs.
+    pub cipher_object: Arc<Cipher>,
+    pub cipher_ctx: Option<CipherContext>,
 }
 
 impl BlobContext {
     /// Create a new instance of [BlobContext].
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         blob_id: String,
         blob_offset: u64,
         features: BlobFeatures,
         compressor: compress::Algorithm,
         digester: digest::Algorithm,
+        cipher: crypt::Algorithm,
+        cipher_object: Arc<Cipher>,
+        cipher_ctx: Option<CipherContext>,
     ) -> Self {
         let blob_meta_info = if features.contains(BlobFeatures::CHUNK_INFO_V2) {
             BlobMetaChunkArray::new_v2()
@@ -433,6 +442,7 @@ impl BlobContext {
             blob_hash: Sha256::new(),
             blob_compressor: compressor,
             blob_digester: digester,
+            blob_cipher: cipher,
             blob_prefetch_size: 0,
             blob_meta_info_enabled: false,
             blob_meta_info,
@@ -455,6 +465,8 @@ impl BlobContext {
             blob_toc_size: 0,
 
             entry_list: toc::TocEntryList::new(),
+            cipher_object,
+            cipher_ctx,
         };
 
         blob_ctx
@@ -490,6 +502,9 @@ impl BlobContext {
         blob_ctx
             .blob_meta_header
             .set_tarfs(features.contains(BlobFeatures::TARFS));
+        blob_ctx
+            .blob_meta_header
+            .set_encrypted(features.contains(BlobFeatures::ENCRYPTED));
 
         blob_ctx
     }
@@ -578,7 +593,18 @@ impl BlobContext {
             }
         }
 
-        let mut blob_ctx = Self::new(blob_id, 0, features, blob.compressor(), blob.digester());
+        let (cipher, cipher_object, cipher_ctx) = blob.get_cipher_info();
+
+        let mut blob_ctx = Self::new(
+            blob_id,
+            0,
+            features,
+            blob.compressor(),
+            blob.digester(),
+            cipher,
+            cipher_object,
+            cipher_ctx,
+        );
         blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
         blob_ctx.uncompressed_blob_size = blob.uncompressed_size();
@@ -630,6 +656,15 @@ impl BlobContext {
         self.blob_meta_info_enabled = enable;
     }
 
+    pub fn set_cipher_info(
+        &mut self,
+        cipher_object: Arc<Cipher>,
+        cipher_ctx: Option<CipherContext>,
+    ) {
+        self.cipher_object = cipher_object;
+        self.cipher_ctx = cipher_ctx;
+    }
+
     pub fn add_chunk_meta_info(
         &mut self,
         chunk: &ChunkWrapper,
@@ -658,6 +693,7 @@ impl BlobContext {
                             chunk.uncompressed_offset(),
                             chunk.uncompressed_size(),
                             chunk.is_compressed(),
+                            chunk.is_encrypted(),
                             chunk.is_batch(),
                             0,
                         );
@@ -751,12 +787,33 @@ impl BlobManager {
     }
 
     fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {
+        let (cipher_object, cipher_ctx) = match ctx.cipher {
+            crypt::Algorithm::None => (Default::default(), None),
+            crypt::Algorithm::Aes128Xts => {
+                let key = crypt::Cipher::generate_random_key(ctx.cipher)?;
+                let iv = crypt::Cipher::generate_random_iv()?;
+                let cipher_ctx = CipherContext::new(key, iv, false, ctx.cipher)?;
+                (
+                    ctx.cipher.new_cipher().ok().unwrap_or(Default::default()),
+                    Some(cipher_ctx),
+                )
+            }
+            _ => {
+                return Err(anyhow!(format!(
+                    "cipher algorithm {:?} does not support",
+                    ctx.cipher
+                )))
+            }
+        };
         let mut blob_ctx = BlobContext::new(
             ctx.blob_id.clone(),
             ctx.blob_offset,
             ctx.blob_features,
             ctx.compressor,
             ctx.digester,
+            ctx.cipher,
+            Arc::new(cipher_object),
+            cipher_ctx,
         );
         blob_ctx.set_chunk_size(ctx.chunk_size);
         blob_ctx.set_meta_info_enabled(
@@ -936,6 +993,7 @@ impl BlobManager {
                 RafsBlobTable::V6(table) => {
                     flags |= RafsSuperFlags::from(ctx.blob_compressor);
                     flags |= RafsSuperFlags::from(ctx.blob_digester);
+                    flags |= RafsSuperFlags::from(ctx.blob_cipher);
                     table.add(
                         blob_id,
                         0,
@@ -950,6 +1008,8 @@ impl BlobManager {
                         ctx.blob_meta_size,
                         ctx.blob_toc_size,
                         ctx.blob_meta_header,
+                        ctx.cipher_object.clone(),
+                        ctx.cipher_ctx.clone(),
                     );
                 }
             }
@@ -1087,6 +1147,8 @@ pub struct BuildContext {
     pub compressor: compress::Algorithm,
     /// Inode and chunk digest algorithm flag.
     pub digester: digest::Algorithm,
+    /// Blob encryption algorithm flag.
+    pub cipher: crypt::Algorithm,
     /// Save host uid gid in each inode.
     pub explicit_uidgid: bool,
     /// whiteout spec: overlayfs or oci
@@ -1138,6 +1200,7 @@ impl BuildContext {
         blob_storage: Option<ArtifactStorage>,
         blob_inline_meta: bool,
         features: Features,
+        encrypt: bool,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
@@ -1153,12 +1216,19 @@ impl BuildContext {
             blob_features |= BlobFeatures::TARFS;
         }
 
+        let cipher = if encrypt {
+            crypt::Algorithm::Aes128Xts
+        } else {
+            crypt::Algorithm::None
+        };
+
         BuildContext {
             blob_id,
             aligned_chunk,
             blob_offset,
             compressor,
             digester,
+            cipher,
             explicit_uidgid,
             whiteout_spec,
 
@@ -1208,6 +1278,7 @@ impl Default for BuildContext {
             blob_offset: 0,
             compressor: compress::Algorithm::default(),
             digester: digest::Algorithm::default(),
+            cipher: crypt::Algorithm::None,
             explicit_uidgid: true,
             whiteout_spec: WhiteoutSpec::default(),
 

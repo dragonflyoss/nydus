@@ -26,8 +26,8 @@ use nydus_storage::device::{
     BlobChunkInfo, BlobDevice, BlobFeatures, BlobInfo, BlobIoMerge, BlobIoVec,
 };
 use nydus_storage::meta::toc::TocEntryList;
-use nydus_utils::compress;
 use nydus_utils::digest::{self, RafsDigest};
+use nydus_utils::{compress, crypt};
 use serde::Serialize;
 
 use self::layout::v5::RafsV5PrefetchTable;
@@ -288,10 +288,12 @@ bitflags! {
         const INLINED_CHUNK_DIGEST = 0x0000_0100;
         /// RAFS works in Tarfs mode, which directly uses tar streams as data blobs.
         const TARTFS_MODE = 0x0000_0200;
+        /// Data chunks are not encrypted.
+        const ENCRYPTION_NONE = 0x0100_0000;
+        /// Data chunks are encrypted with AES-128-XTS.
+        const ENCRYPTION_ASE_128_XTS = 0x0200_0000;
 
         // Reserved for future compatible changes.
-        const PRESERVED_COMPAT_7 = 0x0100_0000;
-        const PRESERVED_COMPAT_6 = 0x0200_0000;
         const PRESERVED_COMPAT_5 = 0x0400_0000;
         const PRESERVED_COMPAT_4 = 0x0800_0000;
         const PRESERVED_COMPAT_3 = 0x1000_0000;
@@ -352,6 +354,26 @@ impl From<compress::Algorithm> for RafsSuperFlags {
             compress::Algorithm::Lz4Block => RafsSuperFlags::COMPRESSION_LZ4,
             compress::Algorithm::GZip => RafsSuperFlags::COMPRESSION_GZIP,
             compress::Algorithm::Zstd => RafsSuperFlags::COMPRESSION_ZSTD,
+        }
+    }
+}
+
+impl From<RafsSuperFlags> for crypt::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
+            // NOTE: only aes-128-xts encryption algorithm supported.
+            x if x.contains(RafsSuperFlags::ENCRYPTION_ASE_128_XTS) => crypt::Algorithm::Aes128Xts,
+            _ => crypt::Algorithm::None,
+        }
+    }
+}
+
+impl From<crypt::Algorithm> for RafsSuperFlags {
+    fn from(c: crypt::Algorithm) -> RafsSuperFlags {
+        match c {
+            // NOTE: only aes-128-xts encryption algorithm supported.
+            crypt::Algorithm::Aes128Xts => RafsSuperFlags::ENCRYPTION_ASE_128_XTS,
+            _ => RafsSuperFlags::ENCRYPTION_NONE,
         }
     }
 }
@@ -519,6 +541,15 @@ impl RafsSuperMeta {
             self.flags.into()
         } else {
             digest::Algorithm::Blake3
+        }
+    }
+
+    /// V6: Check whether any data blobs may be encrypted.
+    pub fn get_cipher(&self) -> crypt::Algorithm {
+        if self.is_v6() {
+            self.flags.into()
+        } else {
+            crypt::Algorithm::None
         }
     }
 

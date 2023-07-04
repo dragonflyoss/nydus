@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_api::CacheConfigV2;
-use nydus_utils::crypt::{Algorithm, Cipher};
+use nydus_utils::crypt::{Algorithm, Cipher, CipherContext};
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
@@ -70,6 +70,10 @@ impl BlobCache for DummyCache {
 
     fn blob_cipher_object(&self) -> Arc<Cipher> {
         self.blob_info.cipher_object()
+    }
+
+    fn blob_cipher_context(&self) -> Option<CipherContext> {
+        self.blob_info.cipher_context()
     }
 
     fn blob_digester(&self) -> digest::Algorithm {
