@@ -631,7 +631,7 @@ impl FileSystem for Rafs {
                 let actual_size = window_base - (offset & !chunk_mask);
                 if actual_size < amplify_io as u64 {
                     let window_size = amplify_io as u64 - actual_size;
-                    let orig_cnt = descs.iter().fold(0, |s, d| s + d.len());
+                    let orig_cnt = io_vecs.iter().fold(0, |s, d| s + d.len());
                     self.sb.amplify_io(
                         &self.device,
                         amplify_io,

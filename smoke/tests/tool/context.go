@@ -39,6 +39,7 @@ type RuntimeContext struct {
 	CacheCompressed bool
 	RafsMode        string
 	EnablePrefetch  bool
+	AmplifyIO       uint64
 }
 
 type EnvContext struct {
@@ -75,6 +76,7 @@ func DefaultContext(t *testing.T) *Context {
 			CacheCompressed: false,
 			RafsMode:        "direct",
 			EnablePrefetch:  true,
+			AmplifyIO:       uint64(0x100000),
 		},
 	}
 }

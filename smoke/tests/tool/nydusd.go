@@ -69,6 +69,7 @@ type NydusdConfig struct {
 	LatestReadFiles bool
 	AccessPattern   bool
 	PrefetchFiles   []string
+	AmplifyIO       uint64
 }
 
 type Nydusd struct {
@@ -104,7 +105,8 @@ var configTpl = `
 	 "digest_validate": {{.DigestValidate}},
 	 "enable_xattr": true,
      "latest_read_files": {{.LatestReadFiles}},
-     "access_pattern": {{.AccessPattern}}
+     "access_pattern": {{.AccessPattern}},
+     "amplify_io": {{.AmplifyIO}}
  }
  `
 
