@@ -13,7 +13,15 @@ import (
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 )
 
-func MakeChunkDictLayer(t *testing.T, workDir string) *tool.Layer {
+type LayerMaker func(t *testing.T, layer *tool.Layer)
+
+func LargerFileMaker(path string, sizeGB int) LayerMaker {
+	return func(t *testing.T, layer *tool.Layer) {
+		layer.CreateLargeFile(t, path, sizeGB)
+	}
+}
+
+func MakeChunkDictLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.Layer {
 	layer := tool.NewLayer(t, workDir)
 
 	// Create regular file
@@ -24,14 +32,18 @@ func MakeChunkDictLayer(t *testing.T, workDir string) *tool.Layer {
 	layer.CreateFile(t, "chunk-dict-file-5", []byte("dir-1/file-2"))
 	layer.CreateFile(t, "chunk-dict-file-6", []byte("This is poetry"))
 	layer.CreateFile(t, "chunk-dict-file-7", []byte("My name is long"))
-	layer.CreateLargeFile(t, "chunk-dict-file-8", 13)
 	layer.CreateHoledFile(t, "chunk-dict-file-9", []byte("hello world"), 1024, 1024*1024)
 	layer.CreateFile(t, "chunk-dict-file-10", []byte(""))
+
+	// Customized files
+	for _, maker := range makers {
+		maker(t, layer)
+	}
 
 	return layer
 }
 
-func MakeLowerLayer(t *testing.T, workDir string) *tool.Layer {
+func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.Layer {
 	layer := tool.NewLayer(t, workDir)
 
 	// Create regular file
@@ -66,9 +78,6 @@ func MakeLowerLayer(t *testing.T, workDir string) *tool.Layer {
 	// Create symlink with non-existed source file
 	layer.CreateSymlink(t, "dir-1/file-deleted-symlink", "dir-1/file-deleted")
 
-	// Create large file
-	layer.CreateLargeFile(t, "large-blob.bin", 13)
-
 	// Create holed file
 	layer.CreateHoledFile(t, "file-hole-1", []byte("hello world"), 1024, 1024*1024)
 
@@ -78,6 +87,11 @@ func MakeLowerLayer(t *testing.T, workDir string) *tool.Layer {
 	layer.CreateFile(t, "dir-1/file-2", []byte("dir-1/file-2"))
 	// Set file xattr (only `security.capability` xattr is supported in OCI layer)
 	tool.Run(t, fmt.Sprintf("setcap CAP_NET_RAW+ep %s", filepath.Join(workDir, "dir-1/file-2")))
+
+	// Customized files
+	for _, maker := range makers {
+		maker(t, layer)
+	}
 
 	return layer
 }

@@ -184,7 +184,7 @@ impl AsyncWorkerMgr {
     }
 
     /// Consume network bandwidth budget for prefetching.
-    pub fn consume_prefetch_budget(&self, size: u32) {
+    pub fn consume_prefetch_budget(&self, size: u64) {
         if self.prefetch_inflight.load(Ordering::Relaxed) > 0 {
             self.prefetch_consumed
                 .fetch_add(size as usize, Ordering::AcqRel);
