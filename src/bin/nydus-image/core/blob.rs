@@ -123,6 +123,16 @@ impl Blob {
         Ok(())
     }
 
+    fn set_compression_algorithm(ctx: &BuildContext) -> compress::Algorithm {
+        let compressor = if ctx.conversion_type.is_to_ref() {
+            compress::Algorithm::Zstd
+        } else {
+            ctx.compressor
+        };
+
+        compressor
+    }
+
     pub(crate) fn dump_meta_data(
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
@@ -155,11 +165,8 @@ impl Blob {
             header.set_ci_zran(false);
         };
 
-        let mut compressor = if ctx.conversion_type.is_to_ref() {
-            compress::Algorithm::Zstd
-        } else {
-            ctx.compressor
-        };
+        let mut compressor = Self::set_compression_algorithm(ctx);
+
         let (compressed_data, compressed) = compress::compress(ci_data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
         if !compressed {
@@ -258,5 +265,35 @@ impl Blob {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_compression_algorithm_for_meta_ci() {
+        let mut ctx = BuildContext::default();
+
+        //TarToRef
+        ctx.conversion_type = ConversionType::TarToRef;
+        let compressor = Blob::set_compression_algorithm(&ctx);
+        assert_eq!(compressor, compress::Algorithm::Zstd);
+
+        //EStargzIndexToRef
+        ctx.conversion_type = ConversionType::EStargzIndexToRef;
+        let compressor = Blob::set_compression_algorithm(&ctx);
+        assert_eq!(compressor, compress::Algorithm::Zstd);
+
+        //TargzToRef
+        ctx.conversion_type = ConversionType::TargzToRef;
+        let compressor = Blob::set_compression_algorithm(&ctx);
+        assert_eq!(compressor, compress::Algorithm::Zstd);
+
+        //TarToRef
+        ctx.conversion_type = ConversionType::TarToRef;
+        let compressor = Blob::set_compression_algorithm(&ctx);
+        assert_eq!(compressor, compress::Algorithm::Zstd);
     }
 }
