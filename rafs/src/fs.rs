@@ -617,12 +617,12 @@ impl FileSystem for Rafs {
 
         let real_size = cmp::min(size as u64, inode_size - offset);
         let mut result = 0;
-        let mut descs = inode.alloc_bio_vecs(&self.device, offset, real_size as usize, true)?;
-        assert!(!descs.is_empty() && !descs[0].is_empty());
+        let mut io_vecs = inode.alloc_bio_vecs(&self.device, offset, real_size as usize, true)?;
+        assert!(!io_vecs.is_empty() && !io_vecs[0].is_empty());
 
         // Try to amplify user io for Rafs v5, to improve performance.
         if self.sb.meta.is_v5() && size < self.amplify_io {
-            let all_chunks_ready = self.device.all_chunks_ready(&descs);
+            let all_chunks_ready = self.device.all_chunks_ready(&io_vecs);
             if !all_chunks_ready {
                 let chunk_mask = self.metadata().chunk_size as u64 - 1;
                 let next_chunk_base = (offset + (size as u64) + chunk_mask) & !chunk_mask;
@@ -630,16 +630,16 @@ impl FileSystem for Rafs {
                 let actual_size = window_base - (offset & !chunk_mask);
                 if actual_size < self.amplify_io as u64 {
                     let window_size = self.amplify_io as u64 - actual_size;
-                    let orig_cnt = descs.iter().fold(0, |s, d| s + d.len());
+                    let orig_cnt = io_vecs.iter().fold(0, |s, d| s + d.len());
                     self.sb.amplify_io(
                         &self.device,
                         self.amplify_io,
-                        &mut descs,
+                        &mut io_vecs,
                         &inode,
                         window_base,
                         window_size,
                     )?;
-                    let new_cnt = descs.iter().fold(0, |s, d| s + d.len());
+                    let new_cnt = io_vecs.iter().fold(0, |s, d| s + d.len());
                     trace!(
                         "amplify RAFS v5 read from {} to {} chunks",
                         orig_cnt,
@@ -650,15 +650,15 @@ impl FileSystem for Rafs {
         }
 
         let start = self.ios.latency_start();
-        for desc in descs.iter_mut() {
-            assert!(!desc.is_empty());
-            assert_ne!(desc.size(), 0);
+        for io_vec in io_vecs.iter_mut() {
+            assert!(!io_vec.is_empty());
+            assert_ne!(io_vec.size(), 0);
 
             // Avoid copying `desc`
-            let r = self.device.read_to(w, desc)?;
+            let r = self.device.read_to(w, io_vec)?;
             result += r;
             recorder.mark_success(r);
-            if r as u32 != desc.size() {
+            if r as u64 != io_vec.size() {
                 break;
             }
         }

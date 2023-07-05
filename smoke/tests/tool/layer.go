@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"io"
 	"io/ioutil"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/xattr"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -44,17 +46,15 @@ func (l *Layer) CreateFile(t *testing.T, name string, data []byte) {
 	require.NoError(t, err)
 }
 
-func (l *Layer) CreateLargeFile(t *testing.T, name string, sizeMB int) {
+func (l *Layer) CreateLargeFile(t *testing.T, name string, sizeGB int) {
 	f, err := os.Create(filepath.Join(l.workDir, name))
 	require.NoError(t, err)
 	defer func() {
 		f.Close()
 	}()
 
-	for b := 1; b <= sizeMB; b++ {
-		_, err := f.Write(bytes.Repeat([]byte{byte(b)}, 1024*1024))
-		require.NoError(t, err)
-	}
+	_, err = io.CopyN(f, rand.Reader, int64(sizeGB)<<30)
+	assert.Nil(t, err)
 }
 
 func (l *Layer) CreateHoledFile(t *testing.T, name string, data []byte, offset, fileSize int64) {
