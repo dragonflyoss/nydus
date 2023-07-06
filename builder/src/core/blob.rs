@@ -148,6 +148,14 @@ impl Blob {
         Ok(())
     }
 
+    fn get_compression_algorithm_for_meta(ctx: &BuildContext) -> compress::Algorithm {
+        if ctx.conversion_type.is_to_ref() {
+            compress::Algorithm::Zstd
+        } else {
+            ctx.compressor
+        }
+    }
+
     pub(crate) fn dump_meta_data(
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
@@ -187,11 +195,7 @@ impl Blob {
             header.set_separate_blob(true);
         };
 
-        let mut compressor = if ctx.conversion_type.is_to_ref() {
-            compress::Algorithm::Zstd
-        } else {
-            ctx.compressor
-        };
+        let mut compressor = Self::get_compression_algorithm_for_meta(ctx);
         let (compressed_data, compressed) = compress::compress(ci_data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
         if !compressed {
@@ -297,5 +301,47 @@ impl Blob {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_compression_algorithm_for_meta_ci() {
+        let mut ctx = BuildContext::default();
+
+        //TarToRef
+        ctx = BuildContext {
+            conversion_type: ConversionType::TarToRef,
+            ..ctx
+        };
+        let compressor = Blob::get_compression_algorithm_for_meta(&ctx);
+        assert_eq!(compressor, compress::Algorithm::Zstd);
+
+        //EStargzIndexToRef
+        ctx = BuildContext {
+            conversion_type: ConversionType::EStargzIndexToRef,
+            ..ctx
+        };
+        let compressor = Blob::get_compression_algorithm_for_meta(&ctx);
+        assert_eq!(compressor, compress::Algorithm::Zstd);
+
+        //TargzToRef
+        ctx = BuildContext {
+            conversion_type: ConversionType::TargzToRef,
+            ..ctx
+        };
+        let compressor = Blob::get_compression_algorithm_for_meta(&ctx);
+        assert_eq!(compressor, compress::Algorithm::Zstd);
+
+        //TarToRef
+        ctx = BuildContext {
+            conversion_type: ConversionType::TarToRef,
+            ..ctx
+        };
+        let compressor = Blob::get_compression_algorithm_for_meta(&ctx);
+        assert_eq!(compressor, compress::Algorithm::Zstd);
     }
 }
