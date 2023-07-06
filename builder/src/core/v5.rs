@@ -37,6 +37,7 @@ impl Node {
         ctx: &mut BuildContext,
         f_bootstrap: &mut dyn RafsIoWrite,
     ) -> Result<()> {
+        trace!("[{}]\t{}", self.overlay, self);
         if let InodeWrapper::V5(raw_inode) = &self.inode {
             // Dump inode info
             let name = self.name();
