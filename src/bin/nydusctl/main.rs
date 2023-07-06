@@ -134,8 +134,7 @@ async fn main() -> Result<()> {
                     Arg::new("mountpoint")
                         .help("Mountpoint of the filesystem instance")
                         .short('m')
-                        .required(true)
-                        .index(1),
+                        .required(true),
                 ),
         );
 
