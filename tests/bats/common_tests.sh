@@ -47,4 +47,5 @@ version = 2
    disable_snapshot_annotations = false
 EOF
   systemctl restart containerd
+  sleep 3
 }
