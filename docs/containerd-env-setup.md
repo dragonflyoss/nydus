@@ -124,7 +124,7 @@ sudo systemctl restart containerd
 ```
 
 ### Using Runtime-level Snapshotter in Container for Nydus
-How about: Containerd (>= v1.7.0) supports configuring the ```runtime-level``` snapshotter. By following the steps below, we can declare runtimes that use different snapshotters:
+Containerd (>= v1.7.0) supports configuring the ```runtime-level``` snapshotter. By following the steps below, we can declare runtimes that use different snapshotters:
 #### Step 1: Configure Containerd
 ```toml
 [plugins."io.containerd.grpc.v1.cri".containerd]
