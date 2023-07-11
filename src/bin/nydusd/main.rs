@@ -248,7 +248,7 @@ fn prepare_commandline_options() -> Command {
             Arg::new("log-rotation-size")
                 .long("log-rotation-size")
                 .help("Specify log rotation size(MB), 0 to disable")
-                .default_value("0")
+                .default_value("100")
                 .required(false)
                 .global(true),
         )
