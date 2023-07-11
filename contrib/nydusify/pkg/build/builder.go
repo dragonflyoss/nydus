@@ -1,4 +1,4 @@
-// Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2023 Nydus Developers. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -39,6 +39,10 @@ type CompactOption struct {
 	BackendConfigPath   string
 	OutputJSONPath      string
 	CompactConfigPath   string
+}
+
+type SaveOption struct {
+	BootstrapPath string
 }
 
 type Builder struct {
@@ -142,4 +146,17 @@ func (builder *Builder) Run(option BuilderOption) error {
 	args = append(args, option.RootfsPath)
 
 	return builder.run(args, option.PrefetchPatterns)
+}
+
+// Save calls `nydus-image chunkdict save` to parse Nydus bootstrap
+func (builder *Builder) Save(option SaveOption) error {
+	args := []string{
+		"chunkdict",
+		"save",
+		"--log-level",
+		"warn",
+		"--bootstrap",
+		option.BootstrapPath,
+	}
+	return builder.run(args, "")
 }
