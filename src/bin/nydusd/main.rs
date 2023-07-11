@@ -253,6 +253,14 @@ fn prepare_commandline_options() -> Command {
                 .global(true),
         )
         .arg(
+            Arg::new("log-rotation-backups")
+                .long("log-rotation-backups")
+                .help("Specify maximum compressed log rotation backups, available only when log-rotation-size is not 0")
+                .default_value("5")
+                .required(false)
+                .global(true),
+        )
+        .arg(
             Arg::new("rlimit-nofile")
                 .long("rlimit-nofile")
                 .default_value("1000000")
@@ -729,8 +737,13 @@ fn main() -> Result<()> {
         .unwrap()
         .parse::<u64>()
         .map_err(|e| einval!(format!("Invalid log rotation size: {}", e)))?;
+    let backups = args
+        .get_one::<String>("log-rotation-backups")
+        .unwrap()
+        .parse::<usize>()
+        .map_err(|e| einval!(format!("Invalid log rotation backups: {}", e)))?;
 
-    setup_logging(logging_file, level, rotation_size)?;
+    setup_logging(logging_file, level, rotation_size, backups)?;
 
     // Initialize and run the daemon controller event loop.
     nydus::register_signal_handler(signal::SIGINT, sig_exit);

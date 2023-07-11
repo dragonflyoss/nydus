@@ -678,7 +678,7 @@ fn init_log(matches: &ArgMatches) -> Result<()> {
         .parse()
         .unwrap();
 
-    setup_logging(log_file, level, 0).context("failed to setup logging")
+    setup_logging(log_file, level, 0, 0).context("failed to setup logging")
 }
 
 lazy_static! {

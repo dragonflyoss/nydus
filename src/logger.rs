@@ -96,6 +96,7 @@ pub fn setup_logging(
     log_file_path: Option<PathBuf>,
     level: LevelFilter,
     rotation_size: u64,
+    backups: usize,
 ) -> Result<()> {
     if let Some(ref path) = log_file_path {
         // Do not try to canonicalize the path since the file may not exist yet.
@@ -153,7 +154,7 @@ pub fn setup_logging(
             logger = logger.rotate(
                 Criterion::Size(log_rotation_size_byte),
                 Naming::Timestamps,
-                Cleanup::KeepCompressedFiles(10),
+                Cleanup::KeepCompressedFiles(backups),
             );
         }
 
@@ -199,6 +200,6 @@ mod tests {
         let level = LevelFilter::Info;
         let rotation_size = 1; // 1MB
 
-        assert!(setup_logging(log_file, level, rotation_size).is_ok());
+        assert!(setup_logging(log_file, level, rotation_size, 10).is_ok());
     }
 }
