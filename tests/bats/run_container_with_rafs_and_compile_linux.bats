@@ -1,7 +1,7 @@
 load "${BATS_TEST_DIRNAME}/common_tests.sh"
 
 setup() {
-	nydus_rafs_image="nydus-anolis-registry.cn-hangzhou.cr.aliyuncs.com/nydus_test/bldlinux:v0.1-rafs-v6-lz4"
+	nydus_rafs_image="ghcr.io/dragonflyoss/image-service/bldlinux:v0.1-rafs-v6-lz4"
 	run_nydus_snapshotter
 	config_containerd_for_nydus
 	ctr images ls | grep -q "${nydus_rafs_image}" && ctr images rm $nydus_rafs_image
