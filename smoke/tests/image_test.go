@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	paramZran    = "zran"
-	paramBatch   = "batch"
-	paramEncrypt = "encrypt"
+	paramZran      = "zran"
+	paramBatch     = "batch"
+	paramEncrypt   = "encrypt"
+	paramAmplifyIO = "amplify_io"
 )
 
 type ImageTestSuite struct {
