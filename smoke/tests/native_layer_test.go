@@ -77,6 +77,59 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 	}
 }
 
+func (n *NativeLayerTestSuite) TestAmplifyIO() test.Generator {
+
+	scenarios := tool.DescartesIterator{}
+	scenarios.
+
+		/* Common params */
+		Dimension(paramCompressor, []interface{}{"lz4_block"}).
+		Dimension(paramFSVersion, []interface{}{"5", "6"}).
+		Dimension(paramChunkSize, []interface{}{"0x100000"}).
+		Dimension(paramCacheType, []interface{}{"blobcache"}).
+		Dimension(paramCacheCompressed, []interface{}{false}).
+		Dimension(paramRafsMode, []interface{}{"direct"}).
+		Dimension(paramEnablePrefetch, []interface{}{true}).
+
+		/* Amplify io - target param */
+		Dimension(paramAmplifyIO, []interface{}{uint64(0x0), uint64(0x100000), uint64(0x10000000)}).
+		Skip(func(param *tool.DescartesItem) bool {
+
+			// Rafs v6 not support cached mode nor dummy cache
+			if param.GetString(paramFSVersion) == "6" {
+				return param.GetString(paramRafsMode) == "cached" || param.GetString(paramCacheType) == ""
+			}
+
+			// Dummy cache not support prefetch
+			if param.GetString(paramCacheType) == "" && param.GetBool(paramEnablePrefetch) {
+				return true
+			}
+
+			return false
+		})
+
+	return func() (name string, testCase test.Case) {
+		if !scenarios.HasNext() {
+			return
+		}
+		scenario := scenarios.Next()
+
+		ctx := tool.DefaultContext(n.t)
+		ctx.Build.Compressor = scenario.GetString(paramCompressor)
+		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
+		ctx.Build.ChunkSize = scenario.GetString(paramChunkSize)
+		ctx.Runtime.CacheType = scenario.GetString(paramCacheType)
+		ctx.Runtime.CacheCompressed = scenario.GetBool(paramCacheCompressed)
+		ctx.Runtime.RafsMode = scenario.GetString(paramRafsMode)
+		ctx.Runtime.EnablePrefetch = scenario.GetBool(paramEnablePrefetch)
+		ctx.Runtime.AmplifyIO = scenario.GetUInt64(paramAmplifyIO)
+
+		return scenario.Str(), func(t *testing.T) {
+			n.testMakeLayers(*ctx, t)
+		}
+	}
+}
+
 func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 	packOption := converter.PackOption{
 		BuilderPath: ctx.Binary.Builder,

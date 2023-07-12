@@ -195,7 +195,7 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 	config.RafsMode = ctx.Runtime.RafsMode
 	err = nydusd.MountByAPI(config)
 	require.NoError(t, err)
-	time.Sleep(time.Millisecond * 10)
+	time.Sleep(time.Millisecond * 15)
 
 	bcm, err := nydusd.GetBlobCacheMetrics("")
 	require.NoError(t, err)

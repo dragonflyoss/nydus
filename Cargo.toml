@@ -33,7 +33,8 @@ path = "src/lib.rs"
 anyhow = "1"
 base64 = "0.21"
 clap = { version = "4.0.18", features = ["derive", "cargo"] }
-fuse-backend-rs = "0.10.1"
+flexi_logger = { version = "0.25", features = ["compress"] }
+fuse-backend-rs = "^0.10.4"
 hex = "0.4.3"
 hyper = "0.14.11"
 hyperlocal = "0.8.0"

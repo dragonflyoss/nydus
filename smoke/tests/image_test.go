@@ -15,7 +15,8 @@ import (
 )
 
 const (
-	paramZran = "zran"
+	paramZran      = "zran"
+	paramAmplifyIO = "amplify_io"
 )
 
 type ImageTestSuite struct {

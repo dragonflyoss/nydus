@@ -47,6 +47,10 @@ func (d *DescartesItem) Str() string {
 	return sb.String()
 }
 
+func (d *DescartesItem) GetUInt64(name string) uint64 {
+	return d.vals[name].(uint64)
+}
+
 // Generator of Cartesian product.
 //
 // An example is below:
