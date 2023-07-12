@@ -29,6 +29,7 @@ func Verify(t *testing.T, ctx Context, expectedFiles map[string]*File) {
 		CacheCompressed: ctx.Runtime.CacheCompressed,
 		RafsMode:        ctx.Runtime.RafsMode,
 		DigestValidate:  false,
+		AmplifyIO:       ctx.Runtime.AmplifyIO,
 	}
 
 	nydusd, err := NewNydusd(config)

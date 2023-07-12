@@ -19,7 +19,7 @@ lint:
 # NYDUS_NYDUSIFY=/path/to/latest/nydusify \
 # make test
 test: build lint
-	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=8 -test.run=$(TESTS)
+	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
 
 # WORK_DIR=/tmp \
 # NYDUS_BUILDER=/path/to/latest/nydus-image \
