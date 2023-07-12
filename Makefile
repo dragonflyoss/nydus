@@ -1,4 +1,4 @@
-all: build
+all: release
 
 all-build: build contrib-build
 
@@ -91,7 +91,7 @@ endef
 	@${CARGO} clean --target ${RUST_TARGET_STATIC} --release -p libz-sys
 
 # Targets that are exposed to developers and users.
-build: .format .release_version
+build: .format
 	${CARGO} build $(CARGO_COMMON) $(CARGO_BUILD_FLAGS)
 	# Cargo will skip checking if it is already checked
 	${CARGO} clippy --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) --bins --tests -- -Dwarnings --allow clippy::unnecessary_cast --allow clippy::needless_borrow
