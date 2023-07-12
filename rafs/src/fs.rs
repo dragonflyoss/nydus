@@ -54,6 +54,10 @@ pub type Handle = u64;
 pub const RAFS_DEFAULT_ATTR_TIMEOUT: u64 = 1 << 32;
 /// Rafs default entry timeout value.
 pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
+/// FUSE_KERN_BUF_SIZE * pagesize() + FUSE_HEADER_ SIZE
+/// Use a const as stable v2.1 does not complie with latset fuse-backend-rs that
+/// exports a writer's available buffer size.
+pub const RAFS_MAX_AMPLIFIED_IO: usize = 1052656;
 
 fn default_threads_count() -> usize {
     8
@@ -765,18 +769,19 @@ impl FileSystem for Rafs {
         debug_assert!(!descs.is_empty() && !descs[0].bi_vec.is_empty());
 
         // Try to amplify user io for Rafs v5, to improve performance.
-        if self.sb.meta.is_v5() && size < self.amplify_io {
+        let amplify_io = cmp::min(self.amplify_io as usize, RAFS_MAX_AMPLIFIED_IO) as u32;
+        if self.sb.meta.is_v5() && size < amplify_io {
             let all_chunks_ready = self.device.all_chunks_ready(&descs);
             if !all_chunks_ready {
-                let chunk_size = self.metadata().chunk_size as u64;
-                let next_chunk_base = (offset + (size as u64) + chunk_size) & !chunk_size;
-                let window_base = std::cmp::min(next_chunk_base, inode_size);
-                let actual_size = window_base - (offset & !chunk_size);
-                if actual_size < self.amplify_io as u64 {
-                    let window_size = self.amplify_io as u64 - actual_size;
+                let chunk_mask = self.metadata().chunk_size as u64 - 1;
+                let next_chunk_base = (offset + (size as u64) + chunk_mask) & !chunk_mask;
+                let window_base = cmp::min(next_chunk_base, inode_size);
+                let actual_size = window_base - (offset & !chunk_mask);
+                if actual_size < amplify_io as u64 {
+                    let window_size = amplify_io as u64 - actual_size;
                     self.sb.amplify_io(
                         &self.device,
-                        self.amplify_io,
+                        amplify_io,
                         &mut descs,
                         &inode,
                         window_base,
