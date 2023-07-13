@@ -1287,7 +1287,7 @@ impl RafsInode for OndiskInodeWrapper {
 
         let mut descs = BlobIoVec::new();
         descs.bi_vec.push(desc);
-        descs.bi_size += content_len;
+        descs.bi_size += content_len as u64;
         left -= content_len;
 
         if left != 0 {
@@ -1311,7 +1311,7 @@ impl RafsInode for OndiskInodeWrapper {
                 }
 
                 descs.bi_vec.push(desc);
-                descs.bi_size += content_len;
+                descs.bi_size += content_len as u64;
                 left -= content_len;
                 if left == 0 {
                     break;
