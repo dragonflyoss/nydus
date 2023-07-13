@@ -543,7 +543,7 @@ pub struct BlobIoVec {
     /// Blob IO flags.
     pub bi_flags: u32,
     /// Total size of blob IOs to be performed.
-    pub bi_size: u32,
+    pub bi_size: u64,
     /// Array of blob IOs, these IOs should executed sequentially.
     // TODO: As bi_vec must stay within the same blob, move BlobInfo out here?
     pub bi_vec: Vec<BlobIoDesc>,
@@ -560,7 +560,7 @@ impl BlobIoVec {
     /// Append another blob io vector to current one.
     pub fn append(&mut self, mut desc: BlobIoVec) {
         self.bi_vec.append(desc.bi_vec.as_mut());
-        self.bi_size += desc.bi_size;
+        self.bi_size += desc.bi_size as u64;
         debug_assert!(self.validate());
     }
 

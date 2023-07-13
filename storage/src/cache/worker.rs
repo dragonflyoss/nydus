@@ -186,9 +186,9 @@ impl AsyncWorkerMgr {
     }
 
     /// Consume network bandwidth budget for prefetching.
-    pub fn consume_prefetch_budget(&self, size: u32) {
+    pub fn consume_prefetch_budget(&self, size: u64) {
         if self.prefetch_inflight.load(Ordering::Relaxed) > 0 {
-            if let Some(v) = NonZeroU32::new(size) {
+            if let Some(v) = NonZeroU32::new(size as u32) {
                 // Try to consume budget but ignore result.
                 if let Some(limiter) = self.prefetch_limiter.as_ref() {
                     let _ = limiter.check_n(v);

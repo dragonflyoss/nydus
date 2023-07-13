@@ -1324,7 +1324,7 @@ fn add_chunk_to_bio_desc(
         (chunk_end - chunk_start) as u32,
         user_io,
     );
-    desc.bi_size += bio.size;
+    desc.bi_size += bio.size as u64;
     desc.bi_vec.push(bio);
 
     true
