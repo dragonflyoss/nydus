@@ -123,6 +123,14 @@ impl Blob {
         Ok(())
     }
 
+    fn get_meta_compressor(ctx: &BuildContext) -> compress::Algorithm {
+        if ctx.conversion_type.is_to_ref() {
+            compress::Algorithm::Zstd
+        } else {
+            ctx.compressor
+        }
+    }
+
     pub(crate) fn dump_meta_data(
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
@@ -155,11 +163,7 @@ impl Blob {
             header.set_ci_zran(false);
         };
 
-        let mut compressor = if ctx.conversion_type.is_to_ref() {
-            compress::Algorithm::Zstd
-        } else {
-            ctx.compressor
-        };
+        let mut compressor = Self::get_meta_compressor(ctx);
         let (compressed_data, compressed) = compress::compress(ci_data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
         if !compressed {
@@ -258,5 +262,43 @@ impl Blob {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_meta_compressor() {
+        let mut ctx = BuildContext::default();
+        let conversion_types = vec![
+            ConversionType::DirectoryToRafs,
+            ConversionType::DirectoryToStargz,
+            ConversionType::DirectoryToTargz,
+            ConversionType::EStargzToRafs,
+            ConversionType::EStargzToRef,
+            ConversionType::EStargzIndexToRef,
+            ConversionType::TargzToRafs,
+            ConversionType::TargzToStargz,
+            ConversionType::TargzToRef,
+            ConversionType::TarToStargz,
+            ConversionType::TarToRafs,
+            ConversionType::TarToRef,
+        ];
+
+        for c_type in conversion_types {
+            ctx = BuildContext {
+                conversion_type: c_type,
+                ..ctx
+            };
+
+            let compressor = Blob::get_meta_compressor(&ctx);
+            if ctx.conversion_type.is_to_ref() {
+                assert_eq!(compressor, compress::Algorithm::Zstd);
+            } else {
+                assert_eq!(compressor, compress::Algorithm::None);
+            }
+        }
     }
 }
