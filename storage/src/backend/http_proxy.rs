@@ -214,7 +214,6 @@ impl BlobReader for HttpProxyReader {
                         None,
                         &mut HeaderMap::new(),
                         true,
-                        false,
                     )
                     .map(|resp| resp.headers().to_owned())
                     .map_err(|e| HttpProxyError::RemoteRequest(e).into())
@@ -255,15 +254,7 @@ impl BlobReader for HttpProxyReader {
                         .map_err(|e| HttpProxyError::ConstructHeader(format!("{}", e)))?,
                 );
                 let mut resp = connection
-                    .call::<&[u8]>(
-                        Method::GET,
-                        uri.as_str(),
-                        None,
-                        None,
-                        &mut headers,
-                        true,
-                        false,
-                    )
+                    .call::<&[u8]>(Method::GET, uri.as_str(), None, None, &mut headers, true)
                     .map_err(HttpProxyError::RemoteRequest)?;
 
                 Ok(resp
