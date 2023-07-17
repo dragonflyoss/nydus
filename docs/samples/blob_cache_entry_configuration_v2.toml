@@ -57,8 +57,6 @@ host = "http://127.0.0.1:65001"
 ping_url = "http://127.0.0.1:65001/ping"
 # HTTP request headers to be passed to mirror server.
 # headers =
-# Whether the authorization process is through mirror, default to false.
-auth_through = true
 # Interval for mirror health checking, in seconds.
 health_check_interval = 5
 # Maximum number of failures before marking a mirror as unusable.
@@ -108,8 +106,6 @@ host = "http://127.0.0.1:65001"
 ping_url = "http://127.0.0.1:65001/ping"
 # HTTP request headers to be passed to mirror server.
 # headers =
-# Whether the authorization process is through mirror, default to false.
-auth_through = true
 # Interval for mirror health checking, in seconds.
 health_check_interval = 5
 # Maximum number of failures before marking a mirror as unusable.
