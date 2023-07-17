@@ -265,7 +265,6 @@ impl RegistryState {
                 Some(ReqBody::Form(form)),
                 &mut headers,
                 true,
-                true,
             )
             .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
         let ret: TokenResponse = token_resp.json().map_err(|e| {
@@ -484,22 +483,14 @@ impl RegistryReader {
         if let Some(data) = data {
             return self
                 .connection
-                .call(
-                    method,
-                    url,
-                    None,
-                    Some(data),
-                    &mut headers,
-                    catch_status,
-                    false,
-                )
+                .call(method, url, None, Some(data), &mut headers, catch_status)
                 .map_err(RegistryError::Request);
         }
 
         // Try to request registry server with `authorization` header
         let mut resp = self
             .connection
-            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false, false)
+            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
             .map_err(RegistryError::Request)?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             if headers.contains_key(HEADER_AUTHORIZATION) {
@@ -514,7 +505,7 @@ impl RegistryReader {
 
                 resp = self
                     .connection
-                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false, false)
+                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
                     .map_err(RegistryError::Request)?;
             };
 
@@ -534,7 +525,7 @@ impl RegistryReader {
                     // Try to request registry server with `authorization` header again
                     let resp = self
                         .connection
-                        .call(method, url, None, data, &mut headers, catch_status, false)
+                        .call(method, url, None, data, &mut headers, catch_status)
                         .map_err(RegistryError::Request)?;
 
                     let status = resp.status();
@@ -589,7 +580,6 @@ impl RegistryReader {
                     None,
                     None,
                     &mut headers,
-                    false,
                     false,
                 )
                 .map_err(RegistryError::Request)?;
@@ -675,7 +665,6 @@ impl RegistryReader {
                             None,
                             &mut headers,
                             true,
-                            false,
                         )
                         .map_err(RegistryError::Request);
                     match resp_ret {
@@ -819,8 +808,6 @@ impl Registry {
             cached_bearer_auth: ArcSwapOption::new(None),
         });
 
-        let mirrors = connection.mirrors.clone();
-
         let registry = Registry {
             connection,
             state,
@@ -828,13 +815,8 @@ impl Registry {
             first: First::new(),
         };
 
-        for mirror in mirrors.iter() {
-            if !mirror.config.auth_through {
-                registry.start_refresh_token_thread();
-                info!("Refresh token thread started.");
-                break;
-            }
-        }
+        registry.start_refresh_token_thread();
+        info!("Refresh token thread started.");
 
         Ok(registry)
     }
