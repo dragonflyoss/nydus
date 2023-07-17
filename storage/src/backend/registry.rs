@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Read, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Once, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fmt, thread};
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use base64::Engine;
 use reqwest::blocking::Response;
 pub use reqwest::header::HeaderMap;
@@ -364,11 +364,75 @@ impl RegistryState {
     }
 }
 
+#[derive(Clone)]
+struct First {
+    inner: Arc<ArcSwap<Once>>,
+}
+
+impl First {
+    fn new() -> Self {
+        First {
+            inner: Arc::new(ArcSwap::new(Arc::new(Once::new()))),
+        }
+    }
+
+    fn once<F>(&self, f: F)
+    where
+        F: FnOnce(),
+    {
+        self.inner.load().call_once(f)
+    }
+
+    fn renew(&self) {
+        self.inner.store(Arc::new(Once::new()));
+    }
+
+    fn handle<F, T>(&self, handle: &mut F) -> Option<BackendResult<T>>
+    where
+        F: FnMut() -> BackendResult<T>,
+    {
+        let mut ret = None;
+        // Call once twice to ensure the subsequent requests use the new
+        // Once instance after renew happens.
+        for _ in 0..=1 {
+            self.once(|| {
+                ret = Some(handle().map_err(|err| {
+                    // Replace the Once instance so that we can retry it when
+                    // the handle call failed.
+                    self.renew();
+                    err
+                }));
+            });
+            if ret.is_some() {
+                break;
+            }
+        }
+        ret
+    }
+
+    /// When invoking concurrently, only one of the handle methods will be executed first,
+    /// then subsequent handle methods will be allowed to execute concurrently.
+    ///
+    /// Nydusd uses a registry backend which generates a surge of blob requests without
+    /// auth tokens on initial startup, this caused mirror backends (e.g. dragonfly)
+    /// to process very slowly. The method implements waiting for the first blob request
+    /// to complete before making other blob requests, this ensures the first request
+    /// caches a valid registry auth token, and subsequent concurrent blob requests can
+    /// reuse the cached token.
+    fn handle_force<F, T>(&self, handle: &mut F) -> BackendResult<T>
+    where
+        F: FnMut() -> BackendResult<T>,
+    {
+        self.handle(handle).unwrap_or_else(handle)
+    }
+}
+
 struct RegistryReader {
     blob_id: String,
     connection: Arc<Connection>,
     state: Arc<RegistryState>,
     metrics: Arc<BackendMetrics>,
+    first: First,
 }
 
 impl RegistryReader {
@@ -641,14 +705,20 @@ impl RegistryReader {
 
 impl BlobReader for RegistryReader {
     fn blob_size(&self) -> BackendResult<u64> {
-        let url = format!("/blobs/sha256:{}", self.blob_id);
-        let url = self
-            .state
-            .url(&url, &[])
-            .map_err(|e| RegistryError::Url(url, e))?;
+        self.first.handle_force(&mut || -> BackendResult<u64> {
+            let url = format!("/blobs/sha256:{}", self.blob_id);
+            let url = self
+                .state
+                .url(&url, &[])
+                .map_err(|e| RegistryError::Url(url, e))?;
 
-        let resp =
-            match self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true) {
+            let resp = match self.request::<&[u8]>(
+                Method::HEAD,
+                url.as_str(),
+                None,
+                HeaderMap::new(),
+                true,
+            ) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
                     if self.state.needs_fallback_http(&e) =>
@@ -665,21 +735,26 @@ impl BlobReader for RegistryReader {
                     return Err(BackendError::Registry(e));
                 }
             };
-        let content_length = resp
-            .headers()
-            .get(CONTENT_LENGTH)
-            .ok_or_else(|| RegistryError::Common("invalid content length".to_string()))?;
+            let content_length = resp
+                .headers()
+                .get(CONTENT_LENGTH)
+                .ok_or_else(|| RegistryError::Common("invalid content length".to_string()))?;
 
-        Ok(content_length
-            .to_str()
-            .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?
-            .parse::<u64>()
-            .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?)
+            Ok(content_length
+                .to_str()
+                .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?
+                .parse::<u64>()
+                .map_err(|err| {
+                    RegistryError::Common(format!("invalid content length: {:?}", err))
+                })?)
+        })
     }
 
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        self._try_read(buf, offset, true)
-            .map_err(BackendError::Registry)
+        self.first.handle_force(&mut || -> BackendResult<usize> {
+            self._try_read(buf, offset, true)
+                .map_err(BackendError::Registry)
+        })
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -696,6 +771,7 @@ pub struct Registry {
     connection: Arc<Connection>,
     state: Arc<RegistryState>,
     metrics: Arc<BackendMetrics>,
+    first: First,
 }
 
 impl Registry {
@@ -751,6 +827,7 @@ impl Registry {
             connection,
             state,
             metrics: BackendMetrics::new(id, "registry"),
+            first: First::new(),
         };
 
         for mirror in mirrors.iter() {
@@ -851,6 +928,7 @@ impl BlobBackend for Registry {
             state: self.state.clone(),
             connection: self.connection.clone(),
             metrics: self.metrics.clone(),
+            first: self.first.clone(),
         }))
     }
 }
@@ -970,5 +1048,61 @@ mod tests {
         assert_eq!(trim(Some("  test".to_owned())), Some("test".to_owned()));
         assert_eq!(trim(Some("  te st  ".to_owned())), Some("te st".to_owned()));
         assert_eq!(trim(Some("te st".to_owned())), Some("te st".to_owned()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn test_first_basically() {
+        let first = First::new();
+        let mut val = 0;
+        first.once(|| {
+            val += 1;
+        });
+        assert_eq!(val, 1);
+
+        first.clone().once(|| {
+            val += 1;
+        });
+        assert_eq!(val, 1);
+
+        first.renew();
+        first.clone().once(|| {
+            val += 1;
+        });
+        assert_eq!(val, 2);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn test_first_concurrently() {
+        let val = Arc::new(ArcSwap::new(Arc::new(0)));
+        let first = First::new();
+
+        let mut handlers = Vec::new();
+        for _ in 0..100 {
+            let val_cloned = val.clone();
+            let first_cloned = first.clone();
+            handlers.push(std::thread::spawn(move || {
+                let _ = first_cloned.handle(&mut || -> BackendResult<()> {
+                    let val = val_cloned.load();
+                    let ret = if *val.as_ref() == 0 {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        Err(BackendError::Registry(RegistryError::Common(String::from(
+                            "network error",
+                        ))))
+                    } else {
+                        Ok(())
+                    };
+                    val_cloned.store(Arc::new(val.as_ref() + 1));
+                    ret
+                });
+            }));
+        }
+
+        for handler in handlers {
+            handler.join().unwrap();
+        }
+
+        assert_eq!(*val.load().as_ref(), 2);
     }
 }
