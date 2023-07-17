@@ -917,12 +917,6 @@ pub struct MirrorConfig {
     /// HTTP request headers to be passed to mirror server.
     #[serde(default)]
     pub headers: HashMap<String, String>,
-    /// Whether the authorization process is through mirror, default to false.
-    /// true: authorization through mirror, e.g. Using normal registry as mirror.
-    /// false: authorization through original registry,
-    /// e.g. when using Dragonfly server as mirror, authorization through it may affect performance.
-    #[serde(default)]
-    pub auth_through: bool,
     /// Interval for mirror health checking, in seconds.
     #[serde(default = "default_check_interval")]
     pub health_check_interval: u64,
@@ -936,7 +930,6 @@ impl Default for MirrorConfig {
         Self {
             host: String::new(),
             headers: HashMap::new(),
-            auth_through: false,
             health_check_interval: 5,
             failure_limit: 5,
             ping_url: String::new(),
@@ -1825,7 +1818,6 @@ mod tests {
         [[backend.oss.mirrors]]
         host = "http://127.0.0.1:65001"
         ping_url = "http://127.0.0.1:65001/ping"
-        auth_through = true
         health_check_interval = 10
         failure_limit = 10
         "#;
@@ -1859,7 +1851,6 @@ mod tests {
         let mirror = &oss.mirrors[0];
         assert_eq!(mirror.host, "http://127.0.0.1:65001");
         assert_eq!(mirror.ping_url, "http://127.0.0.1:65001/ping");
-        assert!(mirror.auth_through);
         assert!(mirror.headers.is_empty());
         assert_eq!(mirror.health_check_interval, 10);
         assert_eq!(mirror.failure_limit, 10);
@@ -1891,7 +1882,6 @@ mod tests {
         [[backend.registry.mirrors]]
         host = "http://127.0.0.1:65001"
         ping_url = "http://127.0.0.1:65001/ping"
-        auth_through = true
         health_check_interval = 10
         failure_limit = 10
         "#;
@@ -1927,7 +1917,6 @@ mod tests {
         let mirror = &registry.mirrors[0];
         assert_eq!(mirror.host, "http://127.0.0.1:65001");
         assert_eq!(mirror.ping_url, "http://127.0.0.1:65001/ping");
-        assert!(mirror.auth_through);
         assert!(mirror.headers.is_empty());
         assert_eq!(mirror.health_check_interval, 10);
         assert_eq!(mirror.failure_limit, 10);

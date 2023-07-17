@@ -448,13 +448,6 @@ impl Connection {
         self.shutdown.store(true, Ordering::Release);
     }
 
-    /// If the auth_through is enable, all requests are send to the mirror server.
-    /// If the auth_through disabled, e.g. P2P/Dragonfly, we try to avoid sending
-    /// non-authorization request to the mirror server, which causes performance loss.
-    /// requesting_auth means this request is to get authorization from a server,
-    /// which must be a non-authorization request.
-    /// IOW, only the requesting_auth is false and the headers contain authorization token,
-    /// we send this request to mirror.
     #[allow(clippy::too_many_arguments)]
     pub fn call<R: Read + Clone + Send + 'static>(
         &self,
@@ -464,8 +457,6 @@ impl Connection {
         data: Option<ReqBody<R>>,
         headers: &mut HeaderMap,
         catch_status: bool,
-        // This means the request is dedicated to authorization.
-        requesting_auth: bool,
     ) -> ConnectionResult<Response> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(ConnectionError::Disconnected);
@@ -524,27 +515,10 @@ impl Connection {
             }
         }
 
+        let mut mirror_enabled = false;
         if !self.mirrors.is_empty() {
-            let mut fallback_due_auth = false;
+            mirror_enabled = true;
             for mirror in self.mirrors.iter() {
-                // With configuration `auth_through` disabled, we should not intend to send authentication
-                // request to mirror. Mainly because mirrors like P2P/Dragonfly has a poor performance when
-                // relaying non-data requests. But it's still possible that ever returned token is expired.
-                // So mirror might still respond us with status code UNAUTHORIZED, which should be handle
-                // by sending authentication request to the original registry.
-                //
-                // - For non-authentication request with token in request header, handle is as usual requests to registry.
-                //   This request should already take token in header.
-                // - For authentication request
-                //      1. auth_through is disabled(false): directly pass below mirror translations and jump to original registry handler.
-                //      2. auth_through is enabled(true): try to get authenticated from mirror and should also handle status code UNAUTHORIZED.
-                if !mirror.config.auth_through
-                    && (!headers.contains_key(HEADER_AUTHORIZATION) || requesting_auth)
-                {
-                    fallback_due_auth = true;
-                    break;
-                }
-
                 if mirror.status.load(Ordering::Relaxed) {
                     let data_cloned = data.as_ref().cloned();
 
@@ -598,9 +572,10 @@ impl Connection {
                     headers.remove(HeaderName::from_str(key).unwrap());
                 }
             }
-            if !fallback_due_auth {
-                warn!("Request to all mirror server failed, fallback to original server.");
-            }
+        }
+
+        if mirror_enabled {
+            warn!("Request to all mirror server failed, fallback to original server.");
         }
 
         self.call_inner(
