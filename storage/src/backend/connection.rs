@@ -403,14 +403,17 @@ impl Connection {
                 } else {
                     mirror_cloned.config.ping_url.clone()
                 };
-                info!("Mirror health checking url: {}", mirror_health_url);
+                info!(
+                    "[mirror] start health check, ping url: {}",
+                    mirror_health_url
+                );
 
                 let client = Client::new();
                 loop {
                     // Try to recover the mirror server when it is unavailable.
                     if !mirror_cloned.status.load(Ordering::Relaxed) {
                         info!(
-                            "Mirror server {} unhealthy, try to recover",
+                            "[mirror] server unhealthy, try to recover: {}",
                             mirror_cloned.config.host
                         );
 
@@ -422,14 +425,17 @@ impl Connection {
                                 // If the response status is less than StatusCode::INTERNAL_SERVER_ERROR,
                                 // the mirror server is recovered.
                                 if resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
-                                    info!("Mirror server {} recovered", mirror_cloned.config.host);
+                                    info!(
+                                        "[mirror] server recovered: {}",
+                                        mirror_cloned.config.host
+                                    );
                                     mirror_cloned.failed_times.store(0, Ordering::Relaxed);
                                     mirror_cloned.status.store(true, Ordering::Relaxed);
                                 }
                             })
                             .map_err(|e| {
                                 warn!(
-                                    "Mirror server {} is not recovered: {}",
+                                    "[mirror] failed to recover server: {}, {}",
                                     mirror_cloned.config.host, e
                                 );
                             });
@@ -530,7 +536,7 @@ impl Connection {
                     }
 
                     let current_url = mirror.mirror_url(url)?;
-                    debug!("mirror server url {}", current_url);
+                    debug!("[mirror] replace to: {}", current_url);
 
                     let result = self.call_inner(
                         &self.client,
@@ -552,14 +558,14 @@ impl Connection {
                         }
                         Err(err) => {
                             warn!(
-                                "request mirror server failed, mirror: {:?},  error: {:?}",
-                                mirror, err
+                                "[mirror] request failed, server: {:?}, {:?}",
+                                mirror.config.host, err
                             );
                             mirror.failed_times.fetch_add(1, Ordering::Relaxed);
 
                             if mirror.failed_times.load(Ordering::Relaxed) >= mirror.failure_limit {
                                 warn!(
-                                    "reach to failure limit {}, disable mirror: {:?}",
+                                    "[mirror] exceed failure limit {}, server disabled: {:?}",
                                     mirror.failure_limit, mirror
                                 );
                                 mirror.status.store(false, Ordering::Relaxed);
@@ -575,7 +581,7 @@ impl Connection {
         }
 
         if mirror_enabled {
-            warn!("Request to all mirror server failed, fallback to original server.");
+            warn!("[mirror] request all servers failed, fallback to original server.");
         }
 
         self.call_inner(
