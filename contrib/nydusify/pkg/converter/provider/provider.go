@@ -18,6 +18,8 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+var LayerConcurrentLimit = 5
+
 type Provider struct {
 	mutex        sync.Mutex
 	usePlainHTTP bool
@@ -59,8 +61,9 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 		return err
 	}
 	rc := &containerd.RemoteContext{
-		Resolver:        resolver,
-		PlatformMatcher: pvd.platformMC,
+		Resolver:               resolver,
+		PlatformMatcher:        pvd.platformMC,
+		MaxConcurrentDownloads: LayerConcurrentLimit,
 	}
 
 	img, err := fetch(ctx, pvd.store, rc, ref, 0)
@@ -81,8 +84,9 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 		return err
 	}
 	rc := &containerd.RemoteContext{
-		Resolver:        resolver,
-		PlatformMatcher: pvd.platformMC,
+		Resolver:                    resolver,
+		PlatformMatcher:             pvd.platformMC,
+		MaxConcurrentUploadedLayers: LayerConcurrentLimit,
 	}
 
 	return push(ctx, pvd.store, rc, desc, ref)
@@ -99,4 +103,8 @@ func (pvd *Provider) Image(ctx context.Context, ref string) (*ocispec.Descriptor
 
 func (pvd *Provider) ContentStore() content.Store {
 	return pvd.store
+}
+
+func (pvd *Provider) SetContentStore(store content.Store) {
+	pvd.store = store
 }
