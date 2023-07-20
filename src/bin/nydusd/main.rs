@@ -21,7 +21,7 @@ use nix::sys::signal;
 use rlimit::Resource;
 
 use nydus::{get_build_time_info, SubCmdArgs};
-use nydus_api::BuildTimeInfo;
+use nydus_api::{BuildTimeInfo, ConfigV2};
 use nydus_app::{dump_program_info, setup_logging};
 use nydus_service::daemon::DaemonController;
 use nydus_service::{
@@ -423,7 +423,16 @@ fn process_fs_service(
                 )
             }
             None => match args.value_of("config") {
-                Some(v) => std::fs::read_to_string(v)?,
+                Some(v) => {
+                    let auth = std::env::var("IMAGE_PULL_AUTH").ok();
+                    if auth.is_some() {
+                        let mut config = ConfigV2::from_file(v)?;
+                        config.update_registry_auth_info(&auth);
+                        serde_json::to_string(&config)?
+                    } else {
+                        std::fs::read_to_string(v)?
+                    }
+                }
                 None => {
                     let e = NydusError::InvalidArguments(
                         "both --config and --localfs-dir are missing".to_string(),
