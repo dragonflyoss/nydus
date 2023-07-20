@@ -2,6 +2,7 @@ package packer
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,6 +34,14 @@ func (m *mockBackend) Check(_ string) (bool, error) {
 
 func (m *mockBackend) Type() backend.Type {
 	return backend.OssBackend
+}
+
+func (m *mockBackend) Reader(blobID string) (io.ReadCloser, error) {
+	panic("not implemented")
+}
+
+func (m *mockBackend) Size(blobID string) (int64, error) {
+	panic("not implemented")
 }
 
 func Test_parseBackendConfig(t *testing.T) {

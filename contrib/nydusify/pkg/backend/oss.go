@@ -259,6 +259,26 @@ func (b *OSSBackend) Type() Type {
 	return OssBackend
 }
 
+func (b *OSSBackend) Reader(blobID string) (io.ReadCloser, error) {
+	blobID = b.objectPrefix + blobID
+	rc, err := b.bucket.GetObject(blobID)
+	return rc, err
+}
+
+func (b *OSSBackend) Size(blobID string) (int64, error) {
+	blobID = b.objectPrefix + blobID
+	headers, err := b.bucket.GetObjectMeta(blobID)
+	if err != nil {
+		return 0, errors.Wrap(err, "get object size")
+	}
+	sizeStr := headers.Get("Content-Length")
+	size, err := strconv.ParseInt(sizeStr, 10, 0)
+	if err != nil {
+		return 0, errors.Wrap(err, "parse content-length header")
+	}
+	return size, nil
+}
+
 func (b *OSSBackend) remoteID(blobID string) string {
 	return fmt.Sprintf("oss://%s/%s%s", b.bucket.BucketName, b.objectPrefix, blobID)
 }
