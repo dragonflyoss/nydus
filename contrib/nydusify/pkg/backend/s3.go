@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -157,6 +158,27 @@ func (b *S3Backend) existObject(ctx context.Context, objectKey string) (bool, er
 
 func (b *S3Backend) blobObjectKey(blobID string) string {
 	return b.objectPrefix + blobID
+}
+
+func (b *S3Backend) Reader(blobID string) (io.ReadCloser, error) {
+	objectKey := b.blobObjectKey(blobID)
+	output, err := b.client.GetObject(context.TODO(), &s3.GetObjectInput{
+		Bucket: &b.bucketName,
+		Key:    &objectKey,
+	})
+	return output.Body, err
+}
+
+func (b *S3Backend) Size(blobID string) (int64, error) {
+	objectKey := b.blobObjectKey(blobID)
+	output, err := b.client.GetObjectAttributes(context.TODO(), &s3.GetObjectAttributesInput{
+		Bucket: &b.bucketName,
+		Key:    &objectKey,
+	})
+	if err != nil {
+		return 0, errors.Wrap(err, "get object size")
+	}
+	return output.ObjectSize, nil
 }
 
 func (b *S3Backend) remoteID(blobObjectKey string) string {

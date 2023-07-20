@@ -7,6 +7,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
@@ -25,6 +26,8 @@ type Backend interface {
 	Finalize(cancel bool) error
 	Check(blobID string) (bool, error)
 	Type() Type
+	Reader(blobID string) (io.ReadCloser, error)
+	Size(blobID string) (int64, error)
 }
 
 // TODO: Directly forward blob data to storage backend

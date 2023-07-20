@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"io"
 	"os"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
@@ -44,6 +45,14 @@ func (r *Registry) Check(blobID string) (bool, error) {
 
 func (r *Registry) Type() Type {
 	return RegistryBackend
+}
+
+func (r *Registry) Reader(blobID string) (io.ReadCloser, error) {
+	panic("not implemented")
+}
+
+func (r *Registry) Size(blobID string) (int64, error) {
+	panic("not implemented")
 }
 
 func newRegistryBackend(rawConfig []byte, remote *remote.Remote) (Backend, error) {

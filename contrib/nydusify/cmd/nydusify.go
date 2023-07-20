@@ -25,6 +25,7 @@ import (
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/rule"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
+	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/copier"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/packer"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
@@ -67,27 +68,27 @@ func parseBackendConfig(backendConfigJSON, backendConfigFile string) (string, er
 	return backendConfigJSON, nil
 }
 
-func getBackendConfig(c *cli.Context, required bool) (string, string, error) {
-	backendType := c.String("backend-type")
+func getBackendConfig(c *cli.Context, suffix string, required bool) (string, string, error) {
+	backendType := c.String(suffix + "backend-type")
 	if backendType == "" {
 		if required {
-			return "", "", errors.Errorf("backend type is empty, please specify option '--backend-type'")
+			return "", "", errors.Errorf("backend type is empty, please specify option '--%sbackend-type'", suffix)
 		}
 		return "", "", nil
 	}
 
 	possibleBackendTypes := []string{"oss", "s3"}
 	if !isPossibleValue(possibleBackendTypes, backendType) {
-		return "", "", fmt.Errorf("--backend-type should be one of %v", possibleBackendTypes)
+		return "", "", fmt.Errorf("--%sbackend-type should be one of %v", suffix, possibleBackendTypes)
 	}
 
 	backendConfig, err := parseBackendConfig(
-		c.String("backend-config"), c.String("backend-config-file"),
+		c.String(suffix+"backend-config"), c.String(suffix+"backend-config-file"),
 	)
 	if err != nil {
 		return "", "", err
 	} else if (backendType == "oss" || backendType == "s3") && strings.TrimSpace(backendConfig) == "" {
-		return "", "", errors.Errorf("backend configuration is empty, please specify option '--backend-config'")
+		return "", "", errors.Errorf("backend configuration is empty, please specify option '--%sbackend-config'", suffix)
 	}
 
 	return backendType, backendConfig, nil
@@ -421,7 +422,7 @@ func main() {
 					return err
 				}
 
-				backendType, backendConfig, err := getBackendConfig(c, false)
+				backendType, backendConfig, err := getBackendConfig(c, "", false)
 				if err != nil {
 					return err
 				}
@@ -594,7 +595,7 @@ func main() {
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				backendType, backendConfig, err := getBackendConfig(c, false)
+				backendType, backendConfig, err := getBackendConfig(c, "", false)
 				if err != nil {
 					return err
 				}
@@ -691,7 +692,7 @@ func main() {
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				backendType, backendConfig, err := getBackendConfig(c, false)
+				backendType, backendConfig, err := getBackendConfig(c, "", false)
 				if err != nil {
 					return err
 				} else if backendConfig == "" {
@@ -867,7 +868,7 @@ func main() {
 
 				// if backend-push is specified, we should make sure backend-config-file exists
 				if c.Bool("backend-push") || c.Bool("compact") {
-					_backendType, _backendConfig, err := getBackendConfig(c, true)
+					_backendType, _backendConfig, err := getBackendConfig(c, "", true)
 					if err != nil {
 						return err
 					}
@@ -905,6 +906,106 @@ func main() {
 				}
 				logrus.Infof("successfully built Nydus image (bootstrap:'%s', blob:'%s')", res.Meta, res.Blob)
 				return nil
+			},
+		},
+		{
+			Name:  "copy",
+			Usage: "Copy an image from source to target",
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:     "source",
+					Required: true,
+					Usage:    "Source image reference",
+					EnvVars:  []string{"SOURCE"},
+				},
+				&cli.StringFlag{
+					Name:     "target",
+					Required: false,
+					Usage:    "Target image reference",
+					EnvVars:  []string{"TARGET"},
+				},
+				&cli.BoolFlag{
+					Name:     "source-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS source registry",
+					EnvVars:  []string{"SOURCE_INSECURE"},
+				},
+				&cli.BoolFlag{
+					Name:     "target-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS target registry",
+					EnvVars:  []string{"TARGET_INSECURE"},
+				},
+
+				&cli.StringFlag{
+					Name:    "source-backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "source-backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "source-backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
+
+				&cli.BoolFlag{
+					Name:  "all-platforms",
+					Value: false,
+					Usage: "Copy images for all platforms, conflicts with --platform",
+				},
+				&cli.StringFlag{
+					Name:  "platform",
+					Value: "linux/" + runtime.GOARCH,
+					Usage: "Copy images for specific platforms, for example: 'linux/amd64,linux/arm64'",
+				},
+
+				&cli.StringFlag{
+					Name:    "work-dir",
+					Value:   "./tmp",
+					Usage:   "Working directory for image copy",
+					EnvVars: []string{"WORK_DIR"},
+				},
+				&cli.StringFlag{
+					Name:    "nydus-image",
+					Value:   "nydus-image",
+					Usage:   "Path to the nydus-image binary, default to search in PATH",
+					EnvVars: []string{"NYDUS_IMAGE"},
+				},
+			},
+			Action: func(c *cli.Context) error {
+				setupLogLevel(c)
+
+				sourceBackendType, sourceBackendConfig, err := getBackendConfig(c, "source-", false)
+				if err != nil {
+					return err
+				}
+
+				opt := copier.Opt{
+					WorkDir:        c.String("work-dir"),
+					NydusImagePath: c.String("nydus-image"),
+
+					Source:         c.String("source"),
+					Target:         c.String("target"),
+					SourceInsecure: c.Bool("source-insecure"),
+					TargetInsecure: c.Bool("target-insecure"),
+
+					SourceBackendType:   sourceBackendType,
+					SourceBackendConfig: sourceBackendConfig,
+
+					AllPlatforms: c.Bool("all-platforms"),
+					Platforms:    c.String("platform"),
+				}
+
+				return copier.Copy(context.Background(), opt)
 			},
 		},
 	}
