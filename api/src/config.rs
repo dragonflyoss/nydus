@@ -207,6 +207,17 @@ impl ConfigV2 {
             false
         }
     }
+
+    /// Fill authorization for registry backend.
+    pub fn update_registry_auth_info(&mut self, auth: &Option<String>) {
+        if let Some(auth) = auth {
+            if let Some(backend) = self.backend.as_mut() {
+                if let Some(registry) = backend.registry.as_mut() {
+                    registry.auth = Some(auth.to_string());
+                }
+            }
+        }
+    }
 }
 
 impl FromStr for ConfigV2 {
