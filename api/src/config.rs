@@ -1906,4 +1906,48 @@ mod tests {
         assert_eq!(&config.id, "id1");
         assert_eq!(config.backend.as_ref().unwrap().backend_type, "localfs");
     }
+
+    #[test]
+    fn test_update_registry_auth_info() {
+        let config = r#"
+        {
+            "device": {
+              "id": "test",
+              "backend": {
+                "type": "registry",
+                "config": {
+                    "readahead": false,
+                    "host": "docker.io",
+                    "repo": "library/nginx",
+                    "scheme": "https",
+                    "proxy": {
+                        "fallback": false
+                    },
+                    "timeout": 5,
+                    "connect_timeout": 5,
+                    "retry_limit": 8
+                }
+              }
+            },
+            "mode": "direct",
+            "digest_validate": false,
+            "enable_xattr": true,
+            "fs_prefetch": {
+              "enable": true,
+              "threads_count": 10,
+              "merging_size": 131072,
+              "bandwidth_rate": 10485760
+            }
+          }"#;
+
+        let mut rafs_config = ConfigV2::from_str(&config).unwrap();
+        let test_auth = "test_auth".to_string();
+
+        rafs_config.update_registry_auth_info(&Some(test_auth.clone()));
+
+        let backend = rafs_config.backend.unwrap();
+        let registry = backend.registry.unwrap();
+        let auth = registry.auth.unwrap();
+        assert_eq!(auth, test_auth);
+    }
 }
