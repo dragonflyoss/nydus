@@ -29,6 +29,7 @@ use nix::sys::signal;
 use rlimit::Resource;
 
 use nydus_app::{dump_program_info, setup_logging, BuildTimeInfo};
+use rafs::fs::RafsConfig;
 
 use crate::api_server_glue::ApiServerController;
 use crate::blob_cache::BlobCacheMgr;
@@ -564,6 +565,8 @@ fn process_fs_service(
     let bootstrap = args.value_of("bootstrap");
     // safe as virtual_mountpoint default to "/"
     let virtual_mnt = args.value_of("virtual-mountpoint").unwrap();
+    // auth for registry
+    let auth = std::env::var("IMAGE_PULL_AUTH").ok();
 
     let mut opts = fuse_backend_rs::api::VfsOptions::default();
     let mount_cmd = if let Some(shared_dir) = shared_dir {
@@ -582,7 +585,7 @@ fn process_fs_service(
 
         Some(cmd)
     } else if let Some(b) = bootstrap {
-        let config = args.value_of("config").ok_or_else(|| {
+        let config_file = args.value_of("config").ok_or_else(|| {
             DaemonError::InvalidArguments("config file is not provided".to_string())
         })?;
 
@@ -590,10 +593,20 @@ fn process_fs_service(
             .values_of("prefetch-files")
             .map(|files| files.map(|s| s.to_string()).collect());
 
+        let config = if auth.is_some() {
+            let mut rafs_config = RafsConfig::from_file(config_file).map_err(|_| {
+                DaemonError::InvalidConfig("failed to load config file".to_string())
+            })?;
+            rafs_config.update_registry_auth_info(&auth);
+            serde_json::to_string(&rafs_config)?
+        } else {
+            std::fs::read_to_string(config_file)?
+        };
+
         let cmd = FsBackendMountCmd {
             fs_type: nydus::FsBackendType::Rafs,
             source: b.to_string(),
-            config: std::fs::read_to_string(config)?,
+            config,
             mountpoint: virtual_mnt.to_string(),
             prefetch_files,
         };
