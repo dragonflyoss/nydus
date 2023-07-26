@@ -1095,6 +1095,111 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_is_registry_backend() {
+        let config = r#"
+        {
+            "device": {
+              "id": "test",
+              "backend": {
+                "type": "registry",
+                "config": {
+                    "readahead": false,
+                    "host": "docker.io",
+                    "repo": "library/nginx",
+                    "scheme": "https"
+                }
+              }
+            },
+            "mode": "direct"
+          }"#;
+        let rafs_config = RafsConfig::from_str(config).unwrap();
+        let value = serde_json::to_value(rafs_config.clone()).unwrap();
+        assert!(rafs_config.is_registry_backend(&value));
+
+        let config2 = r#"
+        {
+            "device": {
+              "id": "test",
+              "backend": {
+                "type": "registry",
+                "config": {}
+              }
+            },
+            "mode": "direct"
+          }"#;
+        let rafs_config2 = RafsConfig::from_str(config2).unwrap();
+
+        let value2 = serde_json::to_value(rafs_config2.clone()).unwrap();
+        assert!(rafs_config2.is_registry_backend(&value2));
+    }
+
+    #[test]
+    fn test_is_not_registry_backend() {
+        let config1 = r#"
+        {
+            "device": {
+              "id": "test",
+              "backend": {
+                "config": {}
+              }
+            },
+            "mode": "direct"
+          }"#;
+        assert!(RafsConfig::from_str(config1).is_err());
+    }
+
+    #[test]
+    fn test_update_registry_auth_info() {
+        let config = r#"
+        {
+            "device": {
+              "id": "test",
+              "backend": {
+                "type": "registry",
+                "config": {
+                    "readahead": false,
+                    "host": "docker.io",
+                    "repo": "library/nginx",
+                    "scheme": "https",
+                    "proxy": {
+                        "fallback": false
+                    },
+                    "timeout": 5,
+                    "connect_timeout": 5,
+                    "retry_limit": 8
+                }
+              }
+            },
+            "mode": "direct",
+            "digest_validate": false,
+            "enable_xattr": true,
+            "fs_prefetch": {
+              "enable": true,
+              "threads_count": 10,
+              "merging_size": 131072,
+              "bandwidth_rate": 10485760
+            }
+          }"#;
+        let mut rafs_config = RafsConfig::from_str(config).unwrap();
+        let test_auth = "test_auth".to_string();
+        rafs_config.update_registry_auth_info(&Some(test_auth.clone()));
+        if let Ok(config) =
+            serde_json::from_value::<RegistryConfig>(rafs_config.device.backend.backend_config)
+        {
+            if config.auth.is_none() {
+                panic!()
+            }
+            if let Some(auth) = config.auth {
+                if auth != test_auth {
+                    panic!()
+                }
+            }
+        } else {
+            panic!("failed to serde json")
+        }
+    }
+
+    #[test]
     fn it_should_create_new_rafs_fs() {
         let rafs = new_rafs_backend();
         let attr = rafs.get_inode_attr(1).unwrap();
