@@ -53,6 +53,7 @@ impl FsBackendCollection {
             FsBackendType::Rafs => {
                 let mut config: serde_json::Value =
                     serde_json::from_str(&cmd.config).map_err(DaemonError::Serde)?;
+
                 trim_backend_config!(
                     config,
                     "access_key_id",

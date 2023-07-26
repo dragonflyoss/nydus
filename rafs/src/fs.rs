@@ -32,9 +32,9 @@ use fuse_backend_rs::abi::fuse_abi::{stat64, statvfs64};
 use fuse_backend_rs::api::filesystem::*;
 use fuse_backend_rs::api::BackendFileSystem;
 use nix::unistd::{getegid, geteuid};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-use nydus_api::http::{BlobPrefetchConfig, FactoryConfig};
+use nydus_api::http::{BlobPrefetchConfig, FactoryConfig, RegistryConfig};
 use nydus_storage::device::{BlobDevice, BlobPrefetchRequest};
 use nydus_utils::{
     div_round_up,
@@ -76,7 +76,7 @@ fn default_amplify_io() -> u32 {
 }
 
 /// Configuration information for filesystem data prefetch.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize, Debug)]
 pub struct FsPrefetchControl {
     /// Whether the filesystem layer data prefetch is enabled or not.
     #[serde(default)]
@@ -142,7 +142,7 @@ macro_rules! trim_backend_config {
 }
 
 /// Rafs storage backend configuration information.
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, Serialize, Debug)]
 pub struct RafsConfig {
     /// Configuration for storage subsystem.
     pub device: FactoryConfig,
@@ -183,6 +183,38 @@ impl RafsConfig {
     pub fn from_file(path: &str) -> RafsResult<RafsConfig> {
         let file = File::open(path).map_err(RafsError::LoadConfig)?;
         serde_json::from_reader::<File, RafsConfig>(file).map_err(RafsError::ParseConfig)
+    }
+
+    pub fn is_registry_backend(&self, v: &serde_json::Value) -> bool {
+        if let Some(device) = v.get("device") {
+            if let Some(serde_json::Value::Object(m)) = device.get("backend") {
+                return m
+                    .get("type")
+                    .map_or(false, |backend_type| backend_type == "registry");
+            }
+        }
+        false
+    }
+
+    /// Fill authorization for registry backend.
+    pub fn update_registry_auth_info(&mut self, auth: &Option<String>) {
+        if let Some(auth) = auth {
+            if let Ok(value) = serde_json::to_value(self.clone()) {
+                if self.is_registry_backend(&value) {
+                    if let Err(e) = serde_json::from_value(
+                        self.device.backend.backend_config.clone(),
+                    )
+                    .map(|mut config: RegistryConfig| {
+                        config.auth = Some(auth.to_string());
+                        serde_json::to_value(config).map(|value| {
+                            self.device.backend.backend_config = value;
+                        })
+                    }) {
+                        error!("Fill auth for registry backend failed: {:?}", e);
+                    };
+                }
+            }
+        }
     }
 }
 
