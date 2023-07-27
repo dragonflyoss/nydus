@@ -48,6 +48,8 @@ sudo nydusd \
   --log-level info
 ```
 
+For registry backend, we can set authorization with environment variable `IMAGE_PULL_AUTH` to avoid loading `auth` from nydusd configuration file.
+
 ### Run With Virtio-FS
 If no `/path/to/bootstrap` is available, please refer to [nydus-image.md](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md) for more details.
 
@@ -241,7 +243,8 @@ Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/
   },
   ...
 }
-```
+``` 
+Note: The value of `device.backend.config.auth` will be overwrite if running the nydusd with environment variable `IMAGE_PULL_AUTH`.
 
 ##### Enable P2P Proxy for Storage Backend
 
