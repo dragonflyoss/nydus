@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{fmt, thread};
+use std::{env, fmt, thread};
 
 use log::{max_level, Level};
 
@@ -607,6 +607,11 @@ impl Connection {
         } else {
             None
         };
+        // get pool size from envvar
+        let pool_max_idle_per_host = match env::var("REGISTRY_CLIENT_POOL_MAX_IDLE_PER_HOST") {
+            Ok(val) => val.parse::<usize>().unwrap_or(20),
+            Err(_) => 20,
+        };
 
         let mut cb = Client::builder()
             .timeout(timeout)
@@ -614,7 +619,7 @@ impl Connection {
             .redirect(Policy::none())
             .use_rustls_tls()
             .tcp_keepalive(Some(Duration::from_secs(5 * 60)))
-            .pool_max_idle_per_host(20);
+            .pool_max_idle_per_host(pool_max_idle_per_host);
 
         if config.skip_verify {
             cb = cb.danger_accept_invalid_certs(true);
