@@ -45,6 +45,7 @@ type Opt struct {
 	BatchSize        string
 	PrefetchPatterns string
 	OCIRef           bool
+	WithReferrer     bool
 
 	AllPlatforms bool
 	Platforms    string
