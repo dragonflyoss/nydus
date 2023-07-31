@@ -339,6 +339,12 @@ func main() {
 					EnvVars: []string{"OCI_REF"},
 				},
 				&cli.BoolFlag{
+					Name:    "with-referrer",
+					Value:   false,
+					Usage:   "Associate a reference to the source image, see https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers",
+					EnvVars: []string{"WITH_REFERRER"},
+				},
+				&cli.BoolFlag{
 					Name:    "oci",
 					Value:   false,
 					Usage:   "Convert Docker media types to OCI media types",
@@ -497,6 +503,7 @@ func main() {
 					ChunkSize:        c.String("chunk-size"),
 
 					OCIRef:       c.Bool("oci-ref"),
+					WithReferrer: c.Bool("with-referrer"),
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
 				}

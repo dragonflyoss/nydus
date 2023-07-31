@@ -22,6 +22,7 @@ func getConfig(opt Opt) map[string]string {
 	cfg["docker2oci"] = strconv.FormatBool(opt.Docker2OCI)
 	cfg["merge_manifest"] = strconv.FormatBool(opt.MergePlatform)
 	cfg["oci_ref"] = strconv.FormatBool(opt.OCIRef)
+	cfg["with_referrer"] = strconv.FormatBool(opt.WithReferrer)
 
 	cfg["prefetch_patterns"] = opt.PrefetchPatterns
 	cfg["compressor"] = opt.Compressor

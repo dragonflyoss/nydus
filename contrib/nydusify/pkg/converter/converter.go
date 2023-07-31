@@ -44,6 +44,7 @@ type Opt struct {
 	ChunkSize        string
 	PrefetchPatterns string
 	OCIRef           bool
+	WithReferrer     bool
 
 	AllPlatforms bool
 	Platforms    string
