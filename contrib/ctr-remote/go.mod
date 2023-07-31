@@ -4,8 +4,8 @@ go 1.18
 
 require (
 	github.com/containerd/containerd v1.7.0
-	github.com/containerd/nydus-snapshotter v0.6.1
-	github.com/opencontainers/image-spec v1.1.0-rc2.0.20221005185240-3a7f492d3f1b
+	github.com/containerd/nydus-snapshotter v0.10.0
+	github.com/opencontainers/image-spec v1.1.0-rc3
 	github.com/urfave/cli v1.22.12
 )
 

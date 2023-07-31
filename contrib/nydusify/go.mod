@@ -12,7 +12,7 @@ require (
 	github.com/containerd/containerd v1.7.2
 	github.com/docker/cli v23.0.3+incompatible
 	github.com/docker/distribution v2.8.2+incompatible
-	github.com/goharbor/acceleration-service v0.2.5
+	github.com/goharbor/acceleration-service v0.2.6
 	github.com/google/uuid v1.3.0
 	github.com/hashicorp/go-hclog v1.3.1
 	github.com/hashicorp/go-plugin v1.4.5
@@ -53,7 +53,7 @@ require (
 	github.com/containerd/cgroups v1.1.0 // indirect
 	github.com/containerd/continuity v0.4.1 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
-	github.com/containerd/nydus-snapshotter v0.9.0 // indirect
+	github.com/containerd/nydus-snapshotter v0.10.0 // indirect
 	github.com/containerd/stargz-snapshotter v0.14.3 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.14.3 // indirect
 	github.com/containerd/ttrpc v1.2.2 // indirect
