@@ -66,8 +66,8 @@ github.com/containerd/continuity v0.4.1 h1:wQnVrjIyQ8vhU2sgOiL5T07jo+ouqc2bnKsv5
 github.com/containerd/continuity v0.4.1/go.mod h1:F6PTNCKepoxEaXLQp3wDAjygEnImnZ/7o4JzpodfroQ=
 github.com/containerd/fifo v1.1.0 h1:4I2mbh5stb1u6ycIABlBw9zgtlK8viPI9QkQNRQEEmY=
 github.com/containerd/fifo v1.1.0/go.mod h1:bmC4NWMbXlt2EZ0Hc7Fx7QzTFxgPID13eH0Qu+MAb2o=
-github.com/containerd/nydus-snapshotter v0.9.0 h1:f0Tr3srVKDlURgLG/Kocy4WQIYsmSoc8ihHxdzfB2S0=
-github.com/containerd/nydus-snapshotter v0.9.0/go.mod h1:xEsAzeM0gZEW6POBPOa+1X7EThYsEJNWnO/fhf2moYU=
+github.com/containerd/nydus-snapshotter v0.10.0 h1:aCQoKmksOmZ2C34znlhOCOlYExiw4s/UPPzbIFKQc8U=
+github.com/containerd/nydus-snapshotter v0.10.0/go.mod h1:xEsAzeM0gZEW6POBPOa+1X7EThYsEJNWnO/fhf2moYU=
 github.com/containerd/stargz-snapshotter v0.14.3 h1:OTUVZoPSPs8mGgmQUE1dqw3WX/3nrsmsurW7UPLWl1U=
 github.com/containerd/stargz-snapshotter v0.14.3/go.mod h1:j2Ya4JeA5gMZJr8BchSkPjlcCEh++auAxp4nidPI6N0=
 github.com/containerd/stargz-snapshotter/estargz v0.14.3 h1:OqlDCK3ZVUO6C3B/5FSkDwbkEETK84kQgEeFwDC+62k=
@@ -118,8 +118,8 @@ github.com/godbus/dbus/v5 v5.0.4/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5x
 github.com/godbus/dbus/v5 v5.0.6/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=
 github.com/gogo/protobuf v1.3.2 h1:Ov1cvc58UF3b5XjBnZv7+opcTcQFZebYjWzi34vdm4Q=
 github.com/gogo/protobuf v1.3.2/go.mod h1:P1XiOD3dCwIKUDQYPy72D8LYyHL2YPYrpS2s69NZV8Q=
-github.com/goharbor/acceleration-service v0.2.5 h1:2smZV+I5b1vxjg1ns5d5p+hL6BgONr9Yw/l9Jqo3p2I=
-github.com/goharbor/acceleration-service v0.2.5/go.mod h1:u0VebL4M+34TlIVnVKRnsA1EP7OeGmSnEkobTC+xbCo=
+github.com/goharbor/acceleration-service v0.2.6 h1:aUNf6l7FFAa0i5fhrv1AHOzoU0EuuUSj35dHGxoSu6g=
+github.com/goharbor/acceleration-service v0.2.6/go.mod h1:zKOdEAI28v000sCLBfdaPv161xOk8EmFzftAMlFuhM8=
 github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfUlaOkMMuAQtPIUF8ecWP5IEl/CR7VP2Q=
 github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e/go.mod h1:cIg4eruTrX1D+g88fzRXU5OdNfaM+9IcxsU14FzY7Hc=
 github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da h1:oI5xCqsCo564l8iNU+DwB5epxmsaqB+rhGL0m5jtYqE=
