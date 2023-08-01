@@ -37,6 +37,7 @@ type Opt struct {
 	BackendConfig string
 	ExpectedArch  string
 	FsVersion     string
+	DecryptKeys   []string
 }
 
 // fsViewer provides complete view of file system in nydus image
@@ -84,7 +85,7 @@ func New(opt Opt) (*FsViewer, error) {
 }
 
 // Pull Bootstrap, includes nydus_manifest.json and nydus_config.json
-func (fsViewer *FsViewer) PullBootstrap(ctx context.Context, targetParsed *parser.Parsed) error {
+func (fsViewer *FsViewer) PullBootstrap(ctx context.Context, targetParsed *parser.Parsed, opt Opt) error {
 	if err := os.RemoveAll(fsViewer.WorkDir); err != nil {
 		return errors.Wrap(err, "failed to clean up working directory")
 	}
@@ -114,6 +115,14 @@ func (fsViewer *FsViewer) PullBootstrap(ctx context.Context, targetParsed *parse
 			return errors.Wrap(err, "failed to pull Nydus bootstrap layer")
 		}
 		defer bootstrapReader.Close()
+
+		if len(opt.DecryptKeys) != 0 && utils.IsEncryptedNydusImage(&targetParsed.NydusImage.Manifest) {
+			logrus.Infof("Decrypting Nydus bootstrap layer")
+			bootstrapReader, err = fsViewer.Parser.DecryptNydusBootstrap(ctx, bootstrapReader, targetParsed.NydusImage, opt.DecryptKeys)
+			if err != nil {
+				return errors.Wrap(err, "decrypt Nydus bootstrap layer")
+			}
+		}
 
 		if err := utils.UnpackFile(bootstrapReader, utils.BootstrapFileNameInLayer, target); err != nil {
 			return errors.Wrap(err, "failed to unpack Nydus bootstrap layer")
@@ -168,7 +177,7 @@ func (fsViewer *FsViewer) view(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to parse image reference")
 	}
-	err = fsViewer.PullBootstrap(ctx, targetParsed)
+	err = fsViewer.PullBootstrap(ctx, targetParsed, fsViewer.Opt)
 	if err != nil {
 		return errors.Wrap(err, "failed to pull Nydus image bootstrap")
 	}

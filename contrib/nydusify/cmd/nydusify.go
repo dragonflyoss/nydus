@@ -425,6 +425,13 @@ func main() {
 					Usage:   "File path to save the metrics collected during conversion in JSON format, for example: './output.json'",
 					EnvVars: []string{"OUTPUT_JSON"},
 				},
+				&cli.StringSliceFlag{
+					Name:  "encrypt-recipients",
+					Value: nil,
+					Usage: "Recipients to encrypt the nydus bootstrap layer, like " +
+						"jwe:<public-key-file-path>, provider:<cmd/gprc>, pgp:<email-address>, pkcs7:<x509-file-path>",
+					EnvVars: []string{"ENCRYPT_RECIPIENTS"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -507,14 +514,15 @@ func main() {
 					ChunkDictRef:      chunkDictRef,
 					ChunkDictInsecure: c.Bool("chunk-dict-insecure"),
 
-					PrefetchPatterns: prefetchPatterns,
-					MergePlatform:    c.Bool("merge-platform"),
-					Docker2OCI:       docker2OCI,
-					FsVersion:        fsVersion,
-					FsAlignChunk:     c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
-					Compressor:       c.String("compressor"),
-					ChunkSize:        c.String("chunk-size"),
-					BatchSize:        c.String("batch-size"),
+					PrefetchPatterns:  prefetchPatterns,
+					MergePlatform:     c.Bool("merge-platform"),
+					Docker2OCI:        docker2OCI,
+					FsVersion:         fsVersion,
+					FsAlignChunk:      c.Bool("backend-aligned-chunk") || c.Bool("fs-align-chunk"),
+					Compressor:        c.String("compressor"),
+					ChunkSize:         c.String("chunk-size"),
+					BatchSize:         c.String("batch-size"),
+					EncryptRecipients: c.StringSlice("encrypt-recipients"),
 
 					OCIRef:       c.Bool("oci-ref"),
 					WithReferrer: c.Bool("with-referrer"),
@@ -606,6 +614,12 @@ func main() {
 					Usage:   "Path to the nydusd binary, default to search in PATH",
 					EnvVars: []string{"NYDUSD"},
 				},
+				&cli.StringSliceFlag{
+					Name:    "decrypt-keys",
+					Value:   nil,
+					Usage:   "Keys to decrypt nydus bootstrap layer.",
+					EnvVars: []string{"DECRYPT_KEYS"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -632,6 +646,7 @@ func main() {
 					BackendType:    backendType,
 					BackendConfig:  backendConfig,
 					ExpectedArch:   arch,
+					DecryptKeys:    c.StringSlice("decrypt-keys"),
 				})
 				if err != nil {
 					return err
@@ -765,6 +780,12 @@ func main() {
 					Usage:   "The nydusd binary path, if unset, search in PATH environment",
 					EnvVars: []string{"NYDUSD"},
 				},
+				&cli.StringSliceFlag{
+					Name:    "decrypt-keys",
+					Value:   nil,
+					Usage:   "Keys to decrypt nydus bootstrap layer.",
+					EnvVars: []string{"DECRYPT_KEYS"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -809,6 +830,7 @@ func main() {
 					BackendType:    backendType,
 					BackendConfig:  backendConfig,
 					ExpectedArch:   arch,
+					DecryptKeys:    c.StringSlice("decrypt-keys"),
 				})
 				if err != nil {
 					return err
@@ -921,6 +943,14 @@ func main() {
 					Usage:   "Path to the nydus-image binary, default to search in PATH",
 					EnvVars: []string{"NYDUS_IMAGE"},
 				},
+
+				&cli.StringSliceFlag{
+					Name:  "encrypt-recipients",
+					Value: nil,
+					Usage: "Recipients to encrypt the nydus bootstrap layer, like " +
+						"jwe:<public-key-file-path>, provider:<cmd/gprc>, pgp:<email-address>, pkcs7:<x509-file-path>",
+					EnvVars: []string{"ENCRYPT_RECIPIENTS"},
+				},
 			},
 			Before: func(ctx *cli.Context) error {
 				sourcePath := ctx.String("source-dir")
@@ -958,10 +988,11 @@ func main() {
 				}
 
 				if p, err = packer.New(packer.Opt{
-					LogLevel:       logrus.GetLevel(),
-					NydusImagePath: c.String("nydus-image"),
-					OutputDir:      c.String("output-dir"),
-					BackendConfig:  backendConfig,
+					LogLevel:          logrus.GetLevel(),
+					NydusImagePath:    c.String("nydus-image"),
+					OutputDir:         c.String("output-dir"),
+					BackendConfig:     backendConfig,
+					EncryptRecipients: c.StringSlice("encrypt-recipients"),
 				}); err != nil {
 					return err
 				}
@@ -978,6 +1009,7 @@ func main() {
 					Parent:            c.String("parent-bootstrap"),
 					TryCompact:        c.Bool("compact"),
 					CompactConfigPath: c.String("compact-config-file"),
+					Encrypt:           len(c.StringSlice("encrypt-recipients")) != 0,
 				}); err != nil {
 					return err
 				}

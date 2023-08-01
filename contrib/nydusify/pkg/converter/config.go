@@ -6,6 +6,7 @@ package converter
 
 import (
 	"strconv"
+	"strings"
 )
 
 func getConfig(opt Opt) map[string]string {
@@ -35,6 +36,8 @@ func getConfig(opt Opt) map[string]string {
 	cfg["cache_ref"] = opt.CacheRef
 	cfg["cache_version"] = opt.CacheVersion
 	cfg["cache_max_records"] = strconv.FormatUint(uint64(opt.CacheMaxRecords), 10)
+
+	cfg["encrypt_recipients"] = strings.Join(opt.EncryptRecipients, ",")
 
 	return cfg
 }

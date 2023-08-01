@@ -28,10 +28,11 @@ var (
 )
 
 type Opt struct {
-	LogLevel       logrus.Level
-	NydusImagePath string
-	OutputDir      string
-	BackendConfig  BackendConfig
+	LogLevel          logrus.Level
+	NydusImagePath    string
+	OutputDir         string
+	BackendConfig     BackendConfig
+	EncryptRecipients []string
 }
 
 type Builder interface {
@@ -63,6 +64,7 @@ type PackRequest struct {
 	Parent            string
 	TryCompact        bool
 	CompactConfigPath string
+	Encrypt           bool
 }
 
 type PackResult struct {
@@ -253,6 +255,7 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 		Compressor:          req.Compressor,
 		ChunkSize:           req.ChunkSize,
 		FsVersion:           req.FsVersion,
+		Encrypt:             req.Encrypt,
 	}); err != nil {
 		return PackResult{}, errors.Wrapf(err, "failed to build image from directory %s", req.SourceDir)
 	}

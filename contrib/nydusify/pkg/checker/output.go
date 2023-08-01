@@ -28,7 +28,7 @@ func prettyDump(obj interface{}, name string) error {
 // Output outputs OCI and Nydus image manifest, index, config to JSON file.
 // Prefer to use source image to output OCI image information.
 func (checker *Checker) Output(
-	ctx context.Context, sourceParsed, targetParsed *parser.Parsed, outputPath string,
+	ctx context.Context, sourceParsed, targetParsed *parser.Parsed, outputPath string, opt Opt,
 ) error {
 	logrus.Infof("Dumping OCI and Nydus manifests to %s", outputPath)
 
@@ -86,6 +86,14 @@ func (checker *Checker) Output(
 			return errors.Wrap(err, "pull Nydus bootstrap layer")
 		}
 		defer bootstrapReader.Close()
+
+		if len(opt.DecryptKeys) != 0 && utils.IsEncryptedNydusImage(&targetParsed.NydusImage.Manifest) {
+			logrus.Infof("Decrypting Nydus bootstrap layer")
+			bootstrapReader, err = checker.targetParser.DecryptNydusBootstrap(ctx, bootstrapReader, targetParsed.NydusImage, opt.DecryptKeys)
+			if err != nil {
+				return errors.Wrap(err, "decrypt Nydus bootstrap layer")
+			}
+		}
 
 		if err := utils.UnpackFile(bootstrapReader, utils.BootstrapFileNameInLayer, target); err != nil {
 			return errors.Wrap(err, "unpack Nydus bootstrap layer")
