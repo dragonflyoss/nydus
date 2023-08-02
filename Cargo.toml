@@ -98,3 +98,7 @@ backend-s3 = ["nydus-storage/backend-s3"]
 
 [workspace]
 members = ["api", "app", "blobfs", "clib", "error", "rafs", "storage", "service", "utils"]
+
+[patch.crates-io]
+# Due to the slow processing of PR by the upstream, temporarily fork tar-rs for this project
+tar = { git = "https://github.com/nydusaccelerator/tar-rs.git" }
