@@ -23,7 +23,7 @@ serde = { version = "1.0.110", features = ["rc", "serde_derive"] }
 url = { version = "2.1.1", optional = true }
 
 [dev-dependencies]
-vmm-sys-util = { version = "0.10" }
+vmm-sys-util = { version = "0.11" }
 
 [features]
 error-backtrace = ["backtrace"]
