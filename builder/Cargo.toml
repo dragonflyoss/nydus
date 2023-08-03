@@ -20,7 +20,7 @@ serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 sha2 = "0.10.2"
 tar = "0.4.38"
-vmm-sys-util = "0.10.0"
+vmm-sys-util = "0.11.0"
 xattr = "0.2.3"
 
 nydus-api = { version = "0.3", path = "../api" }

@@ -32,7 +32,7 @@ tar = "0.4.38"
 time = { version = "0.3.14", features = ["formatting"], optional = true }
 tokio = { version = "1.19.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 url = { version = "2.1.1", optional = true }
-vm-memory = "0.9"
+vm-memory = "0.10"
 fuse-backend-rs = "^0.10.3"
 gpt = { version = "3.0.0", optional = true }
 
@@ -40,7 +40,7 @@ nydus-api = { version = "0.3", path = "../api" }
 nydus-utils = { version = "0.4", path = "../utils", features = ["encryption", "zran"] }
 
 [dev-dependencies]
-vmm-sys-util = "0.10"
+vmm-sys-util = "0.11"
 tar = "0.4.38"
 regex = "1.7.0"
 
