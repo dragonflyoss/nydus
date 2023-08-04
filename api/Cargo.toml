@@ -23,7 +23,7 @@ url = { version = "2.1.1", optional = true }
 nydus-error = { version = "0.2", path = "../error" }
 
 [dev-dependencies]
-vmm-sys-util = { version = "0.10" }
+vmm-sys-util = { version = "0.11" }
 
 [features]
 handler = ["dbs-uhttp", "http", "lazy_static", "mio", "url"]
