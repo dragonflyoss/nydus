@@ -1854,7 +1854,7 @@ impl RafsXAttrs {
             for (key, value) in self.pairs.iter() {
                 let (index, prefix_len) = Self::match_prefix(key)
                     .map_err(|_| einval!(format!("invalid xattr key {:?}", key)))?;
-                if key.len() <= prefix_len {
+                if key.len() < prefix_len {
                     return Err(einval!(format!("invalid xattr key {:?}", key)));
                 }
                 if value.len() > u16::MAX as usize {
@@ -2177,10 +2177,29 @@ mod tests {
         let mut reader: Box<dyn RafsIoRead> = Box::new(r);
 
         let mut xattrs = RafsXAttrs::new();
-        xattrs.add(OsString::from("user.nydus"), vec![1u8]).unwrap();
+        // These xattrs are in "e_name_index" order for easier reading:
         xattrs
             .add(OsString::from("security.rafs"), vec![2u8, 3u8])
             .unwrap();
+        xattrs
+            .add(
+                OsString::from("system.posix_acl_access"),
+                vec![4u8, 5u8, 6u8],
+            )
+            .unwrap();
+        xattrs
+            .add(
+                OsString::from("system.posix_acl_default"),
+                vec![7u8, 8u8, 9u8, 10u8],
+            )
+            .unwrap();
+        xattrs
+            .add(
+                OsString::from("trusted.abc"),
+                vec![11u8, 12u8, 13u8, 14u8, 15u8],
+            )
+            .unwrap();
+        xattrs.add(OsString::from("user.nydus"), vec![1u8]).unwrap();
         xattrs.store_v6(&mut writer).unwrap();
         writer.flush().unwrap();
 
@@ -2191,35 +2210,59 @@ mod tests {
         assert_eq!(header.h_shared_count, 0u8);
 
         let target1 = RafsV6XattrEntry {
-            e_name_len: 4u8,
-            e_name_index: 6u8,
-            e_value_size: u16::to_le(2u16),
-        };
-
-        let target2 = RafsV6XattrEntry {
-            e_name_len: 5u8,
-            e_name_index: 1u8,
+            e_name_len: 5u8,   // "nydus"
+            e_name_index: 1u8, // EROFS_XATTR_INDEX_USER
             e_value_size: u16::to_le(1u16),
         };
 
-        let mut entry1 = RafsV6XattrEntry::new();
-        reader.read_exact(entry1.as_mut()).unwrap();
-        assert!((entry1 == target1 || entry1 == target2));
+        let target2 = RafsV6XattrEntry {
+            e_name_len: 0u8,   // ""
+            e_name_index: 2u8, // EROFS_XATTR_INDEX_POSIX_ACL_ACCESS
+            e_value_size: u16::to_le(3u16),
+        };
 
-        size += size_of::<RafsV6XattrEntry>()
-            + entry1.name_len() as usize
-            + entry1.value_size() as usize;
+        let target3 = RafsV6XattrEntry {
+            e_name_len: 0u8,   // ""
+            e_name_index: 3u8, // EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT
+            e_value_size: u16::to_le(4u16),
+        };
 
-        reader
-            .seek_to_offset(round_up(size as u64, size_of::<RafsV6XattrEntry>() as u64))
-            .unwrap();
+        let target4 = RafsV6XattrEntry {
+            e_name_len: 3u8,   // "abc"
+            e_name_index: 4u8, // EROFS_XATTR_INDEX_TRUSTED
+            e_value_size: u16::to_le(5u16),
+        };
 
-        let mut entry2 = RafsV6XattrEntry::new();
-        reader.read_exact(entry2.as_mut()).unwrap();
-        if entry1 == target1 {
-            assert!(entry2 == target2);
-        } else {
-            assert!(entry2 == target1);
+        let target5 = RafsV6XattrEntry {
+            e_name_len: 4u8,   // "rafs"
+            e_name_index: 6u8, // EROFS_XATTR_INDEX_SECURITY
+            e_value_size: u16::to_le(2u16),
+        };
+
+        let targets = vec![target1, target2, target3, target4, target5];
+
+        let mut entries: Vec<RafsV6XattrEntry> = Vec::new();
+        entries.reserve(targets.len());
+        for _i in 0..targets.len() {
+            let mut entry = RafsV6XattrEntry::new();
+            reader.read_exact(entry.as_mut()).unwrap();
+            size += round_up(
+                (size_of::<RafsV6XattrEntry>()
+                    + entry.e_name_len as usize
+                    + entry.e_value_size as usize) as u64,
+                size_of::<RafsV6XattrEntry>() as u64,
+            ) as usize;
+            reader.seek_to_offset(size as u64).unwrap();
+            entries.push(entry);
+        }
+
+        for (i, target) in targets.iter().enumerate() {
+            let j = entries
+                .iter()
+                .position(|entry| entry == target)
+                .unwrap_or_else(|| panic!("Test failed for: target{}", i + 1));
+            // Note: swap_remove() is faster than remove() when order doesn't matter:
+            entries.swap_remove(j);
         }
     }
 }

@@ -88,6 +88,18 @@ func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.La
 	// Set file xattr (only `security.capability` xattr is supported in OCI layer)
 	tool.Run(t, fmt.Sprintf("setcap CAP_NET_RAW+ep %s", filepath.Join(workDir, "dir-1/file-2")))
 
+	// Note: The following test is omitted for now because containerd does not
+	// support created layers with any xattr except "security." xattrs described
+	// in this issue: https://github.com/containerd/containerd/issues/8947
+	// Create file with an ACL:
+	//layer.CreateFile(t, "acl-file.txt", []byte(""))
+	// The following xattr key and value are equivalent to running this ACL
+	// command: "setfacl -x user:root:rwx acl-file.txt"
+	//layer.SetXattr(t, "acl-file.txt", "system.posix_acl_access", []byte{
+	//	0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x07, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x02, 0x00, 0x07, 0x00,
+	//	0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x05, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x10, 0x00, 0x07, 0x00,
+	//	0xFF, 0xFF, 0xFF, 0xFF, 0x20, 0x00, 0x05, 0x00, 0xFF, 0xFF, 0xFF, 0xFF });
+
 	// Customized files
 	for _, maker := range makers {
 		maker(t, layer)
