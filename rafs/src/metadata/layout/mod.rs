@@ -267,7 +267,7 @@ impl RafsXAttrs {
             return Err(einval!("xattr key/value is too big"));
         }
         for p in RAFS_XATTR_PREFIXES {
-            if buf.len() > p.as_bytes().len() && &buf[..p.as_bytes().len()] == p.as_bytes() {
+            if buf.len() >= p.as_bytes().len() && &buf[..p.as_bytes().len()] == p.as_bytes() {
                 self.pairs.insert(name, value);
                 return Ok(());
             }
