@@ -591,7 +591,10 @@ pub fn create_fuse_daemon(
         || api_sock.is_none()
     {
         if let Some(cmd) = mount_cmd {
-            daemon.service.mount(cmd)?;
+            daemon.service.mount(cmd).map_err(|e| {
+                error!("service mount error: {}", &e);
+                eother!(e)
+            })?;
         }
         daemon
             .service
@@ -599,7 +602,10 @@ pub fn create_fuse_daemon(
             .lock()
             .unwrap()
             .mount()
-            .map_err(|e| eother!(e))?;
+            .map_err(|e| {
+                error!("service session mount error: {}", &e);
+                eother!(e)
+            })?;
         daemon
             .on_event(DaemonStateMachineInput::Mount)
             .map_err(|e| eother!(e))?;

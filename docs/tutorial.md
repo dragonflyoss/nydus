@@ -287,6 +287,12 @@ $ cat localfs.json
       "config": {
         "dir": "/<YOUR-WORK-PATH>/nydus-image/blobs"
       }
+    },
+    "cache": {
+      "type": "blobcache",
+      "config": {
+        "work_dir": "/var/lib/nydus/cache"
+      }
     }
   },
   "mode": "direct"
