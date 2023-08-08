@@ -36,7 +36,7 @@ flate2 = { version = "1.0.17", features = ["zlib-ng-compat"], default-features =
 
 [dev-dependencies]
 vmm-sys-util = "0.11.0"
-tar = "0.4.38"
+tar = "0.4.40"
 
 [features]
 zran = ["libz-sys"]
