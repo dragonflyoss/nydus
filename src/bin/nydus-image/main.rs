@@ -13,7 +13,7 @@ extern crate log;
 extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
-
+use crate::deduplicate::SqliteDatabase;
 use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
@@ -34,7 +34,7 @@ use nydus_builder::{
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
-use nydus_storage::device::BlobFeatures;
+use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::{format_blob_features, BatchContextGenerator};
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
@@ -44,6 +44,7 @@ use nydus_utils::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::deduplicate::Deduplicate;
 use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
@@ -52,6 +53,7 @@ use nydus_service::ServiceArgs;
 #[cfg(target_os = "linux")]
 use std::str::FromStr;
 
+mod deduplicate;
 mod inspect;
 mod stat;
 mod unpack;
@@ -355,6 +357,49 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required(false)
                 )
         );
+
+    let app = app.subcommand(
+            App::new("chunkdict")
+                .about("deduplicate RAFS filesystem metadata")
+                .subcommand(
+                    App::new("save")
+                        .about("Save chunk info to a database")
+                        .arg(
+                            Arg::new("bootstrap")
+                            .short('B')
+                            .long("bootstrap")
+                            .help("File path of RAFS meta blob/bootstrap")
+                            .conflicts_with("BOOTSTRAP")
+                            .required(false),
+                        )
+                    .arg(
+                        Arg::new("database")
+                            .long("database")
+                            .help("Database connection URI for assisting chunk dict generation, e.g. sqlite:///path/to/database.db")
+                            .default_value("sqlite://:memory:")
+                            .required(false),
+                    )
+                    .arg(
+                        Arg::new("blob-dir")
+                            .long("blob-dir")
+                            .short('D')
+                            .conflicts_with("config")
+                            .help(
+                                "Directory for localfs storage backend, hosting data blobs and cache files",
+                            ),
+                    )
+                    .arg(arg_config.clone())
+                    .arg(
+                        Arg::new("verbose")
+                            .long("verbose")
+                            .short('v')
+                            .help("Output message in verbose mode")
+                            .action(ArgAction::SetTrue)
+                            .required(false),
+                    )
+                    .arg(arg_output_json.clone())
+            )
+    );
 
     let app = app.subcommand(
         App::new("merge")
@@ -699,6 +744,14 @@ fn main() -> Result<()> {
 
     if let Some(matches) = cmd.subcommand_matches("create") {
         Command::create(matches, &build_info)
+    } else if let Some(matches) = cmd.subcommand_matches("chunkdict") {
+        match matches.subcommand_name() {
+            Some("save") => Command::chunkdict_save(matches.subcommand_matches("save").unwrap()),
+            _ => {
+                println!("{}", usage);
+                Ok(())
+            }
+        }
     } else if let Some(matches) = cmd.subcommand_matches("merge") {
         Command::merge(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("check") {
@@ -1075,6 +1128,50 @@ impl Command {
         event_tracer!("egid", "{}", getegid());
         info!("successfully built RAFS filesystem: \n{}", build_output);
         OutputSerializer::dump(matches, build_output, build_info)
+    }
+
+    fn chunkdict_save(matches: &ArgMatches) -> Result<()> {
+        let bootstrap_path = Self::get_bootstrap(matches)?;
+        let config = Self::get_configuration(matches)?;
+        let db_url: &String = matches.get_one::<String>("database").unwrap();
+        debug!("db_url: {}", db_url);
+        // For backward compatibility with v2.1.
+        config
+            .internal
+            .set_blob_accessible(matches.get_one::<String>("bootstrap").is_none());
+
+        let db_strs: Vec<&str> = db_url.split("://").collect();
+        if db_strs.len() != 2 || (!db_strs[1].starts_with('/') && !db_strs[1].starts_with(':')) {
+            bail!("Invalid database URL: {}", db_url);
+        }
+
+        let blobs: Vec<Arc<BlobInfo>> = match db_strs[0] {
+            "sqlite" => {
+                let mut deduplicate: Deduplicate<SqliteDatabase> =
+                    Deduplicate::<SqliteDatabase>::new(bootstrap_path, config, db_strs[1])?;
+                deduplicate.save_metadata()?
+            }
+            _ => {
+                bail!("Unsupported database type: {}, please use a valid database URI, such as 'sqlite:///path/to/database.db'.", db_strs[0])
+            }
+        };
+        info!("RAFS filesystem metadata is saved:");
+
+        let mut blob_ids = Vec::new();
+        for (idx, blob) in blobs.iter().enumerate() {
+            info!(
+                "\t {}: {}, compressed data size 0x{:x}, compressed file size 0x{:x}, uncompressed file size 0x{:x}, chunks: 0x{:x}, features: {}.",
+                idx,
+                blob.blob_id(),
+                blob.compressed_data_size(),
+                blob.compressed_size(),
+                blob.uncompressed_size(),
+                blob.chunk_count(),
+                format_blob_features(blob.features()),
+            );
+            blob_ids.push(blob.blob_id().to_string());
+        }
+        Ok(())
     }
 
     fn merge(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
