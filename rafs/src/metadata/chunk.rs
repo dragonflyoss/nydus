@@ -445,6 +445,11 @@ fn to_rafs_v5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
     }
 }
 
+pub fn convert_ref_to_rafs_v5_chunk_info(cki: &dyn BlobChunkInfo) -> RafsV5ChunkInfo {
+    let chunk = to_rafs_v5_chunk_info(as_blob_v5_chunk_info(cki.deref()));
+    chunk
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,16 +663,6 @@ mod tests {
         let wrapper_v5 = ChunkWrapper::Ref(Arc::new(CachedChunkInfoV5::default()));
         test_copy_from(wrapper_v5, wrapper_ref);
     }
-}
-
-pub fn convert_ref_to_rafs_v5_chunk_info(cki: &dyn BlobChunkInfo) -> RafsV5ChunkInfo {
-    let chunk = to_rafs_v5_chunk_info(as_blob_v5_chunk_info(cki.deref()));
-    chunk
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
 
     #[test]
     fn test_set_deduped_for_chunk_v5() {

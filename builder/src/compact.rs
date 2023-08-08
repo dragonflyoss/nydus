@@ -720,6 +720,10 @@ mod tests {
             false
         }
 
+        fn is_deduped(&self) -> bool {
+            false
+        }
+
         fn as_any(&self) -> &dyn Any {
             self
         }

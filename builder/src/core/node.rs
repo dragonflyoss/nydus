@@ -1300,4 +1300,3 @@ mod tests {
         assert!(!node.inode.has_xattr());
     }
 }
-

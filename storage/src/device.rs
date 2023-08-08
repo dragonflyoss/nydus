@@ -1181,8 +1181,8 @@ impl BlobDevice {
     /// Create new blob device instance.
     pub fn new(config: &Arc<ConfigV2>, blob_infos: &[Arc<BlobInfo>]) -> io::Result<BlobDevice> {
         let mut blobs = Vec::with_capacity(blob_infos.len());
-        let dedup_config = config.get_dedup_config().ok();
-        let cas_mgr = dedup_config
+        let deduplication_config = config.get_deduplication_config().ok();
+        let cas_mgr = deduplication_config
             .as_ref()
             .filter(|config| config.get_enable() && config.get_work_dir().is_ok())
             .and_then(|config| CasMgr::new(config.get_work_dir().unwrap()).ok());
@@ -1790,7 +1790,7 @@ mod tests {
             0x100000,
             0x100000,
             512,
-            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
+            BlobFeatures::ENCRYPTED,
         );
 
         let algos = vec![
@@ -1835,13 +1835,30 @@ mod tests {
 
             let content = serde_json::to_string(&blob_info).unwrap();
             let blob_info_from_deserialize: BlobInfo = serde_json::from_str(&content).unwrap();
-            println!("{}", algo);
-            println!("origin blob_info: {:?}", blob_info);
 
-            println!(
-                "after deserialize, blob_info: {:?}",
-                blob_info_from_deserialize
+            assert_eq!(algo, blob_info_from_deserialize.cipher());
+            assert_eq!(blob_info_from_deserialize.blob_id(), blob_info.blob_id());
+            assert_eq!(
+                blob_info_from_deserialize.blob_index(),
+                blob_info.blob_index()
             );
+            assert_eq!(
+                blob_info_from_deserialize.uncompressed_size(),
+                blob_info.uncompressed_size()
+            );
+            assert_eq!(
+                blob_info_from_deserialize.compressed_data_size(),
+                blob_info.compressed_data_size()
+            );
+            assert_eq!(
+                blob_info_from_deserialize.chunk_size(),
+                blob_info.chunk_size()
+            );
+            assert_eq!(
+                blob_info_from_deserialize.chunk_count(),
+                blob_info.chunk_count()
+            );
+            assert_eq!(blob_info_from_deserialize.features(), blob_info.features());
         }
     }
 

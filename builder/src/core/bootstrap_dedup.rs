@@ -19,14 +19,14 @@ use nydus_utils::digest::{self, RafsDigest};
 use nydus_utils::{root_tracer, timing_tracer};
 
 use crate::core::bootstrap::Bootstrap;
-use crate::core::context::{
-    ArtifactFileWriter, ArtifactWriter, BlobManager, BuildContext, ConversionType,
-};
+use crate::core::context::{ArtifactWriter, BlobManager, BuildContext, ConversionType};
 
 use crate::core::feature::Features;
 use crate::core::overlay::WhiteoutSpec;
 use crate::core::tree::Tree;
 use crate::ArtifactStorage;
+
+use super::context::ArtifactFileWriter;
 
 pub struct BootstrapDedup {
     cas_mgr: CasMgr,
@@ -51,7 +51,7 @@ impl BootstrapDedup {
                 .open(&bootstrap_path)?,
         ) as RafsIoReader;
 
-        let dedup_config = cfg.get_dedup_config()?;
+        let dedup_config = cfg.get_deduplication_config()?;
         let db_dir = dedup_config.get_work_dir()?;
         let cas_mgr = CasMgr::new(db_dir)?;
 
@@ -112,6 +112,12 @@ impl BootstrapDedup {
             RafsVersion::V5 => false,
             RafsVersion::V6 => true,
         };
+
+        // Now deduplication feature can't work for nydus v5.
+        if !is_v6 {
+            panic!("Deduplication not support nydus v5, please use nydus v6.");
+        }
+
         let tree = Tree::from_bootstrap(&self.rs, &mut ())?;
 
         let mut chunk_cache = BTreeMap::new();

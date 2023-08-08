@@ -30,7 +30,7 @@ pub struct ConfigV2 {
     /// Configuration information for RAFS filesystem.
     pub rafs: Option<RafsConfigV2>,
     /// Configuration information for image deduplication.
-    pub dedup: Option<DeduplicationConfigV2>,
+    pub deduplication: Option<DeduplicationConfigV2>,
     /// Internal runtime configuration.
     #[serde(skip)]
     pub internal: ConfigV2Internal,
@@ -44,7 +44,7 @@ impl Default for ConfigV2 {
             backend: None,
             cache: None,
             rafs: None,
-            dedup: None,
+            deduplication: None,
             internal: ConfigV2Internal::default(),
         }
     }
@@ -59,7 +59,7 @@ impl ConfigV2 {
             backend: None,
             cache: None,
             rafs: None,
-            dedup: None,
+            deduplication: None,
             internal: ConfigV2Internal::default(),
         }
     }
@@ -131,8 +131,8 @@ impl ConfigV2 {
     }
 
     /// Get configuration information for image deduplication.
-    pub fn get_dedup_config(&self) -> Result<&DeduplicationConfigV2> {
-        self.dedup.as_ref().ok_or_else(|| {
+    pub fn get_deduplication_config(&self) -> Result<&DeduplicationConfigV2> {
+        self.deduplication.as_ref().ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidInput,
                 "no configuration information for deduplication",
@@ -978,7 +978,7 @@ pub struct BlobCacheEntryConfigV2 {
     pub cache: CacheConfigV2,
     /// Configuration information for chunk deduplication.
     #[serde(default)]
-    pub dedup: Option<DeduplicationConfigV2>,
+    pub deduplication: Option<DeduplicationConfigV2>,
     /// Optional file path for metadata blob.
     #[serde(default)]
     pub metadata_path: Option<String>,
@@ -1041,7 +1041,7 @@ impl From<&BlobCacheEntryConfigV2> for ConfigV2 {
             backend: Some(c.backend.clone()),
             cache: Some(c.cache.clone()),
             rafs: None,
-            dedup: c.dedup.clone(),
+            deduplication: c.deduplication.clone(),
             internal: ConfigV2Internal::default(),
         }
     }
@@ -1425,7 +1425,7 @@ struct FactoryConfig {
     pub cache: CacheConfig,
     /// Configuration information for image deduplication.
     #[serde(default)]
-    pub dedup: Option<DeduplicationConfig>,
+    pub deduplication: Option<DeduplicationConfig>,
 }
 
 /// Rafs storage backend configuration information.
@@ -1465,7 +1465,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
     fn try_from(v: RafsConfig) -> std::result::Result<Self, Self::Error> {
         let backend: BackendConfigV2 = (&v.device.backend).try_into()?;
         let mut cache: CacheConfigV2 = (&v.device.cache).try_into()?;
-        let dedup: Option<DeduplicationConfigV2> = match &v.device.dedup {
+        let deduplication: Option<DeduplicationConfigV2> = match &v.device.deduplication {
             Some(dedup) => {
                 let dedup_v2: DeduplicationConfigV2 = dedup.try_into()?;
                 Some(dedup_v2)
@@ -1493,7 +1493,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
             backend: Some(backend),
             cache: Some(cache),
             rafs: Some(rafs),
-            dedup,
+            deduplication,
             internal: ConfigV2Internal::default(),
         })
     }
@@ -1614,7 +1614,7 @@ impl TryFrom<&BlobCacheEntryConfig> for BlobCacheEntryConfigV2 {
             cache_validate: false,
             prefetch_config: v.prefetch_config.clone(),
         };
-        let dedup_config = match &v.dedup_config {
+        let deduplication_config = match &v.dedup_config {
             Some(cfg) => {
                 let cfg_v2: DeduplicationConfigV2 = cfg.try_into()?;
                 Some(cfg_v2)
@@ -1626,7 +1626,7 @@ impl TryFrom<&BlobCacheEntryConfig> for BlobCacheEntryConfigV2 {
             id: v.id.clone(),
             backend: (&backend_config).try_into()?,
             cache: (&cache_config).try_into()?,
-            dedup: dedup_config,
+            deduplication: deduplication_config,
             metadata_path: v.metadata_path.clone(),
         })
     }
@@ -2751,7 +2751,7 @@ mod tests {
                         "disable_indexed_map": false
                     }
                 },
-                "dedup": {
+                "deduplication": {
                     "work_dir": "/home/t4/containerd/io.containerd.snapshotter.v1.nydus"
                 }
             },
@@ -2769,9 +2769,9 @@ mod tests {
         "#;
         let config = ConfigV2::from_str(content).unwrap();
         assert_eq!(&config.id, "");
-        assert!(!config.dedup.as_ref().unwrap().enable);
+        assert!(!config.deduplication.as_ref().unwrap().enable);
         assert_eq!(
-            &config.dedup.unwrap().work_dir,
+            &config.deduplication.unwrap().work_dir,
             "/home/t4/containerd/io.containerd.snapshotter.v1.nydus"
         );
     }

@@ -18,12 +18,14 @@ use std::any::Any;
 use std::cmp;
 use std::ffi::{CStr, OsStr, OsString};
 use std::io::Result;
+use std::mem::size_of;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use bitvec::prelude::*;
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::abi::fuse_abi::{stat64, statvfs64};
 use fuse_backend_rs::api::filesystem::*;
@@ -37,7 +39,9 @@ use nydus_utils::{
     div_round_up,
     metrics::{self, FopRecorder, StatsFop::*},
 };
+use storage::device::BlobInfo;
 
+use crate::metadata::layout::v5::RafsV5ChunkInfo;
 use crate::metadata::{
     Inode, RafsInode, RafsInodeWalkAction, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
 };
@@ -81,12 +85,14 @@ impl Rafs {
     pub fn new(cfg: &Arc<ConfigV2>, id: &str, path: &Path) -> RafsResult<(Self, RafsIoReader)> {
         // Assume all meta/data blobs are accessible, otherwise it will always cause IO errors.
         cfg.internal.set_blob_accessible(true);
-
         let cache_cfg = cfg.get_cache_config().map_err(RafsError::LoadConfig)?;
         let rafs_cfg = cfg.get_rafs_config().map_err(RafsError::LoadConfig)?;
         let (sb, reader) = RafsSuper::load_from_file(path, cfg.clone(), false)
             .map_err(RafsError::FillSuperBlock)?;
-        let blob_infos = sb.superblock.get_blob_infos();
+        let mut blob_infos = sb.superblock.get_blob_infos();
+
+        // if enable chunk dedup, modify blob's dedup_bitmap.
+        blob_infos = Self::generate_dedup_bitmap_by_chunk_info(cfg, &blob_infos, &sb)?;
         let device = BlobDevice::new(cfg, &blob_infos).map_err(RafsError::CreateDevice)?;
 
         if cfg.is_chunk_validation_enabled() && sb.meta.has_inlined_chunk_digest() {
@@ -323,6 +329,42 @@ impl Rafs {
         }
 
         entry
+    }
+
+    fn generate_dedup_bitmap_by_chunk_info(
+        cfg: &Arc<ConfigV2>,
+        blob_infos: &Vec<Arc<BlobInfo>>,
+        sb: &RafsSuper,
+    ) -> RafsResult<Vec<Arc<BlobInfo>>> {
+        if let Some(deduplication_config) = &cfg.deduplication {
+            if deduplication_config.enable {
+                let mut dedup_blobs = vec![];
+                for blob in blob_infos.iter() {
+                    let mut blob = blob.deref().clone();
+                    let chunk_count = blob.chunk_count() as usize;
+                    let mut dedup_bitmap = bitvec!(0; chunk_count);
+                    let size = sb.meta.chunk_table_size as usize;
+                    let unit_size = size_of::<RafsV5ChunkInfo>();
+                    if size % unit_size != 0 {
+                        return Err(RafsError::InvalidImageData);
+                    }
+
+                    for idx in 0..(size / unit_size) {
+                        let chunk = sb.superblock.get_chunk_info(idx as usize).unwrap();
+                        let chunk_idx = chunk.id() as usize;
+                        if chunk_idx < chunk_count {
+                            dedup_bitmap.set(chunk_idx, chunk.is_deduped());
+                        }
+                    }
+                    blob.set_dedup_bitmap(Some(dedup_bitmap));
+                    dedup_blobs.push(Arc::new(blob));
+                }
+
+                return Ok(dedup_blobs);
+            }
+        }
+
+        Ok(blob_infos.to_owned())
     }
 }
 

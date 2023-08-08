@@ -194,7 +194,7 @@ impl Write for ArtifactMemoryWriter {
     }
 }
 
-struct ArtifactFileWriter(pub ArtifactWriter);
+pub struct ArtifactFileWriter(pub ArtifactWriter);
 
 impl ArtifactFileWriter {
     pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
@@ -1522,6 +1522,7 @@ mod tests {
             }),
             id: "id".to_owned(),
             cache: None,
+            deduplication: None,
             rafs: None,
             internal: ConfigV2Internal {
                 blob_accessible: Arc::new(AtomicBool::new(true)),
