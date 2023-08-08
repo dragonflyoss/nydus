@@ -1181,6 +1181,7 @@ dependencies = [
  "nydus-utils",
  "openssl",
  "rlimit",
+ "rusqlite",
  "serde",
  "serde_json",
  "tar",
@@ -1546,6 +1547,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8a29d87a652dc4d43c586328706bb5cdff211f3f39a530f240b53f7221dab8e"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "rusqlite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "549b9d036d571d42e6e85d1c1425e2ac83491075078ca9a15be021c56b1641f2"
+dependencies = [
+ "bitflags 2.3.3",
+ "fallible-iterator",
+ "fallible-streaming-iterator",
+ "hashlink",
+ "libsqlite3-sys",
+ "smallvec",
 ]
 
 [[package]]
