@@ -48,10 +48,10 @@ rlimit = "0.9.0"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.51"
 sha2 = "0.10.2"
-tar = "0.4.38"
+tar = "0.4.40"
 tokio = { version = "1.24", features = ["macros"] }
 vmm-sys-util = "0.11.0"
-xattr = "0.2.3"
+xattr = "1.0.1"
 
 # Build static linked openssl library
 openssl = { version = "0.10.55", features = ["vendored"] }
@@ -98,7 +98,3 @@ backend-s3 = ["nydus-storage/backend-s3"]
 
 [workspace]
 members = ["api", "app", "blobfs", "clib", "error", "rafs", "storage", "service", "utils"]
-
-[patch.crates-io]
-# Due to the slow processing of PR by the upstream, temporarily fork tar-rs for this project
-tar = { git = "https://github.com/nydusaccelerator/tar-rs.git" }
