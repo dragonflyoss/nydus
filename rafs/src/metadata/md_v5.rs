@@ -245,6 +245,10 @@ impl BlobChunkInfo for V5IoChunk {
         false
     }
 
+    fn is_deduped(&self) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

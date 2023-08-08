@@ -12,6 +12,7 @@ use nydus_storage::device::v5::BlobV5ChunkInfo;
 use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo};
 use nydus_storage::meta::BlobMetaChunk;
 use nydus_utils::digest::RafsDigest;
+use serde::{Deserialize, Serialize};
 
 use crate::metadata::cached_v5::CachedChunkInfoV5;
 use crate::metadata::direct_v5::DirectChunkInfoV5;
@@ -21,13 +22,14 @@ use crate::metadata::{RafsStore, RafsVersion};
 use crate::RafsIoWrite;
 
 /// A wrapper to encapsulate different versions of chunk information objects.
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 pub enum ChunkWrapper {
     /// Chunk info for RAFS v5.
     V5(RafsV5ChunkInfo),
     /// Chunk info RAFS v6, reuse `RafsV5ChunkInfo` as IR for v6.
     V6(RafsV5ChunkInfo),
     /// Reference to a `BlobChunkInfo` object.
+    #[serde(skip_deserializing, skip_serializing)]
     Ref(Arc<dyn BlobChunkInfo>),
 }
 
@@ -256,6 +258,27 @@ impl ChunkWrapper {
             ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref())
                 .flags()
                 .contains(BlobChunkFlags::ENCYPTED),
+        }
+    }
+
+    /// Check whether the chunk is deduped or not.
+    pub fn is_deduped(&self) -> bool {
+        match self {
+            ChunkWrapper::V5(c) => c.flags.contains(BlobChunkFlags::DEDUPED),
+            ChunkWrapper::V6(c) => c.flags.contains(BlobChunkFlags::DEDUPED),
+            ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref())
+                .flags()
+                .contains(BlobChunkFlags::DEDUPED),
+        }
+    }
+
+    /// Set flag for whether chunk is deduped.
+    pub fn set_deduped(&mut self, deduped: bool) {
+        self.ensure_owned();
+        match self {
+            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::DEDUPED, deduped),
+            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::DEDUPED, deduped),
+            ChunkWrapper::Ref(_c) => panic!("unexpected"),
         }
     }
 
@@ -635,4 +658,9 @@ mod tests {
         let wrapper_v5 = ChunkWrapper::Ref(Arc::new(CachedChunkInfoV5::default()));
         test_copy_from(wrapper_v5, wrapper_ref);
     }
+}
+
+pub fn convert_ref_to_rafs_v5_chunk_info(cki: &dyn BlobChunkInfo) -> RafsV5ChunkInfo {
+    let chunk = to_rafs_v5_chunk_info(as_blob_v5_chunk_info(cki.deref()));
+    chunk
 }

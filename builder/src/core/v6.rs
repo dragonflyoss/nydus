@@ -199,7 +199,7 @@ impl Node {
         Ok(d_size)
     }
 
-    fn v6_size_with_xattr(&self) -> u64 {
+    pub fn v6_size_with_xattr(&self) -> u64 {
         self.inode
             .get_inode_size_with_xattr(&self.info.xattrs, self.v6_compact_inode) as u64
     }
@@ -882,7 +882,7 @@ impl Bootstrap {
         Ok(())
     }
 
-    fn v6_align_mapped_blkaddr(block_size: u64, addr: u64) -> Result<u32> {
+    pub fn v6_align_mapped_blkaddr(block_size: u64, addr: u64) -> Result<u32> {
         match addr.checked_add(V6_BLOCK_SEG_ALIGNMENT - 1) {
             None => bail!("address 0x{:x} is too big", addr),
             Some(v) => {

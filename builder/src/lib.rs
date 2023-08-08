@@ -41,7 +41,7 @@ pub use self::stargz::StargzBuilder;
 pub use self::tarball::TarballBuilder;
 
 mod compact;
-mod core;
+pub mod core;
 mod directory;
 mod merge;
 mod stargz;

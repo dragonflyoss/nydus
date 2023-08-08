@@ -1022,6 +1022,13 @@ impl BlobManager {
         self.blobs.iter().map(|b| b.blob_id.to_owned()).collect()
     }
 
+    pub fn get_blob_id_by_idx(&mut self, idx: usize) -> Option<String> {
+        if idx >= self.len() {
+            return None;
+        }
+        self.blobs[idx].blob_id()
+    }
+
     /// Prepend all blobs from `blob_table` to the blob manager.
     pub fn extend_from_blob_table(
         &mut self,

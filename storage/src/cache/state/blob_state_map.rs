@@ -104,7 +104,6 @@ where
 
     fn check_ready_and_mark_pending(&self, chunk: &dyn BlobChunkInfo) -> StorageResult<bool> {
         let mut ready = self.c.is_ready(chunk).map_err(StorageError::CacheIndex)?;
-
         if ready {
             return Ok(true);
         }
@@ -433,6 +432,10 @@ pub(crate) mod tests {
         }
 
         fn is_encrypted(&self) -> bool {
+            false
+        }
+
+        fn is_deduped(&self) -> bool {
             false
         }
 

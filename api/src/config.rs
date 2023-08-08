@@ -29,6 +29,8 @@ pub struct ConfigV2 {
     pub cache: Option<CacheConfigV2>,
     /// Configuration information for RAFS filesystem.
     pub rafs: Option<RafsConfigV2>,
+    /// Configuration information for image deduplication.
+    pub dedup: Option<DeduplicationConfigV2>,
     /// Internal runtime configuration.
     #[serde(skip)]
     pub internal: ConfigV2Internal,
@@ -42,6 +44,7 @@ impl Default for ConfigV2 {
             backend: None,
             cache: None,
             rafs: None,
+            dedup: None,
             internal: ConfigV2Internal::default(),
         }
     }
@@ -56,6 +59,7 @@ impl ConfigV2 {
             backend: None,
             cache: None,
             rafs: None,
+            dedup: None,
             internal: ConfigV2Internal::default(),
         }
     }
@@ -122,6 +126,16 @@ impl ConfigV2 {
             Error::new(
                 ErrorKind::InvalidInput,
                 "no configuration information for backend",
+            )
+        })
+    }
+
+    /// Get configuration information for image deduplication.
+    pub fn get_dedup_config(&self) -> Result<&DeduplicationConfigV2> {
+        self.dedup.as_ref().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "no configuration information for deduplication",
             )
         })
     }
@@ -962,6 +976,9 @@ pub struct BlobCacheEntryConfigV2 {
     /// Configuration information for local cache system.
     #[serde(default)]
     pub cache: CacheConfigV2,
+    /// Configuration information for chunk deduplication.
+    #[serde(default)]
+    pub dedup: Option<DeduplicationConfigV2>,
     /// Optional file path for metadata blob.
     #[serde(default)]
     pub metadata_path: Option<String>,
@@ -1024,7 +1041,55 @@ impl From<&BlobCacheEntryConfigV2> for ConfigV2 {
             backend: Some(c.backend.clone()),
             cache: Some(c.cache.clone()),
             rafs: None,
+            dedup: c.dedup.clone(),
             internal: ConfigV2Internal::default(),
+        }
+    }
+}
+
+/// Configuration information for image deduplication.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeduplicationConfigV2 {
+    #[serde(default)]
+    pub enable: bool,
+    #[serde(default)]
+    pub work_dir: String,
+}
+
+impl DeduplicationConfigV2 {
+    /// Validate image deduplication configuration.
+    pub fn validate(&self) -> bool {
+        true
+    }
+
+    pub fn get_enable(&self) -> bool {
+        self.enable
+    }
+    pub fn get_work_dir(&self) -> Result<&str> {
+        let path = fs::metadata(&self.work_dir)
+            .or_else(|_| {
+                fs::create_dir_all(&self.work_dir)?;
+                fs::metadata(&self.work_dir)
+            })
+            .map_err(|e| {
+                log::error!(
+                    "fail to stat deduplication work_dir {}: {}",
+                    self.work_dir,
+                    e
+                );
+                e
+            })?;
+
+        if path.is_dir() {
+            Ok(&self.work_dir)
+        } else {
+            Err(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "deduplication work_dir {} is not a directory",
+                    self.work_dir
+                ),
+            ))
         }
     }
 }
@@ -1070,7 +1135,7 @@ pub const BLOB_CACHE_TYPE_META_BLOB: &str = "bootstrap";
 pub const BLOB_CACHE_TYPE_DATA_BLOB: &str = "datablob";
 
 /// Configuration information for a cached blob.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BlobCacheEntry {
     /// Type of blob object, bootstrap or data blob.
     #[serde(rename = "type")]
@@ -1325,6 +1390,28 @@ impl TryFrom<&CacheConfig> for CacheConfigV2 {
     }
 }
 
+/// Configuration information for image deduplication.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct DeduplicationConfig {
+    /// Whether to enable image dedup
+    #[serde(default)]
+    pub enable: bool,
+    /// Work fir for image dedup
+    #[serde(default)]
+    pub work_dir: String,
+}
+
+impl TryFrom<&DeduplicationConfig> for DeduplicationConfigV2 {
+    type Error = std::io::Error;
+
+    fn try_from(v: &DeduplicationConfig) -> std::result::Result<Self, Self::Error> {
+        Ok(DeduplicationConfigV2 {
+            enable: v.enable,
+            work_dir: v.work_dir.clone(),
+        })
+    }
+}
+
 /// Configuration information to create blob cache manager.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct FactoryConfig {
@@ -1336,6 +1423,9 @@ struct FactoryConfig {
     /// Configuration for blob cache manager.
     #[serde(default)]
     pub cache: CacheConfig,
+    /// Configuration information for image deduplication.
+    #[serde(default)]
+    pub dedup: Option<DeduplicationConfig>,
 }
 
 /// Rafs storage backend configuration information.
@@ -1375,6 +1465,14 @@ impl TryFrom<RafsConfig> for ConfigV2 {
     fn try_from(v: RafsConfig) -> std::result::Result<Self, Self::Error> {
         let backend: BackendConfigV2 = (&v.device.backend).try_into()?;
         let mut cache: CacheConfigV2 = (&v.device.cache).try_into()?;
+        let dedup: Option<DeduplicationConfigV2> = match &v.device.dedup {
+            Some(dedup) => {
+                let dedup_v2: DeduplicationConfigV2 = dedup.try_into()?;
+                Some(dedup_v2)
+            }
+            None => None,
+        };
+        // (&v.device.dedup).try_into()?;
         let rafs = RafsConfigV2 {
             mode: v.mode,
             user_io_batch_size: v.user_io_batch_size,
@@ -1395,6 +1493,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
             backend: Some(backend),
             cache: Some(cache),
             rafs: Some(rafs),
+            dedup,
             internal: ConfigV2Internal::default(),
         })
     }
@@ -1490,6 +1589,8 @@ pub(crate) struct BlobCacheEntryConfig {
     ///
     /// Possible value: `FileCacheConfig`, `FsCacheConfig`.
     cache_config: Value,
+    /// Configuration for chunk deduplication
+    dedup_config: Option<DeduplicationConfig>,
     /// Configuration for data prefetch.
     #[serde(default)]
     prefetch_config: BlobPrefetchConfig,
@@ -1513,11 +1614,19 @@ impl TryFrom<&BlobCacheEntryConfig> for BlobCacheEntryConfigV2 {
             cache_validate: false,
             prefetch_config: v.prefetch_config.clone(),
         };
+        let dedup_config = match &v.dedup_config {
+            Some(cfg) => {
+                let cfg_v2: DeduplicationConfigV2 = cfg.try_into()?;
+                Some(cfg_v2)
+            }
+            None => None,
+        };
         Ok(BlobCacheEntryConfigV2 {
             version: 2,
             id: v.id.clone(),
             backend: (&backend_config).try_into()?,
             cache: (&cache_config).try_into()?,
+            dedup: dedup_config,
             metadata_path: v.metadata_path.clone(),
         })
     }

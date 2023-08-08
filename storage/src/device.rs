@@ -40,6 +40,7 @@ use nydus_api::ConfigV2;
 use nydus_utils::compress;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::digest::{self, RafsDigest};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
@@ -48,6 +49,7 @@ pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
 pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_0fff;
 
 bitflags! {
+    #[derive(Deserialize, Serialize)]
     /// Features bits for blob management.
     pub struct BlobFeatures: u32 {
         /// Uncompressed chunk data is aligned.
@@ -112,7 +114,7 @@ impl TryFrom<u32> for BlobFeatures {
 ///
 /// The `BlobInfo` structure provides information for the storage subsystem to manage a blob file
 /// and serve blob IO requests for clients.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct BlobInfo {
     /// The index of blob in RAFS blob table.
     blob_index: u32,
@@ -164,14 +166,66 @@ pub struct BlobInfo {
     // Size of blob ToC content, it's zero for blobs with inlined-meta.
     blob_toc_size: u32,
 
+    #[serde(skip_deserializing, skip_serializing)]
     /// V6: support fs-cache mode
     fs_cache_file: Option<Arc<File>>,
     /// V6: support inlined-meta
     meta_path: Arc<Mutex<String>>,
+    #[serde(
+        serialize_with = "serialize_cipher_object",
+        deserialize_with = "deserialize_cipher_object"
+    )]
     /// V6: support data encryption.
     cipher_object: Arc<Cipher>,
     /// Cipher context for encryption.
     cipher_ctx: Option<CipherContext>,
+}
+
+fn serialize_cipher_object<S>(cipher_object: &Arc<Cipher>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let cipher_object_str = match cipher_object.deref() {
+        Cipher::None => "none",
+        Cipher::Aes128Xts(_) => "aes128_xts",
+        Cipher::Aes256Xts(_) => "aes256_xts",
+        Cipher::Aes256Gcm(_) => "aes256_gcm",
+    };
+    serializer.serialize_str(cipher_object_str)
+}
+
+fn deserialize_cipher_object<'de, D>(deserializer: D) -> Result<Arc<Cipher>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cipher_object_str = String::deserialize(deserializer)?;
+
+    let cipher_object = match cipher_object_str.as_str() {
+        "none" => Ok(Arc::new(Cipher::None)),
+        "aes128_xts" => {
+            let cipher: Result<Cipher, D::Error> = crypt::Algorithm::Aes128Xts
+                .new_cipher()
+                .map_err(de::Error::custom);
+            Ok(Arc::new(cipher.unwrap()))
+        }
+        "aes256_xts" => {
+            let cipher: Result<Cipher, D::Error> = crypt::Algorithm::Aes256Xts
+                .new_cipher()
+                .map_err(de::Error::custom);
+            Ok(Arc::new(cipher.unwrap()))
+        }
+        "aes256_gcm" => {
+            let cipher: Result<Cipher, D::Error> = crypt::Algorithm::Aes256Gcm
+                .new_cipher()
+                .map_err(de::Error::custom);
+            Ok(Arc::new(cipher.unwrap()))
+        }
+        _ => {
+            unimplemented!()
+        }
+    };
+
+    cipher_object
 }
 
 impl BlobInfo {
@@ -571,6 +625,7 @@ impl BlobInfo {
 
 bitflags! {
     /// Blob chunk flags.
+    #[derive(Deserialize, Serialize)]
     pub struct BlobChunkFlags: u32 {
         /// Chunk data is compressed.
         const COMPRESSED = 0x0000_0001;
@@ -580,6 +635,8 @@ bitflags! {
         const ENCYPTED = 0x0000_0004;
         /// Chunk data is merged into a batch chunk.
         const BATCH = 0x0000_0008;
+        /// Chunk data is deduped.
+        const DEDUPED = 0x0000_0010;
     }
 }
 
@@ -643,6 +700,8 @@ pub trait BlobChunkInfo: Any + Sync + Send {
 
     /// Check whether the chunk is encrypted or not.
     fn is_encrypted(&self) -> bool;
+    /// Check whether the chunk is deduped or not.
+    fn is_deduped(&self) -> bool;
 
     fn as_any(&self) -> &dyn Any;
 }
@@ -695,6 +754,10 @@ impl BlobChunkInfo for BlobIoChunk {
 
     fn is_encrypted(&self) -> bool {
         self.0.is_encrypted()
+    }
+
+    fn is_deduped(&self) -> bool {
+        self.0.is_deduped()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1640,5 +1703,69 @@ mod tests {
             id.unwrap(),
             "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef".to_owned()
         );
+    }
+
+    #[test]
+    fn test_serialize_cipher_object() {
+        let mut blob_info = BlobInfo::new(
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
+        );
+
+        let algos = vec![
+            crypt::Algorithm::None,
+            crypt::Algorithm::Aes128Xts,
+            crypt::Algorithm::Aes256Xts,
+            crypt::Algorithm::Aes256Gcm,
+        ];
+
+        for algo in algos {
+            let (cipher_object, cipher_ctx) = match algo {
+                crypt::Algorithm::None => (Default::default(), None),
+                crypt::Algorithm::Aes128Xts => {
+                    let key = crypt::Cipher::generate_random_key(algo).unwrap();
+                    let iv = crypt::Cipher::generate_random_iv().unwrap();
+                    let cipher_ctx = CipherContext::new(key, iv, false, algo).unwrap();
+                    (
+                        algo.new_cipher().ok().unwrap_or(Default::default()),
+                        Some(cipher_ctx),
+                    )
+                }
+                crypt::Algorithm::Aes256Xts => {
+                    let key = crypt::Cipher::generate_random_key(algo).unwrap();
+                    let iv = crypt::Cipher::generate_random_iv().unwrap();
+                    let cipher_ctx = CipherContext::new(key, iv, false, algo).unwrap();
+                    (
+                        algo.new_cipher().ok().unwrap_or(Default::default()),
+                        Some(cipher_ctx),
+                    )
+                }
+                crypt::Algorithm::Aes256Gcm => {
+                    let key = crypt::Cipher::generate_random_key(algo).unwrap();
+                    let iv = crypt::Cipher::generate_random_iv().unwrap();
+                    let cipher_ctx = CipherContext::new(key, iv, false, algo).unwrap();
+                    (
+                        algo.new_cipher().ok().unwrap_or(Default::default()),
+                        Some(cipher_ctx),
+                    )
+                }
+            };
+            blob_info.set_cipher_info(algo, Arc::new(cipher_object), cipher_ctx);
+
+            let content = serde_json::to_string(&blob_info).unwrap();
+            let blob_info_from_deserialize: BlobInfo = serde_json::from_str(&content).unwrap();
+            println!("{}", algo);
+            println!("origin blob_info: {:?}", blob_info);
+
+            println!(
+                "after deserialize, blob_info: {:?}",
+                blob_info_from_deserialize
+            );
+        }
     }
 }

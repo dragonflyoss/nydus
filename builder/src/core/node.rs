@@ -2,11 +2,13 @@
 // Copyright (C) 2021-2023 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
-
+#![allow(unused_variables, unused_imports)]
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, SeekFrom, Write};
+use std::mem::size_of;
 use std::ops::Deref;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
@@ -17,13 +19,19 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
-use nydus_rafs::metadata::chunk::ChunkWrapper;
-use nydus_rafs::metadata::inode::InodeWrapper;
-use nydus_rafs::metadata::layout::v6::EROFS_INODE_FLAT_PLAIN;
-use nydus_rafs::metadata::layout::RafsXAttrs;
-use nydus_rafs::metadata::{Inode, RafsVersion};
-use nydus_storage::device::BlobFeatures;
+use nydus_rafs::metadata::chunk::{convert_ref_to_rafs_v5_chunk_info, ChunkWrapper};
+use nydus_rafs::metadata::inode::{InodeWrapper, RafsV6Inode};
+use nydus_rafs::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeWrapper};
+use nydus_rafs::metadata::layout::v6::{
+    align_offset, RafsV6InodeChunkAddr, EROFS_BLOCK_SIZE_4096, EROFS_BLOCK_SIZE_512,
+    EROFS_INODE_FLAT_PLAIN, EROFS_INODE_SLOT_SIZE,
+};
+use nydus_rafs::metadata::layout::{RafsXAttrs, RAFS_SUPER_VERSION_V6};
+use nydus_rafs::metadata::{Inode, RafsStore, RafsSuperFlags, RafsSuperMeta, RafsVersion};
+use nydus_rafs::RafsIoWrite;
+use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
+use nydus_utils::cas::CasMgr;
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{compress, crypt};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
@@ -32,6 +40,8 @@ use sha2::digest::Digest;
 use crate::{BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay};
 
 use super::context::Artifact;
+
+use super::chunk_dict::DigestWithBlobIndex;
 
 /// Filesystem root path for Unix OSs.
 const ROOT_PATH_NAME: &[u8] = &[b'/'];
@@ -108,7 +118,7 @@ impl NodeChunk {
 }
 
 /// Struct to host sharable fields of [Node].
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default)]
 pub struct NodeInfo {
     /// Whether the explicit UID/GID feature is enabled or not.
     pub explicit_uidgid: bool,
@@ -727,6 +737,228 @@ impl Node {
         self.path()
             .symlink_metadata()
             .with_context(|| format!("failed to get metadata of {}", self.path().display()))
+    }
+
+    pub fn get_chunk_ofs(&mut self, meta: &RafsSuperMeta) -> Result<(u64, u64)> {
+        if meta.version == RAFS_SUPER_VERSION_V6 {
+            self.get_chunk_ofs_v6(meta)
+        } else {
+            self.get_chunk_ofs_v5(meta)
+        }
+    }
+
+    fn get_chunk_ofs_v5(&mut self, meta: &RafsSuperMeta) -> Result<(u64, u64)> {
+        unimplemented!()
+    }
+
+    fn get_chunk_ofs_v6(&mut self, meta: &RafsSuperMeta) -> Result<(u64, u64)> {
+        let unit = size_of::<RafsV6InodeChunkAddr>() as u64;
+        let block_size = if meta.flags.contains(RafsSuperFlags::TARTFS_MODE) {
+            EROFS_BLOCK_SIZE_512
+        } else {
+            EROFS_BLOCK_SIZE_4096
+        };
+        let meta_offset = meta.meta_blkaddr as usize * block_size as usize;
+        let nid = self.info.src_ino;
+        let inode_offset = meta_offset
+            .checked_add(nid as usize * EROFS_INODE_SLOT_SIZE)
+            .unwrap();
+        let inode = match self.inode.clone() {
+            InodeWrapper::V5(i) => InodeWrapper::V5(i),
+            InodeWrapper::V6(i) => InodeWrapper::V6(i),
+            InodeWrapper::Ref(i) => {
+                if meta.version == RAFS_SUPER_VERSION_V6 {
+                    InodeWrapper::V6(RafsV6Inode::from(i.deref()))
+                } else {
+                    InodeWrapper::V5(RafsV5Inode::from(i.deref()))
+                }
+            }
+        };
+        self.inode = inode;
+        let base = self.v6_size_with_xattr();
+        let chunk_ofs = align_offset(inode_offset as u64 + base, unit);
+
+        Ok((chunk_ofs, unit))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn dedup_chunk_for_node(
+        &mut self,
+        build_ctx: &BuildContext,
+        blob_mgr: &mut BlobManager,
+        meta: &RafsSuperMeta,
+        writer: &mut dyn RafsIoWrite,
+        cache_chunks: &mut HashMap<RafsDigest, ChunkWrapper>,
+        insert_chunks: &mut Vec<(String, String, String)>,
+        cas_mgr: &CasMgr,
+        chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
+    ) -> Result<()> {
+        let (mut chunk_ofs, chunk_size) = self.get_chunk_ofs(meta)?;
+
+        for chunk in &self.chunks {
+            let chunk_id = chunk.inner.id();
+            let origin_blob_index = chunk.inner.blob_index() as usize;
+            let blob_id = blob_mgr
+                .get_blob_id_by_idx(chunk.inner.blob_index() as usize)
+                .unwrap();
+
+            writer
+                .seek(SeekFrom::Start(chunk_ofs))
+                .context("failed seek for chunk_ofs")
+                .unwrap();
+
+            match cache_chunks.get(chunk_id) {
+                // dedup chunk between layers
+                Some(new_chunk) => {
+                    // if the chunk is belong to other image's blob
+                    let mut new_chunk = new_chunk.deref().clone();
+                    let blob_index = new_chunk.blob_index() as usize;
+                    if origin_blob_index != blob_index {
+                        new_chunk.set_deduped(true);
+                    }
+
+                    chunk_cache.insert(
+                        DigestWithBlobIndex(*new_chunk.id(), new_chunk.blob_index() + 1),
+                        Arc::new(new_chunk.clone()),
+                    );
+                    self.dedup_bootstrap(build_ctx, &new_chunk, writer)?
+                }
+                None => match cas_mgr.get_chunk(chunk_id, &blob_id, true)? {
+                    Some((new_blob_id, chunk_info)) => {
+                        let blob_idx = match blob_mgr.get_blob_idx_by_id(&new_blob_id) {
+                            Some(blob_idx) => blob_idx,
+                            None => {
+                                //Safe to use unwarp since we get blob_id from chunk table
+                                let blob_info = cas_mgr.get_blob(&new_blob_id, true)?.unwrap();
+                                let blob = serde_json::from_str::<BlobInfo>(&blob_info)?;
+                                let blob_idx = blob_mgr.alloc_index()?;
+                                blob_mgr.add_blob(BlobContext::from(
+                                    build_ctx,
+                                    &blob,
+                                    ChunkSource::Parent,
+                                )?);
+
+                                blob_idx
+                            }
+                        };
+
+                        let new_chunk = serde_json::from_str::<RafsV5ChunkInfo>(&chunk_info)?;
+                        let mut new_chunk = match &build_ctx.fs_version {
+                            RafsVersion::V5 => ChunkWrapper::V5(new_chunk),
+                            RafsVersion::V6 => ChunkWrapper::V6(new_chunk),
+                        };
+
+                        // if this chunk is from other blob, mark it as dedup
+                        if origin_blob_index != blob_idx as usize {
+                            new_chunk.set_deduped(true);
+                        }
+                        new_chunk.set_blob_index(blob_idx);
+                        chunk_cache.insert(
+                            DigestWithBlobIndex(*new_chunk.id(), new_chunk.blob_index() + 1),
+                            Arc::new(new_chunk.clone()),
+                        );
+
+                        self.dedup_bootstrap(build_ctx, &new_chunk, writer)?;
+                        cache_chunks.insert(*chunk_id, new_chunk);
+                    }
+                    None => {
+                        let new_chunk = chunk.inner.as_ref().clone();
+                        cache_chunks.insert(*chunk_id, new_chunk.clone());
+                        chunk_cache.insert(
+                            DigestWithBlobIndex(*new_chunk.id(), new_chunk.blob_index() + 1),
+                            Arc::new(new_chunk.clone()),
+                        );
+
+                        let chunk_info = match new_chunk.clone() {
+                            ChunkWrapper::V5(c) => serde_json::to_string(&c).unwrap(),
+                            ChunkWrapper::V6(c) => serde_json::to_string(&c).unwrap(),
+                            ChunkWrapper::Ref(c) => {
+                                let chunk = convert_ref_to_rafs_v5_chunk_info(c.deref());
+                                serde_json::to_string(&chunk).unwrap()
+                            }
+                        };
+                        insert_chunks.push((String::from(*chunk_id), chunk_info, blob_id));
+                    }
+                },
+            }
+
+            chunk_ofs += chunk_size;
+        }
+        Ok(())
+    }
+
+    pub fn dedup_bootstrap(
+        &self,
+        build_ctx: &BuildContext,
+        chunk: &ChunkWrapper,
+        writer: &mut dyn RafsIoWrite,
+    ) -> Result<()> {
+        match chunk {
+            ChunkWrapper::V5(_) => self.dedup_bootstrap_v5(build_ctx, chunk, writer),
+            ChunkWrapper::V6(_) => self.dedup_bootstrap_v6(build_ctx, chunk, writer),
+            ChunkWrapper::Ref(_) => match &build_ctx.fs_version {
+                RafsVersion::V5 => self.dedup_bootstrap_v5(build_ctx, chunk, writer),
+                RafsVersion::V6 => self.dedup_bootstrap_v6(build_ctx, chunk, writer),
+            },
+        }
+    }
+
+    pub fn update_inode_digest_for_bootstrap(&self, writer: &mut dyn RafsIoWrite) -> Result<()> {
+        // Dump inode info
+        if let InodeWrapper::V5(raw_inode) = &self.inode {
+            let name = self.name();
+            let inode = RafsV5InodeWrapper {
+                name,
+                symlink: self.info.symlink.as_deref(),
+                inode: raw_inode,
+            };
+            inode
+                .store(writer)
+                .context("failed to dump inode to bootstrap")?;
+        }
+
+        Ok(())
+    }
+
+    fn dedup_bootstrap_v5(
+        &self,
+        build_ctx: &BuildContext,
+        chunk: &ChunkWrapper,
+        writer: &mut dyn RafsIoWrite,
+    ) -> Result<()> {
+        chunk
+            .store(writer)
+            .context("failed to dump chunk info to bootstrap")
+            .unwrap();
+        anyhow::Ok(())
+    }
+
+    fn dedup_bootstrap_v6(
+        &self,
+        build_ctx: &BuildContext,
+        chunk: &ChunkWrapper,
+        writer: &mut dyn RafsIoWrite,
+    ) -> Result<()> {
+        let mut v6_chunk = RafsV6InodeChunkAddr::new();
+        // for erofs, bump id by 1 since device id 0 is bootstrap.
+        let offset = chunk.uncompressed_offset();
+        let blk_addr = build_ctx.v6_block_addr(offset).with_context(|| {
+            format!(
+                "failed to compute blk_addr for chunk with uncompressed offset 0x{:x}",
+                offset
+            )
+        })?;
+        v6_chunk.set_blob_index(chunk.blob_index());
+        v6_chunk.set_blob_ci_index(chunk.index());
+        v6_chunk.set_block_addr(blk_addr);
+
+        let mut chunks: Vec<u8> = Vec::new();
+        chunks.extend(v6_chunk.as_ref());
+        writer
+            .write(chunks.as_slice())
+            .context("failed to write chunkindexes")
+            .unwrap();
+        anyhow::Ok(())
     }
 }
 

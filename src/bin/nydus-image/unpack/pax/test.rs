@@ -107,6 +107,10 @@ impl BlobChunkInfo for MockChunkInfo {
         false
     }
 
+    fn is_deduped(&self) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         todo!();
     }
