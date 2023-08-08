@@ -34,7 +34,7 @@ serde_json = "1.0.51"
 sha2 = "0.10.2"
 time = { version = "0.3.14", features = ["serde-human-readable"] }
 lazy_static = "1.4.0"
-xattr = "0.2.2"
+xattr = "1.0.1"
 nix = "0.24.0"
 anyhow = "1.0.35"
 base64 = "0.13.0"
@@ -48,7 +48,7 @@ tokio = { version = "1.18.2", features = ["macros"] }
 hyper = "0.14.11"
 # pin rand_core to bring in fix for https://rustsec.org/advisories/RUSTSEC-2021-0023
 rand_core = "0.6.2"
-tar = "0.4.38"
+tar = "0.4.40"
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
 
 fuse-backend-rs = { version = "0.9" }
