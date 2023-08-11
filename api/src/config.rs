@@ -2710,4 +2710,69 @@ mod tests {
         };
         assert!(BackendConfigV2::try_from(&config).is_err());
     }
+
+    #[test]
+    fn test_dedup_config() {
+        let content = r#"{
+            "enable": true,
+            "work_dir": "/tmp/nydus-cas"
+        }"#;
+        let config: DeduplicationConfig = serde_json::from_str(content).unwrap();
+        assert!(config.enable, "{}", true);
+        assert_eq!(config.work_dir, "/tmp/nydus-cas");
+    }
+
+    #[test]
+    fn test_snapshotter_config_with_dedup() {
+        let content = r#"
+        {
+            "device": {
+                "backend": {
+                    "type": "registry",
+                    "config": {
+                        "readahead": false,
+                        "host": "localhost",
+                        "repo": "vke/golang",
+                        "auth": "",
+                        "scheme": "https",
+                        "proxy": {
+                            "fallback": false
+                        },
+                        "timeout": 5,
+                        "connect_timeout": 5,
+                        "retry_limit": 2
+                    }
+                },
+                "cache": {
+                    "type": "blobcache",
+                    "compressed": true,
+                    "config": {
+                        "work_dir": "/var/lib/containerd-nydus/cache",
+                        "disable_indexed_map": false
+                    }
+                },
+                "dedup": {
+                    "work_dir": "/home/t4/containerd/io.containerd.snapshotter.v1.nydus"
+                }
+            },
+            "mode": "direct",
+            "digest_validate": false,
+            "enable_xattr": true,
+            "fs_prefetch": {
+                "enable": true,
+                "prefetch_all": true,
+                "threads_count": 8,
+                "merging_size": 1048576,
+                "bandwidth_rate": 0
+            }
+        }
+        "#;
+        let config = ConfigV2::from_str(content).unwrap();
+        assert_eq!(&config.id, "");
+        assert!(!config.dedup.as_ref().unwrap().enable);
+        assert_eq!(
+            &config.dedup.unwrap().work_dir,
+            "/home/t4/containerd/io.containerd.snapshotter.v1.nydus"
+        );
+    }
 }

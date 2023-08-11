@@ -664,3 +664,26 @@ pub fn convert_ref_to_rafs_v5_chunk_info(cki: &dyn BlobChunkInfo) -> RafsV5Chunk
     let chunk = to_rafs_v5_chunk_info(as_blob_v5_chunk_info(cki.deref()));
     chunk
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_deduped_for_chunk_v5() {
+        let mut chunk = ChunkWrapper::new(RafsVersion::V5);
+        assert!(!chunk.is_deduped());
+
+        chunk.set_deduped(true);
+        assert!(chunk.is_deduped());
+    }
+
+    #[test]
+    fn test_set_deduped_for_chunk_v6() {
+        let mut chunk = ChunkWrapper::new(RafsVersion::V6);
+        assert!(!chunk.is_deduped());
+
+        chunk.set_deduped(true);
+        assert!(chunk.is_deduped());
+    }
+}

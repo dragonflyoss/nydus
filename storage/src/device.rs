@@ -32,11 +32,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
+use bitvec::prelude::*;
 use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 
-use nydus_api::ConfigV2;
+use nydus_api::{BackendConfigV2, ConfigV2};
+use nydus_utils::cas::CasMgr;
 use nydus_utils::compress;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::digest::{self, RafsDigest};
@@ -179,6 +181,9 @@ pub struct BlobInfo {
     cipher_object: Arc<Cipher>,
     /// Cipher context for encryption.
     cipher_ctx: Option<CipherContext>,
+
+    /// Bitvector to indicate which chunks are deduplicated.
+    dedup_bitmap: Option<BitVec>,
 }
 
 fn serialize_cipher_object<S>(cipher_object: &Arc<Cipher>, serializer: S) -> Result<S::Ok, S::Error>
@@ -269,6 +274,7 @@ impl BlobInfo {
             meta_path: Arc::new(Mutex::new(String::new())),
             cipher_object: Default::default(),
             cipher_ctx: None,
+            dedup_bitmap: None,
         };
 
         blob_info.compute_features();
@@ -620,6 +626,38 @@ impl BlobInfo {
             self.cipher_object.clone(),
             self.cipher_ctx.clone(),
         )
+    }
+
+    pub fn set_dedup_bitmap(&mut self, dedup_bitmap: Option<BitVec>) {
+        self.dedup_bitmap = dedup_bitmap;
+    }
+
+    pub fn set_dedup_by_chunk_idx(&mut self, index: usize, value: bool) {
+        if index >= self.chunk_count as usize || self.dedup_bitmap.is_none() {
+            return;
+        }
+
+        if let Some(bitmap) = &mut self.dedup_bitmap {
+            bitmap.set(index, value);
+        }
+    }
+
+    pub fn get_dedup_by_chunk_idx(&self, index: usize) -> bool {
+        if self.dedup_bitmap.is_none() {
+            return false;
+        }
+        // if chunk index > blob.chunk_count, means this chunk is from other blob.
+        if index >= self.chunk_count as usize {
+            return true;
+        }
+        if let Some(bitmap) = &self.dedup_bitmap {
+            match bitmap.get(index).as_deref() {
+                Some(v) => *v,
+                None => false,
+            }
+        } else {
+            false
+        }
     }
 }
 
@@ -1143,15 +1181,53 @@ impl BlobDevice {
     /// Create new blob device instance.
     pub fn new(config: &Arc<ConfigV2>, blob_infos: &[Arc<BlobInfo>]) -> io::Result<BlobDevice> {
         let mut blobs = Vec::with_capacity(blob_infos.len());
+        let dedup_config = config.get_dedup_config().ok();
+        let cas_mgr = dedup_config
+            .as_ref()
+            .filter(|config| config.get_enable() && config.get_work_dir().is_ok())
+            .and_then(|config| CasMgr::new(config.get_work_dir().unwrap()).ok());
+
         for blob_info in blob_infos.iter() {
-            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
-            blobs.push(blob);
+            let blob = if let Some(cas_mgr) = &cas_mgr {
+                Self::get_new_blob_config(cas_mgr, blob_info, config).and_then(|new_blob_config| {
+                    BLOB_FACTORY.new_blob_cache(&new_blob_config, blob_info)
+                })
+            } else {
+                BLOB_FACTORY.new_blob_cache(config, blob_info)
+            };
+
+            blobs.push(blob.unwrap());
         }
 
         Ok(BlobDevice {
             blobs: Arc::new(ArcSwap::new(Arc::new(blobs))),
             blob_count: blob_infos.len(),
         })
+    }
+
+    fn get_new_blob_config(
+        cas_mgr: &CasMgr,
+        blob_info: &Arc<BlobInfo>,
+        config: &Arc<ConfigV2>,
+    ) -> io::Result<Arc<ConfigV2>> {
+        let blob_id = blob_info.blob_id();
+        let blob_backend = Self::get_blob_backend_config(cas_mgr, &blob_id)?;
+        let mut blob_config = config.deref().clone();
+        blob_config.backend = Some(blob_backend);
+        let blob_config = Arc::new(blob_config);
+
+        Ok(blob_config)
+    }
+
+    fn get_blob_backend_config(cas_mgr: &CasMgr, blob_id: &str) -> io::Result<BackendConfigV2> {
+        let backend_content = match cas_mgr.get_backend_by_blob_id(blob_id, true) {
+            Ok(backend_content) => Ok(backend_content),
+            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+        };
+
+        let backend_content = backend_content?.unwrap();
+        let backend = serde_json::from_str::<BackendConfigV2>(&backend_content)?;
+        Ok(backend)
     }
 
     /// Update configuration and storage backends of the blob device.
@@ -1766,6 +1842,27 @@ mod tests {
                 "after deserialize, blob_info: {:?}",
                 blob_info_from_deserialize
             );
+        }
+    }
+
+    #[test]
+    fn test_set_dedup_bitmap() {
+        let mut blob_info = BlobInfo::new(
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
+        );
+
+        blob_info.dedup_bitmap = Some(bitvec!(0 ; blob_info.chunk_count as usize));
+        for idx in 0..blob_info.chunk_count {
+            let idx = idx as usize;
+            assert!(!blob_info.get_dedup_by_chunk_idx(idx));
+            blob_info.set_dedup_by_chunk_idx(idx, true);
+            assert!(blob_info.get_dedup_by_chunk_idx(idx));
         }
     }
 }
