@@ -34,6 +34,7 @@ type Opt struct {
 	BackendType    string
 	BackendConfig  string
 	ExpectedArch   string
+	DecryptKeys    []string
 }
 
 // Checker validates Nydus image manifest, bootstrap and mounts filesystem
@@ -119,7 +120,7 @@ func (checker *Checker) check(ctx context.Context) error {
 		return errors.Wrap(err, "create work directory")
 	}
 
-	if err := checker.Output(ctx, sourceParsed, targetParsed, checker.WorkDir); err != nil {
+	if err := checker.Output(ctx, sourceParsed, targetParsed, checker.WorkDir, checker.Opt); err != nil {
 		return errors.Wrap(err, "output image information")
 	}
 

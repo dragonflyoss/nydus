@@ -29,6 +29,7 @@ type BuilderOption struct {
 	Compressor   string
 	ChunkSize    string
 	FsVersion    string
+	Encrypt      bool
 }
 
 type CompactOption struct {
@@ -141,6 +142,10 @@ func (builder *Builder) Run(option BuilderOption) error {
 
 	if option.ChunkSize != "" {
 		args = append(args, "--chunk-size", option.ChunkSize)
+	}
+
+	if option.Encrypt {
+		args = append(args, "--encrypt")
 	}
 
 	args = append(args, option.RootfsPath)

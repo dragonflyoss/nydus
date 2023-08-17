@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/archive/compression"
+	"github.com/containerd/containerd/images"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -223,4 +224,38 @@ func HashFile(path string) ([]byte, error) {
 	}
 
 	return hasher.Sum(nil), nil
+}
+
+// IsEncryptedNydusImage checks if the nydus image is encrypted.
+func IsEncryptedNydusImage(manifest *ocispec.Manifest) bool {
+	layers := manifest.Layers
+	if len(layers) != 0 {
+		desc := layers[len(layers)-1]
+		if IsEncryptedNydusBootstrap(desc) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsEncryptedNydusBlob returns true when the specified descriptor is nydus encrypted blob.
+func IsEncryptedNydusBlob(desc ocispec.Descriptor) bool {
+	if desc.Annotations == nil {
+		return false
+	}
+
+	_, hasAnno := desc.Annotations[LayerAnnotationNydusEncryptedBlob]
+	return hasAnno
+}
+
+// IsEncryptedNydusBootstrap returns true when the specified descriptor is nydus encrypted bootstrap.
+func IsEncryptedNydusBootstrap(desc ocispec.Descriptor) bool {
+	if desc.Annotations == nil {
+		return false
+	}
+
+	_, hasAnno := desc.Annotations[LayerAnnotationNydusBootstrap]
+	encrypted := desc.MediaType == images.MediaTypeImageLayerEncrypted ||
+		desc.MediaType == images.MediaTypeImageLayerGzipEncrypted
+	return encrypted && hasAnno
 }
