@@ -1,5 +1,6 @@
 **/target*
 **/*.rs.bk
+/contrib/**/.vscode
 /.vscode
 .idea
 .cargo
