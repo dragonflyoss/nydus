@@ -170,6 +170,16 @@ nydusify check \
   --backend-config-file /path/to/backend-config.json
 ```
 
+## Copy image between registry repositories
+
+``` shell
+nydusify copy \
+  --source myregistry/repo:tag-nydus \
+  --target myregistry/repo:tag-nydus-copy
+```
+
+It supports copying OCI v1 or Nydus images, use the options `--all-platforms` / `--platform` to copy the images of specific platforms.
+
 ## More Nydusify Options
 
 See `nydusify convert/check --help`
