@@ -1,7 +1,6 @@
 **/target*
 **/*.rs.bk
-/contrib/**/.vscode
-/.vscode
+**/.vscode
 .idea
 .cargo
 **/.pyc
