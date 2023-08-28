@@ -432,6 +432,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .help("RAFS blob digest list separated by comma"),
             )
             .arg(
+                Arg::new("original-blob-ids")
+                    .long("original-blob-ids")
+                    .required(false)
+                    .help("original blob id list separated by comma, it may usually be a sha256 hex string"),
+            )
+            .arg(
                 Arg::new("blob-sizes")
                     .long("blob-sizes")
                     .required(false)
@@ -1194,6 +1200,12 @@ impl Command {
                     .map(|item| item.trim().to_string())
                     .collect()
             });
+        let original_blob_ids: Option<Vec<String>> =
+            matches.get_one::<String>("original-blob-ids").map(|list| {
+                list.split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            });
         let blob_toc_sizes: Option<Vec<u64>> =
             matches.get_one::<String>("blob-toc-sizes").map(|list| {
                 list.split(',')
@@ -1234,6 +1246,7 @@ impl Command {
             parent_bootstrap_path,
             source_bootstrap_paths,
             blob_digests,
+            original_blob_ids,
             blob_sizes,
             blob_toc_digests,
             blob_toc_sizes,
