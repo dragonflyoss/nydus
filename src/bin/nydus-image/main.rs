@@ -1345,9 +1345,10 @@ impl Command {
         let file_type = metadata(path.as_ref())
             .context(format!("failed to access path {:?}", path.as_ref()))?
             .file_type();
+        // The SOURCE can be a regular file, FIFO file, or /dev/stdin char device, etc..
         ensure!(
-            file_type.is_file() || file_type.is_fifo(),
-            "specified path must be a regular/fifo file: {:?}",
+            file_type.is_file() || file_type.is_fifo() || file_type.is_char_device(),
+            "specified path must be a regular/fifo/char_device file: {:?}",
             path.as_ref()
         );
         Ok(())
@@ -1362,5 +1363,14 @@ impl Command {
             path.as_ref()
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Command;
+    #[test]
+    fn test_ensure_file() {
+        Command::ensure_file("/dev/stdin").unwrap();
     }
 }
