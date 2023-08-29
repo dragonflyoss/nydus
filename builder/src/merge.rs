@@ -29,6 +29,20 @@ use super::{
 pub struct Merger {}
 
 impl Merger {
+    fn get_string_from_list(
+        original_ids: &Option<Vec<String>>,
+        idx: usize,
+    ) -> Result<Option<String>> {
+        Ok(if let Some(id) = &original_ids {
+            let id_string = id
+                .get(idx)
+                .ok_or_else(|| anyhow!("unmatched digest index {}", idx))?;
+            Some(id_string.clone())
+        } else {
+            None
+        })
+    }
+
     fn get_digest_from_list(digests: &Option<Vec<String>>, idx: usize) -> Result<Option<[u8; 32]>> {
         Ok(if let Some(digests) = &digests {
             let digest = digests
@@ -62,6 +76,7 @@ impl Merger {
         parent_bootstrap_path: Option<String>,
         sources: Vec<PathBuf>,
         blob_digests: Option<Vec<String>>,
+        original_blob_ids: Option<Vec<String>>,
         blob_sizes: Option<Vec<u64>>,
         blob_toc_digests: Option<Vec<String>>,
         blob_toc_sizes: Option<Vec<u64>>,
@@ -77,6 +92,14 @@ impl Merger {
                 digests.len() == sources.len(),
                 "number of blob digest entries {} doesn't match number of sources {}",
                 digests.len(),
+                sources.len(),
+            );
+        }
+        if let Some(original_ids) = original_blob_ids.as_ref() {
+            ensure!(
+                original_ids.len() == sources.len(),
+                "number of original blob id entries {} doesn't match number of sources {}",
+                original_ids.len(),
                 sources.len(),
             );
         }
@@ -194,7 +217,14 @@ impl Merger {
                     } else {
                         // The blob id (blob sha256 hash) in parent bootstrap is invalid for nydusd
                         // runtime, should change it to the hash of whole tar blob.
-                        blob_ctx.blob_id = BlobInfo::get_blob_id_from_meta_path(bootstrap_path)?;
+                        if let Some(original_id) =
+                            Self::get_string_from_list(&original_blob_ids, layer_idx)?
+                        {
+                            blob_ctx.blob_id = original_id;
+                        } else {
+                            blob_ctx.blob_id =
+                                BlobInfo::get_blob_id_from_meta_path(bootstrap_path)?;
+                        }
                     }
                     if let Some(digest) = Self::get_digest_from_list(&blob_digests, layer_idx)? {
                         if blob.has_feature(BlobFeatures::SEPARATE) {

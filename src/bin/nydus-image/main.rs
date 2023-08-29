@@ -432,6 +432,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .help("RAFS blob digest list separated by comma"),
             )
             .arg(
+                Arg::new("original-blob-ids")
+                    .long("original-blob-ids")
+                    .required(false)
+                    .help("original blob id list separated by comma, it may usually be a sha256 hex string"),
+            )
+            .arg(
                 Arg::new("blob-sizes")
                     .long("blob-sizes")
                     .required(false)
@@ -1194,6 +1200,12 @@ impl Command {
                     .map(|item| item.trim().to_string())
                     .collect()
             });
+        let original_blob_ids: Option<Vec<String>> =
+            matches.get_one::<String>("original-blob-ids").map(|list| {
+                list.split(',')
+                    .map(|item| item.trim().to_string())
+                    .collect()
+            });
         let blob_toc_sizes: Option<Vec<u64>> =
             matches.get_one::<String>("blob-toc-sizes").map(|list| {
                 list.split(',')
@@ -1234,6 +1246,7 @@ impl Command {
             parent_bootstrap_path,
             source_bootstrap_paths,
             blob_digests,
+            original_blob_ids,
             blob_sizes,
             blob_toc_digests,
             blob_toc_sizes,
@@ -1695,9 +1708,10 @@ impl Command {
         let file_type = metadata(path.as_ref())
             .context(format!("failed to access path {:?}", path.as_ref()))?
             .file_type();
+        // The SOURCE can be a regular file, FIFO file, or /dev/stdin char device, etc..
         ensure!(
-            file_type.is_file() || file_type.is_fifo(),
-            "specified path must be a regular/fifo file: {:?}",
+            file_type.is_file() || file_type.is_fifo() || file_type.is_char_device(),
+            "specified path must be a regular/fifo/char_device file: {:?}",
             path.as_ref()
         );
         Ok(())
@@ -1802,5 +1816,14 @@ impl Command {
 
     fn thread_validator(v: &str) -> std::result::Result<String, String> {
         nydus_service::validate_threads_configuration(v).map(|s| s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Command;
+    #[test]
+    fn test_ensure_file() {
+        Command::ensure_file("/dev/stdin").unwrap();
     }
 }

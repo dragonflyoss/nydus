@@ -436,9 +436,10 @@ impl BlobCompressionContextInfo {
             if let Some(reader) = reader {
                 let buffer =
                     unsafe { std::slice::from_raw_parts_mut(base as *mut u8, expected_size) };
-                buffer[0..].fill(0);
                 Self::read_metadata(blob_info, reader, buffer)?;
-                Self::validate_header(blob_info, header)?;
+                if !Self::validate_header(blob_info, header)? {
+                    return Err(enoent!(format!("double check blob_info still invalid",)));
+                }
                 filemap.sync_data()?;
             } else {
                 return Err(enoent!(format!(
@@ -851,7 +852,6 @@ impl BlobCompressionContextInfo {
         if u32::from_le(header.s_magic) != BLOB_CCT_MAGIC
             || u32::from_le(header.s_magic2) != BLOB_CCT_MAGIC
             || u32::from_le(header.s_ci_entries) != blob_info.chunk_count()
-            || u32::from_le(header.s_features) != blob_info.features().bits()
             || u32::from_le(header.s_ci_compressor) != blob_info.meta_ci_compressor() as u32
             || u64::from_le(header.s_ci_offset) != blob_info.meta_ci_offset()
             || u64::from_le(header.s_ci_compressed_size) != blob_info.meta_ci_compressed_size()
