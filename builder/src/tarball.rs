@@ -62,6 +62,15 @@ enum TarReader {
     ZranReader(ZranReader<File>),
 }
 
+impl TarReader {
+    fn seekable(&self) -> bool {
+        matches!(
+            self,
+            TarReader::File(_) | TarReader::BufReaderInfoSeekable(_)
+        )
+    }
+}
+
 impl Read for TarReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
@@ -78,10 +87,20 @@ impl Read for TarReader {
 
 impl Seek for TarReader {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let seekable = self.seekable();
         match self {
-            TarReader::File(f) => f.seek(pos),
-            TarReader::BufReaderInfoSeekable(b) => b.seek(pos),
-            _ => Err(enosys!("seek() not supported!")),
+            TarReader::File(f) => {
+                assert!(seekable);
+                f.seek(pos)
+            }
+            TarReader::BufReaderInfoSeekable(b) => {
+                assert!(seekable);
+                b.seek(pos)
+            }
+            _ => {
+                assert!(!seekable);
+                Err(enosys!("seek() not supported!"))
+            }
         }
     }
 }
@@ -183,6 +202,8 @@ impl<'a> TarballTreeBuilder<'a> {
             }
             _ => return Err(anyhow!("tarball: unsupported image conversion type")),
         };
+
+        let is_seekable = reader.seekable();
         let mut tar = Archive::new(reader);
         tar.set_ignore_zeros(true);
         tar.set_preserve_mtime(true);
@@ -199,7 +220,7 @@ impl<'a> TarballTreeBuilder<'a> {
         let mut tree = Tree::new(root);
 
         // Generate RAFS node for each tar entry, and optionally adding missing parents.
-        let entries = if is_file {
+        let entries = if is_seekable {
             tar.entries_with_seek()
                 .context("tarball: failed to read entries from tar")?
         } else {
