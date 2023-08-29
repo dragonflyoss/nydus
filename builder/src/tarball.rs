@@ -62,15 +62,6 @@ enum TarReader {
     ZranReader(ZranReader<File>),
 }
 
-impl TarReader {
-    fn seekable(&self) -> bool {
-        matches!(
-            self,
-            TarReader::File(_) | TarReader::BufReaderInfoSeekable(_)
-        )
-    }
-}
-
 impl Read for TarReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
@@ -85,22 +76,21 @@ impl Read for TarReader {
     }
 }
 
+impl TarReader {
+    fn seekable(&self) -> bool {
+        matches!(
+            self,
+            TarReader::File(_) | TarReader::BufReaderInfoSeekable(_)
+        )
+    }
+}
+
 impl Seek for TarReader {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let seekable = self.seekable();
         match self {
-            TarReader::File(f) => {
-                assert!(seekable);
-                f.seek(pos)
-            }
-            TarReader::BufReaderInfoSeekable(b) => {
-                assert!(seekable);
-                b.seek(pos)
-            }
-            _ => {
-                assert!(!seekable);
-                Err(enosys!("seek() not supported!"))
-            }
+            TarReader::File(f) => f.seek(pos),
+            TarReader::BufReaderInfoSeekable(b) => b.seek(pos),
+            _ => Err(enosys!("seek() not supported!")),
         }
     }
 }
