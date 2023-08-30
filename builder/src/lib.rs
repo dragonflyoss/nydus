@@ -26,8 +26,8 @@ pub use self::compact::BlobCompactor;
 pub use self::core::bootstrap::Bootstrap;
 pub use self::core::chunk_dict::{parse_chunk_dict_arg, ChunkDict, HashChunkDict};
 pub use self::core::context::{
-    ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager,
-    BuildContext, BuildOutput, ConversionType,
+    ArtifactFileWriter, ArtifactStorage, ArtifactWriter, BlobContext, BlobManager,
+    BootstrapContext, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
 pub use self::core::feature::{Feature, Features};
 pub use self::core::node::{ChunkSource, NodeChunk};

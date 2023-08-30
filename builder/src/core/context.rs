@@ -193,7 +193,7 @@ impl Write for ArtifactMemoryWriter {
     }
 }
 
-struct ArtifactFileWriter(ArtifactWriter);
+pub struct ArtifactFileWriter(pub ArtifactWriter);
 
 impl RafsIoWrite for ArtifactFileWriter {
     fn as_any(&self) -> &dyn Any {
@@ -212,6 +212,12 @@ impl RafsIoWrite for ArtifactFileWriter {
         self.0.reader.read_to_end(&mut buf)?;
 
         Ok(Cow::Owned(buf))
+    }
+}
+
+impl ArtifactFileWriter {
+    pub fn set_len(&mut self, s: u64) -> std::io::Result<()> {
+        self.0.file.get_mut().set_len(s)
     }
 }
 
@@ -1182,6 +1188,7 @@ pub struct BuildContext {
 
     pub features: Features,
     pub configuration: Arc<ConfigV2>,
+    pub blob_cache_writer: Option<Mutex<ArtifactFileWriter>>,
 }
 
 impl BuildContext {
@@ -1201,6 +1208,7 @@ impl BuildContext {
         blob_inline_meta: bool,
         features: Features,
         encrypt: bool,
+        blob_cache_writer: Option<Mutex<ArtifactFileWriter>>,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
@@ -1250,6 +1258,7 @@ impl BuildContext {
 
             features,
             configuration: Arc::new(ConfigV2::default()),
+            blob_cache_writer,
         }
     }
 
@@ -1299,6 +1308,7 @@ impl Default for BuildContext {
             blob_inline_meta: false,
             features: Features::new(),
             configuration: Arc::new(ConfigV2::default()),
+            blob_cache_writer: None,
         }
     }
 }

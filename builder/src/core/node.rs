@@ -6,7 +6,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::ops::Deref;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
@@ -462,6 +462,21 @@ impl Node {
             chunk.set_compressed(is_compressed);
         }
 
+        match &ctx.blob_cache_writer {
+            Some(writer) => {
+                let mut guard = writer.lock().unwrap();
+                let curr_pos = guard.seek(std::io::SeekFrom::End(0))?;
+                if curr_pos < chunk.uncompressed_offset() + aligned_d_size as u64 {
+                    guard.set_len(chunk.uncompressed_offset() + aligned_d_size as u64)?;
+                }
+
+                guard.seek(std::io::SeekFrom::Start(chunk.uncompressed_offset()))?;
+                guard
+                    .write_all(&chunk_data)
+                    .context("failed to write blob cache")?;
+            }
+            None => (),
+        }
         event_tracer!("blob_uncompressed_size", +d_size);
 
         Ok(chunk_info)

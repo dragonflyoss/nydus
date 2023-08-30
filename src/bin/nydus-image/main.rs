@@ -27,9 +27,10 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager, BootstrapManager,
-    BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder, Feature, Features,
-    HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+    parse_chunk_dict_arg, ArtifactFileWriter, ArtifactStorage, ArtifactWriter, BlobCompactor,
+    BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder, ConversionType,
+    DirectoryBuilder, Feature, Features, HashChunkDict, Merger, Prefetch, PrefetchPolicy,
+    StargzBuilder, TarballBuilder, WhiteoutSpec,
 };
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
@@ -354,6 +355,13 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .short('E')
                         .help("Encrypt the generated RAFS metadata and data blobs")
                         .action(ArgAction::SetTrue)
+                        .required(false)
+                )
+                .arg(
+                    Arg::new("blob-cache")
+                        .long("blob-cache")
+                        .help("generate blob cache file")
+                        .value_parser(clap::value_parser!(PathBuf))
                         .required(false)
                 )
         );
@@ -793,6 +801,7 @@ impl Command {
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
         let batch_size = Self::get_batch_size(matches, version, conversion_type, chunk_size)?;
+        let blob_cache_writer = Self::get_blob_cache_writer(matches, conversion_type)?;
         let aligned_chunk = if version.is_v6() && conversion_type != ConversionType::TarToTarfs {
             true
         } else {
@@ -1028,6 +1037,7 @@ impl Command {
             blob_inline_meta,
             features,
             encrypt,
+            blob_cache_writer,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
@@ -1459,6 +1469,29 @@ impl Command {
             Ok(ArtifactStorage::FileDir(d))
         } else {
             bail!("both --bootstrap and --blob-dir are missing, please specify one to store the generated metadata blob file");
+        }
+    }
+
+    fn get_blob_cache_writer(
+        matches: &ArgMatches,
+        conversion_type: ConversionType,
+    ) -> Result<Option<Mutex<ArtifactFileWriter>>> {
+        if conversion_type == ConversionType::EStargzIndexToRef {
+            Ok(None)
+        } else if let Some(p) = matches
+            .get_one::<PathBuf>("blob-cache")
+            .map(|b| ArtifactStorage::SingleFile(b.clone()))
+        {
+            if conversion_type == ConversionType::TarToTarfs {
+                bail!(
+                    "conversion type `{}` conflicts with `--blob-cache`",
+                    conversion_type
+                );
+            }
+            let writer = ArtifactFileWriter(ArtifactWriter::new(p)?);
+            Ok(Some(Mutex::new(writer)))
+        } else {
+            Ok(None)
         }
     }
 
