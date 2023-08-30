@@ -7,6 +7,7 @@
 #[macro_use]
 extern crate log;
 
+use crate::core::context::Artifact;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -26,8 +27,8 @@ pub use self::compact::BlobCompactor;
 pub use self::core::bootstrap::Bootstrap;
 pub use self::core::chunk_dict::{parse_chunk_dict_arg, ChunkDict, HashChunkDict};
 pub use self::core::context::{
-    ArtifactStorage, ArtifactWriter, BlobContext, BlobManager, BootstrapContext, BootstrapManager,
-    BuildContext, BuildOutput, ConversionType,
+    ArtifactStorage, ArtifactWriter, BlobCacheGenerator, BlobContext, BlobManager,
+    BootstrapContext, BootstrapManager, BuildContext, BuildOutput, ConversionType,
 };
 pub use self::core::feature::{Feature, Features};
 pub use self::core::node::{ChunkSource, NodeChunk};
@@ -82,7 +83,7 @@ fn dump_bootstrap(
     bootstrap_ctx: &mut BootstrapContext,
     bootstrap: &mut Bootstrap,
     blob_mgr: &mut BlobManager,
-    blob_writer: &mut ArtifactWriter,
+    blob_writer: &mut dyn Artifact,
 ) -> Result<()> {
     // Make sure blob id is updated according to blob hash if not specified by user.
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
@@ -161,7 +162,7 @@ fn dump_bootstrap(
 fn dump_toc(
     ctx: &mut BuildContext,
     blob_ctx: &mut BlobContext,
-    blob_writer: &mut ArtifactWriter,
+    blob_writer: &mut dyn Artifact,
 ) -> Result<()> {
     if ctx.features.is_enabled(Feature::BlobToc) {
         assert_ne!(ctx.conversion_type, ConversionType::TarToTarfs);
@@ -181,7 +182,7 @@ fn dump_toc(
 fn finalize_blob(
     ctx: &mut BuildContext,
     blob_mgr: &mut BlobManager,
-    blob_writer: &mut ArtifactWriter,
+    blob_writer: &mut dyn Artifact,
 ) -> Result<()> {
     if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
         let is_tarfs = ctx.conversion_type == ConversionType::TarToTarfs;
@@ -237,6 +238,10 @@ fn finalize_blob(
         // blob file.
         if !is_tarfs {
             blob_writer.finalize(Some(blob_meta_id))?;
+        }
+
+        if let Some(blob_cache) = ctx.blob_cache_generator.as_ref() {
+            blob_cache.finalize(&blob_ctx.blob_id)?;
         }
     }
 

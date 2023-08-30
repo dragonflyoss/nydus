@@ -6,7 +6,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::ops::Deref;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
@@ -29,9 +29,9 @@ use nydus_utils::{compress, crypt};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
 use sha2::digest::Digest;
 
-use crate::{
-    ArtifactWriter, BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay,
-};
+use crate::{BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay};
+
+use super::context::Artifact;
 
 /// Filesystem root path for Unix OSs.
 const ROOT_PATH_NAME: &[u8] = &[b'/'];
@@ -219,7 +219,7 @@ impl Node {
         self: &mut Node,
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
-        blob_writer: &mut ArtifactWriter,
+        blob_writer: &mut dyn Artifact,
         chunk_data_buf: &mut [u8],
     ) -> Result<u64> {
         let mut reader = if self.is_reg() {
@@ -243,7 +243,7 @@ impl Node {
         &mut self,
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
-        blob_writer: &mut ArtifactWriter,
+        blob_writer: &mut dyn Artifact,
         reader: Option<&mut R>,
         data_buf: &mut [u8],
     ) -> Result<u64> {
@@ -393,7 +393,7 @@ impl Node {
         &self,
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
-        blob_writer: &mut ArtifactWriter,
+        blob_writer: &mut dyn Artifact,
         chunk_data: &[u8],
         chunk: &mut ChunkWrapper,
     ) -> Result<Option<BlobChunkInfoV2Ondisk>> {
@@ -462,6 +462,9 @@ impl Node {
             chunk.set_compressed(is_compressed);
         }
 
+        if let Some(blob_cache) = ctx.blob_cache_generator.as_ref() {
+            blob_cache.write_blob_data(chunk_data, chunk, aligned_d_size)?;
+        }
         event_tracer!("blob_uncompressed_size", +d_size);
 
         Ok(chunk_info)
@@ -470,7 +473,7 @@ impl Node {
     pub fn write_chunk_data(
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
-        blob_writer: &mut ArtifactWriter,
+        blob_writer: &mut dyn Artifact,
         chunk_data: &[u8],
     ) -> Result<(u64, u32, bool)> {
         let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)

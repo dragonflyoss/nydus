@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
-use std::io::Write;
 use std::slice;
 
 use anyhow::{Context, Result};
@@ -16,9 +15,8 @@ use sha2::digest::Digest;
 
 use super::layout::BlobLayout;
 use super::node::Node;
-use crate::{
-    ArtifactWriter, BlobContext, BlobManager, BuildContext, ConversionType, Feature, Tree,
-};
+use crate::core::context::Artifact;
+use crate::{BlobContext, BlobManager, BuildContext, ConversionType, Feature, Tree};
 
 /// Generator for RAFS data blob.
 pub(crate) struct Blob {}
@@ -29,7 +27,7 @@ impl Blob {
         ctx: &BuildContext,
         tree: &Tree,
         blob_mgr: &mut BlobManager,
-        blob_writer: &mut ArtifactWriter,
+        blob_writer: &mut dyn Artifact,
     ) -> Result<()> {
         match ctx.conversion_type {
             ConversionType::DirectoryToRafs => {
@@ -101,7 +99,7 @@ impl Blob {
     fn finalize_blob_data(
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
-        blob_writer: &mut ArtifactWriter,
+        blob_writer: &mut dyn Artifact,
     ) -> Result<()> {
         // Dump buffered batch chunk data if exists.
         if let Some(ref batch) = ctx.blob_batch_generator {
@@ -159,7 +157,7 @@ impl Blob {
     pub(crate) fn dump_meta_data(
         ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
-        blob_writer: &mut ArtifactWriter,
+        blob_writer: &mut dyn Artifact,
     ) -> Result<()> {
         // Dump blob meta for v6 when it has chunks or bootstrap is to be inlined.
         if !blob_ctx.blob_meta_info_enabled || blob_ctx.uncompressed_blob_size == 0 {
@@ -194,7 +192,6 @@ impl Blob {
         } else if ctx.blob_tar_reader.is_some() {
             header.set_separate_blob(true);
         };
-
         let mut compressor = Self::get_compression_algorithm_for_meta(ctx);
         let (compressed_data, compressed) = compress::compress(ci_data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
@@ -223,6 +220,9 @@ impl Blob {
         }
 
         blob_ctx.blob_meta_header = header;
+        if let Some(blob_cache) = ctx.blob_cache_generator.as_ref() {
+            blob_cache.write_blob_meta(ci_data, &header)?;
+        }
         let encrypted_header =
             crypt::encrypt_with_context(header.as_bytes(), cipher_obj, cipher_ctx, encrypt)?;
         let header_size = encrypted_header.len();
