@@ -21,6 +21,8 @@ use nydus_utils::{digest, try_round_up_4k};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
+use crate::core::context::Artifact;
+
 use super::core::blob::Blob;
 use super::core::bootstrap::Bootstrap;
 use super::{

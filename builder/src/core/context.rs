@@ -10,6 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Read, Seek, Write};
+use std::mem::size_of;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Display, Path, PathBuf};
 use std::str::FromStr;
@@ -40,7 +41,7 @@ use nydus_storage::meta::{
     BlobMetaChunkArray, BlobMetaChunkInfo, ZranContextGenerator,
 };
 use nydus_utils::digest::DigestData;
-use nydus_utils::{compress, digest, div_round_up, round_down, BufReaderInfo};
+use nydus_utils::{compress, digest, div_round_up, round_down, try_round_up_4k, BufReaderInfo};
 
 use super::node::ChunkSource;
 use crate::core::tree::TreeNode;
@@ -193,7 +194,13 @@ impl Write for ArtifactMemoryWriter {
     }
 }
 
-struct ArtifactFileWriter(ArtifactWriter);
+struct ArtifactFileWriter(pub ArtifactWriter);
+
+impl ArtifactFileWriter {
+    pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
+        self.0.finalize(name)
+    }
+}
 
 impl RafsIoWrite for ArtifactFileWriter {
     fn as_any(&self) -> &dyn Any {
@@ -215,6 +222,12 @@ impl RafsIoWrite for ArtifactFileWriter {
     }
 }
 
+impl ArtifactFileWriter {
+    pub fn set_len(&mut self, s: u64) -> std::io::Result<()> {
+        self.0.file.get_mut().set_len(s)
+    }
+}
+
 impl Seek for ArtifactFileWriter {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.0.file.seek(pos)
@@ -228,6 +241,37 @@ impl Write for ArtifactFileWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.0.flush()
+    }
+}
+
+pub trait Artifact: Write {
+    fn pos(&self) -> Result<u64>;
+    fn finalize(&mut self, name: Option<String>) -> Result<()>;
+}
+
+#[derive(Default)]
+pub struct NoopArtifactWriter {
+    pos: usize,
+}
+
+impl Write for NoopArtifactWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.pos += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Artifact for NoopArtifactWriter {
+    fn pos(&self) -> Result<u64> {
+        Ok(self.pos as u64)
+    }
+
+    fn finalize(&mut self, _name: Option<String>) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -308,36 +352,18 @@ impl ArtifactWriter {
             }
         }
     }
+}
 
+impl Artifact for ArtifactWriter {
     /// Get the current write position.
-    pub fn pos(&self) -> Result<u64> {
+    fn pos(&self) -> Result<u64> {
         Ok(self.pos as u64)
-    }
-
-    // The `inline-bootstrap` option merges the blob and bootstrap into one
-    // file. We need some header to index the location of the blob and bootstrap,
-    // write_tar_header uses tar header that arranges the data as follows:
-    // data | tar_header | data | tar_header
-    // This is a tar-like structure, except that we put the tar header after the
-    // data. The advantage is that we do not need to determine the size of the data
-    // first, so that we can write the blob data by stream without seek to improve
-    // the performance of the blob dump by using fifo.
-    fn write_tar_header(&mut self, name: &str, size: u64) -> Result<Header> {
-        let mut header = Header::new_gnu();
-        header.set_path(Path::new(name))?;
-        header.set_entry_type(EntryType::Regular);
-        header.set_size(size);
-        // The checksum must be set to ensure that the tar reader implementation
-        // in golang can correctly parse the header.
-        header.set_cksum();
-        self.write_all(header.as_bytes())?;
-        Ok(header)
     }
 
     /// Finalize the metadata/data blob.
     ///
     /// When `name` is None, it means that the blob is empty and should be removed.
-    pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
+    fn finalize(&mut self, name: Option<String>) -> Result<()> {
         self.file.flush()?;
 
         if let Some(n) = name {
@@ -364,6 +390,72 @@ impl ArtifactWriter {
         }
 
         Ok(())
+    }
+}
+
+pub struct BlobCacheGenerator {
+    blob_data: Mutex<ArtifactFileWriter>,
+    blob_meta: Mutex<ArtifactFileWriter>,
+}
+
+impl BlobCacheGenerator {
+    pub fn new(storage: ArtifactStorage) -> Result<Self> {
+        Ok(BlobCacheGenerator {
+            blob_data: Mutex::new(ArtifactFileWriter(ArtifactWriter::new(storage.clone())?)),
+            blob_meta: Mutex::new(ArtifactFileWriter(ArtifactWriter::new(storage)?)),
+        })
+    }
+
+    pub fn write_blob_meta(
+        &self,
+        data: &[u8],
+        header: &BlobCompressionContextHeader,
+    ) -> Result<()> {
+        let mut guard = self.blob_meta.lock().unwrap();
+        let aligned_uncompressed_size = try_round_up_4k(data.len() as u64).ok_or(anyhow!(
+            format!("invalid input {} for try_round_up_4k", data.len())
+        ))?;
+        guard.set_len(
+            aligned_uncompressed_size + size_of::<BlobCompressionContextHeader>() as u64,
+        )?;
+        guard
+            .write_all(data)
+            .context("failed to write blob meta data")?;
+        guard.seek(std::io::SeekFrom::Start(aligned_uncompressed_size))?;
+        guard
+            .write_all(header.as_bytes())
+            .context("failed to write blob meta header")?;
+        Ok(())
+    }
+
+    pub fn write_blob_data(
+        &self,
+        chunk_data: &[u8],
+        chunk_info: &ChunkWrapper,
+        aligned_d_size: u32,
+    ) -> Result<()> {
+        let mut guard = self.blob_data.lock().unwrap();
+        let curr_pos = guard.seek(std::io::SeekFrom::End(0))?;
+        if curr_pos < chunk_info.uncompressed_offset() + aligned_d_size as u64 {
+            guard.set_len(chunk_info.uncompressed_offset() + aligned_d_size as u64)?;
+        }
+
+        guard.seek(std::io::SeekFrom::Start(chunk_info.uncompressed_offset()))?;
+        guard
+            .write_all(&chunk_data)
+            .context("failed to write blob cache")?;
+        Ok(())
+    }
+
+    pub fn finalize(&self, name: &str) -> Result<()> {
+        let blob_data_name = format!("{}.blob.data", name);
+        let mut guard = self.blob_data.lock().unwrap();
+        guard.finalize(Some(blob_data_name))?;
+        drop(guard);
+
+        let blob_meta_name = format!("{}.blob.meta", name);
+        let mut guard = self.blob_meta.lock().unwrap();
+        guard.finalize(Some(blob_meta_name))
     }
 }
 
@@ -731,7 +823,7 @@ impl BlobContext {
     }
 
     /// Helper to write data to blob and update blob hash.
-    pub fn write_data(&mut self, blob_writer: &mut ArtifactWriter, data: &[u8]) -> Result<()> {
+    pub fn write_data(&mut self, blob_writer: &mut dyn Artifact, data: &[u8]) -> Result<()> {
         blob_writer.write_all(data)?;
         self.blob_hash.update(data);
         Ok(())
@@ -740,11 +832,28 @@ impl BlobContext {
     /// Helper to write a tar header to blob and update blob hash.
     pub fn write_tar_header(
         &mut self,
-        blob_writer: &mut ArtifactWriter,
+        blob_writer: &mut dyn Artifact,
         name: &str,
         size: u64,
     ) -> Result<Header> {
-        let header = blob_writer.write_tar_header(name, size)?;
+        // The `inline-bootstrap` option merges the blob and bootstrap into one
+        // file. We need some header to index the location of the blob and bootstrap,
+        // write_tar_header uses tar header that arranges the data as follows:
+        // data | tar_header | data | tar_header
+        // This is a tar-like structure, except that we put the tar header after the
+        // data. The advantage is that we do not need to determine the size of the data
+        // first, so that we can write the blob data by stream without seek to improve
+        // the performance of the blob dump by using fifo.
+
+        let mut header = Header::new_gnu();
+        header.set_path(Path::new(name))?;
+        header.set_entry_type(EntryType::Regular);
+        header.set_size(size);
+        // The checksum must be set to ensure that the tar reader implementation
+        // in golang can correctly parse the header.
+        header.set_cksum();
+
+        blob_writer.write_all(header.as_bytes())?;
         self.blob_hash.update(header.as_bytes());
         Ok(header)
     }
@@ -1182,6 +1291,8 @@ pub struct BuildContext {
 
     pub features: Features,
     pub configuration: Arc<ConfigV2>,
+    /// Generate the blob cache and blob meta
+    pub blob_cache_generator: Option<BlobCacheGenerator>,
 }
 
 impl BuildContext {
@@ -1221,7 +1332,6 @@ impl BuildContext {
         } else {
             crypt::Algorithm::None
         };
-
         BuildContext {
             blob_id,
             aligned_chunk,
@@ -1250,6 +1360,7 @@ impl BuildContext {
 
             features,
             configuration: Arc::new(ConfigV2::default()),
+            blob_cache_generator: None,
         }
     }
 
@@ -1299,6 +1410,7 @@ impl Default for BuildContext {
             blob_inline_meta: false,
             features: Features::new(),
             configuration: Arc::new(ConfigV2::default()),
+            blob_cache_generator: None,
         }
     }
 }

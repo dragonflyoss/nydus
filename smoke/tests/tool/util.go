@@ -21,6 +21,13 @@ var defaultBinary = map[string]string{
 	"NYDUS_NYDUSIFY": "nydusify",
 }
 
+func RunWithCombinedOutput(cmd string) (string, error) {
+	_cmd := exec.Command("sh", "-c", cmd)
+	output, err := _cmd.CombinedOutput()
+
+	return string(output), err
+}
+
 func Run(t *testing.T, cmd string) {
 	_cmd := exec.Command("sh", "-c", cmd)
 	_cmd.Stdout = os.Stdout

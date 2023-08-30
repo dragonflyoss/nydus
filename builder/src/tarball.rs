@@ -39,6 +39,8 @@ use nydus_utils::compress::ZlibDecoder;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::{div_round_up, lazy_drop, root_tracer, timing_tracer, BufReaderInfo, ByteSize};
 
+use crate::core::context::{Artifact, NoopArtifactWriter};
+
 use super::core::blob::Blob;
 use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput, ConversionType,
@@ -99,7 +101,7 @@ struct TarballTreeBuilder<'a> {
     ty: ConversionType,
     ctx: &'a mut BuildContext,
     blob_mgr: &'a mut BlobManager,
-    blob_writer: &'a mut ArtifactWriter,
+    blob_writer: &'a mut dyn Artifact,
     buf: Vec<u8>,
     builder: TarBuilder,
 }
@@ -110,7 +112,7 @@ impl<'a> TarballTreeBuilder<'a> {
         ty: ConversionType,
         ctx: &'a mut BuildContext,
         blob_mgr: &'a mut BlobManager,
-        blob_writer: &'a mut ArtifactWriter,
+        blob_writer: &'a mut dyn Artifact,
         layer_idx: u16,
     ) -> Self {
         let builder = TarBuilder::new(ctx.explicit_uidgid, layer_idx, ctx.fs_version);
@@ -580,7 +582,7 @@ impl Builder for TarballBuilder {
     ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let layer_idx = u16::from(bootstrap_ctx.layered);
-        let mut blob_writer = match self.ty {
+        let mut blob_writer: Box<dyn Artifact> = match self.ty {
             ConversionType::EStargzToRafs
             | ConversionType::EStargzToRef
             | ConversionType::TargzToRafs
@@ -588,9 +590,9 @@ impl Builder for TarballBuilder {
             | ConversionType::TarToRafs
             | ConversionType::TarToTarfs => {
                 if let Some(blob_stor) = ctx.blob_storage.clone() {
-                    ArtifactWriter::new(blob_stor)?
+                    Box::new(ArtifactWriter::new(blob_stor)?)
                 } else {
-                    return Err(anyhow!("tarball: missing configuration for target path"));
+                    Box::<NoopArtifactWriter>::default()
                 }
             }
             _ => {
@@ -602,7 +604,7 @@ impl Builder for TarballBuilder {
         };
 
         let mut tree_builder =
-            TarballTreeBuilder::new(self.ty, ctx, blob_mgr, &mut blob_writer, layer_idx);
+            TarballTreeBuilder::new(self.ty, ctx, blob_mgr, blob_writer.as_mut(), layer_idx);
         let tree = timing_tracer!({ tree_builder.build_tree() }, "build_tree")?;
 
         // Build bootstrap
@@ -613,13 +615,13 @@ impl Builder for TarballBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, &mut blob_writer) },
+            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, blob_writer.as_mut()) },
             "dump_blob"
         )?;
 
         // Dump blob meta information
         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            Blob::dump_meta_data(ctx, blob_ctx, &mut blob_writer)?;
+            Blob::dump_meta_data(ctx, blob_ctx, blob_writer.as_mut())?;
         }
 
         // Dump RAFS meta/bootstrap and finalize the data blob.
@@ -632,14 +634,14 @@ impl Builder for TarballBuilder {
                         &mut bootstrap_ctx,
                         &mut bootstrap,
                         blob_mgr,
-                        &mut blob_writer,
+                        blob_writer.as_mut(),
                     )
                 },
                 "dump_bootstrap"
             )?;
-            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            finalize_blob(ctx, blob_mgr, blob_writer.as_mut())?;
         } else {
-            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            finalize_blob(ctx, blob_mgr, blob_writer.as_mut())?;
             timing_tracer!(
                 {
                     dump_bootstrap(
@@ -648,7 +650,7 @@ impl Builder for TarballBuilder {
                         &mut bootstrap_ctx,
                         &mut bootstrap,
                         blob_mgr,
-                        &mut blob_writer,
+                        blob_writer.as_mut(),
                     )
                 },
                 "dump_bootstrap"

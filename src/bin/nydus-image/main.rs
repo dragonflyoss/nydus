@@ -27,9 +27,10 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, ArtifactStorage, BlobCompactor, BlobManager, BootstrapManager,
-    BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder, Feature, Features,
-    HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobManager,
+    BootstrapManager, BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder,
+    Feature, Features, HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder,
+    TarballBuilder, WhiteoutSpec,
 };
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
@@ -354,6 +355,17 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .short('E')
                         .help("Encrypt the generated RAFS metadata and data blobs")
                         .action(ArgAction::SetTrue)
+                        .required(false)
+                )
+                .arg(
+                    Arg::new("blob-cache-dir")
+                        .long("blob-cache-dir")
+                        .help("Directory path to generate blob cache files ($id.blob.meta and $id.blob.data)")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .conflicts_with("blob-inline-meta")
+                        .conflicts_with("blob")
+                        .conflicts_with("blob-dir")
+                        .conflicts_with("compressor")
                         .required(false)
                 )
         );
@@ -802,12 +814,21 @@ impl Command {
         let prefetch = Self::get_prefetch(matches)?;
         let source_path = PathBuf::from(matches.get_one::<String>("SOURCE").unwrap());
         let conversion_type: ConversionType = matches.get_one::<String>("type").unwrap().parse()?;
-        let blob_storage = Self::get_blob_storage(matches, conversion_type)?;
         let blob_inline_meta = matches.get_flag("blob-inline-meta");
         let repeatable = matches.get_flag("repeatable");
         let version = Self::get_fs_version(matches)?;
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
         let batch_size = Self::get_batch_size(matches, version, conversion_type, chunk_size)?;
+        let blob_cache_storage = Self::get_blob_cache_storage(matches, conversion_type)?;
+        // blob-cacher-dir and blob-dir/blob are a set of mutually exclusive functions,
+        // the former is used to generate blob cache, nydusd is directly started through blob cache,
+        // the latter is to generate nydus blob, as nydud backend to start
+        let blob_storage = if blob_cache_storage.is_some() {
+            None
+        } else {
+            Self::get_blob_storage(matches, conversion_type)?
+        };
+
         let aligned_chunk = if version.is_v6() && conversion_type != ConversionType::TarToTarfs {
             true
         } else {
@@ -840,16 +861,16 @@ impl Command {
         match conversion_type {
             ConversionType::DirectoryToRafs => {
                 Self::ensure_directory(&source_path)?;
-                if blob_storage.is_none() {
-                    bail!("both --blob and --blob-dir are missing");
+                if blob_storage.is_none() && blob_cache_storage.is_none() {
+                    bail!("both --blob and --blob-dir or --blob-cache-dir are missing");
                 }
             }
             ConversionType::EStargzToRafs
             | ConversionType::TargzToRafs
             | ConversionType::TarToRafs => {
                 Self::ensure_file(&source_path)?;
-                if blob_storage.is_none() {
-                    bail!("both --blob and --blob-dir are missing");
+                if blob_storage.is_none() && blob_cache_storage.is_none() {
+                    bail!("both --blob and --blob-dir or --blob-cache-dir are missing");
                 }
             }
             ConversionType::TarToRef
@@ -874,8 +895,8 @@ impl Command {
                 }
                 compressor = compress::Algorithm::GZip;
                 digester = digest::Algorithm::Sha256;
-                if blob_storage.is_none() {
-                    bail!("both --blob and --blob-dir are missing");
+                if blob_storage.is_none() && blob_cache_storage.is_none() {
+                    bail!("all of --blob, --blob-dir and --blob-cache-dir are missing");
                 } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
                     bail!(
                         "conversion type {} conflicts with '--prefetch-policy blob'",
@@ -921,8 +942,8 @@ impl Command {
                 }
                 compressor = compress::Algorithm::None;
                 digester = digest::Algorithm::Sha256;
-                if blob_storage.is_none() {
-                    bail!("both --blob and --blob-dir are missing");
+                if blob_storage.is_none() && blob_cache_storage.is_none() {
+                    bail!("both --blob and --blob-dir or --blob-cache-dir are missing");
                 } else if !prefetch.disabled && prefetch.policy == PrefetchPolicy::Blob {
                     bail!(
                         "conversion type {} conflicts with '--prefetch-policy blob'",
@@ -992,9 +1013,9 @@ impl Command {
                 }
                 compressor = compress::Algorithm::GZip;
                 digester = digest::Algorithm::Sha256;
-                if blob_storage.is_some() {
+                if blob_storage.is_some() || blob_cache_storage.is_some() {
                     bail!(
-                        "conversion type '{}' conflicts with '--blob'",
+                        "conversion type '{}' conflicts with '--blob' and '--blob-cache-dir'",
                         conversion_type
                     );
                 }
@@ -1028,6 +1049,11 @@ impl Command {
             bail!("`--features blob-toc` can't be used with `--version 5` ");
         }
 
+        if blob_cache_storage.is_some() {
+            // In blob cache mode, we don't need to do any compression for the original data
+            compressor = compress::Algorithm::None;
+        }
+
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
@@ -1047,6 +1073,12 @@ impl Command {
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
         build_ctx.set_batch_size(batch_size);
+
+        let blob_cache_generator = match blob_cache_storage {
+            Some(storage) => Some(BlobCacheGenerator::new(storage)?),
+            None => None,
+        };
+        build_ctx.blob_cache_generator = blob_cache_generator;
 
         let mut config = Self::get_configuration(matches)?;
         if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
@@ -1483,6 +1515,31 @@ impl Command {
             Ok(ArtifactStorage::FileDir(d))
         } else {
             bail!("both --bootstrap and --blob-dir are missing, please specify one to store the generated metadata blob file");
+        }
+    }
+
+    fn get_blob_cache_storage(
+        matches: &ArgMatches,
+        conversion_type: ConversionType,
+    ) -> Result<Option<ArtifactStorage>> {
+        if let Some(p) = matches.get_one::<PathBuf>("blob-cache-dir") {
+            if conversion_type == ConversionType::TarToTarfs
+                || conversion_type == ConversionType::EStargzIndexToRef
+                || conversion_type == ConversionType::EStargzToRafs
+                || conversion_type == ConversionType::EStargzToRef
+            {
+                bail!(
+                    "conversion type `{}` conflicts with `--blob-cache-dir`",
+                    conversion_type
+                );
+            }
+
+            if !p.exists() {
+                bail!("directory to store blob cache does not exist")
+            }
+            Ok(Some(ArtifactStorage::FileDir(p.to_owned())))
+        } else {
+            Ok(None)
         }
     }
 

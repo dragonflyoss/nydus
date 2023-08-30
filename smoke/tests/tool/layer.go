@@ -116,7 +116,7 @@ func (l *Layer) TargetPath(t *testing.T, path string) string {
 
 func (l *Layer) Pack(t *testing.T, packOption converter.PackOption, blobDir string) digest.Digest {
 	// Output OCI tar stream
-	ociTar := l.toOCITar(t)
+	ociTar := l.ToOCITar(t)
 	defer ociTar.Close()
 	l.recordFileTree(t)
 
@@ -141,7 +141,7 @@ func (l *Layer) Pack(t *testing.T, packOption converter.PackOption, blobDir stri
 
 func (l *Layer) PackRef(t *testing.T, ctx Context, blobDir string, compress bool) (digest.Digest, digest.Digest) {
 	// Output OCI tar stream
-	ociTar := l.toOCITar(t)
+	ociTar := l.ToOCITar(t)
 	defer ociTar.Close()
 	l.recordFileTree(t)
 
@@ -238,7 +238,7 @@ func (l *Layer) recordFileTree(t *testing.T) {
 	})
 }
 
-func (l *Layer) toOCITar(t *testing.T) io.ReadCloser {
+func (l *Layer) ToOCITar(t *testing.T) io.ReadCloser {
 	return archive.Diff(context.Background(), "", l.workDir)
 }
 

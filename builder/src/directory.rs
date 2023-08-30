@@ -5,8 +5,10 @@
 use std::fs;
 use std::fs::DirEntry;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use nydus_utils::{event_tracer, lazy_drop, root_tracer, timing_tracer};
+
+use crate::core::context::{Artifact, NoopArtifactWriter};
 
 use super::core::blob::Blob;
 use super::core::context::{
@@ -126,12 +128,10 @@ impl Builder for DirectoryBuilder {
     ) -> Result<BuildOutput> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let layer_idx = u16::from(bootstrap_ctx.layered);
-        let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
-            ArtifactWriter::new(blob_stor)?
+        let mut blob_writer: Box<dyn Artifact> = if let Some(blob_stor) = ctx.blob_storage.clone() {
+            Box::new(ArtifactWriter::new(blob_stor)?)
         } else {
-            return Err(anyhow!(
-                "target blob path should always be valid for directory builder"
-            ));
+            Box::<NoopArtifactWriter>::default()
         };
 
         // Scan source directory to build upper layer tree.
@@ -148,13 +148,13 @@ impl Builder for DirectoryBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, &mut blob_writer,) },
+            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, blob_writer.as_mut(),) },
             "dump_blob"
         )?;
 
         // Dump blob meta information
         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            Blob::dump_meta_data(ctx, blob_ctx, &mut blob_writer)?;
+            Blob::dump_meta_data(ctx, blob_ctx, blob_writer.as_mut())?;
         }
 
         // Dump RAFS meta/bootstrap and finalize the data blob.
@@ -167,14 +167,14 @@ impl Builder for DirectoryBuilder {
                         &mut bootstrap_ctx,
                         &mut bootstrap,
                         blob_mgr,
-                        &mut blob_writer,
+                        blob_writer.as_mut(),
                     )
                 },
                 "dump_bootstrap"
             )?;
-            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            finalize_blob(ctx, blob_mgr, blob_writer.as_mut())?;
         } else {
-            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            finalize_blob(ctx, blob_mgr, blob_writer.as_mut())?;
             timing_tracer!(
                 {
                     dump_bootstrap(
@@ -183,7 +183,7 @@ impl Builder for DirectoryBuilder {
                         &mut bootstrap_ctx,
                         &mut bootstrap,
                         blob_mgr,
-                        &mut blob_writer,
+                        blob_writer.as_mut(),
                     )
                 },
                 "dump_bootstrap"

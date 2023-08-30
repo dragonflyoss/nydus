@@ -29,6 +29,8 @@ use nydus_utils::digest::{self, DigestData, RafsDigest};
 use nydus_utils::{lazy_drop, root_tracer, timing_tracer, try_round_up_4k, ByteSize};
 use serde::{Deserialize, Serialize};
 
+use crate::core::context::{Artifact, NoopArtifactWriter};
+
 use super::core::blob::Blob;
 use super::core::context::{
     ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput,
@@ -836,10 +838,10 @@ impl Builder for StargzBuilder {
         } else if ctx.digester != digest::Algorithm::Sha256 {
             bail!("stargz: invalid digest algorithm {:?}", ctx.digester);
         }
-        let mut blob_writer = if let Some(blob_stor) = ctx.blob_storage.clone() {
-            ArtifactWriter::new(blob_stor)?
+        let mut blob_writer: Box<dyn Artifact> = if let Some(blob_stor) = ctx.blob_storage.clone() {
+            Box::new(ArtifactWriter::new(blob_stor)?)
         } else {
-            return Err(anyhow!("missing configuration for target path"));
+            Box::<NoopArtifactWriter>::default()
         };
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let layer_idx = u16::from(bootstrap_ctx.layered);
@@ -858,13 +860,13 @@ impl Builder for StargzBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, &mut blob_writer) },
+            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, blob_writer.as_mut()) },
             "dump_blob"
         )?;
 
         // Dump blob meta information
         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            Blob::dump_meta_data(ctx, blob_ctx, &mut blob_writer)?;
+            Blob::dump_meta_data(ctx, blob_ctx, blob_writer.as_mut())?;
         }
 
         // Dump RAFS meta/bootstrap and finalize the data blob.
@@ -877,14 +879,14 @@ impl Builder for StargzBuilder {
                         &mut bootstrap_ctx,
                         &mut bootstrap,
                         blob_mgr,
-                        &mut blob_writer,
+                        blob_writer.as_mut(),
                     )
                 },
                 "dump_bootstrap"
             )?;
-            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            finalize_blob(ctx, blob_mgr, blob_writer.as_mut())?;
         } else {
-            finalize_blob(ctx, blob_mgr, &mut blob_writer)?;
+            finalize_blob(ctx, blob_mgr, blob_writer.as_mut())?;
             timing_tracer!(
                 {
                     dump_bootstrap(
@@ -893,7 +895,7 @@ impl Builder for StargzBuilder {
                         &mut bootstrap_ctx,
                         &mut bootstrap,
                         blob_mgr,
-                        &mut blob_writer,
+                        blob_writer.as_mut(),
                     )
                 },
                 "dump_bootstrap"
