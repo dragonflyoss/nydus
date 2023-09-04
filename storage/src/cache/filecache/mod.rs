@@ -41,6 +41,7 @@ pub struct FileCacheMgr {
     work_dir: String,
     validate: bool,
     disable_indexed_map: bool,
+    disable_chunk_map: bool,
     cache_raw_data: bool,
     cache_encrypted: bool,
     cache_convergent_encryption: bool,
@@ -71,6 +72,7 @@ impl FileCacheMgr {
             worker_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
             disable_indexed_map: blob_cfg.disable_indexed_map,
+            disable_chunk_map: blob_cfg.disbale_chunk_map,
             validate: config.cache_validate,
             cache_raw_data: config.cache_compressed,
             cache_encrypted: blob_cfg.enable_encryption,
@@ -230,8 +232,13 @@ impl FileCacheEntry {
             (file, None, chunk_map, true, true, false)
         } else {
             let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
-            let (chunk_map, is_direct_chunkmap) =
-                Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
+            let (chunk_map, is_direct_chunkmap) = if mgr.disable_chunk_map {
+                let chunk_map =
+                    Arc::new(BlobStateMap::from(NoopChunkMap::new(true))) as Arc<dyn ChunkMap>;
+                (chunk_map, true)
+            } else {
+                Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?
+            };
             // Validation is supported by RAFS v5 (which has no meta_ci) or v6 with chunk digest array.
             let validation_supported = !blob_info.meta_ci_is_valid()
                 || blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);

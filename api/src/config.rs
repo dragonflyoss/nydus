@@ -755,6 +755,9 @@ pub struct FileCacheConfig {
     /// Key for data encryption, a heximal representation of [u8; 32].
     #[serde(default)]
     pub encryption_key: String,
+    // disbale chunk map, it is assumed that all data is ready
+    #[serde(default)]
+    pub disbale_chunk_map: bool,
 }
 
 impl FileCacheConfig {
