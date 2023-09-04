@@ -714,6 +714,8 @@ pub struct BlobcacheMetrics {
     id: String,
     // Prefer to let external tool get file's state like file size and disk usage.
     // Because stat(2) file may get blocked.
+    // It should include the real blob cache file names, so that the external GC
+    // process can handle it directly.
     pub underlying_files: Mutex<HashSet<String>>,
     pub store_path: String,
     // Cache hit percentage = (partial_hits + whole_hits) / total

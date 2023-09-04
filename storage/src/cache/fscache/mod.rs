@@ -22,6 +22,8 @@ use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
+use crate::cache::filecache::BLOB_DATA_FILE_SUFFIX;
+
 const FSCACHE_BLOBS_CHECK_NUM: u8 = 1;
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
@@ -104,7 +106,7 @@ impl FsCacheMgr {
                 .underlying_files
                 .lock()
                 .unwrap()
-                .insert(blob_id);
+                .insert(blob_id + BLOB_DATA_FILE_SUFFIX);
             Ok(entry)
         }
     }
@@ -256,7 +258,7 @@ impl FileCacheEntry {
         };
 
         let chunk_map = Arc::new(BlobStateMap::from(IndexedChunkMap::new(
-            &blob_file_path,
+            &format!("{}{}", blob_file_path, BLOB_DATA_FILE_SUFFIX),
             blob_info.chunk_count(),
             false,
         )?));
