@@ -25,6 +25,9 @@ use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
+pub const BLOB_RAW_FILE_SUFFIX: &str = ".blob.raw";
+pub const BLOB_DATA_FILE_SUFFIX: &str = ".blob.data";
+
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with local storage.
 #[derive(Clone)]
@@ -107,7 +110,7 @@ impl FileCacheMgr {
                 .underlying_files
                 .lock()
                 .unwrap()
-                .insert(blob_id);
+                .insert(blob_id + BLOB_DATA_FILE_SUFFIX);
             Ok(entry)
         }
     }
@@ -236,9 +239,9 @@ impl FileCacheEntry {
                 && !is_legacy_stargz;
             // Set cache file to its expected size.
             let suffix = if mgr.cache_raw_data {
-                ".blob.raw"
+                BLOB_RAW_FILE_SUFFIX
             } else {
-                ".blob.data"
+                BLOB_DATA_FILE_SUFFIX
             };
             let blob_data_file_path = blob_file_path.clone() + suffix;
             let file = OpenOptions::new()
@@ -358,7 +361,7 @@ impl FileCacheEntry {
             Arc::new(BlobStateMap::from(DigestedChunkMap::new()))
         } else {
             Arc::new(BlobStateMap::from(IndexedChunkMap::new(
-                blob_file,
+                &format!("{}{}", blob_file, BLOB_DATA_FILE_SUFFIX),
                 blob_info.chunk_count(),
                 true,
             )?))

@@ -12,7 +12,7 @@ use std::io::Result;
 
 use crate::cache::state::persist_map::PersistMap;
 use crate::cache::state::{ChunkIndexGetter, ChunkMap, RangeMap};
-use crate::device::{BlobChunkInfo, BlobInfo};
+use crate::device::BlobChunkInfo;
 
 /// The name suffix of blob chunk_map file, named $blob_id.chunk_map.
 const FILE_SUFFIX: &str = "chunk_map";
@@ -38,14 +38,6 @@ impl IndexedChunkMap {
         let filename = format!("{}.{}", blob_path, FILE_SUFFIX);
 
         PersistMap::open(&filename, chunk_count, true, persist).map(|map| IndexedChunkMap { map })
-    }
-
-    /// Create a new instance of `IndexedChunkMap` from an existing chunk map file.
-    pub fn open(blob_info: &BlobInfo, workdir: &str) -> Result<Self> {
-        let filename = format!("{}/{}.{}", workdir, blob_info.blob_id(), FILE_SUFFIX);
-
-        PersistMap::open(&filename, blob_info.chunk_count(), false, true)
-            .map(|map| IndexedChunkMap { map })
     }
 }
 
