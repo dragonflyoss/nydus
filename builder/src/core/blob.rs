@@ -3,15 +3,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
-use std::io::Write;
+use std::io::{Seek, Write};
+use std::mem::size_of;
 use std::slice;
 
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
-use nydus_storage::meta::{toc, BlobMetaChunkArray};
+use nydus_storage::meta::{toc, BlobCompressionContextHeader, BlobMetaChunkArray};
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
-use nydus_utils::{compress, crypt};
+use nydus_utils::{compress, crypt, try_round_up_4k};
 use sha2::digest::Digest;
 
 use super::layout::BlobLayout;
@@ -194,7 +195,6 @@ impl Blob {
         } else if ctx.blob_tar_reader.is_some() {
             header.set_separate_blob(true);
         };
-
         let mut compressor = Self::get_compression_algorithm_for_meta(ctx);
         let (compressed_data, compressed) = compress::compress(ci_data, compressor)
             .with_context(|| "failed to compress blob chunk info array".to_string())?;
@@ -223,6 +223,16 @@ impl Blob {
         }
 
         blob_ctx.blob_meta_header = header;
+        if let Some(meta_writer) = ctx.blob_meta_writer.as_ref() {
+            let mut meta = meta_writer.lock().unwrap();
+            let aligned_uncompressed_size = try_round_up_4k(uncompressed_size as u64).unwrap();
+            meta.set_len(
+                aligned_uncompressed_size + size_of::<BlobCompressionContextHeader>() as u64,
+            )?;
+            meta.write_all(ci_data)?;
+            meta.seek(std::io::SeekFrom::Start(aligned_uncompressed_size))?;
+            meta.write_all(header.as_bytes())?;
+        }
         let encrypted_header =
             crypt::encrypt_with_context(header.as_bytes(), cipher_obj, cipher_ctx, encrypt)?;
         let header_size = encrypted_header.len();

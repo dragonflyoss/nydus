@@ -936,6 +936,7 @@ mod tests {
             Features::new(),
             false,
             None,
+            None,
         );
         ctx.fs_version = RafsVersion::V6;
         let mut bootstrap_mgr =

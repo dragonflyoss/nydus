@@ -1189,6 +1189,7 @@ pub struct BuildContext {
     pub features: Features,
     pub configuration: Arc<ConfigV2>,
     pub blob_cache_writer: Option<Mutex<ArtifactFileWriter>>,
+    pub blob_meta_writer: Option<Mutex<ArtifactFileWriter>>,
 }
 
 impl BuildContext {
@@ -1209,6 +1210,7 @@ impl BuildContext {
         features: Features,
         encrypt: bool,
         blob_cache_writer: Option<Mutex<ArtifactFileWriter>>,
+        blob_meta_writer: Option<Mutex<ArtifactFileWriter>>,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
@@ -1259,6 +1261,7 @@ impl BuildContext {
             features,
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_writer,
+            blob_meta_writer,
         }
     }
 
@@ -1309,6 +1312,7 @@ impl Default for BuildContext {
             features: Features::new(),
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_writer: None,
+            blob_meta_writer: None,
         }
     }
 }

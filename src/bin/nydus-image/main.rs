@@ -364,6 +364,13 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .value_parser(clap::value_parser!(PathBuf))
                         .required(false)
                 )
+                .arg(
+                    Arg::new("blob-meta")
+                        .long("blob-meta")
+                        .help("generate blob meta file")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .required(false)
+                )
         );
 
     let app = app.subcommand(
@@ -802,6 +809,7 @@ impl Command {
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
         let batch_size = Self::get_batch_size(matches, version, conversion_type, chunk_size)?;
         let blob_cache_writer = Self::get_blob_cache_writer(matches, conversion_type)?;
+        let blob_meta_writer = Self::get_blob_meta_writer(matches, conversion_type)?;
         let aligned_chunk = if version.is_v6() && conversion_type != ConversionType::TarToTarfs {
             true
         } else {
@@ -1038,6 +1046,7 @@ impl Command {
             features,
             encrypt,
             blob_cache_writer,
+            blob_meta_writer,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
@@ -1469,6 +1478,29 @@ impl Command {
             Ok(ArtifactStorage::FileDir(d))
         } else {
             bail!("both --bootstrap and --blob-dir are missing, please specify one to store the generated metadata blob file");
+        }
+    }
+
+    fn get_blob_meta_writer(
+        matches: &ArgMatches,
+        conversion_type: ConversionType,
+    ) -> Result<Option<Mutex<ArtifactFileWriter>>> {
+        if conversion_type == ConversionType::EStargzIndexToRef {
+            Ok(None)
+        } else if let Some(p) = matches
+            .get_one::<PathBuf>("blob-meta")
+            .map(|b| ArtifactStorage::SingleFile(b.clone()))
+        {
+            if conversion_type == ConversionType::TarToTarfs {
+                bail!(
+                    "conversion type `{}` conflicts with `--blob-meta`",
+                    conversion_type
+                );
+            }
+            let writer = ArtifactFileWriter(ArtifactWriter::new(p)?);
+            Ok(Some(Mutex::new(writer)))
+        } else {
+            Ok(None)
         }
     }
 

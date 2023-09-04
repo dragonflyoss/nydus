@@ -611,6 +611,7 @@ impl BlobCompactor {
             Features::new(),
             false,
             None,
+            None,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
