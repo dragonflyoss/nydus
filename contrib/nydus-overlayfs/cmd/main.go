@@ -13,7 +13,11 @@ import (
 )
 
 const (
+	// Extra mount option to pass Nydus specific information from snapshotter to runtime through containerd.
 	extraOptionKey = "extraoption="
+	// Kata virtual volume infmation passed from snapshotter to runtime through containerd, superset of `extraOptionKey`.
+	// Please refer to `KataVirtualVolume` in https://github.com/kata-containers/kata-containers/blob/main/src/libs/kata-types/src/mount.rs
+	kataVolumeOptionKey = "io.katacontainers.volume="
 )
 
 var (
@@ -44,7 +48,7 @@ func parseArgs(args []string) (*mountArgs, error) {
 	}
 	if args[2] == "-o" && len(args[3]) != 0 {
 		for _, opt := range strings.Split(args[3], ",") {
-			if strings.HasPrefix(opt, extraOptionKey) {
+			if strings.HasPrefix(opt, extraOptionKey) || strings.HasPrefix(opt, kataVolumeOptionKey) {
 				// filter extraoption
 				continue
 			}
