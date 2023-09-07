@@ -31,7 +31,7 @@ php
 bash
 caddy
 telegraf
-vault
+hashicorp/vault
 couchdb
 eclipse-mosquitto
 cassandra
