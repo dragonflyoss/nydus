@@ -946,6 +946,26 @@ impl RafsInode for OndiskInodeWrapper {
         0
     }
 
+    #[inline]
+    fn is_blkdev(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFBLK as u32
+    }
+
+    #[inline]
+    fn is_chrdev(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFCHR as u32
+    }
+
+    #[inline]
+    fn is_sock(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFSOCK as u32
+    }
+
+    #[inline]
+    fn is_fifo(&self) -> bool {
+        self.mode_format_bits() == libc::S_IFIFO as u32
+    }
+
     fn is_dir(&self) -> bool {
         self.mode_format_bits() == libc::S_IFDIR as u32
     }

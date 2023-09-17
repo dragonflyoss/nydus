@@ -1313,7 +1313,16 @@ impl Command {
 
                 Some(Arc::new(local_fs))
             }
-            None => Self::get_backend(matches, "unpacker").ok(),
+            None => {
+                if let Some(backend) = &config.backend {
+                    Some(BlobFactory::new_backend(&backend, "unpacker")?)
+                } else {
+                    match Self::get_backend(matches, "unpacker") {
+                        Ok(backend) => Some(backend),
+                        Err(_) => bail!("one of `--blob`, `--blob-dir` and `--backend-config` must be specified"),
+                    }
+                }
+            }
         };
 
         OCIUnpacker::new(bootstrap, backend, output)

@@ -714,6 +714,10 @@ impl RafsInode for OndiskInodeWrapper {
         self
     }
 
+    impl_inode_wrapper!(is_blkdev, bool);
+    impl_inode_wrapper!(is_chrdev, bool);
+    impl_inode_wrapper!(is_sock, bool);
+    impl_inode_wrapper!(is_fifo, bool);
     impl_inode_wrapper!(is_dir, bool);
     impl_inode_wrapper!(is_reg, bool);
     impl_inode_wrapper!(is_symlink, bool);

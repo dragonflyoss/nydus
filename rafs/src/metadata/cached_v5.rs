@@ -461,6 +461,26 @@ impl RafsInode for CachedInodeV5 {
     }
 
     #[inline]
+    fn is_blkdev(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32
+    }
+
+    #[inline]
+    fn is_chrdev(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32
+    }
+
+    #[inline]
+    fn is_sock(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32
+    }
+
+    #[inline]
+    fn is_fifo(&self) -> bool {
+        self.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32
+    }
+
+    #[inline]
     fn is_dir(&self) -> bool {
         self.i_mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
     }

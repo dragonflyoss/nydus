@@ -167,37 +167,34 @@ impl SectionBuilder for OCIDirBuilder {
 
 pub struct OCIRegBuilder {
     ext_builder: Rc<PAXExtensionSectionBuilder>,
-    reader: Option<Arc<dyn BlobReader>>,
-    compressor: Option<Algorithm>,
+    readers: HashMap<u32, Arc<dyn BlobReader>>,
+    compressors: HashMap<u32, Algorithm>,
 }
 
 impl OCIRegBuilder {
     pub fn new(
         ext_builder: Rc<PAXExtensionSectionBuilder>,
-        reader: Option<Arc<dyn BlobReader>>,
-        compressor: Option<Algorithm>,
+        readers: HashMap<u32, Arc<dyn BlobReader>>,
+        compressors: HashMap<u32, Algorithm>,
     ) -> Self {
         OCIRegBuilder {
             ext_builder,
-            reader,
-            compressor,
+            readers,
+            compressors,
         }
     }
 
     fn build_data(&self, inode: &dyn RafsInodeExt) -> Box<dyn Read> {
-        if self.reader.is_none() {
-            return Box::new(io::empty());
-        }
-
         let chunks = (0..inode.get_chunk_count())
             .map(|i| inode.get_chunk_info(i).unwrap())
             .collect();
 
-        let reader = ChunkReader::new(
-            *self.compressor.as_ref().unwrap(),
-            self.reader.as_ref().unwrap().clone(),
-            chunks,
-        );
+        let mut compressors = HashMap::new();
+        compressors.clone_from(&self.compressors);
+
+        let mut readers = HashMap::new();
+        readers.clone_from(&self.readers);
+        let reader = ChunkReader::new(compressors, readers, chunks);
 
         Box::new(reader)
     }
@@ -702,8 +699,8 @@ impl Util {
 }
 
 struct ChunkReader {
-    compressor: Algorithm,
-    reader: Arc<dyn BlobReader>,
+    compressors: HashMap<u32, Algorithm>,
+    readers: HashMap<u32, Arc<dyn BlobReader>>,
 
     chunks: IntoIter<Arc<dyn BlobChunkInfo>>,
     chunk: Cursor<Vec<u8>>,
@@ -711,13 +708,13 @@ struct ChunkReader {
 
 impl ChunkReader {
     fn new(
-        compressor: Algorithm,
-        reader: Arc<dyn BlobReader>,
+        compressors: HashMap<u32, Algorithm>,
+        readers: HashMap<u32, Arc<dyn BlobReader>>,
         chunks: Vec<Arc<dyn BlobChunkInfo>>,
     ) -> Self {
         Self {
-            compressor,
-            reader,
+            compressors,
+            readers,
             chunks: chunks.into_iter(),
             chunk: Cursor::new(Vec::new()),
         }
@@ -725,7 +722,13 @@ impl ChunkReader {
 
     fn load_chunk(&mut self, chunk: &dyn BlobChunkInfo) -> Result<()> {
         let mut buf = alloc_buf(chunk.compressed_size() as usize);
-        self.reader
+
+        let reader = self
+            .readers
+            .get(&chunk.blob_index())
+            .expect("No valid reader")
+            .clone();
+        reader
             .read(buf.as_mut_slice(), chunk.compressed_offset())
             .map_err(|err| {
                 error!("fail to read chunk, error: {:?}", err);
@@ -737,8 +740,13 @@ impl ChunkReader {
             return Ok(());
         }
 
+        let compressor = *self
+            .compressors
+            .get(&chunk.blob_index())
+            .expect("No valid compressor");
+
         let mut data = vec![0u8; chunk.uncompressed_size() as usize];
-        compress::decompress(buf.as_mut_slice(), data.as_mut_slice(), self.compressor)
+        compress::decompress(buf.as_mut_slice(), data.as_mut_slice(), compressor)
             .with_context(|| "fail to decompress")?;
 
         self.chunk = Cursor::new(data);

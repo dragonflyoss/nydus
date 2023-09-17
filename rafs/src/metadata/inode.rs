@@ -156,7 +156,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.is_chrdev(),
             InodeWrapper::V6(i) => i.is_chrdev(),
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.as_inode().is_chrdev(),
         }
     }
 
@@ -183,7 +183,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.is_sock(),
             InodeWrapper::V6(i) => i.is_sock(),
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.as_inode().is_dir(),
         }
     }
 
@@ -322,7 +322,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.i_uid,
             InodeWrapper::V6(i) => i.i_uid,
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.as_inode().get_attr().uid,
         }
     }
 
@@ -341,7 +341,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.i_gid,
             InodeWrapper::V6(i) => i.i_gid,
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(i) => i.as_inode().get_attr().gid,
         }
     }
 
