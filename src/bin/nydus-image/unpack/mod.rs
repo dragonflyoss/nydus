@@ -2,6 +2,7 @@
 // Copyright (C) 2022 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -115,8 +116,7 @@ impl OCITarBuilderFactory {
     ) -> Result<Box<dyn TarBuilder>> {
         let writer = self.create_writer(output_path)?;
 
-        let blob = meta.superblock.get_blob_infos().pop();
-        let builders = self.create_builders(blob, blob_backend)?;
+        let builders = self.create_builders(meta, blob_backend)?;
 
         let builder = OCITarBuilder::new(builders, writer);
 
@@ -139,7 +139,7 @@ impl OCITarBuilderFactory {
 
     fn create_builders(
         &self,
-        blob: Option<Arc<BlobInfo>>,
+        meta: &RafsSuper,
         blob_backend: &Option<Arc<dyn BlobBackend + Send + Sync>>,
     ) -> Result<Vec<Box<dyn SectionBuilder>>> {
         // PAX basic builders
@@ -155,7 +155,8 @@ impl OCITarBuilderFactory {
         let fifo_builder = OCIFifoBuilder::new(special_builder.clone());
         let char_builder = OCICharBuilder::new(special_builder.clone());
         let block_builder = OCIBlockBuilder::new(special_builder);
-        let reg_builder = self.create_reg_builder(blob, blob_backend)?;
+        let blobs = meta.superblock.get_blob_infos();
+        let reg_builder = self.create_reg_builder(blobs, blob_backend)?;
 
         // The order counts.
         let builders = vec![
@@ -174,29 +175,28 @@ impl OCITarBuilderFactory {
 
     fn create_reg_builder(
         &self,
-        blob: Option<Arc<BlobInfo>>,
+        blobs: Vec<Arc<BlobInfo>>,
         blob_backend: &Option<Arc<dyn BlobBackend + Send + Sync>>,
     ) -> Result<OCIRegBuilder> {
-        let (reader, compressor) = match blob {
-            None => (None, None),
-            Some(ref blob) => {
-                let blob_backend = blob_backend
-                    .as_deref()
-                    .with_context(|| "both blob path or blob backend config are not specified")?;
-                let reader = blob_backend
-                    .get_reader("unpacker")
-                    .map_err(|err| anyhow!("fail to get reader, error {:?}", err))?;
+        let mut readers = HashMap::new();
+        let mut compressors = HashMap::new();
+        for blob in blobs {
+            let blob_backend = blob_backend
+                .as_deref()
+                .with_context(|| "both blob path or blob backend config are not specified")?;
+            let reader = blob_backend
+                .get_reader(blob.blob_id().as_str())
+                .map_err(|err| anyhow!("fail to get reader, error {:?}", err))?;
 
-                let compressor = blob.compressor();
-
-                (Some(reader), Some(compressor))
-            }
-        };
+            let compressor = blob.compressor();
+            readers.insert(blob.blob_index(), reader);
+            compressors.insert(blob.blob_index(), compressor);
+        }
 
         Ok(OCIRegBuilder::new(
             Rc::new(PAXExtensionSectionBuilder::new()),
-            reader,
-            compressor,
+            readers,
+            compressors,
         ))
     }
 }

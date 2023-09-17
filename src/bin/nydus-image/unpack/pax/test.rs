@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::{io::Read, sync::Arc};
 
 use nydus_storage::backend::{BackendResult, BlobReader};
@@ -79,7 +80,7 @@ impl BlobChunkInfo for MockChunkInfo {
     }
 
     fn blob_index(&self) -> u32 {
-        todo!();
+        0
     }
 
     fn compressed_offset(&self) -> u64 {
@@ -206,7 +207,13 @@ fn create_compress_chunk_reader() -> ChunkReader {
 
     let blob_reader = Arc::new(MockBlobReader::new(compressed_chunk.into_owned()));
 
-    ChunkReader::new(Algorithm::GZip, blob_reader, vec![meta])
+    let mut readers: HashMap<u32, Arc<dyn BlobReader>> = HashMap::new();
+    readers.insert(meta.blob_index(), blob_reader);
+
+    let mut compressors: HashMap<u32, Algorithm> = HashMap::new();
+    compressors.insert(meta.blob_index(), Algorithm::GZip);
+
+    ChunkReader::new(compressors, readers, vec![meta])
 }
 
 fn create_default_chunk_reader() -> ChunkReader {
@@ -230,5 +237,13 @@ fn create_default_chunk_reader() -> ChunkReader {
 
     let blob_reader = Arc::new(MockBlobReader::new([chunk1, chunk2].concat()));
 
-    ChunkReader::new(Algorithm::None, blob_reader, vec![chunk_meta1, chunk_meta2])
+    let mut readers: HashMap<u32, Arc<dyn BlobReader>> = HashMap::new();
+    readers.insert(chunk_meta1.blob_index(), blob_reader.clone());
+    readers.insert(chunk_meta2.blob_index(), blob_reader);
+
+    let mut compressors: HashMap<u32, Algorithm> = HashMap::new();
+    compressors.insert(chunk_meta1.blob_index(), Algorithm::None);
+    compressors.insert(chunk_meta2.blob_index(), Algorithm::None);
+
+    ChunkReader::new(compressors, readers, vec![chunk_meta1, chunk_meta2])
 }
