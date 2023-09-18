@@ -762,8 +762,6 @@ fn main() -> Result<()> {
         Command::merge(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("check") {
         Command::check(matches, &build_info)
-    } else if let Some(matches) = cmd.subcommand_matches("export") {
-        Command::export(&cmd, matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("inspect") {
         Command::inspect(matches)
     } else if let Some(matches) = cmd.subcommand_matches("stat") {
@@ -773,8 +771,18 @@ fn main() -> Result<()> {
     } else if let Some(matches) = cmd.subcommand_matches("unpack") {
         Command::unpack(matches)
     } else {
-        println!("{}", usage);
-        Ok(())
+        #[cfg(target_os = "linux")]
+        if let Some(matches) = cmd.subcommand_matches("export") {
+            Command::export(&cmd, matches, &build_info)
+        } else {
+            println!("{}", usage);
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            println!("{}", usage);
+            Ok(())
+        }
     }
 }
 
@@ -1726,17 +1734,6 @@ impl Command {
             path.as_ref()
         );
         Ok(())
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-impl Command {
-    fn export(
-        _args: &ArgMatches,
-        _subargs: &ArgMatches,
-        _build_info: &BuildTimeInfo,
-    ) -> Result<()> {
-        unimplemented!()
     }
 }
 
