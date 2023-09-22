@@ -128,28 +128,31 @@ impl Database for SqliteDatabase {
 }
 
 pub struct Deduplicate<D: Database + Send + Sync> {
-    sb: RafsSuper,
     db: D,
 }
 
 const IN_MEMORY_DB_URL: &str = ":memory:";
 
 impl Deduplicate<SqliteDatabase> {
-    pub fn new(bootstrap_path: &Path, config: Arc<ConfigV2>, db_url: &str) -> anyhow::Result<Self> {
-        let (sb, _) = RafsSuper::load_from_file(bootstrap_path, config, false)?;
+    pub fn new(db_url: &str) -> anyhow::Result<Self> {
         let db = if db_url == IN_MEMORY_DB_URL {
             SqliteDatabase::new_in_memory()?
         } else {
             SqliteDatabase::new(db_url)?
         };
-        Ok(Self { sb, db })
+        Ok(Self { db })
     }
 
-    pub fn save_metadata(&mut self) -> anyhow::Result<Vec<Arc<BlobInfo>>> {
+    pub fn save_metadata(
+        &mut self,
+        bootstrap_path: &Path,
+        config: Arc<ConfigV2>,
+    ) -> anyhow::Result<Vec<Arc<BlobInfo>>> {
+        let (sb, _) = RafsSuper::load_from_file(bootstrap_path, config, false)?;
         self.create_tables()?;
-        let blob_infos = self.sb.superblock.get_blob_infos();
+        let blob_infos = sb.superblock.get_blob_infos();
         self.insert_blobs(&blob_infos)?;
-        self.insert_chunks(&blob_infos)?;
+        self.insert_chunks(&blob_infos, &sb)?;
         Ok(blob_infos)
     }
 
@@ -176,7 +179,11 @@ impl Deduplicate<SqliteDatabase> {
         Ok(())
     }
 
-    fn insert_chunks(&mut self, blob_infos: &[Arc<BlobInfo>]) -> anyhow::Result<()> {
+    fn insert_chunks(
+        &mut self,
+        blob_infos: &[Arc<BlobInfo>],
+        sb: &RafsSuper,
+    ) -> anyhow::Result<()> {
         let process_chunk = &mut |t: &Tree| -> Result<()> {
             let node = t.lock_node();
             for chunk in &node.chunks {
@@ -195,7 +202,7 @@ impl Deduplicate<SqliteDatabase> {
             }
             Ok(())
         };
-        let tree = Tree::from_bootstrap(&self.sb, &mut ())
+        let tree = Tree::from_bootstrap(sb, &mut ())
             .context("Failed to load bootstrap for deduplication.")?;
         tree.walk_dfs_pre(process_chunk)?;
         Ok(())

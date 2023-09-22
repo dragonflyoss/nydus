@@ -34,7 +34,7 @@ use nydus_builder::{
 use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
-use nydus_storage::device::{BlobFeatures, BlobInfo};
+use nydus_storage::device::BlobFeatures;
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::{format_blob_features, BatchContextGenerator};
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
@@ -369,7 +369,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                             .short('B')
                             .long("bootstrap")
                             .help("File path of RAFS meta blob/bootstrap")
-                            .conflicts_with("BOOTSTRAP")
                             .required(false),
                         )
                     .arg(
@@ -399,7 +398,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     )
                     .arg(arg_output_json.clone())
             )
-    );
+                );
 
     let app = app.subcommand(
         App::new("merge")
@@ -1151,32 +1150,17 @@ impl Command {
             bail!("Invalid database URL: {}", db_url);
         }
 
-        let blobs: Vec<Arc<BlobInfo>> = match db_strs[0] {
+        match db_strs[0] {
             "sqlite" => {
                 let mut deduplicate: Deduplicate<SqliteDatabase> =
-                    Deduplicate::<SqliteDatabase>::new(bootstrap_path, config, db_strs[1])?;
-                deduplicate.save_metadata()?
+                    Deduplicate::<SqliteDatabase>::new(db_strs[1])?;
+                deduplicate.save_metadata(bootstrap_path, config)?
             }
             _ => {
                 bail!("Unsupported database type: {}, please use a valid database URI, such as 'sqlite:///path/to/database.db'.", db_strs[0])
             }
         };
-        info!("RAFS filesystem metadata is saved:");
-
-        let mut blob_ids = Vec::new();
-        for (idx, blob) in blobs.iter().enumerate() {
-            info!(
-                "\t {}: {}, compressed data size 0x{:x}, compressed file size 0x{:x}, uncompressed file size 0x{:x}, chunks: 0x{:x}, features: {}.",
-                idx,
-                blob.blob_id(),
-                blob.compressed_data_size(),
-                blob.compressed_size(),
-                blob.uncompressed_size(),
-                blob.chunk_count(),
-                format_blob_features(blob.features()),
-            );
-            blob_ids.push(blob.blob_id().to_string());
-        }
+        info!("Chunkdict metadata is saved at: {:?}", db_url);
         Ok(())
     }
 
