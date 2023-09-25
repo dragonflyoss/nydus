@@ -40,6 +40,7 @@ pub mod http_proxy;
 pub mod localdisk;
 #[cfg(feature = "backend-localfs")]
 pub mod localfs;
+pub mod noop;
 #[cfg(any(feature = "backend-oss", feature = "backend-s3"))]
 pub mod object_storage;
 #[cfg(feature = "backend-oss")]

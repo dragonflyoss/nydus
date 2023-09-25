@@ -27,6 +27,7 @@ use crate::backend::http_proxy;
 use crate::backend::localdisk;
 #[cfg(feature = "backend-localfs")]
 use crate::backend::localfs;
+use crate::backend::noop::Noop;
 #[cfg(feature = "backend-oss")]
 use crate::backend::oss;
 #[cfg(feature = "backend-registry")]
@@ -117,6 +118,11 @@ impl BlobFactory {
     ) -> IOResult<Arc<dyn BlobCache>> {
         let backend_cfg = config.get_backend_config()?;
         let cache_cfg = config.get_cache_config()?;
+        let use_cache_only = if let Ok(config) = config.get_rafs_config() {
+            config.use_cache_only
+        } else {
+            false
+        };
         let key = BlobCacheMgrKey {
             config: config.clone(),
         };
@@ -125,7 +131,12 @@ impl BlobFactory {
         if let Some(mgr) = guard.get(&key) {
             return mgr.get_blob_cache(blob_info);
         }
-        let backend = Self::new_backend(backend_cfg, &blob_info.blob_id())?;
+
+        let backend = if use_cache_only {
+            Self::new_noop_backend(&blob_info.blob_id())?
+        } else {
+            Self::new_backend(backend_cfg, &blob_info.blob_id())?
+        };
         let mgr = match cache_cfg.cache_type.as_str() {
             "blobcache" | "filecache" => {
                 let mgr = FileCacheMgr::new(cache_cfg, backend, ASYNC_RUNTIME.clone(), &config.id)?;
@@ -190,6 +201,10 @@ impl BlobFactory {
         }
     }
 
+    pub fn new_noop_backend(blob_id: &str) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
+        Ok(Arc::new(Noop::new(Some(blob_id))?))
+    }
+
     /// Create a storage backend for the blob with id `blob_id`.
     #[allow(unused_variables)]
     pub fn new_backend(
@@ -227,6 +242,7 @@ impl BlobFactory {
                 config.get_http_proxy_config()?,
                 Some(blob_id),
             )?)),
+            "noop" => Ok(Arc::new(Noop::new(Some(blob_id))?)),
             _ => Err(einval!(format!(
                 "unsupported backend type '{}'",
                 config.backend_type

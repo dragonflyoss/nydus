@@ -69,6 +69,8 @@ type NydusdConfig struct {
 	AccessPattern   bool
 	PrefetchFiles   []string
 	AmplifyIO       uint64
+	DisableChunkMap	bool
+	UseCacheOnly	bool
 }
 
 type Nydusd struct {
@@ -90,10 +92,12 @@ var configTpl = `
 			 "type": "{{.CacheType}}",
 			 "config": {
 				 "compressed": {{.CacheCompressed}},
-				 "work_dir": "{{.BlobCacheDir}}"
+				 "work_dir": "{{.BlobCacheDir}}",
+				 "disable_chunk_map": {{.DisableChunkMap}}
 			 }
 		 }
 	 },
+	 "use_cache_only": {{.UseCacheOnly}},
 	 "mode": "{{.RafsMode}}",
 	 "iostats_files": {{.IOStatsFiles}},
 	 "fs_prefetch": {
