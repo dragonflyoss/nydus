@@ -229,7 +229,7 @@ impl FileCacheEntry {
                 Arc::new(BlobStateMap::from(NoopChunkMap::new(true))) as Arc<dyn ChunkMap>;
             (file, None, chunk_map, true, true, false)
         } else {
-            let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
+            let blob_file_path = format!("{}/{}", mgr.work_dir, blob_id);
             let (chunk_map, is_direct_chunkmap) =
                 Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
             // Validation is supported by RAFS v5 (which has no meta_ci) or v6 with chunk digest array.
