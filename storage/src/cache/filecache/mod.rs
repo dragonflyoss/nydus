@@ -72,7 +72,7 @@ impl FileCacheMgr {
             worker_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
             disable_indexed_map: blob_cfg.disable_indexed_map,
-            disable_chunk_map: blob_cfg.disbale_chunk_map,
+            disable_chunk_map: blob_cfg.disable_chunk_map,
             validate: config.cache_validate,
             cache_raw_data: config.cache_compressed,
             cache_encrypted: blob_cfg.enable_encryption,
@@ -233,8 +233,7 @@ impl FileCacheEntry {
         } else {
             let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
             let (chunk_map, is_direct_chunkmap) = if mgr.disable_chunk_map {
-                let chunk_map =
-                    Arc::new(BlobStateMap::from(NoopChunkMap::new(true))) as Arc<dyn ChunkMap>;
+                let chunk_map = Arc::new(NoopChunkMap::new(true)) as Arc<dyn ChunkMap>;
                 (chunk_map, true)
             } else {
                 Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?

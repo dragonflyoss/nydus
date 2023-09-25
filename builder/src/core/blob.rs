@@ -229,9 +229,11 @@ impl Blob {
             meta.set_len(
                 aligned_uncompressed_size + size_of::<BlobCompressionContextHeader>() as u64,
             )?;
+            meta.seek(std::io::SeekFrom::Start(0))?;
             meta.write_all(ci_data)?;
             meta.seek(std::io::SeekFrom::Start(aligned_uncompressed_size))?;
             meta.write_all(header.as_bytes())?;
+            meta.flush()?;
         }
         let encrypted_header =
             crypt::encrypt_with_context(header.as_bytes(), cipher_obj, cipher_ctx, encrypt)?;

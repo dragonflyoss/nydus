@@ -49,6 +49,8 @@ pub mod registry;
 #[cfg(feature = "backend-s3")]
 pub mod s3;
 
+pub mod noop;
+
 /// Error codes related to storage backend operations.
 #[derive(Debug)]
 pub enum BackendError {

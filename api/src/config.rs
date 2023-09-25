@@ -339,6 +339,7 @@ impl BackendConfigV2 {
                 }
                 None => return false,
             },
+            "noop" => return true,
             _ => return false,
         }
 
@@ -755,9 +756,9 @@ pub struct FileCacheConfig {
     /// Key for data encryption, a heximal representation of [u8; 32].
     #[serde(default)]
     pub encryption_key: String,
-    // disbale chunk map, it is assumed that all data is ready
+    /// disable chunk map func,
     #[serde(default)]
-    pub disbale_chunk_map: bool,
+    pub disable_chunk_map: bool,
 }
 
 impl FileCacheConfig {
@@ -845,6 +846,9 @@ pub struct RafsConfigV2 {
     /// Filesystem prefetching configuration.
     #[serde(default)]
     pub prefetch: PrefetchConfigV2,
+    // Only use cache, don't access the backend
+    #[serde(default)]
+    pub use_cache_only: bool,
 }
 
 impl RafsConfigV2 {
@@ -1369,6 +1373,9 @@ struct RafsConfig {
     // ZERO value means, amplifying user io is not enabled.
     #[serde(default = "default_batch_size")]
     pub amplify_io: usize,
+    // Only use cache, don't access the backend
+    #[serde(default)]
+    pub use_cache_only: bool,
 }
 
 impl TryFrom<RafsConfig> for ConfigV2 {
@@ -1386,6 +1393,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
             access_pattern: v.access_pattern,
             latest_read_files: v.latest_read_files,
             prefetch: v.fs_prefetch.into(),
+            use_cache_only: v.use_cache_only,
         };
         if !cache.prefetch.enable && rafs.prefetch.enable {
             cache.prefetch = rafs.prefetch.clone();
