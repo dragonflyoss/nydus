@@ -20,6 +20,7 @@ serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 vm-memory = "0.10"
 fuse-backend-rs = "^0.10.3"
+thiserror = "1"
 
 nydus-api = { version = "0.3", path = "../api" }
 nydus-storage = { version = "0.6", path = "../storage", features = ["backend-localfs"] }

@@ -1217,6 +1217,7 @@ dependencies = [
  "nydus-utils",
  "serde",
  "serde_json",
+ "thiserror",
  "vm-memory",
  "vmm-sys-util",
 ]
