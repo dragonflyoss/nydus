@@ -17,8 +17,9 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use thiserror::Error;
 
-use anyhow::bail;
+use anyhow::{bail, ensure};
 use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::api::filesystem::Entry;
 use nydus_api::{ConfigV2, RafsConfigV2};
@@ -409,44 +410,56 @@ pub struct RafsSuperConfig {
     pub is_tarfs_mode: bool,
 }
 
+#[derive(Error, Debug)]
+pub enum MergeError {
+    #[error("Inconsistent RAFS Filesystem: {0}")]
+    InconsistentFilesystem(String),
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
 impl RafsSuperConfig {
     /// Check compatibility for two RAFS filesystems.
-    pub fn check_compatibility(&self, meta: &RafsSuperMeta) -> Result<()> {
-        if self.chunk_size != meta.chunk_size {
-            return Err(einval!(format!(
+    pub fn check_compatibility(&self, meta: &RafsSuperMeta) -> anyhow::Result<()> {
+        ensure!(
+            self.chunk_size == meta.chunk_size,
+            MergeError::InconsistentFilesystem(format!(
                 "Inconsistent configuration of chunk_size: {} vs {}",
                 self.chunk_size, meta.chunk_size
-            )));
-        }
+            ))
+        );
 
-        if self.explicit_uidgid != meta.explicit_uidgid() {
-            return Err(einval!(format!(
-                "Using inconsistent explicit_uidgid setting {:?}, target explicit_uidgid setting {:?}",
-                self.explicit_uidgid,
-                meta.explicit_uidgid()
-            )));
-        }
+        ensure!(
+            self.explicit_uidgid == meta.explicit_uidgid(),
+            MergeError::InconsistentFilesystem(format!(
+                    "Using inconsistent explicit_uidgid setting {:?}, target explicit_uidgid setting {:?}",
+                    self.explicit_uidgid,
+                    meta.explicit_uidgid()
+                ))
+        );
 
-        if u32::from(self.version) != meta.version {
-            return Err(einval!(format!(
+        let meta_version = RafsVersion::try_from(meta.version);
+        ensure!(
+            u32::from(self.version) == meta.version,
+            MergeError::InconsistentFilesystem(format!(
                 "Using inconsistent RAFS version {:?}, target RAFS version {:?}",
-                self.version,
-                RafsVersion::try_from(meta.version)?
-            )));
-        }
+                self.version, meta_version
+            ))
+        );
 
-        if self.version == RafsVersion::V5 && self.digester != meta.get_digester() {
-            return Err(einval!(format!(
+        ensure!(
+            self.version != RafsVersion::V5 || self.digester == meta.get_digester(),
+            MergeError::InconsistentFilesystem(format!(
                 "RAFS v5 can not support different digest algorithm due to inode digest, {} vs {}",
                 self.digester,
                 meta.get_digester()
-            )));
-        }
-
+            ))
+        );
         let is_tarfs_mode = meta.flags.contains(RafsSuperFlags::TARTFS_MODE);
-        if is_tarfs_mode != self.is_tarfs_mode {
-            return Err(einval!(format!("Using inconsistent RAFS TARFS mode")));
-        }
+        ensure!(
+            is_tarfs_mode == self.is_tarfs_mode,
+            MergeError::InconsistentFilesystem("Using inconsistent RAFS TARFS mode".to_string(),)
+        );
 
         Ok(())
     }

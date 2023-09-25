@@ -31,7 +31,7 @@ use nydus_builder::{
     BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder, Feature, Features,
     HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
 };
-use nydus_rafs::metadata::{RafsSuper, RafsSuperConfig, RafsVersion};
+use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::device::BlobFeatures;
@@ -758,7 +758,14 @@ fn main() -> Result<()> {
             }
         }
     } else if let Some(matches) = cmd.subcommand_matches("merge") {
-        Command::merge(matches, &build_info)
+        let result = Command::merge(matches, &build_info);
+        if let Err(ref err) = result {
+            if let Some(MergeError::InconsistentFilesystem(_)) = err.downcast_ref::<MergeError>() {
+                error!("message:{}", err);
+                std::process::exit(2);
+            }
+        }
+        result
     } else if let Some(matches) = cmd.subcommand_matches("check") {
         Command::check(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("inspect") {
