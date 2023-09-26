@@ -29,6 +29,8 @@ use nydus_api::{ConfigV2, DaemonErrorKind};
 use nydus_rafs::RafsError;
 use serde::{Deserialize, Serialize};
 use serde_json::Error as SerdeError;
+use versionize::{VersionMap, Versionize, VersionizeError, VersionizeResult};
+use versionize_derive::Versionize;
 
 pub mod daemon;
 mod fs_service;
@@ -79,7 +81,7 @@ pub enum Error {
     ChannelSend(#[from] SendError<crate::daemon::DaemonStateMachineInput>),
     #[error("failed to receive message from channel, {0}")]
     ChannelReceive(#[from] RecvError),
-    #[error(transparent)]
+    #[error("failed to upgrade nydusd daemon, {0}")]
     UpgradeManager(upgrade::UpgradeMgrError),
     #[error("failed to start service, {0}")]
     StartService(String),
@@ -134,7 +136,7 @@ impl From<Error> for DaemonErrorKind {
     fn from(e: Error) -> Self {
         use Error::*;
         match e {
-            UpgradeManager(_) => DaemonErrorKind::UpgradeManager,
+            UpgradeManager(e) => DaemonErrorKind::UpgradeManager(format!("{:?}", e)),
             NotReady => DaemonErrorKind::NotReady,
             Unsupported => DaemonErrorKind::Unsupported,
             Serde(e) => DaemonErrorKind::Serde(e),
@@ -148,7 +150,7 @@ impl From<Error> for DaemonErrorKind {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Type of supported backend filesystems.
-#[derive(Clone, Debug, Serialize, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Serialize, PartialEq, Deserialize, Versionize)]
 pub enum FsBackendType {
     /// Registry Accelerated File System
     Rafs,

@@ -145,10 +145,9 @@ impl FuseServer {
     }
 }
 
-struct FusedevFsService {
+pub struct FusedevFsService {
     /// Fuse connection ID which usually equals to `st_dev`
     pub conn: AtomicU64,
-    #[allow(dead_code)]
     pub failover_policy: FailoverPolicy,
     pub session: Mutex<FuseSession>,
 
@@ -254,7 +253,7 @@ pub struct FusedevDaemon {
     result_receiver: Mutex<Receiver<NydusResult<()>>>,
     service: Arc<FusedevFsService>,
     state: AtomicI32,
-    supervisor: Option<String>,
+    pub supervisor: Option<String>,
     threads_cnt: u32,
     state_machine_thread: Mutex<Option<JoinHandle<Result<()>>>>,
     fuse_service_threads: Mutex<Vec<JoinHandle<Result<()>>>>,
