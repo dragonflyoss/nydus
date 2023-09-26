@@ -35,7 +35,7 @@ path = "src/lib.rs"
 anyhow = "1"
 clap = { version = "4.0.18", features = ["derive", "cargo"] }
 flexi_logger = { version = "0.25", features = ["compress"] }
-fuse-backend-rs = "^0.10.4"
+fuse-backend-rs = { git = "https://github.com/loheagn/fuse-backend-rs.git", branch = "vfs-persist" }
 hex = "0.4.3"
 hyper = "0.14.11"
 hyperlocal = "0.8.0"
@@ -57,16 +57,25 @@ openssl = { version = "0.10.55", features = ["vendored"] }
 # pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
 #openssl-src = { version = "111.22" }
 
-nydus-api = { version = "0.3.0", path = "api", features = ["error-backtrace", "handler"] }
+nydus-api = { version = "0.3.0", path = "api", features = [
+    "error-backtrace",
+    "handler",
+] }
 nydus-builder = { version = "0.1.0", path = "builder" }
 nydus-rafs = { version = "0.3.1", path = "rafs" }
-nydus-service = { version = "0.3.0", path = "service", features = ["block-device"] }
-nydus-storage = { version = "0.6.3", path = "storage", features = ["prefetch-rate-limit"] }
+nydus-service = { version = "0.3.0", path = "service", features = [
+    "block-device",
+] }
+nydus-storage = { version = "0.6.3", path = "storage", features = [
+    "prefetch-rate-limit",
+] }
 nydus-utils = { version = "0.4.2", path = "utils" }
 
 vhost = { version = "0.6.0", features = ["vhost-user-slave"], optional = true }
 vhost-user-backend = { version = "0.8.0", optional = true }
-virtio-bindings = { version = "0.1", features = ["virtio-v5_0_0"], optional = true }
+virtio-bindings = { version = "0.1", features = [
+    "virtio-v5_0_0",
+], optional = true }
 virtio-queue = { version = "0.7.0", optional = true }
 vm-memory = { version = "0.10.0", features = ["backend-mmap"], optional = true }
 vmm-sys-util = { version = "0.11.0", optional = true }
@@ -96,15 +105,25 @@ virtiofs = [
     "vm-memory",
     "vmm-sys-util",
 ]
-block-nbd = [
-    "nydus-service/block-nbd"
-]
+block-nbd = ["nydus-service/block-nbd"]
 
 backend-http-proxy = ["nydus-storage/backend-http-proxy"]
-backend-localdisk = ["nydus-storage/backend-localdisk", "nydus-storage/backend-localdisk-gpt"]
+backend-localdisk = [
+    "nydus-storage/backend-localdisk",
+    "nydus-storage/backend-localdisk-gpt",
+]
 backend-oss = ["nydus-storage/backend-oss"]
 backend-registry = ["nydus-storage/backend-registry"]
 backend-s3 = ["nydus-storage/backend-s3"]
 
 [workspace]
-members = ["api", "builder", "clib", "rafs", "storage", "service", "utils"]
+members = [
+    "api",
+    "builder",
+    "clib",
+    "rafs",
+    "storage",
+    "service",
+    "upgrade",
+    "utils",
+]

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, MutexGuard};
 
+use fuse_backend_rs::api::vfs::VfsError;
 use fuse_backend_rs::api::{BackFileSystem, Vfs};
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::passthrough::{Config, PassthroughFs};
@@ -21,12 +22,14 @@ use nydus_rafs::fs::Rafs;
 use nydus_rafs::{RafsError, RafsIoRead};
 use nydus_storage::factory::BLOB_FACTORY;
 use serde::{Deserialize, Serialize};
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 
 use crate::upgrade::UpgradeManager;
 use crate::{Error, FsBackendDescriptor, FsBackendType, Result};
 
 /// Request structure to mount a filesystem instance.
-#[derive(Clone)]
+#[derive(Clone, Versionize)]
 pub struct FsBackendMountCmd {
     /// Filesystem type.
     pub fs_type: FsBackendType,
@@ -122,6 +125,7 @@ pub trait FsService: Send + Sync {
                     "failed to add filesystem instance to upgrade manager, {}",
                     e
                 );
+                mgr_guard.disable_upgrade();
                 warn!("disable online upgrade due to inconsistent status!!!");
             }
         }
@@ -162,10 +166,22 @@ pub trait FsService: Send + Sync {
                     "failed to update filesystem instance to upgrade manager, {}",
                     e
                 );
+                mgr_guard.disable_upgrade();
                 warn!("disable online upgrade due to inconsistent status!!!");
             }
         }
 
+        Ok(())
+    }
+
+    /// Restore a filesystem instance.
+    fn restore_mount(&self, cmd: &FsBackendMountCmd, vfs_index: u8) -> Result<()> {
+        let backend = fs_backend_factory(cmd)?;
+        self.get_vfs()
+            .restore_mount(backend, vfs_index, &cmd.mountpoint)
+            .map_err(VfsError::RestoreMount)?;
+        self.backend_collection().add(&cmd.mountpoint, &cmd)?;
+        info!("backend fs restored at {}", cmd.mountpoint);
         Ok(())
     }
 

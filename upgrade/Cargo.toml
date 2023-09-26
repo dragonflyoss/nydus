@@ -1,0 +1,16 @@
+[package]
+name = "nydus-upgrade"
+version = "0.1.0"
+description = "Nydus Daemon Upgrade"
+authors = ["The Nydus Developers"]
+license = "Apache-2.0"
+homepage = "https://nydus.dev/"
+repository = "https://github.com/dragonflyoss/image-service"
+edition = "2021"
+
+[dependencies]
+sendfd = "0.4.3"
+snapshot = { git = "https://github.com/firecracker-microvm/firecracker", tag = "v1.4.1" }
+thiserror = "1"
+versionize_derive = "0.1.6"
+versionize = "0.1.10"
