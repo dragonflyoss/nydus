@@ -132,7 +132,7 @@ pub enum DaemonErrorKind {
     /// Unexpected event type.
     UnexpectedEvent(String),
     /// Can't upgrade the daemon.
-    UpgradeManager,
+    UpgradeManager(String),
     /// Unsupported requests.
     Unsupported,
 }

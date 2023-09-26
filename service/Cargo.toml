@@ -12,7 +12,9 @@ resolver = "2"
 [dependencies]
 bytes = { version = "1", optional = true }
 dbs-allocator = { version = "0.1.1", optional = true }
-fuse-backend-rs = "^0.10.3"
+fuse-backend-rs = { git = "https://github.com/loheagn/fuse-backend-rs.git", branch = "vfs-persist", features = [
+    "persist",
+] }
 libc = "0.2"
 log = "0.4.8"
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
@@ -23,15 +25,20 @@ serde_json = "1.0.51"
 thiserror = "1.0"
 time = { version = "0.3.14", features = ["serde-human-readable"] }
 tokio = { version = "1.24", features = ["macros"] }
+versionize_derive = "0.1.6"
+versionize = "0.1.10"
 
-nydus-api = { version = "0.3.0", path = "../api"}
+nydus-api = { version = "0.3.0", path = "../api" }
 nydus-rafs = { version = "0.3.1", path = "../rafs" }
 nydus-storage = { version = "0.6.3", path = "../storage" }
+nydus-upgrade = { version = "0.1.0", path = "../upgrade" }
 nydus-utils = { version = "0.4.2", path = "../utils" }
 
 vhost = { version = "0.6.0", features = ["vhost-user-slave"], optional = true }
 vhost-user-backend = { version = "0.8.0", optional = true }
-virtio-bindings = { version = "0.1", features = ["virtio-v5_0_0"], optional = true }
+virtio-bindings = { version = "0.1", features = [
+    "virtio-v5_0_0",
+], optional = true }
 virtio-queue = { version = "0.7.0", optional = true }
 vm-memory = { version = "0.10.0", features = ["backend-mmap"], optional = true }
 
@@ -52,10 +59,7 @@ virtiofs = [
     "virtio-bindings",
 ]
 
-block-device = [ "dbs-allocator", "tokio/fs"]
+block-device = ["dbs-allocator", "tokio/fs"]
 block-nbd = ["block-device", "bytes"]
 
-coco = [
-    "fuse-backend-rs/fusedev",
-    "nydus-storage/backend-registry",
-]
+coco = ["fuse-backend-rs/fusedev", "nydus-storage/backend-registry"]
