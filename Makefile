@@ -164,7 +164,6 @@ docker-nydusify-image-test: docker-static
 		-v $(current_dir):/nydus-rs $(dind_cache_mount) nydusify-smoke TestDockerHubImage
 
 # Run integration smoke test in docker-in-docker container. It requires some special settings,
-# refer to `misc/example/README.md` for details.
 docker-smoke: docker-nydus-smoke docker-nydusify-smoke
 
 contrib-build: nydusify ctr-remote nydus-overlayfs
@@ -223,14 +222,3 @@ nydus-overlayfs-clean:
 docker-static:
 	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/musl-static
 	docker run --rm ${CARGO_BUILD_GEARS} -e RUST_TARGET=${RUST_TARGET_STATIC} --workdir /nydus-rs -v ${current_dir}:/nydus-rs nydus-rs-static
-
-docker-example: all-static-release
-	cp ${current_dir}/target/${RUST_TARGET_STATIC}/release/nydusd misc/example
-	cp ${current_dir}/target/${RUST_TARGET_STATIC}/release/nydus-image misc/example
-	cp contrib/nydusify/cmd/nydusify misc/example
-	docker build -t nydus-rs-example misc/example
-	@cid=$(shell docker run --rm -t -d --privileged $(dind_cache_mount) nydus-rs-example)
-	@docker exec $$cid /run.sh
-	@EXIT_CODE=$$?
-	@docker rm -f $$cid
-	@exit $$EXIT_CODE
