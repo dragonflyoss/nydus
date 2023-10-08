@@ -545,7 +545,7 @@ fn process_fs_service(
 
 fn process_singleton_arguments(
     subargs: &SubCmdArgs,
-    _apisock: Option<&str>,
+    apisock: Option<&str>,
     bti: BuildTimeInfo,
 ) -> Result<()> {
     let id = subargs.value_of("id").map(|id| id.to_string());
@@ -572,6 +572,8 @@ fn process_singleton_arguments(
         config,
         bti,
         DAEMON_CONTROLLER.alloc_waker(),
+        apisock,
+        subargs.is_present("upgrade"),
     )
     .map_err(|e| {
         error!("Failed to start singleton daemon: {}", e);

@@ -15,7 +15,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 libc = "0.2.137"
 log = "0.4.17"
-fuse-backend-rs = { git = "https://github.com/loheagn/fuse-backend-rs.git", branch = "vfs-persist" }
+fuse-backend-rs = "^0.11.0"
 nydus-api = { version = "0.3", path = "../api" }
 nydus-rafs = { version = "0.3.1", path = "../rafs" }
 nydus-storage = { version = "0.6.3", path = "../storage" }

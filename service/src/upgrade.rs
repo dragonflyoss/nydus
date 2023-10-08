@@ -7,16 +7,20 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
+use std::fs::File;
 use std::io;
-use std::os::fd::RawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 
+use nydus_api::BlobCacheEntry;
 use nydus_upgrade::backend::unix_domain_socket::UdsStorageBackend;
 use nydus_upgrade::backend::{StorageBackend, StorageBackendErr};
 
 use crate::fs_service::{FsBackendMountCmd, FsBackendUmountCmd};
 use crate::{Error, Result};
+use fuse_backend_rs::api::Vfs;
+use versionize::{VersionMap, Versionize, VersionizeResult};
+use versionize_derive::Versionize;
 
 /// Error codes related to upgrade manager.
 #[derive(thiserror::Error, Debug)]
@@ -26,11 +30,14 @@ pub enum UpgradeMgrError {
 
     #[error("failed to save/restore data via the backend, {0}")]
     StorageBackendError(StorageBackendErr),
-
     #[error("failed to serialize, {0}")]
     Serialize(io::Error),
     #[error("failed to deserialize, {0}")]
     Deserialize(io::Error),
+    #[error("failed to clone file, {0}")]
+    CloneFile(io::Error),
+    #[error("failed to initialize fscache driver, {0}")]
+    InitializeFscache(io::Error),
 }
 
 impl From<UpgradeMgrError> for Error {
@@ -68,55 +75,121 @@ impl TryFrom<&String> for FailoverPolicy {
     }
 }
 
-const MAX_STATE_DATA_LENGTH: usize = 1024 * 32;
+struct FscacheState {
+    blob_entry_map: HashMap<String, BlobCacheEntry>,
+    threads: usize,
+    path: String,
+}
+
+#[derive(Versionize, Clone)]
+struct MountStateWrapper {
+    cmd: FsBackendMountCmd,
+    vfs_index: u8,
+}
+
+struct FusedevState {
+    fs_mount_cmd_map: HashMap<String, MountStateWrapper>,
+    vfs_state_data: Vec<u8>,
+    fuse_conn_id: u64,
+}
 
 /// Online upgrade manager.
 pub struct UpgradeManager {
-    // backend_mount_cmd_map records the mount command of each backend filesystem.
-    // the structure is: mountpoint -> (FsBackendMountCmd, vfs_index)
-    backend_mount_cmd_map: HashMap<String, (FsBackendMountCmd, u8)>,
-    fds: Vec<RawFd>,
+    fscache_deamon_stat: FscacheState,
+    fuse_deamon_stat: FusedevState,
+    file: Option<File>,
     backend: Box<dyn StorageBackend>,
-
-    disabled: AtomicBool,
 }
 
 impl UpgradeManager {
     /// Create a new instance of [UpgradeManager].
     pub fn new(socket_path: PathBuf) -> Self {
         UpgradeManager {
-            backend_mount_cmd_map: HashMap::new(),
+            fscache_deamon_stat: FscacheState {
+                blob_entry_map: HashMap::new(),
+                threads: 1,
+                path: "".to_string(),
+            },
+            fuse_deamon_stat: FusedevState {
+                fs_mount_cmd_map: HashMap::new(),
+                vfs_state_data: vec![],
+                fuse_conn_id: 0,
+            },
+            file: None,
             backend: Box::new(UdsStorageBackend::new(socket_path)),
-            fds: Vec::new(),
-            disabled: AtomicBool::new(false),
+        }
+    }
+    pub fn add_blob_entry_state(&mut self, entry: BlobCacheEntry) {
+        let mut blob_state_id = entry.domain_id.to_string();
+        blob_state_id.push('/');
+        blob_state_id.push_str(&entry.blob_id);
+
+        self.fscache_deamon_stat
+            .blob_entry_map
+            .insert(blob_state_id, entry);
+    }
+
+    pub fn remove_blob_entry_state(&mut self, domain_id: &str, blob_id: &str) {
+        let mut blob_state_id = domain_id.to_string();
+        blob_state_id.push('/');
+        // for no shared domain mode, snapshotter will call unbind without blob_id
+        if !blob_id.is_empty() {
+            blob_state_id.push_str(blob_id);
+        } else {
+            blob_state_id.push_str(domain_id);
+        }
+
+        if self
+            .fscache_deamon_stat
+            .blob_entry_map
+            .remove(&blob_state_id)
+            .is_none()
+        {
+            warn!("blob {}: state was not saved before!", blob_state_id)
         }
     }
 
-    /// Add a filesystem instance into the upgrade manager.
-    pub fn add_mounts_state(&mut self, cmd: FsBackendMountCmd, vfs_index: u8) -> Result<()> {
-        if self.disabled.load(Ordering::Acquire) {
-            return Err(Error::Unsupported);
-        }
+    pub fn save_fscache_states(&mut self, threads: usize, path: String) {
+        self.fscache_deamon_stat.path = path;
+        self.fscache_deamon_stat.threads = threads;
+    }
 
-        let cmd_map = &mut self.backend_mount_cmd_map;
-        if cmd_map.contains_key(&cmd.mountpoint) {
-            return Err(Error::AlreadyExists);
-        }
+    pub fn save_fuse_cid(&mut self, fuse_conn_id: u64) {
+        self.fuse_deamon_stat.fuse_conn_id = fuse_conn_id;
+    }
 
-        cmd_map.insert(cmd.mountpoint.clone(), (cmd, vfs_index));
+    pub fn save_vfs_stat(&mut self, vfs: &Vfs) -> Result<()> {
+        let vfs_state_data = vfs.save_to_bytes().map_err(|e| {
+            let io_err = io::Error::new(
+                io::ErrorKind::Other,
+                format!("Failed to save vfs state: {:?}", e),
+            );
+            UpgradeMgrError::Serialize(io_err)
+        })?;
+        self.fuse_deamon_stat.vfs_state_data = vfs_state_data;
         Ok(())
+    }
+
+    /// Add a filesystem instance into the upgrade manager.
+    pub fn add_mounts_state(&mut self, cmd: FsBackendMountCmd, vfs_index: u8) {
+        let cmd_wrapper = MountStateWrapper {
+            cmd: cmd.clone(),
+            vfs_index,
+        };
+        self.fuse_deamon_stat
+            .fs_mount_cmd_map
+            .insert(cmd.mountpoint, cmd_wrapper);
     }
 
     /// Update a filesystem instance in the upgrade manager.
     pub fn update_mounts_state(&mut self, cmd: FsBackendMountCmd) -> Result<()> {
-        if self.disabled.load(Ordering::Acquire) {
-            return Err(Error::Unsupported);
-        }
-
-        let cmd_map = &mut self.backend_mount_cmd_map;
-        match cmd_map.get_mut(&cmd.mountpoint) {
-            Some(cmd_with_vfs_idx) => {
-                cmd_with_vfs_idx.0 = cmd;
+        match self
+            .fuse_deamon_stat
+            .fs_mount_cmd_map
+            .get_mut(&cmd.mountpoint)
+        {
+            Some(cmd_wrapper) => {
+                cmd_wrapper.cmd = cmd;
                 Ok(())
             }
             None => Err(Error::NotFound),
@@ -124,140 +197,254 @@ impl UpgradeManager {
     }
 
     /// Remove a filesystem instance from the upgrade manager.
-    pub fn remove_mounts_state(&mut self, cmd: FsBackendUmountCmd) -> Result<()> {
-        if self.disabled.load(Ordering::Acquire) {
-            return Err(Error::Unsupported);
-        }
-
-        let cmd_map = &mut self.backend_mount_cmd_map;
-        match cmd_map.get_mut(&cmd.mountpoint) {
-            Some(_) => {
-                cmd_map.remove(&cmd.mountpoint);
-                Ok(())
-            }
-            None => Err(Error::NotFound),
+    pub fn remove_mounts_state(&mut self, cmd: FsBackendUmountCmd) {
+        if self
+            .fuse_deamon_stat
+            .fs_mount_cmd_map
+            .remove(&cmd.mountpoint)
+            .is_none()
+        {
+            warn!(
+                "mount state for {}: state was not saved before!",
+                cmd.mountpoint
+            )
         }
     }
 
-    /// Disable online upgrade capability.
-    pub fn disable_upgrade(&mut self) {
-        self.disabled.store(true, Ordering::Release);
-    }
+    /// Save the fd and daemon state data for online upgrade.
+    fn save(&mut self, data: &[u8]) -> Result<()> {
+        let mut fds = Vec::new();
+        if let Some(ref f) = self.file {
+            fds.push(f.as_raw_fd())
+        }
 
-    /// Save the fuse fds and fuse state data for online upgrade.
-    fn save(&mut self, data: &Vec<u8>) -> Result<()> {
         self.backend
-            .save(&self.fds, data)
+            .save(&fds, data)
             .map_err(UpgradeMgrError::StorageBackendError)?;
         Ok(())
     }
 
-    /// Restore the fuse fds and fuse state data for online upgrade.
+    /// Restore the fd and daemon state data for online upgrade.
     fn restore(&mut self) -> Result<Vec<u8>> {
-        let mut fds = vec![0 as RawFd; 8];
-        let mut state_data = vec![0u8; MAX_STATE_DATA_LENGTH];
-        let (state_data_len, fds_len) = self
+        let (fds, state_data) = self
             .backend
-            .restore(&mut fds, &mut state_data)
+            .restore()
             .map_err(UpgradeMgrError::StorageBackendError)?;
-        fds.truncate(fds_len);
-        state_data.truncate(state_data_len);
-
-        self.fds = fds;
+        if fds.len() != 1 {
+            warn!("Too many fds {}, we may not correctly handle it", fds.len());
+        }
+        self.file = Some(unsafe { File::from_raw_fd(fds[0]) });
         Ok(state_data)
     }
 
-    fn add_fd(&mut self, fd: RawFd) {
-        self.fds.push(fd);
+    pub fn hold_file(&mut self, fd: &File) -> Result<()> {
+        let f = fd.try_clone().map_err(UpgradeMgrError::CloneFile)?;
+        self.file = Some(f);
+
+        Ok(())
+    }
+
+    pub fn return_file(&mut self) -> Option<File> {
+        if let Some(ref f) = self.file {
+            // Basically, this can hardly fail.
+            f.try_clone()
+                .map_err(|e| {
+                    error!("Clone file error, {}", e);
+                    e
+                })
+                .ok()
+        } else {
+            warn!("No file can be returned");
+            None
+        }
+    }
+}
+#[cfg(target_os = "linux")]
+/// Online upgrade utilities for fscache daemon.
+pub mod fscache_upgrade {
+    use std::convert::TryFrom;
+    use std::str::FromStr;
+
+    use super::*;
+    use crate::daemon::NydusDaemon;
+    use crate::singleton::ServiceController;
+    use nydus_upgrade::persist::Snapshotter;
+    use versionize::{VersionMap, Versionize, VersionizeResult};
+    use versionize_derive::Versionize;
+
+    #[derive(Versionize, Clone)]
+    pub struct BlobCacheEntryState {
+        json_str: String,
+    }
+
+    #[derive(Versionize, Clone, Default)]
+    struct FscacheBackendState {
+        blob_entry_list: Vec<(String, BlobCacheEntryState)>,
+        threads: usize,
+        path: String,
+    }
+
+    impl Snapshotter for FscacheBackendState {
+        fn get_versions() -> Vec<HashMap<TypeId, u16>> {
+            vec![
+                // version 1
+                HashMap::from([(FscacheBackendState::type_id(), 1)]),
+                // more versions for the future
+            ]
+        }
+    }
+
+    impl TryFrom<&FscacheBackendState> for FscacheState {
+        type Error = std::io::Error;
+        fn try_from(backend_stat: &FscacheBackendState) -> std::result::Result<Self, Self::Error> {
+            let mut map = HashMap::new();
+            for (id, entry_stat) in &backend_stat.blob_entry_list {
+                let entry = BlobCacheEntry::from_str(&entry_stat.json_str)?;
+                map.insert(id.to_string(), entry);
+            }
+            Ok(FscacheState {
+                blob_entry_map: map,
+                threads: backend_stat.threads,
+                path: backend_stat.path.clone(),
+            })
+        }
+    }
+
+    impl TryFrom<&FscacheState> for FscacheBackendState {
+        type Error = std::io::Error;
+        fn try_from(stat: &FscacheState) -> std::result::Result<Self, Self::Error> {
+            let mut list = Vec::new();
+            for (id, entry) in &stat.blob_entry_map {
+                let entry_stat = serde_json::to_string(&entry)?;
+                list.push((
+                    id.to_string(),
+                    BlobCacheEntryState {
+                        json_str: entry_stat,
+                    },
+                ));
+            }
+            Ok(FscacheBackendState {
+                blob_entry_list: list,
+                threads: stat.threads,
+                path: stat.path.clone(),
+            })
+        }
+    }
+
+    pub fn save(daemon: &ServiceController) -> Result<()> {
+        if let Some(mut mgr) = daemon.upgrade_mgr() {
+            let backend_stat = FscacheBackendState::try_from(&mgr.fscache_deamon_stat)
+                .map_err(UpgradeMgrError::Serialize)?;
+            let stat = backend_stat.save().map_err(UpgradeMgrError::Serialize)?;
+            mgr.save(&stat)?;
+        }
+        Ok(())
+    }
+
+    pub fn restore(daemon: &ServiceController) -> Result<()> {
+        if let Some(mut mgr) = daemon.upgrade_mgr() {
+            if let Some(blob_mgr) = daemon.get_blob_cache_mgr() {
+                // restore the mgr state via the backend in the mgr
+                let mut state_data = mgr.restore()?;
+
+                let backend_stat = FscacheBackendState::restore(&mut state_data)
+                    .map_err(UpgradeMgrError::Deserialize)?;
+
+                let stat =
+                    FscacheState::try_from(&backend_stat).map_err(UpgradeMgrError::Deserialize)?;
+                // restore blob entry
+                stat.blob_entry_map
+                    .iter()
+                    .try_for_each(|(_, entry)| -> Result<()> {
+                        blob_mgr
+                            .add_blob_entry(entry)
+                            .map_err(UpgradeMgrError::Deserialize)?;
+                        Ok(())
+                    })?;
+
+                // init fscache daemon with restored fd
+                if let Some(f) = mgr.return_file() {
+                    daemon
+                        .initialize_fscache_service(None, stat.threads, &stat.path, Some(&f))
+                        .map_err(UpgradeMgrError::InitializeFscache)?;
+                }
+
+                //restore upgrade manager fscache stat
+                mgr.fscache_deamon_stat = stat;
+                return Ok(());
+            }
+        }
+        Err(UpgradeMgrError::MissingSupervisorPath.into())
     }
 }
 
 /// Online upgrade utilities for FUSE daemon.
 pub mod fusedev_upgrade {
-    use std::fs::File;
-    use std::os::fd::{FromRawFd, RawFd};
-    use std::os::unix::io::AsRawFd;
     use std::sync::atomic::Ordering;
-
-    use nydus_upgrade::persist::Snapshotter;
-    use versionize::{VersionMap, Versionize, VersionizeResult};
-    use versionize_derive::Versionize;
 
     use super::*;
     use crate::daemon::NydusDaemon;
     use crate::fusedev::{FusedevDaemon, FusedevFsService};
+    use nydus_upgrade::persist::Snapshotter;
+    use versionize::{VersionMap, Versionize, VersionizeResult};
+    use versionize_derive::Versionize;
 
     #[derive(Versionize, Clone, Default)]
-    struct FusedevState {
-        backend_fs_mount_cmd_list: Vec<(FsBackendMountCmd, u8)>,
+    struct FusedevBackendState {
+        fs_mount_cmd_list: Vec<(String, MountStateWrapper)>,
         vfs_state_data: Vec<u8>,
         fuse_conn_id: u64,
     }
 
-    impl Snapshotter for FusedevState {
+    impl Snapshotter for FusedevBackendState {
         fn get_versions() -> Vec<HashMap<TypeId, u16>> {
             vec![
                 // version 1
-                HashMap::from([(FusedevState::type_id(), 1)]),
+                HashMap::from([(FusedevBackendState::type_id(), 1)]),
                 // more versions for the future
             ]
+        }
+    }
+
+    impl From<&FusedevBackendState> for FusedevState {
+        fn from(backend_stat: &FusedevBackendState) -> Self {
+            let mut map = HashMap::new();
+            for (mp, mw) in &backend_stat.fs_mount_cmd_list {
+                map.insert(mp.to_string(), mw.clone());
+            }
+            FusedevState {
+                fs_mount_cmd_map: map,
+                vfs_state_data: backend_stat.vfs_state_data.clone(),
+                fuse_conn_id: backend_stat.fuse_conn_id,
+            }
+        }
+    }
+
+    impl From<&FusedevState> for FusedevBackendState {
+        fn from(stat: &FusedevState) -> Self {
+            let mut list = Vec::new();
+            for (mp, mw) in &stat.fs_mount_cmd_map {
+                list.push((mp.to_string(), mw.clone()));
+            }
+            FusedevBackendState {
+                fs_mount_cmd_list: list,
+                vfs_state_data: stat.vfs_state_data.clone(),
+                fuse_conn_id: stat.fuse_conn_id,
+            }
         }
     }
 
     /// Save state information for a FUSE daemon.
     pub fn save(daemon: &FusedevDaemon) -> Result<()> {
         let svc = daemon.get_default_fs_service().ok_or(Error::NotFound)?;
-
         if !svc.get_vfs().initialized() {
             return Err(Error::NotReady);
         }
 
         let mut mgr = svc.upgrade_mgr().unwrap();
+        let backend_stat = FusedevBackendState::from(&mgr.fuse_deamon_stat);
 
-        // set fd
-        let fd = svc
-            .as_ref()
-            .as_any()
-            .downcast_ref::<FusedevFsService>()
-            .unwrap()
-            .session
-            .lock()
-            .unwrap()
-            .get_fuse_file()
-            .unwrap()
-            .as_raw_fd();
-        mgr.add_fd(fd);
-
-        // save vfs state
-        let vfs_state_data = svc.get_vfs().save_to_bytes().map_err(|e| {
-            let io_err = io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to save vfs state: {:?}", e),
-            );
-            UpgradeMgrError::Serialize(io_err)
-        })?;
-
-        let backend_fs_mount_cmd_list = mgr
-            .backend_mount_cmd_map
-            .iter()
-            .map(|(_, (cmd, vfs_idx))| (cmd.clone(), *vfs_idx))
-            .collect();
-
-        let fuse_conn_id = svc
-            .as_any()
-            .downcast_ref::<FusedevFsService>()
-            .unwrap()
-            .conn
-            .load(Ordering::Acquire);
-
-        let state = FusedevState {
-            backend_fs_mount_cmd_list,
-            vfs_state_data,
-            fuse_conn_id,
-        };
-        let state = state.save().map_err(UpgradeMgrError::Serialize)?;
-
-        // save the mgr state via the backend in the mgr
+        let state = backend_stat.save().map_err(UpgradeMgrError::Serialize)?;
         mgr.save(&state)?;
 
         Ok(())
@@ -276,17 +463,10 @@ pub mod fusedev_upgrade {
         // restore the mgr state via the backend in the mgr
         let mut state_data = mgr.restore()?;
 
-        let mut state =
-            FusedevState::restore(&mut state_data).map_err(UpgradeMgrError::Deserialize)?;
+        let backend_state =
+            FusedevBackendState::restore(&mut state_data).map_err(UpgradeMgrError::Deserialize)?;
 
-        // restore the backend fs mount cmd map
-        state
-            .backend_fs_mount_cmd_list
-            .iter()
-            .for_each(|(cmd, vfs_idx)| {
-                mgr.backend_mount_cmd_map
-                    .insert(cmd.mountpoint.clone(), (cmd.clone(), *vfs_idx));
-            });
+        let mut state = FusedevState::from(&backend_state);
 
         // restore the fuse daemon
         svc.as_any()
@@ -296,26 +476,31 @@ pub mod fusedev_upgrade {
             .store(state.fuse_conn_id, Ordering::Release);
 
         // restore fuse fd
-        svc.as_any()
-            .downcast_ref::<FusedevFsService>()
-            .unwrap()
-            .session
-            .lock()
-            .unwrap()
-            .set_fuse_file(unsafe { File::from_raw_fd(mgr.fds[0] as RawFd) });
+        if let Some(f) = mgr.return_file() {
+            svc.as_any()
+                .downcast_ref::<FusedevFsService>()
+                .unwrap()
+                .session
+                .lock()
+                .unwrap()
+                .set_fuse_file(f);
+        }
 
         // restore vfs
         svc.get_vfs()
             .restore_from_bytes(&mut state.vfs_state_data)?;
         state
-            .backend_fs_mount_cmd_list
+            .fs_mount_cmd_map
             .iter()
-            .try_for_each(|(cmd, vfs_idx)| -> Result<()> {
-                svc.restore_mount(cmd, *vfs_idx)?;
+            .try_for_each(|(_, mount_wrapper)| -> Result<()> {
+                svc.restore_mount(&mount_wrapper.cmd, mount_wrapper.vfs_index)?;
                 // as we are in upgrade stage and obtain the lock, `unwrap` is safe here
-                mgr.add_mounts_state(cmd.clone(), *vfs_idx).unwrap();
+                //mgr.add_mounts_state(cmd.clone(), *vfs_idx);
                 Ok(())
             })?;
+
+        //restore upgrade manager fuse stat
+        mgr.fuse_deamon_stat = state;
 
         Ok(())
     }

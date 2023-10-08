@@ -502,6 +502,15 @@ impl FileSystem for Rafs {
     type Inode = Inode;
     type Handle = Handle;
 
+    #[cfg(target_os = "macos")]
+    fn init(&self, _opts: FsOptions) -> Result<FsOptions> {
+        Ok(
+            // These fuse features are supported by rafs by default.
+            FsOptions::ASYNC_READ | FsOptions::BIG_WRITES | FsOptions::ATOMIC_O_TRUNC,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
     fn init(&self, _opts: FsOptions) -> Result<FsOptions> {
         Ok(
             // These fuse features are supported by rafs by default.
@@ -823,7 +832,10 @@ impl FileSystem for Rafs {
         _flags: u32,
     ) -> Result<(Option<Self::Handle>, OpenOptions)> {
         // Cache dir since we are readonly
-        Ok((None, OpenOptions::CACHE_DIR | OpenOptions::KEEP_CACHE))
+        #[cfg(target_os = "macos")]
+        return Ok((None, OpenOptions::KEEP_CACHE));
+        #[cfg(target_os = "linux")]
+        return Ok((None, OpenOptions::CACHE_DIR | OpenOptions::KEEP_CACHE));
     }
 
     fn releasedir(&self, _ctx: &Context, _inode: u64, _flags: u32, _handle: u64) -> Result<()> {
@@ -1033,6 +1045,7 @@ mod tests {
         assert_eq!(ent.inode, 0);
         assert_eq!(ent.generation, 0);
         assert_eq!(ent.attr_flags, 0);
+        #[cfg(target_os = "linux")]
         rafs.init(FsOptions::ASYNC_DIO).unwrap();
         rafs.open(&Context::default(), Inode::default(), 0, 0)
             .unwrap();

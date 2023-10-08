@@ -16,15 +16,15 @@ pub enum StorageBackendErr {
 
 pub type Result<T> = std::result::Result<T, StorageBackendErr>;
 
-/// StorageBackend trait is used to save and restore the fuse fds and fuse state data for online upgrade.
+/// StorageBackend trait is used to save and restore the dev fds and daemon state data for online upgrade.
 pub trait StorageBackend: Send + Sync {
-    /// Save the fuse fds and fuse state data for online upgrade.
-    /// Returns the length of bytes of fuse state data.
+    /// Save the dev fds and daemon state data for online upgrade.
+    /// Returns the length of bytes of state data.
     fn save(&mut self, fds: &[RawFd], data: &[u8]) -> Result<usize>;
 
-    /// Restore the fuse fds and fuse state data for online upgrade.
-    /// Returns the length of bytes of fuse state data and the length of fds.
-    fn restore(&mut self, fds: &mut Vec<RawFd>, data: &mut Vec<u8>) -> Result<(usize, usize)>;
+    /// Restore the dev fds and daemon state data for online upgrade.
+    /// Returns the fds and state data
+    fn restore(&mut self) -> Result<(Vec<RawFd>, Vec<u8>)>;
 }
 
 #[cfg(test)]
@@ -53,18 +53,8 @@ mod test {
                 Ok(self.data.len())
             }
 
-            fn restore(
-                &mut self,
-                fds: &mut Vec<RawFd>,
-                data: &mut Vec<u8>,
-            ) -> Result<(usize, usize)> {
-                fds.truncate(self.fds.len());
-                fds.copy_from_slice(&self.fds);
-
-                data.truncate(self.data.len());
-                data.copy_from_slice(&self.data);
-
-                Ok((data.len(), fds.len()))
+            fn restore(&mut self) -> Result<(Vec<RawFd>, Vec<u8>)> {
+                Ok((self.fds.clone(), self.data.clone()))
             }
         }
 
@@ -73,20 +63,11 @@ mod test {
         let fds = [5 as RawFd; FDS_LEN];
         let data: [u8; DATA_LEN] = [7, 8, 9, 10, 12];
 
-        let mut backend: Box<dyn StorageBackend> = Box::new(TestStorageBackend::default());
+        let mut backend: Box<dyn StorageBackend> = Box::<TestStorageBackend>::default();
         let saved_data_len = backend.save(&fds, &data).unwrap();
         assert_eq!(saved_data_len, DATA_LEN);
 
-        let mut restored_fds = vec![0 as RawFd; 100];
-        let mut restored_data = vec![0 as u8; 100];
-        let (restored_data_len, restored_fds_len) = backend
-            .restore(&mut restored_fds, &mut restored_data)
-            .unwrap();
-        assert_eq!(restored_data_len, DATA_LEN);
-        assert_eq!(restored_fds_len, FDS_LEN);
-
-        restored_data.truncate(restored_data_len);
-        restored_fds.truncate(restored_fds_len);
+        let (restored_fds, restored_data) = backend.restore().unwrap();
         assert_eq!(restored_data, data);
         assert_eq!(restored_fds, fds);
     }

@@ -605,6 +605,7 @@ pub fn create_fuse_daemon(
                 error!("service session mount error: {}", &e);
                 eother!(e)
             })?;
+
         daemon
             .on_event(DaemonStateMachineInput::Mount)
             .map_err(|e| eother!(e))?;
@@ -615,12 +616,34 @@ pub fn create_fuse_daemon(
             .service
             .conn
             .store(calc_fuse_conn(mnt)?, Ordering::Relaxed);
+
+        if let Some(f) = daemon.service.session.lock().unwrap().get_fuse_file() {
+            if let Some(mut m) = daemon.service.upgrade_mgr() {
+                m.hold_file(f).map_err(|e| {
+                    error!("Failed to hold fusedev fd, {:?}", e);
+                    eother!(e)
+                })?;
+                m.save_fuse_cid(daemon.service.conn.load(Ordering::Acquire));
+            }
+        }
     }
 
     Ok(daemon)
 }
 
 /// Create vfs backend with rafs or passthrough as the fuse filesystem driver
+
+#[cfg(target_os = "macos")]
+pub fn create_vfs_backend(
+    _fs_type: FsBackendType,
+    _is_fuse: bool,
+    _hybrid_mode: bool,
+) -> Result<Arc<Vfs>> {
+    let vfs = fuse_backend_rs::api::Vfs::new(fuse_backend_rs::api::VfsOptions::default());
+    Ok(Arc::new(vfs))
+}
+
+#[cfg(target_os = "linux")]
 pub fn create_vfs_backend(
     fs_type: FsBackendType,
     is_fuse: bool,

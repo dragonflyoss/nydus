@@ -120,14 +120,8 @@ pub trait FsService: Send + Sync {
             );
         }
         if let Some(mut mgr_guard) = self.upgrade_mgr() {
-            if let Err(e) = mgr_guard.add_mounts_state(cmd, index) {
-                warn!(
-                    "failed to add filesystem instance to upgrade manager, {}",
-                    e
-                );
-                mgr_guard.disable_upgrade();
-                warn!("disable online upgrade due to inconsistent status!!!");
-            }
+            mgr_guard.add_mounts_state(cmd, index);
+            mgr_guard.save_vfs_stat(self.get_vfs())?;
         }
 
         Ok(())
@@ -161,14 +155,7 @@ pub trait FsService: Send + Sync {
         }
         // Update mounts opaque from UpgradeManager
         if let Some(mut mgr_guard) = self.upgrade_mgr() {
-            if let Err(e) = mgr_guard.update_mounts_state(cmd) {
-                warn!(
-                    "failed to update filesystem instance to upgrade manager, {}",
-                    e
-                );
-                mgr_guard.disable_upgrade();
-                warn!("disable online upgrade due to inconsistent status!!!");
-            }
+            mgr_guard.update_mounts_state(cmd)?;
         }
 
         Ok(())
@@ -195,12 +182,8 @@ pub trait FsService: Send + Sync {
         self.backend_collection().del(&cmd.mountpoint);
         if let Some(mut mgr_guard) = self.upgrade_mgr() {
             // Remove mount opaque from UpgradeManager
-            if let Err(e) = mgr_guard.remove_mounts_state(cmd) {
-                warn!(
-                    "failed to remove filesystem instance from upgrade manager, {}",
-                    e
-                );
-            }
+            mgr_guard.remove_mounts_state(cmd);
+            mgr_guard.save_vfs_stat(self.get_vfs())?;
         }
 
         debug!("try to gc unused blobs");
