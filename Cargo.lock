@@ -394,6 +394,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbs-snapshot"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf0c82c41414e93c765f9fb84d5531a836f6a0855c5e1c7fcf6cd2c20c85f6e"
+dependencies = [
+ "displaydoc",
+ "libc",
+ "thiserror",
+ "versionize",
+ "versionize_derive",
+]
+
+[[package]]
 name = "dbs-uhttp"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -412,6 +425,17 @@ dependencies = [
  "block-buffer",
  "crypto-common",
  "subtle",
+]
+
+[[package]]
+name = "displaydoc"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "487585f4d0c6655fe74905e2504d8ad6908e4db67f744eb140876906c2f3175d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.37",
 ]
 
 [[package]]
@@ -538,19 +562,20 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.10.5"
-source = "git+https://github.com/loheagn/fuse-backend-rs.git?branch=vfs-persist#be366463fa66e2e675e32e79b3a5500e58f153d1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5a63a89f40ec26a0a1434e89de3f4ee939a920eae15d641053ee09ee6ed44b"
 dependencies = [
  "arc-swap",
  "bitflags 1.3.2",
  "caps",
  "core-foundation-sys",
+ "dbs-snapshot",
  "lazy_static",
  "libc",
  "log",
  "mio",
  "nix",
- "snapshot",
  "versionize",
  "versionize_derive",
  "vhost",

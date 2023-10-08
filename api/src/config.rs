@@ -1070,7 +1070,7 @@ pub const BLOB_CACHE_TYPE_META_BLOB: &str = "bootstrap";
 pub const BLOB_CACHE_TYPE_DATA_BLOB: &str = "datablob";
 
 /// Configuration information for a cached blob.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BlobCacheEntry {
     /// Type of blob object, bootstrap or data blob.
     #[serde(rename = "type")]

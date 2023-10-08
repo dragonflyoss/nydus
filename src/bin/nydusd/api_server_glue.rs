@@ -280,6 +280,10 @@ impl ApiServer {
                         e
                     ))))
                 } else {
+                    if let Some(mut mgr_guard) = self.get_daemon_object()?.upgrade_mgr() {
+                        // if started with supervisor, save the blob entry state
+                        mgr_guard.add_blob_entry_state(entry.clone());
+                    }
                     Ok(ApiResponsePayload::Empty)
                 }
             }
@@ -296,6 +300,9 @@ impl ApiServer {
                         e
                     ))))
                 } else {
+                    if let Some(mut mgr_guard) = self.get_daemon_object()?.upgrade_mgr() {
+                        mgr_guard.remove_blob_entry_state(&param.domain_id, &param.blob_id);
+                    }
                     Ok(ApiResponsePayload::Empty)
                 }
             }

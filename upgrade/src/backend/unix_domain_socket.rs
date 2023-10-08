@@ -21,9 +21,11 @@ impl UdsStorageBackend {
     }
 }
 
+const MAX_STATE_DATA_LENGTH: usize = 1024 * 32;
+
 impl StorageBackend for UdsStorageBackend {
     fn save(&mut self, fds: &[RawFd], data: &[u8]) -> Result<usize> {
-        if fds.len() < 1 {
+        if fds.is_empty() {
             return Err(StorageBackendErr::NoEnoughFds);
         }
 
@@ -36,17 +38,19 @@ impl StorageBackend for UdsStorageBackend {
         Ok(len)
     }
 
-    fn restore(&mut self, fds: &mut Vec<RawFd>, data: &mut Vec<u8>) -> Result<(usize, usize)> {
+    fn restore(&mut self) -> Result<(Vec<RawFd>, Vec<u8>)> {
+        let mut data = vec![0u8; MAX_STATE_DATA_LENGTH];
+        let mut fds = vec![0i32; 16];
         let socket =
             UnixStream::connect(&self.socket_path).map_err(StorageBackendErr::CreateUnixStream)?;
-        let len_pair = socket
-            .recv_with_fd(data, fds)
+        let (_, fds_cnt) = socket
+            .recv_with_fd(data.as_mut_slice(), fds.as_mut_slice())
             .map_err(StorageBackendErr::RecvFd)?;
 
-        if fds.len() < 1 {
+        if fds.is_empty() {
             return Err(StorageBackendErr::NoEnoughFds);
         }
-
-        Ok(len_pair)
+        fds.truncate(fds_cnt);
+        Ok((fds, data))
     }
 }

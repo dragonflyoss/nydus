@@ -5,9 +5,14 @@
 //! Nydus daemon to host multiple services, including fscache and fusedev.
 
 use std::any::Any;
+use std::fs::metadata;
+#[cfg(target_os = "linux")]
+use std::fs::{File, OpenOptions};
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use mio::Waker;
 use nydus_api::config::BlobCacheList;
@@ -18,10 +23,13 @@ use crate::daemon::{
     NydusDaemon,
 };
 use crate::fs_service::FsService;
+#[cfg(target_os = "linux")]
+use crate::upgrade;
+use crate::upgrade::UpgradeManager;
 use crate::{BlobCacheMgr, Error, Result};
 
 #[allow(dead_code)]
-struct ServiceController {
+pub struct ServiceController {
     bti: BuildTimeInfo,
     id: Option<String>,
     request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
@@ -31,7 +39,7 @@ struct ServiceController {
     waker: Arc<Waker>,
 
     blob_cache_mgr: Arc<BlobCacheMgr>,
-
+    upgrade_mgr: Option<Mutex<UpgradeManager>>,
     fscache_enabled: AtomicBool,
     #[cfg(target_os = "linux")]
     fscache: Mutex<Option<Arc<crate::fs_cache::FsCacheHandler>>>,
@@ -97,11 +105,12 @@ impl ServiceController {
 
 #[cfg(target_os = "linux")]
 impl ServiceController {
-    fn initialize_fscache_service(
+    pub fn initialize_fscache_service(
         &self,
         tag: Option<&str>,
-        threads: Option<&str>,
+        threads: usize,
         path: &str,
+        file: Option<&File>,
     ) -> std::io::Result<()> {
         // Validate --fscache option value is an existing directory.
         let p = match std::path::Path::new(&path).canonicalize() {
@@ -125,12 +134,6 @@ impl ServiceController {
             }
         };
 
-        let threads = if let Some(threads_value) = threads {
-            crate::validate_threads_configuration(threads_value).map_err(|err| einval!(err))?
-        } else {
-            1usize
-        };
-
         info!(
             "Create fscache instance at {} with tag {}, {} working threads",
             p,
@@ -143,11 +146,21 @@ impl ServiceController {
             tag,
             self.blob_cache_mgr.clone(),
             threads,
+            file,
         )?;
         *self.fscache.lock().unwrap() = Some(Arc::new(fscache));
         self.fscache_enabled.store(true, Ordering::Release);
 
         Ok(())
+    }
+
+    fn get_fscache_file(&self) -> std::io::Result<File> {
+        if let Some(fscache) = self.fscache.lock().unwrap().clone() {
+            let f = fscache.get_file().try_clone()?;
+            Ok(f)
+        } else {
+            Err(einval!("fscache file not init"))
+        }
     }
 }
 
@@ -191,11 +204,21 @@ impl NydusDaemon for ServiceController {
     }
 
     fn save(&self) -> Result<()> {
-        Err(Error::Unsupported)
+        #[cfg(target_os = "linux")]
+        return upgrade::fscache_upgrade::save(self);
+        #[cfg(target_os = "macos")]
+        return Ok(());
     }
 
     fn restore(&self) -> Result<()> {
-        Err(Error::Unsupported)
+        #[cfg(target_os = "linux")]
+        return upgrade::fscache_upgrade::restore(self);
+        #[cfg(target_os = "macos")]
+        return Ok(());
+    }
+
+    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
+        self.upgrade_mgr.as_ref().map(|mgr| mgr.lock().unwrap())
     }
 
     fn get_default_fs_service(&self) -> Option<Arc<dyn FsService>> {
@@ -235,6 +258,36 @@ impl DaemonStateMachineSubscriber for ServiceController {
     }
 }
 
+#[allow(unused)]
+fn is_sock_residual(sock: impl AsRef<Path>) -> bool {
+    if metadata(&sock).is_ok() {
+        return UnixStream::connect(&sock).is_err();
+    }
+
+    false
+}
+/// When nydusd starts, it checks that whether a previous nydusd died unexpected by:
+///     1. Checking whether /dev/cachefiles can be opened.
+///     2. Checking whether the API socket exists and the connection can established or not.
+fn is_crashed(_sock: &impl AsRef<Path>) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    if let Err(_e) = OpenOptions::new()
+        .write(true)
+        .read(true)
+        .create(false)
+        .open("/dev/cachefiles")
+    {
+        warn!("cachefiles devfd can not open, the devfd may hold by supervisor or another daemon.");
+        if is_sock_residual(_sock) {
+            warn!("A previous daemon crashed! Try to failover later.");
+            return Ok(true);
+        }
+        warn!("another daemon is running, will exit!");
+        return Err(Error::Unsupported);
+    }
+    Ok(false)
+}
+
 /// Create and start a Nydus daemon to host fscache and fusedev services.
 #[allow(clippy::too_many_arguments, unused)]
 pub fn create_daemon(
@@ -246,40 +299,67 @@ pub fn create_daemon(
     config: Option<serde_json::Value>,
     bti: BuildTimeInfo,
     waker: Arc<Waker>,
+    api_sock: Option<impl AsRef<Path>>,
+    upgrade: bool,
 ) -> std::io::Result<Arc<dyn NydusDaemon>> {
     let (to_sm, from_client) = channel::<DaemonStateMachineInput>();
     let (to_client, from_sm) = channel::<Result<()>>();
+    let upgrade_mgr = supervisor
+        .as_ref()
+        .map(|s| Mutex::new(UpgradeManager::new(s.to_string().into())));
+
     let service_controller = ServiceController {
         bti,
         id,
         request_sender: Arc::new(Mutex::new(to_sm)),
         result_receiver: Mutex::new(from_sm),
-        state: Default::default(),
+        state: AtomicI32::new(DaemonState::INIT as i32),
         supervisor,
         waker,
 
         blob_cache_mgr: Arc::new(BlobCacheMgr::new()),
-
+        upgrade_mgr,
         fscache_enabled: AtomicBool::new(false),
         #[cfg(target_os = "linux")]
         fscache: Mutex::new(None),
     };
 
     service_controller.initialize_blob_cache(&config)?;
-    #[cfg(target_os = "linux")]
-    if let Some(path) = fscache {
-        service_controller.initialize_fscache_service(tag, threads, path)?;
-    }
 
     let daemon = Arc::new(service_controller);
     let machine = DaemonStateMachineContext::new(daemon.clone(), from_client, to_client);
     machine.kick_state_machine()?;
-    daemon
-        .on_event(DaemonStateMachineInput::Mount)
-        .map_err(|e| eother!(e))?;
-    daemon
-        .on_event(DaemonStateMachineInput::Start)
-        .map_err(|e| eother!(e))?;
+
+    // Without api socket, nydusd can't do neither live-upgrade nor failover, so the helper
+    // finding a victim is not necessary.
+    if (api_sock.as_ref().is_some() && !upgrade && !is_crashed(api_sock.as_ref().unwrap())?)
+        || api_sock.is_none()
+    {
+        #[cfg(target_os = "linux")]
+        if let Some(path) = fscache {
+            let threads = if let Some(threads_value) = threads {
+                crate::validate_threads_configuration(threads_value).map_err(|err| einval!(err))?
+            } else {
+                1usize
+            };
+            daemon.initialize_fscache_service(tag, threads, path, None)?;
+            let f = daemon.get_fscache_file()?;
+            if let Some(mut mgr_guard) = daemon.upgrade_mgr() {
+                mgr_guard.hold_file(&f).map_err(|e| {
+                    error!("Failed to hold fscache fd, {:?}", e);
+                    eother!(e)
+                })?;
+                mgr_guard.save_fscache_states(threads, path.to_string());
+            }
+        }
+
+        daemon
+            .on_event(DaemonStateMachineInput::Mount)
+            .map_err(|e| eother!(e))?;
+        daemon
+            .on_event(DaemonStateMachineInput::Start)
+            .map_err(|e| eother!(e))?;
+    }
 
     Ok(daemon)
 }
@@ -316,6 +396,7 @@ mod tests {
             supervisor: Some(String::from("supervisor")),
             waker: Arc::new(waker),
             blob_cache_mgr: Arc::new(BlobCacheMgr::new()),
+            upgrade_mgr: None,
             fscache_enabled: AtomicBool::new(false),
             fscache: Mutex::new(None),
         }
@@ -326,19 +407,19 @@ mod tests {
         let service_controller = create_service_controller();
 
         assert!(service_controller
-            .initialize_fscache_service(None, None, "some path")
+            .initialize_fscache_service(None, 1, "some path", None)
             .is_err());
 
         let mut p = std::env::current_dir().unwrap();
         p.push("Cargo.toml");
         assert!(service_controller
-            .initialize_fscache_service(None, None, p.to_str().unwrap())
+            .initialize_fscache_service(None, 1, p.to_str().unwrap(), None)
             .is_err());
 
         let tmp_dir = TempDir::new().unwrap();
         let dir = tmp_dir.as_path().to_str().unwrap();
         assert!(service_controller
-            .initialize_fscache_service(None, Some("1"), dir)
+            .initialize_fscache_service(None, 1, dir, None)
             .is_ok());
 
         assert_eq!(service_controller.id(), Some(String::from("id")));

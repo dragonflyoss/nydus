@@ -14,7 +14,7 @@ use std::ops::Deref;
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{Builder, JoinHandle};
 
 use mio::{Events, Poll, Token, Waker};
@@ -23,6 +23,7 @@ use rust_fsm::*;
 use serde::{self, Serialize};
 
 use crate::fs_service::{FsBackendCollection, FsService};
+use crate::upgrade::UpgradeManager;
 use crate::{BlobCacheMgr, Error, Result};
 
 /// Nydus daemon working states.
@@ -168,6 +169,10 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
     /// Trigger `Start` transition event to start the new instance.
     fn trigger_start(&self) -> Result<()> {
         self.on_event(DaemonStateMachineInput::Start)
+    }
+
+    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
+        None
     }
 
     // For backward compatibility.

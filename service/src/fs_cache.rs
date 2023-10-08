@@ -266,6 +266,7 @@ impl FsCacheHandler {
         tag: Option<&str>,
         blob_cache_mgr: Arc<BlobCacheMgr>,
         threads: usize,
+        restore_file: Option<&File>,
     ) -> Result<Self> {
         info!(
             "fscache: create FsCacheHandler with dir {}, tag {}",
@@ -273,15 +274,18 @@ impl FsCacheHandler {
             tag.unwrap_or("<None>")
         );
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .read(true)
-            .create(false)
-            .open(path)
-            .map_err(|e| {
-                error!("Failed to open cachefiles device {}. {}", path, e);
-                e
-            })?;
+        let mut file = match restore_file {
+            None => OpenOptions::new()
+                .write(true)
+                .read(true)
+                .create(false)
+                .open(path)
+                .map_err(|e| {
+                    error!("Failed to open cachefiles device {}. {}", path, e);
+                    e
+                })?,
+            Some(f) => f.try_clone()?,
+        };
 
         let poller =
             Poll::new().map_err(|_e| eother!("fscache: failed to create poller for service"))?;
@@ -296,15 +300,21 @@ impl FsCacheHandler {
             )
             .map_err(|_e| eother!("fscache: failed to register fd for service"))?;
 
-        // Initialize the fscache session
-        file.write_all(format!("dir {}", dir).as_bytes())?;
-        file.flush()?;
-        if let Some(tag) = tag {
-            file.write_all(format!("tag {}", tag).as_bytes())?;
+        if restore_file.is_none() {
+            // Initialize the fscache session
+            file.write_all(format!("dir {}", dir).as_bytes())?;
+            file.flush()?;
+            if let Some(tag) = tag {
+                file.write_all(format!("tag {}", tag).as_bytes())?;
+                file.flush()?;
+            }
+            file.write_all(b"bind ondemand")?;
+            file.flush()?;
+        } else {
+            // send restore cmd, if we are in restore process
+            file.write_all(b"restore")?;
             file.flush()?;
         }
-        file.write_all(b"bind ondemand")?;
-        file.flush()?;
 
         let state = FsCacheState {
             id_to_object_map: Default::default(),
@@ -377,6 +387,10 @@ impl FsCacheHandler {
                 }
             }
         }
+    }
+
+    pub fn get_file(&self) -> &File {
+        &self.file
     }
 
     /// Read and process all requests from fscache driver until no data available.
