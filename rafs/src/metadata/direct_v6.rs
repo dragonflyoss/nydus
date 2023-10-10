@@ -1349,7 +1349,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
                         blob_index, chunk_index
                     ))
                 })
-        } else if state.is_tarfs() {
+        } else if state.is_tarfs() || state.meta.has_inlined_chunk_digest() {
             let size = if idx == self.get_chunk_count() - 1 {
                 (self.size() % self.chunk_size() as u64) as u32
             } else {

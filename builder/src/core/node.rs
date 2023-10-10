@@ -292,7 +292,9 @@ impl Node {
             }
 
             // No need to perform chunk deduplication for tar-tarfs case.
-            if ctx.conversion_type != ConversionType::TarToTarfs {
+            if ctx.conversion_type != ConversionType::TarToTarfs
+                && ctx.conversion_type != ConversionType::TargzToRef
+            {
                 chunk = match self.deduplicate_chunk(
                     ctx,
                     blob_mgr,
