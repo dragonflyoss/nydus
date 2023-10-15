@@ -73,7 +73,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential git autotools-dev automake libtool pkg-config uuid-dev liblz4-dev
           git clone https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git
-          cd erofs-utils && git apply ../${{ env.FSCK_PATCH_PATH }} && ./autogen.sh && ./configure && make && cd ..
+          cd erofs-utils && git checkout v1.6 && git apply ../${{ env.FSCK_PATCH_PATH }} && ./autogen.sh && ./configure && make && cd ..
           sudo cp erofs-utils/fsck/fsck.erofs /usr/local/bin/
       - name: Upload fsck.erofs
         uses: actions/upload-artifact@master
