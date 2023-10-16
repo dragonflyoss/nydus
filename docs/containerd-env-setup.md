@@ -16,6 +16,26 @@ sudo install -D -m 755 nydusd nydus-image nydusify nydusctl nydus-overlayfs /usr
 sudo install -D -m 755 containerd-nydus-grpc /usr/bin
 ```
 
+## Start a Local Registry Container
+
+To make it easier to convert and run nydus images next, we can run a local registry service with docker:
+
+```bash
+sudo docker run -d --restart=always -p 5000:5000 registry
+```
+
+## Convert/Build an Image to Nydus Format
+
+Nydus image can be created by converting from an existing OCI or docker v2 image stored in container registry or directly built from Dockerfile(with [Buildkit](https://github.com/nydusaccelerator/buildkit/blob/master/docs/nydus.md))
+
+Note: For private registry repo, please make sure you are authorized to pull and push the target registry. The basic method is to use `docker pull` and `docker push` to verify your access to the source or target registry.
+
+```bash
+sudo nydusify convert --source ubuntu --target localhost:5000/ubuntu-nydus
+```
+
+For more details about how to build nydus image, please refer to [Nydusify](https://github.com/dragonflyoss/nydus/blob/master/docs/nydusify.md) conversion tool, [Acceld](https://github.com/goharbor/acceleration-service) conversion service or [Nerdctl](https://github.com/containerd/nerdctl/blob/master/docs/nydus.md#build-nydus-image-using-nerdctl-image-convert).
+
 ## Start Nydus Snapshotter
 
 Nydus provides a containerd remote snapshotter `containerd-nydus-grpc` (nydus snapshotter) to prepare container rootfs with nydus formatted images.
@@ -82,7 +102,7 @@ sudo /usr/bin/containerd-nydus-grpc \
     --log-to-stdout
 ```
 
-## Configure and Start Containerd
+## [Option 1] Configure as Containerd Global Snapshotter
 
 Nydus depends on two features of Containerd:
 
@@ -107,6 +127,7 @@ For version 1 containerd config format:
   [plugins.cri.containerd]
     snapshotter = "nydus"
     disable_snapshot_annotations = false
+    discard_unpacked_layers = false
 ```
 
 For version 2 containerd config format:
@@ -115,6 +136,7 @@ For version 2 containerd config format:
 [plugins."io.containerd.grpc.v1.cri".containerd]
    snapshotter = "nydus"
    disable_snapshot_annotations = false
+   discard_unpacked_layers = false
 ```
 
 Then restart containerd, e.g.:
@@ -123,19 +145,45 @@ Then restart containerd, e.g.:
 sudo systemctl restart containerd
 ```
 
-### Using Runtime-level Snapshotter in Container for Nydus
-Containerd (>= v1.7.0) supports configuring the ```runtime-level``` snapshotter. By following the steps below, we can declare runtimes that use different snapshotters:
-#### Step 1: Configure Containerd
+## [Option 2] Configure as Containerd Runtime-Level Snapshotter
+
+Note: this way only works on CRI based scenario (for example crictl or kubernetes).
+
+Containerd (>= v1.7.0) supports configuring the `runtime-level` snapshotter. By following the steps below, we can declare runtimes that use different snapshotters:
+
+### Step 1: Apply Containerd Patches
+
+[Patch](https://github.com/nydusaccelerator/containerd/commit/0959cdb0b190e35c058a0e5bc2e256e59b95b584): fixes the handle of sandbox run and container create for runtime-level snapshotter;
+
+### Step 2: Configure Containerd
+
+Only for version 2 containerd config format:
+
 ```toml
 [plugins."io.containerd.grpc.v1.cri".containerd]
   snapshotter = "overlayfs"
   disable_snapshot_annotations = false
   discard_unpacked_layers = false
-  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nydus-runc]
+
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc-nydus]
     snapshotter = "nydus"
+
+[proxy_plugins]
+  [proxy_plugins.nydus]
+    type = "snapshot"
+    address = "/run/containerd-nydus/containerd-nydus-grpc.sock"
 ```
-#### Step 2: Add an Extra Annotation in Sandbox Spec
-The annotation ```"io.containerd.cri.runtime-handler": "nydus-runc"``` must be set in sandbox spec. The ```nydus-sandbox.yaml``` looks like below:
+
+Then restart containerd, e.g.:
+
+```bash
+sudo systemctl restart containerd
+```
+
+### Step 3: Add an Extra Annotation in Sandbox Spec
+
+The annotation `"io.containerd.cri.runtime-handler": "runc-nydus"` must be set in sandbox spec. The `nydus-sandbox.yaml` looks like below:
+
 ```yaml
 metadata:
   attempt: 1
@@ -147,29 +195,24 @@ linux:
     namespace_options:
       network: 2
 annotations:
-  "io.containerd.cri.runtime-handler": "nydus-runc"
-```
-As shown above, the sandbox is declared with ```"io.containerd.cri.runtime-handler": "nydus-runc"``` annotation will use the ```nydus``` snapshotter, while others will use the default ```overlayfs``` snapshotter.
-
-## Start a Local Registry Container
-
-To make it easier to convert and run nydus images next, we can run a local registry service with docker:
-
-```bash
-sudo docker run -d --restart=always -p 5000:5000 registry
+  "io.containerd.cri.runtime-handler": "runc-nydus"
 ```
 
-## Convert/Build an Image to Nydus Format
+As shown above, the sandbox is declared with `"io.containerd.cri.runtime-handler": "runc-nydus"` annotation will use the `nydus` snapshotter, while others will use the default `overlayfs` snapshotter.
 
-Nydus image can be created by converting from an existing OCI or docker v2 image stored in container registry or directly built from Dockerfile(with [Buildkit](https://github.com/moby/buildkit/blob/master/docs/nydus.md))
+Note: You may encounter the following error when creating a Pod:
 
-Note: For private registry repo, please make sure you are authorized to pull and push the target registry. The basic method is to use `docker pull` and `docker push` to verify your access to the source or target registry.
-
-```bash
-sudo nydusify convert --source ubuntu --target localhost:5000/ubuntu-nydus
+```
+err="failed to \"StartContainer\" for \"xxx\" with CreateContainerError: \"failed to create containerd container: error unpacking image: failed to extract layer sha256:yyy: failed to get reader from content store: content digest sha256:zzz: not found\""
 ```
 
-For more details about how to build nydus image, please refer to [Nydusify](https://github.com/dragonflyoss/nydus/blob/master/docs/nydusify.md) conversion tool, [Acceld](https://github.com/goharbor/acceleration-service) conversion service or [Nerdctl](https://github.com/containerd/nerdctl/blob/master/docs/nydus.md#build-nydus-image-using-nerdctl-image-convert).
+This is because some images in the Pod (including the Pause image) have used containerd's default snapshotter (such as the `overlayfs`` snapshotter), and the `discard_unpacked_layers` option was previously set to `true`, containerd has already deleted the blobs from the content store. To resolve this issue, you should first ensure that `discard_unpacked_layers=false`, then use the following command to restore the image:
+
+```
+ctr -n k8s.io content fetch pause:3.8
+```
+
+Please note that `pause:3.8` is just an example image, you should also fetch all images used by the Pod to ensure that there are no issues.
 
 ## Try Nydus with `nerdctl`
 
@@ -195,8 +238,6 @@ linux:
   security_context:
     namespace_options:
       network: 2
-annotations:
-  "io.containerd.osfeature": "nydus.remoteimage.v1"
 ```
 
 The `nydus-container.yaml` looks like below:

@@ -145,6 +145,8 @@ We are working on enabling cloud-hypervisor support for nydus.
 
 #### Use Different Storage Backends
 
+Using different storage backend means that the nydus image metadata (bootstrap) layer is stored in the image registry, but the data layer will be stored on the external storage. Therefore, the option `--target` for `nydusify convert` is still required, the registry image reference is needed to store the metadata layer.
+
 ##### Localfs Backend
 
 ```
@@ -192,7 +194,7 @@ Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/
 }
 ```
 
-##### OSS backend with blobcache
+##### OSS Backend
 
 ```
 {
@@ -204,7 +206,8 @@ Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/
         "endpoint": "region.aliyuncs.com",
         "access_key_id": "",
         "access_key_secret": "",
-        "bucket_name": ""
+        "bucket_name": "",
+        "object_prefix": "nydus/"
       }
     },
     ...
@@ -213,7 +216,31 @@ Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/
 }
 ```
 
-##### Registry backend
+##### S3 Backend
+
+```
+{
+  "device": {
+    "backend": {
+      "type": "s3",
+      "config": {
+        ...
+        "endpoint": "s3.amazonaws.com",
+        "scheme": "https",
+        "access_key_id": "",
+        "access_key_secret": "",
+        "bucket_name": "",
+        "region": "",
+        "object_prefix": "nydus/"
+      }
+    },
+    ...
+  },
+  ...
+}
+```
+
+##### Registry Backend
 
 ```
 {
@@ -246,40 +273,50 @@ Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/
 ``` 
 Note: The value of `device.backend.config.auth` will be overwrite if running the nydusd with environment variable `IMAGE_PULL_AUTH`.
 
-##### Enable P2P Proxy for Storage Backend
+#### HTTP Proxy Backend
 
-Add `device.backend.config.proxy` field to enable HTTP proxy for storage backend. For example, use P2P distribution service to reduce network workload and latency in large scale container cluster using [Dragonfly](https://d7y.io/) (enable centralized dfdaemon mode).
+The `HttpProxy` backend can access blobs through a http proxy server which can be local (using unix socket) or remote (using `https://` or using `http://`).
+
+`HttpProxy` uses two API endpoints to access the blobs:
+- `HEAD /path/to/blobs` to get the blob size
+- `GET /path/to/blobs` to read the blob
+
+The http proxy server should respect [the `Range` header](https://www.rfc-editor.org/rfc/rfc9110.html#name-range) to compute the offset and length of the blob.
+
+The example config files for the `HttpProxy` backend may be:
 
 ```
+// for remote usage
 {
   "device": {
-    "backend": {
-      "type": "registry",
+      "backend": {
+      "type": "http-proxy",
       "config": {
-        "proxy": {
-          // Access remote storage backend via P2P proxy, e.g. Dragonfly dfdaemon server URL
-          "url": "http://p2p-proxy:65001",
-          // Fallback to remote storage backend if P2P proxy ping failed
-          "fallback": true,
-          // Endpoint of P2P proxy health checking
-          "ping_url": "http://p2p-proxy:40901/server/ping",
-          // Interval of P2P proxy health checking, in seconds
-          "check_interval": 5
-        },
-        ...
+        "addr": "http://127.0.0.1:9977",
+        "path": "/namespace/<repo>/blobs"
       }
-    },
-    ...
-  },
-  ...
+    }
+  }
 }
 ```
 
-Once the configuration is loaded successfully on nydusd starting, we will see the log as shown below:
+or
 
 ```
-INFO [storage/src/backend/connection.rs:136] backend config: CommonConfig { proxy: ProxyConfig { url: "http://p2p-proxy:65001", ping_url: "http://p2p-proxy:40901/server/ping", fallback: true, check_interval: 5 }, timeout: 5, connect_timeout: 5, retry_limit: 0 }
+// for local usage
+{
+  "device": {
+      "backend": {
+      "type": "http-proxy",
+      "config": {
+        "addr": "/path/to/unix.sock",
+      }
+    }
+  }
+}
 ```
+
+The `HttpProxy` backend also supports the `Proxy` and `Mirrors` configurations for remote usage like the `Registry backend` described above.
 
 ##### Enable Mirrors for Storage Backend (Recommend)
 
@@ -332,50 +369,41 @@ Currently, the mirror mode is only tested in the registry backend, and in theory
 }
 ```
 
-#### HTTP proxy backend
 
-The `HttpProxy` backend can access blobs through a http proxy server which can be local (using unix socket) or remote (using `https://` or using `http://`).
+##### Enable P2P Proxy for Storage Backend
 
-`HttpProxy` uses two API endpoints to access the blobs:
-- `HEAD /path/to/blobs` to get the blob size
-- `GET /path/to/blobs` to read the blob
-
-The http proxy server should respect [the `Range` header](https://www.rfc-editor.org/rfc/rfc9110.html#name-range) to compute the offset and length of the blob.
-
-The example config files for the `HttpProxy` backend may be:
+Add `device.backend.config.proxy` field to enable HTTP proxy for storage backend. For example, use P2P distribution service to reduce network workload and latency in large scale container cluster using [Dragonfly](https://d7y.io/) (enable centralized dfdaemon mode).
 
 ```
-// for remote usage
 {
   "device": {
-      "backend": {
-      "type": "http-proxy",
+    "backend": {
+      "type": "registry",
       "config": {
-        "addr": "http://127.0.0.1:9977",
-        "path": "/namespace/<repo>/blobs"
+        "proxy": {
+          // Access remote storage backend via P2P proxy, e.g. Dragonfly dfdaemon server URL
+          "url": "http://p2p-proxy:65001",
+          // Fallback to remote storage backend if P2P proxy ping failed
+          "fallback": true,
+          // Endpoint of P2P proxy health checking
+          "ping_url": "http://p2p-proxy:40901/server/ping",
+          // Interval of P2P proxy health checking, in seconds
+          "check_interval": 5
+        },
+        ...
       }
-    }
-  }
+    },
+    ...
+  },
+  ...
 }
 ```
 
-or
+Once the configuration is loaded successfully on nydusd starting, we will see the log as shown below:
 
 ```
-// for local usage
-{
-  "device": {
-      "backend": {
-      "type": "http-proxy",
-      "config": {
-        "addr": "/path/to/unix.sock",
-      }
-    }
-  }
-}
+INFO [storage/src/backend/connection.rs:136] backend config: CommonConfig { proxy: ProxyConfig { url: "http://p2p-proxy:65001", ping_url: "http://p2p-proxy:40901/server/ping", fallback: true, check_interval: 5 }, timeout: 5, connect_timeout: 5, retry_limit: 0 }
 ```
-
-The `HttpProxy` backend also supports the `Proxy` and `Mirrors` configurations for remote usage like the `Registry backend` described above.
 
 ### Mount Bootstrap Via API
 
