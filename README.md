@@ -64,7 +64,7 @@ The following Benchmarking results demonstrate that Nydus images significantly o
 | Storage       | Registry/OSS/S3/NAS                                                                                             | Support for OCI-compatible distribution implementations such as Docker Hub, Harbor, Github GHCR, Aliyun ACR, NAS, and Aliyun OSS-like object storage service | ✅      |
 | Storage/Build | [Harbor](https://github.com/goharbor/acceleration-service)                                                      | Provides a general service for Harbor to support acceleration image conversion based on kinds of accelerator like Nydus and eStargz etc                      | ✅      |
 | Distribution  | [Dragonfly](https://github.com/dragonflyoss/Dragonfly2)                                                         | Improve the runtime performance of Nydus image even further with the Dragonfly P2P data distribution system                                                  | ✅      |
-| Build         | [Buildkit](https://github.com/moby/buildkit/blob/master/docs/nydus.md)                                          | Provides the ability to build and export Nydus images directly from Dockerfile                                                                               | ✅      |
+| Build         | [Buildkit](https://github.com/nydusaccelerator/buildkit/blob/master/docs/nydus.md)                                          | Provides the ability to build and export Nydus images directly from Dockerfile                                                                               | ✅      |
 | Build/Runtime | [Nerdctl](https://github.com/containerd/nerdctl/blob/master/docs/nydus.md)                                      | The containerd client to build or run (requires nydus snapshotter) Nydus image                                                                               | ✅      |
 | Runtime       | [Docker / Moby](https://github.com/dragonflyoss/nydus/blob/master/docs/docker-env-setup.md)             | Run Nydus image in Docker container with containerd and nydus-snapshotter                                                                                    | ✅      |
 | Runtime       | [Kubernetes](https://github.com/containerd/nydus-snapshotter/blob/main/docs/run_nydus_in_kubernetes.md)         | Run Nydus image using CRI interface                                                                                                                          | ✅      |
@@ -89,7 +89,7 @@ make docker-static
 
 Convert OCIv1 image to Nydus image: [Nydusify](./docs/nydusify.md), [Acceld](https://github.com/goharbor/acceleration-service) or [Nerdctl](https://github.com/containerd/nerdctl/blob/master/docs/nydus.md#build-nydus-image-using-nerdctl-image-convert).
 
-Build Nydus image from Dockerfile directly: [Buildkit](https://github.com/moby/buildkit/blob/master/docs/nydus.md).
+Build Nydus image from Dockerfile directly: [Buildkit](https://github.com/nydusaccelerator/buildkit/blob/master/docs/nydus.md).
 
 Build Nydus layer from various sources: [Nydus Image Builder](./docs/nydus-image.md).
 
