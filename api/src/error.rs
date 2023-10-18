@@ -11,16 +11,16 @@ pub fn make_error(
     _file: &str,
     _line: u32,
 ) -> std::io::Error {
-    #[cfg(all(debug_assertions, feature = "error-backtrace"))]
+    #[cfg(all(feature = "error-backtrace"))]
     {
         if let Ok(val) = std::env::var("RUST_BACKTRACE") {
             if val.trim() != "0" {
-                log::error!("Stack:\n{:?}", backtrace::Backtrace::new());
-                log::error!("Error:\n\t{:?}\n\tat {}:{}", _raw, _file, _line);
+                error!("Stack:\n{:?}", backtrace::Backtrace::new());
+                error!("Error:\n\t{:?}\n\tat {}:{}", _raw, _file, _line);
                 return err;
             }
         }
-        log::error!(
+        error!(
             "Error:\n\t{:?}\n\tat {}:{}\n\tnote: enable `RUST_BACKTRACE=1` env to display a backtrace",
             _raw, _file, _line
         );
