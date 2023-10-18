@@ -144,7 +144,6 @@ struct BearerAuth {
     realm: String,
     service: String,
     scope: String,
-    header: Option<HeaderValue>,
 }
 
 #[derive(Debug)]
@@ -257,8 +256,8 @@ impl RegistryState {
         } else {
             match self.get_token_with_post(&auth, connection) {
                 Ok(resp) => resp,
-                Err(err) => {
-                    warn!("retry http GET method to get auth token: {}", err);
+                Err(_) => {
+                    warn!("retry http GET method to get auth token");
                     let resp = self.get_token_with_get(&auth, connection)?;
                     // Cache http method for next use.
                     self.cached_auth_using_http_get.set(self.host.clone(), true);
@@ -303,18 +302,22 @@ impl RegistryState {
         form.insert("passward".to_string(), self.password.clone());
         form.insert("client_id".to_string(), REGISTRY_CLIENT_ID.to_string());
 
-        let mut headers = HeaderMap::new();
-
         let token_resp = connection
             .call::<&[u8]>(
                 Method::POST,
                 auth.realm.as_str(),
                 None,
                 Some(ReqBody::Form(form)),
-                &mut headers,
+                &mut HeaderMap::new(),
                 true,
             )
-            .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
+            .map_err(|e| {
+                warn!(
+                    "failed to request registry auth server by POST method: {:?}",
+                    e
+                );
+                einval!()
+            })?;
 
         Ok(token_resp)
     }
@@ -336,6 +339,16 @@ impl RegistryState {
 
         let mut headers = HeaderMap::new();
 
+        // Insert the basic auth header to ensure the compatibility (e.g. Harbor registry)
+        // of fetching token by HTTP GET method.
+        // This refers containerd implementation: https://github.com/containerd/containerd/blob/dc7dba9c20f7210c38e8255487fc0ee12692149d/remotes/docker/auth/fetch.go#L187
+        if let Some(auth) = &self.auth {
+            headers.insert(
+                HEADER_AUTHORIZATION,
+                format!("Basic {}", auth).parse().unwrap(),
+            );
+        }
+
         let token_resp = connection
             .call::<&[u8]>(
                 Method::GET,
@@ -345,7 +358,13 @@ impl RegistryState {
                 &mut headers,
                 true,
             )
-            .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
+            .map_err(|e| {
+                warn!(
+                    "failed to request registry auth server by GET method: {:?}",
+                    e
+                );
+                einval!()
+            })?;
 
         Ok(token_resp)
     }
@@ -366,7 +385,7 @@ impl RegistryState {
 
     /// Parse `www-authenticate` response header respond from registry server
     /// The header format like: `Bearer realm="https://auth.my-registry.com/token",service="my-registry.com",scope="repository:test/repo:pull,push"`
-    fn parse_auth(source: &HeaderValue, auth: &Option<String>) -> Option<Auth> {
+    fn parse_auth(source: &HeaderValue) -> Option<Auth> {
         let source = source.to_str().unwrap();
         let source: Vec<&str> = source.splitn(2, ' ').collect();
         if source.len() < 2 {
@@ -403,15 +422,10 @@ impl RegistryState {
                     return None;
                 }
 
-                let header = auth
-                    .as_ref()
-                    .map(|auth| HeaderValue::from_str(&format!("Basic {}", auth)).unwrap());
-
                 Some(Auth::Bearer(BearerAuth {
                     realm: (*paras.get("realm").unwrap()).to_string(),
                     service: (*paras.get("service").unwrap()).to_string(),
                     scope: (*paras.get("scope").unwrap()).to_string(),
-                    header,
                 }))
             }
             _ => None,
@@ -573,7 +587,7 @@ impl RegistryReader {
 
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
                 // Get token from registry authorization server
-                if let Some(auth) = RegistryState::parse_auth(resp_auth_header, &self.state.auth) {
+                if let Some(auth) = RegistryState::parse_auth(resp_auth_header) {
                     let auth_header = self
                         .state
                         .get_auth_header(auth, &self.connection)
@@ -1068,7 +1082,7 @@ mod tests {
     fn test_parse_auth() {
         let str = "Bearer realm=\"https://auth.my-registry.com/token\",service=\"my-registry.com\",scope=\"repository:test/repo:pull,push\"";
         let header = HeaderValue::from_str(str).unwrap();
-        let auth = RegistryState::parse_auth(&header, &None).unwrap();
+        let auth = RegistryState::parse_auth(&header).unwrap();
         match auth {
             Auth::Bearer(auth) => {
                 assert_eq!(&auth.realm, "https://auth.my-registry.com/token");
@@ -1080,7 +1094,7 @@ mod tests {
 
         let str = "Basic realm=\"https://auth.my-registry.com/token\"";
         let header = HeaderValue::from_str(str).unwrap();
-        let auth = RegistryState::parse_auth(&header, &None).unwrap();
+        let auth = RegistryState::parse_auth(&header).unwrap();
         match auth {
             Auth::Basic(auth) => assert_eq!(&auth.realm, "https://auth.my-registry.com/token"),
             _ => panic!("failed to pase `Bearer` authentication header"),
@@ -1088,7 +1102,7 @@ mod tests {
 
         let str = "Base realm=\"https://auth.my-registry.com/token\"";
         let header = HeaderValue::from_str(str).unwrap();
-        assert!(RegistryState::parse_auth(&header, &None).is_none());
+        assert!(RegistryState::parse_auth(&header).is_none());
     }
 
     #[test]
