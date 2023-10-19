@@ -13,6 +13,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 use serde_json::{error::Error, value::Value};
+use thiserror::Error;
 
 impl Display for TraceClass {
     fn fmt(&self, f: &mut Formatter) -> FmtResult {
@@ -51,8 +52,9 @@ pub enum TraceClass {
 }
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum TraceError {
+    #[error("serialize error: {0}")]
     Serde(Error),
 }
 

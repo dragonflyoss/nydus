@@ -39,7 +39,7 @@ extern crate nydus_storage as storage;
 
 use std::any::Any;
 use std::borrow::Cow;
-use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::{BufWriter, Error, Read, Result, Seek, SeekFrom, Write};
 use std::os::unix::io::AsRawFd;
@@ -56,35 +56,36 @@ pub mod metadata;
 pub mod mock;
 
 /// Error codes for rafs related operations.
-#[derive(Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum RafsError {
+    #[error("Operation is not supported.")]
     Unsupported,
+    #[error("Rafs is not initialized.")]
     Uninitialized,
+    #[error("Rafs is already mounted.")]
     AlreadyMounted,
+    #[error("Failed to read metadata: {0}`")]
     ReadMetadata(Error, String),
+    #[error("Failed to load config: {0}`")]
     LoadConfig(Error),
-    ParseConfig(serde_json::Error),
+    #[error("Failed to parse config: {0}`")]
+    ParseConfig(#[source] serde_json::Error),
+    #[error("Failed to create swap backend: {0}`")]
     SwapBackend(Error),
-    FillSuperblock(Error),
+    #[error("Failed to fill superBlock: {0}`")]
+    FillSuperBlock(Error),
+    #[error("Failed to create device: {0}`")]
     CreateDevice(Error),
+    #[error("Failed to prefetch data: {0}`")]
     Prefetch(String),
+    #[error("Failed to configure device: {0}`")]
     Configure(String),
+    #[error("Incompatible RAFS version: `{0}`")]
     Incompatible(u16),
+    #[error("Illegal meta struct, type is `{0:?}` and content is `{1}`")]
     IllegalMetaStruct(MetaType, String),
+    #[error("Invalid image data")]
     InvalidImageData,
-}
-
-impl std::error::Error for RafsError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
-
-impl Display for RafsError {
-    fn fmt(&self, f: &mut Formatter) -> FmtResult {
-        write!(f, "{:?}", self)?;
-        Ok(())
-    }
 }
 
 #[derive(Debug)]

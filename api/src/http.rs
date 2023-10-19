@@ -9,16 +9,17 @@ use std::sync::mpsc::{RecvError, SendError};
 
 use serde::Deserialize;
 use serde_json::Error as SerdeError;
+use thiserror::Error;
 
 use crate::BlobCacheEntry;
 
 /// Errors related to Metrics.
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum MetricsError {
-    /// Non-exist counter.
+    #[error("no counter found for the metric")]
     NoCounter,
-    /// Failed to serialize message.
-    Serialize(SerdeError),
+    #[error("failed to serialize metric: {0:?}")]
+    Serialize(#[source] SerdeError),
 }
 
 /// Mount a filesystem.
@@ -145,25 +146,25 @@ pub enum MetricsErrorKind {
     Stats(MetricsError),
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum ApiError {
-    /// Daemon internal error
+    #[error("daemon internal error: {0:?}")]
     DaemonAbnormal(DaemonErrorKind),
-    /// Failed to get events information
+    #[error("daemon events error: {0}")]
     Events(String),
-    /// Failed to get metrics information
+    #[error("metrics error: {0:?}")]
     Metrics(MetricsErrorKind),
-    /// Failed to mount filesystem
+    #[error("failed to mount filesystem: {0:?}")]
     MountFilesystem(DaemonErrorKind),
-    /// Failed to send request to the API service
-    RequestSend(SendError<Option<ApiRequest>>),
-    /// Unrecognized payload content
+    #[error("failed to send request to the API service: {0:?}")]
+    RequestSend(#[from] SendError<Option<ApiRequest>>),
+    #[error("failed to parse response payload type")]
     ResponsePayloadType,
-    /// Failed to receive response from the API service
-    ResponseRecv(RecvError),
-    /// Failed to send wakeup notification
-    Wakeup(io::Error),
+    #[error("failed to receive response from the API service: {0:?}")]
+    ResponseRecv(#[from] RecvError),
+    #[error("failed to wake up the daemon: {0:?}")]
+    Wakeup(#[source] io::Error),
 }
 
 /// Specialized `std::result::Result` for API replies.
