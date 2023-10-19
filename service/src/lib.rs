@@ -96,7 +96,7 @@ pub enum Error {
     #[error("RAFS failed to handle request, {0}")]
     Rafs(#[from] RafsError),
     #[error("VFS failed to handle request, {0:?}")]
-    Vfs(VfsError),
+    Vfs(#[from] VfsError),
 
     // fusedev
     #[error("failed to create FUSE server, {0}")]
@@ -127,12 +127,6 @@ pub enum Error {
 impl From<Error> for io::Error {
     fn from(e: Error) -> Self {
         einval!(e)
-    }
-}
-
-impl From<VfsError> for Error {
-    fn from(e: VfsError) -> Self {
-        Error::Vfs(e)
     }
 }
 

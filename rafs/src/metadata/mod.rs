@@ -847,7 +847,7 @@ impl RafsSuper {
     pub fn update(&self, r: &mut RafsIoReader) -> RafsResult<()> {
         if self.meta.is_v5() {
             self.skip_v5_superblock(r)
-                .map_err(RafsError::FillSuperblock)?;
+                .map_err(RafsError::FillSuperBlock)?;
         }
 
         self.superblock.update(r)

@@ -85,7 +85,7 @@ impl Rafs {
         let cache_cfg = cfg.get_cache_config().map_err(RafsError::LoadConfig)?;
         let rafs_cfg = cfg.get_rafs_config().map_err(RafsError::LoadConfig)?;
         let (sb, reader) = RafsSuper::load_from_file(path, cfg.clone(), false)
-            .map_err(RafsError::FillSuperblock)?;
+            .map_err(RafsError::FillSuperBlock)?;
         let blob_infos = sb.superblock.get_blob_infos();
         let device = BlobDevice::new(cfg, &blob_infos).map_err(RafsError::CreateDevice)?;
 
