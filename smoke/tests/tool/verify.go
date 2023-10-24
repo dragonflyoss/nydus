@@ -43,7 +43,7 @@ func Verify(t *testing.T, ctx Context, expectedFiles map[string]*File) {
 	}()
 
 	actualFiles := map[string]*File{}
-	err = filepath.WalkDir(ctx.Env.MountDir, func(path string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(ctx.Env.MountDir, func(path string, _ fs.DirEntry, err error) error {
 		require.Nil(t, err)
 
 		targetPath, err := filepath.Rel(ctx.Env.MountDir, path)

@@ -47,6 +47,8 @@ type EnvContext struct {
 	CacheDir      string
 	MountDir      string
 	BootstrapPath string
+	OvlUpperDir   string
+	OvlWorkDir    string
 }
 
 type Context struct {
@@ -98,11 +100,21 @@ func (ctx *Context) PrepareWorkDir(t *testing.T) {
 	err = os.MkdirAll(mountDir, 0755)
 	require.NoError(t, err)
 
+	// For overlay fs
+	ovlUpperDir := filepath.Join(workDir, "upper")
+	err = os.MkdirAll(ovlUpperDir, 0755)
+	require.NoError(t, err)
+	ovlWorkDir := filepath.Join(workDir, "work")
+	err = os.MkdirAll(ovlWorkDir, 0755)
+	require.NoError(t, err)
+
 	ctx.Env = EnvContext{
-		WorkDir:  workDir,
-		BlobDir:  blobDir,
-		CacheDir: cacheDir,
-		MountDir: mountDir,
+		WorkDir:     workDir,
+		BlobDir:     blobDir,
+		CacheDir:    cacheDir,
+		MountDir:    mountDir,
+		OvlUpperDir: ovlUpperDir,
+		OvlWorkDir:  ovlWorkDir,
 	}
 }
 

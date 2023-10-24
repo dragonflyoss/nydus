@@ -39,3 +39,4 @@ mount -t overlay overlay ./foo/merged -o lowerdir=./foo/lower2:./foo/lower1,uppe
 Meanwhile, when containerd passes the `nydus-snapshotter` mount slice to `containerd-shim-kata-v2`, it can parse the mount slice and pass the `extraoption` to `nydusd`, to support nydus image format natively.
 
 So in summary, `containerd` and `containerd-shim-runc-v2` rely on the `nydus-overlay` mount helper to handle the mount slice returned by `nydus-snapshotter`, while `containerd-shim-kata-v2` can parse and handle it on its own.
+

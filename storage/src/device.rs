@@ -1338,12 +1338,9 @@ impl FileReadWriteVolatile for BlobDeviceIoVec<'_> {
         unimplemented!();
     }
 
-    fn read_at_volatile(
-        &mut self,
-        _slice: FileVolatileSlice,
-        _offset: u64,
-    ) -> Result<usize, Error> {
-        unimplemented!();
+    fn read_at_volatile(&mut self, slice: FileVolatileSlice, offset: u64) -> Result<usize, Error> {
+        let buffers = [slice];
+        self.read_vectored_at_volatile(&buffers, offset)
     }
 
     // The default read_vectored_at_volatile only read to the first slice, so we have to overload it.

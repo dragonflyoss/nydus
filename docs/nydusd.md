@@ -409,6 +409,53 @@ Once the configuration is loaded successfully on nydusd starting, we will see th
 INFO [storage/src/backend/connection.rs:136] backend config: CommonConfig { proxy: ProxyConfig { url: "http://p2p-proxy:65001", ping_url: "http://p2p-proxy:40901/server/ping", fallback: true, check_interval: 5 }, timeout: 5, connect_timeout: 5, retry_limit: 0 }
 ```
 
+### Mount writable Overlay FS
+
+`Nydusd` itself has a native userspace Overlay FS implementation, which can be enabled with several extra configurations. 
+
+An example configuration `/etc/nydus/nydusd-config.overlay.json` is as follows:
+
+```json
+{
+	"version": 2,
+	"backend": {
+		"type": "localfs",
+		"localfs": "/var/lib/nydus/blobs"
+	},
+	"cache": {
+		"type": "blobcache",
+		"filecache": {
+			"work_dir": "/var/lib/nydus/cache"
+		}
+	},
+	"rafs": {
+		"mode": "direct",
+		"enable_xattr": true
+	},
+	"overlay": {
+		"upper_dir": "/path/to/upperdir",
+		"work_dir": "/path/to/workdir"
+	}
+}
+```
+
+An extra field `overlay` is added to the Nydusd configuration, which specifies the `upper_dir` and `work_dir` for the overlay filesystem.
+
+You can start `nydusd` with the above configuration and such command:
+
+```bash
+sudo nydusd \
+    --config /etc/nydus/nydusd-config.overlay.json \
+    --mountpoint /path/to/mnt/ \
+    --bootstrap /path/to/bootstrap \
+    --log-level info \
+    --writable
+```
+
+This will create a FUSE overlay mountpoint at `/path/to/mnt/`, with one `Nydus` image as readonly lower layer and the `/path/to/upperdir` as writable upper layer, so that it can take over whole rootfs of a container, any contents writen from container will be stored in `/path/to/upperdir`.
+
+Removing `--writable` flag will make the overlay filesystem readonly if you wish.
+
 ### Mount Bootstrap Via API
 
 To mount a bootstrap via api, first launch nydusd without a bootstrap:

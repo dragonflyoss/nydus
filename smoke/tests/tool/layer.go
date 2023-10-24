@@ -230,7 +230,7 @@ func (l *Layer) Overlay(_ *testing.T, upper *Layer) *Layer {
 
 func (l *Layer) recordFileTree(t *testing.T) {
 	l.FileTree = map[string]*File{}
-	filepath.Walk(l.workDir, func(path string, fi os.FileInfo, err error) error {
+	filepath.Walk(l.workDir, func(path string, _ os.FileInfo, _ error) error {
 		targetPath := l.TargetPath(t, path)
 		l.FileTree[targetPath] = NewFile(t, path, targetPath)
 		return nil
