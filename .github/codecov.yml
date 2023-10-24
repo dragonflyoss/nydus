@@ -5,11 +5,9 @@ coverage:
         enabled: yes
         target: auto  # auto compares coverage to the previous base commit
         # adjust accordingly based on how flaky your tests are
-        # this allows a 1% drop from the previous base commit coverage
-        threshold: 1%
-    patch:
-      default:
-        target: 25%   # the required coverage value in each patch
+        # this allows a 0.2% drop from the previous base commit coverage
+        threshold: 0.2%
+    patch: false
 
 comment:
   layout: "reach, diff, flags, files"
