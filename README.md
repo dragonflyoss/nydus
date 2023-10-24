@@ -15,7 +15,6 @@
 
 [![Smoke Test](https://github.com/dragonflyoss/image-service/actions/workflows/smoke.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/smoke.yml)
 [![Image Conversion](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/convert.yml)
-[![Integration Test](https://github.com/dragonflyoss/image-service/actions/workflows/integration.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/integration.yml)
 [![Release Test Daily](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/image-service/actions/workflows/release.yml)
 [![Coverage](https://codecov.io/gh/dragonflyoss/image-service/branch/master/graph/badge.svg)](https://codecov.io/gh/dragonflyoss/image-service)
 
