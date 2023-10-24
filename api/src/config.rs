@@ -29,6 +29,8 @@ pub struct ConfigV2 {
     pub cache: Option<CacheConfigV2>,
     /// Configuration information for RAFS filesystem.
     pub rafs: Option<RafsConfigV2>,
+    /// Overlay configuration information for the instance.
+    pub overlay: Option<OverlayConfig>,
     /// Internal runtime configuration.
     #[serde(skip)]
     pub internal: ConfigV2Internal,
@@ -42,6 +44,7 @@ impl Default for ConfigV2 {
             backend: None,
             cache: None,
             rafs: None,
+            overlay: None,
             internal: ConfigV2Internal::default(),
         }
     }
@@ -56,6 +59,7 @@ impl ConfigV2 {
             backend: None,
             cache: None,
             rafs: None,
+            overlay: None,
             internal: ConfigV2Internal::default(),
         }
     }
@@ -1024,6 +1028,7 @@ impl From<&BlobCacheEntryConfigV2> for ConfigV2 {
             backend: Some(c.backend.clone()),
             cache: Some(c.cache.clone()),
             rafs: None,
+            overlay: None,
             internal: ConfigV2Internal::default(),
         }
     }
@@ -1395,6 +1400,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
             backend: Some(backend),
             cache: Some(cache),
             rafs: Some(rafs),
+            overlay: None,
             internal: ConfigV2Internal::default(),
         })
     }
@@ -1521,6 +1527,15 @@ impl TryFrom<&BlobCacheEntryConfig> for BlobCacheEntryConfigV2 {
             metadata_path: v.metadata_path.clone(),
         })
     }
+}
+
+/// Configuration information for Overlay filesystem.
+/// OverlayConfig is used to configure the writable layer(upper layer),
+/// The filesystem will be writable when OverlayConfig is set.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OverlayConfig {
+    pub upper_dir: String,
+    pub work_dir: String,
 }
 
 #[cfg(test)]

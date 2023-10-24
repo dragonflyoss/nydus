@@ -291,7 +291,8 @@ impl Rafs {
         // since nydusify gives root directory permission of 0o750 and fuse mount
         // options `rootmode=` does not affect root directory's permission bits, ending
         // up with preventing other users from accessing the container rootfs.
-        if attr.ino == self.root_ino() {
+        let root_ino = self.root_ino();
+        if attr.ino == root_ino {
             attr.mode = attr.mode & !0o777 | 0o755;
         }
 
@@ -684,9 +685,9 @@ impl FileSystem for Rafs {
         _inode: Self::Inode,
         _flags: u32,
         _fuse_flags: u32,
-    ) -> Result<(Option<Self::Handle>, OpenOptions)> {
+    ) -> Result<(Option<Self::Handle>, OpenOptions, Option<u32>)> {
         // Keep cache since we are readonly
-        Ok((None, OpenOptions::KEEP_CACHE))
+        Ok((None, OpenOptions::KEEP_CACHE, None))
     }
 
     fn release(
@@ -883,6 +884,14 @@ impl FileSystem for Rafs {
 
         rec.mark_success(0);
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+// Let Rafs works as an OverlayFs layer.
+impl Layer for Rafs {
+    fn root_inode(&self) -> Self::Inode {
+        self.root_ino()
     }
 }
 

@@ -13,10 +13,14 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, MutexGuard};
 
+#[cfg(target_os = "linux")]
+use fuse_backend_rs::api::filesystem::{FileSystem, FsOptions, Layer};
 use fuse_backend_rs::api::vfs::VfsError;
 use fuse_backend_rs::api::{BackFileSystem, Vfs};
 #[cfg(target_os = "linux")]
-use fuse_backend_rs::passthrough::{Config, PassthroughFs};
+use fuse_backend_rs::overlayfs::{config::Config as overlay_config, OverlayFs};
+#[cfg(target_os = "linux")]
+use fuse_backend_rs::passthrough::{CachePolicy, Config as passthrough_config, PassthroughFs};
 use nydus_api::ConfigV2;
 use nydus_rafs::fs::Rafs;
 use nydus_rafs::{RafsError, RafsIoRead};
@@ -244,8 +248,77 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
             let config = Arc::new(config);
             let (mut rafs, reader) = Rafs::new(&config, &cmd.mountpoint, Path::new(&cmd.source))?;
             rafs.import(reader, prefetch_files)?;
-            info!("RAFS filesystem imported");
-            Ok(Box::new(rafs))
+
+            // Put a writable upper layer above the rafs to create an OverlayFS with two layers.
+            match &config.overlay {
+                Some(ovl_conf) => {
+                    // check workdir and upperdir params.
+                    if ovl_conf.work_dir.is_empty() || ovl_conf.upper_dir.is_empty() {
+                        return Err(Error::InvalidArguments(String::from(
+                            "workdir and upperdir must be specified for overlayfs",
+                        )));
+                    }
+
+                    // Create an overlay upper layer with passthroughfs.
+                    #[cfg(target_os = "macos")]
+                    return Err(Error::InvalidArguments(String::from(
+                        "not support OverlayFs since passthroughfs isn't supported on MacOS",
+                    )));
+                    #[cfg(target_os = "linux")]
+                    {
+                        let fs_cfg = passthrough_config {
+                            // Use upper_dir as root_dir as rw layer.
+                            root_dir: ovl_conf.upper_dir.clone(),
+                            do_import: true,
+                            writeback: true,
+                            no_open: true,
+                            no_opendir: true,
+                            xattr: true,
+                            cache_policy: CachePolicy::Always,
+                            ..Default::default()
+                        };
+                        let fsopts = FsOptions::WRITEBACK_CACHE
+                            | FsOptions::ZERO_MESSAGE_OPEN
+                            | FsOptions::ZERO_MESSAGE_OPENDIR;
+
+                        let passthrough_fs = PassthroughFs::<()>::new(fs_cfg)
+                            .map_err(|e| Error::InvalidConfig(format!("{}", e)))?;
+                        passthrough_fs.init(fsopts).map_err(Error::PassthroughFs)?;
+
+                        type BoxedLayer = Box<dyn Layer<Inode = u64, Handle = u64> + Send + Sync>;
+                        let upper_layer = Arc::new(Box::new(passthrough_fs) as BoxedLayer);
+
+                        // Create overlay lower layer with rafs, use lower_dir as root_dir of rafs.
+                        let lower_layers = vec![Arc::new(Box::new(rafs) as BoxedLayer)];
+
+                        let overlay_config = overlay_config {
+                            work: ovl_conf.work_dir.clone(),
+                            mountpoint: cmd.mountpoint.clone(),
+                            do_import: false,
+                            no_open: true,
+                            no_opendir: true,
+                            ..Default::default()
+                        };
+                        let overlayfs =
+                            OverlayFs::new(Some(upper_layer), lower_layers, overlay_config)
+                                .map_err(|e| Error::InvalidConfig(format!("{}", e)))?;
+                        info!(
+                            "init overlay fs inode, upper {}, work {}\n",
+                            ovl_conf.upper_dir.clone(),
+                            ovl_conf.work_dir.clone()
+                        );
+                        overlayfs
+                            .import()
+                            .map_err(|e| Error::InvalidConfig(format!("{}", e)))?;
+                        info!("Overlay filesystem imported");
+                        Ok(Box::new(overlayfs))
+                    }
+                }
+                None => {
+                    info!("RAFS filesystem imported");
+                    Ok(Box::new(rafs))
+                }
+            }
         }
         FsBackendType::PassthroughFs => {
             #[cfg(target_os = "macos")]
@@ -257,7 +330,7 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> Result<BackFileSystem> {
                 // Vfs by default enables no_open and writeback, passthroughfs
                 // needs to specify them explicitly.
                 // TODO(liubo): enable no_open_dir.
-                let fs_cfg = Config {
+                let fs_cfg = passthrough_config {
                     root_dir: cmd.source.to_string(),
                     do_import: false,
                     writeback: true,

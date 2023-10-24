@@ -1516,6 +1516,7 @@ mod tests {
             id: "id".to_owned(),
             cache: None,
             rafs: None,
+            overlay: None,
             internal: ConfigV2Internal {
                 blob_accessible: Arc::new(AtomicBool::new(true)),
             },
