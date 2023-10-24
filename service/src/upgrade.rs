@@ -15,7 +15,7 @@ use crate::Result;
 pub enum UpgradeMgrError {}
 
 /// FUSE fail-over policies.
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 pub enum FailoverPolicy {
     /// Flush pending requests.
     Flush,
@@ -84,5 +84,43 @@ pub mod fusedev_upgrade {
     /// Restore state information for a FUSE daemon.
     pub fn restore(_daemon: &FusedevDaemon) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_failover_policy() {
+        assert_eq!(
+            FailoverPolicy::try_from("flush").unwrap(),
+            FailoverPolicy::Flush
+        );
+        assert_eq!(
+            FailoverPolicy::try_from("resend").unwrap(),
+            FailoverPolicy::Resend
+        );
+
+        let strs = vec!["flash", "Resend"];
+        for s in strs.clone().into_iter() {
+            assert!(FailoverPolicy::try_from(s).is_err());
+        }
+
+        let str = String::from("flush");
+        assert_eq!(
+            FailoverPolicy::try_from(&str).unwrap(),
+            FailoverPolicy::Flush
+        );
+        let str = String::from("resend");
+        assert_eq!(
+            FailoverPolicy::try_from(&str).unwrap(),
+            FailoverPolicy::Resend
+        );
+
+        let strings: Vec<String> = strs.into_iter().map(|s| s.to_owned()).collect();
+        for s in strings.iter() {
+            assert!(FailoverPolicy::try_from(s).is_err());
+        }
     }
 }
