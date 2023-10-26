@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,7 +46,7 @@ func (a *BlobCacheTestSuite) prepareTestEnv(t *testing.T) (*tool.Context, string
 	rootfsReader := rootFs.ToOCITar(t)
 
 	ociBlobDigester := digest.Canonical.Digester()
-	ociBlob, err := ioutil.TempFile(ctx.Env.BlobDir, "oci-blob-")
+	ociBlob, err := os.CreateTemp(ctx.Env.BlobDir, "oci-blob-")
 	require.NoError(t, err)
 
 	_, err = io.Copy(io.MultiWriter(ociBlobDigester.Hash(), ociBlob), rootfsReader)

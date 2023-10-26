@@ -10,7 +10,6 @@ import (
 	"context"
 	"crypto/rand"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,7 +120,7 @@ func (l *Layer) Pack(t *testing.T, packOption converter.PackOption, blobDir stri
 	l.recordFileTree(t)
 
 	// Pack OCI tar to nydus native blob
-	blob, err := ioutil.TempFile(blobDir, "blob-")
+	blob, err := os.CreateTemp(blobDir, "blob-")
 	require.NoError(t, err)
 	defer blob.Close()
 	blobDigester := digest.Canonical.Digester()
@@ -160,7 +159,7 @@ func (l *Layer) PackRef(t *testing.T, ctx Context, blobDir string, compress bool
 	}
 
 	// Pack OCI blob to nydus zran blob
-	rafsBlob, err := ioutil.TempFile(blobDir, "rafs-blob-")
+	rafsBlob, err := os.CreateTemp(blobDir, "rafs-blob-")
 	require.NoError(t, err)
 	defer rafsBlob.Close()
 	rafsBlobDigester := digest.Canonical.Digester()
@@ -172,7 +171,7 @@ func (l *Layer) PackRef(t *testing.T, ctx Context, blobDir string, compress bool
 	require.NoError(t, err)
 
 	ociBlobDigester := digest.Canonical.Digester()
-	ociBlob, err := ioutil.TempFile(blobDir, "oci-blob-")
+	ociBlob, err := os.CreateTemp(blobDir, "oci-blob-")
 	require.NoError(t, err)
 
 	_, err = io.Copy(io.MultiWriter(twc, ociBlobDigester.Hash(), ociBlob), ociBlobReader)
@@ -250,7 +249,7 @@ func MergeLayers(t *testing.T, ctx Context, mergeOption converter.MergeOption, l
 		layers[idx].ReaderAt = ra
 	}
 
-	bootstrap, err := ioutil.TempFile(ctx.Env.WorkDir, "bootstrap-")
+	bootstrap, err := os.CreateTemp(ctx.Env.WorkDir, "bootstrap-")
 	require.NoError(t, err)
 	defer bootstrap.Close()
 	actualDigests, err := converter.Merge(context.Background(), layers, bootstrap, mergeOption)
