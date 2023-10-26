@@ -6,7 +6,6 @@ package main
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -50,7 +49,7 @@ func TestParseBackendConfig(t *testing.T) {
 	}`
 	require.True(t, json.Valid([]byte(configJSON)))
 
-	file, err := ioutil.TempFile("", "nydusify-backend-config-test.json")
+	file, err := os.CreateTemp("", "nydusify-backend-config-test.json")
 	require.NoError(t, err)
 	defer os.RemoveAll(file.Name())
 

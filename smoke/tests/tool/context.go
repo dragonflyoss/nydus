@@ -5,7 +5,6 @@
 package tool
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -86,7 +85,7 @@ func (ctx *Context) PrepareWorkDir(t *testing.T) {
 	if tempDir == "" {
 		tempDir = os.TempDir()
 	}
-	workDir, err := ioutil.TempDir(tempDir, "nydus-smoke-")
+	workDir, err := os.MkdirTemp(tempDir, "nydus-smoke-")
 	require.NoError(t, err)
 
 	blobDir := filepath.Join(workDir, "blobs")

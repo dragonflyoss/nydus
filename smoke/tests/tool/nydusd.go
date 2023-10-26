@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -246,7 +245,7 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 		return err
 	}
 	defer f.Close()
-	rafsConfig, err := ioutil.ReadAll(f)
+	rafsConfig, err := io.ReadAll(f)
 	if err != nil {
 		return err
 	}

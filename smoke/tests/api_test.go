@@ -7,7 +7,7 @@ package tests
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -231,7 +231,7 @@ func (a *APIV1TestSuite) visit(path string) error {
 	}
 	defer f.Close()
 
-	ioutil.ReadAll(f)
+	io.ReadAll(f)
 
 	return nil
 }
