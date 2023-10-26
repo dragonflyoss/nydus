@@ -25,8 +25,8 @@ RUN wget https://github.com/opencontainers/runc/releases/download/v1.1.2/runc.am
 RUN chmod +x /usr/bin/*; chmod +x /usr/bin/runc
 
 # Install golang
-RUN wget https://go.dev/dl/go1.18.1.linux-amd64.tar.gz -O /home/go1.18.1.linux-amd64.tar.gz
-RUN tar -C /usr/local -xzf /home/go1.18.1.linux-amd64.tar.gz
+RUN wget https://go.dev/dl/go1.20.10.linux-amd64.tar.gz -O /home/go1.20.10.linux-amd64.tar.gz
+RUN tar -C /usr/local -xzf /home/go1.20.10.linux-amd64.tar.gz
 ENV PATH $PATH:/usr/local/go/bin
 RUN mkdir /root/go
 RUN rm -rf /home/*
