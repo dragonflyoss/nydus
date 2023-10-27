@@ -539,50 +539,16 @@ mod tests {
     use super::*;
     use crate::blob_cache::generate_blob_key;
     use nydus_api::BlobCacheEntry;
-    use std::fs;
+    use nydus_utils::digest::{DigestHasher, RafsDigest};
+    use std::fs::{self, File};
+    use std::io::{BufReader, Read};
     use std::path::PathBuf;
     use vmm_sys_util::tempdir::TempDir;
 
     #[test]
     fn test_block_device() {
-        let tmpdir = TempDir::new().unwrap();
-        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
-        let mut source_path = PathBuf::from(root_dir);
-        source_path.push("../tests/texture/blobs/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
-        let mut dest_path = tmpdir.as_path().to_path_buf();
-        dest_path.push("be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
-        fs::copy(&source_path, &dest_path).unwrap();
-
-        let mut source_path = PathBuf::from(root_dir);
-        source_path.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
-        let config = r#"
-        {
-            "type": "bootstrap",
-            "id": "rafs-v6",
-            "domain_id": "domain2",
-            "config_v2": {
-                "version": 2,
-                "id": "factory1",
-                "backend": {
-                    "type": "localfs",
-                    "localfs": {
-                        "dir": "/tmp/nydus"
-                    }
-                },
-                "cache": {
-                    "type": "filecache",
-                    "filecache": {
-                        "work_dir": "/tmp/nydus"
-                    }
-                },
-                "metadata_path": "RAFS_V5"
-            }
-          }"#;
-        let content = config
-            .replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap())
-            .replace("RAFS_V5", &source_path.display().to_string());
-        let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
-        assert!(entry.prepare_configuration_info());
+        let tmp_dir = TempDir::new().unwrap();
+        let entry = create_bootstrap_entry(&tmp_dir);
 
         let mgr = BlobCacheMgr::new();
         mgr.add_blob_entry(&entry).unwrap();
@@ -597,6 +563,8 @@ mod tests {
         assert!(mgr.get_config(&key).is_some());
 
         let mgr = Arc::new(mgr);
+        // assert with wrong blob_id
+        assert!(BlockDevice::new_with_cache_manager(String::from("blob_id"), mgr.clone()).is_err());
         let device = BlockDevice::new_with_cache_manager(blob_id, mgr).unwrap();
         assert_eq!(device.blocks(), 0x209);
 
@@ -641,5 +609,154 @@ mod tests {
             assert_eq!(buf.len(), 8192);
             assert!(res.is_err());
         });
+    }
+
+    fn create_bootstrap_entry(tmp_dir: &TempDir) -> BlobCacheEntry {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/blobs/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+        let mut dest_path = tmp_dir.as_path().to_path_buf();
+        dest_path.push("be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+        fs::copy(&source_path, &dest_path).unwrap();
+
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+        let config = r#"
+        {
+            "type": "bootstrap",
+            "id": "rafs-v6",
+            "domain_id": "domain2",
+            "config_v2": {
+                "version": 2,
+                "id": "factory1",
+                "backend": {
+                    "type": "localfs",
+                    "localfs": {
+                        "dir": "/tmp/nydus"
+                    }
+                },
+                "cache": {
+                    "type": "filecache",
+                    "filecache": {
+                        "work_dir": "/tmp/nydus"
+                    }
+                },
+                "metadata_path": "RAFS_V5"
+            }
+        }"#;
+
+        // config with non-existing path
+        let entry: BlobCacheEntry = serde_json::from_str(&config).unwrap();
+        assert!(BlockDevice::new(entry).is_err());
+
+        // config with correct path
+        let content = config
+            .replace("/tmp/nydus", tmp_dir.as_path().to_str().unwrap())
+            .replace("RAFS_V5", &source_path.display().to_string());
+        let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(entry.prepare_configuration_info());
+        entry
+    }
+
+    fn create_block_device() -> BlockDevice {
+        let tmp_dir = TempDir::new().unwrap();
+        let entry = create_bootstrap_entry(&tmp_dir);
+
+        let device = BlockDevice::new(entry);
+        assert!(device.is_ok());
+        let device = device.unwrap();
+        assert_eq!(device.blocks(), 0x209);
+
+        device
+    }
+
+    #[test]
+    fn test_block_size() {
+        let mut device = create_block_device();
+
+        assert!(!device.is_tarfs_mode);
+        assert_eq!(device.block_size(), EROFS_BLOCK_SIZE_4096);
+        assert_ne!(device.block_size(), EROFS_BLOCK_SIZE_512);
+
+        device.is_tarfs_mode = true;
+        assert_ne!(device.block_size(), EROFS_BLOCK_SIZE_4096);
+        assert_eq!(device.block_size(), EROFS_BLOCK_SIZE_512);
+    }
+
+    #[test]
+    fn test_size_to_blocks() {
+        let mut device = create_block_device();
+
+        assert!(!device.is_tarfs_mode);
+        assert_eq!(device.size_to_blocks(0), 0);
+        assert_eq!(device.size_to_blocks(4096), 1);
+        assert_ne!(device.size_to_blocks(4096), 4096);
+        assert_ne!(device.size_to_blocks(4096), 8);
+
+        device.is_tarfs_mode = true;
+        assert_eq!(device.size_to_blocks(0), 0);
+        assert_eq!(device.size_to_blocks(512), 1);
+        assert_ne!(device.size_to_blocks(512), 512);
+        assert_ne!(device.size_to_blocks(4096), 1);
+    }
+
+    #[test]
+    fn test_blocks_to_size() {
+        let mut device = create_block_device();
+
+        assert!(!device.is_tarfs_mode);
+        assert_eq!(device.blocks_to_size(0), 0);
+        assert_eq!(device.blocks_to_size(1), 4096);
+        assert_ne!(device.blocks_to_size(4096), 4096);
+        assert_ne!(device.blocks_to_size(8), 4096);
+
+        device.is_tarfs_mode = true;
+        assert_eq!(device.blocks_to_size(0), 0);
+        assert_eq!(device.blocks_to_size(1), 512);
+        assert_ne!(device.blocks_to_size(512), 512);
+        assert_ne!(device.blocks_to_size(1), 4096);
+    }
+
+    fn sha256_digest<R: Read>(mut reader: R) -> Result<String> {
+        let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
+        let mut buffer = [0; 1024];
+
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.digest_update(&buffer[..count]);
+        }
+
+        Ok(hasher.digest_finalize().into())
+    }
+
+    fn test_export_arg_thread(thread: u32) -> Result<()> {
+        let entry_tmp_dir = TempDir::new()?;
+        let entry = create_bootstrap_entry(&entry_tmp_dir);
+
+        let tmp_dir = TempDir::new().unwrap();
+        let data_dir = Some(String::from(tmp_dir.as_path().to_str().unwrap()));
+
+        assert!(BlockDevice::export(entry, None, data_dir, thread, true).is_ok());
+
+        let mut disk_path = PathBuf::from(tmp_dir.as_path());
+        disk_path.push("rafs-v6-2.2.boot.disk");
+        let input = File::open(disk_path)?;
+        let reader = BufReader::new(input);
+        let sha256 = sha256_digest(reader)?;
+        assert_eq!(
+            sha256,
+            String::from("5684c330c622350c12d633d0773201f862b9955375d806670e1aaf36ef038b31")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_export() {
+        assert!(test_export_arg_thread(1).is_ok());
+        assert!(test_export_arg_thread(2).is_ok());
     }
 }
