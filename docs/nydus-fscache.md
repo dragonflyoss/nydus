@@ -58,6 +58,26 @@ $ sudo yum update kernel --enablerepo Plus
 $ sudo reboot
 ```
 
+## Enable fscache
+
+1.  ``[ -c /dev/cachefiles ] && echo ok`` to test fscache is enable or not. If your result shows `ok`, then fscache has been already enabled; otherwise, please follow the following steps to enable fscache.
+
+2.  Download cachefilesd package. For centos users, the command is:
+```
+sudo yum install cachefilesd
+```
+
+3.  Start cachefilesd deamon.
+```
+sudo systemctl start cachefilesd
+sudo systemctl status cachefilesd
+```
+
+4.  Ensure the device file `/dev/cachefiles` is not occupied. If your result is not empty, please kill all processes the result shows.
+```
+sudo lsof /dev/cachefiles
+```
+
 ## Get ctr-remote and the fscache-supported nydusd
 
 1. Make sure you have installed _rust 1.52.1_ version and golang.
