@@ -31,7 +31,6 @@ func getConfig(opt Opt) map[string]string {
 	cfg["fs_chunk_size"] = opt.ChunkSize
 	cfg["batch_size"] = opt.BatchSize
 
-	// FIXME: still needs to be supported by acceld converter package.
 	cfg["cache_ref"] = opt.CacheRef
 	cfg["cache_version"] = opt.CacheVersion
 	cfg["cache_max_records"] = strconv.FormatUint(uint64(opt.CacheMaxRecords), 10)

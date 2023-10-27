@@ -6,14 +6,17 @@ package provider
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
+	"github.com/goharbor/acceleration-service/pkg/cache"
+	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
 	"github.com/goharbor/acceleration-service/pkg/remote"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -27,19 +30,27 @@ type Provider struct {
 	store        content.Store
 	hosts        remote.HostFunc
 	platformMC   platforms.MatchComparer
+	cacheSize    int
+	cacheVersion string
 }
 
-func New(root string, hosts remote.HostFunc, platformMC platforms.MatchComparer) (*Provider, error) {
-	store, err := local.NewLabeledStore(root, newMemoryLabelStore())
+func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer) (*Provider, error) {
+	contentDir := filepath.Join(root, "content")
+	if err := os.MkdirAll(contentDir, 0755); err != nil {
+		return nil, err
+	}
+	store, err := accelcontent.NewContent(hosts, contentDir, root, "0MB")
 	if err != nil {
 		return nil, err
 	}
 
 	return &Provider{
-		images:     make(map[string]*ocispec.Descriptor),
-		store:      store,
-		hosts:      hosts,
-		platformMC: platformMC,
+		images:       make(map[string]*ocispec.Descriptor),
+		store:        store,
+		hosts:        hosts,
+		cacheSize:    int(cacheSize),
+		platformMC:   platformMC,
+		cacheVersion: cacheVersion,
 	}, nil
 }
 
@@ -107,4 +118,11 @@ func (pvd *Provider) ContentStore() content.Store {
 
 func (pvd *Provider) SetContentStore(store content.Store) {
 	pvd.store = store
+}
+
+func (pvd *Provider) NewRemoteCache(ctx context.Context, ref string) (context.Context, *cache.RemoteCache) {
+	if ref != "" {
+		return cache.New(ctx, ref, "", pvd.cacheSize, pvd)
+	}
+	return ctx, nil
 }

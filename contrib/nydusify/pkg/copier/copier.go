@@ -273,7 +273,7 @@ func Copy(ctx context.Context, opt Opt) error {
 	if err != nil {
 		return errors.Wrap(err, "create temp directory")
 	}
-	pvd, err := provider.New(tmpDir, hosts(opt), platformMC)
+	pvd, err := provider.New(tmpDir, hosts(opt), 200, "v1", platformMC)
 	if err != nil {
 		return err
 	}

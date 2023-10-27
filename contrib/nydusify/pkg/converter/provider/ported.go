@@ -8,11 +8,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
@@ -20,7 +18,6 @@ import (
 
 	// nolint:staticcheck
 	"github.com/containerd/containerd/remotes/docker/schema1"
-	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/semaphore"
 )
@@ -179,52 +176,4 @@ func push(ctx context.Context, store content.Store, pushCtx *containerd.RemoteCo
 	}
 
 	return remotes.PushContent(ctx, pusher, desc, store, limiter, pushCtx.PlatformMatcher, wrapper)
-}
-
-// Ported from containerd project, copyright The containerd Authors.
-// https://github.com/containerd/containerd/blob/main/content/local/store_test.go
-type memoryLabelStore struct {
-	l      sync.Mutex
-	labels map[digest.Digest]map[string]string
-}
-
-func newMemoryLabelStore() local.LabelStore {
-	return &memoryLabelStore{
-		labels: map[digest.Digest]map[string]string{},
-	}
-}
-
-func (mls *memoryLabelStore) Get(d digest.Digest) (map[string]string, error) {
-	mls.l.Lock()
-	labels := mls.labels[d]
-	mls.l.Unlock()
-
-	return labels, nil
-}
-
-func (mls *memoryLabelStore) Set(d digest.Digest, labels map[string]string) error {
-	mls.l.Lock()
-	mls.labels[d] = labels
-	mls.l.Unlock()
-
-	return nil
-}
-
-func (mls *memoryLabelStore) Update(d digest.Digest, update map[string]string) (map[string]string, error) {
-	mls.l.Lock()
-	labels, ok := mls.labels[d]
-	if !ok {
-		labels = map[string]string{}
-	}
-	for k, v := range update {
-		if v == "" {
-			delete(labels, k)
-		} else {
-			labels[k] = v
-		}
-	}
-	mls.labels[d] = labels
-	mls.l.Unlock()
-
-	return labels, nil
 }

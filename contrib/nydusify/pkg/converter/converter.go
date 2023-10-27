@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 
+	"github.com/containerd/containerd/namespaces"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
 	"github.com/goharbor/acceleration-service/pkg/converter"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
@@ -54,6 +55,7 @@ type Opt struct {
 }
 
 func Convert(ctx context.Context, opt Opt) error {
+	ctx = namespaces.WithNamespace(ctx, "nydusify")
 	platformMC, err := platformutil.ParsePlatforms(opt.AllPlatforms, opt.Platforms)
 	if err != nil {
 		return err
@@ -75,7 +77,7 @@ func Convert(ctx context.Context, opt Opt) error {
 	if err != nil {
 		return errors.Wrap(err, "create temp directory")
 	}
-	pvd, err := provider.New(tmpDir, hosts(opt), platformMC)
+	pvd, err := provider.New(tmpDir, hosts(opt), opt.CacheMaxRecords, opt.CacheVersion, platformMC)
 	if err != nil {
 		return err
 	}
@@ -90,7 +92,7 @@ func Convert(ctx context.Context, opt Opt) error {
 		return err
 	}
 
-	metric, err := cvt.Convert(ctx, opt.Source, opt.Target)
+	metric, err := cvt.Convert(ctx, opt.Source, opt.Target, opt.CacheRef)
 	if opt.OutputJSON != "" {
 		dumpMetric(metric, opt.OutputJSON)
 	}
