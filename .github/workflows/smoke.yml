@@ -610,9 +610,13 @@ jobs:
         shared-key: nydus-build
     - name: Install cargo nextest
       uses: taiki-e/install-action@nextest
+    - name: Fscache Setup
+      run: sudo bash misc/fscache/setup.sh
     - name: Unit Test
       run: |
-        make ut-nextest
+        CARGO_HOME=${HOME}/.cargo
+        CARGO_BIN=$(which cargo)
+        sudo -E CARGO=${CARGO_BIN} make ut-nextest
 
   nydus-unit-test-coverage:
     runs-on: ubuntu-latest
@@ -626,8 +630,13 @@ jobs:
           cache-on-failure: true
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Fscache Setup
+        run: sudo bash misc/fscache/setup.sh
       - name: Generate code coverage
-        run: make coverage-codecov
+        run: |
+          CARGO_HOME=${HOME}/.cargo
+          CARGO_BIN=$(which cargo)
+          sudo -E CARGO=${CARGO_BIN} make coverage-codecov
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:
