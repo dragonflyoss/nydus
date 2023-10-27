@@ -39,7 +39,7 @@ var (
 	gitVersion string
 )
 
-var maxCacheMaxRecords uint = 50
+var maxCacheMaxRecords uint = 200
 
 const defaultLogLevel = logrus.InfoLevel
 
@@ -293,7 +293,7 @@ func main() {
 					EnvVars:  []string{"BUILD_CACHE_INSECURE"},
 				},
 				// The --build-cache-max-records flag represents the maximum number
-				// of layers in cache image. 50 (bootstrap + blob in one record) was
+				// of layers in cache image. 200 (bootstrap + blob in one record) was
 				// chosen to make it compatible with the 127 max in graph driver of
 				// docker so that we can pull cache image using docker.
 				&cli.UintFlag{
