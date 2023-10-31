@@ -14,7 +14,7 @@ Therefore, a RAFS file system may consist of the following parts:
 
 ## Installation
 
-Get latest `nydus-image` binary from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
+Get latest `nydus-image` binary from [release](https://github.com/dragonflyoss/nydus/releases/latest) page.
 
 ## Nydus Image Builder
 
@@ -257,7 +257,7 @@ dm-verity options: --no-superblock --format=1 -s "" --hash=sha256 --data-block-s
 [root@image-service]# lsblk
 NAME     MAJ:MIN RM  SIZE RO TYPE  MOUNTPOINT
 loop1      7:1    0  2.4M  0 loop  
-└─verity 252:0    0  2.2M  1 crypt /root/image-service/mnt
+└─verity 252:0    0  2.2M  1 crypt /root/nydus/mnt
 [root@image-service]# mount -t erofs -r /dev/dm-0 mnt/
 ```
 

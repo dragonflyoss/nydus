@@ -23,11 +23,11 @@ wget -O /etc/nydus/nydusd-config.json https://raw.githubusercontent.com/containe
 wget -O /etc/nydus/config.toml https://raw.githubusercontent.com/containerd/nydus-snapshotter/"$TAG"/misc/snapshotter/config.toml
 ```
 
-3. Download nydus image service release tarball from [the release page](https://github.com/dragonflyoss/image-service/releases). 
+3. Download nydus image service release tarball from [the release page](https://github.com/dragonflyoss/nydus/releases). 
 ```
 # Get the latest version. If this version does not work for you, you can try v2.1.4
-TAG=`curl -s https://api.github.com/repos/dragonflyoss/image-service/releases/latest | grep tag_name | cut -f4 -d "\""`
-wget https://github.com/dragonflyoss/image-service/releases/download/"$TAG"/nydus-static-"$TAG"-linux-amd64.tgz
+TAG=`curl -s https://api.github.com/repos/dragonflyoss/nydus/releases/latest | grep tag_name | cut -f4 -d "\""`
+wget https://github.com/dragonflyoss/nydus/releases/download/"$TAG"/nydus-static-"$TAG"-linux-amd64.tgz
 tar -xzvf nydus-static-"$TAG"-linux-amd64.tgz
 sudo install -D -m 755 nydus-static/* /usr/local/bin
 ```
