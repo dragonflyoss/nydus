@@ -6,7 +6,7 @@ The Nydusify CLI tool supports:
 
 ### Get binaries from release page
 
-Get `nydus-image`, `nydusd` and `nydusify` binaries from [release](https://github.com/dragonflyoss/image-service/releases/latest) page and install them to system PATH like `/usr/bin` or `/usr/local/bin`.
+Get `nydus-image`, `nydusd` and `nydusify` binaries from [release](https://github.com/dragonflyoss/nydus/releases/latest) page and install them to system PATH like `/usr/bin` or `/usr/local/bin`.
 
 ## Basic Usage
 
