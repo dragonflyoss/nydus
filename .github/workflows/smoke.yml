@@ -155,7 +155,7 @@ jobs:
           version=${versions[$i]}
           version_arch=${version_archs[$i]}
 
-          wget -q https://github.com/dragonflyoss/image-service/releases/download/$version/nydus-static-$version_arch.tgz
+          wget -q https://github.com/dragonflyoss/nydus/releases/download/$version/nydus-static-$version_arch.tgz
           sudo mkdir nydus-$version /usr/bin/nydus-$version
           sudo tar xzf nydus-static-$version_arch.tgz -C nydus-$version
           sudo cp -r nydus-$version/nydus-static/* /usr/bin/nydus-$version/
