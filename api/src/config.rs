@@ -1312,7 +1312,7 @@ impl TryFrom<&CacheConfig> for CacheConfigV2 {
             "fscache" => {
                 config.fs_cache = Some(serde_json::from_value(v.cache_config.clone())?);
             }
-            "" => {}
+            "" | "dummycache" => {}
             t => {
                 return Err(Error::new(
                     ErrorKind::InvalidInput,
