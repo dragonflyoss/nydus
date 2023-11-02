@@ -34,9 +34,11 @@ Nydusify uploads Nydus blob to registry by default, change this behavior by spec
 cat /path/to/backend-config.json
 {
   "endpoint": "region.aliyuncs.com",
+  "scheme": "https",
   "access_key_id": "",
   "access_key_secret": "",
-  "bucket_name": ""
+  "bucket_name": "",
+  "object_prefix": "nydus/"
 }
 ```
 
@@ -61,7 +63,8 @@ cat /path/to/backend-config.json
   "scheme": "http",
   "access_key_id": "",
   "access_key_secret": "",
-  "bucket_name": ""
+  "bucket_name": "",
+  "object_prefix": "nydus/"
 }
 ```
 
@@ -82,8 +85,8 @@ nydusify convert \
 ``` shell
 # meta_prefix:
 #  push bootstrap into oss://$bucket_name/$meta_prefix$bootstrap_name
-# blob_prefix:
-#  push blobs into oss://$bucket_name/$blob_prefix$blob_id
+# object_prefix:
+#  push blobs into oss://$bucket_name/$object_prefix$blob_id
 cat /path/to/backend-config.json
 {
   "bucket_name": "",
@@ -91,7 +94,7 @@ cat /path/to/backend-config.json
   "access_key_id": "",
   "access_key_secret": "",
   "meta_prefix": "meta/",
-  "blob_prefix": "blob/"
+  "object_prefix": "nydus/"
 }
 
 nydusify pack --bootstrap target.bootstrap \
@@ -107,8 +110,8 @@ nydusify pack --bootstrap target.bootstrap \
 ``` shell
 # meta_prefix:
 #  push bootstrap into s3://$bucket_name/$meta_prefix$bootstrap_name
-# blob_prefix:
-#  push blobs into s3://$bucket_name/$blob_prefix$blob_id
+# object_prefix:
+#  push blobs into s3://$bucket_name/$object_prefix$blob_id
 cat /path/to/backend-config.json
 {
   "bucket_name": "",
@@ -116,7 +119,7 @@ cat /path/to/backend-config.json
   "access_key_id": "",
   "access_key_secret": "",
   "meta_prefix": "meta/",
-  "blob_prefix": "blob/"
+  "object_prefix": "nydus/"
 }
 
 nydusify pack --bootstrap target.bootstrap \

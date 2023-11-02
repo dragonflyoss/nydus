@@ -204,6 +204,7 @@ Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/
       "config": {
         ...
         "endpoint": "region.aliyuncs.com",
+        "scheme": "https",
         "access_key_id": "",
         "access_key_secret": "",
         "bucket_name": "",

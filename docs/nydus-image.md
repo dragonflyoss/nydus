@@ -192,9 +192,11 @@ data blobs: ["9e50ae5ac02b2ef6ffb86075720e49d95d8240eed4717dd8ac9c68cadba00762"]
 cat /path/to/backend-config.json
 {
   "endpoint": "region.aliyuncs.com",
+  "scheme": "https",
   "access_key_id": "",
   "access_key_secret": "",
-  "bucket_name": ""
+  "bucket_name": "",
+  "object_prefix": "nydus/"
 }
 
 # min_used_ratio:
