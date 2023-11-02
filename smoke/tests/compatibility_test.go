@@ -29,9 +29,9 @@ func (c *CompatibilityTestSuite) TestConvertImages() test.Generator {
 	scenarios.
 		Dimension(paramImage, []interface{}{"nginx:latest"}).
 		Dimension(paramFSVersion, []interface{}{"5", "6"}).
-		Dimension(paramNydusImageVersion, []interface{}{"v0.1.0", "v2.1.6", "latest"}).
-		Dimension(paramNydusifyVersion, []interface{}{"v0.1.0", "v2.1.6", "latest"}).
-		Dimension(paramNydusdVersion, []interface{}{"v0.1.0", "v2.1.6", "latest"}).
+		Dimension(paramNydusImageVersion, []interface{}{"v0.1.0", "v2.2.3", "latest"}).
+		Dimension(paramNydusifyVersion, []interface{}{"v0.1.0", "v2.2.3", "latest"}).
+		Dimension(paramNydusdVersion, []interface{}{"v0.1.0", "v2.2.3", "latest"}).
 		Skip(func(param *tool.DescartesItem) bool {
 
 			// Nydus-image 0.1.0 only works with nydus-nydusify 0.1.0, vice versa.
