@@ -86,7 +86,7 @@ func (c *CompatibilityTestSuite) TestConvertImages() test.Generator {
 		image := c.prepareImage(c.t, scenario.GetString(paramImage))
 		return scenario.Str(), func(t *testing.T) {
 			imageTest := &ImageTestSuite{T: t}
-			imageTest.TestConvertImage(t, *ctx, image)
+			imageTest.TestConvertAndCopyImage(t, *ctx, image, false)
 		}
 	}
 }
