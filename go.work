@@ -1,0 +1,8 @@
+go 1.20
+
+use (
+	./contrib/ctr-remote
+	./contrib/nydus-overlayfs
+	./contrib/nydusify
+	./smoke
+)
