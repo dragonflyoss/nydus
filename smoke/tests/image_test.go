@@ -63,12 +63,12 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 
 		image := i.prepareImage(i.T, scenario.GetString(paramImage))
 		return scenario.Str(), func(t *testing.T) {
-			i.TestConvertImage(t, *ctx, image)
+			i.TestConvertAndCopyImage(t, *ctx, image, true)
 		}
 	}
 }
 
-func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source string) {
+func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context, source string, testCopy bool) {
 
 	// Prepare work directory
 	ctx.PrepareWorkDir(t)
@@ -117,6 +117,25 @@ func (i *ImageTestSuite) TestConvertImage(t *testing.T, ctx tool.Context, source
 	checkCmd := fmt.Sprintf(
 		"%s %s check --source %s --target %s --nydus-image %s --nydusd %s --work-dir %s",
 		nydusifyPath, logLevel, source, target, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
+	)
+	tool.RunWithoutOutput(t, checkCmd)
+
+	if !testCopy {
+		return
+	}
+
+	// Copy image
+	targetCopied := fmt.Sprintf("%s_copied", target)
+	copyCmd := fmt.Sprintf(
+		"%s %s copy --source %s --target %s --nydus-image %s --work-dir %s",
+		ctx.Binary.Nydusify, logLevel, target, targetCopied, ctx.Binary.Builder, ctx.Env.WorkDir,
+	)
+	tool.RunWithoutOutput(t, copyCmd)
+
+	// Check copied image
+	checkCmd = fmt.Sprintf(
+		"%s %s check --source %s --target %s --nydus-image %s --nydusd %s --work-dir %s",
+		nydusifyPath, logLevel, source, targetCopied, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
 	)
 	tool.RunWithoutOutput(t, checkCmd)
 }
