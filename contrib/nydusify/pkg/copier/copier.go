@@ -16,6 +16,7 @@ import (
 	"github.com/containerd/containerd/content"
 	containerdErrdefs "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
@@ -151,7 +152,7 @@ func pushBlobFromBackend(
 	for idx := range blobIDs {
 		func(idx int) {
 			eg.Go(func() error {
-				sem.Acquire(ctx, 1)
+				sem.Acquire(context.Background(), 1)
 				defer sem.Release(1)
 
 				blobID := blobIDs[idx]
@@ -244,6 +245,9 @@ func getPlatform(platform *ocispec.Platform) string {
 }
 
 func Copy(ctx context.Context, opt Opt) error {
+	// Containerd image fetch requires a namespace context.
+	ctx = namespaces.WithNamespace(ctx, "nydusify")
+
 	platformMC, err := platformutil.ParsePlatforms(opt.AllPlatforms, opt.Platforms)
 	if err != nil {
 		return err
@@ -319,7 +323,7 @@ func Copy(ctx context.Context, opt Opt) error {
 	for idx := range sourceDescs {
 		func(idx int) {
 			eg.Go(func() error {
-				sem.Acquire(ctx, 1)
+				sem.Acquire(context.Background(), 1)
 				defer sem.Release(1)
 
 				sourceDesc := sourceDescs[idx]
