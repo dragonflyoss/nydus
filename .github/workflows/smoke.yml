@@ -16,6 +16,8 @@ env:
   CARGO_TERM_COLOR: always
   IMAGE: wordpress
   TAG: 6.1.1
+  NYDUS_STABLE_VERSION: v2.2.3
+  NYDUS_STABLE_VERSION_EXPORT: v2_2_3
 
 jobs:
   contrib-build:
@@ -149,8 +151,8 @@ jobs:
     - name: Prepare Older Binaries
       id: prepare-binaries
       run: |
-        versions=(v0.1.0 v2.2.3)
-        version_archs=(v0.1.0-x86_64 v2.2.3-linux-amd64)
+        versions=(v0.1.0 ${{env.NYDUS_STABLE_VERSION}})
+        version_archs=(v0.1.0-x86_64 ${{env.NYDUS_STABLE_VERSION}}-linux-amd64)
         for i in ${!versions[@]}; do
           version=${versions[$i]}
           version_arch=${version_archs[$i]}
@@ -175,8 +177,8 @@ jobs:
         sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/bin/nydus-latest
         sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/bin/nydus-latest
 
-        versions=(v0.1.0 v2.2.3 latest)
-        version_exports=(v0_1_0 v2_2_3 latest)
+        versions=(v0.1.0 ${{env.NYDUS_STABLE_VERSION}} latest)
+        version_exports=(v0_1_0 ${{env.NYDUS_STABLE_VERSION_EXPORT}} latest)
         for i in ${!version_exports[@]}; do
           version=${versions[$i]}
           version_export=${version_exports[$i]}
