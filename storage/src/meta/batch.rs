@@ -153,3 +153,62 @@ impl BatchContextGenerator {
         Ok((data, self.contexts.len() as u32))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_batch_inflate_context() {
+        let mut ctx = BatchInflateContext {
+            compressed_offset: 0,
+            compressed_size: 0,
+            uncompressed_batch_size: 0,
+            __reserved1: 0,
+            __reserved2: 0,
+            __reserved3: 0,
+        };
+        ctx.set_compressed_offset(0x10);
+        assert_eq!(ctx.compressed_offset(), 0x10);
+        ctx.set_compressed_size(0x20);
+        assert_eq!(ctx.compressed_size(), 0x20);
+        assert_eq!(ctx.compressed_end(), 0x30);
+        let mut v = [0u8; 40];
+        v[0] = 0x10;
+        v[8] = 0x20;
+        assert_eq!(ctx.as_slice(), v);
+    }
+
+    #[test]
+    fn test_batch_context_generator() {
+        let mut generator = BatchContextGenerator {
+            chunk_data_buf: vec![1u8, 2, 3, 4, 5],
+            contexts: vec![],
+        };
+        assert!(!generator.chunk_data_buf_is_empty());
+        let data = [6u8, 7, 8, 9];
+        generator.append_chunk_data_buf(&data);
+        assert_eq!(
+            generator.chunk_data_buf_len(),
+            generator.chunk_data_buf().len()
+        );
+
+        generator.add_context(0x10, 0x20);
+        assert_eq!(generator.contexts.len(), 1);
+
+        let mut data = vec![0u8; 40];
+        data[0] = 0x10;
+        data[8] = 0x20;
+        data[12] = 9;
+        assert_eq!(generator.to_vec().unwrap(), (data, 1 as u32));
+
+        let ctx = BatchContextGenerator::new(8);
+        assert!(ctx.is_ok());
+        assert_eq!(ctx.unwrap().chunk_data_buf().capacity(), 8);
+
+        assert!(generator.generate_chunk_info(0, 2, true).is_ok());
+
+        generator.clear_chunk_data_buf();
+        assert_eq!(generator.chunk_data_buf_len(), 0);
+    }
+}

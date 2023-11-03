@@ -306,6 +306,36 @@ mod tests {
         chunk.set_zran_offset(5);
         assert_eq!(chunk.get_zran_index(), 3);
         assert_eq!(chunk.get_zran_offset(), 5);
+        chunk.set_zran(false);
+        assert!(!chunk.is_zran());
+
+        let before = chunk.uncomp_info;
+        chunk.set_compressed(true);
+        chunk.set_compressed(false);
+        assert_eq!(chunk.uncomp_info as u64, before);
+
+        chunk.set_encrypted(true);
+        assert!(chunk.is_encrypted());
+
+        let before = chunk.uncomp_info;
+        chunk.set_batch(true);
+        chunk.set_batch(false);
+        assert_eq!(chunk.uncomp_info as u64, before);
+
+        chunk.set_data(0x10);
+        assert_eq!(chunk.data as u64, 0x10);
+
+        chunk.set_batch(true);
+        chunk.set_batch_index(0x20);
+        assert_eq!(chunk.data as u64, 137438953488);
+
+        chunk.set_uncompressed_offset_in_batch_buf(0x30);
+        assert_eq!(chunk.data as u64, 137438953520);
+
+        assert_eq!(chunk.flags(), 12);
+        assert_eq!(chunk.get_batch_index(), 32);
+        assert_eq!(chunk.get_uncompressed_offset_in_batch_buf(), 48);
+        assert_eq!(chunk.get_data(), 137438953520);
 
         // For testing old format compatibility.
         let chunk = BlobChunkInfoV2Ondisk {
@@ -379,5 +409,34 @@ mod tests {
             .chunk_info_array
             .get_chunk_index_nocheck(&state, 0x102000, false)
             .unwrap_err();
+    }
+
+    #[test]
+    fn test_chunk_on_disk_validate() {
+        let mut ctx = BlobCompressionContext::default();
+        let mut chunk = BlobChunkInfoV2Ondisk::default();
+        println!("{}", chunk);
+
+        chunk.set_compressed_offset(0x10);
+        chunk.set_compressed_size(0x20);
+        chunk.set_encrypted(false);
+        chunk.set_compressed(false);
+        chunk.set_uncompressed_size(0x30);
+        chunk.set_compressed_size(0x40);
+        chunk.set_zran(true);
+        ctx.compressed_size = 0x100;
+        ctx.uncompressed_size = 0x40;
+        ctx.blob_features = 0;
+        assert!(chunk.validate(&ctx).is_err());
+
+        chunk.set_encrypted(true);
+        assert!(chunk.validate(&ctx).is_err());
+
+        ctx.blob_features = BlobFeatures::ZRAN.bits();
+        chunk.set_zran_index(0);
+        assert!(chunk.validate(&ctx).is_err());
+
+        chunk.set_zran(false);
+        assert!(chunk.validate(&ctx).is_ok());
     }
 }
