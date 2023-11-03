@@ -353,3 +353,46 @@ impl TarBuilder {
             || path == Path::new("/.no.prefetch.landmark")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use vmm_sys_util::tempdir::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn test_tar_builder_is_stargz_special_files() {
+        let builder = TarBuilder::new(true, 0, RafsVersion::V6);
+
+        let path = Path::new("/stargz.index.json");
+        assert!(builder.is_stargz_special_files(&path));
+        let path = Path::new("/.prefetch.landmark");
+        assert!(builder.is_stargz_special_files(&path));
+        let path = Path::new("/.no.prefetch.landmark");
+        assert!(builder.is_stargz_special_files(&path));
+
+        let path = Path::new("/no.prefetch.landmark");
+        assert!(!builder.is_stargz_special_files(&path));
+        let path = Path::new("/prefetch.landmark");
+        assert!(!builder.is_stargz_special_files(&path));
+        let path = Path::new("/tar.index.json");
+        assert!(!builder.is_stargz_special_files(&path));
+    }
+
+    #[test]
+    fn test_tar_builder_create_directory() {
+        let tmp_dir = TempDir::new().unwrap();
+        let target_paths = [OsString::from(tmp_dir.as_path())];
+        let mut builder = TarBuilder::new(true, 0, RafsVersion::V6);
+
+        let node = builder.create_directory(&target_paths);
+        assert!(node.is_ok());
+        let node = node.unwrap();
+        println!("Node: {}", node);
+        assert_eq!(node.file_type(), "dir");
+        assert_eq!(node.target(), tmp_dir.as_path());
+
+        assert_eq!(builder.next_ino, 1);
+        assert_eq!(builder.next_ino(), 2);
+    }
+}

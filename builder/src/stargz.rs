@@ -913,11 +913,10 @@ mod tests {
     use super::*;
     use crate::{ArtifactStorage, ConversionType, Features, Prefetch, WhiteoutSpec};
 
-    #[ignore]
     #[test]
     fn test_build_stargz_toc() {
         let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
-        let tmp_dir = tmp_dir.as_path().to_path_buf();
+        let mut tmp_dir = tmp_dir.as_path().to_path_buf();
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let source_path =
             PathBuf::from(root_dir).join("../tests/texture/stargz/estargz_sample.json");
@@ -939,13 +938,116 @@ mod tests {
             false,
         );
         ctx.fs_version = RafsVersion::V6;
+        ctx.conversion_type = ConversionType::EStargzToRafs;
         let mut bootstrap_mgr =
-            BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);
+            BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir.clone())), None);
         let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
         let mut builder = StargzBuilder::new(0x1000000, &ctx);
 
-        builder
-            .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
-            .unwrap();
+        let builder = builder.build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr);
+        assert!(builder.is_ok());
+        let builder = builder.unwrap();
+        assert_eq!(
+            builder.blobs,
+            vec![String::from(
+                "bd4eff3fe6f5a352457c076d2133583e43db895b4af08d717b3fbcaeca89834e"
+            )]
+        );
+        assert_eq!(builder.blob_size, Some(4128));
+        tmp_dir.push("e60676aef5cc0d5caca9f4c8031f5b0c8392a0611d44c8e1bbc46dbf7fe7bfef");
+        assert_eq!(
+            builder.bootstrap_path.unwrap(),
+            tmp_dir.to_str().unwrap().to_string()
+        )
+    }
+
+    #[test]
+    fn test_toc_entry() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let source_path = PathBuf::from(root_dir).join("../tests/texture/tar/all-entry-type.tar");
+
+        let mut entry = TocEntry {
+            name: source_path,
+            toc_type: "".to_string(),
+            size: 0x10,
+            link_name: PathBuf::from("link_name"),
+            mode: 0,
+            uid: 1,
+            gid: 1,
+            uname: "user_name".to_string(),
+            gname: "group_name".to_string(),
+            dev_major: 255,
+            dev_minor: 33,
+            xattrs: Default::default(),
+            digest: Default::default(),
+            offset: 0,
+            chunk_offset: 0,
+            chunk_size: 0,
+            chunk_digest: "sha256:".to_owned(),
+            inner_offset: 0,
+        };
+        entry.chunk_digest.extend(vec!['a'; 64].iter());
+
+        entry.toc_type = "dir".to_owned();
+        assert!(entry.is_dir());
+        assert!(entry.is_supported());
+        assert_eq!(entry.mode(), libc::S_IFDIR);
+        assert_eq!(entry.rdev(), u32::MAX);
+
+        entry.toc_type = "req".to_owned();
+        assert!(!entry.is_reg());
+        entry.toc_type = "reg".to_owned();
+        assert!(entry.is_reg());
+        assert!(entry.is_supported());
+        assert_eq!(entry.mode(), libc::S_IFREG);
+        assert_eq!(entry.size(), 0x10);
+
+        entry.toc_type = "symlink".to_owned();
+        assert!(entry.is_symlink());
+        assert!(entry.is_supported());
+        assert_eq!(entry.mode(), libc::S_IFLNK);
+        assert_eq!(entry.symlink_link_path(), Path::new("link_name"));
+        assert!(entry.normalize().is_ok());
+
+        entry.toc_type = "hardlink".to_owned();
+        assert!(entry.is_supported());
+        assert!(entry.is_hardlink());
+        assert_eq!(entry.mode(), libc::S_IFREG);
+        assert_eq!(entry.hardlink_link_path(), Path::new("link_name"));
+        assert!(entry.normalize().is_ok());
+
+        entry.toc_type = "chunk".to_owned();
+        assert!(entry.is_supported());
+        assert!(entry.is_chunk());
+        assert_eq!(entry.mode(), 0);
+        assert_eq!(entry.size(), 0);
+        assert!(entry.normalize().is_err());
+
+        entry.toc_type = "block".to_owned();
+        assert!(entry.is_special());
+        assert!(entry.is_blockdev());
+        assert_eq!(entry.mode(), libc::S_IFBLK);
+
+        entry.toc_type = "char".to_owned();
+        assert!(entry.is_special());
+        assert!(entry.is_chardev());
+        assert_eq!(entry.mode(), libc::S_IFCHR);
+        assert_ne!(entry.size(), 0x10);
+
+        entry.toc_type = "fifo".to_owned();
+        assert!(entry.is_fifo());
+        assert!(entry.is_special());
+        assert_eq!(entry.mode(), libc::S_IFIFO);
+        assert_eq!(entry.rdev(), 65313);
+
+        assert_eq!(entry.name().unwrap().to_str(), Some("all-entry-type.tar"));
+        entry.name = PathBuf::from("/");
+        assert_eq!(entry.name().unwrap().to_str(), Some("/"));
+        assert_ne!(entry.path(), Path::new("all-entry-type.tar"));
+
+        assert_eq!(entry.block_id().unwrap().data, [0xaa as u8; 32]);
+
+        entry.name = PathBuf::from("");
+        assert!(entry.normalize().is_err());
     }
 }
