@@ -1464,3 +1464,71 @@ impl BuildOutput {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use nydus_api::{BackendConfigV2, ConfigV2Internal, LocalFsConfig};
+
+    use super::*;
+
+    #[test]
+    fn test_blob_context_from() {
+        let mut blob = BlobInfo::new(
+            1,
+            "blob_id".to_string(),
+            16,
+            8,
+            4,
+            2,
+            BlobFeatures::INLINED_FS_META | BlobFeatures::SEPARATE | BlobFeatures::HAS_TOC,
+        );
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/blobs/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+        assert!(blob
+            .set_blob_id_from_meta_path(source_path.as_path())
+            .is_ok());
+        blob.set_blob_meta_size(2);
+        blob.set_blob_toc_size(2);
+        blob.set_blob_meta_digest([32u8; 32]);
+        blob.set_blob_toc_digest([64u8; 32]);
+        blob.set_blob_meta_info(1, 2, 4, 8);
+
+        let mut ctx = BuildContext::default();
+        ctx.configuration.internal.set_blob_accessible(true);
+        let config = ConfigV2 {
+            version: 2,
+            backend: Some(BackendConfigV2 {
+                backend_type: "localfs".to_owned(),
+                localdisk: None,
+                localfs: Some(LocalFsConfig {
+                    blob_file: source_path.to_str().unwrap().to_owned(),
+                    dir: "/tmp".to_owned(),
+                    alt_dirs: vec!["/var/nydus/cache".to_owned()],
+                }),
+                oss: None,
+                s3: None,
+                registry: None,
+                http_proxy: None,
+            }),
+            id: "id".to_owned(),
+            cache: None,
+            rafs: None,
+            internal: ConfigV2Internal {
+                blob_accessible: Arc::new(AtomicBool::new(true)),
+            },
+        };
+        ctx.set_configuration(config.into());
+
+        let chunk_source = ChunkSource::Dict;
+
+        let blob_ctx = BlobContext::from(&ctx, &blob, chunk_source);
+
+        assert!(blob_ctx.is_ok());
+        let blob_ctx = blob_ctx.unwrap();
+        assert_eq!(blob_ctx.uncompressed_blob_size, 16);
+        assert!(blob_ctx.blob_meta_info_enabled);
+    }
+}
