@@ -778,7 +778,7 @@ mod tests {
         let blob_mgr = BlobFactory::new_backend(&config, id).unwrap();
         let blob = blob_mgr.get_reader(id).unwrap();
         let location = TocLocation::with_digest(9010, 1024, digest);
-        let list =
+        let mut list =
             TocEntryList::read_from_blob::<fs::File>(blob.as_ref(), None, &location).unwrap();
         assert_eq!(list.entries.len(), 4);
 
@@ -789,15 +789,27 @@ mod tests {
 
         let mut buf = Vec::new();
         let entry = list.get_entry(TOC_ENTRY_BLOB_META).unwrap();
-        assert_eq!(entry.uncompressed_size, 0x30);
+        assert_eq!(entry.uncompressed_size(), 0x30);
         entry.extract_from_reader(blob.clone(), &mut buf).unwrap();
         assert!(!buf.is_empty());
 
         let mut buf = Vec::new();
         let entry = list.get_entry(TOC_ENTRY_BLOB_META_HEADER).unwrap();
-        assert_eq!(entry.uncompressed_size, 0x1000);
+        assert_eq!(entry.uncompressed_size(), 0x1000);
         entry.extract_from_reader(blob.clone(), &mut buf).unwrap();
         assert!(!buf.is_empty());
+
+        assert!(list
+            .add(
+                TOC_ENTRY_BLOB_DIGEST,
+                compress::Algorithm::Lz4Block,
+                digest,
+                0,
+                2,
+                3
+            )
+            .is_ok());
+        assert!(list.get_entry(TOC_ENTRY_BLOB_DIGEST).is_some());
     }
 
     #[test]
@@ -891,5 +903,93 @@ mod tests {
         let flags = TocEntryFlags::try_from(compress::Algorithm::Zstd).unwrap();
         assert_eq!(flags, TocEntryFlags::COMPRESSION_ZSTD);
         let _e = TocEntryFlags::try_from(compress::Algorithm::GZip).unwrap_err();
+    }
+
+    fn extract_from_buf_with_different_flags(entry: &TocEntry, buf: &[u8]) -> Result<String> {
+        let tmp_file = TempFile::new();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .open(tmp_file.unwrap().as_path())
+            .unwrap();
+
+        entry.extract_from_buf(&buf, &mut file)?;
+
+        let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
+        let mut buffer = [0; 1024];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hasher.digest_update(&buffer[..count]);
+        }
+        Ok(hasher.digest_finalize().into())
+    }
+
+    #[test]
+    fn test_extract_from_buf() {
+        let mut entry = TocEntry {
+            flags: 0,
+            reserved1: 0,
+            name: [0u8; 16],
+            uncompressed_digest: [
+                45, 15, 227, 154, 167, 87, 190, 28, 152, 93, 55, 27, 96, 217, 56, 121, 96, 131,
+                226, 94, 70, 74, 193, 156, 222, 228, 46, 156, 49, 169, 143, 53,
+            ],
+            compressed_offset: 0,
+            compressed_size: 0,
+            uncompressed_size: 0,
+            reserved2: [0u8; 48],
+        };
+
+        let buf = [
+            79u8, 223, 187, 54, 239, 116, 163, 198, 58, 40, 226, 171, 175, 165, 64, 68, 199, 89,
+            65, 85, 190, 182, 221, 173, 159, 54, 130, 92, 254, 88, 40, 108,
+        ];
+
+        entry.flags = TocEntryFlags::COMPRESSION_LZ4_BLOCK.bits();
+        assert!(extract_from_buf_with_different_flags(&entry, &buf).is_err());
+
+        entry.flags = (!TocEntryFlags::empty()).bits() + 1;
+        assert!(extract_from_buf_with_different_flags(&entry, &buf).is_err());
+
+        entry.flags = TocEntryFlags::COMPRESSION_NONE.bits();
+        assert!(extract_from_buf_with_different_flags(&entry, &buf).is_err());
+        entry.uncompressed_size = 32;
+        let s = extract_from_buf_with_different_flags(&entry, &buf);
+        assert!(s.is_ok());
+        assert_eq!(
+            s.unwrap(),
+            String::from("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = Path::new(root_dir)
+            .join("../tests/texture/zstd")
+            .join("2fa78cad554b75ac91a4a125ed148d0ddeb25efa4aaa8bd80e5dc292690a4dca.zst");
+        let mut file = OpenOptions::new().read(true).open(path.as_path()).unwrap();
+        let mut buffer = [0; 1024];
+        let mut buf = vec![];
+        loop {
+            let count = file.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            buf.extend_from_slice(&buffer[..count]);
+        }
+        entry.flags = TocEntryFlags::COMPRESSION_ZSTD.bits();
+        entry.uncompressed_size = 10034;
+        assert!(extract_from_buf_with_different_flags(&entry, &buf).is_err());
+        entry.uncompressed_digest = [
+            47, 167, 140, 173, 85, 75, 117, 172, 145, 164, 161, 37, 237, 20, 141, 13, 222, 178, 94,
+            250, 74, 170, 139, 216, 14, 93, 194, 146, 105, 10, 77, 202,
+        ];
+        let s = extract_from_buf_with_different_flags(&entry, &buf);
+        assert!(s.is_ok());
+        assert_eq!(
+            s.unwrap(),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned()
+        );
     }
 }
