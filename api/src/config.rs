@@ -2178,4 +2178,424 @@ mod tests {
         let auth = registry.auth.unwrap();
         assert_eq!(auth, test_auth);
     }
+
+    #[test]
+    fn test_config2_error() {
+        let content_bad_version = r#"version=3
+        "#;
+        let cfg: ConfigV2 = toml::from_str(content_bad_version).unwrap();
+        assert!(!cfg.validate());
+        let cfg = ConfigV2::new("id");
+        assert!(cfg.get_backend_config().is_err());
+        assert!(cfg.get_cache_config().is_err());
+        assert!(cfg.get_rafs_config().is_err());
+        assert!(cfg.get_cache_working_directory().is_err());
+
+        let content = r#"version=2
+            [cache]
+            type = "filecache"
+            [cache.filecache]
+            work_dir = "/tmp"
+        "#;
+        let cfg: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(cfg.get_cache_working_directory().unwrap(), "/tmp");
+
+        let content = r#"version=2
+            [cache]
+            type = "fscache"
+            [cache.fscache]
+            work_dir = "./foo"
+        "#;
+        let cfg: ConfigV2 = toml::from_str(content).unwrap();
+        assert_eq!(cfg.get_cache_working_directory().unwrap(), "./foo");
+
+        let content = r#"version=2
+            [cache]
+            type = "bar"
+        "#;
+        let cfg: ConfigV2 = toml::from_str(content).unwrap();
+        assert!(cfg.get_cache_working_directory().is_err());
+
+        let content = r#"
+            foo-bar-xxxx
+        "#;
+        assert!(toml::from_str::<ConfigV2>(content).is_err());
+    }
+
+    #[test]
+    fn test_backend_config_valid() {
+        let mut cfg = BackendConfigV2 {
+            backend_type: "localdisk".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+        cfg.localdisk = Some(LocalDiskConfig {
+            device_path: "".to_string(),
+            disable_gpt: true,
+        });
+        assert!(!cfg.validate());
+
+        let cfg = BackendConfigV2 {
+            backend_type: "localfs".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+
+        let cfg = BackendConfigV2 {
+            backend_type: "oss".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+
+        let cfg = BackendConfigV2 {
+            backend_type: "s3".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+
+        let cfg = BackendConfigV2 {
+            backend_type: "register".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+
+        let cfg = BackendConfigV2 {
+            backend_type: "http-proxy".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+
+        let cfg = BackendConfigV2 {
+            backend_type: "foobar".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+    }
+
+    fn get_config(backend_type: &str) {
+        let mut cfg: BackendConfigV2 = BackendConfigV2::default();
+        assert!(cfg.get_localdisk_config().is_err());
+
+        cfg.backend_type = backend_type.to_string();
+        assert!(cfg.get_localdisk_config().is_err());
+    }
+
+    #[test]
+    fn test_get_confg() {
+        get_config("localdisk");
+        get_config("localfs");
+        get_config("oss");
+        get_config("s3");
+        get_config("register");
+        get_config("http-proxy");
+    }
+
+    #[test]
+    fn test_cache_config_valid() {
+        let cfg = CacheConfigV2 {
+            cache_type: "blobcache".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+
+        let cfg = CacheConfigV2 {
+            cache_type: "fscache".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+
+        let cfg = CacheConfigV2 {
+            cache_type: "dummycache".to_string(),
+            ..Default::default()
+        };
+        assert!(cfg.validate());
+
+        let cfg = CacheConfigV2 {
+            cache_type: "foobar".to_string(),
+            ..Default::default()
+        };
+        assert!(!cfg.validate());
+    }
+
+    #[test]
+    fn test_get_fscache_config() {
+        let mut cfg = CacheConfigV2::default();
+        assert!(cfg.get_fscache_config().is_err());
+        cfg.cache_type = "fscache".to_string();
+        assert!(cfg.get_fscache_config().is_err());
+    }
+
+    #[test]
+    fn test_fscache_get_work_dir() {
+        let mut cfg = FsCacheConfig::default();
+        assert!(cfg.get_work_dir().is_err());
+        cfg.work_dir = ".".to_string();
+        assert!(cfg.get_work_dir().is_ok());
+        cfg.work_dir = "foobar".to_string();
+        let res = cfg.get_work_dir().is_ok();
+        fs::remove_dir_all("foobar").unwrap();
+        assert!(res);
+    }
+
+    #[test]
+    fn test_default_mirror_config() {
+        let cfg = MirrorConfig::default();
+        assert_eq!(cfg.host, "");
+        assert_eq!(cfg.health_check_interval, 5);
+        assert_eq!(cfg.failure_limit, 5);
+        assert_eq!(cfg.ping_url, "");
+    }
+
+    #[test]
+    fn test_config_v2_from_file() {
+        let content = r#"version=2
+            [cache]
+            type = "filecache"
+            [cache.filecache]
+            work_dir = "/tmp"
+        "#;
+        if fs::write("test_config_v2_from_file.cfg", content).is_ok() {
+            let res = ConfigV2::from_file("test_config_v2_from_file.cfg").is_ok();
+            fs::remove_file("test_config_v2_from_file.cfg").unwrap();
+            assert!(res);
+        } else {
+            assert!(ConfigV2::from_file("test_config_v2_from_file.cfg").is_err());
+        }
+    }
+
+    #[test]
+    fn test_blob_cache_entry_v2_from_file() {
+        let content = r#"version=2
+        id = "my_id"
+        metadata_path = "meta_path"
+        [backend]
+        type = "localfs"
+        [backend.localfs]
+        blob_file = "/tmp/nydus.blob.data"
+        dir = "/tmp"
+        alt_dirs = ["/var/nydus/cache"]
+        [cache]
+        type = "filecache"
+        compressed = true
+        validate = true
+        [cache.filecache]
+        work_dir = "/tmp"
+        "#;
+        if fs::write("test_blob_cache_entry_v2_from_file.cfg", content).is_ok() {
+            let res =
+                BlobCacheEntryConfigV2::from_file("test_blob_cache_entry_v2_from_file.cfg").is_ok();
+            fs::remove_file("test_blob_cache_entry_v2_from_file.cfg").unwrap();
+            assert!(res);
+        } else {
+            assert!(ConfigV2::from_file("test_blob_cache_entry_v2_from_file.cfg").is_err());
+        }
+    }
+
+    #[test]
+    fn test_blob_cache_valid() {
+        let err_version_content = r#"version=1"#;
+
+        let config: BlobCacheEntryConfigV2 = toml::from_str(err_version_content).unwrap();
+        assert!(!config.validate());
+
+        let content = r#"version=2
+        id = "my_id"
+        metadata_path = "meta_path"
+        [backend]
+        type = "localfs"
+        [backend.localfs]
+        blob_file = "/tmp/nydus.blob.data"
+        dir = "/tmp"
+        alt_dirs = ["/var/nydus/cache"]
+        [cache]
+        type = "filecache"
+        compressed = true
+        validate = true
+        [cache.filecache]
+        work_dir = "/tmp"
+        "#;
+
+        let config: BlobCacheEntryConfigV2 = toml::from_str(content).unwrap();
+        assert!(config.validate());
+    }
+
+    #[test]
+    fn test_blob_from_str() {
+        let content = r#"version=2
+        id = "my_id"
+        metadata_path = "meta_path"
+        [backend]
+        type = "localfs"
+        [backend.localfs]
+        blob_file = "/tmp/nydus.blob.data"
+        dir = "/tmp"
+        alt_dirs = ["/var/nydus/cache"]
+        [cache]
+        type = "filecache"
+        compressed = true
+        validate = true
+        [cache.filecache]
+        work_dir = "/tmp"
+        "#;
+
+        let config: BlobCacheEntryConfigV2 = BlobCacheEntryConfigV2::from_str(content).unwrap();
+        assert_eq!(config.version, 2);
+        assert_eq!(config.id, "my_id");
+        assert_eq!(config.backend.localfs.unwrap().dir, "/tmp");
+        assert_eq!(config.cache.file_cache.unwrap().work_dir, "/tmp");
+        let content = r#"
+            {
+                "version": 2,
+                "id": "my_id",
+                "backend": {
+                    "type": "localfs",
+                    "localfs": {
+                        "dir": "/tmp"
+                    }
+                }
+            }
+        "#;
+        let config: BlobCacheEntryConfigV2 = BlobCacheEntryConfigV2::from_str(content).unwrap();
+
+        assert_eq!(config.version, 2);
+        assert_eq!(config.id, "my_id");
+        assert_eq!(config.backend.localfs.unwrap().dir, "/tmp");
+
+        let content = r#"foobar"#;
+        assert!(BlobCacheEntryConfigV2::from_str(content).is_err());
+    }
+
+    #[test]
+    fn test_blob_cache_entry_from_file() {
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "localfs",
+                "backend_config": {},
+                "cache_type": "fscache",
+                "cache_config": {},
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1"
+        }"#;
+        if fs::write("test_blob_cache_entry_from_file.cfg", content).is_ok() {
+            let res = BlobCacheEntry::from_file("test_blob_cache_entry_from_file.cfg").is_ok();
+            fs::remove_file("test_blob_cache_entry_from_file.cfg").unwrap();
+            assert!(res);
+        } else {
+            assert!(ConfigV2::from_file("test_blob_cache_entry_from_file.cfg").is_err());
+        }
+    }
+
+    #[test]
+    fn test_blob_cache_entry_valid() {
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "localfs",
+                "backend_config": {},
+                "cache_type": "fscache",
+                "cache_config": {},
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1"
+        }"#;
+        let mut cfg = BlobCacheEntry::from_str(content).unwrap();
+        cfg.blob_type = "foobar".to_string();
+        assert!(!cfg.validate());
+
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "domain_id": "domain1"
+        }"#;
+        let cfg = BlobCacheEntry::from_str(content).unwrap();
+        assert!(cfg.validate());
+    }
+
+    #[test]
+    fn test_blob_cache_entry_from_str() {
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "localfs",
+                "backend_config": {},
+                "cache_type": "fscache",
+                "cache_config": {},
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1"
+        }"#;
+        assert!(BlobCacheEntry::from_str(content).is_ok());
+        let content = r#"{
+            "type": "foobar",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "foobar",
+                "backend_config": {},
+                "cache_type": "foobar",
+                "cache_config": {},
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1"
+        }"#;
+        assert!(BlobCacheEntry::from_str(content).is_err());
+
+        let content = r#"foobar"#;
+        assert!(BlobCacheEntry::from_str(content).is_err());
+    }
+
+    #[test]
+    fn test_default_value() {
+        assert!(default_true());
+        assert_eq!(default_failure_limit(), 5);
+        assert_eq!(default_prefetch_batch_size(), 1024 * 1024);
+        assert_eq!(default_prefetch_threads(), 8);
+    }
+
+    #[test]
+    fn test_bckend_config_try_from() {
+        let config = BackendConfig {
+            backend_type: "localdisk".to_string(),
+            backend_config: serde_json::to_value(LocalDiskConfig::default()).unwrap(),
+        };
+        assert!(BackendConfigV2::try_from(&config).is_ok());
+
+        let config = BackendConfig {
+            backend_type: "localfs".to_string(),
+            backend_config: serde_json::to_value(LocalFsConfig::default()).unwrap(),
+        };
+        assert!(BackendConfigV2::try_from(&config).is_ok());
+
+        let config = BackendConfig {
+            backend_type: "oss".to_string(),
+            backend_config: serde_json::to_value(OssConfig::default()).unwrap(),
+        };
+        assert!(BackendConfigV2::try_from(&config).is_ok());
+
+        let config = BackendConfig {
+            backend_type: "s3".to_string(),
+            backend_config: serde_json::to_value(S3Config::default()).unwrap(),
+        };
+        assert!(BackendConfigV2::try_from(&config).is_ok());
+
+        let config = BackendConfig {
+            backend_type: "registry".to_string(),
+            backend_config: serde_json::to_value(RegistryConfig::default()).unwrap(),
+        };
+        assert!(BackendConfigV2::try_from(&config).is_ok());
+
+        let config = BackendConfig {
+            backend_type: "foobar".to_string(),
+            backend_config: serde_json::to_value(LocalDiskConfig::default()).unwrap(),
+        };
+        assert!(BackendConfigV2::try_from(&config).is_err());
+    }
 }
