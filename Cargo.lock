@@ -1324,6 +1324,7 @@ dependencies = [
  "tar",
  "time",
  "tokio",
+ "toml",
  "url",
  "vm-memory",
  "vmm-sys-util",

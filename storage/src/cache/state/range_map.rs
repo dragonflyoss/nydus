@@ -192,4 +192,26 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_range_map_state() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-1");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+        let range_count = 100;
+
+        let map = BlobRangeMap::new(&blob_path, range_count, 0).unwrap();
+        assert_eq!(
+            map.check_range_ready_and_mark_pending(1, 10)
+                .unwrap()
+                .unwrap()
+                .len(),
+            10
+        );
+        assert!(map.set_range_ready_and_clear_pending(1, 10).is_ok());
+        assert!(map
+            .check_range_ready_and_mark_pending(1, 10)
+            .unwrap()
+            .is_none());
+    }
 }
