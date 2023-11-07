@@ -213,6 +213,8 @@ pub fn clone_file(fd: RawFd) -> Result<File> {
 
 #[cfg(test)]
 mod tests {
+    use vmm_sys_util::tempfile::TempFile;
+
     use super::*;
     use std::fs::OpenOptions;
     use std::path::PathBuf;
@@ -244,5 +246,33 @@ mod tests {
     fn create_default_file_map_object() {
         let map = FileMapState::default();
         drop(map);
+    }
+
+    #[test]
+    fn test_file_map_error() {
+        let temp = TempFile::new().unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        assert!(FileMapState::new(file, 0, 4096, true).is_err());
+
+        let temp = TempFile::new().unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let mut map = FileMapState::new(file, 0, 4096, false).unwrap();
+        assert!(map.get_slice::<usize>(0, usize::MAX).is_err());
+        assert!(map.get_slice::<usize>(usize::MAX, 1).is_err());
+        assert!(map.get_slice::<usize>(4096, 4096).is_err());
+        assert!(map.get_slice::<usize>(0, 128).is_ok());
+
+        assert!(map.get_slice_mut::<usize>(0, usize::MAX).is_err());
+        assert!(map.get_slice_mut::<usize>(usize::MAX, 1).is_err());
+        assert!(map.get_slice_mut::<usize>(4096, 4096).is_err());
+        assert!(map.get_slice_mut::<usize>(0, 128).is_ok());
     }
 }
