@@ -261,6 +261,8 @@ macro_rules! event_tracer {
 
 #[cfg(test)]
 pub mod tests {
+    use crate::trace::TimingTracerClass;
+
     use super::{EventTracerClass, TraceClass};
     use std::thread;
 
@@ -302,5 +304,39 @@ pub mod tests {
         let map = root_tracer!().dump_summary_map().unwrap();
         assert_eq!(map["registered_events"]["event_1"].as_u64(), Some(600));
         assert_eq!(map["registered_events"]["event_2"].as_u64(), Some(900));
+    }
+
+    #[test]
+    fn test_timing_trace() {
+        register_tracer!(TraceClass::Timing, TimingTracerClass);
+        let f = || ();
+
+        let t1 = thread::Builder::new()
+            .spawn(move || {
+                for i in 0..100 {
+                    timing_tracer!({ f() }, format!("t1.{}", i).as_str());
+                }
+            })
+            .unwrap();
+
+        let t2 = thread::Builder::new()
+            .spawn(move || {
+                for i in 0..100 {
+                    timing_tracer!({ f() }, format!("t2.{}", i).as_str());
+                }
+            })
+            .unwrap();
+        let t3 = thread::Builder::new()
+            .spawn(move || {
+                for i in 0..100 {
+                    timing_tracer!({ f() }, format!("t3.{}", i).as_str());
+                }
+            })
+            .unwrap();
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
+        assert_eq!(timing_tracer!().unwrap().records.lock().unwrap().len(), 300);
     }
 }

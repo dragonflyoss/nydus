@@ -431,4 +431,27 @@ mod tests {
         assert_ne!(root_digest, digest);
         assert_eq!(generator.mkl_tree.max_levels, 2);
     }
+
+    #[test]
+    fn test_merkle_tree_digest_algo() {
+        let mkl = MerkleTree::new(4096, 1, Algorithm::Sha256);
+        assert_eq!(mkl.digest_algorithm(), Algorithm::Sha256);
+    }
+
+    #[test]
+    fn test_verity_generator_error() {
+        let file = TempFile::new().unwrap();
+        assert!(VerityGenerator::new(file.into_file(), u64::MAX, u32::MAX).is_err());
+
+        let file = TempFile::new().unwrap();
+        let mut generator = VerityGenerator::new(file.into_file(), 0, 4097).unwrap();
+        assert!(generator.set_digest(1, 0, &[1u8; 64]).is_err());
+    }
+
+    #[test]
+    fn test_verity_initialize() {
+        let file = TempFile::new().unwrap();
+        let mut generator = VerityGenerator::new(file.into_file(), 0, 4097).unwrap();
+        assert!(generator.initialize().is_ok());
+    }
 }

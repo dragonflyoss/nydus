@@ -688,4 +688,122 @@ mod tests {
         assert_eq!(buf2[0], 0x5a);
         assert_eq!(buf2[16], 0xa5);
     }
+
+    #[test]
+    fn test_attribute() {
+        let none = Algorithm::None.new_cipher().unwrap();
+        let aes128xts = Algorithm::Aes128Xts.new_cipher().unwrap();
+        let aes256xts = Algorithm::Aes256Xts.new_cipher().unwrap();
+        let aes256gcm = Algorithm::Aes256Gcm.new_cipher().unwrap();
+
+        assert!(!Algorithm::None.is_encryption_enabled());
+        assert!(Algorithm::Aes128Xts.is_encryption_enabled());
+        assert!(Algorithm::Aes256Xts.is_encryption_enabled());
+        assert!(Algorithm::Aes256Gcm.is_encryption_enabled());
+
+        assert!(!Algorithm::None.is_aead());
+        assert!(!Algorithm::Aes128Xts.is_aead());
+        assert!(!Algorithm::Aes256Xts.is_aead());
+        assert!(Algorithm::Aes256Gcm.is_aead());
+
+        assert_eq!(Algorithm::None.tag_size(), 0);
+        assert_eq!(Algorithm::Aes128Xts.tag_size(), 0);
+        assert_eq!(Algorithm::Aes256Xts.tag_size(), 0);
+        assert_eq!(Algorithm::Aes256Gcm.tag_size(), 12);
+
+        assert_eq!(Algorithm::None.key_length(), 0);
+        assert_eq!(Algorithm::Aes128Xts.key_length(), AES_128_XTS_KEY_LENGTH);
+        assert_eq!(Algorithm::Aes256Xts.key_length(), AES_256_XTS_KEY_LENGTH);
+        assert_eq!(Algorithm::Aes256Gcm.key_length(), AES_256_GCM_KEY_LENGTH);
+
+        print!("{}", Algorithm::Aes128Xts);
+        assert!(Algorithm::from_str("none").is_ok());
+        assert!(Algorithm::from_str("aes128xts").is_ok());
+        assert!(Algorithm::from_str("aes256xts").is_ok());
+        assert!(Algorithm::from_str("aes256gcm").is_ok());
+        assert!(Algorithm::from_str("non-exist").is_err());
+
+        assert!(Algorithm::try_from(Algorithm::None as u32).is_ok());
+        assert!(Algorithm::try_from(Algorithm::Aes128Xts as u32).is_ok());
+        assert!(Algorithm::try_from(Algorithm::Aes256Xts as u32).is_ok());
+        assert!(Algorithm::try_from(Algorithm::Aes256Gcm as u32).is_ok());
+        assert!(Algorithm::try_from(u32::MAX).is_err());
+
+        assert!(Algorithm::try_from(Algorithm::None as u64).is_ok());
+        assert!(Algorithm::try_from(Algorithm::Aes128Xts as u64).is_ok());
+        assert!(Algorithm::try_from(Algorithm::Aes256Xts as u64).is_ok());
+        assert!(Algorithm::try_from(Algorithm::Aes256Gcm as u64).is_ok());
+        assert!(Algorithm::try_from(u64::MAX).is_err());
+
+        println!("{:?},{:?},{:?},{:?}", none, aes128xts, aes256xts, aes256gcm);
+    }
+
+    #[test]
+    fn test_crypt_with_context() {
+        let error_key = [0xcu8, 64];
+        let symmetry_key = [0xcu8, 32];
+        let mut key = [0xcu8; 32];
+        key[31] = 0xa;
+        let iv = [0u8; 16];
+        let data = b"11111111111111111";
+        // create with mismatch key length and algo
+        assert!(
+            CipherContext::new(error_key.to_vec(), iv.to_vec(), true, Algorithm::Aes128Xts)
+                .is_err()
+        );
+        // create wtih symmetry key
+        assert!(CipherContext::new(
+            symmetry_key.to_vec(),
+            iv.to_vec(),
+            true,
+            Algorithm::Aes128Xts
+        )
+        .is_err());
+
+        // test context is none
+        let ctx =
+            CipherContext::new(key.to_vec(), iv.to_vec(), false, Algorithm::Aes128Xts).unwrap();
+        let obj = Arc::new(Algorithm::Aes128Xts.new_cipher().unwrap());
+        assert!(encrypt_with_context(data, &obj, &None, true).is_err());
+        assert!(decrypt_with_context(b"somedata", &obj, &None, true).is_err());
+
+        // test encrypted is false
+        let no_change = encrypt_with_context(data, &obj, &Some(ctx.clone()), false).unwrap();
+        assert_eq!(no_change.clone().into_owned(), data);
+        let bind = no_change.into_owned();
+        let plain_text_no_change =
+            decrypt_with_context(&bind, &obj, &Some(ctx.clone()), false).unwrap();
+        assert_eq!(plain_text_no_change.into_owned(), data);
+
+        // test normal encrypt and decrypt
+        let encrypt_text = encrypt_with_context(data, &obj, &Some(ctx.clone()), true).unwrap();
+        let bind = encrypt_text.into_owned();
+        let plain_text = decrypt_with_context(&bind, &obj, &Some(ctx), true).unwrap();
+        assert_eq!(&plain_text.into_owned(), data);
+    }
+
+    fn test_gen_key(convergent_encryption: bool) {
+        let mut key = [0xcu8; 32];
+        key[31] = 0xa;
+        let iv = [0u8; 16];
+        let data = b"11111111111111111";
+        let ctx = CipherContext::new(
+            key.to_vec(),
+            iv.to_vec(),
+            convergent_encryption,
+            Algorithm::Aes128Xts,
+        )
+        .unwrap();
+        let obj = Arc::new(Algorithm::Aes128Xts.new_cipher().unwrap());
+        let (gen_key, gen_iv) = ctx.generate_cipher_meta(&key);
+        let ciphertext = obj.encrypt(gen_key, Some(&gen_iv), data).unwrap();
+        let plaintext = obj.decrypt(gen_key, Some(&gen_iv), &ciphertext).unwrap();
+        assert_eq!(&plaintext, data);
+    }
+
+    #[test]
+    fn test_generate_cipher_meta() {
+        test_gen_key(true);
+        test_gen_key(false);
+    }
 }

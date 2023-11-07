@@ -38,3 +38,19 @@ pub fn minor_dev(dev: u64) -> u64 {
         dev & 0xffffff
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_dev() {
+        let major: u64 = 0xffff_ffff_ffff_abcd;
+        let minor: u64 = 0xffff_ffff_abcd_ffff;
+        let dev = nix::sys::stat::makedev(major, minor);
+        assert_eq!(major_dev(dev), 0xffff_abcd);
+        assert_eq!(minor_dev(dev), 0xabcd_ffff);
+    }
+}
