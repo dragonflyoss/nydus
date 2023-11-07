@@ -209,3 +209,143 @@ impl Node {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nydus_rafs::metadata::{inode::InodeWrapper, layout::v5::RafsV5Inode};
+
+    use crate::core::node::NodeInfo;
+
+    use super::*;
+
+    #[test]
+    fn test_white_spec_from_str() {
+        let spec = WhiteoutSpec::default();
+        assert!(matches!(spec, WhiteoutSpec::Oci));
+
+        assert!(WhiteoutSpec::from_str("oci").is_ok());
+        assert!(WhiteoutSpec::from_str("overlayfs").is_ok());
+        assert!(WhiteoutSpec::from_str("none").is_ok());
+        assert!(WhiteoutSpec::from_str("foo").is_err());
+    }
+
+    #[test]
+    fn test_white_type_removal_check() {
+        let t1 = WhiteoutType::OciOpaque;
+        let t2 = WhiteoutType::OciRemoval;
+        let t3 = WhiteoutType::OverlayFsOpaque;
+        let t4 = WhiteoutType::OverlayFsRemoval;
+        assert!(!t1.is_removal());
+        assert!(t2.is_removal());
+        assert!(!t3.is_removal());
+        assert!(t4.is_removal());
+    }
+
+    #[test]
+    fn test_overlay_low_layer_check() {
+        let t1 = Overlay::Lower;
+        let t2 = Overlay::UpperAddition;
+        let t3 = Overlay::UpperModification;
+
+        assert!(t1.is_lower_layer());
+        assert!(!t2.is_lower_layer());
+        assert!(!t3.is_lower_layer());
+    }
+
+    #[test]
+    fn test_node() {
+        let mut inode = InodeWrapper::V5(RafsV5Inode::default());
+        inode.set_mode(libc::S_IFCHR);
+        let node = Node::new(inode, NodeInfo::default(), 0);
+        assert!(!node.is_overlayfs_whiteout(WhiteoutSpec::None));
+        assert!(node.is_overlayfs_whiteout(WhiteoutSpec::Overlayfs));
+        assert_eq!(
+            node.whiteout_type(WhiteoutSpec::Overlayfs).unwrap(),
+            WhiteoutType::OverlayFsRemoval
+        );
+
+        let mut inode = InodeWrapper::V5(RafsV5Inode::default());
+        let mut info: NodeInfo = NodeInfo::default();
+        assert!(info
+            .xattrs
+            .add(OVERLAYFS_WHITEOUT_OPAQUE.into(), "y".into())
+            .is_ok());
+        inode.set_mode(libc::S_IFDIR);
+        let node = Node::new(inode, info, 0);
+        assert!(!node.is_overlayfs_opaque(WhiteoutSpec::None));
+        assert!(node.is_overlayfs_opaque(WhiteoutSpec::Overlayfs));
+        assert_eq!(
+            node.whiteout_type(WhiteoutSpec::Overlayfs).unwrap(),
+            WhiteoutType::OverlayFsOpaque
+        );
+
+        let mut inode = InodeWrapper::V5(RafsV5Inode::default());
+        let mut info = NodeInfo::default();
+        assert!(info
+            .xattrs
+            .add(OVERLAYFS_WHITEOUT_OPAQUE.into(), "n".into())
+            .is_ok());
+        inode.set_mode(libc::S_IFDIR);
+        let node = Node::new(inode, info, 0);
+        assert!(!node.is_overlayfs_opaque(WhiteoutSpec::None));
+        assert!(!node.is_overlayfs_opaque(WhiteoutSpec::Overlayfs));
+
+        let mut inode = InodeWrapper::V5(RafsV5Inode::default());
+        let mut info = NodeInfo::default();
+        assert!(info
+            .xattrs
+            .add(OVERLAYFS_WHITEOUT_OPAQUE.into(), "y".into())
+            .is_ok());
+        inode.set_mode(libc::S_IFCHR);
+        let node = Node::new(inode, info, 0);
+        assert!(!node.is_overlayfs_opaque(WhiteoutSpec::None));
+        assert!(!node.is_overlayfs_opaque(WhiteoutSpec::Overlayfs));
+
+        let mut inode = InodeWrapper::V5(RafsV5Inode::default());
+        let mut info = NodeInfo::default();
+        assert!(info
+            .xattrs
+            .add(OVERLAYFS_WHITEOUT_OPAQUE.into(), "n".into())
+            .is_ok());
+        inode.set_mode(libc::S_IFDIR);
+        let node = Node::new(inode, info, 0);
+        assert!(!node.is_overlayfs_opaque(WhiteoutSpec::None));
+        assert!(!node.is_overlayfs_opaque(WhiteoutSpec::Overlayfs));
+
+        let inode = InodeWrapper::V5(RafsV5Inode::default());
+        let info = NodeInfo::default();
+        let mut node = Node::new(inode, info, 0);
+
+        assert_eq!(node.whiteout_type(WhiteoutSpec::None), None);
+        assert_eq!(node.whiteout_type(WhiteoutSpec::Oci), None);
+        assert_eq!(node.whiteout_type(WhiteoutSpec::Overlayfs), None);
+
+        node.overlay = Overlay::Lower;
+        assert_eq!(node.whiteout_type(WhiteoutSpec::Overlayfs), None);
+
+        let inode = InodeWrapper::V5(RafsV5Inode::default());
+        let mut info = NodeInfo::default();
+        let name = OCISPEC_WHITEOUT_PREFIX.to_string() + "foo";
+        info.target_vec.push(name.clone().into());
+        let node = Node::new(inode, info, 0);
+        assert_eq!(
+            node.whiteout_type(WhiteoutSpec::Oci).unwrap(),
+            WhiteoutType::OciRemoval
+        );
+        assert_eq!(node.origin_name(WhiteoutType::OciRemoval).unwrap(), "foo");
+        assert_eq!(node.origin_name(WhiteoutType::OciOpaque), None);
+        assert_eq!(
+            node.origin_name(WhiteoutType::OverlayFsRemoval).unwrap(),
+            OsStr::new(&name)
+        );
+
+        let inode = InodeWrapper::V5(RafsV5Inode::default());
+        let mut info = NodeInfo::default();
+        info.target_vec.push(OCISPEC_WHITEOUT_OPAQUE.into());
+        let node = Node::new(inode, info, 0);
+        assert_eq!(
+            node.whiteout_type(WhiteoutSpec::Oci).unwrap(),
+            WhiteoutType::OciOpaque
+        );
+    }
+}
