@@ -366,3 +366,90 @@ impl FileCacheEntry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::OpenOptions, path::PathBuf};
+
+    use nydus_api::ConfigV2;
+    use nydus_utils::{compress, metrics::BackendMetrics};
+
+    use crate::{factory::ASYNC_RUNTIME, test::MockBackend};
+
+    use super::*;
+
+    #[test]
+    fn test_fs_cache_mgr() {
+        let content = r#"version=2
+        id = "my_id"
+        metadata_path = "meta_path"
+        [backend]
+        type = "localfs"
+        [backend.localfs]
+        blob_file = "/tmp/nydus.blob.data"
+        dir = "/tmp"
+        alt_dirs = ["/var/nydus/cache"]
+        [cache]
+        type = "fscache"
+        compressed = false
+        validate = true
+        [cache.fscache]
+        work_dir = "/tmp"
+        "#;
+
+        let cfg: ConfigV2 = toml::from_str(content).unwrap();
+        let backend = MockBackend {
+            metrics: BackendMetrics::new("dummy", "localfs"),
+        };
+
+        let mut mgr: FsCacheMgr = FsCacheMgr::new(
+            cfg.get_cache_config().unwrap(),
+            Arc::new(backend),
+            ASYNC_RUNTIME.clone(),
+            &cfg.id,
+        )
+        .unwrap();
+        assert!(mgr.init().is_ok());
+        mgr.work_dir = "../tests/texture/zran/".to_string();
+
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a");
+
+        let features = BlobFeatures::ALIGNED
+            | BlobFeatures::INLINED_FS_META
+            | BlobFeatures::CHUNK_INFO_V2
+            | BlobFeatures::ZRAN;
+
+        let mut blob_info = BlobInfo::new(
+            0,
+            "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a".to_string(),
+            0x16c6000,
+            9839040,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0xa3,
+            features,
+        );
+
+        blob_info.set_blob_meta_info(0, 0xa1290, 0xa1290, compress::Algorithm::None as u32);
+
+        let f1: File = OpenOptions::new()
+            .truncate(true)
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(path.as_os_str())
+            .unwrap();
+        f1.set_len(800).unwrap();
+
+        blob_info.set_fscache_file(Some(Arc::new(f1.try_clone().unwrap())));
+
+        assert!(mgr.get_blob_cache(&Arc::new(blob_info.clone())).is_ok());
+        assert!(mgr.gc(Some(
+            "233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a"
+        )));
+        mgr.check_stat();
+        let _backend = mgr.backend();
+        mgr.destroy();
+        drop(mgr);
+    }
+}
