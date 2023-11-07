@@ -848,4 +848,244 @@ mod tests {
         g.fop_update(StatsFop::Read, 2015520, true);
         assert_eq!(g.block_count_read[3].count(), 2);
     }
+
+    #[test]
+    fn test_latency_millis_range_index() {
+        assert_eq!(latency_millis_range_index(0), 0);
+        assert_eq!(latency_millis_range_index(1), 0);
+        assert_eq!(latency_millis_range_index(10), 1);
+        assert_eq!(latency_millis_range_index(20), 1);
+        assert_eq!(latency_millis_range_index(40), 2);
+        assert_eq!(latency_millis_range_index(80), 3);
+        assert_eq!(latency_millis_range_index(160), 4);
+        assert_eq!(latency_millis_range_index(320), 4);
+        assert_eq!(latency_millis_range_index(640), 5);
+        assert_eq!(latency_millis_range_index(1280), 6);
+        assert_eq!(latency_millis_range_index(2560), 7);
+    }
+
+    #[test]
+    fn test_latency_micros_range_index() {
+        assert_eq!(latency_micros_range_index(100), 0);
+        assert_eq!(latency_micros_range_index(500), 1);
+        assert_eq!(latency_micros_range_index(10_000), 2);
+        assert_eq!(latency_micros_range_index(30_000), 3);
+        assert_eq!(latency_micros_range_index(100_000), 4);
+        assert_eq!(latency_micros_range_index(1_000_000), 5);
+        assert_eq!(latency_micros_range_index(1_500_000), 6);
+        assert_eq!(latency_micros_range_index(3_000_000), 7);
+    }
+
+    #[test]
+    fn test_inode_stats() {
+        let stat = InodeIoStats::default();
+        stat.stats_fop_inc(StatsFop::Read);
+        stat.stats_fop_inc(StatsFop::Open);
+        assert_eq!(stat.fop_hits[StatsFop::Read as usize].count(), 1);
+        assert_eq!(stat.total_fops.count(), 2);
+
+        stat.stats_cumulative(StatsFop::Open, 1000);
+        stat.stats_cumulative(StatsFop::Read, 4000);
+        stat.stats_cumulative(StatsFop::Read, 5000);
+
+        assert_eq!(stat.block_count_read[0].count(), 0);
+        assert_eq!(stat.block_count_read[1].count(), 1);
+        assert_eq!(stat.block_count_read[2].count(), 1);
+    }
+
+    #[test]
+    fn test_access_pattern() {
+        let ap = AccessPattern::default();
+        ap.record_access_time();
+        assert_ne!(ap.first_access_time_secs.load(Ordering::Relaxed), 0);
+        assert_ne!(ap.first_access_time_nanos.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_file_stats_update() {
+        let f = FsIoStats::default();
+        let node1: Inode = 1;
+        let node2: Inode = 2;
+        let node3: Inode = 3;
+
+        f.new_file_counter(node1);
+        f.new_file_counter(node2);
+        assert!(f.access_patterns.read().unwrap().is_empty());
+        assert!(f.file_counters.read().unwrap().is_empty());
+
+        f.access_pattern_enabled.store(true, Ordering::Relaxed);
+        f.files_account_enabled.store(true, Ordering::Relaxed);
+        f.record_latest_read_files_enabled
+            .store(true, Ordering::Relaxed);
+        f.new_file_counter(node1);
+        f.new_file_counter(node2);
+        f.file_stats_update(node1, StatsFop::Read, 4000, true);
+        f.file_stats_update(node1, StatsFop::Read, 5000, true);
+        f.file_stats_update(node1, StatsFop::Open, 0, true);
+        f.file_stats_update(node3, StatsFop::Open, 0, true);
+        assert_eq!(
+            f.access_patterns
+                .read()
+                .unwrap()
+                .get(&node1)
+                .unwrap()
+                .nr_read
+                .count(),
+            2
+        );
+        assert_eq!(
+            f.file_counters
+                .read()
+                .unwrap()
+                .get(&node1)
+                .unwrap()
+                .fop_hits[StatsFop::Read as usize]
+                .count(),
+            2
+        );
+        assert!(f.recent_read_files.is_set(node1 as u64));
+    }
+
+    #[test]
+    fn test_fop_update() {
+        let f = FsIoStats::default();
+        assert_eq!(f.nr_opens.count(), 0);
+        f.fop_update(StatsFop::Open, 0, true);
+        assert_eq!(f.nr_opens.count(), 1);
+        f.fop_update(StatsFop::Release, 0, true);
+        assert_eq!(f.nr_opens.count(), 0);
+        f.fop_update(StatsFop::Opendir, 0, true);
+        assert_eq!(f.fop_errors[StatsFop::Opendir as usize].count(), 0);
+        f.fop_update(StatsFop::Opendir, 0, false);
+        assert_eq!(f.fop_errors[StatsFop::Opendir as usize].count(), 1);
+    }
+
+    #[test]
+    fn test_latecny() {
+        let f = FsIoStats::default();
+        assert_eq!(f.latency_start(), None);
+        f.measure_latency.store(true, Ordering::Relaxed);
+        let s = f.latency_start().unwrap();
+        let d = Duration::new(2, 0);
+        f.latency_end(&s.checked_sub(d), StatsFop::Read);
+
+        assert_eq!(
+            f.read_latency_dist[latency_micros_range_index(2 * 1000 * 1000)].count(),
+            1
+        );
+        assert_eq!(
+            f.fop_cumulative_latency_total[StatsFop::Read as usize].count(),
+            saturating_duration_micros(&d)
+        );
+    }
+
+    #[test]
+    fn test_fs_io_stats_new_and_export() {
+        let id0: Option<String> = Some("id-0".to_string());
+        let id1: Option<String> = Some("id-1".to_string());
+        let none: Option<String> = None;
+
+        let _f1 = FsIoStats::new("id-0");
+        assert!(export_files_stats(&id0, true).is_ok());
+        assert!(export_files_stats(&none, true).is_ok());
+        assert!(export_global_stats(&id0).is_ok());
+        assert!(export_global_stats(&id1).is_err());
+        assert!(export_global_stats(&none).is_ok());
+
+        let _f2 = FsIoStats::new("id-1");
+        assert!(export_files_stats(&none, false).is_err());
+        assert!(export_files_stats(&id0, true).is_ok());
+        assert!(export_files_stats(&id0, false).is_ok());
+        assert!(export_global_stats(&none).is_err());
+        assert!(export_files_access_pattern(&id0).is_ok());
+        assert!(export_files_access_pattern(&none).is_err());
+
+        let ios = FsIoStats::default();
+        assert!(ios.export_files_access_patterns().is_ok());
+        assert!(ios.export_files_stats().is_ok());
+        assert!(ios.export_fs_stats().is_ok());
+        ios.export_latest_read_files();
+
+        test_fop_record();
+    }
+
+    fn test_fop_record() {
+        let ios = FsIoStats::new("0");
+        let mut recorder = FopRecorder::settle(StatsFop::Read, 0, &ios);
+        assert!(!recorder.success);
+        assert_eq!(recorder.size, 0);
+
+        recorder.mark_success(10);
+        assert!(recorder.success);
+        assert_eq!(recorder.size, 10);
+        drop(recorder);
+    }
+
+    #[test]
+    fn test_saturating_duration() {
+        assert_eq!(
+            saturating_duration_millis(&Duration::from_millis(1234)),
+            1234
+        );
+        assert_eq!(
+            saturating_duration_micros(&Duration::from_millis(888)),
+            888_000
+        );
+        assert_eq!(
+            saturating_duration_micros(&Duration::from_millis(1888)),
+            1_888_000
+        );
+    }
+
+    #[test]
+    fn test_blob_cache_metric() {
+        let m1: Arc<BlobcacheMetrics> = BlobcacheMetrics::new("id", "path");
+        {
+            let metrics = BLOBCACHE_METRICS.read().unwrap();
+            assert_eq!(metrics.len(), 1);
+        }
+        assert!(m1.export_metrics().is_ok());
+        assert!(m1.release().is_ok());
+        {
+            let metrics = BLOBCACHE_METRICS.read().unwrap();
+            assert_eq!(metrics.len(), 0);
+        }
+
+        let now = SystemTime::now();
+        let prev = now.checked_sub(Duration::new(10, 0)).unwrap();
+        m1.calculate_prefetch_metrics(prev);
+        assert_eq!(m1.prefetch_cumulative_time_millis.count(), 10_000);
+        assert_eq!(
+            m1.prefetch_end_time_secs.count(),
+            now.duration_since(SystemTime::UNIX_EPOCH)
+                .expect("No error")
+                .as_secs()
+        );
+
+        let id0: Option<String> = Some("id-0".to_string());
+        let none: Option<String> = None;
+        BlobcacheMetrics::new("id-0", "t0");
+        assert!(export_blobcache_metrics(&id0).is_ok());
+        assert!(export_blobcache_metrics(&none).is_ok());
+        BlobcacheMetrics::new("id-1", "t1");
+        assert!(export_blobcache_metrics(&none).is_err());
+        assert!(export_events().is_ok());
+    }
+
+    #[test]
+    fn test_backend_metric() {
+        let id0: Option<String> = Some("id-0".to_string());
+        let id1: Option<String> = Some("id-1".to_string());
+        let none: Option<String> = None;
+        let b0 = BackendMetrics::new("id-0", "t0");
+        assert!(export_backend_metrics(&id0).is_ok());
+        assert!(export_backend_metrics(&id1).is_err());
+        assert!(export_backend_metrics(&none).is_ok());
+        let b1 = BackendMetrics::new("id-1", "t1");
+        assert!(export_backend_metrics(&id0).is_ok());
+        assert!(export_backend_metrics(&id1).is_ok());
+        assert!(export_backend_metrics(&none).is_err());
+        assert!(b0.release().is_ok());
+        assert!(b1.release().is_ok());
+    }
 }

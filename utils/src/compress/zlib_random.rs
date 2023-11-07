@@ -887,4 +887,18 @@ mod tests {
             decoder.uncompress(ctx, None, &c_buf, &mut d_buf).unwrap();
         }
     }
+
+    #[test]
+    fn test_zran_reader() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
+        let file = OpenOptions::new().read(true).open(&path).unwrap();
+
+        let reader = ZranReader::new(file).unwrap();
+        assert_eq!(reader.get_data_size(), 0);
+
+        let buf = vec![0x0u8; 32];
+        reader.set_initial_data(&buf);
+        assert_eq!(reader.get_data_size(), 32);
+    }
 }
