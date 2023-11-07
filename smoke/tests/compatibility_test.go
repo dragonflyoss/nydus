@@ -5,10 +5,12 @@
 package tests
 
 import (
+	"os"
 	"testing"
 
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -24,14 +26,16 @@ type CompatibilityTestSuite struct {
 }
 
 func (c *CompatibilityTestSuite) TestConvertImages() test.Generator {
+	stableVersion := os.Getenv("NYDUS_STABLE_VERSION")
+	require.NotEmpty(c.t, stableVersion, "please specify env `NYDUS_STABLE_VERSION` to run the compatibility test.")
 
 	scenarios := tool.DescartesIterator{}
 	scenarios.
 		Dimension(paramImage, []interface{}{"nginx:latest"}).
 		Dimension(paramFSVersion, []interface{}{"5", "6"}).
-		Dimension(paramNydusImageVersion, []interface{}{"v0.1.0", "v2.1.6", "latest"}).
-		Dimension(paramNydusifyVersion, []interface{}{"v0.1.0", "v2.1.6", "latest"}).
-		Dimension(paramNydusdVersion, []interface{}{"v0.1.0", "v2.1.6", "latest"}).
+		Dimension(paramNydusImageVersion, []interface{}{"v0.1.0", stableVersion, "latest"}).
+		Dimension(paramNydusifyVersion, []interface{}{"v0.1.0", stableVersion, "latest"}).
+		Dimension(paramNydusdVersion, []interface{}{"v0.1.0", stableVersion, "latest"}).
 		Skip(func(param *tool.DescartesItem) bool {
 
 			// Nydus-image 0.1.0 only works with nydus-nydusify 0.1.0, vice versa.
@@ -82,7 +86,7 @@ func (c *CompatibilityTestSuite) TestConvertImages() test.Generator {
 		image := c.prepareImage(c.t, scenario.GetString(paramImage))
 		return scenario.Str(), func(t *testing.T) {
 			imageTest := &ImageTestSuite{T: t}
-			imageTest.TestConvertImage(t, *ctx, image)
+			imageTest.TestConvertAndCopyImage(t, *ctx, image, false)
 		}
 	}
 }

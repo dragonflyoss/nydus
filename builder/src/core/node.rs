@@ -868,3 +868,220 @@ impl Node {
         self.info = Arc::new(info);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::BufReader;
+
+    use nydus_utils::{digest, BufReaderInfo};
+    use vmm_sys_util::tempfile::TempFile;
+
+    use crate::{ArtifactWriter, BlobCacheGenerator, HashChunkDict};
+
+    use super::*;
+
+    #[test]
+    fn test_node_chunk() {
+        let chunk_wrapper1 = ChunkWrapper::new(RafsVersion::V5);
+        let mut chunk = NodeChunk {
+            source: ChunkSource::Build,
+            inner: Arc::new(chunk_wrapper1),
+        };
+        println!("NodeChunk: {}", chunk);
+        matches!(chunk.inner.deref().clone(), ChunkWrapper::V5(_));
+
+        let chunk_wrapper2 = ChunkWrapper::new(RafsVersion::V6);
+        chunk.copy_from(&chunk_wrapper2);
+        matches!(chunk.inner.deref().clone(), ChunkWrapper::V6(_));
+
+        chunk.set_index(0x10);
+        assert_eq!(chunk.inner.index(), 0x10);
+        chunk.set_blob_index(0x20);
+        assert_eq!(chunk.inner.blob_index(), 0x20);
+        chunk.set_compressed_size(0x30);
+        assert_eq!(chunk.inner.compressed_size(), 0x30);
+        chunk.set_file_offset(0x40);
+        assert_eq!(chunk.inner.file_offset(), 0x40);
+    }
+
+    #[test]
+    fn test_node_dump_node_data() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/blobs/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+
+        let mut inode = InodeWrapper::new(RafsVersion::V5);
+        inode.set_child_count(2);
+        inode.set_size(20);
+        let info = NodeInfo {
+            explicit_uidgid: true,
+            src_ino: 1,
+            src_dev: u64::MAX,
+            rdev: u64::MAX,
+            path: source_path.clone(),
+            source: PathBuf::from("/"),
+            target: source_path.clone(),
+            target_vec: vec![OsString::from(source_path)],
+            symlink: Some(OsString::from("symlink")),
+            xattrs: RafsXAttrs::new(),
+            v6_force_extended_inode: false,
+        };
+        let mut node = Node::new(inode, info, 1);
+
+        let mut ctx = BuildContext::default();
+        ctx.set_chunk_size(2);
+        ctx.conversion_type = ConversionType::TarToRef;
+        ctx.cipher = crypt::Algorithm::Aes128Xts;
+        let tmp_file1 = TempFile::new().unwrap();
+        std::fs::write(
+            tmp_file1.as_path(),
+            "This is a test!\n".repeat(32).as_bytes(),
+        )
+        .unwrap();
+        let buf_reader = BufReader::new(tmp_file1.into_file());
+        ctx.blob_tar_reader = Some(BufReaderInfo::from_buf_reader(buf_reader));
+        let tmp_file2 = TempFile::new().unwrap();
+        ctx.blob_cache_generator = Some(
+            BlobCacheGenerator::new(crate::ArtifactStorage::SingleFile(PathBuf::from(
+                tmp_file2.as_path(),
+            )))
+            .unwrap(),
+        );
+
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        let mut chunk_dict = HashChunkDict::new(digest::Algorithm::Sha256);
+        let mut chunk_wrapper = ChunkWrapper::new(RafsVersion::V5);
+        chunk_wrapper.set_id(RafsDigest {
+            data: [
+                209, 217, 144, 116, 135, 113, 3, 121, 133, 92, 96, 25, 219, 145, 151, 219, 119, 47,
+                96, 147, 90, 51, 78, 44, 193, 149, 6, 102, 13, 173, 138, 191,
+            ],
+        });
+        chunk_wrapper.set_uncompressed_size(2);
+        chunk_dict.add_chunk(Arc::new(chunk_wrapper), digest::Algorithm::Sha256);
+        blob_mgr.set_chunk_dict(Arc::new(chunk_dict));
+
+        let tmp_file3 = TempFile::new().unwrap();
+        let mut blob_writer = ArtifactWriter::new(crate::ArtifactStorage::SingleFile(
+            PathBuf::from(tmp_file3.as_path()),
+        ))
+        .unwrap();
+
+        let mut chunk_data_buf = [1u8; 32];
+
+        node.inode.set_mode(0o755 | libc::S_IFDIR as u32);
+        let data_size =
+            node.dump_node_data(&ctx, &mut blob_mgr, &mut blob_writer, &mut chunk_data_buf);
+        assert!(data_size.is_ok());
+        assert_eq!(data_size.unwrap(), 0);
+
+        node.inode.set_mode(0o755 | libc::S_IFLNK as u32);
+        let data_size =
+            node.dump_node_data(&ctx, &mut blob_mgr, &mut blob_writer, &mut chunk_data_buf);
+        assert!(data_size.is_ok());
+        assert_eq!(data_size.unwrap(), 0);
+
+        node.inode.set_mode(0o755 | libc::S_IFBLK as u32);
+        let data_size =
+            node.dump_node_data(&ctx, &mut blob_mgr, &mut blob_writer, &mut chunk_data_buf);
+        assert!(data_size.is_ok());
+        assert_eq!(data_size.unwrap(), 0);
+
+        node.inode.set_mode(0o755 | libc::S_IFREG as u32);
+        let data_size =
+            node.dump_node_data(&ctx, &mut blob_mgr, &mut blob_writer, &mut chunk_data_buf);
+        assert!(data_size.is_ok());
+        assert_eq!(data_size.unwrap(), 18);
+    }
+
+    #[test]
+    fn test_node() {
+        let inode = InodeWrapper::new(RafsVersion::V5);
+        let info = NodeInfo {
+            explicit_uidgid: true,
+            src_ino: 1,
+            src_dev: u64::MAX,
+            rdev: u64::MAX,
+            path: PathBuf::new(),
+            source: PathBuf::new(),
+            target: PathBuf::new(),
+            target_vec: vec![OsString::new()],
+            symlink: None,
+            xattrs: RafsXAttrs::new(),
+            v6_force_extended_inode: false,
+        };
+
+        let mut inode1 = inode.clone();
+        inode1.set_size(1 << 60);
+        inode1.set_mode(0o755 | libc::S_IFREG as u32);
+        let node = Node::new(inode1, info.clone(), 1);
+        assert!(node.chunk_count(2).is_err());
+
+        let mut inode2 = inode.clone();
+        inode2.set_mode(0o755 | libc::S_IFCHR as u32);
+        let node = Node::new(inode2, info.clone(), 1);
+        assert!(node.chunk_count(2).is_ok());
+        assert_eq!(node.chunk_count(2).unwrap(), 0);
+
+        let mut inode3 = inode.clone();
+        inode3.set_mode(0o755 | libc::S_IFLNK as u32);
+        let node = Node::new(inode3, info.clone(), 1);
+        assert_eq!(node.file_type(), "symlink");
+        let mut inode4 = inode.clone();
+        inode4.set_mode(0o755 | libc::S_IFDIR as u32);
+        let node = Node::new(inode4, info.clone(), 1);
+        assert_eq!(node.file_type(), "dir");
+        let mut inode5 = inode.clone();
+        inode5.set_mode(0o755 | libc::S_IFREG as u32);
+        let node = Node::new(inode5, info.clone(), 1);
+        assert_eq!(node.file_type(), "file");
+
+        let mut info1 = info.clone();
+        info1.target_vec = vec![OsString::from("1"), OsString::from("2")];
+        let node = Node::new(inode.clone(), info1, 1);
+        assert_eq!(node.name(), OsString::from("2").as_os_str());
+        let mut info2 = info.clone();
+        info2.target_vec = vec![];
+        info2.path = PathBuf::from("/");
+        info2.source = PathBuf::from("/");
+        let node = Node::new(inode.clone(), info2, 1);
+        assert_eq!(node.name(), OsStr::from_bytes(ROOT_PATH_NAME));
+        let mut info3 = info.clone();
+        info3.target_vec = vec![];
+        info3.path = PathBuf::from("/1");
+        info3.source = PathBuf::from("/11");
+        let node = Node::new(inode.clone(), info3, 1);
+        assert_eq!(node.name(), OsStr::new("1"));
+
+        let target = PathBuf::from("/root/child");
+        assert_eq!(
+            Node::generate_target_vec(&target),
+            vec![
+                OsString::from("/"),
+                OsString::from("root"),
+                OsString::from("child")
+            ]
+        );
+
+        let mut node = Node::new(inode, info, 1);
+        node.set_symlink(OsString::from("symlink"));
+        assert_eq!(node.info.deref().symlink, Some(OsString::from("symlink")));
+
+        let mut xatter = RafsXAttrs::new();
+        assert!(xatter
+            .add(OsString::from("user.key"), [1u8; 16].to_vec())
+            .is_ok());
+        assert!(xatter
+            .add(
+                OsString::from("system.posix_acl_default.key"),
+                [2u8; 8].to_vec()
+            )
+            .is_ok());
+        node.set_xattr(xatter);
+        node.inode.set_has_xattr(true);
+        node.remove_xattr(OsStr::new("user.key"));
+        assert!(node.inode.has_xattr());
+        node.remove_xattr(OsStr::new("system.posix_acl_default.key"));
+        assert!(!node.inode.has_xattr());
+    }
+}

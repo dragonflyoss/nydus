@@ -659,3 +659,657 @@ impl BlobCompactor {
         )?))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::core::node::Node;
+    use crate::HashChunkDict;
+    use crate::{NodeChunk, Overlay};
+
+    use super::*;
+    use nydus_api::ConfigV2;
+    use nydus_rafs::metadata::RafsSuperConfig;
+    use nydus_storage::backend::{BackendResult, BlobReader};
+    use nydus_storage::device::v5::BlobV5ChunkInfo;
+    use nydus_storage::device::{BlobChunkFlags, BlobChunkInfo, BlobFeatures};
+    use nydus_storage::RAFS_DEFAULT_CHUNK_SIZE;
+    use nydus_utils::crypt::Algorithm;
+    use nydus_utils::metrics::BackendMetrics;
+    use nydus_utils::{compress, crypt};
+    use std::any::Any;
+    use vmm_sys_util::tempdir::TempDir;
+    use vmm_sys_util::tempfile::TempFile;
+
+    #[doc(hidden)]
+    #[macro_export]
+    macro_rules! impl_getter {
+        ($G: ident, $F: ident, $U: ty) => {
+            fn $G(&self) -> $U {
+                self.$F
+            }
+        };
+    }
+
+    #[derive(Default, Clone)]
+    struct MockChunkInfo {
+        pub block_id: RafsDigest,
+        pub blob_index: u32,
+        pub flags: BlobChunkFlags,
+        pub compress_size: u32,
+        pub uncompress_size: u32,
+        pub compress_offset: u64,
+        pub uncompress_offset: u64,
+        pub file_offset: u64,
+        pub index: u32,
+        #[allow(unused)]
+        pub reserved: u32,
+    }
+
+    impl BlobChunkInfo for MockChunkInfo {
+        fn chunk_id(&self) -> &RafsDigest {
+            &self.block_id
+        }
+        fn id(&self) -> u32 {
+            self.index
+        }
+        fn is_compressed(&self) -> bool {
+            self.flags.contains(BlobChunkFlags::COMPRESSED)
+        }
+
+        fn is_encrypted(&self) -> bool {
+            false
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        impl_getter!(blob_index, blob_index, u32);
+        impl_getter!(compressed_offset, compress_offset, u64);
+        impl_getter!(compressed_size, compress_size, u32);
+        impl_getter!(uncompressed_offset, uncompress_offset, u64);
+        impl_getter!(uncompressed_size, uncompress_size, u32);
+    }
+
+    impl BlobV5ChunkInfo for MockChunkInfo {
+        fn as_base(&self) -> &dyn BlobChunkInfo {
+            self
+        }
+
+        impl_getter!(index, index, u32);
+        impl_getter!(file_offset, file_offset, u64);
+        impl_getter!(flags, flags, BlobChunkFlags);
+    }
+
+    struct MockBackend {
+        pub metrics: Arc<BackendMetrics>,
+    }
+
+    impl BlobReader for MockBackend {
+        fn blob_size(&self) -> BackendResult<u64> {
+            Ok(1)
+        }
+
+        fn try_read(&self, buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
+            let mut i = 0;
+            while i < buf.len() {
+                buf[i] = i as u8;
+                i += 1;
+            }
+            Ok(i)
+        }
+
+        fn metrics(&self) -> &BackendMetrics {
+            // Safe because nydusd must have backend attached with id, only image builder can no id
+            // but use backend instance to upload blob.
+            &self.metrics
+        }
+    }
+
+    unsafe impl Send for MockBackend {}
+    unsafe impl Sync for MockBackend {}
+
+    impl BlobBackend for MockBackend {
+        fn shutdown(&self) {}
+
+        fn metrics(&self) -> &BackendMetrics {
+            // Safe because nydusd must have backend attached with id, only image builder can no id
+            // but use backend instance to upload blob.
+            &self.metrics
+        }
+
+        fn get_reader(&self, _blob_id: &str) -> BackendResult<Arc<dyn BlobReader>> {
+            Ok(Arc::new(MockBackend {
+                metrics: self.metrics.clone(),
+            }))
+        }
+    }
+
+    #[test]
+    #[should_panic = "not implemented: unsupport ChunkWrapper::Ref(c)"]
+    fn test_chunk_key_from() {
+        let cw = ChunkWrapper::new(RafsVersion::V5);
+        matches!(ChunkKey::from(&cw), ChunkKey::Digest(_));
+
+        let cw = ChunkWrapper::new(RafsVersion::V6);
+        matches!(ChunkKey::from(&cw), ChunkKey::Offset(_, _));
+
+        let chunk = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 2,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x800,
+            uncompress_offset: 0x1000,
+            file_offset: 0x1000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let cw = ChunkWrapper::Ref(chunk);
+        ChunkKey::from(&cw);
+    }
+
+    #[test]
+    fn test_chunk_set() {
+        let mut chunk_set1 = ChunkSet::new();
+
+        let mut chunk_wrapper1 = ChunkWrapper::new(RafsVersion::V5);
+        chunk_wrapper1.set_id(RafsDigest { data: [1u8; 32] });
+        chunk_wrapper1.set_compressed_size(8);
+        let mut chunk_wrapper2 = ChunkWrapper::new(RafsVersion::V6);
+        chunk_wrapper2.set_compressed_size(16);
+
+        chunk_set1.add_chunk(&chunk_wrapper1);
+        chunk_set1.add_chunk(&chunk_wrapper2);
+        assert_eq!(chunk_set1.total_size, 24);
+
+        let chunk_key2 = ChunkKey::from(&chunk_wrapper2);
+        assert_eq!(
+            format!("{:?}", Some(chunk_wrapper2)),
+            format!("{:?}", chunk_set1.get_chunk(&chunk_key2))
+        );
+
+        let mut chunk_wrapper3 = ChunkWrapper::new(RafsVersion::V5);
+        chunk_wrapper3.set_id(RafsDigest { data: [3u8; 32] });
+        chunk_wrapper3.set_compressed_size(32);
+
+        let mut chunk_set2 = ChunkSet::new();
+        chunk_set2.add_chunk(&chunk_wrapper3);
+        chunk_set2.merge(chunk_set1);
+        assert_eq!(chunk_set2.total_size, 56);
+        assert_eq!(chunk_set2.chunks.len(), 3);
+
+        let build_ctx = BuildContext::default();
+        let tmp_file = TempFile::new().unwrap();
+        let blob_storage = ArtifactStorage::SingleFile(PathBuf::from(tmp_file.as_path()));
+        let cipher_object = Algorithm::Aes256Xts.new_cipher().unwrap();
+        let mut new_blob_ctx = BlobContext::new(
+            "blob_id".to_owned(),
+            0,
+            BlobFeatures::all(),
+            compress::Algorithm::Lz4Block,
+            digest::Algorithm::Sha256,
+            crypt::Algorithm::Aes256Xts,
+            Arc::new(cipher_object),
+            None,
+        );
+        let ori_blob_ids = ["1".to_owned(), "2".to_owned()];
+        let backend = Arc::new(MockBackend {
+            metrics: BackendMetrics::new("id", "backend_type"),
+        }) as Arc<dyn BlobBackend + Send + Sync>;
+
+        let mut res = chunk_set2
+            .dump(
+                &build_ctx,
+                blob_storage,
+                &ori_blob_ids,
+                &mut new_blob_ctx,
+                0,
+                true,
+                &backend,
+            )
+            .unwrap();
+
+        res.sort_by(|a, b| a.0.id().data.cmp(&b.0.id().data));
+
+        assert_eq!(res.len(), 3);
+        assert_eq!(
+            format!("{:?}", res[0].1.id()),
+            format!("{:?}", RafsDigest { data: [0u8; 32] })
+        );
+        assert_eq!(
+            format!("{:?}", res[1].1.id()),
+            format!("{:?}", RafsDigest { data: [1u8; 32] })
+        );
+        assert_eq!(
+            format!("{:?}", res[2].1.id()),
+            format!("{:?}", RafsDigest { data: [3u8; 32] })
+        );
+    }
+
+    #[test]
+    fn test_state() {
+        let state = State::Rebuild(ChunkSet::new());
+        assert!(state.is_rebuild());
+        let state = State::ChunkDict;
+        assert!(state.is_from_dict());
+        let state = State::default();
+        assert!(state.is_invalid());
+
+        let mut chunk_set1 = ChunkSet::new();
+        let mut chunk_wrapper1 = ChunkWrapper::new(RafsVersion::V5);
+        chunk_wrapper1.set_id(RafsDigest { data: [1u8; 32] });
+        chunk_wrapper1.set_compressed_size(8);
+        chunk_set1.add_chunk(&chunk_wrapper1);
+        let mut state1 = State::Original(chunk_set1);
+        assert_eq!(state1.chunk_total_size().unwrap(), 8);
+
+        let mut chunk_wrapper2 = ChunkWrapper::new(RafsVersion::V6);
+        chunk_wrapper2.set_compressed_size(16);
+        let mut chunk_set2 = ChunkSet::new();
+        chunk_set2.add_chunk(&chunk_wrapper2);
+        let mut state2 = State::Rebuild(chunk_set2);
+        assert_eq!(state2.chunk_total_size().unwrap(), 16);
+
+        assert!(state1.merge_blob(state2.clone()).is_err());
+        assert!(state2.merge_blob(state1).is_ok());
+        assert!(state2.merge_blob(State::Invalid).is_err());
+
+        assert_eq!(state2.chunk_total_size().unwrap(), 24);
+        assert!(State::Delete.chunk_total_size().is_err());
+    }
+
+    #[test]
+    fn test_apply_chunk_change() {
+        let mut chunk_wrapper1 = ChunkWrapper::new(RafsVersion::V5);
+        chunk_wrapper1.set_id(RafsDigest { data: [1u8; 32] });
+        chunk_wrapper1.set_uncompressed_size(8);
+        chunk_wrapper1.set_compressed_size(8);
+
+        let mut chunk_wrapper2 = ChunkWrapper::new(RafsVersion::V6);
+        chunk_wrapper2.set_uncompressed_size(16);
+        chunk_wrapper2.set_compressed_size(16);
+
+        assert!(apply_chunk_change(&chunk_wrapper1, &mut chunk_wrapper2).is_err());
+        chunk_wrapper2.set_uncompressed_size(8);
+        assert!(apply_chunk_change(&chunk_wrapper1, &mut chunk_wrapper2).is_err());
+
+        chunk_wrapper2.set_compressed_size(8);
+        chunk_wrapper1.set_blob_index(0x10);
+        chunk_wrapper1.set_index(0x20);
+        chunk_wrapper1.set_uncompressed_offset(0x30);
+        chunk_wrapper1.set_compressed_offset(0x40);
+        assert!(apply_chunk_change(&chunk_wrapper1, &mut chunk_wrapper2).is_ok());
+        assert_eq!(chunk_wrapper2.blob_index(), 0x10);
+        assert_eq!(chunk_wrapper2.index(), 0x20);
+        assert_eq!(chunk_wrapper2.uncompressed_offset(), 0x30);
+        assert_eq!(chunk_wrapper2.compressed_offset(), 0x40);
+    }
+
+    fn create_blob_compactor() -> Result<BlobCompactor> {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/bootstrap/rafs-v5.boot");
+        let path = source_path.to_str().unwrap();
+        let rafs_config = RafsSuperConfig {
+            version: RafsVersion::V5,
+            compressor: compress::Algorithm::Lz4Block,
+            digester: digest::Algorithm::Blake3,
+            chunk_size: 0x100000,
+            batch_size: 0,
+            explicit_uidgid: true,
+            is_tarfs_mode: false,
+        };
+        let dict =
+            HashChunkDict::from_commandline_arg(path, Arc::new(ConfigV2::default()), &rafs_config)
+                .unwrap();
+
+        let mut ori_blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        ori_blob_mgr.set_chunk_dict(dict);
+
+        let backend = Arc::new(MockBackend {
+            metrics: BackendMetrics::new("id", "backend_type"),
+        });
+
+        let tmpdir = TempDir::new()?;
+        let tmpfile = TempFile::new_in(tmpdir.as_path())?;
+        let node = Node::from_fs_object(
+            RafsVersion::V6,
+            tmpdir.as_path().to_path_buf(),
+            tmpfile.as_path().to_path_buf(),
+            Overlay::UpperAddition,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            true,
+            false,
+        )?;
+        let tree = Tree::new(node);
+        let bootstrap = Bootstrap::new(tree)?;
+
+        BlobCompactor::new(
+            RafsVersion::V6,
+            ori_blob_mgr,
+            backend,
+            digest::Algorithm::Sha256,
+            &bootstrap,
+        )
+    }
+
+    #[test]
+    fn test_blob_compactor_new() {
+        let compactor = create_blob_compactor();
+        assert!(compactor.is_ok());
+        assert!(compactor.unwrap().is_v6());
+    }
+
+    #[test]
+    fn test_blob_compactor_load_chunk_dict_blobs() {
+        let mut compactor = create_blob_compactor().unwrap();
+        let chunk_dict = compactor.get_chunk_dict();
+        let n = chunk_dict.get_blobs().len();
+        for i in 0..n {
+            chunk_dict.set_real_blob_idx(i as u32, i as u32);
+        }
+        compactor.states = vec![State::default(); n + 1];
+        compactor.load_chunk_dict_blobs();
+
+        assert_eq!(compactor.states.len(), n + 1);
+        assert!(compactor.states[0].is_from_dict());
+        assert!(compactor.states[n >> 1].is_from_dict());
+        assert!(compactor.states[n - 1].is_from_dict());
+        assert!(!compactor.states[n].is_from_dict());
+    }
+
+    fn blob_compactor_load_and_dedup_chunks() -> Result<BlobCompactor> {
+        let mut compactor = create_blob_compactor()?;
+
+        let mut chunk1 = ChunkWrapper::new(RafsVersion::V5);
+        chunk1.set_id(RafsDigest { data: [1u8; 32] });
+        chunk1.set_uncompressed_size(0);
+        chunk1.set_compressed_offset(0x11);
+        chunk1.set_blob_index(1);
+        let node_chunk1 = NodeChunk {
+            source: crate::ChunkSource::Dict,
+            inner: Arc::new(chunk1.clone()),
+        };
+        let mut chunk2 = ChunkWrapper::new(RafsVersion::V6);
+        chunk2.set_id(RafsDigest { data: [2u8; 32] });
+        chunk2.set_uncompressed_size(0x20);
+        chunk2.set_compressed_offset(0x22);
+        chunk2.set_blob_index(2);
+        let node_chunk2 = NodeChunk {
+            source: crate::ChunkSource::Dict,
+            inner: Arc::new(chunk2.clone()),
+        };
+        let mut chunk3 = ChunkWrapper::new(RafsVersion::V6);
+        chunk3.set_id(RafsDigest { data: [3u8; 32] });
+        chunk3.set_uncompressed_size(0x20);
+        chunk3.set_compressed_offset(0x22);
+        chunk3.set_blob_index(2);
+        let node_chunk3 = NodeChunk {
+            source: crate::ChunkSource::Dict,
+            inner: Arc::new(chunk3.clone()),
+        };
+
+        let mut chunk_dict = HashChunkDict::new(digest::Algorithm::Sha256);
+        chunk_dict.add_chunk(
+            Arc::new(ChunkWrapper::new(RafsVersion::V5)),
+            digest::Algorithm::Sha256,
+        );
+        chunk_dict.add_chunk(Arc::new(chunk1.clone()), digest::Algorithm::Sha256);
+        compactor.ori_blob_mgr.set_chunk_dict(Arc::new(chunk_dict));
+
+        compactor.states = vec![State::ChunkDict; 5];
+
+        let tmpdir = TempDir::new()?;
+        let tmpfile = TempFile::new_in(tmpdir.as_path())?;
+        let node = Node::from_fs_object(
+            RafsVersion::V6,
+            tmpdir.as_path().to_path_buf(),
+            tmpfile.as_path().to_path_buf(),
+            Overlay::UpperAddition,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            true,
+            false,
+        )?;
+        let mut tree = Tree::new(node);
+        let tmpfile2 = TempFile::new_in(tmpdir.as_path())?;
+        let mut node = Node::from_fs_object(
+            RafsVersion::V6,
+            tmpdir.as_path().to_path_buf(),
+            tmpfile2.as_path().to_path_buf(),
+            Overlay::UpperAddition,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            true,
+            false,
+        )?;
+        node.chunks.push(node_chunk1);
+        node.chunks.push(node_chunk2);
+        node.chunks.push(node_chunk3);
+        let tree2 = Tree::new(node);
+        tree.insert_child(tree2);
+
+        let bootstrap = Bootstrap::new(tree)?;
+
+        assert!(compactor.load_and_dedup_chunks(&bootstrap).is_ok());
+        assert_eq!(compactor.c2nodes.len(), 2);
+        assert_eq!(compactor.b2nodes.len(), 2);
+
+        let chunk_key1 = ChunkKey::from(&chunk1);
+        assert!(compactor.c2nodes.get(&chunk_key1).is_some());
+        assert_eq!(compactor.c2nodes.get(&chunk_key1).unwrap().len(), 1);
+        assert!(compactor.b2nodes.get(&chunk2.blob_index()).is_some());
+        assert_eq!(
+            compactor.b2nodes.get(&chunk2.blob_index()).unwrap().len(),
+            2
+        );
+
+        Ok(compactor)
+    }
+
+    #[test]
+    fn test_blob_compactor_load_and_dedup_chunks() {
+        assert!(blob_compactor_load_and_dedup_chunks().is_ok());
+    }
+
+    #[test]
+    fn test_blob_compactor_dump_new_blobs() {
+        let tmp_dir = TempDir::new().unwrap();
+        let build_ctx = BuildContext::new(
+            "build_ctx".to_string(),
+            false,
+            0,
+            compress::Algorithm::Lz4Block,
+            digest::Algorithm::Sha256,
+            true,
+            WhiteoutSpec::None,
+            ConversionType::DirectoryToRafs,
+            PathBuf::from(tmp_dir.as_path()),
+            Default::default(),
+            None,
+            false,
+            Features::new(),
+            false,
+        );
+
+        let mut compactor = blob_compactor_load_and_dedup_chunks().unwrap();
+
+        let blob_ctx1 = BlobContext::new(
+            "blob_id1".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        let blob_ctx2 = BlobContext::new(
+            "blob_id2".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        let blob_ctx3 = BlobContext::new(
+            "blob_id3".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        let blob_ctx4 = BlobContext::new(
+            "blob_id4".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        let blob_ctx5 = BlobContext::new(
+            "blob_id5".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        compactor.ori_blob_mgr.add_blob(blob_ctx1);
+        compactor.ori_blob_mgr.add_blob(blob_ctx2);
+        compactor.ori_blob_mgr.add_blob(blob_ctx3);
+        compactor.ori_blob_mgr.add_blob(blob_ctx4);
+        compactor.ori_blob_mgr.add_blob(blob_ctx5);
+
+        compactor.states[0] = State::Invalid;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let dir = tmp_dir.as_path().to_str().unwrap();
+        assert!(compactor.dump_new_blobs(&build_ctx, dir, true).is_err());
+
+        compactor.states = vec![
+            State::Delete,
+            State::ChunkDict,
+            State::Original(ChunkSet::new()),
+            State::Rebuild(ChunkSet::new()),
+            State::Delete,
+        ];
+        assert!(compactor.dump_new_blobs(&build_ctx, dir, true).is_ok());
+        assert_eq!(compactor.ori_blob_mgr.len(), 3);
+    }
+
+    #[test]
+    fn test_blob_compactor_do_compact() {
+        let mut compactor = blob_compactor_load_and_dedup_chunks().unwrap();
+
+        let tmp_dir = TempDir::new().unwrap();
+        let build_ctx = BuildContext::new(
+            "build_ctx".to_string(),
+            false,
+            0,
+            compress::Algorithm::Lz4Block,
+            digest::Algorithm::Sha256,
+            true,
+            WhiteoutSpec::None,
+            ConversionType::DirectoryToRafs,
+            PathBuf::from(tmp_dir.as_path()),
+            Default::default(),
+            None,
+            false,
+            Features::new(),
+            false,
+        );
+        let mut blob_ctx1 = BlobContext::new(
+            "blob_id1".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        blob_ctx1.compressed_blob_size = 2;
+        let mut blob_ctx2 = BlobContext::new(
+            "blob_id2".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        blob_ctx2.compressed_blob_size = 0;
+        let blob_ctx3 = BlobContext::new(
+            "blob_id3".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        let blob_ctx4 = BlobContext::new(
+            "blob_id4".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        let blob_ctx5 = BlobContext::new(
+            "blob_id5".to_owned(),
+            0,
+            build_ctx.blob_features,
+            build_ctx.compressor,
+            build_ctx.digester,
+            build_ctx.cipher,
+            Default::default(),
+            None,
+        );
+        compactor.ori_blob_mgr.add_blob(blob_ctx1);
+        compactor.ori_blob_mgr.add_blob(blob_ctx2);
+        compactor.ori_blob_mgr.add_blob(blob_ctx3);
+        compactor.ori_blob_mgr.add_blob(blob_ctx4);
+        compactor.ori_blob_mgr.add_blob(blob_ctx5);
+
+        let mut chunk_set1 = ChunkSet::new();
+        chunk_set1.total_size = 4;
+        let mut chunk_set2 = ChunkSet::new();
+        chunk_set2.total_size = 6;
+        let mut chunk_set3 = ChunkSet::new();
+        chunk_set3.total_size = 5;
+
+        compactor.states = vec![
+            State::Original(chunk_set1),
+            State::Original(chunk_set2),
+            State::Rebuild(chunk_set3),
+            State::ChunkDict,
+            State::Invalid,
+        ];
+
+        let cfg = Config {
+            min_used_ratio: 50,
+            compact_blob_size: 10,
+            max_compact_size: 8,
+            layers_to_compact: 0,
+            blobs_dir: "blobs_dir".to_string(),
+        };
+
+        assert!(compactor.do_compact(&cfg).is_ok());
+        assert!(!compactor.states.last().unwrap().is_invalid());
+    }
+}

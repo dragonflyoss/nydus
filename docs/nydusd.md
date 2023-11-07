@@ -4,7 +4,7 @@
 
 ### Get binary from release page
 
-Get `nydusd` binary from [release](https://github.com/dragonflyoss/image-service/releases/latest) page.
+Get `nydusd` binary from [release](https://github.com/dragonflyoss/nydus/releases/latest) page.
 
 ## Run Nydusd Daemon
 
@@ -36,7 +36,7 @@ EOF
 ```
 
 ### Run With FUSE
-If no `/path/to/bootstrap` is available, please refer to [nydus-image.md](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md) for more details.
+If no `/path/to/bootstrap` is available, please refer to [nydus-image.md](https://github.com/dragonflyoss/nydus/blob/master/docs/nydus-image.md) for more details.
 
 ``` shell
 sudo mkdir -p /var/lib/nydus/blobs/
@@ -51,7 +51,7 @@ sudo nydusd \
 For registry backend, we can set authorization with environment variable `IMAGE_PULL_AUTH` to avoid loading `auth` from nydusd configuration file.
 
 ### Run With Virtio-FS
-If no `/path/to/bootstrap` is available, please refer to [nydus-image.md](https://github.com/dragonflyoss/image-service/blob/master/docs/nydus-image.md) for more details.
+If no `/path/to/bootstrap` is available, please refer to [nydus-image.md](https://github.com/dragonflyoss/nydus/blob/master/docs/nydus-image.md) for more details.
 
 Virtio-fs is supported by both [QEMU](https://www.qemu.org/) and [Cloud-hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor). To run `nydusd` with virtio-fs support, first start it with `--sock` option to expose a virtio-fs socket endpoint.
 

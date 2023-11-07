@@ -69,27 +69,27 @@ func parseBackendConfig(backendConfigJSON, backendConfigFile string) (string, er
 	return backendConfigJSON, nil
 }
 
-func getBackendConfig(c *cli.Context, suffix string, required bool) (string, string, error) {
-	backendType := c.String(suffix + "backend-type")
+func getBackendConfig(c *cli.Context, prefix string, required bool) (string, string, error) {
+	backendType := c.String(prefix + "backend-type")
 	if backendType == "" {
 		if required {
-			return "", "", errors.Errorf("backend type is empty, please specify option '--%sbackend-type'", suffix)
+			return "", "", errors.Errorf("backend type is empty, please specify option '--%sbackend-type'", prefix)
 		}
 		return "", "", nil
 	}
 
 	possibleBackendTypes := []string{"oss", "s3"}
 	if !isPossibleValue(possibleBackendTypes, backendType) {
-		return "", "", fmt.Errorf("--%sbackend-type should be one of %v", suffix, possibleBackendTypes)
+		return "", "", fmt.Errorf("--%sbackend-type should be one of %v", prefix, possibleBackendTypes)
 	}
 
 	backendConfig, err := parseBackendConfig(
-		c.String(suffix+"backend-config"), c.String(suffix+"backend-config-file"),
+		c.String(prefix+"backend-config"), c.String(prefix+"backend-config-file"),
 	)
 	if err != nil {
 		return "", "", err
 	} else if (backendType == "oss" || backendType == "s3") && strings.TrimSpace(backendConfig) == "" {
-		return "", "", errors.Errorf("backend configuration is empty, please specify option '--%sbackend-config'", suffix)
+		return "", "", errors.Errorf("backend configuration is empty, please specify option '--%sbackend-config'", prefix)
 	}
 
 	return backendType, backendConfig, nil

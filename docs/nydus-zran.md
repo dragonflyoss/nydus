@@ -19,7 +19,7 @@ A simple test result is shown below:
 
 ## Generate nydus zran artifact
 
-1. Get nydus components `nydusd`, `nydus-image`, `nydusify` from [release](https://github.com/dragonflyoss/image-service/releases) page (requires >= v2.2).
+1. Get nydus components `nydusd`, `nydus-image`, `nydusify` from [release](https://github.com/dragonflyoss/nydus/releases) page (requires >= v2.2).
 
 ```
 sudo install -D -m 755 nydusd nydus-image nydusify /usr/bin
@@ -43,7 +43,7 @@ sudo nydusify convert --oci-ref --source your-registry.com/node:19.0 --target yo
 - Nydus ZRAN artifacts must be in the same namespace with the OCI image.
 ## Run nydus zran artifact:
 
-Follow the [documentation](https://github.com/dragonflyoss/image-service/blob/master/docs/containerd-env-setup.md) to configure `containerd` and `nydus-snapshotter` (containerd-nydus-grpc):
+Follow the [documentation](https://github.com/dragonflyoss/nydus/blob/master/docs/containerd-env-setup.md) to configure `containerd` and `nydus-snapshotter` (containerd-nydus-grpc):
 
 ``` bash
 # Run nydus zran artifact

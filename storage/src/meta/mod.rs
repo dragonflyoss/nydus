@@ -1997,6 +1997,7 @@ pub(crate) mod tests {
     use crate::device::BlobFeatures;
     use crate::RAFS_DEFAULT_CHUNK_SIZE;
     use nix::sys::uio;
+    use nydus_utils::digest::{self, DigestHasher};
     use nydus_utils::metrics::BackendMetrics;
     use std::fs::File;
     use std::os::unix::io::AsRawFd;
@@ -2201,5 +2202,111 @@ pub(crate) mod tests {
         assert!(meta
             .get_chunks_compressed(0x1000000, 0x1, RAFS_DEFAULT_CHUNK_SIZE, false)
             .is_err());
+    }
+
+    #[test]
+    fn test_blob_compression_context_header_getters_and_setters() {
+        let mut header = BlobCompressionContextHeader::default();
+
+        assert_eq!(header.features(), 0);
+        header.set_aligned(true);
+        assert!(header.is_4k_aligned());
+        header.set_aligned(false);
+
+        header.set_inlined_fs_meta(true);
+        assert!(header.has_feature(BlobFeatures::INLINED_FS_META));
+        header.set_inlined_fs_meta(false);
+
+        header.set_chunk_info_v2(true);
+        assert!(header.has_feature(BlobFeatures::CHUNK_INFO_V2));
+        header.set_chunk_info_v2(false);
+
+        header.set_ci_zran(true);
+        assert!(header.has_feature(BlobFeatures::ZRAN));
+        header.set_ci_zran(false);
+
+        header.set_separate_blob(true);
+        assert!(header.has_feature(BlobFeatures::SEPARATE));
+        header.set_separate_blob(false);
+
+        header.set_ci_batch(true);
+        assert!(header.has_feature(BlobFeatures::BATCH));
+        header.set_ci_batch(false);
+
+        header.set_inlined_chunk_digest(true);
+        assert!(header.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST));
+        header.set_inlined_chunk_digest(false);
+
+        header.set_has_tar_header(true);
+        assert!(header.has_feature(BlobFeatures::HAS_TAR_HEADER));
+        header.set_has_tar_header(false);
+
+        header.set_has_toc(true);
+        assert!(header.has_feature(BlobFeatures::HAS_TOC));
+        header.set_has_toc(false);
+
+        header.set_cap_tar_toc(true);
+        assert!(header.has_feature(BlobFeatures::CAP_TAR_TOC));
+        header.set_cap_tar_toc(false);
+
+        header.set_tarfs(true);
+        assert!(header.has_feature(BlobFeatures::TARFS));
+        header.set_tarfs(false);
+
+        header.set_encrypted(true);
+        assert!(header.has_feature(BlobFeatures::ENCRYPTED));
+        header.set_encrypted(false);
+
+        assert_eq!(header.features(), 0);
+
+        assert_eq!(header.ci_compressor(), compress::Algorithm::Lz4Block);
+        header.set_ci_compressor(compress::Algorithm::GZip);
+        assert_eq!(header.ci_compressor(), compress::Algorithm::GZip);
+        header.set_ci_compressor(compress::Algorithm::Zstd);
+        assert_eq!(header.ci_compressor(), compress::Algorithm::Zstd);
+
+        let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
+        hasher.digest_update(header.as_bytes());
+        let hash: String = hasher.digest_finalize().into();
+        assert_eq!(
+            hash,
+            String::from("f56a1129d3df9fc7d60b26dbf495a60bda3dfc265f4f37854e4a36b826b660fc")
+        );
+
+        assert_eq!(header.ci_entries(), 0);
+        header.set_ci_entries(1);
+        assert_eq!(header.ci_entries(), 1);
+
+        assert_eq!(header.ci_compressed_offset(), 0);
+        header.set_ci_compressed_offset(1);
+        assert_eq!(header.ci_compressed_offset(), 1);
+
+        assert_eq!(header.ci_compressed_size(), 0);
+        header.set_ci_compressed_size(1);
+        assert_eq!(header.ci_compressed_size(), 1);
+
+        assert_eq!(header.ci_uncompressed_size(), 0);
+        header.set_ci_uncompressed_size(1);
+        assert_eq!(header.ci_uncompressed_size(), 1);
+
+        assert_eq!(header.ci_zran_count(), 0);
+        header.set_ci_zran_count(1);
+        assert_eq!(header.ci_zran_count(), 1);
+
+        assert_eq!(header.ci_zran_offset(), 0);
+        header.set_ci_zran_offset(1);
+        assert_eq!(header.ci_zran_offset(), 1);
+
+        assert_eq!(header.ci_zran_size(), 0);
+        header.set_ci_zran_size(1);
+        assert_eq!(header.ci_zran_size(), 1);
+    }
+
+    #[test]
+    fn test_format_blob_features() {
+        let features = !BlobFeatures::default();
+        let content = format_blob_features(features);
+        assert!(content.contains("aligned"));
+        assert!(content.contains("fs-meta"));
     }
 }

@@ -1398,6 +1398,8 @@ pub mod v5 {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::test::MockChunkInfo;
 
@@ -1610,5 +1612,33 @@ mod tests {
 
         assert_eq!(size, iovec.size());
         assert_eq!(chunk_count, iovec.len() as u32);
+    }
+
+    #[test]
+    fn test_blob_info_blob_meta_id() {
+        let blob_info = BlobInfo::new(
+            1,
+            "blob_id".to_owned(),
+            0,
+            0,
+            0,
+            1,
+            BlobFeatures::SEPARATE | BlobFeatures::INLINED_FS_META,
+        );
+
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/blobs/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+
+        assert!(blob_info
+            .set_blob_id_from_meta_path(source_path.as_path())
+            .is_ok());
+
+        let id = blob_info.get_blob_meta_id();
+        assert!(id.is_ok());
+        assert_eq!(
+            id.unwrap(),
+            "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef".to_owned()
+        );
     }
 }

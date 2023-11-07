@@ -315,3 +315,101 @@ impl Merger {
         BuildOutput::new(&blob_mgr, &bootstrap_storage)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nydus_utils::digest;
+    use vmm_sys_util::tempfile::TempFile;
+
+    use super::*;
+
+    #[test]
+    fn test_merger_get_string_from_list() {
+        let res = Merger::get_string_from_list(&None, 1);
+        assert!(res.is_ok());
+        assert!(res.unwrap().is_none());
+
+        let original_ids = vec!["string1".to_owned(), "string2".to_owned()];
+        let original_ids = Some(original_ids);
+
+        let res = Merger::get_string_from_list(&original_ids, 0);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), Some("string1".to_owned()));
+        assert!(Merger::get_string_from_list(&original_ids, 2).is_err());
+    }
+
+    #[test]
+    fn test_merger_get_digest_from_list() {
+        let res = Merger::get_digest_from_list(&None, 1);
+        assert!(res.is_ok());
+        assert!(res.unwrap().is_none());
+
+        let original_ids = vec!["string1".to_owned(), "12ab".repeat(16)];
+        let original_ids = Some(original_ids);
+
+        let res = Merger::get_digest_from_list(&original_ids, 1);
+        assert!(res.is_ok());
+        assert_eq!(
+            res.unwrap(),
+            Some([
+                18u8, 171, 18, 171, 18, 171, 18, 171, 18, 171, 18, 171, 18, 171, 18, 171, 18, 171,
+                18, 171, 18, 171, 18, 171, 18, 171, 18, 171, 18, 171, 18, 171
+            ])
+        );
+        assert!(Merger::get_digest_from_list(&original_ids, 0).is_err());
+        assert!(Merger::get_digest_from_list(&original_ids, 2).is_err());
+    }
+
+    #[test]
+    fn test_merger_get_size_from_list() {
+        let res = Merger::get_size_from_list(&None, 1);
+        assert!(res.is_ok());
+        assert!(res.unwrap().is_none());
+
+        let original_ids = vec![1u64, 2, 3, 4];
+        let original_ids = Some(original_ids);
+        let res = Merger::get_size_from_list(&original_ids, 1);
+        assert!(res.is_ok());
+        assert_eq!(res.unwrap(), Some(2u64));
+        assert!(Merger::get_size_from_list(&original_ids, 4).is_err());
+    }
+
+    #[test]
+    fn test_merger_merge() {
+        let mut ctx = BuildContext::default();
+        ctx.configuration.internal.set_blob_accessible(false);
+        ctx.digester = digest::Algorithm::Sha256;
+
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path1 = PathBuf::from(root_dir);
+        source_path1.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+        let mut source_path2 = PathBuf::from(root_dir);
+        source_path2.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+
+        let tmp_file = TempFile::new().unwrap();
+        let target = ArtifactStorage::SingleFile(tmp_file.as_path().to_path_buf());
+
+        let blob_toc_digests = Some(vec![
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+            "4cf0c409788fc1c149afbf4c81276b92427ae41e46412334ca495991b8526650".to_owned(),
+        ]);
+
+        let build_output = Merger::merge(
+            &mut ctx,
+            None,
+            vec![source_path1, source_path2],
+            Some(vec!["a70f".repeat(16), "9bd3".repeat(16)]),
+            Some(vec!["blob_id".to_owned(), "blob_id2".to_owned()]),
+            Some(vec![16u64, 32u64]),
+            blob_toc_digests,
+            Some(vec![64u64, 128]),
+            target,
+            None,
+            Arc::new(ConfigV2::new("config_v2")),
+        );
+        assert!(build_output.is_ok());
+        let build_output = build_output.unwrap();
+        println!("BuildOutpu: {}", build_output);
+        assert_eq!(build_output.blob_size, Some(16));
+    }
+}

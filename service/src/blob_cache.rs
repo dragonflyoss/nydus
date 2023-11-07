@@ -622,6 +622,7 @@ mod tests {
             is_tarfs_mode: false,
         };
         assert_eq!(blob.path(), &path);
+        assert_eq!(blob.blob_id(), "123456789-123");
     }
 
     #[test]
@@ -733,6 +734,9 @@ mod tests {
         mgr.add_blob_entry(&entry).unwrap();
         let blob_id = generate_blob_key(&entry.domain_id, &entry.blob_id);
         assert!(mgr.get_config(&blob_id).is_some());
+
+        // add the same entry will trigger an error
+        assert!(mgr.add_blob_entry(&entry).is_err());
 
         // Check existence of data blob referenced by the bootstrap.
         let key = generate_blob_key(

@@ -149,13 +149,15 @@ jobs:
     - name: Prepare Older Binaries
       id: prepare-binaries
       run: |
-        versions=(v0.1.0 v2.1.6)
-        version_archs=(v0.1.0-x86_64 v2.1.6-linux-amd64)
+        export NYDUS_STABLE_VERSION=$(curl https://api.github.com/repos/Dragonflyoss/nydus/releases/latest | jq -r '.tag_name')
+
+        versions=(v0.1.0 ${NYDUS_STABLE_VERSION})
+        version_archs=(v0.1.0-x86_64 ${NYDUS_STABLE_VERSION}-linux-amd64)
         for i in ${!versions[@]}; do
           version=${versions[$i]}
           version_arch=${version_archs[$i]}
 
-          wget -q https://github.com/dragonflyoss/image-service/releases/download/$version/nydus-static-$version_arch.tgz
+          wget -q https://github.com/dragonflyoss/nydus/releases/download/$version/nydus-static-$version_arch.tgz
           sudo mkdir nydus-$version /usr/bin/nydus-$version
           sudo tar xzf nydus-static-$version_arch.tgz -C nydus-$version
           sudo cp -r nydus-$version/nydus-static/* /usr/bin/nydus-$version/
@@ -175,8 +177,11 @@ jobs:
         sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/bin/nydus-latest
         sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/bin/nydus-latest
 
-        versions=(v0.1.0 v2.1.6 latest)
-        version_exports=(v0_1_0 v2_1_6 latest)
+        export NYDUS_STABLE_VERSION=$(curl https://api.github.com/repos/Dragonflyoss/nydus/releases/latest | jq -r '.tag_name')
+        export NYDUS_STABLE_VERSION_EXPORT="${NYDUS_STABLE_VERSION//./_}"
+
+        versions=(v0.1.0 ${NYDUS_STABLE_VERSION} latest)
+        version_exports=(v0_1_0 ${NYDUS_STABLE_VERSION_EXPORT} latest)
         for i in ${!version_exports[@]}; do
           version=${versions[$i]}
           version_export=${version_exports[$i]}
@@ -608,9 +613,13 @@ jobs:
         shared-key: nydus-build
     - name: Install cargo nextest
       uses: taiki-e/install-action@nextest
+    - name: Fscache Setup
+      run: sudo bash misc/fscache/setup.sh
     - name: Unit Test
       run: |
-        make ut-nextest
+        CARGO_HOME=${HOME}/.cargo
+        CARGO_BIN=$(which cargo)
+        sudo -E CARGO=${CARGO_BIN} make ut-nextest
 
   nydus-unit-test-coverage:
     runs-on: ubuntu-latest
@@ -624,8 +633,13 @@ jobs:
           cache-on-failure: true
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Fscache Setup
+        run: sudo bash misc/fscache/setup.sh
       - name: Generate code coverage
-        run: make coverage-codecov
+        run: |
+          CARGO_HOME=${HOME}/.cargo
+          CARGO_BIN=$(which cargo)
+          sudo -E CARGO=${CARGO_BIN} make coverage-codecov
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:

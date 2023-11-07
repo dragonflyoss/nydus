@@ -976,4 +976,71 @@ mod tests {
         FsCacheMsgHeader::try_from(vec![0u8, 0, 0, 1, 0, 0, 0, 2, 0, 0].as_slice()).unwrap_err();
         FsCacheMsgHeader::try_from(vec![].as_slice()).unwrap_err();
     }
+
+    #[test]
+    fn test_fs_cache_msg_open_try_from() {
+        // request message size too small
+        assert!(FsCacheMsgOpen::try_from(
+            vec![1u8, 0, 0, 0, 2, 0, 0, 0, 17, 0, 0, 0, 2u8, 0, 0].as_slice()
+        )
+        .is_err());
+
+        // volume key size or cookie key size too large
+        assert!(FsCacheMsgOpen::try_from(
+            vec![255u8, 127, 127, 127, 255, 127, 127, 255, 17, 0, 0, 0, 2u8, 0, 0, 0, 4u8, 0, 0, 0]
+                .as_slice()
+        )
+        .is_err());
+        assert!(FsCacheMsgOpen::try_from(
+            vec![
+                255u8, 127, 127, 127, 241u8, 127, 128, 128, 17, 0, 0, 0, 2u8, 0, 0, 0, 4u8, 0, 0,
+                0,
+            ]
+            .as_slice()
+        )
+        .is_err());
+
+        // value size too small
+        assert!(FsCacheMsgOpen::try_from(
+            vec![1u8, 0, 0, 0, 2, 0, 0, 0, 17, 0, 0, 0, 2u8, 0, 0, 0, 0].as_slice()
+        )
+        .is_err());
+
+        let res = FsCacheMsgOpen::try_from(
+            vec![
+                1u8, 0, 0, 0, 2, 0, 0, 0, 17, 0, 0, 0, 2u8, 0, 0, 0, 4u8, 0, 0, 0,
+            ]
+            .as_slice(),
+        );
+        assert!(res.is_ok());
+        assert_eq!(
+            res.unwrap(),
+            FsCacheMsgOpen {
+                volume_key: String::from("\u{4}"),
+                cookie_key: String::from("\0\0"),
+                fd: 17,
+                flags: 2
+            }
+        );
+    }
+
+    #[test]
+    fn test_fs_cache_msg_read_try_from() {
+        assert!(FsCacheMsgRead::try_from(
+            vec![1u8, 0, 0, 0, 2, 0, 0, 0, 17, 0, 0, 0, 2u8, 0, 0].as_slice()
+        )
+        .is_err());
+
+        let res = FsCacheMsgRead::try_from(
+            vec![1u8, 0, 0, 0, 2, 0, 0, 0, 17, 0, 0, 0, 2u8, 0, 0, 0].as_slice(),
+        );
+        assert!(res.is_ok());
+        assert_eq!(
+            res.unwrap(),
+            FsCacheMsgRead {
+                off: 8589934593,
+                len: 8589934609,
+            }
+        );
+    }
 }
