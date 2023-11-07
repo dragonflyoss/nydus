@@ -991,7 +991,7 @@ mod tests {
         entry.toc_type = "dir".to_owned();
         assert!(entry.is_dir());
         assert!(entry.is_supported());
-        assert_eq!(entry.mode(), libc::S_IFDIR);
+        assert_eq!(entry.mode(), libc::S_IFDIR as u32);
         assert_eq!(entry.rdev(), u32::MAX);
 
         entry.toc_type = "req".to_owned();
@@ -999,20 +999,20 @@ mod tests {
         entry.toc_type = "reg".to_owned();
         assert!(entry.is_reg());
         assert!(entry.is_supported());
-        assert_eq!(entry.mode(), libc::S_IFREG);
+        assert_eq!(entry.mode(), libc::S_IFREG as u32);
         assert_eq!(entry.size(), 0x10);
 
         entry.toc_type = "symlink".to_owned();
         assert!(entry.is_symlink());
         assert!(entry.is_supported());
-        assert_eq!(entry.mode(), libc::S_IFLNK);
+        assert_eq!(entry.mode(), libc::S_IFLNK as u32);
         assert_eq!(entry.symlink_link_path(), Path::new("link_name"));
         assert!(entry.normalize().is_ok());
 
         entry.toc_type = "hardlink".to_owned();
         assert!(entry.is_supported());
         assert!(entry.is_hardlink());
-        assert_eq!(entry.mode(), libc::S_IFREG);
+        assert_eq!(entry.mode(), libc::S_IFREG as u32);
         assert_eq!(entry.hardlink_link_path(), Path::new("link_name"));
         assert!(entry.normalize().is_ok());
 
@@ -1026,18 +1026,18 @@ mod tests {
         entry.toc_type = "block".to_owned();
         assert!(entry.is_special());
         assert!(entry.is_blockdev());
-        assert_eq!(entry.mode(), libc::S_IFBLK);
+        assert_eq!(entry.mode(), libc::S_IFBLK as u32);
 
         entry.toc_type = "char".to_owned();
         assert!(entry.is_special());
         assert!(entry.is_chardev());
-        assert_eq!(entry.mode(), libc::S_IFCHR);
+        assert_eq!(entry.mode(), libc::S_IFCHR as u32);
         assert_ne!(entry.size(), 0x10);
 
         entry.toc_type = "fifo".to_owned();
         assert!(entry.is_fifo());
         assert!(entry.is_special());
-        assert_eq!(entry.mode(), libc::S_IFIFO);
+        assert_eq!(entry.mode(), libc::S_IFIFO as u32);
         assert_eq!(entry.rdev(), 65313);
 
         assert_eq!(entry.name().unwrap().to_str(), Some("all-entry-type.tar"));
