@@ -161,3 +161,51 @@ pub trait ChunkIndexGetter {
     /// Get the chunk's id/key for state tracking.
     fn get_index(chunk: &dyn BlobChunkInfo) -> Self::Index;
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::test::MockChunkInfo;
+
+    use super::*;
+
+    impl RangeMap for NoopChunkMap {
+        type I = u32;
+    }
+
+    #[test]
+    fn test_trait_default_impl() {
+        let m = NoopChunkMap::new(false);
+        let chunk_info = MockChunkInfo {
+            index: 128,
+            ..Default::default()
+        };
+
+        assert!(m.is_pending(&chunk_info).is_ok());
+        assert!(!m.is_pending(&chunk_info).unwrap());
+        assert!(!m.is_range_all_ready());
+        assert!(m.is_range_ready(0, 1).is_err());
+        assert!(m.check_range_ready_and_mark_pending(0, 1).is_err());
+        assert!(m.set_range_ready_and_clear_pending(0, 1).is_err());
+        m.clear_range_pending(0, 1);
+        assert!(m.wait_for_range_ready(0, 1).is_err());
+        assert!(m.as_range_map().is_none());
+        assert!(!m.is_persist());
+        assert!(!m.is_ready(&chunk_info).unwrap());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_check_ready_and_mark_pending_default_impl() {
+        let chunk_info = MockChunkInfo::default();
+        let m = NoopChunkMap::new(false);
+        m.check_ready_and_mark_pending(&chunk_info).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_ready_and_clear_pending_default_impl() {
+        let chunk_info = MockChunkInfo::default();
+        let m = NoopChunkMap::new(false);
+        m.set_ready_and_clear_pending(&chunk_info).unwrap();
+    }
+}
