@@ -2193,6 +2193,7 @@ impl RafsV6PrefetchTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::RafsVersion;
     use crate::{BufWriter, RafsIoRead};
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -2511,5 +2512,297 @@ mod tests {
         assert_eq!(addr.block_addr(), 0);
         addr.set_block_addr(179);
         assert_eq!(addr.block_addr(), 179);
+    }
+
+    #[test]
+    fn test_rsfs_v6_super_block() {
+        let mut blk = RafsV6SuperBlock::new();
+        assert!(blk.validate(0).is_err());
+
+        blk.set_inos(10);
+        blk.set_blocks(100);
+        blk.set_root_nid(1000);
+        assert_eq!(blk.s_inos, 10);
+        assert_eq!(blk.s_blocks, 100);
+        assert_eq!(blk.s_root_nid, 1000);
+
+        blk.set_block_bits(EROFS_BLOCK_BITS_9);
+        blk.set_meta_addr(1024 * 1024);
+        assert_eq!(
+            blk.s_meta_blkaddr,
+            (1024 * 1024) / EROFS_BLOCK_SIZE_512 as u32
+        );
+
+        blk.set_block_bits(EROFS_BLOCK_BITS_12);
+        blk.set_meta_addr(1024 * 1024);
+        assert_eq!(
+            blk.s_meta_blkaddr,
+            (1024 * 1024) / EROFS_BLOCK_SIZE_4096 as u32
+        );
+    }
+
+    #[test]
+    fn test_rafs_v6_super_block_ext() {
+        let mut ext = RafsV6SuperBlockExt::new();
+        ext.set_compressor(compress::Algorithm::GZip);
+        ext.set_has_xattr();
+        ext.set_explicit_uidgid();
+        ext.set_inlined_chunk_digest();
+        ext.set_tarfs_mode();
+        ext.set_digester(digest::Algorithm::Blake3);
+        ext.set_chunk_table(1024, 1024);
+        ext.set_cipher(crypt::Algorithm::Aes128Xts);
+
+        assert_ne!(ext.s_flags & RafsSuperFlags::COMPRESSION_GZIP.bits(), 0);
+        assert_ne!(ext.s_flags & RafsSuperFlags::HAS_XATTR.bits(), 0);
+        assert_ne!(ext.s_flags & RafsSuperFlags::EXPLICIT_UID_GID.bits(), 0);
+        assert_ne!(ext.s_flags & RafsSuperFlags::INLINED_CHUNK_DIGEST.bits(), 0);
+        assert_ne!(ext.s_flags & RafsSuperFlags::TARTFS_MODE.bits(), 0);
+        assert_ne!(ext.s_flags & RafsSuperFlags::HASH_BLAKE3.bits(), 0);
+        assert_eq!(ext.chunk_table_size(), 1024);
+        assert_eq!(ext.chunk_table_offset(), 1024);
+        assert_ne!(
+            ext.s_flags & RafsSuperFlags::ENCRYPTION_ASE_128_XTS.bits(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_rafs_v6_inode_compact() {
+        let mut cpt = RafsV6InodeCompact::new();
+        cpt.set_size(1024);
+        cpt.set_ino(10);
+        cpt.set_nlink(2048);
+        cpt.set_mode(1);
+        cpt.set_u(8);
+        cpt.set_uidgid(1, 1);
+        cpt.set_mtime(1, 1000);
+        cpt.set_rdev(20);
+        cpt.set_xattr_inline_count(10);
+        cpt.set_data_layout(1);
+        assert_eq!(cpt.format().to_le(), 2);
+        assert_eq!(cpt.mode(), 1);
+        assert_eq!(cpt.size(), 1024);
+        assert_eq!(cpt.union(), 8);
+        assert_eq!(cpt.ino(), 10);
+        assert_eq!(cpt.ugid(), (1, 1));
+        assert_eq!(cpt.mtime_s_ns(), (0, 0));
+        assert_eq!(cpt.nlink(), 2048);
+        assert_eq!(cpt.rdev(), 0);
+        assert_eq!(cpt.xattr_inline_count(), 10);
+    }
+
+    #[test]
+    fn test_rafs_v6_inode_extended_inode() {
+        let mut ext = RafsV6InodeExtended::new();
+        ext.set_size(1024);
+        ext.set_ino(1024);
+        ext.set_nlink(1024);
+        ext.set_mode(1024);
+        ext.set_u(1024);
+        ext.set_rdev(1024);
+        ext.set_xattr_inline_count(1024);
+
+        assert_eq!(ext.format(), 1);
+        assert_eq!(ext.mode(), 1024);
+        assert_eq!(ext.size(), 1024);
+        assert_eq!(ext.union(), 1024);
+        assert_eq!(ext.ino(), 1024);
+        assert_eq!(ext.ugid(), (0, 0));
+        assert_eq!(ext.mtime_s_ns(), (0, 0));
+        assert_eq!(ext.nlink(), 1024);
+        assert_eq!(ext.rdev(), 1024);
+        assert_eq!(ext.xattr_inline_count(), 1024);
+    }
+
+    #[test]
+    fn test_v6_inode() {
+        let i = new_v6_inode(
+            &InodeWrapper::new(RafsVersion::V6),
+            EROFS_INODE_FLAT_INLINE,
+            1024,
+            true,
+        );
+        assert_eq!(i.ino(), 0);
+        assert_eq!(i.size(), 0);
+        assert_eq!(i.mtime_s_ns(), (0, 0));
+        assert_eq!(i.nlink(), 0);
+    }
+
+    #[test]
+    fn test_rafs_v6_dirent() {
+        let mut dir = RafsV6Dirent::new(0, 1024, EROFS_FILE_TYPE::EROFS_FT_BLKDEV as u8);
+        dir.set_name_offset(2048);
+        assert_eq!(dir.e_nameoff, 2048);
+
+        assert_eq!(
+            RafsV6Dirent::file_type(libc::S_IFREG),
+            EROFS_FILE_TYPE::EROFS_FT_REG_FILE as u8
+        );
+        assert_eq!(
+            RafsV6Dirent::file_type(libc::S_IFDIR),
+            EROFS_FILE_TYPE::EROFS_FT_DIR as u8
+        );
+        assert_eq!(
+            RafsV6Dirent::file_type(libc::S_IFCHR),
+            EROFS_FILE_TYPE::EROFS_FT_CHRDEV as u8
+        );
+        assert_eq!(
+            RafsV6Dirent::file_type(libc::S_IFBLK),
+            EROFS_FILE_TYPE::EROFS_FT_BLKDEV as u8
+        );
+        assert_eq!(
+            RafsV6Dirent::file_type(libc::S_IFIFO),
+            EROFS_FILE_TYPE::EROFS_FT_FIFO as u8
+        );
+        assert_eq!(
+            RafsV6Dirent::file_type(libc::S_IFSOCK),
+            EROFS_FILE_TYPE::EROFS_FT_SOCK as u8
+        );
+        assert_eq!(
+            RafsV6Dirent::file_type(libc::S_IFLNK),
+            EROFS_FILE_TYPE::EROFS_FT_SYMLINK as u8
+        );
+    }
+
+    #[test]
+    fn test_rafs_v6_inode_chunk_header() {
+        let hdr = RafsV6InodeChunkHeader::new(0x1000_0000, EROFS_BLOCK_SIZE_4096);
+        let val = hdr.to_u32();
+        let newhdr = RafsV6InodeChunkHeader::from_u32(val);
+        assert_eq!(newhdr.format, hdr.format);
+        assert_eq!(newhdr.reserved, hdr.reserved);
+    }
+    #[test]
+    fn test_align_offset() {
+        assert_eq!(align_offset(1099, 8), 1104);
+        assert_eq!(align_offset(1099, 16), 1104);
+        assert_eq!(align_offset(1099, 32), 1120);
+    }
+    #[test]
+    fn test_calculate_nid() {
+        assert_eq!(calculate_nid(1024, 512), 16);
+        assert_eq!(calculate_nid(1024, 768), 8);
+        assert_eq!(calculate_nid(2048, 768), 40);
+    }
+
+    #[test]
+    fn test_rafs_v6_blob() {
+        let mut blob = RafsV6Blob {
+            cipher_algo: crypt::Algorithm::Aes256Gcm as u32,
+            ..RafsV6Blob::default()
+        };
+        assert!(blob.to_blob_info().is_err());
+
+        blob.blob_id = [0x1u8; BLOB_SHA256_LEN];
+        blob.blob_meta_digest = [0xcu8; 32];
+        blob.blob_meta_digest[31] = 0xau8;
+
+        blob.cipher_algo = crypt::Algorithm::Aes128Xts as u32;
+        let info: BlobInfo = blob.to_blob_info().unwrap();
+        RafsV6Blob::from_blob_info(&info).unwrap();
+        assert!(RafsV6Blob::from_blob_info(&info).is_ok());
+
+        blob.cipher_algo = crypt::Algorithm::None as u32;
+        let info: BlobInfo = blob.to_blob_info().unwrap();
+        RafsV6Blob::from_blob_info(&info).unwrap();
+        assert!(RafsV6Blob::from_blob_info(&info).is_ok());
+    }
+
+    #[test]
+    fn test_rafs_v6_blob_table() {
+        let mut table = RafsV6BlobTable::new();
+        assert_eq!(table.size(), 0);
+        table.add(
+            "0".to_string(),
+            0,
+            0,
+            1024,
+            10,
+            0,
+            0,
+            RafsSuperFlags { bits: 0 },
+            [0; 32],
+            [0; 32],
+            0,
+            0,
+            BlobCompressionContextHeader::default(),
+            Arc::new(crypt::Algorithm::Aes128Xts.new_cipher().unwrap()),
+            Some(CipherContext::default()),
+        );
+        assert_eq!(table.size(), size_of::<RafsV6Blob>());
+        assert!(table.get(0).is_ok());
+        assert!(table.get(1).is_err());
+    }
+
+    fn get_streams() -> (Box<dyn RafsIoRead>, BufWriter<std::fs::File>) {
+        let temp = TempFile::new().unwrap();
+        let w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let writer: BufWriter<std::fs::File> = BufWriter::new(w);
+        let reader: Box<dyn RafsIoRead> = Box::new(r);
+        (reader, writer)
+    }
+
+    #[test]
+    fn test_rafs_v6_blob_table_store() {
+        let mut table = RafsV6BlobTable::new();
+        table.add(
+            "0".to_string(),
+            0,
+            0,
+            1024,
+            10,
+            0,
+            0,
+            RafsSuperFlags { bits: 0 },
+            [0; 32],
+            [0; 32],
+            0,
+            0,
+            BlobCompressionContextHeader::default(),
+            Arc::new(crypt::Algorithm::Aes128Xts.new_cipher().unwrap()),
+            Some(CipherContext::default()),
+        );
+
+        let (_reader, mut writer) = get_streams();
+        table.store(&mut writer).unwrap();
+        writer.flush().unwrap();
+    }
+
+    #[test]
+    fn test_rafs_v6_xattr_entry() {
+        let ent = RafsV6XattrEntry::new();
+        assert_eq!(ent.name_index(), 0);
+        assert_eq!(ent.name_len(), 0);
+        assert_eq!(ent.value_size(), 0);
+    }
+
+    #[test]
+    fn test_rafs_prefetch_table() {
+        let mut table = RafsV6PrefetchTable::new();
+        assert_eq!(table.size(), 0);
+        assert_eq!(table.len(), 0);
+        assert!(table.is_empty());
+        table.add_entry(0);
+        table.add_entry(1);
+        assert_eq!(table.len(), 2);
+        assert!(!table.is_empty());
+
+        let (mut reader, mut writer) = get_streams();
+        table.store(&mut writer).unwrap();
+        writer.flush().unwrap();
+        table.inodes.clear();
+        assert_eq!(table.len(), 0);
+        assert!(table.load_prefetch_table_from(&mut reader, 0, 2).is_ok());
+        assert_eq!(table.len(), 2);
     }
 }

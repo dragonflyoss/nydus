@@ -1173,4 +1173,145 @@ mod tests {
             digest::Algorithm::Blake3
         );
     }
+
+    #[test]
+    fn test_rafs_crypt_from() {
+        assert_eq!(
+            crypt::Algorithm::from(RafsSuperFlags::ENCRYPTION_ASE_128_XTS),
+            crypt::Algorithm::Aes128Xts
+        );
+        assert_eq!(
+            crypt::Algorithm::from(RafsSuperFlags::empty()),
+            crypt::Algorithm::None
+        );
+    }
+
+    #[test]
+    fn test_rafs_super_meta() {
+        let mut meta = RafsSuperMeta::default();
+        assert!(!meta.has_xattr());
+        assert!(!meta.has_inlined_chunk_digest());
+        assert_eq!(meta.get_compressor(), compress::Algorithm::None);
+        assert_eq!(meta.get_digester(), digest::Algorithm::Blake3);
+        assert_eq!(meta.get_cipher(), crypt::Algorithm::None);
+
+        meta.version = RAFS_SUPER_VERSION_V6;
+        meta.flags |= RafsSuperFlags::INLINED_CHUNK_DIGEST;
+        meta.flags |= RafsSuperFlags::HASH_SHA256;
+        meta.flags |= RafsSuperFlags::COMPRESSION_GZIP;
+        meta.flags |= RafsSuperFlags::ENCRYPTION_ASE_128_XTS;
+
+        assert!(meta.has_inlined_chunk_digest());
+        assert_eq!(meta.get_compressor(), compress::Algorithm::GZip);
+        assert_eq!(meta.get_digester(), digest::Algorithm::Sha256);
+        assert_eq!(meta.get_cipher(), crypt::Algorithm::Aes128Xts);
+
+        meta.version = RAFS_SUPER_VERSION_V5;
+        assert_eq!(meta.get_compressor(), compress::Algorithm::GZip);
+        assert_eq!(meta.get_digester(), digest::Algorithm::Sha256);
+        assert_eq!(meta.get_cipher(), crypt::Algorithm::None);
+
+        let cfg = meta.get_config();
+        assert!(cfg.check_compatibility(&meta).is_ok());
+    }
+
+    #[test]
+    fn test_rafs_super_new() {
+        let cfg = RafsConfigV2 {
+            mode: "direct".into(),
+            ..RafsConfigV2::default()
+        };
+        let mut rs = RafsSuper::new(&cfg).unwrap();
+        rs.destroy();
+    }
+
+    fn get_meta(
+        chunk_size: u32,
+        explice_uidgid: bool,
+        tartfs_mode: bool,
+        hash: RafsSuperFlags,
+        comp: RafsSuperFlags,
+        crypt: RafsSuperFlags,
+        version: u32,
+    ) -> RafsSuperMeta {
+        let mut meta = RafsSuperMeta {
+            chunk_size,
+            ..Default::default()
+        };
+        if explice_uidgid {
+            meta.flags |= RafsSuperFlags::EXPLICIT_UID_GID;
+        }
+        if tartfs_mode {
+            meta.flags |= RafsSuperFlags::TARTFS_MODE;
+        }
+        meta.flags |= hash;
+        meta.flags |= comp;
+        meta.flags |= crypt;
+        meta.version = version;
+        meta
+    }
+
+    #[test]
+    fn test_rafs_super_config_check_compatibility_fail() {
+        let meta1 = get_meta(
+            1024 as u32,
+            true,
+            true,
+            RafsSuperFlags::HASH_BLAKE3,
+            RafsSuperFlags::COMPRESSION_GZIP,
+            RafsSuperFlags::ENCRYPTION_ASE_128_XTS,
+            RAFS_SUPER_VERSION_V5,
+        );
+        let meta2 = get_meta(
+            2048 as u32,
+            true,
+            true,
+            RafsSuperFlags::HASH_BLAKE3,
+            RafsSuperFlags::COMPRESSION_GZIP,
+            RafsSuperFlags::ENCRYPTION_ASE_128_XTS,
+            RAFS_SUPER_VERSION_V5,
+        );
+        let meta3 = get_meta(
+            1024 as u32,
+            false,
+            true,
+            RafsSuperFlags::HASH_BLAKE3,
+            RafsSuperFlags::COMPRESSION_GZIP,
+            RafsSuperFlags::ENCRYPTION_ASE_128_XTS,
+            RAFS_SUPER_VERSION_V5,
+        );
+        let meta4 = get_meta(
+            1024 as u32,
+            true,
+            false,
+            RafsSuperFlags::HASH_BLAKE3,
+            RafsSuperFlags::COMPRESSION_GZIP,
+            RafsSuperFlags::ENCRYPTION_ASE_128_XTS,
+            RAFS_SUPER_VERSION_V5,
+        );
+        let meta5 = get_meta(
+            1024 as u32,
+            true,
+            true,
+            RafsSuperFlags::HASH_SHA256,
+            RafsSuperFlags::COMPRESSION_GZIP,
+            RafsSuperFlags::ENCRYPTION_ASE_128_XTS,
+            RAFS_SUPER_VERSION_V5,
+        );
+        let meta6 = get_meta(
+            1024 as u32,
+            true,
+            true,
+            RafsSuperFlags::HASH_BLAKE3,
+            RafsSuperFlags::COMPRESSION_GZIP,
+            RafsSuperFlags::ENCRYPTION_NONE,
+            RAFS_SUPER_VERSION_V6,
+        );
+
+        assert!(meta1.get_config().check_compatibility(&meta2).is_err());
+        assert!(meta1.get_config().check_compatibility(&meta3).is_err());
+        assert!(meta1.get_config().check_compatibility(&meta4).is_err());
+        assert!(meta1.get_config().check_compatibility(&meta5).is_err());
+        assert!(meta1.get_config().check_compatibility(&meta6).is_err());
+    }
 }
