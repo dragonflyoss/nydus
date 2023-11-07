@@ -1003,3 +1003,49 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nydus_utils::metrics::FsIoStats;
+
+    use super::*;
+    #[test]
+    fn test_rafs() {
+        let rafs = Rafs {
+            id: "foo".into(),
+            device: BlobDevice::default(),
+            ios: FsIoStats::default().into(),
+            sb: Arc::new(RafsSuper::default()),
+            initialized: false,
+            digest_validate: false,
+            fs_prefetch: false,
+            prefetch_all: false,
+            xattr_enabled: false,
+            amplify_io: 0,
+            i_uid: 0,
+            i_gid: 0,
+            i_time: 0,
+        };
+        assert_eq!(rafs.id(), "foo");
+        assert!(!rafs.xattr_supported());
+        let ent = rafs.negative_entry();
+        assert_eq!(ent.inode, 0);
+        assert_eq!(ent.generation, 0);
+        assert_eq!(ent.attr_flags, 0);
+        rafs.init(FsOptions::ASYNC_DIO).unwrap();
+        rafs.open(&Context::default(), Inode::default(), 0, 0)
+            .unwrap();
+        rafs.release(
+            &Context::default(),
+            Inode::default(),
+            0,
+            Handle::default(),
+            false,
+            false,
+            Some(0),
+        )
+        .unwrap();
+        rafs.statfs(&Context::default(), Inode::default()).unwrap();
+        rafs.destroy();
+    }
+}
