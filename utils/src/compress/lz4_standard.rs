@@ -58,3 +58,16 @@ pub(super) fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> Result<usize> {
 
     Ok(dec_bytes as usize)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_input() {
+        let mut big_buf = vec![0x0u8; u32::MAX as usize];
+        let mock_comperessed = vec![0x0u8; 32];
+        assert!(lz4_compress(&big_buf).is_err());
+        assert!(lz4_decompress(&mock_comperessed, big_buf.as_mut_slice()).is_err());
+    }
+}

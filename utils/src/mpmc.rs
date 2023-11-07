@@ -156,4 +156,17 @@ mod tests {
 
         t.join().unwrap();
     }
+
+    #[test]
+    fn test_default_channel_send_and_recv() {
+        let channel = Channel::default();
+
+        channel.send(0x1u32).unwrap();
+        channel.send(0x2u32).unwrap();
+        assert_eq!(channel.try_recv().unwrap(), 0x1);
+        assert_eq!(channel.try_recv().unwrap(), 0x2);
+
+        channel.close();
+        channel.send(2u32).unwrap_err();
+    }
 }

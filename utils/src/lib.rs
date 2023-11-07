@@ -164,4 +164,11 @@ mod tests {
         // fail to convert u64 to u32
         assert_eq!(try_round_up_4k::<u32, _>(u64::MAX - 4096), None);
     }
+
+    #[test]
+    fn test_round_up_uszie() {
+        assert_eq!(round_up_usize(10, 8), 16);
+        assert_eq!(round_up_usize(100, 8), 104);
+        assert_eq!(round_up_usize(1000, 8), 1000);
+    }
 }

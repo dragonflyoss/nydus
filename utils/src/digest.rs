@@ -273,4 +273,54 @@ mod test {
             b"d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"
         );
     }
+
+    #[test]
+    fn test_try_from() {
+        assert!(Algorithm::try_from(Algorithm::Sha256 as u32).is_ok());
+        assert!(Algorithm::try_from(Algorithm::Blake3 as u32).is_ok());
+        assert!(Algorithm::try_from(0xffff_abcd as u32).is_err());
+
+        assert!(Algorithm::try_from(Algorithm::Sha256 as u64).is_ok());
+        assert!(Algorithm::try_from(Algorithm::Blake3 as u64).is_ok());
+        assert!(Algorithm::try_from(0xffff_abcd as u64).is_err());
+    }
+
+    #[test]
+    fn test_spec_hasher_new() {
+        let text = b"The quick brown fox jumps ";
+        let text2 = b"over the lazy dog";
+
+        let mut hasher: blake3::Hasher = blake3::Hasher::new();
+        hasher.digest_update(text);
+        hasher.digest_update(text2);
+        let blake3 = hasher.digest_finalize();
+        let str: String = blake3.into();
+        assert_eq!(
+            str.as_bytes(),
+            b"2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"
+        );
+
+        let mut hasher = RafsDigestHasher::Sha256(Sha256::new());
+        hasher.digest_update(text);
+        hasher.digest_update(text2);
+        let sha256 = hasher.digest_finalize();
+        let str: String = sha256.into();
+        assert_eq!(
+            str.as_bytes(),
+            b"d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"
+        );
+    }
+
+    #[test]
+    fn test_rafs_digest_try_from() {
+        let text = b"The quick brown fox jumps over the lazy dog";
+
+        let d1 = RafsDigest::from_buf(text, Algorithm::Blake3);
+        let d2 = RafsDigest::try_from(d1.data).unwrap();
+        let s1: String = d1.into();
+        let s2: String = d2.into();
+        print!("{:?}", d1);
+        assert_eq!(s1, s2);
+        print!("{:?}, {:?}", Algorithm::Blake3, Algorithm::Sha256);
+    }
 }

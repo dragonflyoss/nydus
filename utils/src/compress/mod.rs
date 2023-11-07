@@ -282,9 +282,38 @@ mod tests {
             0x1u8, 0x2u8, 0x3u8, 0x4u8, 0x1u8, 0x2u8, 0x3u8, 0x4u8, 0x1u8, 0x2u8, 0x3u8, 0x4u8,
             0x1u8, 0x2u8, 0x3u8, 0x4u8,
         ];
+        let mut dst = [0x0u8; 16];
         let (compressed, _) = compress(&buf, Algorithm::None).unwrap();
-
         assert_eq!(buf.to_vec(), compressed.to_vec());
+        let _len = decompress(&buf, &mut dst, Algorithm::None).unwrap();
+        assert_eq!(dst.to_vec(), compressed.to_vec());
+    }
+
+    #[test]
+    fn test_compress_algorithm_ztsd() {
+        let buf = vec![0x2u8; 4097];
+        let mut decompressed = vec![0; buf.len()];
+        let (compressed, _) = compress(&buf, Algorithm::Zstd).unwrap();
+        let sz = decompress(&compressed, decompressed.as_mut_slice(), Algorithm::Zstd).unwrap();
+        assert_eq!(sz, 4097);
+        assert_eq!(buf, decompressed);
+    }
+
+    #[test]
+    fn test_compress_algorithm_lz4() {
+        let buf = [
+            0x1u8, 0x2u8, 0x3u8, 0x4u8, 0x1u8, 0x2u8, 0x3u8, 0x4u8, 0x1u8, 0x2u8, 0x3u8, 0x4u8,
+            0x1u8, 0x2u8, 0x3u8, 0x4u8,
+        ];
+        let mut decompressed = vec![0; buf.len()];
+        let (compressed, _) = compress(&buf, Algorithm::Lz4Block).unwrap();
+        let _len = decompress(
+            &compressed,
+            decompressed.as_mut_slice(),
+            Algorithm::Lz4Block,
+        )
+        .unwrap();
+        assert_eq!(decompressed.to_vec(), buf.to_vec());
     }
 
     #[test]
@@ -505,5 +534,63 @@ mod tests {
         assert_eq!(&String::from_utf8_lossy(&buf[0..6]), "zlib.\n");
         let ret = decoder.read(&mut buf).unwrap();
         assert_eq!(ret, 0);
+        print!(
+            "{:?}, {:?}, {:?}, {:?},",
+            Algorithm::GZip,
+            Algorithm::Lz4Block,
+            Algorithm::Zstd,
+            Algorithm::None
+        )
+    }
+
+    #[test]
+    fn test_algorithm_from() {
+        assert_eq!(Algorithm::from_str("none").unwrap(), Algorithm::None);
+        assert_eq!(
+            Algorithm::from_str("lz4_block").unwrap(),
+            Algorithm::Lz4Block
+        );
+        assert_eq!(Algorithm::from_str("gzip").unwrap(), Algorithm::GZip);
+        assert_eq!(Algorithm::from_str("zstd").unwrap(), Algorithm::Zstd);
+        assert!(Algorithm::from_str("foo").is_err());
+        assert_eq!(
+            Algorithm::try_from(Algorithm::None as u32).unwrap(),
+            Algorithm::None
+        );
+        assert_eq!(
+            Algorithm::try_from(Algorithm::Lz4Block as u32).unwrap(),
+            Algorithm::Lz4Block
+        );
+        assert_eq!(
+            Algorithm::try_from(Algorithm::GZip as u32).unwrap(),
+            Algorithm::GZip
+        );
+        assert_eq!(
+            Algorithm::try_from(Algorithm::Zstd as u32).unwrap(),
+            Algorithm::Zstd
+        );
+        assert!(Algorithm::try_from(u32::MAX).is_err());
+
+        assert_eq!(
+            Algorithm::try_from(Algorithm::None as u64).unwrap(),
+            Algorithm::None
+        );
+        assert_eq!(
+            Algorithm::try_from(Algorithm::Lz4Block as u64).unwrap(),
+            Algorithm::Lz4Block
+        );
+        assert_eq!(
+            Algorithm::try_from(Algorithm::GZip as u64).unwrap(),
+            Algorithm::GZip
+        );
+        assert_eq!(
+            Algorithm::try_from(Algorithm::Zstd as u64).unwrap(),
+            Algorithm::Zstd
+        );
+        assert!(Algorithm::try_from(u64::MAX).is_err());
+        assert!(Algorithm::None.is_none());
+        assert!(!Algorithm::Lz4Block.is_none());
+        assert!(!Algorithm::GZip.is_none());
+        assert!(!Algorithm::Zstd.is_none());
     }
 }
