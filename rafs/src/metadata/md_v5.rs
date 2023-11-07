@@ -258,5 +258,24 @@ impl BlobChunkInfo for V5IoChunk {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     // TODO: add unit test cases for RafsSuper::{try_load_v5, amplify_io}
+    #[test]
+    fn test_v5_io_chunk() {
+        let info = V5IoChunk {
+            block_id: RafsDigest::default().into(),
+            blob_index: 2,
+            index: 3,
+            compressed_offset: 1024,
+            uncompressed_offset: 2048,
+            compressed_size: 10,
+            uncompressed_size: 20,
+            flags: BlobChunkFlags::BATCH,
+        };
+
+        assert_eq!(info.chunk_id(), &RafsDigest::default());
+        assert_eq!(info.id(), 3);
+        assert!(!info.is_compressed());
+        assert!(!info.is_encrypted());
+    }
 }

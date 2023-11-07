@@ -94,3 +94,43 @@ impl BlobV5ChunkInfo for MockChunkInfo {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nydus_utils::digest::{Algorithm, RafsDigest};
+    use storage::device::{v5::BlobV5ChunkInfo, BlobChunkFlags, BlobChunkInfo};
+
+    use super::MockChunkInfo;
+
+    #[test]
+    fn test_mock_chunk_info() {
+        let mut info = MockChunkInfo::mock(0, 1024, 512, 2048, 512);
+        let digest = RafsDigest::from_buf("foobar".as_bytes(), Algorithm::Blake3);
+        info.c_block_id = Arc::new(digest);
+        info.c_blob_index = 1;
+        info.c_flags = BlobChunkFlags::COMPRESSED;
+        info.c_index = 2;
+
+        let base = info.as_base();
+        let any = info.as_any();
+        let rev = any.downcast_ref::<MockChunkInfo>().unwrap();
+
+        assert_eq!(info.chunk_id().data, digest.data);
+        assert_eq!(info.id(), 2);
+        assert_eq!(base.id(), rev.id());
+        assert!(info.is_compressed());
+        assert!(!info.is_encrypted());
+        assert_eq!(info.blob_index(), 1);
+        assert_eq!(info.flags(), BlobChunkFlags::COMPRESSED);
+        assert_eq!(info.compressed_offset(), 1024);
+        assert_eq!(info.compressed_size(), 512);
+        assert_eq!(info.compressed_end(), 1024 + 512);
+
+        assert_eq!(info.uncompressed_offset(), 2048);
+        assert_eq!(info.uncompressed_size(), 512);
+        assert_eq!(info.uncompressed_end(), 2048 + 512);
+        assert_eq!(info.file_offset(), 0);
+    }
+}

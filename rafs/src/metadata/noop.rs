@@ -66,3 +66,56 @@ impl RafsSuperBlock for NoopSuperBlock {
         unimplemented!("used by RAFS v6 only")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[should_panic]
+    fn test_get_max_ino() {
+        let blk = NoopSuperBlock::new();
+        blk.get_max_ino();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_inode() {
+        let blk = NoopSuperBlock::new();
+        blk.get_inode(Inode::default(), false).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_extended_inode() {
+        let blk = NoopSuperBlock::new();
+        blk.get_extended_inode(Inode::default(), false).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_root_ino() {
+        let blk = NoopSuperBlock::new();
+        blk.root_ino();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_chunk_info() {
+        let blk = NoopSuperBlock::new();
+        blk.get_chunk_info(0).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_blob_device() {
+        let blk = NoopSuperBlock::new();
+        blk.set_blob_device(BlobDevice::default());
+    }
+
+    #[test]
+    fn test_noop_super_block() {
+        let mut blk = NoopSuperBlock::new();
+        assert!(blk.get_blob_infos().is_empty());
+        blk.destroy();
+    }
+}
