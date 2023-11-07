@@ -1565,3 +1565,40 @@ impl BlobV5ChunkInfo for TarfsChunkInfoV6 {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_direct_mapping_state() {
+        let mut meta = RafsSuperMeta::default();
+        meta.flags |= RafsSuperFlags::TARTFS_MODE;
+        let state = DirectMappingState::new(&meta);
+        assert!(state.is_tarfs());
+        assert_eq!(state.block_size(), EROFS_BLOCK_SIZE_512);
+
+        meta.flags &= !RafsSuperFlags::TARTFS_MODE;
+        let state = DirectMappingState::new(&meta);
+        assert!(!state.is_tarfs());
+        assert_eq!(state.block_size(), EROFS_BLOCK_SIZE_4096);
+    }
+
+    #[test]
+    fn test_tarfs_chunk_info_v6() {
+        let info1 = TarfsChunkInfoV6::new(0x0000_0001, 0x0000_0002, 0x0000_0004, 0x0000_0008);
+        let _info2 = TarfsChunkInfoV6::from_chunk_addr(&RafsV6InodeChunkAddr::default(), 0);
+        assert_eq!(info1.chunk_id().to_owned(), TARFS_DIGEST);
+        assert_eq!(info1.id(), 0x0000_0002);
+        assert_eq!(info1.blob_index(), 0x0000_0001);
+        assert_eq!(info1.compressed_offset(), 0x0000_0004);
+        assert_eq!(info1.uncompressed_offset(), 0x0000_0004);
+        assert_eq!(info1.compressed_size(), 0x0000_0008);
+        assert_eq!(info1.uncompressed_size(), 0x0000_0008);
+        assert!(!info1.is_compressed());
+        assert!(!info1.is_encrypted());
+        assert_eq!(info1.index(), 0x0000_0002);
+        assert_eq!(info1.file_offset(), 0x0000_0000);
+        assert_eq!(info1.flags(), BlobChunkFlags::empty());
+    }
+}

@@ -758,3 +758,369 @@ impl Default for RafsInodeFlags {
         RafsInodeFlags::empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        metadata::{direct_v5::DirectSuperBlockV5, RafsSuperMeta},
+        mock::MockInode,
+    };
+
+    #[test]
+    fn test_inode_wrapper() {
+        let mut wrapper_v5 = InodeWrapper::new(RafsVersion::V5);
+        let mut wrapper_v6 = InodeWrapper::new(RafsVersion::V6);
+        let mut wrapper_cache_v5 =
+            InodeWrapper::from_inode_info(Arc::new(CachedInodeV5::default()));
+        let wrapper_ondisk_v5 = InodeWrapper::from_inode_info(Arc::new(OndiskInodeWrapperV5 {
+            mapping: DirectSuperBlockV5::new(&RafsSuperMeta::default(), false),
+            offset: 0,
+        }));
+
+        assert!(wrapper_v5.is_v5());
+        assert!(!wrapper_v6.is_v5());
+        assert!(wrapper_cache_v5.is_v5());
+        assert!(wrapper_ondisk_v5.is_v5());
+        assert!(!wrapper_v5.is_v6());
+        assert!(wrapper_v6.is_v6());
+        assert!(!wrapper_cache_v5.is_v6());
+        assert!(!wrapper_ondisk_v5.is_v6());
+        assert_eq!(wrapper_v5.inode_size(), 128);
+
+        wrapper_v5.set_mode(0x0000_0001);
+        wrapper_v6.set_mode(0x0000_0002);
+        assert_eq!(wrapper_v5.mode(), 0x0000_0001);
+        assert_eq!(wrapper_v6.mode(), 0x0000_0002);
+
+        assert!(!wrapper_v5.is_hardlink());
+        assert!(!wrapper_v6.is_hardlink());
+        assert!(!wrapper_cache_v5.is_hardlink());
+        assert!(!wrapper_v5.is_symlink());
+        assert!(!wrapper_v6.is_symlink());
+        assert!(!wrapper_cache_v5.is_symlink());
+        assert!(!wrapper_v5.is_chrdev());
+        assert!(!wrapper_v6.is_chrdev());
+        assert!(!wrapper_cache_v5.is_chrdev());
+        assert!(!wrapper_v5.is_blkdev());
+        assert!(!wrapper_v6.is_blkdev());
+        assert!(!wrapper_v5.is_fifo());
+        assert!(!wrapper_v6.is_fifo());
+        assert!(!wrapper_v5.is_sock());
+        assert!(!wrapper_v6.is_sock());
+        assert!(!wrapper_cache_v5.is_sock());
+        assert!(!wrapper_v5.has_hardlink());
+        assert!(!wrapper_v6.has_hardlink());
+        wrapper_v5.set_has_hardlink(true);
+        wrapper_v6.set_has_hardlink(true);
+        assert!(wrapper_v5.has_hardlink());
+        assert!(wrapper_v6.has_hardlink());
+        wrapper_v5.set_has_hardlink(false);
+        wrapper_v6.set_has_hardlink(false);
+        assert!(!wrapper_v5.has_hardlink());
+        assert!(!wrapper_v6.has_hardlink());
+        assert!(!wrapper_v5.has_xattr());
+        assert!(!wrapper_v6.has_xattr());
+        assert!(!wrapper_cache_v5.has_xattr());
+        wrapper_v5.set_has_xattr(true);
+        wrapper_v6.set_has_xattr(true);
+        assert!(wrapper_v5.has_xattr());
+        assert!(wrapper_v6.has_xattr());
+        wrapper_v5.set_has_xattr(false);
+        wrapper_v6.set_has_xattr(false);
+        assert!(!wrapper_v5.has_xattr());
+        assert!(!wrapper_v6.has_xattr());
+        wrapper_v5.set_ino(0x0000_0001);
+        wrapper_v6.set_ino(0x0000_0002);
+        assert_eq!(wrapper_v5.ino(), 0x0000_0001);
+        assert_eq!(wrapper_v6.ino(), 0x0000_0002);
+        wrapper_v5.set_parent(0x0000_0004);
+        assert_eq!(wrapper_v5.parent(), 0x0000_0004);
+        assert_eq!(wrapper_cache_v5.size(), 0);
+        wrapper_v5.set_uid(0x0000_0001);
+        wrapper_v6.set_uid(0x0000_0002);
+        assert_eq!(wrapper_v5.uid(), 0x0000_0001);
+        assert_eq!(wrapper_v6.uid(), 0x0000_0002);
+        wrapper_v5.set_gid(0x0000_0001);
+        wrapper_v6.set_gid(0x0000_0002);
+        assert_eq!(wrapper_v5.gid(), 0x0000_0001);
+        assert_eq!(wrapper_v6.gid(), 0x0000_0002);
+        wrapper_v5.set_mtime(0x0000_0004);
+        wrapper_v6.set_mtime(0x0000_0008);
+        assert_eq!(wrapper_v5.mtime(), 0x0000_0004);
+        assert_eq!(wrapper_v6.mtime(), 0x0000_0008);
+        assert_eq!(wrapper_cache_v5.mtime(), 0x0000_0000);
+        wrapper_v5.set_mtime_nsec(0x0000_0004);
+        wrapper_v6.set_mtime_nsec(0x0000_0008);
+        assert_eq!(wrapper_v5.mtime_nsec(), 0x0000_0004);
+        assert_eq!(wrapper_v6.mtime_nsec(), 0x0000_0008);
+        assert_eq!(wrapper_cache_v5.mtime_nsec(), 0x0000_0000);
+        wrapper_v5.set_blocks(0x0000_0010);
+        wrapper_v6.set_blocks(0x0000_0020);
+        assert_eq!(wrapper_v5.blocks(), 0x0000_0010);
+        assert_eq!(wrapper_v6.blocks(), 0x0000_0020);
+        assert_eq!(wrapper_cache_v5.blocks(), 0x0000_0000);
+        wrapper_v5.set_rdev(0x0000_0010);
+        wrapper_v6.set_rdev(0x0000_0020);
+        assert_eq!(wrapper_v5.rdev(), 0x0000_0010);
+        assert_eq!(wrapper_v6.rdev(), 0x0000_0020);
+        assert_eq!(wrapper_cache_v5.rdev(), 0x0000_0000);
+        wrapper_v5.set_projid(0x0000_0100);
+        wrapper_v6.set_projid(0x0000_0200);
+        wrapper_v5.set_nlink(0x0000_0010);
+        wrapper_v6.set_nlink(0x0000_0020);
+        assert_eq!(wrapper_v5.nlink(), 0x0000_0010);
+        assert_eq!(wrapper_v6.nlink(), 0x0000_0020);
+        assert_eq!(wrapper_cache_v5.nlink(), 0x0000_0000);
+        wrapper_v5.set_name_size(0x0000_0010);
+        wrapper_v6.set_name_size(0x0000_0020);
+        assert_eq!(wrapper_v5.name_size(), 0x0000_0010);
+        assert_eq!(wrapper_v6.name_size(), 0x0000_0020);
+        assert_eq!(wrapper_cache_v5.name_size(), 0x0000_0000);
+        wrapper_v5.set_symlink_size(0x0000_0010);
+        wrapper_v6.set_symlink_size(0x0000_0020);
+        assert_eq!(wrapper_v5.symlink_size(), 0x0000_0010);
+        assert_eq!(wrapper_v6.symlink_size(), 0x0000_0020);
+        assert_eq!(wrapper_cache_v5.symlink_size(), 0x0000_0000);
+        wrapper_v5.set_child_index(0x0000_0010);
+        wrapper_v6.set_child_index(0x0000_0020);
+        wrapper_cache_v5.set_child_index(0x0000_0008);
+        assert_eq!(wrapper_v5.child_index(), 0x0000_0010);
+        assert_eq!(wrapper_v6.child_index(), u32::MAX);
+        assert_eq!(wrapper_cache_v5.child_index(), 0x0000_0008);
+        wrapper_v5.set_child_count(0x0000_0010);
+        wrapper_v6.set_child_count(0x0000_0020);
+        assert_eq!(wrapper_v5.child_count(), 0x0000_0010);
+        assert_eq!(wrapper_v6.child_count(), 0x0000_0020);
+        assert_eq!(wrapper_cache_v5.child_count(), 0x0000_0000);
+        wrapper_v5.create_chunk();
+        wrapper_v6.create_chunk();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_inode_size_v6() {
+        let wrapper_v6 = InodeWrapper::new(RafsVersion::V6);
+        wrapper_v6.inode_size();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_inode_size_ref() {
+        let wrapper_cache_v5 = InodeWrapper::from_inode_info(Arc::new(CachedInodeV5::default()));
+        wrapper_cache_v5.inode_size();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_mode_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_mode(0x0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_is_blk_dev_ref() {
+        let wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.is_blkdev();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_is_fifo_ref() {
+        let wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.is_fifo();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_has_hardlink_ref() {
+        let wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.has_hardlink();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_has_hardlink_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_has_hardlink(true);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_has_xattr_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_has_xattr(true);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_ino_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_ino(Inode::default());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_parent_v6() {
+        let mut wrapper_v6 = InodeWrapper::new(RafsVersion::V6);
+        wrapper_v6.set_parent(Inode::default());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_parent_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_parent(Inode::default());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_parent_v6() {
+        let wrapper_v6 = InodeWrapper::new(RafsVersion::V6);
+        wrapper_v6.parent();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_parent_ref() {
+        let wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.parent();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_size_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_size(0x0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_uid_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_uid(0x0000_0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_gid_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_gid(0x0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_mtime_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_mtime(0x0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_mtime_nsec_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_mtime_nsec(0x0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_blocks_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_blocks(0x0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_rdev_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_rdev(0x0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_projid_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_projid(0x0000_0001);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_digest_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_digest(RafsDigest::default());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_digest_v6() {
+        let wrapper_v6 = InodeWrapper::new(RafsVersion::V6);
+        wrapper_v6.digest();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_namesize_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_name_size(0x0000_0000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_symlink_size_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_symlink_size(0x0000_0000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_child_count_ref() {
+        let mut wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.set_child_count(0x0000_0000);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_create_chunk_ref() {
+        let wrapper_mock = InodeWrapper::from_inode_info(Arc::new(MockInode::default()));
+        wrapper_mock.create_chunk();
+    }
+
+    #[test]
+    fn test_rafs_v6_inode() {
+        let mut inode = RafsV6Inode {
+            i_ino: 0x0000_0000,
+            i_uid: 0x0000_0001,
+            i_gid: 0x0000_0002,
+            i_projid: 0x0000_0003,
+            i_mode: 0x0000_0000,
+            i_size: 0x0000_0005,
+            i_blocks: 0x0000_0006,
+            i_flags: RafsInodeFlags::default(),
+            i_nlink: 0x0000_0007,
+            i_child_count: 0x0000_0008,
+            i_name_size: 0x0000_0010,
+            i_symlink_size: 0x0000_0011,
+            i_rdev: 0x0000_0012,
+            i_mtime_nsec: 0x0000_0013,
+            i_mtime: 0x0000_0014,
+        };
+
+        inode.set_name_size(0x0000_0001);
+        inode.set_symlink_size(0x0000_0002);
+
+        assert_eq!(inode.i_name_size, 0x0000_0001);
+        assert_eq!(inode.i_symlink_size, 0x0000_0002);
+        assert_eq!(inode.uidgid(), (0x0000_0001, 0x0000_0002));
+        assert_eq!(inode.mtime(), (0x0000_0014 as u64, 0x0000_0013));
+        assert_eq!(inode.mode(), 0x0000_0000);
+        assert!(!inode.is_chrdev());
+        assert!(!inode.is_blkdev());
+        assert!(!inode.is_fifo());
+        assert!(!inode.is_sock());
+        assert!(!inode.is_hardlink());
+        assert!(!inode.has_hardlink());
+        assert!(!inode.has_xattr());
+        assert!(!inode.has_hole());
+    }
+}

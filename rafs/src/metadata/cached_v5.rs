@@ -797,15 +797,24 @@ mod cached_tests {
     use std::sync::Arc;
 
     use nydus_storage::device::{BlobDevice, BlobFeatures};
+    use nydus_utils::digest::{Algorithm, RafsDigest};
     use nydus_utils::ByteSize;
+    use storage::device::v5::BlobV5ChunkInfo;
+    use storage::device::{BlobChunkFlags, BlobChunkInfo};
 
     use crate::metadata::cached_v5::{CachedInodeV5, CachedSuperBlockV5};
+    use crate::metadata::inode::RafsInodeFlags;
     use crate::metadata::layout::v5::{
         rafsv5_align, RafsV5BlobTable, RafsV5ChunkInfo, RafsV5Inode, RafsV5InodeWrapper,
     };
     use crate::metadata::layout::{RafsXAttrs, RAFS_V5_ROOT_INODE};
-    use crate::metadata::{RafsInode, RafsStore, RafsSuperMeta};
-    use crate::{BufWriter, RafsInodeExt, RafsIoReader};
+    use crate::metadata::{
+        RafsInode, RafsInodeWalkAction, RafsStore, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
+    };
+    use crate::{BufWriter, RafsInodeExt, RafsIoRead, RafsIoReader};
+    use vmm_sys_util::tempfile::TempFile;
+
+    use super::CachedChunkInfoV5;
 
     #[test]
     fn test_load_inode() {
@@ -1060,5 +1069,112 @@ mod cached_tests {
         sb.hash_inode(Arc::new(inode)).unwrap();
         assert_eq!(sb.max_inode, 4);
         assert_eq!(sb.s_inodes.len(), 3);
+    }
+
+    fn get_streams() -> (Box<dyn RafsIoRead>, BufWriter<std::fs::File>) {
+        let temp = TempFile::new().unwrap();
+        let w = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(temp.as_path())
+            .unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let writer: BufWriter<std::fs::File> = BufWriter::new(w);
+        let reader: Box<dyn RafsIoRead> = Box::new(r);
+        (reader, writer)
+    }
+
+    #[test]
+    fn test_cached_super_block_v5() {
+        let digest = RafsDigest::from_buf("foobar".as_bytes(), Algorithm::Blake3);
+        let meta = RafsSuperMeta::default();
+        let mut node = CachedInodeV5 {
+            i_ino: 0,
+            ..CachedInodeV5::default()
+        };
+        node.i_mode |= libc::S_IFDIR as u32;
+        node.i_child_idx = 2;
+        node.i_flags = RafsInodeFlags::SYMLINK;
+        node.i_name = OsStr::new("foo").into();
+        node.i_digest = digest;
+        let mut child_node = CachedInodeV5::default();
+        child_node.i_mode |= libc::S_IFDIR as u32;
+        child_node.i_ino = 1;
+        child_node.i_name = OsStr::new("bar").into();
+        let mut blk = CachedSuperBlockV5::new(meta, false);
+        let (r, _w) = get_streams();
+        let mut r = r as RafsIoReader;
+        assert!(blk.load_all_inodes(&mut r).is_ok());
+        assert_eq!(blk.get_max_ino(), RAFS_V5_ROOT_INODE);
+        assert!(blk.get_inode(0, false).is_err());
+        assert!(blk.get_extended_inode(0, false).is_err());
+
+        blk.s_inodes.insert(0, Arc::new(node.clone()));
+        assert!(blk.get_inode(0, false).is_ok());
+        assert!(blk.get_extended_inode(0, false).is_ok());
+
+        blk.destroy();
+        assert!(blk.s_inodes.is_empty());
+        let blobs = blk.get_blob_extra_infos();
+        assert!(blobs.unwrap().is_empty());
+        assert_eq!(blk.root_ino(), RAFS_V5_ROOT_INODE);
+
+        node.add_child(Arc::new(child_node));
+        assert_eq!(node.i_child.len(), 1);
+
+        let mut descendants = Vec::<Arc<dyn RafsInode>>::new();
+        node.collect_descendants_inodes(&mut descendants).unwrap();
+        assert!(node.collect_descendants_inodes(&mut descendants).is_ok());
+        assert_eq!(node.get_entry().inode, node.ino());
+        assert_eq!(node.get_xattr(OsStr::new("foobar")).unwrap(), None);
+        assert!(!node.is_blkdev());
+        assert!(!node.is_chrdev());
+        assert!(!node.is_sock());
+        assert!(!node.is_fifo());
+        assert_eq!(node.get_symlink_size(), 0);
+
+        node.i_child_cnt = 1;
+        let mut found = false;
+        node.walk_children_inodes(0, &mut |_node, _child_name, child_ino, _offset| {
+            if child_ino == 1 {
+                found = true;
+                Ok(RafsInodeWalkAction::Break)
+            } else {
+                Ok(RafsInodeWalkAction::Continue)
+            }
+        })
+        .unwrap();
+        assert!(found);
+        let rafsinode = node.as_inode();
+        assert!(rafsinode.get_child_by_name(OsStr::new("bar")).is_ok());
+        assert!(rafsinode.get_child_by_index(0).is_ok());
+        assert!(rafsinode.get_child_by_index(1).is_err());
+        assert_eq!(rafsinode.get_child_index().unwrap(), 2);
+
+        assert_eq!(node.name(), "foo");
+        assert_eq!(node.get_name_size(), "foo".len() as u16);
+        assert_eq!(node.flags(), RafsInodeFlags::SYMLINK.bits());
+        assert_eq!(node.get_digest(), digest);
+    }
+
+    #[test]
+    fn test_cached_chunk_info_v5() {
+        let mut info = CachedChunkInfoV5::new();
+        info.index = 1024;
+        info.blob_index = 1;
+        info.flags = BlobChunkFlags::COMPRESSED;
+
+        assert_eq!(info.index(), 1024 as u32);
+        assert!(info.is_compressed());
+        assert!(!info.is_encrypted());
+        let info = info.as_base();
+
+        assert_eq!(info.blob_index(), 1 as u32);
+        assert!(info.is_compressed());
+        assert!(!info.is_encrypted());
     }
 }

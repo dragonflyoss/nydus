@@ -421,3 +421,218 @@ fn to_rafs_v5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
         reserved: 0u32,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mock::MockChunkInfo;
+    use nydus_utils::digest;
+
+    fn test_chunk_wrapper(mut wrapper: ChunkWrapper) {
+        let dig = RafsDigest::from_buf([0xc; 32].as_slice(), digest::Algorithm::Blake3);
+        wrapper.set_id(dig);
+        assert_eq!(wrapper.id().to_owned(), dig);
+        wrapper.set_blob_index(1024);
+        assert_eq!(wrapper.blob_index(), 1024);
+        wrapper.set_compressed_offset(1024);
+        assert_eq!(wrapper.compressed_offset(), 1024);
+        wrapper.set_compressed_size(1024);
+        assert_eq!(wrapper.compressed_size(), 1024);
+        wrapper.set_uncompressed_offset(1024);
+        assert_eq!(wrapper.uncompressed_offset(), 1024);
+        wrapper.set_uncompressed_size(1024);
+        assert_eq!(wrapper.uncompressed_size(), 1024);
+        wrapper.set_index(1024);
+        assert_eq!(wrapper.index(), 1024);
+        wrapper.set_file_offset(1024);
+        assert_eq!(wrapper.file_offset(), 1024);
+        wrapper.set_compressed(true);
+        assert!(wrapper.is_compressed());
+        wrapper.set_batch(true);
+        assert!(wrapper.is_batch());
+        wrapper
+            .set_chunk_info(2048, 2048, 2048, 2048, 2048, 2048, 2048, true, true)
+            .unwrap();
+        assert_eq!(wrapper.blob_index(), 2048);
+        assert_eq!(wrapper.compressed_offset(), 2048);
+        assert_eq!(wrapper.compressed_size(), 2048);
+        assert_eq!(wrapper.uncompressed_offset(), 2048);
+        assert_eq!(wrapper.uncompressed_size(), 2048);
+        assert_eq!(wrapper.file_offset(), 2048);
+        assert!(wrapper.is_compressed());
+    }
+
+    #[test]
+    fn test_chunk_wrapper_v5() {
+        let wrapper = ChunkWrapper::new(RafsVersion::V5);
+        test_chunk_wrapper(wrapper);
+        let wrapper = ChunkWrapper::Ref(Arc::new(CachedChunkInfoV5::default()));
+        test_chunk_wrapper(wrapper);
+    }
+
+    #[test]
+    fn test_chunk_wrapper_v6() {
+        let wrapper = ChunkWrapper::new(RafsVersion::V6);
+        test_chunk_wrapper(wrapper);
+        let wrapper = ChunkWrapper::Ref(Arc::new(TarfsChunkInfoV6::new(0, 0, 0, 0)));
+        test_chunk_wrapper(wrapper);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref() {
+        let wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        assert_eq!(wrapper.id().to_owned(), RafsDigest::default());
+        assert_eq!(wrapper.blob_index(), 0);
+        assert_eq!(wrapper.compressed_offset(), 0);
+        assert_eq!(wrapper.compressed_size(), 0);
+        assert_eq!(wrapper.uncompressed_offset(), 0);
+        assert_eq!(wrapper.uncompressed_size(), 0);
+        assert_eq!(wrapper.index(), 0);
+        assert_eq!(wrapper.file_offset(), 0);
+        assert!(!wrapper.is_compressed());
+        assert!(!wrapper.is_batch());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_id() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        let dig = RafsDigest::from_buf([0xc; 32].as_slice(), digest::Algorithm::Blake3);
+        wrapper.set_id(dig);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_blob_index() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_blob_index(1024);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_compressed_offset() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_compressed_offset(2048);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_uncompressed_size() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_uncompressed_size(1024);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_uncompressed_offset() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_uncompressed_offset(1024);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_compressed_size() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_compressed_size(2048);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_index() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_index(2048);
+    }
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_file_offset() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_file_offset(1024);
+    }
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_compressed() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_compressed(true);
+    }
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_batch() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.set_batch(true);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_set_chunk_info() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper
+            .set_chunk_info(2048, 2048, 2048, 2048, 2048, 2048, 2048, true, true)
+            .unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_chunk_wrapper_ref_ensure_owned() {
+        let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        wrapper.ensure_owned();
+    }
+
+    fn test_copy_from(mut w1: ChunkWrapper, w2: ChunkWrapper) {
+        w1.copy_from(&w2);
+        assert_eq!(w1.blob_index(), w2.blob_index());
+        assert_eq!(w1.compressed_offset(), w2.compressed_offset());
+        assert_eq!(w1.compressed_size(), w2.compressed_size());
+        assert_eq!(w1.uncompressed_offset(), w2.uncompressed_offset());
+        assert_eq!(w1.uncompressed_size(), w2.uncompressed_size());
+    }
+
+    #[test]
+    fn test_chunk_wrapper_copy_from() {
+        let wrapper_v6 = ChunkWrapper::Ref(Arc::new(TarfsChunkInfoV6::new(0, 1, 128, 256)));
+        let wrapper_v5 = ChunkWrapper::Ref(Arc::new(CachedChunkInfoV5::new()));
+        test_copy_from(wrapper_v5.clone(), wrapper_v5.clone());
+        test_copy_from(wrapper_v5.clone(), wrapper_v6.clone());
+        test_copy_from(wrapper_v6.clone(), wrapper_v5);
+        test_copy_from(wrapper_v6.clone(), wrapper_v6);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_ref_copy1() {
+        let wrapper_ref = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        test_copy_from(wrapper_ref.clone(), wrapper_ref);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_ref_copy2() {
+        let wrapper_ref = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        let wrapper_v5 = ChunkWrapper::Ref(Arc::new(CachedChunkInfoV5::default()));
+        test_copy_from(wrapper_ref, wrapper_v5);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_ref_copy3() {
+        let wrapper_ref = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        let wrapper_v6 = ChunkWrapper::Ref(Arc::new(TarfsChunkInfoV6::new(0, 0, 0, 0)));
+        test_copy_from(wrapper_ref, wrapper_v6);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_ref_copy4() {
+        let wrapper_ref = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        let wrapper_v6 = ChunkWrapper::Ref(Arc::new(TarfsChunkInfoV6::new(0, 0, 0, 0)));
+        test_copy_from(wrapper_v6, wrapper_ref);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_ref_copy5() {
+        let wrapper_ref = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
+        let wrapper_v5 = ChunkWrapper::Ref(Arc::new(CachedChunkInfoV5::default()));
+        test_copy_from(wrapper_v5, wrapper_ref);
+    }
+}

@@ -74,3 +74,95 @@ impl RafsSuperBlock for MockSuperBlock {
         unimplemented!()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs::OpenOptions;
+
+    use vmm_sys_util::tempfile::TempFile;
+
+    use crate::{mock::MockChunkInfo, RafsIoRead};
+
+    use super::*;
+
+    #[test]
+    fn test_mock_super_block() {
+        let chunks = Vec::<Arc<MockChunkInfo>>::new();
+        let node1 = MockInode::mock(0, 20, chunks.clone());
+        let node2 = MockInode::mock(1, 20, chunks);
+        let mut blk = MockSuperBlock::new();
+        blk.inodes.insert(node1.ino(), Arc::new(node1));
+        blk.inodes.insert(node2.ino(), Arc::new(node2));
+        assert!(blk.get_inode(0, false).is_ok());
+        assert!(blk.get_inode(1, false).is_ok());
+        assert!(blk.get_inode(2, false).is_err());
+
+        assert!(blk.get_extended_inode(0, false).is_ok());
+        assert!(blk.get_extended_inode(1, false).is_ok());
+        assert!(blk.get_extended_inode(2, false).is_err());
+    }
+    #[test]
+    #[should_panic]
+    fn test_get_max_ino() {
+        let blk = MockSuperBlock::new();
+        blk.get_max_ino();
+    }
+
+    fn get_reader() -> Box<dyn RafsIoRead> {
+        let temp = TempFile::new().unwrap();
+        let r = OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(temp.as_path())
+            .unwrap();
+        let reader: Box<dyn RafsIoRead> = Box::new(r);
+        reader
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_load() {
+        let mut blk = MockSuperBlock::new();
+        let mut reader: Box<dyn RafsIoRead> = get_reader();
+        blk.load(&mut reader).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_update() {
+        let blk = MockSuperBlock::new();
+        let mut reader: Box<dyn RafsIoRead> = get_reader();
+        blk.update(&mut reader).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_rootino() {
+        let blk = MockSuperBlock::new();
+        blk.root_ino();
+    }
+    #[test]
+    #[should_panic]
+    fn test_get_chunk_info() {
+        let blk = MockSuperBlock::new();
+        blk.get_chunk_info(0).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_set_blob_device() {
+        let blk = MockSuperBlock::new();
+        blk.set_blob_device(BlobDevice::default());
+    }
+
+    #[test]
+    fn test_mock_super_block_func() {
+        let mut blk = MockSuperBlock::new();
+        assert!(blk.get_inode(0, true).is_err());
+        assert!(blk.get_extended_inode(0, true).is_err());
+        blk.inodes.insert(0, Arc::new(MockInode::default()));
+        assert!(blk.get_inode(0, true).is_ok());
+        assert!(blk.get_extended_inode(0, true).is_ok());
+        blk.destroy();
+    }
+}

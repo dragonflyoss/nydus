@@ -308,3 +308,97 @@ impl RafsV5InodeOps for MockInode {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use nydus_utils::digest::Algorithm;
+
+    use crate::metadata::layout::RAFS_V5_ROOT_INODE;
+
+    use super::*;
+
+    #[test]
+    fn test_mock_node() {
+        let size = 20;
+        let mut chunks = Vec::<Arc<MockChunkInfo>>::new();
+        let digest = RafsDigest::from_buf("foobar".as_bytes(), Algorithm::Blake3);
+        let info = MockChunkInfo::mock(0, 1024, 1024, 2048, 1024);
+
+        chunks.push(Arc::new(info.clone()));
+        chunks.push(Arc::new(info));
+
+        let mut node = MockInode::mock(13, size, chunks);
+        node.i_flags = RafsInodeFlags::XATTR;
+        node.i_mode = libc::S_IFDIR;
+        node.i_name = "foo".into();
+        node.i_digest = digest;
+        node.i_parent = RAFS_V5_ROOT_INODE;
+        let mut child_node1 = MockInode::mock(14, size, Vec::<Arc<MockChunkInfo>>::new());
+        child_node1.i_name = OsStr::new("child1").into();
+        child_node1.i_size = 10;
+        let mut child_node2 = MockInode::mock(15, size, Vec::<Arc<MockChunkInfo>>::new());
+        child_node2.i_name = OsStr::new("child2").into();
+        child_node1.i_size = 20;
+
+        node.i_child.push(Arc::new(child_node1));
+        node.i_child.push(Arc::new(child_node2));
+        node.i_child_cnt = 2;
+        node.i_child_idx = 2;
+
+        node.i_xattr.insert("attr1".into(), "bar1".into());
+        node.i_xattr.insert("attr2".into(), "bar2".into());
+        node.i_xattr.insert("attr3".into(), "bar3".into());
+
+        node.i_data.push(Arc::new(MockChunkInfo::default()));
+
+        assert!(node.validate(0, 0).is_ok());
+        assert_eq!(node.ino(), 13);
+        assert_eq!(node.size(), 20);
+        assert_eq!(node.rdev(), 0);
+        assert_eq!(node.projid(), 0);
+        assert_eq!(node.name(), "foo");
+        assert_eq!(node.flags(), RafsInodeFlags::XATTR.bits());
+        assert_eq!(node.get_digest(), digest);
+        assert_eq!(node.get_name_size(), "foo".len() as u16);
+        assert!(node.get_chunk_info(0).is_ok());
+        assert!(node.get_chunk_info_v5(0).is_ok());
+        assert_eq!(node.parent(), RAFS_V5_ROOT_INODE);
+        assert!(node.get_blob_by_index(0).is_ok());
+        assert_eq!(node.get_chunk_size(), CHUNK_SIZE);
+        assert!(!node.has_hole());
+
+        let ent = node.get_entry();
+        assert_eq!(ent.inode, node.ino());
+        assert_eq!(ent.attr_timeout, node.i_meta.attr_timeout);
+        assert_eq!(ent.entry_timeout, node.i_meta.entry_timeout);
+        assert_eq!(ent.attr, node.get_attr().into());
+
+        assert!(node.get_symlink().is_err());
+        assert_eq!(node.get_symlink_size(), 0 as u16);
+
+        assert!(node.get_child_by_name(OsStr::new("child1")).is_ok());
+        assert!(node.get_child_by_index(0).is_ok());
+        assert!(node.get_child_by_index(1).is_ok());
+        assert_eq!(node.get_child_count(), 2 as u32);
+        assert_eq!(node.get_child_index().unwrap(), 2 as u32);
+        assert_eq!(node.get_chunk_count(), 2 as u32);
+        assert!(node.has_xattr());
+        assert_eq!(
+            node.get_xattr(OsStr::new("attr2")).unwrap().unwrap(),
+            "bar2".as_bytes()
+        );
+        assert_eq!(node.get_xattrs().unwrap().len(), 3);
+
+        assert!(!node.is_blkdev());
+        assert!(!node.is_chrdev());
+        assert!(!node.is_sock());
+        assert!(!node.is_fifo());
+        assert!(node.is_dir());
+        assert!(!node.is_symlink());
+        assert!(!node.is_reg());
+        assert!(!node.is_hardlink());
+        let mut inodes = Vec::<Arc<dyn RafsInode>>::new();
+        node.collect_descendants_inodes(&mut inodes).unwrap();
+        assert_eq!(inodes.len(), 2);
+    }
+}
