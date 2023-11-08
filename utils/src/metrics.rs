@@ -966,16 +966,18 @@ mod tests {
         assert_eq!(f.latency_start(), None);
         f.measure_latency.store(true, Ordering::Relaxed);
         let s = f.latency_start().unwrap();
-        let d = Duration::new(2, 0);
+        let d = Duration::new(1, 500_000_000);
+        /* because of the timer resolution, the elapsed maybe greater than 1.5s gentlely*/
         f.latency_end(&s.checked_sub(d), StatsFop::Read);
-
         assert_eq!(
-            f.read_latency_dist[latency_micros_range_index(2 * 1000 * 1000)].count(),
+            f.read_latency_dist[latency_micros_range_index(1_500_000)].count(),
             1
         );
-        assert_eq!(
-            f.fop_cumulative_latency_total[StatsFop::Read as usize].count(),
-            saturating_duration_micros(&d)
+        /* we think if the latency delta error no more 1ms, the test is successful. */
+        assert!(
+            f.fop_cumulative_latency_total[StatsFop::Read as usize].count()
+                - saturating_duration_micros(&d)
+                <= 1000
         );
     }
 
