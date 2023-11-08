@@ -35,7 +35,6 @@ url = { version = "2.1.1", optional = true }
 vm-memory = "0.10"
 fuse-backend-rs = "^0.10.3"
 gpt = { version = "3.0.0", optional = true }
-toml = "0.5"
 
 nydus-api = { version = "0.3", path = "../api" }
 nydus-utils = { version = "0.4", path = "../utils", features = ["encryption", "zran"] }
@@ -44,6 +43,7 @@ nydus-utils = { version = "0.4", path = "../utils", features = ["encryption", "z
 vmm-sys-util = "0.11"
 tar = "0.4.40"
 regex = "1.7.0"
+toml = "0.5"
 
 [features]
 backend-localdisk = []
