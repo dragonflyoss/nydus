@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
-use nydus_api::{BackendConfigV2, ConfigV2};
+use nydus_api::{default_user_io_batch_size, BackendConfigV2, ConfigV2};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 
@@ -117,6 +117,10 @@ impl BlobFactory {
     ) -> IOResult<Arc<dyn BlobCache>> {
         let backend_cfg = config.get_backend_config()?;
         let cache_cfg = config.get_cache_config()?;
+        let user_io_batch_size = config
+            .get_rafs_config()
+            .map_or_else(|_| default_user_io_batch_size(), |v| v.user_io_batch_size)
+            as u32;
         let key = BlobCacheMgrKey {
             config: config.clone(),
         };
@@ -128,7 +132,13 @@ impl BlobFactory {
         let backend = Self::new_backend(backend_cfg, &blob_info.blob_id())?;
         let mgr = match cache_cfg.cache_type.as_str() {
             "blobcache" | "filecache" => {
-                let mgr = FileCacheMgr::new(cache_cfg, backend, ASYNC_RUNTIME.clone(), &config.id)?;
+                let mgr = FileCacheMgr::new(
+                    cache_cfg,
+                    backend,
+                    ASYNC_RUNTIME.clone(),
+                    &config.id,
+                    user_io_batch_size,
+                )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>
             }
@@ -139,6 +149,7 @@ impl BlobFactory {
                     backend,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
+                    user_io_batch_size,
                 )?;
                 mgr.init()?;
                 Arc::new(mgr) as Arc<dyn BlobCacheMgr>

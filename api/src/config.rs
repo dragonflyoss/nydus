@@ -819,8 +819,8 @@ pub struct RafsConfigV2 {
     /// Filesystem metadata cache mode.
     #[serde(default = "default_rafs_mode")]
     pub mode: String,
-    /// Batch size to read data from storage cache layer.
-    #[serde(rename = "batch_size", default = "default_batch_size")]
+    /// Amplified user IO request batch size to read data from remote storage backend / local cache.
+    #[serde(rename = "batch_size", default = "default_user_io_batch_size")]
     pub user_io_batch_size: usize,
     /// Whether to validate data digest.
     #[serde(default)]
@@ -874,7 +874,7 @@ pub struct PrefetchConfigV2 {
     /// Number of data prefetching working threads.
     #[serde(rename = "threads", default = "default_prefetch_threads_count")]
     pub threads_count: usize,
-    /// The batch size to prefetch data from backend.
+    /// The amplify batch size to prefetch data from backend.
     #[serde(default = "default_prefetch_batch_size")]
     pub batch_size: usize,
     /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.
@@ -1194,11 +1194,11 @@ fn default_work_dir() -> String {
     ".".to_string()
 }
 
-pub fn default_batch_size() -> usize {
-    128 * 1024
+pub fn default_user_io_batch_size() -> usize {
+    1024 * 1024
 }
 
-fn default_prefetch_batch_size() -> usize {
+pub fn default_prefetch_batch_size() -> usize {
     1024 * 1024
 }
 
@@ -1363,8 +1363,9 @@ struct RafsConfig {
     /// Record file name if file access trace log.
     #[serde(default)]
     pub latest_read_files: bool,
+    // Amplified user IO request batch size to read data from remote storage backend / local cache.
     // ZERO value means, amplifying user io is not enabled.
-    #[serde(rename = "amplify_io", default = "default_batch_size")]
+    #[serde(rename = "amplify_io", default = "default_user_io_batch_size")]
     pub user_io_batch_size: usize,
 }
 
@@ -1410,8 +1411,8 @@ struct FsPrefetchControl {
     #[serde(default = "default_prefetch_threads_count")]
     pub threads_count: usize,
 
-    /// Window size in unit of bytes to merge request to backend.
-    #[serde(rename = "merging_size", default = "default_batch_size")]
+    /// The amplify batch size to prefetch data from backend.
+    #[serde(rename = "merging_size", default = "default_prefetch_batch_size")]
     pub batch_size: usize,
 
     /// Network bandwidth limitation for prefetching.
@@ -1449,7 +1450,7 @@ struct BlobPrefetchConfig {
     pub enable: bool,
     /// Number of data prefetching working threads.
     pub threads_count: usize,
-    /// The maximum size of a merged IO request.
+    /// The amplify batch size to prefetch data from backend.
     #[serde(rename = "merging_size")]
     pub batch_size: usize,
     /// Network bandwidth rate limit in unit of Bytes and Zero means no limit.

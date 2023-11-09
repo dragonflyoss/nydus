@@ -164,7 +164,8 @@ pub(crate) struct FileCacheEntry {
     pub(crate) dio_enabled: bool,
     // Data from the file cache should be validated before use.
     pub(crate) need_validation: bool,
-    pub(crate) batch_size: u64,
+    // Amplified user IO request batch size to read data from remote storage backend / local cache.
+    pub(crate) user_io_batch_size: u32,
     pub(crate) prefetch_config: Arc<AsyncPrefetchConfig>,
 }
 
@@ -308,11 +309,11 @@ impl FileCacheEntry {
         }
     }
 
-    fn ondemand_batch_size(&self) -> u64 {
-        if self.batch_size < 0x2_0000 {
+    fn user_io_batch_size(&self) -> u64 {
+        if self.user_io_batch_size < 0x2_0000 {
             0x2_0000
         } else {
-            self.batch_size
+            self.user_io_batch_size as u64
         }
     }
 
@@ -745,7 +746,7 @@ impl BlobObject for FileCacheEntry {
 
         let meta = self.meta.as_ref().ok_or_else(|| einval!())?;
         let meta = meta.get_blob_meta().ok_or_else(|| einval!())?;
-        let mut chunks = meta.get_chunks_uncompressed(offset, size, self.ondemand_batch_size())?;
+        let mut chunks = meta.get_chunks_uncompressed(offset, size, self.user_io_batch_size())?;
         if let Some(meta) = self.get_blob_meta_info()? {
             chunks = self.strip_ready_chunks(meta, None, chunks);
         }
@@ -934,7 +935,7 @@ impl FileCacheEntry {
     fn read_iter(&self, bios: &mut [BlobIoDesc], buffers: &[FileVolatileSlice]) -> Result<usize> {
         // Merge requests with continuous blob addresses.
         let requests = self
-            .merge_requests_for_user(bios, self.ondemand_batch_size())
+            .merge_requests_for_user(bios, self.user_io_batch_size())
             .ok_or_else(|| {
                 for bio in bios.iter() {
                     self.update_chunk_pending_status(&bio.chunkinfo, false);
@@ -1100,14 +1101,14 @@ impl FileCacheEntry {
                     + region.chunks[idx].compressed_size() as u64;
                 let start = region.chunks[idx + 1].compressed_offset();
                 assert!(end <= start);
-                assert!(start - end <= self.ondemand_batch_size() >> RAFS_BATCH_SIZE_TO_GAP_SHIFT);
+                assert!(start - end <= self.user_io_batch_size() >> RAFS_BATCH_SIZE_TO_GAP_SHIFT);
                 assert!(region.chunks[idx].id() < region.chunks[idx + 1].id());
             }
         }
 
         // Try to extend requests.
         let mut region_hold;
-        if let Some(v) = self.extend_pending_chunks(&region.chunks, self.ondemand_batch_size())? {
+        if let Some(v) = self.extend_pending_chunks(&region.chunks, self.user_io_batch_size())? {
             if v.len() > r.chunks.len() {
                 let mut tag_set = HashSet::new();
                 for (idx, chunk) in region.chunks.iter().enumerate() {
