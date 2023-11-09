@@ -200,13 +200,15 @@ annotations:
 
 As shown above, the sandbox is declared with `"io.containerd.cri.runtime-handler": "runc-nydus"` annotation will use the `nydus` snapshotter, while others will use the default `overlayfs` snapshotter.
 
-Note: You may encounter the following error when creating a Pod:
+## Multiple Snapshotter Switch Troubleshooting
+
+⚠️ You may encounter the following error when creating a Pod:
 
 ```
 err="failed to \"StartContainer\" for \"xxx\" with CreateContainerError: \"failed to create containerd container: error unpacking image: failed to extract layer sha256:yyy: failed to get reader from content store: content digest sha256:zzz: not found\""
 ```
 
-This is because some images in the Pod (including the Pause image) have used containerd's default snapshotter (such as the `overlayfs`` snapshotter), and the `discard_unpacked_layers` option was previously set to `true`, containerd has already deleted the blobs from the content store. To resolve this issue, you should first ensure that `discard_unpacked_layers=false`, then use the following command to restore the image:
+One possible reason is some images in the Pod (including the Pause image) have used containerd's default snapshotter (such as the `overlayfs` snapshotter), and the `discard_unpacked_layers` option was previously set to `true` in containerd config, containerd has already deleted the blobs from the content store. To resolve this issue, you should first ensure that `discard_unpacked_layers=false`, then use the following command to restore the image:
 
 ```
 ctr -n k8s.io content fetch pause:3.8
