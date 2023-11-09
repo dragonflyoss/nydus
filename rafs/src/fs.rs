@@ -68,7 +68,7 @@ pub struct Rafs {
     fs_prefetch: bool,
     prefetch_all: bool,
     xattr_enabled: bool,
-    amplify_io: u32,
+    user_io_batch_size: u32,
 
     // static inode attributes
     i_uid: u32,
@@ -102,7 +102,7 @@ impl Rafs {
             initialized: false,
             digest_validate: rafs_cfg.validate,
             fs_prefetch: rafs_cfg.prefetch.enable,
-            amplify_io: rafs_cfg.batch_size as u32,
+            user_io_batch_size: rafs_cfg.user_io_batch_size as u32,
             prefetch_all: rafs_cfg.prefetch.prefetch_all,
             xattr_enabled: rafs_cfg.enable_xattr,
 
@@ -621,20 +621,21 @@ impl FileSystem for Rafs {
         assert!(!io_vecs.is_empty() && !io_vecs[0].is_empty());
 
         // Try to amplify user io for Rafs v5, to improve performance.
-        let amplify_io = cmp::min(self.amplify_io as usize, w.available_bytes()) as u32;
-        if self.sb.meta.is_v5() && size < amplify_io {
+        let user_io_batch_size =
+            cmp::min(self.user_io_batch_size as usize, w.available_bytes()) as u32;
+        if self.sb.meta.is_v5() && size < user_io_batch_size {
             let all_chunks_ready = self.device.all_chunks_ready(&io_vecs);
             if !all_chunks_ready {
                 let chunk_mask = self.metadata().chunk_size as u64 - 1;
                 let next_chunk_base = (offset + (size as u64) + chunk_mask) & !chunk_mask;
                 let window_base = cmp::min(next_chunk_base, inode_size);
                 let actual_size = window_base - (offset & !chunk_mask);
-                if actual_size < amplify_io as u64 {
-                    let window_size = amplify_io as u64 - actual_size;
+                if actual_size < user_io_batch_size as u64 {
+                    let window_size = user_io_batch_size as u64 - actual_size;
                     let orig_cnt = io_vecs.iter().fold(0, |s, d| s + d.len());
-                    self.sb.amplify_io(
+                    self.sb.amplify_user_io(
                         &self.device,
-                        amplify_io,
+                        user_io_batch_size,
                         &mut io_vecs,
                         &inode,
                         window_base,
@@ -1021,7 +1022,7 @@ mod tests {
             fs_prefetch: false,
             prefetch_all: false,
             xattr_enabled: false,
-            amplify_io: 0,
+            user_io_batch_size: 0,
             i_uid: 0,
             i_gid: 0,
             i_time: 0,

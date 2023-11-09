@@ -128,7 +128,7 @@ impl RafsSuper {
     // not overlap user IO's chunk.
     // V5 rafs tries to amplify user IO by expanding more chunks to user IO and
     // expect that those chunks are likely to be continuous with user IO's chunks.
-    pub(crate) fn amplify_io(
+    pub(crate) fn amplify_user_io(
         &self,
         device: &BlobDevice,
         max_uncomp_size: u32,

@@ -301,10 +301,10 @@ impl FileCacheEntry {
     }
 
     fn prefetch_batch_size(&self) -> u64 {
-        if self.prefetch_config.merging_size < 0x2_0000 {
+        if self.prefetch_config.batch_size < 0x2_0000 {
             0x2_0000
         } else {
-            self.prefetch_config.merging_size as u64
+            self.prefetch_config.batch_size as u64
         }
     }
 
