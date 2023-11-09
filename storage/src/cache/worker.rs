@@ -26,19 +26,19 @@ pub(crate) struct AsyncPrefetchConfig {
     /// Number of working threads.
     pub threads_count: usize,
     /// Window size to merge/amplify requests.
-    pub merging_size: usize,
+    pub batch_size: usize,
     /// Network bandwidth for prefetch, in unit of Bytes and Zero means no rate limit is set.
     #[allow(unused)]
-    pub bandwidth_rate: u32,
+    pub bandwidth_limit: u32,
 }
 
 impl From<&PrefetchConfigV2> for AsyncPrefetchConfig {
     fn from(p: &PrefetchConfigV2) -> Self {
         AsyncPrefetchConfig {
             enable: p.enable,
-            threads_count: p.threads,
-            merging_size: p.batch_size,
-            bandwidth_rate: p.bandwidth_limit,
+            threads_count: p.threads_count,
+            batch_size: p.batch_size,
+            bandwidth_limit: p.bandwidth_limit,
         }
     }
 }
@@ -97,7 +97,7 @@ impl AsyncWorkerMgr {
         prefetch_config: Arc<AsyncPrefetchConfig>,
     ) -> Result<Self> {
         #[cfg(feature = "prefetch-rate-limit")]
-        let prefetch_limiter = match prefetch_config.bandwidth_rate {
+        let prefetch_limiter = match prefetch_config.bandwidth_limit {
             0 => None,
             v => {
                 // If the given value is less than maximum blob chunk size, it exceeds burst size of the
@@ -437,8 +437,8 @@ mod tests {
         let config = Arc::new(AsyncPrefetchConfig {
             enable: true,
             threads_count: 2,
-            merging_size: 0x100000,
-            bandwidth_rate: 0x100000,
+            batch_size: 0x100000,
+            bandwidth_limit: 0x100000,
         });
 
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
@@ -477,8 +477,8 @@ mod tests {
         let config = Arc::new(AsyncPrefetchConfig {
             enable: true,
             threads_count: 4,
-            merging_size: 0x1000000,
-            bandwidth_rate: 0x1000000,
+            batch_size: 0x1000000,
+            bandwidth_limit: 0x1000000,
         });
 
         let mgr = Arc::new(AsyncWorkerMgr::new(metrics, config).unwrap());
