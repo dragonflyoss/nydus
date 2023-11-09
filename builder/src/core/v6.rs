@@ -831,6 +831,9 @@ impl Bootstrap {
         if ctx.conversion_type == ConversionType::TarToTarfs {
             ext_sb.set_tarfs_mode();
         }
+        if ctx.conversion_type == ConversionType::TargzToRef {
+            ext_sb.set_targz_ref_mode();
+        }
         bootstrap_ctx
             .writer
             .seek_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)

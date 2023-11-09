@@ -83,6 +83,10 @@ impl DirectMappingState {
         self.meta.flags.contains(RafsSuperFlags::TARTFS_MODE)
     }
 
+    fn is_zran(&self) -> bool {
+        self.meta.flags.contains(RafsSuperFlags::TARGZ_REF_MODE)
+    }
+
     fn block_size(&self) -> u64 {
         if self.is_tarfs() {
             EROFS_BLOCK_SIZE_512
@@ -1349,7 +1353,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
                         blob_index, chunk_index
                     ))
                 })
-        } else if state.is_tarfs() || state.meta.has_inlined_chunk_digest() {
+        } else if state.is_tarfs() || state.is_zran() {
             let size = if idx == self.get_chunk_count() - 1 {
                 (self.size() % self.chunk_size() as u64) as u32
             } else {

@@ -301,6 +301,9 @@ bitflags! {
         const INLINED_CHUNK_DIGEST = 0x0000_0100;
         /// RAFS works in Tarfs mode, which directly uses tar streams as data blobs.
         const TARTFS_MODE = 0x0000_0200;
+
+        const TARGZ_REF_MODE = 0x0000_0400;
+
         /// Data chunks are not encrypted.
         const ENCRYPTION_NONE = 0x0100_0000;
         /// Data chunks are encrypted with AES-128-XTS.
