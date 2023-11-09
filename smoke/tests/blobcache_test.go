@@ -162,6 +162,57 @@ func (a *BlobCacheTestSuite) TestCommandFlags(t *testing.T) {
 	}
 }
 
+func (a *BlobCacheTestSuite) TestUseBlobCacheToRun(t *testing.T) {
+	ctx, _, ociBlobDigest := a.prepareTestEnv(t)
+	defer ctx.Destroy(t)
+
+	// Generate blobcache
+	tool.Run(t, fmt.Sprintf("%s create -t targz-ref --bootstrap %s --blob-cache-dir %s %s",
+		ctx.Binary.Builder, ctx.Env.BootstrapPath, ctx.Env.CacheDir,
+		filepath.Join(ctx.Env.BlobDir, ociBlobDigest.Hex())))
+
+	// Remove the origin blob
+	os.Remove(filepath.Join(ctx.Env.BlobDir, ociBlobDigest.Hex()))
+
+	nydusd, err := tool.NewNydusd(tool.NydusdConfig{
+		NydusdPath:      ctx.Binary.Nydusd,
+		BootstrapPath:   ctx.Env.BootstrapPath,
+		ConfigPath:      filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		MountPath:       ctx.Env.MountDir,
+		APISockPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		BackendType:     "localfs",
+		BackendConfig:   fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
+		EnablePrefetch:  ctx.Runtime.EnablePrefetch,
+		BlobCacheDir:    ctx.Env.CacheDir,
+		CacheType:       ctx.Runtime.CacheType,
+		CacheCompressed: ctx.Runtime.CacheCompressed,
+		RafsMode:        ctx.Runtime.RafsMode,
+		DigestValidate:  false,
+		UseCacheOnly:    true,
+		DisableChunkMap: true,
+	})
+	require.NoError(t, err)
+
+	err = nydusd.Mount()
+	require.NoError(t, err)
+	defer func() {
+		if err := nydusd.Umount(); err != nil {
+			log.L.WithError(err).Errorf("umount")
+		}
+	}()
+
+	// make sure blobcache ready
+	err = filepath.WalkDir(ctx.Env.MountDir, func(path string, entry fs.DirEntry, err error) error {
+		require.Nil(t, err)
+		if entry.Type().IsRegular() {
+			_, err = os.ReadFile(path)
+			require.NoError(t, err)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+}
+
 func (a *BlobCacheTestSuite) TestGenerateBlobcache(t *testing.T) {
 	ctx, blobcacheDir, ociBlobDigest := a.prepareTestEnv(t)
 	defer ctx.Destroy(t)
@@ -199,9 +250,7 @@ func (a *BlobCacheTestSuite) TestGenerateBlobcache(t *testing.T) {
 	err = filepath.WalkDir(ctx.Env.MountDir, func(path string, entry fs.DirEntry, err error) error {
 		require.Nil(t, err)
 		if entry.Type().IsRegular() {
-			targetPath, err := filepath.Rel(ctx.Env.MountDir, path)
-			require.NoError(t, err)
-			_, _ = os.ReadFile(targetPath)
+			_, _ = os.ReadFile(path)
 		}
 		return nil
 	})
