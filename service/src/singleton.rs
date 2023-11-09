@@ -284,7 +284,7 @@ pub fn create_daemon(
     Ok(daemon)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use crate::blob_cache::generate_blob_key;
 
@@ -317,13 +317,11 @@ mod tests {
             waker: Arc::new(waker),
             blob_cache_mgr: Arc::new(BlobCacheMgr::new()),
             fscache_enabled: AtomicBool::new(false),
-            #[cfg(target_os = "linux")]
             fscache: Mutex::new(None),
         }
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
     fn test_initialize_fscache_service() {
         let service_controller = create_service_controller();
 
