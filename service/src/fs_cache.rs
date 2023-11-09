@@ -518,8 +518,8 @@ impl FsCacheHandler {
             .map_err(|e| eother!(format!("failed to start prefetch worker, {}", e)))?;
 
         let size = match cache_cfg.prefetch.batch_size.checked_next_power_of_two() {
-            None => nydus_api::default_batch_size() as u64,
-            Some(1) => nydus_api::default_batch_size() as u64,
+            None => nydus_api::default_prefetch_batch_size() as u64,
+            Some(1) => nydus_api::default_prefetch_batch_size() as u64,
             Some(s) => s as u64,
         };
         let size = std::cmp::max(0x4_0000u64, size);

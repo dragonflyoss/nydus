@@ -142,7 +142,8 @@ bandwidth_limit = 10000000
 [rafs]
 # Filesystem metadata cache mode, "direct" or "cached". "direct" is almost what you want.
 mode = "direct"
-# Batch size to read data from storage cache layer, valid values: 0-0x10000000
+# Amplified user IO request batch size to read data from remote storage backend / local cache,
+# valid values: 0-0x10000000
 batch_size = 1000000
 # Whether to validate data digest.
 validate = true

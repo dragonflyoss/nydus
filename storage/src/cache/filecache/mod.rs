@@ -23,7 +23,6 @@ use crate::cache::state::{
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
-use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 pub const BLOB_RAW_FILE_SUFFIX: &str = ".blob.raw";
 pub const BLOB_DATA_FILE_SUFFIX: &str = ".blob.data";
@@ -46,6 +45,7 @@ pub struct FileCacheMgr {
     cache_convergent_encryption: bool,
     cache_encryption_key: String,
     closed: Arc<AtomicBool>,
+    user_io_batch_size: u32,
 }
 
 impl FileCacheMgr {
@@ -55,6 +55,7 @@ impl FileCacheMgr {
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
         id: &str,
+        user_io_batch_size: u32,
     ) -> Result<FileCacheMgr> {
         let blob_cfg = config.get_filecache_config()?;
         let work_dir = blob_cfg.get_work_dir()?;
@@ -77,6 +78,7 @@ impl FileCacheMgr {
             cache_convergent_encryption: blob_cfg.enable_convergent_encryption,
             cache_encryption_key: blob_cfg.encryption_key.clone(),
             closed: Arc::new(AtomicBool::new(false)),
+            user_io_batch_size,
         })
     }
 
@@ -339,7 +341,7 @@ impl FileCacheEntry {
             is_zran,
             dio_enabled: false,
             need_validation,
-            batch_size: RAFS_DEFAULT_CHUNK_SIZE,
+            user_io_batch_size: mgr.user_io_batch_size,
             prefetch_config,
         })
     }

@@ -25,7 +25,7 @@ pub(crate) struct AsyncPrefetchConfig {
     pub enable: bool,
     /// Number of working threads.
     pub threads_count: usize,
-    /// Window size to merge/amplify requests.
+    /// The amplify batch size to prefetch data from backend.
     pub batch_size: usize,
     /// Network bandwidth for prefetch, in unit of Bytes and Zero means no rate limit is set.
     #[allow(unused)]

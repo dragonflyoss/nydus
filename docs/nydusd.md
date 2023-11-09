@@ -130,6 +130,9 @@ We are working on enabling cloud-hypervisor support for nydus.
   "iostats_files": true,
   // Enable support of fs extended attributes
   "enable_xattr": false,
+  // Amplified user IO request batch size to read data from remote storage backend / local cache
+  // in unit of Bytes, valid values: 0-268435456, default: 1048576
+  "amplify_io": 1048576,
   "fs_prefetch": {
     // Enable blob prefetch
     "enable": false,

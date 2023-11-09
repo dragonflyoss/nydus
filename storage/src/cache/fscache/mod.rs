@@ -20,7 +20,6 @@ use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
-use crate::RAFS_DEFAULT_CHUNK_SIZE;
 
 use crate::cache::filecache::BLOB_DATA_FILE_SUFFIX;
 
@@ -40,6 +39,7 @@ pub struct FsCacheMgr {
     need_validation: bool,
     blobs_check_count: Arc<AtomicU8>,
     closed: Arc<AtomicBool>,
+    user_io_batch_size: u32,
 }
 
 impl FsCacheMgr {
@@ -49,6 +49,7 @@ impl FsCacheMgr {
         backend: Arc<dyn BlobBackend>,
         runtime: Arc<Runtime>,
         id: &str,
+        user_io_batch_size: u32,
     ) -> Result<FsCacheMgr> {
         if config.cache_compressed {
             return Err(enosys!("fscache doesn't support compressed cache mode"));
@@ -73,6 +74,7 @@ impl FsCacheMgr {
             need_validation: config.cache_validate,
             blobs_check_count: Arc::new(AtomicU8::new(0)),
             closed: Arc::new(AtomicBool::new(false)),
+            user_io_batch_size,
         })
     }
 
@@ -290,7 +292,7 @@ impl FileCacheEntry {
             is_zran,
             dio_enabled: true,
             need_validation,
-            batch_size: RAFS_DEFAULT_CHUNK_SIZE,
+            user_io_batch_size: mgr.user_io_batch_size,
             prefetch_config,
         })
     }
@@ -374,7 +376,7 @@ mod tests {
     use nydus_api::ConfigV2;
     use nydus_utils::{compress, metrics::BackendMetrics};
 
-    use crate::{factory::ASYNC_RUNTIME, test::MockBackend};
+    use crate::{factory::ASYNC_RUNTIME, test::MockBackend, RAFS_DEFAULT_CHUNK_SIZE};
 
     use super::*;
 
@@ -407,6 +409,7 @@ mod tests {
             Arc::new(backend),
             ASYNC_RUNTIME.clone(),
             &cfg.id,
+            0,
         )
         .unwrap();
         assert!(mgr.init().is_ok());
