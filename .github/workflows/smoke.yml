@@ -126,6 +126,30 @@ jobs:
           target/release/nydus-image
           target/release/nydusd
 
+  nydusd-build-macos:
+    runs-on: macos-11
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+    - uses: actions/checkout@v3
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2.2.0
+      with:
+        cache-on-failure: true
+        key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+    - name: build
+      run: |
+        if [[ "${{matrix.arch}}" == "amd64" ]]; then
+          RUST_TARGET="x86_64-apple-darwin"
+        else
+          RUST_TARGET="aarch64-apple-darwin"
+        fi
+        cargo install --version 0.2.4 cross
+        rustup target add ${RUST_TARGET}
+        rustup component add rustfmt clippy
+        make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
+
   nydus-integration-test:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
