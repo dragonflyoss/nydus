@@ -329,7 +329,7 @@ mod tests {
 
         let mut node = MockInode::mock(13, size, chunks);
         node.i_flags = RafsInodeFlags::XATTR;
-        node.i_mode = libc::S_IFDIR;
+        node.i_mode = libc::S_IFDIR as u32;
         node.i_name = "foo".into();
         node.i_digest = digest;
         node.i_parent = RAFS_V5_ROOT_INODE;

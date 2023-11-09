@@ -2636,31 +2636,31 @@ mod tests {
         assert_eq!(dir.e_nameoff, 2048);
 
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFREG),
+            RafsV6Dirent::file_type(libc::S_IFREG as u32),
             EROFS_FILE_TYPE::EROFS_FT_REG_FILE as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFDIR),
+            RafsV6Dirent::file_type(libc::S_IFDIR as u32),
             EROFS_FILE_TYPE::EROFS_FT_DIR as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFCHR),
+            RafsV6Dirent::file_type(libc::S_IFCHR as u32),
             EROFS_FILE_TYPE::EROFS_FT_CHRDEV as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFBLK),
+            RafsV6Dirent::file_type(libc::S_IFBLK as u32),
             EROFS_FILE_TYPE::EROFS_FT_BLKDEV as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFIFO),
+            RafsV6Dirent::file_type(libc::S_IFIFO as u32),
             EROFS_FILE_TYPE::EROFS_FT_FIFO as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFSOCK),
+            RafsV6Dirent::file_type(libc::S_IFSOCK as u32),
             EROFS_FILE_TYPE::EROFS_FT_SOCK as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFLNK),
+            RafsV6Dirent::file_type(libc::S_IFLNK as u32),
             EROFS_FILE_TYPE::EROFS_FT_SYMLINK as u8
         );
     }
