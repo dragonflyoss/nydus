@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn test_node() {
         let mut inode = InodeWrapper::V5(RafsV5Inode::default());
-        inode.set_mode(libc::S_IFCHR);
+        inode.set_mode(libc::S_IFCHR as u32);
         let node = Node::new(inode, NodeInfo::default(), 0);
         assert!(!node.is_overlayfs_whiteout(WhiteoutSpec::None));
         assert!(node.is_overlayfs_whiteout(WhiteoutSpec::Overlayfs));
@@ -270,7 +270,7 @@ mod tests {
             .xattrs
             .add(OVERLAYFS_WHITEOUT_OPAQUE.into(), "y".into())
             .is_ok());
-        inode.set_mode(libc::S_IFDIR);
+        inode.set_mode(libc::S_IFDIR as u32);
         let node = Node::new(inode, info, 0);
         assert!(!node.is_overlayfs_opaque(WhiteoutSpec::None));
         assert!(node.is_overlayfs_opaque(WhiteoutSpec::Overlayfs));
@@ -285,7 +285,7 @@ mod tests {
             .xattrs
             .add(OVERLAYFS_WHITEOUT_OPAQUE.into(), "n".into())
             .is_ok());
-        inode.set_mode(libc::S_IFDIR);
+        inode.set_mode(libc::S_IFDIR as u32);
         let node = Node::new(inode, info, 0);
         assert!(!node.is_overlayfs_opaque(WhiteoutSpec::None));
         assert!(!node.is_overlayfs_opaque(WhiteoutSpec::Overlayfs));
@@ -296,7 +296,7 @@ mod tests {
             .xattrs
             .add(OVERLAYFS_WHITEOUT_OPAQUE.into(), "y".into())
             .is_ok());
-        inode.set_mode(libc::S_IFCHR);
+        inode.set_mode(libc::S_IFCHR as u32);
         let node = Node::new(inode, info, 0);
         assert!(!node.is_overlayfs_opaque(WhiteoutSpec::None));
         assert!(!node.is_overlayfs_opaque(WhiteoutSpec::Overlayfs));
@@ -307,7 +307,7 @@ mod tests {
             .xattrs
             .add(OVERLAYFS_WHITEOUT_OPAQUE.into(), "n".into())
             .is_ok());
-        inode.set_mode(libc::S_IFDIR);
+        inode.set_mode(libc::S_IFDIR as u32);
         let node = Node::new(inode, info, 0);
         assert!(!node.is_overlayfs_opaque(WhiteoutSpec::None));
         assert!(!node.is_overlayfs_opaque(WhiteoutSpec::Overlayfs));
