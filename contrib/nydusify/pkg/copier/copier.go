@@ -364,8 +364,8 @@ func Copy(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "push image manifests")
 	}
 
-	if sourceImage.MediaType == ocispec.MediaTypeImageIndex ||
-		sourceImage.MediaType == images.MediaTypeDockerSchema2ManifestList {
+	if len(targetDescs) > 1 && (sourceImage.MediaType == ocispec.MediaTypeImageIndex ||
+		sourceImage.MediaType == images.MediaTypeDockerSchema2ManifestList) {
 		targetIndex := ocispec.Index{}
 		if _, err := utils.ReadJSON(ctx, pvd.ContentStore(), &targetIndex, *sourceImage); err != nil {
 			return errors.Wrap(err, "read source manifest list")
