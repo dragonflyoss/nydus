@@ -746,7 +746,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 Arg::new("config")
                     .long("config")
                     .short('C')
-                    .help("config to compactor")
+                    .help("Config to local CAS")
                     .required(true),
             )
         )

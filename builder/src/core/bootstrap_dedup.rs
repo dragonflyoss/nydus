@@ -38,6 +38,31 @@ pub struct BootstrapDedup {
     writer: Box<dyn RafsIoWrite>,
     backend: BackendConfigV2,
     encrypt: bool,
+    metrics: DeduplicationMetrics,
+}
+
+#[derive(Debug)]
+pub struct DeduplicationMetrics {
+    pub chunk_cnt: u32,
+    pub chunk_size_cnt: u32,
+    pub new_chunk_cnt: u32,
+    pub new_chunk_size_cnt: u32,
+}
+
+impl DeduplicationMetrics {
+    pub fn new(
+        chunk_cnt: u32,
+        chunk_size_cnt: u32,
+        new_chunk_cnt: u32,
+        new_chunk_size_cnt: u32,
+    ) -> Self {
+        DeduplicationMetrics {
+            chunk_cnt,
+            chunk_size_cnt,
+            new_chunk_cnt,
+            new_chunk_size_cnt,
+        }
+    }
 }
 
 impl BootstrapDedup {
@@ -64,6 +89,8 @@ impl BootstrapDedup {
             ArtifactStorage::SingleFile(PathBuf::from(&output_path)),
         )?)) as Box<dyn RafsIoWrite>;
 
+        let metrics = DeduplicationMetrics::new(0, 0, 0, 0);
+
         fs::copy(&bootstrap_path, &output_path)?;
 
         Ok(BootstrapDedup {
@@ -76,6 +103,7 @@ impl BootstrapDedup {
             writer,
             backend,
             encrypt,
+            metrics,
         })
     }
 
@@ -139,6 +167,7 @@ impl BootstrapDedup {
                         &mut self.insert_chunks,
                         &self.cas_mgr,
                         &mut chunk_cache,
+                        &mut self.metrics,
                     )
                 })
             },
@@ -167,6 +196,7 @@ impl BootstrapDedup {
         self.cas_mgr.add_blobs(&self.insert_blobs, is_v6)?;
         self.cas_mgr.add_chunks(&self.insert_chunks, is_v6)?;
 
+        info!("{:?}", self.metrics);
         Ok(())
     }
 }

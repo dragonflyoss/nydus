@@ -56,6 +56,31 @@ func (l *Layer) CreateLargeFile(t *testing.T, name string, sizeGB int) {
 	assert.Nil(t, err)
 }
 
+func (l *Layer) CreateLargeFileWithCustomizedContent(t *testing.T, name string, sizeGB int, content string) {
+	f, err := os.Create(filepath.Join(l.workDir, name))
+	require.NoError(t, err)
+	defer func() {
+		f.Close()
+	}()
+
+	fileSizeInBytes := int64(sizeGB) << 30 // 将 GB 转换为字节
+
+	bytesWritten := int64(0)
+	for bytesWritten < fileSizeInBytes {
+		bytesToWrite := min(fileSizeInBytes-bytesWritten, int64(len(content)))
+		_, err := f.WriteString(content[:bytesToWrite])
+		assert.Nil(t, err)
+		bytesWritten += bytesToWrite
+	}
+}
+
+func min(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func (l *Layer) CreateHoledFile(t *testing.T, name string, data []byte, offset, fileSize int64) {
 	f, err := os.Create(filepath.Join(l.workDir, name))
 	require.NoError(t, err)

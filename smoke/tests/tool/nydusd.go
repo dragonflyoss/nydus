@@ -51,24 +51,26 @@ type InflightMetrics struct {
 }
 
 type NydusdConfig struct {
-	EnablePrefetch  bool
-	NydusdPath      string
-	BootstrapPath   string
-	ConfigPath      string
-	BackendType     string
-	BackendConfig   string
-	BlobCacheDir    string
-	APISockPath     string
-	MountPath       string
-	RafsMode        string
-	DigestValidate  bool
-	CacheType       string
-	CacheCompressed bool
-	IOStatsFiles    bool
-	LatestReadFiles bool
-	AccessPattern   bool
-	PrefetchFiles   []string
-	AmplifyIO       uint64
+	EnablePrefetch      bool
+	NydusdPath          string
+	BootstrapPath       string
+	ConfigPath          string
+	BackendType         string
+	BackendConfig       string
+	BlobCacheDir        string
+	APISockPath         string
+	MountPath           string
+	RafsMode            string
+	DigestValidate      bool
+	CacheType           string
+	CacheCompressed     bool
+	IOStatsFiles        bool
+	LatestReadFiles     bool
+	AccessPattern       bool
+	PrefetchFiles       []string
+	AmplifyIO           uint64
+	EnableDeduplication bool
+	DeduplicationDir    string
 }
 
 type Nydusd struct {
@@ -92,6 +94,10 @@ var configTpl = `
 				 "compressed": {{.CacheCompressed}},
 				 "work_dir": "{{.BlobCacheDir}}"
 			 }
+		 },
+		 "deduplication": {
+			"enable": {{.EnableDeduplication}},
+			"work_dir": "{{.DeduplicationDir}}"
 		 }
 	 },
 	 "mode": "{{.RafsMode}}",
@@ -183,6 +189,7 @@ func NewNydusd(conf NydusdConfig) (*Nydusd, error) {
 	if err := makeConfig(conf); err != nil {
 		return nil, errors.Wrap(err, "create config file for Nydusd")
 	}
+
 	return &Nydusd{
 		NydusdConfig: conf,
 	}, nil

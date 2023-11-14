@@ -21,6 +21,12 @@ func LargerFileMaker(path string, sizeGB int) LayerMaker {
 	}
 }
 
+func LargerFileWithCustomizedContentMaker(path string, sizeGB int, content string) LayerMaker {
+	return func(t *testing.T, layer *tool.Layer) {
+		layer.CreateLargeFileWithCustomizedContent(t, path, sizeGB, content)
+	}
+}
+
 func MakeChunkDictLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.Layer {
 	layer := tool.NewLayer(t, workDir)
 

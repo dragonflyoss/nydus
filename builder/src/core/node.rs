@@ -39,6 +39,7 @@ use sha2::digest::Digest;
 
 use crate::{BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay};
 
+use super::bootstrap_dedup::DeduplicationMetrics;
 use super::context::Artifact;
 
 use super::chunk_dict::DigestWithBlobIndex;
@@ -781,6 +782,7 @@ impl Node {
         Ok((chunk_ofs, unit))
     }
 
+    // Perform deduplication for the node to achieve chunk reuse.
     #[allow(clippy::too_many_arguments)]
     pub fn dedup_chunk_for_node(
         &mut self,
@@ -792,6 +794,7 @@ impl Node {
         insert_chunks: &mut Vec<(String, String, String)>,
         cas_mgr: &CasMgr,
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
+        metrics: &mut DeduplicationMetrics,
     ) -> Result<()> {
         let (mut chunk_ofs, chunk_size) = self.get_chunk_ofs(meta)?;
 
@@ -802,17 +805,23 @@ impl Node {
                 .get_blob_id_by_idx(chunk.inner.blob_index() as usize)
                 .unwrap();
 
+            // Record metrics.
+            metrics.chunk_cnt += 1;
+            metrics.chunk_size_cnt += chunk.inner.uncompressed_size();
+
             writer
                 .seek(SeekFrom::Start(chunk_ofs))
                 .context("failed seek for chunk_ofs")
                 .unwrap();
 
             match cache_chunks.get(chunk_id) {
-                // dedup chunk between layers
+                // Dedup chunk between layers
                 Some(new_chunk) => {
-                    // if the chunk is belong to other image's blob
+                    // In this case, the chunk is from native image or other image.
                     let mut new_chunk = new_chunk.deref().clone();
                     let blob_index = new_chunk.blob_index() as usize;
+
+                    // if this chunk is from other blob, mark it as dedup.
                     if origin_blob_index != blob_index {
                         new_chunk.set_deduped(true);
                     }
@@ -821,10 +830,13 @@ impl Node {
                         DigestWithBlobIndex(*new_chunk.id(), new_chunk.blob_index() + 1),
                         Arc::new(new_chunk.clone()),
                     );
+
+                    // Update chunk info in bootstrap.
                     self.dedup_bootstrap(build_ctx, &new_chunk, writer)?
                 }
                 None => match cas_mgr.get_chunk(chunk_id, &blob_id, true)? {
                     Some((new_blob_id, chunk_info)) => {
+                        // In this case, the chunk is from local cas.
                         let blob_idx = match blob_mgr.get_blob_idx_by_id(&new_blob_id) {
                             Some(blob_idx) => blob_idx,
                             None => {
@@ -848,7 +860,7 @@ impl Node {
                             RafsVersion::V6 => ChunkWrapper::V6(new_chunk),
                         };
 
-                        // if this chunk is from other blob, mark it as dedup
+                        // If this chunk is from other blob, mark it as dedup.
                         if origin_blob_index != blob_idx as usize {
                             new_chunk.set_deduped(true);
                         }
@@ -862,6 +874,12 @@ impl Node {
                         cache_chunks.insert(*chunk_id, new_chunk);
                     }
                     None => {
+                        // In this case, the chunk is a new chunk.
+
+                        // Record metrics.
+                        metrics.new_chunk_cnt += 1;
+                        metrics.new_chunk_size_cnt += chunk.inner.uncompressed_size();
+
                         let new_chunk = chunk.inner.as_ref().clone();
                         cache_chunks.insert(*chunk_id, new_chunk.clone());
                         chunk_cache.insert(

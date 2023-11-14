@@ -1059,7 +1059,10 @@ pub struct DeduplicationConfigV2 {
 impl DeduplicationConfigV2 {
     /// Validate image deduplication configuration.
     pub fn validate(&self) -> bool {
-        true
+        match self.get_enable() {
+            true => !self.work_dir.is_empty(),
+            false => true,
+        }
     }
 
     pub fn get_enable(&self) -> bool {
@@ -2673,7 +2676,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bckend_config_try_from() {
+    fn test_backend_config_try_from() {
         let config = BackendConfig {
             backend_type: "localdisk".to_string(),
             backend_config: serde_json::to_value(LocalDiskConfig::default()).unwrap(),
@@ -2713,6 +2716,34 @@ mod tests {
 
     #[test]
     fn test_dedup_config() {
+        let dedup_config = DeduplicationConfig {
+            enable: true,
+            work_dir: "/tmp/nydus-cas".to_string(),
+        };
+
+        let str_val = serde_json::to_string(&dedup_config).unwrap();
+        let dedup_config2 = serde_json::from_str(&str_val).unwrap();
+        assert_eq!(dedup_config, dedup_config2);
+    }
+
+    #[test]
+    fn test_dedup_config_valid() {
+        let mut dedup_config = DeduplicationConfigV2 {
+            enable: true,
+            work_dir: "".to_string(),
+        };
+        assert!(!dedup_config.validate());
+
+        dedup_config.enable = false;
+        assert!(dedup_config.validate());
+
+        dedup_config.enable = true;
+        dedup_config.work_dir = "/tmp/nydus-cas".to_string();
+        assert!(dedup_config.validate());
+    }
+
+    #[test]
+    fn test_dedup_config_try_from() {
         let content = r#"{
             "enable": true,
             "work_dir": "/tmp/nydus-cas"

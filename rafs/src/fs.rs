@@ -331,6 +331,7 @@ impl Rafs {
         entry
     }
 
+    // Get backend config from local cas for dynamic deduplication.
     fn generate_dedup_bitmap_by_chunk_info(
         cfg: &Arc<ConfigV2>,
         blob_infos: &Vec<Arc<BlobInfo>>,

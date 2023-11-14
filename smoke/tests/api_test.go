@@ -36,19 +36,21 @@ func (a *APIV1TestSuite) TestDaemonStatus(t *testing.T) {
 	rafs := a.rootFsToRafs(t, ctx, rootFs)
 
 	nydusd, err := tool.NewNydusd(tool.NydusdConfig{
-		NydusdPath:      ctx.Binary.Nydusd,
-		BootstrapPath:   rafs,
-		ConfigPath:      filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
-		MountPath:       ctx.Env.MountDir,
-		APISockPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
-		BackendType:     "localfs",
-		BackendConfig:   fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
-		EnablePrefetch:  ctx.Runtime.EnablePrefetch,
-		BlobCacheDir:    ctx.Env.CacheDir,
-		CacheType:       ctx.Runtime.CacheType,
-		CacheCompressed: ctx.Runtime.CacheCompressed,
-		RafsMode:        ctx.Runtime.RafsMode,
-		DigestValidate:  false,
+		NydusdPath:          ctx.Binary.Nydusd,
+		BootstrapPath:       rafs,
+		ConfigPath:          filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		MountPath:           ctx.Env.MountDir,
+		APISockPath:         filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		BackendType:         "localfs",
+		BackendConfig:       fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
+		EnablePrefetch:      ctx.Runtime.EnablePrefetch,
+		BlobCacheDir:        ctx.Env.CacheDir,
+		CacheType:           ctx.Runtime.CacheType,
+		CacheCompressed:     ctx.Runtime.CacheCompressed,
+		RafsMode:            ctx.Runtime.RafsMode,
+		DigestValidate:      false,
+		EnableDeduplication: false,
+		DeduplicationDir:    "",
 	})
 	require.NoError(t, err)
 
@@ -85,22 +87,24 @@ func (a *APIV1TestSuite) TestMetrics(t *testing.T) {
 	rafs := a.rootFsToRafs(t, ctx, rootFs)
 
 	nydusd, err := tool.NewNydusd(tool.NydusdConfig{
-		NydusdPath:      ctx.Binary.Nydusd,
-		BootstrapPath:   rafs,
-		ConfigPath:      filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
-		MountPath:       ctx.Env.MountDir,
-		APISockPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
-		BackendType:     "localfs",
-		BackendConfig:   fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
-		EnablePrefetch:  ctx.Runtime.EnablePrefetch,
-		BlobCacheDir:    ctx.Env.CacheDir,
-		CacheType:       ctx.Runtime.CacheType,
-		CacheCompressed: ctx.Runtime.CacheCompressed,
-		RafsMode:        ctx.Runtime.RafsMode,
-		DigestValidate:  false,
-		IOStatsFiles:    true,
-		LatestReadFiles: true,
-		AccessPattern:   true,
+		NydusdPath:          ctx.Binary.Nydusd,
+		BootstrapPath:       rafs,
+		ConfigPath:          filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		MountPath:           ctx.Env.MountDir,
+		APISockPath:         filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		BackendType:         "localfs",
+		BackendConfig:       fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
+		EnablePrefetch:      ctx.Runtime.EnablePrefetch,
+		BlobCacheDir:        ctx.Env.CacheDir,
+		CacheType:           ctx.Runtime.CacheType,
+		CacheCompressed:     ctx.Runtime.CacheCompressed,
+		RafsMode:            ctx.Runtime.RafsMode,
+		DigestValidate:      false,
+		IOStatsFiles:        true,
+		LatestReadFiles:     true,
+		AccessPattern:       true,
+		EnableDeduplication: false,
+		DeduplicationDir:    "",
 	})
 	require.NoError(t, err)
 
@@ -167,10 +171,12 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 	rafs := a.rootFsToRafs(t, ctx, rootFs)
 
 	config := tool.NydusdConfig{
-		NydusdPath:  ctx.Binary.Nydusd,
-		MountPath:   ctx.Env.MountDir,
-		APISockPath: filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
-		ConfigPath:  filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		NydusdPath:          ctx.Binary.Nydusd,
+		MountPath:           ctx.Env.MountDir,
+		APISockPath:         filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:          filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		EnableDeduplication: false,
+		DeduplicationDir:    "",
 	}
 	nydusd, err := tool.NewNydusd(config)
 	require.NoError(t, err)
