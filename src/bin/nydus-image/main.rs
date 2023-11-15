@@ -28,9 +28,9 @@ use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
     parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobManager,
-    BootstrapManager, BuildContext, BuildOutput, Builder, ConversionType, DirectoryBuilder,
-    Feature, Features, HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder,
-    TarballBuilder, WhiteoutSpec,
+    BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictChunkInfo, ConversionType,
+    DirectoryBuilder, Feature, Features, Generater, HashChunkDict, Merger, Prefetch,
+    PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
 };
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
@@ -387,7 +387,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         Arg::new("database")
                             .long("database")
                             .help("Database connection URI for assisting chunk dict generation, e.g. sqlite:///path/database.db")
-                            .default_value("sqlite:///home/runner/work/image-service/chunkdict/image-service/contrib/nydusify/database.db")
+                            .default_value("sqlite:///home/runner/output/database.db")
                             .required(false),
                     )
                     .arg(
@@ -417,7 +417,74 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                             Arg::new("database")
                                 .long("database")
                                 .help("Database connection address for assisting chunk dictionary generation, e.g. /path/database.db")
-                                .required(true),
+                                .default_value("sqlite:///home/runner/output/database.db")
+                                .required(false),
+                        )
+                        .arg(
+                            Arg::new("parent-bootstrap")
+                                .long("parent-bootstrap")
+                                .help("File path of the parent/referenced RAFS metadata blob (optional)")
+                                .required(false),
+                        )
+                        .arg(
+                            Arg::new("bootstrap")
+                                .long("bootstrap")
+                                .short('B')
+                                .help("Output path of nydus overlaid bootstrap"),
+                        )
+                        .arg(
+                            Arg::new("blob-dir")
+                                .long("blob-dir")
+                                .short('D')
+                                .help("Directory path to save generated RAFS metadata and data blobs"),
+                        )
+                        .arg(arg_chunk_dict.clone())
+                        .arg(arg_prefetch_policy.clone())
+                        .arg(arg_output_json.clone())
+                        .arg(
+                            Arg::new("blob-digests")
+                                .long("blob-digests")
+                                .required(false)
+                                .help("RAFS blob digest list separated by comma"),
+                        )
+                        .arg(
+                            Arg::new("original-blob-ids")
+                                .long("original-blob-ids")
+                                .required(false)
+                                .help("original blob id list separated by comma, it may usually be a sha256 hex string"),
+                        )
+                        .arg(
+                            Arg::new("blob-sizes")
+                                .long("blob-sizes")
+                                .required(false)
+                                .help("RAFS blob size list separated by comma"),
+                        )
+                        .arg(
+                            Arg::new("blob-toc-digests")
+                                .long("blob-toc-digests")
+                                .required(false)
+                                .help("RAFS blob toc digest list separated by comma"),
+                        )
+                        .arg(
+                            Arg::new("blob-toc-sizes")
+                                .long("blob-toc-sizes")
+                                .required(false)
+                                .help("RAFS blob toc size list separated by comma"),
+                        )
+                        .arg(arg_config.clone())
+                        .arg(
+                            Arg::new("SOURCE")
+                                .help("bootstrap paths (allow one or more)")
+                                .required(true)
+                                .num_args(1..),
+                        )
+                        .arg(
+                            Arg::new("digester")
+                                .long("digester")
+                                .help("Algorithm to digest data chunks:")
+                                .required(false)
+                                .default_value("blake3")
+                                .value_parser(["blake3", "sha256"]),
                         )
                         .arg(
                             Arg::new("verbose")
@@ -427,7 +494,91 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                                 .action(ArgAction::SetTrue)
                                 .required(false),
                         )
+                        .arg(
+                            Arg::new("features")
+                                .long("features")
+                                .value_parser(["blob-toc"])
+                                .help("Enable/disable features")
+                        )
                     )
+                .subcommand(
+                    App::new("dump")
+                    .about("Dump chunkdict bootstrap")
+                    .arg(
+                        Arg::new("parent-bootstrap")
+                            .long("parent-bootstrap")
+                            .help("File path of the parent/referenced RAFS metadata blob (optional)")
+                            .required(false),
+                    )
+                    .arg(
+                        Arg::new("bootstrap")
+                            .long("bootstrap")
+                            .short('B')
+                            .help("Output path of nydus overlaid bootstrap"),
+                    )
+                    .arg(
+                        Arg::new("blob-dir")
+                            .long("blob-dir")
+                            .short('D')
+                            .help("Directory path to save generated RAFS metadata and data blobs"),
+                    )
+                    .arg(arg_chunk_dict.clone())
+                    .arg(arg_prefetch_policy)
+                    .arg(arg_output_json.clone())
+                    .arg(
+                        Arg::new("blob-digests")
+                            .long("blob-digests")
+                            .required(false)
+                            .help("RAFS blob digest list separated by comma"),
+                    )
+                    .arg(
+                        Arg::new("blob-sizes")
+                            .long("blob-sizes")
+                            .required(false)
+                            .help("RAFS blob size list separated by comma"),
+                    )
+                    .arg(
+                        Arg::new("blob-toc-digests")
+                            .long("blob-toc-digests")
+                            .required(false)
+                            .help("RAFS blob toc digest list separated by comma"),
+                    )
+                    .arg(
+                        Arg::new("blob-toc-sizes")
+                            .long("blob-toc-sizes")
+                            .required(false)
+                            .help("RAFS blob toc size list separated by comma"),
+                    )
+                    .arg(arg_config.clone())
+                    .arg(
+                        Arg::new("SOURCE")
+                            .help("bootstrap paths (allow one or more)")
+                            .required(true)
+                            .num_args(1..),
+                    )
+                    .arg(
+                        Arg::new("digester")
+                            .long("digester")
+                            .help("Algorithm to digest data chunks:")
+                            .required(false)
+                            .default_value("blake3")
+                            .value_parser(["blake3", "sha256"]),
+                    )
+                    .arg(
+                        Arg::new("verbose")
+                            .long("verbose")
+                            .short('v')
+                            .help("Output message in verbose mode")
+                            .action(ArgAction::SetTrue)
+                            .required(false),
+                    )
+                    .arg(
+                        Arg::new("features")
+                            .long("features")
+                            .value_parser(["blob-toc"])
+                            .help("Enable/disable features")
+                    )
+                )
                 );
 
     let app = app.subcommand(
@@ -452,7 +603,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .help("Directory path to save generated RAFS metadata and data blobs"),
             )
             .arg(arg_chunk_dict.clone())
-            .arg(arg_prefetch_policy)
             .arg(arg_output_json.clone())
             .arg(
                 Arg::new("blob-digests")
@@ -785,6 +935,11 @@ fn main() -> Result<()> {
             Some("generate") => {
                 Command::chunkdict_generate(matches.subcommand_matches("generate").unwrap())
             }
+            Some("dump") => Command::chunkdict_dump(
+                matches.subcommand_matches("dump").unwrap(),
+                &build_info,
+                None,
+            ),
             _ => {
                 println!("{}", usage);
                 Ok(())
@@ -1208,7 +1363,7 @@ impl Command {
         let path = bootstrap_path.display().to_string();
         info!("Bootstrap path is {}", path);
         let path_name: Vec<&str> = path.split('/').collect();
-        let full_image_name: Vec<&str> = path_name[1].split(':').collect();
+        let full_image_name: Vec<&str> = path_name[4].split(':').collect();
         let image_name = match full_image_name.get(full_image_name.len() - 2) {
             Some(&second_last) => second_last.to_string(),
             None => bail!("Invalid image name"),
@@ -1247,19 +1402,181 @@ impl Command {
         // Connecting database and Generating chunk dictionary by algorithm "exponential_smoothing"
         let db_url: &String = matches.get_one::<String>("database").unwrap();
         debug!("db_url: {}", db_url);
+        let db_strs: Vec<&str> = db_url.split("://").collect();
         let algorithm = String::from("exponential_smoothing");
         let mut algorithm: deduplicate::Algorithm<SqliteDatabase> =
-            deduplicate::Algorithm::<SqliteDatabase>::new(algorithm, db_url)?;
+            deduplicate::Algorithm::<SqliteDatabase>::new(algorithm, db_strs[1])?;
         let (chunkdict, noise_points) = algorithm.chunkdict_generate()?;
         info!(
             "The length of chunkdict is {}",
-            Vec::<deduplicate::Chunk>::len(&chunkdict)
+            Vec::<ChunkdictChunkInfo>::len(&chunkdict)
         );
         info!("It is not recommended to use image deduplication");
         for image_name in noise_points {
             info!("{}", image_name);
         }
         // To be continued, dump chunk of "chunk dictionary" ...
+        let build_info = BTI.to_owned();
+        Command::chunkdict_dump(matches, &build_info, Some(chunkdict)).unwrap();
+        Ok(())
+    }
+
+    fn chunkdict_dump(
+        matches: &ArgMatches,
+        build_info: &BuildTimeInfo,
+        chunkdict: Option<Vec<ChunkdictChunkInfo>>,
+    ) -> Result<()> {
+        let _features = Features::try_from(
+            matches
+                .get_one::<String>("features")
+                .map(|s| s.as_str())
+                .unwrap_or_default(),
+        )?;
+        let chunkdict_bootstrap_path = Self::get_bootstrap_storage(matches)?;
+        let config =
+            Self::get_configuration(matches).context("failed to get configuration information")?;
+        config
+            .internal
+            .set_blob_accessible(matches.get_one::<String>("config").is_some());
+        let mut build_ctx = BuildContext {
+            prefetch: Self::get_prefetch(matches)?,
+            ..Default::default()
+        };
+        build_ctx.configuration = config;
+        build_ctx.blob_storage = Some(chunkdict_bootstrap_path.clone());
+        build_ctx.blob_features = BlobFeatures::CAP_TAR_TOC;
+        build_ctx.blob_features.insert(BlobFeatures::ALIGNED);
+        // build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
+        // build_ctx.blob_features.insert(BlobFeatures::ENCRYPTED);
+        build_ctx.features = _features;
+
+        let digester = matches
+            .get_one::<String>("digester")
+            .map(|s| s.as_str())
+            .unwrap_or_default()
+            .parse()?;
+        let mut blob_mgr = BlobManager::new(digester);
+
+        let bootstrap_path = Self::get_bootstrap_storage(matches)?;
+        let mut bootstrap_mgr = BootstrapManager::new(Some(bootstrap_path), None);
+        if let Some(chunkdic_tmp) = chunkdict {
+            let output = Generater::generate(
+                &mut build_ctx,
+                &mut bootstrap_mgr,
+                &mut blob_mgr,
+                chunkdic_tmp,
+            )?;
+            OutputSerializer::dump(matches, output, build_info).unwrap();
+        } else {
+            // test chunkdict
+            let mut chunkdic_tmp = vec![ChunkdictChunkInfo {
+                image_name: String::from("redis"),
+                version_name: String::from("nydus_7.0.2"),
+                chunk_blob_id: String::from(
+                    "73483061f74471da1b80947688b92bf0fd853e8456a6d662829cf7ec88785e8a",
+                ),
+                chunk_digest: String::from(
+                    "00047517875f3cd8a471ae956f654015c719f6d52220a5745da30c2eea48d33a",
+                ),
+                chunk_compressed_size: 779,
+                chunk_uncompressed_size: 1738,
+                chunk_compressed_offset: 30597831,
+                chunk_uncompressed_offset: 75816960,
+            }];
+            chunkdic_tmp.push(ChunkdictChunkInfo {
+                image_name: String::from("redis"),
+                version_name: String::from("nydus_7.0.2"),
+                chunk_blob_id: String::from(
+                    "73483061f74471da1b80947688b92bf0fd853e8456a6d662829cf7ec88785e8a",
+                ),
+                chunk_digest: String::from(
+                    "00096459293ffff2f057815589f662f51d85b9bfc111d34f465a31290cf6a785",
+                ),
+                chunk_compressed_size: 983,
+                chunk_uncompressed_size: 2044,
+                chunk_compressed_offset: 29593326,
+                chunk_uncompressed_offset: 72409088,
+            });
+            chunkdic_tmp.push(ChunkdictChunkInfo {
+                image_name: String::from("redis"),
+                version_name: String::from("nydus_7.0.2"),
+                chunk_blob_id: String::from(
+                    "73483061f74471da1b80947688b92bf0fd853e8456a6d662829cf7ec88785e8a",
+                ),
+                chunk_digest: String::from(
+                    "003dfa491feb4729728dba4024bec506eb035d28fd9943b3ff696033cc5413b0",
+                ),
+                chunk_compressed_size: 5541,
+                chunk_uncompressed_size: 18544,
+                chunk_compressed_offset: 17635022,
+                chunk_uncompressed_offset: 42688512,
+            });
+            chunkdic_tmp.push(ChunkdictChunkInfo {
+                image_name: String::from("redis"),
+                version_name: String::from("nydus_7.0.2"),
+                chunk_blob_id: String::from(
+                    "73483061f74471da1b80947688b92bf0fd853e8456a6d662829cf7ec88785e8d",
+                ),
+                chunk_digest: String::from(
+                    "005848293161638f46cde2b8397f93298fe8184cb35afa4bd81489ac6a74f9c2",
+                ),
+                chunk_compressed_size: 148,
+                chunk_uncompressed_size: 239,
+                chunk_compressed_offset: 14935577,
+                chunk_uncompressed_offset: 36294656,
+            });
+            chunkdic_tmp.push(ChunkdictChunkInfo {
+                image_name: String::from("redis"),
+                version_name: String::from("nydus_7.0.2"),
+                chunk_blob_id: String::from(
+                    "73483061f74471da1b80947688b92bf0fd853e8456a6d662829cf7ec88785e8d",
+                ),
+                chunk_digest: String::from(
+                    "00788bcf621250cf9a71651dd0f8453423a08760770e63f36951d51316c12cb8",
+                ),
+                chunk_compressed_size: 378,
+                chunk_uncompressed_size: 685,
+                chunk_compressed_offset: 2541908,
+                chunk_uncompressed_offset: 554176,
+            });
+            let output = Generater::generate(
+                &mut build_ctx,
+                &mut bootstrap_mgr,
+                &mut blob_mgr,
+                chunkdic_tmp,
+            )?;
+            OutputSerializer::dump(matches, output, build_info).unwrap();
+        }
+
+        // 临时测试
+        let mut verbose = matches.get_flag("verbose");
+        if !verbose {
+            verbose = true;
+        }
+        let chunkdict_bootstrap_path_tmp = chunkdict_bootstrap_path;
+        let bootstrap_path = match &chunkdict_bootstrap_path_tmp {
+            ArtifactStorage::SingleFile(path_buf) => path_buf.as_path(),
+            ArtifactStorage::FileDir(path_buf) => path_buf.as_path(),
+        };
+
+        let config = Self::get_configuration(matches)?;
+        let demo_booststrap_path = Path::new("/home/runner/bootstrap");
+        let mut demo_validator = Validator::new(demo_booststrap_path, config)?;
+
+        demo_validator
+            .check(verbose)
+            .with_context(|| format!("failed to check bootstrap {:?}", demo_booststrap_path))?;
+
+        println!("Demo RAFS filesystem metadata is valid, referenced data blobs: ");
+
+        let config = Self::get_configuration(matches)?;
+        let mut validator = Validator::new(bootstrap_path, config)?;
+        validator
+            .check(verbose)
+            .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
+
+        println!("Chundict RAFS filesystem metadata is valid, referenced data blobs: ");
+
         Ok(())
     }
 

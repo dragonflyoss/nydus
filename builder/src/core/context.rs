@@ -955,6 +955,29 @@ impl BlobManager {
         }
     }
 
+    /// Get or cerate blob for chunkdict, this is used for chunk deduplication.
+    pub fn get_or_cerate_blob_for_chunkdict(
+        &mut self,
+        ctx: &BuildContext,
+        id: &str,
+    ) -> Result<(u32, &mut BlobContext)> {
+        if self.get_blob_idx_by_id(id).is_none() {
+            let blob_ctx = Self::new_blob_ctx(ctx)?;
+            self.current_blob_index = Some(self.alloc_index()?);
+            self.add_blob(blob_ctx);
+        } else {
+            self.current_blob_index = self.get_blob_idx_by_id(id);
+        }
+
+        // Safe to unwrap because the blob context has been added.
+        Ok(self.get_current_blob().unwrap())
+    }
+
+    /// Determine if the given blob has been created.
+    pub fn has_blob(&self, blob_id: &str) -> bool {
+        self.get_blob_idx_by_id(blob_id).is_some()
+    }
+
     /// Set the global chunk dictionary for chunk deduplication.
     pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
         self.global_chunk_dict = dict
