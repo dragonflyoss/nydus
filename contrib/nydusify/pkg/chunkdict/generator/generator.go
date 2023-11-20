@@ -69,11 +69,15 @@ func (generator *Generator) Generate(ctx context.Context) error {
 			}
 		}
 	}
+	if err := generator.deduplicating(ctx); err != nil {
+		return err
+	}
 	return nil
 }
 
 // "save" stores information of chunk and blob of a Nydus Image in the database
 func (generator *Generator) save(ctx context.Context, index int) error {
+	currentDir, _ := os.Getwd()
 	sourceParsed, err := generator.sourcesParser[index].Parse(ctx)
 	if err != nil {
 		return errors.Wrap(err, "parse Nydus image")
@@ -81,26 +85,46 @@ func (generator *Generator) save(ctx context.Context, index int) error {
 
 	// Create a directory to store the image bootstrap
 	nydusImageName := strings.Replace(generator.Sources[index], "/", ":", -1)
-	folderPath := filepath.Join(generator.WorkDir, nydusImageName)
-	if err := os.MkdirAll(folderPath, fs.ModePerm); err != nil {
+	bootstrapFolderPath := filepath.Join(currentDir, generator.WorkDir, nydusImageName)
+	if err := os.MkdirAll(bootstrapFolderPath, fs.ModePerm); err != nil {
 		return errors.Wrap(err, "creat work directory")
 	}
-	if err := generator.Output(ctx, sourceParsed, folderPath, index); err != nil {
+	if err := generator.Output(ctx, sourceParsed, bootstrapFolderPath, index); err != nil {
 		return errors.Wrap(err, "output image information")
 	}
+
+	databaseName := "chunkdict.db"
+	databaseType := "sqlite"
+	DatabasePath := databaseType + "://" + filepath.Join(currentDir, generator.WorkDir, databaseName)
 
 	// Invoke "nydus-image save" command
 	builder := build.NewBuilder(generator.NydusImagePath)
 	if err := builder.Save(build.SaveOption{
-		BootstrapPath: filepath.Join(folderPath, "nydus_bootstrap"),
+		BootstrapPath: filepath.Join(bootstrapFolderPath, "nydus_bootstrap"),
+		DatabasePath:  DatabasePath,
 	}); err != nil {
 		return errors.Wrap(err, "invalid nydus bootstrap format")
 	}
 
-	logrus.Infof("Save chunk information from image %s", generator.sourcesParser[index].Remote.Ref)
+	logrus.Infof("Saving chunk information from image %s", generator.sourcesParser[index].Remote.Ref)
 
-	if err := os.RemoveAll(folderPath); err != nil {
-		return errors.Wrap(err, "remove work directory")
+	// if err := os.RemoveAll(folderPath); err != nil {
+	// 	return errors.Wrap(err, "remove work directory")
+	// }
+	return nil
+}
+
+func (generator *Generator) deduplicating(ctx context.Context) error {
+	builder := build.NewBuilder(generator.NydusImagePath)
+	currentDir, _ := os.Getwd()
+
+	databaseName := "chunkdict.db"
+	databaseType := "sqlite"
+	DatabasePath := databaseType + "://" + filepath.Join(currentDir, generator.WorkDir, databaseName)
+	if err := builder.Generate(build.GenerateOption{
+		DatabasePath: DatabasePath,
+	}); err != nil {
+		return errors.Wrap(err, "invalid nydus bootstrap format")
 	}
 	return nil
 }

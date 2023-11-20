@@ -43,6 +43,11 @@ type CompactOption struct {
 
 type SaveOption struct {
 	BootstrapPath string
+	DatabasePath  string
+}
+
+type GenerateOption struct {
+	DatabasePath string
 }
 
 type Builder struct {
@@ -157,6 +162,22 @@ func (builder *Builder) Save(option SaveOption) error {
 		"warn",
 		"--bootstrap",
 		option.BootstrapPath,
+		"--database",
+		option.DatabasePath,
+	}
+	return builder.run(args, "")
+}
+
+// Generate calls `nydus-image chunkdict generate` to get chunkdict
+func (builder *Builder) Generate(option GenerateOption) error {
+	logrus.Infof("Invoking 'nydus-image chunkdict generate' subcommand")
+	args := []string{
+		"chunkdict",
+		"generate",
+		"--log-level",
+		"warn",
+		"--database",
+		option.DatabasePath,
 	}
 	return builder.run(args, "")
 }

@@ -140,6 +140,50 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 	tool.RunWithoutOutput(t, checkCmd)
 }
 
+func (i *ImageTestSuite) TestGenerate() test.Generator {
+
+	scenarios := tool.DescartesIterator{}
+	scenarios.Dimension(paramImage, []interface{}{"nginx:latest"})
+
+	return func() (name string, testCase test.Case) {
+		if !scenarios.HasNext() {
+			return
+		}
+		scenario := scenarios.Next()
+		ctx := tool.DefaultContext(i.T)
+
+		image := i.prepareImage(i.T, scenario.GetString(paramImage))
+		return scenario.Str(), func(t *testing.T) {
+			i.TestGenerateChunkDict(t, *ctx, image)
+		}
+	}
+}
+
+func (i *ImageTestSuite) TestGenerateChunkDict(t *testing.T, ctx tool.Context, source string) {
+
+	// Prepare work directory
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	target := fmt.Sprintf("%s-nydus-%s", source, uuid.NewString())
+	logLevel := "--log-level warn"
+
+	// Convert image
+	convertCmd := fmt.Sprintf(
+		"%s %s convert --source %s --target %s --nydus-image %s --work-dir %s",
+		ctx.Binary.Nydusify, logLevel, source, target, ctx.Binary.Builder, ctx.Env.WorkDir,
+	)
+	tool.RunWithoutOutput(t, convertCmd)
+
+	nydusifyPath := ctx.Binary.Nydusify
+	generateCmd := fmt.Sprintf(
+		"%s %s chunkdict generate --sources %s --nydus-image %s --work-dir %s",
+		nydusifyPath, logLevel, target, ctx.Binary.Builder, ctx.Env.WorkDir,
+	)
+	tool.RunWithoutOutput(t, generateCmd)
+
+}
+
 func (i *ImageTestSuite) prepareImage(t *testing.T, image string) string {
 	if i.preparedImages == nil {
 		i.preparedImages = make(map[string]string)
