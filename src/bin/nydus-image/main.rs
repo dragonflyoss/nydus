@@ -720,8 +720,16 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             .arg(
                 Arg::new("output")
                     .long("output")
-                    .help("path for output tar file")
-                    .required(true),
+                    .default_value("/dev/stdout")
+                    .help("Path for output tar file, if not configured, it will default to STDOUT.")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("untar")
+                    .long("untar")
+                    .action(ArgAction::SetTrue)
+                    .help("Untar all files to the output dir, creating dir if it does not exist.")
+                    .required(false),
             ),
     )
 }
@@ -1363,11 +1371,12 @@ impl Command {
                 }
             }
         };
+        let untar = matches.get_flag("untar");
 
-        OCIUnpacker::new(bootstrap, backend, output)
-            .with_context(|| "fail to create unpacker")?
+        OCIUnpacker::new(bootstrap, backend, output, untar)
+            .with_context(|| "failed to create unpacker")?
             .unpack(config)
-            .with_context(|| "fail to unpack")
+            .with_context(|| format!("failed to unpack image to: {}", output))
     }
 
     fn check(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {

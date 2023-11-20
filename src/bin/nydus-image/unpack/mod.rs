@@ -3,7 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{create_dir_all, remove_file, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -18,7 +18,7 @@ use nydus_rafs::{
 };
 use nydus_storage::backend::BlobBackend;
 use nydus_storage::device::BlobInfo;
-use tar::{Builder, Header};
+use tar::{Archive, Builder, Header};
 
 use self::pax::{
     OCIBlockBuilder, OCICharBuilder, OCIDirBuilder, OCIFifoBuilder, OCILinkBuilder, OCIRegBuilder,
@@ -32,11 +32,12 @@ pub trait Unpacker {
     fn unpack(&self, config: Arc<ConfigV2>) -> Result<()>;
 }
 
-///  A unpacker with the ability to convert bootstrap file and blob file to tar
+///  A unpacker with the ability to convert bootstrap file and blob file to tar or dir.
 pub struct OCIUnpacker {
     bootstrap: PathBuf,
     blob_backend: Option<Arc<dyn BlobBackend + Send + Sync>>,
     output: PathBuf,
+    untar: bool,
 
     builder_factory: OCITarBuilderFactory,
 }
@@ -46,6 +47,7 @@ impl OCIUnpacker {
         bootstrap: &Path,
         blob_backend: Option<Arc<dyn BlobBackend + Send + Sync>>,
         output: &str,
+        untar: bool,
     ) -> Result<Self> {
         let bootstrap = bootstrap.to_path_buf();
         let output = PathBuf::from(output);
@@ -57,6 +59,7 @@ impl OCIUnpacker {
             bootstrap,
             blob_backend,
             output,
+            untar,
         })
     }
 
@@ -64,23 +67,63 @@ impl OCIUnpacker {
         let (rs, _) = RafsSuper::load_from_file(self.bootstrap.as_path(), config, false)?;
         Ok(rs)
     }
+
+    fn get_unpack_path(&self) -> Result<PathBuf> {
+        // If output ends with path separator, then it is a dir.
+        let is_dir = self
+            .output
+            .to_string_lossy()
+            .ends_with(std::path::MAIN_SEPARATOR);
+
+        // Unpack the tar file to a subdirectory
+        if is_dir || self.untar {
+            if !self.output.exists() {
+                create_dir_all(&self.output)?;
+            }
+            let tar_path = self
+                .output
+                .join(self.bootstrap.file_stem().unwrap_or_default())
+                .with_extension("tar");
+
+            return Ok(tar_path);
+        }
+
+        // Unpack the tar file to the specified location
+        Ok(self.output.clone())
+    }
 }
 
 impl Unpacker for OCIUnpacker {
     fn unpack(&self, config: Arc<ConfigV2>) -> Result<()> {
         debug!(
-            "oci unpacker, bootstrap file: {:?}, output file: {:?}",
+            "oci unpacker, bootstrap file: {:?}, output path: {:?}",
             self.bootstrap, self.output
         );
 
         let rafs = self.load_rafs(config)?;
 
+        let tar_path = self.get_unpack_path()?;
         let mut builder = self
             .builder_factory
-            .create(&rafs, &self.blob_backend, &self.output)?;
+            .create(&rafs, &self.blob_backend, &tar_path)?;
 
         for (node, path) in RafsIterator::new(&rafs) {
             builder.append(node, &path)?;
+        }
+        info!("successfully unpack image to: {}", tar_path.display());
+
+        // untar this tar file to self.output dir
+        if self.untar {
+            let file = File::open(&tar_path)?;
+            let mut tar = Archive::new(file);
+            tar.unpack(&self.output)?;
+            remove_file(&tar_path)?;
+
+            info!(
+                "successfully untar {} to: {}",
+                tar_path.display(),
+                self.output.display()
+            );
         }
 
         Ok(())
@@ -228,5 +271,34 @@ impl TarBuilder for OCITarBuilder {
         }
 
         bail!("node {:?} can not be unpacked", path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_get_unpack_path() {
+        // test data: (bootstrap, output, untar, expected_tar_path)
+        let test_cases = [
+            ("./test", "target.tar", false, "target.tar"),
+            ("test/test", "target", false, "target"),
+            ("test/test", "target/", false, "target/test.tar"),
+            ("/run/test.meta", "target/", false, "target/test.tar"),
+            ("/run/test.meta", "/run/", false, "/run/test.tar"),
+            ("./test", "target.tar", true, "target.tar/test.tar"),
+            ("test/test", "target", true, "target/test.tar"),
+            ("test/test", "target/", true, "target/test.tar"),
+        ];
+
+        for (bootstrap, output, untar, expected_tar_path) in test_cases {
+            let unpacker = OCIUnpacker::new(Path::new(bootstrap), None, output, untar).unwrap();
+            let tar_path = unpacker.get_unpack_path().unwrap();
+            assert_eq!(
+                tar_path,
+                PathBuf::from(expected_tar_path),
+                "tar_path not equal to expected_tar_path"
+            );
+        }
     }
 }
