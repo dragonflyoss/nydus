@@ -615,7 +615,7 @@ impl Builder for TarballBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, &bootstrap.tree, blob_mgr, blob_writer.as_mut()) },
+            { Blob::dump(ctx, blob_mgr, blob_writer.as_mut()) },
             "dump_blob"
         )?;
 

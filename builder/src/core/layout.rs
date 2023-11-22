@@ -6,37 +6,26 @@ use anyhow::Result;
 use std::ops::Deref;
 
 use super::node::Node;
-use crate::{Overlay, Prefetch, Tree, TreeNode};
+use crate::{Overlay, Prefetch, TreeNode};
 
 #[derive(Clone)]
 pub struct BlobLayout {}
 
 impl BlobLayout {
-    pub fn layout_blob_simple(prefetch: &Prefetch, tree: &Tree) -> Result<(Vec<TreeNode>, usize)> {
-        let mut inodes = Vec::with_capacity(10000);
+    pub fn layout_blob_simple(prefetch: &Prefetch) -> Result<(Vec<TreeNode>, usize)> {
+        let (pre, non_pre) = prefetch.get_file_nodes();
+        let mut inodes: Vec<TreeNode> = pre
+            .into_iter()
+            .filter(|x| Self::should_dump_node(x.lock().unwrap().deref()))
+            .collect();
+        let mut non_prefetch_inodes: Vec<TreeNode> = non_pre
+            .into_iter()
+            .filter(|x| Self::should_dump_node(x.lock().unwrap().deref()))
+            .collect();
 
-        // Put all prefetch inodes at the head
-        // NOTE: Don't try to sort readahead files by their sizes,  thus to keep files
-        // belonging to the same directory arranged in adjacent in blob file. Together with
-        // BFS style collecting descendants inodes, it will have a higher merging possibility.
-        // Later, we might write chunks of data one by one according to inode number order.
-        let prefetches = prefetch.get_file_nodes();
-        for n in prefetches {
-            let node = n.lock().unwrap();
-            if Self::should_dump_node(node.deref()) {
-                inodes.push(n.clone());
-            }
-        }
         let prefetch_entries = inodes.len();
 
-        tree.walk_bfs(true, &mut |n| -> Result<()> {
-            let node = n.lock_node();
-            // Ignore lower layer node when dump blob
-            if !prefetch.contains(node.deref()) && Self::should_dump_node(node.deref()) {
-                inodes.push(n.node.clone());
-            }
-            Ok(())
-        })?;
+        inodes.append(&mut non_prefetch_inodes);
 
         Ok((inodes, prefetch_entries))
     }
@@ -44,5 +33,30 @@ impl BlobLayout {
     #[inline]
     fn should_dump_node(node: &Node) -> bool {
         node.overlay == Overlay::UpperAddition || node.overlay == Overlay::UpperModification
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{core::node::NodeInfo, Tree};
+    use nydus_rafs::metadata::{inode::InodeWrapper, RafsVersion};
+
+    #[test]
+    fn test_layout_blob_simple() {
+        let mut inode = InodeWrapper::new(RafsVersion::V6);
+        inode.set_mode(0o755 | libc::S_IFREG as u32);
+        inode.set_size(1);
+        let mut node1 = Node::new(inode.clone(), NodeInfo::default(), 1);
+        node1.overlay = Overlay::UpperAddition;
+
+        let tree = Tree::new(node1);
+
+        let mut prefetch = Prefetch::default();
+        prefetch.insert(&tree.node, tree.node.lock().unwrap().deref());
+
+        let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&prefetch).unwrap();
+        assert_eq!(inodes.len(), 1);
+        assert_eq!(prefetch_entries, 0);
     }
 }

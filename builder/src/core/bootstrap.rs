@@ -37,8 +37,7 @@ impl Bootstrap {
         assert_eq!(index, RAFS_V5_ROOT_INODE);
         root_node.index = index;
         root_node.inode.set_ino(index);
-        ctx.prefetch
-            .insert_if_need(&self.tree.node, root_node.deref());
+        ctx.prefetch.insert(&self.tree.node, root_node.deref());
         bootstrap_ctx.inode_map.insert(
             (
                 root_node.layer_idx,
@@ -160,7 +159,7 @@ impl Bootstrap {
             if !child_node.is_dir() && ctx.fs_version.is_v6() {
                 child_node.v6_set_offset(bootstrap_ctx, v6_hardlink_offset, block_size)?;
             }
-            ctx.prefetch.insert_if_need(&child.node, child_node.deref());
+            ctx.prefetch.insert(&child.node, child_node.deref());
             if child_node.is_dir() {
                 dirs.push(child);
             }
