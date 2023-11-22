@@ -3,7 +3,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -73,7 +72,7 @@ fn get_patterns() -> Result<IndexMap<PathBuf, Option<TreeNode>>> {
 fn generate_patterns(input: Vec<String>) -> Result<IndexMap<PathBuf, Option<TreeNode>>> {
     let mut patterns = IndexMap::new();
 
-    for (idx, file) in input.iter().enumerate() {
+    for file in &input {
         let file_trimmed: PathBuf = file.trim().into();
         // Sanity check for the list format.
         if !file_trimmed.is_absolute() {
@@ -84,13 +83,21 @@ fn generate_patterns(input: Vec<String>) -> Result<IndexMap<PathBuf, Option<Tree
             continue;
         }
 
-        let mut skip = false;
-        for prefix in input.iter().take(idx) {
-            if file_trimmed.starts_with(prefix) {
+        let mut current_path = file_trimmed.clone();
+        let mut skip = patterns.contains_key(&current_path);
+        while !skip && current_path.pop() {
+            if patterns.contains_key(&current_path) {
                 skip = true;
+                break;
             }
         }
-        if !skip {
+
+        if skip {
+            warn!(
+                "prefetch pattern {} is covered by previous pattern and thus omitted",
+                file
+            );
+        } else {
             debug!(
                 "prefetch pattern: {}, trimmed file name {:?}",
                 file, file_trimmed
@@ -114,8 +121,16 @@ pub struct Prefetch {
     patterns: IndexMap<PathBuf, Option<TreeNode>>,
 
     // File list to help optimizing layout of data blobs.
-    // Files from this list may be put at the head of data blob for better prefetch performance.
-    files: BTreeMap<PathBuf, TreeNode>,
+    // Files from this list may be put at the head of data blob for better prefetch performance,
+    // The index of matched prefetch pattern is stored in `usize`,
+    // which will help to sort the prefetch files in the final layout.
+    // It only stores regular files.
+    files_prefetch: Vec<(TreeNode, usize)>,
+
+    // It stores all non-prefetch files that is not stored in `prefetch_files`,
+    // including regular files, dirs, symlinks, etc.,
+    // with the same order of BFS traversal of file tree.
+    files_non_prefetch: Vec<TreeNode>,
 }
 
 impl Prefetch {
@@ -131,50 +146,63 @@ impl Prefetch {
             policy,
             disabled: false,
             patterns,
-            files: BTreeMap::new(),
+            files_prefetch: Vec::with_capacity(10000),
+            files_non_prefetch: Vec::with_capacity(10000),
         })
     }
 
-    /// Insert node into the prefetch list if it matches prefetch rules.
-    pub fn insert_if_need(&mut self, obj: &TreeNode, node: &Node) {
+    /// Insert node into the prefetch Vector if it matches prefetch rules,
+    /// while recording the index of matched prefetch pattern,
+    /// or insert it into non-prefetch Vector.
+    pub fn insert(&mut self, obj: &TreeNode, node: &Node) {
         // Newly created root inode of this rafs has zero size
         if self.policy == PrefetchPolicy::None
             || self.disabled
             || (node.inode.is_reg() && node.inode.size() == 0)
         {
+            self.files_non_prefetch.push(obj.clone());
             return;
         }
 
-        let path = node.target();
-        for (f, v) in self.patterns.iter_mut() {
-            // As path is canonicalized, it should be reliable.
-            if path == f {
-                if self.policy == PrefetchPolicy::Fs {
+        let mut path = node.target().clone();
+        let mut exact_match = true;
+        loop {
+            if let Some((idx, _, v)) = self.patterns.get_full_mut(&path) {
+                if exact_match {
                     *v = Some(obj.clone());
                 }
                 if node.is_reg() {
-                    self.files.insert(path.clone(), obj.clone());
+                    self.files_prefetch.push((obj.clone(), idx));
+                } else {
+                    self.files_non_prefetch.push(obj.clone());
                 }
-            } else if path.starts_with(f) && node.is_reg() {
-                self.files.insert(path.clone(), obj.clone());
+                return;
             }
+            // If no exact match, try to match parent dir until root.
+            if !path.pop() {
+                self.files_non_prefetch.push(obj.clone());
+                return;
+            }
+            exact_match = false;
         }
     }
 
-    /// Check whether the node is in the prefetch list.
-    pub fn contains(&self, node: &Node) -> bool {
-        self.files.contains_key(node.target())
+    /// Get node Vector of files in the prefetch list and non-prefetch list.
+    /// The order of prefetch files is the same as the order of prefetch patterns.
+    /// The order of non-prefetch files is the same as the order of BFS traversal of file tree.
+    pub fn get_file_nodes(&self) -> (Vec<TreeNode>, Vec<TreeNode>) {
+        let mut p_files = self.files_prefetch.clone();
+        p_files.sort_by_key(|k| k.1);
+
+        let p_files = p_files.into_iter().map(|(s, _)| s).collect();
+
+        (p_files, self.files_non_prefetch.clone())
     }
 
-    /// Get node index array of files in the prefetch list.
-    pub fn get_file_nodes(&self) -> Vec<TreeNode> {
-        self.files.values().cloned().collect()
-    }
-
-    /// Get number of prefetch rules.
+    /// Get the number of ``valid`` prefetch rules.
     pub fn fs_prefetch_rule_count(&self) -> u32 {
         if self.policy == PrefetchPolicy::Fs {
-            self.patterns.values().len() as u32
+            self.patterns.values().filter(|v| v.is_some()).count() as u32
         } else {
             0
         }
@@ -231,13 +259,18 @@ impl Prefetch {
     /// Reset to initialization state.
     pub fn clear(&mut self) {
         self.disabled = false;
-        self.files.clear();
+        self.patterns.clear();
+        self.files_prefetch.clear();
+        self.files_non_prefetch.clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::node::NodeInfo;
+    use nydus_rafs::metadata::{inode::InodeWrapper, RafsVersion};
+    use std::sync::Mutex;
 
     #[test]
     fn test_generate_pattern() {
@@ -272,5 +305,87 @@ mod tests {
         assert_eq!(policy, PrefetchPolicy::None);
         PrefetchPolicy::from_str("").unwrap_err();
         PrefetchPolicy::from_str("invalid").unwrap_err();
+    }
+
+    #[test]
+    fn test_prefetch() {
+        let input = vec![
+            "/a/b".to_string(),
+            "/f".to_string(),
+            "/h/i".to_string(),
+            "/k".to_string(),
+        ];
+        let patterns = generate_patterns(input).unwrap();
+        let mut prefetch = Prefetch {
+            policy: PrefetchPolicy::Fs,
+            disabled: false,
+            patterns,
+            files_prefetch: Vec::with_capacity(10),
+            files_non_prefetch: Vec::with_capacity(10),
+        };
+        let mut inode = InodeWrapper::new(RafsVersion::V6);
+        inode.set_mode(0o755 | libc::S_IFREG as u32);
+        inode.set_size(1);
+
+        let info = NodeInfo::default();
+
+        let mut info1 = info.clone();
+        info1.target = PathBuf::from("/f");
+        let node1 = Node::new(inode.clone(), info1, 1);
+        let node1 = TreeNode::new(Mutex::from(node1));
+        prefetch.insert(&node1, &node1.lock().unwrap());
+
+        let inode2 = inode.clone();
+        let mut info2 = info.clone();
+        info2.target = PathBuf::from("/a/b");
+        let node2 = Node::new(inode2, info2, 1);
+        let node2 = TreeNode::new(Mutex::from(node2));
+        prefetch.insert(&node2, &node2.lock().unwrap());
+
+        let inode3 = inode.clone();
+        let mut info3 = info.clone();
+        info3.target = PathBuf::from("/h/i/j");
+        let node3 = Node::new(inode3, info3, 1);
+        let node3 = TreeNode::new(Mutex::from(node3));
+        prefetch.insert(&node3, &node3.lock().unwrap());
+
+        let inode4 = inode.clone();
+        let mut info4 = info.clone();
+        info4.target = PathBuf::from("/z");
+        let node4 = Node::new(inode4, info4, 1);
+        let node4 = TreeNode::new(Mutex::from(node4));
+        prefetch.insert(&node4, &node4.lock().unwrap());
+
+        let inode5 = inode.clone();
+        inode.set_mode(0o755 | libc::S_IFDIR as u32);
+        inode.set_size(0);
+        let mut info5 = info;
+        info5.target = PathBuf::from("/a/b/d");
+        let node5 = Node::new(inode5, info5, 1);
+        let node5 = TreeNode::new(Mutex::from(node5));
+        prefetch.insert(&node5, &node5.lock().unwrap());
+
+        // node1, node2
+        assert_eq!(prefetch.fs_prefetch_rule_count(), 2);
+
+        let (pre, non_pre) = prefetch.get_file_nodes();
+        assert_eq!(pre.len(), 4);
+        assert_eq!(non_pre.len(), 1);
+        let pre_str: Vec<String> = pre
+            .iter()
+            .map(|n| n.lock().unwrap().target().to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(pre_str, vec!["/a/b", "/a/b/d", "/f", "/h/i/j"]);
+        let non_pre_str: Vec<String> = non_pre
+            .iter()
+            .map(|n| n.lock().unwrap().target().to_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(non_pre_str, vec!["/z"]);
+
+        prefetch.clear();
+        assert_eq!(prefetch.fs_prefetch_rule_count(), 0);
+        let (pre, non_pre) = prefetch.get_file_nodes();
+        assert_eq!(pre.len(), 0);
+        assert_eq!(non_pre.len(), 0);
     }
 }

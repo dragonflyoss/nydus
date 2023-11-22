@@ -16,7 +16,7 @@ use sha2::digest::Digest;
 use super::layout::BlobLayout;
 use super::node::Node;
 use crate::core::context::Artifact;
-use crate::{BlobContext, BlobManager, BuildContext, ConversionType, Feature, Tree};
+use crate::{BlobContext, BlobManager, BuildContext, ConversionType, Feature};
 
 /// Generator for RAFS data blob.
 pub(crate) struct Blob {}
@@ -25,15 +25,13 @@ impl Blob {
     /// Dump blob file and generate chunks
     pub(crate) fn dump(
         ctx: &BuildContext,
-        tree: &Tree,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut dyn Artifact,
     ) -> Result<()> {
         match ctx.conversion_type {
             ConversionType::DirectoryToRafs => {
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
-                let (inodes, prefetch_entries) =
-                    BlobLayout::layout_blob_simple(&ctx.prefetch, tree)?;
+                let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch)?;
                 for (idx, node) in inodes.iter().enumerate() {
                     let mut node = node.lock().unwrap();
                     let size = node
