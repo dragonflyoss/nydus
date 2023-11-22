@@ -133,6 +133,9 @@ coverage-codecov:
 smoke-only:
 	make -C smoke test
 
+smoke-performance:
+	make -C smoke test-performance
+
 smoke: release smoke-only
 
 docker-nydus-smoke:

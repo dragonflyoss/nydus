@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -70,4 +71,17 @@ func GetBinary(t *testing.T, env, version string) string {
 		t.Fatalf("not found binary from env `%s`, version %s", env, version)
 	}
 	return binary
+}
+
+func ImageRepo(t *testing.T, image string) string {
+	if strings.Contains(image, "/") {
+		re := regexp.MustCompile(`^.*/`)
+		image = re.ReplaceAllString(image, "")
+	}
+	parts := strings.Split(image, ":")
+	if len(parts) > 0 {
+		return parts[0]
+	}
+	t.Fatalf("Can't get image repo of " + image)
+	return ""
 }

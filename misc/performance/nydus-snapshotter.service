@@ -1,0 +1,18 @@
+[Unit]
+Description=nydus snapshotter
+After=network.target
+Before=containerd.service
+
+[Service]
+Type=simple
+Environment=HOME=/root
+ExecStart=/usr/local/bin/containerd-nydus-grpc --config /etc/nydus/config.toml
+Restart=always
+RestartSec=1
+KillMode=process
+OOMScoreAdjust=-999
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
