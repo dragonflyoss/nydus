@@ -127,7 +127,7 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 	// Copy image
 	targetCopied := fmt.Sprintf("%s_copied", target)
 	copyCmd := fmt.Sprintf(
-		"%s %s copy --source %s --target %s --nydus-image %s --work-dir %s",
+		"%s %s copy --source %s --target %s --nydus-image %s --work-dir %s --push-chunk-size 1MB",
 		ctx.Binary.Nydusify, logLevel, target, targetCopied, ctx.Binary.Builder, ctx.Env.WorkDir,
 	)
 	tool.RunWithoutOutput(t, copyCmd)

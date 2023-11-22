@@ -18,6 +18,7 @@ import (
 
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/docker/distribution/reference"
+	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -1047,6 +1048,12 @@ func main() {
 				},
 
 				&cli.StringFlag{
+					Name:  "push-chunk-size",
+					Value: "0MB",
+					Usage: "Chunk size for pushing a blob layer in chunked",
+				},
+
+				&cli.StringFlag{
 					Name:    "work-dir",
 					Value:   "./tmp",
 					Usage:   "Working directory for image copy",
@@ -1067,6 +1074,14 @@ func main() {
 					return err
 				}
 
+				pushChunkSize, err := humanize.ParseBytes(c.String("push-chunk-size"))
+				if err != nil {
+					return errors.Wrap(err, "invalid --push-chunk-size option")
+				}
+				if pushChunkSize > 0 {
+					logrus.Infof("will copy layer with chunk size %s", c.String("push-chunk-size"))
+				}
+
 				opt := copier.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
@@ -1081,6 +1096,8 @@ func main() {
 
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
+
+					PushChunkSize: int64(pushChunkSize),
 				}
 
 				return copier.Copy(context.Background(), opt)
