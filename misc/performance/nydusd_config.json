@@ -1,0 +1,26 @@
+{
+    "device": {
+        "backend": {
+            "type": "registry",
+            "config": {
+                "scheme": "http",
+                "host": "localhost:5000"
+            }
+        },
+        "cache": {
+            "type": "blobcache",
+            "config": {
+                "work_dir": "/var/lib/containerd-nydus/cache"
+            }
+        }
+    },
+    "mode": "direct",
+    "digest_validate": false,
+    "enable_xattr": true,
+    "iostats_files": false,
+    "access_pattern": false,
+    "latest_read_files": false,
+    "fs_prefetch": {
+        "enable": false
+    }
+}
