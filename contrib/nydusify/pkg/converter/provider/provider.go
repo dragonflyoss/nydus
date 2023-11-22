@@ -6,15 +6,20 @@ package provider
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/remotes/docker"
 	"github.com/goharbor/acceleration-service/pkg/cache"
 	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
 	"github.com/goharbor/acceleration-service/pkg/remote"
@@ -32,9 +37,10 @@ type Provider struct {
 	platformMC   platforms.MatchComparer
 	cacheSize    int
 	cacheVersion string
+	chunkSize    int64
 }
 
-func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer) (*Provider, error) {
+func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64) (*Provider, error) {
 	contentDir := filepath.Join(root, "content")
 	if err := os.MkdirAll(contentDir, 0755); err != nil {
 		return nil, err
@@ -51,7 +57,50 @@ func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string
 		cacheSize:    int(cacheSize),
 		platformMC:   platformMC,
 		cacheVersion: cacheVersion,
+		chunkSize:    chunkSize,
 	}, nil
+}
+
+func newDefaultClient(skipTLSVerify bool) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+				DualStack: true,
+			}).DialContext,
+			MaxIdleConns:          10,
+			IdleConnTimeout:       30 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 5 * time.Second,
+			DisableKeepAlives:     true,
+			TLSNextProto:          make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: skipTLSVerify,
+			},
+		},
+	}
+}
+
+func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunkSize int64) remotes.Resolver {
+	registryHosts := docker.ConfigureDefaultRegistries(
+		docker.WithAuthorizer(
+			docker.NewDockerAuthorizer(
+				docker.WithAuthClient(newDefaultClient(insecure)),
+				docker.WithAuthCreds(credFunc),
+			),
+		),
+		docker.WithClient(newDefaultClient(insecure)),
+		docker.WithPlainHTTP(func(host string) (bool, error) {
+			return plainHTTP, nil
+		}),
+		docker.WithChunkSize(chunkSize),
+	)
+
+	return docker.NewResolver(docker.ResolverOptions{
+		Hosts: registryHosts,
+	})
 }
 
 func (pvd *Provider) UsePlainHTTP() {
@@ -63,7 +112,7 @@ func (pvd *Provider) Resolver(ref string) (remotes.Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return remote.NewResolver(insecure, pvd.usePlainHTTP, credFunc), nil
+	return newResolver(insecure, pvd.usePlainHTTP, credFunc, pvd.chunkSize), nil
 }
 
 func (pvd *Provider) Pull(ctx context.Context, ref string) error {
