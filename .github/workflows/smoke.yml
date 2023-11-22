@@ -212,3 +212,33 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: EmbarkStudios/cargo-deny-action@v1
+
+  performance-test:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - mode: fs-version-5
+          - mode: fs-version-6
+          - mode: zran
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Nydus Container Environment
+      run: |
+        sudo bash misc/performance/prepare.sh
+    - name: Performance Test
+      run: |
+        export PERFORMANCE_TEST_MODE=${{ matrix.mode }}
+        sudo -E make smoke-performance
