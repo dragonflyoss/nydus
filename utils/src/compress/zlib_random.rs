@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::{mem, ptr};
 
 use libz_sys::{
-    inflate, inflateEnd, inflateInit2_, inflatePrime, inflateReset, inflateSetDictionary, uInt,
-    z_stream, zlibVersion, Z_BLOCK, Z_BUF_ERROR, Z_OK, Z_STREAM_END,
+    inflate, inflateEnd, inflateInit2_, inflatePrime, inflateReset, inflateReset2,
+    inflateSetDictionary, uInt, z_stream, zlibVersion, Z_BLOCK, Z_BUF_ERROR, Z_OK, Z_STREAM_END,
 };
 use sha2::{Digest, Sha256};
 
@@ -118,19 +118,65 @@ impl ZranDecoder {
         self.stream.set_dict(dict)?;
 
         self.stream.set_next_in(input);
-        self.stream.set_next_out(output);
-        self.stream.set_avail_out(ctx.out_len as uInt);
-        let ret = self.stream.inflate(true);
-        match ret {
-            Z_OK => {
-                let count = self.stream.next_out() as usize - output.as_ptr() as usize;
-                if count != ctx.out_len as usize {
-                    Err(eio!("failed to decode data from stream, size mismatch"))
-                } else {
-                    Ok(count)
+
+        let mut left = ctx.out_len;
+        loop {
+            let used = (ctx.out_len - left) as usize;
+            self.stream.set_next_out(&mut output[used..]);
+            self.stream.set_avail_out(left as uInt);
+            let mut got = self.stream.avail_out();
+            let mut ret = self.stream.raw_inflate(0);
+            got -= self.stream.avail_out();
+            left -= got;
+
+            match ret {
+                Z_OK => {
+                    let count = self.stream.next_out() as usize - output.as_ptr() as usize;
+                    if count != ctx.out_len as usize {
+                        return Err(eio!("failed to decode data from stream, size mismatch"));
+                    } else {
+                        return Ok(count);
+                    }
+                }
+                Z_STREAM_END => {
+                    // Discard the gzip trailer.
+                    let drop = 8;
+                    if self.stream.avail_in() >= drop {
+                        let avail_in = self.stream.avail_in();
+                        let used = input.len() - avail_in as usize + drop as usize;
+                        self.stream.set_next_in(&input[used..]);
+                    } else {
+                        // The input does not have a complete trailer.
+                        return Err(eio!("the input does not have a complete gzip trailer"));
+                    }
+                    // Use inflate to skip the gzip header and resume the raw inflate there.
+                    self.stream.reset2(true)?;
+                    let mut discard = vec![0u8; ZRAN_DICT_WIN_SIZE];
+                    loop {
+                        self.stream.set_next_out(&mut discard);
+                        self.stream.set_avail_out(ZRAN_DICT_WIN_SIZE as u32);
+                        ret = self.stream.raw_inflate(Z_BLOCK); // stop at end of header
+                        if ret == Z_OK && (self.stream.data_type() & 0x80) == 0 {
+                            continue;
+                        }
+
+                        if ret != Z_OK {
+                            return Err(eio!(format!(
+                                "failed to handle gzip multi member, ret: {:?}",
+                                ret
+                            )));
+                        }
+                        self.stream.reset2(false)?;
+                        break;
+                    }
+                }
+                e => {
+                    return Err(eio!(format!(
+                        "failed to decode data from compressed data stream, ret: {}",
+                        e
+                    )))
                 }
             }
-            _ => Err(eio!("failed to decode data from compressed data stream")),
         }
     }
 }
@@ -531,14 +577,27 @@ impl ZranStream {
         let mode = if decode { 0 } else { Z_BLOCK };
         self.total_in += self.stream.avail_in as u64;
         self.total_out += self.stream.avail_out as u64;
-        let ret = unsafe { inflate(self.stream.deref_mut() as *mut z_stream, mode) };
+        let ret = self.raw_inflate(mode);
         self.total_in -= self.stream.avail_in as u64;
         self.total_out -= self.stream.avail_out as u64;
         ret
     }
 
+    fn raw_inflate(&mut self, mode: i32) -> i32 {
+        unsafe { inflate(self.stream.deref_mut() as *mut z_stream, mode) }
+    }
+
     fn reset(&mut self) -> Result<()> {
         let ret = unsafe { inflateReset(self.stream.deref_mut() as *mut z_stream) };
+        if ret != Z_OK {
+            return Err(einval!("failed to reset zlib inflate context"));
+        }
+        Ok(())
+    }
+
+    fn reset2(&mut self, is_gzip: bool) -> Result<()> {
+        let winodw_bits = if is_gzip { 31 } else { -15 };
+        let ret = unsafe { inflateReset2(self.stream.deref_mut() as *mut z_stream, winodw_bits) };
         if ret != Z_OK {
             return Err(einval!("failed to reset zlib inflate context"));
         }
@@ -616,6 +675,14 @@ impl ZranStream {
 
     fn avail_in(&self) -> u32 {
         self.stream.avail_in
+    }
+
+    fn avail_out(&self) -> u32 {
+        self.stream.avail_out
+    }
+
+    fn data_type(&self) -> i32 {
+        self.stream.data_type
     }
 
     fn set_avail_in(&mut self, avail_in: u32) {
@@ -842,6 +909,48 @@ mod tests {
 
         let ctx = generator.get_compression_ctx_array();
         assert_eq!(ctx.len(), 3);
+    }
+
+    #[test]
+    fn test_zran_bgzip() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/bgzip.tar.gz");
+        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let reader = ZranReader::new(file).unwrap();
+        let mut tar = Archive::new(reader.clone());
+        tar.set_ignore_zeros(true);
+        let mut generator = ZranGenerator::new(reader);
+        generator.set_min_compressed_size(1024);
+        generator.set_max_compressed_size(2048);
+        generator.set_max_uncompressed_size(4096);
+
+        let entries = tar.entries().unwrap();
+        for entry in entries {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type() == EntryType::Regular {
+                loop {
+                    let _start = generator.begin_read(512).unwrap();
+                    let mut buf = vec![0u8; 512];
+                    let sz = entry.read(&mut buf).unwrap();
+                    let _info = generator.end_read().unwrap();
+                    if sz == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let ctx_array = generator.get_compression_ctx_array();
+        for ctx in ctx_array.iter() {
+            let mut c_buf = vec![0u8; ctx.in_len as usize];
+            let mut file = OpenOptions::new().read(true).open(&path).unwrap();
+            file.seek(SeekFrom::Start(ctx.in_offset)).unwrap();
+            file.read_exact(&mut c_buf).unwrap();
+
+            let mut d_buf = vec![0u8; ctx.out_len as usize];
+            let mut decoder = ZranDecoder::new().unwrap();
+            decoder.uncompress(ctx, None, &c_buf, &mut d_buf).unwrap();
+        }
     }
 
     #[test]
