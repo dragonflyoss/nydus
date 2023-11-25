@@ -142,7 +142,7 @@ pub fn decompress(src: &[u8], dst: &mut [u8], algorithm: Algorithm) -> Result<us
 /// Stream decoder for gzip/lz4/zstd.
 pub enum Decoder<'a, R: Read> {
     None(R),
-    Gzip(flate2::bufread::GzDecoder<BufReader<R>>),
+    Gzip(flate2::bufread::MultiGzDecoder<BufReader<R>>),
     Zstd(zstd::stream::Decoder<'a, BufReader<R>>),
 }
 
@@ -152,7 +152,7 @@ impl<'a, R: Read> Decoder<'a, R> {
         let decoder = match algorithm {
             Algorithm::None => Decoder::None(reader),
             Algorithm::GZip => {
-                Decoder::Gzip(flate2::bufread::GzDecoder::new(BufReader::new(reader)))
+                Decoder::Gzip(flate2::bufread::MultiGzDecoder::new(BufReader::new(reader)))
             }
             Algorithm::Lz4Block => panic!("Decoder doesn't support lz4_block"),
             Algorithm::Zstd => Decoder::Zstd(zstd::stream::Decoder::new(reader)?),
@@ -173,14 +173,14 @@ impl<'a, R: Read> Read for Decoder<'a, R> {
 
 /// Stream decoder for zlib/gzip.
 pub struct ZlibDecoder<R> {
-    stream: flate2::bufread::GzDecoder<BufReader<R>>,
+    stream: flate2::bufread::MultiGzDecoder<BufReader<R>>,
 }
 
 impl<R: Read> ZlibDecoder<R> {
     /// Create a new instance of `ZlibDecoder`.
     pub fn new(reader: R) -> Self {
         ZlibDecoder {
-            stream: flate2::bufread::GzDecoder::new(BufReader::new(reader)),
+            stream: flate2::bufread::MultiGzDecoder::new(BufReader::new(reader)),
         }
     }
 }

@@ -44,3 +44,4 @@ solr
 sentry
 zookeeper
 ghcr.io/dragonflyoss/image-service/pax-uid-test
+cgr.dev/chainguard/busybox
