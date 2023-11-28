@@ -58,7 +58,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
     }
 
     fn set_uncompressed_offset(&mut self, offset: u64) {
-        assert_eq!(offset & !BLOB_CC_V1_CHUNK_UNCOMP_OFFSET_MASK, 0);
+        assert_eq!(
+            ((offset & !BLOB_CC_V1_CHUNK_UNCOMP_OFFSET_MASK) >> 32) as u32,
+            0
+        );
         self.uncomp_info &= u64::to_le(!BLOB_CC_V1_CHUNK_UNCOMP_OFFSET_MASK);
         self.uncomp_info |= u64::to_le(offset & BLOB_CC_V1_CHUNK_UNCOMP_OFFSET_MASK);
     }

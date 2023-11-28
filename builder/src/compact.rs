@@ -79,7 +79,7 @@ impl ChunkKey {
         match c {
             ChunkWrapper::V5(_) => Self::Digest(*c.id()),
             ChunkWrapper::V6(_) => Self::Offset(c.blob_index(), c.compressed_offset()),
-            ChunkWrapper::Ref(_) => unimplemented!("unsupport ChunkWrapper::Ref(c)"),
+            ChunkWrapper::Ref(_) => Self::Offset(c.blob_index(), c.compressed_offset()),
         }
     }
 }
@@ -332,6 +332,20 @@ impl BlobCompactor {
                             cs.add_chunk(&chunk.inner);
                         }
                     }
+                } else if let Some(c) = all_chunks.get_chunk(&chunk_key) {
+                    let mut chunk_inner = chunk.inner.deref().clone();
+                    apply_chunk_change(c, &mut chunk_inner)?;
+                    chunk.inner = Arc::new(chunk_inner);
+                } else {
+                    all_chunks.add_chunk(&chunk.inner);
+                    // add to per blob ChunkSet
+                    let blob_index = chunk.inner.blob_index() as usize;
+                    if self.states[blob_index].is_invalid() {
+                        self.states[blob_index] = State::Original(ChunkSet::new());
+                    }
+                    if let State::Original(cs) = &mut self.states[blob_index] {
+                        cs.add_chunk(&chunk.inner);
+                    }
                 }
 
                 // construct blobs/chunk --> nodes index map
@@ -404,7 +418,7 @@ impl BlobCompactor {
     }
 
     fn prepare_to_rebuild(&mut self, idx: usize) -> Result<()> {
-        if !self.states[idx].is_rebuild() {
+        if self.states[idx].is_rebuild() {
             return Ok(());
         }
 
@@ -443,8 +457,8 @@ impl BlobCompactor {
             };
 
             info!(
-                "compactor: original blob size {}, used data ratio {}%",
-                blob_info.blob_id, used_ratio
+                "compactor: original blob id is {}, blob size is {}, used data ratio {}%",
+                blob_info.blob_id, blob_info.compressed_blob_size, used_ratio
             );
             if used_ratio < ratio {
                 self.prepare_to_rebuild(idx)?;
@@ -531,7 +545,7 @@ impl BlobCompactor {
         let ori_blob_ids = self.original_blob_ids();
         ensure!(self.states.len() == self.ori_blob_mgr.len());
 
-        for idx in 0..self.states.len() {
+        for idx in (0..self.states.len()).rev() {
             match &self.states[idx] {
                 State::Original(_) | State::ChunkDict => {
                     info!("compactor: keep original data blob {}", ori_blob_ids[idx]);
@@ -613,6 +627,13 @@ impl BlobCompactor {
             Features::new(),
             false,
         );
+        if rs.meta.is_v5() {
+            build_ctx.fs_version = RafsVersion::V5;
+            info!("Version:V5");
+        } else {
+            build_ctx.fs_version = RafsVersion::V6;
+            info!("Version:V6");
+        }
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
@@ -786,7 +807,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "not implemented: unsupport ChunkWrapper::Ref(c)"]
     fn test_chunk_key_from() {
         let cw = ChunkWrapper::new(RafsVersion::V5);
         matches!(ChunkKey::from(&cw), ChunkKey::Digest(_));
@@ -807,7 +827,7 @@ mod tests {
             reserved: 0,
         }) as Arc<dyn BlobChunkInfo>;
         let cw = ChunkWrapper::Ref(chunk);
-        ChunkKey::from(&cw);
+        matches!(ChunkKey::from(&cw), ChunkKey::Offset(_, _));
     }
 
     #[test]
@@ -1190,7 +1210,7 @@ mod tests {
         compactor.ori_blob_mgr.add_blob(blob_ctx4);
         compactor.ori_blob_mgr.add_blob(blob_ctx5);
 
-        compactor.states[0] = State::Invalid;
+        compactor.states[4] = State::Invalid;
 
         let tmp_dir = TempDir::new().unwrap();
         let dir = tmp_dir.as_path().to_str().unwrap();

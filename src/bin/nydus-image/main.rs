@@ -654,8 +654,8 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required(true),
                 )
                 .arg(
-                    Arg::new("config")
-                        .long("config")
+                    Arg::new("compact-config")
+                        .long("compact-config")
                         .short('C')
                         .help("config to compactor")
                         .required(true),
@@ -1293,7 +1293,7 @@ impl Command {
             Self::get_configuration(matches).context("failed to get configuration information")?;
         config
             .internal
-            .set_blob_accessible(matches.get_one::<String>("config").is_some());
+            .set_blob_accessible(matches.get_one::<String>("bootstrap").is_some());
         let bootstrap_path = PathBuf::from(Self::get_bootstrap(matches)?);
         let dst_bootstrap = match matches.get_one::<String>("output-bootstrap") {
             None => bootstrap_path.with_extension("bootstrap.compact"),
@@ -1313,7 +1313,7 @@ impl Command {
 
         let backend = Self::get_backend(matches, "compactor")?;
 
-        let config_file_path = matches.get_one::<String>("config").unwrap();
+        let config_file_path = matches.get_one::<String>("compact-config").unwrap();
         let file = File::open(config_file_path)
             .with_context(|| format!("failed to open config file {}", config_file_path))?;
         let config = serde_json::from_reader(file)
