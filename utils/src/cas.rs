@@ -1,19 +1,17 @@
-// Copyright (C) 2022 Alibaba Cloud. All rights reserved.
+// Copyright (C) 2022-2023 Alibaba Cloud. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::{self, Display, Formatter};
-use std::io;
-use std::path::{Path, PathBuf};
+use std::io::Error;
+use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
-
-use crate::digest::RafsDigest;
+use rusqlite::{Connection, DropBehavior, OptionalExtension, Transaction};
 
 /// Error codes related to local cas.
 #[derive(Debug)]
 pub enum CasError {
-    Io(std::io::Error),
+    Io(Error),
     Db(rusqlite::Error),
 }
 
@@ -31,8 +29,8 @@ impl From<rusqlite::Error> for CasError {
     }
 }
 
-impl From<io::Error> for CasError {
-    fn from(e: io::Error) -> Self {
+impl From<Error> for CasError {
+    fn from(e: Error) -> Self {
         CasError::Io(e)
     }
 }
@@ -40,411 +38,303 @@ impl From<io::Error> for CasError {
 /// Specialized `Result` for local cas.
 type Result<T> = std::result::Result<T, CasError>;
 
-pub struct CasMgr {
+pub struct CasDb {
     conn: Connection,
 }
 
-impl CasMgr {
-    pub fn new(path: impl AsRef<Path>) -> Result<CasMgr> {
+impl CasDb {
+    pub fn new(path: impl AsRef<Path>) -> Result<CasDb> {
         let mut db_path = path.as_ref().to_owned();
         db_path.push("cas.db");
         let conn = Connection::open(db_path)?;
 
-        // create blob and chunk table for nydus v5
+        // Always wait in case of busy.
+        conn.busy_handler(Some(|_v| true))?;
+
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS BlobInfos_V5 (
-            BlobId     TEXT NOT NULL PRIMARY KEY,
-            BlobInfo   TEXT NOT NULL,
-            Backend    TEXT NOT NULL
+            "CREATE TABLE IF NOT EXISTS Blobs (
+            BlobId  INTEGER PRIMARY KEY,
+            FilePath   TEXT NOT NULL UNIQUE
+        )",
+            (),
+        )?;
+        /*
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS BlobIndex ON Blobs(FilePath)",
+            (),
+        )?;
+         */
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS Chunks (
+            ChunkId           TEXT NOT NULL,
+            ChunkOffset       INTEGER,
+            BlobId            INTEGER,
+            UNIQUE(ChunkId, BlobID) ON CONFLICT IGNORE,
+            FOREIGN KEY(BlobId) REFERENCES Blobs(BlobId)
         )",
             (),
         )?;
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS BlobIndex_V5 ON BlobInfos_V5(BlobId)",
+            "CREATE INDEX IF NOT EXISTS ChunkIndex ON Chunks(ChunkId)",
             (),
         )?;
+        /*
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ChunkBlobIndex ON Chunks(BlobId)",
+            (),
+        )?;
+         */
 
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS ChunkInfos_V5 (
-            ChunkId           INTEGER PRIMARY KEY,
-            ChunkDigestValue  TEXT NOT NULL,
-            ChunkInfo         TEXT NOT NULL,
-            BlobId            TEXT NOT NULL,
-            UNIQUE(ChunkDigestValue, BlobId) ON CONFLICT IGNORE,
-            FOREIGN KEY(BlobId) REFERENCES BlobInfos_V5(BlobId)
-        )",
-            (),
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS ChunkIndex_V5 ON ChunkInfos_V5(ChunkDigestValue)",
-            (),
-        )?;
-
-        // create blob and chunk table for nydus v6
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS BlobInfos_V6 (
-            BlobId     TEXT NOT NULL PRIMARY KEY,
-            BlobInfo   TEXT NOT NULL,
-            Backend    TEXT NOT NULL
-        )",
-            (),
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS BlobIndex_V6 ON BlobInfos_V6(BlobId)",
-            (),
-        )?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS ChunkInfos_V6 (
-            ChunkId           INTEGER PRIMARY KEY,
-            ChunkDigestValue  TEXT NOT NULL,
-            ChunkInfo         TEXT NOT NULL,
-            BlobId            TEXT NOT NULL,
-            UNIQUE(ChunkDigestValue, BlobId) ON CONFLICT IGNORE,
-            FOREIGN KEY(BlobId) REFERENCES BlobInfos_V6(BlobId)
-        )",
-            (),
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS ChunkIndex_V6 ON ChunkInfos_V6(ChunkDigestValue)",
-            (),
-        )?;
-
-        Ok(CasMgr { conn })
+        Ok(CasDb { conn })
     }
 
-    pub fn get_bootstrap(&mut self, _file: impl AsRef<Path>) -> Option<PathBuf> {
-        unimplemented!()
-    }
+    pub fn get_blob_id_with_tx(tran: &Transaction, blob: &str) -> Result<Option<u64>> {
+        let sql = "SELECT BlobId FROM Blobs WHERE FilePath = ?";
 
-    pub fn add_bootstrap(
-        &mut self,
-        _source: impl AsRef<Path>,
-        _target: impl AsRef<Path>,
-    ) -> Result<()> {
-        unimplemented!()
-    }
-
-    pub fn remove_bootstrap(&mut self, _file: impl AsRef<Path>) -> Result<()> {
-        unimplemented!()
-    }
-
-    pub fn get_blob(&self, blob_id: &str, is_v6: bool) -> Result<Option<String>> {
-        let sql = if is_v6 {
-            "SELECT BlobInfo FROM BlobInfos_V6 WHERE BlobId = ?"
-        } else {
-            "SELECT BlobInfo FROM BlobInfos_V5 WHERE BlobId = ?"
-        };
-
-        if let Some(blob_info) = self
-            .conn
-            .query_row(sql, [blob_id], |row| row.get::<usize, String>(0))
+        if let Some(id) = tran
+            .query_row(sql, [blob], |row| row.get::<usize, u64>(0))
             .optional()?
         {
-            return Ok(Some(blob_info));
+            return Ok(Some(id));
+        }
+
+        Ok(None)
+    }
+
+    pub fn get_blob_id(&self, blob: &str) -> Result<Option<u64>> {
+        let sql = "SELECT BlobId FROM Blobs WHERE FilePath = ?";
+
+        if let Some(id) = self
+            .conn
+            .query_row(sql, [blob], |row| row.get::<usize, u64>(0))
+            .optional()?
+        {
+            return Ok(Some(id));
+        }
+
+        Ok(None)
+    }
+
+    pub fn get_blob_path(&self, id: u64) -> Result<Option<String>> {
+        let sql = "SELECT FilePath FROM Blobs WHERE BlobId = ?";
+
+        if let Some(path) = self
+            .conn
+            .query_row(sql, [id], |row| row.get::<usize, String>(0))
+            .optional()?
+        {
+            return Ok(Some(path));
         };
 
         Ok(None)
     }
 
-    pub fn get_backend_by_blob_id(&self, blob_id: &str, is_v6: bool) -> Result<Option<String>> {
-        let sql = if is_v6 {
-            "SELECT Backend FROM BlobInfos_V6 WHERE BlobId = ?"
-        } else {
-            "SELECT Backend FROM BlobInfos_V5 WHERE BlobId = ?"
-        };
-
-        if let Some(backend) = self
-            .conn
-            .query_row(sql, [blob_id], |row| row.get::<usize, String>(0))
-            .optional()?
-        {
-            return Ok(Some(backend));
-        };
-
-        Ok(None)
-    }
-
-    pub fn get_all_blobs(&self, is_v6: bool) -> Result<Vec<(String, String)>> {
-        let mut stmt = if is_v6 {
-            self.conn
-                .prepare("SELECT BlobId, BlobInfo FROM BlobInfos_V6")?
-        } else {
-            self.conn
-                .prepare("SELECT BlobId, BlobInfo FROM BlobInfos_V5")?
-        };
-
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-
-        let mut results: Vec<(String, String)> = Vec::new();
+    pub fn get_all_blobs(&self) -> Result<Vec<(u64, String)>> {
+        let mut stmt = self.conn.prepare("SELECT BlobId, FilePath FROM Blobs")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<usize, u64>(0)?, row.get(1)?)))?;
+        let mut results: Vec<(u64, String)> = Vec::new();
         for row in rows {
             results.push(row?);
         }
-
         Ok(results)
     }
 
-    pub fn add_blobs(&mut self, blobs: &Vec<(String, String, String)>, is_v6: bool) -> Result<()> {
-        let sql = if is_v6 {
-            "INSERT OR IGNORE INTO BlobInfos_V6 (BlobId, BlobInfo, Backend)
-                VALUES (?1, ?2, ?3)"
-        } else {
-            "INSERT OR IGNORE INTO BlobInfos_V5 (BlobId, BlobInfo, Backend)
-                VALUES (?1, ?2, ?3)"
-        };
+    pub fn add_blobs(&mut self, blobs: &[String]) -> Result<()> {
+        let sql = "INSERT OR IGNORE INTO Blobs (FilePath) VALUES (?1)";
 
-        // let tran = self.conn.transaction()?;
-        let tran = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
+        let tran = self.begin_transaction()?;
         for blob in blobs {
-            tran.execute(sql, (&blob.0, &blob.1, &blob.2)).unwrap();
+            if let Err(e) = tran.execute(sql, [blob]) {
+                return Err(e.into());
+            };
         }
         tran.commit()?;
 
         Ok(())
     }
 
-    pub fn delete_blobs(&mut self, blobs: &[String], is_v6: bool) -> Result<()> {
-        let delete_blobs_sql = if is_v6 {
-            "DELETE  FROM BlobInfos_V6 WHERE BlobId = (?1)"
-        } else {
-            "DELETE  FROM BlobInfos_V5 WHERE BlobId = (?1)"
-        };
+    pub fn add_blob(&mut self, blob: &str) -> Result<u64> {
+        let sql = "INSERT OR IGNORE INTO Blobs (FilePath) VALUES (?1)";
+        self.conn.execute(sql, [blob])?;
+        Ok(self.conn.last_insert_rowid() as u64)
+    }
 
-        let delete_chunks_sql = if is_v6 {
-            "DELETE FROM ChunkInfos_V6 WHERE BlobId = (?1)"
-        } else {
-            "DELETE FROM ChunkInfos_V5 WHERE BlobId = (?1)"
-        };
+    pub fn delete_blobs(&mut self, blobs: &[String]) -> Result<()> {
+        let delete_blobs_sql = "DELETE FROM Blobs WHERE FilePath = (?1)";
+        let delete_chunks_sql = "DELETE FROM Chunks WHERE BlobId = (?1)";
 
-        let tran = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        for blob_id in blobs {
-            tran.execute(delete_blobs_sql, [blob_id]).unwrap();
-            tran.execute(delete_chunks_sql, [blob_id]).unwrap();
+        let tran = self.begin_transaction()?;
+        for blob in blobs {
+            if let Some(id) = Self::get_blob_id_with_tx(&tran, blob)? {
+                if let Err(e) = tran.execute(delete_chunks_sql, [id]) {
+                    return Err(e.into());
+                }
+            }
+            if let Err(e) = tran.execute(delete_blobs_sql, [blob]) {
+                return Err(e.into());
+            }
         }
         tran.commit()?;
 
         Ok(())
     }
 
-    pub fn get_chunk(
-        &self,
-        chunk_id: &RafsDigest,
-        blob_id: &str,
-        is_v6: bool,
-    ) -> Result<Option<(String, String)>> {
-        let sql = if is_v6 {
-            "SELECT BlobId, ChunkInfo
-                FROM ChunkInfos_V6 INDEXED BY ChunkIndex_V6
-                WHERE ChunkDigestValue = ?"
-        } else {
-            "SELECT BlobId, ChunkInfo
-                FROM ChunkInfos_V5 INDEXED BY ChunkIndex_V5
-                WHERE ChunkDigestValue = ?"
-        };
+    pub fn get_chunk_info(&self, chunk_id: &str) -> Result<Option<(String, u64)>> {
+        let sql = "SELECT FilePath, ChunkOffset \
+                FROM Chunks INDEXED BY ChunkIndex \
+                JOIN Blobs ON Chunks.BlobId = Blobs.BlobId \
+                WHERE ChunkId = ?\
+                ORDER BY Blobs.BlobId LIMIT 1 OFFSET 0";
 
         if let Some((new_blob_id, chunk_info)) = self
             .conn
-            .query_row(sql, [String::from(chunk_id.to_owned()).as_str()], |row| {
-                Ok((row.get(0)?, row.get(1)?))
+            .query_row(sql, [chunk_id], |row| {
+                Ok((row.get(0)?, row.get::<usize, u64>(1)?))
             })
             .optional()?
         {
-            trace!("new_blob_id = {}, chunk_info = {}", new_blob_id, chunk_info);
-
-            if new_blob_id != *blob_id {
-                return Ok(Some((new_blob_id, chunk_info)));
-            }
+            return Ok(Some((new_blob_id, chunk_info)));
         }
 
         Ok(None)
     }
 
-    pub fn add_chunks(
-        &mut self,
-        chunks: &Vec<(String, String, String)>,
-        is_v6: bool,
-    ) -> Result<()> {
-        let sql = if is_v6 {
-            "INSERT OR IGNORE INTO ChunkInfos_V6 (ChunkDigestValue, ChunkInfo, BlobId)
-                    VALUES (?1, ?2, ?3)"
-        } else {
-            "INSERT OR IGNORE INTO ChunkInfos_V5 (ChunkDigestValue, ChunkInfo, BlobId)
-                    VALUES (?1, ?2, ?3)"
-        };
+    pub fn add_chunks(&mut self, chunks: &[(String, u64, String)]) -> Result<()> {
+        let sql = "INSERT OR IGNORE INTO Chunks (ChunkId, ChunkOffset, BlobId) VALUES (?1, ?2, ?3)";
 
-        let tran = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
+        let tran = self.begin_transaction()?;
         for chunk in chunks {
-            tran.execute(sql, (&chunk.0, &chunk.1, &chunk.2)).unwrap();
+            match Self::get_blob_id_with_tx(&tran, &chunk.2) {
+                Err(e) => return Err(e.into()),
+                Ok(id) => {
+                    if let Err(e) = tran.execute(sql, (&chunk.0, &chunk.1, id)) {
+                        return Err(e.into());
+                    }
+                }
+            }
         }
         tran.commit()?;
 
         Ok(())
     }
 
-    pub fn delete_chunks(&mut self, blob_id: &str, chunk_id: &str, is_v6: bool) -> Result<()> {
-        let sql = if is_v6 {
-            "DELETE OR IGNORE FROM ChunkInfos_V6 WHERE BlobId = (?1) AND ChunkId = (?2)"
-        } else {
-            "DELETE OR IGNORE FROM ChunkInfos_V5 WHERE BlobId = (?1) AND ChunkId = (?2)"
-        };
+    pub fn add_chunk(&mut self, chunk_id: &str, chunk_offset: u64, blob_id: &str) -> Result<()> {
+        let sql = "INSERT OR IGNORE INTO Chunks (ChunkId, ChunkOffset, BlobId) VALUES (?1, ?2, ?3)";
 
-        let tran = self
+        let tran = self.begin_transaction()?;
+        match Self::get_blob_id_with_tx(&tran, blob_id) {
+            Err(e) => return Err(e.into()),
+            Ok(id) => {
+                if let Err(e) = tran.execute(sql, (chunk_id, chunk_offset, id)) {
+                    return Err(e.into());
+                }
+            }
+        }
+        tran.commit()?;
+
+        Ok(())
+    }
+
+    fn begin_transaction(&mut self) -> Result<Transaction> {
+        let mut tx = self
             .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        tran.execute(sql, [blob_id, chunk_id]).unwrap();
-        tran.commit()?;
-
-        Ok(())
-    }
-
-    pub fn delete_chunks_by_blobid(&mut self, blob_id: &str, is_v6: bool) -> Result<()> {
-        let sql = if is_v6 {
-            "DELETE  FROM ChunkInfos_V6 WHERE BlobId = (?1)"
-        } else {
-            "DELETE  FROM ChunkInfos_V5 WHERE BlobId = (?1)"
-        };
-
-        let tran = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)?;
-        tran.execute(sql, [blob_id]).unwrap();
-        tran.commit()?;
-
-        Ok(())
-    }
-
-    pub fn get_chunks_by_blobid(
-        &self,
-        blob_id: &str,
-        is_v6: bool,
-    ) -> Result<Vec<(String, String)>> {
-        let sql = if is_v6 {
-            "SELECT BlobId, ChunkInfo FROM ChunkInfos_V6 WHERE BlobId = (?1)"
-        } else {
-            "SELECT BlobId, ChunkInfo FROM ChunkInfos_V5 WHERE BlobId = (?1)"
-        };
-
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([blob_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-
-        let mut results: Vec<(String, String)> = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-
-        Ok(results)
-    }
-
-    pub fn get_all_chunks(&self, is_v6: bool) -> Result<Vec<(String, String)>> {
-        let sql = if is_v6 {
-            "SELECT BlobId, ChunkInfo FROM ChunkInfos_V6"
-        } else {
-            "SELECT BlobId, ChunkInfo FROM ChunkInfos_V5"
-        };
-
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-
-        let mut results: Vec<(String, String)> = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-
-        Ok(results)
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.set_drop_behavior(DropBehavior::Rollback);
+        Ok(tx)
     }
 }
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-    use std::{fs, path::PathBuf};
+    use vmm_sys_util::tempdir::TempDir;
 
     #[test]
-    fn test_get_all_blobs() {
-        let path = PathBuf::from("/tmp/local-cas");
-        match fs::create_dir_all(path.clone()) {
-            Ok(()) => println!("Directory created!"),
-            Err(e) => println!("Error: {:?}", e),
-        };
-        let cas_mgr = CasMgr::new(path).unwrap();
-        let vec = cas_mgr.get_all_blobs(false).unwrap();
+    fn test_cas_blob() {
+        let tmpdir = TempDir::new().unwrap();
 
-        println!("v5 blobs");
-        for (blob_id, _blob_info) in vec {
-            let backend = cas_mgr
-                .get_backend_by_blob_id(&blob_id, false)
-                .unwrap()
-                .unwrap();
-            println!("blob_id: {}, backend: {}", blob_id, backend);
-        }
+        let mut cas_mgr = CasDb::new(tmpdir.as_path()).unwrap();
+        cas_mgr
+            .add_blobs(&["/tmp/blob1".to_string(), "/tmp/blob2".to_string()])
+            .unwrap();
 
-        println!("v6 blobs");
-        let vec = cas_mgr.get_all_blobs(true).unwrap();
-        for (blob_id, _blob_info) in vec {
-            let backend = cas_mgr
-                .get_backend_by_blob_id(&blob_id, true)
-                .unwrap()
-                .unwrap();
-            println!("blob_id: {}, backend: {}", blob_id, backend);
-        }
+        let mut mgr2 = CasDb::new(tmpdir.as_path()).unwrap();
+        assert_eq!(mgr2.add_blob("/tmp/blob3").unwrap(), 3);
+
+        drop(cas_mgr);
+
+        assert_eq!(mgr2.get_blob_id("/tmp/blob1").unwrap(), Some(1));
+        assert_eq!(mgr2.get_blob_id("/tmp/blob2").unwrap(), Some(2));
+        assert_eq!(mgr2.get_blob_id("/tmp/blob3").unwrap(), Some(3));
+        assert_eq!(mgr2.get_blob_id("/tmp/blob4").unwrap(), None);
+
+        assert_eq!(
+            mgr2.get_blob_path(1).unwrap(),
+            Some("/tmp/blob1".to_string())
+        );
+        assert_eq!(
+            mgr2.get_blob_path(2).unwrap(),
+            Some("/tmp/blob2".to_string())
+        );
+        assert_eq!(
+            mgr2.get_blob_path(3).unwrap(),
+            Some("/tmp/blob3".to_string())
+        );
+        assert_eq!(mgr2.get_blob_path(4).unwrap(), None);
+
+        let blobs = mgr2.get_all_blobs().unwrap();
+        assert_eq!(blobs.len(), 3);
+
+        mgr2.delete_blobs(&["/tmp/blob1".to_string(), "/tmp/blob2".to_string()])
+            .unwrap();
+        assert_eq!(mgr2.get_blob_path(1).unwrap(), None);
+        assert_eq!(mgr2.get_blob_path(2).unwrap(), None);
+        assert_eq!(
+            mgr2.get_blob_path(3).unwrap(),
+            Some("/tmp/blob3".to_string())
+        );
+
+        let blobs = mgr2.get_all_blobs().unwrap();
+        assert_eq!(blobs.len(), 1);
     }
 
     #[test]
-    fn test_get_all_chunks() {
-        let path = PathBuf::from("/tmp/local-cas");
-        match fs::create_dir_all(path.clone()) {
-            Ok(()) => println!("Directory created!"),
-            Err(e) => println!("Error: {:?}", e),
-        };
-        let cas_mgr = CasMgr::new(path).unwrap();
-        let vec = cas_mgr.get_all_chunks(false).unwrap();
-        for (blob_id, chunk_info) in vec {
-            println!("[{}, {}]", blob_id, chunk_info);
-        }
+    fn test_cas_chunk() {
+        let tmpdir = TempDir::new().unwrap();
+        let mut cas_mgr = CasDb::new(tmpdir.as_path()).unwrap();
+        cas_mgr
+            .add_blobs(&["/tmp/blob1".to_string(), "/tmp/blob2".to_string()])
+            .unwrap();
 
-        let vec = cas_mgr.get_all_chunks(true).unwrap();
-        for (blob_id, chunk_info) in vec {
-            println!("[{}, {}]", blob_id, chunk_info);
-        }
-    }
+        cas_mgr
+            .add_chunks(&[
+                ("chunk1".to_string(), 4096, "/tmp/blob1".to_string()),
+                ("chunk2".to_string(), 0, "/tmp/blob2".to_string()),
+            ])
+            .unwrap();
 
-    #[test]
-    fn test_delete_chunks() {
-        let path = PathBuf::from("/tmp/local-cas");
-        match fs::create_dir_all(path.clone()) {
-            Ok(()) => println!("Directory created!"),
-            Err(e) => println!("Error: {:?}", e),
-        };
-        let mut cas_mgr = CasMgr::new(path).unwrap();
-        let blobs = cas_mgr.get_all_blobs(false).unwrap();
-        for (blob_id, _blob_info) in &blobs {
-            println!("delete blob: [{}]", blob_id);
-            cas_mgr.delete_chunks_by_blobid(blob_id, false).unwrap();
-            cas_mgr.delete_chunks_by_blobid(blob_id, true).unwrap();
-        }
-    }
+        let (file, offset) = cas_mgr.get_chunk_info("chunk1").unwrap().unwrap();
+        assert_eq!(&file, "/tmp/blob1");
+        assert_eq!(offset, 4096);
+        let (file, offset) = cas_mgr.get_chunk_info("chunk2").unwrap().unwrap();
+        assert_eq!(&file, "/tmp/blob2");
+        assert_eq!(offset, 0);
 
-    #[test]
-    fn test_delete_blobs() {
-        let path = PathBuf::from("/tmp/local-cas");
-        match fs::create_dir_all(path.clone()) {
-            Ok(()) => println!("Directory created!"),
-            Err(e) => println!("Error: {:?}", e),
-        };
-        let mut cas_mgr = CasMgr::new(path).unwrap();
-        let blobs = cas_mgr.get_all_blobs(false).unwrap();
-        for (blob_id, _blob_info) in &blobs {
-            println!("delete blob: [{}]", blob_id);
-            let blob_id = vec![blob_id.to_owned()];
-            cas_mgr.delete_blobs(&blob_id, false).unwrap();
-            cas_mgr.delete_blobs(&blob_id, true).unwrap();
-        }
+        cas_mgr.add_chunk("chunk1", 8192, "/tmp/blob2").unwrap();
+        let (file, offset) = cas_mgr.get_chunk_info("chunk1").unwrap().unwrap();
+        assert_eq!(&file, "/tmp/blob1");
+        assert_eq!(offset, 4096);
+
+        cas_mgr.delete_blobs(&["/tmp/blob1".to_string()]).unwrap();
+        let (file, offset) = cas_mgr.get_chunk_info("chunk1").unwrap().unwrap();
+        assert_eq!(&file, "/tmp/blob2");
+        assert_eq!(offset, 8192);
+
+        cas_mgr.delete_blobs(&["/tmp/blob2".to_string()]).unwrap();
+        let res = cas_mgr.get_chunk_info("chunk1").unwrap();
+        assert!(res.is_none());
+        let res = cas_mgr.get_chunk_info("chunk2").unwrap();
+        assert!(res.is_none());
     }
 }
