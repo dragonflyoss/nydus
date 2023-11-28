@@ -1355,6 +1355,7 @@ dependencies = [
  "nix",
  "nydus-api",
  "openssl",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
