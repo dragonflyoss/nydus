@@ -6,15 +6,17 @@
 use anyhow::{Context, Result};
 use core::cmp::Ordering;
 use nydus_api::ConfigV2;
+use nydus_builder::BuildContext;
 use nydus_builder::ChunkdictChunkInfo;
 use nydus_builder::Tree;
-use nydus_rafs::metadata::RafsSuper;
+use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::device::BlobInfo;
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::TryFrom;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::result::Result::Ok;
 use std::sync::{Arc, Mutex};
 
@@ -135,6 +137,41 @@ impl Database for SqliteDatabase {
     }
 }
 
+/// Get fs version from bootstrap file.
+fn get_fs_version(bootstrap_path: &Path) -> Result<RafsVersion> {
+    let (sb, _) = RafsSuper::load_from_file(bootstrap_path, Arc::new(ConfigV2::default()), false)?;
+    RafsVersion::try_from(sb.meta.version).context("Failed to get RAFS version number")
+}
+
+/// Checks if all Bootstrap versions are consistent.
+/// If they are inconsistent, returns an error and prints the version of each Bootstrap.
+pub fn check_bootstrap_versions_consistency(
+    ctx: &mut BuildContext,
+    bootstrap_paths: &[PathBuf],
+) -> Result<()> {
+    let mut versions = Vec::new();
+
+    for bootstrap_path in bootstrap_paths {
+        let version = get_fs_version(bootstrap_path)?;
+        versions.push((bootstrap_path.clone(), version));
+    }
+
+    if !versions.is_empty() {
+        let first_version = versions[0].1;
+        ctx.fs_version = first_version;
+        if versions.iter().any(|(_, v)| *v != first_version) {
+            for (path, version) in &versions {
+                println!("Bootstrap path {:?} has version {:?}", path, version);
+            }
+            return Err(anyhow!(
+                "Bootstrap versions are inconsistent, cannot use chunkdict."
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub struct Deduplicate<D: Database + Send + Sync> {
     db: D,
 }
@@ -203,8 +240,8 @@ impl Deduplicate<SqliteDatabase> {
                 let chunk_blob_id = blob_infos[index as usize].blob_id();
                 self.db
                     .insert_chunk(&ChunkdictChunkInfo {
-                        image_name: image_name.to_string(),
-                        version_name: version_name.to_string(),
+                        image_reference: image_name.to_string(),
+                        version: version_name.to_string(),
                         chunk_blob_id,
                         chunk_digest: chunk.inner.id().to_string(),
                         chunk_compressed_size: chunk.inner.compressed_size(),
@@ -229,9 +266,9 @@ pub struct Algorithm<D: Database + Send + Sync> {
 }
 
 // Generate deduplicated chunkdict by exponential_smoothing algorithm
-type VersionMap = HashMap<String, Vec<ChunkdictChunkInfo>>;
+type Versiondic = HashMap<String, Vec<ChunkdictChunkInfo>>;
 // Generate deduplicated chunkdict by cluster algorithm
-type ImageMap = Vec<HashMap<Vec<String>, Vec<ChunkdictChunkInfo>>>;
+type Imagedic = Vec<HashMap<Vec<String>, Vec<ChunkdictChunkInfo>>>;
 
 impl Algorithm<SqliteDatabase> {
     pub fn new(algorithm: String, db_url: &str) -> anyhow::Result<Self> {
@@ -270,9 +307,9 @@ impl Algorithm<SqliteDatabase> {
             chunkdict_size as f64 / 1024 as f64 / 1024 as f64
         );
         for chunk in all_chunks {
-            if !core_image.contains(&chunk.image_name) && !noise_points.contains(&chunk.image_name)
+            if !core_image.contains(&chunk.image_reference) && !noise_points.contains(&chunk.image_reference)
             {
-                noise_points.push(chunk.image_name.clone());
+                noise_points.push(chunk.image_reference.clone());
             }
         }
         Ok((chunkdict, noise_points))
@@ -295,11 +332,11 @@ impl Algorithm<SqliteDatabase> {
 
         for (chunk_index, chunk) in all_chunks.iter().enumerate() {
             let mut is_duplicate: f64 = 0.0;
-            if chunk.version_name == all_chunks[0].version_name {
+            if chunk.version == all_chunks[0].version {
                 let smoothed_score: f64 = 0.0;
                 smoothed_data.push(smoothed_score);
             } else {
-                if all_chunks[chunk_index - 1].version_name != all_chunks[chunk_index].version_name
+                if all_chunks[chunk_index - 1].version != all_chunks[chunk_index].version
                 {
                     last_start_version_index = start_version_index;
                     start_version_index = chunk_index;
@@ -324,8 +361,8 @@ impl Algorithm<SqliteDatabase> {
         let mut chunkdict: Vec<ChunkdictChunkInfo> = Vec::new();
         for i in 0..smoothed_data.len() {
             let chunk = ChunkdictChunkInfo {
-                image_name: all_chunks[i].image_name.clone(),
-                version_name: all_chunks[i].version_name.clone(),
+                image_reference: all_chunks[i].image_reference.clone(),
+                version: all_chunks[i].version.clone(),
                 chunk_blob_id: all_chunks[i].chunk_blob_id.clone(),
                 chunk_digest: all_chunks[i].chunk_digest.clone(),
                 chunk_compressed_offset: all_chunks[i].chunk_compressed_offset,
@@ -393,7 +430,7 @@ impl Algorithm<SqliteDatabase> {
         let mut datadict: Vec<DataPoint> = Vec::new();
         for chunk in all_chunks {
             image_chunks
-                .entry(chunk.image_name.clone())
+                .entry(chunk.image_reference.clone())
                 .or_insert(Vec::new())
                 .push(chunk.clone());
         }
@@ -420,7 +457,7 @@ impl Algorithm<SqliteDatabase> {
         // Group chunks into image_name
         for chunk in chunks {
             let entry = image_chunks
-                .entry(chunk.image_name.clone())
+                .entry(chunk.image_reference.clone())
                 .or_insert(Vec::new());
             entry.push(chunk.clone());
         }
@@ -436,7 +473,7 @@ impl Algorithm<SqliteDatabase> {
             // Group the chunks in the image into version_name
             for chunk in chunk_list {
                 let entry = version_chunks
-                    .entry(CustomString(chunk.version_name.clone()))
+                    .entry(CustomString(chunk.version.clone()))
                     .or_insert(Vec::new());
                 entry.push(chunk.clone());
             }
@@ -679,7 +716,7 @@ impl Algorithm<SqliteDatabase> {
 
     pub fn deduplicate_version(
         all_chunks: &[ChunkdictChunkInfo],
-    ) -> anyhow::Result<(VersionMap, ImageMap)> {
+    ) -> anyhow::Result<(Versiondic, Imagedic)> {
         let mut all_chunks_size = 0;
         for i in all_chunks {
             all_chunks_size += i.chunk_compressed_size;
@@ -870,8 +907,8 @@ impl ChunkTable {
             )?;
         let chunk_iterator = stmt.query_map(params![blob_id, limit, offset], |row| {
             Ok(ChunkdictChunkInfo {
-                image_name: row.get(1)?,
-                version_name: row.get(2)?,
+                image_reference: row.get(1)?,
+                version: row.get(2)?,
                 chunk_blob_id: row.get(3)?,
                 chunk_digest: row.get(4)?,
                 chunk_compressed_size: row.get(5)?,
@@ -1001,8 +1038,8 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
                 ",
                 rusqlite::params![
-                    chunk.image_name,
-                    chunk.version_name,
+                    chunk.image_reference,
+                    chunk.version,
                     chunk.chunk_blob_id,
                     chunk.chunk_digest,
                     chunk.chunk_compressed_size,
@@ -1050,8 +1087,8 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
             )?;
         let chunk_iterator = stmt.query_map(params![limit, offset], |row| {
             Ok(ChunkdictChunkInfo {
-                image_name: row.get(1)?,
-                version_name: row.get(2)?,
+                image_reference: row.get(1)?,
+                version: row.get(2)?,
                 chunk_blob_id: row.get(3)?,
                 chunk_digest: row.get(4)?,
                 chunk_compressed_size: row.get(5)?,
@@ -1241,8 +1278,8 @@ mod tests {
         let chunk_table = ChunkTable::new_in_memory()?;
         chunk_table.create()?;
         let chunk = ChunkdictChunkInfo {
-            image_name: "REDIS".to_string(),
-            version_name: "1.0.0".to_string(),
+            image_reference: "REDIS".to_string(),
+            version: "1.0.0".to_string(),
             chunk_blob_id: "BLOB123".to_string(),
             chunk_digest: "DIGEST123".to_string(),
             chunk_compressed_size: 512,
@@ -1252,8 +1289,8 @@ mod tests {
         };
         chunk_table.insert(&chunk)?;
         let chunk2 = ChunkdictChunkInfo {
-            image_name: "REDIS".to_string(),
-            version_name: "1.0.0".to_string(),
+            image_reference: "REDIS".to_string(),
+            version: "1.0.0".to_string(),
             chunk_blob_id: "BLOB456".to_string(),
             chunk_digest: "DIGEST123".to_string(),
             chunk_compressed_size: 512,
@@ -1263,8 +1300,8 @@ mod tests {
         };
         chunk_table.insert(&chunk2)?;
         let chunks = chunk_table.list_all()?;
-        assert_eq!(chunks[0].image_name, chunk.image_name);
-        assert_eq!(chunks[0].version_name, chunk.version_name);
+        assert_eq!(chunks[0].image_reference, chunk.image_reference);
+        assert_eq!(chunks[0].version, chunk.version);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].chunk_blob_id, chunk.chunk_blob_id);
         assert_eq!(chunks[0].chunk_digest, chunk.chunk_digest);
@@ -1316,8 +1353,8 @@ mod tests {
         for i in 0..200 {
             let i64 = i as u64;
             let chunk = ChunkdictChunkInfo {
-                image_name: format!("REDIS{}", i),
-                version_name: format!("1.0.0{}", i),
+                image_reference: format!("REDIS{}", i),
+                version: format!("1.0.0{}", i),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", i),
                 chunk_compressed_size: i,
@@ -1329,8 +1366,8 @@ mod tests {
         }
         let chunks = chunk_table.list_paged(100, 100)?;
         assert_eq!(chunks.len(), 100);
-        assert_eq!(chunks[0].image_name, "REDIS100");
-        assert_eq!(chunks[0].version_name, "1.0.0100");
+        assert_eq!(chunks[0].image_reference, "REDIS100");
+        assert_eq!(chunks[0].version, "1.0.0100");
         assert_eq!(chunks[0].chunk_blob_id, "BLOB100");
         assert_eq!(chunks[0].chunk_digest, "DIGEST100");
         assert_eq!(chunks[0].chunk_compressed_size, 100);
@@ -1347,8 +1384,8 @@ mod tests {
         for i in 0..199 {
             let i64 = i as u64;
             let chunk = ChunkdictChunkInfo {
-                image_name: format!("REDIS{}", 0),
-                version_name: format!("1.0.0{}", (i + 1) / 100),
+                image_reference: format!("REDIS{}", 0),
+                version: format!("1.0.0{}", (i + 1) / 100),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 2),
                 chunk_compressed_size: i,
@@ -1360,8 +1397,8 @@ mod tests {
         }
         let chunkdict = Algorithm::<SqliteDatabase>::exponential_smoothing(all_chunk, threshold)?;
         assert_eq!(chunkdict.len(), 2);
-        assert_eq!(chunkdict[0].image_name, "REDIS0");
-        assert_eq!(chunkdict[0].version_name, "1.0.01");
+        assert_eq!(chunkdict[0].image_reference, "REDIS0");
+        assert_eq!(chunkdict[0].version, "1.0.01");
         assert_eq!(chunkdict[0].chunk_blob_id, "BLOB99");
         assert_eq!(chunkdict[0].chunk_digest, "DIGEST0");
         assert_eq!(chunkdict[0].chunk_compressed_size, 99);
@@ -1379,8 +1416,8 @@ mod tests {
         for i in 0..200 {
             let i64 = i as u64;
             let chunk = ChunkdictChunkInfo {
-                image_name: format!("REDIS{}", i / 50),
-                version_name: format!("1.0.0{}", (i + 1) / 100),
+                image_reference: format!("REDIS{}", i / 50),
+                version: format!("1.0.0{}", (i + 1) / 100),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 2),
                 chunk_compressed_size: i,
@@ -1408,8 +1445,8 @@ mod tests {
         for i in 0..200 {
             let i64 = i as u64;
             let chunk = ChunkdictChunkInfo {
-                image_name: format!("REDIS{}", 0),
-                version_name: format!("1.0.0{}", (i + 1) / 100),
+                image_reference: format!("REDIS{}", 0),
+                version: format!("1.0.0{}", (i + 1) / 100),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 4),
                 chunk_compressed_size: 1,
@@ -1423,8 +1460,8 @@ mod tests {
         for i in 0..200 {
             let i64 = i as u64;
             let chunk = ChunkdictChunkInfo {
-                image_name: format!("REDIS{}", 1),
-                version_name: format!("1.0.0{}", (i + 1) / 100),
+                image_reference: format!("REDIS{}", 1),
+                version: format!("1.0.0{}", (i + 1) / 100),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 4),
                 chunk_compressed_size: 1,
@@ -1451,8 +1488,8 @@ mod tests {
         for i in 0..200 {
             for j in 0..100 {
                 let chunk = ChunkdictChunkInfo {
-                    image_name: format!("REDIS{}", i),
-                    version_name: format!("1.0.0{}", j / 10),
+                    image_reference: format!("REDIS{}", i),
+                    version: format!("1.0.0{}", j / 10),
                     chunk_blob_id: format!("BLOB{}", j),
                     chunk_digest: format!("DIGEST{}", j + (i / 100) * 100),
                     chunk_compressed_size: 1,
@@ -1466,11 +1503,11 @@ mod tests {
         assert_eq!(all_chunks.len(), 20000);
         let (train, test) = Algorithm::<SqliteDatabase>::divide_set(&all_chunks, 0.7)?;
         assert_eq!(train.len(), 14000);
-        assert_eq!(train[0].image_name, "REDIS0");
-        assert_eq!(train[0].version_name, "1.0.00");
+        assert_eq!(train[0].image_reference, "REDIS0");
+        assert_eq!(train[0].version, "1.0.00");
         assert_eq!(test.len(), 6000);
-        assert_eq!(test[0].image_name, "REDIS0");
-        assert_eq!(test[0].version_name, "1.0.07");
+        assert_eq!(test[0].image_reference, "REDIS0");
+        assert_eq!(test[0].version, "1.0.07");
         Ok(())
     }
 
@@ -1481,8 +1518,8 @@ mod tests {
         for i in 0..200 {
             for j in 0..100 {
                 let chunk = ChunkdictChunkInfo {
-                    image_name: format!("REDIS{}", i),
-                    version_name: format!("1.0.0{}", j / 10),
+                    image_reference: format!("REDIS{}", i),
+                    version: format!("1.0.0{}", j / 10),
                     chunk_blob_id: format!("BLOB{}", j),
                     chunk_digest: format!("DIGEST{}", j + (i / 100) * 100),
                     chunk_compressed_size: 1,
@@ -1516,8 +1553,8 @@ mod tests {
         for i in 0..200 {
             for j in 0..100 {
                 let chunk = ChunkdictChunkInfo {
-                    image_name: format!("REDIS{}", i),
-                    version_name: format!("1.0.0{}", (j + 1) / 100),
+                    image_reference: format!("REDIS{}", i),
+                    version: format!("1.0.0{}", (j + 1) / 100),
                     chunk_blob_id: format!("BLOB{}", j),
                     chunk_digest: format!("DIGEST{}", j + (i / 100) * 100),
                     chunk_compressed_size: 1,
@@ -1542,8 +1579,8 @@ mod tests {
         for i in 0..200 {
             for j in 0..100 {
                 let chunk = ChunkdictChunkInfo {
-                    image_name: format!("REDIS{}", i),
-                    version_name: format!("1.0.0{}", j / 10),
+                    image_reference: format!("REDIS{}", i),
+                    version: format!("1.0.0{}", j / 10),
                     chunk_blob_id: format!("BLOB{}", j),
                     chunk_digest: format!("DIGEST{}", j + (i / 100) * 100),
                     chunk_compressed_size: 1,
@@ -1578,8 +1615,8 @@ mod tests {
         for i in 0..200 {
             let i64 = i as u64;
             let chunk = ChunkdictChunkInfo {
-                image_name: format!("REDIS{}", 0),
-                version_name: format!("1.0.0{}", (i + 1) / 20),
+                image_reference: format!("REDIS{}", 0),
+                version: format!("1.0.0{}", (i + 1) / 20),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 2),
                 chunk_compressed_size: i,
@@ -1595,7 +1632,7 @@ mod tests {
             chunkdict.extend(dictionary);
         }
 
-        assert_eq!(chunkdict[0].image_name, "REDIS0");
+        assert_eq!(chunkdict[0].image_reference, "REDIS0");
         assert_eq!(chunkdict[0].chunk_compressed_size, 21);
         assert_eq!(chunkdict.len(), 2);
 
