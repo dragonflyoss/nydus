@@ -36,6 +36,7 @@ use crate::utils::{alloc_buf, check_digest};
 use crate::{StorageResult, RAFS_MAX_CHUNK_SIZE};
 
 mod cachedfile;
+mod dedup;
 mod dummycache;
 mod filecache;
 #[cfg(target_os = "linux")]

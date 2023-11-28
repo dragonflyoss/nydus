@@ -20,7 +20,6 @@ pub use self::reader::*;
 pub use self::types::*;
 
 pub mod async_helper;
-pub mod cas;
 pub mod compact;
 pub mod compress;
 #[cfg(feature = "encryption")]

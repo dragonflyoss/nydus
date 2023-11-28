@@ -2,41 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fmt::{self, Display, Formatter};
-use std::io::Error;
+#![allow(unused)]
+
 use std::path::Path;
 
 use rusqlite::{Connection, DropBehavior, OptionalExtension, Transaction};
 
-/// Error codes related to local cas.
-#[derive(Debug)]
-pub enum CasError {
-    Io(Error),
-    Db(rusqlite::Error),
-}
-
-impl Display for CasError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for CasError {}
-
-impl From<rusqlite::Error> for CasError {
-    fn from(e: rusqlite::Error) -> Self {
-        CasError::Db(e)
-    }
-}
-
-impl From<Error> for CasError {
-    fn from(e: Error) -> Self {
-        CasError::Io(e)
-    }
-}
-
-/// Specialized `Result` for local cas.
-type Result<T> = std::result::Result<T, CasError>;
+use super::Result;
 
 pub struct CasDb {
     conn: Connection,
@@ -206,7 +178,7 @@ impl CasDb {
         let tran = self.begin_transaction()?;
         for chunk in chunks {
             match Self::get_blob_id_with_tx(&tran, &chunk.2) {
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(e),
                 Ok(id) => {
                     if let Err(e) = tran.execute(sql, (&chunk.0, &chunk.1, id)) {
                         return Err(e.into());
@@ -224,7 +196,7 @@ impl CasDb {
 
         let tran = self.begin_transaction()?;
         match Self::get_blob_id_with_tx(&tran, blob_id) {
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
             Ok(id) => {
                 if let Err(e) = tran.execute(sql, (chunk_id, chunk_offset, id)) {
                     return Err(e.into());
