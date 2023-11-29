@@ -297,7 +297,7 @@ impl LocalDisk {
                 v.name.clone()
             } else {
                 // The 64-byte blob_id is stored in two parts
-                v.name.clone() + guid.to_simple().to_string().as_str()
+                v.name.clone() + guid.simple().to_string().as_str()
             };
 
             if name.is_empty() {

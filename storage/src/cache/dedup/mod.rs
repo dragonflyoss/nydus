@@ -12,11 +12,16 @@ mod db;
 pub enum CasError {
     Io(Error),
     Db(rusqlite::Error),
+    R2D2(r2d2::Error),
 }
 
 impl Display for CasError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self)
+        match self {
+            CasError::Io(e) => write!(f, "{}", e),
+            CasError::Db(e) => write!(f, "{}", e),
+            CasError::R2D2(e) => write!(f, "{}", e),
+        }
     }
 }
 
@@ -25,6 +30,12 @@ impl std::error::Error for CasError {}
 impl From<rusqlite::Error> for CasError {
     fn from(e: rusqlite::Error) -> Self {
         CasError::Db(e)
+    }
+}
+
+impl From<r2d2::Error> for CasError {
+    fn from(e: r2d2::Error) -> Self {
+        CasError::R2D2(e)
     }
 }
 

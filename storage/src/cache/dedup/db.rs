@@ -6,43 +6,42 @@
 
 use std::path::Path;
 
+use r2d2::{Pool, PooledConnection};
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{Connection, DropBehavior, OptionalExtension, Transaction};
 
 use super::Result;
 
 pub struct CasDb {
-    conn: Connection,
+    pool: Pool<SqliteConnectionManager>,
 }
 
 impl CasDb {
     pub fn new(path: impl AsRef<Path>) -> Result<CasDb> {
         let mut db_path = path.as_ref().to_owned();
         db_path.push("cas.db");
-        let conn = Connection::open(db_path)?;
+        Self::from_file(db_path)
+    }
 
-        // Always wait in case of busy.
-        conn.busy_handler(Some(|_v| true))?;
+    pub fn from_file(db_path: impl AsRef<Path>) -> Result<CasDb> {
+        let mgr = SqliteConnectionManager::file(db_path);
+        let pool = r2d2::Pool::new(mgr)?;
+        let conn = pool.get()?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS Blobs (
-            BlobId  INTEGER PRIMARY KEY,
+            BlobId     INTEGER PRIMARY KEY,
             FilePath   TEXT NOT NULL UNIQUE
         )",
             (),
         )?;
-        /*
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS BlobIndex ON Blobs(FilePath)",
-            (),
-        )?;
-         */
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS Chunks (
             ChunkId           TEXT NOT NULL,
             ChunkOffset       INTEGER,
             BlobId            INTEGER,
-            UNIQUE(ChunkId, BlobID) ON CONFLICT IGNORE,
+            UNIQUE(ChunkId, BlobId) ON CONFLICT IGNORE,
             FOREIGN KEY(BlobId) REFERENCES Blobs(BlobId)
         )",
             (),
@@ -51,14 +50,8 @@ impl CasDb {
             "CREATE INDEX IF NOT EXISTS ChunkIndex ON Chunks(ChunkId)",
             (),
         )?;
-        /*
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS ChunkBlobIndex ON Chunks(BlobId)",
-            (),
-        )?;
-         */
 
-        Ok(CasDb { conn })
+        Ok(CasDb { pool })
     }
 
     pub fn get_blob_id_with_tx(tran: &Transaction, blob: &str) -> Result<Option<u64>> {
@@ -78,7 +71,7 @@ impl CasDb {
         let sql = "SELECT BlobId FROM Blobs WHERE FilePath = ?";
 
         if let Some(id) = self
-            .conn
+            .get_connection()?
             .query_row(sql, [blob], |row| row.get::<usize, u64>(0))
             .optional()?
         {
@@ -92,7 +85,7 @@ impl CasDb {
         let sql = "SELECT FilePath FROM Blobs WHERE BlobId = ?";
 
         if let Some(path) = self
-            .conn
+            .get_connection()?
             .query_row(sql, [id], |row| row.get::<usize, String>(0))
             .optional()?
         {
@@ -103,7 +96,8 @@ impl CasDb {
     }
 
     pub fn get_all_blobs(&self) -> Result<Vec<(u64, String)>> {
-        let mut stmt = self.conn.prepare("SELECT BlobId, FilePath FROM Blobs")?;
+        let conn = self.get_connection()?;
+        let mut stmt = conn.prepare_cached("SELECT BlobId, FilePath FROM Blobs")?;
         let rows = stmt.query_map([], |row| Ok((row.get::<usize, u64>(0)?, row.get(1)?)))?;
         let mut results: Vec<(u64, String)> = Vec::new();
         for row in rows {
@@ -114,8 +108,9 @@ impl CasDb {
 
     pub fn add_blobs(&mut self, blobs: &[String]) -> Result<()> {
         let sql = "INSERT OR IGNORE INTO Blobs (FilePath) VALUES (?1)";
+        let mut conn = self.get_connection()?;
+        let tran = Self::begin_transaction(&mut conn)?;
 
-        let tran = self.begin_transaction()?;
         for blob in blobs {
             if let Err(e) = tran.execute(sql, [blob]) {
                 return Err(e.into());
@@ -126,25 +121,27 @@ impl CasDb {
         Ok(())
     }
 
-    pub fn add_blob(&mut self, blob: &str) -> Result<u64> {
+    pub fn add_blob(&self, blob: &str) -> Result<u64> {
         let sql = "INSERT OR IGNORE INTO Blobs (FilePath) VALUES (?1)";
-        self.conn.execute(sql, [blob])?;
-        Ok(self.conn.last_insert_rowid() as u64)
+        let conn = self.get_connection()?;
+        conn.execute(sql, [blob])?;
+        Ok(conn.last_insert_rowid() as u64)
     }
 
     pub fn delete_blobs(&mut self, blobs: &[String]) -> Result<()> {
-        let delete_blobs_sql = "DELETE FROM Blobs WHERE FilePath = (?1)";
+        let delete_blobs_sql = "DELETE FROM Blobs WHERE BlobId = (?1)";
         let delete_chunks_sql = "DELETE FROM Chunks WHERE BlobId = (?1)";
+        let mut conn = self.get_connection()?;
+        let tran = Self::begin_transaction(&mut conn)?;
 
-        let tran = self.begin_transaction()?;
         for blob in blobs {
             if let Some(id) = Self::get_blob_id_with_tx(&tran, blob)? {
                 if let Err(e) = tran.execute(delete_chunks_sql, [id]) {
                     return Err(e.into());
                 }
-            }
-            if let Err(e) = tran.execute(delete_blobs_sql, [blob]) {
-                return Err(e.into());
+                if let Err(e) = tran.execute(delete_blobs_sql, [id]) {
+                    return Err(e.into());
+                }
             }
         }
         tran.commit()?;
@@ -160,7 +157,7 @@ impl CasDb {
                 ORDER BY Blobs.BlobId LIMIT 1 OFFSET 0";
 
         if let Some((new_blob_id, chunk_info)) = self
-            .conn
+            .get_connection()?
             .query_row(sql, [chunk_id], |row| {
                 Ok((row.get(0)?, row.get::<usize, u64>(1)?))
             })
@@ -174,8 +171,9 @@ impl CasDb {
 
     pub fn add_chunks(&mut self, chunks: &[(String, u64, String)]) -> Result<()> {
         let sql = "INSERT OR IGNORE INTO Chunks (ChunkId, ChunkOffset, BlobId) VALUES (?1, ?2, ?3)";
+        let mut conn = self.get_connection()?;
+        let tran = Self::begin_transaction(&mut conn)?;
 
-        let tran = self.begin_transaction()?;
         for chunk in chunks {
             match Self::get_blob_id_with_tx(&tran, &chunk.2) {
                 Err(e) => return Err(e),
@@ -191,10 +189,11 @@ impl CasDb {
         Ok(())
     }
 
-    pub fn add_chunk(&mut self, chunk_id: &str, chunk_offset: u64, blob_id: &str) -> Result<()> {
+    pub fn add_chunk(&self, chunk_id: &str, chunk_offset: u64, blob_id: &str) -> Result<()> {
         let sql = "INSERT OR IGNORE INTO Chunks (ChunkId, ChunkOffset, BlobId) VALUES (?1, ?2, ?3)";
+        let mut conn = self.get_connection()?;
+        let tran = Self::begin_transaction(&mut conn)?;
 
-        let tran = self.begin_transaction()?;
         match Self::get_blob_id_with_tx(&tran, blob_id) {
             Err(e) => return Err(e),
             Ok(id) => {
@@ -208,12 +207,18 @@ impl CasDb {
         Ok(())
     }
 
-    fn begin_transaction(&mut self) -> Result<Transaction> {
-        let mut tx = self
-            .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    fn begin_transaction(
+        conn: &mut PooledConnection<SqliteConnectionManager>,
+    ) -> Result<Transaction> {
+        let mut tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.set_drop_behavior(DropBehavior::Rollback);
         Ok(tx)
+    }
+
+    fn get_connection(&self) -> Result<PooledConnection<SqliteConnectionManager>> {
+        let conn = self.pool.get()?;
+        conn.busy_handler(Some(|_v| true))?;
+        Ok(conn)
     }
 }
 
