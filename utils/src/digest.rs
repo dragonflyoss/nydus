@@ -205,7 +205,7 @@ impl AsRef<[u8]> for RafsDigest {
 impl fmt::Display for RafsDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for c in &self.data {
-            write!(f, "{:02x}", c).unwrap()
+            write!(f, "{:02x}", c)?;
         }
         Ok(())
     }
