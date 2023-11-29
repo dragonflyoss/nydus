@@ -21,7 +21,7 @@ test: build
 # PERFORMANCE_TEST_IMAGE=wordpress:latest \
 # make test-performance
 test-performance: build
-	PERFORMANCE_TEST=True;sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestPerformance
+	PERFORMANCE_TEST=True sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestPerformance
 
 # WORK_DIR=/tmp \
 # NYDUS_STABLE_VERSION=v2.2.3 \
