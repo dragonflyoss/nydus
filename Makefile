@@ -136,6 +136,9 @@ smoke-only:
 smoke-performance:
 	make -C smoke test-performance
 
+smoke-benchmark:
+	make -C smoke test-benchmark
+
 smoke: release smoke-only
 
 docker-nydus-smoke:
