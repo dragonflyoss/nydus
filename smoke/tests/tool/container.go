@@ -21,8 +21,10 @@ import (
 )
 
 type ContainerMetrics struct {
-	ReadCount       uint64 `json:"read_count"`
-	ReadAmountTotal uint64 `json:"read_amount_total"`
+	E2ETime         time.Duration `json:"e2e_time"`
+	ReadCount       uint64        `json:"read_count"`
+	ReadAmountTotal uint64        `json:"read_amount_total"`
+	ImageSize       int64         `json:"image_size"`
 }
 
 type RunArgs struct {
@@ -77,26 +79,55 @@ func runUrlWaitContainer(t *testing.T, image string, containerName string, runAr
 	}
 }
 
-// RunContainer and get metrics from api socket.
+// RunContainerWithBaseline and get metrics from api socket.
 // Test will fail if performance below baseline.
-func RunContainer(t *testing.T, image string, containerName string, mode string) {
+func RunContainerWithBaseline(t *testing.T, image string, containerName string, mode string) {
 	args, ok := URL_WAIT[ImageRepo(t, image)]
 	if ok {
 		runUrlWaitContainer(t, image, containerName, args)
+		defer clearContainer(t, image, containerName)
+	} else {
+		t.Fatalf(fmt.Sprintf("%s is not in URL_WAIT", image))
 	}
-	containerMetrics, err := getContainerMetrics(t)
+	backendMetrics, err := getContainerBackendMetrics(t)
 	if err != nil {
 		t.Logf(err.Error())
 	}
-	if containerMetrics.ReadAmountTotal > uint64(float64(args.BaselineReadAmount[mode])*1.05) ||
-		containerMetrics.ReadCount > uint64(float64(args.BaselineReadCount[mode])*1.05) {
-		t.Fatalf(fmt.Sprintf("Performance reduction with ReadAmount %d and ReadCount %d", containerMetrics.ReadAmountTotal, containerMetrics.ReadCount))
+	if backendMetrics.ReadAmountTotal > uint64(float64(args.BaselineReadAmount[mode])*1.05) ||
+		backendMetrics.ReadCount > uint64(float64(args.BaselineReadCount[mode])*1.05) {
+		t.Fatalf(fmt.Sprintf("Performance reduction with ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount))
 	}
-	t.Logf(fmt.Sprintf("Performance Test: ReadAmount %d and ReadCount %d", containerMetrics.ReadAmountTotal, containerMetrics.ReadCount))
+	t.Logf(fmt.Sprintf("Performance Test: ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount))
 }
 
-// getContainerMetrics get metrics by nydus api sock
-func getContainerMetrics(t *testing.T) (*ContainerMetrics, error) {
+// RunContainer and return container metric
+func RunContainer(t *testing.T, image string, containerName string) *ContainerMetrics {
+	var containerMetic ContainerMetrics
+	args, ok := URL_WAIT[ImageRepo(t, image)]
+	if ok {
+		startTime := time.Now()
+		runUrlWaitContainer(t, image, containerName, args)
+		endTime := time.Now()
+		containerMetic.E2ETime = endTime.Sub(startTime)
+		defer clearContainer(t, image, containerName)
+	}
+	backendMetrics, err := getContainerBackendMetrics(t)
+	if err != nil {
+		t.Logf(err.Error())
+	}
+	containerMetic.ReadAmountTotal = backendMetrics.ReadAmountTotal
+	containerMetic.ReadCount = backendMetrics.ReadCount
+	return &containerMetic
+}
+
+// ClearContainer clear container by containerName
+func clearContainer(t *testing.T, image string, containerName string) {
+	RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter nydus rm -f %s", containerName))
+	RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter nydus image rm %s", image))
+}
+
+// getContainerBackendMetrics get backend metrics by nydus api sock
+func getContainerBackendMetrics(t *testing.T) (*ContainerMetrics, error) {
 	transport := &http.Transport{
 		MaxIdleConns:          10,
 		IdleConnTimeout:       10 * time.Second,

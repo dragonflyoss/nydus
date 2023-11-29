@@ -55,8 +55,7 @@ func (p *PerformanceTestSuite) TestPerformance(t *testing.T) {
 
 	// run Contaienr
 	p.testContainerName = uuid.NewString()
-	tool.RunContainer(p.t, p.testImage, p.testContainerName, mode)
-	clearContainer(p.t, p.testImage, p.testContainerName)
+	tool.RunContainerWithBaseline(p.t, p.testImage, p.testContainerName, mode)
 }
 
 func (p *PerformanceTestSuite) prepareTestImage(t *testing.T, ctx *tool.Context, mode string, image string) {
@@ -86,11 +85,6 @@ func (p *PerformanceTestSuite) prepareTestImage(t *testing.T, ctx *tool.Context,
 		ctx.Binary.Nydusify, logLevel, source, target, ctx.Binary.Builder, ctx.Env.WorkDir, fsVersion, enableOCIRef)
 	tool.RunWithoutOutput(t, convertCmd)
 	p.testImage = target
-}
-
-func clearContainer(t *testing.T, image string, containerName string) {
-	tool.RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter nydus rm -f %s", containerName))
-	tool.RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter nydus image rm %s", image))
 }
 
 func TestPerformance(t *testing.T) {
