@@ -24,7 +24,9 @@ libc = "0.2"
 log = "0.4.8"
 nix = "0.24"
 reqwest = { version = "0.11.14", features = ["blocking", "json"], optional = true }
-rusqlite = { version = "0.30", features = ["bundled"] }
+rusqlite = { version = "0.30", features = ["bundled"], optional = true }
+r2d2 = { version = "0.8", optional = true }
+r2d2_sqlite = { version = "0.23", optional = true }
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 sha1 = { version = "0.10.5", optional = true }
@@ -35,7 +37,7 @@ tokio = { version = "1.19.0", features = ["macros", "rt", "rt-multi-thread", "sy
 url = { version = "2.1.1", optional = true }
 vm-memory = "0.10"
 fuse-backend-rs = "^0.10.3"
-gpt = { version = "3.0.0", optional = true }
+gpt = { version = "3.1.0", optional = true }
 
 nydus-api = { version = "0.3", path = "../api" }
 nydus-utils = { version = "0.4", path = "../utils", features = ["encryption", "zran"] }
@@ -47,6 +49,7 @@ regex = "1.7.0"
 toml = "0.5"
 
 [features]
+default = ["dedup"]
 backend-localdisk = []
 backend-localdisk-gpt = ["gpt", "backend-localdisk"]
 backend-localfs = []
@@ -54,6 +57,7 @@ backend-oss = ["base64", "httpdate", "hmac", "sha1", "reqwest", "url"]
 backend-registry = ["base64", "reqwest", "url"]
 backend-s3 = ["base64", "hmac", "http", "reqwest", "sha2", "time", "url"]
 backend-http-proxy = ["hyper", "hyperlocal", "http", "reqwest", "url"]
+dedup = ["rusqlite", "r2d2", "r2d2_sqlite"]
 prefetch-rate-limit = ["leaky-bucket"]
 
 [package.metadata.docs.rs]
