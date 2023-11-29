@@ -26,6 +26,7 @@ use nydus_service::{
     create_daemon, create_fuse_daemon, create_vfs_backend, validate_threads_configuration,
     Error as NydusError, FsBackendMountCmd, FsBackendType, ServiceArgs,
 };
+use nydus_storage::cache::CasMgr;
 
 use crate::api_server_glue::ApiServerController;
 
@@ -50,7 +51,7 @@ fn thread_validator(v: &str) -> std::result::Result<String, String> {
 }
 
 fn append_fs_options(app: Command) -> Command {
-    app.arg(
+    let mut app = app.arg(
         Arg::new("bootstrap")
             .long("bootstrap")
             .short('B')
@@ -87,7 +88,18 @@ fn append_fs_options(app: Command) -> Command {
             .help("Mountpoint within the FUSE/virtiofs device to mount the RAFS/passthroughfs filesystem")
             .default_value("/")
             .required(false),
-    )
+    );
+
+    #[cfg(feature = "dedup")]
+    {
+        app = app.arg(
+            Arg::new("dedup-db")
+                .long("dedup-db")
+                .help("Database file for chunk deduplication"),
+        );
+    }
+
+    app
 }
 
 fn append_fuse_options(app: Command) -> Command {
@@ -749,6 +761,13 @@ fn main() -> Result<()> {
 
     dump_program_info();
     handle_rlimit_nofile_option(&args, "rlimit-nofile")?;
+
+    #[cfg(feature = "dedup")]
+    if let Some(db) = args.get_one::<String>("dedup-db") {
+        let mgr = CasMgr::new(db).map_err(|e| eother!(format!("{}", e)))?;
+        info!("Enable chunk deduplication by using database at {}", db);
+        CasMgr::set_singleton(mgr);
+    }
 
     match args.subcommand_name() {
         Some("singleton") => {

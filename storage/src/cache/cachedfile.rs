@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Result};
 use std::mem::ManuallyDrop;
+use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
@@ -29,7 +30,7 @@ use tokio::runtime::Runtime;
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
-use crate::cache::{BlobCache, BlobIoMergeState};
+use crate::cache::{BlobCache, BlobIoMergeState, CasMgr};
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
     BlobObject, BlobPrefetchRequest,
@@ -133,8 +134,10 @@ pub(crate) struct FileCacheEntry {
     pub(crate) blob_info: Arc<BlobInfo>,
     pub(crate) cache_cipher_object: Arc<Cipher>,
     pub(crate) cache_cipher_context: Arc<CipherContext>,
+    pub(crate) cas_mgr: Option<Arc<CasMgr>>,
     pub(crate) chunk_map: Arc<dyn ChunkMap>,
     pub(crate) file: Arc<File>,
+    pub(crate) file_path: Arc<String>,
     pub(crate) meta: Option<FileCacheMeta>,
     pub(crate) metrics: Arc<BlobcacheMetrics>,
     pub(crate) prefetch_state: Arc<AtomicU32>,
@@ -182,13 +185,16 @@ impl FileCacheEntry {
     }
 
     fn delay_persist_chunk_data(&self, chunk: Arc<dyn BlobChunkInfo>, buffer: Arc<DataBuffer>) {
+        let blob_info = self.blob_info.clone();
         let delayed_chunk_map = self.chunk_map.clone();
         let file = self.file.clone();
+        let file_path = self.file_path.clone();
         let metrics = self.metrics.clone();
         let is_raw_data = self.is_raw_data;
         let is_cache_encrypted = self.is_cache_encrypted;
         let cipher_object = self.cache_cipher_object.clone();
         let cipher_context = self.cache_cipher_context.clone();
+        let cas_mgr = self.cas_mgr.clone();
 
         metrics.buffered_backend_size.add(buffer.size() as u64);
         self.runtime.spawn_blocking(move || {
@@ -240,6 +246,11 @@ impl FileCacheEntry {
             };
             let res = Self::persist_cached_data(&file, offset, buf);
             Self::_update_chunk_pending_status(&delayed_chunk_map, chunk.as_ref(), res.is_ok());
+            if let Some(mgr) = cas_mgr {
+                if let Err(e) = mgr.record_chunk(&blob_info, chunk.deref(), file_path.as_ref()) {
+                    warn!("failed to record chunk state for dedup, {}", e);
+                }
+            }
         });
     }
 
@@ -973,12 +984,21 @@ impl FileCacheEntry {
 
         trace!("dispatch single io range {:?}", req);
         for (i, chunk) in req.chunks.iter().enumerate() {
-            let is_ready = match self.chunk_map.check_ready_and_mark_pending(chunk.as_ref()) {
+            let mut is_ready = match self.chunk_map.check_ready_and_mark_pending(chunk.as_ref()) {
                 Ok(true) => true,
                 Ok(false) => false,
                 Err(StorageError::Timeout) => false, // Retry if waiting for inflight IO timeouts
                 Err(e) => return Err(einval!(e)),
             };
+
+            if !is_ready {
+                if let Some(mgr) = self.cas_mgr.as_ref() {
+                    is_ready = mgr.dedup_chunk(&self.blob_info, chunk.deref(), &self.file);
+                    if is_ready {
+                        self.update_chunk_pending_status(chunk.deref(), true);
+                    }
+                }
+            }
 
             // Directly read chunk data from file cache into user buffer iff:
             // - the chunk is ready in the file cache

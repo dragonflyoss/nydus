@@ -204,6 +204,7 @@ mod tests {
             BlobFeatures::empty(),
         );
         let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest { data: [3u8; 32] };
         chunk.uncompress_offset = 0;
         chunk.uncompress_size = 8192;
         let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
