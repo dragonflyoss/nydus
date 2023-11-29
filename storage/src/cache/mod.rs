@@ -660,6 +660,12 @@ pub(crate) trait BlobCacheMgr: Send + Sync {
     fn check_stat(&self);
 }
 
+#[cfg(feature = "dedup")]
+pub use dedup::CasMgr;
+
+#[cfg(not(feature = "dedup"))]
+pub struct CasMgr {}
+
 #[cfg(test)]
 mod tests {
     use crate::device::{BlobChunkFlags, BlobFeatures};
