@@ -47,10 +47,10 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.2.0
+      uses: Swatinem/rust-cache@v2.7.0
       with:
         cache-on-failure: true
-        shared-key: nydus-build
+        shared-key: Linux-cargo-amd64
     - name: Build Nydus
       run: |
         rustup component add rustfmt clippy
