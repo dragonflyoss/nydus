@@ -21,10 +21,10 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2.2.0
+      uses: Swatinem/rust-cache@v2.7.0
       with:
         cache-on-failure: true
-        key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+        shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: Build nydus-rs
       run: |
         declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
@@ -55,10 +55,10 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2.2.0
+      uses: Swatinem/rust-cache@v2.7.0
       with:
         cache-on-failure: true
-        key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+        shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - name: build
       run: |
         if [[ "${{matrix.arch}}" == "amd64" ]]; then

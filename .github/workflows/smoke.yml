@@ -53,10 +53,11 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.2.0
+      uses: Swatinem/rust-cache@v2.7.0
       with:
         cache-on-failure: true
-        shared-key: nydus-build
+        shared-key: Linux-cargo-amd64
+        save-if: ${{ github.ref == 'refs/heads/master' }}
     - name: Build Nydus
       run: |
         rustup component add rustfmt clippy
@@ -77,10 +78,11 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2.2.0
+      uses: Swatinem/rust-cache@v2.7.0
       with:
         cache-on-failure: true
-        key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+        shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+        save-if: ${{ github.ref == 'refs/heads/master' }}
     - name: build
       run: |
         if [[ "${{matrix.arch}}" == "amd64" ]]; then
@@ -166,10 +168,11 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.2.0
+      uses: Swatinem/rust-cache@v2.7.0
       with:
         cache-on-failure: true
-        shared-key: nydus-build
+        shared-key: Linux-cargo-amd64
+        save-if: ${{ github.ref == 'refs/heads/master' }}
     - name: Install cargo nextest
       uses: taiki-e/install-action@nextest
     - name: Fscache Setup
@@ -187,9 +190,11 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.2.0
+        uses: Swatinem/rust-cache@v2.7.0
         with:
           cache-on-failure: true
+          shared-key: Linux-cargo-amd64
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Fscache Setup
