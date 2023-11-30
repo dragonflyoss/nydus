@@ -7,7 +7,6 @@ on:
   pull_request:
     paths:
       - '.github/workflows/benchmark.yml'
-      - 'misc/benchmark/*'
   workflow_dispatch:
 
 env:
@@ -64,405 +63,171 @@ jobs:
           target/release/nydus-image
           target/release/nydusd
 
-  benchmark-oci:
-    runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build]
-    strategy:
-      matrix:
-        include:
-          - image: wordpress
-            tag: 6.1.1
-          - image: node
-            tag: 19.8
-          - image: python
-            tag: 3.10.7
-          - image: golang
-            tag: 1.19.3
-          - image: ruby
-            tag: 3.1.3
-          - image: amazoncorretto
-            tag: 8-al2022-jdk
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - name: Download Nydus
-      uses: actions/download-artifact@master
-      with:
-        name: nydus-artifact
-        path: target/release
-    - name: Download Nydusify
-      uses: actions/download-artifact@master
-      with:
-        name: nydusify-artifact
-        path: contrib/nydusify/cmd
-    - name: Prepare OCI Environment
-      run: |
-        sudo bash misc/benchmark/prepare_env.sh oci
-        sudo docker pull ${{ matrix.image }}:${{ matrix.tag }} && docker tag ${{ matrix.image }}:${{ matrix.tag }} localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
-        sudo docker push localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
-    - name: BenchMark Test
-      run: |
-        cd misc/benchmark
-        sudo python3 benchmark.py --mode oci --image ${{ matrix.image }}:${{ matrix.tag }}
-    - name: Save Test Result
-      uses: actions/upload-artifact@v3
-      with:
-        name: benchmark-oci-${{ matrix.image }}
-        path: misc/benchmark/${{ matrix.image }}.csv
-
-  benchmark-nydus-no-prefetch:
-    runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build]
-    strategy:
-      matrix:
-        include:
-          - image: wordpress
-            tag: 6.1.1
-          - image: node
-            tag: 19.8
-          - image: python
-            tag: 3.10.7
-          - image: golang
-            tag: 1.19.3
-          - image: ruby
-            tag: 3.1.3
-          - image: amazoncorretto
-            tag: 8-al2022-jdk
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - name: Download Nydus
-      uses: actions/download-artifact@master
-      with:
-        name: nydus-artifact
-        path: target/release
-    - name: Download Nydusify
-      uses: actions/download-artifact@master
-      with:
-        name: nydusify-artifact
-        path: contrib/nydusify/cmd
-    - name: Prepare Nydus Environment
-      run: |
-        sudo bash misc/benchmark/prepare_env.sh nydus
-        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{ matrix.image }}:${{ matrix.tag }} \
-          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
-          --fs-version 6
-    - name: BenchMark Test
-      run: |
-        cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
-    - name: Save Test Result
-      uses: actions/upload-artifact@v3
-      with:
-        name: benchmark-nydus-no-prefetch-${{matrix.image}}
-        path: misc/benchmark/${{matrix.image}}.csv
-
-  benchmark-zran-no-prefetch:
-    runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build]
-    strategy:
-      matrix:
-        include:
-          - image: wordpress
-            tag: 6.1.1
-          - image: node
-            tag: 19.8
-          - image: python
-            tag: 3.10.7
-          - image: golang
-            tag: 1.19.3
-          - image: ruby
-            tag: 3.1.3
-          - image: amazoncorretto
-            tag: 8-al2022-jdk
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - name: Download Nydus
-      uses: actions/download-artifact@master
-      with:
-        name: nydus-artifact
-        path: target/release
-    - name: Download Nydusify
-      uses: actions/download-artifact@master
-      with:
-        name: nydusify-artifact
-        path: contrib/nydusify/cmd
-    - name: Prepare Nydus Environment
-      run: |
-        sudo bash misc/benchmark/prepare_env.sh nydus
-        sudo docker pull ${{ matrix.image }}:${{ matrix.tag }} && docker tag ${{ matrix.image }}:${{ matrix.tag }} localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
-        sudo docker push localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
-        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source localhost:5000/${{ matrix.image }}:${{ matrix.tag }} \
-          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
-          --fs-version 6 \
-          --oci-ref
-    - name: BenchMark Test
-      run: |
-        cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-no-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
-    - name: Save Test Result
-      uses: actions/upload-artifact@v3
-      with:
-        name: benchmark-zran-no-prefetch-${{matrix.image}}
-        path: misc/benchmark/${{matrix.image}}.csv
-
-  benchmark-nydus-all-prefetch:
-    runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build]
-    strategy:
-      matrix:
-        include:
-          - image: wordpress
-            tag: 6.1.1
-          - image: node
-            tag: 19.8
-          - image: python
-            tag: 3.10.7
-          - image: golang
-            tag: 1.19.3
-          - image: ruby
-            tag: 3.1.3
-          - image: amazoncorretto
-            tag: 8-al2022-jdk
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - name: Download Nydus
-      uses: actions/download-artifact@master
-      with:
-        name: nydus-artifact
-        path: target/release
-    - name: Download Nydusify
-      uses: actions/download-artifact@master
-      with:
-        name: nydusify-artifact
-        path: contrib/nydusify/cmd
-    - name: Prepare Nydus Environment
-      run: |
-        sudo bash misc/benchmark/prepare_env.sh nydus
-        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{ matrix.image }}:${{ matrix.tag }} \
-          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
-          --fs-version 6
-    - name: BenchMark Test
-      run: |
-        cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
-    - name: Save Test Result
-      uses: actions/upload-artifact@v3
-      with:
-        name: benchmark-nydus-all-prefetch-${{matrix.image}}
-        path: misc/benchmark/${{matrix.image}}.csv
-
-  benchmark-zran-all-prefetch:
-    runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build]
-    strategy:
-      matrix:
-        include:
-          - image: wordpress
-            tag: 6.1.1
-          - image: node
-            tag: 19.8
-          - image: python
-            tag: 3.10.7
-          - image: golang
-            tag: 1.19.3
-          - image: ruby
-            tag: 3.1.3
-          - image: amazoncorretto
-            tag: 8-al2022-jdk
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - name: Download Nydus
-      uses: actions/download-artifact@master
-      with:
-        name: nydus-artifact
-        path: target/release
-    - name: Download Nydusify
-      uses: actions/download-artifact@master
-      with:
-        name: nydusify-artifact
-        path: contrib/nydusify/cmd
-    - name: Prepare Nydus Environment
-      run: |
-        sudo bash misc/benchmark/prepare_env.sh nydus
-        sudo docker pull ${{ matrix.image }}:${{ matrix.tag }} && docker tag ${{ matrix.image }}:${{ matrix.tag }} localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
-        sudo docker push localhost:5000/${{ matrix.image }}:${{ matrix.tag }}
-        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source localhost:5000/${{ matrix.image }}:${{ matrix.tag }} \
-          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
-          --fs-version 6 \
-          --oci-ref
-    - name: BenchMark Test
-      run: |
-        cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-all-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
-    - name: Save Test Result
-      uses: actions/upload-artifact@v3
-      with:
-        name: benchmark-zran-all-prefetch-${{matrix.image}}
-        path: misc/benchmark/${{matrix.image}}.csv
-
-  benchmark-nydus-filelist-prefetch:
-    runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build]
-    strategy:
-      matrix:
-        include:
-          - image: wordpress
-            tag: 6.1.1
-          - image: node
-            tag: 19.8
-          - image: python
-            tag: 3.10.7
-          - image: golang
-            tag: 1.19.3
-          - image: ruby
-            tag: 3.1.3
-          - image: amazoncorretto
-            tag: 8-al2022-jdk
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v3
-    - name: Download Nydus
-      uses: actions/download-artifact@master
-      with:
-        name: nydus-artifact
-        path: target/release
-    - name: Download Nydusify
-      uses: actions/download-artifact@master
-      with:
-        name: nydusify-artifact
-        path: contrib/nydusify/cmd
-    - name: Prepare Nydus Environment
-      run: |
-        sudo bash misc/benchmark/prepare_env.sh nydus
-        sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
-          --source ${{ matrix.image }}:${{ matrix.tag }} \
-          --target localhost:5000/${{ matrix.image }}:${{ matrix.tag }}_nydus \
-          --fs-version 6
-    - name: BenchMark Test
-      run: |
-        cd misc/benchmark
-        sudo python3 benchmark.py --mode nydus-filelist-prefetch --image ${{ matrix.image }}:${{ matrix.tag }}
-    - name: Save Test Result
-      uses: actions/upload-artifact@v3
-      with:
-        name: benchmark-nydus-filelist-prefetch-${{matrix.image}}
-        path: misc/benchmark/${{matrix.image}}.csv
-
   benchmark-description:
     runs-on: ubuntu-latest
     steps:
     - name: Description
       run: |
         echo "## Benchmark Environment" > $GITHUB_STEP_SUMMARY
-        echo "| operating system | cpu | memory |bandwidth|" >> $GITHUB_STEP_SUMMARY
-        echo "|:----------------:|:---:|:------:|:--------:|" >> $GITHUB_STEP_SUMMARY
-        echo "| ubuntu-22.04 | 2-core CPU (x86_64) | 7GB |10MB|" >> $GITHUB_STEP_SUMMARY
+        echo "| operating system | cpu | memory " >> $GITHUB_STEP_SUMMARY
+        echo "|:----------------:|:---:|:------ " >> $GITHUB_STEP_SUMMARY
+        echo "| ubuntu-22.04 | 2-core CPU (x86_64) | 7GB |" >> $GITHUB_STEP_SUMMARY
 
-  benchmark-result:
+  benchmark-fsversion-v5:
     runs-on: ubuntu-latest
-    needs: [benchmark-oci, benchmark-zran-all-prefetch, benchmark-zran-no-prefetch, benchmark-nydus-no-prefetch, benchmark-nydus-all-prefetch, benchmark-nydus-filelist-prefetch]
+    needs: [contrib-build, nydus-build]
     strategy:
       matrix:
         include:
           - image: wordpress
             tag: 6.1.1
-          - image: node
-            tag: 19.8
-          - image: python
-            tag: 3.10.7
-          - image: golang
-            tag: 1.19.3
-          - image: ruby
-            tag: 3.1.3
-          - image: amazoncorretto
-            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
-    - name: Get Date
-      id: get-date
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Environment
       run: |
-        echo "date=$(date  +%s)" >> $GITHUB_OUTPUT
-      shell: bash
-    - name: Restore benchmark result
-      uses: actions/cache/restore@v3
+        sudo bash misc/performance/prepare.sh
+    - name: BenchMark Test
+      run: |
+        export BENCHMARK_TEST_IMAGE=${{ matrix.image }}:${{ matrix.tag }}
+        export BENCHMARK_MODE=fs-version-5
+        export BENCHMARK_METRIC_FILE=${{ matrix.image }}-fsversion-v5.json
+        sudo -E make smoke-benchmark
+    - name: Save BenchMark Result
+      uses: actions/upload-artifact@v3
       with:
+        name: benchmark-fsversion-v5-${{ matrix.image }}
+        path: smoke/${{ matrix.image }}-fsversion-v5.json
+
+  benchmark-fsversion-v6:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Environment
+      run: |
+        sudo bash misc/performance/prepare.sh
+    - name: BenchMark Test
+      run: |
+        export BENCHMARK_TEST_IMAGE=${{ matrix.image }}:${{ matrix.tag }}
+        export BENCHMARK_MODE=fs-version-6
+        export BENCHMARK_METRIC_FILE=${{ matrix.image }}-fsversion-v6.json
+        sudo -E make smoke-benchmark
+    - name: Save BenchMark Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-fsversion-v6-${{ matrix.image }}
+        path: smoke/${{ matrix.image }}-fsversion-v6.json
+
+  benchmark-zran:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Environment
+      run: |
+        sudo bash misc/performance/prepare.sh
+    - name: BenchMark Test
+      run: |
+        export BENCHMARK_TEST_IMAGE=${{ matrix.image }}:${{ matrix.tag }}
+        export BENCHMARK_MODE=zran
+        export BENCHMARK_METRIC_FILE=${{ matrix.image }}-zran.json
+        sudo -E make smoke-benchmark
+    - name: Save BenchMark Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-zran-${{ matrix.image }}
+        path: smoke/${{ matrix.image }}-zran.json
+
+  benchmark-result:
+    runs-on: ubuntu-latest
+    needs: [benchmark-fsversion-v5, benchmark-fsversion-v6, benchmark-zran]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download benchmark-fsversion-v5
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-fsversion-v5-${{ matrix.image }}
         path: benchmark-result
-        key: benchmark-${{matrix.image}}-${{ steps.get-date.outputs.date }}
-        restore-keys: |
-         benchmark-${{matrix.image}}
-    - name: Download benchmark-oci
+    - name: Download benchmark-fsversion-v6
       uses: actions/download-artifact@v3
       with:
-        name: benchmark-oci-${{matrix.image}}
-        path: benchmark-oci
-    - name: Download benchmark-nydus-no-prefetch
+        name: benchmark-fsversion-v6-${{ matrix.image }}
+        path: benchmark-result
+    - name: Download benchmark-zran
       uses: actions/download-artifact@v3
       with:
-        name: benchmark-nydus-no-prefetch-${{matrix.image}}
-        path: benchmark-nydus-no-prefetch
-    - name: Download benchmark-zran-no-prefetch
-      uses: actions/download-artifact@v3
-      with:
-        name: benchmark-zran-no-prefetch-${{matrix.image}}
-        path: benchmark-zran-no-prefetch
-    - name: Download benchmark-nydus-all-prefetch
-      uses: actions/download-artifact@v3
-      with:
-        name: benchmark-nydus-all-prefetch-${{matrix.image}}
-        path: benchmark-nydus-all-prefetch
-    - name: Download benchmark-zran-all-prefetch
-      uses: actions/download-artifact@v3
-      with:
-        name: benchmark-zran-all-prefetch-${{matrix.image}}
-        path: benchmark-zran-all-prefetch
-    - name: Download benchmark-nydus-filelist-prefetch
-      uses: actions/download-artifact@v3
-      with:
-        name: benchmark-nydus-filelist-prefetch-${{matrix.image}}
-        path: benchmark-nydus-filelist-prefetch
+        name: benchmark-zran-${{ matrix.image }}
+        path: benchmark-result
     - uses: geekyeggo/delete-artifact@v2
       with:
         name: "*-${{matrix.image}}"
-    - name: Benchmark Workload
+    - name: Benchmark Summary
       run: |
         case ${{matrix.image}} in
           "wordpress")
               echo "### workload: wait the 80 port response" > $GITHUB_STEP_SUMMARY
             ;;
-          "node")
-              echo "### workload: node index.js; wait the 80 port response" > $GITHUB_STEP_SUMMARY
-            ;;
-          "python")
-              echo "### workload: python -c 'print("hello")'" > $GITHUB_STEP_SUMMARY
-            ;;
-          "golang")
-              echo "### workload: go run main.go" > $GITHUB_STEP_SUMMARY
-            ;;
-          "ruby")
-              echo "### workload: ruby -e "puts \"hello\""" > $GITHUB_STEP_SUMMARY
-            ;;
-          "amazoncorretto")
-              echo "### workload: javac Main.java; java Main" > $GITHUB_STEP_SUMMARY
-            ;;
         esac
-
-    - name: Benchmark
-      run: |
-        if [ ! -d "benchmark-result" ]; then
-          mkdir benchmark-result
-        fi
-        sudo python3 misc/benchmark/benchmark_summary.py --mode benchmark-schedule >> $GITHUB_STEP_SUMMARY
-    - name: Save Benchmark Result
-      uses: actions/cache/save@v3
-      with:
-        path: benchmark-result
-        key: benchmark-${{matrix.image}}-${{ steps.get-date.outputs.date }}
+        cd benchmark-result
+        metric_files=(
+          "${{ matrix.image }}-fsversion-v5.json"
+          "${{ matrix.image }}-fsversion-v6.json"
+          "${{ matrix.image }}-zran.json"
+        )
+        echo "| bench-result | e2e-time(s) | read-count | read-amount(MB) | image-size(MB) |" >> $GITHUB_STEP_SUMMARY
+        echo "|:-------------|:----------:|:----------:|:---------------:|:--------:|" >> $GITHUB_STEP_SUMMARY
+        for file in "${metric_files[@]}"; do
+            name=$(basename "$file" .json | sed 's/^[^-]*-\(.*\)$/\1/')
+            data=$(jq -r '. | "\(.e2e_time / 1e9) \(.read_count) \(.read_amount_total / (1024 * 1024)) \(.image_size / (1024 * 1024))"' "$file" | \
+              awk '{ printf "%.2f | %.0f | %.2f | %.2f", $1, $2, $3, $4 }')
+            echo "| $name | $data |" >> $GITHUB_STEP_SUMMARY
+        done
