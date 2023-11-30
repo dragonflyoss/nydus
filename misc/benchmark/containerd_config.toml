@@ -1,9 +1,0 @@
-[proxy_plugins]
-[proxy_plugins.nydus]
-    type = "snapshot"
-    address = "/run/containerd-nydus/containerd-nydus-grpc.sock"
-
-[plugins.cri]
-[plugins.cri.containerd]
-    snapshotter = "nydus"
-    disable_snapshot_annotations = false
