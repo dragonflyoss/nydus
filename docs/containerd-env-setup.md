@@ -189,6 +189,7 @@ metadata:
   attempt: 1
   name: nydus-sandbox
   namespace: default
+  uid: nydus-sandbox-test
 log_directory: /tmp
 linux:
   security_context:
@@ -235,6 +236,7 @@ metadata:
   attempt: 1
   name: nydus-sandbox
   namespace: default
+  uid: nydus-sandbox-test
 log_directory: /tmp
 linux:
   security_context:
