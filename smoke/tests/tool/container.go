@@ -63,13 +63,41 @@ var URL_WAIT = map[string]RunArgs{
 	},
 }
 
-// SupportContainerImage help to check if we support the image or not
-func SupportContainerImage(image string) bool {
-	_, ok := URL_WAIT[image]
-	return ok
+var CMD_STDOUT = map[string]RunArgs{
+	"golang": {
+		Mount: mountPath{
+			source: "tests/texture/golang",
+			target: "/src",
+		},
+	},
+	"amazoncorretto": {
+		Mount: mountPath{
+			source: "tests/texture/java",
+			target: "/src",
+		},
+	},
+	"ruby": {
+		Mount: mountPath{
+			source: "tests/texture/ruby",
+			target: "/src",
+		},
+	},
+	"python": {
+		Mount: mountPath{
+			source: "tests/texture/python",
+			target: "/src",
+		},
+	},
 }
 
-// runUrlWaitContainer run Contaienr util geting http response from WaitUrl
+// SupportContainerImage help to check if we support the image or not
+func SupportContainerImage(image string) bool {
+	_, existsInUrlWait := URL_WAIT[image]
+	_, existsInCmdStdout := CMD_STDOUT[image]
+	return existsInUrlWait || existsInCmdStdout
+}
+
+// runUrlWaitContainer run container util geting http response from WaitUrl
 func runUrlWaitContainer(t *testing.T, image string, containerName string, runArgs RunArgs) {
 	cmd := "sudo nerdctl --insecure-registry --snapshotter nydus run -d --net=host"
 	if runArgs.Mount.source != "" {
@@ -89,6 +117,20 @@ func runUrlWaitContainer(t *testing.T, image string, containerName string, runAr
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// runCmdStdoutContainer run some commands in container by entrypoint.sh
+func runCmdStdoutContainer(t *testing.T, image string, containerName string, runArgs RunArgs) {
+	cmd := "sudo nerdctl --insecure-registry --snapshotter nydus run -i --net=host"
+	if runArgs.Mount.source != "" {
+		currentDir, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("can't get rooted path name")
+		}
+		cmd += fmt.Sprintf(" -v %s:%s", filepath.Join(currentDir, runArgs.Mount.source), runArgs.Mount.target)
+	}
+	cmd += fmt.Sprintf(" --name=%s %s sh /src/entrypoint.sh", containerName, image)
+	Run(t, cmd)
 }
 
 // RunContainerWithBaseline and get metrics from api socket.
@@ -121,6 +163,9 @@ func RunContainer(t *testing.T, image string, containerName string) *ContainerMe
 	args, ok := URL_WAIT[ImageRepo(t, image)]
 	if ok {
 		runUrlWaitContainer(t, image, containerName, args)
+		defer clearContainer(t, image, containerName)
+	} else if args, ok := CMD_STDOUT[ImageRepo(t, image)]; ok {
+		runCmdStdoutContainer(t, image, containerName, args)
 		defer clearContainer(t, image, containerName)
 	}
 
