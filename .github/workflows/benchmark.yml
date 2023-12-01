@@ -75,6 +75,14 @@ jobs:
             tag: 6.1.1
           - image: node
             tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -113,6 +121,14 @@ jobs:
             tag: 6.1.1
           - image: node
             tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -151,6 +167,14 @@ jobs:
             tag: 6.1.1
           - image: node
             tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -189,6 +213,14 @@ jobs:
             tag: 6.1.1
           - image: node
             tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -216,8 +248,20 @@ jobs:
           "wordpress")
               echo "### workload: wait the 80 port response" > $GITHUB_STEP_SUMMARY
             ;;
-            "node")
+          "node")
               echo "### workload: node index.js; wait the 80 port response" > $GITHUB_STEP_SUMMARY
+            ;;
+          "python")
+              echo "### workload: python -c 'print("hello")'" > $GITHUB_STEP_SUMMARY
+            ;;
+          "golang")
+              echo "### workload: go run main.go" > $GITHUB_STEP_SUMMARY
+            ;;
+          "ruby")
+              echo "### workload: ruby -e "puts \"hello\""" > $GITHUB_STEP_SUMMARY
+            ;;
+          "amazoncorretto")
+              echo "### workload: javac Main.java; java Main" > $GITHUB_STEP_SUMMARY
             ;;
         esac
         cd benchmark-result
