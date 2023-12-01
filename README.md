@@ -13,9 +13,10 @@
 [![Twitter](https://img.shields.io/twitter/url?style=social&url=https%3A%2F%2Ftwitter.com%2Fdragonfly_oss)](https://twitter.com/dragonfly_oss)
 [![Nydus Stars](https://img.shields.io/github/stars/dragonflyoss/image-service?label=Nydus%20Stars&style=social)](https://github.com/dragonflyoss/image-service)
 
-[![Smoke Test](https://github.com/dragonflyoss/nydus/actions/workflows/smoke.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/smoke.yml)
-[![Image Conversion](https://github.com/dragonflyoss/nydus/actions/workflows/convert.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/convert.yml)
-[![Release Test Daily](https://github.com/dragonflyoss/nydus/actions/workflows/release.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/release.yml)
+[![Smoke Test](https://github.com/dragonflyoss/nydus/actions/workflows/smoke.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/smoke.yml?query=event%3Aschedule)
+[![Image Conversion](https://github.com/dragonflyoss/nydus/actions/workflows/convert.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/convert.yml?query=event%3Aschedule)
+[![Release Test Daily](https://github.com/dragonflyoss/nydus/actions/workflows/release.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/release.yml?query=event%3Aschedule)
+[![Benchmark](https://github.com/dragonflyoss/nydus/actions/workflows/benchmark.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/benchmark.yml?query=event%3Aschedule)
 [![Coverage](https://codecov.io/gh/dragonflyoss/nydus/branch/master/graph/badge.svg)](https://codecov.io/gh/dragonflyoss/nydus)
 
 ## Introduction
