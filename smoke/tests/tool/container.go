@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +28,15 @@ type ContainerMetrics struct {
 
 type RunArgs struct {
 	WaitURL            string
+	Arg                string
+	Mount              mountPath
 	BaselineReadCount  map[string]uint64
 	BaselineReadAmount map[string]uint64
+}
+
+type mountPath struct {
+	source string
+	target string
 }
 
 var URL_WAIT = map[string]RunArgs{
@@ -47,27 +53,33 @@ var URL_WAIT = map[string]RunArgs{
 			"zran":         79836339,
 		},
 	},
+	"node": {
+		WaitURL: "http://localhost:80",
+		Arg:     "node /src/index.js",
+		Mount: mountPath{
+			source: "tests/texture/node",
+			target: "/src",
+		},
+	},
 }
-
-var supportContainerImages = []string{"wordpress"}
 
 // SupportContainerImage help to check if we support the image or not
 func SupportContainerImage(image string) bool {
-	return contains(supportContainerImages, image)
-}
-
-func contains(slice []string, value string) bool {
-	for _, v := range slice {
-		if strings.Contains(v, value) {
-			return true
-		}
-	}
-	return false
+	_, ok := URL_WAIT[image]
+	return ok
 }
 
 // runUrlWaitContainer run Contaienr util geting http response from WaitUrl
 func runUrlWaitContainer(t *testing.T, image string, containerName string, runArgs RunArgs) {
-	cmd := fmt.Sprintf("sudo nerdctl --insecure-registry --snapshotter nydus run -d --net=host --name=%s %s", containerName, image)
+	cmd := "sudo nerdctl --insecure-registry --snapshotter nydus run -d --net=host"
+	if runArgs.Mount.source != "" {
+		currentDir, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("can't get rooted path name")
+		}
+		cmd += fmt.Sprintf(" --volume %s:%s", filepath.Join(currentDir, runArgs.Mount.source), runArgs.Mount.target)
+	}
+	cmd += fmt.Sprintf(" --name=%s %s %s", containerName, image, runArgs.Arg)
 	RunWithoutOutput(t, cmd)
 	for {
 		resp, err := http.Get(runArgs.WaitURL)
@@ -103,14 +115,16 @@ func RunContainerWithBaseline(t *testing.T, image string, containerName string, 
 // RunContainer and return container metric
 func RunContainer(t *testing.T, image string, containerName string) *ContainerMetrics {
 	var containerMetic ContainerMetrics
+	startTime := time.Now()
+
+	// runContainer
 	args, ok := URL_WAIT[ImageRepo(t, image)]
 	if ok {
-		startTime := time.Now()
 		runUrlWaitContainer(t, image, containerName, args)
-		endTime := time.Now()
-		containerMetic.E2ETime = endTime.Sub(startTime)
 		defer clearContainer(t, image, containerName)
 	}
+
+	containerMetic.E2ETime = time.Since(startTime)
 	backendMetrics, err := getContainerBackendMetrics(t)
 	if err != nil {
 		t.Logf(err.Error())
