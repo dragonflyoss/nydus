@@ -123,15 +123,11 @@ jobs:
           sudo tar xzf nydus-static-$version_arch.tgz -C nydus-$version
           sudo cp -r nydus-$version/nydus-static/* /usr/bin/nydus-$version/
         done
-    - name: Golang Cache
-      uses: actions/cache@v3
+    - name: Setup Golang
+      uses: actions/setup-go@v4
       with:
-        path: |
-          ~/.cache/go-build
-          ~/go/pkg/mod
-        key: ${{ runner.os }}-golang-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-golang-
+        go-version-file: 'go.work'
+        cache-dependency-path: "**/*.sum"
     - name: Integration Test
       run: |
         sudo mkdir -p /usr/bin/nydus-latest /home/runner/work/workdir
