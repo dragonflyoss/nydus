@@ -73,6 +73,8 @@ jobs:
         include:
           - image: wordpress
             tag: 6.1.1
+          - image: node
+            tag: 19.8
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -109,6 +111,8 @@ jobs:
         include:
           - image: wordpress
             tag: 6.1.1
+          - image: node
+            tag: 19.8
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -145,6 +149,8 @@ jobs:
         include:
           - image: wordpress
             tag: 6.1.1
+          - image: node
+            tag: 19.8
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -181,6 +187,8 @@ jobs:
         include:
           - image: wordpress
             tag: 6.1.1
+          - image: node
+            tag: 19.8
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -207,6 +215,9 @@ jobs:
         case ${{matrix.image}} in
           "wordpress")
               echo "### workload: wait the 80 port response" > $GITHUB_STEP_SUMMARY
+            ;;
+            "node")
+              echo "### workload: node index.js; wait the 80 port response" > $GITHUB_STEP_SUMMARY
             ;;
         esac
         cd benchmark-result
