@@ -178,7 +178,7 @@ func (b *S3Backend) Size(blobID string) (int64, error) {
 	if err != nil {
 		return 0, errors.Wrap(err, "get object size")
 	}
-	return output.ObjectSize, nil
+	return *output.ObjectSize, nil
 }
 
 func (b *S3Backend) remoteID(blobObjectKey string) string {
