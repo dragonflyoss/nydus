@@ -15,8 +15,8 @@ import (
 	"reflect"
 	"syscall"
 
+	"github.com/distribution/reference"
 	dockerconfig "github.com/docker/cli/cli/config"
-	"github.com/docker/distribution/reference"
 
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"

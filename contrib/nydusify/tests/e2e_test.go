@@ -151,7 +151,7 @@ func testConvertWithS3Backend(t *testing.T, fsVersion string) {
 
 	// create bucket
 	s3Client := s3.NewFromConfig(aws.Config{}, func(o *s3.Options) {
-		o.EndpointResolver = s3.EndpointResolverFromURL("http://" + endpoint)
+		o.BaseEndpoint = aws.String("http://" + endpoint)
 		o.Region = region
 		o.UsePathStyle = true
 		o.Credentials = credentials.NewStaticCredentialsProvider(accessKey, accessSecret, "")
