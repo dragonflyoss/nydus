@@ -17,7 +17,7 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/reference/docker"
-	"github.com/docker/distribution/reference"
+	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"

@@ -71,7 +71,7 @@ func newS3Backend(rawConfig []byte) (*S3Backend, error) {
 	}
 
 	client := s3.NewFromConfig(s3AWSConfig, func(o *s3.Options) {
-		o.EndpointResolver = s3.EndpointResolverFromURL(endpointWithScheme)
+		o.BaseEndpoint = &endpointWithScheme
 		o.Region = cfg.Region
 		o.UsePathStyle = true
 		if len(cfg.AccessKeySecret) > 0 && len(cfg.AccessKeyID) > 0 {

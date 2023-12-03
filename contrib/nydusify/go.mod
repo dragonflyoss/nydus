@@ -11,8 +11,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.47.2
 	github.com/containerd/containerd v1.7.6
 	github.com/containerd/nydus-snapshotter v0.13.3
+	github.com/distribution/reference v0.5.0
 	github.com/docker/cli v24.0.7+incompatible
-	github.com/docker/distribution v2.8.3+incompatible
 	github.com/dustin/go-humanize v1.0.1
 	github.com/goharbor/acceleration-service v0.2.12
 	github.com/google/uuid v1.4.0
@@ -63,7 +63,6 @@ require (
 	github.com/containers/ocicrypt v1.1.7 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/distribution/reference v0.5.0 // indirect
 	github.com/docker/docker v23.0.3+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.7.0 // indirect
 	github.com/docker/go-events v0.0.0-20190806004212-e31b211e4f1c // indirect
