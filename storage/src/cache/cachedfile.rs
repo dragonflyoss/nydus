@@ -377,11 +377,15 @@ impl FileCacheEntry {
                 extended_chunks[start..=end].to_vec()
             }
         } else {
-            while !extended_chunks.is_empty() {
-                let chunk = &extended_chunks[extended_chunks.len() - 1];
-                if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true)) {
-                    extended_chunks.pop();
-                } else {
+            // check from start to end for dedup
+            for idx in 0..extended_chunks.len() {
+                let chunk = &extended_chunks[idx];
+                if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true))
+                    || self
+                        .blob_info
+                        .get_dedup_by_chunk_idx(chunk.as_ref().id() as usize)
+                {
+                    extended_chunks.truncate(idx);
                     break;
                 }
             }
@@ -592,6 +596,10 @@ impl BlobCache for FileCacheEntry {
                     continue;
                 }
 
+                if self.blob_info.get_dedup_by_chunk_idx(c.id() as usize) {
+                    continue;
+                }
+
                 // For digested chunk map, we must check whether the cached data is valid because
                 // the digested chunk map cannot persist readiness state.
                 let d_size = c.uncompressed_size() as usize;
@@ -607,9 +615,12 @@ impl BlobCache for FileCacheEntry {
                 if let Ok(true) = self.chunk_map.check_ready_and_mark_pending(c.as_ref()) {
                     // The chunk is ready, so skip it.
                     continue;
-                } else {
-                    pending.push(c.clone());
                 }
+                if self.blob_info.get_dedup_by_chunk_idx(c.id() as usize) {
+                    continue;
+                }
+
+                pending.push(c.clone());
             }
         }
 

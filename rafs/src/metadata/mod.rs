@@ -29,6 +29,7 @@ use nydus_storage::device::{
 use nydus_storage::meta::toc::TocEntryList;
 use nydus_utils::digest::{self, RafsDigest};
 use nydus_utils::{compress, crypt};
+use serde::Deserialize;
 use serde::Serialize;
 
 use self::layout::v5::RafsV5PrefetchTable;
@@ -277,7 +278,7 @@ pub trait RafsStore {
 
 bitflags! {
     /// Rafs filesystem feature flags.
-    #[derive(Serialize)]
+    #[derive(Deserialize, Serialize)]
     pub struct RafsSuperFlags: u64 {
         /// Data chunks are not compressed.
         const COMPRESSION_NONE = 0x0000_0001;
@@ -466,7 +467,7 @@ impl RafsSuperConfig {
 }
 
 /// Rafs filesystem meta-data cached from on disk RAFS super block.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct RafsSuperMeta {
     /// Filesystem magic number.
     pub magic: u32,

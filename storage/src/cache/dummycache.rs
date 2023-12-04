@@ -136,6 +136,12 @@ impl BlobCache for DummyCache {
             if !bios[0].user_io {
                 return Ok(0);
             }
+            if self
+                .blob_info
+                .get_dedup_by_chunk_idx(bios[0].chunkinfo.id() as usize)
+            {
+                return Ok(0);
+            }
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
             self.read_chunk_from_backend(&bios[0].chunkinfo, buf)?;
             return Ok(buf.len());

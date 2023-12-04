@@ -32,14 +32,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
+use bitvec::prelude::*;
 use fuse_backend_rs::api::filesystem::ZeroCopyWriter;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 
-use nydus_api::ConfigV2;
+use nydus_api::{BackendConfigV2, ConfigV2};
+use nydus_utils::cas::CasMgr;
 use nydus_utils::compress;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::digest::{self, RafsDigest};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::cache::BlobCache;
 use crate::factory::BLOB_FACTORY;
@@ -48,6 +51,7 @@ pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
 pub(crate) const BLOB_FEATURE_INCOMPAT_VALUE: u32 = 0x0000_0fff;
 
 bitflags! {
+    #[derive(Deserialize, Serialize)]
     /// Features bits for blob management.
     pub struct BlobFeatures: u32 {
         /// Uncompressed chunk data is aligned.
@@ -112,7 +116,7 @@ impl TryFrom<u32> for BlobFeatures {
 ///
 /// The `BlobInfo` structure provides information for the storage subsystem to manage a blob file
 /// and serve blob IO requests for clients.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct BlobInfo {
     /// The index of blob in RAFS blob table.
     blob_index: u32,
@@ -164,14 +168,69 @@ pub struct BlobInfo {
     // Size of blob ToC content, it's zero for blobs with inlined-meta.
     blob_toc_size: u32,
 
+    #[serde(skip_deserializing, skip_serializing)]
     /// V6: support fs-cache mode
     fs_cache_file: Option<Arc<File>>,
     /// V6: support inlined-meta
     meta_path: Arc<Mutex<String>>,
+    #[serde(
+        serialize_with = "serialize_cipher_object",
+        deserialize_with = "deserialize_cipher_object"
+    )]
     /// V6: support data encryption.
     cipher_object: Arc<Cipher>,
     /// Cipher context for encryption.
     cipher_ctx: Option<CipherContext>,
+
+    /// Bitvector to indicate which chunks are deduplicated.
+    dedup_bitmap: Option<BitVec>,
+}
+
+fn serialize_cipher_object<S>(cipher_object: &Arc<Cipher>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let cipher_object_str = match cipher_object.deref() {
+        Cipher::None => "none",
+        Cipher::Aes128Xts(_) => "aes128_xts",
+        Cipher::Aes256Xts(_) => "aes256_xts",
+        Cipher::Aes256Gcm(_) => "aes256_gcm",
+    };
+    serializer.serialize_str(cipher_object_str)
+}
+
+fn deserialize_cipher_object<'de, D>(deserializer: D) -> Result<Arc<Cipher>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let cipher_object_str = String::deserialize(deserializer)?;
+
+    let cipher_object = match cipher_object_str.as_str() {
+        "none" => Ok(Arc::new(Cipher::None)),
+        "aes128_xts" => {
+            let cipher: Result<Cipher, D::Error> = crypt::Algorithm::Aes128Xts
+                .new_cipher()
+                .map_err(de::Error::custom);
+            Ok(Arc::new(cipher.unwrap()))
+        }
+        "aes256_xts" => {
+            let cipher: Result<Cipher, D::Error> = crypt::Algorithm::Aes256Xts
+                .new_cipher()
+                .map_err(de::Error::custom);
+            Ok(Arc::new(cipher.unwrap()))
+        }
+        "aes256_gcm" => {
+            let cipher: Result<Cipher, D::Error> = crypt::Algorithm::Aes256Gcm
+                .new_cipher()
+                .map_err(de::Error::custom);
+            Ok(Arc::new(cipher.unwrap()))
+        }
+        _ => {
+            unimplemented!()
+        }
+    };
+
+    cipher_object
 }
 
 impl BlobInfo {
@@ -215,6 +274,7 @@ impl BlobInfo {
             meta_path: Arc::new(Mutex::new(String::new())),
             cipher_object: Default::default(),
             cipher_ctx: None,
+            dedup_bitmap: None,
         };
 
         blob_info.compute_features();
@@ -567,10 +627,43 @@ impl BlobInfo {
             self.cipher_ctx.clone(),
         )
     }
+
+    pub fn set_dedup_bitmap(&mut self, dedup_bitmap: Option<BitVec>) {
+        self.dedup_bitmap = dedup_bitmap;
+    }
+
+    pub fn set_dedup_by_chunk_idx(&mut self, index: usize, value: bool) {
+        if index >= self.chunk_count as usize || self.dedup_bitmap.is_none() {
+            return;
+        }
+
+        if let Some(bitmap) = &mut self.dedup_bitmap {
+            bitmap.set(index, value);
+        }
+    }
+
+    pub fn get_dedup_by_chunk_idx(&self, index: usize) -> bool {
+        if self.dedup_bitmap.is_none() {
+            return false;
+        }
+        // if chunk index > blob.chunk_count, means this chunk is from other blob.
+        if index >= self.chunk_count as usize {
+            return true;
+        }
+        if let Some(bitmap) = &self.dedup_bitmap {
+            match bitmap.get(index).as_deref() {
+                Some(v) => *v,
+                None => false,
+            }
+        } else {
+            false
+        }
+    }
 }
 
 bitflags! {
     /// Blob chunk flags.
+    #[derive(Deserialize, Serialize)]
     pub struct BlobChunkFlags: u32 {
         /// Chunk data is compressed.
         const COMPRESSED = 0x0000_0001;
@@ -580,6 +673,8 @@ bitflags! {
         const ENCYPTED = 0x0000_0004;
         /// Chunk data is merged into a batch chunk.
         const BATCH = 0x0000_0008;
+        /// Chunk data is deduped.
+        const DEDUPED = 0x0000_0010;
     }
 }
 
@@ -643,6 +738,8 @@ pub trait BlobChunkInfo: Any + Sync + Send {
 
     /// Check whether the chunk is encrypted or not.
     fn is_encrypted(&self) -> bool;
+    /// Check whether the chunk is deduped or not.
+    fn is_deduped(&self) -> bool;
 
     fn as_any(&self) -> &dyn Any;
 }
@@ -695,6 +792,10 @@ impl BlobChunkInfo for BlobIoChunk {
 
     fn is_encrypted(&self) -> bool {
         self.0.is_encrypted()
+    }
+
+    fn is_deduped(&self) -> bool {
+        self.0.is_deduped()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1080,15 +1181,53 @@ impl BlobDevice {
     /// Create new blob device instance.
     pub fn new(config: &Arc<ConfigV2>, blob_infos: &[Arc<BlobInfo>]) -> io::Result<BlobDevice> {
         let mut blobs = Vec::with_capacity(blob_infos.len());
+        let deduplication_config = config.get_deduplication_config().ok();
+        let cas_mgr = deduplication_config
+            .as_ref()
+            .filter(|config| config.get_enable() && config.get_work_dir().is_ok())
+            .and_then(|config| CasMgr::new(config.get_work_dir().unwrap()).ok());
+
         for blob_info in blob_infos.iter() {
-            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
-            blobs.push(blob);
+            let blob = if let Some(cas_mgr) = &cas_mgr {
+                Self::get_new_blob_config(cas_mgr, blob_info, config).and_then(|new_blob_config| {
+                    BLOB_FACTORY.new_blob_cache(&new_blob_config, blob_info)
+                })
+            } else {
+                BLOB_FACTORY.new_blob_cache(config, blob_info)
+            };
+
+            blobs.push(blob.unwrap());
         }
 
         Ok(BlobDevice {
             blobs: Arc::new(ArcSwap::new(Arc::new(blobs))),
             blob_count: blob_infos.len(),
         })
+    }
+
+    fn get_new_blob_config(
+        cas_mgr: &CasMgr,
+        blob_info: &Arc<BlobInfo>,
+        config: &Arc<ConfigV2>,
+    ) -> io::Result<Arc<ConfigV2>> {
+        let blob_id = blob_info.blob_id();
+        let blob_backend = Self::get_blob_backend_config(cas_mgr, &blob_id)?;
+        let mut blob_config = config.deref().clone();
+        blob_config.backend = Some(blob_backend);
+        let blob_config = Arc::new(blob_config);
+
+        Ok(blob_config)
+    }
+
+    fn get_blob_backend_config(cas_mgr: &CasMgr, blob_id: &str) -> io::Result<BackendConfigV2> {
+        let backend_content = match cas_mgr.get_backend_by_blob_id(blob_id, true) {
+            Ok(backend_content) => Ok(backend_content),
+            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+        };
+
+        let backend_content = backend_content?.unwrap();
+        let backend = serde_json::from_str::<BackendConfigV2>(&backend_content)?;
+        Ok(backend)
     }
 
     /// Update configuration and storage backends of the blob device.
@@ -1640,5 +1779,107 @@ mod tests {
             id.unwrap(),
             "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef".to_owned()
         );
+    }
+
+    #[test]
+    fn test_serialize_cipher_object() {
+        let mut blob_info = BlobInfo::new(
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::ENCRYPTED,
+        );
+
+        let algos = vec![
+            crypt::Algorithm::None,
+            crypt::Algorithm::Aes128Xts,
+            crypt::Algorithm::Aes256Xts,
+            crypt::Algorithm::Aes256Gcm,
+        ];
+
+        for algo in algos {
+            let (cipher_object, cipher_ctx) = match algo {
+                crypt::Algorithm::None => (Default::default(), None),
+                crypt::Algorithm::Aes128Xts => {
+                    let key = crypt::Cipher::generate_random_key(algo).unwrap();
+                    let iv = crypt::Cipher::generate_random_iv().unwrap();
+                    let cipher_ctx = CipherContext::new(key, iv, false, algo).unwrap();
+                    (
+                        algo.new_cipher().ok().unwrap_or(Default::default()),
+                        Some(cipher_ctx),
+                    )
+                }
+                crypt::Algorithm::Aes256Xts => {
+                    let key = crypt::Cipher::generate_random_key(algo).unwrap();
+                    let iv = crypt::Cipher::generate_random_iv().unwrap();
+                    let cipher_ctx = CipherContext::new(key, iv, false, algo).unwrap();
+                    (
+                        algo.new_cipher().ok().unwrap_or(Default::default()),
+                        Some(cipher_ctx),
+                    )
+                }
+                crypt::Algorithm::Aes256Gcm => {
+                    let key = crypt::Cipher::generate_random_key(algo).unwrap();
+                    let iv = crypt::Cipher::generate_random_iv().unwrap();
+                    let cipher_ctx = CipherContext::new(key, iv, false, algo).unwrap();
+                    (
+                        algo.new_cipher().ok().unwrap_or(Default::default()),
+                        Some(cipher_ctx),
+                    )
+                }
+            };
+            blob_info.set_cipher_info(algo, Arc::new(cipher_object), cipher_ctx);
+
+            let content = serde_json::to_string(&blob_info).unwrap();
+            let blob_info_from_deserialize: BlobInfo = serde_json::from_str(&content).unwrap();
+
+            assert_eq!(algo, blob_info_from_deserialize.cipher());
+            assert_eq!(blob_info_from_deserialize.blob_id(), blob_info.blob_id());
+            assert_eq!(
+                blob_info_from_deserialize.blob_index(),
+                blob_info.blob_index()
+            );
+            assert_eq!(
+                blob_info_from_deserialize.uncompressed_size(),
+                blob_info.uncompressed_size()
+            );
+            assert_eq!(
+                blob_info_from_deserialize.compressed_data_size(),
+                blob_info.compressed_data_size()
+            );
+            assert_eq!(
+                blob_info_from_deserialize.chunk_size(),
+                blob_info.chunk_size()
+            );
+            assert_eq!(
+                blob_info_from_deserialize.chunk_count(),
+                blob_info.chunk_count()
+            );
+            assert_eq!(blob_info_from_deserialize.features(), blob_info.features());
+        }
+    }
+
+    #[test]
+    fn test_set_dedup_bitmap() {
+        let mut blob_info = BlobInfo::new(
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
+        );
+
+        blob_info.dedup_bitmap = Some(bitvec!(0 ; blob_info.chunk_count as usize));
+        for idx in 0..blob_info.chunk_count {
+            let idx = idx as usize;
+            assert!(!blob_info.get_dedup_by_chunk_idx(idx));
+            blob_info.set_dedup_by_chunk_idx(idx, true);
+            assert!(blob_info.get_dedup_by_chunk_idx(idx));
+        }
     }
 }

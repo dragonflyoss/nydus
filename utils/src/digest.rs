@@ -20,7 +20,7 @@ pub const RAFS_DIGEST_LENGTH: usize = 32;
 pub type DigestData = [u8; RAFS_DIGEST_LENGTH];
 
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Algorithm {
     #[default]
     Blake3 = 0,
@@ -144,7 +144,9 @@ impl DigestHasher for Sha256 {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, Default, Ord, PartialOrd)]
+#[derive(
+    Clone, Copy, Hash, PartialEq, Eq, Debug, Default, Ord, PartialOrd, Deserialize, Serialize,
+)]
 pub struct RafsDigest {
     pub data: DigestData,
 }

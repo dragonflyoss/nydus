@@ -18,7 +18,7 @@ const COMPRESSION_MINIMUM_RATIO: usize = 100;
 
 /// Supported compression algorithms.
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Deserialize, Serialize)]
 pub enum Algorithm {
     #[default]
     None = 0,

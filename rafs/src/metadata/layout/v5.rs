@@ -45,6 +45,7 @@ use std::sync::Arc;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::{compress, ByteSize};
+use serde::{Deserialize, Serialize};
 use vm_memory::VolatileMemory;
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
 // compressed blob file. To avoid circular dependency, the following Rafs v5 metadata structures
@@ -1089,7 +1090,7 @@ impl<'a> RafsStore for RafsV5InodeWrapper<'a> {
 
 /// Rafs v5 chunk on disk metadata.
 #[repr(C)]
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct RafsV5ChunkInfo {
     /// sha256(chunk), [char; RAFS_SHA256_LENGTH]
     pub block_id: RafsDigest, // 32
@@ -1122,6 +1123,10 @@ impl RafsV5ChunkInfo {
     /// Load a Rafs v5 indoe from a reader.
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.read_exact(self.as_mut())
+    }
+
+    pub fn is_deduped(&self) -> bool {
+        self.flags.contains(BlobChunkFlags::DEDUPED)
     }
 }
 
@@ -1382,6 +1387,10 @@ pub(crate) fn rafsv5_align(size: usize) -> usize {
     }
 }
 
+pub fn dedup_rafsv5_align(size: usize) -> usize {
+    rafsv5_align(size)
+}
+
 /// Validate inode metadata, include children, chunks and symblink etc.
 ///
 /// The default implementation is for rafs v5. The chunk data is not validated here, which will
@@ -1626,6 +1635,10 @@ pub mod tests {
 
         fn is_compressed(&self) -> bool {
             self.flags.contains(BlobChunkFlags::COMPRESSED)
+        }
+
+        fn is_deduped(&self) -> bool {
+            self.flags.contains(BlobChunkFlags::DEDUPED)
         }
 
         fn is_encrypted(&self) -> bool {

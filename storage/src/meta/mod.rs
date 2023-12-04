@@ -1844,6 +1844,10 @@ impl BlobChunkInfo for BlobMetaChunk {
         self.meta.chunk_info_array.is_encrypted(self.chunk_index)
     }
 
+    fn is_deduped(&self) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

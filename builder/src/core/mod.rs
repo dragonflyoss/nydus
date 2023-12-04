@@ -14,3 +14,5 @@ pub(crate) mod prefetch;
 pub(crate) mod tree;
 pub(crate) mod v5;
 pub(crate) mod v6;
+
+pub mod bootstrap_dedup;

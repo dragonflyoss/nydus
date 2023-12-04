@@ -22,6 +22,10 @@ sha2 = "0.10.2"
 tar = "0.4.40"
 vmm-sys-util = "0.11.0"
 xattr = "1.0.1"
+bitvec = { version="1", default-features = false, features = ["alloc",
+  "atomic",
+  "serde",
+  "std",]}
 
 nydus-api = { version = "0.3", path = "../api" }
 nydus-rafs = { version = "0.3", path = "../rafs" }

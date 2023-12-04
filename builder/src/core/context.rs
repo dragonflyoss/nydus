@@ -194,7 +194,7 @@ impl Write for ArtifactMemoryWriter {
     }
 }
 
-struct ArtifactFileWriter(pub ArtifactWriter);
+pub struct ArtifactFileWriter(pub ArtifactWriter);
 
 impl ArtifactFileWriter {
     pub fn finalize(&mut self, name: Option<String>) -> Result<()> {
@@ -1022,6 +1022,13 @@ impl BlobManager {
         self.blobs.iter().map(|b| b.blob_id.to_owned()).collect()
     }
 
+    pub fn get_blob_id_by_idx(&mut self, idx: usize) -> Option<String> {
+        if idx >= self.len() {
+            return None;
+        }
+        self.blobs[idx].blob_id()
+    }
+
     /// Prepend all blobs from `blob_table` to the blob manager.
     pub fn extend_from_blob_table(
         &mut self,
@@ -1515,6 +1522,7 @@ mod tests {
             }),
             id: "id".to_owned(),
             cache: None,
+            deduplication: None,
             rafs: None,
             internal: ConfigV2Internal {
                 blob_accessible: Arc::new(AtomicBool::new(true)),

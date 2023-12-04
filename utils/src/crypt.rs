@@ -42,7 +42,7 @@ const DEFAULT_CE_KEY_64: [u8; 64] = [
 
 /// Supported cipher algorithms.
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum Algorithm {
     #[default]
     None = 0,
@@ -380,7 +380,7 @@ impl Cipher {
 }
 
 /// Struct to provide context information for data encryption/decryption.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize)]
 pub struct CipherContext {
     key: Vec<u8>,
     iv: Vec<u8>,
