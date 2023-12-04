@@ -270,13 +270,17 @@ pub trait BlobCache: Send + Sync {
             )));
         }
         let duration = Instant::now().duration_since(start).as_millis();
+        let duration_s = duration as f64 / 1000.0;
+        let throughput_mbps = blob_size as f64 / duration_s / 1_000_000.0;
+
         debug!(
-            "read_chunks_from_backend: {} {} {} bytes at {}, duration {}ms",
+            "read_chunks_from_backend: {} {} {} bytes at {}, duration {}ms, throughput {:.4}Mbps",
             std::thread::current().name().unwrap_or_default(),
             if prefetch { "prefetch" } else { "fetch" },
             blob_size,
             blob_offset,
-            duration
+            duration,
+            throughput_mbps
         );
 
         let chunks = chunks.iter().map(|v| v.as_ref()).collect();
@@ -328,12 +332,15 @@ pub trait BlobCache: Send + Sync {
         }
 
         let duration = Instant::now().duration_since(start).as_millis();
+        let duration_s = duration as f64 / 1000.0;
+        let throughput_mbps = chunk.compressed_size() as f64 / duration_s / 1_000_000.0;
         debug!(
-            "read_chunk_from_backend: {} {} bytes at {}, duration {}ms",
+            "read_chunk_from_backend: {} {} bytes at {}, duration {}ms, throughput {:.4}Mbps",
             std::thread::current().name().unwrap_or_default(),
             chunk.compressed_size(),
             chunk.compressed_offset(),
-            duration
+            duration,
+            throughput_mbps
         );
         self.validate_chunk_data(chunk, buffer, false)
             .map_err(|e| {
