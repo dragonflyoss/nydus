@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Environment Requirement: Containerd, nerdctl >= 0.22, nydus-snapshoooter, nydusd, nydus-image and nydusify.
+// Environment Requirement: Containerd, nerdctl >= 0.22, nydus-snapshotter, nydusd, nydus-image and nydusify.
 // Prepare: setup nydus for containerd, reference: https://github.com/dragonflyoss/nydus/blob/master/docs/containerd-env-setup.md.
 
 type PerformanceTestSuite struct {
