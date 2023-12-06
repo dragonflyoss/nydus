@@ -65,6 +65,53 @@ jobs:
         echo "|:----------------:|:---:|:------ " >> $GITHUB_STEP_SUMMARY
         echo "| ubuntu-22.04 | 2-core CPU (x86_64) | 7GB |" >> $GITHUB_STEP_SUMMARY
 
+  benchmark-oci:
+    runs-on: ubuntu-latest
+    needs: [contrib-build, nydus-build]
+    strategy:
+      matrix:
+        include:
+          - image: wordpress
+            tag: 6.1.1
+          - image: node
+            tag: 19.8
+          - image: python
+            tag: 3.10.7
+          - image: golang
+            tag: 1.19.3
+          - image: ruby
+            tag: 3.1.3
+          - image: amazoncorretto
+            tag: 8-al2022-jdk
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Download Nydus
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-artifact
+        path: target/release
+    - name: Download Nydusify
+      uses: actions/download-artifact@master
+      with:
+        name: nydusify-artifact
+        path: contrib/nydusify/cmd
+    - name: Prepare Environment
+      run: |
+        sudo bash misc/performance/prepare.sh
+    - name: BenchMark Test
+      run: |
+        export BENCHMARK_TEST_IMAGE=${{ matrix.image }}:${{ matrix.tag }}
+        export BENCHMARK_MODE=oci
+        export BENCHMARK_METRIC_FILE=${{ matrix.image }}-oci.json
+        export SNAPSHOTTER=overlayfs
+        sudo -E make smoke-benchmark
+    - name: Save BenchMark Result
+      uses: actions/upload-artifact@v3
+      with:
+        name: benchmark-oci-${{ matrix.image }}
+        path: smoke/${{ matrix.image }}-oci.json
+
   benchmark-fsversion-v5:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
@@ -205,7 +252,7 @@ jobs:
 
   benchmark-result:
     runs-on: ubuntu-latest
-    needs: [benchmark-fsversion-v5, benchmark-fsversion-v6, benchmark-zran]
+    needs: [benchmark-oci, benchmark-fsversion-v5, benchmark-fsversion-v6, benchmark-zran]
     strategy:
       matrix:
         include:
@@ -224,6 +271,11 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v3
+    - name: Download benchmark-oci
+      uses: actions/download-artifact@v3
+      with:
+        name: benchmark-oci-${{ matrix.image }}
+        path: benchmark-result
     - name: Download benchmark-fsversion-v5
       uses: actions/download-artifact@v3
       with:
@@ -269,6 +321,7 @@ jobs:
           "${{ matrix.image }}-fsversion-v5.json"
           "${{ matrix.image }}-fsversion-v6.json"
           "${{ matrix.image }}-zran.json"
+          "${{ matrix.image }}-oci.json"
         )
         echo "| bench-result | e2e-time(s) | read-count | read-amount(MB) | image-size(MB) |" >> $GITHUB_STEP_SUMMARY
         echo "|:-------------|:----------:|:----------:|:---------------:|:--------:|" >> $GITHUB_STEP_SUMMARY
