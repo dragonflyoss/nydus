@@ -15,7 +15,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Environment Requirement: Containerd, nerdctl >= 0.22, nydus-snapshoooter, nydusd, nydus-image and nydusify.
+// Environment Requirement: Containerd, nerdctl >= 0.22, nydus-snapshotter, nydusd, nydus-image and nydusify.
 // Prepare: setup nydus for containerd, reference: https://github.com/dragonflyoss/nydus/blob/master/docs/containerd-env-setup.md.
 // TestBenchmark will dump json file(benchmark.json) which inlcudes container e2e time, image size, read-amount and read-cout.
 //	Example:
@@ -30,11 +30,16 @@ type BenchmarkTestSuite struct {
 	t                 *testing.T
 	testImage         string
 	testContainerName string
+	snapshotter       string
 	metric            tool.ContainerMetrics
 }
 
 func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 	ctx := tool.DefaultContext(b.t)
+	b.snapshotter = os.Getenv("SNAPSHOTTER")
+	if b.snapshotter == "" {
+		b.snapshotter = "nydus"
+	}
 
 	// choose test mode
 	mode := os.Getenv("BENCHMARK_MODE")
@@ -42,6 +47,7 @@ func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 		mode = "fs-version-6"
 	}
 	switch mode {
+	case "oci":
 	case "fs-version-5":
 		ctx.Build.FSVersion = "5"
 	case "fs-version-6":
@@ -65,7 +71,7 @@ func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 
 	// run contaienr
 	b.testContainerName = uuid.NewString()
-	containerMetic := tool.RunContainer(b.t, b.testImage, b.testContainerName)
+	containerMetic := tool.RunContainer(b.t, b.testImage, b.snapshotter, b.testContainerName)
 	b.metric = tool.ContainerMetrics{
 		E2ETime:         containerMetic.E2ETime,
 		ReadCount:       containerMetic.ReadCount,
@@ -106,7 +112,6 @@ func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, mode 
 		ctx.Binary.Nydusify, logLevel, source, target, ctx.Binary.Builder, ctx.Env.WorkDir, fsVersion, enableOCIRef, convertMetricFile)
 	tool.RunWithoutOutput(t, convertCmd)
 	defer os.Remove(convertMetricFile)
-	b.testImage = target
 
 	metricData, err := os.ReadFile(convertMetricFile)
 	if err != nil {
@@ -119,7 +124,13 @@ func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, mode 
 		t.Fatalf("can't parsing convert metric file")
 		return 0
 	}
-	return convertMetirc["TargetImageSize"]
+	if b.snapshotter == "nydus" {
+		b.testImage = target
+		return convertMetirc["TargetImageSize"]
+	} else {
+		b.testImage = source
+		return convertMetirc["SourceImageSize"]
+	}
 }
 
 func (b *BenchmarkTestSuite) dumpMetric() {

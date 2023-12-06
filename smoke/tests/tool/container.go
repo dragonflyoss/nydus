@@ -98,8 +98,8 @@ func SupportContainerImage(image string) bool {
 }
 
 // runUrlWaitContainer run container util geting http response from WaitUrl
-func runUrlWaitContainer(t *testing.T, image string, containerName string, runArgs RunArgs) {
-	cmd := "sudo nerdctl --insecure-registry --snapshotter nydus run -d --net=host"
+func runUrlWaitContainer(t *testing.T, image string, snapshotter string, containerName string, runArgs RunArgs) {
+	cmd := fmt.Sprintf("sudo nerdctl --insecure-registry --snapshotter %s run -d --net=host", snapshotter)
 	if runArgs.Mount.source != "" {
 		currentDir, err := os.Getwd()
 		if err != nil {
@@ -120,8 +120,8 @@ func runUrlWaitContainer(t *testing.T, image string, containerName string, runAr
 }
 
 // runCmdStdoutContainer run some commands in container by entrypoint.sh
-func runCmdStdoutContainer(t *testing.T, image string, containerName string, runArgs RunArgs) {
-	cmd := "sudo nerdctl --insecure-registry --snapshotter nydus run -i --net=host"
+func runCmdStdoutContainer(t *testing.T, image string, snapshotter string, containerName string, runArgs RunArgs) {
+	cmd := fmt.Sprintf("sudo nerdctl --insecure-registry --snapshotter %s run -i --net=host", snapshotter)
 	if runArgs.Mount.source != "" {
 		currentDir, err := os.Getwd()
 		if err != nil {
@@ -138,8 +138,8 @@ func runCmdStdoutContainer(t *testing.T, image string, containerName string, run
 func RunContainerWithBaseline(t *testing.T, image string, containerName string, mode string) {
 	args, ok := URL_WAIT[ImageRepo(t, image)]
 	if ok {
-		runUrlWaitContainer(t, image, containerName, args)
-		defer clearContainer(t, image, containerName)
+		runUrlWaitContainer(t, image, "nydus", containerName, args)
+		defer clearContainer(t, image, "nydus", containerName)
 	} else {
 		t.Fatalf(fmt.Sprintf("%s is not in URL_WAIT", image))
 	}
@@ -155,34 +155,37 @@ func RunContainerWithBaseline(t *testing.T, image string, containerName string, 
 }
 
 // RunContainer and return container metric
-func RunContainer(t *testing.T, image string, containerName string) *ContainerMetrics {
+func RunContainer(t *testing.T, image string, snapshotter string, containerName string) *ContainerMetrics {
 	var containerMetic ContainerMetrics
 	startTime := time.Now()
 
 	// runContainer
 	args, ok := URL_WAIT[ImageRepo(t, image)]
 	if ok {
-		runUrlWaitContainer(t, image, containerName, args)
-		defer clearContainer(t, image, containerName)
+		runUrlWaitContainer(t, image, snapshotter, containerName, args)
+		defer clearContainer(t, image, snapshotter, containerName)
 	} else if args, ok := CMD_STDOUT[ImageRepo(t, image)]; ok {
-		runCmdStdoutContainer(t, image, containerName, args)
-		defer clearContainer(t, image, containerName)
+		runCmdStdoutContainer(t, image, snapshotter, containerName, args)
+		defer clearContainer(t, image, snapshotter, containerName)
 	}
 
 	containerMetic.E2ETime = time.Since(startTime)
-	backendMetrics, err := getContainerBackendMetrics(t)
-	if err != nil {
-		t.Logf(err.Error())
+	if snapshotter == "nydus" {
+		backendMetrics, err := getContainerBackendMetrics(t)
+		if err != nil {
+			t.Logf(err.Error())
+		}
+		containerMetic.ReadAmountTotal = backendMetrics.ReadAmountTotal
+		containerMetic.ReadCount = backendMetrics.ReadCount
 	}
-	containerMetic.ReadAmountTotal = backendMetrics.ReadAmountTotal
-	containerMetic.ReadCount = backendMetrics.ReadCount
+
 	return &containerMetic
 }
 
 // ClearContainer clear container by containerName
-func clearContainer(t *testing.T, image string, containerName string) {
-	RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter nydus rm -f %s", containerName))
-	RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter nydus image rm %s", image))
+func clearContainer(t *testing.T, image string, snapshotter, containerName string) {
+	RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter %s rm -f %s", snapshotter, containerName))
+	RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter %s image rm %s", snapshotter, image))
 }
 
 // getContainerBackendMetrics get backend metrics by nydus api sock
