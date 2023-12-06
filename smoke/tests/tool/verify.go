@@ -30,6 +30,7 @@ func Verify(t *testing.T, ctx Context, expectedFiles map[string]*File) {
 		RafsMode:        ctx.Runtime.RafsMode,
 		DigestValidate:  false,
 		AmplifyIO:       ctx.Runtime.AmplifyIO,
+		ChunkDedupDb:    ctx.Runtime.ChunkDedupDb,
 	}
 
 	nydusd, err := NewNydusd(config)
