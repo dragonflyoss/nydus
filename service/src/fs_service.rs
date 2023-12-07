@@ -29,7 +29,7 @@ use crate::upgrade::UpgradeManager;
 use crate::{Error, FsBackendDescriptor, FsBackendType, Result};
 
 /// Request structure to mount a filesystem instance.
-#[derive(Clone, Versionize)]
+#[derive(Clone, Versionize, Debug)]
 pub struct FsBackendMountCmd {
     /// Filesystem type.
     pub fs_type: FsBackendType,

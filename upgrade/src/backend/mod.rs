@@ -1,3 +1,7 @@
+// Copyright 2023 Nydus Developers. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{io, os::fd::RawFd};
 
 pub mod unix_domain_socket;

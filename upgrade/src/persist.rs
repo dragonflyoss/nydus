@@ -2,10 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt::Debug;
 use std::io::{Error as IoError, ErrorKind, Result};
 use std::{any::TypeId, collections::HashMap};
 
-use snapshot::Snapshot;
+use dbs_snapshot::Snapshot;
 use versionize::{VersionMap, Versionize};
 
 /// A list of versions.
@@ -14,7 +15,7 @@ type Versions = Vec<HashMap<TypeId, u16>>;
 /// A trait for snapshotting.
 /// This trait is used to save and restore a struct
 /// which implements `versionize::Versionize`.
-pub trait Snapshotter: Versionize + Sized {
+pub trait Snapshotter: Versionize + Sized + Debug {
     /// Returns a list of versions.
     fn get_versions() -> Versions;
 
@@ -55,11 +56,12 @@ pub trait Snapshotter: Versionize + Sized {
 
     /// Restores the struct from a `Vec<u8>`.
     fn restore(buf: &mut Vec<u8>) -> Result<Self> {
-        Snapshot::load(&mut buf.as_slice(), buf.len(), Self::new_version_map()).map_err(|e| {
-            IoError::new(
+        match Snapshot::load(&mut buf.as_slice(), buf.len(), Self::new_version_map()) {
+            Ok((o, _)) => Ok(o),
+            Err(e) => Err(IoError::new(
                 ErrorKind::Other,
                 format!("Failed to load snapshot: {:?}", e),
-            )
-        })
+            )),
+        }
     }
 }
