@@ -318,16 +318,16 @@ jobs:
         esac
         cd benchmark-result
         metric_files=(
+          "${{ matrix.image }}-oci.json"
           "${{ matrix.image }}-fsversion-v5.json"
           "${{ matrix.image }}-fsversion-v6.json"
           "${{ matrix.image }}-zran.json"
-          "${{ matrix.image }}-oci.json"
         )
-        echo "| bench-result | e2e-time(s) | read-count | read-amount(MB) | image-size(MB) |" >> $GITHUB_STEP_SUMMARY
-        echo "|:-------------|:----------:|:----------:|:---------------:|:--------:|" >> $GITHUB_STEP_SUMMARY
+        echo "| bench-result | e2e-time(s) | read-count | read-amount(MB) | image-size(MB) |convert-time(s)|" >> $GITHUB_STEP_SUMMARY
+        echo "|:-------------|:-----------:|:----------:|:---------------:|:--------------:|:-------------:|" >> $GITHUB_STEP_SUMMARY
         for file in "${metric_files[@]}"; do
             name=$(basename "$file" .json | sed 's/^[^-]*-\(.*\)$/\1/')
-            data=$(jq -r '. | "\(.e2e_time / 1e9) \(.read_count) \(.read_amount_total / (1024 * 1024)) \(.image_size / (1024 * 1024))"' "$file" | \
-              awk '{ printf "%.2f | %.0f | %.2f | %.2f", $1, $2, $3, $4 }')
+            data=$(jq -r '. | "\(.e2e_time / 1e9) \(.read_count) \(.read_amount_total / (1024 * 1024)) \(.image_size / (1024 * 1024)) \(.conversion_elapsed / 1e9)"' "$file" | \
+              awk '{ printf "%.2f | %.0f | %.2f | %.2f | %.2f", $1, $2, $3, $4, $5 }')
             echo "| $name | $data |" >> $GITHUB_STEP_SUMMARY
         done
