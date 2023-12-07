@@ -20,10 +20,11 @@ import (
 )
 
 type ContainerMetrics struct {
-	E2ETime         time.Duration `json:"e2e_time"`
-	ReadCount       uint64        `json:"read_count"`
-	ReadAmountTotal uint64        `json:"read_amount_total"`
-	ImageSize       int64         `json:"image_size"`
+	E2ETime           time.Duration `json:"e2e_time"`
+	ConversionElapsed time.Duration `json:"conversion_elapsed"`
+	ReadCount         uint64        `json:"read_count"`
+	ReadAmountTotal   uint64        `json:"read_amount_total"`
+	ImageSize         int64         `json:"image_size"`
 }
 
 type RunArgs struct {

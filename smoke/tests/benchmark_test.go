@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
@@ -67,26 +68,27 @@ func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 			b.t.Fatalf("Benchmark don't support image " + image)
 		}
 	}
-	targetImageSize := b.prepareImage(b.t, ctx, mode, image)
+	targetImageSize, conversionElapsed := b.prepareImage(b.t, ctx, mode, image)
 
 	// run contaienr
 	b.testContainerName = uuid.NewString()
 	containerMetic := tool.RunContainer(b.t, b.testImage, b.snapshotter, b.testContainerName)
 	b.metric = tool.ContainerMetrics{
-		E2ETime:         containerMetic.E2ETime,
-		ReadCount:       containerMetic.ReadCount,
-		ReadAmountTotal: containerMetic.ReadAmountTotal,
-		ImageSize:       targetImageSize,
+		E2ETime:           containerMetic.E2ETime,
+		ConversionElapsed: time.Duration(conversionElapsed),
+		ReadCount:         containerMetic.ReadCount,
+		ReadAmountTotal:   containerMetic.ReadAmountTotal,
+		ImageSize:         targetImageSize,
 	}
 
 	// save metirc
 	b.dumpMetric()
-	t.Logf(fmt.Sprintf("Metric: ReadAmount %d ReadCount %d Runtime %d ImageSize %d", b.metric.ReadAmountTotal, b.metric.ReadCount, b.metric.E2ETime, b.metric.ImageSize))
+	t.Logf(fmt.Sprintf("Metric: E2ETime %d ConversionElapsed %s ReadCount %d ReadAmount %d ImageSize %d", b.metric.E2ETime, b.metric.ConversionElapsed, b.metric.ReadCount, b.metric.ReadAmountTotal, b.metric.ImageSize))
 }
 
-func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, mode string, image string) int64 {
+func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, mode string, image string) (int64, int64) {
 	if b.testImage != "" {
-		return 0
+		return 0, 0
 	}
 
 	ctx.PrepareWorkDir(t)
@@ -116,20 +118,20 @@ func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, mode 
 	metricData, err := os.ReadFile(convertMetricFile)
 	if err != nil {
 		t.Fatalf("can't read convert metric file")
-		return 0
+		return 0, 0
 	}
 	var convertMetirc map[string]int64
 	err = json.Unmarshal(metricData, &convertMetirc)
 	if err != nil {
 		t.Fatalf("can't parsing convert metric file")
-		return 0
+		return 0, 0
 	}
 	if b.snapshotter == "nydus" {
 		b.testImage = target
-		return convertMetirc["TargetImageSize"]
+		return convertMetirc["TargetImageSize"], convertMetirc["ConversionElapsed"]
 	} else {
 		b.testImage = source
-		return convertMetirc["SourceImageSize"]
+		return convertMetirc["SourceImageSize"], 0
 	}
 }
 
