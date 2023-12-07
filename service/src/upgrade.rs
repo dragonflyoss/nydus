@@ -278,7 +278,7 @@ pub mod fscache_upgrade {
     }
 
     #[derive(Versionize, Clone, Default)]
-    struct FscacheBackendState {
+    pub struct FscacheBackendState {
         blob_entry_list: Vec<(String, BlobCacheEntryState)>,
         threads: usize,
         path: String,
@@ -390,7 +390,7 @@ pub mod fusedev_upgrade {
     use versionize_derive::Versionize;
 
     #[derive(Versionize, Clone, Default)]
-    struct FusedevBackendState {
+    pub struct FusedevBackendState {
         fs_mount_cmd_list: Vec<(String, MountStateWrapper)>,
         vfs_state_data: Vec<u8>,
         fuse_conn_id: u64,
@@ -509,6 +509,13 @@ pub mod fusedev_upgrade {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs_service::{FsBackendMountCmd, FsBackendUmountCmd};
+    #[cfg(target_os = "linux")]
+    use crate::upgrade::fscache_upgrade::FscacheBackendState;
+    use crate::upgrade::fusedev_upgrade::FusedevBackendState;
+    use crate::FsBackendType;
+    use nydus_upgrade::persist::Snapshotter;
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_failover_policy() {
@@ -541,5 +548,119 @@ mod tests {
         for s in strings.iter() {
             assert!(FailoverPolicy::try_from(s).is_err());
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_upgrade_manager_for_fscache() {
+        let mut upgrade_mgr = UpgradeManager::new("dummy_socket".into());
+
+        let content = r#"{
+            "type": "bootstrap",
+            "id": "blob1",
+            "config": {
+                "id": "cache1",
+                "backend_type": "localfs",
+                "backend_config": {},
+                "cache_type": "fscache",
+                "cache_config": {},
+                "metadata_path": "/tmp/metadata1"
+            },
+            "domain_id": "domain1"
+        }"#;
+        let entry: BlobCacheEntry = serde_json::from_str(content).unwrap();
+        upgrade_mgr.save_fscache_states(4, "/tmp/fscache_dir".to_string());
+        assert_eq!(upgrade_mgr.fscache_deamon_stat.threads, 4);
+        assert_eq!(upgrade_mgr.fscache_deamon_stat.path, "/tmp/fscache_dir");
+
+        upgrade_mgr.add_blob_entry_state(entry);
+        assert!(upgrade_mgr
+            .fscache_deamon_stat
+            .blob_entry_map
+            .get("domain1/blob1")
+            .is_some());
+
+        assert!(FscacheBackendState::try_from(&upgrade_mgr.fscache_deamon_stat).is_ok());
+
+        let backend_stat = FscacheBackendState::try_from(&upgrade_mgr.fscache_deamon_stat).unwrap();
+        assert!(backend_stat.save().is_ok());
+        assert!(FscacheState::try_from(&backend_stat).is_ok());
+        let stat = FscacheState::try_from(&backend_stat).unwrap();
+        assert_eq!(stat.path, upgrade_mgr.fscache_deamon_stat.path);
+        assert_eq!(stat.threads, upgrade_mgr.fscache_deamon_stat.threads);
+        assert!(stat.blob_entry_map.get("domain1/blob1").is_some());
+
+        upgrade_mgr.remove_blob_entry_state("domain1", "blob1");
+        assert!(upgrade_mgr
+            .fscache_deamon_stat
+            .blob_entry_map
+            .get("domain1/blob1")
+            .is_none());
+    }
+
+    #[test]
+    fn test_upgrade_manager_for_fusedev() {
+        let mut upgrade_mgr = UpgradeManager::new("dummy_socket".into());
+
+        let config = r#"{
+            "version": 2,
+            "id": "factory1",
+            "backend": {
+                "type": "localfs",
+                "localfs": {
+                    "dir": "/tmp/nydus"
+                }
+            },
+            "cache": {
+                "type": "fscache",
+                "fscache": {
+                    "work_dir": "/tmp/nydus"
+                }
+            },
+            "metadata_path": "/tmp/nydus/bootstrap1"
+        }"#;
+        let cmd = FsBackendMountCmd {
+            fs_type: FsBackendType::Rafs,
+            config: config.to_string(),
+            mountpoint: "testmonutount".to_string(),
+            source: "testsource".to_string(),
+            prefetch_files: Some(vec!["testfile".to_string()]),
+        };
+
+        upgrade_mgr.save_fuse_cid(10);
+        assert_eq!(upgrade_mgr.fuse_deamon_stat.fuse_conn_id, 10);
+        upgrade_mgr.add_mounts_state(cmd.clone(), 5);
+        assert!(upgrade_mgr
+            .fuse_deamon_stat
+            .fs_mount_cmd_map
+            .get("testmonutount")
+            .is_some());
+        assert!(upgrade_mgr.update_mounts_state(cmd).is_ok());
+
+        let backend_stat = FusedevBackendState::from(&upgrade_mgr.fuse_deamon_stat);
+        assert!(backend_stat.save().is_ok());
+
+        let stat = FusedevState::from(&backend_stat);
+        assert_eq!(stat.fuse_conn_id, upgrade_mgr.fuse_deamon_stat.fuse_conn_id);
+        assert!(stat.fs_mount_cmd_map.get("testmonutount").is_some());
+
+        let umount_cmd: FsBackendUmountCmd = FsBackendUmountCmd {
+            mountpoint: "testmonutount".to_string(),
+        };
+        upgrade_mgr.remove_mounts_state(umount_cmd);
+        assert!(upgrade_mgr
+            .fuse_deamon_stat
+            .fs_mount_cmd_map
+            .get("testmonutount")
+            .is_none());
+    }
+
+    #[test]
+    fn test_upgrade_manager_hold_fd() {
+        let mut upgrade_mgr = UpgradeManager::new("dummy_socket".into());
+
+        let temp = TempFile::new().unwrap().into_file();
+        assert!(upgrade_mgr.hold_file(&temp).is_ok());
+        assert!(upgrade_mgr.return_file().is_some());
     }
 }
