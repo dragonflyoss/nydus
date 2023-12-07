@@ -81,7 +81,7 @@ struct FscacheState {
     path: String,
 }
 
-#[derive(Versionize, Clone)]
+#[derive(Versionize, Clone, Debug)]
 struct MountStateWrapper {
     cmd: FsBackendMountCmd,
     vfs_index: u8,
@@ -272,12 +272,12 @@ pub mod fscache_upgrade {
     use versionize::{VersionMap, Versionize, VersionizeResult};
     use versionize_derive::Versionize;
 
-    #[derive(Versionize, Clone)]
+    #[derive(Versionize, Clone, Debug)]
     pub struct BlobCacheEntryState {
         json_str: String,
     }
 
-    #[derive(Versionize, Clone, Default)]
+    #[derive(Versionize, Clone, Default, Debug)]
     pub struct FscacheBackendState {
         blob_entry_list: Vec<(String, BlobCacheEntryState)>,
         threads: usize,
@@ -389,7 +389,7 @@ pub mod fusedev_upgrade {
     use versionize::{VersionMap, Versionize, VersionizeResult};
     use versionize_derive::Versionize;
 
-    #[derive(Versionize, Clone, Default)]
+    #[derive(Versionize, Clone, Default, Debug)]
     pub struct FusedevBackendState {
         fs_mount_cmd_list: Vec<(String, MountStateWrapper)>,
         vfs_state_data: Vec<u8>,

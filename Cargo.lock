@@ -1391,8 +1391,8 @@ dependencies = [
 name = "nydus-upgrade"
 version = "0.1.0"
 dependencies = [
+ "dbs-snapshot",
  "sendfd",
- "snapshot",
  "thiserror",
  "versionize",
  "versionize_derive",
@@ -1950,17 +1950,6 @@ name = "smallvec"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fd0db749597d91ff862fd1d55ea87f7855a744a8425a64695b6fca237d1dad1"
-
-[[package]]
-name = "snapshot"
-version = "0.1.0"
-source = "git+https://github.com/firecracker-microvm/firecracker?tag=v1.4.1#02dd0328589c59ae11b7ad13eaf412410f8e72e1"
-dependencies = [
- "libc",
- "thiserror",
- "versionize",
- "versionize_derive",
-]
 
 [[package]]
 name = "socket2"
