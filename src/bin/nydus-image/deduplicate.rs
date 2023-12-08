@@ -266,9 +266,9 @@ pub struct Algorithm<D: Database + Send + Sync> {
 }
 
 // Generate deduplicated chunkdict by exponential_smoothing algorithm
-type Versiondic = HashMap<String, Vec<ChunkdictChunkInfo>>;
+type VersionMap = HashMap<String, Vec<ChunkdictChunkInfo>>;
 // Generate deduplicated chunkdict by cluster algorithm
-type Imagedic = Vec<HashMap<Vec<String>, Vec<ChunkdictChunkInfo>>>;
+type ImageMap = Vec<HashMap<Vec<String>, Vec<ChunkdictChunkInfo>>>;
 
 impl Algorithm<SqliteDatabase> {
     pub fn new(algorithm: String, db_url: &str) -> anyhow::Result<Self> {
@@ -716,7 +716,7 @@ impl Algorithm<SqliteDatabase> {
 
     pub fn deduplicate_version(
         all_chunks: &[ChunkdictChunkInfo],
-    ) -> anyhow::Result<(Versiondic, Imagedic)> {
+    ) -> anyhow::Result<(VersionMap, ImageMap)> {
         let mut all_chunks_size = 0;
         for i in all_chunks {
             all_chunks_size += i.chunk_compressed_size;
