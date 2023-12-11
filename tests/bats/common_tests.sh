@@ -1,5 +1,36 @@
+parse_toml() {
+    local input=$1
+    local key=$2
+
+    # Using sed to extract the value of a specified key from Toml content
+    local value
+    value=$(echo "$input" | sed -n 's/.*'"$key"' = "\(.*\)"/\1/p')
+    # Remove quote
+    # shellcheck disable=SC2001
+    value=$(echo "$value" | sed 's/"//g')
+
+    echo "$value"
+}
+
+get_rust_toolcahin() {
+    local base_dir=$1
+    local toml_file="${base_dir}/rust-toolchain.toml"
+    local legacy_toml_file="${base_dir}/rust-toolchain"
+    local version
+
+    if [ -f "$toml_file" ]; then
+        local toml_content
+        toml_content=$(cat "$toml_file")
+        version=$(parse_toml "$toml_content" 'channel')
+    else
+        version=$(cat "$legacy_toml_file")
+    fi
+
+    echo "$version"
+}
+
 repo_base_dir="${BATS_TEST_DIRNAME}/../.."
-rust_toolchain=$(cat ${repo_base_dir}/rust-toolchain)
+rust_toolchain=$(get_rust_toolcahin "$repo_base_dir")
 compile_image="localhost/compile-image:${rust_toolchain}"
 nydus_snapshotter_repo="https://github.com/containerd/nydus-snapshotter.git"
 
