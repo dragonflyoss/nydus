@@ -202,8 +202,8 @@ github.com/moby/sys/sequential v0.5.0/go.mod h1:tH2cOOs5V9MlPiXcQzRC+eEyab644PWK
 github.com/moby/sys/signal v0.7.0 h1:25RW3d5TnQEoKvRbEKUGay6DCQ46IxAVTT9CUMgmsSI=
 github.com/moby/sys/signal v0.7.0/go.mod h1:GQ6ObYZfqacOwTtlXvcmh9A26dVRul/hbOZn88Kg8Tg=
 github.com/mrunalp/fileutils v0.5.0/go.mod h1:M1WthSahJixYnrXQl/DFQuteStB1weuxD2QJNHXfbSQ=
-github.com/nydusaccelerator/containerd v0.0.0-20231121100328-6c4d1f35ac28 h1:MY+OS7zE05AKucljunXAxnDiWesU3/RDdGm5z9oOolw=
-github.com/nydusaccelerator/containerd v0.0.0-20231121100328-6c4d1f35ac28/go.mod h1:0/W44LWEYfSHoxBtsHIiNU/duEkgpMokemafHVCpq9Y=
+github.com/nydusaccelerator/containerd v0.0.0-20231212110719-1bceeae1231f h1:eHEezWlHQso3y/qJ8LS7bR7k1hCcZX6G7mB78nU29vQ=
+github.com/nydusaccelerator/containerd v0.0.0-20231212110719-1bceeae1231f/go.mod h1:0/W44LWEYfSHoxBtsHIiNU/duEkgpMokemafHVCpq9Y=
 github.com/oklog/run v1.1.0 h1:GEenZ1cK0+q0+wsJew9qUg/DyD8k3JzYsZAi5gYi2mA=
 github.com/oklog/run v1.1.0/go.mod h1:sVPdnTZT1zYwAJeCMu2Th4T21pA3FPOQRfWjQlk7DVU=
 github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8Oi/yOhh5U=
