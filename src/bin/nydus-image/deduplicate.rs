@@ -192,14 +192,14 @@ impl Deduplicate<SqliteDatabase> {
         &mut self,
         bootstrap_path: &Path,
         config: Arc<ConfigV2>,
-        image_name: String,
-        version_name: String,
+        image_reference: String,
+        version: String,
     ) -> anyhow::Result<Vec<Arc<BlobInfo>>> {
         let (sb, _) = RafsSuper::load_from_file(bootstrap_path, config, false)?;
         self.create_tables()?;
         let blob_infos = sb.superblock.get_blob_infos();
         self.insert_blobs(&blob_infos)?;
-        self.insert_chunks(&blob_infos, &sb, image_name, version_name)?;
+        self.insert_chunks(&blob_infos, &sb, image_reference, version)?;
         Ok(blob_infos)
     }
 
@@ -230,8 +230,8 @@ impl Deduplicate<SqliteDatabase> {
         &mut self,
         blob_infos: &[Arc<BlobInfo>],
         sb: &RafsSuper,
-        image_name: String,
-        version_name: String,
+        image_reference: String,
+        version: String,
     ) -> anyhow::Result<()> {
         let process_chunk = &mut |t: &Tree| -> Result<()> {
             let node = t.lock_node();
@@ -240,8 +240,8 @@ impl Deduplicate<SqliteDatabase> {
                 let chunk_blob_id = blob_infos[index as usize].blob_id();
                 self.db
                     .insert_chunk(&ChunkdictChunkInfo {
-                        image_reference: image_name.to_string(),
-                        version: version_name.to_string(),
+                        image_reference: image_reference.to_string(),
+                        version: version.to_string(),
                         chunk_blob_id,
                         chunk_digest: chunk.inner.id().to_string(),
                         chunk_compressed_size: chunk.inner.compressed_size(),
@@ -436,7 +436,7 @@ impl Algorithm<SqliteDatabase> {
         }
         for (index, chunks) in image_chunks {
             let data_point = DataPoint {
-                image_name: index,
+                image_reference: index,
                 chunk_list: chunks,
                 visited: false,
                 clustered: false,
@@ -451,10 +451,10 @@ impl Algorithm<SqliteDatabase> {
         chunks: &[ChunkdictChunkInfo],
         train_percentage: f64,
     ) -> anyhow::Result<(Vec<ChunkdictChunkInfo>, Vec<ChunkdictChunkInfo>)> {
-        // Create a HashMap to store the list of chunks for each image_name
+        // Create a HashMap to store the list of chunks for each image_reference
         let mut image_chunks: BTreeMap<String, Vec<ChunkdictChunkInfo>> = BTreeMap::new();
 
-        // Group chunks into image_name
+        // Group chunks into image_reference
         for chunk in chunks {
             let entry = image_chunks
                 .entry(chunk.image_reference.clone())
@@ -466,11 +466,11 @@ impl Algorithm<SqliteDatabase> {
         let mut train_set: Vec<ChunkdictChunkInfo> = Vec::new();
         let mut test_set: Vec<ChunkdictChunkInfo> = Vec::new();
 
-        // Iterate through the list of Chunks for each image_name
+        // Iterate through the list of Chunks for each image_reference
         for (_, chunk_list) in image_chunks.iter_mut() {
             let mut version_chunks: BTreeMap<CustomString, Vec<ChunkdictChunkInfo>> =
                 BTreeMap::new();
-            // Group the chunks in the image into version_name
+            // Group the chunks in the image into version
             for chunk in chunk_list {
                 let entry = version_chunks
                     .entry(CustomString(chunk.version.clone()))
@@ -598,10 +598,12 @@ impl Algorithm<SqliteDatabase> {
             for &point_index in cluster_points {
                 let point = &data_point[point_index];
                 // let all_count = 0;
-                let image_total_count = image_total_counts.entry(&point.image_name).or_insert(0);
+                let image_total_count = image_total_counts
+                    .entry(&point.image_reference)
+                    .or_insert(0);
                 *image_total_count += 1;
 
-                image_list.push(point.image_name.clone());
+                image_list.push(point.image_reference.clone());
             }
 
             // Count the number of images in which chunks appear in the cluster
@@ -762,7 +764,7 @@ impl Algorithm<SqliteDatabase> {
             for point in data_point.iter_mut() {
                 for single_dictionary in &datadict {
                     for (key, value) in single_dictionary.iter() {
-                        if key.contains(&point.image_name) {
+                        if key.contains(&point.image_reference) {
                             let mut to_remove = Vec::new();
                             for chunk in point.chunk_list.iter() {
                                 if value.contains(chunk) {
@@ -776,15 +778,15 @@ impl Algorithm<SqliteDatabase> {
                     }
                 }
                 let chunk_dict = Self::exponential_smoothing(point.chunk_list.clone(), threshold)?;
-                version_datadict.insert(point.image_name.clone(), chunk_dict);
+                version_datadict.insert(point.image_reference.clone(), chunk_dict);
             }
 
             let mut test_by_image = Self::divide_by_image(&test)?;
             for point in test_by_image.iter_mut() {
-                if version_datadict.contains_key(&point.image_name.clone()) {
+                if version_datadict.contains_key(&point.image_reference.clone()) {
                     let mut to_remove = Vec::new();
                     let mut vec_string = Vec::new();
-                    let chunkdict_option = version_datadict.get(&point.image_name);
+                    let chunkdict_option = version_datadict.get(&point.image_reference);
                     if let Some(chunkdict) = chunkdict_option {
                         for i in chunkdict {
                             vec_string.push(i.chunk_digest.clone());
@@ -821,7 +823,7 @@ impl Algorithm<SqliteDatabase> {
 #[allow(dead_code)]
 #[derive(Debug)]
 struct DataPoint {
-    image_name: String,
+    image_reference: String,
     chunk_list: Vec<ChunkdictChunkInfo>,
     visited: bool,
     clustered: bool,
@@ -900,7 +902,7 @@ impl ChunkTable {
             .map_err(|e| DatabaseError::PoisonError(e.to_string()))?;
         let mut stmt: rusqlite::Statement<'_> = conn_guard
             .prepare(
-                "SELECT id, image_name, version_name, chunk_blob_id, chunk_digest, chunk_compressed_size,
+                "SELECT id, image_reference, version, chunk_blob_id, chunk_digest, chunk_compressed_size,
                 chunk_uncompressed_size, chunk_compressed_offset, chunk_uncompressed_offset from chunk
                 WHERE chunk_blob_id = ?1
                 ORDER BY id LIMIT ?2 OFFSET ?3",
@@ -1005,8 +1007,8 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
             .execute(
                 "CREATE TABLE IF NOT EXISTS chunk (
                     id               INTEGER PRIMARY KEY,
-                    image_name       TEXT,
-                    version_name     TEXT,
+                    image_reference  TEXT,
+                    version          TEXT,
                     chunk_blob_id    TEXT NOT NULL,
                     chunk_digest     TEXT,
                     chunk_compressed_size  INT,
@@ -1026,8 +1028,8 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
             .map_err(|e| DatabaseError::PoisonError(e.to_string()))?
             .execute(
                 "INSERT INTO chunk(
-                    image_name,
-                    version_name,
+                    image_reference,
+                    version,
                     chunk_blob_id,
                     chunk_digest,
                     chunk_compressed_size,
@@ -1081,7 +1083,7 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
             .map_err(|e| DatabaseError::PoisonError(e.to_string()))?;
         let mut stmt: rusqlite::Statement<'_> = conn_guard
             .prepare(
-                "SELECT id, image_name, version_name, chunk_blob_id, chunk_digest, chunk_compressed_size,
+                "SELECT id, image_reference, version, chunk_blob_id, chunk_digest, chunk_compressed_size,
                 chunk_uncompressed_size, chunk_compressed_offset, chunk_uncompressed_offset from chunk
                 ORDER BY id LIMIT ?1 OFFSET ?2",
             )?;
