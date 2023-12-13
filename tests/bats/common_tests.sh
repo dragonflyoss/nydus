@@ -34,7 +34,30 @@ rust_toolchain=$(get_rust_toolcahin "$repo_base_dir")
 compile_image="localhost/compile-image:${rust_toolchain}"
 nydus_snapshotter_repo="https://github.com/containerd/nydus-snapshotter.git"
 
+generate_rust_golang_dockerfile() {
+  local dockerfile=${1:-"/tmp/rust_golang_dockerfile"}
+  local rust_version=${2:-"${rust_toolchain}"}
+  cat > $dockerfile <<EOF
+FROM rust:${rust_version}
+
+RUN apt-get update -y \
+    && apt-get install -y cmake g++ pkg-config jq libcurl4-openssl-dev libelf-dev libdw-dev binutils-dev libiberty-dev musl-tools \
+    && rustup component add rustfmt clippy \
+    && rm -rf /var/lib/apt/lists/*
+
+# install golang env
+Run wget https://go.dev/dl/go1.19.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go1.19.linux-amd64.tar.gz \
+    && rm -rf go1.19.linux-amd64.tar.gz
+
+ENV PATH \$PATH:/usr/local/go/bin
+RUN go env -w GO111MODULE=on
+RUN go env -w GOPROXY=https://goproxy.io,direct
+EOF
+}
+
 run_nydus_snapshotter() {
+  local nydus_snapshotter_logfile=${1:-"${BATS_TEST_DIRNAME}/nydus-snapshotter-${BATS_TEST_NAME}.log"}
   rm -rf /var/lib/containerd/io.containerd.snapshotter.v1.nydus
   rm -rf /var/lib/nydus/cache
   cat >/tmp/nydus-erofs-config.json <<EOF
@@ -52,7 +75,7 @@ EOF
   containerd-nydus-grpc --config-path /tmp/nydus-erofs-config.json --daemon-mode shared \
     --fs-driver fscache --root /var/lib/containerd/io.containerd.snapshotter.v1.nydus \
     --address /run/containerd/containerd-nydus-grpc.sock --nydusd /usr/local/bin/nydusd \
-    --log-to-stdout >${BATS_TEST_DIRNAME}/nydus-snapshotter-${BATS_TEST_NAME}.log 2>&1 &
+    --log-to-stdout > $nydus_snapshotter_logfile 2>&1 &
 }
 
 config_containerd_for_nydus() {
