@@ -7,7 +7,7 @@ PROXY := GOPROXY=${GOPROXY}
 endif
 
 build:
-	go test -o smoke.test -c -race -v -cover ./tests
+	go test -o smoke.test -c -race -v ./tests
 
 # WORK_DIR=/tmp \
 # NYDUS_BUILDER=/path/to/latest/nydus-image \
