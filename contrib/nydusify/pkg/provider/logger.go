@@ -21,7 +21,7 @@ type ProgressLogger interface {
 
 type defaultLogger struct{}
 
-func (logger *defaultLogger) Log(ctx context.Context, msg string, fields LoggerFields) func(err error) error {
+func (logger *defaultLogger) Log(_ context.Context, msg string, fields LoggerFields) func(err error) error {
 	if fields == nil {
 		fields = make(LoggerFields)
 	}

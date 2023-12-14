@@ -60,15 +60,15 @@ type defaultSourceLayer struct {
 	parentChainID *digest.Digest
 }
 
-func (sp *defaultSourceProvider) Manifest(ctx context.Context) (*ocispec.Descriptor, error) {
+func (sp *defaultSourceProvider) Manifest(_ context.Context) (*ocispec.Descriptor, error) {
 	return &sp.image.Desc, nil
 }
 
-func (sp *defaultSourceProvider) Config(ctx context.Context) (*ocispec.Image, error) {
+func (sp *defaultSourceProvider) Config(_ context.Context) (*ocispec.Image, error) {
 	return &sp.image.Config, nil
 }
 
-func (sp *defaultSourceProvider) Layers(ctx context.Context) ([]SourceLayer, error) {
+func (sp *defaultSourceProvider) Layers(_ context.Context) ([]SourceLayer, error) {
 	layers := sp.image.Manifest.Layers
 	diffIDs := sp.image.Config.RootFS.DiffIDs
 	if len(layers) != len(diffIDs) {

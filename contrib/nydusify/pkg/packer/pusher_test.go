@@ -24,7 +24,7 @@ func (m *mockBackend) Upload(ctx context.Context, blobID, blobPath string, blobS
 	return desc.(*ocispec.Descriptor), nil
 }
 
-func (m *mockBackend) Finalize(cancel bool) error {
+func (m *mockBackend) Finalize(_ bool) error {
 	return nil
 }
 
@@ -36,11 +36,11 @@ func (m *mockBackend) Type() backend.Type {
 	return backend.OssBackend
 }
 
-func (m *mockBackend) Reader(blobID string) (io.ReadCloser, error) {
+func (m *mockBackend) Reader(_ string) (io.ReadCloser, error) {
 	panic("not implemented")
 }
 
-func (m *mockBackend) Size(blobID string) (int64, error) {
+func (m *mockBackend) Size(_ string) (int64, error) {
 	panic("not implemented")
 }
 

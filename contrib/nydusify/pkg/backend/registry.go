@@ -15,7 +15,7 @@ type Registry struct {
 }
 
 func (r *Registry) Upload(
-	ctx context.Context, blobID, blobPath string, size int64, forcePush bool,
+	ctx context.Context, blobID, blobPath string, size int64, _ bool,
 ) (*ocispec.Descriptor, error) {
 	// The `forcePush` option is useless for registry backend, because
 	// the blob existed in registry can't be pushed again.
@@ -35,11 +35,11 @@ func (r *Registry) Upload(
 	return &desc, nil
 }
 
-func (r *Registry) Finalize(cancel bool) error {
+func (r *Registry) Finalize(_ bool) error {
 	return nil
 }
 
-func (r *Registry) Check(blobID string) (bool, error) {
+func (r *Registry) Check(_ string) (bool, error) {
 	return true, nil
 }
 
@@ -47,14 +47,14 @@ func (r *Registry) Type() Type {
 	return RegistryBackend
 }
 
-func (r *Registry) Reader(blobID string) (io.ReadCloser, error) {
+func (r *Registry) Reader(_ string) (io.ReadCloser, error) {
 	panic("not implemented")
 }
 
-func (r *Registry) Size(blobID string) (int64, error) {
+func (r *Registry) Size(_ string) (int64, error) {
 	panic("not implemented")
 }
 
-func newRegistryBackend(rawConfig []byte, remote *remote.Remote) (Backend, error) {
+func newRegistryBackend(_ []byte, remote *remote.Remote) (Backend, error) {
 	return &Registry{remote: remote}, nil
 }

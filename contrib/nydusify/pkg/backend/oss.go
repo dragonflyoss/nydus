@@ -109,7 +109,7 @@ func calcCrc64ECMA(path string) (uint64, error) {
 
 // Upload blob as image layer to oss backend and verify
 // integrity by calculate CRC64.
-func (b *OSSBackend) Upload(ctx context.Context, blobID, blobPath string, size int64, forcePush bool) (*ocispec.Descriptor, error) {
+func (b *OSSBackend) Upload(_ context.Context, blobID, blobPath string, size int64, forcePush bool) (*ocispec.Descriptor, error) {
 	blobObjectKey := b.objectPrefix + blobID
 
 	desc := blobDesc(size, blobID)

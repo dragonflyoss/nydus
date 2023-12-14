@@ -163,8 +163,6 @@ func UnpackFile(reader io.Reader, source, target string) error {
 		if err != nil {
 			if err == io.EOF {
 				break
-			} else {
-				return err
 			}
 		}
 		if hdr.Name == source {
