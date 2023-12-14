@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/containerd/containerd/log"
+	"github.com/containerd/log"
 	"github.com/dragonflyoss/image-service/smoke/tests/texture"
 	"github.com/dragonflyoss/image-service/smoke/tests/tool"
 	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"

@@ -23,7 +23,7 @@ type PerformanceTestSuite struct {
 	testContainerName string
 }
 
-func (p *PerformanceTestSuite) TestPerformance(t *testing.T) {
+func (p *PerformanceTestSuite) TestPerformance(_ *testing.T) {
 	ctx := tool.DefaultContext(p.t)
 	// choose test mode
 	mode := os.Getenv("PERFORMANCE_TEST_MODE")
@@ -51,14 +51,14 @@ func (p *PerformanceTestSuite) TestPerformance(t *testing.T) {
 		}
 	}
 	// prepare test image
-	p.prepareTestImage(p.t, ctx, mode, image)
+	p.prepareTestImage(p.t, ctx, image)
 
 	// run Contaienr
 	p.testContainerName = uuid.NewString()
 	tool.RunContainerWithBaseline(p.t, p.testImage, p.testContainerName, mode)
 }
 
-func (p *PerformanceTestSuite) prepareTestImage(t *testing.T, ctx *tool.Context, mode string, image string) {
+func (p *PerformanceTestSuite) prepareTestImage(t *testing.T, ctx *tool.Context, image string) {
 	if p.testImage != "" {
 		return
 	}
