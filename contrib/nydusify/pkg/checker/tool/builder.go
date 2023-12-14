@@ -46,9 +46,5 @@ func (builder *Builder) Check(option BuilderOption) error {
 	cmd.Stdout = builder.stdout
 	cmd.Stderr = builder.stderr
 
-	if err := cmd.Run(); err != nil {
-		return err
-	}
-
-	return nil
+	return cmd.Run()
 }

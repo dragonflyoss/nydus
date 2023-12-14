@@ -7,11 +7,11 @@ import (
 type LocalHook struct {
 }
 
-func (h *LocalHook) BeforePushManifest(info *hook.Info) error {
+func (h *LocalHook) BeforePushManifest(_ *hook.Info) error {
 	return nil
 }
 
-func (h *LocalHook) AfterPushManifest(info *hook.Info) error {
+func (h *LocalHook) AfterPushManifest(_ *hook.Info) error {
 	return nil
 }
 

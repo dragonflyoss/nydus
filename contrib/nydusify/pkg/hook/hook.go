@@ -83,7 +83,7 @@ func (p *Plugin) Server(*plugin.MuxBroker) (interface{}, error) {
 	return &RPCServer{Impl: p.Impl}, nil
 }
 
-func (Plugin) Client(b *plugin.MuxBroker, c *rpc.Client) (interface{}, error) {
+func (Plugin) Client(_ *plugin.MuxBroker, c *rpc.Client) (interface{}, error) {
 	return &RPC{client: c}, nil
 }
 

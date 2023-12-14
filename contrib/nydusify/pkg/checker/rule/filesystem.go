@@ -368,9 +368,5 @@ func (rule *FilesystemRule) Validate() error {
 	}
 	defer nydusd.Umount(false)
 
-	if err := rule.verify(); err != nil {
-		return err
-	}
-
-	return nil
+	return rule.verify()
 }

@@ -152,7 +152,7 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 	return push(ctx, pvd.store, rc, desc, ref)
 }
 
-func (pvd *Provider) Image(ctx context.Context, ref string) (*ocispec.Descriptor, error) {
+func (pvd *Provider) Image(_ context.Context, ref string) (*ocispec.Descriptor, error) {
 	pvd.mutex.Lock()
 	defer pvd.mutex.Unlock()
 	if desc, ok := pvd.images[ref]; ok {
