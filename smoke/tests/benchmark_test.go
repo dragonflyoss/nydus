@@ -18,7 +18,7 @@ import (
 
 // Environment Requirement: Containerd, nerdctl >= 0.22, nydus-snapshotter, nydusd, nydus-image and nydusify.
 // Prepare: setup nydus for containerd, reference: https://github.com/dragonflyoss/nydus/blob/master/docs/containerd-env-setup.md.
-// TestBenchmark will dump json file(benchmark.json) which inlcudes container e2e time, image size, read-amount and read-cout.
+// TestBenchmark will dump json file(benchmark.json) which includes container e2e time, image size, read-amount and read-cout.
 //	Example:
 //	{
 //		e2e_time: 2747131
@@ -68,7 +68,7 @@ func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 			b.t.Fatalf("Benchmark don't support image " + image)
 		}
 	}
-	targetImageSize, conversionElapsed := b.prepareImage(b.t, ctx, mode, image)
+	targetImageSize, conversionElapsed := b.prepareImage(b.t, ctx, image)
 
 	// run contaienr
 	b.testContainerName = uuid.NewString()
@@ -86,7 +86,7 @@ func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 	t.Logf(fmt.Sprintf("Metric: E2ETime %d ConversionElapsed %s ReadCount %d ReadAmount %d ImageSize %d", b.metric.E2ETime, b.metric.ConversionElapsed, b.metric.ReadCount, b.metric.ReadAmountTotal, b.metric.ImageSize))
 }
 
-func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, mode string, image string) (int64, int64) {
+func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, image string) (int64, int64) {
 	if b.testImage != "" {
 		return 0, 0
 	}
@@ -129,10 +129,9 @@ func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, mode 
 	if b.snapshotter == "nydus" {
 		b.testImage = target
 		return convertMetirc["TargetImageSize"], convertMetirc["ConversionElapsed"]
-	} else {
-		b.testImage = source
-		return convertMetirc["SourceImageSize"], 0
 	}
+	b.testImage = source
+	return convertMetirc["SourceImageSize"], 0
 }
 
 func (b *BenchmarkTestSuite) dumpMetric() {

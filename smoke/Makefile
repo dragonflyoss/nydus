@@ -15,6 +15,7 @@ build:
 # NYDUS_NYDUSIFY=/path/to/latest/nydusify \
 # make test
 test: build
+	golangci-lint run
 	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
 
 # PERFORMANCE_TEST_MODE=fs-version-5 \

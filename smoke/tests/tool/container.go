@@ -40,7 +40,7 @@ type mountPath struct {
 	target string
 }
 
-var URL_WAIT = map[string]RunArgs{
+var urlWait = map[string]RunArgs{
 	"wordpress": {
 		WaitURL: "http://localhost:80",
 		BaselineReadCount: map[string]uint64{
@@ -64,7 +64,7 @@ var URL_WAIT = map[string]RunArgs{
 	},
 }
 
-var CMD_STDOUT = map[string]RunArgs{
+var cmdStdout = map[string]RunArgs{
 	"golang": {
 		Mount: mountPath{
 			source: "tests/texture/golang",
@@ -93,13 +93,13 @@ var CMD_STDOUT = map[string]RunArgs{
 
 // SupportContainerImage help to check if we support the image or not
 func SupportContainerImage(image string) bool {
-	_, existsInUrlWait := URL_WAIT[image]
-	_, existsInCmdStdout := CMD_STDOUT[image]
-	return existsInUrlWait || existsInCmdStdout
+	_, existsInURLWait := urlWait[image]
+	_, existsInCmdStdout := cmdStdout[image]
+	return existsInURLWait || existsInCmdStdout
 }
 
-// runUrlWaitContainer run container util geting http response from WaitUrl
-func runUrlWaitContainer(t *testing.T, image string, snapshotter string, containerName string, runArgs RunArgs) {
+// runURLWaitContainer run container util getting http response from WaitUrl
+func runURLWaitContainer(t *testing.T, image string, snapshotter string, containerName string, runArgs RunArgs) {
 	cmd := fmt.Sprintf("sudo nerdctl --insecure-registry --snapshotter %s run -d --net=host", snapshotter)
 	if runArgs.Mount.source != "" {
 		currentDir, err := os.Getwd()
@@ -137,9 +137,9 @@ func runCmdStdoutContainer(t *testing.T, image string, snapshotter string, conta
 // RunContainerWithBaseline and get metrics from api socket.
 // Test will fail if performance below baseline.
 func RunContainerWithBaseline(t *testing.T, image string, containerName string, mode string) {
-	args, ok := URL_WAIT[ImageRepo(t, image)]
+	args, ok := urlWait[ImageRepo(t, image)]
 	if ok {
-		runUrlWaitContainer(t, image, "nydus", containerName, args)
+		runURLWaitContainer(t, image, "nydus", containerName, args)
 		defer clearContainer(t, image, "nydus", containerName)
 	} else {
 		t.Fatalf(fmt.Sprintf("%s is not in URL_WAIT", image))
@@ -161,11 +161,11 @@ func RunContainer(t *testing.T, image string, snapshotter string, containerName 
 	startTime := time.Now()
 
 	// runContainer
-	args, ok := URL_WAIT[ImageRepo(t, image)]
+	args, ok := urlWait[ImageRepo(t, image)]
 	if ok {
-		runUrlWaitContainer(t, image, snapshotter, containerName, args)
+		runURLWaitContainer(t, image, snapshotter, containerName, args)
 		defer clearContainer(t, image, snapshotter, containerName)
-	} else if args, ok := CMD_STDOUT[ImageRepo(t, image)]; ok {
+	} else if args, ok := cmdStdout[ImageRepo(t, image)]; ok {
 		runCmdStdoutContainer(t, image, snapshotter, containerName, args)
 		defer clearContainer(t, image, snapshotter, containerName)
 	}

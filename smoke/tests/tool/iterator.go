@@ -129,10 +129,9 @@ func (c *DescartesIterator) calNext() {
 				carried = true
 				cursors[idx]++
 				break
-			} else {
-				carried = false
-				cursors[idx] = 0
 			}
+			carried = false
+			cursors[idx] = 0
 		}
 		if !carried {
 			c.noNext()
