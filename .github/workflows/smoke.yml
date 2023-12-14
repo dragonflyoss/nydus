@@ -30,7 +30,7 @@ jobs:
         cache-dependency-path: "**/*.sum"
     - name: Build Contrib
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.51.2
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.54.2
         make -e DOCKER=false nydusify-release
         make -e DOCKER=false contrib-test
     - name: Upload Nydusify
@@ -147,7 +147,7 @@ jobs:
           export NYDUS_NYDUSIFY_$version_export=/usr/bin/nydus-$version/nydusify
         done
 
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.51.2
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.54.2
         sudo -E make smoke-only
 
   nydus-unit-test:

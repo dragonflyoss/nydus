@@ -25,7 +25,7 @@ jobs:
         cache-dependency-path: "**/*.sum"
     - name: Build Contrib
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/local/bin v1.51.2
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/local/bin v1.54.2
         make -e DOCKER=false nydusify-release
     - name: Upload Nydusify
       uses: actions/upload-artifact@master
