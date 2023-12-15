@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )

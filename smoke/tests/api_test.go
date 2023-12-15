@@ -17,9 +17,9 @@ import (
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/stretchr/testify/require"
 
-	"github.com/dragonflyoss/image-service/smoke/tests/texture"
-	"github.com/dragonflyoss/image-service/smoke/tests/tool"
-	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
+	"github.com/dragonflyoss/nydus/smoke/tests/texture"
+	"github.com/dragonflyoss/nydus/smoke/tests/tool"
+	"github.com/dragonflyoss/nydus/smoke/tests/tool/test"
 )
 
 type APIV1TestSuite struct{}

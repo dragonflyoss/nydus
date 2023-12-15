@@ -7,7 +7,7 @@ package fileexporter
 import (
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/metrics"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/metrics"
 )
 
 type FileExporter struct{ name string }

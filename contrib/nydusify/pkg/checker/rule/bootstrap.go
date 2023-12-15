@@ -12,8 +12,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 )
 
 // BootstrapRule validates bootstrap in Nydus image

@@ -12,9 +12,9 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/remote"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/sirupsen/logrus"
 
 	"github.com/containerd/containerd/images"

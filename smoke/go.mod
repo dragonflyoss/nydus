@@ -1,4 +1,4 @@
-module github.com/dragonflyoss/image-service/smoke
+module github.com/dragonflyoss/nydus/smoke
 
 go 1.20
 

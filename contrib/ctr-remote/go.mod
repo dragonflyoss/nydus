@@ -1,4 +1,4 @@
-module github.com/dragonflyoss/image-service/contrib/ctr-remote
+module github.com/dragonflyoss/nydus/contrib/ctr-remote
 
 go 1.20
 

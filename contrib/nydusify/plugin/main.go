@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/hook"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/hook"
 )
 
 type LocalHook struct {

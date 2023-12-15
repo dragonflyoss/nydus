@@ -9,8 +9,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dragonflyoss/image-service/smoke/tests/tool"
-	"github.com/dragonflyoss/image-service/smoke/tests/tool/test"
+	"github.com/dragonflyoss/nydus/smoke/tests/tool"
+	"github.com/dragonflyoss/nydus/smoke/tests/tool/test"
 	"github.com/google/uuid"
 )
 

@@ -23,15 +23,15 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/rule"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/chunkdict/generator"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/copier"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/packer"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/provider"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/viewer"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/rule"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/chunkdict/generator"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/copier"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/packer"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/viewer"
 )
 
 var (

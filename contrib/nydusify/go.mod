@@ -1,4 +1,4 @@
-module github.com/dragonflyoss/image-service/contrib/nydusify
+module github.com/dragonflyoss/nydus/contrib/nydusify
 
 go 1.20
 

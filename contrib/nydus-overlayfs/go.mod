@@ -1,4 +1,4 @@
-module github.com/dragonflyoss/image-service/contrib/nydus-overlayfs
+module github.com/dragonflyoss/nydus/contrib/nydus-overlayfs
 
 go 1.20
 
