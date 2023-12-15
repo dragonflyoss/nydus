@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["The Nydus Developers"]
 description = "A simple HTTP server to provide a fake container registry for nydusd"
 homepage = "https://nydus.dev/"
-repository = "https://github.com/dragonflyoss/image-service"
+repository = "https://github.com/dragonflyoss/nydus"
 edition = "2021"
 license = "Apache-2.0"
 

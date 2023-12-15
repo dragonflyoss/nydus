@@ -26,7 +26,7 @@
 //! - [metadata](metadata/index.html): defines and accesses Rafs filesystem metadata.
 //!
 //! For more information, please refer to
-//! [Dragonfly Image Service](https://github.com/dragonflyoss/image-service)
+//! [Dragonfly Image Service](https://github.com/dragonflyoss/nydus)
 
 #[macro_use]
 extern crate log;
