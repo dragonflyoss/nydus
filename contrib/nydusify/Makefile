@@ -26,7 +26,7 @@ release:
 plugin:
 	@CGO_ENABLED=0 ${PROXY} GOOS=linux GOARCH=${GOARCH} go build -ldflags '-s -w -extldflags "-static"' -o nydus-hook-plugin ./plugin
 
-test: build build-smoke
+test: build
 	@go vet $(PACKAGES)
 	golangci-lint run
 	@go test -covermode=atomic -coverprofile=coverage.out -count=1 -v -timeout 20m -race ./pkg/... ./cmd/...
@@ -37,6 +37,3 @@ coverage: test
 clean:
 	rm -f cmd/nydusify
 	rm -f coverage.out
-
-build-smoke:
-	${PROXY} go test -race -v -c -o ./nydusify-smoke ./tests

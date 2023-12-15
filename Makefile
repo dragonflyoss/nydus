@@ -52,12 +52,6 @@ current_dir := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 env_go_path := $(shell go env GOPATH 2> /dev/null)
 go_path := $(if $(env_go_path),$(env_go_path),"$(HOME)/go")
 
-# Set the env DIND_CACHE_DIR to specify a cache directory for
-# docker-in-docker container, used to cache data for docker pull,
-# then mitigate the impact of docker hub rate limit, for example:
-# env DIND_CACHE_DIR=/path/to/host/var-lib-docker make docker-nydusify-smoke
-dind_cache_mount := $(if $(DIND_CACHE_DIR),-v $(DIND_CACHE_DIR):/var/lib/docker,)
-
 # Functions
 
 # Func: build golang target in docker
@@ -129,7 +123,7 @@ coverage: pre-coverage
 # write unit teset coverage to codecov.json, used for Github CI
 coverage-codecov:
 	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) ${CARGO} llvm-cov --codecov --output-path codecov.json --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) -- --skip integration --nocapture  --test-threads=8
-	
+
 smoke-only:
 	make -C smoke test
 
@@ -140,37 +134,6 @@ smoke-benchmark:
 	make -C smoke test-benchmark
 
 smoke: release smoke-only
-
-docker-nydus-smoke:
-	docker build -t nydus-smoke --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/nydus-smoke
-	docker run --rm --privileged ${CARGO_BUILD_GEARS} \
-		-e TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) \
-		-v ~/.cargo:/root/.cargo \
-		-v $(TEST_WORKDIR_PREFIX) \
-		-v ${current_dir}:/nydus-rs \
-		nydus-smoke
-
-# TODO: Nydusify smoke has to be time consuming for a while since it relies on musl nydusd and nydus-image.
-# So musl compilation must be involved.
-# And docker-in-docker deployment involves image building?
-docker-nydusify-smoke: docker-static
-	$(call build_golang,$(NYDUSIFY_PATH),make build-smoke)
-	docker build -t nydusify-smoke misc/nydusify-smoke
-	docker run --rm --privileged \
-		-e BACKEND_TYPE=$(BACKEND_TYPE) \
-		-e BACKEND_CONFIG=$(BACKEND_CONFIG) \
-		-v $(current_dir):/nydus-rs $(dind_cache_mount) nydusify-smoke TestSmoke
-
-docker-nydusify-image-test: docker-static
-	$(call build_golang,$(NYDUSIFY_PATH),make build-smoke)
-	docker build -t nydusify-smoke misc/nydusify-smoke
-	docker run --rm --privileged \
-		-e BACKEND_TYPE=$(BACKEND_TYPE) \
-		-e BACKEND_CONFIG=$(BACKEND_CONFIG) \
-		-v $(current_dir):/nydus-rs $(dind_cache_mount) nydusify-smoke TestDockerHubImage
-
-# Run integration smoke test in docker-in-docker container. It requires some special settings,
-docker-smoke: docker-nydus-smoke docker-nydusify-smoke
 
 contrib-build: nydusify ctr-remote nydus-overlayfs
 
