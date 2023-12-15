@@ -2,7 +2,7 @@
 
 # I. High Level Design
 ##    0. Overview
-Dragonfly image service is named as `nydus`, [GitHub repo](https://github.com/dragonflyoss/image-service)
+Dragonfly image service is named as `nydus`, [GitHub repo](https://github.com/dragonflyoss/nydus)
 
 Nydus consists of two parts,
 * a userspace filesystem called `rafs` on top of a container image format

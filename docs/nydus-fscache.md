@@ -83,12 +83,12 @@ sudo lsof /dev/cachefiles
 1. Make sure you have installed _rust 1.52.1_ version and golang.
 
 2. Check out the latest nydus source code with \
-``git clone https://github.com/dragonflyoss/image-service.git``
+``git clone https://github.com/dragonflyoss/nydus.git``
 
 3. Build nydusd and nydus-image with 
 
 ``` bash
-cd image-service
+cd nydus
 make release
 ```
 

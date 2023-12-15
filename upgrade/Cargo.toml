@@ -5,7 +5,7 @@ description = "Nydus Daemon Upgrade"
 authors = ["The Nydus Developers"]
 license = "Apache-2.0"
 homepage = "https://nydus.dev/"
-repository = "https://github.com/dragonflyoss/image-service"
+repository = "https://github.com/dragonflyoss/nydus"
 edition = "2021"
 
 [dependencies]
