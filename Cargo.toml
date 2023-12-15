@@ -8,7 +8,7 @@ license = "Apache-2.0 OR BSD-3-Clause"
 homepage = "https://nydus.dev/"
 repository = "https://github.com/dragonflyoss/image-service"
 exclude = ["contrib/", "smoke/", "tests/"]
-edition = "2018"
+edition = "2021"
 resolver = "2"
 build = "build.rs"
 
