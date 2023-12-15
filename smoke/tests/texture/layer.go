@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/dragonflyoss/image-service/smoke/tests/tool"
+	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 )
 
 type LayerMaker func(t *testing.T, layer *tool.Layer)

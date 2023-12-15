@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/checker/tool"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/compactor"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/build"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/compactor"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"

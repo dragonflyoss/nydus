@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter"
 )
 
 func main() {

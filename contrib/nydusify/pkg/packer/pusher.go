@@ -10,8 +10,8 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
 type Pusher struct {

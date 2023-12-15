@@ -57,7 +57,7 @@ func (d *DescartesItem) GetUInt64(name string) uint64 {
 //
 //		import (
 //	       "fmt"
-//	       "github.com/dragonflyoss/image-service/smoke/tests/tool"
+//	       "github.com/dragonflyoss/nydus/smoke/tests/tool"
 //	   )
 //
 //		products := tool.DescartesIterator{}

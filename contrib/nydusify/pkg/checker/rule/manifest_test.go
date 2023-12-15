@@ -3,7 +3,7 @@ package rule
 import (
 	"testing"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/stretchr/testify/assert"
 
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"

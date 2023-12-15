@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/dragonflyoss/image-service/smoke/tests/tool"
+	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 )
 
 func TestMain(m *testing.M) {

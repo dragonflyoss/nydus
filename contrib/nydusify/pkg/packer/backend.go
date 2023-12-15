@@ -11,7 +11,7 @@ package packer
 import (
 	"encoding/json"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 )
 
 type BackendConfig interface {

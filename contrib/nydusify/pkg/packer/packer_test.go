@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/build"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"

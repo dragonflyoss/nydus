@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/build"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/build"
 	"github.com/pkg/errors"
 )
 

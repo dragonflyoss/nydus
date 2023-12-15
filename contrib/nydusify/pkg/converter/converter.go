@@ -9,7 +9,7 @@ import (
 	"os"
 
 	"github.com/containerd/containerd/namespaces"
-	"github.com/dragonflyoss/image-service/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
 	"github.com/goharbor/acceleration-service/pkg/converter"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
 	"github.com/pkg/errors"
