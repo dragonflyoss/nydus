@@ -6,7 +6,7 @@ authors = ["The Nydus Developers"]
 license = "Apache-2.0 OR BSD-3-Clause"
 homepage = "https://nydus.dev/"
 repository = "https://github.com/dragonflyoss/image-service"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1.0.35"
