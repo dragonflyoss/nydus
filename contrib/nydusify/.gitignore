@@ -3,3 +3,4 @@ tmp
 cmd/nydusify
 output
 nydus-hook-plugin
+coverage.out
