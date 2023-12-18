@@ -169,7 +169,7 @@ jobs:
         CARGO_BIN=$(which cargo)
         sudo -E CARGO=${CARGO_BIN} make ut-nextest
 
-  contrib-unit-test:
+  contrib-unit-test-coverage:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
@@ -183,6 +183,12 @@ jobs:
       run: |
         curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.54.2
         make -e DOCKER=false contrib-test
+    - name: Upload contrib coverage file
+      uses: actions/upload-artifact@master
+      with:
+        name: contrib-test-coverage-artifact
+        path: |
+          contrib/nydusify/coverage.txt
 
   nydus-unit-test-coverage:
     runs-on: ubuntu-latest
@@ -205,11 +211,31 @@ jobs:
           CARGO_HOME=${HOME}/.cargo
           CARGO_BIN=$(which cargo)
           sudo -E CARGO=${CARGO_BIN} make coverage-codecov
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
+      - name: Upload nydus coverage file
+        uses: actions/upload-artifact@master
         with:
-          files: codecov.json
-          fail_ci_if_error: true
+          name: nydus-test-coverage-artifact
+          path: |
+            codecov.json
+
+  upload-coverage-to-codecov:
+    runs-on: ubuntu-latest
+    needs: [contrib-unit-test-coverage, nydus-unit-test-coverage]
+    steps:
+    - uses: actions/checkout@v3
+    - name: Download nydus coverage file
+      uses: actions/download-artifact@master
+      with:
+        name: nydus-test-coverage-artifact
+    - name: Download contrib coverage file
+      uses: actions/download-artifact@master
+      with:
+        name: contrib-test-coverage-artifact
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./codecov.json,./coverage.txt
+        fail_ci_if_error: true
 
   nydus-cargo-deny:
     name: cargo-deny
