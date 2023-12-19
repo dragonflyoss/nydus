@@ -639,7 +639,7 @@ impl BlobCache for FileCacheEntry {
         // Then handle fs prefetch
         let max_comp_size = self.prefetch_batch_size();
         let mut bios = bios.to_vec();
-        bios.sort_unstable_by_key(|entry| entry.chunkinfo.compressed_offset());
+        bios.sort_by_key(|entry| entry.chunkinfo.compressed_offset());
         self.metrics.prefetch_unmerged_chunks.add(bios.len() as u64);
         BlobIoMergeState::merge_and_issue(
             &bios,
