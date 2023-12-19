@@ -148,6 +148,7 @@ impl BatchContextGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::ManuallyDrop;
 
     #[test]
     fn test_batch_inflate_context() {
@@ -171,33 +172,32 @@ mod tests {
 
     #[test]
     fn test_batch_context_generator() {
-        let mut generator = BatchContextGenerator {
-            chunk_data_buf: vec![1u8, 2, 3, 4, 5],
-            contexts: vec![],
-        };
+        let mut generator = BatchContextGenerator::new(0x100000).unwrap();
+        assert!(generator.chunk_data_buf_is_empty());
+        assert_eq!(generator.chunk_data_buf_len(), 0);
+
+        generator.append_chunk_data_buf(&[1, 2, 3, 4]);
         assert!(!generator.chunk_data_buf_is_empty());
-        let data = [6u8, 7, 8, 9];
-        generator.append_chunk_data_buf(&data);
-        assert_eq!(
-            generator.chunk_data_buf_len(),
-            generator.chunk_data_buf().len()
-        );
+        assert_eq!(generator.chunk_data_buf_len(), 4);
 
-        generator.add_context(0x20);
-        assert_eq!(generator.contexts.len(), 1);
+        generator.add_context(4);
 
-        let mut data = vec![0u8; 40];
-        data[0] = 0x20;
-        data[4] = 9;
-        assert_eq!(generator.to_vec().unwrap(), (data, 1));
-
-        let ctx = BatchContextGenerator::new(8);
-        assert!(ctx.is_ok());
-        assert_eq!(ctx.unwrap().chunk_data_buf().capacity(), 8);
-
-        assert!(generator.generate_chunk_info(0x10, 0, 2, true).is_ok());
+        let (ctx_data, _) = generator.to_vec().unwrap();
+        let ctx_vec = unsafe {
+            ManuallyDrop::new(Vec::from_raw_parts(
+                ctx_data.as_slice().as_ptr() as *mut BatchInflateContext,
+                1,
+                1,
+            ))
+        };
+        assert_eq!(ctx_vec[0].compressed_size(), 4);
+        assert_eq!(ctx_vec[0].uncompressed_batch_size(), 4);
 
         generator.clear_chunk_data_buf();
+        assert!(generator.chunk_data_buf_is_empty());
         assert_eq!(generator.chunk_data_buf_len(), 0);
+
+        let chunk_info = generator.generate_chunk_info(0, 0, 4, false).unwrap();
+        assert!(chunk_info.is_batch());
     }
 }
