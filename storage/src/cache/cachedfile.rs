@@ -340,10 +340,17 @@ impl FileCacheEntry {
         mut extended_chunks: Vec<Arc<dyn BlobChunkInfo>>,
     ) -> Vec<Arc<dyn BlobChunkInfo>> {
         if self.is_zran {
+            // Special handling for zran chunk.
+            // Because zran chunk has not been deduplicated at build time.
+            // So zran index is used to check if chunk is ready.
             let mut set = HashSet::new();
             for c in extended_chunks.iter() {
                 if !matches!(self.chunk_map.is_ready(c.as_ref()), Ok(true)) {
-                    set.insert(meta.get_zran_index(c.id()));
+                    let zran_idx = meta
+                        .get_zran_index(c.id())
+                        .map_err(|e| error!("Failed to get zran index for chunk {}: {}", c.id(), e))
+                        .unwrap_or(u32::MAX);
+                    set.insert(zran_idx);
                 }
             }
 
@@ -351,8 +358,16 @@ impl FileCacheEntry {
             let mut start = 0;
             while start < extended_chunks.len() - 1 {
                 let id = extended_chunks[start].id();
-                if id == first || set.contains(&meta.get_zran_index(id)) {
+                if id == first {
                     break;
+                }
+                match &meta.get_zran_index(id) {
+                    Ok(i) => {
+                        if set.contains(i) {
+                            break;
+                        }
+                    }
+                    Err(_e) => break,
                 }
                 start += 1;
             }
@@ -364,8 +379,16 @@ impl FileCacheEntry {
             let mut end = extended_chunks.len() - 1;
             while end > start {
                 let id = extended_chunks[end].id();
-                if id == last || set.contains(&meta.get_zran_index(id)) {
+                if id == last {
                     break;
+                }
+                match &meta.get_zran_index(id) {
+                    Ok(i) => {
+                        if set.contains(i) {
+                            break;
+                        }
+                    }
+                    Err(_e) => break,
                 }
                 end -= 1;
             }
@@ -377,6 +400,10 @@ impl FileCacheEntry {
                 extended_chunks[start..=end].to_vec()
             }
         } else {
+            // For normal chunks and batch chunks.
+            // No special handling for batch chunk.
+            // Because batch chunk has been deduplicated at build time.
+            // It is enough to just check if chunk is ready.
             while !extended_chunks.is_empty() {
                 let chunk = &extended_chunks[extended_chunks.len() - 1];
                 if matches!(self.chunk_map.is_ready(chunk.as_ref()), Ok(true)) {
@@ -395,15 +422,11 @@ impl FileCacheEntry {
             let meta = self
                 .get_blob_meta_info()?
                 .ok_or_else(|| einval!("failed to get blob meta object"))?;
-            let zran_index = meta.get_zran_index(chunks[0].id());
-            let (ctx, _) = meta
-                .get_zran_context(zran_index)
-                .ok_or_else(|| einval!("failed to get ZRan context for chunk"))?;
+            let zran_index = meta.get_zran_index(chunks[0].id())?;
+            let (ctx, _) = meta.get_zran_context(zran_index)?;
             let blob_start = ctx.in_offset;
-            let zran_index = meta.get_zran_index(chunks[chunks.len() - 1].id());
-            let (ctx, _) = meta
-                .get_zran_context(zran_index)
-                .ok_or_else(|| einval!("failed to get ZRan context for chunk"))?;
+            let zran_index = meta.get_zran_index(chunks[chunks.len() - 1].id())?;
+            let (ctx, _) = meta.get_zran_context(zran_index)?;
             let blob_end = ctx.in_offset + ctx.in_len as u64;
             (blob_start, blob_end)
         } else if self.is_batch {

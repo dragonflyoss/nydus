@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::{Display, Formatter};
+use std::io::{Error, ErrorKind, Result};
 
 use crate::device::BlobFeatures;
 use crate::meta::{BlobCompressionContext, BlobMetaChunkInfo, BLOB_CCT_CHUNK_SIZE_MASK};
@@ -168,31 +169,41 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         u64::from_le(self.uncomp_info) & CHUNK_V2_FLAG_BATCH != 0
     }
 
-    fn get_zran_index(&self) -> u32 {
-        assert!(self.is_zran());
-        (u64::from_le(self.data) >> 32) as u32
+    fn get_zran_index(&self) -> Result<u32> {
+        if !self.is_zran() {
+            return Err(einval!("Failed to get zran_index: not a ZRan chunk"));
+        }
+        Ok((u64::from_le(self.data) >> 32) as u32)
     }
 
-    fn get_zran_offset(&self) -> u32 {
-        assert!(self.is_zran());
-        u64::from_le(self.data) as u32
+    fn get_zran_offset(&self) -> Result<u32> {
+        if !self.is_zran() {
+            return Err(einval!("Failed to get zran_offset: not a ZRan chunk"));
+        }
+        Ok(u64::from_le(self.data) as u32)
     }
 
-    fn get_batch_index(&self) -> u32 {
-        assert!(self.is_batch());
-        (u64::from_le(self.data) >> 32) as u32
+    fn get_batch_index(&self) -> Result<u32> {
+        if !self.is_batch() {
+            return Err(einval!("Failed to get batch_index: not a batch chunk"));
+        }
+        Ok((u64::from_le(self.data) >> 32) as u32)
     }
 
-    fn get_uncompressed_offset_in_batch_buf(&self) -> u32 {
-        assert!(self.is_batch());
-        u64::from_le(self.data) as u32
+    fn get_uncompressed_offset_in_batch_buf(&self) -> Result<u32> {
+        if !self.is_batch() {
+            return Err(einval!(
+                "Failed to get uncompressed_offset_in_batch_buf: not a batch chunk"
+            ));
+        }
+        Ok(u64::from_le(self.data) as u32)
     }
 
     fn get_data(&self) -> u64 {
         u64::from_le(self.data)
     }
 
-    fn validate(&self, state: &BlobCompressionContext) -> std::io::Result<()> {
+    fn validate(&self, state: &BlobCompressionContext) -> Result<()> {
         if self.compressed_end() > state.compressed_size
             || self.uncompressed_end() > state.uncompressed_size
             || self.uncompressed_size() == 0
@@ -201,46 +212,62 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
                 && !self.is_compressed()
                 && self.uncompressed_size() != self.compressed_size())
         {
-            return Err(einval!(format!(
-                "invalid chunk, blob: index {}/c_size 0x{:}/d_size 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {} batch {} zran {} encrypted {}",
-                state.blob_index,
-                state.compressed_size,
-                state.uncompressed_size,
-                self.compressed_end(),
-                self.uncompressed_end(),
-                self.is_compressed(),
-                self.is_batch(),
-                self.is_zran(),
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!(
+                    "invalid chunk, blob: index {}/c_size 0x{:x}/d_size 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {} batch {} zran {} encrypted {}",
+                    state.blob_index,
+                    state.compressed_size,
+                    state.uncompressed_size,
+                    self.compressed_end(),
+                    self.uncompressed_end(),
+                    self.is_compressed(),
+                    self.is_batch(),
+                    self.is_zran(),
                 self.is_encrypted()
-            )));
+                ),
+            ));
         }
 
         let invalid_flags = self.check_flags();
         if invalid_flags != 0 {
-            return Err(einval!(format!("unknown chunk flags {:x}", invalid_flags)));
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("unknown chunk flags 0x{:x}", invalid_flags),
+            ));
         }
 
         if state.blob_features & BlobFeatures::ZRAN.bits() == 0 && self.is_zran() {
-            return Err(einval!("invalid chunk flag ZRan for non-ZRan blob"));
+            return Err(Error::new(
+                ErrorKind::Other,
+                "invalid chunk flag ZRan for non-ZRan blob",
+            ));
         } else if self.is_zran() {
-            let index = self.get_zran_index() as usize;
+            let index = self.get_zran_index()? as usize;
             if index >= state.zran_info_array.len() {
-                return Err(einval!(format!(
-                    "ZRan index {:x} is too big, max {:x}",
-                    self.get_zran_index(),
-                    state.zran_info_array.len()
-                )));
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    format!(
+                        "ZRan index {} is too big, max {}",
+                        index,
+                        state.zran_info_array.len()
+                    ),
+                ));
             }
             let ctx = &state.zran_info_array[index];
-            if self.get_zran_offset() >= ctx.out_size()
-                || self.get_zran_offset() + self.uncompressed_size() > ctx.out_size()
+            let zran_offset = self.get_zran_offset()?;
+            if zran_offset >= ctx.out_size()
+                || zran_offset + self.uncompressed_size() > ctx.out_size()
             {
-                return Err(einval!(format!(
-                    "ZRan range {:x}/{:x} is invalid, should be with in 0/{:x}",
-                    self.get_zran_offset(),
-                    self.uncompressed_size(),
-                    ctx.out_size()
-                )));
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    format!(
+                        "ZRan range 0x{:x}/0x{:x} is invalid, should be with in 0/0x{:x}",
+                        zran_offset,
+                        self.uncompressed_size(),
+                        ctx.out_size()
+                    ),
+                ));
             }
         }
 
@@ -304,8 +331,8 @@ mod tests {
         chunk.set_zran(true);
         chunk.set_zran_index(3);
         chunk.set_zran_offset(5);
-        assert_eq!(chunk.get_zran_index(), 3);
-        assert_eq!(chunk.get_zran_offset(), 5);
+        assert_eq!(chunk.get_zran_index().unwrap(), 3);
+        assert_eq!(chunk.get_zran_offset().unwrap(), 5);
         chunk.set_zran(false);
         assert!(!chunk.is_zran());
 
@@ -333,8 +360,8 @@ mod tests {
         assert_eq!(chunk.data as u64, 137438953520);
 
         assert_eq!(chunk.flags(), 12);
-        assert_eq!(chunk.get_batch_index(), 32);
-        assert_eq!(chunk.get_uncompressed_offset_in_batch_buf(), 48);
+        assert_eq!(chunk.get_batch_index().unwrap(), 32);
+        assert_eq!(chunk.get_uncompressed_offset_in_batch_buf().unwrap(), 48);
         assert_eq!(chunk.get_data(), 137438953520);
 
         // For testing old format compatibility.
@@ -347,8 +374,8 @@ mod tests {
         assert_eq!(chunk.uncompressed_size(), 0x100 + 1);
         assert_eq!(chunk.compressed_size(), 0x000f_ffff);
         assert_eq!(chunk.compressed_offset(), 0x00ff_ffff_ffff);
-        assert_eq!(chunk.get_zran_index(), 3);
-        assert_eq!(chunk.get_zran_offset(), 5);
+        assert_eq!(chunk.get_zran_index().unwrap(), 3);
+        assert_eq!(chunk.get_zran_offset().unwrap(), 5);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::meta::{BlobCompressionContext, BlobMetaChunkInfo, BLOB_CCT_CHUNK_SIZE_MASK};
+use std::io::Result;
 
 const BLOB_CC_V1_CHUNK_COMP_OFFSET_MASK: u64 = 0xff_ffff_ffff;
 const BLOB_CC_V1_CHUNK_UNCOMP_OFFSET_MASK: u64 = 0xfff_ffff_f000;
@@ -99,19 +100,19 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
         false
     }
 
-    fn get_zran_index(&self) -> u32 {
+    fn get_zran_index(&self) -> Result<u32> {
         unimplemented!()
     }
 
-    fn get_zran_offset(&self) -> u32 {
+    fn get_zran_offset(&self) -> Result<u32> {
         unimplemented!()
     }
 
-    fn get_batch_index(&self) -> u32 {
+    fn get_batch_index(&self) -> Result<u32> {
         unimplemented!()
     }
 
-    fn get_uncompressed_offset_in_batch_buf(&self) -> u32 {
+    fn get_uncompressed_offset_in_batch_buf(&self) -> Result<u32> {
         unimplemented!()
     }
 
@@ -119,7 +120,7 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
         0
     }
 
-    fn validate(&self, state: &BlobCompressionContext) -> std::io::Result<()> {
+    fn validate(&self, state: &BlobCompressionContext) -> Result<()> {
         if self.compressed_end() > state.compressed_size
             || self.uncompressed_end() > state.uncompressed_size
             || self.uncompressed_size() == 0
