@@ -716,6 +716,10 @@ mod tests {
             self.flags.contains(BlobChunkFlags::COMPRESSED)
         }
 
+        fn is_batch(&self) -> bool {
+            self.flags.contains(BlobChunkFlags::BATCH)
+        }
+
         fn is_encrypted(&self) -> bool {
             false
         }

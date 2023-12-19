@@ -1442,6 +1442,11 @@ impl BlobChunkInfo for DirectChunkInfoV6 {
         self.index()
     }
 
+    fn is_batch(&self) -> bool {
+        let state = self.state();
+        self.v5_chunk(&state).flags.contains(BlobChunkFlags::BATCH)
+    }
+
     fn is_compressed(&self) -> bool {
         let state = self.state();
         self.v5_chunk(&state)
@@ -1533,6 +1538,10 @@ impl BlobChunkInfo for TarfsChunkInfoV6 {
 
     fn uncompressed_size(&self) -> u32 {
         self.size
+    }
+
+    fn is_batch(&self) -> bool {
+        false
     }
 
     fn is_compressed(&self) -> bool {

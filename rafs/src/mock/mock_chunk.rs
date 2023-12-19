@@ -58,6 +58,10 @@ impl BlobChunkInfo for MockChunkInfo {
         self.c_index
     }
 
+    fn is_batch(&self) -> bool {
+        false
+    }
+
     fn is_compressed(&self) -> bool {
         self.c_flags.contains(BlobChunkFlags::COMPRESSED)
     }

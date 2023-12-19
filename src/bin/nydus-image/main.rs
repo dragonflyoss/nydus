@@ -1702,7 +1702,7 @@ impl Command {
                     u32::from_str_radix(&v[2..], 16).context(format!("invalid batch size {}", v))?
                 } else {
                     v.parse::<u32>()
-                        .context(format!("invalid chunk size {}", v))?
+                        .context(format!("invalid batch size {}", v))?
                 };
                 if batch_size > 0 {
                     if version.is_v5() {

@@ -635,6 +635,9 @@ pub trait BlobChunkInfo: Any + Sync + Send {
         self.uncompressed_offset() + self.uncompressed_size() as u64
     }
 
+    /// Check whether the chunk is batch chunk or not.
+    fn is_batch(&self) -> bool;
+
     /// Check whether the chunk is compressed or not.
     ///
     /// Some chunk may become bigger after compression, so plain data instead of compressed
@@ -687,6 +690,10 @@ impl BlobChunkInfo for BlobIoChunk {
 
     fn uncompressed_size(&self) -> u32 {
         self.0.uncompressed_size()
+    }
+
+    fn is_batch(&self) -> bool {
+        self.0.is_batch()
     }
 
     fn is_compressed(&self) -> bool {

@@ -1834,6 +1834,10 @@ impl BlobChunkInfo for BlobMetaChunk {
             .uncompressed_size(self.chunk_index)
     }
 
+    fn is_batch(&self) -> bool {
+        self.meta.chunk_info_array.is_batch(self.chunk_index)
+    }
+
     fn is_compressed(&self) -> bool {
         self.meta.chunk_info_array.is_compressed(self.chunk_index)
     }
