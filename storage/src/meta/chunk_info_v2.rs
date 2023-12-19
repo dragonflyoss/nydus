@@ -271,6 +271,43 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
             }
         }
 
+        if self.is_batch() {
+            if state.blob_features & BlobFeatures::BATCH.bits() == 0 {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "invalid chunk flag Batch for non-Batch blob",
+                ));
+            } else {
+                let index = self.get_batch_index()? as usize;
+                if index >= state.batch_info_array.len() {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        format!(
+                            "Batch index {} is too big, max {}",
+                            index,
+                            state.batch_info_array.len()
+                        ),
+                    ));
+                }
+                let ctx = &state.batch_info_array[index];
+                if ctx.compressed_size() > ctx.uncompressed_batch_size()
+                    || self.get_uncompressed_offset_in_batch_buf()? + self.uncompressed_size()
+                        > ctx.uncompressed_batch_size()
+                    || u64::MAX - self.compressed_offset() < ctx.compressed_size() as u64
+                {
+                    return Err(Error::new(ErrorKind::Other, format!(
+                        "Batch Context is invalid: chunk: uncompressed_size 0x{:x}, uncompressed_offset_in_batch_buf 0x{:x}, uncompressed_batch_size 0x{:x}, batch context: index {}, compressed_size 0x{:x}, uncompressed_batch_size 0x{:x}",
+                        self.uncompressed_size(),
+                        self.get_uncompressed_offset_in_batch_buf()?,
+                        ctx.uncompressed_batch_size(),
+                        index,
+                        ctx.compressed_size(),
+                        ctx.uncompressed_batch_size(),
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 }
