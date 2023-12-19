@@ -265,9 +265,74 @@ jobs:
           name: convert-native-v6-metric
           path: convert-native-v6
 
+  convert-native-v6-batch:
+    runs-on: ubuntu-latest
+    needs: [nydusify-build, nydus-build, fsck-erofs-build]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Login ghcr registry
+        uses: docker/login-action@v2
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download Nydus
+        uses: actions/download-artifact@master
+        with:
+          name: nydus-artifact
+          path: /usr/local/bin
+      - name: Download Nydusify
+        uses: actions/download-artifact@master
+        with:
+          name: nydusify-artifact
+          path: /usr/local/bin
+      - name: Download fsck.erofs
+        uses: actions/download-artifact@master
+        with:
+          name: fsck-erofs-artifact
+          path: /usr/local/bin
+      - name: Convert and check RAFS v6 batch images
+        run: |
+          sudo chmod +x /usr/local/bin/nydus*
+          sudo chmod +x /usr/local/bin/fsck.erofs
+          sudo docker run -d --restart=always -p 5000:5000 registry
+          sudo mkdir convert-native-v6-batch
+          for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            echo "converting $I:latest to $I:nydus-nightly-v6-batch"
+            # for pre-built images
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+                 --source $I:latest \
+                 --target ${{ env.REGISTRY }}/${{ env.ORGANIZATION }}/$I:nydus-nightly-v6-batch \
+                 --fs-version 6 \
+                 --batch-size 0x100000 \
+                 --platform linux/amd64,linux/arm64
+
+            # use local registry for speed
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify convert \
+                 --source $I:latest \
+                 --target localhost:5000/$I:nydus-nightly-v6-batch \
+                 --fs-version 6 \
+                 --batch-size 0x100000 \
+                 --platform linux/amd64,linux/arm64 \
+                 --output-json convert-native-v6-batch/${I}.json
+
+            sudo rm -rf ./tmp
+            sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
+                --target localhost:5000/$I:nydus-nightly-v6-batch
+
+            sudo fsck.erofs -d1 output/nydus_bootstrap
+            sudo rm -rf ./output
+          done
+      - name: Save Nydusify Metric
+        uses: actions/upload-artifact@v3
+        with:
+          name: convert-native-v6-batch-metric
+          path: convert-native-v6-batch
+
   convert-metric:
     runs-on: ubuntu-latest
-    needs: [convert-zran, convert-native-v5, convert-native-v6]
+    needs: [convert-zran, convert-native-v5, convert-native-v6, convert-native-v6-batch]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -286,12 +351,17 @@ jobs:
         with:
           name: convert-native-v6-metric
           path: convert-native-v6
+      - name: Download V6 Batch Metric
+        uses: actions/download-artifact@master
+        with:
+          name: convert-native-v6-batch-metric
+          path: convert-native-v6-batch
       - name: Summary
         run: |
           echo "## Image Size(MB)" > $GITHUB_STEP_SUMMARY
           echo "> Compare the size of OCI image and Nydus image."
-          echo "|image name|oci/nydus-zran|oci/nydus-v5|oci/nydus-v6|" >> $GITHUB_STEP_SUMMARY
-          echo "|:--------:|:------------:|:----------:|:----------:|" >> $GITHUB_STEP_SUMMARY
+          echo "|image name|oci/nydus-zran|oci/nydus-v5|oci/nydus-v6|oci/nydus-batch|" >> $GITHUB_STEP_SUMMARY
+          echo "|:--------:|:------------:|:----------:|:----------:|:-------------:|" >> $GITHUB_STEP_SUMMARY
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             zranSourceImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.SourceImageSize' convert-zran/${I}.json) / 1048576")")
             zranTargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-zran/${I}.json) / 1048576")")
@@ -299,17 +369,20 @@ jobs:
             v5TargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-native-v5/${I}.json) / 1048576")")
             v6SourceImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.SourceImageSize' convert-native-v6/${I}.json) / 1048576")")
             v6TargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-native-v6/${I}.json) / 1048576")")
-            echo "|${I}:latest|${zranSourceImageSize}/${zranTargetImageSize}|${v5SourceImageSize}/${v5TargetImageSize}|${v6SourceImageSize}/${v6TargetImageSize}|" >> $GITHUB_STEP_SUMMARY
+            batchSourceImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.SourceImageSize' convert-native-v6-batch/${I}.json) / 1048576")")
+            batchTargetImageSize=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.TargetImageSize' convert-native-v6-batch/${I}.json) / 1048576")")
+            echo "|${I}:latest|${zranSourceImageSize}/${zranTargetImageSize}|${v5SourceImageSize}/${v5TargetImageSize}|${v6SourceImageSize}/${v6TargetImageSize}|${batchSourceImageSize}/${batchTargetImageSize}|" >> $GITHUB_STEP_SUMMARY
           done
           echo "## Conversion Time(ms)" >> $GITHUB_STEP_SUMMARY
           echo "> Time elapsed to convert OCI image to Nydus image."
-          echo "|image name|nydus-zran|nydus-v5|nydus-v6|" >> $GITHUB_STEP_SUMMARY
-          echo "|:---:|:--:|:-------:|:-------:|" >> $GITHUB_STEP_SUMMARY
+          echo "|image name|nydus-zran|nydus-v5|nydus-v6|nydus-batch|" >> $GITHUB_STEP_SUMMARY
+          echo "|:---:|:--:|:-------:|:-------:|:-------:|" >> $GITHUB_STEP_SUMMARY
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
             zranConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-zran/${I}.json) / 1000000")")
             v5ConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-native-v5/${I}.json) / 1000000")")
             v6ConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-native-v6/${I}.json) / 1000000")")
-            echo "|${I}:latest|${zranConversionElapsed}|${v5ConversionElapsed}|${v6ConversionElapsed}|" >> $GITHUB_STEP_SUMMARY
+            batchConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-native-v6-batch/${I}.json) / 1000000")")
+            echo "|${I}:latest|${zranConversionElapsed}|${v5ConversionElapsed}|${v6ConversionElapsed}|${batchConversionElapsed}|" >> $GITHUB_STEP_SUMMARY
           done
       - uses: geekyeggo/delete-artifact@v2
         with:
