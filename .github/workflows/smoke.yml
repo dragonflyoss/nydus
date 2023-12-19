@@ -59,7 +59,7 @@ jobs:
       run: |
         declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
         RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
-        cargo install --version 0.2.4 cross
+        cargo install --locked --version 0.2.4 cross
         rustup component add rustfmt clippy
         make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
         sudo mv target/$RUST_TARGET/release/nydusd .
