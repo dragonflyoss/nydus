@@ -704,11 +704,10 @@ impl BlobCompressionContextInfo {
         self.state.get_batch_context(batch_index as usize)
     }
 
-    /// Get compressed offset and size associated with the chunk at `chunk_index`.
+    /// Get compressed size associated with the chunk at `chunk_index`.
     /// Capabale of handling both batch and non-batch chunks.
-    /// Return `compressed_offset` and `compressed_size`.
-    pub fn get_compressed_info(&self, chunk_index: u32) -> Result<(u64, u32)> {
-        self.state.get_compressed_info(chunk_index as usize)
+    pub fn get_compressed_size(&self, chunk_index: u32) -> Result<u32> {
+        self.state.get_compressed_size(chunk_index as usize)
     }
 
     /// Get ZRan index associated with the chunk at `chunk_index`.
@@ -1012,19 +1011,17 @@ impl BlobCompressionContext {
         }
     }
 
-    /// Get compressed offset and size associated with the chunk at `chunk_index`.
+    /// Get compressed size associated with the chunk at `chunk_index`.
     /// Capabale of handling both batch and non-batch chunks.
-    /// Return `compressed_offset` and `compressed_size`.
-    pub fn get_compressed_info(&self, chunk_index: usize) -> Result<(u64, u32)> {
-        let c_offset = self.chunk_info_array.compressed_offset(chunk_index);
-        let c_size = if self.is_batch_chunk(chunk_index) {
-            self.get_batch_context(self.get_batch_index(chunk_index)? as usize)
-                .unwrap()
-                .compressed_size()
+    pub fn get_compressed_size(&self, chunk_index: usize) -> Result<u32> {
+        if self.is_batch_chunk(chunk_index) {
+            let ctx = self
+                .get_batch_context(self.get_batch_index(chunk_index)? as usize)
+                .unwrap();
+            Ok(ctx.compressed_size())
         } else {
-            self.chunk_info_array.compressed_size(chunk_index)
-        };
-        Ok((c_offset, c_size))
+            Ok(self.chunk_info_array.compressed_size(chunk_index))
+        }
     }
 
     fn get_zran_index(&self, chunk_index: usize) -> Result<u32> {
@@ -1383,7 +1380,8 @@ impl BlobMetaChunkArray {
             let entry = &chunks[mid];
             if compressed {
                 // Capabale of handling both batch and non-batch chunks.
-                let (c_offset, c_size) = state.get_compressed_info(mid)?;
+                let c_offset = entry.compressed_offset();
+                let c_size = state.get_compressed_size(mid)?;
                 (start, end) = (c_offset, c_offset + c_size as u64);
             } else {
                 start = entry.uncompressed_offset();

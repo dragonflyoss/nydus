@@ -128,6 +128,57 @@ impl FileCacheMeta {
     }
 }
 
+/// Helper struct to manage and call BlobCompressionContextInfo.
+struct BlobCCI {
+    meta: Option<Arc<BlobCompressionContextInfo>>,
+}
+
+impl BlobCCI {
+    fn new() -> Self {
+        BlobCCI { meta: None }
+    }
+
+    fn is_none(&self) -> bool {
+        self.meta.is_none()
+    }
+
+    fn set_meta(&mut self, meta: Option<Arc<BlobCompressionContextInfo>>) -> Result<&Self> {
+        if meta.is_none() {
+            return Err(einval!("failed to get blob meta info"));
+        }
+        self.meta = meta;
+        Ok(self)
+    }
+
+    fn get_compressed_offset(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u64> {
+        Ok(chunk.compressed_offset())
+    }
+
+    fn get_compressed_size(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u32> {
+        let size = if chunk.is_batch() {
+            self.meta
+                .as_ref()
+                .unwrap()
+                .get_compressed_size(chunk.id())?
+        } else {
+            chunk.compressed_size()
+        };
+        Ok(size)
+    }
+
+    fn get_compressed_info(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<(u64, u32)> {
+        Ok((
+            self.get_compressed_offset(chunk)?,
+            self.get_compressed_size(chunk)?,
+        ))
+    }
+
+    fn get_compressed_end(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u64> {
+        let (offset, size) = self.get_compressed_info(chunk)?;
+        Ok(offset + size as u64)
+    }
+}
+
 pub(crate) struct FileCacheEntry {
     pub(crate) blob_id: String,
     pub(crate) blob_info: Arc<BlobInfo>,
@@ -430,15 +481,18 @@ impl FileCacheEntry {
             let blob_end = ctx.in_offset + ctx.in_len as u64;
             (blob_start, blob_end)
         } else if self.is_batch {
-            let meta = self
-                .get_blob_meta_info()?
-                .ok_or_else(|| einval!("failed to get blob meta object"))?;
+            let first_chunk = &chunks[0];
+            let last_chunk = &chunks[chunks.len() - 1];
 
-            let (c_offset, _) = meta.get_compressed_info(chunks[0].id())?;
-            let blob_start = c_offset;
+            let mut blob_cci = BlobCCI::new();
 
-            let (c_offset, c_size) = meta.get_compressed_info(chunks[chunks.len() - 1].id())?;
-            let blob_end = c_offset + c_size as u64;
+            // Get blob meta info iff the chunk is batch chunk.
+            if first_chunk.is_batch() || last_chunk.is_batch() {
+                blob_cci.set_meta(self.get_blob_meta_info()?)?;
+            }
+
+            let blob_start = blob_cci.get_compressed_offset(first_chunk)?;
+            let blob_end = blob_cci.get_compressed_end(last_chunk)?;
 
             (blob_start, blob_end)
         } else {
@@ -995,6 +1049,7 @@ impl FileCacheEntry {
         let mut total_read: usize = 0;
 
         trace!("dispatch single io range {:?}", req);
+        let mut blob_cci = BlobCCI::new();
         for (i, chunk) in req.chunks.iter().enumerate() {
             let is_ready = match self.chunk_map.check_ready_and_mark_pending(chunk.as_ref()) {
                 Ok(true) => true,
@@ -1050,11 +1105,12 @@ impl FileCacheEntry {
                     BlobIoTag::Internal
                 };
 
-                let (start, len) = if let Ok(Some(meta)) = self.get_blob_meta_info() {
-                    meta.get_compressed_info(chunk.id())?
-                } else {
-                    (chunk.compressed_offset(), chunk.compressed_size())
-                };
+                // Lazy load blob meta info if needed.
+                if chunk.is_batch() && blob_cci.is_none() {
+                    blob_cci.set_meta(self.get_blob_meta_info()?)?;
+                }
+
+                let (start, len) = blob_cci.get_compressed_info(chunk)?;
 
                 // NOTE: Only this request region can read more chunks from backend with user io.
                 state.push(RegionType::Backend, start, len, tag, Some(chunk.clone()))?;
@@ -1119,10 +1175,22 @@ impl FileCacheEntry {
             return Ok(0);
         }
         if region.chunks.len() > 1 {
+            let mut blob_cci = BlobCCI::new();
+            // Validate the chunk order.
             for idx in 0..region.chunks.len() - 1 {
-                let end = region.chunks[idx].compressed_offset()
-                    + region.chunks[idx].compressed_size() as u64;
-                let start = region.chunks[idx + 1].compressed_offset();
+                let pre_chunk = &region.chunks[idx];
+                let next_chunk = &region.chunks[idx + 1];
+
+                // Lazy load blob meta info if needed.
+                if (pre_chunk.is_batch() || next_chunk.is_batch()) && blob_cci.is_none() {
+                    blob_cci.set_meta(self.get_blob_meta_info()?)?;
+                }
+
+                let (pre_offset, pre_size) = blob_cci.get_compressed_info(pre_chunk)?;
+                let end = pre_offset + pre_size as u64;
+
+                let start = blob_cci.get_compressed_offset(next_chunk)?;
+
                 assert!(end <= start);
                 assert!(start - end <= self.user_io_batch_size() >> RAFS_BATCH_SIZE_TO_GAP_SHIFT);
                 assert!(region.chunks[idx].id() < region.chunks[idx + 1].id());
@@ -1496,20 +1564,20 @@ impl Region {
     ) -> Result<Self> {
         assert!(!chunks.is_empty());
         let len = chunks.len();
+        let first_chunk = &chunks[0];
+        let last_chunk = &chunks[len - 1];
 
-        let meta = ctx
-            .get_blob_meta_info()?
-            .ok_or_else(|| einval!("failed to get blob meta object"))?;
-        let (blob_address, blob_len) = if ctx.is_batch && meta.is_batch_chunk(chunks[0].id()) {
-            // Assert all chunks are in the same batch.
-            meta.get_compressed_info(chunks[0].id())?
-        } else {
-            let ba = chunks[0].compressed_offset();
-            let last = &chunks[len - 1];
-            let sz = last.compressed_offset() - ba;
-            assert!(sz < u32::MAX as u64);
+        let mut blob_cci = BlobCCI::new();
+        if first_chunk.is_batch() || last_chunk.is_batch() {
+            blob_cci.set_meta(ctx.get_blob_meta_info()?)?;
+        }
 
-            (ba, sz as u32 + last.compressed_size())
+        let (blob_address, blob_len) = {
+            let first_offset = blob_cci.get_compressed_offset(first_chunk)?;
+            let (last_offset, last_size) = blob_cci.get_compressed_info(last_chunk)?;
+            let size_between = last_offset - first_offset;
+            assert!(size_between < u32::MAX as u64);
+            (first_offset, size_between as u32 + last_size)
         };
 
         Ok(Region {
@@ -1629,6 +1697,9 @@ impl FileIoMergeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::{BlobChunkFlags, BlobFeatures};
+    use crate::meta::*;
+    use crate::test::MockChunkInfo;
 
     #[test]
     fn test_data_buffer() {
@@ -1746,5 +1817,90 @@ mod tests {
             .push(RegionType::CacheSlow, 0x5000, 0x2000, tag, None)
             .unwrap();
         assert_eq!(state.regions.len(), 2);
+    }
+
+    #[test]
+    fn test_blob_cci() {
+        // Batch chunks: [chunk0, chunk1]
+        let mut chunk0 = BlobChunkInfoV2Ondisk::default();
+        chunk0.set_batch(true);
+        chunk0.set_compressed(true);
+        chunk0.set_batch_index(0);
+        chunk0.set_uncompressed_offset_in_batch_buf(0);
+        chunk0.set_uncompressed_offset(0);
+        chunk0.set_uncompressed_size(0x2000);
+
+        let mut chunk1 = BlobChunkInfoV2Ondisk::default();
+        chunk1.set_batch(true);
+        chunk1.set_compressed(true);
+        chunk1.set_batch_index(0);
+        chunk1.set_uncompressed_offset_in_batch_buf(0x2000);
+        chunk1.set_uncompressed_offset(0x2000);
+        chunk1.set_uncompressed_size(0x1000);
+
+        let mut batch_ctx0 = BatchInflateContext::default();
+        batch_ctx0.set_uncompressed_batch_size(0x3000);
+        batch_ctx0.set_compressed_size(0x2000);
+
+        let chunk_info_array = vec![chunk0, chunk1];
+        let chunk_infos = BlobMetaChunkArray::V2(chunk_info_array);
+        let chunk_infos = ManuallyDrop::new(chunk_infos);
+
+        let batch_ctx_array = vec![batch_ctx0];
+        let batch_ctxes = ManuallyDrop::new(batch_ctx_array);
+
+        let mut state = BlobCompressionContext::default();
+        state.chunk_info_array = chunk_infos;
+        state.batch_info_array = batch_ctxes;
+        state.compressed_size = 0x2000;
+        state.uncompressed_size = 0x3000;
+        state.blob_features = (BlobFeatures::BATCH
+            | BlobFeatures::ALIGNED
+            | BlobFeatures::INLINED_FS_META
+            | BlobFeatures::CHUNK_INFO_V2)
+            .bits();
+
+        let state = Arc::new(state);
+        let meta = BlobCompressionContextInfo { state };
+
+        let mut blob_cci = BlobCCI::new();
+        assert!(blob_cci.set_meta(None).is_err());
+
+        blob_cci.set_meta(Some(Arc::new(meta))).unwrap();
+        assert!(!blob_cci.is_none());
+
+        let normal_chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
+            compress_size: 0x100,
+            compress_offset: 0x1000,
+            ..Default::default()
+        });
+        // For normal chunk, just read the BlobChunkInfo.
+        let c_offset = blob_cci.get_compressed_offset(&normal_chunk).unwrap();
+        assert_eq!(c_offset, 0x1000);
+
+        let (c_offset, c_size) = blob_cci.get_compressed_info(&normal_chunk).unwrap();
+        assert_eq!(c_offset, 0x1000);
+        assert_eq!(c_size, 0x100);
+
+        let c_end = blob_cci.get_compressed_end(&normal_chunk).unwrap();
+        assert_eq!(c_end, 0x1100);
+
+        let batch_chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
+            index: 1,
+            blob_index: 0,
+            flags: BlobChunkFlags::BATCH,
+            ..Default::default()
+        });
+        assert!(batch_chunk.is_batch());
+        // For batch chunk, read from BlobCompressionContext.
+        let c_offset = blob_cci.get_compressed_offset(&batch_chunk).unwrap();
+        assert_eq!(c_offset, 0);
+
+        let (c_offset, c_size) = blob_cci.get_compressed_info(&batch_chunk).unwrap();
+        assert_eq!(c_offset, 0);
+        assert_eq!(c_size, 0x2000);
+
+        let c_end = blob_cci.get_compressed_end(&batch_chunk).unwrap();
+        assert_eq!(c_end, 0x2000);
     }
 }
