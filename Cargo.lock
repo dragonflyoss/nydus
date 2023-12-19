@@ -396,9 +396,9 @@ dependencies = [
 
 [[package]]
 name = "dbs-snapshot"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baf0c82c41414e93c765f9fb84d5531a836f6a0855c5e1c7fcf6cd2c20c85f6e"
+checksum = "3c8c92771f804e5635f82c7285b240663e09be1bb457e10e095357b7fb326e79"
 dependencies = [
  "displaydoc",
  "libc",
