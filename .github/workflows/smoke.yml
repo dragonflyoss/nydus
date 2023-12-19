@@ -20,6 +20,9 @@ env:
 jobs:
   contrib-build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64, ppc64le, riscv64]
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -30,8 +33,9 @@ jobs:
         cache-dependency-path: "**/*.sum"
     - name: Build Contrib
       run: |
-        make -e DOCKER=false nydusify-release
+        make -e DOCKER=false GOARCH=${{ matrix.arch }} contrib-release
     - name: Upload Nydusify
+      if: matrix.arch == 'amd64'
       uses: actions/upload-artifact@master
       with:
         name: nydusify-artifact
@@ -39,6 +43,9 @@ jobs:
 
   nydus-build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64, ppc64le, riscv64]
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -46,19 +53,25 @@ jobs:
       uses: Swatinem/rust-cache@v2.7.0
       with:
         cache-on-failure: true
-        shared-key: Linux-cargo-amd64
+        shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
         save-if: ${{ github.ref == 'refs/heads/master' }}
     - name: Build Nydus
       run: |
+        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
+        RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
+        cargo install --version 0.2.4 cross
         rustup component add rustfmt clippy
-        make
+        make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
+        sudo mv target/$RUST_TARGET/release/nydusd .
+        sudo mv target/$RUST_TARGET/release/nydus-image .
     - name: Upload Nydus Binaries
+      if: matrix.arch == 'amd64'
       uses: actions/upload-artifact@master
       with:
         name: nydus-artifact
         path: |
-          target/release/nydus-image
-          target/release/nydusd
+          nydus-image
+          nydusd
 
   nydusd-build-macos:
     runs-on: macos-11
