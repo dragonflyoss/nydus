@@ -750,6 +750,12 @@ impl BlobIoDesc {
         let prev_end = self.chunkinfo.compressed_offset() + self.chunkinfo.compressed_size() as u64;
         let next_offset = next.chunkinfo.compressed_offset();
 
+        if self.chunkinfo.is_batch() || next.chunkinfo.is_batch() {
+            // Batch chunk can only be compared by uncompressed info.
+            return next.chunkinfo.uncompressed_offset() - self.chunkinfo.uncompressed_end()
+                <= max_gap;
+        }
+
         if self.chunkinfo.blob_index() == next.chunkinfo.blob_index() && next_offset >= prev_end {
             if next.blob.is_legacy_stargz() {
                 next_offset - prev_end <= max_gap * 8
@@ -999,7 +1005,7 @@ impl BlobIoRange {
     }
 
     /// Merge an `BlobIoDesc` into the `BlobIoRange` object.
-    pub fn merge(&mut self, bio: &BlobIoDesc, max_gap: u64) {
+    pub fn merge(&mut self, bio: &BlobIoDesc, _max_gap: u64) {
         let end = self.blob_offset + self.blob_size;
         let offset = bio.chunkinfo.compressed_offset();
         let size = bio.chunkinfo.compressed_size() as u64;
@@ -1007,7 +1013,7 @@ impl BlobIoRange {
             assert!(offset.checked_add(size).is_some());
             size
         } else {
-            assert!((offset > end && offset - end <= max_gap));
+            assert!(offset > end);
             size + (offset - end)
         };
         assert!(end.checked_add(size).is_some());
