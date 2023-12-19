@@ -689,18 +689,18 @@ impl BlobCompressionContextInfo {
     }
 
     /// Get Batch index associated with the chunk at `chunk_index`.
-    pub fn get_batch_index(&self, chunk_index: u32) -> u32 {
+    pub fn get_batch_index(&self, chunk_index: u32) -> Result<u32> {
         self.state.get_batch_index(chunk_index as usize)
     }
 
     /// Get uncompressed batch offset associated with the chunk at `chunk_index`.
-    pub fn get_uncompressed_offset_in_batch_buf(&self, chunk_index: u32) -> u32 {
+    pub fn get_uncompressed_offset_in_batch_buf(&self, chunk_index: u32) -> Result<u32> {
         self.state
             .get_uncompressed_offset_in_batch_buf(chunk_index as usize)
     }
 
     /// Get Batch context information at `batch_index`.
-    pub fn get_batch_context(&self, batch_index: u32) -> Option<&BatchInflateContext> {
+    pub fn get_batch_context(&self, batch_index: u32) -> Result<&BatchInflateContext> {
         self.state.get_batch_context(batch_index as usize)
     }
 
@@ -712,17 +712,17 @@ impl BlobCompressionContextInfo {
     }
 
     /// Get ZRan index associated with the chunk at `chunk_index`.
-    pub fn get_zran_index(&self, chunk_index: u32) -> u32 {
+    pub fn get_zran_index(&self, chunk_index: u32) -> Result<u32> {
         self.state.get_zran_index(chunk_index as usize)
     }
 
     /// Get ZRan offset associated with the chunk at `chunk_index`.
-    pub fn get_zran_offset(&self, chunk_index: u32) -> u32 {
+    pub fn get_zran_offset(&self, chunk_index: u32) -> Result<u32> {
         self.state.get_zran_offset(chunk_index as usize)
     }
 
     /// Get ZRan context information at `zran_index`.
-    pub fn get_zran_context(&self, zran_index: u32) -> Option<(ZranContext, &[u8])> {
+    pub fn get_zran_context(&self, zran_index: u32) -> Result<(ZranContext, &[u8])> {
         self.state.get_zran_context(zran_index as usize)
     }
 
@@ -989,22 +989,26 @@ impl BlobCompressionContext {
         self.chunk_info_array.is_batch(chunk_index)
     }
 
-    fn get_batch_index(&self, chunk_index: usize) -> u32 {
+    fn get_batch_index(&self, chunk_index: usize) -> Result<u32> {
         self.chunk_info_array.batch_index(chunk_index)
     }
 
-    fn get_uncompressed_offset_in_batch_buf(&self, chunk_index: usize) -> u32 {
+    fn get_uncompressed_offset_in_batch_buf(&self, chunk_index: usize) -> Result<u32> {
         self.chunk_info_array
             .uncompressed_offset_in_batch_buf(chunk_index)
     }
 
     /// Get Batch context information for decoding.
-    fn get_batch_context(&self, batch_index: usize) -> Option<&BatchInflateContext> {
+    fn get_batch_context(&self, batch_index: usize) -> Result<&BatchInflateContext> {
         if batch_index < self.batch_info_array.len() {
             let ctx = &self.batch_info_array[batch_index];
-            Some(ctx)
+            Ok(ctx)
         } else {
-            None
+            Err(einval!(format!(
+                "Invalid batch index, current: {}, max: {}",
+                batch_index,
+                self.batch_info_array.len()
+            )))
         }
     }
 
@@ -1014,7 +1018,7 @@ impl BlobCompressionContext {
     pub fn get_compressed_info(&self, chunk_index: usize) -> Result<(u64, u32)> {
         let c_offset = self.chunk_info_array.compressed_offset(chunk_index);
         let c_size = if self.is_batch_chunk(chunk_index) {
-            self.get_batch_context(self.get_batch_index(chunk_index) as usize)
+            self.get_batch_context(self.get_batch_index(chunk_index)? as usize)
                 .unwrap()
                 .compressed_size()
         } else {
@@ -1023,16 +1027,16 @@ impl BlobCompressionContext {
         Ok((c_offset, c_size))
     }
 
-    fn get_zran_index(&self, chunk_index: usize) -> u32 {
+    fn get_zran_index(&self, chunk_index: usize) -> Result<u32> {
         self.chunk_info_array.zran_index(chunk_index)
     }
 
-    fn get_zran_offset(&self, chunk_index: usize) -> u32 {
+    fn get_zran_offset(&self, chunk_index: usize) -> Result<u32> {
         self.chunk_info_array.zran_offset(chunk_index)
     }
 
     /// Get ZRan context information for decoding.
-    fn get_zran_context(&self, zran_index: usize) -> Option<(ZranContext, &[u8])> {
+    fn get_zran_context(&self, zran_index: usize) -> Result<(ZranContext, &[u8])> {
         if zran_index < self.zran_info_array.len() {
             let entry = &self.zran_info_array[zran_index];
             let dict_off = entry.dict_offset() as usize;
@@ -1040,13 +1044,22 @@ impl BlobCompressionContext {
             if dict_off.checked_add(dict_size).is_none()
                 || dict_off + dict_size > self.zran_dict_table.len()
             {
-                return None;
+                return Err(einval!(format!(
+                    "Invalid ZRan context, dict_off: {}, dict_size: {}, max: {}",
+                    dict_off,
+                    dict_size,
+                    self.zran_dict_table.len()
+                )));
             };
             let dict = &self.zran_dict_table[dict_off..dict_off + dict_size];
             let ctx = ZranContext::from(entry);
-            Some((ctx, dict))
+            Ok((ctx, dict))
         } else {
-            None
+            Err(einval!(format!(
+                "Invalid ZRan index, current: {}, max: {}",
+                zran_index,
+                self.zran_info_array.len()
+            )))
         }
     }
 
@@ -1307,28 +1320,28 @@ impl BlobMetaChunkArray {
         }
     }
 
-    fn batch_index(&self, index: usize) -> u32 {
+    fn batch_index(&self, index: usize) -> Result<u32> {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].get_batch_index(),
             BlobMetaChunkArray::V2(v) => v[index].get_batch_index(),
         }
     }
 
-    fn uncompressed_offset_in_batch_buf(&self, index: usize) -> u32 {
+    fn uncompressed_offset_in_batch_buf(&self, index: usize) -> Result<u32> {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].get_uncompressed_offset_in_batch_buf(),
             BlobMetaChunkArray::V2(v) => v[index].get_uncompressed_offset_in_batch_buf(),
         }
     }
 
-    fn zran_index(&self, index: usize) -> u32 {
+    fn zran_index(&self, index: usize) -> Result<u32> {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].get_zran_index(),
             BlobMetaChunkArray::V2(v) => v[index].get_zran_index(),
         }
     }
 
-    fn zran_offset(&self, index: usize) -> u32 {
+    fn zran_offset(&self, index: usize) -> Result<u32> {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].get_zran_offset(),
             BlobMetaChunkArray::V2(v) => v[index].get_zran_offset(),
@@ -1383,7 +1396,7 @@ impl BlobMetaChunkArray {
                 left = mid + 1;
             } else {
                 // Find the first chunk in the batch.
-                if entry.is_batch() && entry.get_uncompressed_offset_in_batch_buf() > 0 {
+                if entry.is_batch() && entry.get_uncompressed_offset_in_batch_buf()? > 0 {
                     right = mid;
                 } else {
                     return Ok(mid);
@@ -1436,7 +1449,7 @@ impl BlobMetaChunkArray {
 
         // Special handling of ZRan chunks
         if entry.is_zran() {
-            let zran_index = entry.get_zran_index();
+            let zran_index = entry.get_zran_index()?;
             let mut count = state.zran_info_array[zran_index as usize].out_size() as u64;
             let mut zran_last = zran_index;
             let mut zran_end = entry.aligned_uncompressed_end();
@@ -1447,7 +1460,7 @@ impl BlobMetaChunkArray {
                     return Err(einval!(
                         "inconsistent ZRan and non-ZRan chunk compression information entries"
                     ));
-                } else if entry.get_zran_index() != zran_index {
+                } else if entry.get_zran_index()? != zran_index {
                     // reach the header chunk associated with the same ZRan context.
                     break;
                 } else {
@@ -1462,15 +1475,15 @@ impl BlobMetaChunkArray {
                         "inconsistent ZRan and non-ZRan chunk compression information entries"
                     ));
                 }
-                if entry.get_zran_index() != zran_last {
-                    let ctx = &state.zran_info_array[entry.get_zran_index() as usize];
+                if entry.get_zran_index()? != zran_last {
+                    let ctx = &state.zran_info_array[entry.get_zran_index()? as usize];
                     if count + ctx.out_size() as u64 >= batch_size
                         && entry.uncompressed_offset() >= end
                     {
                         return Ok(vec);
                     }
                     count += ctx.out_size() as u64;
-                    zran_last = entry.get_zran_index();
+                    zran_last = entry.get_zran_index()?;
                 }
                 zran_end = entry.aligned_uncompressed_end();
                 vec.push(BlobMetaChunk::new(index, state));
@@ -1549,7 +1562,7 @@ impl BlobMetaChunkArray {
 
         // Special handling of ZRan chunks
         if entry.is_zran() {
-            let zran_index = entry.get_zran_index();
+            let zran_index = entry.get_zran_index()?;
             let pos = state.zran_info_array[zran_index as usize].in_offset();
             let mut zran_last = zran_index;
 
@@ -1559,7 +1572,7 @@ impl BlobMetaChunkArray {
                     return Err(einval!(
                         "inconsistent ZRan and non-ZRan chunk compression information entries"
                     ));
-                } else if entry.get_zran_index() != zran_index {
+                } else if entry.get_zran_index()? != zran_index {
                     // reach the header chunk associated with the same ZRan context.
                     break;
                 } else {
@@ -1574,14 +1587,14 @@ impl BlobMetaChunkArray {
                         "inconsistent ZRan and non-ZRan chunk compression information entries"
                     ));
                 }
-                if entry.get_zran_index() != zran_last {
-                    let ctx = &state.zran_info_array[entry.get_zran_index() as usize];
+                if entry.get_zran_index()? != zran_last {
+                    let ctx = &state.zran_info_array[entry.get_zran_index()? as usize];
                     if ctx.in_offset() + ctx.in_size() as u64 - pos > batch_size
                         && entry.compressed_offset() > end
                     {
                         return Ok(vec);
                     }
-                    zran_last = entry.get_zran_index();
+                    zran_last = entry.get_zran_index()?;
                 }
                 vec.push(BlobMetaChunk::new(index, state));
                 index += 1;
@@ -1655,15 +1668,18 @@ impl BlobMetaChunkArray {
 
         // Special handling of ZRan chunks
         if first_entry.is_zran() {
-            let first_zran_idx = first_entry.get_zran_index();
-            let mut last_zran_idx = last_entry.get_zran_index();
+            let first_zran_idx = first_entry.get_zran_index()?;
+            let mut last_zran_idx = last_entry.get_zran_index()?;
             let mut index = first_idx;
             while index > 0 {
                 let entry = Self::get_chunk_entry(state, chunk_info_array, index - 1)?;
                 if !entry.is_zran() {
                     // All chunks should be ZRan chunks.
-                    return Err(einval!("invalid ZRan compression information data"));
-                } else if entry.get_zran_index() != first_zran_idx {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "invalid ZRan compression information data",
+                    ));
+                } else if entry.get_zran_index()? != first_zran_idx {
                     // reach the header chunk associated with the same ZRan context.
                     break;
                 } else {
@@ -1673,10 +1689,13 @@ impl BlobMetaChunkArray {
 
             for entry in &chunk_info_array[index..] {
                 if entry.validate(state).is_err() || !entry.is_zran() {
-                    return Err(einval!("invalid ZRan compression information data"));
-                } else if entry.get_zran_index() > last_zran_idx {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "invalid ZRan compression information data",
+                    ));
+                } else if entry.get_zran_index()? > last_zran_idx {
                     if entry.compressed_end() + RAFS_MAX_CHUNK_SIZE <= batch_end
-                        && entry.get_zran_index() == last_zran_idx + 1
+                        && entry.get_zran_index()? == last_zran_idx + 1
                     {
                         vec.push(BlobMetaChunk::new(index, state));
                         last_zran_idx += 1;
@@ -1691,8 +1710,8 @@ impl BlobMetaChunkArray {
         } else if first_entry.is_batch() {
             // Assert each entry in chunks is Batch chunk.
 
-            let first_batch_idx = first_entry.get_batch_index();
-            let last_batch_idx = last_entry.get_batch_index();
+            let first_batch_idx = first_entry.get_batch_index()?;
+            let last_batch_idx = last_entry.get_batch_index()?;
             let mut index = first_idx;
             if first_batch_idx != last_batch_idx {
                 return Err(einval!(
@@ -1702,7 +1721,7 @@ impl BlobMetaChunkArray {
 
             while index > 0 {
                 let entry = Self::get_chunk_entry(state, chunk_info_array, index - 1)?;
-                if !entry.is_batch() || entry.get_batch_index() != first_batch_idx {
+                if !entry.is_batch() || entry.get_batch_index()? != first_batch_idx {
                     // Reach the previous non-batch chunk,
                     // or reach the header chunk associated with the same Batch context.
                     break;
@@ -1718,7 +1737,7 @@ impl BlobMetaChunkArray {
                     return Err(einval!(
                         "non-batch chunks cannot be inside the range of batch chunks"
                     ));
-                } else if entry.get_batch_index() > last_batch_idx {
+                } else if entry.get_batch_index()? > last_batch_idx {
                     return Ok(vec);
                 } else {
                     vec.push(BlobMetaChunk::new(index, state));
@@ -1931,16 +1950,16 @@ pub trait BlobMetaChunkInfo {
     fn is_zran(&self) -> bool;
 
     /// Get index of the ZRan context data associated with the chunk.
-    fn get_zran_index(&self) -> u32;
+    fn get_zran_index(&self) -> Result<u32>;
 
     /// Get offset to get context data from the associated ZRan context.
-    fn get_zran_offset(&self) -> u32;
+    fn get_zran_offset(&self) -> Result<u32>;
 
     /// Get index of the Batch context data associated with the chunk.
-    fn get_batch_index(&self) -> u32;
+    fn get_batch_index(&self) -> Result<u32>;
 
     /// Get offset of uncompressed chunk data inside the batch chunk.
-    fn get_uncompressed_offset_in_batch_buf(&self) -> u32;
+    fn get_uncompressed_offset_in_batch_buf(&self) -> Result<u32>;
 
     /// Get data associated with the entry. V2 only, V1 just returns zero.
     fn get_data(&self) -> u64;
