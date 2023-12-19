@@ -518,15 +518,15 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
     }
 
     fn next_batch(&mut self, chunk: &dyn BlobChunkInfo) -> Result<Vec<u8>> {
+        // If the chunk is not a batch chunk, decompress it as normal.
+        if !chunk.is_batch() {
+            return self.next_buf(chunk);
+        }
+
         let meta = self
             .cache
             .get_blob_meta_info()?
             .ok_or_else(|| einval!("failed to get blob meta object for Batch"))?;
-
-        // If the chunk is not a batch chunk, decompress it as normal.
-        if !meta.is_batch_chunk(chunk.id()) {
-            return self.next_buf(chunk);
-        }
 
         let batch_idx = meta.get_batch_index(chunk.id());
         if batch_idx != self.batch_idx {

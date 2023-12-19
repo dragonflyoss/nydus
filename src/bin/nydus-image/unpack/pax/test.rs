@@ -99,6 +99,10 @@ impl BlobChunkInfo for MockChunkInfo {
         self.uncompress_size
     }
 
+    fn is_batch(&self) -> bool {
+        false
+    }
+
     fn is_compressed(&self) -> bool {
         self.is_compressed
     }
