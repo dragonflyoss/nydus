@@ -1012,17 +1012,15 @@ impl BlobCompressionContext {
     /// Capabale of handling both batch and non-batch chunks.
     /// Return `compressed_offset` and `compressed_size`.
     pub fn get_compressed_info(&self, chunk_index: usize) -> Result<(u64, u32)> {
-        if self.is_batch_chunk(chunk_index) {
-            let ctx = self
-                .get_batch_context(self.get_batch_index(chunk_index) as usize)
-                .unwrap();
-            Ok((ctx.compressed_offset(), ctx.compressed_size()))
+        let c_offset = self.chunk_info_array.compressed_offset(chunk_index);
+        let c_size = if self.is_batch_chunk(chunk_index) {
+            self.get_batch_context(self.get_batch_index(chunk_index) as usize)
+                .unwrap()
+                .compressed_size()
         } else {
-            Ok((
-                self.chunk_info_array.compressed_offset(chunk_index),
-                self.chunk_info_array.compressed_size(chunk_index),
-            ))
-        }
+            self.chunk_info_array.compressed_size(chunk_index)
+        };
+        Ok((c_offset, c_size))
     }
 
     fn get_zran_index(&self, chunk_index: usize) -> u32 {
