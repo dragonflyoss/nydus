@@ -310,17 +310,23 @@ impl Node {
             chunk.set_blob_index(blob_index);
             chunk.set_index(chunk_index);
             chunk.set_file_offset(file_offset);
+            let mut dumped_size = chunk.compressed_size();
             if ctx.conversion_type == ConversionType::TarToTarfs {
                 chunk.set_uncompressed_offset(chunk.compressed_offset());
                 chunk.set_uncompressed_size(chunk.compressed_size());
-            } else if let Some(info) =
-                self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?
-            {
-                chunk_info = Some(info);
+            } else {
+                let (info, d_size) =
+                    self.dump_file_chunk(ctx, blob_ctx, blob_writer, chunk_data, &mut chunk)?;
+                if info.is_some() {
+                    chunk_info = info;
+                }
+                if let Some(d_size) = d_size {
+                    dumped_size = d_size;
+                }
             }
 
             let chunk = Arc::new(chunk);
-            blob_size += chunk.compressed_size() as u64;
+            blob_size += dumped_size as u64;
             if ctx.conversion_type != ConversionType::TarToTarfs {
                 blob_ctx.add_chunk_meta_info(&chunk, chunk_info)?;
                 blob_mgr
@@ -388,7 +394,10 @@ impl Node {
     }
 
     /// Dump a chunk from u8 slice into the data blob.
-    /// Return `BlobChunkInfoV2Ondisk` when the chunk is added into a batch chunk.
+    /// Return `BlobChunkInfoV2Ondisk` iff the chunk is added into a batch chunk.
+    /// Return dumped size iff not `BlobFeatures::SEPARATE`.
+    /// Dumped size can be zero if chunk data is cached in Batch Generator,
+    /// and may contain previous chunk data cached in Batch Generator.
     fn dump_file_chunk(
         &self,
         ctx: &BuildContext,
@@ -396,7 +405,7 @@ impl Node {
         blob_writer: &mut dyn Artifact,
         chunk_data: &[u8],
         chunk: &mut ChunkWrapper,
-    ) -> Result<Option<BlobChunkInfoV2Ondisk>> {
+    ) -> Result<(Option<BlobChunkInfoV2Ondisk>, Option<u32>)> {
         let d_size = chunk_data.len() as u32;
         let aligned_d_size = if ctx.aligned_chunk {
             // Safe to unwrap because `chunk_size` is much less than u32::MAX.
@@ -412,34 +421,47 @@ impl Node {
 
         let mut chunk_info = None;
         let encrypted = blob_ctx.blob_cipher != crypt::Algorithm::None;
+        let mut dumped_size = None;
 
-        if self.inode.child_count() == 1
+        if ctx.blob_batch_generator.is_some()
+            && self.inode.child_count() == 1
             && d_size < ctx.batch_size / 2
-            && ctx.blob_batch_generator.is_some()
         {
             // This chunk will be added into a batch chunk.
             let mut batch = ctx.blob_batch_generator.as_ref().unwrap().lock().unwrap();
 
             if batch.chunk_data_buf_len() as u32 + d_size < ctx.batch_size {
                 // Add into current batch chunk directly.
-                chunk_info = Some(batch.generate_chunk_info(pre_d_offset, d_size, encrypted)?);
+                chunk_info = Some(batch.generate_chunk_info(
+                    blob_ctx.current_compressed_offset,
+                    pre_d_offset,
+                    d_size,
+                    encrypted,
+                )?);
                 batch.append_chunk_data_buf(chunk_data);
             } else {
                 // Dump current batch chunk if exists, and then add into a new batch chunk.
                 if !batch.chunk_data_buf_is_empty() {
                     // Dump current batch chunk.
-                    let (pre_c_offset, c_size, _) =
+                    let (_, c_size, _) =
                         Self::write_chunk_data(ctx, blob_ctx, blob_writer, batch.chunk_data_buf())?;
-                    batch.add_context(pre_c_offset, c_size);
+                    dumped_size = Some(c_size);
+                    batch.add_context(c_size);
                     batch.clear_chunk_data_buf();
                 }
 
                 // Add into a new batch chunk.
-                chunk_info = Some(batch.generate_chunk_info(pre_d_offset, d_size, encrypted)?);
+                chunk_info = Some(batch.generate_chunk_info(
+                    blob_ctx.current_compressed_offset,
+                    pre_d_offset,
+                    d_size,
+                    encrypted,
+                )?);
                 batch.append_chunk_data_buf(chunk_data);
             }
         } else if !ctx.blob_features.contains(BlobFeatures::SEPARATE) {
-            // For other case which needs to write chunk data to data blobs.
+            // For other case which needs to write chunk data to data blobs. Which means,
+            // `tar-ref`, `targz-ref`, `estargz-ref`, and `estargzindex-ref`, are excluded.
 
             // Interrupt and dump buffered batch chunks.
             // TODO: cancel the interruption.
@@ -447,9 +469,10 @@ impl Node {
                 let mut batch = batch.lock().unwrap();
                 if !batch.chunk_data_buf_is_empty() {
                     // Dump current batch chunk.
-                    let (pre_c_offset, c_size, _) =
+                    let (_, c_size, _) =
                         Self::write_chunk_data(ctx, blob_ctx, blob_writer, batch.chunk_data_buf())?;
-                    batch.add_context(pre_c_offset, c_size);
+                    dumped_size = Some(c_size);
+                    batch.add_context(c_size);
                     batch.clear_chunk_data_buf();
                 }
             }
@@ -457,6 +480,7 @@ impl Node {
             let (pre_c_offset, c_size, is_compressed) =
                 Self::write_chunk_data(ctx, blob_ctx, blob_writer, chunk_data)
                     .with_context(|| format!("failed to write chunk data {:?}", self.path()))?;
+            dumped_size = Some(dumped_size.unwrap_or(0) + c_size);
             chunk.set_compressed_offset(pre_c_offset);
             chunk.set_compressed_size(c_size);
             chunk.set_compressed(is_compressed);
@@ -467,7 +491,7 @@ impl Node {
         }
         event_tracer!("blob_uncompressed_size", +d_size);
 
-        Ok(chunk_info)
+        Ok((chunk_info, dumped_size))
     }
 
     pub fn write_chunk_data(

@@ -433,11 +433,14 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
         }
     }
 
-    fn decompress_batch(&mut self, meta: &Arc<BlobCompressionContextInfo>) -> Result<()> {
+    fn decompress_batch(
+        &mut self,
+        meta: &Arc<BlobCompressionContextInfo>,
+        c_offset: u64,
+    ) -> Result<()> {
         let ctx = meta
             .get_batch_context(self.batch_idx)
             .ok_or_else(|| einval!("failed to get Batch context for chunk"))?;
-        let c_offset = ctx.compressed_offset();
         let c_size = ctx.compressed_size() as u64;
         let d_size = ctx.uncompressed_batch_size() as u64;
         if c_offset < self.blob_offset
@@ -528,7 +531,7 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
         let batch_idx = meta.get_batch_index(chunk.id());
         if batch_idx != self.batch_idx {
             self.batch_idx = batch_idx;
-            self.decompress_batch(&meta)?;
+            self.decompress_batch(&meta, chunk.compressed_offset())?;
         }
         let offset = meta.get_uncompressed_offset_in_batch_buf(chunk.id()) as usize;
         let end = offset + chunk.uncompressed_size() as usize;
