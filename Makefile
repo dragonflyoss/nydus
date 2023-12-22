@@ -61,7 +61,7 @@ go_path := $(if $(env_go_path),$(env_go_path),"$(HOME)/go")
 define build_golang
 	echo "Building target $@ by invoking: $(2)"
 	if [ $(DOCKER) = "true" ]; then \
-		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.20 $(2) ;\
+		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.21 $(2) ;\
 	else \
 		$(2) -C $(1); \
 	fi
