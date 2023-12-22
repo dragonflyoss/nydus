@@ -307,7 +307,8 @@ impl Algorithm<SqliteDatabase> {
             chunkdict_size as f64 / 1024 as f64 / 1024 as f64
         );
         for chunk in all_chunks {
-            if !core_image.contains(&chunk.image_reference) && !noise_points.contains(&chunk.image_reference)
+            if !core_image.contains(&chunk.image_reference)
+                && !noise_points.contains(&chunk.image_reference)
             {
                 noise_points.push(chunk.image_reference.clone());
             }
@@ -336,8 +337,7 @@ impl Algorithm<SqliteDatabase> {
                 let smoothed_score: f64 = 0.0;
                 smoothed_data.push(smoothed_score);
             } else {
-                if all_chunks[chunk_index - 1].version != all_chunks[chunk_index].version
-                {
+                if all_chunks[chunk_index - 1].version != all_chunks[chunk_index].version {
                     last_start_version_index = start_version_index;
                     start_version_index = chunk_index;
                     last_end_version_index = chunk_index - 1;
