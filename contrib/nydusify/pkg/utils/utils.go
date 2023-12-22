@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containerd/containerd/archive/compression"
@@ -39,22 +41,6 @@ const (
 	V5 FsVersion = iota
 	V6
 )
-
-// IsErrHTTPResponseToHTTPSClient returns whether err is
-// "http: server gave HTTP response to HTTPS client"
-func isErrHTTPResponseToHTTPSClient(err error) bool {
-	// The error string is unexposed as of Go 1.16, so we can't use `errors.Is`.
-	// https://github.com/golang/go/issues/44855
-	const unexposed = "server gave HTTP response to HTTPS client"
-	return strings.Contains(err.Error(), unexposed)
-}
-
-// IsErrConnectionRefused return whether err is
-// "connect: connection refused"
-func isErrConnectionRefused(err error) bool {
-	const errMessage = "connect: connection refused"
-	return strings.Contains(err.Error(), errMessage)
-}
 
 func GetNydusFsVersionOrDefault(annotations map[string]string, defaultVersion FsVersion) FsVersion {
 	if annotations == nil {
@@ -92,7 +78,7 @@ func WithRetry(op func() error) error {
 }
 
 func RetryWithHTTP(err error) bool {
-	return err != nil && (isErrHTTPResponseToHTTPSClient(err) || isErrConnectionRefused(err))
+	return err != nil && (errors.Is(err, http.ErrSchemeMismatch) || errors.Is(err, syscall.ECONNREFUSED))
 }
 
 func MarshalToDesc(data interface{}, mediaType string) (*ocispec.Descriptor, []byte, error) {
@@ -131,12 +117,7 @@ func IsSupportedArch(arch string) bool {
 
 // A matched nydus image should match os/arch
 func MatchNydusPlatform(dst *ocispec.Descriptor, os, arch string) bool {
-
 	if dst.Platform.Architecture != arch || dst.Platform.OS != os {
-		return false
-	}
-
-	if dst.Platform.OSFeatures == nil {
 		return false
 	}
 
