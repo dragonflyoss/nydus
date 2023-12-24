@@ -62,28 +62,10 @@ func (p *PerformanceTestSuite) prepareTestImage(t *testing.T, ctx *tool.Context,
 	if p.testImage != "" {
 		return
 	}
-
-	ctx.PrepareWorkDir(t)
-	defer ctx.Destroy(t)
 	source := tool.PrepareImage(t, image)
-
-	// Prepare options
 	target := fmt.Sprintf("%s-nydus-%s", source, uuid.NewString())
-	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
-	logLevel := "--log-level warn"
-	if ctx.Binary.NydusifyOnlySupportV5 {
-		fsVersion = ""
-		logLevel = ""
-	}
-	enableOCIRef := ""
-	if ctx.Build.OCIRef {
-		enableOCIRef = "--oci-ref"
-	}
 
-	// Convert image
-	convertCmd := fmt.Sprintf("%s %s convert --source %s --target %s --nydus-image %s --work-dir %s %s %s",
-		ctx.Binary.Nydusify, logLevel, source, target, ctx.Binary.Builder, ctx.Env.WorkDir, fsVersion, enableOCIRef)
-	tool.RunWithoutOutput(t, convertCmd)
+	tool.ConvertImage(t, ctx, source, target)
 	p.testImage = target
 }
 
