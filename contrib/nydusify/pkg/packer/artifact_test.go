@@ -1,20 +1,35 @@
+// Copyright 2023 Nydus Developers. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package packer
 
 import (
+	"os"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestArtifactPath(t *testing.T) {
-	artifact, err := NewArtifact("/tmp")
+	artifact, err := NewArtifact("")
+	defer os.RemoveAll("./.nydus-build-output")
+	require.NoError(t, err)
+	require.Equal(t, ".nydus-build-output/test.meta", artifact.bootstrapPath("test.meta"))
+	require.Equal(t, ".nydus-build-output/test.m", artifact.bootstrapPath("test.m"))
+	require.Equal(t, ".nydus-build-output/test.meta", artifact.bootstrapPath("test"))
+	require.Equal(t, ".nydus-build-output/test.blob", artifact.blobFilePath("test.meta", false))
+	require.Equal(t, ".nydus-build-output/test.blob", artifact.blobFilePath("test.m", false))
+	require.Equal(t, ".nydus-build-output/test.blob", artifact.blobFilePath("test", false))
+	require.Equal(t, ".nydus-build-output/test", artifact.blobFilePath("test", true))
 
-	assert.Nil(t, err)
-	assert.Equal(t, artifact.bootstrapPath("test.meta"), "/tmp/test.meta")
-	assert.Equal(t, artifact.bootstrapPath("test.m"), "/tmp/test.m")
-	assert.Equal(t, artifact.bootstrapPath("test"), "/tmp/test.meta")
-	assert.Equal(t, artifact.blobFilePath("test.meta", false), "/tmp/test.blob")
-	assert.Equal(t, artifact.blobFilePath("test.m", false), "/tmp/test.blob")
-	assert.Equal(t, artifact.blobFilePath("test", false), "/tmp/test.blob")
-	assert.Equal(t, artifact.blobFilePath("test", true), "/tmp/test")
+	artifact, err = NewArtifact("/tmp")
+	require.NoError(t, err)
+	require.Equal(t, "/tmp/test.meta", artifact.bootstrapPath("test.meta"))
+	require.Equal(t, "/tmp/test.m", artifact.bootstrapPath("test.m"))
+	require.Equal(t, "/tmp/test.meta", artifact.bootstrapPath("test"))
+	require.Equal(t, "/tmp/test.blob", artifact.blobFilePath("test.meta", false))
+	require.Equal(t, "/tmp/test.blob", artifact.blobFilePath("test.m", false))
+	require.Equal(t, "/tmp/test.blob", artifact.blobFilePath("test", false))
+	require.Equal(t, "/tmp/test", artifact.blobFilePath("test", true))
 }

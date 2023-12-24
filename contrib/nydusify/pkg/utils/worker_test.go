@@ -1,4 +1,5 @@
 // Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2023 Nydus Developers. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type queueJob struct {
@@ -45,7 +46,7 @@ func TestQueueWorkerPool1(t *testing.T) {
 
 	for idx, job := range pool.Waiter() {
 		ret := (<-job).(*queueJob)
-		assert.Equal(t, ret.after, idx)
+		require.Equal(t, ret.after, idx)
 	}
 }
 
@@ -64,10 +65,10 @@ func TestQueueWorkerPool2(t *testing.T) {
 		job := <-_job
 		ret := job.(*queueJob)
 		if job.Err() != nil {
-			assert.Equal(t, ret.before, 1500)
+			require.Equal(t, ret.before, 1500)
 			break
 		}
-		assert.Equal(t, ret.after, idx)
+		require.Equal(t, ret.after, idx)
 	}
 }
 
@@ -81,7 +82,8 @@ func TestWorkerPool1(t *testing.T) {
 		})
 	}
 
-	assert.Nil(t, <-pool.Waiter())
+	require.Nil(t, <-pool.Waiter())
+	require.Nil(t, <-pool.Err())
 }
 
 func TestWorkerPool2(t *testing.T) {
@@ -99,7 +101,8 @@ func TestWorkerPool2(t *testing.T) {
 		return nil
 	})
 
-	assert.NotNil(t, <-pool.Waiter())
+	require.NotNil(t, <-pool.Waiter())
+	require.Nil(t, <-pool.Err())
 }
 
 func TestWorkerPool3(t *testing.T) {
@@ -112,7 +115,8 @@ func TestWorkerPool3(t *testing.T) {
 		})
 	}
 
-	assert.NotNil(t, <-pool.Waiter())
+	require.NotNil(t, <-pool.Waiter())
+	require.Nil(t, <-pool.Err())
 }
 
 func TestWorkerPool4(t *testing.T) {
@@ -125,7 +129,8 @@ func TestWorkerPool4(t *testing.T) {
 		})
 	}
 
-	assert.Nil(t, <-pool.Waiter())
+	require.Nil(t, <-pool.Waiter())
+	require.Nil(t, <-pool.Err())
 }
 
 func TestWorkerPool5(t *testing.T) {
@@ -143,5 +148,6 @@ func TestWorkerPool5(t *testing.T) {
 		return nil
 	})
 
-	assert.NotNil(t, <-pool.Waiter())
+	require.NotNil(t, <-pool.Waiter())
+	require.Nil(t, <-pool.Err())
 }

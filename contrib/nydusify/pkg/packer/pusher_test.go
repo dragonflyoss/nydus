@@ -1,3 +1,7 @@
+// Copyright 2023 Nydus Developers. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package packer
 
 import (
@@ -10,8 +14,8 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 type mockBackend struct {
@@ -46,8 +50,8 @@ func (m *mockBackend) Size(_ string) (int64, error) {
 
 func Test_parseBackendConfig(t *testing.T) {
 	cfg, err := ParseBackendConfig("oss", filepath.Join("testdata", "backend-config.json"))
-	assert.Nil(t, err)
-	assert.Equal(t, &OssBackendConfig{
+	require.NoError(t, err)
+	require.Equal(t, &OssBackendConfig{
 		Endpoint:        "mock.aliyuncs.com",
 		AccessKeyID:     "testid",
 		AccessKeySecret: "testkey",
@@ -58,16 +62,17 @@ func Test_parseBackendConfig(t *testing.T) {
 }
 
 func Test_parseBackendConfigString(t *testing.T) {
-	cfg, err := ParseBackendConfigString("oss", `{
-  "endpoint": "mock.aliyuncs.com",
-  "access_key_id": "testid",
-  "access_key_secret": "testkey",
-  "bucket_name": "testbucket",
-  "meta_prefix": "test/",
-  "blob_prefix": ""
-}`)
-	assert.Nil(t, err)
-	assert.Equal(t, &OssBackendConfig{
+	cfg, err := ParseBackendConfigString("oss", `
+	{
+		"endpoint": "mock.aliyuncs.com",
+		"access_key_id": "testid",
+		"access_key_secret": "testkey",
+		"bucket_name": "testbucket",
+		"meta_prefix": "test/",
+		"blob_prefix": ""
+	}`)
+	require.NoError(t, err)
+	require.Equal(t, &OssBackendConfig{
 		Endpoint:        "mock.aliyuncs.com",
 		AccessKeyID:     "testid",
 		AccessKeySecret: "testkey",
@@ -75,6 +80,35 @@ func Test_parseBackendConfigString(t *testing.T) {
 		MetaPrefix:      "test/",
 		BlobPrefix:      "",
 	}, cfg)
+
+	cfg, err = ParseBackendConfigString("s3", `
+	{
+		"bucket_name": "test",
+		"endpoint": "s3.amazonaws.com",
+		"access_key_id": "testAK",
+		"access_key_secret": "testSK",
+		"object_prefix": "blob",
+		"scheme": "https",
+		"region": "region1",
+		"meta_prefix": "meta/",
+		"blob_prefix": "blob/"
+	}`)
+	require.NoError(t, err)
+	require.Equal(t, &S3BackendConfig{
+		Endpoint:        "s3.amazonaws.com",
+		AccessKeyID:     "testAK",
+		AccessKeySecret: "testSK",
+		BucketName:      "test",
+		Scheme:          "https",
+		Region:          "region1",
+		MetaPrefix:      "meta/",
+		BlobPrefix:      "blob/",
+	}, cfg)
+
+	cfg, err = ParseBackendConfigString("registry", "")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported backend type")
+	require.Empty(t, cfg)
 }
 
 func TestPusher_Push(t *testing.T) {
@@ -87,7 +121,8 @@ func TestPusher_Push(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "output.json"), content, 0755)
 
 	artifact, err := NewArtifact(tmpDir)
-	assert.Nil(t, err)
+	require.NoError(t, err)
+
 	mp := &mockBackend{}
 	pusher := Pusher{
 		Artifact: artifact,
@@ -100,21 +135,20 @@ func TestPusher_Push(t *testing.T) {
 		metaBackend: mp,
 		blobBackend: mp,
 	}
-
 	hash := "3093776c78a21e47f0a8b4c80a1f019b1e838fc1ade274209332af1ca5f57090"
-	assert.Nil(t, err)
 	mp.On("Upload", mock.Anything, "mock.meta", mock.Anything, mock.Anything, mock.Anything).Return(&ocispec.Descriptor{
 		URLs: []string{"oss://testbucket/testmetaprefix/mock.meta"},
 	}, nil)
 	mp.On("Upload", mock.Anything, hash, mock.Anything, mock.Anything, mock.Anything).Return(&ocispec.Descriptor{
 		URLs: []string{"oss://testbucket/testblobprefix/3093776c78a21e47f0a8b4c80a1f019b1e838fc1ade274209332af1ca5f57090"},
 	}, nil)
+
 	res, err := pusher.Push(PushRequest{
 		Meta: "mock.meta",
 		Blob: hash,
 	})
-	assert.Nil(t, err)
-	assert.Equal(
+	require.NoError(t, err)
+	require.Equal(
 		t,
 		PushResult{
 			RemoteMeta: "oss://testbucket/testmetaprefix/mock.meta",
@@ -122,4 +156,51 @@ func TestPusher_Push(t *testing.T) {
 		},
 		res,
 	)
+}
+
+func TestNewPusher(t *testing.T) {
+	backendConfig := &OssBackendConfig{
+		Endpoint:   "region.oss.com",
+		BucketName: "testbucket",
+		BlobPrefix: "testblobprefix",
+		MetaPrefix: "testmetaprefix",
+	}
+	tmpDir, tearDown := setUpTmpDir(t)
+	defer tearDown()
+
+	artifact, err := NewArtifact(tmpDir)
+	require.NoError(t, err)
+	_, err = NewPusher(NewPusherOpt{
+		Artifact:      artifact,
+		BackendConfig: backendConfig,
+		Logger:        logrus.New(),
+	})
+	require.NoError(t, err)
+
+	_, err = NewPusher(NewPusherOpt{
+		BackendConfig: backendConfig,
+		Logger:        logrus.New(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "outputDir is required")
+
+	_, err = NewPusher(NewPusherOpt{
+		Artifact:      Artifact{OutputDir: "test"},
+		BackendConfig: backendConfig,
+		Logger:        logrus.New(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not exists")
+
+	_, err = NewPusher(NewPusherOpt{
+		Artifact: artifact,
+		BackendConfig: &OssBackendConfig{
+			BucketName: "testbucket",
+			BlobPrefix: "testblobprefix",
+			MetaPrefix: "testmetaprefix",
+		},
+		Logger: logrus.New(),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to init backend for bootstrap blob")
 }
