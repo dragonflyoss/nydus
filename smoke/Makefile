@@ -45,3 +45,9 @@ test-benchmark: build
 # make test TESTS=TestCompatibility
 test-compatibility: build
 	make test TESTS=TestCompatibility
+
+# SNAPSHOTTER_SYSTEM_SOCK=/run/containerd-nydus/system.sock
+# SNAPSHOTTER=nydus
+# FAILOVER_TEST_IMAGE=wordpress
+test-failover: build 
+	FAILOVER_TEST=true sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestFailover

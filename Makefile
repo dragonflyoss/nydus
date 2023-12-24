@@ -133,6 +133,9 @@ smoke-performance:
 smoke-benchmark:
 	make -C smoke test-benchmark
 
+smoke-failover:
+	make -C smoke test-failover
+
 smoke: release smoke-only
 
 contrib-build: nydusify ctr-remote nydus-overlayfs
