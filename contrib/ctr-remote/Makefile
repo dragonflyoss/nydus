@@ -18,7 +18,7 @@ build:
 release:
 	@CGO_ENABLED=0 ${PROXY} GOOS=linux GOARCH=${GOARCH} go build -ldflags '-s -w -extldflags "-static"' -v -o bin/ctr-remote ./cmd/main.go
 
-test: build
+test:
 	go vet $(PACKAGES)
 	golangci-lint run
 	go test -v -cover ${PACKAGES}
