@@ -25,10 +25,9 @@ jobs:
         cache-dependency-path: "**/*.sum"
     - name: Build Contrib
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/local/bin v1.54.2
         make -e DOCKER=false nydusify-release
     - name: Upload Nydusify
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@v3
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd/nydusify
@@ -48,7 +47,7 @@ jobs:
         rustup component add rustfmt clippy
         make
     - name: Upload Nydus Binaries
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@v3
       with:
         name: nydus-artifact
         path: |
@@ -87,12 +86,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -134,12 +133,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -180,12 +179,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -226,12 +225,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd

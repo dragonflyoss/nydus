@@ -36,7 +36,7 @@ jobs:
         make -e DOCKER=false GOARCH=${{ matrix.arch }} contrib-release
     - name: Upload Nydusify
       if: matrix.arch == 'amd64'
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@v3
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -66,7 +66,7 @@ jobs:
         sudo mv target/$RUST_TARGET/release/nydus-image .
     - name: Upload Nydus Binaries
       if: matrix.arch == 'amd64'
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@v3
       with:
         name: nydus-artifact
         path: |
@@ -108,13 +108,13 @@ jobs:
       uses: jpribyl/action-docker-layer-caching@v0.1.0
       continue-on-error: true
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydus-artifact
         path: |
           target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -197,7 +197,7 @@ jobs:
         curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.54.2
         sudo make -e DOCKER=false contrib-test
     - name: Upload contrib coverage file
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@v3
       with:
         name: contrib-test-coverage-artifact
         path: |
@@ -225,7 +225,7 @@ jobs:
           CARGO_BIN=$(which cargo)
           sudo -E CARGO=${CARGO_BIN} make coverage-codecov
       - name: Upload nydus coverage file
-        uses: actions/upload-artifact@master
+        uses: actions/upload-artifact@v3
         with:
           name: nydus-test-coverage-artifact
           path: |
@@ -237,11 +237,11 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Download nydus coverage file
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydus-test-coverage-artifact
     - name: Download contrib coverage file
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: contrib-test-coverage-artifact
     - name: Upload coverage to Codecov
@@ -271,12 +271,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v3
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
