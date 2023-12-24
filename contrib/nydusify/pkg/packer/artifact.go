@@ -1,3 +1,7 @@
+// Copyright 2023 Nydus Developers. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package packer
 
 import (
@@ -32,9 +36,8 @@ func (a Artifact) blobFilePath(imageName string, isDigest bool) string {
 		return filepath.Join(a.OutputDir, imageName)
 	} else if suffix := filepath.Ext(imageName); suffix != "" {
 		return filepath.Join(a.OutputDir, strings.TrimSuffix(imageName, suffix)+".blob")
-	} else {
-		return filepath.Join(a.OutputDir, imageName+".blob")
 	}
+	return filepath.Join(a.OutputDir, imageName+".blob")
 }
 
 func (a Artifact) outputJSONPath() string {
