@@ -14,8 +14,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  IMAGE: wordpress
-  TAG: 6.1.1
 
 jobs:
   contrib-build:
