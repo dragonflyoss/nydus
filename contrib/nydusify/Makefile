@@ -36,4 +36,4 @@ coverage: test
 
 clean:
 	rm -f cmd/nydusify
-	rm -f coverage.out
+	rm -f coverage.txt

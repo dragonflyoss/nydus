@@ -193,7 +193,7 @@ jobs:
     - name: Unit Test
       run: |
         curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.54.2
-        sudo make -e DOCKER=false contrib-test
+        make -e DOCKER=false contrib-test
     - name: Upload contrib coverage file
       uses: actions/upload-artifact@v3
       with:
