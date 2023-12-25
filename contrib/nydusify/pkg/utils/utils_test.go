@@ -8,15 +8,16 @@ package utils
 import (
 	"archive/tar"
 	"compress/gzip"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -241,11 +242,11 @@ func TestWithRetry(t *testing.T) {
 		_, err := http.Get("http://localhost:5000")
 		return err
 	})
-	require.Contains(t, err.Error(), "connect: connection refused")
+	require.ErrorIs(t, err, syscall.ECONNREFUSED)
 }
 
 func TestRetryWithHTTP(t *testing.T) {
-	require.True(t, RetryWithHTTP(fmt.Errorf("server gave HTTP response to HTTPS client")))
+	require.True(t, RetryWithHTTP(errors.Wrap(http.ErrSchemeMismatch, "parse Nydus image")))
 	require.False(t, RetryWithHTTP(nil))
 }
 
