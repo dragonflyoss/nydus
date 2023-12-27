@@ -286,7 +286,7 @@ jobs:
         export PERFORMANCE_TEST_MODE=${{ matrix.mode }}
         sudo -E make smoke-performance
 
-  failover-test:
+  takeover-test:
     runs-on: ubuntu-latest
     needs: [contrib-build, nydus-build]
     steps:
@@ -304,7 +304,8 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Container Environment
       run: |
-        sudo bash misc/failover/prepare.sh
-    - name: Failover Test
+        sudo bash misc/takeover/prepare.sh
+    - name: Takeover Test
       run: |
-        sudo -E make smoke-failover
+        export NEW_NYDUSD_BINARY_PATH=target/release/nydusd
+        sudo -E make smoke-takeover

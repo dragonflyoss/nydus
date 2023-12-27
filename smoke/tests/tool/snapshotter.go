@@ -5,6 +5,7 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 // SnapshotterClient commnicates with nydus-snapshotter via
@@ -41,6 +44,12 @@ type rafsInstanceInfo struct {
 	ImageID     string `json:"image_id"`
 }
 
+type UpgradeRequest struct {
+	NydusdPath string `json:"nydusd_path"`
+	Version    string `json:"version"`
+	Policy     string `json:"policy"`
+}
+
 func NewSnapshotterClient(sock string) *SnapshotterClient {
 	transport := &http.Transport{
 		MaxIdleConns:          10,
@@ -64,14 +73,42 @@ func NewSnapshotterClient(sock string) *SnapshotterClient {
 	}
 }
 
-func (cli *SnapshotterClient) GetNydusDaemonInfos() ([]*DaemonInfoFromSnapshotter, error) {
-	resp, err := cli.client.Get(fmt.Sprintf("http://unix%s", "/api/v1/daemons"))
+func (cli *SnapshotterClient) request(method, urlSuffix string, body any) (respBody []byte, err error) {
+	var reqBody io.Reader
+	if body != nil {
+		reqJSON, err := json.Marshal(body)
+		if err != nil {
+			return nil, errors.Wrap(err, "marshal request body")
+		}
+
+		reqBody = bytes.NewBuffer(reqJSON)
+	}
+
+	url := fmt.Sprintf("http://unix%s", urlSuffix)
+	req, err := http.NewRequest(method, url, reqBody)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "build request")
+	}
+	resp, err := cli.client.Do(req)
+	if err != nil {
+		return nil, errors.Wrap(err, "do request")
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	respBody, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "read response body")
+	}
+
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("faild  to do request(%v), got status %s, and resp %s", req, resp.Status, respBody)
+	}
+
+	return
+}
+
+func (cli *SnapshotterClient) GetNydusDaemonInfos() ([]*DaemonInfoFromSnapshotter, error) {
+	body, err := cli.request("GET", "/api/v1/daemons", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -82,4 +119,9 @@ func (cli *SnapshotterClient) GetNydusDaemonInfos() ([]*DaemonInfoFromSnapshotte
 	}
 
 	return infos, nil
+}
+
+func (cli *SnapshotterClient) Upgrade(req *UpgradeRequest) error {
+	_, err := cli.request("PUT", "/api/v1/daemons/upgrade", req)
+	return err
 }

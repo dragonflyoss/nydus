@@ -18,6 +18,6 @@ sudo tar -xzvf cni-plugins-linux-amd64-v$CNI_PLUGINS_VERSION.tgz -C /opt/cni/bin
 sudo install -D misc/performance/containerd_config.toml /etc/containerd/config.toml
 sudo systemctl restart containerd
 sudo install -D misc/performance/nydusd_config.json /etc/nydus/nydusd-config.fusedev.json
-sudo install -D misc/failover/snapshotter_config.toml /etc/nydus/config.toml
+sudo install -D misc/takeover/snapshotter_config.toml /etc/nydus/config.toml
 sudo install -D misc/performance/nydus-snapshotter.service /etc/systemd/system/nydus-snapshotter.service
 sudo systemctl start nydus-snapshotter
