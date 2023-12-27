@@ -133,8 +133,8 @@ smoke-performance:
 smoke-benchmark:
 	make -C smoke test-benchmark
 
-smoke-failover:
-	make -C smoke test-failover
+smoke-takeover:
+	make -C smoke test-takeover
 
 smoke: release smoke-only
 
