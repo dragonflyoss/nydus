@@ -128,7 +128,7 @@ impl LocalFs {
             // Search blob file in dir and additionally in alt_dirs
             let is_valid = |dir: &PathBuf| -> bool {
                 let blob = Path::new(&dir).join(blob_id);
-                if let Ok(meta) = std::fs::metadata(&blob) {
+                if let Ok(meta) = std::fs::metadata(blob) {
                     meta.len() != 0
                 } else {
                     false

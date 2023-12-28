@@ -219,7 +219,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("bootstrap")
                         .short('B')
                         .help("File path to save the generated RAFS metadata blob")
-                        .required_unless_present_any(&["blob-dir", "blob-inline-meta"])
+                        .required_unless_present_any(["blob-dir", "blob-inline-meta"])
                         .conflicts_with("blob-inline-meta"),
                 )
                 .arg(
@@ -233,7 +233,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("blob")
                         .short('b')
                         .help("File path to save the generated RAFS data blob")
-                        .required_unless_present_any(&["type", "blob-dir"]),
+                        .required_unless_present_any(["type", "blob-dir"]),
                 )
                 .arg(
                     Arg::new("blob-inline-meta")

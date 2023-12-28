@@ -233,7 +233,7 @@ mod tests {
     fn test_generate_chunk_info() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
 
         let mut generator = ZranContextGenerator::new(file).unwrap();
         let mut tar = Archive::new(generator.reader());

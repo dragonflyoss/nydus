@@ -326,7 +326,7 @@ mod tests {
         let bootstrap = OpenOptions::new()
             .read(true)
             .write(false)
-            .open(&path)
+            .open(path)
             .unwrap();
         let mut rs = RafsSuper {
             mode: RafsMode::Direct,

@@ -808,7 +808,7 @@ impl FsCacheHandler {
             }
         }
 
-        env::set_current_dir(&cwd_old)?;
+        env::set_current_dir(cwd_old)?;
         if res {
             Ok(())
         } else {
@@ -879,7 +879,7 @@ impl FsCacheHandler {
     }
 
     fn inuse(&self, cookie_dir: &Path, cookie_name: &str) -> Result<bool> {
-        env::set_current_dir(&cookie_dir)?;
+        env::set_current_dir(cookie_dir)?;
         let msg = format!("inuse {}", cookie_name);
         let ret = unsafe {
             libc::write(
@@ -902,7 +902,7 @@ impl FsCacheHandler {
     }
 
     fn cull(&self, cookie_dir: &Path, cookie_name: &str) -> Result<()> {
-        env::set_current_dir(&cookie_dir)?;
+        env::set_current_dir(cookie_dir)?;
         let msg = format!("cull {}", cookie_name);
         let ret = unsafe {
             libc::write(

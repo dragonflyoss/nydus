@@ -531,7 +531,7 @@ impl BlobCompressionContextInfo {
                     TocLocation::default()
                 };
                 let toc_list =
-                    TocEntryList::read_from_cache_file(&toc_path, reader.as_ref(), &location)?;
+                    TocEntryList::read_from_cache_file(toc_path, reader.as_ref(), &location)?;
                 toc_list.extract_from_blob(reader.clone(), None, Some(&digest_path))?;
             }
             if !digest_path.exists() {

@@ -223,7 +223,7 @@ impl Node {
         chunk_data_buf: &mut [u8],
     ) -> Result<u64> {
         let mut reader = if self.is_reg() {
-            let file = File::open(&self.path())
+            let file = File::open(self.path())
                 .with_context(|| format!("failed to open node file {:?}", self.path()))?;
             Some(file)
         } else {

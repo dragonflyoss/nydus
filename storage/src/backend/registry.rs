@@ -662,7 +662,7 @@ impl RegistryReader {
 
             // The request has expired or has been denied, need to re-request
             if allow_retry
-                && vec![StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN].contains(&resp.status())
+                && [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN].contains(&resp.status())
             {
                 warn!(
                     "The redirected link has expired: {}, will retry read",

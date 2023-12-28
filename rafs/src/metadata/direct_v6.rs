@@ -1301,7 +1301,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
     /// It depends on Self::validate() to ensure valid memory layout.
     fn name(&self) -> OsString {
         assert!(self.name.is_some());
-        self.name.clone().unwrap_or_else(OsString::new)
+        self.name.clone().unwrap_or_default()
     }
 
     /// Get file name size of the inode.

@@ -15,6 +15,7 @@ use std::cmp::{max, min};
 use std::fs::OpenOptions;
 use std::io::Result;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
@@ -36,8 +37,8 @@ const BLOCK_DEVICE_EXPORT_BATCH_SIZE: usize = 0x80000;
 
 enum BlockRange {
     Hole,
-    MetaBlob(Arc<MetaBlob>),
-    DataBlob(Arc<DataBlob>),
+    MetaBlob(Rc<MetaBlob>),
+    DataBlob(Rc<DataBlob>),
 }
 
 /// A block device composed up from a RAFSv6 image.
@@ -93,7 +94,7 @@ impl BlockDevice {
         };
         let is_tarfs_mode = meta_blob_config.is_tarfs_mode();
         let meta_blob = MetaBlob::new(meta_blob_config.path())?;
-        let meta_blob = Arc::new(meta_blob);
+        let meta_blob = Rc::new(meta_blob);
         let blocks = if is_tarfs_mode {
             meta_blob.blocks() * 8
         } else {
@@ -171,7 +172,7 @@ impl BlockDevice {
                     blob_info.blob_id()
                 ))
             })?;
-            ranges.update(&range, BlockRange::DataBlob(Arc::new(data_blob)));
+            ranges.update(&range, BlockRange::DataBlob(Rc::new(data_blob)));
             pos = extra_info.mapped_blkaddr + blocks as u32;
         }
 
@@ -307,7 +308,7 @@ impl BlockDevice {
         verity: bool,
     ) -> Result<()> {
         let block_device = BlockDevice::new(blob_entry)?;
-        let block_device = Arc::new(block_device);
+        let block_device = Rc::new(block_device);
         let blocks = block_device.blocks();
         let blob_id = block_device.meta_blob_id();
 
@@ -358,7 +359,7 @@ impl BlockDevice {
                     e
                 ))
             })?;
-        let output_file = Arc::new(tokio_uring::fs::File::from_std(output_file));
+        let output_file = Rc::new(tokio_uring::fs::File::from_std(output_file));
 
         let mut verity_offset = 0;
         let generator = if verity {
@@ -420,7 +421,7 @@ impl BlockDevice {
                                 e
                             ))
                         })?;
-                    let file = Arc::new(tokio_uring::fs::File::from_std(output_file));
+                    let file = Rc::new(tokio_uring::fs::File::from_std(output_file));
                     let block_device =
                         BlockDevice::new_with_cache_manager(id, mgr).map_err(|e| {
                             eother!(format!(
@@ -428,7 +429,7 @@ impl BlockDevice {
                                 e
                             ))
                         })?;
-                    let device = Arc::new(block_device);
+                    let device = Rc::new(block_device);
 
                     tokio_uring::start(async move {
                         Self::do_export(device, file, pos, count, generator).await
@@ -462,8 +463,7 @@ impl BlockDevice {
             let root_digest: String = root_digest
                 .data
                 .iter()
-                .map(|v| format!("{:02x}", v))
-                .collect();
+                .fold(String::new(), |acc, v| acc + &format!("{:02x}", v));
             println!(
                 "dm-verity options: --no-superblock --format=1 -s \"\" --hash=sha256 --data-block-size={} --hash-block-size=4096 --data-blocks {} --hash-offset {} {}",
                 block_device.block_size(), blocks, verity_offset, root_digest
@@ -474,8 +474,8 @@ impl BlockDevice {
     }
 
     async fn do_export(
-        block_device: Arc<BlockDevice>,
-        output_file: Arc<tokio_uring::fs::File>,
+        block_device: Rc<BlockDevice>,
+        output_file: Rc<tokio_uring::fs::File>,
         start: u32,
         mut blocks: u32,
         generator: Option<Arc<Mutex<VerityGenerator>>>,

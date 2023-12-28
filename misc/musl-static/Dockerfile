@@ -1,4 +1,4 @@
-FROM clux/muslrust:1.68.2
+FROM clux/muslrust:1.72.1
 
 ARG RUST_TARGET=x86_64-unknown-linux-musl
 

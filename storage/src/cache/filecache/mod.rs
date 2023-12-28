@@ -226,7 +226,7 @@ impl FileCacheEntry {
                 .create(false)
                 .write(false)
                 .read(true)
-                .open(&blob_file_path)?;
+                .open(blob_file_path)?;
             let chunk_map =
                 Arc::new(BlobStateMap::from(NoopChunkMap::new(true))) as Arc<dyn ChunkMap>;
             (file, None, chunk_map, true, true, false)
@@ -250,7 +250,7 @@ impl FileCacheEntry {
                 .create(true)
                 .write(true)
                 .read(true)
-                .open(&blob_data_file_path)?;
+                .open(blob_data_file_path)?;
             let file_size = file.metadata()?.len();
             let cached_file_size = if mgr.cache_raw_data {
                 blob_info.compressed_data_size()
