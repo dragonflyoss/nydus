@@ -100,7 +100,7 @@ impl ObjectStorageState for OssState {
             .chain_update(data.as_bytes())
             .finalize()
             .into_bytes();
-        let signature = base64::engine::general_purpose::STANDARD.encode(&hmac);
+        let signature = base64::engine::general_purpose::STANDARD.encode(hmac);
 
         let authorization = format!("OSS {}:{}", self.access_key_id, signature);
 

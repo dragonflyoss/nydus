@@ -554,7 +554,7 @@ impl BlobInfo {
             }
             guard.deref().clone()
         } else {
-            hex::encode(&self.blob_meta_digest)
+            hex::encode(self.blob_meta_digest)
         };
         Ok(id)
     }

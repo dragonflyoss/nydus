@@ -2473,8 +2473,7 @@ mod tests {
 
         let targets = vec![target1, target2, target3, target4, target5];
 
-        let mut entries: Vec<RafsV6XattrEntry> = Vec::new();
-        entries.reserve(targets.len());
+        let mut entries: Vec<RafsV6XattrEntry> = Vec::with_capacity(targets.len());
         for _i in 0..targets.len() {
             let mut entry = RafsV6XattrEntry::new();
             reader.read_exact(entry.as_mut()).unwrap();

@@ -351,7 +351,7 @@ mod tests {
             .open(temp.as_path())
             .unwrap();
 
-        let chunks = vec![
+        let chunks = [
             BlobChunkInfoV1Ondisk {
                 uncomp_info: 0x01ff_f000_0000_0000,
                 comp_info: 0x00ff_f000_0000_0000,
@@ -417,7 +417,7 @@ mod tests {
             .open(temp.as_path())
             .unwrap();
 
-        let chunks = vec![
+        let chunks = [
             BlobChunkInfoV1Ondisk {
                 uncomp_info: 0x01ff_f000_0000_0000,
                 comp_info: 0x00ff_f000_0000_0000,

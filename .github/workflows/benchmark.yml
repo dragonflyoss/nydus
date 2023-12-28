@@ -42,10 +42,10 @@ jobs:
       with:
         cache-on-failure: true
         shared-key: Linux-cargo-amd64
+    - uses: dsherret/rust-toolchain-file@v1
     - name: Build Nydus
       run: |
-        rustup component add rustfmt clippy
-        make
+        make release
     - name: Upload Nydus Binaries
       uses: actions/upload-artifact@v3
       with:

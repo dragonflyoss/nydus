@@ -498,7 +498,7 @@ mod tests {
     fn test_gzip_decoder() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = Path::new(root_dir).join("../tests/texture/zran/zlib_sample.txt.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
         let mut decoder = Decoder::new(file, Algorithm::GZip).unwrap();
         let mut buf = [0u8; 8];
 
@@ -519,7 +519,7 @@ mod tests {
     fn test_zlib_decoder() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = Path::new(root_dir).join("../tests/texture/zran/zlib_sample.txt.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
         let mut decoder = ZlibDecoder::new(file);
         let mut buf = [0u8; 8];
 

@@ -161,7 +161,7 @@ impl LocalDisk {
                 path, e
             ))
         })?;
-        let device_file = OpenOptions::new().read(true).open(&path_buf).map_err(|e| {
+        let device_file = OpenOptions::new().read(true).open(path_buf).map_err(|e| {
             einval!(format!(
                 "localdisk: can not open disk device at {}, {}",
                 path, e

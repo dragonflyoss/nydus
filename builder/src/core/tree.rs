@@ -19,6 +19,7 @@
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Result};
@@ -34,7 +35,7 @@ use crate::core::overlay::OVERLAYFS_WHITEOUT_OPAQUE;
 use crate::{BuildContext, ChunkDict};
 
 /// Type alias for tree internal node.
-pub type TreeNode = Arc<Mutex<Node>>;
+pub type TreeNode = Rc<Mutex<Node>>;
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.
 #[derive(Clone)]
@@ -52,7 +53,7 @@ impl Tree {
     pub fn new(node: Node) -> Self {
         let name = node.name().as_bytes().to_vec();
         Tree {
-            node: Arc::new(Mutex::new(node)),
+            node: Rc::new(Mutex::new(node)),
             name,
             children: Vec::new(),
         }
@@ -81,7 +82,7 @@ impl Tree {
 
     /// Set `Node` associated with the tree node.
     pub fn set_node(&mut self, node: Node) {
-        self.node = Arc::new(Mutex::new(node));
+        self.node = Rc::new(Mutex::new(node));
     }
 
     /// Get mutex guard to access the associated `Node` object.

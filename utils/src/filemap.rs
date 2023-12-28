@@ -226,7 +226,7 @@ mod tests {
         let file = OpenOptions::new()
             .read(true)
             .write(false)
-            .open(&path)
+            .open(path)
             .unwrap();
         let map = FileMapState::new(file, 0, 4096, false).unwrap();
 

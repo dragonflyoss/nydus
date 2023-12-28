@@ -780,7 +780,7 @@ mod tests {
     fn test_parse_single_gzip_object() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-single-stream.tar.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
 
         let mut files = 0;
         let mut objects = 0;
@@ -803,7 +803,7 @@ mod tests {
     fn test_parse_first_gzip_object() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
 
         let mut files = 0;
         let mut objects = 0;
@@ -827,7 +827,7 @@ mod tests {
     fn test_parse_two_gzip_objects() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
 
         let mut files = 0;
         let mut objects = 0;
@@ -852,7 +852,7 @@ mod tests {
     fn test_parse_gzip_with_big_zero() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-zero-file.tar.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
         let reader = ZranReader::new(file).unwrap();
         let mut tar = Archive::new(reader.clone());
         let entries = tar.entries().unwrap();
@@ -881,7 +881,7 @@ mod tests {
     fn test_generate_comp_info() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
 
         let reader = ZranReader::new(file).unwrap();
         let mut tar = Archive::new(reader.clone());
@@ -1001,7 +1001,7 @@ mod tests {
     fn test_zran_reader() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
-        let file = OpenOptions::new().read(true).open(&path).unwrap();
+        let file = OpenOptions::new().read(true).open(path).unwrap();
 
         let reader = ZranReader::new(file).unwrap();
         assert_eq!(reader.get_data_size(), 0);

@@ -53,12 +53,12 @@ jobs:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
         save-if: ${{ github.ref == 'refs/heads/master' }}
+    - uses: dsherret/rust-toolchain-file@v1
     - name: Build Nydus
       run: |
         declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
         RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
         cargo install --locked --version 0.2.4 cross
-        rustup component add rustfmt clippy
         make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
         sudo mv target/$RUST_TARGET/release/nydusd .
         sudo mv target/$RUST_TARGET/release/nydus-image .
@@ -84,6 +84,7 @@ jobs:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
         save-if: ${{ github.ref == 'refs/heads/master' }}
+    - uses: dsherret/rust-toolchain-file@v1
     - name: build
       run: |
         if [[ "${{matrix.arch}}" == "amd64" ]]; then
@@ -93,7 +94,6 @@ jobs:
         fi
         cargo install --version 0.2.4 cross
         rustup target add ${RUST_TARGET}
-        rustup component add rustfmt clippy
         make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
 
   nydus-integration-test:
