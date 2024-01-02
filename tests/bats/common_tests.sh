@@ -38,7 +38,7 @@ generate_rust_golang_dockerfile() {
   local dockerfile=${1:-"/tmp/rust_golang_dockerfile"}
   local rust_version=${2:-"${rust_toolchain}"}
   cat > $dockerfile <<EOF
-FROM rust:${rust_version}
+FROM rust:${rust_version}-bullseye
 
 RUN apt-get update -y \
     && apt-get install -y cmake g++ pkg-config jq libcurl4-openssl-dev libelf-dev libdw-dev binutils-dev libiberty-dev musl-tools \
