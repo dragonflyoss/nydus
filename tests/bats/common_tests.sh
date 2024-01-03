@@ -46,9 +46,9 @@ RUN apt-get update -y \
     && rm -rf /var/lib/apt/lists/*
 
 # install golang env
-Run wget https://go.dev/dl/go1.19.linux-amd64.tar.gz \
-    && tar -C /usr/local -xzf go1.19.linux-amd64.tar.gz \
-    && rm -rf go1.19.linux-amd64.tar.gz
+Run wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz \
+    && rm -rf go1.21.5.linux-amd64.tar.gz
 
 ENV PATH \$PATH:/usr/local/go/bin
 RUN go env -w GO111MODULE=on
