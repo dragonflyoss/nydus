@@ -52,7 +52,7 @@ impl Generator {
         blob_mgr: &mut BlobManager,
         chunkdict_origin: Vec<ChunkdictChunkInfo>,
     ) -> Result<BuildOutput> {
-        // validate and remove chunks which bloned blob size is smaller than block.
+        // Validate and remove chunks whose belonged blob sizes are smaller than a block.
         let mut chunkdict = chunkdict_origin.to_vec();
         Self::validate_and_remove_chunks(ctx, &mut chunkdict);
 
@@ -136,8 +136,8 @@ impl Generator {
         inode.set_blocks(256);
         let node_info = NodeInfo {
             explicit_uidgid: true,
-            src_dev: 66305,
-            src_ino: 24772610,
+            src_dev: 0,
+            src_ino: 0,
             rdev: 0,
             source: PathBuf::from("/"),
             path: PathBuf::from("/"),
@@ -171,8 +171,8 @@ impl Generator {
         inode.set_blocks(256);
         let node_info = NodeInfo {
             explicit_uidgid: true,
-            src_dev: 66305,
-            src_ino: 24775126,
+            src_dev: 0,
+            src_ino: 1,
             rdev: 0,
             source: PathBuf::from("/"),
             path: PathBuf::from("/chunkdict"),
@@ -211,17 +211,14 @@ impl Generator {
         node: &mut Node,
         chunkdict: &[ChunkdictChunkInfo],
     ) -> Result<()> {
-        for chunk_info in chunkdict.iter() {
+        for (i, chunk_info) in chunkdict.iter().enumerate() {
             let chunk_size: u32 = chunk_info.chunk_compressed_size;
-            let file_offset = 1 as u64 * chunk_size as u64;
+            let file_offset = i as u64 * chunk_size as u64;
             let mut chunk = ChunkWrapper::new(ctx.fs_version);
 
             // update blob context
             let (blob_index, blob_ctx) =
                 blob_mgr.get_or_cerate_blob_for_chunkdict(ctx, &chunk_info.chunk_blob_id)?;
-            if blob_ctx.blob_id.is_empty() {
-                blob_ctx.blob_id = chunk_info.chunk_blob_id.clone();
-            }
             let chunk_uncompressed_size = chunk_info.chunk_uncompressed_size;
             let pre_d_offset = blob_ctx.current_uncompressed_offset;
             blob_ctx.uncompressed_blob_size = pre_d_offset + chunk_uncompressed_size as u64;

@@ -54,8 +54,6 @@ type Opt struct {
 
 	AllPlatforms bool
 	Platforms    string
-
-	PushChunkSize int64
 }
 
 // Generator generates chunkdict by deduplicating multiple nydus images
@@ -119,7 +117,8 @@ func (generator *Generator) Generate(ctx context.Context) error {
 		return err
 	}
 
-	return os.RemoveAll(generator.WorkDir)
+	// return os.RemoveAll(generator.WorkDir)
+	return nil 
 }
 
 // Pull the bootstrap of nydus image
@@ -147,7 +146,7 @@ func (generator *Generator) pull(ctx context.Context) ([]string, error) {
 }
 
 func (generator *Generator) generate(_ context.Context, bootstrapSlice []string) (string, string, error) {
-	// Invoke "nydus-image generate" command
+	// Invoke "nydus-image chunkdict generate" command
 	currentDir, _ := os.Getwd()
 	builder := build.NewBuilder(generator.NydusImagePath)
 
@@ -194,7 +193,7 @@ func (generator *Generator) push(ctx context.Context, chunkdictBootstrapPath str
 		return err
 	}
 
-	pvd, err := provider.New(generator.WorkDir, hosts(generator), 200, "v1", platformMC, generator.PushChunkSize)
+	pvd, err := provider.New(generator.WorkDir, hosts(generator), 200, "v1", platformMC, 0)
 	if err != nil {
 		return err
 	}
@@ -207,17 +206,20 @@ func (generator *Generator) push(ctx context.Context, chunkdictBootstrapPath str
 		}
 	}
 
-	// Pull a source image as a template
-	if err := pvd.Pull(ctx, generator.Sources[0]); err != nil {
-		if errdefs.NeedsRetryWithHTTP(err) {
-			pvd.UsePlainHTTP()
-			if err := pvd.Pull(ctx, generator.Sources[0]); err != nil {
-				return errors.Wrap(err, "try to pull image")
+	// Pull source image 
+	for index := range generator.Sources {
+		if err := pvd.Pull(ctx, generator.Sources[index]); err != nil {
+			if errdefs.NeedsRetryWithHTTP(err) {
+				pvd.UsePlainHTTP()
+				if err := pvd.Pull(ctx, generator.Sources[index]); err != nil {
+					return errors.Wrap(err, "try to pull image")
+				}
+			} else {
+				return errors.Wrap(err, "pull source image")
 			}
-		} else {
-			return errors.Wrap(err, "pull source image")
 		}
 	}
+	
 	logrus.Infof("pulled source image %s", generator.Sources[0])
 	sourceImage, err := pvd.Image(ctx, generator.Sources[0])
 	if err != nil {
@@ -239,18 +241,18 @@ func (generator *Generator) push(ctx context.Context, chunkdictBootstrapPath str
 				defer sem.Release(1)
 				sourceDesc := sourceDescs[idx]
 				targetDesc := &sourceDesc
+
 				// Get the blob from backend
-				if bkd != nil {
-					descs, _targetDesc, err := pushBlobFromBackend(ctx, pvd, bkd, sourceDesc, *generator, chunkdictBootstrapPath, outputPath)
-					if err != nil {
-						return errors.Wrap(err, "get resolver")
-					}
-					if _targetDesc != nil {
-						targetDesc = _targetDesc
-						store := newStore(pvd.ContentStore(), descs)
-						pvd.SetContentStore(store)
-					}
+				descs, _targetDesc, err := pushBlobFromBackend(ctx, pvd, bkd, sourceDesc, *generator, chunkdictBootstrapPath, outputPath)
+				if err != nil {
+					return errors.Wrap(err, "get resolver")
 				}
+				if _targetDesc != nil {
+					targetDesc = _targetDesc
+					store := newStore(pvd.ContentStore(), descs)
+					pvd.SetContentStore(store)
+				}
+
 				targetDescs[idx] = *targetDesc
 
 				if err := pvd.Push(ctx, *targetDesc, generator.Target); err != nil {
@@ -309,20 +311,45 @@ func pushBlobFromBackend(
 			eg.Go(func() error {
 				sem.Acquire(context.Background(), 1)
 				defer sem.Release(1)
+
 				blobID := blobIDs[idx]
 				blobDigest := digest.Digest("sha256:" + blobID)
-				blobSize, err := bkd.Size(blobID)
-				if err != nil {
-					return errors.Wrap(err, "get blob size")
-				}
-				blobSizeStr := humanize.Bytes(uint64(blobSize))
 
-				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushing blob from backend")
-				rc, err := bkd.Reader(blobID)
-				if err != nil {
-					return errors.Wrap(err, "get blob reader")
+				var blobSize int64
+				var rc io.ReadCloser
+
+				if bkd != nil {
+					rc, err = bkd.Reader(blobID)
+					if err != nil {
+						return errors.Wrap(err, "get blob reader")
+					}
+					blobSize, err = bkd.Size(blobID)
+					if err != nil {
+						return errors.Wrap(err, "get blob size")
+					}
+				} else {
+					imageDesc, err := generator.sourcesParser[0].Remote.Resolve(ctx)
+					if err != nil {
+						if strings.Contains(err.Error(), "x509: certificate signed by unknown authority") {
+							logrus.Warningln("try to enable \"--source-insecure\" / \"--target-insecure\" option")
+						}
+						return errors.Wrap(err, "resolve image")
+					}
+					rc, err = generator.sourcesParser[0].Remote.Pull(ctx, *imageDesc, true)
+					if err != nil {
+						return errors.Wrap(err, "get blob reader")
+					}
+					blobInfo, err := pvd.ContentStore().Info(ctx, blobDigest)
+					if err != nil {
+						return errors.Wrap(err, "get info from content store")
+					}
+					blobSize = blobInfo.Size
 				}
 				defer rc.Close()
+
+				blobSizeStr := humanize.Bytes(uint64(blobSize))
+				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushing blob from backend")
+
 				blobDescs[idx] = ocispec.Descriptor{
 					Digest:    blobDigest,
 					Size:      blobSize,
@@ -349,6 +376,7 @@ func pushBlobFromBackend(
 				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend")
 
 				return nil
+
 			})
 		}(idx)
 	}

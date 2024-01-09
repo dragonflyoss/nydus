@@ -5,9 +5,7 @@
 package tests
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -159,7 +157,7 @@ func (i *ImageTestSuite) TestGenerateChunkdict() test.Generator {
 		logLevel := "--log-level warn"
 		nydusifyPath := ctx.Binary.Nydusify
 
-		// Test v6
+		// Generate v6 chunkdcit
 		target1v6 := fmt.Sprintf("%s-nydus-%s", image1, uuid.NewString())
 		target2v6 := fmt.Sprintf("%s-nydus-%s", image2, uuid.NewString())
 		target3v6 := fmt.Sprintf("%s-nydus-%s", image3, uuid.NewString())
@@ -179,32 +177,32 @@ func (i *ImageTestSuite) TestGenerateChunkdict() test.Generator {
 		)
 		tool.RunWithoutOutput(i.T, convertCmd3)
 
-		backendtype := "--backend-type oss"
+		// backendtype := "--backend-type oss"
 		sourceinsecure := "--source-insecure"
 		targetinsecure := "--target-insecure"
 
-		jsonData := `{
-			"endpoint": "oss-cn-zhangjiakou.aliyuncs.com",
-			"access_key_id": "LTAI5tKHuSQQXVjSE7PgKYhf",
-			"access_key_secret": "FBYp1JDxlIZt8cCpFWpq3j9HYokw8a",
-			"bucket_name": "testcompact1"
-		}`
+		// jsonData := `{
+		// 	"endpoint": "oss-cn-zhangjiakou.aliyuncs.com",
+		// 	"access_key_id": "LTAI5tKHuSQQXVjSE7PgKYhf",
+		// 	"access_key_secret": "FBYp1JDxlIZt8cCpFWpq3j9HYokw8a",
+		// 	"bucket_name": "testcompact1"
+		// }`
 
-		formattedData, err := json.MarshalIndent(json.RawMessage(jsonData), "", "  ")
-		if err != nil {
-			fmt.Println("Error marshalling JSON:", err)
-			return
-		}
-		os.WriteFile("output.json", formattedData, 0644)
+		// formattedData, err := json.MarshalIndent(json.RawMessage(jsonData), "", "  ")
+		// if err != nil {
+		// 	fmt.Println("Error marshalling JSON:", err)
+		// 	return
+		// }
+		// os.WriteFile("output.json", formattedData, 0644)
 
-		backendconfigfile := "--backend-config-file output.json"
+		// backendconfigfile := "--backend-config-file output.json"
 
 		targetv6 := fmt.Sprintf("%s,%s,%s", target1v6, target2v6, target3v6)
 		chunkdictv6 := fmt.Sprintf("%s-nydus-%s", image1, uuid.NewString())
 
 		generateCmd := fmt.Sprintf(
-			"%s %s chunkdict generate --sources %s --target %s %s %s %s %s --nydus-image %s --work-dir %s",
-			nydusifyPath, logLevel, targetv6, chunkdictv6, sourceinsecure, targetinsecure, backendtype, backendconfigfile, ctx.Binary.Builder, filepath.Join(ctx.Env.WorkDir, "generate"),
+			"%s %s chunkdict generate --sources %s --target %s %s %s --nydus-image %s --work-dir %s",
+			nydusifyPath, logLevel, targetv6, chunkdictv6, sourceinsecure, targetinsecure, ctx.Binary.Builder, filepath.Join(ctx.Env.WorkDir, "generate"),
 		)
 		tool.RunWithoutOutput(i.T, generateCmd)
 
@@ -214,7 +212,7 @@ func (i *ImageTestSuite) TestGenerateChunkdict() test.Generator {
 		)
 		tool.RunWithoutOutput(i.T, checkCmd)
 
-		// Test v5
+		// Generate v5 chunkdcit
 		fsversion := "--fs-version 5"
 		target1v5 := fmt.Sprintf("%s-nydus5-%s", image1, uuid.NewString())
 		target2v5 := fmt.Sprintf("%s-nydus5-%s", image2, uuid.NewString())
@@ -239,10 +237,42 @@ func (i *ImageTestSuite) TestGenerateChunkdict() test.Generator {
 		chunkdictv5 := fmt.Sprintf("%s-nydus5-%s", image1, uuid.NewString())
 
 		generateCmd2 := fmt.Sprintf(
-			"%s %s chunkdict generate --sources %s --target %s %s %s %s %s --nydus-image %s --work-dir %s",
-			nydusifyPath, logLevel, targetv5, chunkdictv5, sourceinsecure, targetinsecure, backendtype, backendconfigfile, ctx.Binary.Builder, filepath.Join(ctx.Env.WorkDir, "generate"),
+			"%s %s chunkdict generate --sources %s --target %s %s %s --nydus-image %s --work-dir %s",
+			nydusifyPath, logLevel, targetv5, chunkdictv5, sourceinsecure, targetinsecure, ctx.Binary.Builder, filepath.Join(ctx.Env.WorkDir, "generate"),
 		)
 		tool.RunWithoutOutput(i.T, generateCmd2)
+
+		// Test v6 chunkdict convert
+		target4v6 := fmt.Sprintf("%s-nydus-chunkdict-%s", image1, uuid.NewString())
+		chunkdict1v6 := fmt.Sprintf("bootstrap:registry:%s", chunkdictv6)
+		convertCmd7 := fmt.Sprintf(
+			"%s %s convert --source %s --target %s --chunk-dict %s --nydus-image %s --work-dir %s",
+			ctx.Binary.Nydusify, logLevel, image1, target4v6, chunkdict1v6, ctx.Binary.Builder, ctx.Env.TempDir,
+		)
+		tool.RunWithoutOutput(i.T, convertCmd7) 
+
+		checkCmd1 := fmt.Sprintf(
+			"%s %s check  --target %s --nydus-image %s --nydusd %s --work-dir %s",
+			nydusifyPath, logLevel, target4v6, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
+		)
+		tool.RunWithoutOutput(i.T, checkCmd1)
+
+        // Test v5 chunkdict convert
+		target4v5 := fmt.Sprintf("%s-nydus5-chunkdict-%s", image1, uuid.NewString())
+		chunkdict1v5 := fmt.Sprintf("bootstrap:registry:%s", chunkdictv5)
+
+        convertCmd8 := fmt.Sprintf(
+			"%s %s convert --source %s --target %s --chunk-dict %s --nydus-image %s  %s --work-dir %s",
+			ctx.Binary.Nydusify, logLevel, image1, target4v5, chunkdict1v5, ctx.Binary.Builder, fsversion, ctx.Env.TempDir,
+		)
+		tool.RunWithoutOutput(i.T, convertCmd8) 
+
+
+		checkCmd2 := fmt.Sprintf(
+			"%s %s check  --target %s --nydus-image %s --nydusd %s --work-dir %s",
+			nydusifyPath, logLevel, target4v5, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
+		)
+		tool.RunWithoutOutput(i.T, checkCmd2)
 
 		return "generateChunkdict", nil
 	}

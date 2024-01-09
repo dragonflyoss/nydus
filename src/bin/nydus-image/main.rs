@@ -13,7 +13,7 @@ extern crate log;
 extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
-use crate::deduplicate::SqliteDatabase;
+use crate::deduplicate::{update_ctx_from_parent_bootstrap, SqliteDatabase};
 use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
@@ -405,26 +405,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                                 .num_args(1..),
                         )
                         .arg(
-                            Arg::new("digester")
-                                .long("digester")
-                                .help("Algorithm to digest data chunks:")
-                                .required(false)
-                                .default_value("blake3")
-                                .value_parser(["blake3", "sha256"]),
-                        )
-                        .arg(
                             Arg::new("verbose")
                                 .long("verbose")
                                 .short('v')
                                 .help("Output message in verbose mode")
                                 .action(ArgAction::SetTrue)
                                 .required(false),
-                        )
-                        .arg(
-                            Arg::new("features")
-                                .long("features")
-                                .value_parser(["blob-toc"])
-                                .help("Enable/disable features")
                         )
                     )
                 );
@@ -1215,25 +1201,30 @@ impl Command {
             .unwrap();
 
         check_bootstrap_versions_consistency(&mut build_ctx, &source_bootstrap_paths)?;
+        update_ctx_from_parent_bootstrap(&mut build_ctx, &source_bootstrap_paths[0])?;
 
         for (_, bootstrap_path) in source_bootstrap_paths.iter().enumerate() {
-            let path = bootstrap_path.display().to_string();
-            info!("Bootstrap path is {}", path);
-            let path_name: Vec<&str> = path.split('/').collect();
+            let path_name = bootstrap_path.as_path();
 
             // Extract the image name and version  name from the bootstrap directory
-            let bootstrap_dir = match path_name.get(path_name.len() - 2) {
-                Some(&bootstrap_dir) => bootstrap_dir.to_string(),
+            let bootstrap_dir = match path_name
+                .parent()
+                .and_then(|p| p.file_name().and_then(|f| f.to_str()))
+            {
+                Some(dir_str) => dir_str.to_string(),
                 None => bail!("Invalid Bootstrap directory name"),
             };
             let full_image_name: Vec<&str> = bootstrap_dir.split(':').collect();
             let image_name = match full_image_name.get(full_image_name.len() - 2) {
                 Some(&second_last) => second_last.to_string(),
-                None => bail!("Invalid image name"),
+                None => bail!(
+                    "Invalid image name {:?}",
+                    full_image_name.get(full_image_name.len() - 2)
+                ),
             };
-            let version_name = match full_image_name.last() {
+            let image_tag = match full_image_name.last() {
                 Some(&last) => last.to_string(),
-                None => bail!("Invalid version name"),
+                None => bail!("Invalid version name {:?}", full_image_name.last()),
             };
             // For backward compatibility with v2.1.
             let config = Self::get_configuration(matches)?;
@@ -1249,7 +1240,7 @@ impl Command {
                 "sqlite" => {
                     let mut deduplicate: Deduplicate<SqliteDatabase> =
                         Deduplicate::<SqliteDatabase>::new(db_strs[1])?;
-                    deduplicate.save_metadata(bootstrap_path, config, image_name, version_name)?
+                    deduplicate.save_metadata(bootstrap_path, config, image_name, image_tag)?
                 }
                 _ => {
                     bail!("Unsupported database type: {}, please use a valid database URI, such as 'sqlite:///path/to/chunkdict.db'.", db_strs[0])
@@ -1295,12 +1286,12 @@ impl Command {
         }
 
         // Dump chunkdict to bootstrap
-        let features = Features::try_from(
-            matches
-                .get_one::<String>("features")
-                .map(|s| s.as_str())
-                .unwrap_or_default(),
-        )?;
+        // let features = Features::try_from(
+        //     matches
+        //         .get_one::<String>("features")
+        //         .map(|s| s.as_str())
+        //         .unwrap_or_default(),
+        // )?;
         let chunkdict_bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let config =
             Self::get_configuration(matches).context("failed to get configuration information")?;
@@ -1309,18 +1300,18 @@ impl Command {
             .set_blob_accessible(matches.get_one::<String>("config").is_some());
         build_ctx.configuration = config;
         build_ctx.blob_storage = Some(chunkdict_bootstrap_path);
-        build_ctx.blob_features = BlobFeatures::CAP_TAR_TOC;
-        build_ctx.blob_features.insert(BlobFeatures::ALIGNED);
+        // build_ctx.blob_features = BlobFeatures::CAP_TAR_TOC;
+        // build_ctx.blob_features.insert(BlobFeatures::ALIGNED);
         // Build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
         // Build_ctx.blob_features.insert(BlobFeatures::ENCRYPTED);
-        build_ctx.features = features;
+        // build_ctx.features = features;
 
-        let digester = matches
-            .get_one::<String>("digester")
-            .map(|s| s.as_str())
-            .unwrap_or_default()
-            .parse()?;
-        let mut blob_mgr = BlobManager::new(digester);
+        // let digester = matches
+        //     .get_one::<String>("digester")
+        //     .map(|s| s.as_str())
+        //     .unwrap_or_default()
+        //     .parse()?;
+        let mut blob_mgr = BlobManager::new(build_ctx.digester);
 
         let bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let mut bootstrap_mgr = BootstrapManager::new(Some(bootstrap_path), None);

@@ -694,11 +694,6 @@ func main() {
 							Usage:     "Json configuration file for storage backend",
 							EnvVars:   []string{"BACKEND_CONFIG_FILE"},
 						},
-						&cli.StringFlag{
-							Name:  "push-chunk-size",
-							Value: "0MB",
-							Usage: "Chunk size for pushing a blob layer in chunked",
-						},
 
 						&cli.StringFlag{
 							Name:    "work-dir",
@@ -731,13 +726,6 @@ func main() {
 						if err != nil {
 							return err
 						}
-						pushChunkSize, err := humanize.ParseBytes(c.String("push-chunk-size"))
-						if err != nil {
-							return errors.Wrap(err, "invalid --push-chunk-size option")
-						}
-						if pushChunkSize > 0 {
-							logrus.Infof("will copy layer with chunk size %s", c.String("push-chunk-size"))
-						}
 
 						_, arch, err := provider.ExtractOsArch(c.String("platform"))
 						if err != nil {
@@ -759,8 +747,6 @@ func main() {
 							ExpectedArch:   arch,
 							AllPlatforms:   c.Bool("all-platforms"),
 							Platforms:      c.String("platform"),
-
-							PushChunkSize: int64(pushChunkSize),
 						})
 						if err != nil {
 							return err

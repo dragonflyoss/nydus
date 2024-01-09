@@ -8,9 +8,10 @@ use core::cmp::Ordering;
 use nydus_api::ConfigV2;
 use nydus_builder::BuildContext;
 use nydus_builder::ChunkdictChunkInfo;
+use nydus_builder::ConversionType;
 use nydus_builder::Tree;
 use nydus_rafs::metadata::{RafsSuper, RafsVersion};
-use nydus_storage::device::BlobInfo;
+use nydus_storage::device::{BlobFeatures, BlobInfo};
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
@@ -167,6 +168,24 @@ pub fn check_bootstrap_versions_consistency(
                 "Bootstrap versions are inconsistent, cannot use chunkdict."
             ));
         }
+    }
+
+    Ok(())
+}
+
+// Get parent bootstrap context for chunkdict bootstrap.
+pub fn update_ctx_from_parent_bootstrap(
+    ctx: &mut BuildContext,
+    bootstrap_path: &PathBuf,
+) -> Result<()> {
+    let (sb, _) = RafsSuper::load_from_file(bootstrap_path, Arc::new(ConfigV2::default()), false)?;
+
+    let config = sb.meta.get_config();
+    config.check_compatibility(&sb.meta)?;
+
+    if config.is_tarfs_mode {
+        ctx.conversion_type = ConversionType::TarToTarfs;
+        ctx.blob_features |= BlobFeatures::TARFS;
     }
 
     Ok(())
