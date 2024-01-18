@@ -140,7 +140,7 @@ jobs:
     - name: store-artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: nydus-release-tarball
+        name: nydus-release-tarball-${{ matrix.os }}-${{ matrix.arch }}
         path: |
           ${{ env.tarball }}
           ${{ env.tarball_shasum }}
@@ -173,7 +173,7 @@ jobs:
     - name: store-artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: nydus-release-tarball
+        name: nydus-release-tarball-${{ matrix.os }}-${{ matrix.arch }}
         path: |
           ${{ env.tarball }}
           ${{ env.tarball_shasum }}
@@ -185,7 +185,8 @@ jobs:
     - name: download artifacts
       uses: actions/download-artifact@v4
       with:
-        name: nydus-release-tarball
+        pattern: nydus-release-tarball-*
+        merge-multiple: true
         path: nydus-tarball
     - name: prepare release env
       run: |
