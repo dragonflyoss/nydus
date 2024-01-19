@@ -106,7 +106,7 @@ jobs:
     - name: store-artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: nydus-artifacts-linux-${{ matrix.arch }}
+        name: nydus-artifacts-linux-${{ matrix.arch }}-contrib
         path: |
           ctr-remote
           nydusify
@@ -124,7 +124,8 @@ jobs:
     - name: download artifacts
       uses: actions/download-artifact@v4
       with:
-        name: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}
+        pattern: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}*
+        merge-multiple: true
         path: nydus-static
     - name: prepare release tarball
       run: |
