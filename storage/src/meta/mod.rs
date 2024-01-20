@@ -1549,8 +1549,8 @@ impl BlobMetaChunkArray {
         chunk_info_array: &[T],
         start: u64,
         end: u64,
-        batch_end: u64,
-        batch_size: u64,
+        amplify_end: u64,
+        amplify_size: u64,
         prefetch: bool,
     ) -> Result<Vec<Arc<dyn BlobChunkInfo>>> {
         let mut vec = Vec::with_capacity(512);
@@ -1587,7 +1587,7 @@ impl BlobMetaChunkArray {
                 }
                 if entry.get_zran_index()? != zran_last {
                     let ctx = &state.zran_info_array[entry.get_zran_index()? as usize];
-                    if ctx.in_offset() + ctx.in_size() as u64 - pos > batch_size
+                    if ctx.in_offset() + ctx.in_size() as u64 - pos > amplify_size
                         && entry.compressed_offset() > end
                     {
                         return Ok(vec);
@@ -1615,38 +1615,32 @@ impl BlobMetaChunkArray {
         }
 
         vec.push(BlobMetaChunk::new(index, state));
-        let mut last_end = entry.compressed_end();
-        if last_end >= batch_end {
+        let mut last_end = entry.compressed_end_batch(state);
+        while index + 1 < chunk_info_array.len() {
+            index += 1;
+            let entry = Self::get_chunk_entry(state, chunk_info_array, index)?;
+
+            // Avoid adding, only if entry_start >= end && entry_end > amplify_end.
+            // Support batch chunks.
+            if entry.compressed_offset() >= end && entry.compressed_end_batch(state) > amplify_end {
+                return Ok(vec);
+            }
+
+            vec.push(BlobMetaChunk::new(index, state));
+            last_end = entry.compressed_end_batch(state);
+        }
+
+        if last_end >= end || (prefetch && !vec.is_empty()) {
             Ok(vec)
         } else {
-            while index + 1 < chunk_info_array.len() {
-                index += 1;
-
-                let entry = Self::get_chunk_entry(state, chunk_info_array, index)?;
-                // Avoid read amplify if next chunk is too big.
-                if last_end >= end && entry.compressed_end() > batch_end {
-                    return Ok(vec);
-                }
-
-                vec.push(BlobMetaChunk::new(index, state));
-                last_end = entry.compressed_end();
-                if last_end >= batch_end {
-                    return Ok(vec);
-                }
-            }
-
-            if last_end >= end || (prefetch && !vec.is_empty()) {
-                Ok(vec)
-            } else {
-                Err(einval!(format!(
-                    "entry not found index {} chunk_info_array.len {}, last_end 0x{:x}, end 0x{:x}, blob compressed size 0x{:x}",
-                    index,
-                    chunk_info_array.len(),
-                    last_end,
-                    end,
-                    state.compressed_size,
-                )))
-            }
+            Err(einval!(format!(
+                "entry not found index {} chunk_info_array.len {}, last_end 0x{:x}, end 0x{:x}, blob compressed size 0x{:x}",
+                index,
+                chunk_info_array.len(),
+                last_end,
+                end,
+                state.compressed_size,
+            )))
         }
     }
 
@@ -1896,9 +1890,19 @@ pub trait BlobMetaChunkInfo {
     /// Set compressed size of the chunk.
     fn set_compressed_size(&mut self, size: u32);
 
+    /// Get compressed size of the whole batch chunk.
+    /// If the chunk is not a batch chunk, fallback to `compressed_size`.
+    fn compressed_size_batch(&self, state: &BlobCompressionContext) -> u32;
+
     /// Get end of compressed data of the chunk.
     fn compressed_end(&self) -> u64 {
         self.compressed_offset() + self.compressed_size() as u64
+    }
+
+    /// Get end of compressed data of the whole batch chunk.
+    /// If the chunk is not a batch chunk, fallback to `compressed_end`.
+    fn compressed_end_batch(&self, state: &BlobCompressionContext) -> u64 {
+        self.compressed_offset() + self.compressed_size_batch(state) as u64
     }
 
     /// Get uncompressed offset of the chunk.

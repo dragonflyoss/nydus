@@ -16,6 +16,7 @@ use tokio::runtime::Runtime;
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{BlobStateMap, IndexedChunkMap, RangeMap};
+use crate::cache::streaming::StreamPrefetchMgr;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
@@ -35,6 +36,7 @@ pub struct FsCacheMgr {
     prefetch_config: Arc<AsyncPrefetchConfig>,
     runtime: Arc<Runtime>,
     worker_mgr: Arc<AsyncWorkerMgr>,
+    streaming_prefetch_mgr: Arc<StreamPrefetchMgr>,
     work_dir: String,
     need_validation: bool,
     blobs_check_count: Arc<AtomicU8>,
@@ -60,6 +62,7 @@ impl FsCacheMgr {
         let metrics = BlobcacheMetrics::new(id, work_dir);
         let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new((&config.prefetch).into());
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
+        let streaming_prefetch_mgr = StreamPrefetchMgr::new(prefetch_config.clone());
 
         BLOB_FACTORY.start_mgr_checker();
 
@@ -70,6 +73,7 @@ impl FsCacheMgr {
             prefetch_config,
             runtime,
             worker_mgr: Arc::new(worker_mgr),
+            streaming_prefetch_mgr: Arc::new(streaming_prefetch_mgr),
             work_dir: work_dir.to_owned(),
             need_validation: config.cache_validate,
             blobs_check_count: Arc::new(AtomicU8::new(0)),
@@ -96,6 +100,7 @@ impl FsCacheMgr {
             self.prefetch_config.clone(),
             self.runtime.clone(),
             self.worker_mgr.clone(),
+            self.streaming_prefetch_mgr.clone(),
         )?;
         let entry = Arc::new(entry);
         let mut guard = self.blobs.write().unwrap();
@@ -116,7 +121,8 @@ impl FsCacheMgr {
 
 impl BlobCacheMgr for FsCacheMgr {
     fn init(&self) -> Result<()> {
-        AsyncWorkerMgr::start(self.worker_mgr.clone())
+        AsyncWorkerMgr::start(self.worker_mgr.clone())?;
+        StreamPrefetchMgr::start(self.streaming_prefetch_mgr.clone())
     }
 
     fn destroy(&self) {
@@ -201,6 +207,7 @@ impl FileCacheEntry {
         prefetch_config: Arc<AsyncPrefetchConfig>,
         runtime: Arc<Runtime>,
         workers: Arc<AsyncWorkerMgr>,
+        stream_workers: Arc<StreamPrefetchMgr>,
     ) -> Result<Self> {
         if blob_info.has_feature(BlobFeatures::_V5_NO_EXT_BLOB_TABLE) {
             return Err(einval!("fscache does not support Rafs v5 blobs"));
@@ -279,6 +286,7 @@ impl FileCacheEntry {
             reader,
             runtime,
             workers,
+            stream_workers,
 
             blob_compressed_size,
             blob_uncompressed_size: blob_info.uncompressed_size(),

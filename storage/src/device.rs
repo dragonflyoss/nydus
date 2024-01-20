@@ -41,7 +41,7 @@ use nydus_utils::compress;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::digest::{self, RafsDigest};
 
-use crate::cache::BlobCache;
+use crate::cache::{BlobCCI, BlobCache};
 use crate::factory::BLOB_FACTORY;
 
 pub(crate) const BLOB_FEATURE_INCOMPAT_MASK: u32 = 0x0000_ffff;
@@ -663,6 +663,12 @@ impl From<Arc<dyn BlobChunkInfo>> for BlobIoChunk {
     }
 }
 
+impl AsRef<Arc<dyn BlobChunkInfo>> for BlobIoChunk {
+    fn as_ref(&self) -> &Arc<dyn BlobChunkInfo> {
+        &self.0
+    }
+}
+
 impl BlobChunkInfo for BlobIoChunk {
     fn chunk_id(&self) -> &RafsDigest {
         self.0.chunk_id()
@@ -788,7 +794,7 @@ pub struct BlobIoVec {
     /// Total size of blob IOs to be performed.
     bi_size: u64,
     /// Array of blob IOs, these IOs should executed sequentially.
-    pub(crate) bi_vec: Vec<BlobIoDesc>,
+    pub bi_vec: Vec<BlobIoDesc>,
 }
 
 impl BlobIoVec {
@@ -1047,6 +1053,23 @@ pub struct BlobPrefetchRequest {
     pub len: u64,
 }
 
+pub struct BlobRange {
+    pub blob_idx: u32,
+    /// Compressed offset into the blob to prefetch data.
+    pub offset: u64,
+    pub end: u64,
+}
+
+impl Debug for BlobRange {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        f.debug_struct("BlobRange")
+            .field("blob_idx", &self.blob_idx)
+            .field("offset", &self.offset)
+            .field("end", &self.end)
+            .finish()
+    }
+}
+
 /// Trait to provide direct access to underlying uncompressed blob file.
 ///
 /// The suggested flow to make use of an `BlobObject` is as below:
@@ -1199,11 +1222,32 @@ impl BlobDevice {
         Ok(())
     }
 
+    pub fn add_stream_prefetch_range(&self, range: BlobRange) -> io::Result<()> {
+        let state = self.blobs.load();
+        let blob = &state[range.blob_idx as usize];
+        blob.add_stream_prefetch_range(range)
+    }
+
+    pub fn flush_stream_prefetch(&self) -> io::Result<()> {
+        let state = self.blobs.load();
+        let blob = &state[0];
+        blob.flush_stream_prefetch()
+    }
+
     /// Start the background blob data prefetch task.
     pub fn start_prefetch(&self) {
         for blob in self.blobs.load().iter() {
             let _ = blob.start_prefetch();
         }
+    }
+
+    pub fn init_stream_prefetch(&self) {
+        let blobs: Vec<Arc<dyn BlobCache>> = self.blobs.load().to_vec();
+        if blobs.is_empty() {
+            error!("init_stream_prefetch failed: empty blobs in blob device");
+            return;
+        }
+        blobs[0].clone().init_stream_prefetch(blobs);
     }
 
     /// Stop the background blob data prefetch task.
@@ -1309,6 +1353,21 @@ impl BlobDevice {
         }
 
         None
+    }
+
+    pub fn get_all_blob_cci(&self) -> Vec<BlobCCI> {
+        let state: arc_swap::Guard<Arc<Vec<Arc<dyn BlobCache>>>> = self.blobs.load();
+        let state: &Vec<Arc<dyn BlobCache>> = &state;
+
+        let mut blob_ccis = Vec::new();
+        blob_ccis.resize_with(self.blob_count, BlobCCI::new);
+
+        for (cci, cache) in blob_ccis.iter_mut().zip(state.iter()) {
+            let meta = cache.get_blob_meta_info().unwrap_or(None);
+            let _ = cci.set_meta(meta);
+        }
+
+        blob_ccis
     }
 }
 

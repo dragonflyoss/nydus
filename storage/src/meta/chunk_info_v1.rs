@@ -54,6 +54,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
         self.comp_info = u64::to_le(size_low | size_high | offset);
     }
 
+    fn compressed_size_batch(&self, _state: &BlobCompressionContext) -> u32 {
+        self.compressed_size()
+    }
+
     fn uncompressed_offset(&self) -> u64 {
         u64::from_le(self.uncomp_info) & BLOB_CC_V1_CHUNK_UNCOMP_OFFSET_MASK
     }

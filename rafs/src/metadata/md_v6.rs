@@ -151,6 +151,74 @@ impl RafsSuper {
 
         Ok(found_root_inode)
     }
+
+    pub(crate) fn stream_prefetch_data_v6(
+        &self,
+        device: &BlobDevice,
+        rafs_reader: &mut RafsIoReader,
+        root_ino: Inode,
+    ) -> RafsResult<bool> {
+        let hint_entries = self.meta.prefetch_table_entries as usize;
+        if hint_entries == 0 {
+            return Ok(false);
+        }
+
+        // Try to prefetch according to the list of files specified by the
+        // builder's `--prefetch-policy fs` option.
+        let mut prefetch_table = RafsV6PrefetchTable::new();
+        prefetch_table
+            .load_prefetch_table_from(rafs_reader, self.meta.prefetch_table_offset, hint_entries)
+            .map_err(|e| {
+                error!("Failed in loading hint prefetch table at offset {}", e);
+                RafsError::Prefetch(format!(
+                    "Failed in loading hint prefetch table at offset {}. {:?}",
+                    self.meta.prefetch_table_offset, e
+                ))
+            })?;
+        // debug!("prefetch table contents {:?}", prefetch_table);
+
+        let mut hardlinks: HashSet<u64> = HashSet::new();
+        let mut fetched_ranges: HashMap<u32, HashSet<u64>> = HashMap::new();
+        let blob_ccis = device.get_all_blob_cci();
+
+        let mut found_root_inode = false;
+        for ino in prefetch_table.inodes {
+            // Inode number 0 is invalid, it was added because prefetch table has to be aligned.
+            if ino == 0 {
+                break;
+            }
+            if ino as Inode == root_ino {
+                found_root_inode = true;
+            }
+            // debug!("CMDebug: hint prefetch inode {}", ino);
+
+            let ranges = self
+                .get_inode_ranges(
+                    ino as u64,
+                    &mut hardlinks,
+                    &mut fetched_ranges,
+                    device,
+                    &blob_ccis,
+                )
+                .map_err(|e| {
+                    RafsError::Prefetch(format!("Failed in get inode chunk ranges. {:?}", e))
+                })?;
+
+            // debug!("CMDebug: prefetch inode: {}, ranges: {:?}", ino, ranges);
+
+            for r in ranges {
+                device.add_stream_prefetch_range(r).map_err(|e| {
+                    RafsError::Prefetch(format!("Failed to add inode prefetch range. {:?}", e))
+                })?;
+            }
+        }
+
+        device.flush_stream_prefetch().map_err(|e| {
+            RafsError::Prefetch(format!("Failed to flush inode prefetch range. {:?}", e))
+        })?;
+
+        Ok(found_root_inode)
+    }
 }
 
 #[cfg(test)]

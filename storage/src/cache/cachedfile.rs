@@ -9,11 +9,13 @@
 //! performance. It may be used by both the userspace `FileCacheMgr` or the `FsCacheMgr` based
 //! on the in-kernel fscache system.
 
+use std::cmp;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Result};
 use std::mem::ManuallyDrop;
 use std::os::unix::io::{AsRawFd, RawFd};
+
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,8 +30,9 @@ use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
+use crate::cache::streaming::StreamPrefetchMgr;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
-use crate::cache::{BlobCache, BlobIoMergeState};
+use crate::cache::{BlobCCI, BlobCache, BlobIoMergeState};
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
     BlobObject, BlobPrefetchRequest,
@@ -37,6 +40,8 @@ use crate::device::{
 use crate::meta::{BlobCompressionContextInfo, BlobMetaChunk};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
 use crate::{StorageError, StorageResult, RAFS_BATCH_SIZE_TO_GAP_SHIFT, RAFS_DEFAULT_CHUNK_SIZE};
+
+use super::ChunkDecompressState;
 
 const DOWNLOAD_META_RETRY_COUNT: u32 = 5;
 const DOWNLOAD_META_RETRY_DELAY: u64 = 400;
@@ -128,57 +133,6 @@ impl FileCacheMeta {
     }
 }
 
-/// Helper struct to manage and call BlobCompressionContextInfo.
-struct BlobCCI {
-    meta: Option<Arc<BlobCompressionContextInfo>>,
-}
-
-impl BlobCCI {
-    fn new() -> Self {
-        BlobCCI { meta: None }
-    }
-
-    fn is_none(&self) -> bool {
-        self.meta.is_none()
-    }
-
-    fn set_meta(&mut self, meta: Option<Arc<BlobCompressionContextInfo>>) -> Result<&Self> {
-        if meta.is_none() {
-            return Err(einval!("failed to get blob meta info"));
-        }
-        self.meta = meta;
-        Ok(self)
-    }
-
-    fn get_compressed_offset(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u64> {
-        Ok(chunk.compressed_offset())
-    }
-
-    fn get_compressed_size(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u32> {
-        let size = if chunk.is_batch() {
-            self.meta
-                .as_ref()
-                .unwrap()
-                .get_compressed_size(chunk.id())?
-        } else {
-            chunk.compressed_size()
-        };
-        Ok(size)
-    }
-
-    fn get_compressed_info(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<(u64, u32)> {
-        Ok((
-            self.get_compressed_offset(chunk)?,
-            self.get_compressed_size(chunk)?,
-        ))
-    }
-
-    fn get_compressed_end(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u64> {
-        let (offset, size) = self.get_compressed_info(chunk)?;
-        Ok(offset + size as u64)
-    }
-}
-
 pub(crate) struct FileCacheEntry {
     pub(crate) blob_id: String,
     pub(crate) blob_info: Arc<BlobInfo>,
@@ -192,6 +146,7 @@ pub(crate) struct FileCacheEntry {
     pub(crate) reader: Arc<dyn BlobReader>,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) workers: Arc<AsyncWorkerMgr>,
+    pub(crate) stream_workers: Arc<StreamPrefetchMgr>,
 
     pub(crate) blob_compressed_size: u64,
     pub(crate) blob_uncompressed_size: u64,
@@ -509,6 +464,39 @@ impl FileCacheEntry {
             Ok((start, end, size as usize))
         }
     }
+
+    // 必须保证infos.is_empty() == false
+    #[inline]
+    fn process_chunk(
+        infos: &[Arc<dyn BlobChunkInfo>],
+        c_size: u32,
+        entry: &Arc<FileCacheEntry>,
+        info_offset: &mut u64,
+        processed: &mut u64,
+        reader: &mut Box<dyn Read>,
+    ) -> Result<()> {
+        let c_offset = infos[0].compressed_offset();
+
+        *info_offset += c_size as u64;
+
+        let mut chunk_buf = vec![0u8; c_size as usize];
+        reader.read_exact(chunk_buf.as_mut_slice())?;
+
+        let mut d_bufs = ChunkDecompressState::new(
+            c_offset,
+            entry.as_ref(),
+            infos.iter().map(|i| i.as_ref()).collect(),
+            chunk_buf,
+        );
+        for info in infos {
+            let d_buf = d_bufs.next().unwrap().unwrap();
+            entry.persist_chunk_data(info.as_ref(), &d_buf);
+        }
+        // todo:这个失败后的重试逻辑还存在问题
+        *processed += c_size as u64;
+
+        Ok(())
+    }
 }
 
 impl AsRawFd for FileCacheEntry {
@@ -594,6 +582,10 @@ impl BlobCache for FileCacheEntry {
         Ok(())
     }
 
+    fn init_stream_prefetch(&self, blobs: Vec<Arc<dyn BlobCache>>) {
+        self.stream_workers.init_blobs(blobs);
+    }
+
     fn stop_prefetch(&self) -> StorageResult<()> {
         loop {
             let val = self.prefetch_state.load(Ordering::Acquire);
@@ -652,6 +644,14 @@ impl BlobCache for FileCacheEntry {
         );
 
         Ok(0)
+    }
+
+    fn add_stream_prefetch_range(&self, range: crate::device::BlobRange) -> Result<()> {
+        self.stream_workers.add_prefetch_range(range)
+    }
+
+    fn flush_stream_prefetch(&self) -> Result<()> {
+        self.stream_workers.flush_waiting_queue()
     }
 
     fn prefetch_range(&self, range: &BlobIoRange) -> Result<usize> {
@@ -768,6 +768,236 @@ impl BlobCache for FileCacheEntry {
             }
         } else {
             Ok(None)
+        }
+    }
+
+    fn fetch_range_compressed_stream(
+        self: Arc<Self>,
+        offset: u64,
+        size: u64,
+        prefetch: bool,
+    ) -> std::io::Result<()> {
+        let entry = self.clone(); // 有风险，观察是否真正写入
+        let fc_meta = entry.meta.as_ref().ok_or_else(|| einval!())?;
+        let meta = fc_meta.get_blob_meta().ok_or_else(|| einval!())?;
+        let mut f = move |mut resp: Box<dyn Read>,
+                          f_offset: u64,
+                          f_size: u64,
+                          processed: &mut u64|
+              -> std::io::Result<()> {
+            let mut info_offset = 0u64;
+            let iter = StreamChunkIter::new(
+                entry.clone(),
+                meta.clone(),
+                0x100_0000, // todo:这里可以定制 16MiB
+                f_offset,
+                f_size,
+                prefetch,
+            );
+            for (infos, c_size) in iter {
+                Self::process_chunk(
+                    &infos,
+                    c_size,
+                    &entry,
+                    &mut info_offset,
+                    processed,
+                    &mut resp,
+                )?;
+            }
+            Ok(())
+        };
+        self.reader()
+            .stream_read(offset, size, &mut f)
+            .map_err(|e| eio!(e))?;
+        Ok(())
+    }
+}
+
+struct StreamChunkIter {
+    // 暂存获取到的chunk info
+    chunks: Vec<Arc<dyn BlobChunkInfo>>,
+    // 记录当前已经处理到的chunk info的位置下标。当infos前部被清理时，这个需要同步更新
+    p_cur: usize,
+    // 记录当前已经锁定到的chunk info的位置下标。当infos前部被清理时，这个需要同步更新
+    l_cur: usize,
+    // 记录当前已经获取到的chunk info的总位置
+    ext_end: u64,
+    entry: Arc<FileCacheEntry>,
+    meta: Arc<BlobCompressionContextInfo>,
+    // 常量，用于判断需要锁定多少个chunk info
+    min_pending_size: u64,
+    // request在整个blob的偏移
+    f_offset: u64,
+    // request的大小
+    f_size: u64,
+    prefetch: bool,
+}
+
+impl StreamChunkIter {
+    fn new(
+        entry: Arc<FileCacheEntry>,
+        meta: Arc<BlobCompressionContextInfo>,
+        min_pending_size: u64,
+        f_offset: u64,
+        f_size: u64,
+        prefetch: bool,
+    ) -> Self {
+        let mut iter = Self {
+            chunks: Vec::new(),
+            p_cur: 0,
+            l_cur: 0,
+            ext_end: 0,
+            entry,
+            meta,
+            min_pending_size,
+            f_offset,
+            f_size,
+            prefetch,
+        };
+        let _ = iter.extend();
+        iter
+    }
+
+    // 扩展infos
+    fn extend(&mut self) -> bool {
+        // todo:可调整，一次载入16MiB的chunk info
+        let size_to_extend = cmp::min(self.f_offset + self.f_size - self.ext_end, 0x100_0000);
+
+        if size_to_extend == 0 {
+            return false;
+        }
+
+        let mut chunks_new = self
+            .meta
+            .get_chunks_compressed(
+                self.f_offset + self.ext_end,
+                size_to_extend,
+                0,
+                self.prefetch,
+            )
+            .unwrap();
+
+        self.chunks.append(&mut chunks_new);
+
+        self.ext_end = self
+            .chunks
+            .last()
+            .map(|i| {
+                if i.is_batch() {
+                    i.compressed_offset() + self.meta.get_compressed_size(i.id()).unwrap() as u64
+                } else {
+                    i.compressed_end()
+                }
+            })
+            .unwrap();
+
+        // strip processed chunks
+        if self.p_cur > self.chunks.len() / 2 {
+            self.chunks = self.chunks.split_off(self.p_cur);
+            self.l_cur -= self.p_cur;
+            self.p_cur = 0;
+        }
+
+        true
+    }
+
+    fn mark_pending(&mut self, processed_end: u64) {
+        if self.p_cur > self.l_cur {
+            // 先追上p_cur
+            for i in &self.chunks[self.l_cur..self.p_cur] {
+                let _ = self
+                    .entry
+                    .chunk_map
+                    .check_ready_and_mark_pending(i.as_ref());
+            }
+            self.l_cur = self.p_cur;
+        }
+
+        loop {
+            if self.l_cur == self.chunks.len() && !self.extend() {
+                return;
+            }
+
+            // 再追上min_pending_size
+            let i = &self.chunks[self.l_cur];
+            self.l_cur += 1;
+
+            self.entry
+                .chunk_map
+                .check_ready_and_mark_pending(i.as_ref())
+                .ok();
+
+            let c_end = if i.is_batch() {
+                i.compressed_offset() + self.meta.get_compressed_size(i.id()).unwrap() as u64
+            } else {
+                i.compressed_end()
+            };
+
+            if c_end >= processed_end && c_end - processed_end >= self.min_pending_size {
+                return;
+            }
+        }
+    }
+}
+
+impl Iterator for StreamChunkIter {
+    type Item = (Vec<Arc<dyn BlobChunkInfo>>, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut items: Vec<Arc<dyn BlobChunkInfo>> = Vec::new();
+        // uncompressed and compressed size of the whole batch chunk
+        let mut batch_d_size = u32::MAX;
+        let mut batch_c_size = u32::MAX;
+        // processed compressed end of chunks that calculated in this function
+        let mut p_end = u64::MAX;
+
+        loop {
+            if self.p_cur == self.chunks.len() && !self.extend() {
+                if !items.is_empty() {
+                    error!("no enough chunks to add!");
+                }
+                return None;
+            }
+
+            let i = self.chunks[self.p_cur].clone();
+
+            if !i.is_batch() {
+                let c_size = i.compressed_size();
+                p_end = i.compressed_end();
+                items.push(i);
+                self.p_cur += 1;
+
+                self.mark_pending(p_end);
+                return Some((items, c_size));
+            }
+
+            // is batch
+            if items.is_empty() {
+                let batch_idx = self.meta.get_batch_index(i.id()).unwrap();
+                let ctx = self.meta.get_batch_context(batch_idx).unwrap();
+                batch_d_size = ctx.uncompressed_batch_size();
+                batch_c_size = ctx.compressed_size();
+            }
+
+            let in_batch_end = i.uncompressed_size()
+                + self
+                    .meta
+                    .get_uncompressed_offset_in_batch_buf(i.id())
+                    .unwrap();
+
+            if items.is_empty() {
+                // update only once for the whole batch chunk
+                p_end = i.compressed_offset() + batch_c_size as u64;
+            }
+
+            items.push(i);
+            self.p_cur += 1;
+
+            if batch_d_size == in_batch_end {
+                self.mark_pending(p_end);
+                return Some((items, batch_c_size));
+            }
+            // not ended, continue
         }
     }
 }

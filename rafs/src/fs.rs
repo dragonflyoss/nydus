@@ -175,8 +175,10 @@ impl Rafs {
         }
         if self.fs_prefetch {
             // Device should be ready before any prefetch.
-            self.device.start_prefetch();
-            self.prefetch(r, prefetch_files);
+            // self.device.start_prefetch();
+            // self.prefetch(r, prefetch_files);
+            self.device.init_stream_prefetch();
+            self.start_stream_prefetch(r, prefetch_files);
         }
         self.initialized = true;
 
@@ -327,6 +329,7 @@ impl Rafs {
 }
 
 impl Rafs {
+    #[allow(unused)]
     fn prefetch(&self, reader: RafsIoReader, prefetch_files: Option<Vec<PathBuf>>) {
         let sb = self.sb.clone();
         let device = self.device.clone();
@@ -335,6 +338,18 @@ impl Rafs {
 
         let _ = std::thread::spawn(move || {
             Self::do_prefetch(root_ino, reader, prefetch_files, prefetch_all, sb, device);
+        });
+    }
+
+    #[allow(unused)]
+    fn start_stream_prefetch(&self, reader: RafsIoReader, prefetch_files: Option<Vec<PathBuf>>) {
+        let sb = self.sb.clone();
+        let device = self.device.clone();
+        let prefetch_all = self.prefetch_all;
+        let root_ino = self.root_ino();
+
+        let _ = std::thread::spawn(move || {
+            Self::do_stream_prefetch(root_ino, reader, prefetch_files, prefetch_all, sb, device);
         });
     }
 
@@ -347,6 +362,7 @@ impl Rafs {
         self.sb.superblock.root_ino()
     }
 
+    #[allow(unused)]
     fn do_prefetch(
         root_ino: u64,
         mut reader: RafsIoReader,
@@ -468,6 +484,45 @@ impl Rafs {
                 if let Err(e) = res {
                     info!("No file to be prefetched {:?}", e);
                 }
+            }
+        }
+    }
+
+    fn do_stream_prefetch(
+        root_ino: u64,
+        mut reader: RafsIoReader,
+        prefetch_files: Option<Vec<PathBuf>>,
+        _prefetch_all: bool,
+        sb: Arc<RafsSuper>,
+        device: BlobDevice,
+    ) {
+        // Bootstrap has non-empty prefetch table indicating a full prefetch
+        let inlay_prefetch_all = sb
+            .is_inlay_prefetch_all(&mut reader)
+            .map_err(|e| error!("Detect prefetch table error {}", e))
+            .unwrap_or_default();
+
+        // Nydusd has a CLI option indicating a full prefetch
+        let startup_prefetch_all = prefetch_files
+            .as_ref()
+            .map(|f| f.len() == 1 && f[0].as_os_str() == "/")
+            .unwrap_or(false);
+
+        // User specified prefetch files have high priority to be prefetched.
+        // Moreover, user specified prefetch files list will override those on-disk prefetch table.
+        if !startup_prefetch_all && !inlay_prefetch_all {
+            // Then do file based prefetch based on:
+            // - prefetch listed passed in by user
+            // - or file prefetch list in metadata
+            // TODO: change this to iterator
+            let inodes = prefetch_files.map(|files| Self::convert_file_list(&files, &sb));
+            let res = sb.stream_prefetch_files(&device, &mut reader, root_ino, inodes);
+            match res {
+                Ok(true) => {
+                    info!("Root inode was found, but it should not prefetch all files!")
+                }
+                Ok(false) => {}
+                Err(e) => error!("No file to be prefetched {:?}", e),
             }
         }
     }

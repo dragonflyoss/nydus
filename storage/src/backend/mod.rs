@@ -14,8 +14,8 @@
 //!   prefetching, which is to load data into page cache.
 //! - [LocalDisk](localdisk/struct.LocalDisk.html): backend driver to access blobs on local disk.
 
-use std::fmt;
 use std::io::Read;
+use std::{fmt, thread};
 use std::{sync::Arc, time::Duration};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
@@ -23,7 +23,9 @@ use nydus_utils::{
     metrics::{BackendMetrics, ERROR_HOLDER},
     DelayType, Delayer,
 };
+use reqwest::blocking::Response;
 
+use crate::backend::registry::StreamCallback;
 use crate::utils::{alloc_buf, copyv};
 use crate::StorageError;
 
@@ -137,6 +139,62 @@ pub trait BlobReader: Send + Sync {
                         delayer.delay();
                     } else {
                         self.metrics().end(&begin_time, buf.len(), true);
+                        ERROR_HOLDER
+                            .lock()
+                            .unwrap()
+                            .push(&format!("{:?}", err))
+                            .unwrap_or_else(|_| error!("Failed when try to hold error"));
+                        return Err(err);
+                    }
+                }
+            }
+        }
+    }
+
+    fn try_stream_read(
+        &self,
+        _offset: u64,
+        _size: u64,
+        _processed: &mut u64,
+        _f: &mut StreamCallback,
+    ) -> BackendResult<()> {
+        unimplemented!();
+    }
+
+    /// TODO:
+    fn stream_read(&self, offset: u64, size: u64, f: &mut StreamCallback) -> BackendResult<usize> {
+        let mut retry_count = self.retry_limit();
+
+        let mut delayer = Delayer::new(DelayType::BackOff, Duration::from_millis(500));
+
+        let mut processed_all = 0u64;
+        loop {
+            let begin_time = self.metrics().begin();
+
+            let mut processed = 0u64;
+            match self.try_stream_read(
+                offset + processed_all as u64,
+                size - processed_all,
+                &mut processed,
+                f,
+            ) {
+                Ok(()) => {
+                    self.metrics().end(&begin_time, processed as usize, false);
+                    return Ok(size as usize);
+                }
+                Err(err) => {
+                    if processed > 0 {
+                        self.metrics().end(&begin_time, processed as usize, true);
+                        processed_all += processed;
+                    }
+                    if retry_count > 0 {
+                        warn!(
+                            "Read from backend failed: {:?}, retry count {}",
+                            err, retry_count
+                        );
+                        retry_count -= 1;
+                        delayer.delay();
+                    } else {
                         ERROR_HOLDER
                             .lock()
                             .unwrap()
@@ -272,5 +330,84 @@ impl Read for BlobBufReader {
         self.len -= sz;
 
         Ok(sz)
+    }
+}
+
+struct ResponseBufReader {
+    buf: Option<Vec<u8>>,
+    pos: usize,
+    receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl ResponseBufReader {
+    pub fn new(mut res: Response, size: u64) -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        // 新开一个线程来流式下载和发送数据
+        thread::spawn(move || {
+            let mut downloaded = 0u64;
+            while downloaded < size {
+                let count = std::cmp::min(102400, size - downloaded);
+                let mut buffer = vec![0u8; count as usize];
+                res.read_exact(&mut buffer).unwrap();
+                sender.send(buffer).unwrap(); // 发送数据块到主线程
+                downloaded += count;
+            }
+        });
+
+        Self {
+            buf: None,
+            pos: 0,
+            receiver,
+        }
+    }
+}
+
+impl Read for ResponseBufReader {
+    fn read(&mut self, target: &mut [u8]) -> std::io::Result<usize> {
+        let t_len = target.len();
+        let mut t_pos = 0;
+        // read from buffer
+        if let Some(buf) = self.buf.as_ref() {
+            let copy_size = std::cmp::min(t_len, buf.len() - self.pos);
+            target[..copy_size].copy_from_slice(&buf[self.pos..self.pos + copy_size]);
+            self.pos += copy_size;
+            if self.pos == buf.len() {
+                self.buf = None;
+                self.pos = 0;
+            }
+            if copy_size == t_len {
+                return Ok(t_len);
+            }
+            t_pos += copy_size;
+        }
+
+        // read from channel
+        while let Ok(data) = self.receiver.recv() {
+            // debug!(
+            //     "t_pos: {}, t_len: {}, data.len(): {}",
+            //     t_pos,
+            //     t_len,
+            //     data.len()
+            // );
+            let copy_size = std::cmp::min(t_len - t_pos, data.len());
+            target[t_pos..t_pos + copy_size].copy_from_slice(&data[..copy_size]);
+            t_pos += copy_size;
+            if copy_size == data.len() {
+                continue;
+            }
+            // store buffer before early exit
+            // assert!(copy_size < res_data.len());
+            self.buf = Some(data);
+            self.pos = copy_size;
+            break;
+        }
+        if t_pos < t_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("read size is too big! {}, {}", t_pos, t_len),
+            ));
+        }
+        Ok(t_len)
     }
 }

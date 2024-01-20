@@ -17,6 +17,8 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use storage::cache::BlobCCI;
+use storage::device::BlobRange;
 use thiserror::Error;
 
 use anyhow::{bail, ensure};
@@ -962,6 +964,29 @@ impl RafsSuper {
         }
     }
 
+    pub fn stream_prefetch_files(
+        &self,
+        device: &BlobDevice,
+        r: &mut RafsIoReader,
+        root_ino: Inode,
+        files: Option<Vec<Inode>>,
+    ) -> RafsResult<bool> {
+        // Try to prefetch files according to the list specified by the `--prefetch-files` option.
+        if let Some(_files) = files {
+            unimplemented!();
+        } else if self.meta.is_v5() {
+            Err(RafsError::Prefetch(
+                "Unsupported filesystem version, prefetch disabled".to_string(),
+            ))
+        } else if self.meta.is_v6() {
+            self.stream_prefetch_data_v6(device, r, root_ino)
+        } else {
+            Err(RafsError::Prefetch(
+                "Unknown filesystem version, prefetch disabled".to_string(),
+            ))
+        }
+    }
+
     #[inline]
     fn prefetch_inode(
         device: &BlobDevice,
@@ -1016,6 +1041,124 @@ impl RafsSuper {
             // for symlink size. For rafs v6, symlink size is also represented by i_size.
             // So we have to restrain the condition here.
             Self::prefetch_inode(device, &inode, state, hardlinks, fetcher)?;
+        }
+
+        Ok(())
+    }
+
+    fn get_inode_ranges(
+        &self,
+        ino: u64,
+        hardlinks: &mut HashSet<u64>,
+        fetched_ranges: &mut HashMap<u32, HashSet<u64>>,
+        device: &BlobDevice,
+        blob_ccis: &[BlobCCI],
+    ) -> Result<Vec<BlobRange>> {
+        let inode = self
+            .superblock
+            .get_inode(ino, self.validate_digest)
+            .map_err(|_e| enoent!("Can't find inode"))?;
+
+        let mut ranges = Vec::new();
+
+        if inode.is_dir() {
+            let mut descendants = Vec::new();
+            let _ = inode.collect_descendants_inodes(&mut descendants)?;
+            for i in descendants.iter() {
+                Self::get_inode_ranges_inner(
+                    &i,
+                    hardlinks,
+                    fetched_ranges,
+                    &mut ranges,
+                    device,
+                    blob_ccis,
+                )?;
+            }
+        } else if !inode.is_empty_size() && inode.is_reg() {
+            // An empty regular file will also be packed into nydus image,
+            // then it has a size of zero.
+            // Moreover, for rafs v5, symlink has size of zero but non-zero size
+            // for symlink size. For rafs v6, symlink size is also represented by i_size.
+            // So we have to restrain the condition here.
+            // debug!("CMDebug: 2");
+
+            Self::get_inode_ranges_inner(
+                &inode,
+                hardlinks,
+                fetched_ranges,
+                &mut ranges,
+                device,
+                blob_ccis,
+            )?;
+        }
+
+        Ok(ranges)
+    }
+
+    #[inline]
+    fn get_inode_ranges_inner(
+        inode: &Arc<dyn RafsInode>,
+        hardlinks: &mut HashSet<u64>,
+        fetched_ranges: &mut HashMap<u32, HashSet<u64>>,
+        ranges: &mut Vec<BlobRange>,
+        device: &BlobDevice,
+        blob_ccis: &[BlobCCI],
+    ) -> Result<()> {
+        // Check for duplicated hardlinks.
+        if inode.is_hardlink() {
+            if hardlinks.contains(&inode.ino()) {
+                return Ok(());
+            } else {
+                hardlinks.insert(inode.ino());
+            }
+        }
+
+        let mut bi_vecs = inode.alloc_bio_vecs(device, 0, inode.size() as usize, false)?;
+        for bi_vec in &mut bi_vecs {
+            //每个bi_vec是单个blob，但里面可能不连续，需要对里面的每个desc判断是否能合并
+            let mut i = 0;
+            'vec: while i < bi_vec.len() {
+                let blob_idx = bi_vec.blob_index();
+                let ci = &bi_vec.bi_vec[i].chunkinfo;
+
+                let (c_offset, c_size) = if ci.is_batch() {
+                    blob_ccis[blob_idx as usize].get_compressed_info(ci.as_ref())?
+                } else {
+                    (ci.compressed_offset(), ci.compressed_size())
+                };
+                let c_end = c_offset + c_size as u64;
+
+                // 判断这个chunk / batch chunk是否已经下载过
+                let fetched_blob_ranges = fetched_ranges.entry(blob_idx).or_insert(HashSet::new());
+                if fetched_blob_ranges.contains(&c_offset) {
+                    i += 1;
+                    continue;
+                }
+
+                // 尝试merge 进已有的range
+                // TODO:如果chunk在同一个blob，但是乱序的，是否存在这种情况，如何处理
+                for r in &mut *ranges {
+                    //先匹配blob
+                    if r.blob_idx == blob_idx {
+                        // 再看is_continuous
+                        // TODO:对特殊格式进行处理
+                        if r.end == c_offset {
+                            r.end = c_end;
+                            fetched_blob_ranges.insert(c_offset);
+                            i += 1;
+                            continue 'vec;
+                        }
+                    }
+                }
+                // 放到一个新range里
+                ranges.push(BlobRange {
+                    blob_idx: bi_vec.blob_index(),
+                    offset: c_offset,
+                    end: c_end,
+                });
+                fetched_blob_ranges.insert(c_offset);
+                i += 1;
+            }
         }
 
         Ok(())
