@@ -846,7 +846,7 @@ impl StreamChunkIter {
             chunks: Vec::new(),
             p_cur: 0,
             l_cur: 0,
-            ext_end: 0,
+            ext_end: f_offset,
             entry,
             meta,
             min_pending_size,
@@ -869,12 +869,7 @@ impl StreamChunkIter {
 
         let mut chunks_new = self
             .meta
-            .get_chunks_compressed(
-                self.f_offset + self.ext_end,
-                size_to_extend,
-                0,
-                self.prefetch,
-            )
+            .get_chunks_compressed(self.ext_end, size_to_extend, 0, self.prefetch)
             .unwrap();
 
         self.chunks.append(&mut chunks_new);
