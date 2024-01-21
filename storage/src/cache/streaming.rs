@@ -110,7 +110,7 @@ impl StreamPrefetchMgr {
             if r.end - r.offset < MIN_SUBMITTALBE_TASK_SIZE {
                 waiting.buf.insert(end_offset, r);
             } else {
-                self.send_msg(&r, &waiting.blobs)?;
+                self.merge_and_send_msg(end_offset, &r, waiting)?;
             }
         }
         Ok(())
@@ -157,7 +157,39 @@ impl StreamPrefetchMgr {
         Ok(())
     }
 
-    #[inline]
+    // 递归式地merge将要send的range
+    // 直到该range无法merge，则send
+    fn merge_and_send_msg(
+        &self,
+        send_e_of: u64,
+        send: &BlobRange,
+        waiting: &mut PrefetchBuffer,
+    ) -> Result<()> {
+        for (old_e_of, old) in waiting.buf.iter() {
+            let (prev_e_of, r_prev, r_next) = if *old_e_of < send_e_of {
+                (*old_e_of, old, send)
+            } else {
+                (send_e_of, send, old)
+            };
+            if let Some((added_size, merged)) = r_prev.try_merge(&r_next, MAX_MERGE_GAP) {
+                // remove old and add merged
+                let old_e_of = *old_e_of;
+                waiting.buf.remove(&old_e_of);
+                // 在原先的end_processed基础上增加
+                let new_e_of = prev_e_of + added_size;
+
+                warn!(
+                    "CMDebug!!!!!!!!!!: merge_and_send_msg, new_e_of: {}",
+                    new_e_of
+                );
+                // 尝试进一步merge
+                return self.merge_and_send_msg(new_e_of, &merged, waiting);
+            }
+        }
+        // merge失败，直接send原始的range
+        self.send_msg(send, &waiting.blobs)
+    }
+
     fn send_msg(&self, r: &BlobRange, blobs: &[Arc<dyn BlobCache>]) -> Result<()> {
         let msg = StreamingPrefetchMessage::new_blob_prefetch(
             blobs[r.blob_idx as usize].clone(),
@@ -182,12 +214,15 @@ impl StreamPrefetchMgr {
     // 清空等待队列，提交全部任务
     pub fn flush_waiting_queue(&self) -> Result<()> {
         let mut waiting = self.waiting.lock().unwrap();
-        let mut buf = std::mem::take(&mut waiting.buf);
+        // let mut buf = std::mem::take(&mut waiting.buf);
 
-        for r in buf.values() {
-            self.send_msg(r, &waiting.blobs)?;
+        let end_offsets = waiting.buf.keys().cloned().collect::<Vec<_>>();
+        for end_offset in end_offsets {
+            if let Some(r) = waiting.buf.remove(&end_offset) {
+                self.merge_and_send_msg(end_offset, &r, &mut waiting)?;
+            }
         }
-        buf.clear();
+        assert!(waiting.buf.is_empty());
 
         Ok(())
     }
