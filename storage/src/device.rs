@@ -1060,6 +1060,37 @@ pub struct BlobRange {
     pub end: u64,
 }
 
+impl BlobRange {
+    // 尝试合并两个BlobRange，如果合并成功，返回合并后的BlobRange，否则返回None
+    // 还返回合并r_new所增加的大小（不计算重复区域）
+    pub fn try_merge(&self, r_new: &BlobRange, max_gap: u64) -> Option<(u64, Self)> {
+        if self.blob_idx != r_new.blob_idx {
+            return None;
+        }
+
+        // 确保 r1 总是在 r2 的左侧
+        let (l, r) = if self.offset <= r_new.offset {
+            (self, r_new)
+        } else {
+            (r_new, self)
+        };
+
+        if l.end + max_gap < r.offset {
+            // cannot merge
+            None
+        } else {
+            // can merge
+            let merged = BlobRange {
+                blob_idx: r.blob_idx,
+                offset: l.offset,
+                end: l.end.max(r.end),
+            };
+            let added_size = merged.end - merged.offset - self.end + self.offset;
+            Some((added_size, merged))
+        }
+    }
+}
+
 impl Debug for BlobRange {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         f.debug_struct("BlobRange")
