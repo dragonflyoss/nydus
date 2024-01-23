@@ -417,7 +417,7 @@ impl DaemonController {
     }
 
     /// Notify controller shutdown
-    pub fn notify_shutdown(&self){
+    pub fn notify_shutdown(&self) {
         // Marking exiting state.
         self.active.store(false, Ordering::Release);
         // Signal the `run_loop()` working thread to exit.
@@ -426,7 +426,6 @@ impl DaemonController {
 
     /// Shutdown all services managed by the controller.
     pub fn shutdown(&self) {
-
         let daemon = self.daemon.lock().unwrap().take();
         if let Some(d) = daemon {
             if let Err(e) = d.trigger_stop() {

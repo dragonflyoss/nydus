@@ -215,11 +215,7 @@ impl FileCacheEntry {
         );
 
         // Set cache file to its expected size.
-        let suffix = if mgr.cache_raw_data {
-            ".blob.raw"
-        } else {
-            ".blob.data"
-        };
+        let suffix = if mgr.cache_raw_data { ".blob.raw" } else { "" };
         let blob_data_file_path = blob_file_path.clone() + suffix;
         let file = OpenOptions::new()
             .create(true)
