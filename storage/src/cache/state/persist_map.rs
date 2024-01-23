@@ -111,36 +111,33 @@ impl PersistMap {
         }
 
         let header = filemap.get_mut::<Header>(0)?;
-        let mut not_ready_count = chunk_count;
-        if header.version >= 1 {
-            if header.magic2 != MAGIC2 {
-                return Err(einval!(format!(
-                    "invalid blob chunk_map file header: {:?}",
-                    filename
-                )));
-            }
-            if header.all_ready == MAGIC_ALL_READY {
-                not_ready_count = 0;
-            } else if new_content {
-                not_ready_count = chunk_count;
-            } else {
-                let mut ready_count = 0;
-                for idx in HEADER_SIZE..expected_size as usize {
-                    let current = filemap.get_ref::<AtomicU8>(idx)?;
-                    let val = current.load(Ordering::Acquire);
-                    ready_count += val.count_ones() as u32;
-                }
-
-                if ready_count >= chunk_count {
-                    let header = filemap.get_mut::<Header>(0)?;
-                    header.all_ready = MAGIC_ALL_READY;
-                    let _ = file.sync_all();
-                    not_ready_count = 0;
-                } else {
-                    not_ready_count = chunk_count - ready_count;
-                }
-            }
+        if header.version >= 1 && header.magic2 != MAGIC2 {
+            return Err(einval!(format!(
+                "invalid blob chunk_map file header: {:?}",
+                filename
+            )));
         }
+        let not_ready_count = if new_content {
+            chunk_count
+        } else if header.version >= 1 && header.all_ready == MAGIC_ALL_READY {
+            0
+        } else {
+            let mut ready_count = 0;
+            for idx in HEADER_SIZE..expected_size as usize {
+                let current = filemap.get_ref::<AtomicU8>(idx)?;
+                let val = current.load(Ordering::Acquire);
+                ready_count += val.count_ones() as u32;
+            }
+
+            if ready_count >= chunk_count {
+                let header = filemap.get_mut::<Header>(0)?;
+                header.all_ready = MAGIC_ALL_READY;
+                let _ = file.sync_all();
+                0
+            } else {
+                chunk_count - ready_count
+            }
+        };
 
         readahead(file.as_raw_fd(), 0, expected_size);
         if !persist {
