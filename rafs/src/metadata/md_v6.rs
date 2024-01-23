@@ -178,7 +178,7 @@ impl RafsSuper {
         // debug!("prefetch table contents {:?}", prefetch_table);
 
         let mut hardlinks: HashSet<u64> = HashSet::new();
-        let mut fetched_ranges: HashMap<u32, HashSet<u64>> = HashMap::new();
+        let mut fetched_ranges: HashMap<u32, HashSet<u32>> = HashMap::new();
         let blob_ccis = device.get_all_blob_cci();
 
         let mut found_root_inode = false;

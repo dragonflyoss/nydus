@@ -18,7 +18,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use storage::cache::BlobCCI;
-use storage::device::BlobRange;
+use storage::device::{BlobIoDesc, BlobRange};
 use thiserror::Error;
 
 use anyhow::{bail, ensure};
@@ -1050,7 +1050,7 @@ impl RafsSuper {
         &self,
         ino: u64,
         hardlinks: &mut HashSet<u64>,
-        fetched_ranges: &mut HashMap<u32, HashSet<u64>>,
+        fetched_ranges: &mut HashMap<u32, HashSet<u32>>,
         device: &BlobDevice,
         blob_ccis: &[BlobCCI],
     ) -> Result<Vec<BlobRange>> {
@@ -1099,7 +1099,7 @@ impl RafsSuper {
     fn get_inode_ranges_inner(
         inode: &Arc<dyn RafsInode>,
         hardlinks: &mut HashSet<u64>,
-        fetched_ranges: &mut HashMap<u32, HashSet<u64>>,
+        fetched_ranges: &mut HashMap<u32, HashSet<u32>>,
         ranges: &mut Vec<BlobRange>,
         device: &BlobDevice,
         blob_ccis: &[BlobCCI],
@@ -1115,23 +1115,20 @@ impl RafsSuper {
 
         let mut bi_vecs = inode.alloc_bio_vecs(device, 0, inode.size() as usize, false)?;
         for bi_vec in &mut bi_vecs {
-            //每个bi_vec是单个blob，但里面可能不连续，需要对里面的每个desc判断是否能合并
-            let mut i = 0;
-            'vec: while i < bi_vec.len() {
-                let blob_idx = bi_vec.blob_index();
-                let ci = &bi_vec.bi_vec[i].chunkinfo;
+            //每个bi_vecs是单个blob，但里面可能不连续，需要对里面的每个desc判断是否能合并
 
-                let (c_offset, c_size) = if ci.is_batch() {
-                    blob_ccis[blob_idx as usize].get_compressed_info(ci.as_ref())?
-                } else {
-                    (ci.compressed_offset(), ci.compressed_size())
-                };
+            let blob_idx = bi_vec.blob_index();
+
+            'vec: for BlobIoDesc { chunkinfo: ci, .. } in &mut bi_vec.bi_vec {
+                let ci_id = ci.id();
+
+                let (c_offset, c_size) =
+                    blob_ccis[blob_idx as usize].get_compressed_info(ci.as_ref())?;
                 let c_end = c_offset + c_size as u64;
 
                 // 判断这个chunk / batch chunk是否已经下载过
                 let fetched_blob_ranges = fetched_ranges.entry(blob_idx).or_insert(HashSet::new());
-                if fetched_blob_ranges.contains(&c_offset) {
-                    i += 1;
+                if fetched_blob_ranges.contains(&ci_id) {
                     continue;
                 }
 
@@ -1139,25 +1136,31 @@ impl RafsSuper {
                 // TODO:如果chunk在同一个blob，但是乱序的，是否存在这种情况，如何处理
                 for r in &mut *ranges {
                     //先匹配blob
-                    if r.blob_idx == blob_idx {
-                        // 再看is_continuous
-                        // TODO:对特殊格式进行处理
-                        if r.end == c_offset {
-                            r.end = c_end;
-                            fetched_blob_ranges.insert(c_offset);
-                            i += 1;
-                            continue 'vec;
-                        }
+                    if r.blob_idx != blob_idx {
+                        continue;
+                    }
+
+                    // 再判断是否重复(for batch chunks)
+                    if r.end == c_end {
+                        //说明对应的batch chunk已经添加过了
+                        continue 'vec;
+                    }
+
+                    // 再判断is_continuous
+                    // TODO:进一步对特殊格式进行处理
+                    if r.end == c_offset {
+                        r.end = c_end;
+                        fetched_blob_ranges.insert(ci_id);
+                        continue 'vec;
                     }
                 }
                 // 放到一个新range里
                 ranges.push(BlobRange {
-                    blob_idx: bi_vec.blob_index(),
+                    blob_idx,
                     offset: c_offset,
                     end: c_end,
                 });
-                fetched_blob_ranges.insert(c_offset);
-                i += 1;
+                fetched_blob_ranges.insert(ci_id);
             }
         }
 
