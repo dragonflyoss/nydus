@@ -1334,6 +1334,8 @@ pub struct BuildContext {
 
     /// Whether is chunkdict.
     pub is_chunkdict_generated: bool,
+    /// Nydus attributes for different build behavior.
+    pub attributes: HashMap<PathBuf, u32>,
 }
 
 impl BuildContext {
@@ -1353,6 +1355,7 @@ impl BuildContext {
         blob_inline_meta: bool,
         features: Features,
         encrypt: bool,
+        attributes: HashMap<PathBuf, u32>,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
@@ -1403,6 +1406,8 @@ impl BuildContext {
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_generator: None,
             is_chunkdict_generated: false,
+
+            attributes,
         }
     }
 
@@ -1458,6 +1463,8 @@ impl Default for BuildContext {
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_generator: None,
             is_chunkdict_generated: false,
+
+            attributes: HashMap::new(),
         }
     }
 }

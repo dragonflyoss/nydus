@@ -936,6 +936,7 @@ mod tests {
             false,
             Features::new(),
             false,
+            HashMap::new(),
         );
         ctx.fs_version = RafsVersion::V6;
         ctx.conversion_type = ConversionType::EStargzToRafs;

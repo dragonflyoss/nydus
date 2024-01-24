@@ -17,6 +17,7 @@ use crate::deduplicate::{
     check_bootstrap_versions_consistency, update_ctx_from_parent_bootstrap, Deduplicate,
     SqliteDatabase,
 };
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
@@ -31,11 +32,10 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage, BlobCacheGenerator,
+    attributes::Attribute, parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage, BlobCacheGenerator,
     BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder,
-    ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature, Features,
-    Generator, HashChunkDict, Merger, OptimizePrefetch, Prefetch, PrefetchPolicy, StargzBuilder,
-    TarballBuilder, Tree, TreeNode, WhiteoutSpec,
+    ConversionType, DirectoryBuilder, Feature, Features, HashChunkDict, Merger, Prefetch,
+    PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec, ChunkdictChunkInfo, ChunkdictBlobInfo, Generator, Tree, TreeNode, OptimizePrefetch,
 };
 
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
@@ -387,6 +387,13 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .conflicts_with("blob")
                         .conflicts_with("blob-dir")
                         .conflicts_with("compressor")
+                        .required(false)
+                )
+                .arg(
+                    Arg::new("attributes")
+                        .long("attributes")
+                        .help("Nydus attributes file path (usually .nydusattributes file)")
+                        .value_parser(clap::value_parser!(PathBuf))
                         .required(false)
                 )
         );
@@ -1190,6 +1197,11 @@ impl Command {
             compressor = compress::Algorithm::None;
         }
 
+        let attributes = if let Some(attributes_path) = &matches.get_one::<PathBuf>("attributes") {
+            Attribute::parse(attributes_path)?
+        } else {
+            HashMap::new()
+        };
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
@@ -1205,6 +1217,7 @@ impl Command {
             blob_inline_meta,
             features,
             encrypt,
+            attributes,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);

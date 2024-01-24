@@ -665,6 +665,8 @@ impl Builder for TarballBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::{ArtifactStorage, Features, Prefetch, WhiteoutSpec};
     use nydus_utils::{compress, digest};
@@ -691,6 +693,7 @@ mod tests {
             false,
             Features::new(),
             false,
+            HashMap::new(),
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);
@@ -723,6 +726,7 @@ mod tests {
             false,
             Features::new(),
             true,
+            HashMap::new(),
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);

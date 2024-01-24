@@ -27,7 +27,7 @@ nydus-api = { version = "0.3", path = "../api" }
 nydus-rafs = { version = "0.3", path = "../rafs" }
 nydus-storage = { version = "0.6", path = "../storage", features = ["backend-localfs"] }
 nydus-utils = { version = "0.4", path = "../utils" }
-gix-attributes = "0.22.0"
+gix-attributes = "0.24.0"
 
 [package.metadata.docs.rs]
 all-features = true
