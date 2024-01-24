@@ -81,6 +81,8 @@ bitflags! {
         const IS_CHUNKDICT_GENERATED = 0x0000_0200;
         /// Blob is generated with separated prefetch files.
         const IS_SEPARATED_WITH_PREFETCH_FILES = 0x0000_0400;
+        /// Blob is stored in an external storage backend.
+        const EXTERNAL = 0x0000_0800;
     }
 }
 

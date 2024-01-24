@@ -12,7 +12,7 @@ use crate::core::context::{Artifact, NoopArtifactWriter};
 
 use super::core::blob::Blob;
 use super::core::context::{
-    ArtifactWriter, BlobManager, BootstrapContext, BootstrapManager, BuildContext, BuildOutput,
+    ArtifactWriter, BlobManager, BootstrapManager, BuildContext, BuildOutput,
 };
 use super::core::node::Node;
 use super::{build_bootstrap, dump_bootstrap, finalize_blob, Builder, Overlay, Tree, TreeNode};
@@ -29,14 +29,14 @@ impl FilesystemTreeBuilder {
     fn load_children(
         &self,
         ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
         parent: &TreeNode,
         layer_idx: u16,
-    ) -> Result<Vec<Tree>> {
-        let mut result = Vec::new();
+    ) -> Result<(Vec<Tree>, Vec<Tree>)> {
+        let mut trees = Vec::new();
+        let mut external_trees = Vec::new();
         let parent = parent.borrow();
         if !parent.is_dir() {
-            return Ok(result);
+            return Ok((trees.clone(), external_trees));
         }
 
         let children = fs::read_dir(parent.path())
@@ -46,6 +46,7 @@ impl FilesystemTreeBuilder {
         event_tracer!("load_from_directory", +children.len());
         for child in children {
             let path = child.path();
+            let target = Node::generate_target(&path, &ctx.source_path);
             let mut child = Node::from_fs_object(
                 ctx.fs_version,
                 ctx.source_path.clone(),
@@ -60,24 +61,49 @@ impl FilesystemTreeBuilder {
 
             // as per OCI spec, whiteout file should not be present within final image
             // or filesystem, only existed in layers.
-            if !bootstrap_ctx.layered
+            if layer_idx == 0
                 && child.whiteout_type(ctx.whiteout_spec).is_some()
                 && !child.is_overlayfs_opaque(ctx.whiteout_spec)
             {
                 continue;
             }
 
-            let mut child = Tree::new(child);
-            child.children = self.load_children(ctx, bootstrap_ctx, &child.node, layer_idx)?;
+            let (mut child, mut external_child) = (Tree::new(child.clone()), Tree::new(child));
+
+            let external = ctx.attributes.get(&target).is_some();
+            if external {
+                info!("ignore external file data: {:?}", path);
+            }
+
+            let (child_children, external_children) =
+                self.load_children(ctx, &child.node, layer_idx)?;
+
+            child.children = child_children;
+            external_child.children = external_children;
             child
                 .borrow_mut_node()
                 .v5_set_dir_size(ctx.fs_version, &child.children);
-            result.push(child);
+            external_child
+                .borrow_mut_node()
+                .v5_set_dir_size(ctx.fs_version, &external_child.children);
+
+            if external {
+                external_trees.push(external_child);
+            } else {
+                trees.push(child.clone());
+                for (path, _) in &ctx.attributes {
+                    if path.starts_with(&target) {
+                        external_trees.push(external_child);
+                        break;
+                    }
+                }
+            };
         }
 
-        result.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+        trees.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+        external_trees.sort_unstable_by(|a, b| a.name().cmp(b.name()));
 
-        Ok(result)
+        Ok((trees, external_trees))
     }
 }
 
@@ -90,12 +116,7 @@ impl DirectoryBuilder {
     }
 
     /// Build node tree from a filesystem directory
-    fn build_tree(
-        &mut self,
-        ctx: &mut BuildContext,
-        bootstrap_ctx: &mut BootstrapContext,
-        layer_idx: u16,
-    ) -> Result<Tree> {
+    fn build_tree(&mut self, ctx: &mut BuildContext, layer_idx: u16) -> Result<(Tree, Tree)> {
         let node = Node::from_fs_object(
             ctx.fs_version,
             ctx.source_path.clone(),
@@ -105,17 +126,23 @@ impl DirectoryBuilder {
             ctx.explicit_uidgid,
             true,
         )?;
-        let mut tree = Tree::new(node);
+        let mut tree = Tree::new(node.clone());
+        let mut external_tree = Tree::new(node);
         let tree_builder = FilesystemTreeBuilder::new();
 
-        tree.children = timing_tracer!(
-            { tree_builder.load_children(ctx, bootstrap_ctx, &tree.node, layer_idx) },
+        let (tree_children, external_tree_children) = timing_tracer!(
+            { tree_builder.load_children(ctx, &tree.node, layer_idx) },
             "load_from_directory"
         )?;
+        tree.children = tree_children;
+        external_tree.children = external_tree_children;
         tree.borrow_mut_node()
             .v5_set_dir_size(ctx.fs_version, &tree.children);
+        external_tree
+            .borrow_mut_node()
+            .v5_set_dir_size(ctx.fs_version, &external_tree.children);
 
-        Ok(tree)
+        Ok((tree, external_tree))
     }
 }
 
@@ -126,27 +153,25 @@ impl Builder for DirectoryBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
     ) -> Result<BuildOutput> {
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
-        let layer_idx = u16::from(bootstrap_ctx.layered);
-        let mut blob_writer: Box<dyn Artifact> = if let Some(blob_stor) = ctx.blob_storage.clone() {
-            Box::new(ArtifactWriter::new(blob_stor)?)
-        } else {
-            Box::<NoopArtifactWriter>::default()
-        };
+        let layer_idx = u16::from(bootstrap_mgr.f_parent_path.is_some());
 
         // Scan source directory to build upper layer tree.
-        let tree = timing_tracer!(
-            { self.build_tree(ctx, &mut bootstrap_ctx, layer_idx) },
-            "build_tree"
-        )?;
+        let (tree, _external_tree) =
+            timing_tracer!({ self.build_tree(ctx, layer_idx) }, "build_tree")?;
 
         // Build bootstrap
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let mut bootstrap = timing_tracer!(
             { build_bootstrap(ctx, bootstrap_mgr, &mut bootstrap_ctx, blob_mgr, tree) },
             "build_bootstrap"
         )?;
 
         // Dump blob file
+        let mut blob_writer: Box<dyn Artifact> = if let Some(blob_stor) = ctx.blob_storage.clone() {
+            Box::new(ArtifactWriter::new(blob_stor)?)
+        } else {
+            Box::<NoopArtifactWriter>::default()
+        };
         timing_tracer!(
             { Blob::dump(ctx, blob_mgr, blob_writer.as_mut()) },
             "dump_blob"
