@@ -74,7 +74,7 @@ pub trait ChunkMap: Any + Send + Sync {
     ///
     /// The function returns:
     /// - `Err(Timeout)` waiting for inflight backend IO timeouts.
-    /// - `Ok(true)` if the the chunk is ready.
+    /// - `Ok(true)` if the chunk is ready.
     /// - `Ok(false)` marks the chunk as pending, either set_ready_and_clear_pending() or
     ///   clear_pending() must be called to clear the pending state.
     fn check_ready_and_mark_pending(&self, _chunk: &dyn BlobChunkInfo) -> StorageResult<bool> {
@@ -83,7 +83,16 @@ pub trait ChunkMap: Any + Send + Sync {
 
     /// Set the chunk to ready for use and clear the pending state.
     fn set_ready_and_clear_pending(&self, _chunk: &dyn BlobChunkInfo) -> Result<()> {
-        panic!("no support of check_ready_and_mark_pending()");
+        panic!("no support of set_ready_and_clear_pending()");
+    }
+
+    /// Try to mark the chunk to pending if the chunk is not ready or pending yet.
+    ///
+    /// The function returns:
+    /// - `Ok(true)` if the chunk is successfully turned into pending.
+    /// - `Ok(false)` if the chunk is pending or ready already.
+    fn try_mark_pending(&self, _chunk: &dyn BlobChunkInfo) -> StorageResult<bool> {
+        panic!("no support of try_mark_pending()");
     }
 
     /// Clear the pending state of the chunk.

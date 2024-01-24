@@ -475,12 +475,17 @@ impl FileCacheEntry {
         processed: &mut u64,
         reader: &mut Box<dyn Read>,
     ) -> Result<()> {
+        let mut chunk_buf = vec![0u8; c_size as usize];
+        reader.read_exact(chunk_buf.as_mut_slice())?;
+
+        // 如果没有chunk info，那就跳过解压
+        if infos.is_empty() {
+            return Ok(());
+        }
+
         let c_offset = infos[0].compressed_offset();
 
         *info_offset += c_size as u64;
-
-        let mut chunk_buf = vec![0u8; c_size as usize];
-        reader.read_exact(chunk_buf.as_mut_slice())?;
 
         let mut d_bufs = ChunkDecompressState::new(
             c_offset,
@@ -492,7 +497,6 @@ impl FileCacheEntry {
             let d_buf = d_bufs.next().unwrap().unwrap();
             entry.persist_chunk_data(info.as_ref(), &d_buf);
         }
-        // todo:这个失败后的重试逻辑还存在问题
         *processed += c_size as u64;
 
         Ok(())
@@ -900,10 +904,7 @@ impl StreamChunkIter {
         if self.p_cur > self.l_cur {
             // 先追上p_cur
             for i in &self.chunks[self.l_cur..self.p_cur] {
-                let _ = self
-                    .entry
-                    .chunk_map
-                    .check_ready_and_mark_pending(i.as_ref());
+                let _ = self.entry.chunk_map.try_mark_pending(i.as_ref());
             }
             self.l_cur = self.p_cur;
         }
@@ -931,6 +932,26 @@ impl StreamChunkIter {
             if c_end >= processed_end && c_end - processed_end >= self.min_pending_size {
                 return;
             }
+        }
+    }
+
+    fn strip_ready_chunks(
+        &self,
+        infos: Vec<Arc<dyn BlobChunkInfo>>,
+    ) -> Vec<Arc<dyn BlobChunkInfo>> {
+        // 只有batch chunk会有多个chunk info，其他情况都是单个chunk info
+        let mut all_ready = true;
+        for i in &infos {
+            if !self.entry.chunk_map.is_ready(i.as_ref()).unwrap() {
+                all_ready = false;
+                break;
+            }
+        }
+
+        if all_ready {
+            Vec::new()
+        } else {
+            infos
         }
     }
 }
@@ -963,7 +984,7 @@ impl Iterator for StreamChunkIter {
                 self.p_cur += 1;
 
                 self.mark_pending(p_end);
-                return Some((items, c_size));
+                return Some((self.strip_ready_chunks(items), c_size));
             }
 
             // is batch
@@ -990,7 +1011,7 @@ impl Iterator for StreamChunkIter {
 
             if batch_d_size == in_batch_end {
                 self.mark_pending(p_end);
-                return Some((items, batch_c_size));
+                return Some((self.strip_ready_chunks(items), batch_c_size));
             }
             // not ended, continue
         }
