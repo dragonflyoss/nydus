@@ -1293,6 +1293,9 @@ pub struct BuildContext {
     pub configuration: Arc<ConfigV2>,
     /// Generate the blob cache and blob meta
     pub blob_cache_generator: Option<BlobCacheGenerator>,
+
+    /// Nydus attributes for different build behavior.
+    pub attributes: HashMap<PathBuf, u32>,
 }
 
 impl BuildContext {
@@ -1312,6 +1315,7 @@ impl BuildContext {
         blob_inline_meta: bool,
         features: Features,
         encrypt: bool,
+        attributes: HashMap<PathBuf, u32>,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
@@ -1361,6 +1365,8 @@ impl BuildContext {
             features,
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_generator: None,
+
+            attributes,
         }
     }
 
@@ -1411,6 +1417,8 @@ impl Default for BuildContext {
             features: Features::new(),
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_generator: None,
+
+            attributes: HashMap::new(),
         }
     }
 }
