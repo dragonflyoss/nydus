@@ -138,7 +138,7 @@ pub enum ArtifactStorage {
     // Won't rename user's specification
     SingleFile(PathBuf),
     // Will rename it from tmp file as user didn't specify a name.
-    FileDir(PathBuf),
+    FileDir((PathBuf, String)),
 }
 
 impl ArtifactStorage {
@@ -146,7 +146,16 @@ impl ArtifactStorage {
     pub fn display(&self) -> Display {
         match self {
             ArtifactStorage::SingleFile(p) => p.display(),
-            ArtifactStorage::FileDir(p) => p.display(),
+            ArtifactStorage::FileDir(p) => p.0.display(),
+        }
+    }
+
+    pub fn add_suffix(&mut self, suffix: &str) {
+        match self {
+            ArtifactStorage::SingleFile(p) => {
+                p.set_extension(suffix);
+            }
+            ArtifactStorage::FileDir(p) => p.1 = String::from(suffix),
         }
     }
 }
@@ -335,8 +344,8 @@ impl ArtifactWriter {
             ArtifactStorage::FileDir(ref p) => {
                 // Better we can use open(2) O_TMPFILE, but for compatibility sake, we delay this job.
                 // TODO: Blob dir existence?
-                let tmp = TempFile::new_in(p)
-                    .with_context(|| format!("failed to create temp file in {}", p.display()))?;
+                let tmp = TempFile::new_in(&p.0)
+                    .with_context(|| format!("failed to create temp file in {}", p.0.display()))?;
                 let tmp2 = tmp.as_file().try_clone()?;
                 let reader = OpenOptions::new()
                     .read(true)
@@ -368,7 +377,8 @@ impl Artifact for ArtifactWriter {
 
         if let Some(n) = name {
             if let ArtifactStorage::FileDir(s) = &self.storage {
-                let path = Path::new(s).join(n);
+                let mut path = Path::new(&s.0).join(n);
+                path.set_extension(&s.1);
                 if !path.exists() {
                     if let Some(tmp_file) = &self.tmp_file {
                         rename(tmp_file.as_path(), &path).with_context(|| {
@@ -509,6 +519,9 @@ pub struct BlobContext {
     /// Cipher to encrypt the RAFS blobs.
     pub cipher_object: Arc<Cipher>,
     pub cipher_ctx: Option<CipherContext>,
+
+    /// Whether the blob is from external storage backend.
+    pub external: bool,
 }
 
 impl BlobContext {
@@ -523,6 +536,7 @@ impl BlobContext {
         cipher: crypt::Algorithm,
         cipher_object: Arc<Cipher>,
         cipher_ctx: Option<CipherContext>,
+        external: bool,
     ) -> Self {
         let blob_meta_info = if features.contains(BlobFeatures::CHUNK_INFO_V2) {
             BlobMetaChunkArray::new_v2()
@@ -559,6 +573,8 @@ impl BlobContext {
             entry_list: toc::TocEntryList::new(),
             cipher_object,
             cipher_ctx,
+
+            external,
         };
 
         blob_ctx
@@ -597,6 +613,10 @@ impl BlobContext {
         blob_ctx
             .blob_meta_header
             .set_encrypted(features.contains(BlobFeatures::ENCRYPTED));
+        println!("EXTERNAL {}", features.contains(BlobFeatures::EXTERNAL));
+        blob_ctx
+            .blob_meta_header
+            .set_external(features.contains(BlobFeatures::EXTERNAL));
 
         blob_ctx
     }
@@ -696,6 +716,7 @@ impl BlobContext {
             cipher,
             cipher_object,
             cipher_ctx,
+            false,
         );
         blob_ctx.blob_prefetch_size = blob.prefetch_size();
         blob_ctx.chunk_count = blob.chunk_count();
@@ -882,20 +903,23 @@ pub struct BlobManager {
     /// Used for chunk data de-duplication between layers (with `--parent-bootstrap`)
     /// or within layer (with `--inline-bootstrap`).
     pub(crate) layered_chunk_dict: HashChunkDict,
+    // Whether the managed blobs is from external storage backend.
+    pub external: bool,
 }
 
 impl BlobManager {
     /// Create a new instance of [BlobManager].
-    pub fn new(digester: digest::Algorithm) -> Self {
+    pub fn new(digester: digest::Algorithm, external: bool) -> Self {
         Self {
             blobs: Vec::new(),
             current_blob_index: None,
             global_chunk_dict: Arc::new(()),
             layered_chunk_dict: HashChunkDict::new(digester),
+            external,
         }
     }
 
-    fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {
+    fn new_blob_ctx(&self, ctx: &BuildContext) -> Result<BlobContext> {
         let (cipher_object, cipher_ctx) = match ctx.cipher {
             crypt::Algorithm::None => (Default::default(), None),
             crypt::Algorithm::Aes128Xts => {
@@ -914,15 +938,22 @@ impl BlobManager {
                 )))
             }
         };
+        let mut blob_features = ctx.blob_features.clone();
+        let mut compressor = ctx.compressor;
+        if self.external {
+            blob_features.insert(BlobFeatures::EXTERNAL);
+            compressor = compress::Algorithm::None;
+        }
         let mut blob_ctx = BlobContext::new(
             ctx.blob_id.clone(),
             ctx.blob_offset,
-            ctx.blob_features,
-            ctx.compressor,
+            blob_features,
+            compressor,
             ctx.digester,
             ctx.cipher,
             Arc::new(cipher_object),
             cipher_ctx,
+            self.external,
         );
         blob_ctx.set_chunk_size(ctx.chunk_size);
         blob_ctx.set_meta_info_enabled(
@@ -938,7 +969,7 @@ impl BlobManager {
         ctx: &BuildContext,
     ) -> Result<(u32, &mut BlobContext)> {
         if self.current_blob_index.is_none() {
-            let blob_ctx = Self::new_blob_ctx(ctx)?;
+            let blob_ctx = self.new_blob_ctx(ctx)?;
             self.current_blob_index = Some(self.alloc_index()?);
             self.add_blob(blob_ctx);
         }
@@ -1222,6 +1253,7 @@ impl BootstrapContext {
 }
 
 /// BootstrapManager is used to hold the parent bootstrap reader and create new bootstrap context.
+#[derive(Clone)]
 pub struct BootstrapManager {
     pub(crate) f_parent_path: Option<PathBuf>,
     pub(crate) bootstrap_storage: Option<ArtifactStorage>,
@@ -1283,6 +1315,7 @@ pub struct BuildContext {
 
     /// Storage writing blob to single file or a directory.
     pub blob_storage: Option<ArtifactStorage>,
+    pub external_blob_storage: Option<ArtifactStorage>,
     pub blob_zran_generator: Option<Mutex<ZranContextGenerator<File>>>,
     pub blob_batch_generator: Option<Mutex<BatchContextGenerator>>,
     pub blob_tar_reader: Option<BufReaderInfo<File>>,
@@ -1312,6 +1345,7 @@ impl BuildContext {
         source_path: PathBuf,
         prefetch: Prefetch,
         blob_storage: Option<ArtifactStorage>,
+        external_blob_storage: Option<ArtifactStorage>,
         blob_inline_meta: bool,
         features: Features,
         encrypt: bool,
@@ -1355,6 +1389,7 @@ impl BuildContext {
 
             prefetch,
             blob_storage,
+            external_blob_storage,
             blob_zran_generator: None,
             blob_batch_generator: None,
             blob_tar_reader: None,
@@ -1408,6 +1443,7 @@ impl Default for BuildContext {
 
             prefetch: Prefetch::default(),
             blob_storage: None,
+            external_blob_storage: None,
             blob_zran_generator: None,
             blob_batch_generator: None,
             blob_tar_reader: None,
@@ -1430,8 +1466,12 @@ pub struct BuildOutput {
     pub blobs: Vec<String>,
     /// The size of output blob in this build.
     pub blob_size: Option<u64>,
+    /// External blob ids in the blob table of external bootstrap.
+    pub external_blobs: Vec<String>,
     /// File path for the metadata blob.
     pub bootstrap_path: Option<String>,
+    /// File path for the external metadata blob.
+    pub external_bootstrap_path: Option<String>,
 }
 
 impl fmt::Display for BuildOutput {
@@ -1446,7 +1486,17 @@ impl fmt::Display for BuildOutput {
             "data blob size: 0x{:x}",
             self.blob_size.unwrap_or_default()
         )?;
-        write!(f, "data blobs: {:?}", self.blobs)?;
+        if self.external_blobs.is_empty() {
+            write!(f, "data blobs: {:?}", self.blobs)?;
+        } else {
+            writeln!(f, "data blobs: {:?}", self.blobs)?;
+            writeln!(
+                f,
+                "external meta blob path: {}",
+                self.external_bootstrap_path.as_deref().unwrap_or("<none>")
+            )?;
+            write!(f, "external data blobs: {:?}", self.external_blobs)?;
+        }
         Ok(())
     }
 }
@@ -1455,20 +1505,28 @@ impl BuildOutput {
     /// Create a new instance of [BuildOutput].
     pub fn new(
         blob_mgr: &BlobManager,
+        external_blob_mgr: Option<&BlobManager>,
         bootstrap_storage: &Option<ArtifactStorage>,
+        external_bootstrap_storage: &Option<ArtifactStorage>,
     ) -> Result<BuildOutput> {
         let blobs = blob_mgr.get_blob_ids();
         let blob_size = blob_mgr.get_last_blob().map(|b| b.compressed_blob_size);
-        let bootstrap_path = if let Some(ArtifactStorage::SingleFile(p)) = bootstrap_storage {
-            Some(p.display().to_string())
-        } else {
-            None
-        };
+        let bootstrap_path = bootstrap_storage
+            .as_ref()
+            .map(|stor| stor.display().to_string());
+        let external_bootstrap_path = external_bootstrap_storage
+            .as_ref()
+            .map(|stor| stor.display().to_string());
+        let external_blobs = external_blob_mgr
+            .map(|mgr| mgr.get_blob_ids())
+            .unwrap_or_default();
 
         Ok(Self {
             blobs,
+            external_blobs,
             blob_size,
             bootstrap_path,
+            external_bootstrap_path,
         })
     }
 }

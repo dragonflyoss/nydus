@@ -19,7 +19,7 @@ use nydus_utils::digest::{self, RafsDigest};
 use crate::Tree;
 
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct DigestWithBlobIndex(pub RafsDigest, pub u32);
+pub struct DigestWithBlobIndex(pub RafsDigest, pub u32, pub Option<u32>);
 
 /// Trait to manage chunk cache for chunk deduplication.
 pub trait ChunkDict: Sync + Send + 'static {

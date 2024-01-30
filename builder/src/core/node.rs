@@ -286,13 +286,14 @@ impl Node {
             };
 
             let chunk_data = &mut data_buf[0..uncompressed_size as usize];
-            let (mut chunk, mut chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
+            let (mut chunk, mut chunk_info) =
+                self.read_file_chunk(ctx, reader, chunk_data, blob_mgr.external)?;
             if let Some(h) = inode_hasher.as_mut() {
                 h.digest_update(chunk.id().as_ref());
             }
 
-            // No need to perform chunk deduplication for tar-tarfs case.
-            if ctx.conversion_type != ConversionType::TarToTarfs {
+            // No need to perform chunk deduplication for tar-tarfs/external blob case.
+            if ctx.conversion_type != ConversionType::TarToTarfs && !blob_mgr.external {
                 chunk = match self.deduplicate_chunk(
                     ctx,
                     blob_mgr,
@@ -333,6 +334,7 @@ impl Node {
                     .layered_chunk_dict
                     .add_chunk(chunk.clone(), ctx.digester);
             }
+            println!("CHUNK {:?} {}", self.target(), chunk);
             self.chunks.push(NodeChunk {
                 source: ChunkSource::Build,
                 inner: chunk,
@@ -352,15 +354,18 @@ impl Node {
         ctx: &BuildContext,
         reader: &mut R,
         buf: &mut [u8],
+        external: bool,
     ) -> Result<(ChunkWrapper, Option<BlobChunkInfoV2Ondisk>)> {
         let mut chunk = self.inode.create_chunk();
         let mut chunk_info = None;
         if let Some(ref zran) = ctx.blob_zran_generator {
             let mut zran = zran.lock().unwrap();
             zran.start_chunk(ctx.chunk_size as u64)?;
-            reader
-                .read_exact(buf)
-                .with_context(|| format!("failed to read node file {:?}", self.path()))?;
+            if !external {
+                reader
+                    .read_exact(buf)
+                    .with_context(|| format!("failed to read node file {:?}", self.path()))?;
+            }
             let info = zran.finish_chunk()?;
             chunk.set_compressed_offset(info.compressed_offset());
             chunk.set_compressed_size(info.compressed_size());
@@ -372,21 +377,25 @@ impl Node {
             chunk.set_compressed_offset(pos);
             chunk.set_compressed_size(buf.len() as u32);
             chunk.set_compressed(false);
-            reader
-                .read_exact(buf)
-                .with_context(|| format!("failed to read node file {:?}", self.path()))?;
+            if !external {
+                reader
+                    .read_exact(buf)
+                    .with_context(|| format!("failed to read node file {:?}", self.path()))?;
+            }
         } else {
-            reader
-                .read_exact(buf)
-                .with_context(|| format!("failed to read node file {:?}", self.path()))?;
+            if !external {
+                reader
+                    .read_exact(buf)
+                    .with_context(|| format!("failed to read node file {:?}", self.path()))?;
+            }
         }
 
         // For tar-tarfs case, no need to compute chunk id.
-        if ctx.conversion_type != ConversionType::TarToTarfs {
+        if ctx.conversion_type != ConversionType::TarToTarfs && !external {
             chunk.set_id(RafsDigest::from_buf(buf, ctx.digester));
         }
 
-        if ctx.cipher != crypt::Algorithm::None {
+        if ctx.cipher != crypt::Algorithm::None && !external {
             chunk.set_encrypted(true);
         }
 
@@ -495,12 +504,12 @@ impl Node {
     }
 
     pub fn write_chunk_data(
-        ctx: &BuildContext,
+        _ctx: &BuildContext,
         blob_ctx: &mut BlobContext,
         blob_writer: &mut dyn Artifact,
         chunk_data: &[u8],
     ) -> Result<(u64, u32, bool)> {
-        let (compressed, is_compressed) = compress::compress(chunk_data, ctx.compressor)
+        let (compressed, is_compressed) = compress::compress(chunk_data, blob_ctx.blob_compressor)
             .with_context(|| "failed to compress node file".to_string())?;
         let encrypted = crypt::encrypt_with_context(
             &compressed,
@@ -510,10 +519,14 @@ impl Node {
         )?;
         let compressed_size = encrypted.len() as u32;
         let pre_compressed_offset = blob_ctx.current_compressed_offset;
-        blob_writer
-            .write_all(&encrypted)
-            .context("failed to write blob")?;
-        blob_ctx.blob_hash.update(&encrypted);
+        if !blob_ctx.external {
+            // For the external blob, both compressor and encrypter should
+            // be none, and we don't write data into blob file.
+            blob_writer
+                .write_all(&encrypted)
+                .context("failed to write blob")?;
+            blob_ctx.blob_hash.update(&encrypted);
+        }
         blob_ctx.current_compressed_offset += compressed_size as u64;
         blob_ctx.compressed_blob_size += compressed_size as u64;
 
@@ -972,7 +985,7 @@ mod tests {
             .unwrap(),
         );
 
-        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
         let mut chunk_dict = HashChunkDict::new(digest::Algorithm::Sha256);
         let mut chunk_wrapper = ChunkWrapper::new(RafsVersion::V5);
         chunk_wrapper.set_id(RafsDigest {

@@ -73,6 +73,10 @@ pub struct OutputSerializer {
     /// only include the layer that does have a blob, and should be deprecated
     /// in future, use `artifacts` field to replace.
     blobs: Vec<String>,
+    /// external RAFS meta data file path.
+    external_bootstrap: String,
+    /// external RAFS blob meta data file path.
+    external_blobs: Vec<String>,
     /// Performance trace info for current build.
     trace: serde_json::Map<String, serde_json::Value>,
 }
@@ -100,6 +104,8 @@ impl OutputSerializer {
                 version,
                 bootstrap: build_output.bootstrap_path.unwrap_or_default(),
                 blobs: build_output.blobs,
+                external_bootstrap: build_output.external_bootstrap_path.unwrap_or_default(),
+                external_blobs: build_output.external_blobs,
                 trace,
             };
 
@@ -132,7 +138,9 @@ impl OutputSerializer {
             let output = Self {
                 version,
                 bootstrap: bootstrap.display().to_string(),
+                external_bootstrap: String::new(),
                 blobs: blob_ids,
+                external_blobs: Vec::new(),
                 trace,
             };
 
@@ -234,6 +242,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("blob")
                         .short('b')
                         .help("File path to save the generated RAFS data blob")
+                        .required_unless_present_any(["type", "blob-dir"]),
+                )
+                .arg(
+                    Arg::new("external-blob")
+                        .long("external-blob")
+                        .help("File path to save the generated RAFS external blob")
                         .required_unless_present_any(["type", "blob-dir"]),
                 )
                 .arg(
@@ -1067,6 +1081,9 @@ impl Command {
         } else {
             HashMap::new()
         };
+        let external_blob_storage = matches
+            .get_one::<String>("external-blob")
+            .map(|b| ArtifactStorage::SingleFile(b.into()));
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
@@ -1079,6 +1096,7 @@ impl Command {
             source_path,
             prefetch,
             blob_storage,
+            external_blob_storage,
             blob_inline_meta,
             features,
             encrypt,
@@ -1101,7 +1119,7 @@ impl Command {
         config.internal.set_blob_accessible(true);
         build_ctx.set_configuration(config.clone());
 
-        let mut blob_mgr = BlobManager::new(digester);
+        let mut blob_mgr = BlobManager::new(digester, false);
         if let Some(chunk_dict_arg) = matches.get_one::<String>("chunk-dict") {
             let config = RafsSuperConfig {
                 version,
@@ -1526,7 +1544,7 @@ impl Command {
             if !d.exists() {
                 bail!("Directory to store blobs does not exist")
             }
-            Ok(ArtifactStorage::FileDir(d))
+            Ok(ArtifactStorage::FileDir((d, String::new())))
         } else {
             bail!("both --bootstrap and --blob-dir are missing, please specify one to store the generated metadata blob file");
         }
@@ -1551,7 +1569,10 @@ impl Command {
             if !p.exists() {
                 bail!("directory to store blob cache does not exist")
             }
-            Ok(Some(ArtifactStorage::FileDir(p.to_owned())))
+            Ok(Some(ArtifactStorage::FileDir((
+                p.to_owned(),
+                String::new(),
+            ))))
         } else {
             Ok(None)
         }
@@ -1584,7 +1605,7 @@ impl Command {
             if !d.exists() {
                 bail!("directory to store blobs does not exist")
             }
-            Ok(Some(ArtifactStorage::FileDir(d)))
+            Ok(Some(ArtifactStorage::FileDir((d, String::new()))))
         } else if let Some(config_json) = matches.get_one::<String>("backend-config") {
             let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
             warn!("using --backend-type=localfs is DEPRECATED. Use --blob-dir instead.");
