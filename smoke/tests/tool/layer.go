@@ -138,6 +138,36 @@ func (l *Layer) Pack(t *testing.T, packOption converter.PackOption, blobDir stri
 	return blobDigest
 }
 
+func (l *Layer) PackWithAttributes(t *testing.T, packOption converter.PackOption, blobDir, sourceDir string) (digest.Digest, digest.Digest) {
+	l.recordFileTree(t)
+
+	blob, err := os.CreateTemp(blobDir, "blob-")
+	require.NoError(t, err)
+	defer blob.Close()
+
+	externalBlob, err := os.CreateTemp(blobDir, "external-blob-")
+	require.NoError(t, err)
+	defer externalBlob.Close()
+
+	blobDigester := digest.Canonical.Digester()
+	blobWriter := io.MultiWriter(blob, blobDigester.Hash())
+	externalBlobDigester := digest.Canonical.Digester()
+	packOption.FromDir = sourceDir
+	packOption.ExternalBlobWriter = io.MultiWriter(externalBlob, externalBlobDigester.Hash())
+	_, err = converter.Pack(context.Background(), blobWriter, packOption)
+	require.NoError(t, err)
+
+	blobDigest := blobDigester.Digest()
+	err = os.Rename(blob.Name(), filepath.Join(blobDir, blobDigest.Hex()))
+	require.NoError(t, err)
+
+	externalBlobDigest := externalBlobDigester.Digest()
+	err = os.Rename(externalBlob.Name(), filepath.Join(blobDir, externalBlobDigest.Hex()))
+	require.NoError(t, err)
+
+	return blobDigest, externalBlobDigest
+}
+
 func (l *Layer) PackRef(t *testing.T, ctx Context, blobDir string, compress bool) (digest.Digest, digest.Digest) {
 	// Output OCI tar stream
 	ociTar := l.ToOCITar(t)

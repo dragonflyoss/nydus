@@ -129,7 +129,7 @@ impl Merger {
         }
 
         let mut tree: Option<Tree> = None;
-        let mut blob_mgr = BlobManager::new(ctx.digester);
+        let mut blob_mgr = BlobManager::new(ctx.digester, false);
         let mut blob_idx_map = HashMap::new();
         let mut parent_layers = 0;
 
@@ -312,7 +312,7 @@ impl Merger {
         bootstrap
             .dump(ctx, &mut bootstrap_storage, &mut bootstrap_ctx, &blob_table)
             .context(format!("dump bootstrap to {:?}", target.display()))?;
-        BuildOutput::new(&blob_mgr, &bootstrap_storage)
+        BuildOutput::new(&blob_mgr, None, &bootstrap_storage, &None)
     }
 }
 

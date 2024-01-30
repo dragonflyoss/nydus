@@ -659,7 +659,7 @@ impl Builder for TarballBuilder {
 
         lazy_drop(bootstrap_ctx);
 
-        BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
+        BuildOutput::new(blob_mgr, None, &bootstrap_mgr.bootstrap_storage, &None)
     }
 }
 
@@ -689,15 +689,18 @@ mod tests {
             ConversionType::TarToTarfs,
             source_path,
             prefetch,
-            Some(ArtifactStorage::FileDir(tmp_dir.clone())),
+            Some(ArtifactStorage::FileDir((tmp_dir.clone(), String::new()))),
+            None,
             false,
             Features::new(),
             false,
             HashMap::new(),
         );
-        let mut bootstrap_mgr =
-            BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);
-        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        let mut bootstrap_mgr = BootstrapManager::new(
+            Some(ArtifactStorage::FileDir((tmp_dir, String::new()))),
+            None,
+        );
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
         let mut builder = TarballBuilder::new(ConversionType::TarToTarfs);
         builder
             .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
@@ -722,15 +725,18 @@ mod tests {
             ConversionType::TarToTarfs,
             source_path,
             prefetch,
-            Some(ArtifactStorage::FileDir(tmp_dir.clone())),
+            Some(ArtifactStorage::FileDir((tmp_dir.clone(), String::new()))),
+            None,
             false,
             Features::new(),
             true,
             HashMap::new(),
         );
-        let mut bootstrap_mgr =
-            BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);
-        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        let mut bootstrap_mgr = BootstrapManager::new(
+            Some(ArtifactStorage::FileDir((tmp_dir, String::new()))),
+            None,
+        );
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
         let mut builder = TarballBuilder::new(ConversionType::TarToTarfs);
         builder
             .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)

@@ -904,7 +904,7 @@ impl Builder for StargzBuilder {
 
         lazy_drop(bootstrap_ctx);
 
-        BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
+        BuildOutput::new(blob_mgr, None, &bootstrap_mgr.bootstrap_storage, &None)
     }
 }
 
@@ -932,7 +932,8 @@ mod tests {
             ConversionType::EStargzIndexToRef,
             source_path,
             prefetch,
-            Some(ArtifactStorage::FileDir(tmp_dir.clone())),
+            Some(ArtifactStorage::FileDir((tmp_dir.clone(), String::new()))),
+            None,
             false,
             Features::new(),
             false,
@@ -940,9 +941,11 @@ mod tests {
         );
         ctx.fs_version = RafsVersion::V6;
         ctx.conversion_type = ConversionType::EStargzToRafs;
-        let mut bootstrap_mgr =
-            BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir.clone())), None);
-        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        let mut bootstrap_mgr = BootstrapManager::new(
+            Some(ArtifactStorage::FileDir((tmp_dir.clone(), String::new()))),
+            None,
+        );
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
         let mut builder = StargzBuilder::new(0x1000000, &ctx);
 
         let builder = builder.build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr);
