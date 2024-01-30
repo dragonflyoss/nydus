@@ -293,7 +293,7 @@ impl BlobCompactor {
             version,
             states: vec![Default::default(); ori_blobs_number],
             ori_blob_mgr,
-            new_blob_mgr: BlobManager::new(digester),
+            new_blob_mgr: BlobManager::new(digester, false),
             c2nodes: HashMap::new(),
             b2nodes: HashMap::new(),
             backend,
@@ -555,7 +555,8 @@ impl BlobCompactor {
                     info!("compactor: delete compacted blob {}", ori_blob_ids[idx]);
                 }
                 State::Rebuild(cs) => {
-                    let blob_storage = ArtifactStorage::FileDir(PathBuf::from(dir));
+                    let blob_storage =
+                        ArtifactStorage::FileDir((PathBuf::from(dir), String::new()));
                     let mut blob_ctx = BlobContext::new(
                         String::from(""),
                         0,
@@ -565,6 +566,7 @@ impl BlobCompactor {
                         build_ctx.cipher,
                         Default::default(),
                         None,
+                        false,
                     );
                     blob_ctx.set_meta_info_enabled(self.is_v6());
                     let blob_idx = self.new_blob_mgr.alloc_index()?;
@@ -617,6 +619,7 @@ impl BlobCompactor {
             PathBuf::from(""),
             Default::default(),
             None,
+            None,
             false,
             Features::new(),
             false,
@@ -625,7 +628,7 @@ impl BlobCompactor {
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
-        let mut ori_blob_mgr = BlobManager::new(rs.meta.get_digester());
+        let mut ori_blob_mgr = BlobManager::new(rs.meta.get_digester(), false);
         ori_blob_mgr.extend_from_blob_table(&build_ctx, rs.superblock.get_blob_infos())?;
         if let Some(dict) = chunk_dict {
             ori_blob_mgr.set_chunk_dict(dict);
@@ -664,7 +667,9 @@ impl BlobCompactor {
 
         Ok(Some(BuildOutput::new(
             &compactor.new_blob_mgr,
+            None,
             &bootstrap_mgr.bootstrap_storage,
+            &None,
         )?))
     }
 }
@@ -865,6 +870,7 @@ mod tests {
             crypt::Algorithm::Aes256Xts,
             Arc::new(cipher_object),
             None,
+            false,
         );
         let ori_blob_ids = ["1".to_owned(), "2".to_owned()];
         let backend = Arc::new(MockBackend {
@@ -977,7 +983,7 @@ mod tests {
             HashChunkDict::from_commandline_arg(path, Arc::new(ConfigV2::default()), &rafs_config)
                 .unwrap();
 
-        let mut ori_blob_mgr = BlobManager::new(digest::Algorithm::Sha256);
+        let mut ori_blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
         ori_blob_mgr.set_chunk_dict(dict);
 
         let backend = Arc::new(MockBackend {
@@ -1139,6 +1145,7 @@ mod tests {
             PathBuf::from(tmp_dir.as_path()),
             Default::default(),
             None,
+            None,
             false,
             Features::new(),
             false,
@@ -1156,6 +1163,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         let blob_ctx2 = BlobContext::new(
             "blob_id2".to_owned(),
@@ -1166,6 +1174,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         let blob_ctx3 = BlobContext::new(
             "blob_id3".to_owned(),
@@ -1176,6 +1185,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         let blob_ctx4 = BlobContext::new(
             "blob_id4".to_owned(),
@@ -1186,6 +1196,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         let blob_ctx5 = BlobContext::new(
             "blob_id5".to_owned(),
@@ -1196,6 +1207,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         compactor.ori_blob_mgr.add_blob(blob_ctx1);
         compactor.ori_blob_mgr.add_blob(blob_ctx2);
@@ -1237,6 +1249,7 @@ mod tests {
             PathBuf::from(tmp_dir.as_path()),
             Default::default(),
             None,
+            None,
             false,
             Features::new(),
             false,
@@ -1251,6 +1264,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         blob_ctx1.compressed_blob_size = 2;
         let mut blob_ctx2 = BlobContext::new(
@@ -1262,6 +1276,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         blob_ctx2.compressed_blob_size = 0;
         let blob_ctx3 = BlobContext::new(
@@ -1273,6 +1288,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         let blob_ctx4 = BlobContext::new(
             "blob_id4".to_owned(),
@@ -1283,6 +1299,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         let blob_ctx5 = BlobContext::new(
             "blob_id5".to_owned(),
@@ -1293,6 +1310,7 @@ mod tests {
             build_ctx.cipher,
             Default::default(),
             None,
+            false,
         );
         compactor.ori_blob_mgr.add_blob(blob_ctx1);
         compactor.ori_blob_mgr.add_blob(blob_ctx2);

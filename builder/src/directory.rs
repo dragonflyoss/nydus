@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use nydus_utils::{event_tracer, lazy_drop, root_tracer, timing_tracer};
 
 use crate::core::context::{Artifact, NoopArtifactWriter};
+use crate::core::prefetch;
 
 use super::core::blob::Blob;
 use super::core::context::{
@@ -144,14 +145,14 @@ impl DirectoryBuilder {
 
         Ok((tree, external_tree))
     }
-}
 
-impl Builder for DirectoryBuilder {
-    fn build(
+    fn one_build(
         &mut self,
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
+        blob_writer: &mut Box<dyn Artifact>,
+        _tree: Tree,
     ) -> Result<BuildOutput> {
         let layer_idx = u16::from(bootstrap_mgr.f_parent_path.is_some());
 
@@ -167,11 +168,6 @@ impl Builder for DirectoryBuilder {
         )?;
 
         // Dump blob file
-        let mut blob_writer: Box<dyn Artifact> = if let Some(blob_stor) = ctx.blob_storage.clone() {
-            Box::new(ArtifactWriter::new(blob_stor)?)
-        } else {
-            Box::<NoopArtifactWriter>::default()
-        };
         timing_tracer!(
             { Blob::dump(ctx, blob_mgr, blob_writer.as_mut()) },
             "dump_blob"
@@ -217,6 +213,55 @@ impl Builder for DirectoryBuilder {
 
         lazy_drop(bootstrap_ctx);
 
-        BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
+        BuildOutput::new(blob_mgr, None, &bootstrap_mgr.bootstrap_storage, &None)
+    }
+}
+
+impl Builder for DirectoryBuilder {
+    fn build(
+        &mut self,
+        ctx: &mut BuildContext,
+        bootstrap_mgr: &mut BootstrapManager,
+        blob_mgr: &mut BlobManager,
+    ) -> Result<BuildOutput> {
+        let layer_idx = u16::from(bootstrap_mgr.f_parent_path.is_some());
+
+        // Scan source directory to build upper layer tree.
+        let (tree, external_tree) =
+            timing_tracer!({ self.build_tree(ctx, layer_idx) }, "build_tree")?;
+
+        // Build for tree
+        let mut blob_writer: Box<dyn Artifact> = if let Some(blob_stor) = ctx.blob_storage.clone() {
+            Box::new(ArtifactWriter::new(blob_stor)?)
+        } else {
+            Box::<NoopArtifactWriter>::default()
+        };
+        let mut output = self.one_build(ctx, bootstrap_mgr, blob_mgr, &mut blob_writer, tree)?;
+
+        // Build for external tree
+        ctx.prefetch = prefetch::Prefetch::new(prefetch::PrefetchPolicy::None)?;
+        let mut external_blob_mgr = BlobManager::new(ctx.digester, true);
+        let mut external_bootstrap_mgr = bootstrap_mgr.clone();
+        external_bootstrap_mgr
+            .bootstrap_storage
+            .as_mut()
+            .map(|stor| stor.add_suffix("external"));
+        let mut external_blob_writer: Box<dyn Artifact> =
+            if let Some(blob_stor) = ctx.external_blob_storage.clone() {
+                Box::new(ArtifactWriter::new(blob_stor)?)
+            } else {
+                Box::<NoopArtifactWriter>::default()
+            };
+        let external_output = self.one_build(
+            ctx,
+            &mut external_bootstrap_mgr,
+            &mut external_blob_mgr,
+            &mut external_blob_writer,
+            external_tree,
+        )?;
+        output.external_bootstrap_path = external_output.bootstrap_path;
+        output.external_blobs = external_output.blobs;
+
+        Ok(output)
     }
 }

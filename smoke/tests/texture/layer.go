@@ -6,7 +6,9 @@ package texture
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -46,12 +48,30 @@ func MakeChunkDictLayer(t *testing.T, workDir string, makers ...LayerMaker) *too
 	return layer
 }
 
+func MakeAttributes(t *testing.T, attributesPath string) {
+	externalFiles := []string{
+		"/file-external-1",
+		"/dir-1/file-external-1",
+		"/dir-1/file-external-2",
+	}
+	contents := []string{}
+	for _, path := range externalFiles {
+		contents = append(contents, fmt.Sprintf("%s\ttype=external\tbackend_index=0", path))
+	}
+	err := os.WriteFile(
+		attributesPath,
+		[]byte(strings.Join(contents, "\n")), 0644,
+	)
+	require.NoError(t, err)
+}
+
 func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.Layer {
 	layer := tool.NewLayer(t, workDir)
 
 	// Create regular file
 	layer.CreateFile(t, "file-1", []byte("file-1"))
 	layer.CreateFile(t, "file-2", []byte("file-2"))
+	layer.CreateFile(t, "file-external-1", []byte("file-external-1"))
 
 	// Create directory
 	layer.CreateDir(t, "dir-1")
@@ -86,6 +106,10 @@ func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.La
 
 	// Create empty file
 	layer.CreateFile(t, "empty.txt", []byte(""))
+
+	// Create external file in sub directory
+	layer.CreateFile(t, "dir-1/file-external-1", []byte("dir-1/file-external-1"))
+	layer.CreateFile(t, "dir-1/file-external-2", []byte("dir-1/file-external-2"))
 
 	layer.CreateFile(t, "dir-1/file-2", []byte("dir-1/file-2"))
 	// Set file xattr (only `security.capability` xattr is supported in OCI layer)
