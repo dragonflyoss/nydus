@@ -257,7 +257,7 @@ impl FileCacheEntry {
             } else {
                 blob_info.uncompressed_size()
             };
-            if file_size == 0 {
+            if file_size == 0 || file_size < cached_file_size {
                 file.set_len(cached_file_size)?;
             } else if cached_file_size != 0 && file_size != cached_file_size {
                 let msg = format!(
