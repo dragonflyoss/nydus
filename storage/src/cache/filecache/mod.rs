@@ -232,7 +232,10 @@ impl FileCacheEntry {
         } else {
             blob_info.uncompressed_size()
         };
-        if file_size == 0 {
+        // Compatibility
+        //  1. Nydusd 1.6 generates cache file by prefetch, which is smaller than size in boot.
+        //  2. Nydusd 2.2 generates cache file by prefetch, when image not provide ext blob table.
+        if file_size == 0 || file_size < cached_file_size {
             file.set_len(cached_file_size)?;
         } else if cached_file_size != 0 && file_size != cached_file_size {
             let msg = format!(
