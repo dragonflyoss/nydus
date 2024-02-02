@@ -44,6 +44,7 @@ use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down, try_round_up_4k, BufReaderInfo};
 
 use super::node::ChunkSource;
+use crate::attributes::Attributes;
 use crate::core::tree::TreeNode;
 use crate::{ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolicy, WhiteoutSpec};
 
@@ -613,7 +614,6 @@ impl BlobContext {
         blob_ctx
             .blob_meta_header
             .set_encrypted(features.contains(BlobFeatures::ENCRYPTED));
-        println!("EXTERNAL {}", features.contains(BlobFeatures::EXTERNAL));
         blob_ctx
             .blob_meta_header
             .set_external(features.contains(BlobFeatures::EXTERNAL));
@@ -938,7 +938,7 @@ impl BlobManager {
                 )))
             }
         };
-        let mut blob_features = ctx.blob_features.clone();
+        let mut blob_features = ctx.blob_features;
         let mut compressor = ctx.compressor;
         if self.external {
             blob_features.insert(BlobFeatures::EXTERNAL);
@@ -1328,7 +1328,7 @@ pub struct BuildContext {
     pub blob_cache_generator: Option<BlobCacheGenerator>,
 
     /// Nydus attributes for different build behavior.
-    pub attributes: HashMap<PathBuf, u32>,
+    pub attributes: Attributes,
 }
 
 impl BuildContext {
@@ -1349,7 +1349,7 @@ impl BuildContext {
         blob_inline_meta: bool,
         features: Features,
         encrypt: bool,
-        attributes: HashMap<PathBuf, u32>,
+        attributes: Attributes,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
@@ -1454,7 +1454,7 @@ impl Default for BuildContext {
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_generator: None,
 
-            attributes: HashMap::new(),
+            attributes: Attributes::default(),
         }
     }
 }

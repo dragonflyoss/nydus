@@ -911,7 +911,9 @@ impl Builder for StargzBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArtifactStorage, ConversionType, Features, Prefetch, WhiteoutSpec};
+    use crate::{
+        attributes::Attributes, ArtifactStorage, ConversionType, Features, Prefetch, WhiteoutSpec,
+    };
 
     #[test]
     fn test_build_stargz_toc() {
@@ -937,7 +939,7 @@ mod tests {
             false,
             Features::new(),
             false,
-            HashMap::new(),
+            Attributes::default(),
         );
         ctx.fs_version = RafsVersion::V6;
         ctx.conversion_type = ConversionType::EStargzToRafs;
