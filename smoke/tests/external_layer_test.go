@@ -5,10 +5,14 @@
 package tests
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/containerd/nydus-snapshotter/pkg/external"
+	"github.com/containerd/nydus-snapshotter/pkg/external/backend/local"
 	"github.com/dragonflyoss/nydus/smoke/tests/texture"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool/test"
@@ -48,10 +52,24 @@ func (n *ExternalLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) 
 	ctx.PrepareWorkDir(t)
 	defer ctx.Destroy(t)
 
+	// Make lower layer
+	lowerLayerSourceDir := filepath.Join(ctx.Env.WorkDir, "source-lower")
+	lowerLayer := texture.MakeLowerLayer(t, lowerLayerSourceDir)
+
 	// Prepare .nydusattributes file
 	attributesPath := filepath.Join(ctx.Env.WorkDir, ".nydusattributes")
-	texture.MakeAttributes(t, attributesPath)
+	backendMetaPath := filepath.Join(ctx.Env.CacheDir, ".backend.meta")
+	backendConfigPath := filepath.Join(ctx.Env.CacheDir, ".backend.json")
+	err := external.Handle(context.Background(), external.Options{
+		Dir:              lowerLayerSourceDir,
+		Handler:          local.NewHandler(lowerLayerSourceDir),
+		MetaOutput:       backendMetaPath,
+		BackendOutput:    backendConfigPath,
+		AttributesOutput: attributesPath,
+	})
+	require.NoError(t, err)
 
+	// Build lower layer
 	packOption := converter.PackOption{
 		BuilderPath:    ctx.Binary.Builder,
 		Compressor:     ctx.Build.Compressor,
@@ -59,11 +77,13 @@ func (n *ExternalLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) 
 		ChunkSize:      ctx.Build.ChunkSize,
 		AttributesPath: attributesPath,
 	}
-
-	// Make lower layer
-	lowerLayerSourceDir := filepath.Join(ctx.Env.WorkDir, "source-lower")
-	lowerLayer := texture.MakeLowerLayer(t, lowerLayerSourceDir)
 	lowerBlobDigest, lowerExternalBlobDigest := lowerLayer.PackWithAttributes(t, packOption, ctx.Env.BlobDir, lowerLayerSourceDir)
+
+	err = os.Rename(backendMetaPath, filepath.Join(ctx.Env.CacheDir, lowerExternalBlobDigest.Hex()+".backend.meta"))
+	require.NoError(t, err)
+
+	err = os.Rename(backendConfigPath, filepath.Join(ctx.Env.CacheDir, lowerExternalBlobDigest.Hex()+".backend.json"))
+	require.NoError(t, err)
 
 	// Make upper layer
 	upperLayer := texture.MakeUpperLayer(t, filepath.Join(ctx.Env.WorkDir, "source-upper"))

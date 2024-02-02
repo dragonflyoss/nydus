@@ -21,6 +21,7 @@ use nydus_utils::{digest, try_round_up_4k};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
+use crate::attributes::Attributes;
 use crate::core::context::Artifact;
 
 use super::core::blob::Blob;
@@ -623,7 +624,7 @@ impl BlobCompactor {
             false,
             Features::new(),
             false,
-            HashMap::new(),
+            Attributes::default(),
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
@@ -1149,7 +1150,7 @@ mod tests {
             false,
             Features::new(),
             false,
-            HashMap::new(),
+            Attributes::default(),
         );
 
         let mut compactor = blob_compactor_load_and_dedup_chunks().unwrap();
@@ -1253,7 +1254,7 @@ mod tests {
             false,
             Features::new(),
             false,
-            HashMap::new(),
+            Attributes::default(),
         );
         let mut blob_ctx1 = BlobContext::new(
             "blob_id1".to_owned(),

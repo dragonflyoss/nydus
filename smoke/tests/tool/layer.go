@@ -45,14 +45,14 @@ func (l *Layer) CreateFile(t *testing.T, name string, data []byte) {
 	require.NoError(t, err)
 }
 
-func (l *Layer) CreateLargeFile(t *testing.T, name string, sizeGB int) {
+func (l *Layer) CreateLargeFile(t *testing.T, name string, sizeMB int) {
 	f, err := os.Create(filepath.Join(l.workDir, name))
 	require.NoError(t, err)
 	defer func() {
 		f.Close()
 	}()
 
-	_, err = io.CopyN(f, rand.Reader, int64(sizeGB)<<30)
+	_, err = io.CopyN(f, rand.Reader, int64(sizeMB)<<20)
 	assert.Nil(t, err)
 }
 

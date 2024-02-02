@@ -500,6 +500,10 @@ impl BlobInfo {
         self.blob_features.bits() & features.bits() == features.bits()
     }
 
+    pub fn is_external(&self) -> bool {
+        self.has_feature(BlobFeatures::EXTERNAL)
+    }
+
     /// Generate feature flags according to blob configuration.
     fn compute_features(&mut self) {
         if self.chunk_count == 0 {

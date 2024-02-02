@@ -17,7 +17,6 @@ use crate::deduplicate::{
     check_bootstrap_versions_consistency, update_ctx_from_parent_bootstrap, Deduplicate,
     SqliteDatabase,
 };
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
@@ -32,7 +31,7 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    attributes::Attribute, parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage, BlobCacheGenerator,
+    attributes::Attributes, parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage, BlobCacheGenerator,
     BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder,
     ConversionType, DirectoryBuilder, Feature, Features, HashChunkDict, Merger, Prefetch,
     PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec, ChunkdictChunkInfo, ChunkdictBlobInfo, Generator, Tree, TreeNode, OptimizePrefetch,
@@ -1211,11 +1210,11 @@ impl Command {
             compressor = compress::Algorithm::None;
         }
 
-        let attributes = if let Some(attributes_path) = &matches.get_one::<PathBuf>("attributes") {
-            Attribute::parse(attributes_path)?
-        } else {
-            HashMap::new()
-        };
+        let attributes = matches
+            .get_one::<PathBuf>("attributes")
+            .map(Attributes::from)
+            .transpose()?
+            .unwrap_or_default();
         let external_blob_storage = matches
             .get_one::<String>("external-blob")
             .map(|b| ArtifactStorage::SingleFile(b.into()));

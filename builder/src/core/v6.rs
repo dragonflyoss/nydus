@@ -41,7 +41,7 @@ impl Node {
         orig_meta_addr: u64,
         meta_addr: u64,
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
-        blobs: &Vec<Arc<BlobInfo>>,
+        blobs: &[Arc<BlobInfo>],
     ) -> Result<()> {
         let xattr_inline_count = self.info.xattrs.count_v6();
         ensure!(
@@ -453,7 +453,7 @@ impl Node {
         f_bootstrap: &mut dyn RafsIoWrite,
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
         inode: &mut Box<dyn RafsV6OndiskInode>,
-        blobs: &Vec<Arc<BlobInfo>>,
+        blobs: &[Arc<BlobInfo>],
     ) -> Result<()> {
         let mut is_continuous = true;
         let mut prev = None;

@@ -23,6 +23,9 @@ use crate::cache::state::{
 };
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr, CasMgr};
+use crate::cache::{
+    EXTERNAL_BLOB_BACKEND_CONFIG_FILE_SUFFIX, EXTERNAL_BLOB_BACKEND_META_FILE_SUFFIX,
+};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::utils::get_path_from_file;
 
@@ -200,13 +203,18 @@ impl FileCacheEntry {
             .backend
             .get_reader(&blob_id)
             .map_err(|e| eio!(format!("failed to get reader for blob {}, {}", blob_id, e)))?;
-        let external_reader = ExternalBackendFactory::new(
-            PathBuf::new()
-                .join(&mgr.work_dir)
-                // .join(blob_info.blob_id().as_str())
-                .join("backend.meta"),
-            PathBuf::new().join(&mgr.work_dir).join("backend.json"),
-        )?;
+        let external_reader = if blob_info.is_external() {
+            ExternalBackendFactory::create(
+                PathBuf::new()
+                    .join(&mgr.work_dir)
+                    .join(blob_info.blob_id() + EXTERNAL_BLOB_BACKEND_META_FILE_SUFFIX),
+                PathBuf::new()
+                    .join(&mgr.work_dir)
+                    .join(blob_info.blob_id() + EXTERNAL_BLOB_BACKEND_CONFIG_FILE_SUFFIX),
+            )?
+        } else {
+            ExternalBackendFactory::create_noop()
+        };
         let blob_meta_reader = if is_separate_meta {
             mgr.backend.get_reader(&blob_meta_id).map_err(|e| {
                 eio!(format!(
