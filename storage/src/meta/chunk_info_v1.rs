@@ -121,13 +121,13 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
     }
 
     fn validate(&self, state: &BlobCompressionContext) -> Result<()> {
-        if self.compressed_end() > state.compressed_size
+        if (!state.is_external() && self.compressed_end() > state.compressed_size)
             || self.uncompressed_end() > state.uncompressed_size
             || self.uncompressed_size() == 0
             || (!self.is_compressed() && self.uncompressed_size() != self.compressed_size())
         {
             return Err(einval!(format!(
-                "invalid chunk, blob: index {}/c_end 0x{:}/d_end 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {}",
+                "invalid chunk, blob: index {}, compressed_size {}, uncompressed_size {}, chunk: compressed_end {}, uncompressed_end {}, is_compressed {}",
                 state.blob_index,
                 state.compressed_size,
                 state.uncompressed_size,

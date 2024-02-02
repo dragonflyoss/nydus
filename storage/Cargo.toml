@@ -50,6 +50,7 @@ nydus-utils = { version = "0.4", path = "../utils", features = [
     "encryption",
     "zran",
 ] }
+rmp-serde = "1.1.2"
 
 [dev-dependencies]
 vmm-sys-util = "0.12.1"
