@@ -98,11 +98,8 @@ impl FileMapState {
         let start = self.base.wrapping_add(offset);
         let end = start.wrapping_add(size_of::<T>());
 
-        if start > end
-            || start < self.base
-            || end < self.base
-            || end > self.end
-            || start as usize & (std::mem::align_of::<T>() - 1) != 0
+        if start > end || start < self.base || end < self.base || end > self.end
+        // || start as usize & (std::mem::align_of::<T>() - 1) != 0
         {
             return Err(einval!("invalid mmap offset"));
         }

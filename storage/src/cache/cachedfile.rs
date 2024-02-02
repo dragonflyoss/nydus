@@ -26,13 +26,13 @@ use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::{compress, digest, round_up_usize, DelayType, Delayer, FileRangeReader};
 use tokio::runtime::Runtime;
 
-use crate::backend::BlobReader;
+use crate::backend::{external::ExternalBlobReader, BlobReader};
 use crate::cache::state::ChunkMap;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
-    BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
-    BlobObject, BlobPrefetchRequest,
+    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag,
+    BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
 use crate::meta::{BlobCompressionContextInfo, BlobMetaChunk};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
@@ -190,6 +190,7 @@ pub(crate) struct FileCacheEntry {
     pub(crate) metrics: Arc<BlobcacheMetrics>,
     pub(crate) prefetch_state: Arc<AtomicU32>,
     pub(crate) reader: Arc<dyn BlobReader>,
+    pub(crate) external_reader: Arc<dyn ExternalBlobReader>,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) workers: Arc<AsyncWorkerMgr>,
 
@@ -570,6 +571,10 @@ impl BlobCache for FileCacheEntry {
         &*self.reader
     }
 
+    fn external_reader(&self) -> &dyn ExternalBlobReader {
+        &*self.external_reader
+    }
+
     fn get_chunk_map(&self) -> &Arc<dyn ChunkMap> {
         &self.chunk_map
     }
@@ -700,8 +705,14 @@ impl BlobCache for FileCacheEntry {
             }
 
             let (blob_offset, _blob_end, blob_size) = self.get_blob_range(&pending[start..=end])?;
-            match self.read_chunks_from_backend(blob_offset, blob_size, &pending[start..=end], true)
-            {
+            let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
+            match self.read_chunks_from_backend(
+                blob_offset,
+                blob_size,
+                &pending[start..=end],
+                true,
+                external,
+            ) {
                 Ok(mut bufs) => {
                     total_size += blob_size;
                     if self.is_raw_data {
@@ -905,11 +916,13 @@ impl FileCacheEntry {
                 chunks[0].blob_index()
             );
 
+            let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
             match self.read_chunks_from_backend(
                 blob_offset,
                 blob_size,
                 &chunks[start_idx..=end_idx],
                 prefetch,
+                external,
             ) {
                 Ok(mut bufs) => {
                     if self.is_raw_data {
@@ -974,7 +987,8 @@ impl FileCacheEntry {
                     Ok(false) => {
                         info!("retry for timeout chunk, {}", chunk.id());
                         let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
-                        self.read_chunk_from_backend(chunk.as_ref(), &mut buf)
+                        let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
+                        self.read_chunk_from_backend(chunk.as_ref(), &mut buf, external)
                             .map_err(|e| {
                                 self.update_chunk_pending_status(chunk.as_ref(), false);
                                 eio!(format!("read_raw_chunk failed, {:?}", e))
@@ -1235,12 +1249,14 @@ impl FileCacheEntry {
             region = &region_hold;
         }
 
+        let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
         let bufs = self
             .read_chunks_from_backend(
                 region.blob_address,
                 region.blob_len as usize,
                 &region.chunks,
                 false,
+                external,
             )
             .map_err(|e| {
                 for c in &region.chunks {
@@ -1329,8 +1345,9 @@ impl FileCacheEntry {
             );
             &d
         } else {
+            let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
             let c = self
-                .read_chunk_from_backend(chunk.as_ref(), d.mut_slice())
+                .read_chunk_from_backend(chunk.as_ref(), d.mut_slice(), external)
                 .map_err(|e| {
                     self.chunk_map.clear_pending(chunk.as_ref());
                     e
