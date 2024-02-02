@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Result;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -15,7 +16,7 @@ use nydus_api::CacheConfigV2;
 use nydus_utils::crypt;
 use nydus_utils::metrics::BlobcacheMetrics;
 
-use crate::backend::BlobBackend;
+use crate::backend::{external::ExternalBackendFactory, BlobBackend};
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{
     BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap, NoopChunkMap,
@@ -199,6 +200,13 @@ impl FileCacheEntry {
             .backend
             .get_reader(&blob_id)
             .map_err(|e| eio!(format!("failed to get reader for blob {}, {}", blob_id, e)))?;
+        let external_reader = ExternalBackendFactory::new(
+            PathBuf::new()
+                .join(&mgr.work_dir)
+                // .join(blob_info.blob_id().as_str())
+                .join("backend.meta"),
+            PathBuf::new().join(&mgr.work_dir).join("backend.json"),
+        )?;
         let blob_meta_reader = if is_separate_meta {
             mgr.backend.get_reader(&blob_meta_id).map_err(|e| {
                 eio!(format!(
@@ -355,6 +363,7 @@ impl FileCacheEntry {
             metrics: mgr.metrics.clone(),
             prefetch_state: Arc::new(AtomicU32::new(0)),
             reader,
+            external_reader,
             runtime,
             workers,
 

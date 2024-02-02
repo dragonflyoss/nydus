@@ -27,6 +27,8 @@ use nydus_utils::{
 use crate::utils::{alloc_buf, copyv};
 use crate::StorageError;
 
+pub mod external;
+
 #[cfg(any(
     feature = "backend-oss",
     feature = "backend-registry",

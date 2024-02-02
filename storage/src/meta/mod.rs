@@ -1107,6 +1107,10 @@ impl BlobCompressionContext {
     pub(crate) fn is_encrypted(&self) -> bool {
         self.blob_features & BlobFeatures::ENCRYPTED.bits() != 0
     }
+
+    pub(crate) fn is_external(&self) -> bool {
+        self.blob_features & BlobFeatures::EXTERNAL.bits() != 0
+    }
 }
 
 #[derive(Clone)]

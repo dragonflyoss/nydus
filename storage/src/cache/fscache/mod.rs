@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Error, Result};
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -13,7 +14,7 @@ use nydus_api::CacheConfigV2;
 use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;
 
-use crate::backend::BlobBackend;
+use crate::backend::{external::ExternalBackendFactory, BlobBackend};
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::filecache::BLOB_DATA_FILE_SUFFIX;
 use crate::cache::state::{BlobStateMap, IndexedChunkMap, RangeMap};
@@ -227,7 +228,14 @@ impl FileCacheEntry {
         let reader = mgr
             .backend
             .get_reader(&blob_id)
-            .map_err(|_e| eio!("failed to get reader for data blob"))?;
+            .map_err(|e| eio!(format!("failed to get reader for blob {}, {}", blob_id, e)))?;
+        let external_reader = ExternalBackendFactory::new(
+            PathBuf::new()
+                .join(&mgr.work_dir)
+                // .join(blob_info.blob_id().as_str())
+                .join("backend.meta"),
+            PathBuf::new().join(&mgr.work_dir).join("backend.json"),
+        )?;
         let blob_meta_reader = if is_separate_meta {
             mgr.backend.get_reader(&blob_meta_id).map_err(|e| {
                 eio!(format!(
@@ -303,6 +311,7 @@ impl FileCacheEntry {
             metrics: mgr.metrics.clone(),
             prefetch_state: Arc::new(AtomicU32::new(0)),
             reader,
+            external_reader,
             runtime,
             workers,
 
