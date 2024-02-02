@@ -84,6 +84,10 @@ impl BlobCache for DummyCache {
         self.is_legacy_stargz
     }
 
+    fn is_external(&self) -> bool {
+        self.blob_info.has_feature(BlobFeatures::EXTERNAL)
+    }
+
     fn need_validation(&self) -> bool {
         self.need_validation
     }
@@ -135,14 +139,13 @@ impl BlobCache for DummyCache {
         let bios_len = bios.len();
         let offset = bios[0].offset;
         let d_size = bios[0].chunkinfo.uncompressed_size() as usize;
-        let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
         // Use the destination buffer to receive the uncompressed data if possible.
         if bufs.len() == 1 && bios_len == 1 && offset == 0 && bufs[0].len() >= d_size {
             if !bios[0].user_io {
                 return Ok(0);
             }
             let buf = unsafe { std::slice::from_raw_parts_mut(bufs[0].as_ptr(), d_size) };
-            self.read_chunk_from_backend(&bios[0].chunkinfo, buf, external)?;
+            self.read_chunk_from_backend(&bios[0].chunkinfo, buf)?;
             return Ok(buf.len());
         }
 
@@ -151,7 +154,7 @@ impl BlobCache for DummyCache {
         for bio in bios.iter() {
             if bio.user_io {
                 let mut d = alloc_buf(bio.chunkinfo.uncompressed_size() as usize);
-                self.read_chunk_from_backend(&bio.chunkinfo, d.as_mut_slice(), external)?;
+                self.read_chunk_from_backend(&bio.chunkinfo, d.as_mut_slice())?;
                 buffer_holder.push(d);
                 // Even a merged IO can hardly reach u32::MAX. So this is safe
                 user_size += bio.size;

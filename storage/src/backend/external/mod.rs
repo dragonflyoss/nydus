@@ -25,10 +25,20 @@ struct BackendConfig {
     config: HashMap<String, String>,
 }
 
+#[derive(Default)]
+pub struct NoopBackend {}
+
+impl ExternalBlobReader for NoopBackend {
+    fn read(&self, _buf: &mut [u8], _chunks: &[&dyn BlobChunkInfo]) -> Result<usize> {
+        unimplemented!();
+    }
+}
+
+#[derive(Default)]
 pub struct ExternalBackendFactory {}
 
 impl ExternalBackendFactory {
-    pub fn new(
+    pub fn create(
         meta_path: PathBuf,
         backend_config_path: PathBuf,
     ) -> Result<Arc<dyn ExternalBlobReader>> {
@@ -39,12 +49,15 @@ impl ExternalBackendFactory {
                 let backend = local::LocalBackend::new(meta_path, &backend_config.config)?;
                 Ok(Arc::new(backend) as Arc<dyn ExternalBlobReader>)
             }
-            _ => {
-                return Err(einval!(format!(
-                    "unsupported backend type: {}",
-                    backend_config.kind
-                )))
-            }
+            _ => Err(einval!(format!(
+                "unsupported backend type: {}",
+                backend_config.kind
+            ))),
         }
+    }
+
+    pub fn create_noop() -> Arc<dyn ExternalBlobReader> {
+        let backend = NoopBackend::default();
+        Arc::new(backend) as Arc<dyn ExternalBlobReader>
     }
 }

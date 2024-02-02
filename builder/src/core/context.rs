@@ -45,6 +45,7 @@ use nydus_utils::digest::DigestData;
 use nydus_utils::{compress, digest, div_round_up, round_down, try_round_up_4k, BufReaderInfo};
 
 use super::node::ChunkSource;
+use crate::attributes::Attributes;
 use crate::core::tree::TreeNode;
 use crate::{ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolicy, WhiteoutSpec};
 
@@ -947,7 +948,7 @@ impl BlobManager {
                 )))
             }
         };
-        let mut blob_features = ctx.blob_features.clone();
+        let mut blob_features = ctx.blob_features;
         let mut compressor = ctx.compressor;
         if self.external {
             blob_features.insert(BlobFeatures::EXTERNAL);
@@ -1368,7 +1369,7 @@ pub struct BuildContext {
     /// Whether is chunkdict.
     pub is_chunkdict_generated: bool,
     /// Nydus attributes for different build behavior.
-    pub attributes: HashMap<PathBuf, u32>,
+    pub attributes: Attributes,
 }
 
 impl BuildContext {
@@ -1389,7 +1390,7 @@ impl BuildContext {
         blob_inline_meta: bool,
         features: Features,
         encrypt: bool,
-        attributes: HashMap<PathBuf, u32>,
+        attributes: Attributes,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
@@ -1500,7 +1501,7 @@ impl Default for BuildContext {
             blob_cache_generator: None,
             is_chunkdict_generated: false,
 
-            attributes: HashMap::new(),
+            attributes: Attributes::default(),
         }
     }
 }

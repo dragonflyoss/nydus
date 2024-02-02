@@ -71,7 +71,7 @@ impl FilesystemTreeBuilder {
 
             let (mut child, mut external_child) = (Tree::new(child.clone()), Tree::new(child));
 
-            let external = ctx.attributes.get(&target).is_some();
+            let external = ctx.attributes.is_external(&target);
             if external {
                 info!("ignore external file data: {:?}", path);
             }
@@ -92,11 +92,8 @@ impl FilesystemTreeBuilder {
                 external_trees.push(external_child);
             } else {
                 trees.push(child.clone());
-                for (path, _) in &ctx.attributes {
-                    if path.starts_with(&target) {
-                        external_trees.push(external_child);
-                        break;
-                    }
+                if ctx.attributes.is_prefix_external(target) {
+                    external_trees.push(external_child);
                 }
             };
         }
@@ -242,10 +239,10 @@ impl Builder for DirectoryBuilder {
         ctx.prefetch = prefetch::Prefetch::new(prefetch::PrefetchPolicy::None)?;
         let mut external_blob_mgr = BlobManager::new(ctx.digester, true);
         let mut external_bootstrap_mgr = bootstrap_mgr.clone();
-        external_bootstrap_mgr
-            .bootstrap_storage
-            .as_mut()
-            .map(|stor| stor.add_suffix("external"));
+        if let Some(stor) = external_bootstrap_mgr.bootstrap_storage.as_mut() {
+            stor.add_suffix("external")
+        }
+
         let mut external_blob_writer: Box<dyn Artifact> =
             if let Some(blob_stor) = ctx.external_blob_storage.clone() {
                 Box::new(ArtifactWriter::new(blob_stor)?)

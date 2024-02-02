@@ -115,30 +115,10 @@ impl MetaMap {
 
         let object_size = *self.map.get_ref::<u32>(object_offset)? as usize;
 
-        println!(
-            "get_object: chunk_index={}, object_index={}, object_size={}",
-            chunk_index, object_index, object_size,
-        );
-
         let object_data: &[u8] = self
             .map
             .get_slice(object_offset + size_of::<u32>(), object_size)?;
 
         Ok((object_data, chunk))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_meta_map() {
-        let meta_map = MetaMap::new("/home/imeoer/backend.meta").unwrap();
-        let (object_bytes, _) = meta_map.get_object(0).unwrap();
-        let object: LocalObject = rmp_serde::from_slice(&object_bytes)
-            .map_err(|e| einval!(format!("failed to deserialize object: {:?}", e)))
-            .unwrap();
-        println!("OBJECT {:?}", object);
     }
 }

@@ -17,16 +17,15 @@ import (
 )
 
 type File struct {
-	Path     string
-	Size     int64
-	Mode     os.FileMode
-	Rdev     uint64
-	Symlink  string
-	UID      uint32
-	GID      uint32
-	Xattrs   map[string]string
-	Hash     digest.Digest
-	External bool
+	Path    string
+	Size    int64
+	Mode    os.FileMode
+	Rdev    uint64
+	Symlink string
+	UID     uint32
+	GID     uint32
+	Xattrs  map[string]string
+	Hash    digest.Digest
 }
 
 func GetXattrs(t *testing.T, path string) map[string]string {

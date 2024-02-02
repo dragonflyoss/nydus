@@ -10,48 +10,67 @@ use anyhow::Result;
 use gix_attributes::parse;
 use gix_attributes::parse::Kind;
 
-pub struct Attribute {}
+const KEY_TYPE: &str = "type";
+const VAL_EXTERNAL: &str = "external";
 
-impl Attribute {
+pub struct Parser {}
+
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct Item {
+    pub pattern: PathBuf,
+    pub attributes: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub struct Attributes {
+    pub items: Vec<Item>,
+}
+
+impl Attributes {
     /// Parse nydus attributes from a file.
-    pub fn parse<P: AsRef<Path>>(path: P) -> Result<HashMap<PathBuf, u32>> {
+    pub fn from<P: AsRef<Path>>(path: P) -> Result<Attributes> {
         let content = fs::read(path)?;
-        let attributes = parse(&content);
-        let mut result = HashMap::new();
-        for attribute in attributes {
-            let attribute = attribute?;
-            if let Kind::Pattern(pattern) = attribute.0 {
-                let mut path: Option<PathBuf> = None;
-                let mut backend_index: Option<u32> = None;
-                for line in attribute.1 {
+        let _items = parse(&content);
+
+        let mut items = Vec::new();
+        for _item in _items {
+            let _item = _item?;
+            if let Kind::Pattern(pattern) = _item.0 {
+                let mut path = PathBuf::from(pattern.text.to_string());
+                if !path.is_absolute() {
+                    path = path::Path::new("/").join(path);
+                }
+                let mut attributes = HashMap::new();
+                for line in _item.1 {
                     let line = line?;
-                    if line.name.as_str() == "type"
-                        && line.state.as_bstr().unwrap_or_default() == "external"
-                    {
-                        let _path = PathBuf::from(pattern.text.to_string());
-                        if !_path.is_absolute() {
-                            path = Some(path::Path::new("/").join(_path));
-                        }
-                    }
-                    if line.name.as_str() == "backend_index" {
-                        backend_index = Some(
-                            line.state
-                                .as_bstr()
-                                .unwrap_or_default()
-                                .to_string()
-                                .parse()?,
-                        );
-                    }
+                    let name = line.name.as_str();
+                    let state = line.state.as_bstr().unwrap_or_default();
+                    attributes.insert(name.to_string(), state.to_string());
                 }
-                match (path, backend_index) {
-                    (Some(path), Some(backend_index)) => {
-                        result.insert(path, backend_index);
-                    }
-                    _ => {}
-                }
+                items.push(Item {
+                    pattern: path,
+                    attributes,
+                });
             }
         }
-        Ok(result)
+
+        Ok(Attributes { items })
+    }
+
+    fn check_external(&self, item: &Item) -> bool {
+        item.attributes.get(KEY_TYPE) == Some(&VAL_EXTERNAL.to_string())
+    }
+
+    pub fn is_external<P: AsRef<Path>>(&self, path: P) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.pattern == path.as_ref() && self.check_external(item))
+    }
+
+    pub fn is_prefix_external<P: AsRef<Path>>(&self, target: P) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.pattern.starts_with(&target) && self.check_external(item))
     }
 }
 
@@ -59,7 +78,7 @@ impl Attribute {
 mod tests {
     use std::{collections::HashMap, fs, path::PathBuf};
 
-    use super::Attribute;
+    use super::{Attributes, Item};
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
@@ -67,22 +86,36 @@ mod tests {
         let file = TempFile::new().unwrap();
         fs::write(
             file.as_path(),
-            "/foo type=external backend_index=0
-            /bar type=external backend_index=0
-            /models/foo type=external backend_index=1",
+            "/foo type=external
+            /bar type=external
+            /models/foo type=external",
         )
         .unwrap();
-        let paths = Attribute::parse(file.as_path()).unwrap();
-        assert_eq!(
-            paths,
-            [
-                (PathBuf::from("/foo"), 0),
-                (PathBuf::from("/bar"), 0),
-                (PathBuf::from("/models/foo"), 1)
-            ]
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        let _attributes: HashMap<String, String> = [("type".to_string(), "external".to_string())]
             .iter()
             .cloned()
-            .collect::<HashMap<PathBuf, u32>>()
+            .collect();
+
+        assert_eq!(
+            attributes,
+            Attributes {
+                items: vec![
+                    Item {
+                        pattern: PathBuf::from("/foo"),
+                        attributes: _attributes.clone()
+                    },
+                    Item {
+                        pattern: PathBuf::from("/bar"),
+                        attributes: _attributes.clone()
+                    },
+                    Item {
+                        pattern: PathBuf::from("/models/foo"),
+                        attributes: _attributes.clone()
+                    }
+                ]
+            },
         );
     }
 }

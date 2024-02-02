@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Deserialize, Serialize)]
 pub struct Object {
-    #[serde(default, rename = "Path")]
+    #[serde(default, rename = "p")]
     pub path: String,
 }
 
@@ -40,13 +40,6 @@ impl ExternalBlobReader for LocalBackend {
             .map_err(|_e| einval!("failed to deserialize object"))?;
 
         let path = self.root.join(&object.path);
-
-        println!(
-            "local_backend: path={:?}, object_offset={}, expected_size={}",
-            path,
-            chunk.object_offset,
-            buf.len()
-        );
 
         let file = std::fs::File::open(path)?;
         file.read_exact_at(buf, chunk.object_offset)?;

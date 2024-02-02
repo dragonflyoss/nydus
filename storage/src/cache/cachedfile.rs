@@ -587,6 +587,10 @@ impl BlobCache for FileCacheEntry {
         self.is_zran
     }
 
+    fn is_external(&self) -> bool {
+        self.blob_info.has_feature(BlobFeatures::EXTERNAL)
+    }
+
     fn need_validation(&self) -> bool {
         self.need_validation
     }
@@ -729,14 +733,8 @@ impl BlobCache for FileCacheEntry {
             }
 
             let (blob_offset, _blob_end, blob_size) = self.get_blob_range(&pending[start..=end])?;
-            let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
-            match self.read_chunks_from_backend(
-                blob_offset,
-                blob_size,
-                &pending[start..=end],
-                true,
-                external,
-            ) {
+            match self.read_chunks_from_backend(blob_offset, blob_size, &pending[start..=end], true)
+            {
                 Ok(mut bufs) => {
                     total_size += blob_size;
                     if self.is_raw_data {
@@ -940,13 +938,11 @@ impl FileCacheEntry {
                 chunks[0].blob_index()
             );
 
-            let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
             match self.read_chunks_from_backend(
                 blob_offset,
                 blob_size,
                 &chunks[start_idx..=end_idx],
                 prefetch,
-                external,
             ) {
                 Ok(mut bufs) => {
                     if self.is_raw_data {
@@ -1011,8 +1007,7 @@ impl FileCacheEntry {
                     Ok(false) => {
                         info!("retry for timeout chunk, {}", chunk.id());
                         let mut buf = alloc_buf(chunk.uncompressed_size() as usize);
-                        let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
-                        self.read_chunk_from_backend(chunk.as_ref(), &mut buf, external)
+                        self.read_chunk_from_backend(chunk.as_ref(), &mut buf)
                             .map_err(|e| {
                                 self.update_chunk_pending_status(chunk.as_ref(), false);
                                 eio!(format!("read_raw_chunk failed, {:?}", e))
@@ -1281,14 +1276,12 @@ impl FileCacheEntry {
             region = &region_hold;
         }
 
-        let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
         let bufs = self
             .read_chunks_from_backend(
                 region.blob_address,
                 region.blob_len as usize,
                 &region.chunks,
                 false,
-                external,
             )
             .inspect_err(|_e| {
                 for c in &region.chunks {
@@ -1376,9 +1369,8 @@ impl FileCacheEntry {
             );
             &d
         } else {
-            let external = self.blob_info.has_feature(BlobFeatures::EXTERNAL);
             let c = self
-                .read_chunk_from_backend(chunk.as_ref(), d.mut_slice(), external)
+                .read_chunk_from_backend(chunk.as_ref(), d.mut_slice())
                 .inspect_err(|_e| {
                     self.chunk_map.clear_pending(chunk.as_ref());
                 })?;

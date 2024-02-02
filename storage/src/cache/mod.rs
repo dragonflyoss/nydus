@@ -54,6 +54,9 @@ pub use fscache::FsCacheMgr;
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
 
+pub const EXTERNAL_BLOB_BACKEND_META_FILE_SUFFIX: &str = ".backend.meta";
+pub const EXTERNAL_BLOB_BACKEND_CONFIG_FILE_SUFFIX: &str = ".backend.json";
+
 struct BlobIoMergeState<'a, F: FnMut(BlobIoRange)> {
     cb: F,
     // size of compressed data
@@ -193,6 +196,9 @@ pub trait BlobCache: Send + Sync {
         false
     }
 
+    /// Check whether the blob is external.
+    fn is_external(&self) -> bool;
+
     /// Check whether need to validate the data chunk by digest value.
     fn need_validation(&self) -> bool;
 
@@ -256,19 +262,10 @@ pub trait BlobCache: Send + Sync {
         blob_size: usize,
         chunks: &'b [Arc<dyn BlobChunkInfo>],
         prefetch: bool,
-        external: bool,
     ) -> Result<ChunkDecompressState<'a, 'b>>
     where
         Self: Sized,
     {
-        for chunk in chunks {
-            println!(
-                "read_chunks_from_backend {} {}",
-                chunk.blob_index(),
-                chunk.id()
-            );
-        }
-
         // Read requested data from the backend by altogether.
         let mut c_buf = alloc_buf(blob_size);
         let start = Instant::now();
@@ -276,7 +273,7 @@ pub trait BlobCache: Send + Sync {
             .iter()
             .map(|v| v.as_ref())
             .collect::<Vec<&dyn BlobChunkInfo>>();
-        let nr_read = if external {
+        let nr_read = if self.is_external() {
             self.external_reader()
                 .read(c_buf.as_mut_slice(), chunks.as_slice())?
         } else {
@@ -311,14 +308,7 @@ pub trait BlobCache: Send + Sync {
         &self,
         chunk: &dyn BlobChunkInfo,
         buffer: &mut [u8],
-        external: bool,
     ) -> Result<Option<Vec<u8>>> {
-        println!(
-            "read_chunk_from_backend {} {}",
-            chunk.blob_index(),
-            chunk.id()
-        );
-
         let start = Instant::now();
         let offset = chunk.compressed_offset();
         let mut c_buf = None;
@@ -326,7 +316,7 @@ pub trait BlobCache: Send + Sync {
         if self.is_zran() || self.is_batch() {
             return Err(enosys!("read_chunk_from_backend"));
         } else if !chunk.is_compressed() && !chunk.is_encrypted() {
-            let size = if external {
+            let size = if self.is_external() {
                 let chunks: &[&dyn BlobChunkInfo] = std::slice::from_ref(&chunk);
                 self.external_reader().read(buffer, chunks)?
             } else {

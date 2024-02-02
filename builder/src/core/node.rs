@@ -334,7 +334,6 @@ impl Node {
                     .layered_chunk_dict
                     .add_chunk(chunk.clone(), ctx.digester);
             }
-            println!("CHUNK {:?} {}", self.target(), chunk);
             self.chunks.push(NodeChunk {
                 source: ChunkSource::Build,
                 inner: chunk,
@@ -382,12 +381,10 @@ impl Node {
                     .read_exact(buf)
                     .with_context(|| format!("failed to read node file {:?}", self.path()))?;
             }
-        } else {
-            if !external {
-                reader
-                    .read_exact(buf)
-                    .with_context(|| format!("failed to read node file {:?}", self.path()))?;
-            }
+        } else if !external {
+            reader
+                .read_exact(buf)
+                .with_context(|| format!("failed to read node file {:?}", self.path()))?;
         }
 
         // For tar-tarfs case, no need to compute chunk id.
