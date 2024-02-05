@@ -17,9 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Setup Golang
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -36,9 +36,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: Linux-cargo-amd64
@@ -84,7 +84,7 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
       uses: actions/download-artifact@v4
       with:
@@ -131,7 +131,7 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
       uses: actions/download-artifact@v4
       with:
@@ -177,7 +177,7 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
       uses: actions/download-artifact@v4
       with:
@@ -223,7 +223,7 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
       uses: actions/download-artifact@v4
       with:
@@ -269,7 +269,7 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download benchmark-oci
       uses: actions/download-artifact@v4
       with:
@@ -290,9 +290,6 @@ jobs:
       with:
         name: benchmark-zran-${{ matrix.image }}
         path: benchmark-result
-    - uses: geekyeggo/delete-artifact@v2
-      with:
-        name: "*-${{matrix.image}}"
     - name: Benchmark Summary
       run: |
         case ${{matrix.image}} in

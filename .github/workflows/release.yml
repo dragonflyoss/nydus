@@ -19,9 +19,9 @@ jobs:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
@@ -53,9 +53,9 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
@@ -91,9 +91,9 @@ jobs:
     env:
       DOCKER: false
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Setup Golang
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
