@@ -23,9 +23,9 @@ jobs:
         arch: [amd64, arm64, ppc64le, riscv64]
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Setup Golang
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -46,9 +46,9 @@ jobs:
         arch: [amd64, arm64, ppc64le, riscv64]
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
@@ -77,9 +77,9 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
@@ -101,7 +101,7 @@ jobs:
     needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Docker Cache
       uses: jpribyl/action-docker-layer-caching@v0.1.0
       continue-on-error: true
@@ -133,7 +133,7 @@ jobs:
           sudo cp -r nydus-$version/nydus-static/* /usr/bin/nydus-$version/
         done
     - name: Setup Golang
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -163,9 +163,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: Linux-cargo-amd64
@@ -184,9 +184,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Setup Golang
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -206,9 +206,9 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.7.0
+        uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           shared-key: Linux-cargo-amd64
@@ -233,7 +233,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [contrib-unit-test-coverage, nydus-unit-test-coverage]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Download nydus coverage file
       uses: actions/download-artifact@v4
       with:
@@ -253,7 +253,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v1
 
   performance-test:
@@ -267,7 +267,7 @@ jobs:
           - mode: zran
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
       uses: actions/download-artifact@v4
       with:
@@ -291,7 +291,7 @@ jobs:
     needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
       uses: actions/download-artifact@v4
       with:

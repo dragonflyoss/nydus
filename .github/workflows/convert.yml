@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Setup Golang
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -38,9 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: Linux-cargo-amd64
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Build fsck.erofs
         run: |
           sudo apt-get update && sudo apt-get install -y build-essential git autotools-dev automake libtool pkg-config uuid-dev liblz4-dev
@@ -79,9 +79,9 @@ jobs:
     needs: [nydusify-build, nydus-build, fsck-erofs-build]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Login ghcr registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -153,9 +153,9 @@ jobs:
     needs: [nydusify-build, nydus-build]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Login ghcr registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -207,9 +207,9 @@ jobs:
     needs: [nydusify-build, nydus-build, fsck-erofs-build]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Login ghcr registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -270,9 +270,9 @@ jobs:
     needs: [nydusify-build, nydus-build, fsck-erofs-build]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Login ghcr registry
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -335,7 +335,7 @@ jobs:
     needs: [convert-zran, convert-native-v5, convert-native-v6, convert-native-v6-batch]
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       - name: Download Zran Metric
         uses: actions/download-artifact@v4
         with:
