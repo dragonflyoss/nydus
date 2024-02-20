@@ -158,7 +158,7 @@ func UnpackTargz(ctx context.Context, dst string, r io.Reader, overlay bool) err
 			ctx,
 			dst,
 			ds,
-			archive.WithConvertWhiteout(func(hdr *tar.Header, file string) (bool, error) {
+			archive.WithConvertWhiteout(func(_ *tar.Header, _ string) (bool, error) {
 				return true, nil
 			}),
 		)

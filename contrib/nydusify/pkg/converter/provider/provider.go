@@ -92,7 +92,7 @@ func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunk
 			),
 		),
 		docker.WithClient(newDefaultClient(insecure)),
-		docker.WithPlainHTTP(func(host string) (bool, error) {
+		docker.WithPlainHTTP(func(_ string) (bool, error) {
 			return plainHTTP, nil
 		}),
 		docker.WithChunkSize(chunkSize),
