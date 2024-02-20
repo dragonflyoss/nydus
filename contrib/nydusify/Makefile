@@ -28,8 +28,10 @@ plugin:
 
 test:
 	@go vet $(PACKAGES)
-	golangci-lint run
 	@go test -covermode=atomic -coverprofile=coverage.txt -count=1 -v -timeout 20m -parallel 16 -race ${PACKAGES}
+
+lint: 
+	golangci-lint run
 
 coverage: test
 	@go tool cover -func=coverage.txt

@@ -20,8 +20,10 @@ release:
 
 test: build
 	go vet $(PACKAGES)
-	golangci-lint run
 	go test -v -cover ${PACKAGES}
+
+lint: 
+	golangci-lint run
 
 clean:
 	rm -f bin/*

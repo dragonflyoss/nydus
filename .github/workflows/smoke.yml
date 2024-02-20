@@ -39,6 +39,29 @@ jobs:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
 
+  contrib-lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - path: contrib/nydusify
+          - path: contrib/ctr-remote
+          - path: contrib/nydus-overlayfs
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Setup Golang
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.work'
+        cache: false
+    - name: Lint
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: v1.56
+        working-directory: ${{ matrix.path }}
+        args: --timeout=30m --issues-exit-code=0
+
   nydus-build:
     runs-on: ubuntu-latest
     strategy:
@@ -192,7 +215,6 @@ jobs:
         cache-dependency-path: "**/*.sum"
     - name: Unit Test
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.54.2
         make -e DOCKER=false contrib-test
     - name: Upload contrib coverage file
       uses: actions/upload-artifact@v4

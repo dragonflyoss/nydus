@@ -59,7 +59,7 @@ func withRemote(ref string, insecure bool, credFunc withCredentialFunc) (*remote
 				),
 			),
 			docker.WithClient(newDefaultClient(insecure)),
-			docker.WithPlainHTTP(func(host string) (bool, error) {
+			docker.WithPlainHTTP(func(_ string) (bool, error) {
 				return retryWithHTTP, nil
 			}),
 		)
@@ -97,7 +97,7 @@ func DefaultRemote(ref string, insecure bool) (*remote.Remote, error) {
 // DefaultRemoteWithAuth creates an remote instance, it parses base64 encoded auth string
 // to communicate with remote registry.
 func DefaultRemoteWithAuth(ref string, insecure bool, auth string) (*remote.Remote, error) {
-	return withRemote(ref, insecure, func(host string) (string, string, error) {
+	return withRemote(ref, insecure, func(_ string) (string, string, error) {
 		// Leave auth empty if no authorization be required
 		if strings.TrimSpace(auth) == "" {
 			return "", "", nil
