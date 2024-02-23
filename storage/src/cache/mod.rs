@@ -275,7 +275,8 @@ pub trait BlobCache: Send + Sync {
             .collect::<Vec<&dyn BlobChunkInfo>>();
         let nr_read = if self.is_external() {
             self.external_reader()
-                .read(c_buf.as_mut_slice(), chunks.as_slice())?
+                .read(c_buf.as_mut_slice(), chunks.as_slice())
+                .map_err(|e| eio!(e))?
         } else {
             self.reader()
                 .read(c_buf.as_mut_slice(), blob_offset)
@@ -318,7 +319,9 @@ pub trait BlobCache: Send + Sync {
         } else if !chunk.is_compressed() && !chunk.is_encrypted() {
             let size = if self.is_external() {
                 let chunks: &[&dyn BlobChunkInfo] = std::slice::from_ref(&chunk);
-                self.external_reader().read(buffer, chunks)?
+                self.external_reader()
+                    .read(buffer, chunks)
+                    .map_err(|e| eio!(e))?
             } else {
                 self.reader().read(buffer, offset).map_err(|e| eio!(e))?
             };

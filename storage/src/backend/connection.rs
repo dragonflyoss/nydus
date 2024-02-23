@@ -74,6 +74,7 @@ pub(crate) struct ConnectionConfig {
     pub timeout: u32,
     pub connect_timeout: u32,
     pub retry_limit: u8,
+    pub redirect: bool,
 }
 
 impl Default for ConnectionConfig {
@@ -85,6 +86,7 @@ impl Default for ConnectionConfig {
             timeout: 5,
             connect_timeout: 5,
             retry_limit: 0,
+            redirect: false,
         }
     }
 }
@@ -98,6 +100,7 @@ impl From<OssConfig> for ConnectionConfig {
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
             retry_limit: c.retry_limit,
+            redirect: false,
         }
     }
 }
@@ -111,6 +114,7 @@ impl From<S3Config> for ConnectionConfig {
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
             retry_limit: c.retry_limit,
+            redirect: false,
         }
     }
 }
@@ -124,6 +128,7 @@ impl From<RegistryConfig> for ConnectionConfig {
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
             retry_limit: c.retry_limit,
+            redirect: false,
         }
     }
 }
@@ -137,6 +142,7 @@ impl From<HttpProxyConfig> for ConnectionConfig {
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
             retry_limit: c.retry_limit,
+            redirect: false,
         }
     }
 }
@@ -651,8 +657,12 @@ impl Connection {
 
         let mut cb = Client::builder()
             .timeout(timeout)
-            .connect_timeout(connect_timeout)
-            .redirect(Policy::none());
+            .connect_timeout(connect_timeout);
+        if config.redirect {
+            cb = cb.redirect(Policy::default());
+        } else {
+            cb = cb.redirect(Policy::none());
+        }
 
         if config.skip_verify {
             cb = cb.danger_accept_invalid_certs(true);

@@ -1626,6 +1626,7 @@ mod tests {
                 registry: None,
                 http_proxy: None,
             }),
+            external_backends: Vec::new(),
             id: "id".to_owned(),
             cache: None,
             rafs: None,

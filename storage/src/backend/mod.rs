@@ -27,15 +27,16 @@ use nydus_utils::{
 use crate::utils::{alloc_buf, copyv};
 use crate::StorageError;
 
-pub mod external;
-
 #[cfg(any(
     feature = "backend-oss",
     feature = "backend-registry",
     feature = "backend-s3",
     feature = "backend-http-proxy",
+    feature = "backend-external",
 ))]
 pub mod connection;
+#[cfg(feature = "backend-external")]
+pub mod external;
 #[cfg(feature = "backend-http-proxy")]
 pub mod http_proxy;
 #[cfg(feature = "backend-localdisk")]

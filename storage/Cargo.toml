@@ -44,6 +44,8 @@ url = { version = "2.1.1", optional = true }
 vm-memory = "0.14.1"
 fuse-backend-rs = "^0.12.0"
 gpt = { version = "3.1.0", optional = true }
+chrono = { version = "0.4", features = ["serde"] }
+serde_bytes = "0.11"
 
 nydus-api = { version = "0.3", path = "../api" }
 nydus-utils = { version = "0.4", path = "../utils", features = [
@@ -66,6 +68,7 @@ backend-oss = ["base64", "httpdate", "hmac", "sha1", "reqwest", "url"]
 backend-registry = ["base64", "reqwest", "url"]
 backend-s3 = ["base64", "hmac", "http", "reqwest", "sha2", "time", "url"]
 backend-http-proxy = ["hyper", "hyperlocal", "http", "reqwest", "url"]
+backend-external = ["base64", "reqwest", "url"]
 dedup = ["rusqlite", "r2d2", "r2d2_sqlite"]
 prefetch-rate-limit = ["leaky-bucket"]
 
