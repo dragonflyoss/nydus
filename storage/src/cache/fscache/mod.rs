@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
+use nydus_api::config::ExternalBackendConfig;
 use nydus_api::CacheConfigV2;
 use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;
@@ -37,6 +38,7 @@ pub struct FsCacheMgr {
     backend: Arc<dyn BlobBackend>,
     metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
+    external_backends_config: Arc<Vec<ExternalBackendConfig>>,
     runtime: Arc<Runtime>,
     worker_mgr: Arc<AsyncWorkerMgr>,
     work_dir: String,
@@ -51,6 +53,7 @@ impl FsCacheMgr {
     pub fn new(
         config: &CacheConfigV2,
         backend: Arc<dyn BlobBackend>,
+        external_backends_config: Arc<Vec<ExternalBackendConfig>>,
         runtime: Arc<Runtime>,
         id: &str,
         user_io_batch_size: u32,
@@ -72,6 +75,7 @@ impl FsCacheMgr {
             backend,
             metrics,
             prefetch_config,
+            external_backends_config,
             runtime,
             worker_mgr: Arc::new(worker_mgr),
             work_dir: work_dir.to_owned(),
@@ -98,6 +102,7 @@ impl FsCacheMgr {
             self,
             blob.clone(),
             self.prefetch_config.clone(),
+            self.external_backends_config.clone(),
             self.runtime.clone(),
             self.worker_mgr.clone(),
         )?;
@@ -203,6 +208,7 @@ impl FileCacheEntry {
         mgr: &FsCacheMgr,
         blob_info: Arc<BlobInfo>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
+        external_backends_config: Arc<Vec<ExternalBackendConfig>>,
         runtime: Arc<Runtime>,
         workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {
@@ -234,13 +240,20 @@ impl FileCacheEntry {
             .map_err(|e| eio!(format!("failed to get reader for blob {}, {}", blob_id, e)))?;
         let external_reader = if blob_info.is_external() {
             ExternalBackendFactory::create(
+                external_backends_config,
                 PathBuf::new()
                     .join(&mgr.work_dir)
                     .join(blob_info.blob_id() + EXTERNAL_BLOB_BACKEND_META_FILE_SUFFIX),
                 PathBuf::new()
                     .join(&mgr.work_dir)
                     .join(blob_info.blob_id() + EXTERNAL_BLOB_BACKEND_CONFIG_FILE_SUFFIX),
-            )?
+            )
+            .map_err(|e| {
+                eio!(format!(
+                    "failed to create external backend for blob {}, {}",
+                    blob_id, e
+                ))
+            })?
         } else {
             ExternalBackendFactory::create_noop()
         };
@@ -451,6 +464,7 @@ mod tests {
         let mut mgr: FsCacheMgr = FsCacheMgr::new(
             cfg.get_cache_config().unwrap(),
             Arc::new(backend),
+            Arc::new(Vec::new()),
             ASYNC_RUNTIME.clone(),
             &cfg.id,
             0,

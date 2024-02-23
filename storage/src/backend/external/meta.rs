@@ -7,8 +7,9 @@ use std::mem::size_of;
 use std::path::Path;
 use std::{fs::File, os::unix::fs::MetadataExt};
 
+use serde::{Serialize, Deserialize};
+
 use nydus_utils::filemap::FileMapState;
-use serde::{Deserialize, Serialize};
 
 // Layout
 //
@@ -92,7 +93,7 @@ impl MetaMap {
         let object_meta_offset = header.object_meta_offset;
 
         let chunk_meta = self.map.get_ref::<ChunkMeta>(chunk_meta_offset as usize)?;
-        let object_meta = self
+        let _object_meta = self
             .map
             .get_ref::<ObjectMeta>(object_meta_offset as usize)?;
 
@@ -102,16 +103,20 @@ impl MetaMap {
                 + chunk_index as usize * chunk_meta.entry_size as usize,
         )?;
         let object_index = chunk.object_index;
-        let object_offset = if object_meta.entry_size == 0 {
-            let object_offset_offset = object_meta_offset as usize
-                + size_of::<ObjectMeta>()
-                + object_index as usize * size_of::<ObjectOffset>();
-            *self.map.get_ref::<ObjectOffset>(object_offset_offset)? as usize
-        } else {
-            object_meta_offset as usize
-                + size_of::<ObjectMeta>()
-                + object_index as usize * object_meta.entry_size as usize
-        };
+        // let object_offset_offset = if object_meta.entry_size == 0 {
+        //     object_meta_offset as usize
+        //         + size_of::<ObjectMeta>()
+        //         + object_index as usize * size_of::<ObjectOffset>()
+        // } else {
+        //     object_meta_offset as usize
+        //         + size_of::<ObjectMeta>()
+        //         + object_index as usize
+        //             * (size_of::<u32>() as usize + object_meta.entry_size as usize) as usize
+        // };
+        let object_offset_offset = object_meta_offset as usize
+            + size_of::<ObjectMeta>()
+            + object_index as usize * size_of::<ObjectOffset>();
+        let object_offset = *self.map.get_ref::<ObjectOffset>(object_offset_offset)? as usize;
 
         let object_size = *self.map.get_ref::<u32>(object_offset)? as usize;
 
