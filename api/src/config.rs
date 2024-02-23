@@ -25,6 +25,9 @@ pub struct ConfigV2 {
     pub id: String,
     /// Configuration information for storage backend.
     pub backend: Option<BackendConfigV2>,
+    /// Configuration for external storage backends, order insensitivity.
+    #[serde(default)]
+    pub external_backends: Vec<ExternalBackendConfig>,
     /// Configuration information for local cache system.
     pub cache: Option<CacheConfigV2>,
     /// Configuration information for RAFS filesystem.
@@ -40,6 +43,7 @@ impl Default for ConfigV2 {
             version: 2,
             id: String::new(),
             backend: None,
+            external_backends: Vec::new(),
             cache: None,
             rafs: None,
             internal: ConfigV2Internal::default(),
@@ -54,6 +58,7 @@ impl ConfigV2 {
             version: 2,
             id: id.to_string(),
             backend: None,
+            external_backends: Vec::new(),
             cache: None,
             rafs: None,
             internal: ConfigV2Internal::default(),
@@ -959,6 +964,9 @@ pub struct BlobCacheEntryConfigV2 {
     /// Configuration information for storage backend.
     #[serde(default)]
     pub backend: BackendConfigV2,
+    /// Configuration for external storage backends, order insensitivity.
+    #[serde(default)]
+    pub external_backends: Vec<ExternalBackendConfig>,
     /// Configuration information for local cache system.
     #[serde(default)]
     pub cache: CacheConfigV2,
@@ -1022,6 +1030,7 @@ impl From<&BlobCacheEntryConfigV2> for ConfigV2 {
             version: c.version,
             id: c.id.clone(),
             backend: Some(c.backend.clone()),
+            external_backends: c.external_backends.clone(),
             cache: Some(c.cache.clone()),
             rafs: None,
             internal: ConfigV2Internal::default(),
@@ -1292,6 +1301,19 @@ struct CacheConfig {
     pub prefetch_config: BlobPrefetchConfig,
 }
 
+/// Additional configuration information for external backend, its items
+/// will be merged to the configuration from image.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ExternalBackendConfig {
+    /// External backend identifier to merge.
+    pub patch: HashMap<String, String>,
+    /// External backend type.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// External backend config items to merge.
+    pub config: HashMap<String, String>,
+}
+
 impl TryFrom<&CacheConfig> for CacheConfigV2 {
     type Error = std::io::Error;
 
@@ -1333,6 +1355,9 @@ struct FactoryConfig {
     pub id: String,
     /// Configuration for storage backend.
     pub backend: BackendConfig,
+    /// Configuration for external storage backends, order insensitivity.
+    #[serde(default)]
+    pub external_backends: Vec<ExternalBackendConfig>,
     /// Configuration for blob cache manager.
     #[serde(default)]
     pub cache: CacheConfig,
@@ -1393,6 +1418,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
             version: 2,
             id: v.device.id,
             backend: Some(backend),
+            external_backends: v.device.external_backends,
             cache: Some(cache),
             rafs: Some(rafs),
             internal: ConfigV2Internal::default(),
@@ -1482,6 +1508,9 @@ pub(crate) struct BlobCacheEntryConfig {
     ///
     /// Possible value: `LocalFsConfig`, `RegistryConfig`, `OssConfig`, `LocalDiskConfig`.
     backend_config: Value,
+    /// Configuration for external storage backends, order insensitivity.
+    #[serde(default)]
+    external_backends: Vec<ExternalBackendConfig>,
     /// Type of blob cache, corresponding to `FactoryConfig::CacheConfig::cache_type`.
     ///
     /// Possible value: "fscache", "filecache".
@@ -1517,6 +1546,7 @@ impl TryFrom<&BlobCacheEntryConfig> for BlobCacheEntryConfigV2 {
             version: 2,
             id: v.id.clone(),
             backend: (&backend_config).try_into()?,
+            external_backends: v.external_backends.clone(),
             cache: (&cache_config).try_into()?,
             metadata_path: v.metadata_path.clone(),
         })
