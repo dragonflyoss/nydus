@@ -74,6 +74,10 @@ pub struct OutputSerializer {
     blobs: Vec<String>,
     /// Performance trace info for current build.
     trace: serde_json::Map<String, serde_json::Value>,
+    /// RAFS filesystem version (5 or 6).
+    fs_version: String,
+    /// Chunk compression algorithm.
+    compressor: String,
 }
 
 impl OutputSerializer {
@@ -81,6 +85,8 @@ impl OutputSerializer {
         matches: &ArgMatches,
         build_output: BuildOutput,
         build_info: &BuildTimeInfo,
+        compressor: compress::Algorithm,
+        fs_version: RafsVersion,
     ) -> Result<()> {
         let output_json: Option<PathBuf> = matches
             .get_one::<String>("output-json")
@@ -100,6 +106,8 @@ impl OutputSerializer {
                 bootstrap: build_output.bootstrap_path.unwrap_or_default(),
                 blobs: build_output.blobs,
                 trace,
+                fs_version: fs_version.to_string(),
+                compressor: compressor.to_string(),
             };
 
             serde_json::to_writer_pretty(w, &output)
@@ -114,6 +122,8 @@ impl OutputSerializer {
         build_info: &BuildTimeInfo,
         blob_ids: Vec<String>,
         bootstrap: &Path,
+        compressor: compress::Algorithm,
+        fs_version: RafsVersion,
     ) -> Result<()> {
         let output_json: Option<PathBuf> = matches
             .get_one::<String>("output-json")
@@ -133,6 +143,8 @@ impl OutputSerializer {
                 bootstrap: bootstrap.display().to_string(),
                 blobs: blob_ids,
                 trace,
+                fs_version: fs_version.to_string(),
+                compressor: compressor.to_string(),
             };
 
             serde_json::to_writer(w, &output).context("failed to write result to output file")?;
@@ -1179,7 +1191,7 @@ impl Command {
         event_tracer!("euid", "{}", geteuid());
         event_tracer!("egid", "{}", getegid());
         info!("successfully built RAFS filesystem: \n{}", build_output);
-        OutputSerializer::dump(matches, build_output, build_info)
+        OutputSerializer::dump(matches, build_output, build_info, compressor, version)
     }
 
     fn chunkdict_save(matches: &ArgMatches) -> Result<()> {
@@ -1271,6 +1283,9 @@ impl Command {
         ctx.configuration = config.clone();
 
         let parent_bootstrap_path = Self::get_parent_bootstrap(matches)?;
+        let meta = RafsSuper::load_from_file(&source_bootstrap_paths[0], config.clone(), false)?
+            .0
+            .meta;
 
         let output = Merger::merge(
             &mut ctx,
@@ -1285,7 +1300,13 @@ impl Command {
             chunk_dict_path,
             config,
         )?;
-        OutputSerializer::dump(matches, output, build_info)
+        OutputSerializer::dump(
+            matches,
+            output,
+            build_info,
+            meta.get_compressor(),
+            meta.version.try_into().unwrap(),
+        )
     }
 
     fn compact(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
@@ -1319,10 +1340,12 @@ impl Command {
         let config = serde_json::from_reader(file)
             .with_context(|| format!("invalid config file {}", config_file_path))?;
 
+        let version = rs.meta.version.try_into().unwrap();
+        let compressor = rs.meta.get_compressor();
         if let Some(build_output) =
             BlobCompactor::compact(rs, dst_bootstrap, chunk_dict, backend, &config)?
         {
-            OutputSerializer::dump(matches, build_output, build_info)?;
+            OutputSerializer::dump(matches, build_output, build_info, compressor, version)?;
         }
         Ok(())
     }
@@ -1380,7 +1403,7 @@ impl Command {
             .set_blob_accessible(matches.get_one::<String>("bootstrap").is_none());
 
         let mut validator = Validator::new(bootstrap_path, config)?;
-        let blobs = validator
+        let (blobs, compressor, fs_version) = validator
             .check(verbose)
             .with_context(|| format!("failed to check bootstrap {:?}", bootstrap_path))?;
 
@@ -1400,7 +1423,14 @@ impl Command {
             blob_ids.push(blob.blob_id().to_string());
         }
 
-        OutputSerializer::dump_for_check(matches, build_info, blob_ids, bootstrap_path)?;
+        OutputSerializer::dump_for_check(
+            matches,
+            build_info,
+            blob_ids,
+            bootstrap_path,
+            compressor,
+            fs_version,
+        )?;
 
         Ok(())
     }

@@ -656,6 +656,15 @@ impl From<RafsVersion> for u32 {
     }
 }
 
+impl std::fmt::Display for RafsVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RafsVersion::V5 => write!(f, "5"),
+            RafsVersion::V6 => write!(f, "6"),
+        }
+    }
+}
+
 impl RafsVersion {
     /// Check whether it's RAFS v5.
     pub fn is_v5(&self) -> bool {
