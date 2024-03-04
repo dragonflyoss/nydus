@@ -1662,6 +1662,20 @@ impl FileIoMergeState {
         tag: BlobIoTag,
         chunk: Option<Arc<dyn BlobChunkInfo>>,
     ) -> Result<()> {
+        // Make sure user io of same region continuous
+        if !self.regions.is_empty() && self.joinable(region_type) {
+            let region = &self.regions[self.regions.len() - 1];
+            if !region.seg.is_empty() && tag.is_user_io() {
+                if let BlobIoTag::User(ref seg) = tag {
+                    if seg.offset as u64 + start
+                        != region.blob_address + region.seg.offset as u64 + region.seg.len as u64
+                    {
+                        self.commit();
+                    }
+                }
+            }
+        }
+
         if self.regions.is_empty() || !self.joinable(region_type) {
             self.regions.push(Region::new(region_type));
             self.last_region_joinable = true;
@@ -1793,7 +1807,7 @@ mod tests {
 
         let tag = BlobIoTag::User(BlobIoSegment {
             offset: 0x1800,
-            len: 0x1800,
+            len: 0x800,
         });
         state
             .push(RegionType::CacheFast, 0x1000, 0x2000, tag, None)
@@ -1810,8 +1824,8 @@ mod tests {
         assert_eq!(state.regions.len(), 1);
 
         let tag = BlobIoTag::User(BlobIoSegment {
-            offset: 0x0000,
-            len: 0x2000,
+            offset: 0x0001,
+            len: 0x1fff,
         });
         state
             .push(RegionType::CacheSlow, 0x5000, 0x2000, tag, None)
