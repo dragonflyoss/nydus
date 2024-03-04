@@ -1580,7 +1580,7 @@ mod tests {
 
         let tag = BlobIoTag::User(BlobIoSegment {
             offset: 0x1800,
-            len: 0x1800,
+            len: 0x800,
         });
         state
             .push(RegionType::CacheFast, 0x1000, 0x2000, tag, None)
@@ -1597,8 +1597,8 @@ mod tests {
         assert_eq!(state.regions.len(), 1);
 
         let tag = BlobIoTag::User(BlobIoSegment {
-            offset: 0x0000,
-            len: 0x2000,
+            offset: 0x0001,
+            len: 0x1fff,
         });
         state
             .push(RegionType::CacheSlow, 0x5000, 0x2000, tag, None)
