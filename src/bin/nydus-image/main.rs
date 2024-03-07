@@ -13,7 +13,10 @@ extern crate log;
 extern crate serde_json;
 #[macro_use]
 extern crate lazy_static;
-use crate::deduplicate::{update_ctx_from_parent_bootstrap, SqliteDatabase};
+use crate::deduplicate::{
+    check_bootstrap_versions_consistency, update_ctx_from_parent_bootstrap, Deduplicate,
+    SqliteDatabase,
+};
 use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
@@ -28,9 +31,9 @@ use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
     parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobManager,
-    BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictChunkInfo, ConversionType,
-    DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger, Prefetch,
-    PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+    BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo, ChunkdictChunkInfo,
+    ConversionType, DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger,
+    Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
 };
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
@@ -45,7 +48,6 @@ use nydus_utils::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::deduplicate::{check_bootstrap_versions_consistency, Deduplicate};
 use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
@@ -1260,15 +1262,20 @@ impl Command {
             .map(|paths| paths.map(PathBuf::from).collect())
             .unwrap();
 
-        let (chunkdict, noise_points): (Vec<ChunkdictChunkInfo>, Vec<String>);
+        let (chunkdict_chunks, chunkdict_blobs, noise_points): (
+            Vec<ChunkdictChunkInfo>,
+            Vec<ChunkdictBlobInfo>,
+            Vec<String>,
+        );
 
         match db_strs[0] {
             "sqlite" => {
                 let mut algorithm: deduplicate::Algorithm<SqliteDatabase> =
                     deduplicate::Algorithm::<SqliteDatabase>::new(algorithm, db_strs[1])?;
                 let result = algorithm.chunkdict_generate()?;
-                chunkdict = result.0;
-                noise_points = result.1;
+                chunkdict_chunks = result.0;
+                chunkdict_blobs = result.1;
+                noise_points = result.2;
             }
             _ => {
                 bail!("Unsupported database type: {}, please use a valid database URI, such as 'sqlite:///path/to/chunkdict.db'.", db_strs[0])
@@ -1278,7 +1285,7 @@ impl Command {
         // Output noise point in DBSCAN clustering algorithm
         info!(
             "The length of chunkdict is {}",
-            Vec::<ChunkdictChunkInfo>::len(&chunkdict)
+            Vec::<ChunkdictChunkInfo>::len(&chunkdict_chunks)
         );
         info!("It is not recommended to use image deduplication");
         for image_name in noise_points {
@@ -1286,12 +1293,12 @@ impl Command {
         }
 
         // Dump chunkdict to bootstrap
-        // let features = Features::try_from(
-        //     matches
-        //         .get_one::<String>("features")
-        //         .map(|s| s.as_str())
-        //         .unwrap_or_default(),
-        // )?;
+        let features = Features::try_from(
+            matches
+                .get_one::<String>("features")
+                .map(|s| s.as_str())
+                .unwrap_or_default(),
+        )?;
         let chunkdict_bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let config =
             Self::get_configuration(matches).context("failed to get configuration information")?;
@@ -1300,24 +1307,31 @@ impl Command {
             .set_blob_accessible(matches.get_one::<String>("config").is_some());
         build_ctx.configuration = config;
         build_ctx.blob_storage = Some(chunkdict_bootstrap_path);
-        // build_ctx.blob_features = BlobFeatures::CAP_TAR_TOC;
-        // build_ctx.blob_features.insert(BlobFeatures::ALIGNED);
-        // Build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
-        // Build_ctx.blob_features.insert(BlobFeatures::ENCRYPTED);
-        // build_ctx.features = features;
+        build_ctx.blob_features = BlobFeatures::CAP_TAR_TOC;
+        build_ctx.blob_features.insert(BlobFeatures::ALIGNED);
+        build_ctx
+            .blob_features
+            .insert(BlobFeatures::IS_CHUNKDICT_GENERATED);
+        build_ctx
+            .blob_features
+            .insert(BlobFeatures::INLINED_CHUNK_DIGEST);
+        build_ctx.blob_features.insert(BlobFeatures::HAS_TAR_HEADER);
+        build_ctx.blob_features.insert(BlobFeatures::HAS_TOC);
+        build_ctx.features = features;
+        build_ctx.is_chunkdict_generated = true;
 
-        // let digester = matches
-        //     .get_one::<String>("digester")
-        //     .map(|s| s.as_str())
-        //     .unwrap_or_default()
-        //     .parse()?;
         let mut blob_mgr = BlobManager::new(build_ctx.digester);
 
         let bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let mut bootstrap_mgr = BootstrapManager::new(Some(bootstrap_path), None);
 
-        let output =
-            Generator::generate(&mut build_ctx, &mut bootstrap_mgr, &mut blob_mgr, chunkdict)?;
+        let output = Generator::generate(
+            &mut build_ctx,
+            &mut bootstrap_mgr,
+            &mut blob_mgr,
+            chunkdict_chunks,
+            chunkdict_blobs,
+        )?;
         OutputSerializer::dump(matches, output, build_info).unwrap();
         info!(
             "Chunkdict metadata is saved at: {:?}",

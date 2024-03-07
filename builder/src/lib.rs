@@ -23,6 +23,7 @@ use sha2::Digest;
 
 use self::core::node::{Node, NodeInfo};
 
+pub use self::chunkdict_generator::ChunkdictBlobInfo;
 pub use self::chunkdict_generator::ChunkdictChunkInfo;
 pub use self::chunkdict_generator::Generator;
 pub use self::compact::BlobCompactor;

@@ -1754,7 +1754,8 @@ impl RafsV6Blob {
                 blob_features.bits()
             );
             return false;
-        } else if !tarfs_mode
+        } else if !blob_features.contains(BlobFeatures::IS_CHUNKDICT_GENERATED)
+            && !tarfs_mode
             && ci_uncompr_size != count * size_of::<BlobChunkInfoV1Ondisk>() as u64
         {
             error!(
@@ -1819,6 +1820,7 @@ impl RafsV6BlobTable {
         blob_toc_digest: [u8; 32],
         blob_meta_size: u64,
         blob_toc_size: u32,
+        is_chunkdict: bool,
         header: BlobCompressionContextHeader,
         cipher_object: Arc<Cipher>,
         cipher_context: Option<CipherContext>,
@@ -1850,6 +1852,8 @@ impl RafsV6BlobTable {
         blob_info.set_blob_meta_size(blob_meta_size);
         blob_info.set_blob_toc_size(blob_toc_size);
         blob_info.set_cipher_info(flags.into(), cipher_object, cipher_context);
+
+        blob_info.set_chunkdict_generated(is_chunkdict);
 
         self.entries.push(Arc::new(blob_info));
 
@@ -2726,6 +2730,7 @@ mod tests {
             [0; 32],
             0,
             0,
+            false,
             BlobCompressionContextHeader::default(),
             Arc::new(crypt::Algorithm::Aes128Xts.new_cipher().unwrap()),
             Some(CipherContext::default()),
@@ -2768,6 +2773,7 @@ mod tests {
             [0; 32],
             0,
             0,
+            false,
             BlobCompressionContextHeader::default(),
             Arc::new(crypt::Algorithm::Aes128Xts.new_cipher().unwrap()),
             Some(CipherContext::default()),

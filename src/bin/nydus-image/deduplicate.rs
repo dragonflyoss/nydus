@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 use core::cmp::Ordering;
 use nydus_api::ConfigV2;
 use nydus_builder::BuildContext;
-use nydus_builder::ChunkdictChunkInfo;
 use nydus_builder::ConversionType;
 use nydus_builder::Tree;
+use nydus_builder::{ChunkdictBlobInfo, ChunkdictChunkInfo};
 use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use rusqlite::{params, Connection};
@@ -58,7 +58,7 @@ pub trait Database {
     fn insert_chunk(&self, chunk_info: &ChunkdictChunkInfo) -> Result<()>;
 
     /// Inserts blob information into the database.
-    fn insert_blob(&self, blob_info: &Blob) -> Result<()>;
+    fn insert_blob(&self, blob_info: &ChunkdictBlobInfo) -> Result<()>;
 
     /// Retrieves all chunk information from the database.
     fn get_chunks(&self) -> Result<Vec<ChunkdictChunkInfo>>;
@@ -67,7 +67,10 @@ pub trait Database {
     fn get_chunks_by_blob_id(&self, blob_id: &str) -> Result<Vec<ChunkdictChunkInfo>>;
 
     /// Retrieves all blob information from the database.
-    fn get_blobs(&self) -> Result<Vec<Blob>>;
+    fn get_blobs(&self) -> Result<Vec<ChunkdictBlobInfo>>;
+
+    /// Retrieves blob information from the database filtered by blob ID.
+    fn get_blob_by_id(&self, blob_id: &str) -> Result<ChunkdictBlobInfo>;
 }
 
 pub struct SqliteDatabase {
@@ -119,7 +122,7 @@ impl Database for SqliteDatabase {
             .context("Failed to insert chunk")
     }
 
-    fn insert_blob(&self, blob: &Blob) -> Result<()> {
+    fn insert_blob(&self, blob: &ChunkdictBlobInfo) -> Result<()> {
         self.blob_table
             .insert(blob)
             .context("Failed to insert blob")
@@ -133,8 +136,12 @@ impl Database for SqliteDatabase {
         ChunkTable::list_all_by_blob_id(&self.chunk_table, blob_id).context("Failed to get chunks")
     }
 
-    fn get_blobs(&self) -> Result<Vec<Blob>> {
+    fn get_blobs(&self) -> Result<Vec<ChunkdictBlobInfo>> {
         BlobTable::list_all(&self.blob_table).context("Failed to get blobs")
+    }
+
+    fn get_blob_by_id(&self, blob_id: &str) -> Result<ChunkdictBlobInfo> {
+        BlobTable::list_by_id(&self.blob_table, blob_id).context("Failed to get blob")
     }
 }
 
@@ -235,10 +242,14 @@ impl Deduplicate<SqliteDatabase> {
     fn insert_blobs(&mut self, blob_infos: &[Arc<BlobInfo>]) -> anyhow::Result<()> {
         for blob in blob_infos {
             self.db
-                .insert_blob(&Blob {
+                .insert_blob(&ChunkdictBlobInfo {
                     blob_id: blob.blob_id().to_string(),
                     blob_compressed_size: blob.compressed_size(),
                     blob_uncompressed_size: blob.uncompressed_size(),
+                    blob_compressor: blob.compressor().to_string(),
+                    blob_meta_ci_compressed_size: blob.meta_ci_compressed_size(),
+                    blob_meta_ci_uncompressed_size: blob.meta_ci_uncompressed_size(),
+                    blob_meta_ci_offset: blob.meta_ci_offset(),
                 })
                 .context("Failed to insert blob")?;
         }
@@ -297,11 +308,15 @@ impl Algorithm<SqliteDatabase> {
     }
 
     // Call the algorithm to generate a dictionary
-    pub fn chunkdict_generate(&mut self) -> anyhow::Result<(Vec<ChunkdictChunkInfo>, Vec<String>)> {
-        let all_chunks = self.db.chunk_table.list_all()?;
-        let mut chunkdict: Vec<ChunkdictChunkInfo> = Vec::new();
+    pub fn chunkdict_generate(
+        &mut self,
+    ) -> anyhow::Result<(Vec<ChunkdictChunkInfo>, Vec<ChunkdictBlobInfo>, Vec<String>)> {
+        let all_chunks: Vec<ChunkdictChunkInfo> = self.db.chunk_table.list_all()?;
+        let mut chunkdict_chunks: Vec<ChunkdictChunkInfo> = Vec::new();
+        let mut chunkdict_blobs: Vec<ChunkdictBlobInfo> = Vec::new();
         let mut core_image = Vec::new();
         let mut noise_points = Vec::new();
+
         let (chunkdict_version, chunkdict_image) = match &self.algorithm_name as &str {
             "exponential_smoothing" => Self::deduplicate_version(&all_chunks)?,
             _ => {
@@ -311,14 +326,14 @@ impl Algorithm<SqliteDatabase> {
         for single_clustering in chunkdict_image {
             for (image_list, cluster_dictionary) in single_clustering {
                 core_image.extend(image_list);
-                chunkdict.extend(cluster_dictionary);
+                chunkdict_chunks.extend(cluster_dictionary);
             }
         }
         for (_, dictionary) in chunkdict_version {
-            chunkdict.extend(dictionary);
+            chunkdict_chunks.extend(dictionary);
         }
         let mut chunkdict_size = 0;
-        for i in &chunkdict {
+        for i in &chunkdict_chunks {
             chunkdict_size += i.chunk_compressed_size;
         }
         info!(
@@ -332,7 +347,35 @@ impl Algorithm<SqliteDatabase> {
                 noise_points.push(chunk.image_reference.clone());
             }
         }
-        Ok((chunkdict, noise_points))
+        Self::fill_chunkdict(self, &mut chunkdict_chunks, &mut chunkdict_blobs)?;
+        Ok((chunkdict_chunks, chunkdict_blobs, noise_points))
+    }
+
+    /// Baseed chunk list to fill chunkdict, including all chunks in the same blob and all blobs in the chunkdict.
+    fn fill_chunkdict(
+        &mut self,
+        chunkdict_chunks: &mut Vec<ChunkdictChunkInfo>,
+        chunkdict_blobs: &mut Vec<ChunkdictBlobInfo>,
+    ) -> Result<()> {
+        let mut blob_ids = std::collections::HashSet::new();
+        for chunk in chunkdict_chunks.iter() {
+            blob_ids.insert(chunk.chunk_blob_id.clone());
+        }
+        for blob_id in blob_ids {
+            let mut chunks = self.db.get_chunks_by_blob_id(&blob_id)?;
+            chunks = chunks
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            for chunk in chunks {
+                if !chunkdict_chunks.contains(&chunk) {
+                    chunkdict_chunks.push(chunk);
+                }
+            }
+            chunkdict_blobs.push(self.db.get_blob_by_id(&blob_id)?);
+        }
+        Ok(())
     }
 
     // Algorithm "exponential_smoothing"
@@ -774,7 +817,7 @@ impl Algorithm<SqliteDatabase> {
         let mut threshold = 0.5;
         let max_threshold = 0.8;
 
-        let mut test_total_size = 0;
+        let mut test_total_size: u32 = 0;
         let mut min_test_size: u32 = std::u32::MAX;
         let mut min_data_dict = HashMap::new();
 
@@ -821,7 +864,9 @@ impl Algorithm<SqliteDatabase> {
                     }
                 }
                 for chunk in point.chunk_list.iter() {
-                    test_total_size += chunk.chunk_compressed_size;
+                    test_total_size = test_total_size
+                        .checked_add(chunk.chunk_compressed_size)
+                        .unwrap_or(test_total_size);
                 }
             }
             if test_total_size <= min_test_size {
@@ -889,7 +934,7 @@ impl ChunkTable {
         })
     }
 
-    /// select all data filtered by blob ID.
+    /// Select all data filtered by blob ID.
     fn list_all_by_blob_id(&self, blob_id: &str) -> Result<Vec<ChunkdictChunkInfo>, DatabaseError> {
         let mut offset = 0;
         let limit: i64 = 100;
@@ -908,7 +953,7 @@ impl ChunkTable {
         Ok(all_chunks_by_blob_id)
     }
 
-    /// select data with offset and limit filtered by blob ID.
+    /// Select data with offset and limit filtered by blob ID.
     fn list_paged_by_blob_id(
         &self,
         blob_id: &str,
@@ -1145,15 +1190,38 @@ impl BlobTable {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+
+    pub fn list_by_id(&self, blob_id: &str) -> Result<ChunkdictBlobInfo, DatabaseError> {
+        let conn_guard = self
+            .conn
+            .lock()
+            .map_err(|e| DatabaseError::PoisonError(e.to_string()))?;
+        let mut stmt = conn_guard.prepare(
+            "SELECT blob_id, blob_compressed_size, blob_uncompressed_size, blob_compressor, blob_meta_ci_compressed_size, blob_meta_ci_uncompressed_size, blob_meta_ci_offset FROM blob WHERE blob_id = ?1",
+        )?;
+        let mut blob_iterator = stmt.query_map([blob_id], |row| {
+            Ok(ChunkdictBlobInfo {
+                blob_id: row.get(0)?,
+                blob_compressed_size: row.get(1)?,
+                blob_uncompressed_size: row.get(2)?,
+                blob_compressor: row.get(3)?,
+                blob_meta_ci_compressed_size: row.get(4)?,
+                blob_meta_ci_uncompressed_size: row.get(5)?,
+                blob_meta_ci_offset: row.get(6)?,
+            })
+        })?;
+
+        if let Some(blob) = blob_iterator.next() {
+            blob.map_err(DatabaseError::SqliteError)
+        } else {
+            Err(DatabaseError::SqliteError(
+                rusqlite::Error::QueryReturnedNoRows,
+            ))
+        }
+    }
 }
 
-pub struct Blob {
-    blob_id: String,
-    blob_compressed_size: u64,
-    blob_uncompressed_size: u64,
-}
-
-impl Table<Blob, DatabaseError> for BlobTable {
+impl Table<ChunkdictBlobInfo, DatabaseError> for BlobTable {
     fn clear(&self) -> Result<(), DatabaseError> {
         self.conn
             .lock()
@@ -1169,10 +1237,14 @@ impl Table<Blob, DatabaseError> for BlobTable {
             .map_err(|e| DatabaseError::PoisonError(e.to_string()))?
             .execute(
                 "CREATE TABLE IF NOT EXISTS blob (
-                    id                      INTEGER PRIMARY KEY,
-                    blob_id                 TEXT NOT NULL,
-                    blob_compressed_size    INT,
-                    blob_uncompressed_size  INT
+                    id                                  INTEGER PRIMARY KEY,
+                    blob_id                             TEXT NOT NULL,
+                    blob_compressed_size                INT,
+                    blob_uncompressed_size              INT,
+                    blob_compressor                     TEXT,
+                    blob_meta_ci_compressed_size        INT,
+                    blob_meta_ci_uncompressed_size      INT,
+                    blob_meta_ci_offset                 INT
                 )",
                 [],
             )
@@ -1180,7 +1252,7 @@ impl Table<Blob, DatabaseError> for BlobTable {
         Ok(())
     }
 
-    fn insert(&self, blob: &Blob) -> Result<(), DatabaseError> {
+    fn insert(&self, blob: &ChunkdictBlobInfo) -> Result<(), DatabaseError> {
         self.conn
             .lock()
             .map_err(|e| DatabaseError::PoisonError(e.to_string()))?
@@ -1188,21 +1260,29 @@ impl Table<Blob, DatabaseError> for BlobTable {
                 "INSERT INTO blob (
                     blob_id,
                     blob_compressed_size,
-                    blob_uncompressed_size
+                    blob_uncompressed_size,
+                    blob_compressor,
+                    blob_meta_ci_compressed_size,
+                    blob_meta_ci_uncompressed_size,
+                    blob_meta_ci_offset
                 )
-                VALUES (?1, ?2, ?3);
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);
                 ",
                 rusqlite::params![
                     blob.blob_id,
                     blob.blob_compressed_size,
-                    blob.blob_uncompressed_size
+                    blob.blob_uncompressed_size,
+                    blob.blob_compressor,
+                    blob.blob_meta_ci_compressed_size,
+                    blob.blob_meta_ci_uncompressed_size,
+                    blob.blob_meta_ci_offset,
                 ],
             )
             .map_err(DatabaseError::SqliteError)?;
         Ok(())
     }
 
-    fn list_all(&self) -> Result<Vec<Blob>, DatabaseError> {
+    fn list_all(&self) -> Result<Vec<ChunkdictBlobInfo>, DatabaseError> {
         let mut offset = 0;
         let limit: i64 = 100;
         let mut all_blobs = Vec::new();
@@ -1220,7 +1300,7 @@ impl Table<Blob, DatabaseError> for BlobTable {
         Ok(all_blobs)
     }
 
-    fn list_paged(&self, offset: i64, limit: i64) -> Result<Vec<Blob>, DatabaseError> {
+    fn list_paged(&self, offset: i64, limit: i64) -> Result<Vec<ChunkdictBlobInfo>, DatabaseError> {
         let conn_guard = self
             .conn
             .lock()
@@ -1230,10 +1310,14 @@ impl Table<Blob, DatabaseError> for BlobTable {
                 ORDER BY id LIMIT ?1 OFFSET ?2",
         )?;
         let blob_iterator = stmt.query_map(params![limit, offset], |row| {
-            Ok(Blob {
+            Ok(ChunkdictBlobInfo {
                 blob_id: row.get(0)?,
                 blob_compressed_size: row.get(1)?,
                 blob_uncompressed_size: row.get(2)?,
+                blob_compressor: row.get(3)?,
+                blob_meta_ci_compressed_size: row.get(4)?,
+                blob_meta_ci_uncompressed_size: row.get(5)?,
+                blob_meta_ci_offset: row.get(6)?,
             })
         })?;
         let mut blobs = Vec::new();
@@ -1280,10 +1364,14 @@ mod tests {
     fn test_blob_table() -> Result<(), Box<dyn std::error::Error>> {
         let blob_table = BlobTable::new_in_memory()?;
         blob_table.create()?;
-        let blob = Blob {
+        let blob = ChunkdictBlobInfo {
             blob_id: "BLOB123".to_string(),
             blob_compressed_size: 1024,
             blob_uncompressed_size: 2048,
+            blob_compressor: "zstd".to_string(),
+            blob_meta_ci_compressed_size: 1024,
+            blob_meta_ci_uncompressed_size: 2048,
+            blob_meta_ci_offset: 0,
         };
         blob_table.insert(&blob)?;
         let blobs = blob_table.list_all()?;
@@ -1291,6 +1379,16 @@ mod tests {
         assert_eq!(blobs[0].blob_id, blob.blob_id);
         assert_eq!(blobs[0].blob_compressed_size, blob.blob_compressed_size);
         assert_eq!(blobs[0].blob_uncompressed_size, blob.blob_uncompressed_size);
+        assert_eq!(blobs[0].blob_compressor, blob.blob_compressor);
+        assert_eq!(
+            blobs[0].blob_meta_ci_compressed_size,
+            blob.blob_meta_ci_compressed_size
+        );
+        assert_eq!(
+            blobs[0].blob_meta_ci_uncompressed_size,
+            blob.blob_meta_ci_uncompressed_size
+        );
+        assert_eq!(blobs[0].blob_meta_ci_offset, blob.blob_meta_ci_offset);
         Ok(())
     }
 
@@ -1310,7 +1408,7 @@ mod tests {
         };
         chunk_table.insert(&chunk)?;
         let chunk2 = ChunkdictChunkInfo {
-            image_reference: "REDIS".to_string(),
+            image_reference: "REDIS02".to_string(),
             version: "1.0.0".to_string(),
             chunk_blob_id: "BLOB456".to_string(),
             chunk_digest: "DIGEST123".to_string(),
@@ -1352,10 +1450,14 @@ mod tests {
         let blob_table = BlobTable::new_in_memory()?;
         blob_table.create()?;
         for i in 0..200 {
-            let blob = Blob {
+            let blob = ChunkdictBlobInfo {
                 blob_id: format!("BLOB{}", i),
                 blob_compressed_size: i,
                 blob_uncompressed_size: i * 2,
+                blob_compressor: "zstd".to_string(),
+                blob_meta_ci_compressed_size: i,
+                blob_meta_ci_uncompressed_size: i * 2,
+                blob_meta_ci_offset: i * 3,
             };
             blob_table.insert(&blob)?;
         }
@@ -1364,6 +1466,10 @@ mod tests {
         assert_eq!(blobs[0].blob_id, "BLOB100");
         assert_eq!(blobs[0].blob_compressed_size, 100);
         assert_eq!(blobs[0].blob_uncompressed_size, 200);
+        assert_eq!(blobs[0].blob_compressor, "zstd");
+        assert_eq!(blobs[0].blob_meta_ci_compressed_size, 100);
+        assert_eq!(blobs[0].blob_meta_ci_uncompressed_size, 200);
+        assert_eq!(blobs[0].blob_meta_ci_offset, 300);
         Ok(())
     }
 

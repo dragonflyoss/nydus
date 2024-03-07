@@ -990,6 +990,7 @@ mod cached_tests {
             0,
             BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
             meta.flags,
+            false,
         );
         let mut cached_inode = CachedInodeV5::new(blob_table, meta.clone());
         cached_inode.load(&meta, &mut reader).unwrap();

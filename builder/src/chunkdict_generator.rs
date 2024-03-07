@@ -23,6 +23,7 @@ use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
+use nydus_utils::compress::Algorithm;
 use nydus_utils::digest::RafsDigest;
 use std::ffi::OsString;
 use std::mem::size_of;
@@ -41,6 +42,16 @@ pub struct ChunkdictChunkInfo {
     pub chunk_uncompressed_offset: u64,
 }
 
+pub struct ChunkdictBlobInfo {
+    pub blob_id: String,
+    pub blob_compressed_size: u64,
+    pub blob_uncompressed_size: u64,
+    pub blob_compressor: String,
+    pub blob_meta_ci_compressed_size: u64,
+    pub blob_meta_ci_uncompressed_size: u64,
+    pub blob_meta_ci_offset: u64,
+}
+
 /// Struct to generate chunkdict RAFS bootstrap.
 pub struct Generator {}
 
@@ -50,17 +61,17 @@ impl Generator {
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
-        chunkdict_origin: Vec<ChunkdictChunkInfo>,
+        chunkdict_chunks_origin: Vec<ChunkdictChunkInfo>,
+        chunkdict_blobs: Vec<ChunkdictBlobInfo>,
     ) -> Result<BuildOutput> {
         // Validate and remove chunks whose belonged blob sizes are smaller than a block.
-        let mut chunkdict = chunkdict_origin.to_vec();
-        Self::validate_and_remove_chunks(ctx, &mut chunkdict);
-
+        let mut chunkdict_chunks = chunkdict_chunks_origin.to_vec();
+        Self::validate_and_remove_chunks(ctx, &mut chunkdict_chunks);
         // build root tree
         let mut tree = Self::build_root_tree(ctx)?;
 
         // build child tree
-        let child = Self::build_child_tree(ctx, blob_mgr, &chunkdict)?;
+        let child = Self::build_child_tree(ctx, blob_mgr, &chunkdict_chunks, &chunkdict_blobs)?;
         let result = vec![child];
         tree.children = result;
 
@@ -156,7 +167,8 @@ impl Generator {
     fn build_child_tree(
         ctx: &mut BuildContext,
         blob_mgr: &mut BlobManager,
-        chunkdict: &[ChunkdictChunkInfo],
+        chunkdict_chunks: &[ChunkdictChunkInfo],
+        chunkdict_blobs: &[ChunkdictBlobInfo],
     ) -> Result<Tree> {
         // node
         let mut inode = InodeWrapper::new(ctx.fs_version);
@@ -185,7 +197,7 @@ impl Generator {
         let mut node = Node::new(inode, node_info, 0);
 
         // insert chunks
-        Self::insert_chunks(ctx, blob_mgr, &mut node, chunkdict)?;
+        Self::insert_chunks(ctx, blob_mgr, &mut node, chunkdict_chunks, chunkdict_blobs)?;
 
         let node_size: u64 = node
             .chunks
@@ -209,16 +221,22 @@ impl Generator {
         ctx: &mut BuildContext,
         blob_mgr: &mut BlobManager,
         node: &mut Node,
-        chunkdict: &[ChunkdictChunkInfo],
+        chunkdict_chunks: &[ChunkdictChunkInfo],
+        chunkdict_blobs: &[ChunkdictBlobInfo],
     ) -> Result<()> {
-        for (i, chunk_info) in chunkdict.iter().enumerate() {
+        for (index, chunk_info) in chunkdict_chunks.iter().enumerate() {
             let chunk_size: u32 = chunk_info.chunk_compressed_size;
-            let file_offset = i as u64 * chunk_size as u64;
+            let file_offset = index as u64 * chunk_size as u64;
             let mut chunk = ChunkWrapper::new(ctx.fs_version);
 
             // update blob context
             let (blob_index, blob_ctx) =
                 blob_mgr.get_or_cerate_blob_for_chunkdict(ctx, &chunk_info.chunk_blob_id)?;
+            if blob_ctx.blob_id.is_empty() {
+                blob_ctx.blob_id = chunk_info.chunk_blob_id.clone();
+            }
+
+            // blob_ctx.
             let chunk_uncompressed_size = chunk_info.chunk_uncompressed_size;
             let pre_d_offset = blob_ctx.current_uncompressed_offset;
             blob_ctx.uncompressed_blob_size = pre_d_offset + chunk_uncompressed_size as u64;
@@ -228,6 +246,31 @@ impl Generator {
                 blob_ctx.blob_meta_header.ci_uncompressed_size()
                     + size_of::<BlobChunkInfoV1Ondisk>() as u64,
             );
+            blob_ctx.blob_meta_header.set_ci_compressed_size(
+                blob_ctx.blob_meta_header.ci_uncompressed_size()
+                    + size_of::<BlobChunkInfoV1Ondisk>() as u64,
+            );
+            let chunkdict_blob_info = chunkdict_blobs
+                .iter()
+                .find(|blob| blob.blob_id == chunk_info.chunk_blob_id)
+                .unwrap();
+            blob_ctx.blob_compressor = match chunkdict_blob_info.blob_compressor.as_str() {
+                "None" => Algorithm::None,
+                "Lz4Block" => Algorithm::Lz4Block,
+                "GZip" => Algorithm::GZip,
+                "Zstd" => Algorithm::Zstd,
+                _ => Algorithm::None,
+            };
+            blob_ctx
+                .blob_meta_header
+                .set_ci_uncompressed_size(chunkdict_blob_info.blob_meta_ci_uncompressed_size);
+            blob_ctx
+                .blob_meta_header
+                .set_ci_compressed_size(chunkdict_blob_info.blob_meta_ci_compressed_size);
+            blob_ctx
+                .blob_meta_header
+                .set_ci_compressed_offset(chunkdict_blob_info.blob_meta_ci_offset);
+            blob_ctx.blob_meta_header.set_ci_compressor(Algorithm::Zstd);
 
             // update chunk
             let chunk_index = blob_ctx.alloc_chunk_index()?;
