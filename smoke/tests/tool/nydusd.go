@@ -69,6 +69,7 @@ type NydusdConfig struct {
 	AccessPattern   bool
 	PrefetchFiles   []string
 	AmplifyIO       uint64
+	ChunkDedupDb    string
 }
 
 type Nydusd struct {
@@ -204,6 +205,9 @@ func (nydusd *Nydusd) Mount() error {
 	}
 	if len(nydusd.BootstrapPath) > 0 {
 		args = append(args, "--bootstrap", nydusd.BootstrapPath)
+	}
+	if len(nydusd.ChunkDedupDb) > 0 {
+		args = append(args, "--dedup-db", nydusd.ChunkDedupDb)
 	}
 
 	cmd := exec.Command(nydusd.NydusdPath, args...)

@@ -6,6 +6,7 @@
 use std::alloc::{alloc, Layout};
 use std::cmp::{self, min};
 use std::io::{ErrorKind, IoSliceMut, Result};
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::io::RawFd;
 use std::slice::from_raw_parts_mut;
 
@@ -95,6 +96,68 @@ pub fn copyv<S: AsRef<[u8]>>(
     }
 
     Ok((copied, (dst_index, dst_offset)))
+}
+
+/// The copy_file_range system call performs an in-kernel copy between file descriptors src and dst
+/// without the additional cost of transferring data from the kernel to user space and back again.
+///
+/// There may be additional optimizations for specific file systems. It copies up to len bytes of
+/// data from file descriptor fd_in to file descriptor fd_out, overwriting any data that exists
+/// within the requested range of the target file.
+#[cfg(target_os = "linux")]
+pub fn copy_file_range(
+    src: impl AsFd,
+    src_off: u64,
+    dst: impl AsFd,
+    dst_off: u64,
+    mut len: usize,
+) -> Result<()> {
+    let mut src_off = src_off as i64;
+    let mut dst_off = dst_off as i64;
+
+    while len > 0 {
+        let ret = nix::fcntl::copy_file_range(
+            src.as_fd().as_raw_fd(),
+            Some(&mut src_off),
+            dst.as_fd().as_raw_fd(),
+            Some(&mut dst_off),
+            len,
+        )?;
+        if ret == 0 && len > 0 {
+            return Err(eio!("reach end of file when copy file range"));
+        }
+        len -= ret;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn copy_file_range(
+    src: impl AsFd,
+    src_off: u64,
+    dst: impl AsFd,
+    dst_off: u64,
+    len: usize,
+) -> Result<()> {
+    let mut buf = vec![0u8; len];
+
+    let ret = nix::sys::uio::pread(src.as_fd().as_raw_fd(), &mut buf, src_off as libc::off_t)?;
+    if ret == len {
+        let ret = nix::sys::uio::pwrite(dst.as_fd().as_raw_fd(), &buf, dst_off as libc::off_t)?;
+        if ret == len {
+            return Ok(());
+        }
+    }
+
+    Err(eio!("failed to copy data between files"))
+}
+
+pub fn get_path_from_file(file: &impl AsRawFd) -> String {
+    match std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())) {
+        Ok(v) => v.display().to_string(),
+        Err(_) => "".to_string(),
+    }
 }
 
 /// An memory cursor to access an `FileVolatileSlice` array.
@@ -239,6 +302,8 @@ pub fn check_digest(data: &[u8], digest: &RafsDigest, digester: digest::Algorith
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_copyv() {
@@ -371,5 +436,16 @@ mod tests {
         assert_eq!(cursor.consume(2).len(), 0);
         assert_eq!(cursor.index, 2);
         assert_eq!(cursor.offset, 0);
+    }
+
+    #[test]
+    fn test_copy_file_range() {
+        let mut src = TempFile::new().unwrap().into_file();
+        let dst = TempFile::new().unwrap();
+
+        let buf = vec![8u8; 4096];
+        src.write_all(&buf).unwrap();
+        copy_file_range(&src, 0, dst.as_file(), 4096, 4096).unwrap();
+        assert_eq!(dst.as_file().metadata().unwrap().len(), 8192);
     }
 }
