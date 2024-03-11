@@ -194,6 +194,9 @@ pub fn update_ctx_from_parent_bootstrap(
         ctx.conversion_type = ConversionType::TarToTarfs;
         ctx.blob_features |= BlobFeatures::TARFS;
     }
+    ctx.fs_version =
+        RafsVersion::try_from(sb.meta.version).context("Failed to get RAFS version")?;
+    ctx.compressor = config.compressor;
 
     Ok(())
 }
@@ -1306,7 +1309,7 @@ impl Table<ChunkdictBlobInfo, DatabaseError> for BlobTable {
             .lock()
             .map_err(|e| DatabaseError::PoisonError(e.to_string()))?;
         let mut stmt: rusqlite::Statement<'_> = conn_guard.prepare(
-            "SELECT blob_id, blob_compressed_size, blob_uncompressed_size from blob
+            "SELECT blob_id, blob_compressed_size, blob_uncompressed_size, blob_compressor, blob_meta_ci_compressed_size, blob_meta_ci_uncompressed_size, blob_meta_ci_offset from blob
                 ORDER BY id LIMIT ?1 OFFSET ?2",
         )?;
         let blob_iterator = stmt.query_map(params![limit, offset], |row| {

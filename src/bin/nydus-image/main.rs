@@ -1344,7 +1344,14 @@ impl Command {
             chunkdict_chunks,
             chunkdict_blobs,
         )?;
-        OutputSerializer::dump(matches, output, build_info).unwrap();
+        OutputSerializer::dump(
+            matches,
+            output,
+            build_info,
+            build_ctx.compressor,
+            build_ctx.fs_version,
+        )
+        .unwrap();
         info!(
             "Chunkdict metadata is saved at: {:?}",
             matches
