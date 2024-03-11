@@ -17,18 +17,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Setup Golang
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
     - name: Build Contrib
       run: |
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/local/bin v1.54.2
         make -e DOCKER=false nydusify-release
     - name: Upload Nydusify
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@v4
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd/nydusify
@@ -37,18 +36,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: Linux-cargo-amd64
+    - uses: dsherret/rust-toolchain-file@v1
     - name: Build Nydus
       run: |
-        rustup component add rustfmt clippy
-        make
+        make release
     - name: Upload Nydus Binaries
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@v4
       with:
         name: nydus-artifact
         path: |
@@ -85,14 +84,14 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v4
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v4
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -107,7 +106,7 @@ jobs:
         export SNAPSHOTTER=overlayfs
         sudo -E make smoke-benchmark
     - name: Save BenchMark Result
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: benchmark-oci-${{ matrix.image }}
         path: smoke/${{ matrix.image }}-oci.json
@@ -132,14 +131,14 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v4
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v4
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -153,7 +152,7 @@ jobs:
         export BENCHMARK_METRIC_FILE=${{ matrix.image }}-fsversion-v5.json
         sudo -E make smoke-benchmark
     - name: Save BenchMark Result
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: benchmark-fsversion-v5-${{ matrix.image }}
         path: smoke/${{ matrix.image }}-fsversion-v5.json
@@ -178,14 +177,14 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v4
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v4
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -199,7 +198,7 @@ jobs:
         export BENCHMARK_METRIC_FILE=${{ matrix.image }}-fsversion-v6.json
         sudo -E make smoke-benchmark
     - name: Save BenchMark Result
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: benchmark-fsversion-v6-${{ matrix.image }}
         path: smoke/${{ matrix.image }}-fsversion-v6.json
@@ -224,14 +223,14 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v4
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@master
+      uses: actions/download-artifact@v4
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -245,7 +244,7 @@ jobs:
         export BENCHMARK_METRIC_FILE=${{ matrix.image }}-zran.json
         sudo -E make smoke-benchmark
     - name: Save BenchMark Result
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: benchmark-zran-${{ matrix.image }}
         path: smoke/${{ matrix.image }}-zran.json
@@ -270,30 +269,27 @@ jobs:
             tag: 8-al2022-jdk
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
     - name: Download benchmark-oci
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: benchmark-oci-${{ matrix.image }}
         path: benchmark-result
     - name: Download benchmark-fsversion-v5
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: benchmark-fsversion-v5-${{ matrix.image }}
         path: benchmark-result
     - name: Download benchmark-fsversion-v6
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: benchmark-fsversion-v6-${{ matrix.image }}
         path: benchmark-result
     - name: Download benchmark-zran
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: benchmark-zran-${{ matrix.image }}
         path: benchmark-result
-    - uses: geekyeggo/delete-artifact@v2
-      with:
-        name: "*-${{matrix.image}}"
     - name: Benchmark Summary
       run: |
         case ${{matrix.image}} in

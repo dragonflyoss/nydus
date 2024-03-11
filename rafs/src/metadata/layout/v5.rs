@@ -1628,6 +1628,10 @@ pub mod tests {
             self.index
         }
 
+        fn is_batch(&self) -> bool {
+            false
+        }
+
         fn is_compressed(&self) -> bool {
             self.flags.contains(BlobChunkFlags::COMPRESSED)
         }

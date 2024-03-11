@@ -61,7 +61,7 @@ go_path := $(if $(env_go_path),$(env_go_path),"$(HOME)/go")
 define build_golang
 	echo "Building target $@ by invoking: $(2)"
 	if [ $(DOCKER) = "true" ]; then \
-		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.20 $(2) ;\
+		docker run --rm -v ${go_path}:/go -v ${current_dir}:/nydus-rs --workdir /nydus-rs/$(1) golang:1.21 $(2) ;\
 	else \
 		$(2) -C $(1); \
 	fi
@@ -133,6 +133,9 @@ smoke-performance:
 smoke-benchmark:
 	make -C smoke test-benchmark
 
+smoke-takeover:
+	make -C smoke test-takeover
+
 smoke: release smoke-only
 
 contrib-build: nydusify ctr-remote nydus-overlayfs
@@ -142,6 +145,9 @@ contrib-release: nydusify-release ctr-remote-release \
 
 contrib-test: nydusify-test ctr-remote-test \
 				nydus-overlayfs-test
+
+contrib-lint: nydusify-lint ctr-remote-lint \
+				nydus-overlayfs-lint
 
 contrib-clean: nydusify-clean ctr-remote-clean \
 				nydus-overlayfs-clean
@@ -164,6 +170,9 @@ nydusify-test:
 nydusify-clean:
 	$(call build_golang,${NYDUSIFY_PATH},make clean)
 
+nydusify-lint:
+	$(call build_golang,${NYDUSIFY_PATH},make lint)
+
 ctr-remote:
 	$(call build_golang,${CTR-REMOTE_PATH},make)
 
@@ -176,6 +185,9 @@ ctr-remote-test:
 ctr-remote-clean:
 	$(call build_golang,${CTR-REMOTE_PATH},make clean)
 
+ctr-remote-lint:
+	$(call build_golang,${CTR-REMOTE_PATH},make lint)
+
 nydus-overlayfs:
 	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make)
 
@@ -187,6 +199,9 @@ nydus-overlayfs-test:
 
 nydus-overlayfs-clean:
 	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make clean)
+
+nydus-overlayfs-lint:
+	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make lint)
 
 docker-static:
 	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/musl-static

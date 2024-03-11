@@ -86,17 +86,12 @@ impl Node {
 
     /// Update whether compact mode can be used for this inode or not.
     pub fn v6_set_inode_compact(&mut self) {
-        if self.info.v6_force_extended_inode
+        self.v6_compact_inode = !(self.info.v6_force_extended_inode
             || self.inode.uid() > u16::MAX as u32
             || self.inode.gid() > u16::MAX as u32
             || self.inode.nlink() > u16::MAX as u32
             || self.inode.size() > u32::MAX as u64
-            || self.path().extension() == Some(OsStr::new("pyc"))
-        {
-            self.v6_compact_inode = false;
-        } else {
-            self.v6_compact_inode = true;
-        }
+            || self.path().extension() == Some(OsStr::new("pyc")));
     }
 
     /// Layout the normal inode (except directory inode) into the meta blob.

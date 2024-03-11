@@ -586,7 +586,7 @@ mod tests {
     fn test_blob_cache_entry() {
         let tmpdir = TempDir::new().unwrap();
         let path = tmpdir.as_path().join("bootstrap1");
-        std::fs::write(&path, "metadata").unwrap();
+        std::fs::write(path, "metadata").unwrap();
         let cfg = create_factory_config();
         let content = cfg.replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap());
         let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
@@ -629,7 +629,7 @@ mod tests {
     fn test_invalid_blob_id() {
         let tmpdir = TempDir::new().unwrap();
         let path = tmpdir.as_path().join("bootstrap1");
-        std::fs::write(&path, "metadata").unwrap();
+        std::fs::write(path, "metadata").unwrap();
         let config = create_factory_config();
         let content = config.replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap());
         let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();

@@ -38,7 +38,7 @@ generate_rust_golang_dockerfile() {
   local dockerfile=${1:-"/tmp/rust_golang_dockerfile"}
   local rust_version=${2:-"${rust_toolchain}"}
   cat > $dockerfile <<EOF
-FROM rust:${rust_version}
+FROM rust:${rust_version}-bullseye
 
 RUN apt-get update -y \
     && apt-get install -y cmake g++ pkg-config jq libcurl4-openssl-dev libelf-dev libdw-dev binutils-dev libiberty-dev musl-tools \
@@ -46,9 +46,9 @@ RUN apt-get update -y \
     && rm -rf /var/lib/apt/lists/*
 
 # install golang env
-Run wget https://go.dev/dl/go1.19.linux-amd64.tar.gz \
-    && tar -C /usr/local -xzf go1.19.linux-amd64.tar.gz \
-    && rm -rf go1.19.linux-amd64.tar.gz
+Run wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz \
+    && rm -rf go1.21.5.linux-amd64.tar.gz
 
 ENV PATH \$PATH:/usr/local/go/bin
 RUN go env -w GO111MODULE=on

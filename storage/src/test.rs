@@ -80,9 +80,15 @@ impl BlobChunkInfo for MockChunkInfo {
     fn chunk_id(&self) -> &RafsDigest {
         &self.block_id
     }
+
     fn id(&self) -> u32 {
         self.index
     }
+
+    fn is_batch(&self) -> bool {
+        self.flags.contains(BlobChunkFlags::BATCH)
+    }
+
     fn is_compressed(&self) -> bool {
         self.flags.contains(BlobChunkFlags::COMPRESSED)
     }

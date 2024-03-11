@@ -1,18 +1,23 @@
 // Copyright 2023 Alibaba Cloud. All rights reserved.
+// Copyright 2023 Nydus Developers. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
+
 package utils
 
 import (
 	"archive/tar"
 	"compress/gzip"
 	"io"
+	"net/http"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -31,6 +36,8 @@ func makePlatform(osArch string, nydus bool) *ocispec.Platform {
 	}
 	if nydus {
 		platform.OSFeatures = []string{ManifestOSFeatureNydus}
+	} else {
+		platform.OSFeatures = nil
 	}
 	return platform
 }
@@ -73,6 +80,11 @@ func TestMatchNydusPlatform(t *testing.T) {
 	desc = makeDesc("nydus", makePlatform("linux/amd64", true))
 	require.Equal(t, MatchNydusPlatform(&desc, "linux", "arm64"), false)
 	require.Equal(t, MatchNydusPlatform(&desc, "linux", "amd64"), true)
+	require.Equal(t, MatchNydusPlatform(&desc, "windows", "amd64"), false)
+	require.Equal(t, MatchNydusPlatform(&desc, "windows", "arm64"), false)
+	desc = makeDesc("nydus", makePlatform("linux/amd64", false))
+	require.Equal(t, MatchNydusPlatform(&desc, "linux", "arm64"), false)
+	require.Equal(t, MatchNydusPlatform(&desc, "linux", "amd64"), false)
 	require.Equal(t, MatchNydusPlatform(&desc, "windows", "amd64"), false)
 	require.Equal(t, MatchNydusPlatform(&desc, "windows", "arm64"), false)
 	desc = makeDesc("nydus", makePlatform("windows/arm64", true))
@@ -193,4 +205,68 @@ func TestUnpackFile(t *testing.T) {
 	err = UnpackFile(targzFile, file1.Name(), outputName)
 	require.NoError(t, err)
 	defer os.Remove(outputName)
+}
+
+func TestHashFile(t *testing.T) {
+	file, err := os.CreateTemp("", "tempFile")
+	require.NoError(t, err)
+	defer os.RemoveAll(file.Name())
+
+	_, err = file.WriteString("123456")
+	require.NoError(t, err)
+	file.Sync()
+
+	hashSum, err := HashFile(file.Name())
+	require.NoError(t, err)
+	require.Len(t, hashSum, 32)
+}
+
+func TestMarshalToDesc(t *testing.T) {
+	config := ocispec.Image{
+		Config: ocispec.ImageConfig{},
+		RootFS: ocispec.RootFS{
+			Type: "layers",
+			// Layers from manifest must be match image config.
+			DiffIDs: []digest.Digest{},
+		},
+	}
+	configDesc, configBytes, err := MarshalToDesc(config, ocispec.MediaTypeImageConfig)
+	require.NoError(t, err)
+	require.Equal(t, "application/vnd.oci.image.config.v1+json", configDesc.MediaType)
+	require.Equal(t, "sha256:1475e1cf0118aa3ddadbc8ae05cd5d5e151b63784e1e062de226e70fced50a0f", configDesc.Digest.String())
+	require.Equal(t, int64(len(configBytes)), configDesc.Size)
+}
+
+func TestWithRetry(t *testing.T) {
+	err := WithRetry(func() error {
+		_, err := http.Get("http://localhost:5000")
+		return err
+	})
+	require.ErrorIs(t, err, syscall.ECONNREFUSED)
+}
+
+func TestRetryWithHTTP(t *testing.T) {
+	require.True(t, RetryWithHTTP(errors.Wrap(http.ErrSchemeMismatch, "parse Nydus image")))
+	require.False(t, RetryWithHTTP(nil))
+}
+
+func TestGetNydusFsVersionOrDefault(t *testing.T) {
+	testAnnotations := make(map[string]string)
+	fsVersion := GetNydusFsVersionOrDefault(testAnnotations, V5)
+	require.Equal(t, fsVersion, V5)
+
+	fsVersion = GetNydusFsVersionOrDefault(nil, V6)
+	require.Equal(t, fsVersion, V6)
+
+	testAnnotations[LayerAnnotationNydusFsVersion] = "5"
+	fsVersion = GetNydusFsVersionOrDefault(testAnnotations, V6)
+	require.Equal(t, fsVersion, V5)
+
+	testAnnotations[LayerAnnotationNydusFsVersion] = "6"
+	fsVersion = GetNydusFsVersionOrDefault(testAnnotations, V5)
+	require.Equal(t, fsVersion, V6)
+
+	testAnnotations[LayerAnnotationNydusFsVersion] = "7"
+	fsVersion = GetNydusFsVersionOrDefault(testAnnotations, V5)
+	require.Equal(t, fsVersion, V5)
 }

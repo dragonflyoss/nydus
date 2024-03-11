@@ -11,7 +11,7 @@ pub fn make_error(
     _file: &str,
     _line: u32,
 ) -> std::io::Error {
-    #[cfg(all(feature = "error-backtrace"))]
+    #[cfg(feature = "error-backtrace")]
     {
         if let Ok(val) = std::env::var("RUST_BACKTRACE") {
             if val.trim() != "0" {

@@ -79,7 +79,7 @@ type rPullConfig struct {
 
 func pull(ctx context.Context, client *containerd.Client, ref string, config *rPullConfig) error {
 	pCtx := ctx
-	h := images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+	h := images.HandlerFunc(func(_ context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		if desc.MediaType != images.MediaTypeDockerSchema1Manifest {
 			fmt.Printf("fetching %v... %v\n", desc.Digest.String()[:15], desc.MediaType)
 		}

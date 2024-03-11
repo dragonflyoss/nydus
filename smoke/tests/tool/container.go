@@ -98,6 +98,18 @@ func SupportContainerImage(image string) bool {
 	return existsInURLWait || existsInCmdStdout
 }
 
+// GetRunArgs return the RunArgs for the image
+func GetRunArgs(t *testing.T, image string) *RunArgs {
+	repo := ImageRepo(t, image)
+	if args, ok := urlWait[repo]; ok {
+		return &args
+	}
+	if args, ok := cmdStdout[repo]; ok {
+		return &args
+	}
+	return nil
+}
+
 // runURLWaitContainer run container util getting http response from WaitUrl
 func runURLWaitContainer(t *testing.T, image string, snapshotter string, containerName string, runArgs RunArgs) {
 	cmd := fmt.Sprintf("sudo nerdctl --insecure-registry --snapshotter %s run -d --net=host", snapshotter)
@@ -140,7 +152,7 @@ func RunContainerWithBaseline(t *testing.T, image string, containerName string, 
 	args, ok := urlWait[ImageRepo(t, image)]
 	if ok {
 		runURLWaitContainer(t, image, "nydus", containerName, args)
-		defer clearContainer(t, image, "nydus", containerName)
+		defer ClearContainer(t, image, "nydus", containerName)
 	} else {
 		t.Fatalf(fmt.Sprintf("%s is not in URL_WAIT", image))
 	}
@@ -164,10 +176,10 @@ func RunContainer(t *testing.T, image string, snapshotter string, containerName 
 	args, ok := urlWait[ImageRepo(t, image)]
 	if ok {
 		runURLWaitContainer(t, image, snapshotter, containerName, args)
-		defer clearContainer(t, image, snapshotter, containerName)
+		defer ClearContainer(t, image, snapshotter, containerName)
 	} else if args, ok := cmdStdout[ImageRepo(t, image)]; ok {
 		runCmdStdoutContainer(t, image, snapshotter, containerName, args)
-		defer clearContainer(t, image, snapshotter, containerName)
+		defer ClearContainer(t, image, snapshotter, containerName)
 	}
 
 	containerMetic.E2ETime = time.Since(startTime)
@@ -183,8 +195,24 @@ func RunContainer(t *testing.T, image string, snapshotter string, containerName 
 	return &containerMetic
 }
 
+// RunContainerSimple just runs a container simply
+func RunContainerSimple(t *testing.T, image, snapshotter, containerName string, autoClear bool) {
+	args, ok := urlWait[ImageRepo(t, image)]
+	if ok {
+		runURLWaitContainer(t, image, snapshotter, containerName, args)
+		if autoClear {
+			defer ClearContainer(t, image, snapshotter, containerName)
+		}
+	} else if args, ok := cmdStdout[ImageRepo(t, image)]; ok {
+		runCmdStdoutContainer(t, image, snapshotter, containerName, args)
+		if autoClear {
+			defer ClearContainer(t, image, snapshotter, containerName)
+		}
+	}
+}
+
 // ClearContainer clear container by containerName
-func clearContainer(t *testing.T, image string, snapshotter, containerName string) {
+func ClearContainer(t *testing.T, image string, snapshotter, containerName string) {
 	RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter %s rm -f %s", snapshotter, containerName))
 	RunWithoutOutput(t, fmt.Sprintf("sudo nerdctl --snapshotter %s image rm %s", snapshotter, image))
 }

@@ -906,7 +906,7 @@ impl BlobManager {
                 let iv = crypt::Cipher::generate_random_iv()?;
                 let cipher_ctx = CipherContext::new(key, iv, false, ctx.cipher)?;
                 (
-                    ctx.cipher.new_cipher().ok().unwrap_or(Default::default()),
+                    ctx.cipher.new_cipher().ok().unwrap_or_default(),
                     Some(cipher_ctx),
                 )
             }

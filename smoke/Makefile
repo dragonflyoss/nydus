@@ -45,3 +45,10 @@ test-benchmark: build
 # make test TESTS=TestCompatibility
 test-compatibility: build
 	make test TESTS=TestCompatibility
+
+# SNAPSHOTTER_SYSTEM_SOCK=/run/containerd-nydus/system.sock
+# SNAPSHOTTER=nydus
+# TAKEOVER_TEST_IMAGE=wordpress
+# NEW_NYDUSD_BINARY_PATH=target/release/nydusd
+test-takeover: build 
+	TAKEOVER_TEST=true sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestTakeover

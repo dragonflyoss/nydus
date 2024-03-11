@@ -583,10 +583,10 @@ impl InodeWrapper {
         if let Self::Ref(i) = self {
             let i = i.clone();
             if self.is_v6() {
-                *self = Self::V6(RafsV6Inode::from(i.deref().deref()));
+                *self = Self::V6(RafsV6Inode::from(i.deref()));
             } else {
                 assert!(self.is_v5());
-                *self = Self::V5(RafsV5Inode::from(i.deref().deref()));
+                *self = Self::V5(RafsV5Inode::from(i.deref()));
             }
         }
     }

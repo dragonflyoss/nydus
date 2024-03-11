@@ -12,9 +12,8 @@ use crate::meta::BlobMetaChunkInfo;
 /// Context information to support batch chunk.
 /// Each one corresponds to a whole batch chunk containing multiple small chunks.
 #[repr(C, packed)]
+#[derive(Default)]
 pub struct BatchInflateContext {
-    /// Offset of the batch chunk data into the compressed data blob.
-    compressed_offset: u64,
     /// Compressed size of the whole batch chunk data.
     compressed_size: u32,
     /// Uncompressed size of the whole batch chunk data without 4K aligned.
@@ -22,19 +21,10 @@ pub struct BatchInflateContext {
     __reserved1: u64,
     __reserved2: u64,
     __reserved3: u64,
+    __reserved4: u64,
 }
 
 impl BatchInflateContext {
-    /// Get offset of the batch chunk data into the compressed data blob.
-    pub fn compressed_offset(&self) -> u64 {
-        u64::from_le(self.compressed_offset)
-    }
-
-    /// Set offset of the batch chunk data into the compressed data blob.
-    pub fn set_compressed_offset(&mut self, compressed_offset: u64) {
-        self.compressed_offset = u64::to_le(compressed_offset);
-    }
-
     /// Get compressed size of the whole batch chunk data.
     pub fn compressed_size(&self) -> u32 {
         u32::from_le(self.compressed_size)
@@ -45,9 +35,9 @@ impl BatchInflateContext {
         self.compressed_size = u32::to_le(compressed_size);
     }
 
-    /// Get compressed offset of the end of the whole batch chunk data.
-    pub fn compressed_end(&self) -> u64 {
-        self.compressed_offset() + self.compressed_size() as u64
+    /// Set uncompressed size of the whole batch chunk data.
+    pub fn set_uncompressed_batch_size(&mut self, uncompressed_batch_size: u32) {
+        self.uncompressed_batch_size = u32::to_le(uncompressed_batch_size);
     }
 
     /// Get uncompressed size of the whole batch chunk data.
@@ -101,14 +91,14 @@ impl BatchContextGenerator {
     }
 
     /// Add a batch context for a dumped batch chunk.
-    pub fn add_context(&mut self, compressed_offset: u64, compressed_size: u32) {
+    pub fn add_context(&mut self, compressed_size: u32) {
         let ctx = BatchInflateContext {
-            compressed_offset: u64::to_le(compressed_offset),
             compressed_size: u32::to_le(compressed_size),
-            uncompressed_batch_size: self.chunk_data_buf_len() as u32,
+            uncompressed_batch_size: u32::to_le(self.chunk_data_buf_len() as u32),
             __reserved1: u64::to_le(0),
             __reserved2: u64::to_le(0),
             __reserved3: u64::to_le(0),
+            __reserved4: u64::to_le(0),
         };
         self.contexts.push(ctx);
     }
@@ -124,12 +114,13 @@ impl BatchContextGenerator {
     /// Generate and return a v2 chunk info struct.
     pub fn generate_chunk_info(
         &mut self,
+        compressed_offset: u64,
         uncompressed_offset: u64,
         uncompressed_size: u32,
         encrypted: bool,
     ) -> Result<BlobChunkInfoV2Ondisk> {
         let mut chunk = BlobChunkInfoV2Ondisk::default();
-        chunk.set_compressed_offset(0);
+        chunk.set_compressed_offset(compressed_offset);
         chunk.set_compressed_size(0);
         chunk.set_uncompressed_offset(uncompressed_offset);
         chunk.set_uncompressed_size(uncompressed_size);
@@ -157,58 +148,56 @@ impl BatchContextGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::ManuallyDrop;
 
     #[test]
     fn test_batch_inflate_context() {
         let mut ctx = BatchInflateContext {
-            compressed_offset: 0,
             compressed_size: 0,
             uncompressed_batch_size: 0,
             __reserved1: 0,
             __reserved2: 0,
             __reserved3: 0,
+            __reserved4: 0,
         };
-        ctx.set_compressed_offset(0x10);
-        assert_eq!(ctx.compressed_offset(), 0x10);
         ctx.set_compressed_size(0x20);
         assert_eq!(ctx.compressed_size(), 0x20);
-        assert_eq!(ctx.compressed_end(), 0x30);
+        ctx.set_uncompressed_batch_size(0x30);
+        assert_eq!(ctx.uncompressed_batch_size(), 0x30);
         let mut v = [0u8; 40];
-        v[0] = 0x10;
-        v[8] = 0x20;
+        v[0] = 0x20;
+        v[4] = 0x30;
         assert_eq!(ctx.as_slice(), v);
     }
 
     #[test]
     fn test_batch_context_generator() {
-        let mut generator = BatchContextGenerator {
-            chunk_data_buf: vec![1u8, 2, 3, 4, 5],
-            contexts: vec![],
-        };
+        let mut generator = BatchContextGenerator::new(0x100000).unwrap();
+        assert!(generator.chunk_data_buf_is_empty());
+        assert_eq!(generator.chunk_data_buf_len(), 0);
+
+        generator.append_chunk_data_buf(&[1, 2, 3, 4]);
         assert!(!generator.chunk_data_buf_is_empty());
-        let data = [6u8, 7, 8, 9];
-        generator.append_chunk_data_buf(&data);
-        assert_eq!(
-            generator.chunk_data_buf_len(),
-            generator.chunk_data_buf().len()
-        );
+        assert_eq!(generator.chunk_data_buf_len(), 4);
 
-        generator.add_context(0x10, 0x20);
-        assert_eq!(generator.contexts.len(), 1);
+        generator.add_context(4);
 
-        let mut data = vec![0u8; 40];
-        data[0] = 0x10;
-        data[8] = 0x20;
-        data[12] = 9;
-        assert_eq!(generator.to_vec().unwrap(), (data, 1 as u32));
-
-        let ctx = BatchContextGenerator::new(8);
-        assert!(ctx.is_ok());
-        assert_eq!(ctx.unwrap().chunk_data_buf().capacity(), 8);
-
-        assert!(generator.generate_chunk_info(0, 2, true).is_ok());
+        let (ctx_data, _) = generator.to_vec().unwrap();
+        let ctx_vec = unsafe {
+            ManuallyDrop::new(Vec::from_raw_parts(
+                ctx_data.as_slice().as_ptr() as *mut BatchInflateContext,
+                1,
+                1,
+            ))
+        };
+        assert_eq!(ctx_vec[0].compressed_size(), 4);
+        assert_eq!(ctx_vec[0].uncompressed_batch_size(), 4);
 
         generator.clear_chunk_data_buf();
+        assert!(generator.chunk_data_buf_is_empty());
         assert_eq!(generator.chunk_data_buf_len(), 0);
+
+        let chunk_info = generator.generate_chunk_info(0, 0, 4, false).unwrap();
+        assert!(chunk_info.is_batch());
     }
 }

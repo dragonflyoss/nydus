@@ -10,8 +10,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use nydus_api::ConfigV2;
 use nydus_builder::Tree;
-use nydus_rafs::metadata::RafsSuper;
+use nydus_rafs::metadata::{RafsSuper, RafsVersion};
 use nydus_storage::device::BlobInfo;
+use nydus_utils::compress;
 
 pub struct Validator {
     sb: RafsSuper,
@@ -24,7 +25,10 @@ impl Validator {
         Ok(Self { sb })
     }
 
-    pub fn check(&mut self, verbosity: bool) -> Result<Vec<Arc<BlobInfo>>> {
+    pub fn check(
+        &mut self,
+        verbosity: bool,
+    ) -> Result<(Vec<Arc<BlobInfo>>, compress::Algorithm, RafsVersion)> {
         let err = "failed to load bootstrap for validator";
         let tree = Tree::from_bootstrap(&self.sb, &mut ()).context(err)?;
 
@@ -39,7 +43,13 @@ impl Validator {
             Ok(())
         };
         tree.walk_dfs_pre(pre)?;
+        let compressor = self.sb.meta.get_compressor();
+        let rafs_version: RafsVersion = self.sb.meta.version.try_into().unwrap();
 
-        Ok(self.sb.superblock.get_blob_infos())
+        Ok((
+            self.sb.superblock.get_blob_infos(),
+            compressor,
+            rafs_version,
+        ))
     }
 }

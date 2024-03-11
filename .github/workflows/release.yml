@@ -19,18 +19,18 @@ jobs:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+    - uses: dsherret/rust-toolchain-file@v1
     - name: Build nydus-rs
       run: |
         declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
         RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
         cargo install --locked --version 0.2.4 cross
-        rustup component add rustfmt clippy
         make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
         sudo mv target/$RUST_TARGET/release/nydusd nydusd
         sudo mv target/$RUST_TARGET/release/nydus-image .
@@ -38,7 +38,7 @@ jobs:
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}
         path: |
@@ -53,12 +53,13 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Cache cargo
-      uses: Swatinem/rust-cache@v2.7.0
+      uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
+    - uses: dsherret/rust-toolchain-file@v1
     - name: build
       run: |
         if [[ "${{matrix.arch}}" == "amd64" ]]; then
@@ -68,13 +69,12 @@ jobs:
         fi
         cargo install --version 0.2.4 cross
         rustup target add ${RUST_TARGET}
-        rustup component add rustfmt clippy
         make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
         sudo mv target/$RUST_TARGET/release/nydusd nydusd
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: nydus-artifacts-darwin-${{ matrix.arch }}
         path: |
@@ -91,9 +91,9 @@ jobs:
     env:
       DOCKER: false
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Setup Golang
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -104,9 +104,9 @@ jobs:
         sudo mv contrib/nydusify/cmd/nydusify .
         sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
     - name: store-artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: nydus-artifacts-linux-${{ matrix.arch }}
+        name: nydus-artifacts-linux-${{ matrix.arch }}-contrib
         path: |
           ctr-remote
           nydusify
@@ -122,9 +122,10 @@ jobs:
     needs: [nydus-linux, contrib-linux]
     steps:
     - name: download artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
-        name: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}
+        pattern: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}*
+        merge-multiple: true
         path: nydus-static
     - name: prepare release tarball
       run: |
@@ -138,9 +139,9 @@ jobs:
         sha256sum $tarball > $shasum
         echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: nydus-release-tarball
+        name: nydus-release-tarball-${{ matrix.os }}-${{ matrix.arch }}
         path: |
           ${{ env.tarball }}
           ${{ env.tarball_shasum }}
@@ -155,7 +156,7 @@ jobs:
     needs: [nydus-macos]
     steps:
     - name: download artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}
         path: nydus-static
@@ -171,9 +172,9 @@ jobs:
         sha256sum $tarball > $shasum
         echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: nydus-release-tarball
+        name: nydus-release-tarball-${{ matrix.os }}-${{ matrix.arch }}
         path: |
           ${{ env.tarball }}
           ${{ env.tarball_shasum }}
@@ -183,9 +184,10 @@ jobs:
     needs: [prepare-tarball-linux, prepare-tarball-darwin]
     steps:
     - name: download artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
-        name: nydus-release-tarball
+        pattern: nydus-release-tarball-*
+        merge-multiple: true
         path: nydus-tarball
     - name: prepare release env
       run: |

@@ -162,7 +162,7 @@ impl CommandBackend {
                 let latency_block_hits =
                     metric_vec_delta(&last, &current, "read_count_block_size_dist");
 
-                let sizes = vec!["<1K", "1K~", "4K~", "16K~", "64K~", "128K~", "512K~", "1M~"];
+                let sizes = ["<1K", "1K~", "4K~", "16K~", "64K~", "128K~", "512K~", "1M~"];
 
                 print!(
                     r#"
@@ -208,7 +208,7 @@ Block Sizes/millis:
         if raw {
             println!("{}", metrics);
         } else {
-            let sizes = vec!["<1K", "1K~", "4K~", "16K~", "64K~", "128K~", "512K~", "1M~"];
+            let sizes = ["<1K", "1K~", "4K~", "16K~", "64K~", "128K~", "512K~", "1M~"];
             let m = metrics.as_object().unwrap();
             print!(
                 r#"
@@ -300,7 +300,7 @@ impl CommandFsStats {
         if raw {
             println!("{}", metrics);
         } else {
-            let periods = vec![
+            let periods = [
                 "<1ms", "~20ms", "~50ms", "~100ms", "~500ms", "~1s", "~2s", "2s~",
             ];
             let latency_dist = m["read_latency_dist"].as_array().unwrap();

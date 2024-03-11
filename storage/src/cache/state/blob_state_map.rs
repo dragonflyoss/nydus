@@ -428,6 +428,10 @@ pub(crate) mod tests {
             unimplemented!();
         }
 
+        fn is_batch(&self) -> bool {
+            unimplemented!();
+        }
+
         fn is_compressed(&self) -> bool {
             unimplemented!();
         }

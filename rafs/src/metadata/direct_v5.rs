@@ -840,6 +840,10 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
         self.index()
     }
 
+    fn is_batch(&self) -> bool {
+        false
+    }
+
     fn is_compressed(&self) -> bool {
         self.chunk(self.state().deref())
             .flags
