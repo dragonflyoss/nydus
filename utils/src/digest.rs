@@ -176,6 +176,18 @@ impl RafsDigest {
         }
     }
 
+    /// According to the format of sha256.
+    pub fn from_string(input: &str) -> Self {
+        let mut digest = RafsDigest::default();
+
+        for (i, byte) in input.as_bytes().chunks(2).enumerate() {
+            let hex_str = std::str::from_utf8(byte).unwrap();
+            digest.data[i] = u8::from_str_radix(hex_str, 16).unwrap();
+        }
+
+        digest
+    }
+
     pub fn hasher(algorithm: Algorithm) -> RafsDigestHasher {
         match algorithm {
             Algorithm::Blake3 => RafsDigestHasher::Blake3(Box::new(blake3::Hasher::new())),

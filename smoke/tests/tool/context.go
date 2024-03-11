@@ -42,6 +42,7 @@ type RuntimeContext struct {
 }
 
 type EnvContext struct {
+	TempDir       string
 	WorkDir       string
 	BlobDir       string
 	CacheDir      string
@@ -99,6 +100,7 @@ func (ctx *Context) PrepareWorkDir(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx.Env = EnvContext{
+		TempDir:  tempDir,
 		WorkDir:  workDir,
 		BlobDir:  blobDir,
 		CacheDir: cacheDir,

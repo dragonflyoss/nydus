@@ -563,6 +563,7 @@ impl RafsV5BlobTable {
         compressed_size: u64,
         blob_features: BlobFeatures,
         flags: RafsSuperFlags,
+        is_chunkdict: bool,
     ) -> u32 {
         let blob_index = self.entries.len() as u32;
         let mut blob_info = BlobInfo::new(
@@ -578,6 +579,9 @@ impl RafsV5BlobTable {
         blob_info.set_compressor(flags.into());
         blob_info.set_digester(flags.into());
         blob_info.set_prefetch_info(prefetch_offset as u64, prefetch_size as u64);
+        if is_chunkdict {
+            blob_info.set_chunkdict_generated(true);
+        }
 
         self.entries.push(Arc::new(blob_info));
         self.extended.add(
