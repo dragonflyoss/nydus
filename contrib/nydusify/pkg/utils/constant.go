@@ -21,4 +21,6 @@ const (
 	LayerAnnotationNydusReferenceBlobIDs = "containerd.io/snapshot/nydus-reference-blob-ids"
 
 	LayerAnnotationUncompressed = "containerd.io/uncompressed"
+
+	LayerAnnotationNydusCommitBlobs = "containerd.io/snapshot/nydus-commit-blobs"
 )
