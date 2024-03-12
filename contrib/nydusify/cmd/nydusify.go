@@ -26,6 +26,7 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/rule"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/chunkdict/generator"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/copier"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/packer"
@@ -1101,6 +1102,108 @@ func main() {
 				}
 
 				return copier.Copy(context.Background(), opt)
+			},
+		},
+		{
+			Name:  "commit",
+			Usage: "Create and push a new nydus image from a container's changes that use a nydus image",
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:    "work-dir",
+					Value:   "./tmp",
+					Usage:   "Working directory for commit workflow",
+					EnvVars: []string{"WORK_DIR"},
+				},
+				&cli.StringFlag{
+					Name:    "nydus-image",
+					Value:   "nydus-image",
+					Usage:   "Path to the nydus-image binary, default to search in PATH",
+					EnvVars: []string{"NYDUS_IMAGE"},
+				},
+				&cli.StringFlag{
+					Name:    "containerd-address",
+					Value:   "/run/containerd/containerd.sock",
+					Usage:   "Containerd address, optionally with \"unix://\" prefix [$CONTAINERD_ADDRESS] (default \"/run/containerd/containerd.sock\")",
+					EnvVars: []string{"CONTAINERD_ADDR"},
+				},
+				&cli.StringFlag{
+					Name:     "container",
+					Required: true,
+					Usage:    "Target container id",
+					EnvVars:  []string{"CONTAINER"},
+				},
+				&cli.StringFlag{
+					Name:     "target",
+					Required: true,
+					Usage:    "Target nydus image reference",
+					EnvVars:  []string{"TARGET"},
+				},
+				&cli.BoolFlag{
+					Name:     "source-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS source registry",
+					EnvVars:  []string{"SOURCE_INSECURE"},
+				},
+				&cli.BoolFlag{
+					Name:     "target-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS target registry",
+					EnvVars:  []string{"TARGET_INSECURE"},
+				},
+				&cli.IntFlag{
+					Name:        "maximum-times",
+					Required:    false,
+					DefaultText: "400",
+					Value:       400,
+					Usage:       "The maximum times allowed to be committed",
+					EnvVars:     []string{"MAXIMUM_TIMES"},
+				},
+				&cli.StringSliceFlag{
+					Name:     "with-path",
+					Aliases:  []string{"with-mount-path"},
+					Required: false,
+					Usage:    "The external directory (for example mountpoint) in container that need to be committed",
+					EnvVars:  []string{"WITH_PATH"},
+				},
+			},
+			Action: func(c *cli.Context) error {
+				setupLogLevel(c)
+				parsePaths := func(paths []string) ([]string, []string) {
+					withPaths := []string{}
+					withoutPaths := []string{}
+
+					for _, path := range paths {
+						path = strings.TrimSpace(path)
+						if strings.HasPrefix(path, "!") {
+							path = strings.TrimLeft(path, "!")
+							path = strings.TrimRight(path, "/")
+							withoutPaths = append(withoutPaths, path)
+						} else {
+							withPaths = append(withPaths, path)
+						}
+					}
+
+					return withPaths, withoutPaths
+				}
+
+				withPaths, withoutPaths := parsePaths(c.StringSlice("with-path"))
+				opt := committer.Opt{
+					WorkDir:           c.String("work-dir"),
+					NydusImagePath:    c.String("nydus-image"),
+					ContainerdAddress: c.String("containerd-address"),
+					ContainerID:       c.String("container"),
+					TargetRef:         c.String("target"),
+					SourceInsecure:    c.Bool("source-insecure"),
+					TargetInsecure:    c.Bool("target-insecure"),
+					MaximumTimes:      c.Int("maximum-times"),
+					WithPaths:         withPaths,
+					WithoutPaths:      withoutPaths,
+				}
+				cm, err := committer.NewCommitter(opt)
+				if err != nil {
+					return errors.Wrap(err, "create commiter")
+				}
+				return cm.Commit(c.Context, opt)
 			},
 		},
 	}
