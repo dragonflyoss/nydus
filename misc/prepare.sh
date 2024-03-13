@@ -1,5 +1,10 @@
 #!/bin/bash
 
+SNAPSHOTTER_CONFIG="misc/takeover/snapshotter_config.toml"
+if [ "$1" == "takeover_test" ]; then
+    SNAPSHOTTER_CONFIG="misc/takeover/snapshotter_config.toml"
+fi
+
 readonly SNAPSHOTTER_VERSION=0.13.3
 readonly NERDCTL_VERSION=1.7.0
 readonly CNI_PLUGINS_VERSION=1.3.0
@@ -18,6 +23,6 @@ sudo tar -xzvf cni-plugins-linux-amd64-v$CNI_PLUGINS_VERSION.tgz -C /opt/cni/bin
 sudo install -D misc/performance/containerd_config.toml /etc/containerd/config.toml
 sudo systemctl restart containerd
 sudo install -D misc/performance/nydusd_config.json /etc/nydus/nydusd-config.fusedev.json
-sudo install -D misc/performance/snapshotter_config.toml /etc/nydus/config.toml
+sudo install -D $SNAPSHOTTER_CONFIG /etc/nydus/config.toml
 sudo install -D misc/performance/nydus-snapshotter.service /etc/systemd/system/nydus-snapshotter.service
 sudo systemctl start nydus-snapshotter
