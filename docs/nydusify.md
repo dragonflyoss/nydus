@@ -204,6 +204,28 @@ nydusify copy \
 
 It supports copying OCI v1 or Nydus images, use the options `--all-platforms` / `--platform` to copy the images of specific platforms.
 
+## Commit nydus image from container's changes
+
+The nydusify commit command can commit a nydus image from a nydus container, like `nerdctl commit` command.
+
+``` shell
+nydusify convert \
+  --source myregistry/repo:tag \
+  --target myregistry/repo:tag-nydus
+
+nerdctl --snapshotter nydus run \
+  -dt myregistry/repo:tag-nydus sh
+
+nydusify commit \
+  --container containerID
+  --target myregistry/repo:tag-nydus-committed
+
+nerdctl --snapshotter nydus run \
+  -dt myregistry/repo:tag-nydus-committed sh
+```
+
+The original container ID need to be a full container ID rather than an abbreviation.
+
 ## More Nydusify Options
 
 See `nydusify convert/check/mount --help`
