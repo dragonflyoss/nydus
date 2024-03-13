@@ -165,7 +165,8 @@ jobs:
         sudo mkdir -p /usr/bin/nydus-latest /home/runner/work/workdir
         sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/bin/nydus-latest
         sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/bin/nydus-latest
-
+        sudo bash misc/prepare.sh
+        
         export NYDUS_STABLE_VERSION=$(curl https://api.github.com/repos/Dragonflyoss/nydus/releases/latest | jq -r '.tag_name')
         export NYDUS_STABLE_VERSION_EXPORT="${NYDUS_STABLE_VERSION//./_}"
 
@@ -302,7 +303,7 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Container Environment
       run: |
-        sudo bash misc/performance/prepare.sh
+        sudo bash misc/prepare.sh
     - name: Performance Test
       run: |
         export PERFORMANCE_TEST_MODE=${{ matrix.mode }}
@@ -326,7 +327,7 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Container Environment
       run: |
-        sudo bash misc/takeover/prepare.sh
+        sudo bash misc/prepare.sh takeover_test
     - name: Takeover Test
       run: |
         export NEW_NYDUSD_BINARY_PATH=target/release/nydusd
