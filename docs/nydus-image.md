@@ -264,3 +264,41 @@ loop1      7:1    0  2.4M  0 loop
 ```
 
 **Note**: the argument value of image layer id specified in nydus-image CLI should omit `sha256:` prefix.
+
+## Check RAFS Filesystem
+
+### Check and Validate RAFS filesystem metadata
+
+`nydus-image check` command support output rafs filesystem metadata info into json.
+
+```shell
+[root@image-service]# nydus-image create -t dir-rafs -D images/ src
+[2024-03-13 20:18:16.611453 +08:00] INFO successfully built RAFS filesystem:
+meta blob path: images/05533d7dfe183435d34e862367c32352401f8305bb0ab90bf9e9bfddd5a52157
+data blob size: 0x1025
+data blobs: ["d8c052b11ef830a4655d7c9af3e396c5ce4fb8d4b4708701217845ec9fb2fbb3"]
+
+[root@image-service]# nydus-image check --bootstrap images/05533d7dfe183435d34e862367c32352401f8305bb0ab90bf9e9bfddd5a52157  -J ~/output.json
+[2024-03-13 20:19:08.235328 +08:00] INFO RAFS features: HASH_BLAKE3 | EXPLICIT_UID_GID | COMPRESSION_ZSTD
+RAFS filesystem metadata is valid, referenced data blobs:
+         0: d8c052b11ef830a4655d7c9af3e396c5ce4fb8d4b4708701217845ec9fb2fbb3, compressed data size 0x15, compressed file size 0x1025, uncompressed file size 0x1000, chunks: 0x1, features: aligned cap_toc
+
+[root@image-service]# cat ~/output.json
+{
+    "version": "unknown-baf7148a2721320d0b09f5fca0442b7baf99cbba",
+    "bootstrap": "./images/05533d7dfe183435d34e862367c32352401f8305bb0ab90bf9e9bfddd5a52157",
+    "blobs": [
+        "d8c052b11ef830a4655d7c9af3e396c5ce4fb8d4b4708701217845ec9fb2fbb3"
+    ],
+    "trace": {
+        "consumed_time": {
+            "load_tree_from_bootstrap": 0.0004384600033517927
+        },
+        "registered_events": {
+
+        }
+    },
+    "fs_version": "6",
+    "compressor": "Zstd"
+}
+```
