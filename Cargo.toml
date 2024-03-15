@@ -53,7 +53,7 @@ tar = "0.4.40"
 tokio = { version = "1.35.1", features = ["macros"] }
 
 # Build static linked openssl library
-openssl = { version = "0.10.55", features = ["vendored"] }
+openssl = { version = "0.10.60", features = ["vendored"] }
 # pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
 #openssl-src = { version = "111.22" }
 
