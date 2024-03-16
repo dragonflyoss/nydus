@@ -140,6 +140,55 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 	tool.RunWithoutOutput(t, checkCmd)
 }
 
+func (i *ImageTestSuite) TestCompactImages() test.Generator {
+
+	scenarios := tool.DescartesIterator{}
+	scenarios.Dimension(paramImage, []interface{}{"nginx:latest"})
+
+	return func() (name string, testCase test.Case) {
+		if !scenarios.HasNext() {
+			return
+		}
+		scenario := scenarios.Next()
+		ctx := tool.DefaultContext(i.T)
+	
+
+		image := i.prepareImage(i.T, scenario.GetString(paramImage))
+		return scenario.Str(), func(t *testing.T) {
+			i.TestCompact(t, *ctx, image)
+		}
+	}
+}
+
+func (i *ImageTestSuite) TestCompact(t *testing.T, ctx tool.Context, source string) {
+
+	// Prepare work directory
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	target := fmt.Sprintf("%s-nydus-%s", source, uuid.NewString())
+	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
+	logLevel := "--log-level warn"
+
+	// Convert image
+	convertCmd := fmt.Sprintf(
+		"%s %s convert --source %s --target %s %s --nydus-image %s --work-dir %s",
+		ctx.Binary.Nydusify, logLevel, source, target, fsVersion, ctx.Binary.Builder, ctx.Env.WorkDir,
+	)
+	tool.RunWithoutOutput(t, convertCmd)
+
+	// Compact image
+	bootstrapPath := "/home/runner/work/image-service/chunkdict/image-service/contrib/nydusify/output/localhost:5000:redis:nydus6_7.0.2/nydus_bootstrap"
+	compactconfigPath := "/home/runner/compact.json"
+	backendcompactPath := "/home/runner/backend-config.json"
+
+	compactCmd := fmt.Sprintf(
+		"%s %s compact --bootstrap %s --compact-config %s  --backend-config %s",
+		ctx.Binary.Builder, logLevel, bootstrapPath, compactconfigPath, backendcompactPath,
+	)
+	tool.RunWithoutOutput(t, compactCmd)
+}
+
 func (i *ImageTestSuite) prepareImage(t *testing.T, image string) string {
 	if i.preparedImages == nil {
 		i.preparedImages = make(map[string]string)
