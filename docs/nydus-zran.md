@@ -39,8 +39,10 @@ Or you can generate one by `nydusify` tool:
 # Convert the existing OCI image `your-registry.com/node:19.0` to `your-registry.com/node:19.0-nydus-oci-ref`:
 sudo nydusify convert --oci-ref --source your-registry.com/node:19.0 --target your-registry.com/node:19.0-nydus-oci-ref
 ```
-**Tips**: 
+
+**Tips**:
 - Nydus ZRAN artifacts must be in the same namespace with the OCI image.
+
 ## Run nydus zran artifact:
 
 Follow the [documentation](https://github.com/dragonflyoss/nydus/blob/master/docs/containerd-env-setup.md) to configure `containerd` and `nydus-snapshotter` (containerd-nydus-grpc):
@@ -49,6 +51,10 @@ Follow the [documentation](https://github.com/dragonflyoss/nydus/blob/master/doc
 # Run nydus zran artifact
 sudo nerdctl --snapshotter nydus run --rm -it docker.io/hsiangkao/node:18-nydus-oci-ref node -v
 ```
+
+## Compression method
+
+Currently ZRAN only supports OCI images that use gzip as their compression method.
 
 ## Recording
 
