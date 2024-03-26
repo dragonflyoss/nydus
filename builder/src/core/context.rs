@@ -597,6 +597,9 @@ impl BlobContext {
         blob_ctx
             .blob_meta_header
             .set_encrypted(features.contains(BlobFeatures::ENCRYPTED));
+        blob_ctx
+            .blob_meta_header
+            .set_is_chunkdict_generated(features.contains(BlobFeatures::IS_CHUNKDICT_GENERATED));
 
         blob_ctx
     }
@@ -955,6 +958,32 @@ impl BlobManager {
         }
     }
 
+    /// Get or cerate blob for chunkdict, this is used for chunk deduplication.
+    pub fn get_or_cerate_blob_for_chunkdict(
+        &mut self,
+        ctx: &BuildContext,
+        id: &str,
+    ) -> Result<(u32, &mut BlobContext)> {
+        if self.get_blob_idx_by_id(id).is_none() {
+            let blob_ctx = Self::new_blob_ctx(ctx)?;
+            self.current_blob_index = Some(self.alloc_index()?);
+            self.add_blob(blob_ctx);
+        } else {
+            self.current_blob_index = self.get_blob_idx_by_id(id);
+        }
+        let (_, blob_ctx) = self.get_current_blob().unwrap();
+        if blob_ctx.blob_id.is_empty() {
+            blob_ctx.blob_id = id.to_string();
+        }
+        // Safe to unwrap because the blob context has been added.
+        Ok(self.get_current_blob().unwrap())
+    }
+
+    /// Determine if the given blob has been created.
+    pub fn has_blob(&self, blob_id: &str) -> bool {
+        self.get_blob_idx_by_id(blob_id).is_some()
+    }
+
     /// Set the global chunk dictionary for chunk deduplication.
     pub fn set_chunk_dict(&mut self, dict: Arc<dyn ChunkDict>) {
         self.global_chunk_dict = dict
@@ -1097,6 +1126,7 @@ impl BlobManager {
                         compressed_blob_size,
                         blob_features,
                         flags,
+                        build_ctx.is_chunkdict_generated,
                     );
                 }
                 RafsBlobTable::V6(table) => {
@@ -1116,6 +1146,7 @@ impl BlobManager {
                         ctx.blob_toc_digest,
                         ctx.blob_meta_size,
                         ctx.blob_toc_size,
+                        build_ctx.is_chunkdict_generated,
                         ctx.blob_meta_header,
                         ctx.cipher_object.clone(),
                         ctx.cipher_ctx.clone(),
@@ -1293,6 +1324,9 @@ pub struct BuildContext {
     pub configuration: Arc<ConfigV2>,
     /// Generate the blob cache and blob meta
     pub blob_cache_generator: Option<BlobCacheGenerator>,
+
+    /// Whether is chunkdict.
+    pub is_chunkdict_generated: bool,
 }
 
 impl BuildContext {
@@ -1361,6 +1395,7 @@ impl BuildContext {
             features,
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_generator: None,
+            is_chunkdict_generated: false,
         }
     }
 
@@ -1378,6 +1413,10 @@ impl BuildContext {
 
     pub fn set_configuration(&mut self, config: Arc<ConfigV2>) {
         self.configuration = config;
+    }
+
+    pub fn set_is_chunkdict(&mut self, is_chunkdict: bool) {
+        self.is_chunkdict_generated = is_chunkdict;
     }
 }
 
@@ -1411,6 +1450,7 @@ impl Default for BuildContext {
             features: Features::new(),
             configuration: Arc::new(ConfigV2::default()),
             blob_cache_generator: None,
+            is_chunkdict_generated: false,
         }
     }
 }
