@@ -354,6 +354,15 @@ impl BlobCompressionContextHeader {
             )
         }
     }
+
+    /// Set flag indicating whether it's a blob for batch chunk or not.
+    pub fn set_is_chunkdict_generated(&mut self, enable: bool) {
+        if enable {
+            self.s_features |= BlobFeatures::IS_CHUNKDICT_GENERATED.bits();
+        } else {
+            self.s_features &= !BlobFeatures::IS_CHUNKDICT_GENERATED.bits();
+        }
+    }
 }
 
 /// Struct to manage blob chunk compression information, a wrapper over [BlobCompressionContext].
@@ -850,7 +859,8 @@ impl BlobCompressionContextInfo {
 
         if u32::from_le(header.s_magic) != BLOB_CCT_MAGIC
             || u32::from_le(header.s_magic2) != BLOB_CCT_MAGIC
-            || u32::from_le(header.s_ci_entries) != blob_info.chunk_count()
+            || (!blob_info.has_feature(BlobFeatures::IS_CHUNKDICT_GENERATED)
+                && u32::from_le(header.s_ci_entries) != blob_info.chunk_count())
             || u32::from_le(header.s_ci_compressor) != blob_info.meta_ci_compressor() as u32
             || u64::from_le(header.s_ci_offset) != blob_info.meta_ci_offset()
             || u64::from_le(header.s_ci_compressed_size) != blob_info.meta_ci_compressed_size()
@@ -886,8 +896,9 @@ impl BlobCompressionContextInfo {
             || blob_info.has_feature(BlobFeatures::BATCH)
         {
             return Err(einval!("invalid feature flags in blob meta header!"));
-        } else if info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV1Ondisk>())
-            || (aligned_info_size as u64) > BLOB_CCT_V1_MAX_SIZE
+        } else if !blob_info.has_feature(BlobFeatures::IS_CHUNKDICT_GENERATED)
+            && (info_size != (chunk_count as usize) * (size_of::<BlobChunkInfoV1Ondisk>())
+                || (aligned_info_size as u64) > BLOB_CCT_V1_MAX_SIZE)
         {
             return Err(einval!("uncompressed size in blob meta header is invalid!"));
         }
@@ -1776,7 +1787,10 @@ impl BlobMetaChunkArray {
     ) -> Result<&'a T> {
         assert!(index < chunk_info_array.len());
         let entry = &chunk_info_array[index];
-        entry.validate(state)?;
+        // If the chunk belongs to a chunkdict, skip the validation check.
+        if state.blob_features & BlobFeatures::IS_CHUNKDICT_GENERATED.bits() == 0 {
+            entry.validate(state)?;
+        }
         Ok(entry)
     }
 }
@@ -1992,6 +2006,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     }
     if features.contains(BlobFeatures::ENCRYPTED) {
         output += "encrypted ";
+    }
+    if features.contains(BlobFeatures::IS_CHUNKDICT_GENERATED) {
+        output += "is-chunkdict-generated ";
     }
     output.trim_end().to_string()
 }
