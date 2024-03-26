@@ -97,7 +97,7 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Environment
       run: |
-        sudo bash misc/performance/prepare.sh
+        sudo bash misc/prepare.sh
     - name: BenchMark Test
       run: |
         export BENCHMARK_TEST_IMAGE=${{ matrix.image }}:${{ matrix.tag }}
@@ -144,7 +144,7 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Environment
       run: |
-        sudo bash misc/performance/prepare.sh
+        sudo bash misc/prepare.sh
     - name: BenchMark Test
       run: |
         export BENCHMARK_TEST_IMAGE=${{ matrix.image }}:${{ matrix.tag }}
@@ -190,7 +190,7 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Environment
       run: |
-        sudo bash misc/performance/prepare.sh
+        sudo bash misc/prepare.sh
     - name: BenchMark Test
       run: |
         export BENCHMARK_TEST_IMAGE=${{ matrix.image }}:${{ matrix.tag }}
@@ -236,7 +236,7 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Environment
       run: |
-        sudo bash misc/performance/prepare.sh
+        sudo bash misc/prepare.sh
     - name: BenchMark Test
       run: |
         export BENCHMARK_TEST_IMAGE=${{ matrix.image }}:${{ matrix.tag }}
