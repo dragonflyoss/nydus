@@ -42,7 +42,7 @@ indexmap = "1"
 lazy_static = "1"
 libc = "0.2"
 log = "0.4.8"
-mio = { version = "0.8", features = ["os-poll", "os-ext"] }
+mio = { version = "0.8.11", features = ["os-poll", "os-ext"] }
 nix = "0.24.0"
 rlimit = "0.9.0"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
