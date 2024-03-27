@@ -961,7 +961,7 @@ impl Node {
                 let len = c.as_bytes().len() + size_of::<RafsV6Dirent>();
                 // erofs disk format requires dirent to be aligned to block size.
                 if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
-                    d_size = round_up(d_size as u64, EROFS_BLOCK_SIZE);
+                    d_size = round_up(d_size, EROFS_BLOCK_SIZE);
                 }
                 d_size += len as u64;
             }
@@ -976,7 +976,7 @@ impl Node {
                 let len = child.node.name().as_bytes().len() + size_of::<RafsV6Dirent>();
                 // erofs disk format requires dirent to be aligned to block size.
                 if (d_size % EROFS_BLOCK_SIZE) + len as u64 > EROFS_BLOCK_SIZE {
-                    d_size = round_up(d_size as u64, EROFS_BLOCK_SIZE);
+                    d_size = round_up(d_size, EROFS_BLOCK_SIZE);
                 }
                 d_size += len as u64;
             }
@@ -1227,7 +1227,7 @@ impl Node {
                 }
 
                 f_bootstrap
-                    .seek(SeekFrom::Start(dirent_off as u64))
+                    .seek(SeekFrom::Start(dirent_off))
                     .context("failed seek for dir inode")?;
                 f_bootstrap
                     .write(dir_data.as_slice())
@@ -1284,7 +1284,7 @@ impl Node {
                 _ => bail!("unsupported RAFS v6 inode layout for directory"),
             };
             f_bootstrap
-                .seek(SeekFrom::Start(tail_off as u64))
+                .seek(SeekFrom::Start(tail_off))
                 .context("failed seek for dir inode")?;
             f_bootstrap
                 .write(dir_data.as_slice())

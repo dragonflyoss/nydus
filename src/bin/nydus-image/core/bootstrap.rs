@@ -580,7 +580,7 @@ impl Bootstrap {
         let blob_table_size = blob_table.size() as u64;
         let blob_table_offset = align_offset(
             (EROFS_DEVTABLE_OFFSET as u64) + devtable_len as u64,
-            EROFS_BLOCK_SIZE as u64,
+            EROFS_BLOCK_SIZE,
         );
         let blob_table_entries = blobs.len();
         assert!(blob_table_entries < u16::MAX as usize);
@@ -614,7 +614,7 @@ impl Bootstrap {
         let meta_addr = if blob_table_size > 0 {
             align_offset(
                 blob_table_offset + blob_table_size + prefetch_table_size as u64,
-                EROFS_BLOCK_SIZE as u64,
+                EROFS_BLOCK_SIZE,
             )
         } else {
             orig_meta_addr
@@ -664,7 +664,7 @@ impl Bootstrap {
         // Dump blob table
         bootstrap_ctx
             .writer
-            .seek_offset(blob_table_offset as u64)
+            .seek_offset(blob_table_offset)
             .context("failed seek for extended blob table offset")?;
         blob_table
             .store(bootstrap_ctx.writer.as_mut())
@@ -707,7 +707,7 @@ impl Bootstrap {
             ext_sb.set_prefetch_table_size(prefetch_table_size);
             bootstrap_ctx
                 .writer
-                .seek_offset(prefetch_table_offset as u64)
+                .seek_offset(prefetch_table_offset)
                 .context("failed seek prefetch table offset")?;
             pt.store(bootstrap_ctx.writer.as_mut()).unwrap();
         }
@@ -718,7 +718,7 @@ impl Bootstrap {
             .writer
             .seek_to_end()
             .context("failed to seek to bootstrap's end for chunk table")?;
-        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE) - pos;
         bootstrap_ctx
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])
@@ -758,9 +758,9 @@ impl Bootstrap {
             .context("failed to seek to bootstrap's end")?;
         debug!(
             "align bootstrap to 4k {}",
-            align_offset(pos, EROFS_BLOCK_SIZE as u64)
+            align_offset(pos, EROFS_BLOCK_SIZE)
         );
-        let padding = align_offset(pos, EROFS_BLOCK_SIZE as u64) - pos;
+        let padding = align_offset(pos, EROFS_BLOCK_SIZE) - pos;
         bootstrap_ctx
             .writer
             .write_all(&WRITE_PADDING_DATA[0..padding as usize])

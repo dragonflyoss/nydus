@@ -218,7 +218,14 @@ impl TocEntry {
             mode |= libc::S_IFIFO;
         }
 
-        self.mode | mode as u32
+        #[cfg(target_os = "macos")]
+        {
+            self.mode | mode as u32
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.mode | mode
+        }
     }
 
     /// Get real device id associated with the `TocEntry`.
@@ -379,9 +386,9 @@ impl StargzTreeBuilder {
                     flags: BlobChunkFlags::COMPRESSED,
                     compressed_size: 0,
                     uncompressed_size: uncompress_size as u32,
-                    compressed_offset: entry.offset as u64,
+                    compressed_offset: entry.offset,
                     uncompressed_offset: uncompress_offset,
-                    file_offset: entry.chunk_offset as u64,
+                    file_offset: entry.chunk_offset,
                     index: 0,
                     reserved: 0,
                 });

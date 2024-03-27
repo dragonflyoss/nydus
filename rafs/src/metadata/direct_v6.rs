@@ -652,9 +652,9 @@ impl OndiskInodeWrapper {
         Ok(())
     }
 
-    fn get_entry_count<'a>(
+    fn get_entry_count(
         &self,
-        state: &'a Guard<Arc<DirectMappingState>>,
+        state: &Guard<Arc<DirectMappingState>>,
         inode: &dyn RafsV6OndiskInode,
         block_index: usize,
     ) -> Result<usize> {
