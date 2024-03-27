@@ -27,7 +27,7 @@ use nydus_api::CacheConfigV2;
 use nydus_utils::crypt::{Algorithm, Cipher, CipherContext};
 use nydus_utils::{compress, digest};
 
-use crate::backend::{BlobBackend, BlobReader};
+use crate::backend::{external::ExternalBlobReader, BlobBackend, BlobReader};
 use crate::cache::state::{ChunkMap, NoopChunkMap};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{
@@ -84,12 +84,20 @@ impl BlobCache for DummyCache {
         self.is_legacy_stargz
     }
 
+    fn is_external(&self) -> bool {
+        self.blob_info.has_feature(BlobFeatures::EXTERNAL)
+    }
+
     fn need_validation(&self) -> bool {
         self.need_validation
     }
 
     fn reader(&self) -> &dyn BlobReader {
         &*self.reader
+    }
+
+    fn external_reader(&self) -> &dyn ExternalBlobReader {
+        unimplemented!();
     }
 
     fn get_chunk_map(&self) -> &Arc<dyn ChunkMap> {

@@ -26,13 +26,13 @@ use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::{compress, digest, round_up_usize, DelayType, Delayer, FileRangeReader};
 use tokio::runtime::Runtime;
 
-use crate::backend::BlobReader;
+use crate::backend::{external::ExternalBlobReader, BlobReader};
 use crate::cache::state::ChunkMap;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncPrefetchMessage, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobIoMergeState};
 use crate::device::{
-    BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag, BlobIoVec,
-    BlobObject, BlobPrefetchRequest,
+    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoSegment, BlobIoTag,
+    BlobIoVec, BlobObject, BlobPrefetchRequest,
 };
 use crate::meta::{BlobCompressionContextInfo, BlobMetaChunk};
 use crate::utils::{alloc_buf, copyv, readv, MemSliceCursor};
@@ -190,6 +190,7 @@ pub(crate) struct FileCacheEntry {
     pub(crate) metrics: Arc<BlobcacheMetrics>,
     pub(crate) prefetch_state: Arc<AtomicU32>,
     pub(crate) reader: Arc<dyn BlobReader>,
+    pub(crate) external_reader: Arc<dyn ExternalBlobReader>,
     pub(crate) runtime: Arc<Runtime>,
     pub(crate) workers: Arc<AsyncWorkerMgr>,
 
@@ -562,12 +563,20 @@ impl BlobCache for FileCacheEntry {
         self.is_zran
     }
 
+    fn is_external(&self) -> bool {
+        self.blob_info.has_feature(BlobFeatures::EXTERNAL)
+    }
+
     fn need_validation(&self) -> bool {
         self.need_validation
     }
 
     fn reader(&self) -> &dyn BlobReader {
         &*self.reader
+    }
+
+    fn external_reader(&self) -> &dyn ExternalBlobReader {
+        &*self.external_reader
     }
 
     fn get_chunk_map(&self) -> &Arc<dyn ChunkMap> {

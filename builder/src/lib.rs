@@ -40,6 +40,7 @@ pub use self::merge::Merger;
 pub use self::stargz::StargzBuilder;
 pub use self::tarball::TarballBuilder;
 
+pub mod attributes;
 mod compact;
 mod core;
 mod directory;

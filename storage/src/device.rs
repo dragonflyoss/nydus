@@ -77,6 +77,8 @@ bitflags! {
         const CAP_TAR_TOC = 0x4000_0000;
         /// Rafs V5 image without extended blob table, this is an internal flag.
         const _V5_NO_EXT_BLOB_TABLE = 0x8000_0000;
+        /// Blob is stored in an external storage backend.
+        const EXTERNAL = 0x0000_0200;
     }
 }
 
@@ -442,6 +444,10 @@ impl BlobInfo {
     /// Check whether the requested features are available.
     pub fn has_feature(&self, features: BlobFeatures) -> bool {
         self.blob_features.bits() & features.bits() == features.bits()
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.has_feature(BlobFeatures::EXTERNAL)
     }
 
     /// Generate feature flags according to blob configuration.
