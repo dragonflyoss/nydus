@@ -720,7 +720,7 @@ mod nbd {
 }
 
 extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
-    DAEMON_CONTROLLER.shutdown();
+    DAEMON_CONTROLLER.notify_shutdown();
 }
 
 fn main() -> Result<()> {

@@ -25,7 +25,7 @@ use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 
 pub const BLOB_RAW_FILE_SUFFIX: &str = ".blob.raw";
-pub const BLOB_DATA_FILE_SUFFIX: &str = ".blob.data";
+pub const BLOB_DATA_FILE_SUFFIX: &str = "";
 
 /// An implementation of [BlobCacheMgr](../trait.BlobCacheMgr.html) to improve performance by
 /// caching uncompressed blob with local storage.
@@ -257,7 +257,7 @@ impl FileCacheEntry {
             } else {
                 blob_info.uncompressed_size()
             };
-            if file_size == 0 {
+            if file_size == 0 || file_size < cached_file_size {
                 file.set_len(cached_file_size)?;
             } else if cached_file_size != 0 && file_size != cached_file_size {
                 let msg = format!(
