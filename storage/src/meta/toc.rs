@@ -56,7 +56,7 @@ impl TryFrom<compress::Algorithm> for TocEntryFlags {
             compress::Algorithm::None => Ok(Self::COMPRESSION_NONE),
             compress::Algorithm::Zstd => Ok(Self::COMPRESSION_ZSTD),
             compress::Algorithm::Lz4Block => Ok(Self::COMPRESSION_LZ4_BLOCK),
-            _ => return Err(eother!(format!("unsupported compressor {}", c,))),
+            _ => Err(eother!(format!("unsupported compressor {}", c,))),
         }
     }
 }

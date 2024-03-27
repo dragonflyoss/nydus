@@ -562,7 +562,7 @@ impl PAXUtil {
         let max_len = header.as_old().linkname.len();
         if path.as_os_str().len() <= max_len {
             return header
-                .set_link_name(&path)
+                .set_link_name(path)
                 .with_context(|| "fail to set short link for pax header")
                 .map(|_| None);
         }

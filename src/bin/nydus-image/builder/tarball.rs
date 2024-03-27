@@ -164,7 +164,7 @@ impl<'a> TarballTreeBuilder<'a> {
             let path = PathBuf::from("/").join(path);
             let path = path.components().as_path();
             if !self.is_special_files(path) {
-                self.make_lost_dirs(&path, &mut nodes)?;
+                self.make_lost_dirs(path, &mut nodes)?;
                 let node = self.parse_entry(&nodes, &mut entry, path)?;
                 nodes.push(node);
             }
@@ -428,7 +428,14 @@ impl<'a> TarballTreeBuilder<'a> {
             EntryType::Fifo => libc::S_IFIFO,
             _ => bail!("unsupported tar entry type"),
         };
-        Ok((mode & !libc::S_IFMT as u32) | ty as u32)
+        #[cfg(target_os = "macos")]
+        {
+            Ok((mode & !libc::S_IFMT as u32) | ty as u32)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok((mode & !libc::S_IFMT) | ty)
+        }
     }
 
     fn get_file_name(path: &Path) -> Result<&OsStr> {
@@ -468,7 +475,14 @@ impl<'a> TarballTreeBuilder<'a> {
         let name = Self::get_file_name(path)?;
         let mut inode = InodeWrapper::new(self.ctx.fs_version);
         inode.set_ino(ino);
-        inode.set_mode(0o755 | libc::S_IFDIR as u32);
+        #[cfg(target_os = "macos")]
+        {
+            inode.set_mode(0o755 | libc::S_IFDIR as u32);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            inode.set_mode(0o755 | libc::S_IFDIR);
+        }
         inode.set_nlink(2);
         inode.set_name_size(name.len());
         inode.set_rdev(u32::MAX);

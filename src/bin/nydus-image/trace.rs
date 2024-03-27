@@ -122,7 +122,7 @@ impl BuildRootTracer {
     pub fn tracer(&self, class: TraceClass) -> Option<Arc<dyn TracerClass>> {
         let g = self.tracers.read().unwrap();
         // Safe to unwrap because tracers should always be enabled
-        (&g).get(&class).cloned()
+        g.get(&class).cloned()
     }
 
     pub fn dump_summary_map(&self) -> Result<serde_json::Map<String, serde_json::Value>> {
