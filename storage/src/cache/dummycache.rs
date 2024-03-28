@@ -31,7 +31,7 @@ use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::{ChunkMap, NoopChunkMap};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{
-    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest,
+    BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest, BlobRange,
 };
 use crate::utils::{alloc_buf, copyv};
 use crate::{StorageError, StorageResult};
@@ -104,6 +104,8 @@ impl BlobCache for DummyCache {
         Ok(())
     }
 
+    fn init_stream_prefetch(&self, _blobs: Vec<Arc<dyn BlobCache>>) {}
+
     fn stop_prefetch(&self) -> StorageResult<()> {
         Ok(())
     }
@@ -119,6 +121,14 @@ impl BlobCache for DummyCache {
         _bios: &[BlobIoDesc],
     ) -> StorageResult<usize> {
         Err(StorageError::Unsupported)
+    }
+
+    fn add_stream_prefetch_range(&self, _range: BlobRange) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn flush_stream_prefetch(&self) -> Result<()> {
+        unimplemented!()
     }
 
     fn read(&self, iovec: &mut BlobIoVec, bufs: &[FileVolatileSlice]) -> Result<usize> {
@@ -163,6 +173,15 @@ impl BlobCache for DummyCache {
         )
         .map(|(n, _)| n)
         .map_err(|e| eother!(e))
+    }
+
+    fn fetch_range_compressed_stream(
+        self: Arc<Self>,
+        _offset: u64,
+        _size: u64,
+        _prefetch: bool,
+    ) -> std::io::Result<()> {
+        unimplemented!();
     }
 }
 

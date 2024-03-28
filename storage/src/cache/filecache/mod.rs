@@ -20,6 +20,7 @@ use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{
     BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap, NoopChunkMap,
 };
+use crate::cache::streaming::StreamPrefetchMgr;
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
@@ -37,6 +38,7 @@ pub struct FileCacheMgr {
     prefetch_config: Arc<AsyncPrefetchConfig>,
     runtime: Arc<Runtime>,
     worker_mgr: Arc<AsyncWorkerMgr>,
+    streaming_prefetch_mgr: Arc<StreamPrefetchMgr>,
     work_dir: String,
     validate: bool,
     disable_indexed_map: bool,
@@ -62,6 +64,7 @@ impl FileCacheMgr {
         let metrics = BlobcacheMetrics::new(id, work_dir);
         let prefetch_config: Arc<AsyncPrefetchConfig> = Arc::new((&config.prefetch).into());
         let worker_mgr = AsyncWorkerMgr::new(metrics.clone(), prefetch_config.clone())?;
+        let streaming_prefetch_mgr = StreamPrefetchMgr::new(prefetch_config.clone());
 
         Ok(FileCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
@@ -70,6 +73,7 @@ impl FileCacheMgr {
             prefetch_config,
             runtime,
             worker_mgr: Arc::new(worker_mgr),
+            streaming_prefetch_mgr: Arc::new(streaming_prefetch_mgr),
             work_dir: work_dir.to_owned(),
             disable_indexed_map: blob_cfg.disable_indexed_map,
             validate: config.cache_validate,
@@ -100,6 +104,7 @@ impl FileCacheMgr {
             self.prefetch_config.clone(),
             self.runtime.clone(),
             self.worker_mgr.clone(),
+            self.streaming_prefetch_mgr.clone(),
         )?;
         let entry = Arc::new(entry);
         let mut guard = self.blobs.write().unwrap();
@@ -120,7 +125,8 @@ impl FileCacheMgr {
 
 impl BlobCacheMgr for FileCacheMgr {
     fn init(&self) -> Result<()> {
-        AsyncWorkerMgr::start(self.worker_mgr.clone())
+        AsyncWorkerMgr::start(self.worker_mgr.clone())?;
+        StreamPrefetchMgr::start(self.streaming_prefetch_mgr.clone())
     }
 
     fn destroy(&self) {
@@ -183,6 +189,7 @@ impl FileCacheEntry {
         prefetch_config: Arc<AsyncPrefetchConfig>,
         runtime: Arc<Runtime>,
         workers: Arc<AsyncWorkerMgr>,
+        stream_workers: Arc<StreamPrefetchMgr>,
     ) -> Result<Self> {
         let is_separate_meta = blob_info.has_feature(BlobFeatures::SEPARATE);
         let is_tarfs = blob_info.features().is_tarfs();
@@ -328,6 +335,7 @@ impl FileCacheEntry {
             reader,
             runtime,
             workers,
+            stream_workers,
 
             blob_compressed_size,
             blob_uncompressed_size,

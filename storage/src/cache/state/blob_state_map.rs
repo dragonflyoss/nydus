@@ -146,6 +146,26 @@ where
         res
     }
 
+    fn try_mark_pending(&self, chunk: &dyn BlobChunkInfo) -> StorageResult<bool> {
+        let ready = self.c.is_ready(chunk).map_err(StorageError::CacheIndex)?;
+
+        if ready {
+            return Ok(false);
+        }
+
+        let index = C::get_index(chunk);
+        let mut guard = self.inflight_tracer.lock().unwrap();
+
+        if guard.get(&index).is_some() {
+            // chunk is inflight or ready
+            Ok(false)
+        } else {
+            // mark chunk as pending
+            guard.insert(index, Arc::new(Slot::new()));
+            Ok(true)
+        }
+    }
+
     fn clear_pending(&self, chunk: &dyn BlobChunkInfo) {
         let index = C::get_index(chunk);
         let mut guard = self.inflight_tracer.lock().unwrap();

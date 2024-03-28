@@ -30,6 +30,7 @@ use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::ChunkMap;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject, BlobPrefetchRequest,
+    BlobRange,
 };
 use crate::meta::BlobCompressionContextInfo;
 use crate::utils::{alloc_buf, check_digest};
@@ -42,6 +43,7 @@ mod dummycache;
 mod filecache;
 #[cfg(target_os = "linux")]
 mod fscache;
+mod streaming;
 mod worker;
 
 pub mod state;
@@ -215,6 +217,8 @@ pub trait BlobCache: Send + Sync {
     /// It should be paired with stop_prefetch().
     fn start_prefetch(&self) -> StorageResult<()>;
 
+    fn init_stream_prefetch(&self, blobs: Vec<Arc<dyn BlobCache>>);
+
     /// Stop prefetching blob data in background.
     ///
     /// It should be paired with start_prefetch().
@@ -230,6 +234,10 @@ pub trait BlobCache: Send + Sync {
         prefetches: &[BlobPrefetchRequest],
         bios: &[BlobIoDesc],
     ) -> StorageResult<usize>;
+
+    fn add_stream_prefetch_range(&self, range: BlobRange) -> Result<()>;
+
+    fn flush_stream_prefetch(&self) -> Result<()>;
 
     /// Execute filesystem data prefetch.
     fn prefetch_range(&self, _range: &BlobIoRange) -> Result<usize> {
@@ -281,7 +289,27 @@ pub trait BlobCache: Send + Sync {
             duration
         );
 
-        let chunks = chunks.iter().map(|v| v.as_ref()).collect();
+        let chunks: Vec<&dyn BlobChunkInfo> = chunks.iter().map(|v| v.as_ref()).collect();
+        let mut p = false;
+        for c in &chunks {
+            if c.compressed_offset() == 50365358 {
+                p = true;
+            }
+        }
+        if p {
+            for c in &chunks {
+                warn!(
+                    "read_chunks_from_backend: chunk {} {} {} {} {} {} {}",
+                    c.id(),
+                    c.compressed_offset(),
+                    c.compressed_size(),
+                    c.uncompressed_size(),
+                    c.is_compressed(),
+                    c.is_encrypted(),
+                    c.is_batch(),
+                );
+            }
+        }
         Ok(ChunkDecompressState::new(blob_offset, self, chunks, c_buf))
     }
 
@@ -399,6 +427,78 @@ pub trait BlobCache: Send + Sync {
 
     fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobCompressionContextInfo>>> {
         Ok(None)
+    }
+
+    fn fetch_range_compressed_stream(
+        self: Arc<Self>,
+        offset: u64,
+        size: u64,
+        prefetch: bool,
+    ) -> std::io::Result<()>;
+}
+
+/// Helper struct to manage and call BlobCompressionContextInfo.
+pub struct BlobCCI {
+    meta: Option<Arc<BlobCompressionContextInfo>>,
+}
+
+impl Default for BlobCCI {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BlobCCI {
+    pub fn new() -> Self {
+        BlobCCI { meta: None }
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.meta.is_none()
+    }
+
+    pub fn set_meta(&mut self, meta: Option<Arc<BlobCompressionContextInfo>>) -> Result<&Self> {
+        if meta.is_none() {
+            return Err(einval!("failed to get blob meta info"));
+        }
+        self.meta = meta;
+        Ok(self)
+    }
+
+    pub fn get_batch_index(&self, chunk_idx: u32) -> Result<u32> {
+        if let Some(meta) = &self.meta {
+            meta.get_batch_index(chunk_idx)
+        } else {
+            Err(einval!("failed to get blob meta info"))
+        }
+    }
+
+    pub fn get_compressed_offset(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u64> {
+        Ok(chunk.compressed_offset())
+    }
+
+    pub fn get_compressed_size(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u32> {
+        let size = if chunk.is_batch() {
+            self.meta
+                .as_ref()
+                .unwrap()
+                .get_compressed_size(chunk.id())?
+        } else {
+            chunk.compressed_size()
+        };
+        Ok(size)
+    }
+
+    pub fn get_compressed_info(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<(u64, u32)> {
+        Ok((
+            self.get_compressed_offset(chunk)?,
+            self.get_compressed_size(chunk)?,
+        ))
+    }
+
+    pub fn get_compressed_end(&self, chunk: &Arc<dyn BlobChunkInfo>) -> Result<u64> {
+        let (offset, size) = self.get_compressed_info(chunk)?;
+        Ok(offset + size as u64)
     }
 }
 
