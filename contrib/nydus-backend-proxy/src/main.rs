@@ -2,29 +2,22 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
-#[macro_use]
-extern crate rocket;
-#[macro_use]
-extern crate lazy_static;
-#[macro_use(crate_authors, crate_version)]
-extern crate clap;
-
 use std::collections::HashMap;
 use std::env;
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{fs, io};
 
-use clap::{App, Arg};
+use clap::*;
 use http_range::HttpRange;
+use lazy_static::lazy_static;
 use nix::sys::uio;
 use rocket::fs::{FileServer, NamedFile};
 use rocket::futures::lock::{Mutex, MutexGuard};
 use rocket::http::Status;
 use rocket::request::{self, FromRequest, Outcome};
 use rocket::response::{self, stream::ReaderStream, Responder};
-use rocket::{Request, Response};
+use rocket::*;
 
 lazy_static! {
     static ref BLOB_BACKEND: Mutex<BlobBackend> = Mutex::new(BlobBackend {
@@ -165,12 +158,12 @@ impl<'r> Responder<'r, 'static> for RangeStream {
         let mut read = 0u64;
         let startpos = self.start as i64;
         let size = self.len;
-        let raw_fd = self.file.as_raw_fd();
+        let file = self.file.clone();
 
         Response::build()
             .streamed_body(ReaderStream! {
                 while read < size {
-                    match uio::pread(raw_fd, &mut buf, startpos + read as i64) {
+                    match uio::pread(file.as_ref(), &mut buf, startpos + read as i64) {
                         Ok(mut n) => {
                             n = std::cmp::min(n, (size - read) as usize);
                             read += n as u64;
@@ -268,20 +261,31 @@ async fn fetch(
 
 #[rocket::main]
 async fn main() {
-    let cmd = App::new("nydus-backend-proxy")
-        .author(crate_authors!())
-        .version(crate_version!())
+    let cmd = Command::new("nydus-backend-proxy")
+        .author(env!("CARGO_PKG_AUTHORS"))
+        .version(env!("CARGO_PKG_VERSION"))
         .about("A simple HTTP server to provide a fake container registry for nydusd.")
         .arg(
-            Arg::with_name("blobsdir")
-                .short("b")
+            Arg::new("blobsdir")
+                .short('b')
                 .long("blobsdir")
-                .takes_value(true)
+                .required(true)
                 .help("path to directory hosting nydus blob files"),
+        )
+        .help_template(
+            "\
+{before-help}{name} {version}
+{author-with-newline}{about-with-newline}
+{usage-heading} {usage}
+
+{all-args}{after-help}
+        ",
         )
         .get_matches();
     // Safe to unwrap() because `blobsdir` takes a value.
-    let path = cmd.value_of("blobsdir").unwrap();
+    let path = cmd
+        .get_one::<String>("blobsdir")
+        .expect("required argument");
 
     init_blob_backend(Path::new(path)).await;
 
