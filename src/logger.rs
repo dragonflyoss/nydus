@@ -117,7 +117,7 @@ pub fn setup_logging(
             })?;
         spec = spec.basename(basename);
 
-        // `flexi_logger` automatically add `.log` suffix if the file name has not extension.
+        // `flexi_logger` automatically add `.log` suffix if the file name has no extension.
         if let Some(suffix) = path.extension() {
             let suffix = suffix.to_str().ok_or_else(|| {
                 eprintln!("invalid file extension {:?}", suffix);

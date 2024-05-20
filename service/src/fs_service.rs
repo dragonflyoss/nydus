@@ -222,7 +222,7 @@ pub trait FsService: Send + Sync {
 /// Validate prefetch file list from user input.
 ///
 /// Validation rules:
-/// - an item may be file or directroy.
+/// - an item may be file or directory.
 /// - items must be separated by space, such as "<path1> <path2> <path3>".
 /// - each item must be absolute path, such as "/foo1/bar1 /foo2/bar2".
 fn validate_prefetch_file_list(input: &Option<Vec<String>>) -> Result<Option<Vec<PathBuf>>> {

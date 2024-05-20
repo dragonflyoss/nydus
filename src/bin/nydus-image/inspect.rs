@@ -204,7 +204,7 @@ impl RafsInspector {
         }
 
         // Walk through children inodes to find the file
-        // Print its basic information and all chunk infomation
+        // Print its basic information and all chunk information
         let dir_inode = self.rafs_meta.get_extended_inode(self.cur_dir_ino, false)?;
         dir_inode.walk_children_inodes(0, &mut |_inode, child_name, child_ino, _offset| {
             if child_name == file_name {

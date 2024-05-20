@@ -233,7 +233,7 @@ impl Cipher {
                     .map_err(|e| eother!(format!("failed to encrypt data, {}", e)))
             }
             Cipher::Aes256Gcm(_cipher) => {
-                Err(einval!("Cipher::entrypt() doesn't support Aes256Gcm"))
+                Err(einval!("Cipher::encrypt() doesn't support Aes256Gcm"))
             }
         }
     }
@@ -247,7 +247,7 @@ impl Cipher {
             Cipher::Aes256Xts(cipher) => Self::cipher(*cipher, symm::Mode::Decrypt, key, iv, data)
                 .map_err(|e| eother!(format!("failed to decrypt data, {}", e))),
             Cipher::Aes256Gcm(_cipher) => {
-                Err(einval!("Cipher::detrypt() doesn't support Aes256Gcm"))
+                Err(einval!("Cipher::decrypt() doesn't support Aes256Gcm"))
             }
         }?;
 
@@ -751,7 +751,7 @@ mod tests {
             CipherContext::new(error_key.to_vec(), iv.to_vec(), true, Algorithm::Aes128Xts)
                 .is_err()
         );
-        // create wtih symmetry key
+        // create with symmetry key
         assert!(CipherContext::new(
             symmetry_key.to_vec(),
             iv.to_vec(),

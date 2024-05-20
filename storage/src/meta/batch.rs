@@ -75,7 +75,7 @@ impl BatchContextGenerator {
         self.chunk_data_buf.is_empty()
     }
 
-    /// Get the lenth of chunk data buffer.
+    /// Get the length of chunk data buffer.
     pub fn chunk_data_buf_len(&self) -> usize {
         self.chunk_data_buf.len()
     }

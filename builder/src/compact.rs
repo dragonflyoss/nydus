@@ -53,7 +53,7 @@ pub struct Config {
     /// we compact blobs whose size are less than compact_blob_size
     #[serde(default = "default_compact_blob_size")]
     compact_blob_size: usize,
-    /// size of compacted blobs should not be large than max_compact_size
+    /// size of compacted blobs should not be larger than max_compact_size
     #[serde(default = "default_max_compact_size")]
     max_compact_size: usize,
     /// if number of blobs >= layers_to_compact, do compact
@@ -642,7 +642,7 @@ impl BlobCompactor {
             return Ok(None);
         }
 
-        info!("compatctor: successfully compacted blob");
+        info!("compactor: successfully compacted blob");
         // blobs have already been dumped, dump bootstrap only
         let blob_table = compactor.new_blob_mgr.to_blob_table(&build_ctx)?;
         bootstrap.build(&mut build_ctx, &mut bootstrap_ctx)?;

@@ -434,7 +434,7 @@ impl Rafs {
         }
 
         // Perform different policy for v5 format and v6 format as rafs v6's blobs are capable to
-        // to download chunks and decompress them all by themselves. For rafs v6, directly perform
+        // download chunks and decompress them all by themselves. For rafs v6, directly perform
         // chunk based full prefetch
         if !ignore_prefetch_all && (inlay_prefetch_all || prefetch_all || startup_prefetch_all) {
             if sb.meta.is_v6() {

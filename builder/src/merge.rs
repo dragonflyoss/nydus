@@ -409,7 +409,7 @@ mod tests {
         );
         assert!(build_output.is_ok());
         let build_output = build_output.unwrap();
-        println!("BuildOutpu: {}", build_output);
+        println!("BuildOutput: {}", build_output);
         assert_eq!(build_output.blob_size, Some(16));
     }
 }

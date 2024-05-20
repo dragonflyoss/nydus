@@ -167,7 +167,7 @@ impl BlobFs {
     fn load_bootstrap(cfg: &Config) -> io::Result<BlobfsState> {
         let blob_ondemand_conf = BlobOndemandConfig::from_str(&cfg.blob_ondemand_cfg)?;
         if !blob_ondemand_conf.rafs_conf.validate() {
-            return Err(einval!("blobfs: invlidate configuration for blobfs"));
+            return Err(einval!("blobfs: invalidate configuration for blobfs"));
         }
         let rafs_cfg = blob_ondemand_conf.rafs_conf.get_rafs_config()?;
         if rafs_cfg.mode != "direct" {

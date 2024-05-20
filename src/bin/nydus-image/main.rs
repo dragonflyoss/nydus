@@ -832,9 +832,9 @@ impl Command {
         let chunk_size = Self::get_chunk_size(matches, conversion_type)?;
         let batch_size = Self::get_batch_size(matches, version, conversion_type, chunk_size)?;
         let blob_cache_storage = Self::get_blob_cache_storage(matches, conversion_type)?;
-        // blob-cacher-dir and blob-dir/blob are a set of mutually exclusive functions,
+        // blob-cache-dir and blob-dir/blob are a set of mutually exclusive functions,
         // the former is used to generate blob cache, nydusd is directly started through blob cache,
-        // the latter is to generate nydus blob, as nydud backend to start
+        // the latter is to generate nydus blob, as nydusd backend to start
         let blob_storage = if blob_cache_storage.is_some() {
             None
         } else {
