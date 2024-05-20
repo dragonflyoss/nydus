@@ -213,7 +213,7 @@ pub trait BlobBackend: Send + Sync {
     /// Get metrics object.
     fn metrics(&self) -> &BackendMetrics;
 
-    /// Get a blob reader object to access blod `blob_id`.
+    /// Get a blob reader object to access blob `blob_id`.
     fn get_reader(&self, blob_id: &str) -> BackendResult<Arc<dyn BlobReader>>;
 }
 

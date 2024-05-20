@@ -299,7 +299,7 @@ impl RegistryState {
         form.insert("scope".to_string(), auth.scope.clone());
         form.insert("grant_type".to_string(), "password".to_string());
         form.insert("username".to_string(), self.username.clone());
-        form.insert("passward".to_string(), self.password.clone());
+        form.insert("password".to_string(), self.password.clone());
         form.insert("client_id".to_string(), REGISTRY_CLIENT_ID.to_string());
 
         let token_resp = connection
@@ -1089,7 +1089,7 @@ mod tests {
                 assert_eq!(&auth.service, "my-registry.com");
                 assert_eq!(&auth.scope, "repository:test/repo:pull,push");
             }
-            _ => panic!("failed to pase `Bearer` authentication header"),
+            _ => panic!("failed to parse `Bearer` authentication header"),
         }
 
         let str = "Basic realm=\"https://auth.my-registry.com/token\"";
@@ -1097,7 +1097,7 @@ mod tests {
         let auth = RegistryState::parse_auth(&header).unwrap();
         match auth {
             Auth::Basic(auth) => assert_eq!(&auth.realm, "https://auth.my-registry.com/token"),
-            _ => panic!("failed to pase `Bearer` authentication header"),
+            _ => panic!("failed to parse `Bearer` authentication header"),
         }
 
         let str = "Base realm=\"https://auth.my-registry.com/token\"";

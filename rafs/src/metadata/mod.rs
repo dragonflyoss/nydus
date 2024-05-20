@@ -792,7 +792,7 @@ impl RafsSuper {
             // Backward compatibility: try to fix blob id for old converters.
             // Old converters extracts bootstraps from data blobs with inlined bootstrap
             // use blob digest as the bootstrap file name. The last blob in the blob table from
-            // the bootstrap has wrong blod id, so we need to fix it.
+            // the bootstrap has wrong blob id, so we need to fix it.
             let blobs = rs.superblock.get_blob_infos();
             for blob in blobs.iter() {
                 // Fix blob id for new images with old converters.

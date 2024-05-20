@@ -180,7 +180,7 @@ pub struct DummyCacheMgr {
 }
 
 impl DummyCacheMgr {
-    /// Create a new instance of `DummmyCacheMgr`.
+    /// Create a new instance of `DummyCacheMgr`.
     pub fn new(
         config: &CacheConfigV2,
         backend: Arc<dyn BlobBackend>,

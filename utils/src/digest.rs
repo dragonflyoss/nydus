@@ -88,7 +88,7 @@ pub trait DigestHasher {
 /// So we should avoid any unnecessary clone() operation. Add we prefer allocation on stack
 /// instead of allocation on heap.
 ///
-/// If allocating memory for blake3::Hahser is preferred over using the stack, please try:
+/// If allocating memory for blake3::Hasher is preferred over using the stack, please try:
 /// Blake3(Box<blake3::Hasher>). But be careful, this will cause one extra memory allocation/free
 /// for each digest.
 #[derive(Clone, Debug)]

@@ -9,7 +9,7 @@
 //! storage containing data chunks. Data chunks may be compressed, encrypted and deduplicated by
 //! content digest value. When Rafs file is used for container images, Rafs metadata blob contains
 //! all filesystem metadatas, such as directory, file name, permission etc. Actually file contents
-//! are split into chunks and stored into data blobs. Rafs may built one data blob for each
+//! are split into chunks and stored into data blobs. Rafs may build one data blob for each
 //! container image layer or build a  single data blob for the whole image, according to building
 //! options.
 //!

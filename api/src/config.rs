@@ -2299,7 +2299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_confg() {
+    fn test_get_config() {
         get_config("localdisk");
         get_config("localfs");
         get_config("oss");
@@ -2579,7 +2579,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bckend_config_try_from() {
+    fn test_backend_config_try_from() {
         let config = BackendConfig {
             backend_type: "localdisk".to_string(),
             backend_config: serde_json::to_value(LocalDiskConfig::default()).unwrap(),

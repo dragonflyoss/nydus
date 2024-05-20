@@ -82,7 +82,7 @@ const BLOB_TOC_FILE_SUFFIX: &str = "blob.toc";
 /// and can be used as marker to locate the compression context table. All fields of compression
 /// context table header should be encoded in little-endian format.
 ///
-/// The compression context table and header are arranged in the data blob as follow:
+/// The compression context table and header are arranged in the data blob as follows:
 ///
 /// `chunk data`  |  `compression context table`  |  `[ZRan context table | ZRan dictionary]`  |  `compression context table header`
 #[repr(C)]
@@ -705,7 +705,7 @@ impl BlobCompressionContextInfo {
     }
 
     /// Get compressed size associated with the chunk at `chunk_index`.
-    /// Capabale of handling both batch and non-batch chunks.
+    /// Capable of handling both batch and non-batch chunks.
     pub fn get_compressed_size(&self, chunk_index: u32) -> Result<u32> {
         self.state.get_compressed_size(chunk_index as usize)
     }
@@ -1012,7 +1012,7 @@ impl BlobCompressionContext {
     }
 
     /// Get compressed size associated with the chunk at `chunk_index`.
-    /// Capabale of handling both batch and non-batch chunks.
+    /// Capable of handling both batch and non-batch chunks.
     pub fn get_compressed_size(&self, chunk_index: usize) -> Result<u32> {
         if self.is_batch_chunk(chunk_index) {
             let ctx = self
@@ -1379,7 +1379,7 @@ impl BlobMetaChunkArray {
             // - `mid < size`: `mid` is limited by `[left; right)` bound.
             let entry = &chunks[mid];
             if compressed {
-                // Capabale of handling both batch and non-batch chunks.
+                // Capable of handling both batch and non-batch chunks.
                 let c_offset = entry.compressed_offset();
                 let c_size = state.get_compressed_size(mid)?;
                 (start, end) = (c_offset, c_offset + c_size as u64);

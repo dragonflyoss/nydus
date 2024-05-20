@@ -787,7 +787,7 @@ pub struct BlobIoVec {
     bi_blob: Arc<BlobInfo>,
     /// Total size of blob IOs to be performed.
     bi_size: u64,
-    /// Array of blob IOs, these IOs should executed sequentially.
+    /// Array of blob IOs, these IOs should be executed sequentially.
     pub(crate) bi_vec: Vec<BlobIoDesc>,
 }
 
@@ -829,7 +829,7 @@ impl BlobIoVec {
         self.bi_vec.len()
     }
 
-    /// Check whether there's 'BlobIoDesc' in the'BlobIoVec'.
+    /// Check whether there's 'BlobIoDesc' in the 'BlobIoVec'.
     pub fn is_empty(&self) -> bool {
         self.bi_vec.is_empty()
     }

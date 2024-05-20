@@ -7,7 +7,7 @@
 //!
 //! This module provides a chunk state tracking driver for legacy Rafs images without chunk array,
 //! which uses chunk digest as id to track chunk readiness state. The [DigestedChunkMap] is not
-//! optimal in case of performance and memory consumption. So it is only used only to keep backward
+//! optimal in case of performance and memory consumption. So it is only used to keep backward
 /// compatibility with the old nydus image format.
 use std::collections::HashSet;
 use std::io::Result;

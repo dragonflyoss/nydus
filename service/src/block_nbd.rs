@@ -105,7 +105,7 @@ impl NbdService {
         })
     }
 
-    /// Create a [NbdWoker] to run the event loop to handle NBD requests from kernel.
+    /// Create a [NbdWorker] to run the event loop to handle NBD requests from kernel.
     pub fn create_worker(&self) -> Result<NbdWorker> {
         // Let the NBD driver go.
         let (sock1, sock2) = std::os::unix::net::UnixStream::pair()?;

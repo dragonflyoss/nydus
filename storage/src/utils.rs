@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! Utility helpers to supprt the storage subsystem.
+//! Utility helpers to support the storage subsystem.
 use std::alloc::{alloc, Layout};
 use std::cmp::{self, min};
 use std::io::{ErrorKind, IoSliceMut, Result};

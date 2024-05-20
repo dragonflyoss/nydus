@@ -118,7 +118,7 @@ impl ApiServer {
     }
 
     /// External supervisor wants this instance to fetch `/dev/fuse` fd. Before
-    /// invoking this method, supervisor should already listens on a Unix socket and
+    /// invoking this method, supervisor should already listen on a Unix socket and
     /// waits for connection from this instance. Then supervisor should send the *fd*
     /// back. Note, the http response does not mean this process already finishes Takeover
     /// procedure. Supervisor has to continuously query the state of Nydusd until it gets

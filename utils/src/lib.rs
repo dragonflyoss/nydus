@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_round_up_uszie() {
+    fn test_round_up_usize() {
         assert_eq!(round_up_usize(10, 8), 16);
         assert_eq!(round_up_usize(100, 8), 104);
         assert_eq!(round_up_usize(1000, 8), 1000);
