@@ -6,11 +6,16 @@ package texture
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
+	"github.com/google/uuid"
+	"github.com/opencontainers/go-digest"
+	"github.com/stretchr/testify/require"
 )
 
 type LayerMaker func(t *testing.T, layer *tool.Layer)
@@ -50,6 +55,23 @@ func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.La
 	layer.CreateFile(t, "file-1", []byte("file-1"))
 	layer.CreateFile(t, "file-2", []byte("file-2"))
 
+	for i := 0; i < 10; i++ {
+		data := uuid.NewString()
+		digester := digest.Canonical.Digester()
+		_, err := io.Copy(digester.Hash(), strings.NewReader(data))
+		require.NoError(t, err)
+		fmt.Println(filepath.Join(workDir, fmt.Sprintf("file-small-%d", i)), digester.Digest())
+		layer.CreateFile(t, fmt.Sprintf("file-small-%d", i), []byte(data))
+
+		data2 := uuid.NewString()
+		digester = digest.Canonical.Digester()
+		_, err = io.Copy(digester.Hash(), strings.NewReader(data2))
+		require.NoError(t, err)
+		fmt.Println(filepath.Join(workDir, fmt.Sprintf("dir-1/dir-2/dir-3/file-small-%d", i)), digester.Digest())
+		layer.CreateDir(t, "dir-1/dir-2/dir-3")
+		layer.CreateFile(t, fmt.Sprintf("dir-1/dir-2/dir-3/file-small-%d", i), []byte(data2))
+	}
+
 	// Create directory
 	layer.CreateDir(t, "dir-1")
 	layer.CreateDir(t, "dir-2/dir-1")
@@ -69,7 +91,7 @@ func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.La
 	layer.CreateSpecialFile(t, "block-1", syscall.S_IFBLK)
 	layer.CreateSpecialFile(t, "fifo-1", syscall.S_IFIFO)
 
-	// Create file with chinese name
+	// // Create file with chinese name
 	layer.CreateFile(t, "唐诗三百首", []byte("This is poetry"))
 
 	// Create file with long name

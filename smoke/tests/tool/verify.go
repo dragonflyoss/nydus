@@ -42,11 +42,15 @@ func Verify(t *testing.T, ctx Context, expectedFiles map[string]*File) {
 		}
 	}()
 
+	VerifyMount(t, expectedFiles, ctx.Env.MountDir)
+}
+
+func VerifyMount(t *testing.T, expectedFiles map[string]*File, mountDir string) {
 	actualFiles := map[string]*File{}
-	err = filepath.WalkDir(ctx.Env.MountDir, func(path string, _ fs.DirEntry, err error) error {
+	err := filepath.WalkDir(mountDir, func(path string, _ fs.DirEntry, err error) error {
 		require.Nil(t, err)
 
-		targetPath, err := filepath.Rel(ctx.Env.MountDir, path)
+		targetPath, err := filepath.Rel(mountDir, path)
 		require.NoError(t, err)
 
 		file := NewFile(t, path, targetPath)
