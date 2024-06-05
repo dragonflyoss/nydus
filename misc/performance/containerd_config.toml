@@ -6,10 +6,10 @@ oom_score = 0
 [debug]
   level = "debug"
 
-[plugins."io.containerd.grpc.v1.cri"]
-  [plugins."io.containerd.grpc.v1.cri".containerd]
-      snapshotter = "nydus"
-      disable_snapshot_annotations = false
+[plugins."io.containerd.grpc.v1.cri".containerd]
+  snapshotter = "nydus"
+  disable_snapshot_annotations = false
+  discard_unpacked_layers = false
 
 [proxy_plugins]
   [proxy_plugins.nydus]

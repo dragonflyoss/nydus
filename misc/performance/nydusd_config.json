@@ -4,7 +4,11 @@
             "type": "registry",
             "config": {
                 "scheme": "http",
-                "host": "localhost:5000"
+                "host": "localhost:5077",
+                "skip_verify": true,
+                "timeout": 5,
+                "connect_timeout": 5,
+                "retry_limit": 4
             }
         },
         "cache": {
