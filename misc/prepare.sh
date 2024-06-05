@@ -1,20 +1,20 @@
 #!/bin/bash
 
-SNAPSHOTTER_CONFIG="misc/takeover/snapshotter_config.toml"
+SNAPSHOTTER_CONFIG="misc/performance/snapshotter_config.toml"
 if [ "$1" == "takeover_test" ]; then
     SNAPSHOTTER_CONFIG="misc/takeover/snapshotter_config.toml"
 fi
 
-readonly SNAPSHOTTER_VERSION=0.13.3
-readonly NERDCTL_VERSION=1.7.0
-readonly CNI_PLUGINS_VERSION=1.3.0
+readonly SNAPSHOTTER_VERSION=0.13.13
+readonly NERDCTL_VERSION=1.7.6
+readonly CNI_PLUGINS_VERSION=1.5.0
 
 # setup nerdctl and nydusd env
 sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
 sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/local/bin
-wget https://github.com/containerd/nydus-snapshotter/releases/download/v$SNAPSHOTTER_VERSION/nydus-snapshotter-v$SNAPSHOTTER_VERSION-x86_64.tgz
-tar zxvf nydus-snapshotter-v$SNAPSHOTTER_VERSION-x86_64.tgz
-sudo install -D -m 755 nydus-snapshotter/containerd-nydus-grpc /usr/local/bin
+wget https://github.com/containerd/nydus-snapshotter/releases/download/v$SNAPSHOTTER_VERSION/nydus-snapshotter-v$SNAPSHOTTER_VERSION-linux-amd64.tar.gz
+tar zxvf nydus-snapshotter-v$SNAPSHOTTER_VERSION-linux-amd64.tar.gz
+sudo install -D -m 755 bin/containerd-nydus-grpc /usr/local/bin
 sudo wget https://github.com/containerd/nerdctl/releases/download/v$NERDCTL_VERSION/nerdctl-$NERDCTL_VERSION-linux-amd64.tar.gz
 sudo tar -xzvf nerdctl-$NERDCTL_VERSION-linux-amd64.tar.gz -C /usr/local/bin
 sudo mkdir -p /opt/cni/bin
