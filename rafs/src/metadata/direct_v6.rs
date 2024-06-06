@@ -847,6 +847,7 @@ impl RafsInode for OndiskInodeWrapper {
                         curr_chunk_index == tail_chunk_index,
                     )
                     .ok_or_else(|| einval!("failed to get chunk information"))?;
+                //TODO:这里应该考虑某个中间的chunk的blob_index不同的情况
                 if desc.blob.blob_index() != descs.blob_index() {
                     vec.push(descs);
                     descs = BlobIoVec::new(desc.blob.clone());

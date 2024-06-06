@@ -27,6 +27,8 @@ use crate::backend::connection::{
 };
 use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 
+use super::ResponseBufReader;
+
 const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 const HEADER_AUTHORIZATION: &str = "Authorization";
 const HEADER_WWW_AUTHENTICATE: &str = "www-authenticate";
@@ -67,6 +69,8 @@ impl From<RegistryError> for BackendError {
 }
 
 type RegistryResult<T> = std::result::Result<T, RegistryError>;
+
+pub type StreamCallback = dyn FnMut(Box<dyn Read>, u64, u64, &mut u64) -> Result<()>;
 
 #[derive(Default)]
 struct Cache(RwLock<String>);
@@ -764,6 +768,147 @@ impl RegistryReader {
             .map_err(RegistryError::Transport)
             .map(|size| size as usize)
     }
+
+    fn _try_stream_read(
+        &self,
+        offset: u64,
+        size: u64,
+        processed: &mut u64,
+        f: &mut StreamCallback,
+        allow_retry: bool,
+    ) -> RegistryResult<()> {
+        let url = format!("/blobs/sha256:{}", self.blob_id);
+        let url = self
+            .state
+            .url(url.as_str(), &[])
+            .map_err(|e| RegistryError::Url(url, e))?;
+        let mut headers = HeaderMap::new();
+        let end_at = offset + size as u64 - 1;
+        let range = format!("bytes={}-{}", offset, end_at);
+        headers.insert("Range", range.parse().unwrap());
+
+        let mut resp;
+        let cached_redirect = self.state.cached_redirect.get(&self.blob_id);
+
+        if let Some(cached_redirect) = cached_redirect {
+            resp = self
+                .connection
+                .call::<&[u8]>(
+                    Method::GET,
+                    cached_redirect.as_str(),
+                    None,
+                    None,
+                    &mut headers,
+                    false,
+                )
+                .map_err(RegistryError::Request)?;
+
+            // The request has expired or has been denied, need to re-request
+            if allow_retry
+                && [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN].contains(&resp.status())
+            {
+                warn!(
+                    "The redirected link has expired: {}, will retry read",
+                    cached_redirect.as_str()
+                );
+                self.state.cached_redirect.remove(&self.blob_id);
+                // Try read again only once
+                return self._try_stream_read(offset, size, processed, f, false);
+            }
+        } else {
+            resp = match self.request::<&[u8]>(
+                Method::GET,
+                url.as_str(),
+                None,
+                headers.clone(),
+                false,
+            ) {
+                Ok(res) => res,
+                Err(RegistryError::Request(ConnectionError::Common(e)))
+                    if self.state.needs_fallback_http(&e) =>
+                {
+                    self.state.fallback_http();
+                    let url = format!("/blobs/sha256:{}", self.blob_id);
+                    let url = self
+                        .state
+                        .url(url.as_str(), &[])
+                        .map_err(|e| RegistryError::Url(url, e))?;
+                    self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?
+                }
+                Err(RegistryError::Request(ConnectionError::Common(e))) => {
+                    if e.to_string().contains("self signed certificate") {
+                        warn!("try to enable \"skip_verify: true\" option");
+                    }
+                    return Err(RegistryError::Request(ConnectionError::Common(e)));
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+            let status = resp.status();
+
+            // Handle redirect request and cache redirect url
+            if REDIRECTED_STATUS_CODE.contains(&status) {
+                if let Some(location) = resp.headers().get("location") {
+                    let location = location.to_str().unwrap();
+                    let mut location = Url::parse(location)
+                        .map_err(|e| RegistryError::Url(location.to_string(), e))?;
+                    // Note: Some P2P proxy server supports only scheme specified origin blob server,
+                    // so we need change scheme to `blob_url_scheme` here
+                    if !self.state.blob_url_scheme.is_empty() {
+                        location
+                            .set_scheme(&self.state.blob_url_scheme)
+                            .map_err(|_| {
+                                RegistryError::Scheme(self.state.blob_url_scheme.clone())
+                            })?;
+                    }
+                    if !self.state.blob_redirected_host.is_empty() {
+                        location
+                            .set_host(Some(self.state.blob_redirected_host.as_str()))
+                            .map_err(|e| {
+                                error!(
+                                    "Failed to set blob redirected host to {}: {:?}",
+                                    self.state.blob_redirected_host.as_str(),
+                                    e
+                                );
+                                RegistryError::Url(location.to_string(), e)
+                            })?;
+                        debug!("New redirected location {:?}", location.host_str());
+                    }
+                    let resp_ret = self
+                        .connection
+                        .call::<&[u8]>(
+                            Method::GET,
+                            location.as_str(),
+                            None,
+                            None,
+                            &mut headers,
+                            true,
+                        )
+                        .map_err(RegistryError::Request);
+                    match resp_ret {
+                        Ok(_resp) => {
+                            resp = _resp;
+                            self.state
+                                .cached_redirect
+                                .set(self.blob_id.clone(), location.as_str().to_string())
+                        }
+                        Err(err) => {
+                            return Err(err);
+                        }
+                    }
+                };
+            } else {
+                resp = respond(resp, true).map_err(RegistryError::Request)?;
+            }
+        }
+
+        let buf_reader = ResponseBufReader::new(resp, size);
+
+        f(Box::new(buf_reader), offset, size as u64, processed)
+            .map_err(|e| RegistryError::Common(e.to_string()))?;
+        Ok(())
+    }
 }
 
 impl BlobReader for RegistryReader {
@@ -816,6 +961,19 @@ impl BlobReader for RegistryReader {
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         self.first.handle_force(&mut || -> BackendResult<usize> {
             self._try_read(buf, offset, true)
+                .map_err(BackendError::Registry)
+        })
+    }
+
+    fn try_stream_read(
+        &self,
+        offset: u64,
+        size: u64,
+        processed: &mut u64,
+        f: &mut StreamCallback,
+    ) -> BackendResult<()> {
+        self.first.handle_force(&mut || -> BackendResult<()> {
+            self._try_stream_read(offset, size, processed, f, true)
                 .map_err(BackendError::Registry)
         })
     }
