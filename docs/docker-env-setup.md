@@ -15,11 +15,11 @@ sudo cp ./* /usr/bin/
 ```
 # Get the latest version. If this version does not work for you, you can try v0.6.0
 TAG=`curl -s https://api.github.com/repos/containerd/nydus-snapshotter/releases/latest | grep tag_name | cut -f4 -d "\""`
-wget https://github.com/containerd/nydus-snapshotter/releases/download/"$TAG"/nydus-snapshotter-"$TAG"-x86_64.tgz
-tar -xzvf nydus-snapshotter-"$TAG"-x86_64.tgz
-sudo install -D -m 755 nydus-snapshotter/containerd-nydus-grpc /usr/local/bin
+wget https://github.com/containerd/nydus-snapshotter/releases/download/"$TAG"/nydus-snapshotter-"$TAG"-linux-amd64.tar.gz
+tar -xzvf nydus-snapshotter-"$TAG"-linux-amd64.tar.gz
+sudo install -D -m 755 bin/containerd-nydus-grpc /usr/local/bin
 
-wget -O /etc/nydus/nydusd-config.json https://raw.githubusercontent.com/containerd/nydus-snapshotter/"$TAG"/misc/snapshotter/nydusd-config.fusedev.json
+wget -O /etc/nydus/nydusd-config.fusedev.json https://raw.githubusercontent.com/containerd/nydus-snapshotter/"$TAG"/misc/snapshotter/nydusd-config.fusedev.json
 wget -O /etc/nydus/config.toml https://raw.githubusercontent.com/containerd/nydus-snapshotter/"$TAG"/misc/snapshotter/config.toml
 ```
 
