@@ -23,6 +23,9 @@ use sha2::Digest;
 
 use self::core::node::{Node, NodeInfo};
 
+pub use self::chunkdict_generator::ChunkdictBlobInfo;
+pub use self::chunkdict_generator::ChunkdictChunkInfo;
+pub use self::chunkdict_generator::Generator;
 pub use self::compact::BlobCompactor;
 pub use self::core::bootstrap::Bootstrap;
 pub use self::core::chunk_dict::{parse_chunk_dict_arg, ChunkDict, HashChunkDict};
@@ -40,6 +43,7 @@ pub use self::merge::Merger;
 pub use self::stargz::StargzBuilder;
 pub use self::tarball::TarballBuilder;
 
+mod chunkdict_generator;
 mod compact;
 mod core;
 mod directory;

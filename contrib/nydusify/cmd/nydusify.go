@@ -657,12 +657,45 @@ func main() {
 							Usage:    "One or more Nydus image reference(Multiple images should be split by commas)",
 							EnvVars:  []string{"SOURCES"},
 						},
+						&cli.StringFlag{
+							Name:     "target",
+							Required: false,
+							Usage:    "Target chunkdict image (Nydus) reference",
+							EnvVars:  []string{"TARGET"},
+						},
 						&cli.BoolFlag{
 							Name:     "source-insecure",
 							Required: false,
 							Usage:    "Skip verifying server certs for HTTPS source registry",
 							EnvVars:  []string{"SOURCE_INSECURE"},
 						},
+						&cli.BoolFlag{
+							Name:     "target-insecure",
+							Required: false,
+							Usage:    "Skip verifying server certs for HTTPS target registry",
+							EnvVars:  []string{"TARGET_INSECURE"},
+						},
+
+						&cli.StringFlag{
+							Name:    "backend-type",
+							Value:   "",
+							Usage:   "Type of storage backend, possible values: 'oss', 's3'",
+							EnvVars: []string{"BACKEND_TYPE"},
+						},
+						&cli.StringFlag{
+							Name:    "backend-config",
+							Value:   "",
+							Usage:   "Json configuration string for storage backend",
+							EnvVars: []string{"BACKEND_CONFIG"},
+						},
+						&cli.PathFlag{
+							Name:      "backend-config-file",
+							Value:     "",
+							TakesFile: true,
+							Usage:     "Json configuration file for storage backend",
+							EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+						},
+
 						&cli.StringFlag{
 							Name:    "work-dir",
 							Value:   "./output",
@@ -675,6 +708,12 @@ func main() {
 							Usage:   "Path to the nydus-image binary, default to search in PATH",
 							EnvVars: []string{"NYDUS_IMAGE"},
 						},
+
+						&cli.BoolFlag{
+							Name:  "all-platforms",
+							Value: false,
+							Usage: "Generate chunkdict image for all platforms, conflicts with --platform",
+						},
 						&cli.StringFlag{
 							Name:  "platform",
 							Value: "linux/" + runtime.GOARCH,
@@ -684,17 +723,31 @@ func main() {
 					Action: func(c *cli.Context) error {
 						setupLogLevel(c)
 
+						backendType, backendConfig, err := getBackendConfig(c, "", false)
+						if err != nil {
+							return err
+						}
+
 						_, arch, err := provider.ExtractOsArch(c.String("platform"))
 						if err != nil {
 							return err
 						}
 
 						generator, err := generator.New(generator.Opt{
-							WorkDir:        c.String("work-dir"),
 							Sources:        c.StringSlice("sources"),
+							Target:         c.String("target"),
 							SourceInsecure: c.Bool("source-insecure"),
+							TargetInsecure: c.Bool("target-insecure"),
+
+							BackendType:      backendType,
+							BackendConfig:    backendConfig,
+							BackendForcePush: c.Bool("backend-force-push"),
+
+							WorkDir:        c.String("work-dir"),
 							NydusImagePath: c.String("nydus-image"),
 							ExpectedArch:   arch,
+							AllPlatforms:   c.Bool("all-platforms"),
+							Platforms:      c.String("platform"),
 						})
 						if err != nil {
 							return err

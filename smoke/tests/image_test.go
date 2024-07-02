@@ -7,6 +7,7 @@ package tests
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
@@ -127,7 +128,8 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 	// Copy image
 	targetCopied := fmt.Sprintf("%s_copied", target)
 	copyCmd := fmt.Sprintf(
-		"%s %s copy --source %s --target %s --nydus-image %s --work-dir %s --push-chunk-size 1MB",
+		// "%s %s copy --source %s --target %s --nydus-image %s --work-dir %s --push-chunk-size 1MB",
+		"%s %s copy --source %s --target %s --nydus-image %s --work-dir %s",
 		ctx.Binary.Nydusify, logLevel, target, targetCopied, ctx.Binary.Builder, ctx.Env.WorkDir,
 	)
 	tool.RunWithoutOutput(t, copyCmd)
@@ -138,6 +140,86 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 		nydusifyPath, logLevel, source, targetCopied, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
 	)
 	tool.RunWithoutOutput(t, checkCmd)
+}
+
+func (i *ImageTestSuite) TestGenerateChunkdicts() test.Generator {
+	images := []string{"redis:7.0.1", "redis:7.0.2", "redis:7.0.3"}
+	var sources []string
+	for _, image := range images {
+		image = i.prepareImage(i.T, image)
+		sources = append(sources, image)
+	}
+	scenarios := tool.DescartesIterator{}
+	scenarios.
+		Dimension(paramFSVersion, []interface{}{"5", "6"})
+	return func() (name string, testCase test.Case) {
+		if !scenarios.HasNext() {
+			return
+		}
+		scenario := scenarios.Next()
+		ctx := tool.DefaultContext(i.T)
+		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
+		return "chunkdict:" + scenario.Str(), func(t *testing.T) {
+			i.TestChundict(t, *ctx, sources)
+		}
+	}
+}
+
+func (i *ImageTestSuite) TestChundict(t *testing.T, ctx tool.Context, images []string) {
+	trainImage := images[:len(images)-1]
+	testImage := images[len(images)-1]
+
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	// Prepare options.
+	enableOCIRef := ""
+	enableEncrypt := ""
+	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
+	logLevel := "--log-level warn"
+	compressor := "--compressor lz4_block"
+
+	// Prepare nydus images.
+	var targets []string
+	for _, image := range trainImage {
+		target := fmt.Sprintf("%s-nydus-%s", image, uuid.NewString())
+		targets = append(targets, target)
+
+		fmt.Println("target:", target)
+		convertCmd := fmt.Sprintf(
+			"%s %s convert --source %s --target %s %s %s %s %s --nydus-image %s --work-dir %s %s",
+			ctx.Binary.Nydusify, logLevel, image, target, fsVersion, enableOCIRef, "", enableEncrypt, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
+		)
+		tool.RunWithoutOutput(t, convertCmd)
+	}
+	targetsStr := strings.Join(targets, ",")
+
+	// Generate chunkdict.
+	chunkdict := fmt.Sprintf("%s/redis:nydus-chunkdict-%s", strings.SplitN(testImage, "/", 2)[0], uuid.NewString())
+	fmt.Println("chunkdict:", chunkdict)
+	generateCmd := fmt.Sprintf(
+		"%s %s chunkdict generate --sources %s --target %s --source-insecure --target-insecure --nydus-image %s --work-dir %s",
+		ctx.Binary.Nydusify, logLevel, targetsStr, chunkdict, ctx.Binary.Builder, filepath.Join(ctx.Env.WorkDir, "generate"),
+	)
+	tool.RunWithoutOutput(t, generateCmd)
+	fmt.Println("generateCmd:", generateCmd)
+
+	// Covert test image by chunkdict.
+	target := fmt.Sprintf("%s-nydus-%s", testImage, uuid.NewString())
+	convertCmd := fmt.Sprintf(
+		"%s %s convert --source %s --target %s %s %s %s %s --nydus-image %s --work-dir %s %s",
+		ctx.Binary.Nydusify, logLevel, testImage, target, fsVersion, enableOCIRef, "", enableEncrypt, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
+	)
+	tool.RunWithoutOutput(t, convertCmd)
+
+	// Check nydus image covert by chunkdict.
+	checkCmd := fmt.Sprintf(
+		"%s %s check --target %s --nydus-image %s --nydusd %s --work-dir %s",
+		ctx.Binary.Nydusify, logLevel, target, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
+	)
+	tool.RunWithoutOutput(t, checkCmd)
+	fmt.Println("checkCmd:", checkCmd)
+	ctx.Destroy(t)
 }
 
 func (i *ImageTestSuite) prepareImage(t *testing.T, image string) string {

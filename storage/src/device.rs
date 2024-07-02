@@ -77,6 +77,8 @@ bitflags! {
         const CAP_TAR_TOC = 0x4000_0000;
         /// Rafs V5 image without extended blob table, this is an internal flag.
         const _V5_NO_EXT_BLOB_TABLE = 0x8000_0000;
+        /// Blob is generated with chunkdict.
+        const IS_CHUNKDICT_GENERATED = 0x0000_0200;
     }
 }
 
@@ -172,6 +174,9 @@ pub struct BlobInfo {
     cipher_object: Arc<Cipher>,
     /// Cipher context for encryption.
     cipher_ctx: Option<CipherContext>,
+
+    /// is chunkdict generated
+    is_chunkdict_generated: bool,
 }
 
 impl BlobInfo {
@@ -215,11 +220,23 @@ impl BlobInfo {
             meta_path: Arc::new(Mutex::new(String::new())),
             cipher_object: Default::default(),
             cipher_ctx: None,
+
+            is_chunkdict_generated: false,
         };
 
         blob_info.compute_features();
 
         blob_info
+    }
+
+    /// Set the is_chunkdict_generated flag.
+    pub fn set_chunkdict_generated(&mut self, is_chunkdict_generated: bool) {
+        self.is_chunkdict_generated = is_chunkdict_generated;
+    }
+
+    /// Get the is_chunkdict_generated flag.
+    pub fn is_chunkdict_generated(&self) -> bool {
+        self.is_chunkdict_generated
     }
 
     /// Get the blob index in the blob array.
