@@ -324,7 +324,7 @@ The `HttpProxy` backend also supports the `Proxy` and `Mirrors` configurations f
 
 ##### Enable Mirrors for Storage Backend (Recommend)
 
-Nydus is deeply integrated with [Dragonfly](https://d7y.io/) P2P mirror mode, please refer the [doc](https://d7y.io/docs/setup/integration/nydus) to learn how configuring Nydus to use Dragonfly.
+Nydus is deeply integrated with [Dragonfly](https://d7y.io/) P2P mirror mode, please refer the [doc](https://d7y.io/docs/next/operations/integrations/container-runtime/nydus/) to learn how configuring Nydus to use Dragonfly.
 
 Add `device.backend.config.mirrors` field to enable mirrors for storage backend. The mirror can be a P2P distribution server or registry. If the request to mirror server failed, it will fall back to the original registry.
 Currently, the mirror mode is only tested in the registry backend, and in theory, the OSS backend also supports it.
@@ -356,6 +356,9 @@ Currently, the mirror mode is only tested in the registry backend, and in theory
             "health_check_interval": 5,
             // Failure counts before disabling this mirror. Use 5 as default if left empty.
             "failure_limit": 5,
+            // Elapsed time to pause mirror health check when the request is inactive, in seconds.
+            // Use 300 as default if left empty.
+            "check_pause_elapsed": 300,
           },
           {
             "host": "http://dragonfly2.io:65001",
@@ -393,6 +396,9 @@ Add `device.backend.config.proxy` field to enable HTTP proxy for storage backend
           "ping_url": "http://p2p-proxy:40901/server/ping",
           // Interval of P2P proxy health checking, in seconds
           "check_interval": 5
+          // Elapsed time to pause proxy health check when the request is inactive, in seconds.
+          // Use 300 as default if left empty.
+          "check_pause_elapsed": 300,
         },
         ...
       }
