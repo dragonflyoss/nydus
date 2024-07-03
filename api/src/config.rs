@@ -907,6 +907,9 @@ pub struct ProxyConfig {
     /// Replace URL to http to request source registry with proxy, and allow fallback to https if the proxy is unhealthy.
     #[serde(default)]
     pub use_http: bool,
+    /// Elapsed time to pause proxy health check when the request is inactive, in seconds.
+    #[serde(default = "default_check_pause_elapsed")]
+    pub check_pause_elapsed: u64,
 }
 
 impl Default for ProxyConfig {
@@ -917,6 +920,7 @@ impl Default for ProxyConfig {
             fallback: true,
             check_interval: 5,
             use_http: false,
+            check_pause_elapsed: 300,
         }
     }
 }
@@ -938,6 +942,9 @@ pub struct MirrorConfig {
     /// Maximum number of failures before marking a mirror as unusable.
     #[serde(default = "default_failure_limit")]
     pub failure_limit: u8,
+    /// Elapsed time to pause mirror health check when the request is inactive, in seconds.
+    #[serde(default = "default_check_pause_elapsed")]
+    pub check_pause_elapsed: u64,
 }
 
 impl Default for MirrorConfig {
@@ -948,6 +955,7 @@ impl Default for MirrorConfig {
             health_check_interval: 5,
             failure_limit: 5,
             ping_url: String::new(),
+            check_pause_elapsed: 300,
         }
     }
 }
@@ -1189,6 +1197,10 @@ fn default_http_timeout() -> u32 {
 
 fn default_check_interval() -> u64 {
     5
+}
+
+fn default_check_pause_elapsed() -> u64 {
+    300
 }
 
 fn default_failure_limit() -> u8 {
