@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/content/local"
+	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer/diff"
@@ -38,6 +39,7 @@ type Opt struct {
 	WorkDir           string
 	ContainerdAddress string
 	NydusImagePath    string
+	Namespace         string
 
 	ContainerID    string
 	SourceInsecure bool
@@ -79,6 +81,7 @@ func NewCommitter(opt Opt) (*Committer, error) {
 }
 
 func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
+	ctx = namespaces.WithNamespace(ctx, opt.Namespace)
 	targetRef, err := ValidateRef(opt.TargetRef)
 	if err != nil {
 		return errors.Wrap(err, "parse target image name")
