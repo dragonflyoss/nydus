@@ -298,7 +298,7 @@ func (p *Packer) Pack(_ context.Context, req PackRequest) (PackResult, error) {
 	}, nil
 }
 
-// ensureNydusImagePath ensure nydus-image binary exists, the Precedence for nydus-image is as follow
+// ensureNydusImagePath ensure nydus-image binary exists, the Precedence for nydus-image is as follows
 // 1. if nydusImagePath is specified try nydusImagePath first
 // 2. if nydusImagePath not exists, try to find nydus-image from $PATH
 // 3. return ErrNydusImageBinaryNotFound

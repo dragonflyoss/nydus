@@ -150,7 +150,7 @@ func (workflow *Workflow) Build(
 
 	// Rename the newly generated blob to its sha256 digest.
 	// Because the flow will use the basename as the blob object to be pushed to registry.
-	// When `digestedBlobPath` is void, this layer's bootsrap can be pushed meanwhile not for blob
+	// When `digestedBlobPath` is void, this layer's bootstrap can be pushed meanwhile not for blob
 	if digestedBlobPath != "" {
 		err = os.Rename(blobPath, digestedBlobPath)
 		// It's possible that two blobs that are built with the same digest.

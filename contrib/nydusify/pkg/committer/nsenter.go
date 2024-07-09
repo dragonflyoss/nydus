@@ -40,7 +40,7 @@ type Config struct {
 	WorkingDirectory    string // Set the working directory, default to target process working directory
 }
 
-// Execute executs the givne command with a default background context
+// Execute executes the given command with a default background context
 func (c *Config) Execute(writer io.Writer, program string, args ...string) (string, error) {
 	return c.ExecuteContext(context.Background(), writer, program, args...)
 }

@@ -47,7 +47,7 @@ func newDefaultClient(skipTLSVerify bool) *http.Client {
 // username, password and error.
 type withCredentialFunc = func(string) (string, string, error)
 
-// withRemote creates an remote instance, it uses the implemention of containerd
+// withRemote creates a remote instance, it uses the implementation of containerd
 // docker remote to access image from remote registry.
 func withRemote(ref string, insecure bool, credFunc withCredentialFunc) (*remote.Remote, error) {
 	resolverFunc := func(retryWithHTTP bool) remotes.Resolver {
@@ -72,7 +72,7 @@ func withRemote(ref string, insecure bool, credFunc withCredentialFunc) (*remote
 	return remote.New(ref, resolverFunc)
 }
 
-// DefaultRemote creates an remote instance, it attempts to read docker auth config
+// DefaultRemote creates a remote instance, it attempts to read docker auth config
 // file `$DOCKER_CONFIG/config.json` to communicate with remote registry, `$DOCKER_CONFIG`
 // defaults to `~/.docker`.
 func DefaultRemote(ref string, insecure bool) (*remote.Remote, error) {
@@ -94,7 +94,7 @@ func DefaultRemote(ref string, insecure bool) (*remote.Remote, error) {
 	})
 }
 
-// DefaultRemoteWithAuth creates an remote instance, it parses base64 encoded auth string
+// DefaultRemoteWithAuth creates a remote instance, it parses base64 encoded auth string
 // to communicate with remote registry.
 func DefaultRemoteWithAuth(ref string, insecure bool, auth string) (*remote.Remote, error) {
 	return withRemote(ref, insecure, func(_ string) (string, string, error) {
