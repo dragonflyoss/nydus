@@ -443,7 +443,7 @@ impl Connection {
                         .as_secs()
                         - last_active.load(Ordering::Relaxed);
                     // If the connection is not active for a set time, skip mirror health check.
-                    if elapsed <= mirror_cloned.config.check_pause_elapsed {
+                    if elapsed <= mirror_cloned.config.health_check_pause_elapsed {
                         // Try to recover the mirror server when it is unavailable.
                         if !mirror_cloned.status.load(Ordering::Relaxed) {
                             info!(
