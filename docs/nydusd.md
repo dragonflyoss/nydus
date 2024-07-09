@@ -358,7 +358,7 @@ Currently, the mirror mode is only tested in the registry backend, and in theory
             "failure_limit": 5,
             // Elapsed time to pause mirror health check when the request is inactive, in seconds.
             // Use 300 as default if left empty.
-            "check_pause_elapsed": 300,
+            "health_check_pause_elapsed": 300,
           },
           {
             "host": "http://dragonfly2.io:65001",

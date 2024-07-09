@@ -944,7 +944,7 @@ pub struct MirrorConfig {
     pub failure_limit: u8,
     /// Elapsed time to pause mirror health check when the request is inactive, in seconds.
     #[serde(default = "default_check_pause_elapsed")]
-    pub check_pause_elapsed: u64,
+    pub health_check_pause_elapsed: u64,
 }
 
 impl Default for MirrorConfig {
@@ -955,7 +955,7 @@ impl Default for MirrorConfig {
             health_check_interval: 5,
             failure_limit: 5,
             ping_url: String::new(),
-            check_pause_elapsed: 300,
+            health_check_pause_elapsed: 300,
         }
     }
 }
