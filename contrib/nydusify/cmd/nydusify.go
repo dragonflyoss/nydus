@@ -1180,6 +1180,13 @@ func main() {
 					EnvVars: []string{"CONTAINERD_ADDR"},
 				},
 				&cli.StringFlag{
+					Name:    "namespace",
+					Aliases: []string{"n"},
+					Value:   "default",
+					Usage:   "Container namespace, default with \"default\" namespace",
+					EnvVars: []string{"NAMESPACE"},
+				},
+				&cli.StringFlag{
 					Name:     "container",
 					Required: true,
 					Usage:    "Target container id",
@@ -1244,6 +1251,7 @@ func main() {
 					WorkDir:           c.String("work-dir"),
 					NydusImagePath:    c.String("nydus-image"),
 					ContainerdAddress: c.String("containerd-address"),
+					Namespace:         c.String("namespace"),
 					ContainerID:       c.String("container"),
 					TargetRef:         c.String("target"),
 					SourceInsecure:    c.Bool("source-insecure"),

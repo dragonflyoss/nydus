@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
 
 	"github.com/pkg/errors"
@@ -40,7 +39,6 @@ func NewManager(addr string) (*Manager, error) {
 }
 
 func (m *Manager) Pause(ctx context.Context, containerID string) error {
-	ctx = namespaces.WithNamespace(ctx, "default")
 	client, err := containerd.New(m.address)
 	if err != nil {
 		return errors.Wrapf(err, "create client")
@@ -58,7 +56,6 @@ func (m *Manager) Pause(ctx context.Context, containerID string) error {
 }
 
 func (m *Manager) UnPause(ctx context.Context, containerID string) error {
-	ctx = namespaces.WithNamespace(ctx, "default")
 	client, err := containerd.New(m.address)
 	if err != nil {
 		return errors.Wrapf(err, "create client")
@@ -76,7 +73,6 @@ func (m *Manager) UnPause(ctx context.Context, containerID string) error {
 }
 
 func (m *Manager) Inspect(ctx context.Context, containerID string) (*InspectResult, error) {
-	ctx = namespaces.WithNamespace(ctx, "default")
 	client, err := containerd.New(m.address)
 	if err != nil {
 		return nil, errors.Wrapf(err, "create client")
