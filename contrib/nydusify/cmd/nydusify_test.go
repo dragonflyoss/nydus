@@ -234,7 +234,7 @@ func TestGetTargetReference(t *testing.T) {
 	require.Equal(t, "testTarget", target)
 }
 
-func TestGetCacheReferencet(t *testing.T) {
+func TestGetCacheReference(t *testing.T) {
 	app := &cli.App{
 		Flags: []cli.Flag{
 			&cli.StringFlag{

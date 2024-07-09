@@ -173,7 +173,7 @@ func (fsViewer *FsViewer) view(ctx context.Context) error {
 		return errors.Wrap(err, "failed to pull Nydus image bootstrap")
 	}
 
-	// Adjust nydused parameters(DigestValidate) according to rafs format
+	// Adjust nydusd parameters(DigestValidate) according to rafs format
 	nydusManifest := parser.FindNydusBootstrapDesc(&targetParsed.NydusImage.Manifest)
 	if nydusManifest != nil {
 		v := utils.GetNydusFsVersionOrDefault(nydusManifest.Annotations, utils.V5)

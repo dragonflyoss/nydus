@@ -48,7 +48,7 @@ const (
 )
 
 // ChangeWriter provides tar stream from filesystem change information.
-// The privided tar stream is styled as an OCI layer. Change information
+// The provided tar stream is styled as an OCI layer. Change information
 // (add/modify/delete/unmodified) for each file needs to be passed to this
 // writer through HandleChange method.
 //
@@ -71,7 +71,7 @@ type ChangeWriter struct {
 type ChangeWriterOpt func(cw *ChangeWriter)
 
 // NewChangeWriter returns ChangeWriter that writes tar stream of the source directory
-// to the privided writer. Change information (add/modify/delete/unmodified) for each
+// to the provided writer. Change information (add/modify/delete/unmodified) for each
 // file needs to be passed through HandleChange method.
 func NewChangeWriter(w io.Writer, source string, opts ...ChangeWriterOpt) *ChangeWriter {
 	cw := &ChangeWriter{
@@ -211,7 +211,7 @@ func (cw *ChangeWriter) HandleChange(k fs.ChangeKind, p string, f os.FileInfo, e
 			}
 			defer file.Close()
 
-			// HACK (imeoer): disply file path in error message.
+			// HACK (imeoer): display file path in error message.
 			n, err := copyBuffered(context.TODO(), cw.tw, file)
 			if err != nil {
 				return fmt.Errorf("failed to copy file %s: %w", p, err)

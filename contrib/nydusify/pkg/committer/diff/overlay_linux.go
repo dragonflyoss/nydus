@@ -273,7 +273,7 @@ func checkOpaque(upperdir string, path string, base string, f os.FileInfo) (isOp
 					if !os.IsNotExist(err) {
 						return false, errors.Wrapf(err, "failed to lstat")
 					}
-					// This file doesn't exist even in the base dir. We don't need treat this as an opaque.
+					// This file doesn't exist even in the base dir. We don't need to treat this as an opaque.
 					return false, nil
 				}
 				return true, nil

@@ -148,7 +148,7 @@ func addToArchive(tw *tar.Writer, filename string) error {
 		return err
 	}
 	// Use full path as name (FileInfoHeader only takes the basename)
-	// If we don't do this the directory strucuture would
+	// If we don't do this the directory structure would
 	// not be preserved
 	// https://golang.org/src/archive/tar/common.go?#L626
 	header.Name = filename
