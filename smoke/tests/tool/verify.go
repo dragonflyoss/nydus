@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/containerd/log"
 	"github.com/stretchr/testify/require"
@@ -16,39 +17,45 @@ import (
 
 func Verify(t *testing.T, ctx Context, expectedFiles map[string]*File) {
 	config := NydusdConfig{
-		EnablePrefetch:  ctx.Runtime.EnablePrefetch,
-		NydusdPath:      ctx.Binary.Nydusd,
-		BootstrapPath:   ctx.Env.BootstrapPath,
-		ConfigPath:      filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
-		BackendType:     "localfs",
-		BackendConfig:   fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
-		BlobCacheDir:    ctx.Env.CacheDir,
-		APISockPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
-		MountPath:       ctx.Env.MountDir,
-		CacheType:       ctx.Runtime.CacheType,
-		CacheCompressed: ctx.Runtime.CacheCompressed,
-		RafsMode:        ctx.Runtime.RafsMode,
-		DigestValidate:  false,
-		AmplifyIO:       ctx.Runtime.AmplifyIO,
+		NydusdPath:  ctx.Binary.Nydusd,
+		MountPath:   ctx.Env.MountDir,
+		APISockPath: filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:  filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
 	}
 
 	nydusd, err := NewNydusd(config)
 	require.NoError(t, err)
+
 	err = nydusd.Mount()
 	require.NoError(t, err)
+
 	defer func() {
 		if err := nydusd.Umount(); err != nil {
 			log.L.WithError(err).Errorf("umount")
 		}
 	}()
 
+	config.EnablePrefetch = ctx.Runtime.EnablePrefetch
+	config.BootstrapPath = ctx.Env.BootstrapPath
+	config.MountPath = "/pseudo_fs_1"
+	config.BackendType = "localfs"
+	config.BackendConfig = fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir)
+	config.BlobCacheDir = ctx.Env.CacheDir
+	config.CacheType = ctx.Runtime.CacheType
+	config.CacheCompressed = ctx.Runtime.CacheCompressed
+	config.RafsMode = ctx.Runtime.RafsMode
+	config.DigestValidate = false
+	config.AmplifyIO = ctx.Runtime.AmplifyIO
+
+	err = nydusd.MountByAPI(config)
+	require.NoError(t, err)
+	time.Sleep(time.Millisecond * 15)
+
 	actualFiles := map[string]*File{}
 	err = filepath.WalkDir(ctx.Env.MountDir, func(path string, _ fs.DirEntry, err error) error {
 		require.Nil(t, err)
-
 		targetPath, err := filepath.Rel(ctx.Env.MountDir, path)
 		require.NoError(t, err)
-
 		file := NewFile(t, path, targetPath)
 		actualFiles[targetPath] = file
 		if expectedFiles[targetPath] != nil {
