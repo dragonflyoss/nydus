@@ -95,7 +95,7 @@ jobs:
           nydusd
 
   nydusd-build-macos:
-    runs-on: macos-11
+    runs-on: macos-12
     strategy:
       matrix:
         arch: [amd64, arm64]
