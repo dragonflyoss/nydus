@@ -266,15 +266,7 @@ jobs:
       with:
         name: contrib-test-coverage-artifact
     - name: Upload coverage to Codecov
-      if: ${{ github.event_name == 'pull_request' }}
-      uses: codecov/codecov-action@v4.0.0
-      with:
-        files: ./codecov.json,./coverage.txt
-        verbose: true
-        fail_ci_if_error: true
-    - name: Upload coverage to Codecov
-      if: ${{ (github.event_name == 'push'|| github.event_name == 'schedule') }}
-      uses: codecov/codecov-action@v4.0.0
+      uses: codecov/codecov-action@v4
       with:
         files: ./codecov.json,./coverage.txt
         token: ${{ secrets.CODECOV_TOKEN }}
