@@ -37,7 +37,7 @@ func Verify(t *testing.T, ctx Context, expectedFiles map[string]*File) {
 
 	config.EnablePrefetch = ctx.Runtime.EnablePrefetch
 	config.BootstrapPath = ctx.Env.BootstrapPath
-	config.MountPath = "/pseudo_fs_1"
+	config.MountPath = "/"
 	config.BackendType = "localfs"
 	config.BackendConfig = fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir)
 	config.BlobCacheDir = ctx.Env.CacheDir
