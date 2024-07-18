@@ -403,6 +403,21 @@ func (nydusd *Nydusd) WaitStatus(states ...string) error {
 	}
 }
 
+func (nydusd *Nydusd) StartByAPI() error {
+	req, err := http.NewRequest("PUT", "http://unix/api/v1/daemon/start", nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := nydusd.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	return nil
+}
+
 func (nydusd *Nydusd) SendFd() error {
 	req, err := http.NewRequest("PUT", "http://unix/api/v1/daemon/fuse/sendfd", nil)
 	if err != nil {
