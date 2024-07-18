@@ -2,9 +2,24 @@ package tool
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 )
+
+func isIgnoredByEnv(param *DescartesItem) bool {
+	if skipCases := os.Getenv("SKIP_CASES"); skipCases != "" {
+		kvs := strings.Split(skipCases, ",")
+		for _, kv := range kvs {
+			k := strings.Split(kv, "=")[0]
+			v := strings.Split(kv, "=")[1]
+			if param.GetString(k) == v {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 type DescartesItem struct {
 	vals map[string]interface{}
@@ -141,7 +156,7 @@ func (c *DescartesIterator) calNext() {
 		for name, idx := range c.cursorMap {
 			item.vals[name] = c.valLists[idx][cursors[idx]]
 		}
-		if c.skip == nil || !c.skip(item) {
+		if !isIgnoredByEnv(item) && (c.skip == nil || !c.skip(item)) {
 			c.haveNext(cursors, item)
 			return
 		}

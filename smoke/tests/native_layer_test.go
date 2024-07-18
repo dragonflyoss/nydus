@@ -45,7 +45,6 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 		Dimension(paramEncrypt, []interface{}{false, true}).
 		Dimension(paramAmplifyIO, []interface{}{uint64(0x100000)}).
 		Skip(func(param *tool.DescartesItem) bool {
-
 			// rafs v6 not support cached mode nor dummy cache
 			if param.GetString(paramFSVersion) == "6" {
 				return param.GetString(paramRafsMode) == "cached" || param.GetString(paramCacheType) == ""
@@ -70,17 +69,16 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 		}
 		scenario := scenarios.Next()
 
-		ctx := tool.DefaultContext(n.t)
-		ctx.Build.Compressor = scenario.GetString(paramCompressor)
-		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
-		ctx.Build.ChunkSize = scenario.GetString(paramChunkSize)
-		ctx.Runtime.CacheType = scenario.GetString(paramCacheType)
-		ctx.Runtime.CacheCompressed = scenario.GetBool(paramCacheCompressed)
-		ctx.Runtime.RafsMode = scenario.GetString(paramRafsMode)
-		ctx.Runtime.EnablePrefetch = scenario.GetBool(paramEnablePrefetch)
-		ctx.Runtime.AmplifyIO = scenario.GetUInt64(paramAmplifyIO)
-
 		return scenario.Str(), func(t *testing.T) {
+			ctx := tool.DefaultContext(n.t)
+			ctx.Build.Compressor = scenario.GetString(paramCompressor)
+			ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
+			ctx.Build.ChunkSize = scenario.GetString(paramChunkSize)
+			ctx.Runtime.CacheType = scenario.GetString(paramCacheType)
+			ctx.Runtime.CacheCompressed = scenario.GetBool(paramCacheCompressed)
+			ctx.Runtime.RafsMode = scenario.GetString(paramRafsMode)
+			ctx.Runtime.EnablePrefetch = scenario.GetBool(paramEnablePrefetch)
+			ctx.Runtime.AmplifyIO = scenario.GetUInt64(paramAmplifyIO)
 			n.testMakeLayers(*ctx, t)
 		}
 	}
@@ -105,7 +103,6 @@ func (n *NativeLayerTestSuite) TestAmplifyIO() test.Generator {
 		/* Amplify io - target param */
 		Dimension(paramAmplifyIO, []interface{}{uint64(0x0), uint64(0x100000), uint64(0x10000000)}).
 		Skip(func(param *tool.DescartesItem) bool {
-
 			// Rafs v6 not support cached mode nor dummy cache
 			if param.GetString(paramFSVersion) == "6" {
 				return param.GetString(paramRafsMode) == "cached" || param.GetString(paramCacheType) == ""
@@ -130,17 +127,16 @@ func (n *NativeLayerTestSuite) TestAmplifyIO() test.Generator {
 		}
 		scenario := scenarios.Next()
 
-		ctx := tool.DefaultContext(n.t)
-		ctx.Build.Compressor = scenario.GetString(paramCompressor)
-		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
-		ctx.Build.ChunkSize = scenario.GetString(paramChunkSize)
-		ctx.Runtime.CacheType = scenario.GetString(paramCacheType)
-		ctx.Runtime.CacheCompressed = scenario.GetBool(paramCacheCompressed)
-		ctx.Runtime.RafsMode = scenario.GetString(paramRafsMode)
-		ctx.Runtime.EnablePrefetch = scenario.GetBool(paramEnablePrefetch)
-		ctx.Runtime.AmplifyIO = scenario.GetUInt64(paramAmplifyIO)
-
 		return scenario.Str(), func(t *testing.T) {
+			ctx := tool.DefaultContext(n.t)
+			ctx.Build.Compressor = scenario.GetString(paramCompressor)
+			ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
+			ctx.Build.ChunkSize = scenario.GetString(paramChunkSize)
+			ctx.Runtime.CacheType = scenario.GetString(paramCacheType)
+			ctx.Runtime.CacheCompressed = scenario.GetBool(paramCacheCompressed)
+			ctx.Runtime.RafsMode = scenario.GetString(paramRafsMode)
+			ctx.Runtime.EnablePrefetch = scenario.GetBool(paramEnablePrefetch)
+			ctx.Runtime.AmplifyIO = scenario.GetUInt64(paramAmplifyIO)
 			n.testMakeLayers(*ctx, t)
 		}
 	}

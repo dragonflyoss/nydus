@@ -13,6 +13,7 @@ build:
 # NYDUS_BUILDER=/path/to/latest/nydus-image \
 # NYDUS_NYDUSD=/path/to/latest/nydusd \
 # NYDUS_NYDUSIFY=/path/to/latest/nydusify \
+# SKIP_CASES=compressor=lz4_block,fs_version=5 \
 # make test
 test: build
 	golangci-lint run

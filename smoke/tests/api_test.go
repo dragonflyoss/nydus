@@ -5,13 +5,11 @@
 package tests
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/containerd/log"
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
@@ -33,7 +31,7 @@ func (a *APIV1TestSuite) TestDaemonStatus(t *testing.T) {
 
 	rootFs := texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "root-fs"))
 
-	rafs := a.rootFsToRafs(t, ctx, rootFs)
+	rafs := a.buildLayer(t, ctx, rootFs)
 
 	nydusd, err := tool.NewNydusd(tool.NydusdConfig{
 		NydusdPath:      ctx.Binary.Nydusd,
@@ -60,17 +58,8 @@ func (a *APIV1TestSuite) TestDaemonStatus(t *testing.T) {
 		}
 	}()
 
-	// The implementation of runNydusd() has checked stats, however,
-	// it's clear of semantic to check stats again.
-	newCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	select {
-	case <-tool.CheckReady(newCtx, nydusd.APISockPath):
-		return
-	case <-time.After(50 * time.Millisecond):
-		require.Fail(t, "nydusd status is not RUNNING")
-	}
+	err = nydusd.WaitStatus("RUNNING")
+	require.NoError(t, err)
 }
 
 func (a *APIV1TestSuite) TestMetrics(t *testing.T) {
@@ -82,7 +71,7 @@ func (a *APIV1TestSuite) TestMetrics(t *testing.T) {
 
 	rootFs := texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "root-fs"))
 
-	rafs := a.rootFsToRafs(t, ctx, rootFs)
+	rafs := a.buildLayer(t, ctx, rootFs)
 
 	nydusd, err := tool.NewNydusd(tool.NydusdConfig{
 		NydusdPath:      ctx.Binary.Nydusd,
@@ -164,7 +153,7 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 		filepath.Join(ctx.Env.WorkDir, "root-fs"),
 		texture.LargerFileMaker("large-blob.bin", 5))
 
-	rafs := a.rootFsToRafs(t, ctx, rootFs)
+	rafs := a.buildLayer(t, ctx, rootFs)
 
 	config := tool.NydusdConfig{
 		NydusdPath:  ctx.Binary.Nydusd,
@@ -195,7 +184,6 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 	config.RafsMode = ctx.Runtime.RafsMode
 	err = nydusd.MountByAPI(config)
 	require.NoError(t, err)
-	time.Sleep(time.Millisecond * 15)
 
 	bcm, err := nydusd.GetBlobCacheMetrics("")
 	require.NoError(t, err)
@@ -205,7 +193,7 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func (a *APIV1TestSuite) rootFsToRafs(t *testing.T, ctx *tool.Context, rootFs *tool.Layer) string {
+func (a *APIV1TestSuite) buildLayer(t *testing.T, ctx *tool.Context, rootFs *tool.Layer) string {
 	digest := rootFs.Pack(t,
 		converter.PackOption{
 			BuilderPath: ctx.Binary.Builder,

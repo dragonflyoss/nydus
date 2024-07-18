@@ -22,8 +22,10 @@ func TestMain(m *testing.M) {
 		registryPort = "5077"
 		os.Setenv("REGISTRY_PORT", registryPort)
 	}
-	reg := tool.NewRegistry()
+	if os.Getenv("DISABLE_REGISTRY") == "" {
+		reg := tool.NewRegistry()
+		defer reg.Destroy()
+	}
 	code := m.Run()
-	reg.Destroy()
 	os.Exit(code)
 }
