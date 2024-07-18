@@ -51,6 +51,7 @@ func (ts *OverlayFsTestSuite) prepareTestEnv(t *testing.T) *tool.Context {
 	// Verify lower layer mounted by nydusd
 	ctx.Env.BootstrapPath = lowerBootstrap
 	tool.Verify(t, *ctx, lowerLayer.FileTree)
+
 	return ctx
 }
 

@@ -36,7 +36,7 @@ func (c *CommitTestSuite) TestCommitContainer() test.Generator {
 		ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
 
 		image, committedImage := c.prepareImage(c.t, ctx, scenario.GetString(paramImage))
-		return scenario.Str(), func(t *testing.T) {
+		return scenario.Str(), func(_ *testing.T) {
 			c.TestCommitAndCheck(*ctx, image, committedImage)
 		}
 	}
