@@ -708,8 +708,8 @@ func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
 	nydusd, err := NewNydusd(config)
 	require.NoError(t, err)
 
-	// err = nydusd.Mount()
-	// require.NoError(t, err)
+	err = nydusd.Mount()
+	require.NoError(t, err)
 	// defer func() {
 	// 	if err := nydusd.Umount(); err != nil {
 	// 		log.L.WithError(err).Errorf("umount")
@@ -735,6 +735,7 @@ func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
 	config.DigestValidate = false
 	config.AmplifyIO = ctx.Runtime.AmplifyIO
 	err = nydusd.MountByAPI2(NydusdConfigTpl, config)
+	//err = nydusd.MountByAPI(config)
 	require.NoError(t, err)
 
 	defer nydusd.Umount()
