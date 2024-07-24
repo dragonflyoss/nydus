@@ -61,12 +61,14 @@ pub trait Database {
     fn insert_blob(&self, blob_info: &ChunkdictBlobInfo) -> Result<()>;
 
     /// Retrieves all chunk information from the database.
+    #[allow(dead_code)]
     fn get_chunks(&self) -> Result<Vec<ChunkdictChunkInfo>>;
 
     /// Retrieves all chunk information from the database filtered by blob ID.
     fn get_chunks_by_blob_id(&self, blob_id: &str) -> Result<Vec<ChunkdictChunkInfo>>;
 
     /// Retrieves all blob information from the database.
+    #[allow(dead_code)]
     fn get_blobs(&self) -> Result<Vec<ChunkdictBlobInfo>>;
 
     /// Retrieves blob information from the database filtered by blob ID.
@@ -905,6 +907,7 @@ where
     Err: std::error::Error + 'static,
 {
     /// Clear table.
+    #[allow(dead_code)]
     fn clear(&self) -> Result<(), Err>;
 
     /// Create table.
