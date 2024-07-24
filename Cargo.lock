@@ -1262,6 +1262,7 @@ dependencies = [
  "nydus-storage",
  "nydus-utils",
  "openssl",
+ "openssl-src",
  "rlimit",
  "rusqlite",
  "serde",
