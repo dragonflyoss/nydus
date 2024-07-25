@@ -55,7 +55,7 @@ tokio = { version = "1.35.1", features = ["macros"] }
 # Build static linked openssl library
 openssl = { version = "0.10.66", features = ["vendored"] }
 # pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
-openssl-src = { version = "300.0.2" }
+#openssl-src = { version = "300.0.2" }
 
 nydus-api = { version = "0.3.0", path = "api", features = [
     "error-backtrace",
