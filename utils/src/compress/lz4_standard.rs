@@ -10,7 +10,10 @@ pub(super) fn lz4_compress(src: &[u8]) -> Result<Vec<u8>> {
     // 0 iff src too large
     let compress_bound: i32 = unsafe { LZ4_compressBound(src.len() as i32) };
 
-    if src.len() > (i32::max_value() as usize) || compress_bound <= 0 {
+    // if src.len() > (i32::max_value() as usize) || compress_bound <= 0 {
+    //     return Err(einval!("compression input data is too big"));
+    // }
+    if src.len() > (i32::MAX as usize) || compress_bound <= 0 {
         return Err(einval!("compression input data is too big"));
     }
 
@@ -34,7 +37,10 @@ pub(super) fn lz4_compress(src: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub(super) fn lz4_decompress(src: &[u8], dst: &mut [u8]) -> Result<usize> {
-    if dst.len() >= std::i32::MAX as usize {
+    // if dst.len() >= std::i32::MAX as usize {
+    //     return Err(einval!("the destination buffer is big than i32::MAX"));
+    // }
+    if dst.len() >= i32::MAX as usize {
         return Err(einval!("the destination buffer is big than i32::MAX"));
     }
     let size = dst.len() as i32;
