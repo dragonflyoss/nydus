@@ -354,6 +354,50 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 	return err
 }
 
+func (nydusd *Nydusd) MountByAPI2(tplType TemplateType, config NydusdConfig) error {
+	var tpl *template.Template
+
+	switch tplType {
+	case NydusdConfigTpl:
+		tpl = template.Must(template.New("").Parse(configTpl))
+	case NydusdOvlConfigTpl:
+		tpl = template.Must(template.New("").Parse(configOvlTpl))
+	default:
+		return errors.New("unknown template type")
+	}
+
+	var ret bytes.Buffer
+	if err := tpl.Execute(&ret, config); err != nil {
+		return errors.New("prepare config template for Nydusd")
+	}
+	rafsConfig := ret.String()
+
+	nydusdConfig := struct {
+		Bootstrap     string   `json:"source"`
+		RafsConfig    string   `json:"config"`
+		FsType        string   `json:"fs_type"`
+		PrefetchFiles []string `json:"prefetch_files"`
+	}{
+		Bootstrap:     config.BootstrapPath,
+		RafsConfig:    rafsConfig,
+		FsType:        "rafs",
+		PrefetchFiles: config.PrefetchFiles,
+	}
+
+	body, err := json.Marshal(nydusdConfig)
+	if err != nil {
+		return err
+	}
+
+	_, err = nydusd.client.Post(
+		fmt.Sprintf("http://unix/api/v1/mount?mountpoint=%s", config.MountPath),
+		"application/json",
+		bytes.NewBuffer(body),
+	)
+
+	return err
+}
+
 func (nydusd *Nydusd) Umount() error {
 	if _, err := os.Stat(nydusd.MountPath); err == nil {
 		cmd := exec.Command("umount", nydusd.MountPath)
@@ -655,9 +699,30 @@ func (nydusd *Nydusd) Verify(t *testing.T, expectedFileTree map[string]*File) {
 }
 
 func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
-	nydusd, err := NewNydusdWithContext(ctx)
+	config := NydusdConfig{
+		NydusdPath:  ctx.Binary.Nydusd,
+		MountPath:   ctx.Env.MountDir,
+		APISockPath: filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:  filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+	}
+
+	nydusd, err := NewNydusd(config)
 	require.NoError(t, err)
 	err = nydusd.Mount()
+	require.NoError(t, err)
+
+	config.BootstrapPath = ctx.Env.BootstrapPath
+	config.MountPath = "/"
+	config.BackendType = "localfs"
+	config.BackendConfig = fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir)
+	config.BlobCacheDir = ctx.Env.CacheDir
+	config.CacheType = ctx.Runtime.CacheType
+	config.CacheCompressed = ctx.Runtime.CacheCompressed
+	config.RafsMode = ctx.Runtime.RafsMode
+	config.EnablePrefetch = ctx.Runtime.EnablePrefetch
+	config.DigestValidate = false
+	config.AmplifyIO = ctx.Runtime.AmplifyIO
+	err = nydusd.MountByAPI2(NydusdConfigTpl, config)
 	require.NoError(t, err)
 	defer nydusd.Umount()
 	nydusd.Verify(t, expectedFileTree)
