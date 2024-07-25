@@ -76,6 +76,8 @@ jobs:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
         save-if: ${{ github.ref == 'refs/heads/master' }}
+    - name: Install OpenSSL
+      run: sudo apt-get update && sudo apt-get install -y libssl-dev
     - uses: dsherret/rust-toolchain-file@v1
     - name: Build Nydus
       run: |
