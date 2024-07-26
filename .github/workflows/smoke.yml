@@ -70,13 +70,19 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v4
+    - name: Setup Rust Toolchain
+      uses: dsherret/rust-toolchain-file@v1
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev
     - name: Rust Cache
       uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
         save-if: ${{ github.ref == 'refs/heads/master' }}
-    - uses: dsherret/rust-toolchain-file@v1
+    #- uses: dsherret/rust-toolchain-file@v1
     - name: Build Nydus
       run: |
         declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
