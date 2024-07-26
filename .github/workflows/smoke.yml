@@ -64,6 +64,9 @@ jobs:
 
   nydus-build:
     runs-on: ubuntu-latest
+    env:
+      OPENSSL_LIB_DIR: /usr/lib/ssl
+      OPENSSL_INCLUDE_DIR: /usr/include/openssl
     strategy:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
