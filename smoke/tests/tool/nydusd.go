@@ -409,6 +409,18 @@ func (nydusd *Nydusd) Umount() error {
 	return nil
 }
 
+func (nydusd *Nydusd) UmountByAPI(point string) error {
+	path := nydusd.MountPath + point
+	if _, err := os.Stat(path); err == nil {
+		cmd := exec.Command("umount", path)
+		cmd.Stdout = os.Stdout
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (nydusd *Nydusd) WaitStatus(states ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
@@ -698,6 +710,39 @@ func (nydusd *Nydusd) Verify(t *testing.T, expectedFileTree map[string]*File) {
 	}
 }
 
+func (nydusd *Nydusd) Verify2(t *testing.T, expectedFileTree map[string]*File, point string) {
+	actualFiles := map[string]*File{}
+	err := filepath.WalkDir(nydusd.MountPath, func(path string, _ fs.DirEntry, err error) error {
+		require.Nil(t, err)
+		pointMdr := strings.TrimPrefix(point, "/")
+		targetPath, err := filepath.Rel(nydusd.MountPath, path)
+		require.NoError(t, err)
+		targetPath = strings.TrimPrefix(targetPath, pointMdr+"/")
+		if targetPath == "." || targetPath == ".." || targetPath == pointMdr {
+			return nil
+		}
+
+		file := NewFile(t, path, targetPath)
+		actualFiles[targetPath] = file
+		if expectedFileTree[targetPath] != nil {
+			expectedFileTree[targetPath].Compare(t, file)
+		} else {
+			t.Fatalf("not found file %s in OCI layer", targetPath)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	for targetPath, file := range expectedFileTree {
+		if actualFiles[targetPath] != nil {
+			actualFiles[targetPath].Compare(t, file)
+		} else {
+			t.Fatalf("not found file %s in nydus layer: %s %s", targetPath, nydusd.MountPath, nydusd.BootstrapPath)
+		}
+	}
+}
+
 func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
 	config := NydusdConfig{
 		NydusdPath:  ctx.Binary.Nydusd,
@@ -712,7 +757,7 @@ func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
 	require.NoError(t, err)
 
 	config.BootstrapPath = ctx.Env.BootstrapPath
-	config.MountPath = "/"
+	config.MountPath = "/mount1"
 	config.BackendType = "localfs"
 	config.BackendConfig = fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir)
 	config.BlobCacheDir = ctx.Env.CacheDir
@@ -725,5 +770,6 @@ func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
 	err = nydusd.MountByAPI2(NydusdConfigTpl, config)
 	require.NoError(t, err)
 	defer nydusd.Umount()
-	nydusd.Verify(t, expectedFileTree)
+	defer nydusd.UmountByAPI(config.MountPath)
+	nydusd.Verify2(t, expectedFileTree, config.MountPath)
 }
