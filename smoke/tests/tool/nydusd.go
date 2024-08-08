@@ -354,9 +354,65 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 	return err
 }
 
+func (nydusd *Nydusd) MountByAPI2(tplType TemplateType, config NydusdConfig) error {
+	var tpl *template.Template
+
+	switch tplType {
+	case NydusdConfigTpl:
+		tpl = template.Must(template.New("").Parse(configTpl))
+	case NydusdOvlConfigTpl:
+		tpl = template.Must(template.New("").Parse(configOvlTpl))
+	default:
+		return errors.New("unknown template type")
+	}
+
+	var ret bytes.Buffer
+	if err := tpl.Execute(&ret, config); err != nil {
+		return errors.New("prepare config template for Nydusd")
+	}
+	rafsConfig := ret.String()
+
+	nydusdConfig := struct {
+		Bootstrap     string   `json:"source"`
+		RafsConfig    string   `json:"config"`
+		FsType        string   `json:"fs_type"`
+		PrefetchFiles []string `json:"prefetch_files"`
+	}{
+		Bootstrap:     config.BootstrapPath,
+		RafsConfig:    rafsConfig,
+		FsType:        "rafs",
+		PrefetchFiles: config.PrefetchFiles,
+	}
+
+	body, err := json.Marshal(nydusdConfig)
+	if err != nil {
+		return err
+	}
+
+	_, err = nydusd.client.Post(
+		fmt.Sprintf("http://unix/api/v1/mount?mountpoint=%s", config.MountPath),
+		"application/json",
+		bytes.NewBuffer(body),
+	)
+
+	return err
+}
+
 func (nydusd *Nydusd) Umount() error {
 	if _, err := os.Stat(nydusd.MountPath); err == nil {
 		cmd := exec.Command("umount", nydusd.MountPath)
+		cmd.Stdout = os.Stdout
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (nydusd *Nydusd) UmountByAPI(point string) error {
+	path := nydusd.MountPath + point
+	if _, err := os.Stat(path); err == nil {
+		cmd := exec.Command("umount", path)
 		cmd.Stdout = os.Stdout
 		if err := cmd.Run(); err != nil {
 			return err
@@ -654,11 +710,66 @@ func (nydusd *Nydusd) Verify(t *testing.T, expectedFileTree map[string]*File) {
 	}
 }
 
+func (nydusd *Nydusd) Verify2(t *testing.T, expectedFileTree map[string]*File, point string) {
+	actualFiles := map[string]*File{}
+	err := filepath.WalkDir(nydusd.MountPath, func(path string, _ fs.DirEntry, err error) error {
+		require.Nil(t, err)
+		pointMdr := strings.TrimPrefix(point, "/")
+		targetPath, err := filepath.Rel(nydusd.MountPath, path)
+		require.NoError(t, err)
+		targetPath = strings.TrimPrefix(targetPath, pointMdr+"/")
+		if targetPath == "." || targetPath == ".." || targetPath == pointMdr {
+			return nil
+		}
+
+		file := NewFile(t, path, targetPath)
+		actualFiles[targetPath] = file
+		if expectedFileTree[targetPath] != nil {
+			expectedFileTree[targetPath].Compare(t, file)
+		} else {
+			t.Fatalf("not found file %s in OCI layer", targetPath)
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	for targetPath, file := range expectedFileTree {
+		if actualFiles[targetPath] != nil {
+			actualFiles[targetPath].Compare(t, file)
+		} else {
+			t.Fatalf("not found file %s in nydus layer: %s %s", targetPath, nydusd.MountPath, nydusd.BootstrapPath)
+		}
+	}
+}
+
 func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
-	nydusd, err := NewNydusdWithContext(ctx)
+	config := NydusdConfig{
+		NydusdPath:  ctx.Binary.Nydusd,
+		MountPath:   ctx.Env.MountDir,
+		APISockPath: filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:  filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+	}
+
+	nydusd, err := NewNydusd(config)
 	require.NoError(t, err)
 	err = nydusd.Mount()
 	require.NoError(t, err)
+
+	config.BootstrapPath = ctx.Env.BootstrapPath
+	config.MountPath = "/mount1"
+	config.BackendType = "localfs"
+	config.BackendConfig = fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir)
+	config.BlobCacheDir = ctx.Env.CacheDir
+	config.CacheType = ctx.Runtime.CacheType
+	config.CacheCompressed = ctx.Runtime.CacheCompressed
+	config.RafsMode = ctx.Runtime.RafsMode
+	config.EnablePrefetch = ctx.Runtime.EnablePrefetch
+	config.DigestValidate = false
+	config.AmplifyIO = ctx.Runtime.AmplifyIO
+	err = nydusd.MountByAPI2(NydusdConfigTpl, config)
+	require.NoError(t, err)
 	defer nydusd.Umount()
-	nydusd.Verify(t, expectedFileTree)
+	defer nydusd.UmountByAPI(config.MountPath)
+	nydusd.Verify2(t, expectedFileTree, config.MountPath)
 }

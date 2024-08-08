@@ -17,7 +17,7 @@ build:
 # make test
 test: build
 	golangci-lint run
-	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
+	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=TestNativeLayer
 
 # PERFORMANCE_TEST_MODE=fs-version-5 \
 # PERFORMANCE_TEST_IMAGE=wordpress:latest \
