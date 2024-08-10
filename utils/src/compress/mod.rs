@@ -41,7 +41,7 @@ impl FromStr for Algorithm {
             "none" => Ok(Self::None),
             "lz4_block" => Ok(Self::Lz4Block),
             "gzip" => Ok(Self::GZip),
-            "zstd" => Ok(Self::Zstd),
+            "Zstd" => Ok(Self::Zstd),
             _ => Err(einval!("compression algorithm should be none or lz4_block")),
         }
     }
