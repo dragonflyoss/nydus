@@ -315,19 +315,13 @@ func (nydusd *Nydusd) Mount() error {
 }
 
 func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
-	err := makeConfig(NydusdConfigTpl, config)
-	if err != nil {
-		return err
+	tpl := template.Must(template.New("").Parse(configTpl))
+
+	var ret bytes.Buffer
+	if err := tpl.Execute(&ret, config); err != nil {
+		return errors.New("prepare config template for Nydusd")
 	}
-	f, err := os.Open(config.ConfigPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	rafsConfig, err := io.ReadAll(f)
-	if err != nil {
-		return err
-	}
+	rafsConfig := ret.String()
 
 	nydusdConfig := struct {
 		Bootstrap     string   `json:"source"`
@@ -336,7 +330,7 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 		PrefetchFiles []string `json:"prefetch_files"`
 	}{
 		Bootstrap:     config.BootstrapPath,
-		RafsConfig:    string(rafsConfig),
+		RafsConfig:    rafsConfig,
 		FsType:        "rafs",
 		PrefetchFiles: config.PrefetchFiles,
 	}
@@ -352,6 +346,7 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 	)
 
 	return err
+
 }
 
 func (nydusd *Nydusd) Umount() error {
@@ -362,6 +357,21 @@ func (nydusd *Nydusd) Umount() error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (nydusd *Nydusd) UmountByAPI(subPath string) error {
+	url := fmt.Sprintf("http://unix/api/v1/mount?mountpoint=%s", subPath)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := nydusd.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
 	return nil
 }
 
@@ -622,17 +632,19 @@ func (nydusd *Nydusd) GetInflightMetrics() (*InflightMetrics, error) {
 }
 
 func (nydusd *Nydusd) Verify(t *testing.T, expectedFileTree map[string]*File) {
+	nydusd.VerifyByPath(t, expectedFileTree, "")
+}
+
+func (nydusd *Nydusd) VerifyByPath(t *testing.T, expectedFileTree map[string]*File, subPath string) {
 	actualFiles := map[string]*File{}
-	err := filepath.WalkDir(nydusd.MountPath, func(path string, _ fs.DirEntry, err error) error {
+	mountPath := filepath.Join(nydusd.MountPath, subPath)
+	err := filepath.WalkDir(mountPath, func(path string, _ fs.DirEntry, err error) error {
 		require.Nil(t, err)
-
-		targetPath, err := filepath.Rel(nydusd.MountPath, path)
+		targetPath, err := filepath.Rel(mountPath, path)
 		require.NoError(t, err)
-
 		if targetPath == "." || targetPath == ".." {
 			return nil
 		}
-
 		file := NewFile(t, path, targetPath)
 		actualFiles[targetPath] = file
 		if expectedFileTree[targetPath] != nil {
