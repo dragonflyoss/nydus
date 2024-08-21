@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
 	containerdErrdefs "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
@@ -285,33 +286,64 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	sourceNamed, err := docker.ParseDockerRef(opt.Source)
-	if err != nil {
-		return errors.Wrap(err, "parse source reference")
-	}
-	targetNamed, err := docker.ParseDockerRef(opt.Target)
-	if err != nil {
-		return errors.Wrap(err, "parse target reference")
-	}
-	source := sourceNamed.String()
-	target := targetNamed.String()
+	var source string
+	if strings.HasPrefix(opt.Source, "file:///") {
+		inputPath := strings.TrimPrefix(opt.Source, "file:///")
 
-	logrus.Infof("pulling source image %s", source)
-	if err := pvd.Pull(ctx, source); err != nil {
-		if errdefs.NeedsRetryWithHTTP(err) {
-			pvd.UsePlainHTTP()
-			if err := pvd.Pull(ctx, source); err != nil {
-				return errors.Wrap(err, "try to pull image")
-			}
-		} else {
-			return errors.Wrap(err, "pull source image")
+		logrus.Infof("importing source image from %s", inputPath)
+		f, err := os.Open(inputPath)
+		if err != nil {
+			return err
 		}
+		defer f.Close()
+		decompressor, err := compression.DecompressStream(f)
+		if err != nil {
+			return err
+		}
+		if source, err = pvd.Import(ctx, decompressor); err != nil {
+			return errors.Wrap(err, "import source image")
+		}
+		logrus.Infof("imported source image %s", source)
+	} else {
+		sourceNamed, err := docker.ParseDockerRef(opt.Source)
+		if err != nil {
+			return errors.Wrap(err, "parse source reference")
+		}
+		source = sourceNamed.String()
+
+		logrus.Infof("pulling source image %s", source)
+		if err := pvd.Pull(ctx, source); err != nil {
+			if errdefs.NeedsRetryWithHTTP(err) {
+				pvd.UsePlainHTTP()
+				if err := pvd.Pull(ctx, source); err != nil {
+					return errors.Wrap(err, "try to pull image")
+				}
+			} else {
+				return errors.Wrap(err, "pull source image")
+			}
+		}
+		logrus.Infof("pulled source image %s", source)
 	}
-	logrus.Infof("pulled source image %s", source)
 
 	sourceImage, err := pvd.Image(ctx, source)
 	if err != nil {
 		return errors.Wrap(err, "find image from store")
+	}
+
+	if strings.HasPrefix(opt.Target, "file:///") {
+		outputPath := strings.TrimPrefix(opt.Target, "file:///")
+
+		logrus.Infof("exporting source image to %s", outputPath)
+		f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := pvd.Export(ctx, f, sourceImage, source); err != nil {
+			return errors.Wrap(err, "export source image to target tar file")
+		}
+		logrus.Infof("exported image %s", source)
+		return nil
 	}
 
 	sourceDescs, err := utils.GetManifests(ctx, pvd.ContentStore(), *sourceImage, platformMC)
@@ -319,6 +351,12 @@ func Copy(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "get image manifests")
 	}
 	targetDescs := make([]ocispec.Descriptor, len(sourceDescs))
+
+	targetNamed, err := docker.ParseDockerRef(opt.Target)
+	if err != nil {
+		return errors.Wrap(err, "parse target reference")
+	}
+	target := targetNamed.String()
 
 	sem := semaphore.NewWeighted(1)
 	eg := errgroup.Group{}

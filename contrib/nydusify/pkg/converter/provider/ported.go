@@ -6,21 +6,38 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/images/archive"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/errdefs"
+	"github.com/opencontainers/go-digest"
 
 	// nolint:staticcheck
 	"github.com/containerd/containerd/remotes/docker/schema1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"golang.org/x/sync/semaphore"
 )
+
+type importOpts struct {
+	indexName       string
+	imageRefT       func(string) string
+	dgstRefT        func(digest.Digest) string
+	skipDgstRef     func(string) bool
+	platformMatcher platforms.MatchComparer
+	compress        bool
+	discardLayers   bool
+	skipMissing     bool
+	imageLabels     map[string]string
+}
 
 // Ported from containerd project, copyright The containerd Authors.
 // github.com/containerd/containerd/blob/main/pull.go
@@ -176,4 +193,109 @@ func push(ctx context.Context, store content.Store, pushCtx *containerd.RemoteCo
 	}
 
 	return remotes.PushContent(ctx, pusher, desc, store, limiter, pushCtx.PlatformMatcher, wrapper)
+}
+
+// Ported from containerd project, copyright The containerd Authors.
+// github.com/containerd/containerd/blob/main/import.go
+func load(ctx context.Context, reader io.Reader, store content.Store, iopts importOpts) ([]images.Image, error) {
+	var aio []archive.ImportOpt
+	if iopts.compress {
+		aio = append(aio, archive.WithImportCompression())
+	}
+
+	index, err := archive.ImportIndex(ctx, store, reader, aio...)
+	if err != nil {
+		return nil, err
+	}
+
+	var imgs []images.Image
+
+	if iopts.indexName != "" {
+		imgs = append(imgs, images.Image{
+			Name:   iopts.indexName,
+			Target: index,
+		})
+	}
+	var platformMatcher = iopts.platformMatcher
+
+	var handler images.HandlerFunc = func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		// Only save images at top level
+		if desc.Digest != index.Digest {
+			// Don't set labels on missing content.
+			children, err := images.Children(ctx, store, desc)
+			if iopts.skipMissing && errdefs.IsNotFound(err) {
+				return nil, images.ErrSkipDesc
+			}
+			return children, err
+		}
+
+		var idx ocispec.Index
+		p, err := content.ReadBlob(ctx, store, desc)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(p, &idx); err != nil {
+			return nil, err
+		}
+
+		for _, m := range idx.Manifests {
+			name := imageName(m.Annotations, iopts.imageRefT)
+			if name != "" {
+				imgs = append(imgs, images.Image{
+					Name:   name,
+					Target: m,
+				})
+			}
+			if iopts.skipDgstRef != nil {
+				if iopts.skipDgstRef(name) {
+					continue
+				}
+			}
+			if iopts.dgstRefT != nil {
+				ref := iopts.dgstRefT(m.Digest)
+				if ref != "" {
+					imgs = append(imgs, images.Image{
+						Name:   ref,
+						Target: m,
+					})
+				}
+			}
+		}
+
+		return idx.Manifests, nil
+	}
+
+	handler = images.FilterPlatforms(handler, platformMatcher)
+	if iopts.discardLayers {
+		handler = images.SetChildrenMappedLabels(store, handler, images.ChildGCLabelsFilterLayers)
+	} else {
+		handler = images.SetChildrenLabels(store, handler)
+	}
+	if err := images.WalkNotEmpty(ctx, handler, index); err != nil {
+		return nil, err
+	}
+
+	for i := range imgs {
+		fieldsPath := []string{"target"}
+		if iopts.imageLabels != nil {
+			fieldsPath = append(fieldsPath, "labels")
+			imgs[i].Labels = iopts.imageLabels
+		}
+	}
+
+	return imgs, nil
+}
+
+func imageName(annotations map[string]string, ociCleanup func(string) string) string {
+	name := annotations[images.AnnotationImageName]
+	if name != "" {
+		return name
+	}
+	name = annotations[ocispec.AnnotationRefName]
+	if name != "" {
+		if ociCleanup != nil {
+			name = ociCleanup(name)
+		}
+	}
+	return name
 }

@@ -7,6 +7,7 @@ package provider
 import (
 	"context"
 	"crypto/tls"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -17,13 +18,16 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/images/archive"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/goharbor/acceleration-service/pkg/cache"
 	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
 	"github.com/goharbor/acceleration-service/pkg/remote"
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 )
 
 var LayerConcurrentLimit = 5
@@ -150,6 +154,36 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 	}
 
 	return push(ctx, pvd.store, rc, desc, ref)
+}
+
+func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, error) {
+	iopts := importOpts{
+		dgstRefT: func(dgst digest.Digest) string {
+			return "nydus" + "@" + dgst.String()
+		},
+		skipDgstRef:     func(name string) bool { return name != "" },
+		platformMatcher: pvd.platformMC,
+	}
+	images, err := load(ctx, reader, pvd.store, iopts)
+	if err != nil {
+		return "", err
+	}
+
+	if len(images) != 1 {
+		return "", errors.New("importing multiple images")
+	}
+	image := images[0]
+
+	pvd.mutex.Lock()
+	defer pvd.mutex.Unlock()
+	pvd.images[image.Name] = &image.Target
+
+	return image.Name, nil
+}
+
+func (pvd *Provider) Export(ctx context.Context, writer io.Writer, img *ocispec.Descriptor, name string) error {
+	opts := []archive.ExportOpt{archive.WithManifest(*img, name), archive.WithPlatform(pvd.platformMC)}
+	return archive.Export(ctx, pvd.store, writer, opts...)
 }
 
 func (pvd *Provider) Image(_ context.Context, ref string) (*ocispec.Descriptor, error) {
