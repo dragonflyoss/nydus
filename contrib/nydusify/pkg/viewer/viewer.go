@@ -37,6 +37,7 @@ type Opt struct {
 	BackendConfig string
 	ExpectedArch  string
 	FsVersion     string
+	Prefetch      bool
 }
 
 // fsViewer provides complete view of file system in nydus image
@@ -63,15 +64,16 @@ func New(opt Opt) (*FsViewer, error) {
 	mode := "cached"
 
 	nydusdConfig := tool.NydusdConfig{
-		NydusdPath:    opt.NydusdPath,
-		BackendType:   opt.BackendType,
-		BackendConfig: opt.BackendConfig,
-		BootstrapPath: filepath.Join(opt.WorkDir, "nydus_bootstrap"),
-		ConfigPath:    filepath.Join(opt.WorkDir, "fs/nydusd_config.json"),
-		BlobCacheDir:  filepath.Join(opt.WorkDir, "fs/nydus_blobs"),
-		MountPath:     opt.MountPath,
-		APISockPath:   filepath.Join(opt.WorkDir, "fs/nydus_api.sock"),
-		Mode:          mode,
+		EnablePrefetch: opt.Prefetch,
+		NydusdPath:     opt.NydusdPath,
+		BackendType:    opt.BackendType,
+		BackendConfig:  opt.BackendConfig,
+		BootstrapPath:  filepath.Join(opt.WorkDir, "nydus_bootstrap"),
+		ConfigPath:     filepath.Join(opt.WorkDir, "fs/nydusd_config.json"),
+		BlobCacheDir:   filepath.Join(opt.WorkDir, "fs/nydus_blobs"),
+		MountPath:      opt.MountPath,
+		APISockPath:    filepath.Join(opt.WorkDir, "fs/nydus_api.sock"),
+		Mode:           mode,
 	}
 
 	fsViewer := &FsViewer{
