@@ -168,6 +168,7 @@ func (checker *Checker) check(ctx context.Context) error {
 			TargetInsecure:  checker.TargetInsecure,
 			PlainHTTP:       checker.targetParser.Remote.IsWithHTTP(),
 			NydusdConfig: tool.NydusdConfig{
+				EnablePrefetch: true,
 				NydusdPath:     checker.NydusdPath,
 				BackendType:    checker.BackendType,
 				BackendConfig:  checker.BackendConfig,

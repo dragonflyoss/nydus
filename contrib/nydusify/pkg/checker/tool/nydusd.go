@@ -76,12 +76,10 @@ func makeConfig(conf NydusdConfig) error {
 	if conf.BackendType == "" {
 		conf.BackendType = "localfs"
 		conf.BackendConfig = `{"dir": "/fake"}`
-		conf.EnablePrefetch = false
 	} else {
 		if conf.BackendConfig == "" {
 			return errors.Errorf("empty backend configuration string")
 		}
-		conf.EnablePrefetch = true
 	}
 	if err := tpl.Execute(&ret, conf); err != nil {
 		return errors.New("failed to prepare configuration file for Nydusd")
@@ -176,7 +174,7 @@ func (nydusd *Nydusd) Mount() error {
 		"--apisock",
 		nydusd.APISockPath,
 		"--log-level",
-		"error",
+		"warn",
 	}
 
 	cmd := exec.Command(nydusd.NydusdPath, args...)
