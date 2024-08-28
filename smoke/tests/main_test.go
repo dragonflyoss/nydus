@@ -23,7 +23,7 @@ func TestMain(m *testing.M) {
 		os.Setenv("REGISTRY_PORT", registryPort)
 	}
 
-	var reg *tool.Registry = nil
+	var reg *tool.Registry
 	if os.Getenv("DISABLE_REGISTRY") == "" {
 		reg = tool.NewRegistry()
 	}

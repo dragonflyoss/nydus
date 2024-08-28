@@ -671,17 +671,48 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required(true),
                 )
                 .arg(
-                    Arg::new("config")
-                        .long("config")
-                        .short('C')
-                        .help("config to compactor")
-                        .required(true),
+                    Arg::new("backend-type")
+                        .long("backend-type")
+                        .help(format!(
+                            "Type of backend [possible values: {}]",
+                            BlobFactory::supported_backends()
+                                .into_iter()
+                                .filter(|x| x != "localfs")
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))
+                        .required(false)
+                        .group("backend"),
                 )
                 .arg(
                     Arg::new("backend-config")
                         .long("backend-config")
-                        .help("config file of backend")
-                        .required(true),
+                        .help("Config string of backend")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("backend-config-file")
+                        .long("backend-config-file")
+                        .help("Config file of backend")
+                        .conflicts_with("backend-config")
+                        .required(false),
+                )
+                .arg(
+                    Arg::new("blob")
+                        .long("blob")
+                        .short('b')
+                        .help("Path to RAFS data blob file")
+                        .required(false)
+                        .group("backend"),
+                )
+                .arg(
+                    Arg::new("blob-dir")
+                        .long("blob-dir")
+                        .short('D')
+                        .help(
+                            "Directory for localfs storage backend, hosting data blobs and cache files",
+                        )
+                        .group("backend"),
                 )
                 .arg( arg_chunk_dict )
                 .arg(
@@ -693,6 +724,11 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     arg_output_json,
                 )
+                .group(
+                    clap::ArgGroup::new("backend")
+                        .args(&["backend-type", "blob", "blob-dir"])
+                        .required(false),
+                ),
         );
 
     app.subcommand(
@@ -704,9 +740,30 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .required_unless_present("bootstrap"),
             )
             .arg(
+                Arg::new("backend-type")
+                    .long("backend-type")
+                    .help(format!(
+                        "Type of backend [possible values: {}]",
+                        BlobFactory::supported_backends()
+                            .into_iter()
+                            .filter(|x| x != "localfs")
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .required(false)
+                    .group("backend"),
+            )
+            .arg(
                 Arg::new("backend-config")
                     .long("backend-config")
-                    .help("config file of backend")
+                    .help("Config string of backend")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("backend-config-file")
+                    .long("backend-config-file")
+                    .help("Config file of backend")
+                    .conflicts_with("backend-config")
                     .required(false),
             )
             .arg(
@@ -721,24 +778,29 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 Arg::new("blob")
                     .long("blob")
                     .short('b')
-                    .help("path to RAFS data blob file")
-                    .required(false),
+                    .help("Path to RAFS data blob file")
+                    .required(false)
+                    .group("backend"),
             )
             .arg(
                 Arg::new("blob-dir")
                     .long("blob-dir")
                     .short('D')
-                    .conflicts_with("config")
                     .help(
                         "Directory for localfs storage backend, hosting data blobs and cache files",
-                    ),
+                    )
+                    .group("backend"),
             )
-            .arg(arg_config)
             .arg(
                 Arg::new("output")
                     .long("output")
-                    .help("path for output tar file")
+                    .help("Path for output tar file")
                     .required(true),
+            )
+            .group(
+                clap::ArgGroup::new("backend")
+                    .args(&["backend-type", "blob", "blob-dir"])
+                    .required(false),
             ),
     )
 }
@@ -1436,16 +1498,13 @@ impl Command {
     }
 
     fn compact(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
-        let config =
-            Self::get_configuration(matches).context("failed to get configuration information")?;
-        config
-            .internal
-            .set_blob_accessible(matches.get_one::<String>("config").is_some());
         let bootstrap_path = PathBuf::from(Self::get_bootstrap(matches)?);
         let dst_bootstrap = match matches.get_one::<String>("output-bootstrap") {
             None => bootstrap_path.with_extension("bootstrap.compact"),
             Some(s) => PathBuf::from(s),
         };
+
+        let (config, backend) = Self::get_backend(matches, "compactor")?;
 
         let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, config.clone(), false)?;
         info!("load bootstrap {:?} successfully", bootstrap_path);
@@ -1457,8 +1516,6 @@ impl Command {
                 &rs.meta.get_config(),
             )?),
         };
-
-        let backend = Self::get_backend(matches, "compactor")?;
 
         let config_file_path = matches.get_one::<String>("config").unwrap();
         let file = File::open(config_file_path)
@@ -1478,42 +1535,13 @@ impl Command {
 
     fn unpack(matches: &ArgMatches) -> Result<()> {
         let bootstrap = Self::get_bootstrap(matches)?;
-        let config = Self::get_configuration(matches)?;
-        config
-            .internal
-            .set_blob_accessible(matches.get_one::<String>("config").is_some());
         let output = matches.get_one::<String>("output").expect("pass in output");
         if output.is_empty() {
             return Err(anyhow!("invalid empty --output option"));
         }
+        let (config, backend) = Self::get_backend(matches, "unpacker")?;
 
-        let blob = matches.get_one::<String>("blob").map(|s| s.as_str());
-        let backend: Option<Arc<dyn BlobBackend + Send + Sync>> = match blob {
-            Some(blob_path) => {
-                let blob_path = PathBuf::from(blob_path);
-                let local_fs_conf = LocalFsConfig {
-                    blob_file: blob_path.to_str().unwrap().to_owned(),
-                    dir: Default::default(),
-                    alt_dirs: Default::default(),
-                };
-                let local_fs = LocalFs::new(&local_fs_conf, Some("unpacker"))
-                    .with_context(|| format!("fail to create local backend for {:?}", blob_path))?;
-
-                Some(Arc::new(local_fs))
-            }
-            None => {
-                if let Some(backend) = &config.backend {
-                    Some(BlobFactory::new_backend(&backend, "unpacker")?)
-                } else {
-                    match Self::get_backend(matches, "unpacker") {
-                        Ok(backend) => Some(backend),
-                        Err(_) => bail!("one of `--blob`, `--blob-dir` and `--backend-config` must be specified"),
-                    }
-                }
-            }
-        };
-
-        OCIUnpacker::new(bootstrap, backend, output)
+        OCIUnpacker::new(bootstrap, Some(backend), output)
             .with_context(|| "fail to create unpacker")?
             .unpack(config)
             .with_context(|| "fail to unpack")
@@ -1778,15 +1806,49 @@ impl Command {
     fn get_backend(
         matches: &ArgMatches,
         blob_id: &str,
-    ) -> Result<Arc<dyn BlobBackend + Send + Sync>> {
-        let cfg_file = matches
-            .get_one::<String>("backend-config")
-            .context("missing backend-config argument")?;
-        let cfg = ConfigV2::from_file(cfg_file)?;
-        let backend_cfg = cfg.get_backend_config()?;
-        let backend = BlobFactory::new_backend(backend_cfg, blob_id)?;
+    ) -> Result<(Arc<ConfigV2>, Arc<dyn BlobBackend + Send + Sync>)> {
+        let config: Arc<ConfigV2>;
+        let backend: Arc<dyn BlobBackend + Send + Sync>;
+        if let Some(p) = matches.get_one::<String>("blob") {
+            config = Arc::new(ConfigV2::default());
+            backend = {
+                let blob_path = PathBuf::from(p);
+                let local_fs_conf = LocalFsConfig {
+                    blob_file: blob_path.to_str().unwrap().to_owned(),
+                    dir: Default::default(),
+                    alt_dirs: Default::default(),
+                };
+                let local_fs = LocalFs::new(&local_fs_conf, Some(blob_id))
+                    .with_context(|| format!("fail to create local backend for {:?}", blob_path))?;
 
-        Ok(backend)
+                Arc::new(local_fs)
+            };
+        } else if let Some(dir) = matches.get_one::<String>("blob-dir") {
+            config = Arc::new(ConfigV2::new_localfs("", dir)?);
+            backend = BlobFactory::new_backend(&config.backend.as_ref().unwrap(), blob_id)?;
+        } else if let Some(backend_type) = matches.get_one::<String>("backend-type") {
+            let content =
+                if let Some(backend_file) = matches.get_one::<String>("backend-config-file") {
+                    fs::read_to_string(backend_file).with_context(|| {
+                        format!("fail to read backend config file {:?}", backend_file)
+                    })?
+                } else if let Some(backend_config) = matches.get_one::<String>("backend-config") {
+                    backend_config.clone()
+                } else {
+                    bail!("--backend-config or --backend-config-file must be specified");
+                };
+
+            if backend_type == "localfs" {
+                bail!("Use --blob-dir or --blob to specify localfs backend");
+            } else {
+                backend = BlobFactory::new_backend_from_json(backend_type, &content, blob_id)?;
+                config = Arc::new(ConfigV2::default());
+            }
+        } else {
+            bail!("--blob, --blob-dir or --backend-type must be specified");
+        }
+
+        Ok((config, backend))
     }
 
     fn get_blob_id(matches: &ArgMatches) -> Result<String> {
