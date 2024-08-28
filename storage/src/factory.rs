@@ -17,7 +17,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
-use nydus_api::{default_user_io_batch_size, BackendConfigV2, ConfigV2};
+use nydus_api::{
+    default_user_io_batch_size, BackendConfigV2, ConfigV2, HttpProxyConfig, LocalDiskConfig,
+    LocalFsConfig, OssConfig, RegistryConfig, S3Config,
+};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 
@@ -201,6 +204,24 @@ impl BlobFactory {
         }
     }
 
+    pub fn supported_backends() -> Vec<String> {
+        let backends = vec![
+            #[cfg(feature = "backend-oss")]
+            "oss".to_string(),
+            #[cfg(feature = "backend-s3")]
+            "s3".to_string(),
+            #[cfg(feature = "backend-registry")]
+            "registry".to_string(),
+            #[cfg(feature = "backend-localfs")]
+            "localfs".to_string(),
+            #[cfg(feature = "backend-localdisk")]
+            "localdisk".to_string(),
+            #[cfg(feature = "backend-http-proxy")]
+            "http-proxy".to_string(),
+        ];
+        backends
+    }
+
     /// Create a storage backend for the blob with id `blob_id`.
     #[allow(unused_variables)]
     pub fn new_backend(
@@ -241,6 +262,49 @@ impl BlobFactory {
             _ => Err(einval!(format!(
                 "unsupported backend type '{}'",
                 config.backend_type
+            ))),
+        }
+    }
+
+    pub fn new_backend_from_json(
+        backend_type: &str,
+        content: &str,
+        blob_id: &str,
+    ) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
+        match backend_type {
+            #[cfg(feature = "backend-oss")]
+            "oss" => {
+                let cfg = serde_json::from_str::<OssConfig>(&content)?;
+                Ok(Arc::new(oss::Oss::new(&cfg, Some(blob_id))?))
+            }
+            #[cfg(feature = "backend-s3")]
+            "s3" => {
+                let cfg = serde_json::from_str::<S3Config>(&content)?;
+                Ok(Arc::new(s3::S3::new(&cfg, Some(blob_id))?))
+            }
+            #[cfg(feature = "backend-registry")]
+            "registry" => {
+                let cfg = serde_json::from_str::<RegistryConfig>(&content)?;
+                Ok(Arc::new(registry::Registry::new(&cfg, Some(blob_id))?))
+            }
+            #[cfg(feature = "backend-localfs")]
+            "localfs" => {
+                let cfg = serde_json::from_str::<LocalFsConfig>(&content)?;
+                Ok(Arc::new(localfs::LocalFs::new(&cfg, Some(blob_id))?))
+            }
+            #[cfg(feature = "backend-localdisk")]
+            "localdisk" => {
+                let cfg = serde_json::from_str::<LocalDiskConfig>(&content)?;
+                Ok(Arc::new(localdisk::LocalDisk::new(&cfg, Some(blob_id))?))
+            }
+            #[cfg(feature = "backend-http-proxy")]
+            "http-proxy" => {
+                let cfg = serde_json::from_str::<HttpProxyConfig>(&content)?;
+                Ok(Arc::new(http_proxy::HttpProxy::new(&cfg, Some(blob_id))?))
+            }
+            _ => Err(einval!(format!(
+                "unsupported backend type '{}'",
+                backend_type
             ))),
         }
     }

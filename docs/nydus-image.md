@@ -182,6 +182,29 @@ data blobs: ["9e50ae5ac02b2ef6ffb86075720e49d95d8240eed4717dd8ac9c68cadba00762"]
 -rw-r--r-- 1 root root 20480 3月  29 17:02 df01f389850b79cd5a6ca6db98495bb457aa0821b0558351c55537551322fb96
 ```
 
+## Unpack Nydus Image
+`nydus-image` tool supports to unpack Nydus image to a tar file.
+```shell
+# use --blob to specify RAFS data blob
+nydus-image unpack --blob image/blob1 image/bootstrap --output tmp.tar
+
+# use --blob-dir to specify the directory containing RAFS data blobs
+nydus-image unpack --blob-dir=image/ image/bootstrap --output tmp.tar
+
+# example-oss.config
+{
+  "endpoint": "region.aliyuncs.com",
+  "scheme": "https",
+  "access_key_id": "",
+  "access_key_secret": "",
+  "bucket_name": "",
+  "object_prefix": "image/"
+}
+
+# use backend config file to specify remote storage for RAFS data blobs
+nydus-image unpack --backend-type oss --backend-config-file example-oss.config image/bootstrap --output tmp.tar
+```
+
 ## Compact Nydus Image
 `nydus-image` tool supports to compact Nydus image for
 1. reduce number of blobs
