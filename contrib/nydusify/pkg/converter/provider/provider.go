@@ -170,7 +170,7 @@ func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, erro
 	}
 
 	if len(images) != 1 {
-		return "", errors.New("importing multiple images")
+		return "", errors.New("incorrect tarball format")
 	}
 	image := images[0]
 

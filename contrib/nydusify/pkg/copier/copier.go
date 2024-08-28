@@ -247,6 +247,28 @@ func getPlatform(platform *ocispec.Platform) string {
 	return platforms.Format(*platform)
 }
 
+// getLocalPath checks if the given reference is a local file path and returns its absolute path.
+//
+// Parameters:
+// - ref: A string which may be a docker reference or a local file path prefixed with "file://".
+//
+// Returns:
+// - isLocalPath: A boolean indicating whether the reference is a local file path.
+// - absPath: A string containing the absolute path of the local file, if applicable.
+// - err: An error object if any error occurs during the process of getting the absolute path.
+func getLocalPath(ref string) (isLocalPath bool, absPath string, err error) {
+	if !strings.HasPrefix(ref, "file://") {
+		return false, "", nil
+	}
+	path := strings.TrimPrefix(ref, "file://")
+	absPath, err = filepath.Abs(path)
+	if err != nil {
+		return true, "", err
+	}
+	return true, absPath, nil
+}
+
+// Copy copies an image from the source to the target.
 func Copy(ctx context.Context, opt Opt) error {
 	// Containerd image fetch requires a namespace context.
 	ctx = namespaces.WithNamespace(ctx, "nydusify")
@@ -286,21 +308,27 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	isLocalSource, inputPath, err := getLocalPath(opt.Source)
+	if err != nil {
+		return errors.Wrap(err, "parse source path")
+	}
 	var source string
-	if strings.HasPrefix(opt.Source, "file:///") {
-		inputPath := strings.TrimPrefix(opt.Source, "file:///")
-
+	if isLocalSource {
 		logrus.Infof("importing source image from %s", inputPath)
+
 		f, err := os.Open(inputPath)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
-		decompressor, err := compression.DecompressStream(f)
+
+		ds, err := compression.DecompressStream(f)
 		if err != nil {
 			return err
 		}
-		if source, err = pvd.Import(ctx, decompressor); err != nil {
+		defer ds.Close()
+
+		if source, err = pvd.Import(ctx, ds); err != nil {
 			return errors.Wrap(err, "import source image")
 		}
 		logrus.Infof("imported source image %s", source)
@@ -330,9 +358,11 @@ func Copy(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "find image from store")
 	}
 
-	if strings.HasPrefix(opt.Target, "file:///") {
-		outputPath := strings.TrimPrefix(opt.Target, "file:///")
-
+	isLocalTarget, outputPath, err := getLocalPath(opt.Target)
+	if err != nil {
+		return errors.Wrap(err, "parse target path")
+	}
+	if isLocalTarget {
 		logrus.Infof("exporting source image to %s", outputPath)
 		f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
