@@ -147,7 +147,7 @@ func (c *HotUpgradeTestSuite) TestHotUpgrade(t *testing.T) {
 	err = newNydusd.StartByAPI()
 	require.NoError(t, err)
 
-	// Verify filesytem on new nydusd
+	// Verify filesystem on new nydusd
 	newNydusd.Verify(t, layer.FileTree)
 }
 

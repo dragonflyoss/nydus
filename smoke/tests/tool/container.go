@@ -169,7 +169,7 @@ func RunContainerWithBaseline(t *testing.T, image string, containerName string, 
 
 // RunContainer and return container metric
 func RunContainer(t *testing.T, image string, snapshotter string, containerName string) *ContainerMetrics {
-	var containerMetic ContainerMetrics
+	var containerMetric ContainerMetrics
 	startTime := time.Now()
 
 	// runContainer
@@ -182,17 +182,17 @@ func RunContainer(t *testing.T, image string, snapshotter string, containerName 
 		defer ClearContainer(t, image, snapshotter, containerName)
 	}
 
-	containerMetic.E2ETime = time.Since(startTime)
+	containerMetric.E2ETime = time.Since(startTime)
 	if snapshotter == "nydus" {
 		backendMetrics, err := getContainerBackendMetrics(t)
 		if err != nil {
 			t.Logf(err.Error())
 		}
-		containerMetic.ReadAmountTotal = backendMetrics.ReadAmountTotal
-		containerMetic.ReadCount = backendMetrics.ReadCount
+		containerMetric.ReadAmountTotal = backendMetrics.ReadAmountTotal
+		containerMetric.ReadCount = backendMetrics.ReadCount
 	}
 
-	return &containerMetic
+	return &containerMetric
 }
 
 // RunContainerSimple just runs a container simply
