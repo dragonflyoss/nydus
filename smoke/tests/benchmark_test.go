@@ -18,7 +18,7 @@ import (
 
 // Environment Requirement: Containerd, nerdctl >= 0.22, nydus-snapshotter, nydusd, nydus-image and nydusify.
 // Prepare: setup nydus for containerd, reference: https://github.com/dragonflyoss/nydus/blob/master/docs/containerd-env-setup.md.
-// TestBenchmark will dump json file(benchmark.json) which includes container e2e time, image size, read-amount and read-cout.
+// TestBenchmark will dump json file(benchmark.json) which includes container e2e time, image size, read-amount and read-count.
 //	Example:
 //	{
 //		e2e_time: 2747131
@@ -70,18 +70,18 @@ func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 	}
 	targetImageSize, conversionElapsed := b.prepareImage(b.t, ctx, image)
 
-	// run contaienr
+	// run container
 	b.testContainerName = uuid.NewString()
-	containerMetic := tool.RunContainer(b.t, b.testImage, b.snapshotter, b.testContainerName)
+	containerMetric := tool.RunContainer(b.t, b.testImage, b.snapshotter, b.testContainerName)
 	b.metric = tool.ContainerMetrics{
-		E2ETime:           containerMetic.E2ETime,
+		E2ETime:           containerMetric.E2ETime,
 		ConversionElapsed: time.Duration(conversionElapsed),
-		ReadCount:         containerMetic.ReadCount,
-		ReadAmountTotal:   containerMetic.ReadAmountTotal,
+		ReadCount:         containerMetric.ReadCount,
+		ReadAmountTotal:   containerMetric.ReadAmountTotal,
 		ImageSize:         targetImageSize,
 	}
 
-	// save metirc
+	// save metric
 	b.dumpMetric()
 	t.Logf(fmt.Sprintf("Metric: E2ETime %d ConversionElapsed %s ReadCount %d ReadAmount %d ImageSize %d", b.metric.E2ETime, b.metric.ConversionElapsed, b.metric.ReadCount, b.metric.ReadAmountTotal, b.metric.ImageSize))
 }
@@ -120,18 +120,18 @@ func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, image
 		t.Fatalf("can't read convert metric file")
 		return 0, 0
 	}
-	var convertMetirc map[string]int64
-	err = json.Unmarshal(metricData, &convertMetirc)
+	var convertMetric map[string]int64
+	err = json.Unmarshal(metricData, &convertMetric)
 	if err != nil {
 		t.Fatalf("can't parsing convert metric file")
 		return 0, 0
 	}
 	if b.snapshotter == "nydus" {
 		b.testImage = target
-		return convertMetirc["TargetImageSize"], convertMetirc["ConversionElapsed"]
+		return convertMetric["TargetImageSize"], convertMetric["ConversionElapsed"]
 	}
 	b.testImage = source
-	return convertMetirc["SourceImageSize"], 0
+	return convertMetric["SourceImageSize"], 0
 }
 
 func (b *BenchmarkTestSuite) dumpMetric() {

@@ -53,7 +53,7 @@ func (p *PerformanceTestSuite) TestPerformance(_ *testing.T) {
 	// prepare test image
 	p.prepareTestImage(p.t, ctx, image)
 
-	// run Contaienr
+	// run Container
 	p.testContainerName = uuid.NewString()
 	tool.RunContainerWithBaseline(p.t, p.testImage, p.testContainerName, mode)
 }
