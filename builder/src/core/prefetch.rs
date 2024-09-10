@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Ok, Result};
 use indexmap::IndexMap;
 use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
 use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
 use super::node::Node;
 use crate::core::tree::TreeNode;
+use crate::Tree;
 
 /// Filesystem data prefetch policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,6 +150,22 @@ impl Prefetch {
             files_prefetch: Vec::with_capacity(10000),
             files_non_prefetch: Vec::with_capacity(10000),
         })
+    }
+
+    /// Because New method only create the key of patterns
+    /// This function Search for the nodes of the paths in the key
+    /// And append to the patterns
+    /// Now it is assumed that all the patterns are the
+    /// absolute paths of the regular files
+    pub fn init(&mut self, tree: &mut Tree) {
+        let mut nodes = Vec::new();
+        for (k, _) in &self.patterns {
+            let node = tree.get_node(k);
+            nodes.push(node.unwrap().node.clone());
+        }
+        for node in nodes {
+            self.insert(&node, &node.lock().unwrap());
+        }
     }
 
     /// Insert node into the prefetch Vector if it matches prefetch rules,

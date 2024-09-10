@@ -186,7 +186,6 @@ pub fn update_ctx_from_parent_bootstrap(
     bootstrap_path: &PathBuf,
 ) -> Result<()> {
     let (sb, _) = RafsSuper::load_from_file(bootstrap_path, Arc::new(ConfigV2::default()), false)?;
-
     // Obtain the features of the first blob to use as the features for the blobs in chunkdict.
     if let Some(first_blob) = sb.superblock.get_blob_infos().first() {
         ctx.blob_features = first_blob.features();

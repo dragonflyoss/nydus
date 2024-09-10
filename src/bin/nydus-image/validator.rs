@@ -4,8 +4,8 @@
 
 //! Validator for RAFS format
 
-use std::path::Path;
 use std::sync::Arc;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use nydus_api::ConfigV2;

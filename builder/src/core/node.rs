@@ -221,14 +221,32 @@ impl Node {
         blob_mgr: &mut BlobManager,
         blob_writer: &mut dyn Artifact,
         chunk_data_buf: &mut [u8],
+        is_prefetch: bool,
+        work_dir: Option<PathBuf>,
     ) -> Result<u64> {
-        let mut reader = if self.is_reg() {
-            let file = File::open(self.path())
-                .with_context(|| format!("failed to open node file {:?}", self.path()))?;
-            Some(file)
+        let mut reader: Option<File> = None;
+        if is_prefetch {
+            if let Some(ref dir) = work_dir {
+                let path = dir.join(self.path().strip_prefix("/").unwrap());
+                reader = Some(
+                    File::open(&path)
+                        .expect(format!("Failed to strip prefix:{}", path.display()).as_ref()),
+                );
+                debug!("Replace the reader to path: {}", path.display());
+            }
         } else {
-            None
-        };
+            reader = if self.is_reg() {
+                let file = File::open(self.path())
+                    .with_context(|| format!("failed to open node file {:?}", self.path()))?;
+                Some(file)
+            } else {
+                None
+            };
+        }
+
+        if ctx.blob_id == String::from("Prefetch-blob") {
+            // replace the reader to the blob
+        }
 
         self.dump_node_data_with_reader(ctx, blob_mgr, blob_writer, reader.as_mut(), chunk_data_buf)
     }
@@ -343,7 +361,6 @@ impl Node {
         if let Some(h) = inode_hasher {
             self.inode.set_digest(h.digest_finalize());
         }
-
         Ok(blob_size)
     }
 
@@ -355,7 +372,9 @@ impl Node {
     ) -> Result<(ChunkWrapper, Option<BlobChunkInfoV2Ondisk>)> {
         let mut chunk = self.inode.create_chunk();
         let mut chunk_info = None;
+        debug!("compressor: {}", ctx.compressor);
         if let Some(ref zran) = ctx.blob_zran_generator {
+            debug!("zran");
             let mut zran = zran.lock().unwrap();
             zran.start_chunk(ctx.chunk_size as u64)?;
             reader
@@ -368,6 +387,7 @@ impl Node {
             chunk_info = Some(info);
         } else if let Some(ref tar_reader) = ctx.blob_tar_reader {
             // For `tar-ref` case
+            debug!("tar reader");
             let pos = tar_reader.position();
             chunk.set_compressed_offset(pos);
             chunk.set_compressed_size(buf.len() as u32);
@@ -376,6 +396,7 @@ impl Node {
                 .read_exact(buf)
                 .with_context(|| format!("failed to read node file {:?}", self.path()))?;
         } else {
+            debug!("others");
             reader
                 .read_exact(buf)
                 .with_context(|| format!("failed to read node file {:?}", self.path()))?;
@@ -994,26 +1015,50 @@ mod tests {
         let mut chunk_data_buf = [1u8; 32];
 
         node.inode.set_mode(0o755 | libc::S_IFDIR as u32);
-        let data_size =
-            node.dump_node_data(&ctx, &mut blob_mgr, &mut blob_writer, &mut chunk_data_buf);
+        let data_size = node.dump_node_data(
+            &ctx,
+            &mut blob_mgr,
+            &mut blob_writer,
+            &mut chunk_data_buf,
+            false,
+            None,
+        );
         assert!(data_size.is_ok());
         assert_eq!(data_size.unwrap(), 0);
 
         node.inode.set_mode(0o755 | libc::S_IFLNK as u32);
-        let data_size =
-            node.dump_node_data(&ctx, &mut blob_mgr, &mut blob_writer, &mut chunk_data_buf);
+        let data_size = node.dump_node_data(
+            &ctx,
+            &mut blob_mgr,
+            &mut blob_writer,
+            &mut chunk_data_buf,
+            false,
+            None,
+        );
         assert!(data_size.is_ok());
         assert_eq!(data_size.unwrap(), 0);
 
         node.inode.set_mode(0o755 | libc::S_IFBLK as u32);
-        let data_size =
-            node.dump_node_data(&ctx, &mut blob_mgr, &mut blob_writer, &mut chunk_data_buf);
+        let data_size = node.dump_node_data(
+            &ctx,
+            &mut blob_mgr,
+            &mut blob_writer,
+            &mut chunk_data_buf,
+            false,
+            None,
+        );
         assert!(data_size.is_ok());
         assert_eq!(data_size.unwrap(), 0);
 
         node.inode.set_mode(0o755 | libc::S_IFREG as u32);
-        let data_size =
-            node.dump_node_data(&ctx, &mut blob_mgr, &mut blob_writer, &mut chunk_data_buf);
+        let data_size = node.dump_node_data(
+            &ctx,
+            &mut blob_mgr,
+            &mut blob_writer,
+            &mut chunk_data_buf,
+            false,
+            None,
+        );
         assert!(data_size.is_ok());
         assert_eq!(data_size.unwrap(), 18);
     }

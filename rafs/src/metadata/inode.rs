@@ -8,6 +8,7 @@ use std::mem::size_of;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use fuse_backend_rs::overlayfs::Inode;
 use nydus_utils::digest::RafsDigest;
 
 use crate::metadata::cached_v5::CachedInodeV5;
@@ -17,7 +18,7 @@ use crate::metadata::direct_v6::OndiskInodeWrapper as OndiskInodeWrapperV6;
 use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode};
 use crate::metadata::layout::v6::{RafsV6InodeCompact, RafsV6InodeExtended};
 use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::{Inode, RafsVersion};
+use crate::metadata::{RafsVersion};
 use crate::RafsInodeExt;
 
 /// An inode object wrapper for different RAFS versions.
@@ -165,7 +166,10 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.is_blkdev(),
             InodeWrapper::V6(i) => i.is_blkdev(),
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            // InodeWrapper::Ref(_i) => unimplemented!(),
+            // TODO: Just Indentify that prefetch node is not 
+            // block device
+            InodeWrapper::Ref(_) => false, 
         }
     }
 
@@ -174,7 +178,10 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.is_fifo(),
             InodeWrapper::V6(i) => i.is_fifo(),
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            // TODO: Just Indentify that prefetch node is not 
+            // A fifo
+            InodeWrapper::Ref(_) => false,
+            // InodeWrapper::Ref(_i) => unimplemented!(),
         }
     }
 
@@ -564,7 +571,8 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(_) => ChunkWrapper::V5(RafsV5ChunkInfo::new()),
             InodeWrapper::V6(_) => ChunkWrapper::V6(RafsV5ChunkInfo::new()),
-            InodeWrapper::Ref(_i) => unimplemented!(),
+            // InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(_) => ChunkWrapper::V6(RafsV5ChunkInfo::new()),
         }
     }
 

@@ -11,11 +11,12 @@ use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Read, Seek, Write};
 use std::mem::size_of;
-use std::os::unix::fs::FileTypeExt;
 use std::path::{Display, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::{fmt, fs};
+use std::result::Result::Ok;
+use std::os::unix::fs::FileTypeExt;
 
 use anyhow::{anyhow, Context, Error, Result};
 use nydus_utils::crypt::{self, Cipher, CipherContext};
@@ -712,6 +713,7 @@ impl BlobContext {
         blob_ctx.blob_toc_size = toc_size;
 
         if blob.meta_ci_is_valid() {
+            debug!("meta ci is valid");
             blob_ctx
                 .blob_meta_header
                 .set_ci_compressor(blob.meta_ci_compressor());
@@ -896,6 +898,11 @@ impl BlobManager {
             global_chunk_dict: Arc::new(()),
             layered_chunk_dict: HashChunkDict::new(digester),
         }
+    }
+
+    /// Set current blob index
+    pub fn set_current_blob_index(&mut self,index: usize) {
+        self.current_blob_index = Some(index as u32)
     }
 
     fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {

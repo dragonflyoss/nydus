@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
@@ -246,6 +246,34 @@ impl Tree {
         }
 
         Ok(())
+    }
+
+    pub fn get_prefetch_nodes(&self, files: Vec<String>) -> Result<Vec<Node>> {
+        files
+            .iter()
+            .map(|file| {
+                self.get_node(Path::new(file))
+                    .context(format!("Failed to get node for file: {}", file))
+                    .and_then(|tree| {
+                        tree.node
+                            .lock()
+                            .map_err(|e| anyhow::anyhow!("Failed to lock node: {}", e))
+                            .map(|guard| guard.clone())
+                    })
+            })
+            .collect()
+    }
+
+    pub fn test_get_prefetch_nodes(&self, files: Vec<String>) {
+        // let nodes = self.get_prefetch_nodes(files);
+        match self.get_prefetch_nodes(files) {
+            Ok(nodes) => {
+                nodes.iter().for_each(|node| println!("{}", node.path().display()));
+            }
+            Err(e) => {
+                println!("{}", e);
+            }
+        }
     }
 }
 
