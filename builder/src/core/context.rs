@@ -11,11 +11,12 @@ use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{BufWriter, Cursor, Read, Seek, Write};
 use std::mem::size_of;
-use std::os::unix::fs::FileTypeExt;
 use std::path::{Display, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::{fmt, fs};
+use std::result::Result::Ok;
+use std::os::unix::fs::FileTypeExt;
 
 use anyhow::{anyhow, Context, Error, Result};
 use nydus_utils::crypt::{self, Cipher, CipherContext};

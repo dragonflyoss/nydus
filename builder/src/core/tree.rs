@@ -22,14 +22,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
 use nydus_rafs::metadata::{Inode, RafsInodeExt, RafsSuper};
 use nydus_utils::{lazy_drop, root_tracer, timing_tracer};
 
-use super::node::{ChunkSource, Node, NodeChunk, NodeInfo};
+use super::node::{self, ChunkSource, Node, NodeChunk, NodeInfo};
 use super::overlay::{Overlay, WhiteoutType};
 use crate::core::overlay::OVERLAYFS_WHITEOUT_OPAQUE;
 use crate::{BuildContext, ChunkDict};
@@ -247,6 +247,34 @@ impl Tree {
 
         Ok(())
     }
+
+    pub fn get_prefetch_nodes(&self, files: Vec<String>) -> Result<Vec<Node>> {
+        files
+            .iter()
+            .map(|file| {
+                self.get_node(Path::new(file))
+                    .context(format!("Failed to get node for file: {}", file))
+                    .and_then(|tree| {
+                        tree.node
+                            .lock()
+                            .map_err(|e| anyhow::anyhow!("Failed to lock node: {}", e))
+                            .map(|guard| guard.clone())
+                    })
+            })
+            .collect()
+    }
+
+    pub fn test_get_prefetch_nodes(&self, files: Vec<String>) {
+        // let nodes = self.get_prefetch_nodes(files);
+        match self.get_prefetch_nodes(files) {
+            Ok(nodes) => {
+                nodes.iter().for_each(|node| println!("{}", node.path().display()));
+            }
+            Err(e) => {
+                println!("{}", e);
+            }
+        }
+    }
 }
 
 pub struct MetadataTreeBuilder<'a> {
@@ -317,6 +345,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         let chunks = if inode.is_reg() {
             let chunk_count = inode.get_chunk_count();
             let mut chunks = Vec::with_capacity(chunk_count as usize);
+            println!("Parse Node: {}", path.display());
             for i in 0..chunk_count {
                 let cki = inode.get_chunk_info(i)?;
                 chunks.push(NodeChunk {

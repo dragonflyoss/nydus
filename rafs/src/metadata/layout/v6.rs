@@ -1328,7 +1328,7 @@ impl RafsV6Device {
             }
             Err(_) => return Err(einval!("blob_id in RAFS v6 device entry is invalid")),
         }
-
+        println!("blocks: {}", self.blocks());
         if self.blocks() == 0 {
             let msg = format!("invalid blocks {} in Rafs v6 device entry", self.blocks());
             return Err(einval!(msg));
@@ -1361,9 +1361,13 @@ pub fn rafsv6_load_blob_extra_info(
         return Ok(infos);
     }
     r.seek_to_offset(meta.blob_device_table_offset)?;
+    println!("meta table offset: 0x{:x}", meta.blob_device_table_offset);
+    println!("meta device count: {}", meta.blob_device_table_count);
     for _idx in 0..meta.blob_device_table_count {
         let mut devslot = RafsV6Device::new();
         r.read_exact(devslot.as_mut())?;
+        println!("devslot: ");
+        println!("blob id: {}", String::from_utf8(devslot.blob_id.to_vec()).unwrap());
         devslot.validate()?;
         let id = String::from_utf8(devslot.blob_id.to_vec())
             .map_err(|e| einval!(format!("invalid blob id, {}", e)))?;
@@ -1691,7 +1695,6 @@ impl RafsV6Blob {
             );
             return false;
         }
-
         let blob_features = match BlobFeatures::try_from(self.features) {
             Ok(v) => v,
             Err(_) => return false,
@@ -1773,7 +1776,7 @@ impl RafsV6Blob {
 #[derive(Clone, Debug, Default)]
 pub struct RafsV6BlobTable {
     /// Base blob information array.
-    entries: Vec<Arc<BlobInfo>>,
+    pub entries: Vec<Arc<BlobInfo>>,
 }
 
 impl RafsV6BlobTable {

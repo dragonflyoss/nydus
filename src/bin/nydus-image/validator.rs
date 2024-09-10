@@ -4,8 +4,8 @@
 
 //! Validator for RAFS format
 
-use std::path::Path;
 use std::sync::Arc;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use nydus_api::ConfigV2;
@@ -51,5 +51,17 @@ impl Validator {
             compressor,
             rafs_version,
         ))
+    }
+
+    pub fn get_prefetch_nodes(&mut self) -> Result<()> {
+        let tree = Tree::from_bootstrap(&self.sb, &mut ())
+            .context("failed to load bootstrap for validator")?;
+        tree.test_get_prefetch_nodes(vec![
+            "/file1".to_string(),
+            "/file2".to_string(),
+            "/file3".to_string(),
+        ]);
+        
+        Ok(())
     }
 }

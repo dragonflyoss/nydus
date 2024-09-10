@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(warnings)]
+// #![deny(warnings)]
 #[macro_use(crate_authors)]
 extern crate clap;
 #[macro_use]
@@ -21,6 +21,7 @@ use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::result::Result::Ok;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
@@ -30,11 +31,10 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobManager,
-    BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo, ChunkdictChunkInfo,
-    ConversionType, DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger,
-    Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobContext, BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree, WhiteoutSpec
 };
+
+use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
@@ -48,6 +48,7 @@ use nydus_utils::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::prefetch::update_ctx_from_bootstrap;
 use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
@@ -58,6 +59,7 @@ use std::str::FromStr;
 
 mod deduplicate;
 mod inspect;
+mod prefetch;
 mod stat;
 mod unpack;
 mod validator;
@@ -529,6 +531,35 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             .arg(arg_output_json.clone()),
     );
 
+    let app = app.subcommand(
+        App::new("optimize")
+            .about("Optimize By Prefetch")
+            .arg(
+                Arg::new("bootstrap")
+                    .help("File path of RAFS metadata")
+                    .short('B')
+                    .long("bootstrap")
+                    .required(true),
+            )
+            .arg(
+                Arg::new("prefetch-files")
+                    .long("prefetch-files")
+                    .short('p')
+                    .help("Prefetch files")
+                    .action(ArgAction::Append),
+            )
+            .arg(arg_config.clone())
+            .arg(
+                Arg::new("blob-dir")
+                    .long("blob-dir")
+                    .short('D')
+                    .conflicts_with("config")
+                    .help(
+                        "Directory for localfs storage backend, hosting data blobs and cache files",
+                    ),
+            ),
+    );
+
     #[cfg(target_os = "linux")]
     let app = app.subcommand(
             App::new("export")
@@ -808,6 +839,8 @@ fn main() -> Result<()> {
         Command::compact(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("unpack") {
         Command::unpack(matches)
+    } else if let Some(matches) = cmd.subcommand_matches("optimize") {
+        Command::optimize(matches)
     } else {
         #[cfg(target_os = "linux")]
         if let Some(matches) = cmd.subcommand_matches("export") {
@@ -1558,6 +1591,43 @@ impl Command {
             fs_version,
         )?;
 
+        Ok(())
+    }
+
+    fn optimize(matches: &ArgMatches) -> Result<()> {
+        let bootstrap_path = Self::get_bootstrap(matches)?;
+        let config = Self::get_configuration(matches)?;
+        config.internal.set_blob_accessible(true);
+        // let mut validator = Validator::new(bootstrap_path, config)?;
+        // validator.get_prefetch_nodes()?;
+        let mut build_ctx = BuildContext {
+            // prefetch: Self::get_prefetch(matches)?,
+            prefetch: Prefetch::new(PrefetchPolicy::Fs)?,
+            ..Default::default()
+        };
+
+        let sb = update_ctx_from_bootstrap(&mut build_ctx, config, bootstrap_path)?;
+        let mut tree = Tree::from_bootstrap(&sb, &mut ()).unwrap();
+
+        build_ctx.prefetch.init(&mut tree);
+
+        let bootstrap_path = ArtifactStorage::SingleFile(PathBuf::from("nydus_prefetch_bootstrap"));
+        let mut bootstrap_mgr = BootstrapManager::new(Some(bootstrap_path), None);
+        let mut blob_mgr = BlobManager::new(build_ctx.digester);
+        let blobs = sb.superblock.get_blob_infos();
+        let mut rafsv6table = RafsV6BlobTable::new();
+        for blob in &blobs {
+            rafsv6table.entries.push(blob.clone());
+        }
+
+        Generator::generate_prefetch(
+            &mut tree,
+            &mut build_ctx,
+            &mut bootstrap_mgr,
+            &mut blob_mgr,
+            &mut rafsv6table,
+        )
+        .unwrap();
         Ok(())
     }
 

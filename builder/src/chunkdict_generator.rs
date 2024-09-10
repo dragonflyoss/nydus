@@ -16,20 +16,31 @@
 
 use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
+use crate::core::blob::Blob;
 use crate::core::node::Node;
-use crate::NodeChunk;
-use anyhow::Result;
+use crate::{BlobContext, NodeChunk};
+use anyhow::{Ok, Result};
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
-use nydus_rafs::metadata::layout::RafsXAttrs;
+use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
+use nydus_rafs::metadata::layout::{RafsBlobTable, RafsXAttrs};
+use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
 use nydus_utils::compress::Algorithm;
 use nydus_utils::digest::RafsDigest;
+use nydus_utils::metrics::BlobcacheMetrics;
+use rand::Rng;
+use sha2::{Sha256, Digest};
 use std::ffi::OsString;
 use std::mem::size_of;
+use std::ops::Add;
+use std::ops::{Rem, Sub};
 use std::path::PathBuf;
+use std::process::Output;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::u32;
+use nydus_storage::meta::BlobCompressionContextHeader;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkdictChunkInfo {
@@ -88,6 +99,111 @@ impl Generator {
         bootstrap.dump(ctx, storage, &mut bootstrap_ctx, &blob_table)?;
 
         BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
+    }
+
+    /// Generate a new bootstrap for prefetch.
+    pub fn generate_prefetch(
+        tree: &mut Tree,
+        ctx: &mut BuildContext,
+        bootstrap_mgr: &mut BootstrapManager,
+        blob_mgr: &mut BlobManager,
+        blobtable: &mut RafsV6BlobTable,
+    ) -> Result<()> {
+        // create a new blob for prefetch layer
+        let blob_layer_num = blobtable.entries.len();
+        // TODO: Add Appropriate BlobFeatures
+        let mut prefetch_blob = BlobInfo::new(
+            blob_layer_num as u32,
+            String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
+            0,
+            0,
+            0x100000,
+            // If chunkcount is zero, it will add a feature
+            u32::MAX,
+            BlobFeatures::ALIGNED
+                | BlobFeatures::INLINED_CHUNK_DIGEST
+                | BlobFeatures::HAS_TAR_HEADER
+                | BlobFeatures::HAS_TOC
+                | BlobFeatures::CAP_TAR_TOC,
+        );
+
+        let blob_ctx = BlobContext::from(ctx, &prefetch_blob, ChunkSource::Build).unwrap();
+
+        // blobtable.entries.push(prefetch_blob.clone().into());
+        // for every node in prefetch list, change the offset and blob id
+        let (file_nodes_prefetch, _) = ctx.prefetch.get_file_nodes();
+        let prefetch_blob_index = prefetch_blob.blob_index();
+        let mut chunk_count = 0;
+        // For every chunk, need to align to 4k
+        let mut prefetch_blob_offset = 0;
+        let mut meta_uncompressed_size = 0;
+        let mut chunk_index_in_prefetch = 0;
+        for node in file_nodes_prefetch {
+            let child = tree.get_node(&node.lock().unwrap().path()).unwrap();
+            let mut child = child.node.lock().unwrap();
+            child.layer_idx = prefetch_blob_index as u16;
+            for chunk in &mut child.chunks {
+                chunk_count += 1;
+                let inner = Arc::make_mut(&mut chunk.inner);
+                inner.set_blob_index(prefetch_blob_index);
+                inner.set_index(chunk_index_in_prefetch);
+                chunk_index_in_prefetch += 1;
+                inner.set_compressed_offset(prefetch_blob_offset);
+                inner.set_uncompressed_offset(prefetch_blob_offset);
+                prefetch_blob_offset += inner.uncompressed_size() as u64;
+                meta_uncompressed_size += inner.uncompressed_size() as u64;
+                prefetch_blob_offset = Self::align_to_4k(prefetch_blob_offset);
+                // set meta ci data
+                prefetch_blob.set_meta_ci_uncompressed_size(
+                    (prefetch_blob.meta_ci_uncompressed_size()
+                        + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize,
+                );
+                prefetch_blob.set_meta_ci_compressed_size(
+                    (prefetch_blob.meta_ci_compressed_size()
+                        + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize,
+                );
+                println!("inner: {}", inner);
+            }
+        }
+        // align prefetch blob size to 4096
+        prefetch_blob.set_meta_ci_offset(0x200 + meta_uncompressed_size as usize);
+        prefetch_blob.set_chunk_count(chunk_count);
+        prefetch_blob.set_compressed_size(prefetch_blob_offset as usize);
+        prefetch_blob.set_uncompressed_size(prefetch_blob_offset as usize);
+        prefetch_blob.set_compressor(Algorithm::Zstd);
+        // Build bootstrap
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx().unwrap();
+        let mut bootstrap = Bootstrap::new(tree.clone()).unwrap();
+        bootstrap.build(ctx, &mut bootstrap_ctx).unwrap();
+
+        let mut blob_table_withprefetch = RafsV6BlobTable::new();
+        for blob in blobtable.entries.iter() {
+            blob_table_withprefetch.entries.push(blob.clone());
+        }
+        blob_table_withprefetch
+            .entries
+            .push(prefetch_blob.clone().into());
+        for blob in &blob_table_withprefetch.entries {
+            println!("{:?}", blob);
+        }
+        let storage = &mut bootstrap_mgr.bootstrap_storage;
+        let blob_table_withprefetch = RafsBlobTable::V6(blob_table_withprefetch);
+        bootstrap.dump(ctx, storage, &mut bootstrap_ctx, &blob_table_withprefetch)?;
+        Ok(())
+    }
+
+    fn align_to_4k<T>(offset: T) -> T
+    where
+        T: Sub<Output = T> + Add<Output = T> + Rem<Output = T> + PartialEq + TryFrom<u64> + Copy,
+        <T as TryFrom<u64>>::Error: std::fmt::Debug,
+    {
+        let alignment = T::try_from(4096).unwrap();
+        let remainder = offset % alignment;
+        if remainder == T::try_from(0).unwrap() {
+            offset
+        } else {
+            offset + (alignment - remainder)
+        }
     }
 
     /// Validate tree.
