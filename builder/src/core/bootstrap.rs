@@ -30,7 +30,7 @@ impl Bootstrap {
         bootstrap_ctx: &mut BootstrapContext,
     ) -> Result<()> {
         // Special handling of the root inode
-        let mut root_node = self.tree.lock_node();
+        let mut root_node = self.tree.borrow_mut_node();
         assert!(root_node.is_dir());
         let index = bootstrap_ctx.generate_next_ino();
         // 0 is reserved and 1 also matches RAFS_V5_ROOT_INODE.
@@ -50,7 +50,7 @@ impl Bootstrap {
 
         Self::build_rafs(ctx, bootstrap_ctx, &mut self.tree)?;
         if ctx.fs_version.is_v6() {
-            let root_offset = self.tree.node.lock().unwrap().v6_offset;
+            let root_offset = self.tree.node.borrow().v6_offset;
             Self::v6_update_dirents(&self.tree, root_offset);
         }
 
@@ -90,7 +90,7 @@ impl Bootstrap {
         tree: &mut Tree,
     ) -> Result<()> {
         let parent_node = tree.node.clone();
-        let mut parent_node = parent_node.lock().unwrap();
+        let mut parent_node = parent_node.borrow_mut();
         let parent_ino = parent_node.inode.ino();
         let block_size = ctx.v6_block_size();
 
@@ -113,7 +113,7 @@ impl Bootstrap {
         let mut dirs: Vec<&mut Tree> = Vec::new();
         for child in tree.children.iter_mut() {
             let child_node = child.node.clone();
-            let mut child_node = child_node.lock().unwrap();
+            let mut child_node = child_node.borrow_mut();
             let index = bootstrap_ctx.generate_next_ino();
             child_node.index = index;
             if ctx.fs_version.is_v5() {
@@ -134,11 +134,11 @@ impl Bootstrap {
                 let nlink = indexes.len() as u32 + 1;
                 // Update nlink for previous hardlink inodes
                 for n in indexes.iter() {
-                    n.lock().unwrap().inode.set_nlink(nlink);
+                    n.borrow_mut().inode.set_nlink(nlink);
                 }
 
                 let (first_ino, first_offset) = {
-                    let first_node = indexes[0].lock().unwrap();
+                    let first_node = indexes[0].borrow_mut();
                     (first_node.inode.ino(), first_node.v6_offset)
                 };
                 // set offset for rafs v6 hardlinks

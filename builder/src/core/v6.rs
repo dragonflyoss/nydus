@@ -576,7 +576,7 @@ impl BuildContext {
 
 impl Bootstrap {
     pub(crate) fn v6_update_dirents(parent: &Tree, parent_offset: u64) {
-        let mut node = parent.lock_node();
+        let mut node = parent.borrow_mut_node();
         let node_offset = node.v6_offset;
         if !node.is_dir() {
             return;
@@ -596,7 +596,7 @@ impl Bootstrap {
 
         let mut dirs: Vec<&Tree> = Vec::new();
         for child in parent.children.iter() {
-            let child_node = child.lock_node();
+            let child_node = child.borrow_mut_node();
             let entry = (
                 child_node.v6_offset,
                 OsStr::from_bytes(child.name()).to_owned(),
@@ -670,7 +670,7 @@ impl Bootstrap {
         // When using nid 0 as root nid,
         // the root directory will not be shown by glibc's getdents/readdir.
         // Because in some OS, ino == 0 represents corresponding file is deleted.
-        let root_node_offset = self.tree.lock_node().v6_offset;
+        let root_node_offset = self.tree.borrow_mut_node().v6_offset;
         let orig_meta_addr = root_node_offset - EROFS_BLOCK_SIZE_4096;
         let meta_addr = if blob_table_size > 0 {
             align_offset(
@@ -704,7 +704,7 @@ impl Bootstrap {
         timing_tracer!(
             {
                 self.tree.walk_bfs(true, &mut |n| {
-                    n.lock_node().dump_bootstrap_v6(
+                    n.borrow_mut_node().dump_bootstrap_v6(
                         ctx,
                         bootstrap_ctx.writer.as_mut(),
                         orig_meta_addr,

@@ -16,11 +16,11 @@ impl BlobLayout {
         let (pre, non_pre) = prefetch.get_file_nodes();
         let mut inodes: Vec<TreeNode> = pre
             .into_iter()
-            .filter(|x| Self::should_dump_node(x.lock().unwrap().deref()))
+            .filter(|x| Self::should_dump_node(x.borrow().deref()))
             .collect();
         let mut non_prefetch_inodes: Vec<TreeNode> = non_pre
             .into_iter()
-            .filter(|x| Self::should_dump_node(x.lock().unwrap().deref()))
+            .filter(|x| Self::should_dump_node(x.borrow().deref()))
             .collect();
 
         let prefetch_entries = inodes.len();
@@ -53,7 +53,7 @@ mod tests {
         let tree = Tree::new(node1);
 
         let mut prefetch = Prefetch::default();
-        prefetch.insert(&tree.node, tree.node.lock().unwrap().deref());
+        prefetch.insert(&tree.node, tree.node.borrow().deref());
 
         let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&prefetch).unwrap();
         assert_eq!(inodes.len(), 1);

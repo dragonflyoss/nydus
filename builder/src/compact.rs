@@ -304,7 +304,7 @@ impl BlobCompactor {
         let chunk_dict = self.get_chunk_dict();
 
         let cb = &mut |n: &Tree| -> Result<()> {
-            let mut node = n.lock_node();
+            let mut node = n.borrow_mut_node();
             for chunk_idx in 0..node.chunks.len() {
                 let chunk = &mut node.chunks[chunk_idx];
                 let chunk_key = ChunkKey::from(&chunk.inner);
@@ -367,7 +367,7 @@ impl BlobCompactor {
     fn apply_blob_move(&mut self, from: u32, to: u32) -> Result<()> {
         if let Some(idx_list) = self.b2nodes.get(&from) {
             for (n, chunk_idx) in idx_list.iter() {
-                let mut node = n.lock().unwrap();
+                let mut node = n.borrow_mut();
                 ensure!(
                     node.chunks[*chunk_idx].inner.blob_index() == from,
                     "unexpected blob_index of chunk"
@@ -381,7 +381,7 @@ impl BlobCompactor {
     fn apply_chunk_change(&mut self, c: &(ChunkWrapper, ChunkWrapper)) -> Result<()> {
         if let Some(chunks) = self.c2nodes.get(&ChunkKey::from(&c.0)) {
             for (n, chunk_idx) in chunks.iter() {
-                let mut node = n.lock().unwrap();
+                let mut node = n.borrow_mut();
                 let chunk = &mut node.chunks[*chunk_idx];
                 let mut chunk_inner = chunk.inner.deref().clone();
                 apply_chunk_change(&c.1, &mut chunk_inner)?;

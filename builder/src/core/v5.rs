@@ -92,7 +92,7 @@ impl Node {
 
         let mut d_size = 0u64;
         for child in children.iter() {
-            d_size += child.lock_node().inode.name_size() as u64 + RAFS_V5_VIRTUAL_ENTRY_SIZE;
+            d_size += child.borrow_mut_node().inode.name_size() as u64 + RAFS_V5_VIRTUAL_ENTRY_SIZE;
         }
         if d_size == 0 {
             self.inode.set_size(4096);
@@ -124,13 +124,13 @@ impl Node {
 impl Bootstrap {
     /// Calculate inode digest for directory.
     fn v5_digest_node(&self, ctx: &mut BuildContext, tree: &Tree) {
-        let mut node = tree.lock_node();
+        let mut node = tree.borrow_mut_node();
 
         // We have set digest for non-directory inode in the previous dump_blob workflow.
         if node.is_dir() {
             let mut inode_hasher = RafsDigest::hasher(ctx.digester);
             for child in tree.children.iter() {
-                let child = child.lock_node();
+                let child = child.borrow_mut_node();
                 inode_hasher.digest_update(child.inode.digest().as_ref());
             }
             node.inode.set_digest(inode_hasher.digest_finalize());
@@ -200,7 +200,7 @@ impl Bootstrap {
 
         let mut has_xattr = false;
         self.tree.walk_dfs_pre(&mut |t| {
-            let node = t.lock_node();
+            let node = t.borrow_mut_node();
             inode_table.set(node.index, inode_offset)?;
             // Add inode size
             inode_offset += node.inode.inode_size() as u32;
@@ -253,7 +253,7 @@ impl Bootstrap {
         timing_tracer!(
             {
                 self.tree.walk_dfs_pre(&mut |t| {
-                    t.lock_node()
+                    t.borrow_mut_node()
                         .dump_bootstrap_v5(ctx, bootstrap_ctx.writer.as_mut())
                         .context("failed to dump bootstrap")
                 })
