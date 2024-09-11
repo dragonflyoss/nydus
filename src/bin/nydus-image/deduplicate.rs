@@ -271,7 +271,7 @@ impl Deduplicate<SqliteDatabase> {
         version: String,
     ) -> anyhow::Result<()> {
         let process_chunk = &mut |t: &Tree| -> Result<()> {
-            let node = t.lock_node();
+            let node = t.borrow_mut_node();
             for chunk in &node.chunks {
                 let index = chunk.inner.blob_index();
                 let chunk_blob_id = blob_infos[index as usize].blob_id();

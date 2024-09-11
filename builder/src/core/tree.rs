@@ -16,11 +16,12 @@
 //!   lower tree (MetadataTree).
 //! - Traverse the merged tree (OverlayTree) to dump bootstrap and data blobs.
 
+use std::cell::{RefCell, RefMut};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use nydus_rafs::metadata::chunk::ChunkWrapper;
@@ -35,7 +36,7 @@ use crate::core::overlay::OVERLAYFS_WHITEOUT_OPAQUE;
 use crate::{BuildContext, ChunkDict};
 
 /// Type alias for tree internal node.
-pub type TreeNode = Rc<Mutex<Node>>;
+pub type TreeNode = Rc<RefCell<Node>>;
 
 /// An in-memory tree structure to maintain information and topology of filesystem nodes.
 #[derive(Clone)]
@@ -53,7 +54,7 @@ impl Tree {
     pub fn new(node: Node) -> Self {
         let name = node.name().as_bytes().to_vec();
         Tree {
-            node: Rc::new(Mutex::new(node)),
+            node: Rc::new(RefCell::new(node)),
             name,
             children: Vec::new(),
         }
@@ -82,12 +83,12 @@ impl Tree {
 
     /// Set `Node` associated with the tree node.
     pub fn set_node(&mut self, node: Node) {
-        self.node = Rc::new(Mutex::new(node));
+        self.node.replace(node);
     }
 
-    /// Get mutex guard to access the associated `Node` object.
-    pub fn lock_node(&self) -> MutexGuard<Node> {
-        self.node.lock().unwrap()
+    /// Get mutably borrowed value to access the associated `Node` object.
+    pub fn borrow_mut_node(&self) -> RefMut<'_, Node> {
+        self.node.as_ref().borrow_mut()
     }
 
     /// Walk all nodes in DFS mode.
@@ -133,7 +134,7 @@ impl Tree {
         let mut dirs = Vec::with_capacity(32);
         for child in &self.children {
             cb(child)?;
-            if child.lock_node().is_dir() {
+            if child.borrow_mut_node().is_dir() {
                 dirs.push(child);
             }
         }
@@ -179,7 +180,7 @@ impl Tree {
         assert_eq!(upper.name, "/".as_bytes());
 
         // Handle the root node.
-        upper.lock_node().overlay = Overlay::UpperModification;
+        upper.borrow_mut_node().overlay = Overlay::UpperModification;
         self.node = upper.node.clone();
         self.merge_children(ctx, &upper)?;
         lazy_drop(upper);
@@ -191,7 +192,7 @@ impl Tree {
         // Handle whiteout nodes in the first round, and handle other nodes in the second round.
         let mut modified = Vec::with_capacity(upper.children.len());
         for u in upper.children.iter() {
-            let mut u_node = u.lock_node();
+            let mut u_node = u.borrow_mut_node();
             match u_node.whiteout_type(ctx.whiteout_spec) {
                 Some(WhiteoutType::OciRemoval) => {
                     if let Some(origin_name) = u_node.origin_name(WhiteoutType::OciRemoval) {
@@ -221,7 +222,7 @@ impl Tree {
 
         let mut dirs = Vec::new();
         for u in modified {
-            let mut u_node = u.lock_node();
+            let mut u_node = u.borrow_mut_node();
             if let Some(idx) = self.get_child_idx(&u.name) {
                 u_node.overlay = Overlay::UpperModification;
                 self.children[idx].node = u.node.clone();
@@ -300,7 +301,7 @@ impl<'a> MetadataTreeBuilder<'a> {
         children.sort_unstable_by(|a, b| a.name.cmp(&b.name));
 
         for child in children.iter_mut() {
-            let child_node = child.lock_node();
+            let child_node = child.borrow_mut_node();
             if child_node.is_dir() {
                 let child_ino = child_node.inode.ino();
                 drop(child_node);
@@ -404,7 +405,7 @@ mod tests {
         .unwrap();
         let mut tree = Tree::new(node);
         assert_eq!(tree.name, tmpfile.as_path().file_name().unwrap().as_bytes());
-        let node1 = tree.lock_node();
+        let node1 = tree.borrow_mut_node();
         drop(node1);
 
         let tmpfile = TempFile::new_in(tmpdir.as_path()).unwrap();
@@ -419,7 +420,7 @@ mod tests {
         )
         .unwrap();
         tree.set_node(node);
-        let node2 = tree.lock_node();
+        let node2 = tree.borrow_mut_node();
         assert_eq!(node2.name(), tmpfile.as_path().file_name().unwrap());
     }
 

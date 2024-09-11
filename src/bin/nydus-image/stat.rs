@@ -171,7 +171,7 @@ impl ImageStat {
         };
 
         let pre = &mut |t: &Tree| -> Result<()> {
-            let node = t.lock_node();
+            let node = t.borrow_mut_node();
             if node.is_reg() {
                 image.files += 1;
                 if node.is_hardlink() {

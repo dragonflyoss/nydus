@@ -349,7 +349,7 @@ impl<'a> TarballTreeBuilder<'a> {
                     }
                 }
             }
-            let mut tmp_node = tmp_tree.lock_node();
+            let mut tmp_node = tmp_tree.borrow_mut_node();
             if !tmp_node.is_reg() {
                 bail!(
                     "tarball: target {} for hardlink {} is not a regular file",
@@ -452,7 +452,7 @@ impl<'a> TarballTreeBuilder<'a> {
         // Tar hardlink header has zero file size and no file data associated, so copy value from
         // the associated regular file.
         if let Some(t) = hardlink_target {
-            let n = t.lock_node();
+            let n = t.borrow_mut_node();
             if n.inode.is_v5() {
                 node.inode.set_digest(n.inode.digest().to_owned());
             }
@@ -540,7 +540,7 @@ impl<'a> TarballTreeBuilder<'a> {
         for c in &mut tree.children {
             Self::set_v5_dir_size(c);
         }
-        let mut node = tree.lock_node();
+        let mut node = tree.borrow_mut_node();
         node.v5_set_dir_size(RafsVersion::V5, &tree.children);
     }
 

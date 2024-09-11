@@ -33,7 +33,7 @@ impl Blob {
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
                 let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch)?;
                 for (idx, node) in inodes.iter().enumerate() {
-                    let mut node = node.lock().unwrap();
+                    let mut node = node.borrow_mut();
                     let size = node
                         .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf)
                         .context("failed to dump blob chunks")?;

@@ -213,7 +213,7 @@ impl Prefetch {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV5PrefetchTable::new();
             for i in self.patterns.values().filter_map(|v| v.clone()) {
-                let node = i.lock().unwrap();
+                let node = i.borrow_mut();
                 assert!(node.inode.ino() < u32::MAX as u64);
                 prefetch_table.add_entry(node.inode.ino() as u32);
             }
@@ -228,7 +228,7 @@ impl Prefetch {
         if self.policy == PrefetchPolicy::Fs {
             let mut prefetch_table = RafsV6PrefetchTable::new();
             for i in self.patterns.values().filter_map(|v| v.clone()) {
-                let node = i.lock().unwrap();
+                let node = i.borrow_mut();
                 let ino = node.inode.ino();
                 debug_assert!(ino > 0);
                 let nid = calculate_nid(node.v6_offset, meta_addr);
@@ -270,7 +270,7 @@ mod tests {
     use super::*;
     use crate::core::node::NodeInfo;
     use nydus_rafs::metadata::{inode::InodeWrapper, RafsVersion};
-    use std::sync::Mutex;
+    use std::cell::RefCell;
 
     #[test]
     fn test_generate_pattern() {
@@ -332,29 +332,29 @@ mod tests {
         let mut info1 = info.clone();
         info1.target = PathBuf::from("/f");
         let node1 = Node::new(inode.clone(), info1, 1);
-        let node1 = TreeNode::new(Mutex::from(node1));
-        prefetch.insert(&node1, &node1.lock().unwrap());
+        let node1 = TreeNode::new(RefCell::from(node1));
+        prefetch.insert(&node1, &node1.borrow());
 
         let inode2 = inode.clone();
         let mut info2 = info.clone();
         info2.target = PathBuf::from("/a/b");
         let node2 = Node::new(inode2, info2, 1);
-        let node2 = TreeNode::new(Mutex::from(node2));
-        prefetch.insert(&node2, &node2.lock().unwrap());
+        let node2 = TreeNode::new(RefCell::from(node2));
+        prefetch.insert(&node2, &node2.borrow());
 
         let inode3 = inode.clone();
         let mut info3 = info.clone();
         info3.target = PathBuf::from("/h/i/j");
         let node3 = Node::new(inode3, info3, 1);
-        let node3 = TreeNode::new(Mutex::from(node3));
-        prefetch.insert(&node3, &node3.lock().unwrap());
+        let node3 = TreeNode::new(RefCell::from(node3));
+        prefetch.insert(&node3, &node3.borrow());
 
         let inode4 = inode.clone();
         let mut info4 = info.clone();
         info4.target = PathBuf::from("/z");
         let node4 = Node::new(inode4, info4, 1);
-        let node4 = TreeNode::new(Mutex::from(node4));
-        prefetch.insert(&node4, &node4.lock().unwrap());
+        let node4 = TreeNode::new(RefCell::from(node4));
+        prefetch.insert(&node4, &node4.borrow());
 
         let inode5 = inode.clone();
         inode.set_mode(0o755 | libc::S_IFDIR as u32);
@@ -362,8 +362,8 @@ mod tests {
         let mut info5 = info;
         info5.target = PathBuf::from("/a/b/d");
         let node5 = Node::new(inode5, info5, 1);
-        let node5 = TreeNode::new(Mutex::from(node5));
-        prefetch.insert(&node5, &node5.lock().unwrap());
+        let node5 = TreeNode::new(RefCell::from(node5));
+        prefetch.insert(&node5, &node5.borrow());
 
         // node1, node2
         assert_eq!(prefetch.fs_prefetch_rule_count(), 2);
@@ -373,12 +373,12 @@ mod tests {
         assert_eq!(non_pre.len(), 1);
         let pre_str: Vec<String> = pre
             .iter()
-            .map(|n| n.lock().unwrap().target().to_str().unwrap().to_owned())
+            .map(|n| n.borrow().target().to_str().unwrap().to_owned())
             .collect();
         assert_eq!(pre_str, vec!["/a/b", "/a/b/d", "/f", "/h/i/j"]);
         let non_pre_str: Vec<String> = non_pre
             .iter()
-            .map(|n| n.lock().unwrap().target().to_str().unwrap().to_owned())
+            .map(|n| n.borrow().target().to_str().unwrap().to_owned())
             .collect();
         assert_eq!(non_pre_str, vec!["/z"]);
 

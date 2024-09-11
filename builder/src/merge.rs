@@ -257,7 +257,7 @@ impl Merger {
 
             let upper = Tree::from_bootstrap(&rs, &mut ())?;
             upper.walk_bfs(true, &mut |n| {
-                let mut node = n.lock_node();
+                let mut node = n.borrow_mut_node();
                 for chunk in &mut node.chunks {
                     let origin_blob_index = chunk.inner.blob_index() as usize;
                     let blob_ctx = blobs[origin_blob_index].as_ref();

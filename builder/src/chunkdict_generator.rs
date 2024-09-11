@@ -93,7 +93,7 @@ impl Generator {
     /// Validate tree.
     fn validate_tree(tree: &Tree) -> Result<()> {
         let pre = &mut |t: &Tree| -> Result<()> {
-            let node = t.lock_node();
+            let node = t.borrow_mut_node();
             debug!("chunkdict tree: ");
             debug!("inode: {}", node);
             for chunk in &node.chunks {
@@ -208,7 +208,7 @@ impl Generator {
         node.inode.set_child_count(node.chunks.len() as u32);
         let child = Tree::new(node);
         child
-            .lock_node()
+            .borrow_mut_node()
             .v5_set_dir_size(ctx.fs_version, &child.children);
         Ok(child)
     }
