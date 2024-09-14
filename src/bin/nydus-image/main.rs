@@ -31,7 +31,11 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobContext, BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree, WhiteoutSpec
+    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobContext,
+    BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo,
+    ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature, Features, Generator,
+    HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree,
+    WhiteoutSpec,
 };
 
 use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
@@ -1160,7 +1164,6 @@ impl Command {
                 "import_chunk_dict"
             )?);
         }
-
 
         let mut bootstrap_mgr = if blob_inline_meta {
             BootstrapManager::new(None, parent_path)

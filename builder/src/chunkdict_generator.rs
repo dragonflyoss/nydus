@@ -18,7 +18,7 @@ use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
 use crate::core::blob::Blob;
 use crate::core::node::Node;
-use crate::{BlobContext, NodeChunk};
+use crate::{ArtifactWriter, BlobContext, NodeChunk};
 use anyhow::anyhow;
 use anyhow::{Ok, Result};
 use nydus_api::BackendConfigV2;
@@ -45,7 +45,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::u32;
 use zstd::decode_all;
-
+use crate::Artifact;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkdictChunkInfo {
@@ -130,7 +130,7 @@ impl Generator {
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
         // TODO: Add Appropriate BlobFeatures
-        let mut prefetch_blob = BlobInfo::new(
+        let mut prefetch_blob_info = BlobInfo::new(
             blob_layer_num as u32,
             // String::new(), // String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
             String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
@@ -145,7 +145,7 @@ impl Generator {
                 | BlobFeatures::HAS_TOC
                 | BlobFeatures::CAP_TAR_TOC,
         );
-        
+
         // let mut backend_config = BackendConfigV2 {
         //     backend_type: String::from("localfs"),
         //     localdisk: None,
@@ -167,7 +167,7 @@ impl Generator {
         // blobtable.entries.push(prefetch_blob.clone().into());
         // for every node in prefetch list, change the offset and blob id
         let (file_nodes_prefetch, _) = ctx.prefetch.get_file_nodes();
-        let prefetch_blob_index = prefetch_blob.blob_index();
+        let prefetch_blob_index = prefetch_blob_info.blob_index();
         let mut chunk_count = 0;
         // For every chunk, need to align to 4k
         let mut prefetch_blob_offset = 0;
@@ -190,23 +190,23 @@ impl Generator {
                 meta_uncompressed_size += inner.uncompressed_size() as u64;
                 prefetch_blob_offset = Self::align_to_4k(prefetch_blob_offset);
                 // set meta ci data
-                prefetch_blob.set_meta_ci_uncompressed_size(
-                    (prefetch_blob.meta_ci_uncompressed_size()
+                prefetch_blob_info.set_meta_ci_uncompressed_size(
+                    (prefetch_blob_info.meta_ci_uncompressed_size()
                         + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize,
                 );
-                prefetch_blob.set_meta_ci_compressed_size(
-                    (prefetch_blob.meta_ci_compressed_size()
+                prefetch_blob_info.set_meta_ci_compressed_size(
+                    (prefetch_blob_info.meta_ci_compressed_size()
                         + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize,
                 );
                 println!("inner: {}", inner);
             }
         }
         // align prefetch blob size to 4096
-        prefetch_blob.set_meta_ci_offset(0x200 + meta_uncompressed_size as usize);
-        prefetch_blob.set_chunk_count(chunk_count);
-        prefetch_blob.set_compressed_size(prefetch_blob_offset as usize);
-        prefetch_blob.set_uncompressed_size(prefetch_blob_offset as usize);
-        prefetch_blob.set_compressor(Algorithm::Zstd);
+        prefetch_blob_info.set_meta_ci_offset(0x200 + meta_uncompressed_size as usize);
+        prefetch_blob_info.set_chunk_count(chunk_count);
+        prefetch_blob_info.set_compressed_size(prefetch_blob_offset as usize);
+        prefetch_blob_info.set_uncompressed_size(prefetch_blob_offset as usize);
+        prefetch_blob_info.set_compressor(Algorithm::Zstd);
         // Build bootstrap
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx().unwrap();
         let mut bootstrap = Bootstrap::new(tree.clone()).unwrap();
@@ -218,10 +218,27 @@ impl Generator {
         }
         blob_table_withprefetch
             .entries
-            .push(prefetch_blob.clone().into());
+            .push(prefetch_blob_info.clone().into());
         for blob in &blob_table_withprefetch.entries {
             println!("{:?}", blob);
         }
+
+        // Build Prefetch Blob
+        let prefetch_build_ctx = BuildContext {
+            prefetch: ctx.prefetch.clone(),
+            ..Default::default()
+        };
+        let mut prefetch_blob_mgr = BlobManager::new(nydus_utils::digest::Algorithm::Blake3);
+        let prefetch_blob_ctx =
+            BlobContext::from(&prefetch_build_ctx, &prefetch_blob_info, ChunkSource::Build)
+                .unwrap();
+        prefetch_blob_mgr.add_blob(prefetch_blob_ctx);
+        let mut blob_writer: Box<dyn Artifact> = Box::new(Box::new(ArtifactWriter::new(
+            crate::ArtifactStorage::SingleFile(PathBuf::from("./prefetch_blob")),
+        ))
+        .unwrap());
+        Blob::dump(&prefetch_build_ctx, &mut prefetch_blob_mgr, &mut *blob_writer).unwrap();
+        // Dump Bootstrap
         let storage = &mut bootstrap_mgr.bootstrap_storage;
         let blob_table_withprefetch = RafsBlobTable::V6(blob_table_withprefetch);
         bootstrap.dump(ctx, storage, &mut bootstrap_ctx, &blob_table_withprefetch)?;
@@ -435,6 +452,10 @@ impl Generator {
 mod test {
     use std::env;
 
+    use nydus_rafs::fs::Rafs;
+
+    use crate::{core::prefetch, Features, Prefetch};
+
     use super::*;
 
     #[test]
@@ -455,40 +476,51 @@ mod test {
         };
 
         let blob_mgr = BlobFactory::new_backend(&backend_config, "Fix-Prefetch-Blob-ID").unwrap();
-        let reader = blob_mgr.get_reader("ab6168bdd87225f33a05e4345548922f72ff15ffdcd8e83c3f1ef66dad70b31e").unwrap();
-        let mut buf2:Vec<u8> = vec![0; 19];
+        let reader = blob_mgr
+            .get_reader("ab6168bdd87225f33a05e4345548922f72ff15ffdcd8e83c3f1ef66dad70b31e")
+            .unwrap();
+        let mut buf2: Vec<u8> = vec![0; 19];
         let size = reader.read(&mut buf2, 19).unwrap();
         println!("size: {}", size);
         println!("buf len: {}", buf2.len());
-        
+
         fn decompress_zstd(compressed: &[u8]) -> Result<Vec<u8>> {
             Ok(decode_all(compressed)?)
         }
 
         let revert = decompress_zstd(&buf2).unwrap();
         println!("len: {}", revert.len());
-        
-        let mut buf:Vec<u8> = vec![0; 19];
+
+        let mut buf: Vec<u8> = vec![0; 19];
         let size = reader.read(&mut buf, 0).unwrap();
         println!("size: {}", size);
 
         let revert = decompress_zstd(&buf).unwrap();
         println!("len: {}", revert.len());
+        let mut build_ctx = BuildContext {
+            // prefetch: Self::get_prefetch(matches)?,
+            prefetch: Prefetch::new(crate::PrefetchPolicy::Fs).unwrap(),
+            ..Default::default()
+        };
 
-        // let ctx := BuildContext::new(String::from("Test-Prefetch-BlobGen"), true, 
-        //     blob_offset, 
-        //     compressor, 
-        //     digester, 
-        //     explicit_uidgid, 
-        //     whiteout_spec, 
-        //     conversion_type, 
-        //     source_path, 
-        //     prefetch, 
-        //     blob_storage, 
-        //     blob_inline_meta, 
-        //     features, 
+        // let sb = update_ctx_from_bootstrap(&mut build_ctx, config, bootstrap_path)?;
+        // let mut tree = Tree::from_bootstrap(&sb, &mut ()).unwrap();
+
+        // build_ctx.prefetch.init(&mut tree);
+        // let ctx := BuildContext::new(String::from("Test-Prefetch-BlobGen"), true,
+        //     blob_offset,
+        //     compressor,
+        //     digester,
+        //     explicit_uidgid,
+        //     whiteout_spec,
+        //     conversion_type,
+        //     source_path,
+        //     prefetch,
+        //     blob_storage,
+        //     blob_inline_meta,
+        //     features,
         //     encrypt);
-    }   
+    }
 }
 
 // Read the blob, get the chunk, fix dump node chunk function, Blob::dump generate a blob
