@@ -19,18 +19,22 @@ use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput,
 use crate::core::blob::Blob;
 use crate::core::node::Node;
 use crate::{BlobContext, NodeChunk};
+use anyhow::anyhow;
 use anyhow::{Ok, Result};
+use nydus_api::BackendConfigV2;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
 use nydus_rafs::metadata::layout::{RafsBlobTable, RafsXAttrs};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
+use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
+use nydus_storage::meta::BlobCompressionContextHeader;
 use nydus_utils::compress::Algorithm;
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::metrics::BlobcacheMetrics;
 use rand::Rng;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::mem::size_of;
 use std::ops::Add;
@@ -40,7 +44,7 @@ use std::process::Output;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::u32;
-use nydus_storage::meta::BlobCompressionContextHeader;
+use zstd::decode_all;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkdictChunkInfo {
@@ -109,15 +113,19 @@ impl Generator {
         blob_mgr: &mut BlobManager,
         blobtable: &mut RafsV6BlobTable,
     ) -> Result<()> {
+        // Print the BuildContext
+        println!("BuildContect Print");
+        println!("ID: {}", ctx.blob_id);
+        
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
         // TODO: Add Appropriate BlobFeatures
         let mut prefetch_blob = BlobInfo::new(
             blob_layer_num as u32,
-            String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
+            String::new(), // String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
             0,
             0,
-            0x100000,
+            ctx.chunk_size,
             // If chunkcount is zero, it will add a feature
             u32::MAX,
             BlobFeatures::ALIGNED
@@ -126,7 +134,23 @@ impl Generator {
                 | BlobFeatures::HAS_TOC
                 | BlobFeatures::CAP_TAR_TOC,
         );
+        
+        let mut backend_config = BackendConfigV2 {
+            backend_type: String::from("localfs"),
+            localdisk: None,
+            localfs: Some(nydus_api::LocalFsConfig {
+                blob_file: String::from("nydus_bootstrap"),
+                dir: String::new(),
+                alt_dirs: Vec::new(),
+            }),
+            oss: None,
+            s3: None,
+            registry: None,
+            http_proxy: None,
+        };
 
+        let blob_mgr = BlobFactory::new_backend(&backend_config, "Fix-Prefetch-Blob-ID").unwrap();
+        let reader = blob_mgr.get_reader("");
         let blob_ctx = BlobContext::from(ctx, &prefetch_blob, ChunkSource::Build).unwrap();
 
         // blobtable.entries.push(prefetch_blob.clone().into());
@@ -139,6 +163,7 @@ impl Generator {
         let mut meta_uncompressed_size = 0;
         let mut chunk_index_in_prefetch = 0;
         for node in file_nodes_prefetch {
+            println!("node path: {}", node.lock().unwrap().path().display());
             let child = tree.get_node(&node.lock().unwrap().path()).unwrap();
             let mut child = child.node.lock().unwrap();
             child.layer_idx = prefetch_blob_index as u16;
@@ -394,3 +419,62 @@ impl Generator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_backend() {
+        let backend_config = BackendConfigV2 {
+            backend_type: String::from("localfs"),
+            localdisk: None,
+            localfs: Some(nydus_api::LocalFsConfig {
+                blob_file: String::from("/root/test-image-blobs/output/blob"),
+                dir: String::from("/root/test-image-blobs/output/"),
+                alt_dirs: Vec::new(),
+            }),
+            oss: None,
+            s3: None,
+            registry: None,
+            http_proxy: None,
+        };
+
+        let blob_mgr = BlobFactory::new_backend(&backend_config, "Fix-Prefetch-Blob-ID").unwrap();
+        let reader = blob_mgr.get_reader("ab6168bdd87225f33a05e4345548922f72ff15ffdcd8e83c3f1ef66dad70b31e").unwrap();
+        let mut buf2:Vec<u8> = vec![0; 19];
+        let size = reader.read(&mut buf2, 19).unwrap();
+        println!("size: {}", size);
+        println!("buf len: {}", buf2.len());
+        
+        fn decompress_zstd(compressed: &[u8]) -> Result<Vec<u8>> {
+            Ok(decode_all(compressed)?)
+        }
+
+        let revert = decompress_zstd(&buf2).unwrap();
+        println!("len: {}", revert.len());
+        
+        let mut buf:Vec<u8> = vec![0; 19];
+        let size = reader.read(&mut buf, 0).unwrap();
+        println!("size: {}", size);
+
+        let revert = decompress_zstd(&buf).unwrap();
+        println!("len: {}", revert.len());
+
+        // let ctx := BuildContext::new(String::from("Test-Prefetch-BlobGen"), true, 
+        //     blob_offset, 
+        //     compressor, 
+        //     digester, 
+        //     explicit_uidgid, 
+        //     whiteout_spec, 
+        //     conversion_type, 
+        //     source_path, 
+        //     prefetch, 
+        //     blob_storage, 
+        //     blob_inline_meta, 
+        //     features, 
+        //     encrypt);
+    }   
+}
+
+// Read the blob, get the chunk, fix dump node chunk function, Blob::dump generate a blob

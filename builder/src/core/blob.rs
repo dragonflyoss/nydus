@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use core::panic;
 use std::borrow::Cow;
 use std::slice;
 

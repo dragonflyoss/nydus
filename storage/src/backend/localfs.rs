@@ -163,6 +163,7 @@ impl LocalFs {
         }
 
         let blob_file_path = self.get_blob_path(blob_id)?;
+        println!("blob file path: {}", blob_file_path.display());
         let file = OpenOptions::new()
             .read(true)
             .open(&blob_file_path)

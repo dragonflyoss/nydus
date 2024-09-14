@@ -1123,6 +1123,7 @@ impl Command {
             features,
             encrypt,
         );
+
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
         build_ctx.set_batch_size(batch_size);
@@ -1159,6 +1160,7 @@ impl Command {
                 "import_chunk_dict"
             )?);
         }
+
 
         let mut bootstrap_mgr = if blob_inline_meta {
             BootstrapManager::new(None, parent_path)
@@ -1216,6 +1218,7 @@ impl Command {
             | ConversionType::TarToStargz
             | ConversionType::TargzToStargz => unimplemented!(),
         };
+
         let build_output = timing_tracer!(
             {
                 builder

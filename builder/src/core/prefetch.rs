@@ -168,7 +168,6 @@ impl Prefetch {
         for node in nodes {
             self.insert(&node, &node.lock().unwrap());
             let node = node.lock().unwrap();
-            println!("Node: {}", node.target().display());
             node.chunks.iter().for_each(|chunk| {
                 println!("Chunk Source: {}", chunk.source);
                 println!("Chunk Inner: offset: {}", chunk.inner.uncompressed_offset());
