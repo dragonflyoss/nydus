@@ -46,6 +46,7 @@ use std::sync::Arc;
 use std::u32;
 use zstd::decode_all;
 
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkdictChunkInfo {
     pub image_reference: String,
@@ -116,7 +117,16 @@ impl Generator {
         // Print the BuildContext
         println!("BuildContect Print");
         println!("ID: {}", ctx.blob_id);
-        
+        println!("blob offset: {}", ctx.blob_offset);
+        println!("compressor: {}", ctx.compressor);
+        println!("digester: {}", ctx.digester);
+        println!("explicit uidgid: {}", ctx.explicit_uidgid);
+        println!("whiteout spec: {}", ctx.whiteout_spec);
+        println!("conversion type: {}", ctx.conversion_type);
+        println!("source path: {}", ctx.source_path.display());
+        println!("Blob storage: {:?}", ctx.blob_storage);
+        println!("blob inline meta: {}", ctx.blob_inline_meta);
+        println!("features: {:?}", ctx.features);
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
         // TODO: Add Appropriate BlobFeatures
@@ -423,15 +433,18 @@ impl Generator {
 
 #[cfg(test)]
 mod test {
+    use std::env;
+
     use super::*;
 
     #[test]
     fn test_backend() {
+        println!("current dir: {}", env::current_dir().unwrap().display());
         let backend_config = BackendConfigV2 {
             backend_type: String::from("localfs"),
             localdisk: None,
             localfs: Some(nydus_api::LocalFsConfig {
-                blob_file: String::from("/root/test-image-blobs/output/blob"),
+                blob_file: String::from("../../nydusTestImage/test-image-blobs/output/blob"),
                 dir: String::from("/root/test-image-blobs/output/"),
                 alt_dirs: Vec::new(),
             }),

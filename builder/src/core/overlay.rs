@@ -71,6 +71,16 @@ pub enum WhiteoutSpec {
     None,
 }
 
+impl fmt::Display for WhiteoutSpec {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            WhiteoutSpec::Oci => write!(f, "OCI"),
+            WhiteoutSpec::Overlayfs => write!(f, "Overlayfs"),
+            WhiteoutSpec::None => write!(f, "None"),
+        }
+    }
+}
+
 impl Default for WhiteoutSpec {
     fn default() -> Self {
         Self::Oci
