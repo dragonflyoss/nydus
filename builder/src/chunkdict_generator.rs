@@ -122,7 +122,8 @@ impl Generator {
         // TODO: Add Appropriate BlobFeatures
         let mut prefetch_blob = BlobInfo::new(
             blob_layer_num as u32,
-            String::new(), // String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
+            // String::new(), // String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
+            String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
             0,
             0,
             ctx.chunk_size,
@@ -135,23 +136,23 @@ impl Generator {
                 | BlobFeatures::CAP_TAR_TOC,
         );
         
-        let mut backend_config = BackendConfigV2 {
-            backend_type: String::from("localfs"),
-            localdisk: None,
-            localfs: Some(nydus_api::LocalFsConfig {
-                blob_file: String::from("nydus_bootstrap"),
-                dir: String::new(),
-                alt_dirs: Vec::new(),
-            }),
-            oss: None,
-            s3: None,
-            registry: None,
-            http_proxy: None,
-        };
+        // let mut backend_config = BackendConfigV2 {
+        //     backend_type: String::from("localfs"),
+        //     localdisk: None,
+        //     localfs: Some(nydus_api::LocalFsConfig {
+        //         blob_file: String::from("nydus_bootstrap"),
+        //         dir: String::new(),
+        //         alt_dirs: Vec::new(),
+        //     }),
+        //     oss: None,
+        //     s3: None,
+        //     registry: None,
+        //     http_proxy: None,
+        // };
 
-        let blob_mgr = BlobFactory::new_backend(&backend_config, "Fix-Prefetch-Blob-ID").unwrap();
-        let reader = blob_mgr.get_reader("");
-        let blob_ctx = BlobContext::from(ctx, &prefetch_blob, ChunkSource::Build).unwrap();
+        // let blob_mgr = BlobFactory::new_backend(&backend_config, "Fix-Prefetch-Blob-ID").unwrap();
+        // let reader = blob_mgr.get_reader("");
+        // let blob_ctx = BlobContext::from(ctx, &prefetch_blob, ChunkSource::Build).unwrap();
 
         // blobtable.entries.push(prefetch_blob.clone().into());
         // for every node in prefetch list, change the offset and blob id
