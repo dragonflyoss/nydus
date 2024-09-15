@@ -12,10 +12,6 @@ pub fn update_ctx_from_bootstrap(
     bootstrap_path: &Path,
 ) -> Result<RafsSuper> {
     let (sb, _) = RafsSuper::load_from_file(bootstrap_path, config, false)?;
-    sb.superblock
-        .get_blob_infos()
-        .iter()
-        .for_each(|info| println!("{:?}", info));
 
     ctx.blob_features = sb.superblock.get_blob_infos().first().unwrap().features();
 

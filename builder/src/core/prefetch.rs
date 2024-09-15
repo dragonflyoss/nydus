@@ -167,13 +167,6 @@ impl Prefetch {
         }
         for node in nodes {
             self.insert(&node, &node.lock().unwrap());
-            let node = node.lock().unwrap();
-            node.chunks.iter().for_each(|chunk| {
-                println!("Chunk Source: {}", chunk.source);
-                println!("Chunk Inner: offset: {}", chunk.inner.uncompressed_offset());
-                println!("Index: {}", chunk.inner.index());
-                println!("Blob Index: {}", chunk.inner.blob_index());
-            });
         }
     }
 

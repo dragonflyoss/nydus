@@ -18,6 +18,7 @@ use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
 use crate::core::blob::Blob;
 use crate::core::node::Node;
+use crate::core::prefetch;
 use crate::{ArtifactWriter, BlobContext, NodeChunk};
 use anyhow::anyhow;
 use anyhow::{Ok, Result};
@@ -114,19 +115,6 @@ impl Generator {
         blob_mgr: &mut BlobManager,
         blobtable: &mut RafsV6BlobTable,
     ) -> Result<()> {
-        // Print the BuildContext
-        println!("BuildContect Print");
-        println!("ID: {}", ctx.blob_id);
-        println!("blob offset: {}", ctx.blob_offset);
-        println!("compressor: {}", ctx.compressor);
-        println!("digester: {}", ctx.digester);
-        println!("explicit uidgid: {}", ctx.explicit_uidgid);
-        println!("whiteout spec: {}", ctx.whiteout_spec);
-        println!("conversion type: {}", ctx.conversion_type);
-        println!("source path: {}", ctx.source_path.display());
-        println!("Blob storage: {:?}", ctx.blob_storage);
-        println!("blob inline meta: {}", ctx.blob_inline_meta);
-        println!("features: {:?}", ctx.features);
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
         // TODO: Add Appropriate BlobFeatures
@@ -146,25 +134,6 @@ impl Generator {
                 | BlobFeatures::CAP_TAR_TOC,
         );
 
-        // let mut backend_config = BackendConfigV2 {
-        //     backend_type: String::from("localfs"),
-        //     localdisk: None,
-        //     localfs: Some(nydus_api::LocalFsConfig {
-        //         blob_file: String::from("nydus_bootstrap"),
-        //         dir: String::new(),
-        //         alt_dirs: Vec::new(),
-        //     }),
-        //     oss: None,
-        //     s3: None,
-        //     registry: None,
-        //     http_proxy: None,
-        // };
-
-        // let blob_mgr = BlobFactory::new_backend(&backend_config, "Fix-Prefetch-Blob-ID").unwrap();
-        // let reader = blob_mgr.get_reader("");
-        // let blob_ctx = BlobContext::from(ctx, &prefetch_blob, ChunkSource::Build).unwrap();
-
-        // blobtable.entries.push(prefetch_blob.clone().into());
         // for every node in prefetch list, change the offset and blob id
         let (file_nodes_prefetch, _) = ctx.prefetch.get_file_nodes();
         let prefetch_blob_index = prefetch_blob_info.blob_index();
@@ -174,7 +143,6 @@ impl Generator {
         let mut meta_uncompressed_size = 0;
         let mut chunk_index_in_prefetch = 0;
         for node in file_nodes_prefetch {
-            println!("node path: {}", node.lock().unwrap().path().display());
             let child = tree.get_node(&node.lock().unwrap().path()).unwrap();
             let mut child = child.node.lock().unwrap();
             child.layer_idx = prefetch_blob_index as u16;
@@ -198,7 +166,6 @@ impl Generator {
                     (prefetch_blob_info.meta_ci_compressed_size()
                         + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize,
                 );
-                println!("inner: {}", inner);
             }
         }
         // align prefetch blob size to 4096
@@ -207,10 +174,8 @@ impl Generator {
         prefetch_blob_info.set_compressed_size(prefetch_blob_offset as usize);
         prefetch_blob_info.set_uncompressed_size(prefetch_blob_offset as usize);
         prefetch_blob_info.set_compressor(Algorithm::Zstd);
-        // Build bootstrap
-        let mut bootstrap_ctx = bootstrap_mgr.create_ctx().unwrap();
-        let mut bootstrap = Bootstrap::new(tree.clone()).unwrap();
-        bootstrap.build(ctx, &mut bootstrap_ctx).unwrap();
+
+        
 
         let mut blob_table_withprefetch = RafsV6BlobTable::new();
         for blob in blobtable.entries.iter() {
@@ -219,15 +184,15 @@ impl Generator {
         blob_table_withprefetch
             .entries
             .push(prefetch_blob_info.clone().into());
-        for blob in &blob_table_withprefetch.entries {
-            println!("{:?}", blob);
-        }
 
         // Build Prefetch Blob
         let prefetch_build_ctx = BuildContext {
             prefetch: ctx.prefetch.clone(),
             ..Default::default()
         };
+
+        
+        
         let mut prefetch_blob_mgr = BlobManager::new(nydus_utils::digest::Algorithm::Blake3);
         let prefetch_blob_ctx =
             BlobContext::from(&prefetch_build_ctx, &prefetch_blob_info, ChunkSource::Build)
@@ -238,6 +203,14 @@ impl Generator {
         ))
         .unwrap());
         Blob::dump(&prefetch_build_ctx, &mut prefetch_blob_mgr, &mut *blob_writer).unwrap();
+
+        // Build bootstrap
+        let mut bootstrap_ctx = bootstrap_mgr.create_ctx().unwrap();
+
+        let mut bootstrap = Bootstrap::new(tree.clone()).unwrap();
+
+        bootstrap.build(ctx, &mut bootstrap_ctx).unwrap();
+
         // Dump Bootstrap
         let storage = &mut bootstrap_mgr.bootstrap_storage;
         let blob_table_withprefetch = RafsBlobTable::V6(blob_table_withprefetch);

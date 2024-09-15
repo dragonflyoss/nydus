@@ -205,9 +205,6 @@ impl DirectSuperBlockV6 {
         let mut blob_table = RafsV6BlobTable::new();
         let meta = &old_state.meta;
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
-        println!("meta data:");
-        println!("blob table size: {}", meta.blob_table_size);
-        println!("chunk size: {}", meta.chunk_size);
 
         blob_table.load(r, meta.blob_table_size, meta.chunk_size, meta.flags)?;
         let blob_extra_infos = rafsv6_load_blob_extra_info(meta, r)?;
@@ -1326,7 +1323,6 @@ impl RafsInodeExt for OndiskInodeWrapper {
     /// # Safety
     /// It depends on Self::validate() to ensure valid memory layout.
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
-        println!("Idx: {}", idx);
         let state = self.state();
 
         let inode = self.disk_inode(&state);
@@ -1340,7 +1336,6 @@ impl RafsInodeExt for OndiskInodeWrapper {
             .checked_add(self.offset as usize)
             .ok_or_else(|| einval!("v6: invalid offset or index to calculate chunk address"))?;
         let chunk_addr = state.map.get_ref::<RafsV6InodeChunkAddr>(offset)?;
-        println!("Chunk Addr: {:?}", chunk_addr);
         let has_device = self.mapping.device.lock().unwrap().has_device();
 
         if state.meta.has_inlined_chunk_digest() && has_device {
@@ -1368,9 +1363,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
             if chunk_map.is_none() {
                 *chunk_map = Some(self.mapping.load_chunk_map()?);
             }
-            chunk_map.as_ref().unwrap().keys().for_each(
-                |k| println!("Key: {:?}", k)
-            );
+
             match chunk_map.as_ref().unwrap().get(chunk_addr) {
                 None => Err(enoent!(format!(
                     "failed to get chunk info for chunk {}/{}/{}",

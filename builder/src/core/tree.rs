@@ -345,7 +345,6 @@ impl<'a> MetadataTreeBuilder<'a> {
         let chunks = if inode.is_reg() {
             let chunk_count = inode.get_chunk_count();
             let mut chunks = Vec::with_capacity(chunk_count as usize);
-            println!("Parse Node: {}", path.display());
             for i in 0..chunk_count {
                 let cki = inode.get_chunk_info(i)?;
                 chunks.push(NodeChunk {

@@ -468,12 +468,6 @@ impl Node {
                 )
             })?;
             let blob_idx = chunk.inner.blob_index();
-            println!(
-                "Create Chunk Addr: index: {}, ci index: {}, block addr:{}",
-                blob_idx,
-                chunk.inner.index(),
-                blk_addr
-            );
             let mut v6_chunk = RafsV6InodeChunkAddr::new();
             v6_chunk.set_blob_index(blob_idx);
             v6_chunk.set_blob_ci_index(chunk.inner.index());
@@ -491,7 +485,6 @@ impl Node {
             }
             prev = Some((blob_idx, offset));
         }
-        println!("Keys Len: {}", chunk_cache.keys().len());
         // Special optimization to enable page cache sharing for EROFS.
         let chunk_size = if is_continuous && inode.size() > ctx.chunk_size as u64 {
             inode.size().next_power_of_two()
@@ -801,7 +794,6 @@ impl Bootstrap {
             let mut blob_id = [0u8; 64];
             blob_id[..id.len()].copy_from_slice(id);
             devslot.set_blob_id(&blob_id);
-            println!("id: {},blocks: {}", entry.blob_id(), cnt);
             devslot.set_blocks(cnt);
             devslot.set_mapped_blkaddr(mapped_blkaddr);
             devtable.push(devslot);

@@ -33,6 +33,7 @@ impl Blob {
             ConversionType::DirectoryToRafs => {
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
                 let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch)?;
+                dbg!(inodes.len());
                 for (idx, node) in inodes.iter().enumerate() {
                     let mut node = node.lock().unwrap();
                     let size = node
