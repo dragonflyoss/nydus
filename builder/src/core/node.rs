@@ -343,7 +343,7 @@ impl Node {
         if let Some(h) = inode_hasher {
             self.inode.set_digest(h.digest_finalize());
         }
-
+        debug!("Finalize Blob Dump, size: {}", blob_size);
         Ok(blob_size)
     }
 

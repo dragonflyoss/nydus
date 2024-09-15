@@ -16,7 +16,7 @@ impl BlobLayout {
         let (pre, non_pre) = prefetch.get_file_nodes();
         let mut inodes: Vec<TreeNode> = pre
             .into_iter()
-            .filter(|x| Self::should_dump_node(x.lock().unwrap().deref()))
+            // .filter(|x| Self::should_dump_node(x.lock().unwrap().deref()))
             .collect();
         let mut non_prefetch_inodes: Vec<TreeNode> = non_pre
             .into_iter()

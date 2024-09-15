@@ -14,8 +14,8 @@ use nydus_storage::device::BlobInfo;
 
 use super::node::Node;
 use crate::core::tree::TreeNode;
+use crate::{ChunkdictBlobInfo, Overlay};
 use crate::{BlobManager, BootstrapManager, BuildContext, Tree};
-use crate::ChunkdictBlobInfo;
 
 /// Filesystem data prefetch policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -169,7 +169,6 @@ impl Prefetch {
             self.insert(&node, &node.lock().unwrap());
         }
     }
-
 
     /// Insert node into the prefetch Vector if it matches prefetch rules,
     /// while recording the index of matched prefetch pattern,

@@ -36,6 +36,8 @@ use nydus_utils::digest::RafsDigest;
 use nydus_utils::metrics::BlobcacheMetrics;
 use rand::Rng;
 use sha2::{Digest, Sha256};
+use core::panic;
+use std::cell::Ref;
 use std::ffi::OsString;
 use std::mem::size_of;
 use std::ops::Add;
@@ -47,6 +49,7 @@ use std::sync::Arc;
 use std::u32;
 use zstd::decode_all;
 use crate::Artifact;
+use crate::finalize_blob;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkdictChunkInfo {
@@ -115,6 +118,15 @@ impl Generator {
         blob_mgr: &mut BlobManager,
         blobtable: &mut RafsV6BlobTable,
     ) -> Result<()> {
+        let (prefetch_nodes, _) = ctx.prefetch.get_file_nodes();
+        for node in prefetch_nodes {
+            let node = node.lock().unwrap();
+            match node.inode {
+                InodeWrapper::Ref(_) => {debug!("Node Wrapper: Reference")}
+                _ => {debug!("Not Reference")}
+            }
+        }
+
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
         // TODO: Add Appropriate BlobFeatures
@@ -186,7 +198,7 @@ impl Generator {
             .push(prefetch_blob_info.clone().into());
 
         // Build Prefetch Blob
-        let prefetch_build_ctx = BuildContext {
+        let mut prefetch_build_ctx = BuildContext {
             prefetch: ctx.prefetch.clone(),
             ..Default::default()
         };
@@ -194,16 +206,26 @@ impl Generator {
         
         
         let mut prefetch_blob_mgr = BlobManager::new(nydus_utils::digest::Algorithm::Blake3);
+        // prefetch_blob_mgr.set_current_blob_index(0);
         let prefetch_blob_ctx =
             BlobContext::from(&prefetch_build_ctx, &prefetch_blob_info, ChunkSource::Build)
                 .unwrap();
         prefetch_blob_mgr.add_blob(prefetch_blob_ctx);
+        
         let mut blob_writer: Box<dyn Artifact> = Box::new(Box::new(ArtifactWriter::new(
             crate::ArtifactStorage::SingleFile(PathBuf::from("./prefetch_blob")),
         ))
         .unwrap());
         Blob::dump(&prefetch_build_ctx, &mut prefetch_blob_mgr, &mut *blob_writer).unwrap();
-
+        if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
+            Blob::dump_meta_data(&prefetch_build_ctx, blob_ctx, blob_writer.as_mut()).unwrap();
+            debug!("prefetch blob id: {}", blob_ctx.blob_id);
+        } else {
+            panic!();
+        }
+        finalize_blob(&mut prefetch_build_ctx, &mut prefetch_blob_mgr, blob_writer.as_mut())?;
+        debug!("prefetch blob id: {}", prefetch_build_ctx.blob_id);
+        // let blob_id = format!("{:x}", prefetch_build_ctx.blob_hash.clone().finalize());
         // Build bootstrap
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx().unwrap();
 

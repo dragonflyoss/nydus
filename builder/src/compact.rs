@@ -181,7 +181,6 @@ impl ChunkSet {
         Blob::dump_meta_data(build_ctx, new_blob_ctx, &mut blob_writer)?;
         let blob_id = new_blob_ctx.blob_id();
         blob_writer.finalize(blob_id)?;
-
         Ok(changed_chunks)
     }
 }

@@ -17,7 +17,8 @@ use sha2::digest::Digest;
 use super::layout::BlobLayout;
 use super::node::Node;
 use crate::core::context::Artifact;
-use crate::{BlobContext, BlobManager, BuildContext, ConversionType, Feature};
+use crate::core::node;
+use crate::{BlobContext, BlobManager, BuildContext, ConversionType, Feature, Overlay};
 
 /// Generator for RAFS data blob.
 pub(crate) struct Blob {}
@@ -33,7 +34,6 @@ impl Blob {
             ConversionType::DirectoryToRafs => {
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
                 let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch)?;
-                dbg!(inodes.len());
                 for (idx, node) in inodes.iter().enumerate() {
                     let mut node = node.lock().unwrap();
                     let size = node
@@ -45,6 +45,7 @@ impl Blob {
                         }
                     }
                 }
+                debug!("Dump Node Done");
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
             }
             ConversionType::TarToRafs
@@ -159,11 +160,14 @@ impl Blob {
         blob_ctx: &mut BlobContext,
         blob_writer: &mut dyn Artifact,
     ) -> Result<()> {
+        blob_ctx.blob_meta_info_enabled = true;
         // Dump blob meta for v6 when it has chunks or bootstrap is to be inlined.
         if !blob_ctx.blob_meta_info_enabled || blob_ctx.uncompressed_blob_size == 0 {
+            debug!("not inlined or blob size = 0");
+            dbg!(blob_ctx.uncompressed_blob_size);
             return Ok(());
         }
-
+        debug!("Arrive Here");
         // Prepare blob meta information data.
         let encrypt = ctx.cipher != crypt::Algorithm::None;
         let cipher_obj = &blob_ctx.cipher_object;
@@ -299,7 +303,6 @@ impl Blob {
                 size,
             )?;
         }
-
         Ok(())
     }
 }

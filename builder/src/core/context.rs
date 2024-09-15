@@ -899,6 +899,11 @@ impl BlobManager {
         }
     }
 
+    /// Set current blob index
+    pub fn set_current_blob_index(&mut self,index: usize) {
+        self.current_blob_index = Some(index as u32)
+    }
+
     fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {
         let (cipher_object, cipher_ctx) = match ctx.cipher {
             crypt::Algorithm::None => (Default::default(), None),
