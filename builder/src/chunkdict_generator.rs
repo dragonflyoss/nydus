@@ -118,6 +118,7 @@ impl Generator {
         blob_mgr: &mut BlobManager,
         blobtable: &mut RafsV6BlobTable,
     ) -> Result<()> {
+        debug!("compressor: {}", ctx.compressor);
         let (prefetch_nodes, _) = ctx.prefetch.get_file_nodes();
         for node in prefetch_nodes {
             let node = node.lock().unwrap();
@@ -133,7 +134,7 @@ impl Generator {
         let mut prefetch_blob_info = BlobInfo::new(
             blob_layer_num as u32,
             // String::new(), // String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
-            String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
+            String::from("Prefetch-blob"),
             0,
             0,
             ctx.chunk_size,
@@ -199,6 +200,7 @@ impl Generator {
 
         // Build Prefetch Blob
         let mut prefetch_build_ctx = BuildContext {
+            compressor: ctx.compressor,
             prefetch: ctx.prefetch.clone(),
             ..Default::default()
         };
@@ -233,6 +235,26 @@ impl Generator {
 
         bootstrap.build(ctx, &mut bootstrap_ctx).unwrap();
 
+    
+
+    
+        // The prefetch blob id generated, Rewrite
+        let updated_entries: Vec<Arc<BlobInfo>> = blob_table_withprefetch.entries
+            .iter()
+            .map(|blobinfo|{
+                if blobinfo.blob_id() == String::from("Prefetch-blob") {
+                    let mut prefetch_blob_info =(**blobinfo).clone();
+                    prefetch_blob_info.set_blob_id(prefetch_build_ctx.blob_id.clone());
+                    Arc::new(prefetch_blob_info)
+                } else {
+                    Arc::clone(blobinfo)
+                }
+            })
+            .collect();
+        blob_table_withprefetch.entries = updated_entries;
+        blob_table_withprefetch.entries 
+            .iter() 
+            .for_each(|blobinfo| debug!("blob id: {}", blobinfo.blob_id()));  
         // Dump Bootstrap
         let storage = &mut bootstrap_mgr.bootstrap_storage;
         let blob_table_withprefetch = RafsBlobTable::V6(blob_table_withprefetch);
@@ -478,6 +500,7 @@ mod test {
         let size = reader.read(&mut buf2, 19).unwrap();
         println!("size: {}", size);
         println!("buf len: {}", buf2.len());
+
 
         fn decompress_zstd(compressed: &[u8]) -> Result<Vec<u8>> {
             Ok(decode_all(compressed)?)

@@ -781,7 +781,6 @@ impl Bootstrap {
                 inlined_chunk_digest = false;
             }
             let cnt = (entry.uncompressed_size() / block_size) as u32;
-            println!("size: {}", entry.uncompressed_size());
             if block_count.checked_add(cnt).is_none() {
                 bail!("Too many data blocks in RAFS filesystem, block size 0x{:x}, block count 0x{:x}", block_size, block_count as u64 + cnt as u64);
             }

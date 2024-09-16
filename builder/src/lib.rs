@@ -247,9 +247,9 @@ fn finalize_blob(
         if let Some(blob_cache) = ctx.blob_cache_generator.as_ref() {
             blob_cache.finalize(&blob_ctx.blob_id)?;
         }
-        debug!("Enter Here");
+        debug!("Blob Id:");
         debug!("{}", blob_ctx.blob_id);
-
+        ctx.blob_id = blob_ctx.blob_id.clone();
     }
     Ok(())
 }

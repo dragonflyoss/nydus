@@ -288,6 +288,11 @@ impl BlobInfo {
         self.blob_id.clone()
     }
 
+    /// Set the blob id
+    pub fn set_blob_id(&mut self, blob_id: String) {
+        self.blob_id = blob_id
+    }
+
     /// Get raw blob id, without special handling of `inlined-meta` case.
     pub fn raw_blob_id(&self) -> &str {
         &self.blob_id

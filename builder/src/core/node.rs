@@ -343,7 +343,6 @@ impl Node {
         if let Some(h) = inode_hasher {
             self.inode.set_digest(h.digest_finalize());
         }
-        debug!("Finalize Blob Dump, size: {}", blob_size);
         Ok(blob_size)
     }
 
@@ -355,7 +354,9 @@ impl Node {
     ) -> Result<(ChunkWrapper, Option<BlobChunkInfoV2Ondisk>)> {
         let mut chunk = self.inode.create_chunk();
         let mut chunk_info = None;
+        debug!("compressor: {}", ctx.compressor);
         if let Some(ref zran) = ctx.blob_zran_generator {
+            debug!("zran");
             let mut zran = zran.lock().unwrap();
             zran.start_chunk(ctx.chunk_size as u64)?;
             reader
@@ -368,6 +369,7 @@ impl Node {
             chunk_info = Some(info);
         } else if let Some(ref tar_reader) = ctx.blob_tar_reader {
             // For `tar-ref` case
+            debug!("tar reader");
             let pos = tar_reader.position();
             chunk.set_compressed_offset(pos);
             chunk.set_compressed_size(buf.len() as u32);
@@ -376,6 +378,7 @@ impl Node {
                 .read_exact(buf)
                 .with_context(|| format!("failed to read node file {:?}", self.path()))?;
         } else {
+            debug!("others");
             reader
                 .read_exact(buf)
                 .with_context(|| format!("failed to read node file {:?}", self.path()))?;
