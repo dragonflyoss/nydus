@@ -191,6 +191,7 @@ impl Generator {
 
         // Build Prefetch Blob
         let mut prefetch_build_ctx = BuildContext {
+            blob_id: String::from("Prefetch-blob"),
             compressor: ctx.compressor,
             prefetch: ctx.prefetch.clone(),
             ..Default::default()
@@ -200,9 +201,10 @@ impl Generator {
         
         let mut prefetch_blob_mgr = BlobManager::new(nydus_utils::digest::Algorithm::Blake3);
         // prefetch_blob_mgr.set_current_blob_index(0);
-        let prefetch_blob_ctx =
+        let mut prefetch_blob_ctx =
             BlobContext::from(&prefetch_build_ctx, &prefetch_blob_info, ChunkSource::Build)
                 .unwrap();
+        prefetch_blob_ctx.blob_meta_info_enabled = true;
         prefetch_blob_mgr.add_blob(prefetch_blob_ctx);
         
         let mut blob_writer: Box<dyn Artifact> = Box::new(Box::new(ArtifactWriter::new(
@@ -212,13 +214,11 @@ impl Generator {
         Blob::dump(&prefetch_build_ctx, &mut prefetch_blob_mgr, &mut *blob_writer).unwrap();
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
             Blob::dump_meta_data(&prefetch_build_ctx, blob_ctx, blob_writer.as_mut()).unwrap();
-            debug!("prefetch blob id: {}", blob_ctx.blob_id);
         } else {
             panic!();
         }
         finalize_blob(&mut prefetch_build_ctx, &mut prefetch_blob_mgr, blob_writer.as_mut())?;
         debug!("prefetch blob id: {}", prefetch_build_ctx.blob_id);
-        // let blob_id = format!("{:x}", prefetch_build_ctx.blob_hash.clone().finalize());
         // Build bootstrap
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx().unwrap();
 
@@ -226,9 +226,6 @@ impl Generator {
 
         bootstrap.build(ctx, &mut bootstrap_ctx).unwrap();
 
-    
-
-    
         // The prefetch blob id generated, Rewrite
         let updated_entries: Vec<Arc<BlobInfo>> = blob_table_withprefetch.entries
             .iter()

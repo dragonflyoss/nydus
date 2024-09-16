@@ -230,6 +230,10 @@ impl Node {
             None
         };
 
+        if ctx.blob_id == String::from("Prefetch-blob") {
+            // replace the reader to the blob
+        }
+
         self.dump_node_data_with_reader(ctx, blob_mgr, blob_writer, reader.as_mut(), chunk_data_buf)
     }
 
