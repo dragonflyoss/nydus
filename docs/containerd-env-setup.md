@@ -90,7 +90,7 @@ Please refer to the nydusd [doc](./nydusd.md) to learn more options.
 Make sure the default nydus snapshotter root directory is clear.
 
 ```
-sudo rm -rf /var/lib/containerd-nydus
+sudo rm -rf /var/lib/containerd/io.containerd.snapshotter.v1.nydus
 ```
 
 3. Start `containerd-nydus-grpc` (nydus snapshotter):

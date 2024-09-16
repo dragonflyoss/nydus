@@ -2127,7 +2127,7 @@ mod tests {
                     "type": "blobcache",
                     "compressed": true,
                     "config": {
-                        "work_dir": "/var/lib/containerd-nydus/cache",
+                        "work_dir": "/var/lib/containerd/io.containerd.snapshotter.v1.nydus/cache",
                         "disable_indexed_map": false
                     }
                 }
