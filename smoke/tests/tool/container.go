@@ -256,11 +256,11 @@ func getContainerBackendMetrics(t *testing.T) (*ContainerMetrics, error) {
 	return &info, nil
 }
 
-// searchAPISockPath search sock filepath in nydusd work dir, default in "/var/lib/containerd-nydus/socket"
+// searchAPISockPath search sock filepath in nydusd work dir, default in "/var/lib/containerd/io.containerd.snapshotter.v1.nydus/socket"
 func searchAPISockPath(t *testing.T) string {
 	var apiSockPath string
 
-	err := filepath.Walk("/var/lib/containerd-nydus/socket", func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk("/var/lib/containerd/io.containerd.snapshotter.v1.nydus/socket", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}

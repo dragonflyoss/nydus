@@ -5,7 +5,7 @@ if [ "$1" == "takeover_test" ]; then
     SNAPSHOTTER_CONFIG="misc/takeover/snapshotter_config.toml"
 fi
 
-readonly SNAPSHOTTER_VERSION=0.13.13
+readonly SNAPSHOTTER_VERSION=0.14.0
 readonly NERDCTL_VERSION=1.7.6
 readonly CNI_PLUGINS_VERSION=1.5.0
 

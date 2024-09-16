@@ -134,7 +134,7 @@ make
 
 ```
 # make sure the directory exists.
-mkdir -p /var/lib/containerd-nydus
+mkdir -p /var/lib/containerd/io.containerd.snapshotter.v1.nydus
 
 ./bin/containerd-nydus-grpc \
  --nydusd-config /etc/nydus/nydusd-config.fscache.json \
