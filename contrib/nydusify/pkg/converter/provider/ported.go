@@ -276,9 +276,7 @@ func load(ctx context.Context, reader io.Reader, store content.Store, iopts impo
 	}
 
 	for i := range imgs {
-		fieldsPath := []string{"target"}
 		if iopts.imageLabels != nil {
-			fieldsPath = append(fieldsPath, "labels")
 			imgs[i].Labels = iopts.imageLabels
 		}
 	}
