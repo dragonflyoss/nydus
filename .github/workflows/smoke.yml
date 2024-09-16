@@ -56,11 +56,11 @@ jobs:
         go-version-file: 'go.work'
         cache: false
     - name: Lint
-      uses: golangci/golangci-lint-action@v4
+      uses: golangci/golangci-lint-action@v6
       with:
-        version: v1.56
+        version: v1.61
         working-directory: ${{ matrix.path }}
-        args: --timeout=30m --issues-exit-code=0
+        args: --timeout=10m --verbose
 
   nydus-build:
     runs-on: ubuntu-latest
