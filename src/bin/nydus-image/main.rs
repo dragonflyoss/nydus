@@ -1619,7 +1619,6 @@ impl Command {
 
         let bootstrap_path = ArtifactStorage::SingleFile(PathBuf::from("nydus_prefetch_bootstrap"));
         let mut bootstrap_mgr = BootstrapManager::new(Some(bootstrap_path), None);
-        let mut blob_mgr = BlobManager::new(build_ctx.digester);
         let blobs = sb.superblock.get_blob_infos();
         let mut rafsv6table = RafsV6BlobTable::new();
         for blob in &blobs {
@@ -1630,7 +1629,6 @@ impl Command {
             &mut tree,
             &mut build_ctx,
             &mut bootstrap_mgr,
-            &mut blob_mgr,
             &mut rafsv6table,
         )
         .unwrap();

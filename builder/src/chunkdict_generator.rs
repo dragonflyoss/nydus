@@ -18,9 +18,7 @@ use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
 use crate::core::blob::Blob;
 use crate::core::node::Node;
-use crate::core::prefetch;
 use crate::{ArtifactWriter, BlobContext, NodeChunk};
-use anyhow::anyhow;
 use anyhow::{Ok, Result};
 use nydus_api::BackendConfigV2;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
@@ -30,20 +28,14 @@ use nydus_rafs::metadata::layout::{RafsBlobTable, RafsXAttrs};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
-use nydus_storage::meta::BlobCompressionContextHeader;
 use nydus_utils::compress::Algorithm;
 use nydus_utils::digest::RafsDigest;
-use nydus_utils::metrics::BlobcacheMetrics;
-use rand::Rng;
-use sha2::{Digest, Sha256};
 use core::panic;
-use std::cell::Ref;
 use std::ffi::OsString;
 use std::mem::size_of;
 use std::ops::Add;
 use std::ops::{Rem, Sub};
 use std::path::PathBuf;
-use std::process::Output;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::u32;
@@ -115,7 +107,6 @@ impl Generator {
         tree: &mut Tree,
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
-        blob_mgr: &mut BlobManager,
         blobtable: &mut RafsV6BlobTable,
     ) -> Result<()> {
         debug!("compressor: {}", ctx.compressor);
@@ -252,9 +243,6 @@ impl Generator {
             })
             .collect();
         blob_table_withprefetch.entries = updated_entries;
-        blob_table_withprefetch.entries 
-            .iter() 
-            .for_each(|blobinfo| debug!("blob id: {}", blobinfo.blob_id()));  
         // Dump Bootstrap
         let storage = &mut bootstrap_mgr.bootstrap_storage;
         let blob_table_withprefetch = RafsBlobTable::V6(blob_table_withprefetch);
