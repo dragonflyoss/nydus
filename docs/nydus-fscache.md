@@ -78,7 +78,7 @@ sudo systemctl status cachefilesd
 sudo lsof /dev/cachefiles
 ```
 
-## Get ctr-remote and the fscache-supported nydusd
+## Get nerdctl and the fscache-supported nydusd
 
 1. Make sure you have installed _rust 1.52.1_ version and golang.
 
@@ -95,12 +95,7 @@ make release
 4. Copy the "nydus-image" binary file compiled in Step 3 into _$PATH_ e.g. /usr/bin with \
 ``cp target/release/nydus-image /usr/bin``
 
-5. Build ctr-remote with
-
-``` bash
-cd contrib/ctr-remote
-make
-```
+5. Get nerdctl with [nerdctl docs](https://github.com/containerd/nerdctl?tab=readme-ov-file#install).
 
 ## Run container with nydus snapshotter
 
@@ -172,17 +167,17 @@ For more information on how to configure containerd to use nydus snapshotter ple
 6. Restart containerd with
    `service containerd restart`
 
-7. Run container with [ctr-remote](../contrib/ctr-remote)
+7. Run container with nerdctl
 
 ``` shell
 # pull nydus image
-contrib/ctr-remote/bin/ctr-remote images rpull docker.io/hsiangkao/ubuntu:20.04-rafs-v6
+nerdctl images pull --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6
 
 # run nydus image
-ctr run --rm -t --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6 ubuntu /bin/bash
+nerdctl run --rm -t --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6 ubuntu /bin/bash
 
 # remove nydus image
-ctr images rm docker.io/hsiangkao/ubuntu:20.04-rafs-v6
+nerdctl images rm docker.io/hsiangkao/ubuntu:20.04-rafs-v6
 ```
 
 Some RAFS v6 referenced images (in Zstd algorithms):

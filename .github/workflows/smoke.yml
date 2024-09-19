@@ -45,7 +45,6 @@ jobs:
       matrix:
         include:
           - path: contrib/nydusify
-          - path: contrib/ctr-remote
           - path: contrib/nydus-overlayfs
     steps:
     - name: Checkout
