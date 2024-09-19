@@ -211,6 +211,7 @@ impl Generator {
         .unwrap());
         Blob::dump(&prefetch_build_ctx, &mut prefetch_blob_mgr, &mut *blob_writer).unwrap();
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
+            blob_ctx.set_meta_info_enabled(true);
             Blob::dump_meta_data(&prefetch_build_ctx, blob_ctx, blob_writer.as_mut()).unwrap();
             debug!("prefetch blob id: {}", blob_ctx.blob_id);
         } else {

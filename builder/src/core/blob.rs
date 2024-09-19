@@ -160,7 +160,6 @@ impl Blob {
         blob_ctx: &mut BlobContext,
         blob_writer: &mut dyn Artifact,
     ) -> Result<()> {
-        blob_ctx.blob_meta_info_enabled = true;
         // Dump blob meta for v6 when it has chunks or bootstrap is to be inlined.
         if !blob_ctx.blob_meta_info_enabled || blob_ctx.uncompressed_blob_size == 0 {
             debug!("not inlined or blob size = 0");
