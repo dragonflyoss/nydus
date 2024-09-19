@@ -753,15 +753,35 @@ impl BlobCompressionContextInfo {
         let expected_raw_size = (compressed_size + BLOB_CCT_HEADER_SIZE) as usize;
         let mut raw_data = alloc_buf(expected_raw_size);
 
-        let read_size = reader
-            .read_all(&mut raw_data, blob_info.meta_ci_offset())
-            .map_err(|e| {
-                eio!(format!(
-                    "failed to read metadata for blob {} from backend, {}",
-                    blob_info.blob_id(),
-                    e
-                ))
-            })?;
+        let read_size = (|| {
+            // The maximum retry times
+            let mut retry_count = 3;
+
+            loop {
+                match reader.read_all(&mut raw_data, blob_info.meta_ci_offset()) {
+                    Ok(size) => return Ok(size),
+                    Err(e) => {
+                        // Handle BackendError, retry a maximum of three times.
+                        if retry_count > 0 {
+                            warn!(
+                                "failed to read metadata for blob {} from backend, {}, retry read metadata",
+                                blob_info.blob_id(),
+                                e
+                            );
+                            retry_count -= 1;
+                            continue;
+                        }
+
+                        return Err(eio!(format!(
+                            "failed to read metadata for blob {} from backend, {}",
+                            blob_info.blob_id(),
+                            e
+                        )));
+                    }
+                }
+            }
+        })()?;
+
         if read_size != expected_raw_size {
             return Err(eio!(format!(
                 "failed to read metadata for blob {} from backend, compressor {}, got {} bytes, expect {} bytes",
