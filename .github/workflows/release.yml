@@ -100,7 +100,6 @@ jobs:
     - name: build contrib go components
       run: |
         make -e GOARCH=${{ matrix.arch }} contrib-release
-        sudo mv contrib/ctr-remote/bin/ctr-remote .
         sudo mv contrib/nydusify/cmd/nydusify .
         sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
     - name: store-artifacts
@@ -108,7 +107,6 @@ jobs:
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}-contrib
         path: |
-          ctr-remote
           nydusify
           nydus-overlayfs
           containerd-nydus-grpc
