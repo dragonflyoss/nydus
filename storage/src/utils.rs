@@ -1,15 +1,9 @@
 // Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2024 Nydus Developers. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
 //! Utility helpers to support the storage subsystem.
-use std::alloc::{alloc, Layout};
-use std::cmp::{self, min};
-use std::io::{ErrorKind, IoSliceMut, Result};
-use std::os::fd::{AsFd, AsRawFd};
-use std::os::unix::io::RawFd;
-use std::slice::from_raw_parts_mut;
-
 use fuse_backend_rs::abi::fuse_abi::off64_t;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 #[cfg(target_os = "macos")]
@@ -19,6 +13,13 @@ use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
 };
+use std::alloc::{alloc, Layout};
+use std::cmp::{self, min};
+use std::io::{ErrorKind, IoSliceMut, Result};
+use std::os::fd::{AsFd, AsRawFd};
+use std::os::unix::io::RawFd;
+use std::path::PathBuf;
+use std::slice::from_raw_parts_mut;
 use vm_memory::bytes::Bytes;
 
 use crate::{StorageError, StorageResult};
@@ -123,7 +124,7 @@ pub fn copy_file_range(
             Some(&mut dst_off),
             len,
         )?;
-        if ret == 0 && len > 0 {
+        if ret == 0 {
             return Err(eio!("reach end of file when copy file range"));
         }
         len -= ret;
@@ -135,28 +136,51 @@ pub fn copy_file_range(
 #[cfg(not(target_os = "linux"))]
 pub fn copy_file_range(
     src: impl AsFd,
-    src_off: u64,
+    mut src_off: u64,
     dst: impl AsFd,
-    dst_off: u64,
-    len: usize,
+    mut dst_off: u64,
+    mut len: usize,
 ) -> Result<()> {
-    let mut buf = vec![0u8; len];
+    let buf_size = 4096;
+    let mut buf = vec![0u8; buf_size];
 
-    let ret = nix::sys::uio::pread(src.as_fd().as_raw_fd(), &mut buf, src_off as libc::off_t)?;
-    if ret == len {
-        let ret = nix::sys::uio::pwrite(dst.as_fd().as_raw_fd(), &buf, dst_off as libc::off_t)?;
-        if ret == len {
-            return Ok(());
+    while len > 0 {
+        let bytes_to_read = buf_size.min(len);
+        let read_bytes = nix::sys::uio::pread(
+            src.as_fd().as_raw_fd(),
+            &mut buf[..bytes_to_read],
+            src_off as libc::off_t,
+        )?;
+
+        if read_bytes == 0 {
+            return Err(eio!("reach end of file when read in copy_file_range"));
         }
+
+        let write_bytes = nix::sys::uio::pwrite(
+            dst.as_fd().as_raw_fd(),
+            &buf[..read_bytes],
+            dst_off as libc::off_t,
+        )?;
+        if write_bytes == 0 {
+            return Err(eio!("reach end of file when write in copy_file_range"));
+        }
+
+        src_off += read_bytes as u64;
+        dst_off += read_bytes as u64;
+        len -= read_bytes;
     }
 
-    Err(eio!("failed to copy data between files"))
+    Ok(())
 }
 
-pub fn get_path_from_file(file: &impl AsRawFd) -> String {
-    match std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())) {
-        Ok(v) => v.display().to_string(),
-        Err(_) => "".to_string(),
+pub fn get_path_from_file(file: &impl AsRawFd) -> Option<String> {
+    let path = PathBuf::from("/proc/self/fd").join(file.as_raw_fd().to_string());
+    match std::fs::read_link(&path) {
+        Ok(v) => Some(v.display().to_string()),
+        Err(e) => {
+            warn!("Failed to get path from file descriptor: {}", e);
+            None
+        }
     }
 }
 
@@ -447,5 +471,30 @@ mod tests {
         src.write_all(&buf).unwrap();
         copy_file_range(&src, 0, dst.as_file(), 4096, 4096).unwrap();
         assert_eq!(dst.as_file().metadata().unwrap().len(), 8192);
+
+        let small_buf = vec![8u8; 2048];
+        let mut small_src = TempFile::new().unwrap().into_file();
+        small_src.write_all(&small_buf).unwrap();
+        assert!(copy_file_range(&small_src, 0, dst.as_file(), 4096, 4096).is_err());
+
+        let empty_src = TempFile::new().unwrap().into_file();
+        assert!(copy_file_range(&empty_src, 0, dst.as_file(), 4096, 4096).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_get_path_from_file() {
+        let temp_file = TempFile::new().unwrap();
+        let file = temp_file.as_file();
+        let path = get_path_from_file(file).unwrap();
+        assert_eq!(path, temp_file.as_path().display().to_string());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_get_path_from_file_non_linux() {
+        let temp_file = TempFile::new().unwrap();
+        let file = temp_file.as_file();
+        assert_eq!(get_path_from_file(file).is_none());
     }
 }
