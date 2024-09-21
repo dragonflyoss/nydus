@@ -8,7 +8,7 @@ use std::path::Path;
 
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, DropBehavior, OptionalExtension, Transaction};
+use rusqlite::{Connection, DropBehavior, OpenFlags, OptionalExtension, Transaction};
 
 use super::Result;
 
@@ -24,7 +24,8 @@ impl CasDb {
     }
 
     pub fn from_file(db_path: impl AsRef<Path>) -> Result<CasDb> {
-        let mgr = SqliteConnectionManager::file(db_path);
+        let mgr = SqliteConnectionManager::file(db_path)
+            .with_flags(OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE);
         let pool = r2d2::Pool::new(mgr)?;
         let conn = pool.get()?;
 
