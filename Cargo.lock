@@ -1315,6 +1315,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "tempfile",
  "vmm-sys-util",
  "xattr",
  "zstd 0.12.4",
