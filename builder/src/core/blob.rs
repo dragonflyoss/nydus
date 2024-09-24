@@ -4,9 +4,11 @@
 
 use core::panic;
 use std::borrow::Cow;
+use std::path::PathBuf;
 use std::slice;
 
 use anyhow::{Context, Result};
+use libc::IPTOS_PREC_FLASHOVERRIDE;
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{toc, BlobMetaChunkArray};
@@ -29,15 +31,17 @@ impl Blob {
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut dyn Artifact,
+        work_dir: Option<PathBuf>,
     ) -> Result<()> {
         match ctx.conversion_type {
             ConversionType::DirectoryToRafs => {
+                let is_prefetch = ctx.blob_id == String::from("Prefetch-blob");
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
                 let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch)?;
                 for (idx, node) in inodes.iter().enumerate() {
                     let mut node = node.lock().unwrap();
                     let size = node
-                        .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf)
+                        .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf, is_prefetch, work_dir.clone())
                         .context("failed to dump blob chunks")?;
                     if idx < prefetch_entries {
                         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {

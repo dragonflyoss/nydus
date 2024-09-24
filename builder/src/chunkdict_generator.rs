@@ -188,9 +188,8 @@ impl Generator {
             blobs_id_and_compressor,
             file_nodes_prefetch.clone(),
             &mut backend_config,
-            tmp_path,
+            tmp_path.clone(),
         );
-        panic!();
 
         let prefetch_blob_index = prefetch_blob_info.blob_index();
         let mut chunk_count = 0;
@@ -247,33 +246,6 @@ impl Generator {
             ..Default::default()
         };
 
-        let blob_mgr = BlobFactory::new_backend(&backend_config, "Fix-Prefetch-Blob-ID").unwrap();
-        let reader = blob_mgr
-            .get_reader("f22c9758339fcf8fe77a4ca0b4deba2ededad9904bdf8e520df2c0277e666070")
-            .unwrap();
-
-        println!("Reader Done");
-        let mut buf2: Vec<u8> = vec![0; 19];
-        let size = reader.read(&mut buf2, 19).unwrap();
-        println!("size: {}", size);
-        println!("buf len: {}", buf2.len());
-
-        let revert = Self::decompress_zstd(&buf2).unwrap();
-        println!("len: {}", revert.len());
-
-        let mut buf: Vec<u8> = vec![0; 19];
-        let size = reader.read(&mut buf, 0).unwrap();
-        println!("size: {}", size);
-
-        let revert = Self::decompress_zstd(&buf).unwrap();
-        println!("len: {}", revert.len());
-
-        let reader = blob_mgr
-            .get_reader("be2a8de3dcf46c94ce85cdc8e07ac308f4d8a95490d956c38d780fd610db0813")
-            .unwrap();
-
-        debug!("Reader create success");
-
         let mut prefetch_blob_mgr = BlobManager::new(nydus_utils::digest::Algorithm::Blake3);
         // prefetch_blob_mgr.set_current_blob_index(0);
         let mut prefetch_blob_ctx =
@@ -292,6 +264,7 @@ impl Generator {
             &prefetch_build_ctx,
             &mut prefetch_blob_mgr,
             &mut *blob_writer,
+            Some(tmp_path),
         )
         .unwrap();
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
@@ -300,6 +273,10 @@ impl Generator {
         } else {
             panic!();
         }
+        // replace the prefetch build ctx blod id to empty
+        // to generate blob id
+        prefetch_build_ctx.blob_id = String::from("");
+        prefetch_blob_mgr.get_current_blob().unwrap().1.blob_id = String::from("");
         finalize_blob(
             &mut prefetch_build_ctx,
             &mut prefetch_blob_mgr,
@@ -357,7 +334,6 @@ impl Generator {
             }
             
             let blob_mgr = BlobFactory::new_backend(&node_backend, "Fix-Prefetch-Blob-ID").unwrap();
-
 
             debug!("Node Path: {}", node.path().display());
             let mut path = PathBuf::from(&workdir);
