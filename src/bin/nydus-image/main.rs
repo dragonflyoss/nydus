@@ -552,6 +552,10 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .help("Prefetch files")
                     .action(ArgAction::Append),
             )
+            // .arg(
+            //     Arg::new("blobs-dir-path")
+            //     .required(true),                
+            // )
             .arg(arg_config.clone())
             .arg(
                 Arg::new("blob-dir")
@@ -1601,6 +1605,8 @@ impl Command {
     }
 
     fn optimize(matches: &ArgMatches) -> Result<()> {
+        let blobs_dir_path = Self::get_blobs_dir(matches).unwrap();
+        debug!("Blobs Dir Path: {}", blobs_dir_path.display());
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let config = Self::get_configuration(matches)?;
         config.internal.set_blob_accessible(true);
@@ -1630,6 +1636,7 @@ impl Command {
             &mut build_ctx,
             &mut bootstrap_mgr,
             &mut rafsv6table,
+            blobs_dir_path.to_path_buf(),
         )
         .unwrap();
         Ok(())
@@ -1732,6 +1739,13 @@ impl Command {
                 Some(s) => Ok(Path::new(s)),
                 None => bail!("missing parameter `bootstrap` or `BOOTSTRAP`"),
             },
+        }
+    }
+
+    fn get_blobs_dir(matches: &ArgMatches) -> Result<&Path> {
+        match matches.get_one::<String>("blob-dir") {
+            Some(s) => Ok(Path::new(s)),
+            None => bail!("missing parameter `blob-dir`")
         }
     }
 

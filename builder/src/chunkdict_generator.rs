@@ -120,6 +120,7 @@ impl Generator {
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blobtable: &mut RafsV6BlobTable,
+        blobs_dir_path: PathBuf
     ) -> Result<()> {
         let (prefetch_nodes, _) = ctx.prefetch.get_file_nodes();
         for node in prefetch_nodes {
@@ -160,8 +161,7 @@ impl Generator {
             backend_type: String::from("localfs"),
             localdisk: None,
             localfs: Some(nydus_api::LocalFsConfig {
-                blob_file: String::from("/root/nydusTestImage/test-image/blobs/f22c9758339fcf8fe77a4ca0b4deba2ededad9904bdf8e520df2c0277e666070"),
-                dir: String::from("/root/nydusTestImage/test-image/blobs/"),
+                dir: blobs_dir_path.display().to_string(),
                 alt_dirs: Vec::new(),
                 ..Default::default()
             }),
