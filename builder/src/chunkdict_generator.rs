@@ -348,13 +348,15 @@ impl Generator {
             let blob_id = node.chunks.get(0).unwrap().inner.blob_index();
             let blob_id = blob_ids.get(blob_id as usize).unwrap().blob_id.clone();
             // backend.localfs.unwrap().blob_file = 
-            let node_backend = backend.clone();
+            let mut node_backend = backend.clone();
             let blob_dir = backend.localfs.as_ref().unwrap().dir.clone();
             let mut blob_file = PathBuf::from(blob_dir);
             blob_file.push(blob_id);
-            node_backend.localfs.unwrap().blob_file = blob_file.display().to_string();
+            if let Some(localfs_config) = &mut node_backend.localfs {
+                localfs_config.blob_file = blob_file.display().to_string();
+            }
             
-            let blob_mgr = BlobFactory::new_backend(backend, "Fix-Prefetch-Blob-ID").unwrap();
+            let blob_mgr = BlobFactory::new_backend(&node_backend, "Fix-Prefetch-Blob-ID").unwrap();
 
 
             debug!("Node Path: {}", node.path().display());
