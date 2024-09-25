@@ -2,13 +2,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use core::panic;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::slice;
 
 use anyhow::{Context, Result};
-use libc::IPTOS_PREC_FLASHOVERRIDE;
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{toc, BlobMetaChunkArray};
@@ -19,8 +17,7 @@ use sha2::digest::Digest;
 use super::layout::BlobLayout;
 use super::node::Node;
 use crate::core::context::Artifact;
-use crate::core::node;
-use crate::{BlobContext, BlobManager, BuildContext, ConversionType, Feature, Overlay};
+use crate::{BlobContext, BlobManager, BuildContext, ConversionType, Feature};
 
 /// Generator for RAFS data blob.
 pub(crate) struct Blob {}

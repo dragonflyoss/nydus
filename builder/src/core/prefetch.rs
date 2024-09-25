@@ -10,12 +10,10 @@ use anyhow::{anyhow, Context, Error, Ok, Result};
 use indexmap::IndexMap;
 use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
 use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
-use nydus_storage::device::BlobInfo;
 
 use super::node::Node;
 use crate::core::tree::TreeNode;
-use crate::{ChunkdictBlobInfo, Overlay};
-use crate::{BlobManager, BootstrapManager, BuildContext, Tree};
+use crate::Tree;
 
 /// Filesystem data prefetch policy.
 #[derive(Clone, Copy, Debug, PartialEq)]

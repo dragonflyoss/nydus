@@ -31,7 +31,7 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobContext,
+    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor,
     BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo,
     ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature, Features, Generator,
     HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree,

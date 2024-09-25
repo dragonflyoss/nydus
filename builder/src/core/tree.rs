@@ -29,7 +29,7 @@ use nydus_rafs::metadata::layout::{bytes_to_os_str, RafsXAttrs};
 use nydus_rafs::metadata::{Inode, RafsInodeExt, RafsSuper};
 use nydus_utils::{lazy_drop, root_tracer, timing_tracer};
 
-use super::node::{self, ChunkSource, Node, NodeChunk, NodeInfo};
+use super::node::{ChunkSource, Node, NodeChunk, NodeInfo};
 use super::overlay::{Overlay, WhiteoutType};
 use crate::core::overlay::OVERLAYFS_WHITEOUT_OPAQUE;
 use crate::{BuildContext, ChunkDict};

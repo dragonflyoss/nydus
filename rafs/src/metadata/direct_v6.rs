@@ -25,7 +25,6 @@ use std::io::{Result, SeekFrom};
 use std::mem::size_of;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::io::AsRawFd;
-use std::process::id;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,7 +46,7 @@ use crate::metadata::layout::v6::{
 };
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrName, XattrValue};
 use crate::metadata::{
-    chunk, Attr, Entry, Inode, RafsBlobExtraInfo, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsSuperBlock, RafsSuperFlags, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME
+    Attr, Entry, Inode, RafsBlobExtraInfo, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsSuperBlock, RafsSuperFlags, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME
 };
 use crate::{MetaType, RafsError, RafsInodeExt, RafsIoReader, RafsResult};
 

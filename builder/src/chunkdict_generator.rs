@@ -20,8 +20,7 @@ use crate::core::blob::Blob;
 use crate::core::node::Node;
 use crate::{ArtifactWriter, BlobContext, NodeChunk};
 use anyhow::{Ok, Result};
-use nix::sys::socket::sockopt::PassCred;
-use nydus_api::{BackendConfigV2, LocalFsConfig};
+use nydus_api::BackendConfigV2;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
@@ -43,7 +42,7 @@ use std::io::Write;
 use std::mem::size_of;
 use std::ops::Add;
 use std::ops::{Rem, Sub};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -140,7 +139,6 @@ impl Generator {
         // TODO: Add Appropriate BlobFeatures
         let mut prefetch_blob_info = BlobInfo::new(
             blob_layer_num as u32,
-            // String::new(), // String::from("2f1514181aadccd913abd94cfa592701a5686ab23f8df1dff1b74710febc6d4a"),
             String::from("Prefetch-blob"),
             0,
             0,

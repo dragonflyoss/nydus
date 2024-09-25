@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::ffi::{OsStr, OsString};
-use std::fmt::{self, format, Display, Formatter, Result as FmtResult};
+use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
 use std::io::Read;
 use std::ops::Deref;
