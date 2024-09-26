@@ -183,7 +183,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.is_sock(),
             InodeWrapper::V6(i) => i.is_sock(),
-            InodeWrapper::Ref(i) => i.as_inode().is_dir(),
+            InodeWrapper::Ref(i) => i.as_inode().is_sock(),
         }
     }
 
