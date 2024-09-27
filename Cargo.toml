@@ -95,6 +95,7 @@ default = [
     "backend-s3",
     "backend-http-proxy",
     "backend-localdisk",
+    "dedup",
 ]
 virtiofs = [
     "nydus-service/virtiofs",
@@ -115,6 +116,8 @@ backend-localdisk = [
 backend-oss = ["nydus-storage/backend-oss"]
 backend-registry = ["nydus-storage/backend-registry"]
 backend-s3 = ["nydus-storage/backend-s3"]
+
+dedup = ["nydus-storage/dedup"]
 
 [workspace]
 members = [
