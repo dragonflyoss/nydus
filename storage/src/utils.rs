@@ -18,8 +18,11 @@ use std::cmp::{self, min};
 use std::io::{ErrorKind, IoSliceMut, Result};
 use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::io::RawFd;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::slice::from_raw_parts_mut;
+#[cfg(target_os = "macos")]
+use std::{ffi::CStr, mem, os::raw::c_char};
 use vm_memory::bytes::Bytes;
 
 use crate::{StorageError, StorageResult};
@@ -173,6 +176,7 @@ pub fn copy_file_range(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 pub fn get_path_from_file(file: &impl AsRawFd) -> Option<String> {
     let path = PathBuf::from("/proc/self/fd").join(file.as_raw_fd().to_string());
     match std::fs::read_link(&path) {
@@ -182,6 +186,22 @@ pub fn get_path_from_file(file: &impl AsRawFd) -> Option<String> {
             None
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_path_from_file(file: &impl AsRawFd) -> Option<String> {
+    let fd = file.as_raw_fd();
+    let mut buf: [c_char; 1024] = unsafe { mem::zeroed() };
+
+    let result = unsafe { fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+
+    if result == -1 {
+        warn!("Failed to get path from file descriptor");
+        return None;
+    }
+
+    let cstr = unsafe { CStr::from_ptr(buf.as_ptr()) };
+    cstr.to_str().ok().map(|s| s.to_string())
 }
 
 /// An memory cursor to access an `FileVolatileSlice` array.
@@ -481,20 +501,14 @@ mod tests {
         assert!(copy_file_range(&empty_src, 0, dst.as_file(), 4096, 4096).is_err());
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn test_get_path_from_file() {
         let temp_file = TempFile::new().unwrap();
         let file = temp_file.as_file();
         let path = get_path_from_file(file).unwrap();
         assert_eq!(path, temp_file.as_path().display().to_string());
-    }
 
-    #[cfg(not(target_os = "linux"))]
-    #[test]
-    fn test_get_path_from_file_non_linux() {
-        let temp_file = TempFile::new().unwrap();
-        let file = temp_file.as_file();
-        assert_eq!(get_path_from_file(file).is_none());
+        let invalid_fd: RawFd = -1;
+        assert!(get_path_from_file(&invalid_fd).is_none());
     }
 }

@@ -124,6 +124,15 @@ impl CasMgr {
                         }
                     }
                 }
+            } else if d_file.as_ref().unwrap().metadata().is_err() {
+                // If the blob file no longer exists, delete if from fds and db.
+                let mut guard = self.fds.write().unwrap();
+                guard.remove(&path);
+                let blob_ids: &[String] = &[path];
+                if let Err(e) = self.db.delete_blobs(&blob_ids) {
+                    warn!("failed to delete blobs: {}", e);
+                }
+                return false;
             }
 
             if let Some(f) = d_file {
@@ -176,6 +185,33 @@ impl CasMgr {
             blob.digester().to_string() + ":" + &chunk.chunk_id().to_string()
         }
     }
+
+    /// Check if blobs in the database still exist on the filesystem and perform garbage collection.
+    pub fn gc(&self) -> Result<()> {
+        let all_blobs = self.db.get_all_blobs()?;
+        let mut blobs_not_exist = Vec::new();
+        for (_, file_path) in all_blobs {
+            if !std::path::Path::new(&file_path).exists() {
+                blobs_not_exist.push(file_path);
+            }
+        }
+
+        // If there are any non-existent blobs, delete them from the database.
+        if !blobs_not_exist.is_empty() {
+            self.db.delete_blobs(&blobs_not_exist).map_err(|e| {
+                warn!("failed to delete blobs: {}", e);
+                e
+            })?;
+        }
+
+        let mut guard = self.fds.write().unwrap();
+        for path in blobs_not_exist {
+            // Remove the non-existent blob paths from the cache.
+            guard.remove(&path);
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -219,5 +255,69 @@ mod tests {
         let mut buf2 = vec![0x0u8; 8192];
         tmpfile3.read_exact(&mut buf2).unwrap();
         assert_eq!(buf, buf2);
+    }
+
+    #[test]
+    fn test_cas_dedup_chunk_failed() {
+        let dbfile = TempFile::new().unwrap();
+        let mgr = CasMgr::new(dbfile.as_path()).unwrap();
+
+        let new_blob = BlobInfo::new(
+            1,
+            "test_blob".to_string(),
+            8192,
+            8192,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            1,
+            BlobFeatures::empty(),
+        );
+
+        let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest::default();
+        chunk.uncompress_offset = 0;
+        chunk.uncompress_size = 8192;
+        let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
+
+        let tmpfile = TempFile::new().unwrap().into_file();
+
+        assert!(!mgr.dedup_chunk(&new_blob, chunk.as_ref(), &tmpfile));
+    }
+
+    #[test]
+    fn test_cas_gc() {
+        let dbfile = TempFile::new().unwrap();
+        let mgr = CasMgr::new(dbfile.as_path()).unwrap();
+
+        let tmpfile = TempFile::new().unwrap();
+        let blob_path = tmpfile
+            .as_path()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string();
+        let blob = BlobInfo::new(
+            1,
+            blob_path.clone(),
+            8192,
+            8192,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            1,
+            BlobFeatures::empty(),
+        );
+        let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest { data: [3u8; 32] };
+        chunk.uncompress_offset = 0;
+        chunk.uncompress_size = 8192;
+        let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
+        mgr.record_chunk(&blob, chunk.as_ref(), &blob_path).unwrap();
+
+        let all_blobs_before_gc = mgr.db.get_all_blobs().unwrap();
+        assert_eq!(all_blobs_before_gc.len(), 1);
+
+        drop(tmpfile);
+        mgr.gc().unwrap();
+
+        let all_blobs_after_gc = mgr.db.get_all_blobs().unwrap();
+        assert_eq!(all_blobs_after_gc.len(), 0);
     }
 }

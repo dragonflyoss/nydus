@@ -129,7 +129,7 @@ impl CasDb {
         Ok(conn.last_insert_rowid() as u64)
     }
 
-    pub fn delete_blobs(&mut self, blobs: &[String]) -> Result<()> {
+    pub fn delete_blobs(&self, blobs: &[String]) -> Result<()> {
         let delete_blobs_sql = "DELETE FROM Blobs WHERE BlobId = (?1)";
         let delete_chunks_sql = "DELETE FROM Chunks WHERE BlobId = (?1)";
         let mut conn = self.get_connection()?;
