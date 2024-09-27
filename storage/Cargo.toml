@@ -58,7 +58,6 @@ regex = "1.7.0"
 toml = "0.5"
 
 [features]
-default = ["dedup"]
 backend-localdisk = []
 backend-localdisk-gpt = ["gpt", "backend-localdisk"]
 backend-localfs = []
