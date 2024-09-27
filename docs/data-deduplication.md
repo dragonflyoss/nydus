@@ -164,4 +164,25 @@ So Nydus provides a node level CAS system to reduce data downloaded from the reg
 
 The node level CAS system helps to achieve O4 and O5.
 
-# Node Level CAS System (WIP)
+# Node Level CAS System (Experimental)
+Data deduplication can also be achieved when accessing Nydus images. The key idea is to maintain information about data chunks available on local host by using a database.
+When a chunk is needed but not available in the uncompressed data blob files yet, we will query the database using chunk digest as key. 
+If a record with the same chunk digest already exists, it will be reused.
+We call such a system as CAS (Content Addressable Storage).
+
+## Chunk Deduplication by Using CAS as L2 Cache
+In this chunk deduplication mode, the CAS system works as an L2 cache to provide chunk data on demand, and it keeps Nydus bootstrap blobs as is.
+It works in this way:
+1. query the database when a chunk is needed but not available yet
+2. copy data from source blob to target blob using `copy_file_range` if a record with the same chunk digest
+3. download chunk data from remote if there's no record in database
+4. insert a new record into the database for just downloaded chunk so it can be reused later.
+
+![chunk_dedup_l2cache](images/chunk_dedup_l2_cache.png)
+
+A data download operation can be avoided if a chunk already exists in the database.
+And if the underlying filesystem support data reference, `copy_file_range` will use reference instead of data copy, thus reduce storage space consumption.
+This design has benefit of robustness, the target blob file doesn't have any dependency on the database and source blob files, so ease garbage collection.
+But it depends on capability of underlying filesystem to reduce storage consumption.
+
+## Chunk Deduplication by Rebuilding Nydus Bootstrap (WIP)
