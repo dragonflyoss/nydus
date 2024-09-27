@@ -21,8 +21,9 @@ use crate::cache::state::{
     BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap, NoopChunkMap,
 };
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
-use crate::cache::{BlobCache, BlobCacheMgr};
+use crate::cache::{BlobCache, BlobCacheMgr, CasMgr};
 use crate::device::{BlobFeatures, BlobInfo};
+use crate::utils::get_path_from_file;
 
 pub const BLOB_RAW_FILE_SUFFIX: &str = ".blob.raw";
 pub const BLOB_DATA_FILE_SUFFIX: &str = ".blob.data";
@@ -209,10 +210,19 @@ impl FileCacheEntry {
             reader.clone()
         };
 
+        // Turn off chunk deduplication in case of cache data encryption is enabled or is tarfs.
+        let cas_mgr = if mgr.cache_encrypted || mgr.cache_raw_data || is_tarfs {
+            warn!("chunk deduplication trun off");
+            None
+        } else {
+            CasMgr::get_singleton()
+        };
+
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
         let blob_uncompressed_size = blob_info.uncompressed_size();
         let is_legacy_stargz = blob_info.is_legacy_stargz();
 
+        let blob_file_path = format!("{}/{}", mgr.work_dir, blob_id);
         let (
             file,
             meta,
@@ -221,7 +231,6 @@ impl FileCacheEntry {
             is_get_blob_object_supported,
             need_validation,
         ) = if is_tarfs {
-            let blob_file_path = format!("{}/{}", mgr.work_dir, blob_id);
             let file = OpenOptions::new()
                 .create(false)
                 .write(false)
@@ -231,7 +240,6 @@ impl FileCacheEntry {
                 Arc::new(BlobStateMap::from(NoopChunkMap::new(true))) as Arc<dyn ChunkMap>;
             (file, None, chunk_map, true, true, false)
         } else {
-            let blob_file_path = format!("{}/{}", mgr.work_dir, blob_id);
             let (chunk_map, is_direct_chunkmap) =
                 Self::create_chunk_map(mgr, &blob_info, &blob_file_path)?;
             // Validation is supported by RAFS v5 (which has no meta_ci) or v6 with chunk digest array.
@@ -266,6 +274,7 @@ impl FileCacheEntry {
                 );
                 return Err(einval!(msg));
             }
+            let load_chunk_digest = need_validation || cas_mgr.is_some();
             let meta = if blob_info.meta_ci_is_valid()
                 || blob_info.has_feature(BlobFeatures::IS_CHUNKDICT_GENERATED)
             {
@@ -275,7 +284,7 @@ impl FileCacheEntry {
                     Some(blob_meta_reader),
                     Some(runtime.clone()),
                     false,
-                    need_validation,
+                    load_chunk_digest,
                 )?;
                 Some(meta)
             } else {
@@ -307,6 +316,16 @@ impl FileCacheEntry {
             (Default::default(), Default::default())
         };
 
+        let mut blob_data_file_path = String::new();
+        if cas_mgr.is_some() {
+            blob_data_file_path = if let Some(path) = get_path_from_file(&file) {
+                path
+            } else {
+                warn!("can't get path from file");
+                "".to_string()
+            }
+        }
+
         trace!(
             "filecache entry: is_raw_data {}, direct {}, legacy_stargz {}, separate_meta {}, tarfs {}, batch {}, zran {}",
             mgr.cache_raw_data,
@@ -322,8 +341,10 @@ impl FileCacheEntry {
             blob_info,
             cache_cipher_object,
             cache_cipher_context,
+            cas_mgr,
             chunk_map,
             file: Arc::new(file),
+            file_path: Arc::new(blob_data_file_path),
             meta,
             metrics: mgr.metrics.clone(),
             prefetch_state: Arc::new(AtomicU32::new(0)),
