@@ -38,7 +38,12 @@ type CompactOption struct {
 	BackendType         string
 	BackendConfigPath   string
 	OutputJSONPath      string
-	CompactConfigPath   string
+
+	MinUsedRatio    string
+	CompactBlobSize string
+	MaxCompactSize  string
+	LayersToCompact string
+	BlobsDir        string
 }
 
 type GenerateOption struct {
@@ -82,7 +87,11 @@ func (builder *Builder) Compact(option CompactOption) error {
 	args := []string{
 		"compact",
 		"--bootstrap", option.BootstrapPath,
-		"--config", option.CompactConfigPath,
+		"--blob-dir", option.BlobsDir,
+		"--min-used-ratio", option.MinUsedRatio,
+		"--compact-blob-size", option.CompactBlobSize,
+		"--max-compact-size", option.MaxCompactSize,
+		"--layers-to-compact", option.LayersToCompact,
 		"--backend-type", option.BackendType,
 		"--backend-config-file", option.BackendConfigPath,
 		"--log-level", "info",

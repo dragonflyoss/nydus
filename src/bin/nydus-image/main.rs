@@ -699,17 +699,17 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     Arg::new("min-used-ratio")
                         .long("min-used-ratio")
-                        .help("Lower bound of used ratio for blobs to be kept")
+                        .help("Lower bound of used ratio for blobs to be kept, possible values: 0-99, 0 means disable")
                 )
                 .arg(
                     Arg::new("compact-blob-size")
                         .long("compact-blob-size")
-                        .help("Upper bound of blob size for blobs to be compacted")
+                        .help("Upper bound of blob size for blobs to be compacted, in bytes")
                 )
                 .arg(
                     Arg::new("max-compact-size")
                         .long("max-compact-size")
-                        .help("Upper bound of compacted blob size")
+                        .help("Upper bound of compacted blob size, in bytes")
                 )
                 .arg(
                     Arg::new("layers-to-compact")

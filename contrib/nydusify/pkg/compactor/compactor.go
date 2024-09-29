@@ -10,18 +10,18 @@ import (
 )
 
 var defaultCompactConfig = &CompactConfig{
-	MinUsedRatio:    5,
-	CompactBlobSize: 10485760,
-	MaxCompactSize:  104857600,
-	LayersToCompact: 32,
+	MinUsedRatio:    "5",
+	CompactBlobSize: "10485760",
+	MaxCompactSize:  "104857600",
+	LayersToCompact: "32",
 }
 
 type CompactConfig struct {
-	MinUsedRatio    int    `json:"min_used_ratio"`
-	CompactBlobSize int    `json:"compact_blob_size"`
-	MaxCompactSize  int    `json:"max_compact_size"`
-	LayersToCompact int    `json:"layers_to_compact"`
-	BlobsDir        string `json:"blobs_dir,omitempty"`
+	MinUsedRatio    string
+	CompactBlobSize string
+	MaxCompactSize  string
+	LayersToCompact string
+	BlobsDir        string
 }
 
 func (cfg *CompactConfig) Dumps(filePath string) error {
@@ -81,11 +81,6 @@ func (compactor *Compactor) Compact(bootstrapPath, chunkDict, backendType, backe
 	if err := os.Remove(targetBootstrap); err != nil && !os.IsNotExist(err) {
 		return "", errors.Wrap(err, "failed to delete old bootstrap file")
 	}
-	// prepare config file
-	configFilePath := filepath.Join(compactor.workdir, "compact.json")
-	if err := compactor.cfg.Dumps(configFilePath); err != nil {
-		return "", errors.Wrap(err, "compact err")
-	}
 	outputJSONPath := filepath.Join(compactor.workdir, "compact-result.json")
 	if err := os.Remove(outputJSONPath); err != nil && !os.IsNotExist(err) {
 		return "", errors.Wrap(err, "failed to delete old output-json file")
@@ -97,7 +92,11 @@ func (compactor *Compactor) Compact(bootstrapPath, chunkDict, backendType, backe
 		BackendType:         backendType,
 		BackendConfigPath:   backendConfigFile,
 		OutputJSONPath:      outputJSONPath,
-		CompactConfigPath:   configFilePath,
+		MinUsedRatio:        compactor.cfg.MinUsedRatio,
+		CompactBlobSize:     compactor.cfg.CompactBlobSize,
+		MaxCompactSize:      compactor.cfg.MaxCompactSize,
+		LayersToCompact:     compactor.cfg.LayersToCompact,
+		BlobsDir:            compactor.cfg.BlobsDir,
 	})
 	if err != nil {
 		return "", errors.Wrap(err, "failed to run compact command")
