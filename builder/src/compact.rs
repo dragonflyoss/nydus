@@ -48,22 +48,30 @@ pub struct Config {
     /// available value: 0-99, 0 means disable
     /// hint: it's better to disable this option when there are some shared blobs
     /// for example: build-cache
-    #[serde(default)]
-    min_used_ratio: u8,
+    pub min_used_ratio: u8,
     /// we compact blobs whose size are less than compact_blob_size
-    #[serde(default = "default_compact_blob_size")]
-    compact_blob_size: usize,
+    pub compact_blob_size: usize,
     /// size of compacted blobs should not be larger than max_compact_size
-    #[serde(default = "default_max_compact_size")]
-    max_compact_size: usize,
+    pub max_compact_size: usize,
     /// if number of blobs >= layers_to_compact, do compact
     /// 0 means always try compact
-    #[serde(default)]
-    layers_to_compact: usize,
+    pub layers_to_compact: usize,
     /// local blobs dir, may haven't upload to backend yet
     /// what's more, new blobs will output to this dir
     /// name of blob file should be equal to blob_id
-    blobs_dir: String,
+    pub blobs_dir: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            min_used_ratio: 0,
+            compact_blob_size: default_compact_blob_size(),
+            max_compact_size: default_max_compact_size(),
+            layers_to_compact: 0,
+            blobs_dir: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -79,7 +87,7 @@ impl ChunkKey {
         match c {
             ChunkWrapper::V5(_) => Self::Digest(*c.id()),
             ChunkWrapper::V6(_) => Self::Offset(c.blob_index(), c.compressed_offset()),
-            ChunkWrapper::Ref(_) => unimplemented!("unsupport ChunkWrapper::Ref(c)"),
+            ChunkWrapper::Ref(_) => Self::Digest(*c.id()),
         }
     }
 }
@@ -790,7 +798,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "not implemented: unsupport ChunkWrapper::Ref(c)"]
     fn test_chunk_key_from() {
         let cw = ChunkWrapper::new(RafsVersion::V5);
         matches!(ChunkKey::from(&cw), ChunkKey::Digest(_));

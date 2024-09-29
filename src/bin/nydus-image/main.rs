@@ -18,7 +18,7 @@ use crate::deduplicate::{
     SqliteDatabase,
 };
 use std::convert::TryFrom;
-use std::fs::{self, metadata, DirEntry, File, OpenOptions};
+use std::fs::{self, metadata, DirEntry, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -682,7 +682,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                                 .join(", ")
                         ))
                         .required(false)
-                        .group("backend"),
                 )
                 .arg(
                     Arg::new("backend-config")
@@ -698,21 +697,33 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .required(false),
                 )
                 .arg(
-                    Arg::new("blob")
-                        .long("blob")
-                        .short('b')
-                        .help("Path to RAFS data blob file")
-                        .required(false)
-                        .group("backend"),
+                    Arg::new("min-used-ratio")
+                        .long("min-used-ratio")
+                        .help("Lower bound of used ratio for blobs to be kept")
+                )
+                .arg(
+                    Arg::new("compact-blob-size")
+                        .long("compact-blob-size")
+                        .help("Upper bound of blob size for blobs to be compacted")
+                )
+                .arg(
+                    Arg::new("max-compact-size")
+                        .long("max-compact-size")
+                        .help("Upper bound of compacted blob size")
+                )
+                .arg(
+                    Arg::new("layers-to-compact")
+                        .long("layers-to-compact")
+                        .help("If number of blobs >= layers_to_compact, do compact. 0 means always compact")
                 )
                 .arg(
                     Arg::new("blob-dir")
                         .long("blob-dir")
                         .short('D')
                         .help(
-                            "Directory for localfs storage backend, hosting data blobs and cache files",
+                            "Local blobs dir for blobs not in backend, also for output blobs",
                         )
-                        .group("backend"),
+                        .required(true),
                 )
                 .arg( arg_chunk_dict )
                 .arg(
@@ -724,11 +735,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                 .arg(
                     arg_output_json,
                 )
-                .group(
-                    clap::ArgGroup::new("backend")
-                        .args(&["backend-type", "blob", "blob-dir"])
-                        .required(false),
-                ),
         );
 
     app.subcommand(
@@ -1504,7 +1510,12 @@ impl Command {
             Some(s) => PathBuf::from(s),
         };
 
-        let (config, backend) = Self::get_backend(matches, "compactor")?;
+        let (config, backend) = match Self::get_backend(matches, "compactor") {
+            Ok((c, b)) => (c, b),
+            Err(e) => {
+                bail!("{}, --blob-dir or --backend-type must be specified", e);
+            }
+        };
 
         let (rs, _) = RafsSuper::load_from_file(&bootstrap_path, config.clone(), false)?;
         info!("load bootstrap {:?} successfully", bootstrap_path);
@@ -1517,16 +1528,26 @@ impl Command {
             )?),
         };
 
-        let config_file_path = matches.get_one::<String>("config").unwrap();
-        let file = File::open(config_file_path)
-            .with_context(|| format!("failed to open config file {}", config_file_path))?;
-        let config = serde_json::from_reader(file)
-            .with_context(|| format!("invalid config file {}", config_file_path))?;
+        let mut compact_config: nydus_builder::CompactConfig = Default::default();
+        if let Some(min_used_ratio) = matches.get_one::<String>("min-used-ratio") {
+            compact_config.min_used_ratio = min_used_ratio.parse()?;
+        }
+        if let Some(compact_blob_size) = matches.get_one::<String>("compact-blob-size") {
+            compact_config.compact_blob_size = compact_blob_size.parse()?;
+        }
+        if let Some(max_compact_size) = matches.get_one::<String>("max-compact-size") {
+            compact_config.max_compact_size = max_compact_size.parse()?;
+        }
+        if let Some(layers_to_compact) = matches.get_one::<String>("layers-to-compact") {
+            compact_config.layers_to_compact = layers_to_compact.parse()?;
+        }
+
+        compact_config.blobs_dir = matches.get_one::<String>("blob-dir").unwrap().clone();
 
         let version = rs.meta.version.try_into().unwrap();
         let compressor = rs.meta.get_compressor();
         if let Some(build_output) =
-            BlobCompactor::compact(rs, dst_bootstrap, chunk_dict, backend, &config)?
+            BlobCompactor::compact(rs, dst_bootstrap, chunk_dict, backend, &compact_config)?
         {
             OutputSerializer::dump(matches, build_output, build_info, compressor, version)?;
         }
@@ -1539,7 +1560,31 @@ impl Command {
         if output.is_empty() {
             return Err(anyhow!("invalid empty --output option"));
         }
-        let (config, backend) = Self::get_backend(matches, "unpacker")?;
+
+        let (config, backend): (Arc<ConfigV2>, Arc<dyn BlobBackend + Send + Sync>) =
+            // if --blob is specified, use localfs backend and default config
+            if let Some(p) = matches.get_one::<String>("blob") {
+                let blob_path = PathBuf::from(p);
+                let local_fs_conf = LocalFsConfig {
+                    blob_file: blob_path.to_str().unwrap().to_owned(),
+                    dir: Default::default(),
+                    alt_dirs: Default::default(),
+                };
+                let local_fs = LocalFs::new(&local_fs_conf, Some("unpacker"))
+                    .with_context(|| format!("fail to create local backend for {:?}", blob_path))?;
+
+                (Arc::new(ConfigV2::default()), Arc::new(local_fs))
+            } else {
+                match Self::get_backend(matches, "unpacker") {
+                    Ok((c, b)) => (c, b),
+                    Err(e) => {
+                        bail!(
+                            "{}, --blob, --blob-dir or --backend-type must be specified",
+                            e
+                        );
+                    }
+                }
+            };
 
         OCIUnpacker::new(bootstrap, Some(backend), output)
             .with_context(|| "fail to create unpacker")?
@@ -1809,24 +1854,7 @@ impl Command {
     ) -> Result<(Arc<ConfigV2>, Arc<dyn BlobBackend + Send + Sync>)> {
         let config: Arc<ConfigV2>;
         let backend: Arc<dyn BlobBackend + Send + Sync>;
-        if let Some(p) = matches.get_one::<String>("blob") {
-            config = Arc::new(ConfigV2::default());
-            backend = {
-                let blob_path = PathBuf::from(p);
-                let local_fs_conf = LocalFsConfig {
-                    blob_file: blob_path.to_str().unwrap().to_owned(),
-                    dir: Default::default(),
-                    alt_dirs: Default::default(),
-                };
-                let local_fs = LocalFs::new(&local_fs_conf, Some(blob_id))
-                    .with_context(|| format!("fail to create local backend for {:?}", blob_path))?;
-
-                Arc::new(local_fs)
-            };
-        } else if let Some(dir) = matches.get_one::<String>("blob-dir") {
-            config = Arc::new(ConfigV2::new_localfs("", dir)?);
-            backend = BlobFactory::new_backend(&config.backend.as_ref().unwrap(), blob_id)?;
-        } else if let Some(backend_type) = matches.get_one::<String>("backend-type") {
+        if let Some(backend_type) = matches.get_one::<String>("backend-type") {
             let content =
                 if let Some(backend_file) = matches.get_one::<String>("backend-config-file") {
                     fs::read_to_string(backend_file).with_context(|| {
@@ -1839,13 +1867,16 @@ impl Command {
                 };
 
             if backend_type == "localfs" {
-                bail!("Use --blob-dir or --blob to specify localfs backend");
+                bail!("Use --blob-dir to specify localfs backend");
             } else {
                 backend = BlobFactory::new_backend_from_json(backend_type, &content, blob_id)?;
                 config = Arc::new(ConfigV2::default());
             }
+        } else if let Some(dir) = matches.get_one::<String>("blob-dir") {
+            config = Arc::new(ConfigV2::new_localfs("", dir)?);
+            backend = BlobFactory::new_backend(&config.backend.as_ref().unwrap(), blob_id)?;
         } else {
-            bail!("--blob, --blob-dir or --backend-type must be specified");
+            return Err(anyhow!("invalid backend configuration"));
         }
 
         Ok((config, backend))
