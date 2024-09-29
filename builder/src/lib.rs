@@ -27,6 +27,7 @@ pub use self::chunkdict_generator::ChunkdictBlobInfo;
 pub use self::chunkdict_generator::ChunkdictChunkInfo;
 pub use self::chunkdict_generator::Generator;
 pub use self::compact::BlobCompactor;
+pub use self::compact::Config as CompactConfig;
 pub use self::core::bootstrap::Bootstrap;
 pub use self::core::chunk_dict::{parse_chunk_dict_arg, ChunkDict, HashChunkDict};
 pub use self::core::context::{
