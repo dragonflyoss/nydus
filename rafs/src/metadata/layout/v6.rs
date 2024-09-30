@@ -559,6 +559,10 @@ impl RafsV6SuperBlockExt {
         self.s_flags |= RafsSuperFlags::TARTFS_MODE.bits();
     }
 
+    pub fn set_targz_ref_mode(&mut self) {
+        self.s_flags |= RafsSuperFlags::TARGZ_REF_MODE.bits();
+    }
+
     /// Set message digest algorithm to handle chunk of the Rafs filesystem.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         let c: RafsSuperFlags = digester.into();
