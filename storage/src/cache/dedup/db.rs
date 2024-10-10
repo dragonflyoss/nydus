@@ -24,8 +24,11 @@ impl CasDb {
     }
 
     pub fn from_file(db_path: impl AsRef<Path>) -> Result<CasDb> {
-        let mgr = SqliteConnectionManager::file(db_path)
-            .with_flags(OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE);
+        let mgr = SqliteConnectionManager::file(db_path).with_flags(
+            OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        );
         let pool = r2d2::Pool::new(mgr)?;
         let conn = pool.get()?;
 
