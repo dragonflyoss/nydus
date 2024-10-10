@@ -1,14 +1,9 @@
 // Copyright 2020 Ant Group. All rights reserved.
+// Copyright 2024 Nydus Developers. All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0
 
 //! Utility helpers to support the storage subsystem.
-use std::alloc::{alloc, Layout};
-use std::cmp::{self, min};
-use std::io::{ErrorKind, IoSliceMut, Result};
-use std::os::unix::io::RawFd;
-use std::slice::from_raw_parts_mut;
-
 use fuse_backend_rs::abi::fuse_abi::off64_t;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 #[cfg(target_os = "macos")]
@@ -18,6 +13,16 @@ use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
 };
+use std::alloc::{alloc, Layout};
+use std::cmp::{self, min};
+use std::io::{ErrorKind, IoSliceMut, Result};
+use std::os::fd::{AsFd, AsRawFd};
+use std::os::unix::io::RawFd;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
+use std::slice::from_raw_parts_mut;
+#[cfg(target_os = "macos")]
+use std::{ffi::CStr, mem, os::raw::c_char};
 use vm_memory::bytes::Bytes;
 
 use crate::{StorageError, StorageResult};
@@ -95,6 +100,108 @@ pub fn copyv<S: AsRef<[u8]>>(
     }
 
     Ok((copied, (dst_index, dst_offset)))
+}
+
+/// The copy_file_range system call performs an in-kernel copy between file descriptors src and dst
+/// without the additional cost of transferring data from the kernel to user space and back again.
+///
+/// There may be additional optimizations for specific file systems. It copies up to len bytes of
+/// data from file descriptor fd_in to file descriptor fd_out, overwriting any data that exists
+/// within the requested range of the target file.
+#[cfg(target_os = "linux")]
+pub fn copy_file_range(
+    src: impl AsFd,
+    src_off: u64,
+    dst: impl AsFd,
+    dst_off: u64,
+    mut len: usize,
+) -> Result<()> {
+    let mut src_off = src_off as i64;
+    let mut dst_off = dst_off as i64;
+
+    while len > 0 {
+        let ret = nix::fcntl::copy_file_range(
+            src.as_fd().as_raw_fd(),
+            Some(&mut src_off),
+            dst.as_fd().as_raw_fd(),
+            Some(&mut dst_off),
+            len,
+        )?;
+        if ret == 0 {
+            return Err(eio!("reach end of file when copy file range"));
+        }
+        len -= ret;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn copy_file_range(
+    src: impl AsFd,
+    mut src_off: u64,
+    dst: impl AsFd,
+    mut dst_off: u64,
+    mut len: usize,
+) -> Result<()> {
+    let buf_size = 4096;
+    let mut buf = vec![0u8; buf_size];
+
+    while len > 0 {
+        let bytes_to_read = buf_size.min(len);
+        let read_bytes = nix::sys::uio::pread(
+            src.as_fd().as_raw_fd(),
+            &mut buf[..bytes_to_read],
+            src_off as libc::off_t,
+        )?;
+
+        if read_bytes == 0 {
+            return Err(eio!("reach end of file when read in copy_file_range"));
+        }
+
+        let write_bytes = nix::sys::uio::pwrite(
+            dst.as_fd().as_raw_fd(),
+            &buf[..read_bytes],
+            dst_off as libc::off_t,
+        )?;
+        if write_bytes == 0 {
+            return Err(eio!("reach end of file when write in copy_file_range"));
+        }
+
+        src_off += read_bytes as u64;
+        dst_off += read_bytes as u64;
+        len -= read_bytes;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub fn get_path_from_file(file: &impl AsRawFd) -> Option<String> {
+    let path = PathBuf::from("/proc/self/fd").join(file.as_raw_fd().to_string());
+    match std::fs::read_link(&path) {
+        Ok(v) => Some(v.display().to_string()),
+        Err(e) => {
+            warn!("Failed to get path from file descriptor: {}", e);
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_path_from_file(file: &impl AsRawFd) -> Option<String> {
+    let fd = file.as_raw_fd();
+    let mut buf: [c_char; 1024] = unsafe { mem::zeroed() };
+
+    let result = unsafe { fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+
+    if result == -1 {
+        warn!("Failed to get path from file descriptor");
+        return None;
+    }
+
+    let cstr = unsafe { CStr::from_ptr(buf.as_ptr()) };
+    cstr.to_str().ok().map(|s| s.to_string())
 }
 
 /// An memory cursor to access an `FileVolatileSlice` array.
@@ -239,6 +346,8 @@ pub fn check_digest(data: &[u8], digest: &RafsDigest, digester: digest::Algorith
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_copyv() {
@@ -371,5 +480,35 @@ mod tests {
         assert_eq!(cursor.consume(2).len(), 0);
         assert_eq!(cursor.index, 2);
         assert_eq!(cursor.offset, 0);
+    }
+
+    #[test]
+    fn test_copy_file_range() {
+        let mut src = TempFile::new().unwrap().into_file();
+        let dst = TempFile::new().unwrap();
+
+        let buf = vec![8u8; 4096];
+        src.write_all(&buf).unwrap();
+        copy_file_range(&src, 0, dst.as_file(), 4096, 4096).unwrap();
+        assert_eq!(dst.as_file().metadata().unwrap().len(), 8192);
+
+        let small_buf = vec![8u8; 2048];
+        let mut small_src = TempFile::new().unwrap().into_file();
+        small_src.write_all(&small_buf).unwrap();
+        assert!(copy_file_range(&small_src, 0, dst.as_file(), 4096, 4096).is_err());
+
+        let empty_src = TempFile::new().unwrap().into_file();
+        assert!(copy_file_range(&empty_src, 0, dst.as_file(), 4096, 4096).is_err());
+    }
+
+    #[test]
+    fn test_get_path_from_file() {
+        let temp_file = TempFile::new().unwrap();
+        let file = temp_file.as_file();
+        let path = get_path_from_file(file).unwrap();
+        assert_eq!(path, temp_file.as_path().display().to_string());
+
+        let invalid_fd: RawFd = -1;
+        assert!(get_path_from_file(&invalid_fd).is_none());
     }
 }
