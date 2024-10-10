@@ -299,7 +299,10 @@ impl FileCacheEntry {
             Self::_update_chunk_pending_status(&delayed_chunk_map, chunk.as_ref(), res.is_ok());
             if let Some(mgr) = cas_mgr {
                 if let Err(e) = mgr.record_chunk(&blob_info, chunk.deref(), file_path.as_ref()) {
-                    warn!("failed to record chunk state for dedup, {}", e);
+                    warn!(
+                        "failed to record chunk state for dedup in delay_persist_chunk_data, {}",
+                        e
+                    );
                 }
             }
         });
@@ -309,6 +312,14 @@ impl FileCacheEntry {
         let offset = chunk.uncompressed_offset();
         let res = Self::persist_cached_data(&self.file, offset, buf);
         self.update_chunk_pending_status(chunk, res.is_ok());
+        if let Some(mgr) = &self.cas_mgr {
+            if let Err(e) = mgr.record_chunk(&self.blob_info, chunk, self.file_path.as_ref()) {
+                warn!(
+                    "failed to record chunk state for dedup in persist_chunk_data, {}",
+                    e
+                );
+            }
+        }
     }
 
     fn persist_cached_data(file: &Arc<File>, offset: u64, buffer: &[u8]) -> Result<()> {
