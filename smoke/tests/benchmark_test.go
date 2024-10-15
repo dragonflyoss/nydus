@@ -65,7 +65,7 @@ func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 		image = "wordpress:6.1.1"
 	} else {
 		if !tool.SupportContainerImage(tool.ImageRepo(b.t, image)) {
-			b.t.Fatalf("Benchmark don't support image " + image)
+			b.t.Fatalf("Benchmark don't support %s image ", image)
 		}
 	}
 	targetImageSize, conversionElapsed := b.prepareImage(b.t, ctx, image)
@@ -83,7 +83,7 @@ func (b *BenchmarkTestSuite) TestBenchmark(t *testing.T) {
 
 	// save metric
 	b.dumpMetric()
-	t.Logf(fmt.Sprintf("Metric: E2ETime %d ConversionElapsed %s ReadCount %d ReadAmount %d ImageSize %d", b.metric.E2ETime, b.metric.ConversionElapsed, b.metric.ReadCount, b.metric.ReadAmountTotal, b.metric.ImageSize))
+	t.Logf("Metric: E2ETime %d ConversionElapsed %s ReadCount %d ReadAmount %d ImageSize %d", b.metric.E2ETime, b.metric.ConversionElapsed, b.metric.ReadCount, b.metric.ReadAmountTotal, b.metric.ImageSize)
 }
 
 func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, image string) (int64, int64) {
