@@ -805,7 +805,7 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             )
             .group(
                 clap::ArgGroup::new("backend")
-                    .args(&["backend-type", "blob", "blob-dir"])
+                    .args(["backend-type", "blob", "blob-dir"])
                     .required(false),
             ),
     )
@@ -1285,7 +1285,7 @@ impl Command {
         check_bootstrap_versions_consistency(&mut build_ctx, &source_bootstrap_paths)?;
         update_ctx_from_parent_bootstrap(&mut build_ctx, &source_bootstrap_paths[0])?;
 
-        for (_, bootstrap_path) in source_bootstrap_paths.iter().enumerate() {
+        for bootstrap_path in source_bootstrap_paths.iter() {
             let path_name = bootstrap_path.as_path();
 
             // Extract the image name and version name from the bootstrap directory.
