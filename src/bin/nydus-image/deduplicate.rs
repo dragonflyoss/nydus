@@ -500,7 +500,7 @@ impl Algorithm<SqliteDatabase> {
         for chunk in all_chunks {
             image_chunks
                 .entry(chunk.image_reference.clone())
-                .or_insert(Vec::new())
+                .or_default()
                 .push(chunk.clone());
         }
         for (index, chunks) in image_chunks {
@@ -527,7 +527,7 @@ impl Algorithm<SqliteDatabase> {
         for chunk in chunks {
             let entry = image_chunks
                 .entry(chunk.image_reference.clone())
-                .or_insert(Vec::new());
+                .or_default();
             entry.push(chunk.clone());
         }
 
@@ -543,7 +543,7 @@ impl Algorithm<SqliteDatabase> {
             for chunk in chunk_list {
                 let entry = version_chunks
                     .entry(CustomString(chunk.version.clone()))
-                    .or_insert(Vec::new());
+                    .or_default();
                 entry.push(chunk.clone());
             }
 
@@ -651,10 +651,7 @@ impl Algorithm<SqliteDatabase> {
         for (index, point) in data_point.iter().enumerate() {
             if point.clustered {
                 let cluster_id = point.cluster_id;
-                cluster_map
-                    .entry(cluster_id)
-                    .or_insert(Vec::new())
-                    .push(index);
+                cluster_map.entry(cluster_id).or_default().push(index);
             }
         }
 

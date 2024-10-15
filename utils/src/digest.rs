@@ -328,7 +328,7 @@ mod test {
         let text = b"The quick brown fox jumps over the lazy dog";
 
         let d1 = RafsDigest::from_buf(text, Algorithm::Blake3);
-        let d2 = RafsDigest::try_from(d1.data).unwrap();
+        let d2 = RafsDigest::from(d1.data);
         let s1: String = d1.into();
         let s2: String = d2.into();
         print!("{:?}", d1);
