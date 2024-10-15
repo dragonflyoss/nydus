@@ -154,17 +154,17 @@ func RunContainerWithBaseline(t *testing.T, image string, containerName string, 
 		runURLWaitContainer(t, image, "nydus", containerName, args)
 		defer ClearContainer(t, image, "nydus", containerName)
 	} else {
-		t.Fatalf(fmt.Sprintf("%s is not in URL_WAIT", image))
+		t.Fatalf("%s is not in URL_WAIT", image)
 	}
 	backendMetrics, err := getContainerBackendMetrics(t)
 	if err != nil {
-		t.Logf(err.Error())
+		t.Logf("Can't get containerd backend metrics: %s", err.Error())
 	}
 	if backendMetrics.ReadAmountTotal > uint64(float64(args.BaselineReadAmount[mode])*1.05) ||
 		backendMetrics.ReadCount > uint64(float64(args.BaselineReadCount[mode])*1.05) {
-		t.Fatalf(fmt.Sprintf("Performance reduction with ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount))
+		t.Fatalf("Performance reduction with ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount)
 	}
-	t.Logf(fmt.Sprintf("Performance Test: ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount))
+	t.Logf("Performance Test: ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount)
 }
 
 // RunContainer and return container metric
@@ -186,7 +186,7 @@ func RunContainer(t *testing.T, image string, snapshotter string, containerName 
 	if snapshotter == "nydus" {
 		backendMetrics, err := getContainerBackendMetrics(t)
 		if err != nil {
-			t.Logf(err.Error())
+			t.Logf("Can't get containerd backend metrics: %s", err.Error())
 		}
 		containerMetric.ReadAmountTotal = backendMetrics.ReadAmountTotal
 		containerMetric.ReadCount = backendMetrics.ReadCount
