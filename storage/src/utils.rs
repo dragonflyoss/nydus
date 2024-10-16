@@ -179,7 +179,7 @@ pub fn copy_file_range(
 #[cfg(target_os = "linux")]
 pub fn get_path_from_file(file: &impl AsRawFd) -> Option<String> {
     let path = PathBuf::from("/proc/self/fd").join(file.as_raw_fd().to_string());
-    match std::fs::read_link(&path) {
+    match std::fs::read_link(path) {
         Ok(v) => Some(v.display().to_string()),
         Err(e) => {
             warn!("Failed to get path from file descriptor: {}", e);
