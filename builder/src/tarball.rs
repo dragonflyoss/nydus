@@ -467,6 +467,7 @@ impl<'a> TarballTreeBuilder<'a> {
                 self.blob_writer,
                 Some(entry),
                 &mut self.buf,
+                false
             )?;
         }
 

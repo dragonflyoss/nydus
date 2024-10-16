@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(warnings)]
+// #![deny(warnings)]
 #[macro_use(crate_authors)]
 extern crate clap;
 #[macro_use]
@@ -21,6 +21,7 @@ use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, File, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::result::Result::Ok;
 use std::sync::{Arc, Mutex};
 
@@ -550,12 +551,10 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .long("prefetch-files")
                     .short('p')
                     .help("Prefetch files")
-                    .action(ArgAction::Append),
+                    .action(ArgAction::Append)
+                    .value_delimiter(' ')
+                    .num_args(1..),
             )
-            // .arg(
-            //     Arg::new("blobs-dir-path")
-            //     .required(true),                
-            // )
             .arg(arg_config.clone())
             .arg(
                 Arg::new("blob-dir")
@@ -1606,15 +1605,14 @@ impl Command {
 
     fn optimize(matches: &ArgMatches) -> Result<()> {
         let blobs_dir_path = Self::get_blobs_dir(matches).unwrap();
+        let prefetch_files = Self::get_prefetch_files(matches).unwrap();
+        prefetch_files.iter().for_each(|f| println!("{}", f));
         debug!("Blobs Dir Path: {}", blobs_dir_path.display());
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let config = Self::get_configuration(matches)?;
         config.internal.set_blob_accessible(true);
-        // let mut validator = Validator::new(bootstrap_path, config)?;
-        // validator.get_prefetch_nodes()?;
         let mut build_ctx = BuildContext {
-            // prefetch: Self::get_prefetch(matches)?,
-            prefetch: Prefetch::new(PrefetchPolicy::Fs)?,
+            prefetch: Prefetch::new(PrefetchPolicy::Fs, Some(prefetch_files))?,
             ..Default::default()
         };
 
@@ -1746,6 +1744,16 @@ impl Command {
         match matches.get_one::<String>("blob-dir") {
             Some(s) => Ok(Path::new(s)),
             None => bail!("missing parameter `blob-dir`")
+        }
+    }
+
+    fn get_prefetch_files(matches: &ArgMatches) -> Result<Vec<String>> {
+        match matches.get_many::<String>("prefetch-files") {
+            Some(files) => {
+                let paths: Vec<String> = files.map(String::from).collect();
+                Ok(paths)
+            },
+            None => bail!("missing parameters `prefetch-files`")
         }
     }
 
@@ -1985,7 +1993,7 @@ impl Command {
             .map(|s| s.as_str())
             .unwrap_or_default()
             .parse()?;
-        Prefetch::new(prefetch_policy)
+        Prefetch::new(prefetch_policy, None)
     }
 
     fn get_blob_offset(matches: &ArgMatches) -> Result<u64> {

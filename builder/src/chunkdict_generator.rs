@@ -36,12 +36,14 @@ use tempfile::TempDir;
 use crate::finalize_blob;
 use crate::Artifact;
 use core::panic;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Read, Seek, Write};
 use std::mem::size_of;
 use std::ops::Add;
 use std::ops::{Rem, Sub};
+use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -69,6 +71,42 @@ pub struct ChunkdictBlobInfo {
     pub blob_meta_ci_compressed_size: u64,
     pub blob_meta_ci_uncompressed_size: u64,
     pub blob_meta_ci_offset: u64,
+}
+
+// TODO(daiyongxuan): implement Read Trait for BlobNodeReader
+#[derive(Debug)]
+pub struct BlobNodeReader {
+    blob: File,
+    start: u64,
+    end: u64,
+    position: u64,
+}
+
+impl BlobNodeReader {
+    pub fn new(blob: File, start: u64, end: u64) -> Result<Self> {
+        let mut reader = BlobNodeReader {
+            blob,
+            start,
+            end,
+            position: start,
+        };
+        reader.blob.seek(std::io::SeekFrom::Start(start))?;
+        Ok(reader)
+    }
+}
+
+impl Read for BlobNodeReader {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+        // EOF
+        if self.position > self.end {
+            return std::io::Result::Ok(0);
+        }
+        let max_read = (self.end - self.position) as usize;
+        let to_read = std::cmp::min(buf.len(), max_read);
+        let bytes_read = self.blob.read(&mut buf[..to_read])?;
+        self.position += bytes_read as u64;
+        std::io::Result::Ok(bytes_read)
+    }
 }
 
 /// Struct to generate chunkdict RAFS bootstrap.
@@ -119,7 +157,7 @@ impl Generator {
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blobtable: &mut RafsV6BlobTable,
-        blobs_dir_path: PathBuf
+        blobs_dir_path: PathBuf,
     ) -> Result<()> {
         let (prefetch_nodes, _) = ctx.prefetch.get_file_nodes();
         for node in prefetch_nodes {
@@ -183,15 +221,21 @@ impl Generator {
         debug!("temp path: {}", tmp_path.display());
 
         Self::revert_files(
-            blobs_id_and_compressor,
+            &blobs_id_and_compressor,
             file_nodes_prefetch.clone(),
             &mut backend_config,
             tmp_path.clone(),
         );
 
+        let mut map: HashMap<PathBuf, BlobNodeReader> = Self::get_node_reader(
+            &blobs_id_and_compressor,
+            file_nodes_prefetch.clone(),
+            &mut backend_config,
+        );
+
         let prefetch_blob_index = prefetch_blob_info.blob_index();
         let mut chunk_count = 0;
-        // For every chunk, need to align to 4k
+        // For every chunk, need to align to 4k 
         let mut prefetch_blob_offset = 0;
         let mut meta_uncompressed_size = 0;
         let mut chunk_index_in_prefetch = 0;
@@ -239,7 +283,8 @@ impl Generator {
         // Build Prefetch Blob
         let mut prefetch_build_ctx = BuildContext {
             blob_id: String::from("Prefetch-blob"),
-            compressor: ctx.compressor,
+            // To Avoid Compress Twice.
+            compressor: compress::Algorithm::Zstd,
             prefetch: ctx.prefetch.clone(),
             ..Default::default()
         };
@@ -258,13 +303,18 @@ impl Generator {
             )))
             .unwrap(),
         );
+        prefetch_build_ctx.compressor = compress::Algorithm::None;
         Blob::dump(
             &prefetch_build_ctx,
             &mut prefetch_blob_mgr,
             &mut *blob_writer,
-            Some(tmp_path),
+            Some(&mut map),
         )
         .unwrap();
+        prefetch_build_ctx.compressor = compress::Algorithm::Zstd;
+        // TODO(daiyongxuan): To avoid compress twice, I set the compressor 
+        // to None.
+        // The actual compressor should be set to Zstd or etc..
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
             blob_ctx.set_meta_info_enabled(true);
             Blob::dump_meta_data(&prefetch_build_ctx, blob_ctx, blob_writer.as_mut()).unwrap();
@@ -310,9 +360,31 @@ impl Generator {
         Ok(())
     }
 
+    fn get_node_reader(
+        blob_ids: &Vec<BlobIdAndCompressor>,
+        nodes: Vec<Rc<Mutex<Node>>>,
+        backend: &mut BackendConfigV2,
+    ) -> HashMap<PathBuf, BlobNodeReader> {
+        let mut map = HashMap::new();
+        for node in nodes {
+            let node = node.lock().unwrap();
+            let blob_id = node.chunks.get(0).unwrap().inner.blob_index();
+            let blob_id = blob_ids.get(blob_id as usize).unwrap().blob_id.clone();
+            let blob_dir = backend.localfs.as_ref().unwrap().dir.clone();
+            let blob_file = PathBuf::from(blob_dir).join(blob_id);
+            // TODO(daiyongxuan): Assume that chunks in the same node are arranged continuously in the blob.
+            let start = node.chunks.get(0).unwrap().inner.compressed_offset();
+            let end = node.chunks.last().unwrap().inner.compressed_offset()
+                + node.chunks.last().unwrap().inner.compressed_size() as u64;
+            let reader = BlobNodeReader::new(File::open(blob_file).unwrap(), start, end).unwrap();
+            map.insert(node.path().clone(), reader);
+        }
+        map
+    }
+
     /// Revert files from the blob
     fn revert_files(
-        blob_ids: Vec<BlobIdAndCompressor>,
+        blob_ids: &Vec<BlobIdAndCompressor>,
         nodes: Vec<Rc<Mutex<Node>>>,
         backend: &mut BackendConfigV2,
         workdir: PathBuf,
@@ -322,7 +394,7 @@ impl Generator {
             let node = node.lock().unwrap();
             let blob_id = node.chunks.get(0).unwrap().inner.blob_index();
             let blob_id = blob_ids.get(blob_id as usize).unwrap().blob_id.clone();
-            // backend.localfs.unwrap().blob_file = 
+            // backend.localfs.unwrap().blob_file =
             let mut node_backend = backend.clone();
             let blob_dir = backend.localfs.as_ref().unwrap().dir.clone();
             let mut blob_file = PathBuf::from(blob_dir);
@@ -330,7 +402,7 @@ impl Generator {
             if let Some(localfs_config) = &mut node_backend.localfs {
                 localfs_config.blob_file = blob_file.display().to_string();
             }
-            
+
             let blob_mgr = BlobFactory::new_backend(&node_backend, "Fix-Prefetch-Blob-ID").unwrap();
 
             debug!("Node Path: {}", node.path().display());

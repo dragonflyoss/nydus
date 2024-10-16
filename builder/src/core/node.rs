@@ -15,6 +15,7 @@ use std::os::macos::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Error, Result};
 use nydus_rafs::metadata::chunk::ChunkWrapper;
@@ -27,6 +28,7 @@ use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{compress, crypt};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
+use crate::chunkdict_generator::BlobNodeReader;
 use sha2::digest::Digest;
 
 use crate::{BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay};
@@ -222,33 +224,26 @@ impl Node {
         blob_writer: &mut dyn Artifact,
         chunk_data_buf: &mut [u8],
         is_prefetch: bool,
-        work_dir: Option<PathBuf>,
+        maps: Option<&mut HashMap<PathBuf, BlobNodeReader>>
     ) -> Result<u64> {
-        let mut reader: Option<File> = None;
+        let mut reader: Option<Box<dyn Read>> = None;
         if is_prefetch {
-            if let Some(ref dir) = work_dir {
-                let path = dir.join(self.path().strip_prefix("/").unwrap());
-                reader = Some(
-                    File::open(&path)
-                        .expect(format!("Failed to strip prefix:{}", path.display()).as_ref()),
-                );
-                debug!("Replace the reader to path: {}", path.display());
+            if let Some(m) = maps {
+                if let Some(r) = m.get_mut(self.path()) {
+                    reader = Some(Box::new(r));
+                }
             }
         } else {
             reader = if self.is_reg() {
                 let file = File::open(self.path())
                     .with_context(|| format!("failed to open node file {:?}", self.path()))?;
-                Some(file)
+                Some(Box::new(file))
             } else {
                 None
             };
         }
 
-        if ctx.blob_id == String::from("Prefetch-blob") {
-            // replace the reader to the blob
-        }
-
-        self.dump_node_data_with_reader(ctx, blob_mgr, blob_writer, reader.as_mut(), chunk_data_buf)
+        self.dump_node_data_with_reader(ctx, blob_mgr, blob_writer, reader.as_mut(), chunk_data_buf, is_prefetch)
     }
 
     /// Dump data from a reader into the data blob, and generate chunk information.
@@ -264,6 +259,7 @@ impl Node {
         blob_writer: &mut dyn Artifact,
         reader: Option<&mut R>,
         data_buf: &mut [u8],
+        is_prefetch: bool,
     ) -> Result<u64> {
         if self.is_dir() {
             return Ok(0);
@@ -293,15 +289,23 @@ impl Node {
             None
         };
 
+        
+
         // `child_count` of regular file is reused as `chunk_count`.
         for i in 0..self.inode.child_count() {
             let chunk_size = ctx.chunk_size;
             let file_offset = i as u64 * chunk_size as u64;
-            let uncompressed_size = if i == self.inode.child_count() - 1 {
+            // TODO(daiyongxuan): For prefetch nodes, the chunk is already compressed.
+            // So the buffer size should be set to the compressed size.
+            let mut uncompressed_size = if i == self.inode.child_count() - 1 {
                 (self.inode.size() - chunk_size as u64 * i as u64) as u32
             } else {
                 chunk_size
             };
+
+            if is_prefetch {
+                uncompressed_size =  self.chunks.get(i as usize).unwrap().inner.compressed_size();
+            }
 
             let chunk_data = &mut data_buf[0..uncompressed_size as usize];
             let (mut chunk, mut chunk_info) = self.read_file_chunk(ctx, reader, chunk_data)?;
@@ -310,6 +314,7 @@ impl Node {
             }
 
             // No need to perform chunk deduplication for tar-tarfs case.
+            // TODO(daiyongxuan): For Prefetch nodes, we also don't need to deduplicate chunks.
             if ctx.conversion_type != ConversionType::TarToTarfs {
                 chunk = match self.deduplicate_chunk(
                     ctx,
