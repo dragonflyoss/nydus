@@ -78,6 +78,22 @@ nydusify convert \
   --backend-config-file /path/to/backend-config.json
 ```
 
+### localfs
+
+``` shell
+cat /path/to/backend-config.json
+{
+  "dir": "/path/to/blobs"
+}
+
+nydusify convert \
+  --source myregistry/repo:tag \
+  --target myregistry/repo:tag-nydus \
+  --backend-config-file /path/to/backend-config.json \
+```
+
+Note: Image manifest is still published to target registry (`myregistry`). Blob files are published to localfs.
+
 ## Push Nydus Image to storage backend with subcommand pack
 
 ### OSS
@@ -176,7 +192,7 @@ nydusify check \
 
 ## Mount the nydus image as a filesystem
 
-The nydusify mount command can mount a nydus image stored in the backend as a filesystem. Now  the  supported backend types include Registry (default backend), s3 and oss. 
+The nydusify mount command can mount a nydus image stored in the backend as a filesystem. Now  the  supported backend types include Registry (default backend), s3, oss, and localfs.
 
 When using Registry as the backend, you don't need to specify the `--backend-type` .
 
@@ -252,7 +268,7 @@ See `nydusify convert/check/mount --help`
 
 ## Use Nydusify as a package
 
-``` 
+```
 See `contrib/nydusify/examples/converter/main.go`
 ```
 

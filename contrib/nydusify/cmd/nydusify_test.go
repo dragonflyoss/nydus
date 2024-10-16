@@ -8,6 +8,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"testing"
 
@@ -80,54 +81,13 @@ func TestParseBackendConfig(t *testing.T) {
 }
 
 func TestGetBackendConfig(t *testing.T) {
-	app := &cli.App{
-		Flags: []cli.Flag{
-			&cli.StringFlag{
-				Name:  "prefixbackend-type",
-				Value: "",
-			},
-			&cli.StringFlag{
-				Name:  "prefixbackend-config",
-				Value: "",
-			},
-			&cli.StringFlag{
-				Name:  "prefixbackend-config-file",
-				Value: "",
-			},
-		},
-	}
-	ctx := cli.NewContext(app, nil, nil)
-
-	backendType, backendConfig, err := getBackendConfig(ctx, "prefix", false)
-	require.NoError(t, err)
-	require.Empty(t, backendType)
-	require.Empty(t, backendConfig)
-
-	backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "backend type is empty, please specify option")
-	require.Empty(t, backendType)
-	require.Empty(t, backendConfig)
-
-	flagSet := flag.NewFlagSet("test1", flag.PanicOnError)
-	flagSet.String("prefixbackend-type", "errType", "")
-	ctx = cli.NewContext(app, flagSet, nil)
-	backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "backend-type should be one of")
-	require.Empty(t, backendType)
-	require.Empty(t, backendConfig)
-
-	flagSet = flag.NewFlagSet("test2", flag.PanicOnError)
-	flagSet.String("prefixbackend-type", "oss", "")
-	ctx = cli.NewContext(app, flagSet, nil)
-	backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "backend configuration is empty, please specify option")
-	require.Empty(t, backendType)
-	require.Empty(t, backendConfig)
-
-	configJSON := `
+	tests := []struct {
+		backendType   string
+		backendConfig string
+	}{
+		{
+			backendType: "oss",
+			backendConfig: `
 	{
 		"bucket_name": "test",
 		"endpoint": "region.oss.com",
@@ -135,45 +95,106 @@ func TestGetBackendConfig(t *testing.T) {
 		"access_key_secret": "testSK",
 		"meta_prefix": "meta",
 		"blob_prefix": "blob"
-	}`
-	require.True(t, json.Valid([]byte(configJSON)))
+	}`,
+		},
+		{
+			backendType: "localfs",
+			backendConfig: `
+	{
+		"dir": "/path/to/blobs"
+	}`,
+		},
+	}
 
-	flagSet = flag.NewFlagSet("test3", flag.PanicOnError)
-	flagSet.String("prefixbackend-type", "oss", "")
-	flagSet.String("prefixbackend-config", configJSON, "")
-	ctx = cli.NewContext(app, flagSet, nil)
-	backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
-	require.NoError(t, err)
-	require.Equal(t, "oss", backendType)
-	require.Equal(t, configJSON, backendConfig)
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("backend config %s", test.backendType), func(t *testing.T) {
+			app := &cli.App{
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "prefixbackend-type",
+						Value: "",
+					},
+					&cli.StringFlag{
+						Name:  "prefixbackend-config",
+						Value: "",
+					},
+					&cli.StringFlag{
+						Name:  "prefixbackend-config-file",
+						Value: "",
+					},
+				},
+			}
+			ctx := cli.NewContext(app, nil, nil)
 
-	file, err := os.CreateTemp("", "nydusify-backend-config-test.json")
-	require.NoError(t, err)
-	defer os.RemoveAll(file.Name())
+			backendType, backendConfig, err := getBackendConfig(ctx, "prefix", false)
+			require.NoError(t, err)
+			require.Empty(t, backendType)
+			require.Empty(t, backendConfig)
 
-	_, err = file.WriteString(configJSON)
-	require.NoError(t, err)
-	file.Sync()
+			backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "backend type is empty, please specify option")
+			require.Empty(t, backendType)
+			require.Empty(t, backendConfig)
 
-	flagSet = flag.NewFlagSet("test4", flag.PanicOnError)
-	flagSet.String("prefixbackend-type", "oss", "")
-	flagSet.String("prefixbackend-config-file", file.Name(), "")
-	ctx = cli.NewContext(app, flagSet, nil)
-	backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
-	require.NoError(t, err)
-	require.Equal(t, "oss", backendType)
-	require.Equal(t, configJSON, backendConfig)
+			flagSet := flag.NewFlagSet("test1", flag.PanicOnError)
+			flagSet.String("prefixbackend-type", "errType", "")
+			ctx = cli.NewContext(app, flagSet, nil)
+			backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "backend-type should be one of")
+			require.Empty(t, backendType)
+			require.Empty(t, backendConfig)
 
-	flagSet = flag.NewFlagSet("test5", flag.PanicOnError)
-	flagSet.String("prefixbackend-type", "oss", "")
-	flagSet.String("prefixbackend-config", configJSON, "")
-	flagSet.String("prefixbackend-config-file", file.Name(), "")
-	ctx = cli.NewContext(app, flagSet, nil)
-	backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "--backend-config conflicts with --backend-config-file")
-	require.Empty(t, backendType)
-	require.Empty(t, backendConfig)
+			flagSet = flag.NewFlagSet("test2", flag.PanicOnError)
+			flagSet.String("prefixbackend-type", test.backendType, "")
+			ctx = cli.NewContext(app, flagSet, nil)
+			backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "backend configuration is empty, please specify option")
+			require.Empty(t, backendType)
+			require.Empty(t, backendConfig)
+
+			require.True(t, json.Valid([]byte(test.backendConfig)))
+
+			flagSet = flag.NewFlagSet("test3", flag.PanicOnError)
+			flagSet.String("prefixbackend-type", test.backendType, "")
+			flagSet.String("prefixbackend-config", test.backendConfig, "")
+			ctx = cli.NewContext(app, flagSet, nil)
+			backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
+			require.NoError(t, err)
+			require.Equal(t, test.backendType, backendType)
+			require.Equal(t, test.backendConfig, backendConfig)
+
+			file, err := os.CreateTemp("", "nydusify-backend-config-test.json")
+			require.NoError(t, err)
+			defer os.RemoveAll(file.Name())
+
+			_, err = file.WriteString(test.backendConfig)
+			require.NoError(t, err)
+			file.Sync()
+
+			flagSet = flag.NewFlagSet("test4", flag.PanicOnError)
+			flagSet.String("prefixbackend-type", test.backendType, "")
+			flagSet.String("prefixbackend-config-file", file.Name(), "")
+			ctx = cli.NewContext(app, flagSet, nil)
+			backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
+			require.NoError(t, err)
+			require.Equal(t, test.backendType, backendType)
+			require.Equal(t, test.backendConfig, backendConfig)
+
+			flagSet = flag.NewFlagSet("test5", flag.PanicOnError)
+			flagSet.String("prefixbackend-type", test.backendType, "")
+			flagSet.String("prefixbackend-config", test.backendConfig, "")
+			flagSet.String("prefixbackend-config-file", file.Name(), "")
+			ctx = cli.NewContext(app, flagSet, nil)
+			backendType, backendConfig, err = getBackendConfig(ctx, "prefix", true)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "--backend-config conflicts with --backend-config-file")
+			require.Empty(t, backendType)
+			require.Empty(t, backendConfig)
+		})
+	}
 }
 
 func TestGetTargetReference(t *testing.T) {
