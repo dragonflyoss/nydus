@@ -79,7 +79,7 @@ func getBackendConfig(c *cli.Context, prefix string, required bool) (string, str
 		return "", "", nil
 	}
 
-	possibleBackendTypes := []string{"oss", "s3"}
+	possibleBackendTypes := []string{"oss", "s3", "localfs"}
 	if !isPossibleValue(possibleBackendTypes, backendType) {
 		return "", "", fmt.Errorf("--%sbackend-type should be one of %v", prefix, possibleBackendTypes)
 	}
@@ -89,7 +89,7 @@ func getBackendConfig(c *cli.Context, prefix string, required bool) (string, str
 	)
 	if err != nil {
 		return "", "", err
-	} else if (backendType == "oss" || backendType == "s3") && strings.TrimSpace(backendConfig) == "" {
+	} else if (backendType == "oss" || backendType == "s3" || backendType == "localfs") && strings.TrimSpace(backendConfig) == "" {
 		return "", "", errors.Errorf("backend configuration is empty, please specify option '--%sbackend-config'", prefix)
 	}
 
