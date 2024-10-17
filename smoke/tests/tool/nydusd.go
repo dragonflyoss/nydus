@@ -74,6 +74,7 @@ type NydusdConfig struct {
 	AccessPattern   bool
 	PrefetchFiles   []string
 	AmplifyIO       uint64
+	ChunkDedupDb    string
 	// Hot Upgrade config.
 	Upgrade            bool
 	SupervisorSockPath string
@@ -193,6 +194,9 @@ func newNydusd(conf NydusdConfig) (*Nydusd, error) {
 	if len(conf.BootstrapPath) > 0 {
 		args = append(args, "--bootstrap", conf.BootstrapPath)
 	}
+	if len(conf.ChunkDedupDb) > 0 {
+		args = append(args, "--dedup-db", conf.ChunkDedupDb)
+	}
 	if conf.Upgrade {
 		args = append(args, "--upgrade")
 	}
@@ -276,6 +280,7 @@ func NewNydusdWithContext(ctx Context) (*Nydusd, error) {
 		RafsMode:        ctx.Runtime.RafsMode,
 		DigestValidate:  false,
 		AmplifyIO:       ctx.Runtime.AmplifyIO,
+		ChunkDedupDb:    ctx.Runtime.ChunkDedupDb,
 	}
 
 	if err := makeConfig(NydusdConfigTpl, conf); err != nil {
@@ -346,7 +351,6 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 	)
 
 	return err
-
 }
 
 func (nydusd *Nydusd) Umount() error {

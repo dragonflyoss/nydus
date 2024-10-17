@@ -15,13 +15,13 @@ use tokio::runtime::Runtime;
 
 use crate::backend::BlobBackend;
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
+use crate::cache::filecache::BLOB_DATA_FILE_SUFFIX;
 use crate::cache::state::{BlobStateMap, IndexedChunkMap, RangeMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
-use crate::cache::{BlobCache, BlobCacheMgr};
+use crate::cache::{BlobCache, BlobCacheMgr, CasMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
-
-use crate::cache::filecache::BLOB_DATA_FILE_SUFFIX;
+use crate::utils::get_path_from_file;
 
 const FSCACHE_BLOBS_CHECK_NUM: u8 = 1;
 
@@ -240,9 +240,18 @@ impl FileCacheEntry {
         };
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;
 
+        // Turn off chunk deduplication in case of tarfs.
+        let cas_mgr = if is_tarfs {
+            warn!("chunk deduplication trun off");
+            None
+        } else {
+            CasMgr::get_singleton()
+        };
+
         let need_validation = mgr.need_validation
             && !blob_info.is_legacy_stargz()
             && blob_info.has_feature(BlobFeatures::INLINED_CHUNK_DIGEST);
+        let load_chunk_digest = need_validation || cas_mgr.is_some();
         let blob_file_path = format!("{}/{}", mgr.work_dir, blob_meta_id);
         let meta = if blob_info.meta_ci_is_valid() {
             FileCacheMeta::new(
@@ -251,7 +260,7 @@ impl FileCacheEntry {
                 Some(blob_meta_reader),
                 None,
                 true,
-                need_validation,
+                load_chunk_digest,
             )?
         } else {
             return Err(enosys!(
@@ -266,13 +275,25 @@ impl FileCacheEntry {
         )?));
         Self::restore_chunk_map(blob_info.clone(), file.clone(), &meta, &chunk_map);
 
+        let mut blob_data_file_path = String::new();
+        if cas_mgr.is_some() {
+            blob_data_file_path = if let Some(path) = get_path_from_file(&file) {
+                path
+            } else {
+                warn!("can't get path from file");
+                "".to_string()
+            }
+        }
+
         Ok(FileCacheEntry {
             blob_id,
             blob_info: blob_info.clone(),
             cache_cipher_object: Default::default(),
             cache_cipher_context: Default::default(),
+            cas_mgr,
             chunk_map,
             file,
+            file_path: Arc::new(blob_data_file_path),
             meta: Some(meta),
             metrics: mgr.metrics.clone(),
             prefetch_state: Arc::new(AtomicU32::new(0)),

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::{Connection, DropBehavior, OptionalExtension, Transaction};
+use rusqlite::{Connection, DropBehavior, OpenFlags, OptionalExtension, Transaction};
 
 use super::Result;
 
@@ -24,8 +24,10 @@ impl CasDb {
     }
 
     pub fn from_file(db_path: impl AsRef<Path>) -> Result<CasDb> {
-        let mgr = SqliteConnectionManager::file(db_path);
-        let pool = r2d2::Pool::new(mgr)?;
+        let mgr = SqliteConnectionManager::file(db_path)
+            .with_flags(OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .with_init(|c| c.execute_batch("PRAGMA journal_mode = WAL"));
+        let pool = r2d2::Pool::builder().max_size(10).build(mgr)?;
         let conn = pool.get()?;
 
         conn.execute(
@@ -128,7 +130,7 @@ impl CasDb {
         Ok(conn.last_insert_rowid() as u64)
     }
 
-    pub fn delete_blobs(&mut self, blobs: &[String]) -> Result<()> {
+    pub fn delete_blobs(&self, blobs: &[String]) -> Result<()> {
         let delete_blobs_sql = "DELETE FROM Blobs WHERE BlobId = (?1)";
         let delete_chunks_sql = "DELETE FROM Chunks WHERE BlobId = (?1)";
         let mut conn = self.get_connection()?;
