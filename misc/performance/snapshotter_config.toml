@@ -1,6 +1,6 @@
 version = 1
 # Snapshotter's own home directory where it stores and creates necessary resources
-root = "/var/lib/containerd-nydus"
+root = "/var/lib/containerd/io.containerd.snapshotter.v1.nydus"
 # The snapshotter's GRPC server socket, containerd will connect to plugin on this socket
 address = "/run/containerd-nydus/containerd-nydus-grpc.sock"
 daemon_mode = "dedicated"

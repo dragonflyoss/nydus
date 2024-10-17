@@ -26,16 +26,15 @@ use commands::{
     CommandBackend, CommandCache, CommandDaemon, CommandFsStats, CommandMount, CommandUmount,
 };
 use nydus::get_build_time_info;
-use nydus_api::BuildTimeInfo;
 
 lazy_static! {
-    static ref BTI: BuildTimeInfo = get_build_time_info().1;
+    static ref BTI_STRING: String = get_build_time_info().0;
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let app = Command::new("A client to query and configure the nydusd daemon\n")
-        .version(BTI.package_ver.as_str())
+        .version(BTI_STRING.as_str())
         .author(crate_authors!())
         .arg(
             Arg::new("sock")

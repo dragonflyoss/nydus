@@ -7,7 +7,7 @@ setup() {
 	run_nydus_snapshotter
 	config_containerd_for_nydus
 	ctr images ls | grep -q "${nydus_zran_image}" && ctr images rm $nydus_zran_image
-	ctr-remote images rpull $nydus_zran_image
+	nerdctl pull --snapshotter=nydus $nydus_zran_image
 }
 
 @test "run container with zran" {

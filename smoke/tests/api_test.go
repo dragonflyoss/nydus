@@ -193,6 +193,48 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func (a *APIV1TestSuite) TestMount(t *testing.T) {
+
+	ctx := tool.DefaultContext(t)
+
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	rootFs := texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "rootfs"))
+
+	rafs := a.buildLayer(t, ctx, rootFs)
+
+	config := tool.NydusdConfig{
+		NydusdPath:  ctx.Binary.Nydusd,
+		MountPath:   ctx.Env.MountDir,
+		APISockPath: filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:  filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+	}
+	nydusd, err := tool.NewNydusd(config)
+	require.NoError(t, err)
+
+	err = nydusd.Mount()
+	require.NoError(t, err)
+
+	config.BootstrapPath = rafs
+	config.MountPath = "/mount"
+	config.BackendType = "localfs"
+	config.BackendConfig = fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir)
+	config.BlobCacheDir = ctx.Env.CacheDir
+	config.CacheType = ctx.Runtime.CacheType
+	config.CacheCompressed = ctx.Runtime.CacheCompressed
+	config.RafsMode = ctx.Runtime.RafsMode
+	config.EnablePrefetch = ctx.Runtime.EnablePrefetch
+	config.DigestValidate = false
+	config.AmplifyIO = ctx.Runtime.AmplifyIO
+	err = nydusd.MountByAPI(config)
+	require.NoError(t, err)
+
+	defer nydusd.Umount()
+	defer nydusd.UmountByAPI(config.MountPath)
+	nydusd.VerifyByPath(t, rootFs.FileTree, config.MountPath)
+}
+
 func (a *APIV1TestSuite) buildLayer(t *testing.T, ctx *tool.Context, rootFs *tool.Layer) string {
 	digest := rootFs.Pack(t,
 		converter.PackOption{

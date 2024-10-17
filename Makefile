@@ -44,7 +44,6 @@ endif
 endif
 RUST_TARGET_STATIC ?= $(STATIC_TARGET)
 
-CTR-REMOTE_PATH = contrib/ctr-remote
 NYDUSIFY_PATH = contrib/nydusify
 NYDUS-OVERLAYFS_PATH = contrib/nydus-overlayfs
 
@@ -138,23 +137,18 @@ smoke-takeover:
 
 smoke: release smoke-only
 
-contrib-build: nydusify ctr-remote nydus-overlayfs
+contrib-build: nydusify nydus-overlayfs
 
-contrib-release: nydusify-release ctr-remote-release \
-			    nydus-overlayfs-release
+contrib-release: nydusify-release nydus-overlayfs-release
 
-contrib-test: nydusify-test ctr-remote-test \
-				nydus-overlayfs-test
+contrib-test: nydusify-test nydus-overlayfs-test
 
-contrib-lint: nydusify-lint ctr-remote-lint \
-				nydus-overlayfs-lint
+contrib-lint: nydusify-lint nydus-overlayfs-lint
 
-contrib-clean: nydusify-clean ctr-remote-clean \
-				nydus-overlayfs-clean
+contrib-clean: nydusify-clean nydus-overlayfs-clean
 
 contrib-install:
 	@sudo mkdir -m 755 -p $(INSTALL_DIR_PREFIX)
-	@sudo install -m 755 contrib/ctr-remote/bin/ctr-remote $(INSTALL_DIR_PREFIX)/ctr-remote
 	@sudo install -m 755 contrib/nydus-overlayfs/bin/nydus-overlayfs $(INSTALL_DIR_PREFIX)/nydus-overlayfs
 	@sudo install -m 755 contrib/nydusify/cmd/nydusify $(INSTALL_DIR_PREFIX)/nydusify
 
@@ -172,21 +166,6 @@ nydusify-clean:
 
 nydusify-lint:
 	$(call build_golang,${NYDUSIFY_PATH},make lint)
-
-ctr-remote:
-	$(call build_golang,${CTR-REMOTE_PATH},make)
-
-ctr-remote-release:
-	$(call build_golang,${CTR-REMOTE_PATH},make release)
-
-ctr-remote-test:
-	$(call build_golang,${CTR-REMOTE_PATH},make test)
-
-ctr-remote-clean:
-	$(call build_golang,${CTR-REMOTE_PATH},make clean)
-
-ctr-remote-lint:
-	$(call build_golang,${CTR-REMOTE_PATH},make lint)
 
 nydus-overlayfs:
 	$(call build_golang,${NYDUS-OVERLAYFS_PATH},make)

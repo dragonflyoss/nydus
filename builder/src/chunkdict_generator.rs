@@ -36,6 +36,7 @@ use tempfile::TempDir;
 use crate::finalize_blob;
 use crate::Artifact;
 use core::panic;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
@@ -161,7 +162,7 @@ impl Generator {
     ) -> Result<()> {
         let (prefetch_nodes, _) = ctx.prefetch.get_file_nodes();
         for node in prefetch_nodes {
-            let node = node.lock().unwrap();
+            let node = node.borrow();
             match node.inode {
                 InodeWrapper::Ref(_) => {
                     debug!("Node Wrapper: Reference")
@@ -216,17 +217,6 @@ impl Generator {
             });
         }
 
-        let tmp_dir = TempDir::new().unwrap();
-        let tmp_path = tmp_dir.into_path();
-        debug!("temp path: {}", tmp_path.display());
-
-        Self::revert_files(
-            &blobs_id_and_compressor,
-            file_nodes_prefetch.clone(),
-            &mut backend_config,
-            tmp_path.clone(),
-        );
-
         let mut map: HashMap<PathBuf, BlobNodeReader> = Self::get_node_reader(
             &blobs_id_and_compressor,
             file_nodes_prefetch.clone(),
@@ -240,8 +230,8 @@ impl Generator {
         let mut meta_uncompressed_size = 0;
         let mut chunk_index_in_prefetch = 0;
         for node in &file_nodes_prefetch {
-            let child = tree.get_node(&node.lock().unwrap().path()).unwrap();
-            let mut child = child.node.lock().unwrap();
+            let child = tree.get_node(&node.borrow().path()).unwrap();
+            let mut child = child.node.borrow().clone();
             child.layer_idx = prefetch_blob_index as u16;
             for chunk in &mut child.chunks {
                 chunk_count += 1;
@@ -362,12 +352,12 @@ impl Generator {
 
     fn get_node_reader(
         blob_ids: &Vec<BlobIdAndCompressor>,
-        nodes: Vec<Rc<Mutex<Node>>>,
+        nodes: Vec<Rc<RefCell<Node>>>,
         backend: &mut BackendConfigV2,
     ) -> HashMap<PathBuf, BlobNodeReader> {
         let mut map = HashMap::new();
         for node in nodes {
-            let node = node.lock().unwrap();
+            let node = node.borrow();
             let blob_id = node.chunks.get(0).unwrap().inner.blob_index();
             let blob_id = blob_ids.get(blob_id as usize).unwrap().blob_id.clone();
             let blob_dir = backend.localfs.as_ref().unwrap().dir.clone();
@@ -380,66 +370,6 @@ impl Generator {
             map.insert(node.path().clone(), reader);
         }
         map
-    }
-
-    /// Revert files from the blob
-    fn revert_files(
-        blob_ids: &Vec<BlobIdAndCompressor>,
-        nodes: Vec<Rc<Mutex<Node>>>,
-        backend: &mut BackendConfigV2,
-        workdir: PathBuf,
-    ) {
-        debug!("BackEnd: {:?}", backend);
-        for node in nodes {
-            let node = node.lock().unwrap();
-            let blob_id = node.chunks.get(0).unwrap().inner.blob_index();
-            let blob_id = blob_ids.get(blob_id as usize).unwrap().blob_id.clone();
-            // backend.localfs.unwrap().blob_file =
-            let mut node_backend = backend.clone();
-            let blob_dir = backend.localfs.as_ref().unwrap().dir.clone();
-            let mut blob_file = PathBuf::from(blob_dir);
-            blob_file.push(blob_id);
-            if let Some(localfs_config) = &mut node_backend.localfs {
-                localfs_config.blob_file = blob_file.display().to_string();
-            }
-
-            let blob_mgr = BlobFactory::new_backend(&node_backend, "Fix-Prefetch-Blob-ID").unwrap();
-
-            debug!("Node Path: {}", node.path().display());
-            let mut path = PathBuf::from(&workdir);
-            path.push(node.path().strip_prefix("/").unwrap());
-            let mut file = File::create(path).unwrap();
-            for chunk in &node.chunks {
-                let inner = &chunk.inner;
-                // Read From Blob
-                let blob_index = inner.blob_index();
-                debug!("blob index: {}", blob_index);
-                let BlobIdAndCompressor {
-                    blob_id,
-                    compressor,
-                } = blob_ids.get(blob_index as usize).unwrap();
-
-                let reader = blob_mgr.get_reader(blob_id.as_ref()).unwrap();
-                debug!("blob id: {}", blob_id);
-                let compressed_size = inner.compressed_size();
-                debug!("compressed size as u8: {}", compressed_size as u8);
-                let mut buf: Vec<u8> = vec![0; compressed_size as usize];
-                debug!("buf len: {}", buf.len());
-                let compressed_offset = inner.compressed_offset();
-                debug!("compressed {}/{}", compressed_size, compressed_offset);
-                let size = reader.read(&mut buf, compressed_offset).unwrap();
-                debug!("size: {}", size);
-                debug!("buf len: {}", buf.len());
-                match compressor {
-                    Algorithm::Zstd => {
-                        let revert = Self::decompress_zstd(&buf).unwrap();
-                        debug!("Revert size: {}", revert.len());
-                        file.write_all(&revert).unwrap();
-                    }
-                    _ => unimplemented!(),
-                }
-            }
-        }
     }
 
     fn decompress_zstd(compressed: &[u8]) -> Result<Vec<u8>> {
@@ -463,7 +393,7 @@ impl Generator {
     /// Validate tree.
     fn validate_tree(tree: &Tree) -> Result<()> {
         let pre = &mut |t: &Tree| -> Result<()> {
-            let node = t.lock_node();
+            let node = t.borrow_mut_node();
             debug!("chunkdict tree: ");
             debug!("inode: {}", node);
             for chunk in &node.chunks {
@@ -578,7 +508,7 @@ impl Generator {
         node.inode.set_child_count(node.chunks.len() as u32);
         let child = Tree::new(node);
         child
-            .lock_node()
+            .borrow_mut_node()
             .v5_set_dir_size(ctx.fs_version, &child.children);
         Ok(child)
     }

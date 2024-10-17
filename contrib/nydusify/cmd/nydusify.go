@@ -24,7 +24,6 @@ import (
 	"github.com/urfave/cli/v2"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/rule"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/chunkdict/generator"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter"
@@ -80,7 +79,7 @@ func getBackendConfig(c *cli.Context, prefix string, required bool) (string, str
 		return "", "", nil
 	}
 
-	possibleBackendTypes := []string{"oss", "s3"}
+	possibleBackendTypes := []string{"oss", "s3", "localfs"}
 	if !isPossibleValue(possibleBackendTypes, backendType) {
 		return "", "", fmt.Errorf("--%sbackend-type should be one of %v", prefix, possibleBackendTypes)
 	}
@@ -90,7 +89,7 @@ func getBackendConfig(c *cli.Context, prefix string, required bool) (string, str
 	)
 	if err != nil {
 		return "", "", err
-	} else if (backendType == "oss" || backendType == "s3") && strings.TrimSpace(backendConfig) == "" {
+	} else if (backendType == "oss" || backendType == "s3" || backendType == "localfs") && strings.TrimSpace(backendConfig) == "" {
 		return "", "", errors.Errorf("backend configuration is empty, please specify option '--%sbackend-config'", prefix)
 	}
 
@@ -796,7 +795,12 @@ func main() {
 					Usage:     "Json configuration file for storage backend",
 					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
 				},
-
+				&cli.BoolFlag{
+					Name:    "prefetch",
+					Value:   false,
+					Usage:   "Enable full image data prefetch",
+					EnvVars: []string{"PREFETCH"},
+				},
 				&cli.StringFlag{
 					Name:    "mount-path",
 					Value:   "./image-fs",
@@ -836,12 +840,10 @@ func main() {
 						return err
 					}
 
-					backendConfigStruct, err := rule.NewRegistryBackendConfig(parsed)
+					backendConfigStruct, err := utils.NewRegistryBackendConfig(parsed, c.Bool("target-insecure"))
 					if err != nil {
 						return errors.Wrap(err, "parse registry backend configuration")
 					}
-
-					backendConfigStruct.SkipVerify = c.Bool("target-insecure")
 
 					bytes, err := json.Marshal(backendConfigStruct)
 					if err != nil {
@@ -865,6 +867,7 @@ func main() {
 					BackendType:    backendType,
 					BackendConfig:  backendConfig,
 					ExpectedArch:   arch,
+					Prefetch:       c.Bool("prefetch"),
 				})
 				if err != nil {
 					return err

@@ -8,7 +8,7 @@ linters:
     - goimports
     - revive
     - ineffassign
-    - vet
+    - govet
     - unused
     - misspell
   disable:
@@ -16,6 +16,3 @@ linters:
 
 run:
   deadline: 4m
-  skip-dirs:
-    - misc
-

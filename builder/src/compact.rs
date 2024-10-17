@@ -48,22 +48,30 @@ pub struct Config {
     /// available value: 0-99, 0 means disable
     /// hint: it's better to disable this option when there are some shared blobs
     /// for example: build-cache
-    #[serde(default)]
-    min_used_ratio: u8,
+    pub min_used_ratio: u8,
     /// we compact blobs whose size are less than compact_blob_size
-    #[serde(default = "default_compact_blob_size")]
-    compact_blob_size: usize,
+    pub compact_blob_size: usize,
     /// size of compacted blobs should not be larger than max_compact_size
-    #[serde(default = "default_max_compact_size")]
-    max_compact_size: usize,
+    pub max_compact_size: usize,
     /// if number of blobs >= layers_to_compact, do compact
     /// 0 means always try compact
-    #[serde(default)]
-    layers_to_compact: usize,
+    pub layers_to_compact: usize,
     /// local blobs dir, may haven't upload to backend yet
     /// what's more, new blobs will output to this dir
     /// name of blob file should be equal to blob_id
-    blobs_dir: String,
+    pub blobs_dir: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            min_used_ratio: 0,
+            compact_blob_size: default_compact_blob_size(),
+            max_compact_size: default_max_compact_size(),
+            layers_to_compact: 0,
+            blobs_dir: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -79,7 +87,7 @@ impl ChunkKey {
         match c {
             ChunkWrapper::V5(_) => Self::Digest(*c.id()),
             ChunkWrapper::V6(_) => Self::Offset(c.blob_index(), c.compressed_offset()),
-            ChunkWrapper::Ref(_) => unimplemented!("unsupport ChunkWrapper::Ref(c)"),
+            ChunkWrapper::Ref(_) => Self::Digest(*c.id()),
         }
     }
 }
@@ -303,7 +311,7 @@ impl BlobCompactor {
         let chunk_dict = self.get_chunk_dict();
 
         let cb = &mut |n: &Tree| -> Result<()> {
-            let mut node = n.lock_node();
+            let mut node = n.borrow_mut_node();
             for chunk_idx in 0..node.chunks.len() {
                 let chunk = &mut node.chunks[chunk_idx];
                 let chunk_key = ChunkKey::from(&chunk.inner);
@@ -366,7 +374,7 @@ impl BlobCompactor {
     fn apply_blob_move(&mut self, from: u32, to: u32) -> Result<()> {
         if let Some(idx_list) = self.b2nodes.get(&from) {
             for (n, chunk_idx) in idx_list.iter() {
-                let mut node = n.lock().unwrap();
+                let mut node = n.borrow_mut();
                 ensure!(
                     node.chunks[*chunk_idx].inner.blob_index() == from,
                     "unexpected blob_index of chunk"
@@ -380,7 +388,7 @@ impl BlobCompactor {
     fn apply_chunk_change(&mut self, c: &(ChunkWrapper, ChunkWrapper)) -> Result<()> {
         if let Some(chunks) = self.c2nodes.get(&ChunkKey::from(&c.0)) {
             for (n, chunk_idx) in chunks.iter() {
-                let mut node = n.lock().unwrap();
+                let mut node = n.borrow_mut();
                 let chunk = &mut node.chunks[*chunk_idx];
                 let mut chunk_inner = chunk.inner.deref().clone();
                 apply_chunk_change(&c.1, &mut chunk_inner)?;
@@ -789,7 +797,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic = "not implemented: unsupport ChunkWrapper::Ref(c)"]
     fn test_chunk_key_from() {
         let cw = ChunkWrapper::new(RafsVersion::V5);
         matches!(ChunkKey::from(&cw), ChunkKey::Digest(_));

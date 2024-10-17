@@ -33,7 +33,7 @@ impl Validator {
         let tree = Tree::from_bootstrap(&self.sb, &mut ()).context(err)?;
 
         let pre = &mut |t: &Tree| -> Result<()> {
-            let node = t.lock_node();
+            let node = t.borrow_mut_node();
             if verbosity {
                 println!("inode: {}", node);
                 for chunk in &node.chunks {

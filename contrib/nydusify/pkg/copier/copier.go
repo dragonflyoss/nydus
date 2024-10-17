@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
 	containerdErrdefs "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
@@ -246,6 +247,28 @@ func getPlatform(platform *ocispec.Platform) string {
 	return platforms.Format(*platform)
 }
 
+// getLocalPath checks if the given reference is a local file path and returns its absolute path.
+//
+// Parameters:
+// - ref: A string which may be a docker reference or a local file path prefixed with "file://".
+//
+// Returns:
+// - isLocalPath: A boolean indicating whether the reference is a local file path.
+// - absPath: A string containing the absolute path of the local file, if applicable.
+// - err: An error object if any error occurs during the process of getting the absolute path.
+func getLocalPath(ref string) (isLocalPath bool, absPath string, err error) {
+	if !strings.HasPrefix(ref, "file://") {
+		return false, "", nil
+	}
+	path := strings.TrimPrefix(ref, "file://")
+	absPath, err = filepath.Abs(path)
+	if err != nil {
+		return true, "", err
+	}
+	return true, absPath, nil
+}
+
+// Copy copies an image from the source to the target.
 func Copy(ctx context.Context, opt Opt) error {
 	// Containerd image fetch requires a namespace context.
 	ctx = namespaces.WithNamespace(ctx, "nydusify")
@@ -285,33 +308,72 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	sourceNamed, err := docker.ParseDockerRef(opt.Source)
+	isLocalSource, inputPath, err := getLocalPath(opt.Source)
 	if err != nil {
-		return errors.Wrap(err, "parse source reference")
+		return errors.Wrap(err, "parse source path")
 	}
-	targetNamed, err := docker.ParseDockerRef(opt.Target)
-	if err != nil {
-		return errors.Wrap(err, "parse target reference")
-	}
-	source := sourceNamed.String()
-	target := targetNamed.String()
+	var source string
+	if isLocalSource {
+		logrus.Infof("importing source image from %s", inputPath)
 
-	logrus.Infof("pulling source image %s", source)
-	if err := pvd.Pull(ctx, source); err != nil {
-		if errdefs.NeedsRetryWithHTTP(err) {
-			pvd.UsePlainHTTP()
-			if err := pvd.Pull(ctx, source); err != nil {
-				return errors.Wrap(err, "try to pull image")
-			}
-		} else {
-			return errors.Wrap(err, "pull source image")
+		f, err := os.Open(inputPath)
+		if err != nil {
+			return err
 		}
+		defer f.Close()
+
+		ds, err := compression.DecompressStream(f)
+		if err != nil {
+			return err
+		}
+		defer ds.Close()
+
+		if source, err = pvd.Import(ctx, ds); err != nil {
+			return errors.Wrap(err, "import source image")
+		}
+		logrus.Infof("imported source image %s", source)
+	} else {
+		sourceNamed, err := docker.ParseDockerRef(opt.Source)
+		if err != nil {
+			return errors.Wrap(err, "parse source reference")
+		}
+		source = sourceNamed.String()
+
+		logrus.Infof("pulling source image %s", source)
+		if err := pvd.Pull(ctx, source); err != nil {
+			if errdefs.NeedsRetryWithHTTP(err) {
+				pvd.UsePlainHTTP()
+				if err := pvd.Pull(ctx, source); err != nil {
+					return errors.Wrap(err, "try to pull image")
+				}
+			} else {
+				return errors.Wrap(err, "pull source image")
+			}
+		}
+		logrus.Infof("pulled source image %s", source)
 	}
-	logrus.Infof("pulled source image %s", source)
 
 	sourceImage, err := pvd.Image(ctx, source)
 	if err != nil {
 		return errors.Wrap(err, "find image from store")
+	}
+
+	isLocalTarget, outputPath, err := getLocalPath(opt.Target)
+	if err != nil {
+		return errors.Wrap(err, "parse target path")
+	}
+	if isLocalTarget {
+		logrus.Infof("exporting source image to %s", outputPath)
+		f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := pvd.Export(ctx, f, sourceImage, source); err != nil {
+			return errors.Wrap(err, "export source image to target tar file")
+		}
+		logrus.Infof("exported image %s", source)
+		return nil
 	}
 
 	sourceDescs, err := utils.GetManifests(ctx, pvd.ContentStore(), *sourceImage, platformMC)
@@ -319,6 +381,12 @@ func Copy(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "get image manifests")
 	}
 	targetDescs := make([]ocispec.Descriptor, len(sourceDescs))
+
+	targetNamed, err := docker.ParseDockerRef(opt.Target)
+	if err != nil {
+		return errors.Wrap(err, "parse target reference")
+	}
+	target := targetNamed.String()
 
 	sem := semaphore.NewWeighted(1)
 	eg := errgroup.Group{}

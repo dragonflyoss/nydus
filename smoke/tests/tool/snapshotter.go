@@ -17,7 +17,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-// SnapshotterClient commnicates with nydus-snapshotter via
+// SnapshotterClient communicates with nydus-snapshotter via
 // the system controller endpoint unix socket of nydus-snapshotter.
 type SnapshotterClient struct {
 	client *http.Client

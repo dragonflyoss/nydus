@@ -37,7 +37,7 @@ type Generator func() (name string, testCase Case)
 // asynchronous/synchronized control is suite-leveled.
 //
 // Compared with github.com/onsi/ginkgo, this framework provides simpler way to organize
-// cases into suite, which requires less learing of terms and less nested definitions.
+// cases into suite, which requires less learning of terms and less nested definitions.
 // Moreover, the asynchronous run is more golang-natived, which requires no other binary.
 //
 // Compared with github.com/stretchr/testify, this framework provides asynchronous mode
@@ -161,7 +161,7 @@ type Generator func() (name string, testCase Case)
 //
 //	`go test -v --parallel 4`
 //	    1. The cases are parallel executed, which leads to random completion.
-//	    2. The dynamic tests are named automicly in lack of customized name.
+//	    2. The dynamic tests are named automatically in lack of customized name.
 //
 //	    --- PASS: Test1 (0.00s)
 //	        --- PASS: Test1/TestDynamicTest_4 (5.00s)

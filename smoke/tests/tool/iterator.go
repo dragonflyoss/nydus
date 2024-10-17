@@ -95,7 +95,7 @@ func (d *DescartesItem) GetUInt64(name string) uint64 {
 //	       fmt.Println(item.Str())
 //	   }
 type DescartesIterator struct {
-	cursores  []int
+	cursors   []int
 	valLists  [][]interface{}
 	cursorMap map[string]int
 	skip      func(item *DescartesItem) bool
@@ -118,7 +118,7 @@ func (c *DescartesIterator) Next() *DescartesItem {
 		return nil
 	}
 
-	c.cursores = c.nextCursors
+	c.cursors = c.nextCursors
 	result := c.nextItem
 
 	c.clearNext()
@@ -133,8 +133,8 @@ func (c *DescartesIterator) HasNext() bool {
 
 func (c *DescartesIterator) calNext() {
 
-	cursors := make([]int, len(c.cursores))
-	copy(cursors, c.cursores)
+	cursors := make([]int, len(c.cursors))
+	copy(cursors, c.cursors)
 
 	item := &DescartesItem{vals: make(map[string]interface{})}
 	for {
@@ -186,11 +186,11 @@ func (c *DescartesIterator) Dimension(name string, vals []interface{}) *Descarte
 		c.cursorMap = make(map[string]int)
 	}
 
-	c.cursores = append(c.cursores, 0)
+	c.cursors = append(c.cursors, 0)
 	c.valLists = append(c.valLists, vals)
-	c.cursorMap[name] = len(c.cursores) - 1
+	c.cursorMap[name] = len(c.cursors) - 1
 
-	c.cursores[0] = -1
+	c.cursors[0] = -1
 
 	return c
 }
