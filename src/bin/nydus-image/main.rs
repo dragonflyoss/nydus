@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// #![deny(warnings)]
+#![deny(warnings)]
 #[macro_use(crate_authors)]
 extern crate clap;
 #[macro_use]
@@ -21,7 +21,6 @@ use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::result::Result::Ok;
 use std::sync::{Arc, Mutex};
 

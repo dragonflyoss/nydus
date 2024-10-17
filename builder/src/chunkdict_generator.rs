@@ -26,12 +26,10 @@ use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
 use nydus_rafs::metadata::layout::{RafsBlobTable, RafsXAttrs};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
-use nydus_storage::factory::BlobFactory;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
 use nydus_utils::compress;
 use nydus_utils::compress::Algorithm;
 use nydus_utils::digest::RafsDigest;
-use tempfile::TempDir;
 
 use crate::finalize_blob;
 use crate::Artifact;
@@ -40,17 +38,15 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{self, Read, Seek, Write};
+use std::io::{Read, Seek};
 use std::mem::size_of;
 use std::ops::Add;
 use std::ops::{Rem, Sub};
-use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::u32;
-use zstd::decode_all;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkdictChunkInfo {
@@ -76,6 +72,7 @@ pub struct ChunkdictBlobInfo {
 
 // TODO(daiyongxuan): implement Read Trait for BlobNodeReader
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct BlobNodeReader {
     blob: File,
     start: u64,
@@ -113,6 +110,7 @@ impl Read for BlobNodeReader {
 /// Struct to generate chunkdict RAFS bootstrap.
 pub struct Generator {}
 
+#[allow(dead_code)]
 struct BlobIdAndCompressor {
     pub blob_id: String,
     pub compressor: compress::Algorithm,
@@ -372,10 +370,6 @@ impl Generator {
         map
     }
 
-    fn decompress_zstd(compressed: &[u8]) -> Result<Vec<u8>> {
-        Ok(decode_all(compressed)?)
-    }
-
     fn align_to_4k<T>(offset: T) -> T
     where
         T: Sub<Output = T> + Add<Output = T> + Rem<Output = T> + PartialEq + TryFrom<u64> + Copy,
@@ -576,55 +570,6 @@ impl Generator {
             });
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use std::env;
-
-    use nydus_rafs::fs::Rafs;
-
-    use crate::{core::prefetch, Features, Prefetch};
-
-    use super::*;
-
-    #[test]
-    fn test_backend() {
-        println!("current dir: {}", env::current_dir().unwrap().display());
-        let backend_config = BackendConfigV2 {
-            backend_type: String::from("localfs"),
-            localdisk: None,
-            localfs: Some(nydus_api::LocalFsConfig {
-                blob_file: String::from("/root/nydusTestImage/test-image/blobs/f22c9758339fcf8fe77a4ca0b4deba2ededad9904bdf8e520df2c0277e666070"),
-                dir: String::from("/root/nydusTestImage/test-image/blobs/"),
-                alt_dirs: Vec::new(),
-            }),
-            oss: None,
-            s3: None,
-            registry: None,
-            http_proxy: None,
-        };
-
-        let blob_mgr = BlobFactory::new_backend(&backend_config, "Fix-Prefetch-Blob-ID").unwrap();
-        let reader = blob_mgr
-            .get_reader("f22c9758339fcf8fe77a4ca0b4deba2ededad9904bdf8e520df2c0277e666070")
-            .unwrap();
-        println!("Reader Done");
-        let mut buf2: Vec<u8> = vec![0; 19];
-        let size = reader.read(&mut buf2, 19).unwrap();
-        println!("size: {}", size);
-        println!("buf len: {}", buf2.len());
-
-        let revert = Generator::decompress_zstd(&buf2).unwrap();
-        println!("len: {}", revert.len());
-
-        let mut buf: Vec<u8> = vec![0; 19];
-        let size = reader.read(&mut buf, 0).unwrap();
-        println!("size: {}", size);
-
-        let revert = Generator::decompress_zstd(&buf).unwrap();
-        println!("len: {}", revert.len());
     }
 }
 

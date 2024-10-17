@@ -47,6 +47,7 @@ impl From<rusqlite::Error> for DatabaseError {
     }
 }
 
+#[allow(dead_code)]
 pub trait Database {
     /// Creates a new chunk in the database.
     fn create_chunk_table(&self) -> Result<()>;
@@ -896,6 +897,7 @@ struct DataPoint {
     cluster_id: i32,
 }
 
+#[allow(dead_code)]
 pub trait Table<T, Err>: Sync + Send + Sized + 'static
 where
     Err: std::error::Error + 'static,
