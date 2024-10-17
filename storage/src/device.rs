@@ -309,10 +309,6 @@ impl BlobInfo {
                 // For RAFS v6
                 if self.has_feature(BlobFeatures::HAS_TAR_HEADER) {
                     // There's a tar header between chunk data and compression information.
-                    println!("SELF BLOB ID: {}", self.blob_id);
-                    println!("META CI OFFSET: {}", self.meta_ci_offset);
-                    println!("SELF CI COMPRESSED DATA SIZE: {}", self.meta_ci_compressed_size);
-                    println!("COMPRESSED DATA SIZE: 0x{:x}", self.meta_ci_offset - 0x200);
                     self.meta_ci_offset - 0x200
                 } else {
                     self.meta_ci_offset

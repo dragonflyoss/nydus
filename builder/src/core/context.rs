@@ -713,7 +713,6 @@ impl BlobContext {
         blob_ctx.blob_toc_size = toc_size;
 
         if blob.meta_ci_is_valid() {
-            debug!("meta ci is valid");
             blob_ctx
                 .blob_meta_header
                 .set_ci_compressor(blob.meta_ci_compressor());

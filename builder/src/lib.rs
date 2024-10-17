@@ -202,9 +202,7 @@ fn finalize_blob(
         }
 
         let hash = blob_ctx.blob_hash.clone().finalize();
-        debug!("hash: {:x}", hash);
         let blob_meta_id = if ctx.blob_id.is_empty() {
-            debug!("IS EMPTY");
             format!("{:x}", hash)
         } else {
             assert!(!ctx.conversion_type.is_to_ref() || is_tarfs);
@@ -249,11 +247,7 @@ fn finalize_blob(
         if let Some(blob_cache) = ctx.blob_cache_generator.as_ref() {
             blob_cache.finalize(&blob_ctx.blob_id)?;
         }
-        debug!("Blob Id:");
-        debug!("{}", blob_ctx.blob_id);
-        debug!("{}", ctx.blob_id);
         ctx.blob_id = blob_ctx.blob_id.clone();
-        
     }
     Ok(())
 }

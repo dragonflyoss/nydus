@@ -40,7 +40,7 @@ impl Blob {
             ConversionType::DirectoryToRafs => {
                 let is_prefetch = ctx.blob_id == String::from("Prefetch-blob");
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
-                let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch)?;
+                let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch, is_prefetch)?;
                 let maps: &mut HashMap<PathBuf, BlobNodeReader> = maps.unwrap();
                 for (idx, node) in inodes.iter().enumerate() {
                     let mut node = node.lock().unwrap();
@@ -53,7 +53,6 @@ impl Blob {
                         }
                     }
                 }
-                debug!("Dump Node Done");
                 Self::finalize_blob_data(ctx, blob_mgr, blob_writer)?;
             }
             ConversionType::TarToRafs
@@ -174,7 +173,6 @@ impl Blob {
             dbg!(blob_ctx.uncompressed_blob_size);
             return Ok(());
         }
-        debug!("Arrive Here");
         // Prepare blob meta information data.
         let encrypt = ctx.cipher != crypt::Algorithm::None;
         let cipher_obj = &blob_ctx.cipher_object;
