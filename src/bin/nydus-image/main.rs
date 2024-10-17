@@ -1968,7 +1968,7 @@ impl Command {
             }
         } else if let Some(dir) = matches.get_one::<String>("blob-dir") {
             config = Arc::new(ConfigV2::new_localfs("", dir)?);
-            backend = BlobFactory::new_backend(&config.backend.as_ref().unwrap(), blob_id)?;
+            backend = BlobFactory::new_backend(config.backend.as_ref().unwrap(), blob_id)?;
         } else {
             return Err(anyhow!("invalid backend configuration"));
         }

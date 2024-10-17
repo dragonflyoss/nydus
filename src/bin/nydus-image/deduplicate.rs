@@ -345,7 +345,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "Chunkdict size is {}",
-            chunkdict_size as f64 / 1024 as f64 / 1024 as f64
+            chunkdict_size as f64 / 1024_f64 / 1024_f64
         );
         for chunk in all_chunks {
             if !core_image.contains(&chunk.image_reference)
@@ -790,7 +790,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "All chunk size is {}",
-            all_chunks_size as f64 / 1024 as f64 / 1024 as f64
+            all_chunks_size as f64 / 1024_f64 / 1024_f64
         );
 
         let train_percentage = 0.7;
@@ -802,7 +802,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "Train set size is {}",
-            train_set_size as f64 / 1024 as f64 / 1024 as f64
+            train_set_size as f64 / 1024_f64 / 1024_f64
         );
 
         let mut test_set_size = 0;
@@ -811,7 +811,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "Test set size is {}",
-            test_set_size as f64 / 1024 as f64 / 1024 as f64
+            test_set_size as f64 / 1024_f64 / 1024_f64
         );
 
         let mut version_datadict: HashMap<String, Vec<ChunkdictChunkInfo>> = HashMap::new();
@@ -880,7 +880,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "After deduplicating test set size is {} and deduplicating rate is {} ",
-            min_test_size as f64 / 1024 as f64 / 1024 as f64,
+            min_test_size as f64 / 1024_f64 / 1024_f64,
             1.0 - (min_test_size as f64) / (test_set_size as f64)
         );
         Ok((min_data_dict, datadict))
