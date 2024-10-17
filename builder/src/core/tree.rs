@@ -248,7 +248,6 @@ impl Tree {
 
         Ok(())
     }
-
 }
 
 pub struct MetadataTreeBuilder<'a> {

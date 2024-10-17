@@ -46,7 +46,9 @@ use crate::metadata::layout::v6::{
 };
 use crate::metadata::layout::{bytes_to_os_str, MetaRange, XattrName, XattrValue};
 use crate::metadata::{
-    Attr, Entry, Inode, RafsBlobExtraInfo, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler, RafsSuperBlock, RafsSuperFlags, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE, RAFS_MAX_NAME
+    Attr, Entry, Inode, RafsBlobExtraInfo, RafsInode, RafsInodeWalkAction, RafsInodeWalkHandler,
+    RafsSuperBlock, RafsSuperFlags, RafsSuperInodes, RafsSuperMeta, RAFS_ATTR_BLOCK_SIZE,
+    RAFS_MAX_NAME,
 };
 use crate::{MetaType, RafsError, RafsInodeExt, RafsIoReader, RafsResult};
 

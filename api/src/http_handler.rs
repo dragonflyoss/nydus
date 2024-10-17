@@ -35,6 +35,7 @@ const REQUEST_TOKEN: Token = Token(1);
 /// Specialized version of [`std::result::Result`] for value returned by [`EndpointHandler`].
 pub type HttpResult = std::result::Result<Response, HttpError>;
 
+#[allow(clippy::manual_inspect)]
 /// Get query parameter with `key` from the HTTP request.
 pub fn extract_query_part(req: &Request, key: &str) -> Option<String> {
     // Splicing req.uri with "http:" prefix might look weird, but since it depends on

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::slice;
 
+use crate::chunkdict_generator::BlobNodeReader;
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
@@ -14,7 +15,6 @@ use nydus_storage::meta::{toc, BlobMetaChunkArray};
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::{compress, crypt};
 use sha2::digest::Digest;
-use crate::chunkdict_generator::BlobNodeReader;
 
 use super::layout::BlobLayout;
 use super::node::Node;
@@ -40,12 +40,20 @@ impl Blob {
             ConversionType::DirectoryToRafs => {
                 let is_prefetch = ctx.blob_id == String::from("Prefetch-blob");
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
-                let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch, is_prefetch)?;
+                let (inodes, prefetch_entries) =
+                    BlobLayout::layout_blob_simple(&ctx.prefetch, is_prefetch)?;
                 let maps: &mut HashMap<PathBuf, BlobNodeReader> = maps.unwrap();
                 for (idx, node) in inodes.iter().enumerate() {
                     let mut node = node.borrow_mut();
                     let size = node
-                        .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf, is_prefetch, Some(maps))
+                        .dump_node_data(
+                            ctx,
+                            blob_mgr,
+                            blob_writer,
+                            &mut chunk_data_buf,
+                            is_prefetch,
+                            Some(maps),
+                        )
                         .context("failed to dump blob chunks")?;
                     if idx < prefetch_entries {
                         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {

@@ -225,7 +225,7 @@ impl Generator {
 
         let prefetch_blob_index = prefetch_blob_info.blob_index();
         let mut chunk_count = 0;
-        // For every chunk, need to align to 4k 
+        // For every chunk, need to align to 4k
         let mut prefetch_blob_offset = 0;
         let mut meta_uncompressed_size = 0;
         let mut chunk_index_in_prefetch = 0;
@@ -302,7 +302,7 @@ impl Generator {
         )
         .unwrap();
         prefetch_build_ctx.compressor = compress::Algorithm::Zstd;
-        // TODO(daiyongxuan): To avoid compress twice, I set the compressor 
+        // TODO(daiyongxuan): To avoid compress twice, I set the compressor
         // to None.
         // The actual compressor should be set to Zstd or etc..
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {

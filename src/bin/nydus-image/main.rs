@@ -32,11 +32,10 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor,
-    BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo,
-    ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature, Features, Generator,
-    HashChunkDict, Merger, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree,
-    WhiteoutSpec,
+    parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobManager,
+    BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo, ChunkdictChunkInfo,
+    ConversionType, DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger,
+    Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree, WhiteoutSpec,
 };
 
 use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
@@ -1816,7 +1815,7 @@ impl Command {
     fn get_blobs_dir(matches: &ArgMatches) -> Result<&Path> {
         match matches.get_one::<String>("blob-dir") {
             Some(s) => Ok(Path::new(s)),
-            None => bail!("missing parameter `blob-dir`")
+            None => bail!("missing parameter `blob-dir`"),
         }
     }
 
@@ -1825,8 +1824,8 @@ impl Command {
             Some(files) => {
                 let paths: Vec<String> = files.map(String::from).collect();
                 Ok(paths)
-            },
-            None => bail!("missing parameters `prefetch-files`")
+            }
+            None => bail!("missing parameters `prefetch-files`"),
         }
     }
 

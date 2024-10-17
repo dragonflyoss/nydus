@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
 use std::fs::{self, File};
@@ -15,8 +16,8 @@ use std::os::macos::fs::MetadataExt;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::collections::HashMap;
 
+use crate::chunkdict_generator::BlobNodeReader;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
@@ -28,7 +29,6 @@ use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{compress, crypt};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
-use crate::chunkdict_generator::BlobNodeReader;
 use sha2::digest::Digest;
 
 use crate::{BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay};
@@ -224,7 +224,7 @@ impl Node {
         blob_writer: &mut dyn Artifact,
         chunk_data_buf: &mut [u8],
         is_prefetch: bool,
-        maps: Option<&mut HashMap<PathBuf, BlobNodeReader>>
+        maps: Option<&mut HashMap<PathBuf, BlobNodeReader>>,
     ) -> Result<u64> {
         let mut reader: Option<Box<dyn Read>> = None;
         if is_prefetch {
@@ -243,7 +243,14 @@ impl Node {
             };
         }
 
-        self.dump_node_data_with_reader(ctx, blob_mgr, blob_writer, reader.as_mut(), chunk_data_buf, is_prefetch)
+        self.dump_node_data_with_reader(
+            ctx,
+            blob_mgr,
+            blob_writer,
+            reader.as_mut(),
+            chunk_data_buf,
+            is_prefetch,
+        )
     }
 
     /// Dump data from a reader into the data blob, and generate chunk information.
@@ -289,8 +296,6 @@ impl Node {
             None
         };
 
-        
-
         // `child_count` of regular file is reused as `chunk_count`.
         for i in 0..self.inode.child_count() {
             let chunk_size = ctx.chunk_size;
@@ -304,7 +309,7 @@ impl Node {
             };
 
             if is_prefetch {
-                uncompressed_size =  self.chunks.get(i as usize).unwrap().inner.compressed_size();
+                uncompressed_size = self.chunks.get(i as usize).unwrap().inner.compressed_size();
             }
 
             let chunk_data = &mut data_buf[0..uncompressed_size as usize];

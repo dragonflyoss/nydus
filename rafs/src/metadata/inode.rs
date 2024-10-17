@@ -18,7 +18,7 @@ use crate::metadata::direct_v6::OndiskInodeWrapper as OndiskInodeWrapperV6;
 use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode};
 use crate::metadata::layout::v6::{RafsV6InodeCompact, RafsV6InodeExtended};
 use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::{RafsVersion};
+use crate::metadata::RafsVersion;
 use crate::RafsInodeExt;
 
 /// An inode object wrapper for different RAFS versions.
@@ -167,9 +167,9 @@ impl InodeWrapper {
             InodeWrapper::V5(i) => i.is_blkdev(),
             InodeWrapper::V6(i) => i.is_blkdev(),
             // InodeWrapper::Ref(_i) => unimplemented!(),
-            // TODO: Just Indentify that prefetch node is not 
+            // TODO: Just Indentify that prefetch node is not
             // block device
-            InodeWrapper::Ref(_) => false, 
+            InodeWrapper::Ref(_) => false,
         }
     }
 
@@ -178,7 +178,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.is_fifo(),
             InodeWrapper::V6(i) => i.is_fifo(),
-            // TODO: Just Indentify that prefetch node is not 
+            // TODO: Just Indentify that prefetch node is not
             // A fifo
             InodeWrapper::Ref(_) => false,
             // InodeWrapper::Ref(_i) => unimplemented!(),

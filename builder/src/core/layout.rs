@@ -22,8 +22,7 @@ impl BlobLayout {
                 .filter(|x| Self::should_dump_node(x.borrow().deref()))
                 .collect()
         } else {
-            pre.into_iter()
-                .collect()
+            pre.into_iter().collect()
         };
         let mut non_prefetch_inodes: Vec<TreeNode> = non_pre
             .into_iter()
