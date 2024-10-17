@@ -331,7 +331,7 @@ impl Generator {
             .entries
             .iter()
             .map(|blobinfo| {
-                if blobinfo.blob_id() == String::from("Prefetch-blob") {
+                if blobinfo.blob_id() == "Prefetch-blob" {
                     let mut prefetch_blob_info = (**blobinfo).clone();
                     prefetch_blob_info.set_blob_id(prefetch_build_ctx.blob_id.clone());
                     Arc::new(prefetch_blob_info)
@@ -349,19 +349,19 @@ impl Generator {
     }
 
     fn get_node_reader(
-        blob_ids: &Vec<BlobIdAndCompressor>,
+        blob_ids: &[BlobIdAndCompressor],
         nodes: Vec<Rc<RefCell<Node>>>,
         backend: &mut BackendConfigV2,
     ) -> HashMap<PathBuf, BlobNodeReader> {
         let mut map = HashMap::new();
         for node in nodes {
             let node = node.borrow();
-            let blob_id = node.chunks.get(0).unwrap().inner.blob_index();
+            let blob_id = node.chunks.first().unwrap().inner.blob_index();
             let blob_id = blob_ids.get(blob_id as usize).unwrap().blob_id.clone();
             let blob_dir = backend.localfs.as_ref().unwrap().dir.clone();
             let blob_file = PathBuf::from(blob_dir).join(blob_id);
             // TODO(daiyongxuan): Assume that chunks in the same node are arranged continuously in the blob.
-            let start = node.chunks.get(0).unwrap().inner.compressed_offset();
+            let start = node.chunks.first().unwrap().inner.compressed_offset();
             let end = node.chunks.last().unwrap().inner.compressed_offset()
                 + node.chunks.last().unwrap().inner.compressed_size() as u64;
             let reader = BlobNodeReader::new(File::open(blob_file).unwrap(), start, end).unwrap();

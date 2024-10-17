@@ -38,7 +38,7 @@ impl Blob {
     ) -> Result<()> {
         match ctx.conversion_type {
             ConversionType::DirectoryToRafs => {
-                let is_prefetch = ctx.blob_id == String::from("Prefetch-blob");
+                let is_prefetch = ctx.blob_id == "Prefetch-blob";
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
                 let (inodes, prefetch_entries) =
                     BlobLayout::layout_blob_simple(&ctx.prefetch, is_prefetch)?;
