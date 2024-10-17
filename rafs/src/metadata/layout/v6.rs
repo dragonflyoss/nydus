@@ -1328,7 +1328,6 @@ impl RafsV6Device {
             }
             Err(_) => return Err(einval!("blob_id in RAFS v6 device entry is invalid")),
         }
-
         if self.blocks() == 0 {
             let msg = format!("invalid blocks {} in Rafs v6 device entry", self.blocks());
             return Err(einval!(msg));
@@ -1691,7 +1690,6 @@ impl RafsV6Blob {
             );
             return false;
         }
-
         let blob_features = match BlobFeatures::try_from(self.features) {
             Ok(v) => v,
             Err(_) => return false,
@@ -1773,7 +1771,7 @@ impl RafsV6Blob {
 #[derive(Clone, Debug, Default)]
 pub struct RafsV6BlobTable {
     /// Base blob information array.
-    entries: Vec<Arc<BlobInfo>>,
+    pub entries: Vec<Arc<BlobInfo>>,
 }
 
 impl RafsV6BlobTable {

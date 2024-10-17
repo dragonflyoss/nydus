@@ -6,13 +6,14 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Ok, Result};
 use indexmap::IndexMap;
 use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
 use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
 use super::node::Node;
 use crate::core::tree::TreeNode;
+use crate::Tree;
 
 /// Filesystem data prefetch policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -53,10 +54,12 @@ impl FromStr for PrefetchPolicy {
 ///
 /// It does not guarantee that specified path exist in local filesystem because the specified path
 /// may exist in parent image/layers.
-fn get_patterns() -> Result<IndexMap<PathBuf, Option<TreeNode>>> {
+fn get_patterns(patterns: Option<Vec<String>>) -> Result<IndexMap<PathBuf, Option<TreeNode>>> {
     let stdin = std::io::stdin();
+    if let Some(patterns) = patterns {
+        return generate_patterns(patterns);
+    }
     let mut patterns = Vec::new();
-
     loop {
         let mut file = String::new();
         let size = stdin
@@ -135,9 +138,9 @@ pub struct Prefetch {
 
 impl Prefetch {
     /// Create a new instance of [Prefetch].
-    pub fn new(policy: PrefetchPolicy) -> Result<Self> {
+    pub fn new(policy: PrefetchPolicy, patterns: Option<Vec<String>>) -> Result<Self> {
         let patterns = if policy != PrefetchPolicy::None {
-            get_patterns().context("failed to get prefetch patterns")?
+            get_patterns(patterns).context("failed to get prefetch patterns")?
         } else {
             IndexMap::new()
         };
@@ -149,6 +152,22 @@ impl Prefetch {
             files_prefetch: Vec::with_capacity(10000),
             files_non_prefetch: Vec::with_capacity(10000),
         })
+    }
+
+    /// Because New method only create the key of patterns
+    /// This function Search for the nodes of the paths in the key
+    /// And append to the patterns
+    /// Now it is assumed that all the patterns are the
+    /// absolute paths of the regular files
+    pub fn init(&mut self, tree: &mut Tree) {
+        let mut nodes = Vec::new();
+        for (k, _) in &self.patterns {
+            let node = tree.get_node(k);
+            nodes.push(node.unwrap().node.clone());
+        }
+        for node in nodes {
+            self.insert(&node, &node.borrow());
+        }
     }
 
     /// Insert node into the prefetch Vector if it matches prefetch rules,

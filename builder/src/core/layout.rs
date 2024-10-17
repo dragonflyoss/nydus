@@ -12,12 +12,18 @@ use crate::{Overlay, Prefetch, TreeNode};
 pub struct BlobLayout {}
 
 impl BlobLayout {
-    pub fn layout_blob_simple(prefetch: &Prefetch) -> Result<(Vec<TreeNode>, usize)> {
+    pub fn layout_blob_simple(
+        prefetch: &Prefetch,
+        is_prefetch: bool,
+    ) -> Result<(Vec<TreeNode>, usize)> {
         let (pre, non_pre) = prefetch.get_file_nodes();
-        let mut inodes: Vec<TreeNode> = pre
-            .into_iter()
-            .filter(|x| Self::should_dump_node(x.borrow().deref()))
-            .collect();
+        let mut inodes: Vec<TreeNode> = if !is_prefetch {
+            pre.into_iter()
+                .filter(|x| Self::should_dump_node(x.borrow().deref()))
+                .collect()
+        } else {
+            pre.into_iter().collect()
+        };
         let mut non_prefetch_inodes: Vec<TreeNode> = non_pre
             .into_iter()
             .filter(|x| Self::should_dump_node(x.borrow().deref()))
@@ -55,7 +61,7 @@ mod tests {
         let mut prefetch = Prefetch::default();
         prefetch.insert(&tree.node, tree.node.borrow().deref());
 
-        let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&prefetch).unwrap();
+        let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&prefetch, false).unwrap();
         assert_eq!(inodes.len(), 1);
         assert_eq!(prefetch_entries, 0);
     }

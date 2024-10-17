@@ -3,8 +3,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::slice;
 
+use crate::chunkdict_generator::BlobNodeReader;
 use anyhow::{Context, Result};
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
@@ -27,15 +30,30 @@ impl Blob {
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut dyn Artifact,
+        // TODO(daiyongxuan): Replace work dir to
+        // a HashMap
+        // The Key is the node identifier
+        // The Value is a reader from the blob
+        maps: Option<&mut HashMap<PathBuf, BlobNodeReader>>,
     ) -> Result<()> {
         match ctx.conversion_type {
             ConversionType::DirectoryToRafs => {
+                let is_prefetch = ctx.blob_id == "Prefetch-blob";
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
-                let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch)?;
+                let (inodes, prefetch_entries) =
+                    BlobLayout::layout_blob_simple(&ctx.prefetch, is_prefetch)?;
+                let maps: &mut HashMap<PathBuf, BlobNodeReader> = maps.unwrap();
                 for (idx, node) in inodes.iter().enumerate() {
                     let mut node = node.borrow_mut();
                     let size = node
-                        .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf)
+                        .dump_node_data(
+                            ctx,
+                            blob_mgr,
+                            blob_writer,
+                            &mut chunk_data_buf,
+                            is_prefetch,
+                            Some(maps),
+                        )
                         .context("failed to dump blob chunks")?;
                     if idx < prefetch_entries {
                         if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
@@ -159,9 +177,10 @@ impl Blob {
     ) -> Result<()> {
         // Dump blob meta for v6 when it has chunks or bootstrap is to be inlined.
         if !blob_ctx.blob_meta_info_enabled || blob_ctx.uncompressed_blob_size == 0 {
+            debug!("not inlined or blob size = 0");
+            dbg!(blob_ctx.uncompressed_blob_size);
             return Ok(());
         }
-
         // Prepare blob meta information data.
         let encrypt = ctx.cipher != crypt::Algorithm::None;
         let cipher_obj = &blob_ctx.cipher_object;
@@ -297,7 +316,6 @@ impl Blob {
                 size,
             )?;
         }
-
         Ok(())
     }
 }

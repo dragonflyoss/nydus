@@ -206,6 +206,7 @@ impl DirectSuperBlockV6 {
         let mut blob_table = RafsV6BlobTable::new();
         let meta = &old_state.meta;
         r.seek(SeekFrom::Start(meta.blob_table_offset))?;
+
         blob_table.load(r, meta.blob_table_size, meta.chunk_size, meta.flags)?;
         let blob_extra_infos = rafsv6_load_blob_extra_info(meta, r)?;
 
@@ -1324,6 +1325,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
     /// It depends on Self::validate() to ensure valid memory layout.
     fn get_chunk_info(&self, idx: u32) -> Result<Arc<dyn BlobChunkInfo>> {
         let state = self.state();
+
         let inode = self.disk_inode(&state);
         if !self.is_reg() || idx >= self.get_chunk_count() {
             return Err(enoent!("invalid chunk info"));
@@ -1362,6 +1364,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
             if chunk_map.is_none() {
                 *chunk_map = Some(self.mapping.load_chunk_map()?);
             }
+
             match chunk_map.as_ref().unwrap().get(chunk_addr) {
                 None => Err(enoent!(format!(
                     "failed to get chunk info for chunk {}/{}/{}",

@@ -13,6 +13,7 @@ use std::io::{BufWriter, Cursor, Read, Seek, Write};
 use std::mem::size_of;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Display, Path, PathBuf};
+use std::result::Result::Ok;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::{fmt, fs};
@@ -896,6 +897,11 @@ impl BlobManager {
             global_chunk_dict: Arc::new(()),
             layered_chunk_dict: HashChunkDict::new(digester),
         }
+    }
+
+    /// Set current blob index
+    pub fn set_current_blob_index(&mut self, index: usize) {
+        self.current_blob_index = Some(index as u32)
     }
 
     fn new_blob_ctx(ctx: &BuildContext) -> Result<BlobContext> {

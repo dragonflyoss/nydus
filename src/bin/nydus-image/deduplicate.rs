@@ -47,6 +47,7 @@ impl From<rusqlite::Error> for DatabaseError {
     }
 }
 
+#[allow(dead_code)]
 pub trait Database {
     /// Creates a new chunk in the database.
     fn create_chunk_table(&self) -> Result<()>;
@@ -186,7 +187,6 @@ pub fn update_ctx_from_parent_bootstrap(
     bootstrap_path: &PathBuf,
 ) -> Result<()> {
     let (sb, _) = RafsSuper::load_from_file(bootstrap_path, Arc::new(ConfigV2::default()), false)?;
-
     // Obtain the features of the first blob to use as the features for the blobs in chunkdict.
     if let Some(first_blob) = sb.superblock.get_blob_infos().first() {
         ctx.blob_features = first_blob.features();
@@ -345,7 +345,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "Chunkdict size is {}",
-            chunkdict_size as f64 / 1024 as f64 / 1024 as f64
+            chunkdict_size as f64 / 1024_f64 / 1024_f64
         );
         for chunk in all_chunks {
             if !core_image.contains(&chunk.image_reference)
@@ -790,7 +790,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "All chunk size is {}",
-            all_chunks_size as f64 / 1024 as f64 / 1024 as f64
+            all_chunks_size as f64 / 1024_f64 / 1024_f64
         );
 
         let train_percentage = 0.7;
@@ -802,7 +802,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "Train set size is {}",
-            train_set_size as f64 / 1024 as f64 / 1024 as f64
+            train_set_size as f64 / 1024_f64 / 1024_f64
         );
 
         let mut test_set_size = 0;
@@ -811,7 +811,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "Test set size is {}",
-            test_set_size as f64 / 1024 as f64 / 1024 as f64
+            test_set_size as f64 / 1024_f64 / 1024_f64
         );
 
         let mut version_datadict: HashMap<String, Vec<ChunkdictChunkInfo>> = HashMap::new();
@@ -880,7 +880,7 @@ impl Algorithm<SqliteDatabase> {
         }
         info!(
             "After deduplicating test set size is {} and deduplicating rate is {} ",
-            min_test_size as f64 / 1024 as f64 / 1024 as f64,
+            min_test_size as f64 / 1024_f64 / 1024_f64,
             1.0 - (min_test_size as f64) / (test_set_size as f64)
         );
         Ok((min_data_dict, datadict))
@@ -897,6 +897,7 @@ struct DataPoint {
     cluster_id: i32,
 }
 
+#[allow(dead_code)]
 pub trait Table<T, Err>: Sync + Send + Sized + 'static
 where
     Err: std::error::Error + 'static,
