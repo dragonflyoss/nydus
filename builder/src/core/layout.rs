@@ -17,15 +17,15 @@ impl BlobLayout {
         is_prefetch: bool,
     ) -> Result<(Vec<TreeNode>, usize)> {
         let (pre, non_pre) = prefetch.get_file_nodes();
-        let mut inodes: Vec<TreeNode>;
-        if !is_prefetch {
-            inodes = pre
-                .into_iter()
+        let mut inodes: Vec<TreeNode> = if !is_prefetch {
+            pre.into_iter()
                 .filter(|x| Self::should_dump_node(x.lock().unwrap().deref()))
-                .collect();
+                .collect()
         } else {
-            inodes = pre.into_iter().collect();
-        }
+            pre.into_iter()
+                .filter(|x| Self::should_dump_node(x.borrow().deref()))
+                .collect()
+        };
         let mut non_prefetch_inodes: Vec<TreeNode> = non_pre
             .into_iter()
             .filter(|x| Self::should_dump_node(x.lock().unwrap().deref()))
