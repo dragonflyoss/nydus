@@ -34,7 +34,7 @@ impl FilesystemTreeBuilder {
         layer_idx: u16,
     ) -> Result<Vec<Tree>> {
         let mut result = Vec::new();
-        let parent = parent.lock().unwrap();
+        let parent = parent.borrow();
         if !parent.is_dir() {
             return Ok(result);
         }
@@ -70,7 +70,7 @@ impl FilesystemTreeBuilder {
             let mut child = Tree::new(child);
             child.children = self.load_children(ctx, bootstrap_ctx, &child.node, layer_idx)?;
             child
-                .lock_node()
+                .borrow_mut_node()
                 .v5_set_dir_size(ctx.fs_version, &child.children);
             result.push(child);
         }
@@ -112,7 +112,7 @@ impl DirectoryBuilder {
             { tree_builder.load_children(ctx, bootstrap_ctx, &tree.node, layer_idx) },
             "load_from_directory"
         )?;
-        tree.lock_node()
+        tree.borrow_mut_node()
             .v5_set_dir_size(ctx.fs_version, &tree.children);
 
         Ok(tree)

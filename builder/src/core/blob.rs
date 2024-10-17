@@ -43,7 +43,7 @@ impl Blob {
                 let (inodes, prefetch_entries) = BlobLayout::layout_blob_simple(&ctx.prefetch, is_prefetch)?;
                 let maps: &mut HashMap<PathBuf, BlobNodeReader> = maps.unwrap();
                 for (idx, node) in inodes.iter().enumerate() {
-                    let mut node = node.lock().unwrap();
+                    let mut node = node.borrow_mut();
                     let size = node
                         .dump_node_data(ctx, blob_mgr, blob_writer, &mut chunk_data_buf, is_prefetch, Some(maps))
                         .context("failed to dump blob chunks")?;

@@ -14,7 +14,7 @@
         "cache": {
             "type": "blobcache",
             "config": {
-                "work_dir": "/var/lib/containerd-nydus/cache"
+                "work_dir": "/var/lib/containerd/io.containerd.snapshotter.v1.nydus/cache"
             }
         }
     },

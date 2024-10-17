@@ -6,7 +6,6 @@ package rule
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"syscall"
 
 	"github.com/distribution/reference"
-	dockerconfig "github.com/docker/cli/cli/config"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
@@ -221,28 +219,6 @@ func (rule *FilesystemRule) mountSourceImage() (*tool.Image, error) {
 	return image, nil
 }
 
-func NewRegistryBackendConfig(parsed reference.Named) (RegistryBackendConfig, error) {
-
-	backendConfig := RegistryBackendConfig{
-		Scheme: "https",
-		Host:   reference.Domain(parsed),
-		Repo:   reference.Path(parsed),
-	}
-
-	config := dockerconfig.LoadDefaultConfigFile(os.Stderr)
-	authConfig, err := config.GetAuthConfig(backendConfig.Host)
-	if err != nil {
-		return backendConfig, errors.Wrap(err, "get docker registry auth config")
-	}
-	var auth string
-	if authConfig.Username != "" && authConfig.Password != "" {
-		auth = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", authConfig.Username, authConfig.Password)))
-	}
-	backendConfig.Auth = auth
-
-	return backendConfig, nil
-}
-
 func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
 	logrus.Infof("Mounting Nydus image to %s", rule.NydusdConfig.MountPath)
 
@@ -263,7 +239,7 @@ func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
 		rule.NydusdConfig.BackendType = "registry"
 
 		if rule.NydusdConfig.BackendConfig == "" {
-			backendConfig, err := NewRegistryBackendConfig(parsed)
+			backendConfig, err := utils.NewRegistryBackendConfig(parsed, rule.TargetInsecure)
 			if err != nil {
 				return nil, errors.Wrap(err, "failed to parse backend configuration")
 			}

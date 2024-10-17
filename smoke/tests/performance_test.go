@@ -47,13 +47,13 @@ func (p *PerformanceTestSuite) TestPerformance(_ *testing.T) {
 		image = "wordpress:6.1.1"
 	} else {
 		if !tool.SupportContainerImage(tool.ImageRepo(p.t, image)) {
-			p.t.Fatalf("Unsupport image " + image)
+			p.t.Fatalf("Unsupport %s image ", image)
 		}
 	}
 	// prepare test image
 	p.prepareTestImage(p.t, ctx, image)
 
-	// run Contaienr
+	// run Container
 	p.testContainerName = uuid.NewString()
 	tool.RunContainerWithBaseline(p.t, p.testImage, p.testContainerName, mode)
 }

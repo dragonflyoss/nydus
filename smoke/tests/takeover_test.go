@@ -56,8 +56,8 @@ func (f *TakeoverTestSuit) clear() {
 	tool.RunWithoutOutput(f.t, fmt.Sprintf("sudo nerdctl --snapshotter %s image rm %s", snapshotter, f.testImage))
 }
 
-func (f *TakeoverTestSuit) rmContainer(conatinerName string) {
-	tool.RunWithoutOutput(f.t, fmt.Sprintf("sudo nerdctl --snapshotter %s rm -f %s", snapshotter, conatinerName))
+func (f *TakeoverTestSuit) rmContainer(containerName string) {
+	tool.RunWithoutOutput(f.t, fmt.Sprintf("sudo nerdctl --snapshotter %s rm -f %s", snapshotter, containerName))
 }
 
 func (f *TakeoverTestSuit) TestFailover(t *testing.T) {
@@ -82,10 +82,10 @@ func (f *TakeoverTestSuit) TestFailover(t *testing.T) {
 	// check the container by requesting its wait url
 	runArgs := tool.GetRunArgs(t, imageName)
 	resp, err := http.Get(runArgs.WaitURL)
-	require.NoError(t, err, "access to the wait url of the recoverd container")
+	require.NoError(t, err, "access to the wait url of the recovered container")
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		t.Fatalf("Failed to access the wait url of the recoverd container")
+		t.Fatalf("Failed to access the wait url of the recovered container")
 	}
 }
 
@@ -120,10 +120,10 @@ func (f *TakeoverTestSuit) TestHotUpgrade(t *testing.T) {
 	// check the container by requesting its wait url
 	runArgs := tool.GetRunArgs(t, imageName)
 	resp, err := http.Get(runArgs.WaitURL)
-	require.NoError(t, err, "access to the wait url of the recoverd container")
+	require.NoError(t, err, "access to the wait url of the recovered container")
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		t.Fatalf("Failed to access the wait url of the recoverd container")
+		t.Fatalf("Failed to access the wait url of the recovered container")
 	}
 }
 

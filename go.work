@@ -1,7 +1,6 @@
 go 1.21
 
 use (
-	./contrib/ctr-remote
 	./contrib/nydus-overlayfs
 	./contrib/nydusify
 	./smoke

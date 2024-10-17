@@ -45,7 +45,6 @@ jobs:
       matrix:
         include:
           - path: contrib/nydusify
-          - path: contrib/ctr-remote
           - path: contrib/nydus-overlayfs
     steps:
     - name: Checkout
@@ -56,11 +55,11 @@ jobs:
         go-version-file: 'go.work'
         cache: false
     - name: Lint
-      uses: golangci/golangci-lint-action@v4
+      uses: golangci/golangci-lint-action@v6
       with:
-        version: v1.56
+        version: v1.61
         working-directory: ${{ matrix.path }}
-        args: --timeout=30m --issues-exit-code=0
+        args: --timeout=10m --verbose
 
   nydus-build:
     runs-on: ubuntu-latest
@@ -95,7 +94,7 @@ jobs:
           nydusd
 
   nydusd-build-macos:
-    runs-on: macos-12
+    runs-on: macos-13
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -180,7 +179,7 @@ jobs:
           export NYDUS_NYDUSIFY_$version_export=/usr/bin/nydus-$version/nydusify
         done
 
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.54.2
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.61.0
         sudo -E make smoke-only
 
   nydus-unit-test:

@@ -601,7 +601,7 @@ impl StargzBuilder {
                 }
             }
 
-            let mut tmp_node = tmp_tree.lock_node();
+            let mut tmp_node = tmp_tree.borrow_mut_node();
             if !tmp_node.is_reg() {
                 bail!(
                     "stargz: target {} for hardlink {} is not a regular file",
@@ -788,7 +788,7 @@ impl StargzBuilder {
         bootstrap
             .tree
             .walk_bfs(true, &mut |n| {
-                let mut node = n.lock_node();
+                let mut node = n.borrow_mut_node();
                 let node_path = node.path();
                 if let Some((size, ref mut chunks)) = self.file_chunk_map.get_mut(node_path) {
                     node.inode.set_size(*size);
@@ -802,9 +802,9 @@ impl StargzBuilder {
 
         for (k, v) in self.hardlink_map.iter() {
             match bootstrap.tree.get_node(k) {
-                Some(n) => {
-                    let mut node = n.lock_node();
-                    let target = v.lock().unwrap();
+                Some(t) => {
+                    let mut node = t.borrow_mut_node();
+                    let target = v.borrow();
                     node.inode.set_size(target.inode.size());
                     node.inode.set_child_count(target.inode.child_count());
                     node.chunks = target.chunks.clone();

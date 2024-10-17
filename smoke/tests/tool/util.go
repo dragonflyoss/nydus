@@ -82,6 +82,6 @@ func ImageRepo(t *testing.T, image string) string {
 	if len(parts) > 0 {
 		return parts[0]
 	}
-	t.Fatalf("Can't get image repo of " + image)
+	t.Fatalf("Can't get %s repo", image)
 	return ""
 }

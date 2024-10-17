@@ -6,6 +6,7 @@ package tests
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool/test"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -45,7 +47,7 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 				}
 
 				// Zran and Batch can not work together.
-				// Zran and Encrpt can not work together.
+				// Zran and Encrypt can not work together.
 				return (param.GetBool(paramZran) && param.GetString(paramBatch) != "0") ||
 					(param.GetBool(paramZran) && param.GetBool(paramEncrypt))
 			})
@@ -121,10 +123,12 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 	)
 	tool.RunWithoutOutput(t, checkCmd)
 
-	if !testCopy {
-		return
+	if testCopy {
+		testNydusifyCopy(t, ctx, source, target, logLevel, nydusifyPath)
 	}
+}
 
+func testNydusifyCopy(t *testing.T, ctx tool.Context, source, target, logLevel, nydusifyPath string) {
 	// Copy image
 	targetCopied := fmt.Sprintf("%s_copied", target)
 	copyCmd := fmt.Sprintf(
@@ -135,9 +139,36 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 	tool.RunWithoutOutput(t, copyCmd)
 
 	// Check copied image
-	checkCmd = fmt.Sprintf(
+	checkCmd := fmt.Sprintf(
 		"%s %s check --source %s --target %s --nydus-image %s --nydusd %s --work-dir %s",
 		nydusifyPath, logLevel, source, targetCopied, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
+	)
+	tool.RunWithoutOutput(t, checkCmd)
+
+	// Save image
+	targetSaved := fmt.Sprintf("file://%s", filepath.Join(ctx.Env.WorkDir, "saved.tar"))
+	saveCmd := fmt.Sprintf(
+		"%s %s copy --source %s --target %s --nydus-image %s --work-dir %s",
+		ctx.Binary.Nydusify, logLevel, target, targetSaved, ctx.Binary.Builder, filepath.Join(ctx.Env.WorkDir, "save"),
+	)
+	tool.RunWithoutOutput(t, saveCmd)
+
+	// Check saved image
+	_, err := os.Stat(filepath.Join(ctx.Env.WorkDir, "saved.tar"))
+	require.NoError(t, err)
+
+	// Load image
+	targetLoaded := fmt.Sprintf("%s_loaded", target)
+	loadCmd := fmt.Sprintf(
+		"%s %s copy --source %s --target %s --nydus-image %s --work-dir %s",
+		ctx.Binary.Nydusify, logLevel, targetSaved, targetLoaded, ctx.Binary.Builder, filepath.Join(ctx.Env.WorkDir, "load"),
+	)
+	tool.RunWithoutOutput(t, loadCmd)
+
+	// Check loaded image
+	checkCmd = fmt.Sprintf(
+		"%s %s check --source %s --target %s --nydus-image %s --nydusd %s --work-dir %s",
+		nydusifyPath, logLevel, source, targetLoaded, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
 	)
 	tool.RunWithoutOutput(t, checkCmd)
 }

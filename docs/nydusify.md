@@ -68,7 +68,7 @@ cat /path/to/backend-config.json
 }
 ```
 
-Note: the `endpoint` in the s3 `backend-config.json` **should not** contains the scheme prefix.
+Note: the `endpoint` in the s3 `backend-config.json` **should not** contain the scheme prefix.
 
 ``` shell
 nydusify convert \
@@ -77,6 +77,22 @@ nydusify convert \
   --backend-type s3 \
   --backend-config-file /path/to/backend-config.json
 ```
+
+### localfs
+
+``` shell
+cat /path/to/backend-config.json
+{
+  "dir": "/path/to/blobs"
+}
+
+nydusify convert \
+  --source myregistry/repo:tag \
+  --target myregistry/repo:tag-nydus \
+  --backend-config-file /path/to/backend-config.json \
+```
+
+Note: Image manifest is still published to target registry (`myregistry`). Blob files are published to localfs.
 
 ## Push Nydus Image to storage backend with subcommand pack
 
@@ -176,9 +192,9 @@ nydusify check \
 
 ## Mount the nydus image as a filesystem
 
-The nydusify mount command can mount a nydus image stored in the backend as a filesystem. Now  the  supported backend types include Registry (default backend), s3 and oss. 
+The nydusify mount command can mount a nydus image stored in the backend as a filesystem. Now  the  supported backend types include Registry (default backend), s3, oss, and localfs.
 
-When using Registy as the backend, you don't need specify the `--backend-type` .
+When using Registry as the backend, you don't need to specify the `--backend-type` .
 
 ``` shell
 nydusify mount \
@@ -203,6 +219,26 @@ nydusify copy \
 ```
 
 It supports copying OCI v1 or Nydus images, use the options `--all-platforms` / `--platform` to copy the images of specific platforms.
+
+## Export to / Import from local tarball
+
+All you need is to change the `source` or `target` parameter in `nydusify copy` command to a local file path, which must start with `file://`.
+
+``` shell
+# registry repository --> local tarball
+nydusify copy \
+  --source myregistry/repo:tag-nydus \
+  --target file:///home/user/repo-tag-nydus.tar
+```
+
+Absolute path is also supported.
+
+``` shell
+# local tarball --> registry repository
+nydusify copy \
+  --source file://./repo-tag-nydus.tar \
+  --target myregistry/repo:tag-nydus
+```
 
 ## Commit nydus image from container's changes
 
@@ -232,7 +268,7 @@ See `nydusify convert/check/mount --help`
 
 ## Use Nydusify as a package
 
-``` 
+```
 See `contrib/nydusify/examples/converter/main.go`
 ```
 

@@ -154,22 +154,22 @@ func RunContainerWithBaseline(t *testing.T, image string, containerName string, 
 		runURLWaitContainer(t, image, "nydus", containerName, args)
 		defer ClearContainer(t, image, "nydus", containerName)
 	} else {
-		t.Fatalf(fmt.Sprintf("%s is not in URL_WAIT", image))
+		t.Fatalf("%s is not in URL_WAIT", image)
 	}
 	backendMetrics, err := getContainerBackendMetrics(t)
 	if err != nil {
-		t.Logf(err.Error())
+		t.Logf("Can't get containerd backend metrics: %s", err.Error())
 	}
 	if backendMetrics.ReadAmountTotal > uint64(float64(args.BaselineReadAmount[mode])*1.05) ||
 		backendMetrics.ReadCount > uint64(float64(args.BaselineReadCount[mode])*1.05) {
-		t.Fatalf(fmt.Sprintf("Performance reduction with ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount))
+		t.Fatalf("Performance reduction with ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount)
 	}
-	t.Logf(fmt.Sprintf("Performance Test: ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount))
+	t.Logf("Performance Test: ReadAmount %d and ReadCount %d", backendMetrics.ReadAmountTotal, backendMetrics.ReadCount)
 }
 
 // RunContainer and return container metric
 func RunContainer(t *testing.T, image string, snapshotter string, containerName string) *ContainerMetrics {
-	var containerMetic ContainerMetrics
+	var containerMetric ContainerMetrics
 	startTime := time.Now()
 
 	// runContainer
@@ -182,17 +182,17 @@ func RunContainer(t *testing.T, image string, snapshotter string, containerName 
 		defer ClearContainer(t, image, snapshotter, containerName)
 	}
 
-	containerMetic.E2ETime = time.Since(startTime)
+	containerMetric.E2ETime = time.Since(startTime)
 	if snapshotter == "nydus" {
 		backendMetrics, err := getContainerBackendMetrics(t)
 		if err != nil {
-			t.Logf(err.Error())
+			t.Logf("Can't get containerd backend metrics: %s", err.Error())
 		}
-		containerMetic.ReadAmountTotal = backendMetrics.ReadAmountTotal
-		containerMetic.ReadCount = backendMetrics.ReadCount
+		containerMetric.ReadAmountTotal = backendMetrics.ReadAmountTotal
+		containerMetric.ReadCount = backendMetrics.ReadCount
 	}
 
-	return &containerMetic
+	return &containerMetric
 }
 
 // RunContainerSimple just runs a container simply
@@ -256,11 +256,11 @@ func getContainerBackendMetrics(t *testing.T) (*ContainerMetrics, error) {
 	return &info, nil
 }
 
-// searchAPISockPath search sock filepath in nydusd work dir, default in "/var/lib/containerd-nydus/socket"
+// searchAPISockPath search sock filepath in nydusd work dir, default in "/var/lib/containerd/io.containerd.snapshotter.v1.nydus/socket"
 func searchAPISockPath(t *testing.T) string {
 	var apiSockPath string
 
-	err := filepath.Walk("/var/lib/containerd-nydus/socket", func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk("/var/lib/containerd/io.containerd.snapshotter.v1.nydus/socket", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
