@@ -18,6 +18,7 @@ use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
 use crate::core::blob::Blob;
 use crate::core::node::Node;
+use crate::TreeNode;
 use crate::{ArtifactWriter, BlobContext, NodeChunk};
 use anyhow::{Ok, Result};
 use nydus_api::BackendConfigV2;
@@ -157,9 +158,10 @@ impl Generator {
         bootstrap_mgr: &mut BootstrapManager,
         blobtable: &mut RafsV6BlobTable,
         blobs_dir_path: PathBuf,
+        prefetch_nodes: Vec<TreeNode>,
     ) -> Result<()> {
-        let (prefetch_nodes, _) = ctx.prefetch.get_file_nodes();
         for node in prefetch_nodes {
+            debug!("Node: {:?}", node.borrow().target());
             let node = node.borrow();
             match node.inode {
                 InodeWrapper::Ref(_) => {
@@ -206,6 +208,8 @@ impl Generator {
             http_proxy: None,
         };
 
+        // backend_config.localfs.
+
         // Revert files
         let mut blobs_id_and_compressor: Vec<BlobIdAndCompressor> = Vec::new();
         for blob in &blobtable.entries {
@@ -230,6 +234,7 @@ impl Generator {
         for node in &file_nodes_prefetch {
             let child = tree.get_node(&node.borrow().path()).unwrap();
             let mut child = child.node.borrow().clone();
+            
             child.layer_idx = prefetch_blob_index as u16;
             for chunk in &mut child.chunks {
                 chunk_count += 1;
