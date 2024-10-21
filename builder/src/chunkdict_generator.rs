@@ -27,10 +27,12 @@ use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
 use nydus_rafs::metadata::layout::{RafsBlobTable, RafsXAttrs};
 use nydus_storage::device::{BlobFeatures, BlobInfo};
+use nydus_storage::meta::BatchContextGenerator;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
 use nydus_utils::compress;
 use nydus_utils::compress::Algorithm;
 use nydus_utils::digest::RafsDigest;
+use sha2::digest::Update;
 
 use crate::finalize_blob;
 use crate::Artifact;
@@ -39,7 +41,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::ops::Add;
 use std::ops::{Rem, Sub};
@@ -75,16 +77,16 @@ pub struct ChunkdictBlobInfo {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct BlobNodeReader {
-    blob: File,
+    blob: Arc<File>,
     start: u64,
     end: u64,
     position: u64,
 }
 
 impl BlobNodeReader {
-    pub fn new(blob: File, start: u64, end: u64) -> Result<Self> {
+    pub fn new(blob: Arc<File>, start: u64, end: u64) -> Result<Self> {
         let mut reader = BlobNodeReader {
-            blob,
+            blob: blob,
             start,
             end,
             position: start,
@@ -231,19 +233,79 @@ impl Generator {
         let mut prefetch_blob_offset = 0;
         let mut meta_uncompressed_size = 0;
         let mut chunk_index_in_prefetch = 0;
+
+        // Create a new blob for prefetch layer
+        let prefetch_blob_file = PathBuf::from(blobs_dir_path.clone()).join("Prefetch-blob");
+        let mut prefetch_blob_file = File::create(prefetch_blob_file).unwrap();
+        let mut prefetch_blob_ctx =
+            BlobContext::from(ctx, &prefetch_blob_info, ChunkSource::Build).unwrap();
+        prefetch_blob_ctx.chunk_count = 0;
+        let encrypted = prefetch_blob_ctx.blob_compressor != compress::Algorithm::None;
+        let mut batch = BatchContextGenerator::new(4096).unwrap();
+        prefetch_blob_ctx.blob_meta_info_enabled = true;
+        debug!(
+            "Prefetch blob ctx meta len: {}",
+            prefetch_blob_ctx.blob_meta_info.len()
+        );
         for node in &file_nodes_prefetch {
             let child = tree.get_node(&node.borrow().path()).unwrap();
             let mut child = child.node.borrow().clone();
-            
+            let index = child.chunks.first().unwrap().inner.blob_index();
+            let blob_id = blobs_id_and_compressor
+                .get(index as usize)
+                .unwrap()
+                .blob_id
+                .clone();
+            let blob_file = PathBuf::from(blobs_dir_path.clone()).join(blob_id);
+            let blob_file = Arc::new(File::open(blob_file).unwrap());
             child.layer_idx = prefetch_blob_index as u16;
             for chunk in &mut child.chunks {
                 chunk_count += 1;
                 let inner = Arc::make_mut(&mut chunk.inner);
+                let mut reader = BlobNodeReader::new(
+                    Arc::clone(&blob_file),
+                    inner.compressed_offset(),
+                    inner.compressed_offset() + inner.compressed_size() as u64,
+                )
+                .unwrap();
+                let buf = &mut vec![0u8; inner.compressed_size() as usize];
+                reader.read_exact(buf).unwrap();
+                prefetch_blob_file.seek(SeekFrom::End(0)).unwrap();
+                prefetch_blob_file.write(buf).unwrap();
+
+                let info = batch
+                    .generate_chunk_info(
+                        prefetch_blob_ctx.current_compressed_offset,
+                        prefetch_blob_ctx.current_uncompressed_offset,
+                        inner.uncompressed_size() as u32,
+                        encrypted,
+                    )
+                    .unwrap();
+                debug!(
+                    "Prefetch blob ctx meta len: {}",
+                    prefetch_blob_ctx.blob_meta_info.len()
+                );
+
                 inner.set_blob_index(prefetch_blob_index);
                 inner.set_index(chunk_index_in_prefetch);
                 chunk_index_in_prefetch += 1;
                 inner.set_compressed_offset(prefetch_blob_offset);
                 inner.set_uncompressed_offset(prefetch_blob_offset);
+                let aligned_d_size: u64 =
+                    nydus_utils::try_round_up_4k(inner.uncompressed_size()).unwrap();
+                prefetch_blob_ctx.uncompressed_blob_size += aligned_d_size;
+                prefetch_blob_ctx.current_compressed_offset += inner.compressed_size() as u64;
+                prefetch_blob_ctx.compressed_blob_size += inner.compressed_size() as u64;
+                prefetch_blob_ctx.blob_hash.update(&buf);
+                debug!(
+                    "Prefetch blob ctx meta len: {}",
+                    prefetch_blob_ctx.blob_meta_info.len()
+                );
+
+                prefetch_blob_ctx
+                    .add_chunk_meta_info(inner, Some(info))
+                    .unwrap();
+                prefetch_blob_ctx.chunk_count += 1;
                 prefetch_blob_offset += inner.uncompressed_size() as u64;
                 meta_uncompressed_size += inner.uncompressed_size() as u64;
                 prefetch_blob_offset = Self::align_to_4k(prefetch_blob_offset);
@@ -260,7 +322,7 @@ impl Generator {
         }
         // align prefetch blob size to 4096
         prefetch_blob_info.set_meta_ci_offset(0x200 + meta_uncompressed_size as usize);
-        prefetch_blob_info.set_chunk_count(chunk_count);
+        prefetch_blob_info.set_chunk_count(chunk_count as usize);
         prefetch_blob_info.set_compressed_size(prefetch_blob_offset as usize);
         prefetch_blob_info.set_uncompressed_size(prefetch_blob_offset as usize);
         prefetch_blob_info.set_compressor(Algorithm::Zstd);
@@ -283,12 +345,13 @@ impl Generator {
         };
 
         let mut prefetch_blob_mgr = BlobManager::new(nydus_utils::digest::Algorithm::Blake3);
-        // prefetch_blob_mgr.set_current_blob_index(0);
-        let mut prefetch_blob_ctx =
-            BlobContext::from(&prefetch_build_ctx, &prefetch_blob_info, ChunkSource::Build)
-                .unwrap();
-        prefetch_blob_ctx.blob_meta_info_enabled = true;
+        // // prefetch_blob_mgr.set_current_blob_index(0);
+        // let mut prefetch_blob_ctx =
+        //     BlobContext::from(&prefetch_build_ctx, &prefetch_blob_info, ChunkSource::Build)
+        //         .unwrap();
+        // prefetch_blob_ctx.blob_meta_info_enabled = true;
         prefetch_blob_mgr.add_blob(prefetch_blob_ctx);
+        prefetch_blob_mgr.set_current_blob_index(0);
 
         let mut blob_writer: Box<dyn Artifact> = Box::new(
             Box::new(ArtifactWriter::new(crate::ArtifactStorage::SingleFile(
@@ -296,15 +359,15 @@ impl Generator {
             )))
             .unwrap(),
         );
-        prefetch_build_ctx.compressor = compress::Algorithm::None;
-        Blob::dump(
-            &prefetch_build_ctx,
-            &mut prefetch_blob_mgr,
-            &mut *blob_writer,
-            Some(&mut map),
-        )
-        .unwrap();
-        prefetch_build_ctx.compressor = compress::Algorithm::Zstd;
+        // prefetch_build_ctx.compressor = compress::Algorithm::None;
+        // Blob::dump(
+        //     &prefetch_build_ctx,
+        //     &mut prefetch_blob_mgr,
+        //     &mut *blob_writer,
+        //     Some(&mut map),
+        // )
+        // .unwrap();
+        // prefetch_build_ctx.compressor = compress::Algorithm::Zstd;
         // TODO(daiyongxuan): To avoid compress twice, I set the compressor
         // to None.
         // The actual compressor should be set to Zstd or etc..
@@ -353,7 +416,7 @@ impl Generator {
         Ok(())
     }
 
-    fn get_node_reader(
+    fn get_node_reader<'a>(
         blob_ids: &[BlobIdAndCompressor],
         nodes: Vec<Rc<RefCell<Node>>>,
         backend: &mut BackendConfigV2,
@@ -369,7 +432,8 @@ impl Generator {
             let start = node.chunks.first().unwrap().inner.compressed_offset();
             let end = node.chunks.last().unwrap().inner.compressed_offset()
                 + node.chunks.last().unwrap().inner.compressed_size() as u64;
-            let reader = BlobNodeReader::new(File::open(blob_file).unwrap(), start, end).unwrap();
+            let reader =
+                BlobNodeReader::new(File::open(blob_file).unwrap().into(), start, end).unwrap();
             map.insert(node.path().clone(), reader);
         }
         map
