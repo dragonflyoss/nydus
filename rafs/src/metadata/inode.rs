@@ -8,7 +8,6 @@ use std::mem::size_of;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use fuse_backend_rs::overlayfs::Inode;
 use nydus_utils::digest::RafsDigest;
 
 use crate::metadata::cached_v5::CachedInodeV5;
@@ -20,6 +19,7 @@ use crate::metadata::layout::v6::{RafsV6InodeCompact, RafsV6InodeExtended};
 use crate::metadata::layout::RafsXAttrs;
 use crate::metadata::RafsVersion;
 use crate::RafsInodeExt;
+use nydus_utils::metrics::Inode;
 
 /// An inode object wrapper for different RAFS versions.
 #[derive(Clone)]
