@@ -571,8 +571,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(_) => ChunkWrapper::V5(RafsV5ChunkInfo::new()),
             InodeWrapper::V6(_) => ChunkWrapper::V6(RafsV5ChunkInfo::new()),
-            // InodeWrapper::Ref(_i) => unimplemented!(),
-            InodeWrapper::Ref(_) => ChunkWrapper::V6(RafsV5ChunkInfo::new()),
+            InodeWrapper::Ref(_i) => unimplemented!(),
         }
     }
 

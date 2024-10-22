@@ -363,8 +363,13 @@ impl Generator {
             blob_ctx.set_meta_info_enabled(true);
         }
 
-        Blob::finalize_blob_data(&prefetch_build_ctx, &mut prefetch_blob_mgr, blob_writer.as_mut()).unwrap();
-        
+        Blob::finalize_blob_data(
+            &prefetch_build_ctx,
+            &mut prefetch_blob_mgr,
+            blob_writer.as_mut(),
+        )
+        .unwrap();
+
         // prefetch_build_ctx.compressor = compress::Algorithm::None;
         // Blob::dump(
         //     &prefetch_build_ctx,
