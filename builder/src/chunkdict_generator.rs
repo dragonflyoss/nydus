@@ -232,6 +232,8 @@ impl Generator {
             let mut child = child.node.borrow().clone();
             child.layer_idx = prefetch_blob_index as u16;
             for chunk in &mut child.chunks {
+                // TODO(daiyongxuan): Dump Blob Dirrectly.
+                // Use BlobReader::read
                 chunk_count += 1;
                 let inner = Arc::make_mut(&mut chunk.inner);
                 inner.set_blob_index(prefetch_blob_index);
@@ -361,6 +363,7 @@ impl Generator {
             let blob_dir = backend.localfs.as_ref().unwrap().dir.clone();
             let blob_file = PathBuf::from(blob_dir).join(blob_id);
             // TODO(daiyongxuan): Assume that chunks in the same node are arranged continuously in the blob.
+            // Implement A New Interface.
             let start = node.chunks.first().unwrap().inner.compressed_offset();
             let end = node.chunks.last().unwrap().inner.compressed_offset()
                 + node.chunks.last().unwrap().inner.compressed_size() as u64;
