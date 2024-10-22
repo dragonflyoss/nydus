@@ -41,7 +41,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, Write};
 use std::mem::size_of;
 use std::ops::Add;
 use std::ops::{Rem, Sub};
@@ -86,7 +86,7 @@ pub struct BlobNodeReader {
 impl BlobNodeReader {
     pub fn new(blob: Arc<File>, start: u64, end: u64) -> Result<Self> {
         let mut reader = BlobNodeReader {
-            blob: blob,
+            blob,
             start,
             end,
             position: start,
@@ -221,12 +221,6 @@ impl Generator {
             });
         }
 
-        let mut map: HashMap<PathBuf, BlobNodeReader> = Self::get_node_reader(
-            &blobs_id_and_compressor,
-            file_nodes_prefetch.clone(),
-            &mut backend_config,
-        );
-
         let prefetch_blob_index = prefetch_blob_info.blob_index();
         let mut chunk_count = 0;
         // For every chunk, need to align to 4k
@@ -235,7 +229,6 @@ impl Generator {
         let mut chunk_index_in_prefetch = 0;
 
         // Create a new blob for prefetch layer
-        let prefetch_blob_file = PathBuf::from(blobs_dir_path.clone()).join("Prefetch-blob");
         let mut prefetch_blob_ctx =
             BlobContext::from(ctx, &prefetch_blob_info, ChunkSource::Build).unwrap();
         prefetch_blob_ctx.chunk_count = 0;
@@ -247,7 +240,7 @@ impl Generator {
             prefetch_blob_ctx.blob_meta_info.len()
         );
         let blob_writer = ArtifactWriter::new(crate::ArtifactStorage::SingleFile(
-            PathBuf::from(blobs_dir_path.clone()).join("Prefetch-blob"),
+            blobs_dir_path.clone().join("Prefetch-blob"),
         ))
         .expect("Failed to create ArtifactWriter");
 
@@ -261,7 +254,7 @@ impl Generator {
                 .unwrap()
                 .blob_id
                 .clone();
-            let blob_file = PathBuf::from(blobs_dir_path.clone()).join(blob_id);
+            let blob_file = blobs_dir_path.clone().join(blob_id);
             let blob_file = Arc::new(File::open(blob_file).unwrap());
             child.layer_idx = prefetch_blob_index as u16;
             for chunk in &mut child.chunks {
@@ -425,30 +418,6 @@ impl Generator {
         let blob_table_withprefetch = RafsBlobTable::V6(blob_table_withprefetch);
         bootstrap.dump(ctx, storage, &mut bootstrap_ctx, &blob_table_withprefetch)?;
         Ok(())
-    }
-
-    fn get_node_reader<'a>(
-        blob_ids: &[BlobIdAndCompressor],
-        nodes: Vec<Rc<RefCell<Node>>>,
-        backend: &mut BackendConfigV2,
-    ) -> HashMap<PathBuf, BlobNodeReader> {
-        let mut map = HashMap::new();
-        for node in nodes {
-            let node = node.borrow();
-            let blob_id = node.chunks.first().unwrap().inner.blob_index();
-            let blob_id = blob_ids.get(blob_id as usize).unwrap().blob_id.clone();
-            let blob_dir = backend.localfs.as_ref().unwrap().dir.clone();
-            let blob_file = PathBuf::from(blob_dir).join(blob_id);
-            // TODO(daiyongxuan): Assume that chunks in the same node are arranged continuously in the blob.
-            // Implement A New Interface.
-            let start = node.chunks.first().unwrap().inner.compressed_offset();
-            let end = node.chunks.last().unwrap().inner.compressed_offset()
-                + node.chunks.last().unwrap().inner.compressed_size() as u64;
-            let reader =
-                BlobNodeReader::new(File::open(blob_file).unwrap().into(), start, end).unwrap();
-            map.insert(node.path().clone(), reader);
-        }
-        map
     }
 
     fn align_to_4k<T>(offset: T) -> T
