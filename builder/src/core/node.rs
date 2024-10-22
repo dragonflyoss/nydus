@@ -367,6 +367,9 @@ impl Node {
                 inner: chunk,
             });
         }
+        // TODO(daiyongxuan):
+        // Chunk1 Chunk2 
+        // add chunk meta info
 
         // Finish inode digest calculation
         if let Some(h) = inode_hasher {

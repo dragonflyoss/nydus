@@ -37,6 +37,7 @@ impl Blob {
         maps: Option<&mut HashMap<PathBuf, BlobNodeReader>>,
     ) -> Result<()> {
         match ctx.conversion_type {
+            // TODO(daiyongxuan): Add A new Case to Handle Prefetch.
             ConversionType::DirectoryToRafs => {
                 let is_prefetch = ctx.blob_id == "Prefetch-blob";
                 let mut chunk_data_buf = vec![0u8; RAFS_MAX_CHUNK_SIZE as usize];
