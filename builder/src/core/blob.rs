@@ -112,7 +112,7 @@ impl Blob {
         Ok(())
     }
 
-    fn finalize_blob_data(
+    pub fn finalize_blob_data(
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut dyn Artifact,
@@ -133,7 +133,6 @@ impl Blob {
                 }
             }
         }
-
         if !ctx.blob_features.contains(BlobFeatures::SEPARATE)
             && (ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc))
         {
@@ -219,6 +218,7 @@ impl Blob {
         let encrypted_ci_data =
             crypt::encrypt_with_context(&compressed_data, cipher_obj, cipher_ctx, encrypt)?;
         let compressed_offset = blob_writer.pos()?;
+        debug!("compressed offset/blob writer pos: {}", compressed_offset);
         let compressed_size = encrypted_ci_data.len() as u64;
         let uncompressed_size = ci_data.len() as u64;
 

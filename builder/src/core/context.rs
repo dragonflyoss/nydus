@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{remove_file, rename, File, OpenOptions};
-use std::io::{BufWriter, Cursor, Read, Seek, Write};
+use std::io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::mem::size_of;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Display, Path, PathBuf};
