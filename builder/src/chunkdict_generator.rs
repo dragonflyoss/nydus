@@ -236,7 +236,6 @@ impl Generator {
 
         // Create a new blob for prefetch layer
         let prefetch_blob_file = PathBuf::from(blobs_dir_path.clone()).join("Prefetch-blob");
-        let mut prefetch_blob_file = File::create(prefetch_blob_file).unwrap();
         let mut prefetch_blob_ctx =
             BlobContext::from(ctx, &prefetch_blob_info, ChunkSource::Build).unwrap();
         prefetch_blob_ctx.chunk_count = 0;
@@ -247,6 +246,12 @@ impl Generator {
             "Prefetch blob ctx meta len: {}",
             prefetch_blob_ctx.blob_meta_info.len()
         );
+        let blob_writer = ArtifactWriter::new(crate::ArtifactStorage::SingleFile(
+            PathBuf::from(blobs_dir_path.clone()).join("Prefetch-blob"),
+        ))
+        .expect("Failed to create ArtifactWriter");
+
+        let mut blob_writer: Box<dyn Artifact> = Box::new(blob_writer);
         for node in &file_nodes_prefetch {
             let child = tree.get_node(&node.borrow().path()).unwrap();
             let mut child = child.node.borrow().clone();
@@ -272,8 +277,7 @@ impl Generator {
                 .unwrap();
                 let buf = &mut vec![0u8; inner.compressed_size() as usize];
                 reader.read_exact(buf).unwrap();
-                prefetch_blob_file.seek(SeekFrom::End(0)).unwrap();
-                prefetch_blob_file.write(buf).unwrap();
+                blob_writer.write_all(buf).unwrap();
 
                 let info = batch
                     .generate_chunk_info(
@@ -343,6 +347,7 @@ impl Generator {
             // To Avoid Compress Twice.
             compressor: compress::Algorithm::Zstd,
             prefetch: ctx.prefetch.clone(),
+            blob_inline_meta: true,
             ..Default::default()
         };
 
@@ -354,13 +359,17 @@ impl Generator {
         // prefetch_blob_ctx.blob_meta_info_enabled = true;
         prefetch_blob_mgr.add_blob(prefetch_blob_ctx);
         prefetch_blob_mgr.set_current_blob_index(0);
+        if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
+            blob_ctx.set_meta_info_enabled(true);
+        }
 
-        let mut blob_writer: Box<dyn Artifact> = Box::new(
-            Box::new(ArtifactWriter::new(crate::ArtifactStorage::SingleFile(
-                PathBuf::from("./prefetch_blob"),
-            )))
-            .unwrap(),
-        );
+        Blob::finalize_blob_data(
+            &prefetch_build_ctx,
+            &mut prefetch_blob_mgr,
+            blob_writer.as_mut(),
+        )
+        .unwrap();
+
         // prefetch_build_ctx.compressor = compress::Algorithm::None;
         // Blob::dump(
         //     &prefetch_build_ctx,

@@ -368,7 +368,7 @@ impl Node {
             });
         }
         // TODO(daiyongxuan):
-        // Chunk1 Chunk2 
+        // Chunk1 Chunk2
         // add chunk meta info
 
         // Finish inode digest calculation

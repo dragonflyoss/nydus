@@ -166,10 +166,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.is_blkdev(),
             InodeWrapper::V6(i) => i.is_blkdev(),
-            // InodeWrapper::Ref(_i) => unimplemented!(),
-            // TODO: Just Indentify that prefetch node is not
-            // block device
-            InodeWrapper::Ref(_) => false,
+            InodeWrapper::Ref(_i) => unimplemented!(),
         }
     }
 
@@ -178,10 +175,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(i) => i.is_fifo(),
             InodeWrapper::V6(i) => i.is_fifo(),
-            // TODO: Just Indentify that prefetch node is not
-            // A fifo
-            InodeWrapper::Ref(_) => false,
-            // InodeWrapper::Ref(_i) => unimplemented!(),
+            InodeWrapper::Ref(_i) => unimplemented!(),
         }
     }
 
@@ -571,8 +565,7 @@ impl InodeWrapper {
         match self {
             InodeWrapper::V5(_) => ChunkWrapper::V5(RafsV5ChunkInfo::new()),
             InodeWrapper::V6(_) => ChunkWrapper::V6(RafsV5ChunkInfo::new()),
-            // InodeWrapper::Ref(_i) => unimplemented!(),
-            InodeWrapper::Ref(_) => ChunkWrapper::V6(RafsV5ChunkInfo::new()),
+            InodeWrapper::Ref(_i) => unimplemented!(),
         }
     }
 
