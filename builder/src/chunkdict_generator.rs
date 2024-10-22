@@ -21,7 +21,6 @@ use crate::core::node::Node;
 use crate::TreeNode;
 use crate::{ArtifactWriter, BlobContext, NodeChunk};
 use anyhow::{Ok, Result};
-use nydus_api::BackendConfigV2;
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
@@ -37,8 +36,6 @@ use sha2::digest::Update;
 use crate::finalize_blob;
 use crate::Artifact;
 use core::panic;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
@@ -46,7 +43,6 @@ use std::mem::size_of;
 use std::ops::Add;
 use std::ops::{Rem, Sub};
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::u32;
@@ -195,22 +191,6 @@ impl Generator {
 
         // for every node in prefetch list, change the offset and blob id
         let (file_nodes_prefetch, _) = ctx.prefetch.get_file_nodes();
-
-        let mut backend_config = BackendConfigV2 {
-            backend_type: String::from("localfs"),
-            localdisk: None,
-            localfs: Some(nydus_api::LocalFsConfig {
-                dir: blobs_dir_path.display().to_string(),
-                alt_dirs: Vec::new(),
-                ..Default::default()
-            }),
-            oss: None,
-            s3: None,
-            registry: None,
-            http_proxy: None,
-        };
-
-        // backend_config.localfs.
 
         // Revert files
         let mut blobs_id_and_compressor: Vec<BlobIdAndCompressor> = Vec::new();
