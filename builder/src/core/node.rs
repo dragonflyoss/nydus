@@ -3,6 +3,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use core::panic;
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Display, Formatter, Result as FmtResult};
@@ -506,7 +507,6 @@ impl Node {
                     batch.clear_chunk_data_buf();
                 }
             }
-
             let (pre_c_offset, c_size, is_compressed) =
                 Self::write_chunk_data(ctx, blob_ctx, blob_writer, chunk_data)
                     .with_context(|| format!("failed to write chunk data {:?}", self.path()))?;

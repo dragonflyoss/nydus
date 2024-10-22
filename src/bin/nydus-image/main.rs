@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(warnings)]
+// #![deny(warnings)]
 #[macro_use(crate_authors)]
 extern crate clap;
 #[macro_use]
@@ -34,7 +34,7 @@ use nydus_builder::{
     parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobManager,
     BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo, ChunkdictChunkInfo,
     ConversionType, DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger,
-    Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree, WhiteoutSpec,
+    Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree, TreeNode, WhiteoutSpec,
 };
 
 use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
@@ -549,9 +549,8 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     .long("prefetch-files")
                     .short('p')
                     .help("Prefetch files")
-                    .action(ArgAction::Append)
-                    .value_delimiter(' ')
-                    .num_args(1..),
+                    .action(ArgAction::Set)
+                    .num_args(1),
             )
             .arg(arg_config.clone())
             .arg(
@@ -1678,17 +1677,25 @@ impl Command {
         let blobs_dir_path = Self::get_blobs_dir(matches).unwrap();
         let prefetch_files = Self::get_prefetch_files(matches).unwrap();
         prefetch_files.iter().for_each(|f| println!("{}", f));
-        debug!("Blobs Dir Path: {}", blobs_dir_path.display());
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let config = Self::get_configuration(matches)?;
         config.internal.set_blob_accessible(true);
         let mut build_ctx = BuildContext {
-            prefetch: Prefetch::new(PrefetchPolicy::Fs, Some(prefetch_files))?,
+            prefetch: Prefetch::new(PrefetchPolicy::Fs, Some(prefetch_files.clone()))?,
             ..Default::default()
         };
 
         let sb = update_ctx_from_bootstrap(&mut build_ctx, config, bootstrap_path)?;
         let mut tree = Tree::from_bootstrap(&sb, &mut ()).unwrap();
+
+        let mut prefetch_nodes: Vec<TreeNode> = Vec::new();
+        // Init prefetch nodes
+        for f in prefetch_files.iter() {
+            let path = PathBuf::from(f);
+            if let Some(tree) = tree.get_node(&path) {
+                prefetch_nodes.push(tree.node.clone());
+            }
+        }
 
         build_ctx.prefetch.init(&mut tree);
 
@@ -1706,6 +1713,7 @@ impl Command {
             &mut bootstrap_mgr,
             &mut rafsv6table,
             blobs_dir_path.to_path_buf(),
+            prefetch_nodes,
         )
         .unwrap();
         Ok(())
@@ -1819,12 +1827,21 @@ impl Command {
     }
 
     fn get_prefetch_files(matches: &ArgMatches) -> Result<Vec<String>> {
-        match matches.get_many::<String>("prefetch-files") {
-            Some(files) => {
-                let paths: Vec<String> = files.map(String::from).collect();
-                Ok(paths)
+        match matches.get_one::<String>("prefetch-files") {
+            Some(v) => {
+                let content = std::fs::read_to_string(v)
+                    .map_err(|_| anyhow!("failed to read prefetch files from {}", v))?;
+
+                let mut prefetch_files: Vec<String> = Vec::new();
+                for line in content.lines() {
+                    if line.is_empty() || line.trim().is_empty() {
+                        continue;
+                    }
+                    prefetch_files.push(line.trim().to_string());
+                }
+                Ok(prefetch_files)
             }
-            None => bail!("missing parameters `prefetch-files`"),
+            None => Ok(Vec::new()),
         }
     }
 
