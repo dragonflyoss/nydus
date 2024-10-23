@@ -12,6 +12,7 @@ require (
 	github.com/pkg/xattr v0.4.9
 	github.com/stretchr/testify v1.8.4
 	golang.org/x/sys v0.15.0
+	github.com/mattn/go-sqlite3 v1.14.23
 )
 
 require (
@@ -27,6 +28,7 @@ require (
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
+	github.com/mattn/go-sqlite3 v1.14.23 // indirect
 	github.com/moby/sys/mountinfo v0.7.1 // indirect
 	github.com/moby/sys/sequential v0.5.0 // indirect
 	github.com/opencontainers/image-spec v1.1.0-rc5 // indirect

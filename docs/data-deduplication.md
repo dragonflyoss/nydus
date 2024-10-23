@@ -166,8 +166,8 @@ The node level CAS system helps to achieve O4 and O5.
 
 # Node Level CAS System (Experimental)
 Data deduplication can also be achieved when accessing Nydus images. The key idea is to maintain information about data chunks available on local host by using a database.
-When a chunk is needed but not available in the uncompressed data blob files yet, we will query the database using chunk digest as key. 
-If a record with the same chunk digest already exists, it will be reused.
+When a chunk is needed but not available in the uncompressed data blob files yet, we will query the database using chunk digest as key.
+If a record with the same chunk digest already exists, it will be reused to reduce duplicate data downloads.
 We call such a system as CAS (Content Addressable Storage).
 
 ## Chunk Deduplication by Using CAS as L2 Cache
@@ -181,7 +181,7 @@ It works in this way:
 ![chunk_dedup_l2cache](images/chunk_dedup_l2_cache.png)
 
 A data download operation can be avoided if a chunk already exists in the database.
-And if the underlying filesystem support data reference, `copy_file_range` will use reference instead of data copy, thus reduce storage space consumption.
+And if the **underlying filesystem support data reference**, `copy_file_range` will use reference instead of data copy, thus reduce storage space consumption.
 This design has benefit of robustness, the target blob file doesn't have any dependency on the database and source blob files, so ease garbage collection.
 But it depends on capability of underlying filesystem to reduce storage consumption.
 

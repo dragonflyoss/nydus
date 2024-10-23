@@ -24,6 +24,7 @@ const (
 	paramCacheCompressed = "cache_compressed"
 	paramRafsMode        = "rafs_mode"
 	paramEnablePrefetch  = "enable_prefetch"
+	paramChunkDedupDb    = "chunk_dedup_db"
 )
 
 type NativeLayerTestSuite struct {
@@ -44,6 +45,7 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 		Dimension(paramBatch, []interface{}{"0", "0x100000"}).
 		Dimension(paramEncrypt, []interface{}{false, true}).
 		Dimension(paramAmplifyIO, []interface{}{uint64(0x100000)}).
+		Dimension(paramChunkDedupDb, []interface{}{"", "/tmp/cas.db"}).
 		Skip(func(param *tool.DescartesItem) bool {
 			// rafs v6 not support cached mode nor dummy cache
 			if param.GetString(paramFSVersion) == "6" {
@@ -79,6 +81,7 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 			ctx.Runtime.RafsMode = scenario.GetString(paramRafsMode)
 			ctx.Runtime.EnablePrefetch = scenario.GetBool(paramEnablePrefetch)
 			ctx.Runtime.AmplifyIO = scenario.GetUInt64(paramAmplifyIO)
+			ctx.Runtime.ChunkDedupDb = scenario.GetString(paramChunkDedupDb)
 			n.testMakeLayers(*ctx, t)
 		}
 	}

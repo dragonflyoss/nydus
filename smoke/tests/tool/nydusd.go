@@ -38,6 +38,9 @@ type FileMetrics struct {
 }
 
 type BackendMetrics struct {
+	ReadCount       uint64 `json:"read_count"`
+	ReadAmountTotal uint64 `json:"read_amount_total"`
+	ReadErrors      uint64 `json:"read_errors"`
 }
 
 type AccessPatternMetrics struct {
@@ -74,6 +77,7 @@ type NydusdConfig struct {
 	AccessPattern   bool
 	PrefetchFiles   []string
 	AmplifyIO       uint64
+	ChunkDedupDb    string
 	// Hot Upgrade config.
 	Upgrade            bool
 	SupervisorSockPath string
@@ -193,6 +197,9 @@ func newNydusd(conf NydusdConfig) (*Nydusd, error) {
 	if len(conf.BootstrapPath) > 0 {
 		args = append(args, "--bootstrap", conf.BootstrapPath)
 	}
+	if len(conf.ChunkDedupDb) > 0 {
+		args = append(args, "--dedup-db", conf.ChunkDedupDb)
+	}
 	if conf.Upgrade {
 		args = append(args, "--upgrade")
 	}
@@ -276,6 +283,7 @@ func NewNydusdWithContext(ctx Context) (*Nydusd, error) {
 		RafsMode:        ctx.Runtime.RafsMode,
 		DigestValidate:  false,
 		AmplifyIO:       ctx.Runtime.AmplifyIO,
+		ChunkDedupDb:    ctx.Runtime.ChunkDedupDb,
 	}
 
 	if err := makeConfig(NydusdConfigTpl, conf); err != nil {
@@ -346,7 +354,6 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 	)
 
 	return err
-
 }
 
 func (nydusd *Nydusd) Umount() error {
@@ -513,8 +520,14 @@ func (nydusd *Nydusd) GetFilesMetrics(id string) (map[string]FileMetrics, error)
 	return info, nil
 }
 
-func (nydusd *Nydusd) GetBackendMetrics(id string) (*BackendMetrics, error) {
-	resp, err := nydusd.client.Get(fmt.Sprintf("http://unix/api/v1/metrics/backend?id=%s", id))
+func (nydusd *Nydusd) GetBackendMetrics(id ...string) (*BackendMetrics, error) {
+	requestURL := "http://unix/api/v1/metrics/backend"
+	if len(id) == 1 {
+		requestURL = fmt.Sprintf("http://unix/api/v1/metrics/backend?id=%s", id[0])
+	} else if len(id) > 1 {
+		return nil, errors.Errorf("Multiple id are not allowed")
+	}
+	resp, err := nydusd.client.Get(requestURL)
 	if err != nil {
 		return nil, err
 	}
