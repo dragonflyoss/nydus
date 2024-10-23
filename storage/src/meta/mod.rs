@@ -1100,6 +1100,7 @@ impl BlobCompressionContext {
     }
 }
 
+#[derive(Clone)]
 /// A customized array to host chunk information table for a blob.
 pub enum BlobMetaChunkArray {
     /// V1 chunk compression information array.

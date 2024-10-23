@@ -18,18 +18,20 @@ use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
 use crate::core::node::Node;
 use crate::NodeChunk;
-use anyhow::Result;
+use crate::OsString;
+use anyhow::{Ok, Result};
 use nydus_rafs::metadata::chunk::ChunkWrapper;
 use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
 use nydus_utils::compress::Algorithm;
 use nydus_utils::digest::RafsDigest;
-use std::ffi::OsString;
+
 use std::mem::size_of;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::u32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkdictChunkInfo {

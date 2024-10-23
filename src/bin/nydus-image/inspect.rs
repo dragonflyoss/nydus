@@ -392,7 +392,7 @@ RAFS Blob Size:         {rafs_size}
                 }
             }
         } else {
-            let file_path = self.rafs_meta.path_from_ino(ino as u64)?;
+            let file_path = self.rafs_meta.path_from_ino(ino)?;
             file_paths.push(file_path);
         };
         Ok(file_paths)

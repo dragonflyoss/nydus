@@ -1691,7 +1691,6 @@ impl RafsV6Blob {
             );
             return false;
         }
-
         let blob_features = match BlobFeatures::try_from(self.features) {
             Ok(v) => v,
             Err(_) => return false,
@@ -1773,7 +1772,7 @@ impl RafsV6Blob {
 #[derive(Clone, Debug, Default)]
 pub struct RafsV6BlobTable {
     /// Base blob information array.
-    entries: Vec<Arc<BlobInfo>>,
+    pub entries: Vec<Arc<BlobInfo>>,
 }
 
 impl RafsV6BlobTable {
