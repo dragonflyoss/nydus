@@ -310,7 +310,7 @@ impl Generator {
         };
 
         let mut prefetch_blob_mgr = BlobManager::new(nydus_utils::digest::Algorithm::Blake3);
-        
+
         prefetch_blob_mgr.add_blob(prefetch_blob_ctx);
         prefetch_blob_mgr.set_current_blob_index(0);
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
