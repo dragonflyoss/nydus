@@ -860,7 +860,7 @@ impl Builder for StargzBuilder {
 
         // Dump blob file
         timing_tracer!(
-            { Blob::dump(ctx, blob_mgr, blob_writer.as_mut(), None) },
+            { Blob::dump(ctx, blob_mgr, blob_writer.as_mut()) },
             "dump_blob"
         )?;
 

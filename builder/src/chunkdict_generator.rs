@@ -158,19 +158,6 @@ impl Generator {
         blobs_dir_path: PathBuf,
         prefetch_nodes: Vec<TreeNode>,
     ) -> Result<()> {
-        for node in prefetch_nodes {
-            debug!("Node: {:?}", node.borrow().target());
-            let node = node.borrow();
-            match node.inode {
-                InodeWrapper::Ref(_) => {
-                    debug!("Node Wrapper: Reference")
-                }
-                _ => {
-                    debug!("Not Reference")
-                }
-            }
-        }
-
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
         // TODO: Add Appropriate BlobFeatures
@@ -190,9 +177,7 @@ impl Generator {
         );
 
         // for every node in prefetch list, change the offset and blob id
-        let (file_nodes_prefetch, _) = ctx.prefetch.get_file_nodes();
 
-        // Revert files
         let mut blobs_id_and_compressor: Vec<BlobIdAndCompressor> = Vec::new();
         for blob in &blobtable.entries {
             blobs_id_and_compressor.push(BlobIdAndCompressor {
@@ -225,7 +210,7 @@ impl Generator {
         .expect("Failed to create ArtifactWriter");
 
         let mut blob_writer: Box<dyn Artifact> = Box::new(blob_writer);
-        for node in &file_nodes_prefetch {
+        for node in &prefetch_nodes {
             let child = tree.get_node(&node.borrow().path()).unwrap();
             let mut child = child.node.borrow().clone();
             let index = child.chunks.first().unwrap().inner.blob_index();
@@ -325,11 +310,7 @@ impl Generator {
         };
 
         let mut prefetch_blob_mgr = BlobManager::new(nydus_utils::digest::Algorithm::Blake3);
-        // // prefetch_blob_mgr.set_current_blob_index(0);
-        // let mut prefetch_blob_ctx =
-        //     BlobContext::from(&prefetch_build_ctx, &prefetch_blob_info, ChunkSource::Build)
-        //         .unwrap();
-        // prefetch_blob_ctx.blob_meta_info_enabled = true;
+        
         prefetch_blob_mgr.add_blob(prefetch_blob_ctx);
         prefetch_blob_mgr.set_current_blob_index(0);
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
@@ -343,18 +324,6 @@ impl Generator {
         )
         .unwrap();
 
-        // prefetch_build_ctx.compressor = compress::Algorithm::None;
-        // Blob::dump(
-        //     &prefetch_build_ctx,
-        //     &mut prefetch_blob_mgr,
-        //     &mut *blob_writer,
-        //     Some(&mut map),
-        // )
-        // .unwrap();
-        // prefetch_build_ctx.compressor = compress::Algorithm::Zstd;
-        // TODO(daiyongxuan): To avoid compress twice, I set the compressor
-        // to None.
-        // The actual compressor should be set to Zstd or etc..
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
             blob_ctx.set_meta_info_enabled(true);
             Blob::dump_meta_data(&prefetch_build_ctx, blob_ctx, blob_writer.as_mut()).unwrap();
