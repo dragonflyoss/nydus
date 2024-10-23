@@ -18,6 +18,7 @@ use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
 use crate::core::blob::Blob;
 use crate::core::node::Node;
+use crate::core::prefetch;
 use crate::TreeNode;
 use crate::{ArtifactWriter, BlobContext, NodeChunk};
 use anyhow::{Ok, Result};
@@ -36,6 +37,7 @@ use sha2::digest::Update;
 use crate::finalize_blob;
 use crate::Artifact;
 use core::panic;
+use std::borrow::BorrowMut;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
@@ -202,7 +204,10 @@ impl Generator {
         blobs_dir_path: PathBuf,
         prefetch_nodes: Vec<TreeNode>,
     ) -> Result<()> {
-        unimplemented!();
+        // let mut prefetch_state =
+        //     PrefetchBlobState::new(ctx, blobtable.entries.len() as u32, &blobs_dir_path);
+        // let mut batch = BatchContextGenerator::new(4096).unwrap();
+        // unimplemented!();
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
         // TODO: Add Appropriate BlobFeatures
@@ -256,8 +261,8 @@ impl Generator {
 
         let mut blob_writer: Box<dyn Artifact> = Box::new(blob_writer);
         for node in &prefetch_nodes {
-            let child = tree.get_node(&node.borrow().path()).unwrap();
-            let mut child = child.node.borrow().clone();
+            let child = tree.get_node_mut(&node.borrow().path()).unwrap();
+            let mut child  = child.node.as_ref().borrow_mut();
             let index = child.chunks.first().unwrap().inner.blob_index();
             let blob_id = blobs_id_and_compressor
                 .get(index as usize)
@@ -412,6 +417,18 @@ impl Generator {
         let blob_table_withprefetch = RafsBlobTable::V6(blob_table_withprefetch);
         bootstrap.dump(ctx, storage, &mut bootstrap_ctx, &blob_table_withprefetch)?;
         Ok(())
+    }
+
+    fn process_prefetch_node(
+        tree: &mut Tree,
+        node: &TreeNode,
+        prefetch_state: &mut PrefetchBlobState,
+        batch: &BatchContextGenerator,
+        blobtable: &RafsV6BlobTable,
+        blobs_dir_path: &PathBuf,
+    ) {
+        let node = tree.get_node(&node.borrow().path()).unwrap();
+        // let mut node = node.node.borrow_mut();
     }
 
     fn align_to_4k<T>(offset: T) -> T

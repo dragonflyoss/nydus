@@ -174,6 +174,30 @@ impl Tree {
         Some(tree)
     }
 
+    /// Get the mutable tree node corresponding to the path.
+    pub fn get_node_mut(&mut self, path: &Path) -> Option<&mut Tree> {
+        let target_vec = Node::generate_target_vec(path);
+        assert!(!target_vec.is_empty());
+        let mut tree = self;
+
+        let last_idx = target_vec.len() - 1;
+        for name in &target_vec[1..last_idx] {
+            match tree.get_child_idx(name.as_bytes()) {
+                Some(idx) => tree = &mut tree.children[idx],
+                None => return None,
+            }
+        }
+
+        if let Some(last_name) = target_vec.last() {
+            match tree.get_child_idx(last_name.as_bytes()) {
+                Some(idx) => Some(&mut tree.children[idx]),
+                None => None,
+            }
+        } else {
+            Some(tree)
+        }
+    }
+
     /// Merge the upper layer tree into the lower layer tree, applying whiteout rules.
     pub fn merge_overaly(&mut self, ctx: &BuildContext, upper: Tree) -> Result<()> {
         assert_eq!(self.name, "/".as_bytes());
