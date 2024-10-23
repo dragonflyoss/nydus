@@ -115,6 +115,50 @@ struct BlobIdAndCompressor {
     pub compressor: compress::Algorithm,
 }
 
+struct PrefetchBlobState {
+    blob_info: BlobInfo,
+    blob_ctx: BlobContext,
+    blob_writer: Box<dyn Artifact>,
+    chunk_count: u32,
+    blob_offset: u64,
+    meta_uncompressed_size: u64,
+    chunk_index: u32,
+}
+
+impl PrefetchBlobState {
+    fn new(ctx: &BuildContext, blob_layer_num: u32, blobs_dir_path: &PathBuf) -> Result<Self> {
+        let blob_info = BlobInfo::new(
+            blob_layer_num,
+            String::from("Prefetch-blob"),
+            0,
+            0,
+            ctx.chunk_size,
+            u32::MAX,
+            BlobFeatures::ALIGNED
+                | BlobFeatures::INLINED_CHUNK_DIGEST
+                | BlobFeatures::HAS_TAR_HEADER
+                | BlobFeatures::HAS_TOC
+                | BlobFeatures::CAP_TAR_TOC,
+        );
+        let mut blob_ctx = BlobContext::from(ctx, &blob_info, ChunkSource::Build)?;
+        blob_ctx.chunk_count = 0;
+        blob_ctx.blob_meta_info_enabled = true;
+        let blob_writer = ArtifactWriter::new(crate::ArtifactStorage::SingleFile(
+            blobs_dir_path.join("Prefetch-blob"),
+        ))
+        .map(|writer| Box::new(writer) as Box<dyn Artifact>)?;
+        Ok(Self {
+            blob_info,
+            blob_ctx,
+            blob_writer,
+            chunk_count: 0,
+            blob_offset: 0,
+            meta_uncompressed_size: 0,
+            chunk_index: 0,
+        })
+    }
+}
+
 impl Generator {
     // Generate chunkdict RAFS bootstrap.
     pub fn generate(
@@ -158,6 +202,7 @@ impl Generator {
         blobs_dir_path: PathBuf,
         prefetch_nodes: Vec<TreeNode>,
     ) -> Result<()> {
+        unimplemented!();
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
         // TODO: Add Appropriate BlobFeatures
