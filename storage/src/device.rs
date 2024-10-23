@@ -229,6 +229,36 @@ impl BlobInfo {
         blob_info
     }
 
+    /// Set the chunk count
+    pub fn set_chunk_count(&mut self, count: usize) {
+        self.chunk_count = count as u32;
+    }
+
+    /// Set compressed size
+    pub fn set_compressed_size(&mut self, size: usize) {
+        self.compressed_size = size as u64;
+    }
+
+    /// Set uncompressed size
+    pub fn set_uncompressed_size(&mut self, size: usize) {
+        self.uncompressed_size = size as u64;
+    }
+
+    /// Set meta ci compressed size
+    pub fn set_meta_ci_compressed_size(&mut self, size: usize) {
+        self.meta_ci_compressed_size = size as u64;
+    }
+
+    /// Set meta ci uncompressed size
+    pub fn set_meta_ci_uncompressed_size(&mut self, size: usize) {
+        self.meta_ci_uncompressed_size = size as u64;
+    }
+
+    /// Set meta ci offset
+    pub fn set_meta_ci_offset(&mut self, size: usize) {
+        self.meta_ci_offset = size as u64;
+    }
+
     /// Set the is_chunkdict_generated flag.
     pub fn set_chunkdict_generated(&mut self, is_chunkdict_generated: bool) {
         self.is_chunkdict_generated = is_chunkdict_generated;
@@ -256,6 +286,11 @@ impl BlobInfo {
             }
         }
         self.blob_id.clone()
+    }
+
+    /// Set the blob id
+    pub fn set_blob_id(&mut self, blob_id: String) {
+        self.blob_id = blob_id
     }
 
     /// Get raw blob id, without special handling of `inlined-meta` case.

@@ -272,6 +272,7 @@ impl TocEntry {
     }
 }
 
+#[derive(Clone)]
 /// Container to host a group of ToC entries.
 pub struct TocEntryList {
     entries: Vec<TocEntry>,
