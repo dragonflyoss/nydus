@@ -39,6 +39,7 @@ type RuntimeContext struct {
 	RafsMode        string
 	EnablePrefetch  bool
 	AmplifyIO       uint64
+	ChunkDedupDb    string
 }
 
 type EnvContext struct {

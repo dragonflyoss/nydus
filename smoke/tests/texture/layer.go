@@ -10,7 +10,10 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
+	"github.com/opencontainers/go-digest"
+	"github.com/stretchr/testify/require"
 )
 
 type LayerMaker func(t *testing.T, layer *tool.Layer)
@@ -134,4 +137,29 @@ func MakeMatrixLayer(t *testing.T, workDir, id string) *tool.Layer {
 	layer.CreateFile(t, file2, []byte(file2))
 
 	return layer
+}
+
+func PrepareLayerWithContext(t *testing.T) (*tool.Context, *tool.Layer) {
+	ctx := tool.DefaultContext(t)
+
+	// Prepare work directory
+	ctx.PrepareWorkDir(t)
+
+	lowerLayer := MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "source"))
+	lowerOCIBlobDigest, lowerRafsBlobDigest := lowerLayer.PackRef(t, *ctx, ctx.Env.BlobDir, ctx.Build.OCIRefGzip)
+	mergeOption := converter.MergeOption{
+		BuilderPath:   ctx.Binary.Builder,
+		ChunkDictPath: "",
+		OCIRef:        false,
+	}
+	actualDigests, lowerBootstrap := tool.MergeLayers(t, *ctx, mergeOption, []converter.Layer{
+		{
+			Digest:         lowerRafsBlobDigest,
+			OriginalDigest: &lowerOCIBlobDigest,
+		},
+	})
+	require.Equal(t, []digest.Digest{lowerOCIBlobDigest}, actualDigests)
+
+	ctx.Env.BootstrapPath = lowerBootstrap
+	return ctx, lowerLayer
 }

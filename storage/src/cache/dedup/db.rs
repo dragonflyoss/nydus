@@ -25,8 +25,9 @@ impl CasDb {
 
     pub fn from_file(db_path: impl AsRef<Path>) -> Result<CasDb> {
         let mgr = SqliteConnectionManager::file(db_path)
-            .with_flags(OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE);
-        let pool = r2d2::Pool::new(mgr)?;
+            .with_flags(OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .with_init(|c| c.execute_batch("PRAGMA journal_mode = WAL"));
+        let pool = r2d2::Pool::builder().max_size(10).build(mgr)?;
         let conn = pool.get()?;
 
         conn.execute(
