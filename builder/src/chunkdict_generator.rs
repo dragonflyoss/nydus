@@ -32,6 +32,7 @@ use nydus_storage::meta::BlobChunkInfoV1Ondisk;
 use nydus_utils::compress;
 use nydus_utils::compress::Algorithm;
 use nydus_utils::digest::RafsDigest;
+use nydus_utils::metrics::BlobcacheMetrics;
 use sha2::digest::Update;
 
 use crate::finalize_blob;
@@ -260,85 +261,25 @@ impl Generator {
         .expect("Failed to create ArtifactWriter");
 
         let mut blob_writer: Box<dyn Artifact> = Box::new(blob_writer);
+        
+        let mut blob_state = PrefetchBlobState::new(
+            &ctx, blob_layer_num as u32, &blobs_dir_path).unwrap();
+        let mut batch = BatchContextGenerator::new(4096).unwrap();
         for node in &prefetch_nodes {
-            let child = tree.get_node_mut(&node.borrow().path()).unwrap();
-            let mut child  = child.node.as_ref().borrow_mut();
-            let index = child.chunks.first().unwrap().inner.blob_index();
-            let blob_id = blobs_id_and_compressor
-                .get(index as usize)
-                .unwrap()
-                .blob_id
-                .clone();
-            let blob_file = blobs_dir_path.clone().join(blob_id);
-            let blob_file = Arc::new(File::open(blob_file).unwrap());
-            child.layer_idx = prefetch_blob_index as u16;
-            for chunk in &mut child.chunks {
-                // TODO(daiyongxuan): Dump Blob Dirrectly.
-                // Use BlobReader::read
-                chunk_count += 1;
-                let inner = Arc::make_mut(&mut chunk.inner);
-                let mut reader = BlobNodeReader::new(
-                    Arc::clone(&blob_file),
-                    inner.compressed_offset(),
-                    inner.compressed_offset() + inner.compressed_size() as u64,
-                )
-                .unwrap();
-                let buf = &mut vec![0u8; inner.compressed_size() as usize];
-                reader.read_exact(buf).unwrap();
-                blob_writer.write_all(buf).unwrap();
-
-                let info = batch
-                    .generate_chunk_info(
-                        prefetch_blob_ctx.current_compressed_offset,
-                        prefetch_blob_ctx.current_uncompressed_offset,
-                        inner.uncompressed_size() as u32,
-                        encrypted,
-                    )
-                    .unwrap();
-                debug!(
-                    "Prefetch blob ctx meta len: {}",
-                    prefetch_blob_ctx.blob_meta_info.len()
-                );
-
-                inner.set_blob_index(prefetch_blob_index);
-                inner.set_index(chunk_index_in_prefetch);
-                chunk_index_in_prefetch += 1;
-                inner.set_compressed_offset(prefetch_blob_offset);
-                inner.set_uncompressed_offset(prefetch_blob_offset);
-                let aligned_d_size: u64 =
-                    nydus_utils::try_round_up_4k(inner.uncompressed_size()).unwrap();
-                prefetch_blob_ctx.uncompressed_blob_size += aligned_d_size;
-                prefetch_blob_ctx.current_compressed_offset += inner.compressed_size() as u64;
-                prefetch_blob_ctx.compressed_blob_size += inner.compressed_size() as u64;
-                prefetch_blob_ctx.blob_hash.update(&buf);
-                debug!(
-                    "Prefetch blob ctx meta len: {}",
-                    prefetch_blob_ctx.blob_meta_info.len()
-                );
-
-                prefetch_blob_ctx
-                    .add_chunk_meta_info(inner, Some(info))
-                    .unwrap();
-                prefetch_blob_ctx.chunk_count += 1;
-                prefetch_blob_offset += inner.uncompressed_size() as u64;
-                meta_uncompressed_size += inner.uncompressed_size() as u64;
-                prefetch_blob_offset = Self::align_to_4k(prefetch_blob_offset);
-                // set meta ci data
-                prefetch_blob_info.set_meta_ci_uncompressed_size(
-                    (prefetch_blob_info.meta_ci_uncompressed_size()
-                        + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize,
-                );
-                prefetch_blob_info.set_meta_ci_compressed_size(
-                    (prefetch_blob_info.meta_ci_compressed_size()
-                        + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize,
-                );
-            }
+            Self::process_prefetch_node(
+                tree,
+                &node,
+                &mut blob_state,
+                &mut batch,
+                blobtable,
+                &blobs_dir_path,
+            );
         }
-        // align prefetch blob size to 4096
-        prefetch_blob_info.set_meta_ci_offset(0x200 + meta_uncompressed_size as usize);
-        prefetch_blob_info.set_chunk_count(chunk_count as usize);
-        prefetch_blob_info.set_compressed_size(prefetch_blob_offset as usize);
-        prefetch_blob_info.set_uncompressed_size(prefetch_blob_offset as usize);
+
+        prefetch_blob_info.set_meta_ci_offset(0x200 + blob_state.blob_ctx.current_uncompressed_offset as usize);
+        prefetch_blob_info.set_chunk_count(blob_state.chunk_count as usize);
+        prefetch_blob_info.set_compressed_size(blob_state.blob_ctx.current_compressed_offset as usize);
+        prefetch_blob_info.set_uncompressed_size(blob_state.blob_ctx.current_uncompressed_offset as usize);
         prefetch_blob_info.set_compressor(Algorithm::Zstd);
 
         let mut blob_table_withprefetch = RafsV6BlobTable::new();
@@ -423,50 +364,121 @@ impl Generator {
         tree: &mut Tree,
         node: &TreeNode,
         prefetch_state: &mut PrefetchBlobState,
-        batch: &BatchContextGenerator,
+        batch: &mut BatchContextGenerator,
         blobtable: &RafsV6BlobTable,
         blobs_dir_path: &PathBuf,
     ) {
-        let child = tree.get_node_mut(&node.borrow().path()).unwrap();
-        let mut child = child.node.as_ref().borrow_mut();
-        let index = child.chunks.first().unwrap().inner.blob_index();
-        let blob_id = blobtable.entries.get(index as usize).unwrap().blob_id();
-        let blob_file = blobs_dir_path.join(blob_id);
-        let blob_file = Arc::new(File::open(blob_file).unwrap());
-        child.layer_idx = prefetch_state.blob_info.blob_index() as u16;
-        let mut chunks: &mut Vec<NodeChunk> = child.chunks.as_mut();
-        for chunk in chunks {
-            prefetch_state.chunk_count += 1;
-            let inner = Arc::make_mut(&mut chunk.inner);
-            let mut reader = BlobNodeReader::new(
-                Arc::clone(&blob_file),
-                inner.compressed_offset(),
-                inner.compressed_offset() + inner.compressed_size() as u64,
-            ).unwrap();
-            let buf = &mut vec![0u8; inner.compressed_size() as usize];
-            reader.read_exact(buf).unwrap();
-            prefetch_state.blob_writer.write_all(buf).unwrap();
-            let blob_entry = blobtable.entries.get(chunk.inner.blob_index() as usize).unwrap();
+        let tree_node  = tree
+            .get_node_mut(&node.borrow().path())
+            .unwrap()
+            .node
+            .as_ref();
+        let blob_id = {
+            let child = tree_node.borrow();
+            child.chunks
+                .first()
+                .and_then(|chunk| blobtable.entries.get(chunk.inner.blob_index() as usize))
+                .map(|entry| entry.blob_id())
+                .unwrap()
+        };
+        let blob_file = Arc::new(File::open(blobs_dir_path.join(blob_id)).unwrap());
+        {
+            let mut child = tree_node.borrow_mut();
+            child.layer_idx = prefetch_state.blob_info.blob_index() as u16;
+        }
 
+        {
+            let mut child = tree_node.borrow_mut();
+            let chunks: &mut Vec<NodeChunk> = child.chunks.as_mut();
+            let blob_ctx = &mut prefetch_state.blob_ctx;
+            let blob_info = &mut prefetch_state.blob_info;
+            let encrypted = blob_ctx.blob_compressor != compress::Algorithm::None;
             
-        }
-        let index = child.chunks.first().unwrap().inner.blob_index();
-        
-        // let mut node = node.node.borrow_mut();
-    }
+            for chunk in chunks {
+                let inner = Arc::make_mut(&mut chunk.inner);
+                let mut reader = BlobNodeReader::new(
+                    Arc::clone(&blob_file),
+                    inner.compressed_offset(),
+                    inner.compressed_offset() + inner.compressed_size() as u64,
+                )
+                .unwrap();
+                let buf = &mut vec![0u8; inner.compressed_size() as usize];
+                reader.read_exact(buf).unwrap();
+                prefetch_state.blob_writer.write_all(buf).unwrap();
+                let info = batch.generate_chunk_info(
+                    blob_ctx.current_compressed_offset,
+                    blob_ctx.current_uncompressed_offset,
+                    inner.uncompressed_size(),
+                    encrypted,
+                ).unwrap();
+                inner.set_blob_index(blob_info.blob_index());
+                inner.set_index(prefetch_state.chunk_count);
+                prefetch_state.chunk_count += 1;
+                inner.set_compressed_offset(blob_ctx.current_compressed_offset);
+                inner.set_uncompressed_offset(blob_ctx.current_uncompressed_offset);
+                let aligned_d_size: u64 =
+                    nydus_utils::try_round_up_4k(inner.uncompressed_size()).unwrap();
+                blob_ctx.compressed_blob_size += inner.compressed_size() as u64;
+                blob_ctx.uncompressed_blob_size += aligned_d_size;
+                blob_ctx.current_compressed_offset += inner.compressed_size() as u64;
+                blob_ctx.current_uncompressed_offset += aligned_d_size;
+                blob_ctx.add_chunk_meta_info(&inner, Some(info)).unwrap();
+                blob_ctx.blob_hash.update(&buf);
 
-    fn align_to_4k<T>(offset: T) -> T
-    where
-        T: Sub<Output = T> + Add<Output = T> + Rem<Output = T> + PartialEq + TryFrom<u64> + Copy,
-        <T as TryFrom<u64>>::Error: std::fmt::Debug,
-    {
-        let alignment = T::try_from(4096).unwrap();
-        let remainder = offset % alignment;
-        if remainder == T::try_from(0).unwrap() {
-            offset
-        } else {
-            offset + (alignment - remainder)
+                blob_info.set_meta_ci_compressed_size(
+                    (blob_info.meta_ci_compressed_size() + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize
+                );
+
+                blob_info.set_meta_ci_uncompressed_size(
+                    (blob_info.meta_ci_uncompressed_size() + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize
+                );
+            }
         }
+
+        // let chunks: &mut Vec<NodeChunk> = child.chunks.as_mut();
+        // let blob_ctx = &mut prefetch_state.blob_ctx;
+        // let blob_info = &mut prefetch_state.blob_info;
+        // let encrypted = blob_ctx.blob_compressor != compress::Algorithm::None;
+        // for chunk in chunks {
+        //     let inner = Arc::make_mut(&mut chunk.inner);
+        //     let mut reader = BlobNodeReader::new(
+        //         Arc::clone(&blob_file),
+        //         inner.compressed_offset(),
+        //         inner.compressed_offset() + inner.compressed_size() as u64,
+        //     )
+        //     .unwrap();
+        //     let buf = &mut vec![0u8; inner.compressed_size() as usize];
+        //     reader.read_exact(buf).unwrap();
+        //     prefetch_state.blob_writer.write_all(buf).unwrap();
+        //     let info = batch.generate_chunk_info(
+        //         blob_ctx.current_compressed_offset,
+        //         blob_ctx.current_uncompressed_offset,
+        //         inner.uncompressed_size(),
+        //         encrypted,
+        //     ).unwrap();
+        //     blob_ctx.add_chunk_meta_info(&inner, Some(info)).unwrap();
+        //     inner.set_blob_index(blob_info.blob_index());
+        //     inner.set_index(prefetch_state.chunk_count);
+        //     prefetch_state.chunk_count += 1;
+        //     inner.set_compressed_offset(blob_ctx.current_compressed_offset);
+        //     inner.set_uncompressed_offset(blob_ctx.current_uncompressed_offset);
+        //     let aligned_d_size: u64 =
+        //         nydus_utils::try_round_up_4k(inner.uncompressed_size()).unwrap();
+        //     blob_ctx.compressed_blob_size += inner.compressed_size() as u64;
+        //     blob_ctx.uncompressed_blob_size += aligned_d_size;
+        //     blob_ctx.current_compressed_offset += inner.compressed_size() as u64;
+        //     blob_ctx.current_uncompressed_offset += aligned_d_size;
+        //     blob_ctx.blob_hash.update(&buf);
+
+        //     blob_info.set_meta_ci_compressed_size(
+        //         (blob_info.meta_ci_compressed_size() + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize
+        //     );
+
+        //     blob_info.set_meta_ci_uncompressed_size(
+        //         (blob_info.meta_ci_uncompressed_size() + size_of::<BlobChunkInfoV1Ondisk>() as u64) as usize
+        //     );
+        // }
+        // let mut node = node.node.borrow_mut();
     }
 
     /// Validate tree.
