@@ -151,6 +151,72 @@ func (c *CasTestSuite) testCasGcUmountByAPI(t *testing.T, enablePrefetch bool) {
 	}
 }
 
+func (c *CasTestSuite) TestCasGcUmount() test.Generator {
+	scenarios := tool.DescartesIterator{}
+	scenarios.Dimension(paramEnablePrefetch, []interface{}{false, true})
+
+	return func() (name string, testCase test.Case) {
+		if !scenarios.HasNext() {
+			return
+		}
+		scenario := scenarios.Next()
+
+		return scenario.Str(), func(t *testing.T) {
+			c.testCasGcUmount(t, scenario.GetBool(paramEnablePrefetch))
+		}
+	}
+}
+
+func (c *CasTestSuite) testCasGcUmount(t *testing.T, enablePrefetch bool) {
+	ctx, layer := texture.PrepareLayerWithContext(t)
+	defer ctx.Destroy(t)
+
+	file, err := os.CreateTemp("", "cas-*.db")
+	require.NoError(t, err)
+	defer os.Remove(file.Name())
+
+	ctx.Runtime.EnablePrefetch = enablePrefetch
+	ctx.Runtime.ChunkDedupDb = file.Name()
+
+	nydusd, err := tool.NewNydusdWithContext(*ctx)
+	require.NoError(t, err)
+	err = nydusd.Mount()
+	require.NoError(t, err)
+	nydusd.Verify(t, layer.FileTree)
+
+	db, err := sql.Open("sqlite3", file.Name())
+	require.NoError(t, err)
+	defer db.Close()
+
+	for _, expectedTable := range []string{"Blobs", "Chunks"} {
+		_, err = db.Exec("PRAGMA wal_checkpoint(FULL)")
+		require.NoError(t, err)
+		var count int
+		query := fmt.Sprintf("SELECT COUNT(*) FROM %s;", expectedTable)
+		err := db.QueryRow(query).Scan(&count)
+		require.NoError(t, err)
+		require.NotZero(t, count)
+	}
+
+	// Mock nydus snapshotter clear cache
+	os.RemoveAll(filepath.Join(ctx.Env.WorkDir, "cache"))
+	time.Sleep(1 * time.Second)
+
+	err = nydusd.Umount()
+	require.NoError(t, err)
+
+	for _, expectedTable := range []string{"Chunks", "Blobs"} {
+		// Manual execution WAL Checkpoint
+		_, err = db.Exec("PRAGMA wal_checkpoint(FULL)")
+		require.NoError(t, err)
+		var count int
+		query := fmt.Sprintf("SELECT COUNT(*) FROM %s;", expectedTable)
+		err := db.QueryRow(query).Scan(&count)
+		require.NoError(t, err)
+		require.Zero(t, count)
+	}
+}
+
 func TestCas(t *testing.T) {
 	test.Run(t, &CasTestSuite{})
 }
