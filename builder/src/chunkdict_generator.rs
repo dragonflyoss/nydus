@@ -445,6 +445,7 @@ impl Generator {
             ).unwrap();
             let buf = &mut vec![0u8; inner.compressed_size() as usize];
             reader.read_exact(buf).unwrap();
+            prefetch_state.blob_writer.write_all(buf).unwrap();
             let blob_entry = blobtable.entries.get(chunk.inner.blob_index() as usize).unwrap();
 
             
