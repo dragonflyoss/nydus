@@ -16,7 +16,7 @@
 
 use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
-use crate::core::blob::Blob;
+use crate::core::blob::{self, Blob};
 use crate::core::node::Node;
 use crate::core::prefetch;
 use crate::TreeNode;
@@ -39,7 +39,7 @@ use crate::Artifact;
 use core::panic;
 use std::borrow::BorrowMut;
 use std::ffi::OsString;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::mem::size_of;
 use std::ops::Add;
@@ -427,7 +427,30 @@ impl Generator {
         blobtable: &RafsV6BlobTable,
         blobs_dir_path: &PathBuf,
     ) {
-        let node = tree.get_node(&node.borrow().path()).unwrap();
+        let child = tree.get_node_mut(&node.borrow().path()).unwrap();
+        let mut child = child.node.as_ref().borrow_mut();
+        let index = child.chunks.first().unwrap().inner.blob_index();
+        let blob_id = blobtable.entries.get(index as usize).unwrap().blob_id();
+        let blob_file = blobs_dir_path.join(blob_id);
+        let blob_file = Arc::new(File::open(blob_file).unwrap());
+        child.layer_idx = prefetch_state.blob_info.blob_index() as u16;
+        let mut chunks: &mut Vec<NodeChunk> = child.chunks.as_mut();
+        for chunk in chunks {
+            prefetch_state.chunk_count += 1;
+            let inner = Arc::make_mut(&mut chunk.inner);
+            let mut reader = BlobNodeReader::new(
+                Arc::clone(&blob_file),
+                inner.compressed_offset(),
+                inner.compressed_offset() + inner.compressed_size() as u64,
+            ).unwrap();
+            let buf = &mut vec![0u8; inner.compressed_size() as usize];
+            reader.read_exact(buf).unwrap();
+            let blob_entry = blobtable.entries.get(chunk.inner.blob_index() as usize).unwrap();
+
+            
+        }
+        let index = child.chunks.first().unwrap().inner.blob_index();
+        
         // let mut node = node.node.borrow_mut();
     }
 
