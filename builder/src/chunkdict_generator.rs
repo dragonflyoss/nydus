@@ -123,9 +123,6 @@ struct PrefetchBlobState {
     blob_ctx: BlobContext,
     blob_writer: Box<dyn Artifact>,
     chunk_count: u32,
-    blob_offset: u64,
-    meta_uncompressed_size: u64,
-    chunk_index: u32,
 }
 
 impl PrefetchBlobState {
@@ -155,9 +152,6 @@ impl PrefetchBlobState {
             blob_ctx,
             blob_writer,
             chunk_count: 0,
-            blob_offset: 0,
-            meta_uncompressed_size: 0,
-            chunk_index: 0,
         })
     }
 }
@@ -205,62 +199,9 @@ impl Generator {
         blobs_dir_path: PathBuf,
         prefetch_nodes: Vec<TreeNode>,
     ) -> Result<()> {
-        // let mut prefetch_state =
-        //     PrefetchBlobState::new(ctx, blobtable.entries.len() as u32, &blobs_dir_path);
-        // let mut batch = BatchContextGenerator::new(4096).unwrap();
-        // unimplemented!();
+
         // create a new blob for prefetch layer
         let blob_layer_num = blobtable.entries.len();
-        // TODO: Add Appropriate BlobFeatures
-        let mut prefetch_blob_info = BlobInfo::new(
-            blob_layer_num as u32,
-            String::from("Prefetch-blob"),
-            0,
-            0,
-            ctx.chunk_size,
-            // If chunkcount is zero, it will add a feature
-            u32::MAX,
-            BlobFeatures::ALIGNED
-                | BlobFeatures::INLINED_CHUNK_DIGEST
-                | BlobFeatures::HAS_TAR_HEADER
-                | BlobFeatures::HAS_TOC
-                | BlobFeatures::CAP_TAR_TOC,
-        );
-
-        // for every node in prefetch list, change the offset and blob id
-
-        let mut blobs_id_and_compressor: Vec<BlobIdAndCompressor> = Vec::new();
-        for blob in &blobtable.entries {
-            blobs_id_and_compressor.push(BlobIdAndCompressor {
-                blob_id: blob.blob_id(),
-                compressor: blob.compressor(),
-            });
-        }
-
-        let prefetch_blob_index = prefetch_blob_info.blob_index();
-        let mut chunk_count = 0;
-        // For every chunk, need to align to 4k
-        let mut prefetch_blob_offset = 0;
-        let mut meta_uncompressed_size = 0;
-        let mut chunk_index_in_prefetch = 0;
-
-        // Create a new blob for prefetch layer
-        let mut prefetch_blob_ctx =
-            BlobContext::from(ctx, &prefetch_blob_info, ChunkSource::Build).unwrap();
-        prefetch_blob_ctx.chunk_count = 0;
-        let encrypted = prefetch_blob_ctx.blob_compressor != compress::Algorithm::None;
-        let mut batch = BatchContextGenerator::new(4096).unwrap();
-        prefetch_blob_ctx.blob_meta_info_enabled = true;
-        debug!(
-            "Prefetch blob ctx meta len: {}",
-            prefetch_blob_ctx.blob_meta_info.len()
-        );
-        let blob_writer = ArtifactWriter::new(crate::ArtifactStorage::SingleFile(
-            blobs_dir_path.clone().join("Prefetch-blob"),
-        ))
-        .expect("Failed to create ArtifactWriter");
-
-        let mut blob_writer: Box<dyn Artifact> = Box::new(blob_writer);
         
         let mut blob_state = PrefetchBlobState::new(
             &ctx, blob_layer_num as u32, &blobs_dir_path).unwrap();
@@ -276,10 +217,13 @@ impl Generator {
             );
         }
 
-        prefetch_blob_info.set_meta_ci_offset(0x200 + blob_state.blob_ctx.current_uncompressed_offset as usize);
+        let prefetch_blob_ctx = blob_state.blob_ctx;
+        let mut prefetch_blob_info = blob_state.blob_info;
+
+        prefetch_blob_info.set_meta_ci_offset(0x200 + prefetch_blob_ctx.current_uncompressed_offset as usize);
         prefetch_blob_info.set_chunk_count(blob_state.chunk_count as usize);
-        prefetch_blob_info.set_compressed_size(blob_state.blob_ctx.current_compressed_offset as usize);
-        prefetch_blob_info.set_uncompressed_size(blob_state.blob_ctx.current_uncompressed_offset as usize);
+        prefetch_blob_info.set_compressed_size(prefetch_blob_ctx.current_compressed_offset as usize);
+        prefetch_blob_info.set_uncompressed_size(prefetch_blob_ctx.current_uncompressed_offset as usize);
         prefetch_blob_info.set_compressor(Algorithm::Zstd);
 
         let mut blob_table_withprefetch = RafsV6BlobTable::new();
@@ -304,9 +248,8 @@ impl Generator {
 
         prefetch_blob_mgr.add_blob(prefetch_blob_ctx);
         prefetch_blob_mgr.set_current_blob_index(0);
-        if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
-            blob_ctx.set_meta_info_enabled(true);
-        }
+
+        let mut blob_writer = blob_state.blob_writer;
 
         Blob::finalize_blob_data(
             &prefetch_build_ctx,
@@ -316,7 +259,6 @@ impl Generator {
         .unwrap();
 
         if let Some((_, blob_ctx)) = prefetch_blob_mgr.get_current_blob() {
-            blob_ctx.set_meta_info_enabled(true);
             Blob::dump_meta_data(&prefetch_build_ctx, blob_ctx, blob_writer.as_mut()).unwrap();
         } else {
             panic!();
