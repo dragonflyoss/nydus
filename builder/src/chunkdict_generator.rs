@@ -241,19 +241,21 @@ impl Generator {
     ) -> Result<()> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let mut bootstrap = Bootstrap::new(tree.clone())?;
-    
+
         // Build bootstrap
         bootstrap.build(ctx, &mut bootstrap_ctx)?;
-    
+
         // Verify and update prefetch blob
         assert!(
-            blobtable.entries
+            blobtable
+                .entries
                 .iter()
                 .filter(|blob| blob.blob_id() == "Prefetch-blob")
-                .count() == 1,
+                .count()
+                == 1,
             "Expected exactly one Prefetch-blob"
         );
-    
+
         // Rewrite prefetch blob id
         blobtable
             .entries
@@ -264,7 +266,7 @@ impl Generator {
                 info.set_blob_id(ctx.blob_id.clone());
                 *blob = Arc::new(info);
             });
-    
+
         // Dump bootstrap
         let blob_table_withprefetch = RafsBlobTable::V6(blobtable.clone());
         bootstrap.dump(
@@ -273,7 +275,7 @@ impl Generator {
             &mut bootstrap_ctx,
             &blob_table_withprefetch,
         )?;
-    
+
         Ok(())
     }
 
