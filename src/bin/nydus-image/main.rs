@@ -1841,7 +1841,7 @@ impl Command {
                 }
                 Ok(prefetch_files)
             }
-            None => Ok(Vec::new()),
+            None => panic!("missing parameter `prefetch-files`"),
         }
     }
 

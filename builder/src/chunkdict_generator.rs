@@ -16,9 +16,10 @@
 
 use super::core::node::{ChunkSource, NodeInfo};
 use super::{BlobManager, Bootstrap, BootstrapManager, BuildContext, BuildOutput, Tree};
-use crate::core::blob::{self, Blob};
+use crate::core::blob::Blob;
 use crate::core::node::Node;
 use crate::OsString;
+use crate::Path;
 use crate::TreeNode;
 use crate::{ArtifactWriter, BlobContext, NodeChunk};
 use anyhow::{Ok, Result};
@@ -122,7 +123,7 @@ struct PrefetchBlobState {
 }
 
 impl PrefetchBlobState {
-    fn new(ctx: &BuildContext, blob_layer_num: u32, blobs_dir_path: &PathBuf) -> Result<Self> {
+    fn new(ctx: &BuildContext, blob_layer_num: u32, blobs_dir_path: &Path) -> Result<Self> {
         let mut blob_info = BlobInfo::new(
             blob_layer_num,
             String::from("Prefetch-blob"),
@@ -317,7 +318,7 @@ impl Generator {
         prefetch_state: &mut PrefetchBlobState,
         batch: &mut BatchContextGenerator,
         blobtable: &RafsV6BlobTable,
-        blobs_dir_path: &PathBuf,
+        blobs_dir_path: &Path,
     ) {
         let tree_node = tree
             .get_node_mut(&node.borrow().path())
