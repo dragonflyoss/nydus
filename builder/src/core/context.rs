@@ -460,6 +460,7 @@ impl BlobCacheGenerator {
     }
 }
 
+#[derive(Clone)]
 /// BlobContext is used to hold the blob information of a layer during build.
 pub struct BlobContext {
     /// Blob id (user specified or sha256(blob)).

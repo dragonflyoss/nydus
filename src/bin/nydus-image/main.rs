@@ -1681,7 +1681,9 @@ impl Command {
         let config = Self::get_configuration(matches)?;
         config.internal.set_blob_accessible(true);
         let mut build_ctx = BuildContext {
-            prefetch: Prefetch::new(PrefetchPolicy::Fs, Some(prefetch_files.clone()))?,
+            blob_id: String::from("Prefetch-blob"),
+            compressor: compress::Algorithm::Zstd,
+            blob_inline_meta: true,
             ..Default::default()
         };
 
@@ -1696,8 +1698,6 @@ impl Command {
                 prefetch_nodes.push(tree.node.clone());
             }
         }
-
-        build_ctx.prefetch.init(&mut tree);
 
         let bootstrap_path = ArtifactStorage::SingleFile(PathBuf::from("nydus_prefetch_bootstrap"));
         let mut bootstrap_mgr = BootstrapManager::new(Some(bootstrap_path), None);

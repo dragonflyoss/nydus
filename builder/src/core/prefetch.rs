@@ -154,22 +154,6 @@ impl Prefetch {
         })
     }
 
-    /// Because New method only create the key of patterns
-    /// This function Search for the nodes of the paths in the key
-    /// And append to the patterns
-    /// Now it is assumed that all the patterns are the
-    /// absolute paths of the regular files
-    pub fn init(&mut self, tree: &mut Tree) {
-        let mut nodes = Vec::new();
-        for (k, _) in &self.patterns {
-            let node = tree.get_node(k);
-            nodes.push(node.unwrap().node.clone());
-        }
-        for node in nodes {
-            self.insert(&node, &node.borrow());
-        }
-    }
-
     /// Insert node into the prefetch Vector if it matches prefetch rules,
     /// while recording the index of matched prefetch pattern,
     /// or insert it into non-prefetch Vector.
