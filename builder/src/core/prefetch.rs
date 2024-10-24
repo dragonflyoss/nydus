@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::{anyhow, Context, Error, Result};
+use anyhow::{anyhow, Context, Error, Ok, Result};
 use indexmap::IndexMap;
 use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
 use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
@@ -53,10 +53,12 @@ impl FromStr for PrefetchPolicy {
 ///
 /// It does not guarantee that specified path exist in local filesystem because the specified path
 /// may exist in parent image/layers.
-fn get_patterns() -> Result<IndexMap<PathBuf, Option<TreeNode>>> {
+fn get_patterns(patterns: Option<Vec<String>>) -> Result<IndexMap<PathBuf, Option<TreeNode>>> {
     let stdin = std::io::stdin();
+    if let Some(patterns) = patterns {
+        return generate_patterns(patterns);
+    }
     let mut patterns = Vec::new();
-
     loop {
         let mut file = String::new();
         let size = stdin
@@ -135,9 +137,9 @@ pub struct Prefetch {
 
 impl Prefetch {
     /// Create a new instance of [Prefetch].
-    pub fn new(policy: PrefetchPolicy) -> Result<Self> {
+    pub fn new(policy: PrefetchPolicy, patterns: Option<Vec<String>>) -> Result<Self> {
         let patterns = if policy != PrefetchPolicy::None {
-            get_patterns().context("failed to get prefetch patterns")?
+            get_patterns(patterns).context("failed to get prefetch patterns")?
         } else {
             IndexMap::new()
         };

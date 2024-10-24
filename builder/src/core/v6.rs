@@ -485,7 +485,6 @@ impl Node {
             }
             prev = Some((blob_idx, offset));
         }
-
         // Special optimization to enable page cache sharing for EROFS.
         let chunk_size = if is_continuous && inode.size() > ctx.chunk_size as u64 {
             inode.size().next_power_of_two()

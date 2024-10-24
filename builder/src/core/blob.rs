@@ -94,7 +94,7 @@ impl Blob {
         Ok(())
     }
 
-    fn finalize_blob_data(
+    pub fn finalize_blob_data(
         ctx: &BuildContext,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut dyn Artifact,

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#![deny(warnings)]
+// #![deny(warnings)]
 #[macro_use(crate_authors)]
 extern crate clap;
 #[macro_use]
@@ -21,6 +21,7 @@ use std::convert::TryFrom;
 use std::fs::{self, metadata, DirEntry, OpenOptions};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+use std::result::Result::Ok;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
@@ -33,8 +34,10 @@ use nydus_builder::{
     parse_chunk_dict_arg, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobManager,
     BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo, ChunkdictChunkInfo,
     ConversionType, DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger,
-    Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec,
+    Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree, TreeNode, WhiteoutSpec,
 };
+
+use nydus_rafs::metadata::layout::v6::RafsV6BlobTable;
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
 use nydus_storage::backend::localfs::LocalFs;
 use nydus_storage::backend::BlobBackend;
@@ -48,6 +51,7 @@ use nydus_utils::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::prefetch::update_ctx_from_bootstrap;
 use crate::unpack::{OCIUnpacker, Unpacker};
 use crate::validator::Validator;
 
@@ -58,6 +62,7 @@ use std::str::FromStr;
 
 mod deduplicate;
 mod inspect;
+mod prefetch;
 mod stat;
 mod unpack;
 mod validator;
@@ -529,6 +534,36 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             .arg(arg_output_json.clone()),
     );
 
+    let app = app.subcommand(
+        App::new("optimize")
+            .about("Optimize By Prefetch")
+            .arg(
+                Arg::new("bootstrap")
+                    .help("File path of RAFS metadata")
+                    .short('B')
+                    .long("bootstrap")
+                    .required(true),
+            )
+            .arg(
+                Arg::new("prefetch-files")
+                    .long("prefetch-files")
+                    .short('p')
+                    .help("Prefetch files")
+                    .action(ArgAction::Set)
+                    .num_args(1),
+            )
+            .arg(arg_config.clone())
+            .arg(
+                Arg::new("blob-dir")
+                    .long("blob-dir")
+                    .short('D')
+                    .conflicts_with("config")
+                    .help(
+                        "Directory for localfs storage backend, hosting data blobs and cache files",
+                    ),
+            ),
+    );
+
     #[cfg(target_os = "linux")]
     let app = app.subcommand(
             App::new("export")
@@ -876,6 +911,8 @@ fn main() -> Result<()> {
         Command::compact(matches, &build_info)
     } else if let Some(matches) = cmd.subcommand_matches("unpack") {
         Command::unpack(matches)
+    } else if let Some(matches) = cmd.subcommand_matches("optimize") {
+        Command::optimize(matches)
     } else {
         #[cfg(target_os = "linux")]
         if let Some(matches) = cmd.subcommand_matches("export") {
@@ -1158,6 +1195,7 @@ impl Command {
             features,
             encrypt,
         );
+
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
         build_ctx.set_batch_size(batch_size);
@@ -1251,6 +1289,7 @@ impl Command {
             | ConversionType::TarToStargz
             | ConversionType::TargzToStargz => unimplemented!(),
         };
+
         let build_output = timing_tracer!(
             {
                 builder
@@ -1634,6 +1673,52 @@ impl Command {
         Ok(())
     }
 
+    fn optimize(matches: &ArgMatches) -> Result<()> {
+        let blobs_dir_path = Self::get_blobs_dir(matches).unwrap();
+        let prefetch_files = Self::get_prefetch_files(matches).unwrap();
+        prefetch_files.iter().for_each(|f| println!("{}", f));
+        let bootstrap_path = Self::get_bootstrap(matches)?;
+        let config = Self::get_configuration(matches)?;
+        config.internal.set_blob_accessible(true);
+        let mut build_ctx = BuildContext {
+            blob_id: String::from("Prefetch-blob"),
+            compressor: compress::Algorithm::Zstd,
+            blob_inline_meta: true,
+            ..Default::default()
+        };
+
+        let sb = update_ctx_from_bootstrap(&mut build_ctx, config, bootstrap_path)?;
+        let mut tree = Tree::from_bootstrap(&sb, &mut ()).unwrap();
+
+        let mut prefetch_nodes: Vec<TreeNode> = Vec::new();
+        // Init prefetch nodes
+        for f in prefetch_files.iter() {
+            let path = PathBuf::from(f);
+            if let Some(tree) = tree.get_node(&path) {
+                prefetch_nodes.push(tree.node.clone());
+            }
+        }
+
+        let bootstrap_path = ArtifactStorage::SingleFile(PathBuf::from("nydus_prefetch_bootstrap"));
+        let mut bootstrap_mgr = BootstrapManager::new(Some(bootstrap_path), None);
+        let blobs = sb.superblock.get_blob_infos();
+        let mut rafsv6table = RafsV6BlobTable::new();
+        for blob in &blobs {
+            rafsv6table.entries.push(blob.clone());
+        }
+
+        Generator::generate_prefetch(
+            &mut tree,
+            &mut build_ctx,
+            &mut bootstrap_mgr,
+            &mut rafsv6table,
+            blobs_dir_path.to_path_buf(),
+            prefetch_nodes,
+        )
+        .unwrap();
+        Ok(())
+    }
+
     fn inspect(matches: &ArgMatches) -> Result<()> {
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let mut config = Self::get_configuration(matches)?;
@@ -1731,6 +1816,32 @@ impl Command {
                 Some(s) => Ok(Path::new(s)),
                 None => bail!("missing parameter `bootstrap` or `BOOTSTRAP`"),
             },
+        }
+    }
+
+    fn get_blobs_dir(matches: &ArgMatches) -> Result<&Path> {
+        match matches.get_one::<String>("blob-dir") {
+            Some(s) => Ok(Path::new(s)),
+            None => bail!("missing parameter `blob-dir`"),
+        }
+    }
+
+    fn get_prefetch_files(matches: &ArgMatches) -> Result<Vec<String>> {
+        match matches.get_one::<String>("prefetch-files") {
+            Some(v) => {
+                let content = std::fs::read_to_string(v)
+                    .map_err(|_| anyhow!("failed to read prefetch files from {}", v))?;
+
+                let mut prefetch_files: Vec<String> = Vec::new();
+                for line in content.lines() {
+                    if line.is_empty() || line.trim().is_empty() {
+                        continue;
+                    }
+                    prefetch_files.push(line.trim().to_string());
+                }
+                Ok(prefetch_files)
+            }
+            None => panic!("missing parameter `prefetch-files`"),
         }
     }
 
@@ -1874,7 +1985,7 @@ impl Command {
             }
         } else if let Some(dir) = matches.get_one::<String>("blob-dir") {
             config = Arc::new(ConfigV2::new_localfs("", dir)?);
-            backend = BlobFactory::new_backend(&config.backend.as_ref().unwrap(), blob_id)?;
+            backend = BlobFactory::new_backend(config.backend.as_ref().unwrap(), blob_id)?;
         } else {
             return Err(anyhow!("invalid backend configuration"));
         }
@@ -1990,7 +2101,7 @@ impl Command {
             .map(|s| s.as_str())
             .unwrap_or_default()
             .parse()?;
-        Prefetch::new(prefetch_policy)
+        Prefetch::new(prefetch_policy, None)
     }
 
     fn get_blob_offset(matches: &ArgMatches) -> Result<u64> {

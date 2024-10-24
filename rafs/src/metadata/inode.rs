@@ -17,8 +17,9 @@ use crate::metadata::direct_v6::OndiskInodeWrapper as OndiskInodeWrapperV6;
 use crate::metadata::layout::v5::{RafsV5ChunkInfo, RafsV5Inode};
 use crate::metadata::layout::v6::{RafsV6InodeCompact, RafsV6InodeExtended};
 use crate::metadata::layout::RafsXAttrs;
-use crate::metadata::{Inode, RafsVersion};
+use crate::metadata::RafsVersion;
 use crate::RafsInodeExt;
+use nydus_utils::metrics::Inode;
 
 /// An inode object wrapper for different RAFS versions.
 #[derive(Clone)]
