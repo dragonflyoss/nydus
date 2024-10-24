@@ -13,7 +13,6 @@ use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
 use super::node::Node;
 use crate::core::tree::TreeNode;
-use crate::Tree;
 
 /// Filesystem data prefetch policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
