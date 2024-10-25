@@ -177,7 +177,7 @@ nerdctl pull --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6
 nerdctl run --rm -t --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6 ubuntu /bin/bash
 
 # remove nydus image
-nerdctl images rm docker.io/hsiangkao/ubuntu:20.04-rafs-v6
+nerdctl image rm docker.io/hsiangkao/ubuntu:20.04-rafs-v6
 ```
 
 Some RAFS v6 referenced images (in Zstd algorithms):
