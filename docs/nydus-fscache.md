@@ -171,7 +171,7 @@ For more information on how to configure containerd to use nydus snapshotter ple
 
 ``` shell
 # pull nydus image
-nerdctl images pull --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6
+nerdctl pull --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6
 
 # run nydus image
 nerdctl run --rm -t --snapshotter=nydus docker.io/hsiangkao/ubuntu:20.04-rafs-v6 ubuntu /bin/bash
