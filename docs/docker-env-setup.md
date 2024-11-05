@@ -1,7 +1,7 @@
 # Nydus Setup for Docker(Moby) Environment
 ## Install Nydus Snapshotter for Docker(Moby) with Systemd
 1. Docker(Moby) newer than [5c1d6c957b97321c8577e10ddbffe6e01981617a](https://github.com/moby/moby/commit/5c1d6c957b97321c8577e10ddbffe6e01981617a) is needed on your host. The commit is expected to be included in Docker v24. 
-```
+```shell
 git clone https://github.com/moby/moby
 cd moby
 make binary
@@ -12,24 +12,25 @@ sudo cp ./* /usr/bin/
 ```
 
 2. Download nydus-snapshotter release tarball from [the release page](https://github.com/containerd/nydus-snapshotter/releases). 
-```
+```shell
 # Get the latest version. If this version does not work for you, you can try v0.6.0
 TAG=`curl -s https://api.github.com/repos/containerd/nydus-snapshotter/releases/latest | grep tag_name | cut -f4 -d "\""`
 wget https://github.com/containerd/nydus-snapshotter/releases/download/"$TAG"/nydus-snapshotter-"$TAG"-linux-amd64.tar.gz
 tar -xzvf nydus-snapshotter-"$TAG"-linux-amd64.tar.gz
 sudo install -D -m 755 bin/containerd-nydus-grpc /usr/local/bin
 
-wget -O /etc/nydus/nydusd-config.fusedev.json https://raw.githubusercontent.com/containerd/nydus-snapshotter/"$TAG"/misc/snapshotter/nydusd-config.fusedev.json
-wget -O /etc/nydus/config.toml https://raw.githubusercontent.com/containerd/nydus-snapshotter/"$TAG"/misc/snapshotter/config.toml
+sudo wget -O /etc/nydus/nydusd-config.fusedev.json https://raw.githubusercontent.com/containerd/nydus-snapshotter/"$TAG"/misc/snapshotter/nydusd-config.fusedev.json
+sudo wget -O /etc/nydus/config.toml https://raw.githubusercontent.com/containerd/nydus-snapshotter/"$TAG"/misc/snapshotter/config.toml
 ```
 
-3. Download nydus image service release tarball from [the release page](https://github.com/dragonflyoss/nydus/releases). 
-```
+3. Download nydus image service release tarball from [the release page](https://github.com/dragonflyoss/image-service/releases). 
+```shell
 # Get the latest version. If this version does not work for you, you can try v2.1.4
 TAG=`curl -s https://api.github.com/repos/dragonflyoss/nydus/releases/latest | grep tag_name | cut -f4 -d "\""`
-wget https://github.com/dragonflyoss/nydus/releases/download/"$TAG"/nydus-static-"$TAG"-linux-amd64.tgz
+wget https://github.com/dragonflyoss/image-service/releases/download/"$TAG"/nydus-static-"$TAG"-linux-amd64.tgz
 tar -xzvf nydus-static-"$TAG"-linux-amd64.tgz
-sudo install -D -m 755 nydus-static/* /usr/local/bin
+sudo cp -r nydus-static/* /usr/local/bin
+sudo chmod -R 755 /usr/local/bin/nydus*
 ```
 
 4. Enable `containerd-snapshotter` feature and `nydus`snapshotter in Docker. Add the following to docker's configuration file (typically: /etc/docker/daemon.json). 
@@ -71,9 +72,9 @@ sudo modprobe fuse
 ```
 
 7. Start nydus-snapshotter and restart containerd and docker 
-```
+```shell
 # install nydus snapshotter service
-wget -O /etc/systemd/system/nydus-snapshotter.service https://raw.githubusercontent.com/containerd/nydus-snapshotter/main/misc/snapshotter/nydus-snapshotter.fusedev.service
+sudo wget -O /etc/systemd/system/nydus-snapshotter.service https://raw.githubusercontent.com/containerd/nydus-snapshotter/main/misc/snapshotter/nydus-snapshotter.fusedev.service
 sudo systemctl enable --now nydus-snapshotter
 sudo systemctl restart containerd
 
@@ -81,8 +82,9 @@ sudo sed -i "s/fd:/unix:/g" /lib/systemd/system/docker.service
 sudo systemctl daemon-reload
 sudo systemctl restart docker
 ```
- 8. Run nydus image in docker
-```
+
+8. Run nydus image in docker
+```bash
 # Start local registry
 sudo docker run -d --restart=always -p 5000:5000 registry
 # Convert Nydus image
