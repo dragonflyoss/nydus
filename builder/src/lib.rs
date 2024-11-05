@@ -41,6 +41,8 @@ pub use self::core::prefetch::{Prefetch, PrefetchPolicy};
 pub use self::core::tree::{MetadataTreeBuilder, Tree, TreeNode};
 pub use self::directory::DirectoryBuilder;
 pub use self::merge::Merger;
+pub use self::optimize_prefetch::update_ctx_from_bootstrap;
+pub use self::optimize_prefetch::OptimizePrefetch;
 pub use self::stargz::StargzBuilder;
 pub use self::tarball::TarballBuilder;
 
@@ -49,6 +51,7 @@ mod compact;
 mod core;
 mod directory;
 mod merge;
+mod optimize_prefetch;
 mod stargz;
 mod tarball;
 
@@ -249,7 +252,6 @@ fn finalize_blob(
             blob_cache.finalize(&blob_ctx.blob_id)?;
         }
     }
-
     Ok(())
 }
 
