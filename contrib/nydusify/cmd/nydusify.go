@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/optimizer"
+
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
@@ -1158,6 +1160,97 @@ func main() {
 				}
 
 				return copier.Copy(context.Background(), opt)
+			},
+		},
+		{
+			Name:  "optimize",
+			Usage: "Optimize a source nydus image and push to the target",
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:     "source",
+					Required: true,
+					Usage:    "Source (Nydus) image reference",
+					EnvVars:  []string{"SOURCE"},
+				},
+				&cli.StringFlag{
+					Name:     "target",
+					Required: true,
+					Usage:    "Target (Nydus) image reference",
+					EnvVars:  []string{"TARGET"},
+				},
+				&cli.BoolFlag{
+					Name:     "source-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS source registry",
+					EnvVars:  []string{"SOURCE_INSECURE"},
+				},
+				&cli.BoolFlag{
+					Name:     "target-insecure",
+					Required: false,
+					Usage:    "Skip verifying server certs for HTTPS target registry",
+					EnvVars:  []string{"TARGET_INSECURE"},
+				},
+
+				&cli.StringFlag{
+					Name:    "policy",
+					Value:   "separated-blob-with-prefetch-files",
+					Usage:   "Specify the optimizing way",
+					EnvVars: []string{"OPTIMIZE_POLICY"},
+				},
+				&cli.StringFlag{
+					Name:     "prefetch-files",
+					Required: false,
+					Usage:    "File path to include prefetch files for optimization",
+					EnvVars:  []string{"PREFETCH_FILES"},
+				},
+
+				&cli.StringFlag{
+					Name:    "work-dir",
+					Value:   "./tmp",
+					Usage:   "Working directory for image optimization",
+					EnvVars: []string{"WORK_DIR"},
+				},
+
+				&cli.StringFlag{
+					Name:    "nydus-image",
+					Value:   "nydus-image",
+					Usage:   "Path to the nydus-image binary, default to search in PATH",
+					EnvVars: []string{"NYDUS_IMAGE"},
+				},
+
+				&cli.StringFlag{
+					Name:  "push-chunk-size",
+					Value: "0MB",
+					Usage: "Chunk size for pushing a blob layer in chunked",
+				},
+			},
+			Action: func(c *cli.Context) error {
+				setupLogLevel(c)
+
+				pushChunkSize, err := humanize.ParseBytes(c.String("push-chunk-size"))
+				if err != nil {
+					return errors.Wrap(err, "invalid --push-chunk-size option")
+				}
+				if pushChunkSize > 0 {
+					logrus.Infof("will push layer with chunk size %s", c.String("push-chunk-size"))
+				}
+				opt := optimizer.Opt{
+					WorkDir:        c.String("work-dir"),
+					NydusImagePath: c.String("nydus-image"),
+
+					Source:         c.String("source"),
+					Target:         c.String("target"),
+					SourceInsecure: c.Bool("source-insecure"),
+					TargetInsecure: c.Bool("target-insecure"),
+
+					AllPlatforms: c.Bool("all-platforms"),
+					Platforms:    c.String("platform"),
+
+					PushChunkSize:     int64(pushChunkSize),
+					PrefetchFilesPath: c.String("prefetch-files"),
+				}
+
+				return optimizer.Optimize(context.Background(), opt)
 			},
 		},
 		{
