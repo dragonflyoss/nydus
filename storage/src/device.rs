@@ -79,6 +79,8 @@ bitflags! {
         const _V5_NO_EXT_BLOB_TABLE = 0x8000_0000;
         /// Blob is generated with chunkdict.
         const IS_CHUNKDICT_GENERATED = 0x0000_0200;
+        /// Blob is generated with separated prefetch files.
+        const IS_SEPARATED_WITH_PREFETCH_FILES = 0x0000_0400;
     }
 }
 
@@ -505,6 +507,12 @@ impl BlobInfo {
             && !self.has_feature(BlobFeatures::CHUNK_INFO_V2)
         {
             self.is_legacy_stargz = true;
+        }
+    }
+
+    pub fn set_separated_with_prefetch_files_feature(&mut self, is_prefetchblob: bool) {
+        if is_prefetchblob {
+            self.blob_features |= BlobFeatures::IS_SEPARATED_WITH_PREFETCH_FILES;
         }
     }
 
