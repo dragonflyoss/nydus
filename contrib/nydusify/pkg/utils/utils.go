@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -162,6 +163,45 @@ func UnpackFile(reader io.Reader, source, target string) error {
 
 	if !found {
 		return fmt.Errorf("Not found file %s in targz", source)
+	}
+
+	return nil
+}
+
+func UnpackFromTar(reader io.Reader, targetDir string) error {
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return err
+	}
+
+	tr := tar.NewReader(reader)
+	for {
+		header, err := tr.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		filePath := filepath.Join(targetDir, header.Name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(filePath, header.FileInfo().Mode()); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, header.FileInfo().Mode())
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+
+			if _, err := io.Copy(f, tr); err != nil {
+				return err
+			}
+		default:
+		}
 	}
 
 	return nil

@@ -8,19 +8,21 @@ import (
 	"testing"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/stretchr/testify/require"
 
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func TestManifestName(t *testing.T) {
 	rule := ManifestRule{}
-	require.Equal(t, "Manifest", rule.Name())
+	require.Equal(t, "manifest", rule.Name())
 }
 
 func TestManifestRuleValidate_IgnoreDeprecatedField(t *testing.T) {
 	source := &parser.Parsed{
+		Remote: &remote.Remote{},
 		OCIImage: &parser.Image{
 			Config: ocispec.Image{
 				Config: ocispec.ImageConfig{
@@ -30,6 +32,7 @@ func TestManifestRuleValidate_IgnoreDeprecatedField(t *testing.T) {
 		},
 	}
 	target := &parser.Parsed{
+		Remote: &remote.Remote{},
 		NydusImage: &parser.Image{
 			Config: ocispec.Image{
 				Config: ocispec.ImageConfig{
@@ -47,61 +50,11 @@ func TestManifestRuleValidate_IgnoreDeprecatedField(t *testing.T) {
 	require.Nil(t, rule.Validate())
 }
 
-func TestManifestRuleValidate_MultiPlatform(t *testing.T) {
-	source := &parser.Parsed{
-		OCIImage: &parser.Image{},
-	}
-	target := &parser.Parsed{
-		NydusImage: &parser.Image{},
-	}
-
-	rule := ManifestRule{
-		MultiPlatform: true,
-		ExpectedArch:  "amd64",
-		SourceParsed:  source,
-		TargetParsed:  target,
-	}
-	require.Error(t, rule.Validate())
-	require.Contains(t, rule.Validate().Error(), "not found image manifest list")
-
-	rule.TargetParsed.Index = &ocispec.Index{}
-	require.Error(t, rule.Validate())
-	require.Contains(t, rule.Validate().Error(), "not found nydus image of specified platform linux")
-
-	rule.TargetParsed.Index = &ocispec.Index{
-		Manifests: []ocispec.Descriptor{
-			{
-				MediaType: utils.MediaTypeNydusBlob,
-				Platform: &ocispec.Platform{
-					Architecture: "amd64",
-					OS:           "linux",
-					OSFeatures:   []string{utils.ManifestOSFeatureNydus},
-				},
-			},
-		},
-	}
-	require.Error(t, rule.Validate())
-	require.Contains(t, rule.Validate().Error(), "not found OCI image of specified platform linux")
-
-	rule.TargetParsed.Index.Manifests = append(rule.TargetParsed.Index.Manifests, ocispec.Descriptor{
-		MediaType: "application/vnd.oci.image.manifest.v1+json",
-		Platform: &ocispec.Platform{
-			Architecture: "amd64",
-			OS:           "linux",
-		},
-	})
-	require.NoError(t, rule.Validate())
-}
-
 func TestManifestRuleValidate_TargetLayer(t *testing.T) {
-	rule := ManifestRule{
-		SourceParsed: &parser.Parsed{},
-		TargetParsed: &parser.Parsed{},
-	}
-	require.Error(t, rule.Validate())
-	require.Contains(t, rule.Validate().Error(), "invalid nydus image manifest")
+	rule := ManifestRule{}
 
 	rule.TargetParsed = &parser.Parsed{
+		Remote: &remote.Remote{},
 		NydusImage: &parser.Image{
 			Manifest: ocispec.Manifest{
 				MediaType: "application/vnd.docker.distribution.manifest.v2+json",
@@ -146,6 +99,11 @@ func TestManifestRuleValidate_TargetLayer(t *testing.T) {
 	}
 	require.Error(t, rule.Validate())
 	require.Contains(t, rule.Validate().Error(), "invalid bootstrap layer in nydus image manifest")
+
+	rule.TargetParsed.NydusImage.Config.RootFS.DiffIDs = []digest.Digest{
+		"sha256:09845cce1d983b158d4865fc37c23bbfb892d4775c786e8114d3cf868975c059",
+		"sha256:bec98c9e3dce739877b8f5fe1cddd339de1db2b36c20995d76f6265056dbdb08",
+	}
 
 	rule.TargetParsed.NydusImage.Manifest.Layers = []ocispec.Descriptor{
 		{
