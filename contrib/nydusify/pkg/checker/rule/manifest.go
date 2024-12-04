@@ -6,65 +6,69 @@ package rule
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
-// ManifestRule validates manifest format of Nydus image
+// ManifestRule validates manifest format of nydus image
 type ManifestRule struct {
-	SourceParsed  *parser.Parsed
-	TargetParsed  *parser.Parsed
-	MultiPlatform bool
-	BackendType   string
-	ExpectedArch  string
+	SourceParsed *parser.Parsed
+	TargetParsed *parser.Parsed
 }
 
 func (rule *ManifestRule) Name() string {
-	return "Manifest"
+	return "manifest"
 }
 
-func (rule *ManifestRule) Validate() error {
-	logrus.Infof("Checking Nydus manifest")
+func (rule *ManifestRule) validateConfig(sourceImage, targetImage *parser.Image) error {
+	//nolint:staticcheck
+	// ignore static check SA1019 here. We have to assign deprecated field.
+	//
+	// Skip ArgsEscaped's Check
+	//
+	//   This field is present only for legacy compatibility with Docker and
+	// should not be used by new image builders. Nydusify (1.6 and above)
+	// ignores it, which is an expected behavior.
+	//   Also ignore it in check.
+	//
+	//   Addition: [ArgsEscaped in spec](https://github.com/opencontainers/image-spec/pull/892)
+	sourceImage.Config.Config.ArgsEscaped = targetImage.Config.Config.ArgsEscaped
 
-	// Ensure the target image represents a manifest list,
-	// and it should consist of OCI and Nydus manifest
-	if rule.MultiPlatform {
-		if rule.TargetParsed.Index == nil {
-			return errors.New("not found image manifest list")
-		}
-		foundNydusDesc := false
-		foundOCIDesc := false
-		for _, desc := range rule.TargetParsed.Index.Manifests {
-			if desc.Platform == nil {
-				continue
-			}
-			if desc.Platform.Architecture == rule.ExpectedArch && desc.Platform.OS == "linux" {
-				if utils.IsNydusPlatform(desc.Platform) {
-					foundNydusDesc = true
-				} else {
-					foundOCIDesc = true
-				}
-			}
-		}
-		if !foundNydusDesc {
-			return errors.Errorf("not found nydus image of specified platform linux/%s", rule.ExpectedArch)
-		}
-		if !foundOCIDesc {
-			return errors.Errorf("not found OCI image of specified platform linux/%s", rule.ExpectedArch)
-		}
+	sourceConfig, err := json.Marshal(sourceImage.Config.Config)
+	if err != nil {
+		return errors.New("marshal source image config")
+	}
+	targetConfig, err := json.Marshal(targetImage.Config.Config)
+	if err != nil {
+		return errors.New("marshal target image config")
+	}
+	if !reflect.DeepEqual(sourceConfig, targetConfig) {
+		return errors.New("source image config should be equal with target image config")
 	}
 
-	// Check manifest of Nydus
-	if rule.TargetParsed.NydusImage == nil {
-		return errors.New("invalid nydus image manifest")
+	return nil
+}
+
+func (rule *ManifestRule) validateOCI(image *parser.Image) error {
+	// Check config diff IDs
+	layers := image.Manifest.Layers
+	if len(image.Config.RootFS.DiffIDs) != len(layers) {
+		return fmt.Errorf("invalid diff ids in image config: %d (diff ids) != %d (layers)", len(image.Config.RootFS.DiffIDs), len(layers))
 	}
 
-	layers := rule.TargetParsed.NydusImage.Manifest.Layers
+	return nil
+}
+
+func (rule *ManifestRule) validateNydus(image *parser.Image) error {
+	// Check bootstrap and blob layers
+	layers := image.Manifest.Layers
 	for i, layer := range layers {
 		if i == len(layers)-1 {
 			if layer.Annotations[utils.LayerAnnotationNydusBootstrap] != "true" {
@@ -78,32 +82,49 @@ func (rule *ManifestRule) Validate() error {
 		}
 	}
 
-	// Check Nydus image config with OCI image
-	if rule.SourceParsed.OCIImage != nil {
+	// Check config diff IDs
+	if len(image.Config.RootFS.DiffIDs) != len(layers) {
+		return fmt.Errorf("invalid diff ids in image config: %d (diff ids) != %d (layers)", len(image.Config.RootFS.DiffIDs), len(layers))
+	}
 
-		//nolint:staticcheck
-		// ignore static check SA1019 here. We have to assign deprecated field.
-		//
-		// Skip ArgsEscaped's Check
-		//
-		//   This field is present only for legacy compatibility with Docker and
-		// should not be used by new image builders. Nydusify (1.6 and above)
-		// ignores it, which is an expected behavior.
-		//   Also ignore it in check.
-		//
-		//   Addition: [ArgsEscaped in spec](https://github.com/opencontainers/image-spec/pull/892)
-		rule.TargetParsed.NydusImage.Config.Config.ArgsEscaped = rule.SourceParsed.OCIImage.Config.Config.ArgsEscaped
+	return nil
+}
 
-		ociConfig, err := json.Marshal(rule.SourceParsed.OCIImage.Config.Config)
-		if err != nil {
-			return errors.New("marshal oci image config")
+func (rule *ManifestRule) validate(parsed *parser.Parsed) error {
+	if parsed == nil {
+		return nil
+	}
+
+	logrus.WithField("type", tool.CheckImageType(parsed)).WithField("image", parsed.Remote.Ref).Infof("checking manifest")
+	if parsed.OCIImage != nil {
+		return errors.Wrap(rule.validateOCI(parsed.OCIImage), "invalid OCI image manifest")
+	} else if parsed.NydusImage != nil {
+		return errors.Wrap(rule.validateNydus(parsed.NydusImage), "invalid nydus image manifest")
+	}
+
+	return errors.New("not found valid image")
+}
+
+func (rule *ManifestRule) Validate() error {
+	if err := rule.validate(rule.SourceParsed); err != nil {
+		return errors.Wrap(err, "source image: invalid manifest")
+	}
+
+	if err := rule.validate(rule.TargetParsed); err != nil {
+		return errors.Wrap(err, "target image: invalid manifest")
+	}
+
+	if rule.SourceParsed != nil && rule.TargetParsed != nil {
+		sourceImage := rule.SourceParsed.OCIImage
+		if sourceImage == nil {
+			sourceImage = rule.SourceParsed.NydusImage
 		}
-		nydusConfig, err := json.Marshal(rule.TargetParsed.NydusImage.Config.Config)
-		if err != nil {
-			return errors.New("marshal nydus image config")
+		targetImage := rule.TargetParsed.OCIImage
+		if targetImage == nil {
+			targetImage = rule.TargetParsed.NydusImage
 		}
-		if !reflect.DeepEqual(ociConfig, nydusConfig) {
-			return errors.New("nydus image config should be equal with oci image config")
+		if err := rule.validateConfig(sourceImage, targetImage); err != nil {
+			return fmt.Errorf("validate image config: %v", err)
 		}
 	}
 

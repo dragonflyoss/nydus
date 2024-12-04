@@ -42,7 +42,8 @@ type Image struct {
 // Parsed presents OCI and Nydus image manifest.
 // Nydus image conversion only works on top of an existed oci image whose platform is linux/amd64
 type Parsed struct {
-	Index *ocispec.Index
+	Remote *remote.Remote
+	Index  *ocispec.Index
 	// The base image from which to generate nydus image.
 	OCIImage   *Image
 	NydusImage *Image
@@ -183,9 +184,9 @@ func (parser *Parser) matchImagePlatform(desc *ocispec.Descriptor) bool {
 
 // Parse parses Nydus image reference into Parsed object.
 func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
-	logrus.Infof("Parsing image %s", parser.Remote.Ref)
-
-	parsed := Parsed{}
+	parsed := Parsed{
+		Remote: parser.Remote,
+	}
 
 	imageDesc, err := parser.Remote.Resolve(ctx)
 	if err != nil {
