@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/mount"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
@@ -45,11 +46,19 @@ func mkMounts(dirs []string) []mount.Mount {
 	}
 }
 
+func CheckImageType(parsed *parser.Parsed) string {
+	if parsed.NydusImage != nil {
+		return "nydus"
+	} else if parsed.OCIImage != nil {
+		return "oci"
+	}
+	return "unknown"
+}
+
 type Image struct {
-	Layers     []ocispec.Descriptor
-	Source     string
-	SourcePath string
-	Rootfs     string
+	Layers       []ocispec.Descriptor
+	LayerBaseDir string
+	Rootfs       string
 }
 
 // Mount mounts rootfs of OCI image.
@@ -62,7 +71,7 @@ func (image *Image) Mount() error {
 	count := len(image.Layers)
 	for idx := range image.Layers {
 		layerName := fmt.Sprintf("layer-%d", count-idx-1)
-		layerDir := filepath.Join(image.SourcePath, layerName)
+		layerDir := filepath.Join(image.LayerBaseDir, layerName)
 		dirs = append(dirs, strings.ReplaceAll(layerDir, ":", "\\:"))
 	}
 
