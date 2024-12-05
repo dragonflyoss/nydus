@@ -203,14 +203,6 @@ impl OptimizePrefetch {
             RafsBlobTable::V5(table) => table.get_all(),
             RafsBlobTable::V6(table) => table.get_all(),
         };
-        let blob_id = tree_node
-            .borrow()
-            .chunks
-            .first()
-            .and_then(|chunk| entries.get(chunk.inner.blob_index() as usize).cloned())
-            .map(|entry| entry.blob_id())
-            .ok_or(anyhow!("failed to get blob id"))?;
-        let mut blob_file = Arc::new(File::open(blobs_dir_path.join(blob_id))?);
 
         tree_node.borrow_mut().layer_idx = prefetch_state.blob_info.blob_index() as u16;
 
@@ -221,6 +213,12 @@ impl OptimizePrefetch {
         let encrypted = blob_ctx.blob_compressor != compress::Algorithm::None;
 
         for chunk in chunks {
+            let blob_id = entries
+                .get(chunk.inner.blob_index() as usize)
+                .map(|entry| entry.blob_id())
+                .ok_or(anyhow!("failed to get blob id"))?;
+            let mut blob_file = Arc::new(File::open(blobs_dir_path.join(blob_id))?);
+
             let inner = Arc::make_mut(&mut chunk.inner);
 
             let mut buf = vec![0u8; inner.compressed_size() as usize];
