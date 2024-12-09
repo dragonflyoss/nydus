@@ -41,6 +41,7 @@ pub use self::core::prefetch::{Prefetch, PrefetchPolicy};
 pub use self::core::tree::{MetadataTreeBuilder, Tree, TreeNode};
 pub use self::directory::DirectoryBuilder;
 pub use self::merge::Merger;
+pub use self::optimize_prefetch::generate_prefetch_file_info;
 pub use self::optimize_prefetch::update_ctx_from_bootstrap;
 pub use self::optimize_prefetch::OptimizePrefetch;
 pub use self::stargz::StargzBuilder;

@@ -31,11 +31,11 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage, BlobCacheGenerator,
-    BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder,
-    ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature, Features,
-    Generator, HashChunkDict, Merger, OptimizePrefetch, Prefetch, PrefetchPolicy, StargzBuilder,
-    TarballBuilder, Tree, TreeNode, WhiteoutSpec,
+    generate_prefetch_file_info, parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage,
+    BlobCacheGenerator, BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput,
+    Builder, ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature,
+    Features, Generator, HashChunkDict, Merger, OptimizePrefetch, Prefetch, PrefetchPolicy,
+    StargzBuilder, TarballBuilder, Tree, WhiteoutSpec,
 };
 
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
@@ -1684,8 +1684,7 @@ impl Command {
 
     fn optimize(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
         let blobs_dir_path = Self::get_blobs_dir(matches)?;
-        let prefetch_files = Self::get_prefetch_files(matches)?;
-        prefetch_files.iter().for_each(|f| println!("{}", f));
+        let prefetch_file = Self::get_prefetch_files(matches)?;
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let dst_bootstrap = match matches.get_one::<String>("output-bootstrap") {
             None => ArtifactStorage::SingleFile(PathBuf::from("optimized_bootstrap")),
@@ -1702,17 +1701,8 @@ impl Command {
 
         let sb = update_ctx_from_bootstrap(&mut build_ctx, config, bootstrap_path)?;
         let mut tree = Tree::from_bootstrap(&sb, &mut ())?;
-
-        let mut prefetch_nodes: Vec<TreeNode> = Vec::new();
-        // Init prefetch nodes
-        for f in prefetch_files.iter() {
-            let path = PathBuf::from(f);
-            if let Some(tree) = tree.get_node(&path) {
-                prefetch_nodes.push(tree.node.clone());
-            }
-        }
-
         let mut bootstrap_mgr = BootstrapManager::new(Some(dst_bootstrap), None);
+        let prefetch_nodes = generate_prefetch_file_info(prefetch_file)?;
         let blobs = sb.superblock.get_blob_infos();
 
         let mut blob_table = match build_ctx.fs_version {
@@ -1849,21 +1839,9 @@ impl Command {
         }
     }
 
-    fn get_prefetch_files(matches: &ArgMatches) -> Result<Vec<String>> {
+    fn get_prefetch_files(matches: &ArgMatches) -> Result<&Path> {
         match matches.get_one::<String>("prefetch-files") {
-            Some(v) => {
-                let content = std::fs::read_to_string(v)
-                    .map_err(|e| anyhow!("failed to read prefetch files from {}: {}", v, e))?;
-
-                let mut prefetch_files: Vec<String> = Vec::new();
-                for line in content.lines() {
-                    if line.is_empty() || line.trim().is_empty() {
-                        continue;
-                    }
-                    prefetch_files.push(line.trim().to_string());
-                }
-                Ok(prefetch_files)
-            }
+            Some(s) => Ok(Path::new(s)),
             None => bail!("missing parameter `prefetch-files`"),
         }
     }
