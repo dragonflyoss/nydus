@@ -15,9 +15,7 @@ use crate::NodeChunk;
 use crate::Path;
 use crate::PathBuf;
 use crate::Tree;
-use crate::TreeNode;
-use anyhow::Context;
-use anyhow::{Ok, Result};
+use anyhow::{bail, Context, Result};
 use nydus_api::ConfigV2;
 use nydus_rafs::metadata::layout::RafsBlobTable;
 use nydus_rafs::metadata::RafsSuper;
@@ -26,7 +24,9 @@ use nydus_storage::device::BlobInfo;
 use nydus_storage::meta::BatchContextGenerator;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
 use nydus_utils::compress;
+use serde::Deserialize;
 use sha2::Digest;
+use std::cmp::{max, min};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::mem::size_of;
@@ -37,6 +37,29 @@ struct PrefetchBlobState {
     blob_info: BlobInfo,
     blob_ctx: BlobContext,
     blob_writer: Box<dyn Artifact>,
+}
+
+#[derive(Clone)]
+struct PrefetchFileRange {
+    offset: u64,
+    size: usize,
+}
+
+pub struct PrefetchFileInfo {
+    file: PathBuf,
+    ranges: Option<Vec<PrefetchFileRange>>,
+}
+
+#[derive(Deserialize)]
+struct PrefetchJson {
+    version: String,
+    files: Vec<PrefetchFileJson>,
+}
+
+#[derive(Deserialize)]
+struct PrefetchFileJson {
+    path: String,
+    ranges: Option<Vec<[u64; 2]>>,
 }
 
 impl PrefetchBlobState {
@@ -75,7 +98,7 @@ impl OptimizePrefetch {
         bootstrap_mgr: &mut BootstrapManager,
         blob_table: &mut RafsBlobTable,
         blobs_dir_path: PathBuf,
-        prefetch_nodes: Vec<TreeNode>,
+        prefetch_files: Vec<PrefetchFileInfo>,
     ) -> Result<BuildOutput> {
         // create a new blob for prefetch layer
 
@@ -85,10 +108,10 @@ impl OptimizePrefetch {
         };
         let mut blob_state = PrefetchBlobState::new(&ctx, blob_layer_num as u32, &blobs_dir_path)?;
         let mut batch = BatchContextGenerator::new(0)?;
-        for node in &prefetch_nodes {
+        for node in prefetch_files {
             Self::process_prefetch_node(
                 tree,
-                &node,
+                node,
                 &mut blob_state,
                 &mut batch,
                 blob_table,
@@ -188,14 +211,14 @@ impl OptimizePrefetch {
 
     fn process_prefetch_node(
         tree: &mut Tree,
-        node: &TreeNode,
+        prefetch_file_info: PrefetchFileInfo,
         prefetch_state: &mut PrefetchBlobState,
         batch: &mut BatchContextGenerator,
         blob_table: &RafsBlobTable,
         blobs_dir_path: &Path,
     ) -> Result<()> {
         let tree_node = tree
-            .get_node_mut(&node.borrow().path())
+            .get_node_mut(&prefetch_file_info.file)
             .ok_or(anyhow!("failed to get node"))?
             .node
             .as_ref();
@@ -205,7 +228,6 @@ impl OptimizePrefetch {
         };
 
         tree_node.borrow_mut().layer_idx = prefetch_state.blob_info.blob_index() as u16;
-
         let mut child = tree_node.borrow_mut();
         let chunks: &mut Vec<NodeChunk> = child.chunks.as_mut();
         let blob_ctx = &mut prefetch_state.blob_ctx;
@@ -213,6 +235,20 @@ impl OptimizePrefetch {
         let encrypted = blob_ctx.blob_compressor != compress::Algorithm::None;
 
         for chunk in chunks {
+            // check the file range
+            if let Some(ref ranges) = prefetch_file_info.ranges {
+                let mut should_skip = true;
+                for range in ranges {
+                    if range_overlap(chunk, range) {
+                        should_skip = false;
+                        break;
+                    }
+                }
+                if should_skip {
+                    continue;
+                }
+            }
+
             let blob_id = entries
                 .get(chunk.inner.blob_index() as usize)
                 .map(|entry| entry.blob_id())
@@ -297,4 +333,62 @@ pub fn update_ctx_from_bootstrap(
         RafsVersion::try_from(sb.meta.version).context("Failed to get RAFS version")?;
     ctx.compressor = config.compressor;
     Ok(sb)
+}
+
+pub fn generate_prefetch_file_info(prefetch_file: &Path) -> Result<Vec<PrefetchFileInfo>> {
+    let content = std::fs::read_to_string(prefetch_file).map_err(|e| {
+        anyhow!(
+            "failed to read prefetch files from {}: {}",
+            prefetch_file.display(),
+            e
+        )
+    })?;
+
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let prefetch_json: PrefetchJson = serde_json::from_str(&content)
+        .map_err(|e| anyhow!("failed to parse prefetch file as JSON: {}", e))?;
+
+    if prefetch_json.version != "v1" {
+        bail!(
+            "unsupported prefetch file version: {}",
+            prefetch_json.version
+        );
+    }
+
+    let mut prefetch_nodes = Vec::new();
+    for file_json in prefetch_json.files {
+        let file = PathBuf::from(file_json.path);
+        if !file.is_absolute() {
+            warn!(
+                "prefetch file path is not absolute, skipping: {}",
+                file.display()
+            );
+            continue;
+        }
+        let ranges = file_json.ranges.map(|rs| {
+            rs.into_iter()
+                .map(|r| PrefetchFileRange {
+                    offset: r[0],
+                    size: r[1] as usize,
+                })
+                .collect()
+        });
+        prefetch_nodes.push(PrefetchFileInfo { file, ranges });
+    }
+    Ok(prefetch_nodes)
+}
+
+fn range_overlap(chunk: &mut NodeChunk, range: &PrefetchFileRange) -> bool {
+    if max(range.offset, chunk.inner.file_offset())
+        <= min(
+            range.offset + range.size as u64,
+            chunk.inner.file_offset() + chunk.inner.uncompressed_size() as u64,
+        )
+    {
+        return true;
+    }
+    false
 }
