@@ -251,8 +251,14 @@ impl OptimizePrefetch {
         blob_table: &RafsBlobTable,
         blobs_dir_path: &Path,
     ) -> Result<()> {
+        let file = prefetch_file_info.file;
+        if tree.get_node_mut(&file).is_none() {
+            warn!("prefetch file {} is bad, skip it", file.display());
+            return Ok(());
+        }
+
         let tree_node = tree
-            .get_node_mut(&prefetch_file_info.file)
+            .get_node_mut(&file)
             .ok_or(anyhow!("failed to get node"))?
             .node
             .as_ref();
