@@ -119,11 +119,11 @@ impl OptimizePrefetch {
             )?;
         }
 
-        let blob_mgr = Self::dump_blob(ctx, blob_table, &mut blob_state)?;
+        Self::dump_blob(ctx, blob_table, &mut blob_state)?;
 
         debug!("prefetch blob id: {}", ctx.blob_id);
 
-        Self::build_dump_bootstrap(tree, ctx, bootstrap_mgr, blob_table)?;
+        let blob_mgr = Self::build_dump_bootstrap(tree, ctx, bootstrap_mgr, blob_table)?;
         BuildOutput::new(&blob_mgr, None, &bootstrap_mgr.bootstrap_storage, &None)
     }
 
@@ -132,31 +132,36 @@ impl OptimizePrefetch {
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blob_table: &mut RafsBlobTable,
-    ) -> Result<()> {
+    ) -> Result<BlobManager> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let mut bootstrap = Bootstrap::new(tree.clone())?;
 
         // Build bootstrap
         bootstrap.build(ctx, &mut bootstrap_ctx)?;
 
-        let blob_table_withprefetch = match blob_table {
-            RafsBlobTable::V5(table) => RafsBlobTable::V5(table.clone()),
-            RafsBlobTable::V6(table) => RafsBlobTable::V6(table.clone()),
+        // generate blob table with extended table
+        let mut blob_mgr = BlobManager::new(ctx.digester, false);
+        let blob_info = match blob_table {
+            RafsBlobTable::V5(table) => table.get_all(),
+            RafsBlobTable::V6(table) => table.get_all(),
         };
+        blob_mgr.extend_from_blob_table(ctx, blob_info)?;
+        let blob_table_withprefetch = blob_mgr.to_blob_table(&ctx)?;
+
         bootstrap.dump(
             ctx,
             &mut bootstrap_mgr.bootstrap_storage,
             &mut bootstrap_ctx,
             &blob_table_withprefetch,
         )?;
-        Ok(())
+        Ok(blob_mgr)
     }
 
     fn dump_blob(
         ctx: &mut BuildContext,
         blob_table: &mut RafsBlobTable,
         blob_state: &mut PrefetchBlobState,
-    ) -> Result<BlobManager> {
+    ) -> Result<()> {
         match blob_table {
             RafsBlobTable::V5(table) => {
                 table.entries.push(blob_state.blob_info.clone().into());
@@ -206,7 +211,7 @@ impl OptimizePrefetch {
                 rewrite_blob_id(&mut table.entries, "prefetch-blob", ctx.blob_id.clone())
             }
         }
-        Ok(blob_mgr)
+        Ok(())
     }
 
     fn process_prefetch_node(
