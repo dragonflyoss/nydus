@@ -185,7 +185,7 @@ impl Rafs {
 
     /// Umount a mounted Rafs Fuse filesystem.
     pub fn destroy(&mut self) -> Result<()> {
-        info! {"Destroy rafs"}
+        info!("Destroy rafs");
 
         if self.initialized {
             Arc::get_mut(&mut self.sb)
