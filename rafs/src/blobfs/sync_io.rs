@@ -178,7 +178,7 @@ impl FileSystem for BlobFs {
         inode: Inode,
         flags: u32,
         _fuse_flags: u32,
-    ) -> io::Result<(Option<Handle>, OpenOptions)> {
+    ) -> io::Result<(Option<Handle>, OpenOptions, Option<u32>)> {
         self.pfs.open(_ctx, inode, flags, _fuse_flags)
     }
 
@@ -188,7 +188,7 @@ impl FileSystem for BlobFs {
         _parent: Inode,
         _name: &CStr,
         _args: CreateIn,
-    ) -> io::Result<(Entry, Option<Handle>, OpenOptions)> {
+    ) -> io::Result<(Entry, Option<Handle>, OpenOptions, Option<u32>)> {
         Err(eacces!("Create request is not allowed in blobfs"))
     }
 
