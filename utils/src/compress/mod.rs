@@ -29,7 +29,13 @@ pub enum Algorithm {
 
 impl fmt::Display for Algorithm {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
+        let output = match self {
+            Algorithm::None => "none",
+            Algorithm::Lz4Block => "lz4_block",
+            Algorithm::GZip => "gzip",
+            Algorithm::Zstd => "zstd",
+        };
+        write!(f, "{}", output)
     }
 }
 
@@ -250,6 +256,7 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom};
     use std::path::Path;
+    use std::str::FromStr;
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
@@ -592,5 +599,47 @@ mod tests {
         assert!(!Algorithm::Lz4Block.is_none());
         assert!(!Algorithm::GZip.is_none());
         assert!(!Algorithm::Zstd.is_none());
+    }
+
+    #[test]
+    fn test_algorithm_to_string() {
+        assert_eq!(Algorithm::None.to_string(), "none");
+        assert_eq!(Algorithm::Lz4Block.to_string(), "lz4_block");
+        assert_eq!(Algorithm::GZip.to_string(), "gzip");
+        assert_eq!(Algorithm::Zstd.to_string(), "zstd");
+    }
+
+    #[test]
+    fn test_algorithm_from_str() {
+        assert_eq!(Algorithm::from_str("none").unwrap(), Algorithm::None);
+        assert_eq!(
+            Algorithm::from_str("lz4_block").unwrap(),
+            Algorithm::Lz4Block
+        );
+        assert_eq!(Algorithm::from_str("gzip").unwrap(), Algorithm::GZip);
+        assert_eq!(Algorithm::from_str("zstd").unwrap(), Algorithm::Zstd);
+    }
+
+    #[test]
+    fn test_algorithm_to_string_and_from_str_consistency() {
+        let algorithms = vec![
+            Algorithm::None,
+            Algorithm::Lz4Block,
+            Algorithm::GZip,
+            Algorithm::Zstd,
+        ];
+
+        for algo in algorithms {
+            let stringified = algo.to_string();
+            let parsed = Algorithm::from_str(&stringified).unwrap();
+            assert_eq!(algo, parsed, "Mismatch for algorithm: {:?}", algo);
+        }
+    }
+
+    #[test]
+    fn test_algorithm_from_str_invalid_input() {
+        assert!(Algorithm::from_str("invalid_algorithm").is_err());
+        assert!(Algorithm::from_str("GZIP").is_err());
+        assert!(Algorithm::from_str("LZ4_BLOCK").is_err());
     }
 }
