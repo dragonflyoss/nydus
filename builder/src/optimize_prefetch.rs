@@ -45,6 +45,7 @@ struct PrefetchFileRange {
     size: usize,
 }
 
+#[derive(Clone)]
 pub struct PrefetchFileInfo {
     file: PathBuf,
     ranges: Option<Vec<PrefetchFileRange>>,
@@ -108,7 +109,7 @@ impl OptimizePrefetch {
         };
         let mut blob_state = PrefetchBlobState::new(&ctx, blob_layer_num as u32, &blobs_dir_path)?;
         let mut batch = BatchContextGenerator::new(0)?;
-        for node in prefetch_files {
+        for node in prefetch_files.clone() {
             Self::process_prefetch_node(
                 tree,
                 node,
@@ -123,7 +124,8 @@ impl OptimizePrefetch {
 
         debug!("prefetch blob id: {}", ctx.blob_id);
 
-        let blob_mgr = Self::build_dump_bootstrap(tree, ctx, bootstrap_mgr, blob_table)?;
+        let blob_mgr =
+            Self::build_dump_bootstrap(tree, ctx, bootstrap_mgr, blob_table, prefetch_files)?;
         BuildOutput::new(&blob_mgr, None, &bootstrap_mgr.bootstrap_storage, &None)
     }
 
@@ -132,6 +134,7 @@ impl OptimizePrefetch {
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blob_table: &mut RafsBlobTable,
+        prefetch_files: Vec<PrefetchFileInfo>,
     ) -> Result<BlobManager> {
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let mut bootstrap = Bootstrap::new(tree.clone())?;
@@ -139,6 +142,38 @@ impl OptimizePrefetch {
         // Build bootstrap
         bootstrap.build(ctx, &mut bootstrap_ctx)?;
 
+        // Fix hardlink
+        for node in prefetch_files.clone() {
+            let file = &node.file;
+            if tree.get_node(&file).is_none() {
+                warn!(
+                    "prefetch file {} is skipped, no need to fixing hardlink",
+                    file.display()
+                );
+                continue;
+            }
+
+            let tree_node = tree
+                .get_node(&file)
+                .ok_or(anyhow!("failed to get node"))?
+                .node
+                .as_ref();
+            let child_node = tree_node.borrow();
+            let key = (
+                child_node.layer_idx,
+                child_node.info.src_ino,
+                child_node.info.src_dev,
+            );
+            let chunks = child_node.chunks.clone();
+            drop(child_node);
+
+            if let Some(indexes) = bootstrap_ctx.inode_map.get_mut(&key) {
+                for n in indexes.iter() {
+                    // Rewrite blob chunks to the prefetch blob's chunks
+                    n.borrow_mut().chunks = chunks.clone();
+                }
+            }
+        }
         // generate blob table with extended table
         let mut blob_mgr = BlobManager::new(ctx.digester, false);
         let blob_info = match blob_table {
@@ -222,7 +257,7 @@ impl OptimizePrefetch {
         blob_table: &RafsBlobTable,
         blobs_dir_path: &Path,
     ) -> Result<()> {
-        let file = prefetch_file_info.file;
+        let file = prefetch_file_info.file.clone();
         if tree.get_node_mut(&file).is_none() {
             warn!("prefetch file {} is bad, skip it", file.display());
             return Ok(());
@@ -238,7 +273,6 @@ impl OptimizePrefetch {
             RafsBlobTable::V6(table) => table.get_all(),
         };
 
-        tree_node.borrow_mut().layer_idx = prefetch_state.blob_info.blob_index() as u16;
         let mut child = tree_node.borrow_mut();
         let chunks: &mut Vec<NodeChunk> = child.chunks.as_mut();
         let blob_ctx = &mut prefetch_state.blob_ctx;
