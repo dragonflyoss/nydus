@@ -60,12 +60,14 @@ pub trait Database {
     /// Inserts blob information into the database.
     fn insert_blob(&self, blob_info: &ChunkdictBlobInfo) -> Result<()>;
 
+    #[allow(dead_code)]
     /// Retrieves all chunk information from the database.
     fn get_chunks(&self) -> Result<Vec<ChunkdictChunkInfo>>;
 
     /// Retrieves all chunk information from the database filtered by blob ID.
     fn get_chunks_by_blob_id(&self, blob_id: &str) -> Result<Vec<ChunkdictChunkInfo>>;
 
+    #[allow(dead_code)]
     /// Retrieves all blob information from the database.
     fn get_blobs(&self) -> Result<Vec<ChunkdictBlobInfo>>;
 
@@ -601,7 +603,7 @@ impl Algorithm<SqliteDatabase> {
 
     /// Core point expansion cluster in dbscan algorithm.
     fn expand_cluster(
-        data_point: &mut Vec<DataPoint>,
+        data_point: &mut [DataPoint],
         i: usize,
         cluster_id: i32,
         radius: f64,
@@ -725,7 +727,7 @@ impl Algorithm<SqliteDatabase> {
             let mut radius = 0.5;
             let max_radius = 0.9;
             let mut test_chunk_sizes = Vec::new();
-            let mut min_test_size: u64 = std::u64::MAX;
+            let mut min_test_size: u64 = u64::MAX;
             let mut min_data_dict = HashMap::new();
             let mut data_cluster_length = 0;
 
@@ -821,7 +823,7 @@ impl Algorithm<SqliteDatabase> {
         let max_threshold = 0.8;
 
         let mut test_total_size: u32 = 0;
-        let mut min_test_size: u32 = std::u32::MAX;
+        let mut min_test_size: u32 = u32::MAX;
         let mut min_data_dict = HashMap::new();
 
         while threshold <= max_threshold {
@@ -901,6 +903,7 @@ pub trait Table<T, Err>: Sync + Send + Sized + 'static
 where
     Err: std::error::Error + 'static,
 {
+    #[allow(dead_code)]
     /// Clear table.
     fn clear(&self) -> Result<(), Err>;
 

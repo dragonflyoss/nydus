@@ -126,7 +126,7 @@ impl S3State {
             "{}\n{}\n{}\n{}\n\n{}\n{}",
             method, uri, query_string, headers, signed_headers, content_sha256
         );
-        return sha256_hash(canonical_request.as_bytes());
+        sha256_hash(canonical_request.as_bytes())
     }
 
     // modified based on https://github.com/minio/minio-rs/blob/5fea81d68d381fd2a4c27e4d259f7012de08ab77/src/s3/signer.rs#L75-88
@@ -138,7 +138,7 @@ impl S3State {
         let date_key = hmac_hash(key.as_slice(), to_signer_date(date).as_bytes());
         let date_region_key = hmac_hash(date_key.as_slice(), self.region.as_bytes());
         let date_region_service_key = hmac_hash(date_region_key.as_slice(), "s3".as_bytes());
-        return hmac_hash(date_region_service_key.as_slice(), b"aws4_request");
+        hmac_hash(date_region_service_key.as_slice(), b"aws4_request")
     }
 }
 

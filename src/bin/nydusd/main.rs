@@ -504,9 +504,8 @@ fn process_fs_service(
             .value_of("failover-policy")
             .unwrap_or(&"flush".to_string())
             .try_into()
-            .map_err(|e| {
+            .inspect(|_e| {
                 error!("Invalid failover policy");
-                e
             })?;
 
         // mountpoint means fuse device only
@@ -529,13 +528,11 @@ fn process_fs_service(
                 mount_cmd,
                 bti,
             )
-            .map(|d| {
+            .inspect(|_d| {
                 info!("Fuse daemon started!");
-                d
             })
-            .map_err(|e| {
+            .inspect_err(|e| {
                 error!("Failed in starting daemon: {}", e);
-                e
             })?
         };
         DAEMON_CONTROLLER.set_daemon(daemon);

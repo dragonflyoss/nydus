@@ -306,7 +306,7 @@ impl TocEntryList {
         compressed_size: u64,
         uncompressed_size: u64,
     ) -> Result<&mut TocEntry> {
-        let name_size = name.as_bytes().len();
+        let name_size = name.len();
         if name_size > 16 {
             return Err(eother!(format!("invalid entry name length {}", name_size)));
         }
@@ -558,13 +558,11 @@ impl TocEntryList {
                     .open(p.as_path())?;
                 bootstrap
                     .extract_from_reader(reader.clone(), &mut file)
-                    .map_err(|e| {
+                    .inspect_err(|_e| {
                         let _ = fs::remove_file(&p);
-                        e
                     })?;
-                fs::rename(&p, path).map_err(|e| {
+                fs::rename(&p, path).inspect_err(|_e| {
                     let _ = fs::remove_file(&p);
-                    e
                 })?;
             }
         }
@@ -599,13 +597,11 @@ impl TocEntryList {
                     .truncate(true)
                     .open(p.as_path())?;
                 cda.extract_from_reader(reader.clone(), &mut file)
-                    .map_err(|e| {
+                    .inspect_err(|_e| {
                         let _ = fs::remove_file(&p);
-                        e
                     })?;
-                fs::rename(&p, path).map_err(|e| {
+                fs::rename(&p, path).inspect_err(|_e| {
                     let _ = fs::remove_file(&p);
-                    e
                 })?;
             }
         }

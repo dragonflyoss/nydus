@@ -420,7 +420,7 @@ pub struct FopRecorder<'a> {
     ios: &'a FsIoStats,
 }
 
-impl<'a> Drop for FopRecorder<'a> {
+impl Drop for FopRecorder<'_> {
     fn drop(&mut self) {
         self.ios
             .file_stats_update(self.inode, self.fop, self.size, self.success);

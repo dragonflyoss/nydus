@@ -1048,13 +1048,12 @@ impl FileCacheEntry {
         for (idx, req) in requests.iter().enumerate() {
             total_read += self
                 .dispatch_one_range(req, &mut cursor, &mut state)
-                .map_err(|e| {
+                .inspect_err(|_e| {
                     for req in requests.iter().skip(idx) {
                         for chunk in req.chunks.iter() {
                             self.update_chunk_pending_status(chunk.as_ref(), false);
                         }
                     }
-                    e
                 })?;
             state.reset();
         }
@@ -1272,11 +1271,10 @@ impl FileCacheEntry {
                 &region.chunks,
                 false,
             )
-            .map_err(|e| {
+            .inspect_err(|_e| {
                 for c in &region.chunks {
                     self.chunk_map.clear_pending(c.as_ref());
                 }
-                e
             })?;
 
         if self.is_raw_data {
@@ -1361,9 +1359,8 @@ impl FileCacheEntry {
         } else {
             let c = self
                 .read_chunk_from_backend(chunk.as_ref(), d.mut_slice())
-                .map_err(|e| {
+                .inspect_err(|_e| {
                     self.chunk_map.clear_pending(chunk.as_ref());
-                    e
                 })?;
             if self.is_raw_data {
                 match c {

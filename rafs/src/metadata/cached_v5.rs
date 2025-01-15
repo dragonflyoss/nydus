@@ -379,7 +379,7 @@ impl RafsInode for CachedInodeV5 {
             return Err(einval!("invalid parent inode"));
         }
         if self.is_reg() {
-            let chunks = (self.i_size + chunk_size - 1) / chunk_size;
+            let chunks = self.i_size.div_ceil(chunk_size);
             if !self.has_hole() && chunks != self.i_data.len() as u64 {
                 return Err(einval!("invalid chunk count"));
             }

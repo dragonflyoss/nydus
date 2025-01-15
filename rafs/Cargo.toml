@@ -37,6 +37,7 @@ assert_matches = "1.5.0"
 fusedev = ["fuse-backend-rs/fusedev"]
 virtio-fs = ["fuse-backend-rs/virtiofs", "vm-memory/backend-mmap"]
 vhost-user-fs = ["fuse-backend-rs/vhost-user-fs"]
+backend-oss = ["nydus-storage/backend-oss"]
 
 [package.metadata.docs.rs]
 all-features = true

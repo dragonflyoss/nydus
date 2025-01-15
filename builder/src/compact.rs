@@ -1107,9 +1107,9 @@ mod tests {
         assert_eq!(compactor.b2nodes.len(), 2);
 
         let chunk_key1 = ChunkKey::from(&chunk1);
-        assert!(compactor.c2nodes.get(&chunk_key1).is_some());
+        assert!(compactor.c2nodes.contains_key(&chunk_key1));
         assert_eq!(compactor.c2nodes.get(&chunk_key1).unwrap().len(), 1);
-        assert!(compactor.b2nodes.get(&chunk2.blob_index()).is_some());
+        assert!(compactor.b2nodes.contains_key(&chunk2.blob_index()));
         assert_eq!(
             compactor.b2nodes.get(&chunk2.blob_index()).unwrap().len(),
             2

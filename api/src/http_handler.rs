@@ -43,9 +43,8 @@ pub fn extract_query_part(req: &Request, key: &str) -> Option<String> {
     // right now, below way makes it easy to obtain query parts from uri.
     let http_prefix = format!("http:{}", req.uri().get_abs_path());
     let url = Url::parse(&http_prefix)
-        .map_err(|e| {
+        .inspect_err(|e| {
             error!("api: can't parse request {:?}", e);
-            e
         })
         .ok()?;
 
@@ -326,35 +325,30 @@ mod tests {
 
     #[test]
     fn test_http_api_routes_v1() {
-        assert!(HTTP_ROUTES.routes.get("/api/v1/daemon").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/events").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/backend").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/start").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/daemon/exit").is_some());
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/daemon"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/daemon/events"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/daemon/backend"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/daemon/start"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/daemon/exit"));
         assert!(HTTP_ROUTES
             .routes
-            .get("/api/v1/daemon/fuse/sendfd")
-            .is_some());
+            .contains_key("/api/v1/daemon/fuse/sendfd"));
         assert!(HTTP_ROUTES
             .routes
-            .get("/api/v1/daemon/fuse/takeover")
-            .is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/mount").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/metrics").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/files").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/pattern").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/backend").is_some());
-        assert!(HTTP_ROUTES
-            .routes
-            .get("/api/v1/metrics/blobcache")
-            .is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v1/metrics/inflight").is_some());
+            .contains_key("/api/v1/daemon/fuse/takeover"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/mount"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/metrics"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/metrics/files"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/metrics/pattern"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/metrics/backend"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/metrics/blobcache"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v1/metrics/inflight"));
     }
 
     #[test]
     fn test_http_api_routes_v2() {
-        assert!(HTTP_ROUTES.routes.get("/api/v2/daemon").is_some());
-        assert!(HTTP_ROUTES.routes.get("/api/v2/blobs").is_some());
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v2/daemon"));
+        assert!(HTTP_ROUTES.routes.contains_key("/api/v2/blobs"));
     }
 
     #[test]
