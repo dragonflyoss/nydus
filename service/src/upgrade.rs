@@ -577,8 +577,7 @@ mod tests {
         assert!(upgrade_mgr
             .fscache_deamon_stat
             .blob_entry_map
-            .get("domain1/blob1")
-            .is_some());
+            .contains_key("domain1/blob1"));
 
         assert!(FscacheBackendState::try_from(&upgrade_mgr.fscache_deamon_stat).is_ok());
 
@@ -588,14 +587,13 @@ mod tests {
         let stat = FscacheState::try_from(&backend_stat).unwrap();
         assert_eq!(stat.path, upgrade_mgr.fscache_deamon_stat.path);
         assert_eq!(stat.threads, upgrade_mgr.fscache_deamon_stat.threads);
-        assert!(stat.blob_entry_map.get("domain1/blob1").is_some());
+        assert!(stat.blob_entry_map.contains_key("domain1/blob1"));
 
         upgrade_mgr.remove_blob_entry_state("domain1", "blob1");
-        assert!(upgrade_mgr
+        assert!(!upgrade_mgr
             .fscache_deamon_stat
             .blob_entry_map
-            .get("domain1/blob1")
-            .is_none());
+            .contains_key("domain1/blob1"));
     }
 
     #[test]
@@ -633,8 +631,7 @@ mod tests {
         assert!(upgrade_mgr
             .fuse_deamon_stat
             .fs_mount_cmd_map
-            .get("testmonutount")
-            .is_some());
+            .contains_key("testmonutount"));
         assert!(upgrade_mgr.update_mounts_state(cmd).is_ok());
 
         let backend_stat = FusedevBackendState::from(&upgrade_mgr.fuse_deamon_stat);
@@ -642,17 +639,16 @@ mod tests {
 
         let stat = FusedevState::from(&backend_stat);
         assert_eq!(stat.fuse_conn_id, upgrade_mgr.fuse_deamon_stat.fuse_conn_id);
-        assert!(stat.fs_mount_cmd_map.get("testmonutount").is_some());
+        assert!(stat.fs_mount_cmd_map.contains_key("testmonutount"));
 
         let umount_cmd: FsBackendUmountCmd = FsBackendUmountCmd {
             mountpoint: "testmonutount".to_string(),
         };
         upgrade_mgr.remove_mounts_state(umount_cmd);
-        assert!(upgrade_mgr
+        assert!(!upgrade_mgr
             .fuse_deamon_stat
             .fs_mount_cmd_map
-            .get("testmonutount")
-            .is_none());
+            .contains_key("testmonutount"));
     }
 
     #[test]

@@ -31,7 +31,7 @@ const HEADER_AUTHORIZATION: &str = "Authorization";
 const RATE_LIMITED_LOG_TIME: u8 = 2;
 
 thread_local! {
-    pub static LAST_FALLBACK_AT: RefCell<SystemTime> = RefCell::new(UNIX_EPOCH);
+    pub static LAST_FALLBACK_AT: RefCell<SystemTime> = const { RefCell::new(UNIX_EPOCH) };
 }
 
 /// Error codes related to network communication.
@@ -164,10 +164,9 @@ impl<R> Progress<R> {
 
 impl<R: Read + Send + 'static> Read for Progress<R> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.inner.read(buf).map(|count| {
+        self.inner.read(buf).inspect(|&count| {
             self.current += count as usize;
             (self.callback)((self.current, self.total));
-            count
         })
     }
 }

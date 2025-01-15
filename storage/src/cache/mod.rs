@@ -611,7 +611,7 @@ impl<'a, 'b> ChunkDecompressState<'a, 'b> {
     }
 }
 
-impl<'a, 'b> Iterator for ChunkDecompressState<'a, 'b> {
+impl Iterator for ChunkDecompressState<'_, '_> {
     type Item = Result<Vec<u8>>;
 
     fn next(&mut self) -> Option<Self::Item> {

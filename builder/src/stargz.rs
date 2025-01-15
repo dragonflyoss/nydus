@@ -58,10 +58,10 @@ struct TocEntry {
     /// - block: block device
     /// - fifo: fifo
     /// - chunk: a chunk of regular file data As described in the above section,
-    /// a regular file can be divided into several chunks. TOCEntry MUST be created for each chunk.
-    /// TOCEntry of the first chunk of that file MUST be typed as reg. TOCEntry of each chunk after
-    /// 2nd MUST be typed as chunk. chunk TOCEntry MUST set offset, chunkOffset and chunkSize
-    /// properties.
+    ///   a regular file can be divided into several chunks. TOCEntry MUST be created for each chunk.
+    ///   TOCEntry of the first chunk of that file MUST be typed as reg. TOCEntry of each chunk after
+    ///   2nd MUST be typed as chunk. chunk TOCEntry MUST set offset, chunkOffset and chunkSize
+    ///   properties.
     #[serde(rename = "type")]
     pub toc_type: String,
 

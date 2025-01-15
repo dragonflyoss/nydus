@@ -40,7 +40,7 @@ impl<'a> SubCmdArgs<'a> {
     }
 }
 
-impl<'a> ServiceArgs for SubCmdArgs<'a> {
+impl ServiceArgs for SubCmdArgs<'_> {
     fn value_of(&self, key: &str) -> Option<&String> {
         if let Some(v) = self.subargs.get_one::<String>(key) {
             Some(v)

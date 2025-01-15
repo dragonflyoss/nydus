@@ -578,9 +578,8 @@ impl FileSystem for Rafs {
     ) -> Result<(stat64, Duration)> {
         let mut recorder = FopRecorder::settle(Getattr, ino, &self.ios);
 
-        let attr = self.get_inode_attr(ino).map(|r| {
+        let attr = self.get_inode_attr(ino).inspect(|_r| {
             recorder.mark_success(0);
-            r
         })?;
 
         Ok((attr.into(), self.sb.meta.attr_timeout))
@@ -592,9 +591,8 @@ impl FileSystem for Rafs {
 
         Ok(inode
             .get_symlink()
-            .map(|r| {
+            .inspect(|_r| {
                 rec.mark_success(0);
-                r
             })?
             .as_bytes()
             .to_vec())
@@ -756,9 +754,8 @@ impl FileSystem for Rafs {
             }
         };
 
-        r.map(|v| {
+        r.inspect(|_v| {
             recorder.mark_success(0);
-            v
         })
     }
 
@@ -799,10 +796,10 @@ impl FileSystem for Rafs {
     ) -> Result<()> {
         let mut rec = FopRecorder::settle(Readdir, inode, &self.ios);
 
-        self.do_readdir(inode, size, offset, add_entry).map(|r| {
-            rec.mark_success(0);
-            r
-        })
+        self.do_readdir(inode, size, offset, add_entry)
+            .inspect(|_r| {
+                rec.mark_success(0);
+            })
     }
 
     fn readdirplus(
@@ -820,9 +817,8 @@ impl FileSystem for Rafs {
             let inode = self.sb.get_inode(dir_entry.ino, self.digest_validate)?;
             add_entry(dir_entry, self.get_inode_entry(inode))
         })
-        .map(|r| {
+        .inspect(|_r| {
             rec.mark_success(0);
-            r
         })
     }
 

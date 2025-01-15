@@ -8,11 +8,11 @@
 //!
 //! The tarball data is arrange as a sequence of tar headers with associated file data interleaved.
 //! - (tar header) (tar header) (file data) (tar header) (file data) (tar header)
-//! And to support read tarball data from FIFO, we could only go over the tarball stream once.
-//! So the workflow is as:
+//!   And to support read tarball data from FIFO, we could only go over the tarball stream once.
+//!   So the workflow is as:
 //! - for each tar header from the stream
-//! -- generate RAFS filesystem node from the tar header
-//! -- optionally dump file data associated with the tar header into RAFS data blob
+//!   -- generate RAFS filesystem node from the tar header
+//!   -- optionally dump file data associated with the tar header into RAFS data blob
 //! - arrange all generated RAFS nodes into a RAFS filesystem tree
 //! - dump the RAFS filesystem tree into RAFS metadata blob
 use std::ffi::{OsStr, OsString};

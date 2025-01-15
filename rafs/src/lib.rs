@@ -264,7 +264,7 @@ impl<'a> RafsIterator<'a> {
     }
 }
 
-impl<'a> Iterator for RafsIterator<'a> {
+impl Iterator for RafsIterator<'_> {
     type Item = (Arc<dyn RafsInodeExt>, PathBuf);
 
     fn next(&mut self) -> Option<Self::Item> {

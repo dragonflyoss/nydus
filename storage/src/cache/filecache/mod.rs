@@ -256,6 +256,7 @@ impl FileCacheEntry {
             let blob_data_file_path = blob_file_path.clone() + suffix;
             let file = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .read(true)
                 .open(blob_data_file_path)?;

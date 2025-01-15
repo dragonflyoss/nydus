@@ -538,7 +538,7 @@ impl FsCacheHandler {
         };
         let size = std::cmp::max(0x4_0000u64, size);
         let blob_size = blob_info.compressed_data_size();
-        let count = (blob_size + size - 1) / size;
+        let count = blob_size.div_ceil(size);
         let mut blob_req = Vec::with_capacity(count as usize);
         let mut pre_offset = 0u64;
         for _i in 0..count {
