@@ -53,9 +53,7 @@ tar = "0.4.40"
 tokio = { version = "1.35.1", features = ["macros"] }
 
 # Build static linked openssl library
-openssl = { version = "0.10.55", features = ["vendored"] }
-# pin openssl-src to bring in fix for https://rustsec.org/advisories/RUSTSEC-2022-0032
-#openssl-src = { version = "111.22" }
+openssl = { version = '*', features = ["vendored"] }
 
 nydus-api = { version = "0.3.0", path = "api", features = [
     "error-backtrace",
@@ -82,6 +80,7 @@ vmm-sys-util = { version = "0.11.0", optional = true }
 
 [build-dependencies]
 time = { version = "0.3.14", features = ["formatting"] }
+openssl = { version = '*', features = ["vendored"] }
 
 [dev-dependencies]
 xattr = "1.0.1"

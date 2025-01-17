@@ -26,17 +26,40 @@ jobs:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - uses: dsherret/rust-toolchain-file@v1
-    - name: Build nydus-rs
+    - name: Set up Docker Buildx
+      if: matrix.arch == 'riscv64'
+      uses: docker/setup-buildx-action@v3
+    - name: Build and push Docker image
+      if: matrix.arch == 'riscv64'
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./.github/workflows/Rust-Cross-Compile-Dockerfile
+        push: false
+        load: true
+        tags: rust-cross-compile-riscv64:latest    
+    - name: Build nydus-rs Non-RISC-V
+      if: matrix.arch != 'riscv64' 
       run: |
-        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
+        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu")
         RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
         cargo install --locked --version 0.2.5 cross
         make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
+    - name : Build Nydus-rs RISC-V
+      if: matrix.arch == 'riscv64'
+      run: |
+        RUST_TARGET=riscv64gc-unknown-linux-gnu
+        docker run --rm -v ${{ github.workspace }}:/root/src rust-cross-compile-riscv64:latest \
+        sh -c "cd /root/src && make -e RUST_TARGET_STATIC=$RUST_TARGET static-release"
+    - name: Prepare to upload artifacts
+      run: |
+        declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
+        RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}     
         sudo mv target/$RUST_TARGET/release/nydusd nydusd
         sudo mv target/$RUST_TARGET/release/nydus-image .
         sudo mv target/$RUST_TARGET/release/nydusctl .
         sudo cp -r misc/configs .
-        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
+        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/      
     - name: store-artifacts
       uses: actions/upload-artifact@v4
       with:
