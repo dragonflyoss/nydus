@@ -735,7 +735,7 @@ impl FileSystem for Rafs {
         let mut recorder = FopRecorder::settle(Getxattr, inode, &self.ios);
 
         if !self.xattr_supported() {
-            return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+            return Err(enosys!());
         }
 
         let name = OsStr::from_bytes(name.to_bytes());
@@ -744,7 +744,7 @@ impl FileSystem for Rafs {
         let r = match value {
             Some(value) => match size {
                 0 => Ok(GetxattrReply::Count((value.len() + 1) as u32)),
-                x if x < value.len() as u32 => Err(std::io::Error::from_raw_os_error(libc::ERANGE)),
+                x if x < value.len() as u32 => Err(erange!()),
                 _ => Ok(GetxattrReply::Value(value)),
             },
             None => {
@@ -752,7 +752,7 @@ impl FileSystem for Rafs {
                 // the future to wrap this method thus to handle different reasonable
                 // errors in a clean way.
                 recorder.mark_success(0);
-                Err(std::io::Error::from_raw_os_error(libc::ENODATA))
+                Err(enodata!())
             }
         };
 
@@ -765,7 +765,7 @@ impl FileSystem for Rafs {
     fn listxattr(&self, _ctx: &Context, inode: u64, size: u32) -> Result<ListxattrReply> {
         let mut rec = FopRecorder::settle(Listxattr, inode, &self.ios);
         if !self.xattr_supported() {
-            return Err(std::io::Error::from_raw_os_error(libc::ENOSYS));
+            return Err(enosys!());
         }
 
         let inode = self.sb.get_inode(inode, false)?;
@@ -783,7 +783,7 @@ impl FileSystem for Rafs {
 
         match size {
             0 => Ok(ListxattrReply::Count(count as u32)),
-            x if x < count as u32 => Err(std::io::Error::from_raw_os_error(libc::ERANGE)),
+            x if x < count as u32 => Err(erange!()),
             _ => Ok(ListxattrReply::Names(buf)),
         }
     }
