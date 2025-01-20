@@ -18,7 +18,6 @@ import (
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
 	"github.com/pkg/xattr"
@@ -29,18 +28,23 @@ import (
 var WorkerCount uint = 8
 
 // FilesystemRule compares file metadata and data in the two mountpoints:
-// Mounted by Nydusd for Nydus image,
+// Mounted by nydusd for nydus image,
 // Mounted by Overlayfs for OCI image.
 type FilesystemRule struct {
-	NydusdConfig    tool.NydusdConfig
-	Source          string
-	SourceMountPath string
-	SourceParsed    *parser.Parsed
-	SourcePath      string
-	SourceRemote    *remote.Remote
-	Target          string
-	TargetInsecure  bool
-	PlainHTTP       bool
+	WorkDir    string
+	NydusdPath string
+
+	SourceImage         *Image
+	TargetImage         *Image
+	SourceBackendType   string
+	SourceBackendConfig string
+	TargetBackendType   string
+	TargetBackendConfig string
+}
+
+type Image struct {
+	Parsed   *parser.Parsed
+	Insecure bool
 }
 
 // Node records file metadata and file data hash.
@@ -66,14 +70,14 @@ type RegistryBackendConfig struct {
 
 func (node *Node) String() string {
 	return fmt.Sprintf(
-		"Path: %s, Size: %d, Mode: %d, Rdev: %d, Symink: %s, UID: %d, GID: %d, "+
-			"Xattrs: %v, Hash: %s", node.Path, node.Size, node.Mode, node.Rdev, node.Symlink,
+		"path: %s, size: %d, mode: %d, rdev: %d, symink: %s, uid: %d, gid: %d, "+
+			"xattrs: %v, hash: %s", node.Path, node.Size, node.Mode, node.Rdev, node.Symlink,
 		node.UID, node.GID, node.Xattrs, hex.EncodeToString(node.Hash),
 	)
 }
 
 func (rule *FilesystemRule) Name() string {
-	return "Filesystem"
+	return "filesystem"
 }
 
 func getXattrs(path string) (map[string][]byte, error) {
@@ -132,13 +136,13 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 
 		xattrs, err := getXattrs(path)
 		if err != nil {
-			logrus.Warnf("Failed to get xattr: %s", err)
+			logrus.Warnf("failed to get xattr: %s", err)
 		}
 
 		// Calculate file data hash if the `backend-type` option be specified,
 		// this will cause that nydusd read data from backend, it's network load
 		var hash []byte
-		if rule.NydusdConfig.BackendType != "" && info.Mode().IsRegular() {
+		if info.Mode().IsRegular() {
 			hash, err = utils.HashFile(path)
 			if err != nil {
 				return err
@@ -166,20 +170,139 @@ func (rule *FilesystemRule) walk(rootfs string) (map[string]Node, error) {
 	return nodes, nil
 }
 
-func (rule *FilesystemRule) pullSourceImage() (*tool.Image, error) {
-	layers := rule.SourceParsed.OCIImage.Manifest.Layers
+func (rule *FilesystemRule) mountNydusImage(image *Image, dir string) (func() error, error) {
+	logrus.WithField("type", tool.CheckImageType(image.Parsed)).WithField("image", image.Parsed.Remote.Ref).Info("mounting image")
+
+	digestValidate := false
+	if image.Parsed.NydusImage != nil {
+		nydusManifest := parser.FindNydusBootstrapDesc(&image.Parsed.NydusImage.Manifest)
+		if nydusManifest != nil {
+			v := utils.GetNydusFsVersionOrDefault(nydusManifest.Annotations, utils.V5)
+			if v == utils.V5 {
+				// Digest validate is not currently supported for v6,
+				// but v5 supports it. In order to make the check more sufficient,
+				// this validate needs to be turned on for v5.
+				digestValidate = true
+			}
+		}
+	}
+
+	backendType := rule.SourceBackendType
+	backendConfig := rule.SourceBackendConfig
+	if dir == "target" {
+		backendType = rule.TargetBackendType
+		backendConfig = rule.TargetBackendConfig
+	}
+
+	mountDir := filepath.Join(rule.WorkDir, dir, "mnt")
+	nydusdDir := filepath.Join(rule.WorkDir, dir, "nydusd")
+	if err := os.MkdirAll(nydusdDir, 0755); err != nil {
+		return nil, errors.Wrap(err, "create nydusd directory")
+	}
+
+	nydusdConfig := tool.NydusdConfig{
+		EnablePrefetch: true,
+		NydusdPath:     rule.NydusdPath,
+		BackendType:    backendType,
+		BackendConfig:  backendConfig,
+		BootstrapPath:  filepath.Join(rule.WorkDir, dir, "nydus_bootstrap/image/image.boot"),
+		ConfigPath:     filepath.Join(nydusdDir, "config.json"),
+		BlobCacheDir:   filepath.Join(nydusdDir, "cache"),
+		APISockPath:    filepath.Join(nydusdDir, "api.sock"),
+		MountPath:      mountDir,
+		Mode:           "direct",
+		DigestValidate: digestValidate,
+	}
+
+	if err := os.MkdirAll(nydusdConfig.BlobCacheDir, 0755); err != nil {
+		return nil, errors.Wrap(err, "create blob cache directory for nydusd")
+	}
+
+	if err := os.MkdirAll(nydusdConfig.MountPath, 0755); err != nil {
+		return nil, errors.Wrap(err, "create mountpoint directory of nydus image")
+	}
+
+	ref, err := reference.ParseNormalizedNamed(image.Parsed.Remote.Ref)
+	if err != nil {
+		return nil, err
+	}
+
+	if nydusdConfig.BackendType == "" {
+		nydusdConfig.BackendType = "registry"
+
+		if nydusdConfig.BackendConfig == "" {
+			backendConfig, err := utils.NewRegistryBackendConfig(ref, image.Insecure)
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to parse backend configuration")
+			}
+
+			if image.Insecure {
+				backendConfig.SkipVerify = true
+			}
+
+			if image.Parsed.Remote.IsWithHTTP() {
+				backendConfig.Scheme = "http"
+			}
+
+			bytes, err := json.Marshal(backendConfig)
+			if err != nil {
+				return nil, errors.Wrap(err, "parse registry backend config")
+			}
+			nydusdConfig.BackendConfig = string(bytes)
+		}
+	}
+
+	nydusd, err := tool.NewNydusd(nydusdConfig)
+	if err != nil {
+		return nil, errors.Wrap(err, "create nydusd daemon")
+	}
+
+	if err := nydusd.Mount(); err != nil {
+		return nil, errors.Wrap(err, "mount nydus image")
+	}
+
+	umount := func() error {
+		if err := nydusd.Umount(false); err != nil {
+			return errors.Wrap(err, "umount nydus image")
+		}
+		if err := os.RemoveAll(mountDir); err != nil {
+			logrus.WithError(err).Warnf("cleanup mount directory: %s", mountDir)
+		}
+		if err := os.RemoveAll(nydusdDir); err != nil {
+			logrus.WithError(err).Warnf("cleanup nydusd directory: %s", nydusdDir)
+		}
+		return nil
+	}
+
+	return umount, nil
+}
+
+func (rule *FilesystemRule) mountOCIImage(image *Image, dir string) (func() error, error) {
+	logrus.WithField("type", tool.CheckImageType(image.Parsed)).WithField("image", image.Parsed.Remote.Ref).Infof("mounting image")
+
+	mountPath := filepath.Join(rule.WorkDir, dir, "mnt")
+	if err := os.MkdirAll(mountPath, 0755); err != nil {
+		return nil, errors.Wrap(err, "create mountpoint directory")
+	}
+	layerBasePath := filepath.Join(rule.WorkDir, dir, "layers")
+	if err := os.MkdirAll(layerBasePath, 0755); err != nil {
+		return nil, errors.Wrap(err, "create layer base directory")
+	}
+
+	layers := image.Parsed.OCIImage.Manifest.Layers
 	worker := utils.NewWorkerPool(WorkerCount, uint(len(layers)))
 
 	for idx := range layers {
 		worker.Put(func(idx int) func() error {
 			return func() error {
 				layer := layers[idx]
-				reader, err := rule.SourceRemote.Pull(context.Background(), layer, true)
+				reader, err := image.Parsed.Remote.Pull(context.Background(), layer, true)
 				if err != nil {
 					return errors.Wrap(err, "pull source image layers from the remote registry")
 				}
 
-				if err = utils.UnpackTargz(context.Background(), filepath.Join(rule.SourcePath, fmt.Sprintf("layer-%d", idx)), reader, true); err != nil {
+				layerDir := filepath.Join(layerBasePath, fmt.Sprintf("layer-%d", idx))
+				if err = utils.UnpackTargz(context.Background(), layerDir, reader, true); err != nil {
 					return errors.Wrap(err, "unpack source image layers")
 				}
 
@@ -192,102 +315,59 @@ func (rule *FilesystemRule) pullSourceImage() (*tool.Image, error) {
 		return nil, errors.Wrap(err, "pull source image layers in wait")
 	}
 
-	return &tool.Image{
-		Layers:     layers,
-		Source:     rule.Source,
-		SourcePath: rule.SourcePath,
-		Rootfs:     rule.SourceMountPath,
-	}, nil
-}
-
-func (rule *FilesystemRule) mountSourceImage() (*tool.Image, error) {
-	logrus.Infof("Mounting source image to %s", rule.SourceMountPath)
-
-	image, err := rule.pullSourceImage()
-	if err != nil {
-		return nil, errors.Wrap(err, "pull source image")
+	mounter := &tool.Image{
+		Layers:       layers,
+		LayerBaseDir: layerBasePath,
+		Rootfs:       mountPath,
 	}
 
-	if err := image.Umount(); err != nil {
+	if err := mounter.Umount(); err != nil {
 		return nil, errors.Wrap(err, "umount previous rootfs")
 	}
 
-	if err := image.Mount(); err != nil {
+	if err := mounter.Mount(); err != nil {
 		return nil, errors.Wrap(err, "mount source image")
 	}
 
-	return image, nil
-}
-
-func (rule *FilesystemRule) mountNydusImage() (*tool.Nydusd, error) {
-	logrus.Infof("Mounting Nydus image to %s", rule.NydusdConfig.MountPath)
-
-	if err := os.MkdirAll(rule.NydusdConfig.BlobCacheDir, 0755); err != nil {
-		return nil, errors.Wrap(err, "create blob cache directory for Nydusd")
-	}
-
-	if err := os.MkdirAll(rule.NydusdConfig.MountPath, 0755); err != nil {
-		return nil, errors.Wrap(err, "create mountpoint directory of Nydus image")
-	}
-
-	parsed, err := reference.ParseNormalizedNamed(rule.Target)
-	if err != nil {
-		return nil, err
-	}
-
-	if rule.NydusdConfig.BackendType == "" {
-		rule.NydusdConfig.BackendType = "registry"
-
-		if rule.NydusdConfig.BackendConfig == "" {
-			backendConfig, err := utils.NewRegistryBackendConfig(parsed, rule.TargetInsecure)
-			if err != nil {
-				return nil, errors.Wrap(err, "failed to parse backend configuration")
-			}
-
-			if rule.TargetInsecure {
-				backendConfig.SkipVerify = true
-			}
-
-			if rule.PlainHTTP {
-				backendConfig.Scheme = "http"
-			}
-
-			bytes, err := json.Marshal(backendConfig)
-			if err != nil {
-				return nil, errors.Wrap(err, "parse registry backend config")
-			}
-			rule.NydusdConfig.BackendConfig = string(bytes)
+	umount := func() error {
+		if err := mounter.Umount(); err != nil {
+			logrus.WithError(err).Warnf("umount rootfs")
 		}
+		if err := os.RemoveAll(layerBasePath); err != nil {
+			logrus.WithError(err).Warnf("cleanup layers directory %s", layerBasePath)
+		}
+		return nil
 	}
 
-	nydusd, err := tool.NewNydusd(rule.NydusdConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, "create Nydusd daemon")
-	}
-
-	if err := nydusd.Mount(); err != nil {
-		return nil, errors.Wrap(err, "mount Nydus image")
-	}
-
-	return nydusd, nil
+	return umount, nil
 }
 
-func (rule *FilesystemRule) verify() error {
-	logrus.Infof("Verifying filesystem for source and Nydus image")
+func (rule *FilesystemRule) mountImage(image *Image, dir string) (func() error, error) {
+	if image.Parsed.OCIImage != nil {
+		return rule.mountOCIImage(image, dir)
+	} else if image.Parsed.NydusImage != nil {
+		return rule.mountNydusImage(image, dir)
+	}
+
+	return nil, fmt.Errorf("invalid image for mounting")
+}
+
+func (rule *FilesystemRule) verify(sourceRootfs, targetRootfs string) error {
+	logrus.Infof("comparing filesystem")
 
 	sourceNodes := map[string]Node{}
 
-	// Concurrently walk the rootfs directory of source and Nydus image
+	// Concurrently walk the rootfs directory of source and nydus image
 	walkErr := make(chan error)
 	go func() {
 		var err error
-		sourceNodes, err = rule.walk(rule.SourceMountPath)
+		sourceNodes, err = rule.walk(sourceRootfs)
 		walkErr <- err
 	}()
 
-	nydusNodes, err := rule.walk(rule.NydusdConfig.MountPath)
+	targetNodes, err := rule.walk(targetRootfs)
 	if err != nil {
-		return errors.Wrap(err, "walk rootfs of Nydus image")
+		return errors.Wrap(err, "walk rootfs of source image")
 	}
 
 	if err := <-walkErr; err != nil {
@@ -295,54 +375,44 @@ func (rule *FilesystemRule) verify() error {
 	}
 
 	for path, sourceNode := range sourceNodes {
-		nydusNode, exist := nydusNodes[path]
+		targetNode, exist := targetNodes[path]
 		if !exist {
-			return fmt.Errorf("File not found in Nydus image: %s", path)
+			return fmt.Errorf("file not found in target image: %s", path)
 		}
-		delete(nydusNodes, path)
+		delete(targetNodes, path)
 
-		if path != "/" && !reflect.DeepEqual(sourceNode, nydusNode) {
-			return fmt.Errorf("File not match in Nydus image: %s <=> %s", sourceNode.String(), nydusNode.String())
+		if path != "/" && !reflect.DeepEqual(sourceNode, targetNode) {
+			return fmt.Errorf("file not match in target image:\n\t[source] %s\n\t[target] %s", sourceNode.String(), targetNode.String())
 		}
 	}
 
-	for path := range nydusNodes {
-		return fmt.Errorf("File not found in source image: %s", path)
+	for path := range targetNodes {
+		return fmt.Errorf("file not found in source image: %s", path)
 	}
 
 	return nil
 }
 
 func (rule *FilesystemRule) Validate() error {
-	// Skip filesystem validation if no source image be specified
-	if rule.Source == "" {
+	// Skip filesystem validation if no source or target image be specified
+	if rule.SourceImage.Parsed == nil || rule.TargetImage.Parsed == nil {
 		return nil
 	}
 
-	// Cleanup temporary directories
-	defer func() {
-		if err := os.RemoveAll(rule.SourcePath); err != nil {
-			logrus.WithError(err).Warnf("cleanup source image directory %s", rule.SourcePath)
-		}
-		if err := os.RemoveAll(rule.NydusdConfig.MountPath); err != nil {
-			logrus.WithError(err).Warnf("cleanup nydus image directory %s", rule.NydusdConfig.MountPath)
-		}
-		if err := os.RemoveAll(rule.NydusdConfig.BlobCacheDir); err != nil {
-			logrus.WithError(err).Warnf("cleanup nydus blob cache directory %s", rule.NydusdConfig.BlobCacheDir)
-		}
-	}()
-
-	image, err := rule.mountSourceImage()
+	umountSource, err := rule.mountImage(rule.SourceImage, "source")
 	if err != nil {
 		return err
 	}
-	defer image.Umount()
+	defer umountSource()
 
-	nydusd, err := rule.mountNydusImage()
+	umountTarget, err := rule.mountImage(rule.TargetImage, "target")
 	if err != nil {
 		return err
 	}
-	defer nydusd.Umount(false)
+	defer umountTarget()
 
-	return rule.verify()
+	return rule.verify(
+		filepath.Join(rule.WorkDir, "source/mnt"),
+		filepath.Join(rule.WorkDir, "target/mnt"),
+	)
 }
