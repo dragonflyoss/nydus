@@ -1270,9 +1270,51 @@ func main() {
 					Value: "0MB",
 					Usage: "Chunk size for pushing a blob layer in chunked",
 				},
+
+				&cli.StringFlag{
+					Name:    "source-backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified, possible values: 'oss', 's3', 'localfs'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "source-backend-config",
+					Value:   "",
+					Usage:   "Json string for storage backend configuration",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "source-backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
+
+				backendType, backendConfig, err := getBackendConfig(c, "source-", false)
+				if err != nil {
+					return err
+				} else if backendConfig == "" {
+					backendType = "registry"
+					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
+					if err != nil {
+						return err
+					}
+
+					backendConfigStruct, err := utils.NewRegistryBackendConfig(parsed, c.Bool("target-insecure"))
+					if err != nil {
+						return errors.Wrap(err, "parse registry backend configuration")
+					}
+
+					bytes, err := json.Marshal(backendConfigStruct)
+					if err != nil {
+						return errors.Wrap(err, "marshal registry backend configuration")
+					}
+					backendConfig = string(bytes)
+				}
 
 				pushChunkSize, err := humanize.ParseBytes(c.String("push-chunk-size"))
 				if err != nil {
@@ -1295,6 +1337,9 @@ func main() {
 
 					PushChunkSize:     int64(pushChunkSize),
 					PrefetchFilesPath: c.String("prefetch-files"),
+
+					BackendType:   backendType,
+					BackendConfig: backendConfig,
 				}
 
 				return optimizer.Optimize(context.Background(), opt)
