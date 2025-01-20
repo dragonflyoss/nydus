@@ -329,6 +329,9 @@ impl OptimizePrefetch {
             blob_ctx.add_chunk_meta_info(&inner, Some(info))?;
             blob_ctx.blob_hash.update(&buf);
 
+            blob_info.set_compressed_size(blob_ctx.compressed_blob_size as usize);
+            blob_info.set_uncompressed_size(blob_ctx.uncompressed_blob_size as usize);
+            blob_info.set_chunk_count(blob_ctx.chunk_count as usize);
             blob_info.set_meta_ci_compressed_size(
                 (blob_info.meta_ci_compressed_size() + size_of::<BlobChunkInfoV1Ondisk>() as u64)
                     as usize,
