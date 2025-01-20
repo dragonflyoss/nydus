@@ -46,7 +46,7 @@ struct PrefetchFileRange {
 
 #[derive(Clone)]
 pub struct PrefetchFileInfo {
-    file: PathBuf,
+    path: PathBuf,
     ranges: Option<Vec<PrefetchFileRange>>,
 }
 
@@ -143,9 +143,9 @@ impl OptimizePrefetch {
         // Build bootstrap
         bootstrap.build(ctx, &mut bootstrap_ctx)?;
 
-        // Fix hardlink
+        // carefully address hardlink
         for node in prefetch_files.clone() {
-            let file = &node.file;
+            let file = &node.path;
             if tree.get_node(&file).is_none() {
                 warn!(
                     "prefetch file {} is skipped, no need to fixing hardlink",
@@ -260,7 +260,7 @@ impl OptimizePrefetch {
         blob_table: &RafsBlobTable,
         backend: Arc<dyn BlobBackend + Send + Sync>,
     ) -> Result<()> {
-        let file = prefetch_file_info.file.clone();
+        let file = prefetch_file_info.path.clone();
         if tree.get_node_mut(&file).is_none() {
             warn!("prefetch file {} is bad, skip it", file.display());
             return Ok(());
@@ -418,11 +418,11 @@ pub fn generate_prefetch_file_info(prefetch_file: &Path) -> Result<Vec<PrefetchF
 
     let mut prefetch_nodes = Vec::new();
     for file_json in prefetch_json.files {
-        let file = PathBuf::from(file_json.path);
-        if !file.is_absolute() {
+        let path = PathBuf::from(file_json.path);
+        if !path.is_absolute() {
             warn!(
                 "prefetch file path is not absolute, skipping: {}",
-                file.display()
+                path.display()
             );
             continue;
         }
@@ -434,7 +434,7 @@ pub fn generate_prefetch_file_info(prefetch_file: &Path) -> Result<Vec<PrefetchF
                 })
                 .collect()
         });
-        prefetch_nodes.push(PrefetchFileInfo { file, ranges });
+        prefetch_nodes.push(PrefetchFileInfo { path, ranges });
     }
     Ok(prefetch_nodes)
 }

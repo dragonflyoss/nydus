@@ -262,6 +262,36 @@ nerdctl --snapshotter nydus run \
 
 The original container ID need to be a full container ID rather than an abbreviation.
 
+## Optimize nydus image from prefetch files
+
+The nydusify optimize command can optimize a nydus image from prefetch files, prefetch files are file access patterns during container startup. This will generate a new bootstrap and a new blob wich contains all data indicated by prefetch files.
+
+The content of prefetch files likes this:
+```json
+{
+  "version": "v1",
+  "files": [
+    {
+      "path": "/path/to/file1",
+      "ranges": [[100, 20], [140, 50]] // [[offset, size]]
+    },
+    {
+      "path": "/path/to/file2",
+      "ranges": [[200, 30], [250, 40]]
+    },
+    ...
+  ]
+}
+```
+
+``` shell
+nydusify optimize \
+  --nydus-image  /path/to/nydus-image \
+  --source myregistry/repo:tag-nydus \
+  --target myregistry/repo:tag-nydus-optimized \
+  --prefetch-files /path/to/prefetch-files \
+```
+
 ## More Nydusify Options
 
 See `nydusify convert/check/mount --help`
