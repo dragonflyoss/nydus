@@ -556,6 +556,32 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             )
             .arg(arg_config.clone())
             .arg(
+                Arg::new("backend-type")
+                    .long("backend-type")
+                    .help(format!(
+                        "Type of backend [possible values: {}]",
+                        BlobFactory::supported_backends()
+                            .into_iter()
+                            .filter(|x| x != "localfs")
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .required(false)
+            )
+            .arg(
+                Arg::new("backend-config")
+                    .long("backend-config")
+                    .help("Config string of backend")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("backend-config-file")
+                    .long("backend-config-file")
+                    .help("Config file of backend")
+                    .conflicts_with("backend-config")
+                    .required(false),
+            )
+            .arg(
                 Arg::new("blob-dir")
                     .long("blob-dir")
                     .short('D')
@@ -565,10 +591,21 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     ),
             )
             .arg(
+                Arg::new("blob")
+                    .long("blob")
+                    .short('b')
+                    .help("Path to RAFS data blob file")
+            )
+            .arg(
                 Arg::new("output-bootstrap")
                     .long("output-bootstrap")
                     .short('O')
                     .help("Output path of optimized bootstrap"),
+            )
+            .arg(
+                Arg::new("output-blob-dir")
+                    .long("output-blob-dir")
+                    .help("Directroy path for storing optimized blob"),
             )
             .arg(
                 arg_output_json.clone(),
@@ -1683,7 +1720,7 @@ impl Command {
     }
 
     fn optimize(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
-        let blobs_dir_path = Self::get_blobs_dir(matches)?;
+        let output_blob_dir_path = Self::get_output_blob_dir(matches)?;
         let prefetch_file = Self::get_prefetch_files(matches)?;
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let dst_bootstrap = match matches.get_one::<String>("output-bootstrap") {
@@ -1697,6 +1734,13 @@ impl Command {
             blob_id: String::from("prefetch-blob"),
             blob_inline_meta: true,
             ..Default::default()
+        };
+
+        let (_c, backend) = match Self::get_backend(matches, "optimizer") {
+            Ok((c, b)) => (c, b),
+            Err(e) => {
+                bail!("{}, --blob-dir or --backend-type must be specified", e);
+            }
         };
 
         let sb = update_ctx_from_bootstrap(&mut build_ctx, config, bootstrap_path)?;
@@ -1718,8 +1762,9 @@ impl Command {
             &mut build_ctx,
             &mut bootstrap_mgr,
             &mut blob_table,
-            blobs_dir_path.to_path_buf(),
+            output_blob_dir_path.to_path_buf(),
             prefetch_nodes,
+            backend,
         )
         .with_context(|| "Failed to generate prefetch bootstrap")?;
 
@@ -1832,10 +1877,10 @@ impl Command {
         }
     }
 
-    fn get_blobs_dir(matches: &ArgMatches) -> Result<&Path> {
-        match matches.get_one::<String>("blob-dir") {
+    fn get_output_blob_dir(matches: &ArgMatches) -> Result<&Path> {
+        match matches.get_one::<String>("output-blob-dir") {
             Some(s) => Ok(Path::new(s)),
-            None => bail!("missing parameter `blob-dir`"),
+            None => bail!("missing parameter `output-blob-dir`"),
         }
     }
 

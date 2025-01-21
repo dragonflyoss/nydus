@@ -20,14 +20,13 @@ use nydus_api::ConfigV2;
 use nydus_rafs::metadata::layout::RafsBlobTable;
 use nydus_rafs::metadata::RafsSuper;
 use nydus_rafs::metadata::RafsVersion;
+use nydus_storage::backend::BlobBackend;
 use nydus_storage::device::BlobInfo;
 use nydus_storage::meta::BatchContextGenerator;
 use nydus_storage::meta::BlobChunkInfoV2Ondisk;
 use nydus_utils::compress;
 use sha2::Digest;
 use std::cmp::{max, min};
-use std::fs::File;
-use std::io::{Read, Seek, Write};
 use std::mem::size_of;
 use std::sync::Arc;
 pub struct OptimizePrefetch {}
@@ -94,7 +93,7 @@ impl PrefetchFileInfo {
 }
 
 impl PrefetchBlobState {
-    fn new(ctx: &BuildContext, blob_layer_num: u32, blobs_dir_path: &Path) -> Result<Self> {
+    fn new(ctx: &BuildContext, blob_layer_num: u32, output_blob_dir_path: &Path) -> Result<Self> {
         let mut blob_info = BlobInfo::new(
             blob_layer_num,
             String::from("prefetch-blob"),
@@ -109,7 +108,7 @@ impl PrefetchBlobState {
         let mut blob_ctx = BlobContext::from(ctx, &blob_info, ChunkSource::Build)?;
         blob_ctx.blob_meta_info_enabled = true;
         let blob_writer = ArtifactWriter::new(crate::ArtifactStorage::FileDir(
-            blobs_dir_path.to_path_buf(),
+            output_blob_dir_path.to_path_buf(),
         ))
         .map(|writer| Box::new(writer) as Box<dyn Artifact>)?;
         Ok(Self {
@@ -127,8 +126,9 @@ impl OptimizePrefetch {
         ctx: &mut BuildContext,
         bootstrap_mgr: &mut BootstrapManager,
         blob_table: &mut RafsBlobTable,
-        blobs_dir_path: PathBuf,
+        output_blob_dir_path: PathBuf,
         prefetch_files: Vec<PrefetchFileInfo>,
+        backend: Arc<dyn BlobBackend + Send + Sync>,
     ) -> Result<BuildOutput> {
         // create a new blob for prefetch layer
 
@@ -136,7 +136,8 @@ impl OptimizePrefetch {
             RafsBlobTable::V5(table) => table.get_all().len(),
             RafsBlobTable::V6(table) => table.get_all().len(),
         };
-        let mut blob_state = PrefetchBlobState::new(&ctx, blob_layer_num as u32, &blobs_dir_path)?;
+        let mut blob_state =
+            PrefetchBlobState::new(&ctx, blob_layer_num as u32, &output_blob_dir_path)?;
         let mut batch = BatchContextGenerator::new(0)?;
         for node in prefetch_files.clone() {
             Self::process_prefetch_node(
@@ -145,7 +146,7 @@ impl OptimizePrefetch {
                 &mut blob_state,
                 &mut batch,
                 blob_table,
-                &blobs_dir_path,
+                backend.clone(),
             )?;
         }
 
@@ -286,7 +287,7 @@ impl OptimizePrefetch {
         prefetch_state: &mut PrefetchBlobState,
         batch: &mut BatchContextGenerator,
         blob_table: &RafsBlobTable,
-        blobs_dir_path: &Path,
+        backend: Arc<dyn BlobBackend + Send + Sync>,
     ) -> Result<()> {
         let file = prefetch_file_info.file.clone();
         if tree.get_node_mut(&file).is_none() {
@@ -329,13 +330,17 @@ impl OptimizePrefetch {
                 .get(chunk.inner.blob_index() as usize)
                 .map(|entry| entry.blob_id())
                 .ok_or(anyhow!("failed to get blob id"))?;
-            let mut blob_file = Arc::new(File::open(blobs_dir_path.join(blob_id))?);
 
             let inner = Arc::make_mut(&mut chunk.inner);
 
+            let reader = backend
+                .clone()
+                .get_reader(&blob_id.clone())
+                .expect("get blob err");
             let mut buf = vec![0u8; inner.compressed_size() as usize];
-            blob_file.seek(std::io::SeekFrom::Start(inner.compressed_offset()))?;
-            blob_file.read_exact(&mut buf)?;
+            reader
+                .read(&mut buf, inner.compressed_offset())
+                .expect("read blob err");
             prefetch_state.blob_writer.write_all(&buf)?;
             inner.set_blob_index(blob_info.blob_index());
             if blob_ctx.chunk_count == u32::MAX {
