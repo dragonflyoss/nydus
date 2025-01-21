@@ -34,12 +34,14 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         context: .
-        file: ./.github/workflows/Rust-Cross-Compile-Dockerfile
+        file: ./.github/workflows/Dockerfile.cross
         push: false
         load: true
-        tags: rust-cross-compile-riscv64:latest    
+        tags: rust-cross-compile-riscv64:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
     - name: Build nydus-rs Non-RISC-V
-      if: matrix.arch != 'riscv64' 
+      if: matrix.arch != 'riscv64'
       run: |
         declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu")
         RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
@@ -54,12 +56,12 @@ jobs:
     - name: Prepare to upload artifacts
       run: |
         declare -A rust_target_map=( ["amd64"]="x86_64-unknown-linux-musl" ["arm64"]="aarch64-unknown-linux-musl" ["ppc64le"]="powerpc64le-unknown-linux-gnu" ["riscv64"]="riscv64gc-unknown-linux-gnu")
-        RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}     
+        RUST_TARGET=${rust_target_map[${{ matrix.arch }}]}
         sudo mv target/$RUST_TARGET/release/nydusd nydusd
         sudo mv target/$RUST_TARGET/release/nydus-image .
         sudo mv target/$RUST_TARGET/release/nydusctl .
         sudo cp -r misc/configs .
-        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/      
+        sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
       uses: actions/upload-artifact@v4
       with:
