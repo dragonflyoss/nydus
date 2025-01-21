@@ -22,7 +22,7 @@ use nydus_rafs::metadata::RafsSuper;
 use nydus_rafs::metadata::RafsVersion;
 use nydus_storage::device::BlobInfo;
 use nydus_storage::meta::BatchContextGenerator;
-use nydus_storage::meta::BlobChunkInfoV1Ondisk;
+use nydus_storage::meta::BlobChunkInfoV2Ondisk;
 use nydus_utils::compress;
 use sha2::Digest;
 use std::cmp::{max, min};
@@ -239,9 +239,11 @@ impl OptimizePrefetch {
         blob_mgr.add_blob(blob_state.blob_ctx.clone());
         blob_mgr.set_current_blob_index(0);
         Blob::finalize_blob_data(&ctx, &mut blob_mgr, blob_state.blob_writer.as_mut())?;
-        if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
-            Blob::dump_meta_data(&ctx, blob_ctx, blob_state.blob_writer.as_mut()).unwrap();
-        };
+        if let RafsBlobTable::V6(_) = blob_table {
+            if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+                Blob::dump_meta_data(&ctx, blob_ctx, blob_state.blob_writer.as_mut()).unwrap();
+            };
+        }
         ctx.blob_id = String::from("");
         blob_mgr.get_current_blob().unwrap().1.blob_id = String::from("");
         finalize_blob(ctx, &mut blob_mgr, blob_state.blob_writer.as_mut())?;
@@ -335,12 +337,6 @@ impl OptimizePrefetch {
             blob_file.seek(std::io::SeekFrom::Start(inner.compressed_offset()))?;
             blob_file.read_exact(&mut buf)?;
             prefetch_state.blob_writer.write_all(&buf)?;
-            let info = batch.generate_chunk_info(
-                blob_ctx.current_compressed_offset,
-                blob_ctx.current_uncompressed_offset,
-                inner.uncompressed_size(),
-                encrypted,
-            )?;
             inner.set_blob_index(blob_info.blob_index());
             if blob_ctx.chunk_count == u32::MAX {
                 blob_ctx.chunk_count = 0;
@@ -349,27 +345,36 @@ impl OptimizePrefetch {
             blob_ctx.chunk_count += 1;
             inner.set_compressed_offset(blob_ctx.current_compressed_offset);
             inner.set_uncompressed_offset(blob_ctx.current_uncompressed_offset);
-            let aligned_d_size: u64 = nydus_utils::try_round_up_4k(inner.uncompressed_size())
-                .ok_or_else(|| anyhow!("invalid size"))?;
+            let mut aligned_d_size: u64 = inner.uncompressed_size() as u64;
+            if let RafsBlobTable::V6(_) = blob_table {
+                aligned_d_size = nydus_utils::try_round_up_4k(inner.uncompressed_size())
+                    .ok_or_else(|| anyhow!("invalid size"))?;
+                let info = batch.generate_chunk_info(
+                    blob_ctx.current_compressed_offset,
+                    blob_ctx.current_uncompressed_offset,
+                    inner.uncompressed_size(),
+                    encrypted,
+                )?;
+                blob_info.set_meta_ci_compressed_size(
+                    (blob_info.meta_ci_compressed_size()
+                        + size_of::<BlobChunkInfoV2Ondisk>() as u64) as usize,
+                );
+
+                blob_info.set_meta_ci_uncompressed_size(
+                    (blob_info.meta_ci_uncompressed_size()
+                        + size_of::<BlobChunkInfoV2Ondisk>() as u64) as usize,
+                );
+                blob_ctx.add_chunk_meta_info(&inner, Some(info))?;
+            }
             blob_ctx.compressed_blob_size += inner.compressed_size() as u64;
             blob_ctx.uncompressed_blob_size += aligned_d_size;
             blob_ctx.current_compressed_offset += inner.compressed_size() as u64;
             blob_ctx.current_uncompressed_offset += aligned_d_size;
-            blob_ctx.add_chunk_meta_info(&inner, Some(info))?;
             blob_ctx.blob_hash.update(&buf);
 
             blob_info.set_compressed_size(blob_ctx.compressed_blob_size as usize);
             blob_info.set_uncompressed_size(blob_ctx.uncompressed_blob_size as usize);
             blob_info.set_chunk_count(blob_ctx.chunk_count as usize);
-            blob_info.set_meta_ci_compressed_size(
-                (blob_info.meta_ci_compressed_size() + size_of::<BlobChunkInfoV1Ondisk>() as u64)
-                    as usize,
-            );
-
-            blob_info.set_meta_ci_uncompressed_size(
-                (blob_info.meta_ci_uncompressed_size() + size_of::<BlobChunkInfoV1Ondisk>() as u64)
-                    as usize,
-            );
         }
 
         Ok(())
