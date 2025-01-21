@@ -24,12 +24,12 @@ RUN add-apt-repository ppa:ubuntu-toolchain-r/test \
 
 WORKDIR /root
 
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.84.0
 
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 RUN rustup target add \
-    riscv64gc-unknown-linux-gnu 
+    riscv64gc-unknown-linux-gnu
 
 RUN mkdir -p ~/.cargo && echo '\
 [target.riscv64gc-unknown-linux-gnu]\n\
