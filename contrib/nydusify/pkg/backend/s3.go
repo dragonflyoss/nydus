@@ -22,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/containerd/containerd/remotes"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -158,6 +159,25 @@ func (b *S3Backend) existObject(ctx context.Context, objectKey string) (bool, er
 
 func (b *S3Backend) blobObjectKey(blobID string) string {
 	return b.objectPrefix + blobID
+}
+
+type rangeReader struct {
+	b         *S3Backend
+	objectKey string
+}
+
+func (rr *rangeReader) Reader(offset int64, size int64) (io.ReadCloser, error) {
+	output, err := rr.b.client.GetObject(context.TODO(), &s3.GetObjectInput{
+		Bucket: &rr.b.bucketName,
+		Key:    &rr.objectKey,
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+size-1)),
+	})
+	return output.Body, err
+}
+
+func (b *S3Backend) RangeReader(blobID string) (remotes.RangeReadCloser, error) {
+	objectKey := b.blobObjectKey(blobID)
+	return &rangeReader{b: b, objectKey: objectKey}, nil
 }
 
 func (b *S3Backend) Reader(blobID string) (io.ReadCloser, error) {

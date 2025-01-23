@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/containerd/containerd/remotes"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -45,6 +46,10 @@ func (r *Registry) Check(_ string) (bool, error) {
 
 func (r *Registry) Type() Type {
 	return RegistryBackend
+}
+
+func (r *Registry) RangeReader(_ string) (remotes.RangeReadCloser, error) {
+	panic("not implemented")
 }
 
 func (r *Registry) Reader(_ string) (io.ReadCloser, error) {
