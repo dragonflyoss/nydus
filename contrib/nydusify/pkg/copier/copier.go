@@ -66,6 +66,23 @@ type output struct {
 	Blobs []string
 }
 
+func withRetry(handle func() error, total int) error {
+	for {
+		total--
+		err := handle()
+		if err == nil {
+			return nil
+		}
+
+		if total > 0 && !errors.Is(err, context.Canceled) {
+			logrus.WithError(err).Warnf("retry (remain %d times)", total)
+			continue
+		}
+
+		return err
+	}
+}
+
 func hosts(opt Opt) remote.HostFunc {
 	maps := map[string]bool{
 		opt.Source: opt.SourceInsecure,
@@ -167,11 +184,6 @@ func pushBlobFromBackend(
 				blobSizeStr := humanize.Bytes(uint64(blobSize))
 
 				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushing blob from backend")
-				rc, err := backend.Reader(blobID)
-				if err != nil {
-					return errors.Wrap(err, "get blob reader")
-				}
-				defer rc.Close()
 				blobDescs[idx] = ocispec.Descriptor{
 					Digest:    blobDigest,
 					Size:      blobSize,
@@ -180,22 +192,37 @@ func pushBlobFromBackend(
 						converter.LayerAnnotationNydusBlob: "true",
 					},
 				}
-				writer, err := getPushWriter(ctx, pvd, blobDescs[idx], opt)
-				if err != nil {
-					if errdefs.NeedsRetryWithHTTP(err) {
-						pvd.UsePlainHTTP()
-						writer, err = getPushWriter(ctx, pvd, blobDescs[idx], opt)
-					}
-					if err != nil {
-						return errors.Wrap(err, "get push writer")
-					}
-				}
-				if writer != nil {
-					defer writer.Close()
-					return content.Copy(ctx, writer, rc, blobSize, blobDigest)
-				}
 
-				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend")
+				if err := withRetry(func() error {
+					rc, err := backend.Reader(blobID)
+					if err != nil {
+						return errors.Wrapf(err, "get push reader: %s", blobDigest)
+					}
+					defer rc.Close()
+					writer, err := getPushWriter(ctx, pvd, blobDescs[idx], opt)
+					if err != nil {
+						if errdefs.NeedsRetryWithHTTP(err) {
+							pvd.UsePlainHTTP()
+							writer, err = getPushWriter(ctx, pvd, blobDescs[idx], opt)
+						}
+						if err != nil {
+							return errors.Wrapf(err, "get push writer: %s", blobDigest)
+						}
+					}
+					if writer != nil {
+						defer writer.Close()
+						if err := content.Copy(ctx, writer, rc, blobSize, blobDigest); err != nil {
+							return errors.Wrapf(err, "copy blob content: %s", blobDigest)
+						}
+						logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend")
+					} else {
+						logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend (exists)")
+					}
+
+					return nil
+				}, 5); err != nil {
+					return errors.Wrapf(err, "push blob: %s", blobDigest)
+				}
 
 				return nil
 			})
