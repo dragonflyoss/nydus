@@ -297,6 +297,7 @@ impl FileCacheEntry {
             };
             let res = Self::persist_cached_data(&file, offset, buf);
             Self::_update_chunk_pending_status(&delayed_chunk_map, chunk.as_ref(), res.is_ok());
+            #[cfg(feature = "dedup")]
             if let Some(mgr) = cas_mgr {
                 if let Err(e) = mgr.record_chunk(&blob_info, chunk.deref(), file_path.as_ref()) {
                     warn!(
@@ -312,6 +313,7 @@ impl FileCacheEntry {
         let offset = chunk.uncompressed_offset();
         let res = Self::persist_cached_data(&self.file, offset, buf);
         self.update_chunk_pending_status(chunk, res.is_ok());
+        #[cfg(feature = "dedup")]
         if let Some(mgr) = &self.cas_mgr {
             if let Err(e) = mgr.record_chunk(&self.blob_info, chunk, self.file_path.as_ref()) {
                 warn!(
@@ -1079,6 +1081,7 @@ impl FileCacheEntry {
                 Err(e) => return Err(einval!(e)),
             };
 
+            #[cfg(feature = "dedup")]
             if !is_ready {
                 if let Some(mgr) = self.cas_mgr.as_ref() {
                     is_ready = mgr.dedup_chunk(&self.blob_info, chunk.deref(), &self.file);
@@ -1481,6 +1484,7 @@ impl FileCacheEntry {
     }
 }
 
+#[cfg(feature = "dedup")]
 impl Drop for FileCacheEntry {
     fn drop(&mut self) {
         if let Some(cas_mgr) = &self.cas_mgr {
