@@ -26,6 +26,13 @@ jobs:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - uses: dsherret/rust-toolchain-file@v1
+    - name: Read Rust toolchain version
+      id: set_toolchain_version
+      run: |
+        RUST_TOOLCHAIN_VERSION=$(grep -oP '(?<=channel = ")[^"]*' rust-toolchain.toml)
+        echo "Rust toolchain version: $RUST_TOOLCHAIN_VERSION"
+        echo "rust-version=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_OUTPUT
+      shell: bash
     - name: Set up Docker Buildx
       if: matrix.arch == 'riscv64'
       uses: docker/setup-buildx-action@v3
@@ -40,6 +47,8 @@ jobs:
         tags: rust-cross-compile-riscv64:latest
         cache-from: type=gha
         cache-to: type=gha,mode=max
+        build-args: |
+          RUST_VERSION=${{ steps.set_toolchain_version.outputs.rust-version }}
     - name: Build nydus-rs Non-RISC-V
       if: matrix.arch != 'riscv64'
       run: |
