@@ -215,7 +215,12 @@ impl FileCacheEntry {
             warn!("chunk deduplication trun off");
             None
         } else {
-            CasMgr::get_singleton()
+            #[cfg(feature = "dedup")]
+            {
+                CasMgr::get_singleton()
+            }
+            #[cfg(not(feature = "dedup"))]
+            None
         };
 
         let blob_compressed_size = Self::get_blob_size(&reader, &blob_info)?;

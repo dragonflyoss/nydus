@@ -245,7 +245,12 @@ impl FileCacheEntry {
             warn!("chunk deduplication trun off");
             None
         } else {
-            CasMgr::get_singleton()
+            #[cfg(feature = "dedup")]
+            {
+                CasMgr::get_singleton()
+            }
+            #[cfg(not(feature = "dedup"))]
+            None
         };
 
         let need_validation = mgr.need_validation
