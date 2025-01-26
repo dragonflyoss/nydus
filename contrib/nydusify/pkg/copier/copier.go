@@ -14,12 +14,12 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/archive/compression"
-	"github.com/containerd/containerd/content"
-	containerdErrdefs "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/reference/docker"
+	"github.com/containerd/containerd/remotes"
+	containerdErrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
@@ -66,6 +66,23 @@ type output struct {
 	Blobs []string
 }
 
+func withRetry(handle func() error, total int) error {
+	for {
+		total--
+		err := handle()
+		if err == nil {
+			return nil
+		}
+
+		if total > 0 && !errors.Is(err, context.Canceled) {
+			logrus.WithError(err).Warnf("retry (remain %d times)", total)
+			continue
+		}
+
+		return err
+	}
+}
+
 func hosts(opt Opt) remote.HostFunc {
 	maps := map[string]bool{
 		opt.Source: opt.SourceInsecure,
@@ -76,7 +93,7 @@ func hosts(opt Opt) remote.HostFunc {
 	}
 }
 
-func getPushWriter(ctx context.Context, pvd *provider.Provider, desc ocispec.Descriptor, opt Opt) (content.Writer, error) {
+func getPusherInChunked(ctx context.Context, pvd *provider.Provider, desc ocispec.Descriptor, opt Opt) (remotes.PusherInChunked, error) {
 	resolver, err := pvd.Resolver(opt.Target)
 	if err != nil {
 		return nil, errors.Wrap(err, "get resolver")
@@ -85,18 +102,13 @@ func getPushWriter(ctx context.Context, pvd *provider.Provider, desc ocispec.Des
 	if !strings.Contains(ref, "@") {
 		ref = ref + "@" + desc.Digest.String()
 	}
-	pusher, err := resolver.Pusher(ctx, ref)
+
+	pusherInChunked, err := resolver.PusherInChunked(ctx, ref)
 	if err != nil {
-		return nil, errors.Wrap(err, "create pusher")
+		return nil, errors.Wrap(err, "create pusher in chunked")
 	}
-	writer, err := pusher.Push(ctx, desc)
-	if err != nil {
-		if containerdErrdefs.IsAlreadyExists(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return writer, nil
+
+	return pusherInChunked, nil
 }
 
 func pushBlobFromBackend(
@@ -167,11 +179,6 @@ func pushBlobFromBackend(
 				blobSizeStr := humanize.Bytes(uint64(blobSize))
 
 				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushing blob from backend")
-				rc, err := backend.Reader(blobID)
-				if err != nil {
-					return errors.Wrap(err, "get blob reader")
-				}
-				defer rc.Close()
 				blobDescs[idx] = ocispec.Descriptor{
 					Digest:    blobDigest,
 					Size:      blobSize,
@@ -180,22 +187,35 @@ func pushBlobFromBackend(
 						converter.LayerAnnotationNydusBlob: "true",
 					},
 				}
-				writer, err := getPushWriter(ctx, pvd, blobDescs[idx], opt)
-				if err != nil {
-					if errdefs.NeedsRetryWithHTTP(err) {
-						pvd.UsePlainHTTP()
-						writer, err = getPushWriter(ctx, pvd, blobDescs[idx], opt)
-					}
-					if err != nil {
-						return errors.Wrap(err, "get push writer")
-					}
-				}
-				if writer != nil {
-					defer writer.Close()
-					return content.Copy(ctx, writer, rc, blobSize, blobDigest)
-				}
 
-				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend")
+				if err := withRetry(func() error {
+					rr, err := backend.RangeReader(blobID)
+					if err != nil {
+						return errors.Wrapf(err, "get push reader: %s", blobDigest)
+					}
+					pusher, err := getPusherInChunked(ctx, pvd, blobDescs[idx], opt)
+					if err != nil {
+						if errdefs.NeedsRetryWithHTTP(err) {
+							pvd.UsePlainHTTP()
+							pusher, err = getPusherInChunked(ctx, pvd, blobDescs[idx], opt)
+						}
+						if err != nil {
+							return errors.Wrapf(err, "get push writer: %s", blobDigest)
+						}
+					}
+					if err := pusher.PusherInChunked(ctx, blobDescs[idx], rr); err != nil {
+						if containerdErrdefs.IsAlreadyExists(err) {
+							logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend (exists)")
+							return nil
+						}
+						return errors.Wrapf(err, "copy blob content: %s", blobDigest)
+					}
+					logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend")
+
+					return nil
+				}, 3); err != nil {
+					return errors.Wrapf(err, "push blob: %s", blobDigest)
+				}
 
 				return nil
 			})
