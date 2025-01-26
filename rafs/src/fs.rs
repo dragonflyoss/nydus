@@ -891,136 +891,139 @@ impl Layer for Rafs {
     }
 }
 
-#[cfg(all(test, feature = "backend-oss"))]
-pub(crate) mod tests {
-    use super::*;
-    use std::str::FromStr;
+// Comment the test since clippy will complain about unexpected-cfgs code.
+// And the code is nerver used before.
 
-    pub fn new_rafs_backend() -> Box<Rafs> {
-        let config = r#"
-        version = 2
-        id = "test"
-        [backend]
-        type = "oss"
-        [backend.oss]
-        endpoint = "test"
-        access_key_id = "test"
-        access_key_secret = "test"
-        bucket_name = "antsys-nydus"
-        object_prefix = "nydus_v2/"
-        scheme = "http"
-        [cache]
-        type = "filecache"
-        [cache.filecache]
-        work_dir = "."
-        [rafs]
-        mode = "direct"
-        validate = false
-        enable_xattr = true
-        [rafs.prefetch]
-        enable = true
-        threads = 10
-        batch_size = 131072
-        bandwidth_limit = 10485760
-        "#;
-        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
-        let mut source_path = PathBuf::from(root_dir);
-        source_path.push("../tests/texture/bootstrap/rafs-v5.boot");
-        let mountpoint = "/mnt";
-        let config = Arc::new(ConfigV2::from_str(config).unwrap());
-        let bootstrapfile = source_path.to_str().unwrap();
-        let (mut rafs, reader) = Rafs::new(&config, mountpoint, Path::new(bootstrapfile)).unwrap();
-        rafs.import(reader, Some(vec![std::path::PathBuf::new()]))
-            .unwrap();
-        Box::new(rafs)
-    }
+// #[cfg(all(test, feature = "backend-oss"))]
+// pub(crate) mod tests {
+//     use super::*;
+//     use std::str::FromStr;
 
-    #[test]
-    fn it_should_create_new_rafs_fs() {
-        let rafs = new_rafs_backend();
-        let attr = rafs.get_inode_attr(1).unwrap();
-        assert_eq!(attr.ino, 1);
-        assert_eq!(attr.blocks, 8);
-        assert_eq!(attr.uid, 0);
-        // Root inode mode must be 0755
-        assert_eq!(attr.mode & 0o777, 0o755);
-    }
+//     pub fn new_rafs_backend() -> Box<Rafs> {
+//         let config = r#"
+//         version = 2
+//         id = "test"
+//         [backend]
+//         type = "oss"
+//         [backend.oss]
+//         endpoint = "test"
+//         access_key_id = "test"
+//         access_key_secret = "test"
+//         bucket_name = "antsys-nydus"
+//         object_prefix = "nydus_v2/"
+//         scheme = "http"
+//         [cache]
+//         type = "filecache"
+//         [cache.filecache]
+//         work_dir = "."
+//         [rafs]
+//         mode = "direct"
+//         validate = false
+//         enable_xattr = true
+//         [rafs.prefetch]
+//         enable = true
+//         threads = 10
+//         batch_size = 131072
+//         bandwidth_limit = 10485760
+//         "#;
+//         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+//         let mut source_path = PathBuf::from(root_dir);
+//         source_path.push("../tests/texture/bootstrap/rafs-v5.boot");
+//         let mountpoint = "/mnt";
+//         let config = Arc::new(ConfigV2::from_str(config).unwrap());
+//         let bootstrapfile = source_path.to_str().unwrap();
+//         let (mut rafs, reader) = Rafs::new(&config, mountpoint, Path::new(bootstrapfile)).unwrap();
+//         rafs.import(reader, Some(vec![std::path::PathBuf::new()]))
+//             .unwrap();
+//         Box::new(rafs)
+//     }
 
-    #[test]
-    fn it_should_access() {
-        let rafs = new_rafs_backend();
-        let ctx = &Context {
-            gid: 0,
-            pid: 1,
-            uid: 0,
-        };
-        if rafs.access(ctx, 1, 0).is_err() {
-            panic!("failed to access inode 1");
-        }
-    }
+//     #[test]
+//     fn it_should_create_new_rafs_fs() {
+//         let rafs = new_rafs_backend();
+//         let attr = rafs.get_inode_attr(1).unwrap();
+//         assert_eq!(attr.ino, 1);
+//         assert_eq!(attr.blocks, 8);
+//         assert_eq!(attr.uid, 0);
+//         // Root inode mode must be 0755
+//         assert_eq!(attr.mode & 0o777, 0o755);
+//     }
 
-    #[test]
-    fn it_should_listxattr() {
-        let rafs = new_rafs_backend();
-        let ctx = &Context {
-            gid: 0,
-            pid: 1,
-            uid: 0,
-        };
-        match rafs.listxattr(ctx, 1, 0) {
-            Ok(reply) => match reply {
-                ListxattrReply::Count(c) => assert_eq!(c, 0),
-                _ => panic!(),
-            },
-            Err(_) => panic!("failed to access inode 1"),
-        }
-    }
+//     #[test]
+//     fn it_should_access() {
+//         let rafs = new_rafs_backend();
+//         let ctx = &Context {
+//             gid: 0,
+//             pid: 1,
+//             uid: 0,
+//         };
+//         if rafs.access(ctx, 1, 0).is_err() {
+//             panic!("failed to access inode 1");
+//         }
+//     }
 
-    #[test]
-    fn it_should_get_statfs() {
-        let rafs = new_rafs_backend();
-        let ctx = &Context {
-            gid: 0,
-            pid: 1,
-            uid: 0,
-        };
-        match rafs.statfs(ctx, 1) {
-            Ok(statfs) => {
-                assert_eq!(statfs.f_files, 43082);
-                assert_eq!(statfs.f_bsize, 512);
-                assert_eq!(statfs.f_namemax, 255);
-                assert_eq!(statfs.f_fsid, 1380009555);
-                assert_eq!(statfs.f_ffree, 0);
-            }
-            Err(_) => panic!("failed to statfs"),
-        }
-    }
+//     #[test]
+//     fn it_should_listxattr() {
+//         let rafs = new_rafs_backend();
+//         let ctx = &Context {
+//             gid: 0,
+//             pid: 1,
+//             uid: 0,
+//         };
+//         match rafs.listxattr(ctx, 1, 0) {
+//             Ok(reply) => match reply {
+//                 ListxattrReply::Count(c) => assert_eq!(c, 0),
+//                 _ => panic!(),
+//             },
+//             Err(_) => panic!("failed to access inode 1"),
+//         }
+//     }
 
-    #[test]
-    fn it_should_enable_xattr() {
-        let rafs = new_rafs_backend();
-        assert!(rafs.xattr_enabled);
-        assert!(rafs.xattr_supported());
-    }
+//     #[test]
+//     fn it_should_get_statfs() {
+//         let rafs = new_rafs_backend();
+//         let ctx = &Context {
+//             gid: 0,
+//             pid: 1,
+//             uid: 0,
+//         };
+//         match rafs.statfs(ctx, 1) {
+//             Ok(statfs) => {
+//                 assert_eq!(statfs.f_files, 43082);
+//                 assert_eq!(statfs.f_bsize, 512);
+//                 assert_eq!(statfs.f_namemax, 255);
+//                 assert_eq!(statfs.f_fsid, 1380009555);
+//                 assert_eq!(statfs.f_ffree, 0);
+//             }
+//             Err(_) => panic!("failed to statfs"),
+//         }
+//     }
 
-    #[test]
-    fn it_should_lookup_entry() {
-        let rafs = new_rafs_backend();
-        let ctx = &Context {
-            gid: 0,
-            pid: 1,
-            uid: 0,
-        };
-        match rafs.lookup(ctx, 1, &std::ffi::CString::new("/etc").unwrap()) {
-            Err(_e) => {
-                panic!("failed to lookup /etc from ino 1");
-            }
-            Ok(e) => {
-                assert_eq!(e.inode, 0);
-            }
-        }
-    }
-}
+//     #[test]
+//     fn it_should_enable_xattr() {
+//         let rafs = new_rafs_backend();
+//         assert!(rafs.xattr_enabled);
+//         assert!(rafs.xattr_supported());
+//     }
+
+//     #[test]
+//     fn it_should_lookup_entry() {
+//         let rafs = new_rafs_backend();
+//         let ctx = &Context {
+//             gid: 0,
+//             pid: 1,
+//             uid: 0,
+//         };
+//         match rafs.lookup(ctx, 1, &std::ffi::CString::new("/etc").unwrap()) {
+//             Err(_e) => {
+//                 panic!("failed to lookup /etc from ino 1");
+//             }
+//             Ok(e) => {
+//                 assert_eq!(e.inode, 0);
+//             }
+//         }
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
