@@ -463,7 +463,7 @@ impl PAXExtensionSectionBuilder {
         }
 
         let mut size = k.len() + v.len() + PAX_SEP1.len() + PAX_SEP2.len() + PAX_DELIMITER.len();
-        size += size.to_string().as_bytes().len();
+        size += size.to_string().len();
 
         let mut record = Vec::with_capacity(size);
         pax(&mut record, size, k, v);

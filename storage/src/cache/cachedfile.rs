@@ -297,6 +297,7 @@ impl FileCacheEntry {
             };
             let res = Self::persist_cached_data(&file, offset, buf);
             Self::_update_chunk_pending_status(&delayed_chunk_map, chunk.as_ref(), res.is_ok());
+            #[cfg(feature = "dedup")]
             if let Some(mgr) = cas_mgr {
                 if let Err(e) = mgr.record_chunk(&blob_info, chunk.deref(), file_path.as_ref()) {
                     warn!(
@@ -312,6 +313,7 @@ impl FileCacheEntry {
         let offset = chunk.uncompressed_offset();
         let res = Self::persist_cached_data(&self.file, offset, buf);
         self.update_chunk_pending_status(chunk, res.is_ok());
+        #[cfg(feature = "dedup")]
         if let Some(mgr) = &self.cas_mgr {
             if let Err(e) = mgr.record_chunk(&self.blob_info, chunk, self.file_path.as_ref()) {
                 warn!(
@@ -1048,13 +1050,12 @@ impl FileCacheEntry {
         for (idx, req) in requests.iter().enumerate() {
             total_read += self
                 .dispatch_one_range(req, &mut cursor, &mut state)
-                .map_err(|e| {
+                .inspect_err(|_e| {
                     for req in requests.iter().skip(idx) {
                         for chunk in req.chunks.iter() {
                             self.update_chunk_pending_status(chunk.as_ref(), false);
                         }
                     }
-                    e
                 })?;
             state.reset();
         }
@@ -1080,6 +1081,7 @@ impl FileCacheEntry {
                 Err(e) => return Err(einval!(e)),
             };
 
+            #[cfg(feature = "dedup")]
             if !is_ready {
                 if let Some(mgr) = self.cas_mgr.as_ref() {
                     is_ready = mgr.dedup_chunk(&self.blob_info, chunk.deref(), &self.file);
@@ -1272,11 +1274,10 @@ impl FileCacheEntry {
                 &region.chunks,
                 false,
             )
-            .map_err(|e| {
+            .inspect_err(|_e| {
                 for c in &region.chunks {
                     self.chunk_map.clear_pending(c.as_ref());
                 }
-                e
             })?;
 
         if self.is_raw_data {
@@ -1361,9 +1362,8 @@ impl FileCacheEntry {
         } else {
             let c = self
                 .read_chunk_from_backend(chunk.as_ref(), d.mut_slice())
-                .map_err(|e| {
+                .inspect_err(|_e| {
                     self.chunk_map.clear_pending(chunk.as_ref());
-                    e
                 })?;
             if self.is_raw_data {
                 match c {
@@ -1484,6 +1484,7 @@ impl FileCacheEntry {
     }
 }
 
+#[cfg(feature = "dedup")]
 impl Drop for FileCacheEntry {
     fn drop(&mut self) {
         if let Some(cas_mgr) = &self.cas_mgr {

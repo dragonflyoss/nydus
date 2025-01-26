@@ -70,7 +70,7 @@ impl InodeBitmap {
             .read()
             .unwrap()
             .get(&index)
-            .map_or(false, |v| v.load(Ordering::Relaxed) & mask != 0)
+            .is_some_and(|v| v.load(Ordering::Relaxed) & mask != 0)
     }
 
     pub fn clear(&self, ino: u64) {

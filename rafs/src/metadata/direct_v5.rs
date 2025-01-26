@@ -452,7 +452,7 @@ impl RafsInode for OndiskInodeWrapper {
                 // chunk-dict doesn't support chunk_count check
                 return Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP));
             }
-            let chunks = (inode.i_size + chunk_size - 1) / chunk_size;
+            let chunks = inode.i_size.div_ceil(chunk_size);
             if !inode.has_hole() && chunks != inode.i_child_count as u64 {
                 return Err(einval!(format!(
                     "invalid chunk count, ino {}, expected {}, actual {}",

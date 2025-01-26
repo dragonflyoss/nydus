@@ -145,6 +145,7 @@ impl FuseServer {
     }
 }
 
+#[allow(dead_code)]
 pub struct FusedevFsService {
     /// Fuse connection ID which usually equals to `st_dev`
     pub conn: AtomicU64,
@@ -527,18 +528,16 @@ fn is_crashed(path: impl AsRef<Path>, sock: &impl AsRef<Path>) -> Result<bool> {
 
 #[cfg(target_os = "macos")]
 fn calc_fuse_conn(mp: impl AsRef<Path>) -> Result<u64> {
-    let st = metadata(mp.as_ref()).map_err(|e| {
+    let st = metadata(mp.as_ref()).inspect_err(|e| {
         error!("Stat mountpoint {:?}, {}", mp.as_ref(), &e);
-        e
     })?;
     Ok(st.dev())
 }
 
 #[cfg(target_os = "linux")]
 fn calc_fuse_conn(mp: impl AsRef<Path>) -> Result<u64> {
-    let st = metadata(mp.as_ref()).map_err(|e| {
+    let st = metadata(mp.as_ref()).inspect_err(|e| {
         error!("Stat mountpoint {:?}, {}", mp.as_ref(), &e);
-        e
     })?;
     let dev = st.st_dev();
     let (major, minor) = (major(dev), minor(dev));
@@ -632,7 +631,6 @@ pub fn create_fuse_daemon(
 }
 
 /// Create vfs backend with rafs or passthrough as the fuse filesystem driver
-
 #[cfg(target_os = "macos")]
 pub fn create_vfs_backend(
     _fs_type: FsBackendType,

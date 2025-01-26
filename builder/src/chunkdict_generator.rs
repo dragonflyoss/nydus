@@ -31,7 +31,6 @@ use std::mem::size_of;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::u32;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkdictChunkInfo {

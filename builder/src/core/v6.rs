@@ -177,10 +177,9 @@ impl Node {
         } else {
             // Avoid sorting again if "." and ".." are at the head after sorting due to that
             // `tree.children` has already been sorted.
-            d_size = (".".as_bytes().len()
-                + size_of::<RafsV6Dirent>()
-                + "..".as_bytes().len()
-                + size_of::<RafsV6Dirent>()) as u64;
+            d_size =
+                (".".len() + size_of::<RafsV6Dirent>() + "..".len() + size_of::<RafsV6Dirent>())
+                    as u64;
             for child in tree.children.iter() {
                 let len = child.name().len() + size_of::<RafsV6Dirent>();
                 // erofs disk format requires dirent to be aligned to block size.

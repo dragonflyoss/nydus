@@ -40,21 +40,21 @@ pub mod verity;
 pub fn div_round_up(n: u64, d: u64) -> u64 {
     debug_assert!(d != 0);
     debug_assert!(d.is_power_of_two());
-    (n + d - 1) / d
+    n.div_ceil(d)
 }
 
 /// Round up the value `n` to by `d`.
 pub fn round_up(n: u64, d: u64) -> u64 {
     debug_assert!(d != 0);
     debug_assert!(d.is_power_of_two());
-    (n + d - 1) / d * d
+    n.div_ceil(d) * d
 }
 
 /// Round up the value `n` to by `d`.
 pub fn round_up_usize(n: usize, d: usize) -> usize {
     debug_assert!(d != 0);
     debug_assert!(d.is_power_of_two());
-    (n + d - 1) / d * d
+    n.div_ceil(d) * d
 }
 
 /// Overflow can fail this rounder if the base value is large enough with 4095 added.

@@ -267,7 +267,7 @@ impl RafsXAttrs {
             return Err(einval!("xattr key/value is too big"));
         }
         for p in RAFS_XATTR_PREFIXES {
-            if buf.len() >= p.as_bytes().len() && &buf[..p.as_bytes().len()] == p.as_bytes() {
+            if buf.len() >= p.len() && &buf[..p.len()] == p.as_bytes() {
                 self.pairs.insert(name, value);
                 return Ok(());
             }
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn test_parse_string() {
-        let (str1, str2) = parse_string(&[b'a']).unwrap();
+        let (str1, str2) = parse_string(b"a").unwrap();
         assert_eq!(str1, "a");
         assert_eq!(str2, "");
 
@@ -393,7 +393,7 @@ mod tests {
         let buf = [0x3u8, 0x0, 0x0, 0x0, b'a', 0, b'b'];
         let names = parse_xattr_names(&buf, 7).unwrap();
         assert_eq!(names.len(), 1);
-        assert_eq!(names[0], &[b'a']);
+        assert_eq!(names[0], b"a");
 
         let value = parse_xattr_value(&buf, 7, &OsString::from("a")).unwrap();
         assert_eq!(value, Some(vec![b'b']));

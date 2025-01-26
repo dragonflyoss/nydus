@@ -20,7 +20,7 @@ pub struct FileRangeReader<'a> {
     r: PhantomData<&'a u8>,
 }
 
-impl<'a> FileRangeReader<'a> {
+impl FileRangeReader<'_> {
     /// Create a wrapper reader to read a range of data from the file.
     pub fn new(f: &File, offset: u64, size: u64) -> Self {
         Self {
@@ -32,7 +32,7 @@ impl<'a> FileRangeReader<'a> {
     }
 }
 
-impl<'a> Read for FileRangeReader<'a> {
+impl Read for FileRangeReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let size = std::cmp::min(self.size as usize, buf.len());
         let nr_read = nix::sys::uio::pread(self.fd, &mut buf[0..size], self.offset as i64)
@@ -88,12 +88,11 @@ impl<R: Read> BufReaderInfo<R> {
 impl<R: Read> Read for BufReaderInfo<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut state = self.state.lock().unwrap();
-        state.reader.read(buf).map(|v| {
+        state.reader.read(buf).inspect(|&v| {
             state.pos += v as u64;
             if v > 0 && self.calc_digest {
                 state.hash.digest_update(&buf[..v]);
             }
-            v
         })
     }
 }

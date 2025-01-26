@@ -147,6 +147,7 @@ struct BearerAuth {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum Auth {
     Basic(BasicAuth),
     Bearer(BearerAuth),
@@ -415,9 +416,9 @@ impl RegistryState {
                 Some(Auth::Basic(BasicAuth { realm }))
             }
             "Bearer" => {
-                if paras.get("realm").is_none()
-                    || paras.get("service").is_none()
-                    || paras.get("scope").is_none()
+                if !paras.contains_key("realm")
+                    || !paras.contains_key("service")
+                    || !paras.contains_key("scope")
                 {
                     return None;
                 }
@@ -469,11 +470,10 @@ impl First {
         // Once instance after renew happens.
         for _ in 0..=1 {
             self.once(|| {
-                ret = Some(handle().map_err(|err| {
+                ret = Some(handle().inspect_err(|_err| {
                     // Replace the Once instance so that we can retry it when
                     // the handle call failed.
                     self.renew();
-                    err
                 }));
             });
             if ret.is_some() {

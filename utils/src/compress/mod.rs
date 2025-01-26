@@ -152,7 +152,7 @@ pub enum Decoder<'a, R: Read> {
     Zstd(zstd::stream::Decoder<'a, BufReader<R>>),
 }
 
-impl<'a, R: Read> Decoder<'a, R> {
+impl<R: Read> Decoder<'_, R> {
     /// Create a new instance of `Decoder`.
     pub fn new(reader: R, algorithm: Algorithm) -> Result<Self> {
         let decoder = match algorithm {
@@ -167,7 +167,7 @@ impl<'a, R: Read> Decoder<'a, R> {
     }
 }
 
-impl<'a, R: Read> Read for Decoder<'a, R> {
+impl<R: Read> Read for Decoder<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         match self {
             Decoder::None(r) => r.read(buf),

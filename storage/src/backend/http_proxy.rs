@@ -391,7 +391,7 @@ mod tests {
     }
 
     async fn server_handler(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-        return match *req.method() {
+        match *req.method() {
             hyper::Method::HEAD => Ok::<_, hyper::Error>(
                 Response::builder()
                     .status(200)
@@ -427,7 +427,7 @@ mod tests {
                     .body(Body::empty())
                     .unwrap(),
             ),
-        };
+        }
     }
 
     #[test]

@@ -286,9 +286,8 @@ impl DaemonStateMachineContext {
                 &self.pid, last, cur, input, &action
             );
             let r = match action {
-                Some(StartService) => d.start().map(|r| {
+                Some(StartService) => d.start().inspect(|_r| {
                     d.set_state(DaemonState::RUNNING);
-                    r
                 }),
                 Some(TerminateService) => {
                     d.stop();
@@ -298,7 +297,7 @@ impl DaemonStateMachineContext {
                     }
                     res
                 }
-                Some(Umount) => d.umount().map(|r| {
+                Some(Umount) => d.umount().inspect(|_r| {
                     // Always interrupt fuse service loop after shutdown connection to kernel.
                     // In case that kernel does not really shutdown the session due to some reasons
                     // causing service loop keep waiting of `/dev/fuse`.
@@ -307,7 +306,6 @@ impl DaemonStateMachineContext {
                         .unwrap_or_else(|e| error!("failed to wait service {}", e));
                     // at least all fuse thread stopped, no matter what error each thread got
                     d.set_state(DaemonState::STOPPED);
-                    r
                 }),
                 Some(Restore) => {
                     let res = d.restore();

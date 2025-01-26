@@ -158,6 +158,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&cache_path)
             .map_err(|err| {
                 einval!(format!(
@@ -187,6 +188,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&cache_path)
             .map_err(|err| {
                 einval!(format!(
@@ -222,6 +224,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&cache_path)
             .map_err(|err| {
                 einval!(format!(
@@ -258,6 +261,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&cache_path)
             .map_err(|err| {
                 einval!(format!(
@@ -303,6 +307,7 @@ mod tests {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&cache_path)
             .map_err(|err| {
                 einval!(format!(

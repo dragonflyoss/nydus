@@ -1941,27 +1941,27 @@ lazy_static! {
         RafsV6XattrPrefix::new(
             XATTR_USER_PREFIX,
             EROFS_XATTR_INDEX_USER,
-            XATTR_USER_PREFIX.as_bytes().len()
+            XATTR_USER_PREFIX.len()
         ),
         RafsV6XattrPrefix::new(
             XATTR_NAME_POSIX_ACL_ACCESS,
             EROFS_XATTR_INDEX_POSIX_ACL_ACCESS,
-            XATTR_NAME_POSIX_ACL_ACCESS.as_bytes().len()
+            XATTR_NAME_POSIX_ACL_ACCESS.len()
         ),
         RafsV6XattrPrefix::new(
             XATTR_NAME_POSIX_ACL_DEFAULT,
             EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT,
-            XATTR_NAME_POSIX_ACL_DEFAULT.as_bytes().len()
+            XATTR_NAME_POSIX_ACL_DEFAULT.len()
         ),
         RafsV6XattrPrefix::new(
             XATTR_TRUSTED_PREFIX,
             EROFS_XATTR_INDEX_TRUSTED,
-            XATTR_TRUSTED_PREFIX.as_bytes().len()
+            XATTR_TRUSTED_PREFIX.len()
         ),
         RafsV6XattrPrefix::new(
             XATTR_SECURITY_PREFIX,
             EROFS_XATTR_INDEX_SECURITY,
-            XATTR_SECURITY_PREFIX.as_bytes().len()
+            XATTR_SECURITY_PREFIX.len()
         ),
     ];
 }
@@ -2474,7 +2474,7 @@ mod tests {
             e_value_size: u16::to_le(2u16),
         };
 
-        let targets = vec![target1, target2, target3, target4, target5];
+        let targets = [target1, target2, target3, target4, target5];
 
         let mut entries: Vec<RafsV6XattrEntry> = Vec::with_capacity(targets.len());
         for _i in 0..targets.len() {

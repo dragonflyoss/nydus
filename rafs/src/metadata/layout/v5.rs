@@ -701,7 +701,7 @@ impl RafsStore for RafsV5BlobTable {
                 w.write_all(entry.blob_id().as_bytes())?;
                 if idx != self.entries.len() - 1 {
                     size += size_of::<u32>() * 2 + entry.blob_id().len() + 1;
-                    w.write_all(&[b'\0'])?;
+                    w.write_all(b"\0")?;
                 } else {
                     size += size_of::<u32>() * 2 + entry.blob_id().len();
                 }
@@ -1063,7 +1063,7 @@ pub struct RafsV5InodeWrapper<'a> {
     pub inode: &'a RafsV5Inode,
 }
 
-impl<'a> RafsStore for RafsV5InodeWrapper<'a> {
+impl RafsStore for RafsV5InodeWrapper<'_> {
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         let mut size: usize = 0;
 

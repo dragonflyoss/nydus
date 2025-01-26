@@ -34,7 +34,7 @@ use crate::{BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, O
 use super::context::Artifact;
 
 /// Filesystem root path for Unix OSs.
-const ROOT_PATH_NAME: &[u8] = &[b'/'];
+const ROOT_PATH_NAME: &[u8] = b"/";
 
 /// Source of chunk data: chunk dictionary, parent filesystem or builder.
 #[derive(Clone, Hash, PartialEq, Eq)]

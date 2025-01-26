@@ -271,12 +271,11 @@ impl BlobCacheMgr {
             BLOB_CACHE_TYPE_META_BLOB => {
                 let (path, config) = self.get_meta_info(entry)?;
                 self.add_meta_object(&entry.domain_id, &entry.blob_id, path, config)
-                    .map_err(|e| {
+                    .inspect_err(|_e| {
                         warn!(
                             "blob_cache: failed to add cache entry for meta blob: {:?}",
                             entry
                         );
-                        e
                     })
             }
             BLOB_CACHE_TYPE_DATA_BLOB => Err(einval!(format!(
@@ -452,19 +451,17 @@ impl MetaBlob {
             .read(true)
             .write(false)
             .open(path.as_ref())
-            .map_err(|e| {
+            .inspect_err(|_e| {
                 warn!(
                     "blob_cache: failed to open metadata blob {}",
                     path.as_ref().display()
                 );
-                e
             })?;
-        let md = file.metadata().map_err(|e| {
+        let md = file.metadata().inspect_err(|_e| {
             warn!(
                 "blob_cache: failed to get metadata about metadata blob {}",
                 path.as_ref().display()
             );
-            e
         })?;
         let size = md.len();
         if size % EROFS_BLOCK_SIZE_4096 != 0 || (size >> EROFS_BLOCK_BITS_12) > u32::MAX as u64 {
@@ -504,12 +501,11 @@ impl DataBlob {
         let blob_id = config.blob_info().blob_id();
         let blob = BLOB_FACTORY
             .new_blob_cache(config.config_v2(), &config.blob_info)
-            .map_err(|e| {
+            .inspect_err(|_e| {
                 warn!(
                     "blob_cache: failed to create cache object for blob {}",
                     blob_id
                 );
-                e
             })?;
 
         match blob.get_blob_object() {
