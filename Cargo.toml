@@ -53,7 +53,7 @@ tar = "0.4.40"
 tokio = { version = "1.35.1", features = ["macros"] }
 
 # Build static linked openssl library
-openssl = { version = '0.10.68', features = ["vendored"] }
+openssl = { version = '0.10.70', features = ["vendored"] }
 
 nydus-api = { version = "0.3.0", path = "api", features = [
     "error-backtrace",
@@ -69,21 +69,21 @@ nydus-storage = { version = "0.6.3", path = "storage", features = [
 ] }
 nydus-utils = { version = "0.4.2", path = "utils" }
 
-vhost = { version = "0.6.0", features = ["vhost-user-slave"], optional = true }
-vhost-user-backend = { version = "0.8.0", optional = true }
+vhost = { version = "0.11.0", features = ["vhost-user"], optional = true }
+vhost-user-backend = { version = "0.15.0", optional = true }
 virtio-bindings = { version = "0.1", features = [
     "virtio-v5_0_0",
 ], optional = true }
-virtio-queue = { version = "0.7.0", optional = true }
-vm-memory = { version = "0.10.0", features = ["backend-mmap"], optional = true }
-vmm-sys-util = { version = "0.11.0", optional = true }
+virtio-queue = { version = "0.12.0", optional = true }
+vm-memory = { version = "0.14.1", features = ["backend-mmap","backend-atomic"], optional = true }
+vmm-sys-util = { version = "0.12.1", optional = true }
 
 [build-dependencies]
 time = { version = "0.3.14", features = ["formatting"] }
 
 [dev-dependencies]
 xattr = "1.0.1"
-vmm-sys-util = "0.11.0"
+vmm-sys-util = "0.12.1"
 
 [features]
 default = [

@@ -18,7 +18,7 @@ log = "0.4"
 nix = "0.24"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
-vm-memory = "0.10"
+vm-memory = "0.14.1"
 fuse-backend-rs = "^0.12.0"
 thiserror = "1"
 
@@ -29,7 +29,7 @@ nydus-storage = { version = "0.6", path = "../storage", features = [
 nydus-utils = { version = "0.4", path = "../utils" }
 
 [dev-dependencies]
-vmm-sys-util = "0.11"
+vmm-sys-util = "0.12.1"
 assert_matches = "1.5.0"
 
 [features]

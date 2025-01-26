@@ -45,6 +45,7 @@ use std::sync::Arc;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
 use nydus_utils::{compress, ByteSize};
+#[allow(unused_imports)]
 use vm_memory::VolatileMemory;
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
 // compressed blob file. To avoid circular dependency, the following Rafs v5 metadata structures

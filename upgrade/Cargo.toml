@@ -10,7 +10,7 @@ edition = "2021"
 
 [dependencies]
 sendfd = "0.4.3"
-dbs-snapshot = "1.5.1"
+dbs-snapshot = "1.5.2"
 thiserror = "1"
 versionize_derive = "0.1.6"
-versionize = "0.1.10"
+versionize = "0.2.0"
