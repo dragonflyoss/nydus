@@ -14,12 +14,12 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/archive/compression"
-	"github.com/containerd/containerd/content"
-	containerdErrdefs "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/reference/docker"
+	"github.com/containerd/containerd/remotes"
+	containerdErrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
@@ -93,7 +93,7 @@ func hosts(opt Opt) remote.HostFunc {
 	}
 }
 
-func getPushWriter(ctx context.Context, pvd *provider.Provider, desc ocispec.Descriptor, opt Opt) (content.Writer, error) {
+func getPusherInChunked(ctx context.Context, pvd *provider.Provider, desc ocispec.Descriptor, opt Opt) (remotes.PusherInChunked, error) {
 	resolver, err := pvd.Resolver(opt.Target)
 	if err != nil {
 		return nil, errors.Wrap(err, "get resolver")
@@ -102,18 +102,13 @@ func getPushWriter(ctx context.Context, pvd *provider.Provider, desc ocispec.Des
 	if !strings.Contains(ref, "@") {
 		ref = ref + "@" + desc.Digest.String()
 	}
-	pusher, err := resolver.Pusher(ctx, ref)
+
+	pusherInChunked, err := resolver.PusherInChunked(ctx, ref)
 	if err != nil {
-		return nil, errors.Wrap(err, "create pusher")
+		return nil, errors.Wrap(err, "create pusher in chunked")
 	}
-	writer, err := pusher.Push(ctx, desc)
-	if err != nil {
-		if containerdErrdefs.IsAlreadyExists(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return writer, nil
+
+	return pusherInChunked, nil
 }
 
 func pushBlobFromBackend(
@@ -194,33 +189,31 @@ func pushBlobFromBackend(
 				}
 
 				if err := withRetry(func() error {
-					rc, err := backend.Reader(blobID)
+					rr, err := backend.RangeReader(blobID)
 					if err != nil {
 						return errors.Wrapf(err, "get push reader: %s", blobDigest)
 					}
-					defer rc.Close()
-					writer, err := getPushWriter(ctx, pvd, blobDescs[idx], opt)
+					pusher, err := getPusherInChunked(ctx, pvd, blobDescs[idx], opt)
 					if err != nil {
 						if errdefs.NeedsRetryWithHTTP(err) {
 							pvd.UsePlainHTTP()
-							writer, err = getPushWriter(ctx, pvd, blobDescs[idx], opt)
+							pusher, err = getPusherInChunked(ctx, pvd, blobDescs[idx], opt)
 						}
 						if err != nil {
 							return errors.Wrapf(err, "get push writer: %s", blobDigest)
 						}
 					}
-					if writer != nil {
-						defer writer.Close()
-						if err := content.Copy(ctx, writer, rc, blobSize, blobDigest); err != nil {
-							return errors.Wrapf(err, "copy blob content: %s", blobDigest)
+					if err := pusher.PusherInChunked(ctx, blobDescs[idx], rr); err != nil {
+						if containerdErrdefs.IsAlreadyExists(err) {
+							logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend (exists)")
+							return nil
 						}
-						logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend")
-					} else {
-						logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend (exists)")
+						return errors.Wrapf(err, "copy blob content: %s", blobDigest)
 					}
+					logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend")
 
 					return nil
-				}, 5); err != nil {
+				}, 3); err != nil {
 					return errors.Wrapf(err, "push blob: %s", blobDigest)
 				}
 
