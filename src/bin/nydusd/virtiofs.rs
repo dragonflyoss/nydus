@@ -12,7 +12,8 @@ use std::thread;
 
 use fuse_backend_rs::api::{server::Server, Vfs};
 use fuse_backend_rs::transport::{FsCacheReqHandler, Reader, VirtioFsWriter};
-use vhost::vhost_user::{message::*, Listener, SlaveFsCacheReq};
+use vhost::vhost_user::{message::*, Backend, Listener};
+use vhost_user_backend::bitmap::BitmapReplace;
 use vhost_user_backend::{
     VhostUserBackend, VhostUserBackendMut, VhostUserDaemon, VringMutex, VringState, VringT,
 };
@@ -21,6 +22,7 @@ use virtio_bindings::bindings::virtio_ring::{
 };
 use virtio_queue::DescriptorChain;
 use virtio_queue::QueueOwnedT;
+use vm_memory::mmap::NewBitmap;
 use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
 use vmm_sys_util::eventfd::EventFd;
@@ -52,7 +54,7 @@ struct VhostUserFsBackend {
     mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     server: Arc<Server<Arc<Vfs>>>,
     // handle request from slave to master
-    vu_req: Option<SlaveFsCacheReq>,
+    vu_req: Option<Backend>,
 }
 
 impl VhostUserFsBackend {
@@ -142,7 +144,10 @@ impl VhostUserFsBackendHandler {
     }
 }
 
-impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
+impl VhostUserBackendMut for VhostUserFsBackendHandler {
+    type Bitmap = ();
+    type Vring = VringMutex;
+
     fn num_queues(&self) -> usize {
         NUM_QUEUES
     }
@@ -159,7 +164,7 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
-        VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::SLAVE_REQ
+        VhostUserProtocolFeatures::MQ | VhostUserProtocolFeatures::BACKEND_REQ
     }
 
     fn set_event_idx(&mut self, _enabled: bool) {
@@ -174,7 +179,7 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
         Ok(())
     }
 
-    fn set_slave_req_fd(&mut self, vu_req: SlaveFsCacheReq) {
+    fn set_backend_req_fd(&mut self, vu_req: Backend) {
         self.backend.lock().unwrap().vu_req = Some(vu_req);
     }
 
@@ -190,7 +195,7 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
         evset: EventSet,
         vrings: &[VringMutex],
         _thread_id: usize,
-    ) -> VhostUserBackendResult<bool> {
+    ) -> VhostUserBackendResult<()> {
         if evset != EventSet::IN {
             return Err(Error::HandleEventNotEpollIn.into());
         }
@@ -230,7 +235,7 @@ impl VhostUserBackendMut<VringMutex> for VhostUserFsBackendHandler {
                 .process_queue(&mut vring_state)?;
         }
 
-        Ok(false)
+        Ok(())
     }
 }
 
@@ -272,7 +277,7 @@ impl FsService for VirtioFsService {
     }
 }
 
-struct VirtiofsDaemon<S: 'static + VhostUserBackend<VringMutex> + Clone> {
+struct VirtiofsDaemon<S: 'static + VhostUserBackend + Clone> {
     bti: BuildTimeInfo,
     id: Option<String>,
     request_sender: Arc<Mutex<Sender<DaemonStateMachineInput>>>,
@@ -281,11 +286,15 @@ struct VirtiofsDaemon<S: 'static + VhostUserBackend<VringMutex> + Clone> {
     state: AtomicI32,
     supervisor: Option<String>,
 
-    daemon: Arc<Mutex<VhostUserDaemon<S, VringMutex>>>,
+    daemon: Arc<Mutex<VhostUserDaemon<S>>>,
     sock: String,
 }
 
-impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for VirtiofsDaemon<S> {
+impl<S: 'static + VhostUserBackend + Clone> NydusDaemon for VirtiofsDaemon<S>
+where
+    <S as VhostUserBackend>::Vring: Send + Sync + Clone,
+    <S as VhostUserBackend>::Bitmap: Send + Sync + BitmapReplace + NewBitmap + Clone,
+{
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -353,9 +362,7 @@ impl<S: 'static + VhostUserBackend<VringMutex> + Clone> NydusDaemon for Virtiofs
     }
 }
 
-impl<S: 'static + VhostUserBackend<VringMutex> + Clone> DaemonStateMachineSubscriber
-    for VirtiofsDaemon<S>
-{
+impl<S: 'static + VhostUserBackend + Clone> DaemonStateMachineSubscriber for VirtiofsDaemon<S> {
     fn on_event(&self, event: DaemonStateMachineInput) -> Result<()> {
         self.request_sender
             .lock()
