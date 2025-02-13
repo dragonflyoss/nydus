@@ -1,6 +1,6 @@
 PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
 GOARCH ?= $(shell go env GOARCH)
-GOPROXY ?= https://goproxy.io
+GOPROXY ?=
 
 ifdef GOPROXY
 PROXY := GOPROXY=${GOPROXY}

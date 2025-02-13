@@ -1,5 +1,5 @@
 PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
-GOPROXY ?= https://goproxy.io
+GOPROXY ?=
 TESTS ?= .*
 
 ifdef GOPROXY
