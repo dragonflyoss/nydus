@@ -124,7 +124,7 @@ impl ConfigV2 {
     pub fn get_backend_config(&self) -> Result<&BackendConfigV2> {
         self.backend.as_ref().ok_or_else(|| {
             Error::new(
-                ErrorKind::InvalidInput,
+                ErrorKind::InvalidData,
                 "no configuration information for backend",
             )
         })
@@ -163,7 +163,7 @@ impl ConfigV2 {
     pub fn get_rafs_config(&self) -> Result<&RafsConfigV2> {
         self.rafs.as_ref().ok_or_else(|| {
             Error::new(
-                ErrorKind::InvalidInput,
+                ErrorKind::InvalidData,
                 "no configuration information for rafs",
             )
         })
