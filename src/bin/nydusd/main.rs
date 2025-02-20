@@ -504,8 +504,8 @@ fn process_fs_service(
             .value_of("failover-policy")
             .unwrap_or(&"flush".to_string())
             .try_into()
-            .inspect(|_e| {
-                error!("Invalid failover policy");
+            .inspect_err(|e| {
+                error!("Invalid failover policy: {}", e);
             })?;
 
         // mountpoint means fuse device only

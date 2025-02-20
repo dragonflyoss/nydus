@@ -604,9 +604,6 @@ impl BlobContext {
             .set_encrypted(features.contains(BlobFeatures::ENCRYPTED));
         blob_ctx
             .blob_meta_header
-            .set_has_crc(features.contains(BlobFeatures::HAS_CRC));
-        blob_ctx
-            .blob_meta_header
             .set_is_chunkdict_generated(features.contains(BlobFeatures::IS_CHUNKDICT_GENERATED));
 
         blob_ctx
@@ -790,6 +787,10 @@ impl BlobContext {
                         info.set_uncompressed_offset(chunk.uncompressed_offset());
                         self.blob_meta_info.add_v2_info(info);
                     } else {
+                        let mut data: u64 = 0;
+                        if chunk.has_crc() {
+                            data = chunk.crc32() as u64;
+                        }
                         self.blob_meta_info.add_v2(
                             chunk.compressed_offset(),
                             chunk.compressed_size(),
@@ -799,7 +800,7 @@ impl BlobContext {
                             chunk.is_encrypted(),
                             chunk.has_crc(),
                             chunk.is_batch(),
-                            0,
+                            data,
                         );
                     }
                     self.blob_chunk_digest.push(chunk.id().data);

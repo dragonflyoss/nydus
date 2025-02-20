@@ -340,15 +340,6 @@ impl BlobCompressionContextHeader {
         }
     }
 
-    /// Set flag indicating whether the blob's chunk has crc checksum.
-    pub fn set_has_crc(&mut self, enable: bool) {
-        if enable {
-            self.s_features |= BlobFeatures::HAS_CRC.bits();
-        } else {
-            self.s_features &= !BlobFeatures::HAS_CRC.bits();
-        }
-    }
-
     /// Get blob meta feature flags.
     pub fn features(&self) -> u32 {
         self.s_features
@@ -2066,9 +2057,6 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     }
     if features.contains(BlobFeatures::ENCRYPTED) {
         output += "encrypted ";
-    }
-    if features.contains(BlobFeatures::HAS_CRC) {
-        output += "crc-checksumed ";
     }
     if features.contains(BlobFeatures::IS_CHUNKDICT_GENERATED) {
         output += "is-chunkdict-generated ";

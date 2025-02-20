@@ -1763,7 +1763,6 @@ impl RafsV6Blob {
         } else if blob_features.contains(BlobFeatures::BATCH)
             || blob_features.contains(BlobFeatures::ZRAN)
             || blob_features.contains(BlobFeatures::ENCRYPTED)
-            || blob_features.contains(BlobFeatures::HAS_CRC)
         {
             error!(
                 "RafsV6Blob: idx {} invalid feature bits {}",

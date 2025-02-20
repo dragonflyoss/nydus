@@ -300,6 +300,15 @@ impl ChunkWrapper {
         }
     }
 
+    /// Get crc32 of chunk data.
+    pub fn crc32(&self) -> u32 {
+        match self {
+            ChunkWrapper::V5(c) => c.crc32,
+            ChunkWrapper::V6(c) => c.crc32,
+            ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref()).crc32(),
+        }
+    }
+
     /// Check whether the chunk has CRC or not.
     pub fn has_crc(&self) -> bool {
         match self {

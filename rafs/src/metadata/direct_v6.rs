@@ -1469,7 +1469,7 @@ impl BlobChunkInfo for DirectChunkInfoV6 {
     }
 
     fn crc32(&self) -> u32 {
-        0
+        self.v5_chunk(&self.state()).crc32
     }
     fn as_any(&self) -> &dyn Any {
         self

@@ -1302,7 +1302,7 @@ struct CacheConfig {
     #[serde(default, rename = "config")]
     pub cache_config: Value,
     /// Whether to validate data read from the cache.
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(default, rename = "validate")]
     pub cache_validate: bool,
     /// Configuration for blob data prefetching.
     #[serde(skip_serializing, skip_deserializing)]
