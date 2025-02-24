@@ -111,6 +111,14 @@ impl BlobChunkInfo for MockChunkInfo {
         false
     }
 
+    fn has_crc(&self) -> bool {
+        false
+    }
+
+    fn crc32(&self) -> u32 {
+        0
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         todo!();
     }

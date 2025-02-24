@@ -25,7 +25,7 @@ use nydus_rafs::metadata::RafsVersion;
 use nydus_storage::device::BlobInfo;
 use nydus_storage::meta::BatchContextGenerator;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
-use nydus_utils::compress;
+use nydus_utils::{compress, crc};
 use sha2::Digest;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
@@ -218,6 +218,7 @@ impl OptimizePrefetch {
         let blob_ctx = &mut prefetch_state.blob_ctx;
         let blob_info = &mut prefetch_state.blob_info;
         let encrypted = blob_ctx.blob_compressor != compress::Algorithm::None;
+        let crc_enable = blob_ctx.blob_crc_checker != crc::Algorithm::None;
 
         for chunk in chunks {
             let inner = Arc::make_mut(&mut chunk.inner);
@@ -231,6 +232,7 @@ impl OptimizePrefetch {
                 blob_ctx.current_uncompressed_offset,
                 inner.uncompressed_size(),
                 encrypted,
+                crc_enable,
             )?;
             inner.set_blob_index(blob_info.blob_index());
             if blob_ctx.chunk_count == u32::MAX {

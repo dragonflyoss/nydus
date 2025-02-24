@@ -707,6 +707,7 @@ pub struct CachedChunkInfoV5 {
     compressed_size: u32,
     uncompressed_size: u32,
     flags: BlobChunkFlags,
+    crc32: u32,
 }
 
 impl CachedChunkInfoV5 {
@@ -761,6 +762,17 @@ impl BlobChunkInfo for CachedChunkInfoV5 {
         false
     }
 
+    fn has_crc(&self) -> bool {
+        self.flags.contains(BlobChunkFlags::HAS_CRC)
+    }
+
+    fn crc32(&self) -> u32 {
+        if self.has_crc() {
+            self.crc32
+        } else {
+            0
+        }
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }

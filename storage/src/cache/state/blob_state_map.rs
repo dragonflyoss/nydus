@@ -440,6 +440,14 @@ pub(crate) mod tests {
             false
         }
 
+        fn has_crc(&self) -> bool {
+            unimplemented!();
+        }
+
+        fn crc32(&self) -> u32 {
+            unimplemented!();
+        }
+
         fn as_any(&self) -> &dyn Any {
             self
         }

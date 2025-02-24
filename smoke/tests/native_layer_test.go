@@ -44,6 +44,7 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 		Dimension(paramEnablePrefetch, []interface{}{false, true}).
 		Dimension(paramBatch, []interface{}{"0", "0x100000"}).
 		Dimension(paramEncrypt, []interface{}{false, true}).
+		Dimension(paramCrc, []interface{}{false, true}).
 		Dimension(paramAmplifyIO, []interface{}{uint64(0x100000)}).
 		Dimension(paramChunkDedupDb, []interface{}{"", "/tmp/cas.db"}).
 		Skip(func(param *tool.DescartesItem) bool {
