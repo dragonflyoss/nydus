@@ -6,22 +6,27 @@
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Result;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
 
+use nydus_api::config::ExternalBackendConfig;
 use nydus_api::CacheConfigV2;
 use nydus_utils::crypt;
 use nydus_utils::metrics::BlobcacheMetrics;
 
-use crate::backend::BlobBackend;
+use crate::backend::{external::ExternalBackendFactory, BlobBackend};
 use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::state::{
     BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap, NoopChunkMap,
 };
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
 use crate::cache::{BlobCache, BlobCacheMgr, CasMgr};
+use crate::cache::{
+    EXTERNAL_BLOB_BACKEND_CONFIG_FILE_SUFFIX, EXTERNAL_BLOB_BACKEND_META_FILE_SUFFIX,
+};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::utils::get_path_from_file;
 
@@ -34,6 +39,7 @@ pub const BLOB_DATA_FILE_SUFFIX: &str = ".blob.data";
 pub struct FileCacheMgr {
     blobs: Arc<RwLock<HashMap<String, Arc<FileCacheEntry>>>>,
     backend: Arc<dyn BlobBackend>,
+    external_backends: Arc<Vec<ExternalBackendConfig>>,
     metrics: Arc<BlobcacheMetrics>,
     prefetch_config: Arc<AsyncPrefetchConfig>,
     runtime: Arc<Runtime>,
@@ -54,6 +60,7 @@ impl FileCacheMgr {
     pub fn new(
         config: &CacheConfigV2,
         backend: Arc<dyn BlobBackend>,
+        external_backends: Arc<Vec<ExternalBackendConfig>>,
         runtime: Arc<Runtime>,
         id: &str,
         user_io_batch_size: u32,
@@ -67,6 +74,7 @@ impl FileCacheMgr {
         Ok(FileCacheMgr {
             blobs: Arc::new(RwLock::new(HashMap::new())),
             backend,
+            external_backends,
             metrics,
             prefetch_config,
             runtime,
@@ -99,6 +107,7 @@ impl FileCacheMgr {
             self,
             blob.clone(),
             self.prefetch_config.clone(),
+            self.external_backends.clone(),
             self.runtime.clone(),
             self.worker_mgr.clone(),
         )?;
@@ -182,6 +191,7 @@ impl FileCacheEntry {
         mgr: &FileCacheMgr,
         blob_info: Arc<BlobInfo>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
+        external_backends_config: Arc<Vec<ExternalBackendConfig>>,
         runtime: Arc<Runtime>,
         workers: Arc<AsyncWorkerMgr>,
     ) -> Result<Self> {
@@ -199,6 +209,25 @@ impl FileCacheEntry {
             .backend
             .get_reader(&blob_id)
             .map_err(|e| eio!(format!("failed to get reader for blob {}, {}", blob_id, e)))?;
+        let external_reader = if blob_info.is_external() {
+            ExternalBackendFactory::create(
+                external_backends_config,
+                PathBuf::new()
+                    .join(&mgr.work_dir)
+                    .join(blob_info.blob_id() + EXTERNAL_BLOB_BACKEND_META_FILE_SUFFIX),
+                PathBuf::new()
+                    .join(&mgr.work_dir)
+                    .join(blob_info.blob_id() + EXTERNAL_BLOB_BACKEND_CONFIG_FILE_SUFFIX),
+            )
+            .map_err(|e| {
+                eio!(format!(
+                    "failed to create external backend for blob {}, {}",
+                    blob_id, e
+                ))
+            })?
+        } else {
+            ExternalBackendFactory::create_noop()
+        };
         let blob_meta_reader = if is_separate_meta {
             mgr.backend.get_reader(&blob_meta_id).map_err(|e| {
                 eio!(format!(
@@ -355,6 +384,7 @@ impl FileCacheEntry {
             metrics: mgr.metrics.clone(),
             prefetch_state: Arc::new(AtomicU32::new(0)),
             reader,
+            external_reader,
             runtime,
             workers,
 

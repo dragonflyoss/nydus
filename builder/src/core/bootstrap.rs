@@ -75,7 +75,9 @@ impl Bootstrap {
             let digest = RafsDigest::from_buf(&bootstrap_data, digest::Algorithm::Sha256);
             let name = digest.to_string();
             bootstrap_ctx.writer.finalize(Some(name.clone()))?;
-            *bootstrap_storage = Some(ArtifactStorage::SingleFile(p.join(name)));
+            let mut path = p.0.join(name);
+            path.set_extension(&p.1);
+            *bootstrap_storage = Some(ArtifactStorage::SingleFile(path));
             Ok(())
         } else {
             bootstrap_ctx.writer.finalize(Some(String::default()))
