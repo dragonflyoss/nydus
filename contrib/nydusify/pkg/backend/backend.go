@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/containerd/containerd/remotes"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/opencontainers/go-digest"
@@ -27,6 +28,7 @@ type Backend interface {
 	Check(blobID string) (bool, error)
 	Type() Type
 	Reader(blobID string) (io.ReadCloser, error)
+	RangeReader(blobID string) (remotes.RangeReadCloser, error)
 	Size(blobID string) (int64, error)
 }
 

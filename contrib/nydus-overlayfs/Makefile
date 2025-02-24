@@ -2,7 +2,7 @@ GIT_COMMIT := $(shell git rev-parse --verify HEAD --short=7)
 BUILD_TIME := $(shell date -u +%Y%m%d.%H%M)
 PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
 GOARCH ?= $(shell go env GOARCH)
-GOPROXY ?= https://goproxy.io
+GOPROXY ?=
 
 ifdef GOPROXY
 PROXY := GOPROXY=${GOPROXY}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	"github.com/containerd/containerd/remotes"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -257,6 +258,20 @@ func (b *OSSBackend) Check(blobID string) (bool, error) {
 
 func (b *OSSBackend) Type() Type {
 	return OssBackend
+}
+
+type RangeReader struct {
+	b      *OSSBackend
+	blobID string
+}
+
+func (rr *RangeReader) Reader(offset int64, size int64) (io.ReadCloser, error) {
+	return rr.b.bucket.GetObject(rr.blobID, oss.Range(offset, offset+size-1))
+}
+
+func (b *OSSBackend) RangeReader(blobID string) (remotes.RangeReadCloser, error) {
+	blobID = b.objectPrefix + blobID
+	return &RangeReader{b: b, blobID: blobID}, nil
 }
 
 func (b *OSSBackend) Reader(blobID string) (io.ReadCloser, error) {

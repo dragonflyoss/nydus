@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/containerd/containerd/remotes"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
@@ -41,6 +42,10 @@ func (m *mockBackend) Type() backend.Type {
 }
 
 func (m *mockBackend) Reader(_ string) (io.ReadCloser, error) {
+	panic("not implemented")
+}
+
+func (m *mockBackend) RangeReader(_ string) (remotes.RangeReadCloser, error) {
 	panic("not implemented")
 }
 
