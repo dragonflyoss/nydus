@@ -18,7 +18,7 @@ import (
 
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/content/local"
-	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/xattr"
 	"github.com/stretchr/testify/assert"

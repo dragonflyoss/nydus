@@ -1,11 +1,10 @@
 module github.com/dragonflyoss/nydus/smoke
 
-go 1.21
+go 1.23.1
 
 require (
 	github.com/containerd/containerd v1.7.11
 	github.com/containerd/log v0.1.0
-	github.com/containerd/nydus-snapshotter v0.13.4
 	github.com/google/uuid v1.5.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/pkg/errors v0.9.1
@@ -48,5 +47,3 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/containerd/nydus-snapshotter => github.com/imeoer/nydus-snapshotter v0.13.13
