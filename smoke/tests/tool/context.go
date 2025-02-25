@@ -70,7 +70,7 @@ func DefaultContext(t *testing.T) *Context {
 		},
 		Build: BuildContext{
 			FSVersion:  "6",
-			Compressor: "zstd",
+			Compressor: "lz4_block",
 			ChunkSize:  "0x100000",
 		},
 		Runtime: RuntimeContext{

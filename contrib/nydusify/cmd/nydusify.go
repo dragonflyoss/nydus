@@ -228,6 +228,18 @@ func main() {
 					EnvVars:  []string{"TARGET"},
 				},
 				&cli.StringFlag{
+					Name:    "source-backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "source-backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.StringFlag{
 					Name:     "target-suffix",
 					Required: false,
 					Usage:    "Generate the target image reference by adding a suffix to the source image reference, conflicts with --target",
@@ -494,10 +506,12 @@ func main() {
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
 
-					Source:         c.String("source"),
-					Target:         targetRef,
-					SourceInsecure: c.Bool("source-insecure"),
-					TargetInsecure: c.Bool("target-insecure"),
+					SourceBackendType:   c.String("source-backend-type"),
+					SourceBackendConfig: c.String("source-backend-config"),
+					Source:              c.String("source"),
+					Target:              targetRef,
+					SourceInsecure:      c.Bool("source-insecure"),
+					TargetInsecure:      c.Bool("target-insecure"),
 
 					BackendType:      backendType,
 					BackendConfig:    backendConfig,

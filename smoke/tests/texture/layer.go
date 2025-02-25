@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
