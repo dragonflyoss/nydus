@@ -31,10 +31,11 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    attributes::Attributes, parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage, BlobCacheGenerator,
-    BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder,
-    ConversionType, DirectoryBuilder, Feature, Features, HashChunkDict, Merger, Prefetch,
-    PrefetchPolicy, StargzBuilder, TarballBuilder, WhiteoutSpec, ChunkdictChunkInfo, ChunkdictBlobInfo, Generator, Tree, TreeNode, OptimizePrefetch,
+    attributes::Attributes, parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage,
+    BlobCacheGenerator, BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput,
+    Builder, ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature,
+    Features, Generator, HashChunkDict, Merger, OptimizePrefetch, Prefetch, PrefetchPolicy,
+    StargzBuilder, TarballBuilder, Tree, TreeNode, WhiteoutSpec,
 };
 
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
@@ -1688,12 +1689,12 @@ impl Command {
         let mut blob_ids = Vec::new();
         for (idx, blob) in blobs.iter().enumerate() {
             println!(
-                "\t {}: {}, compressed data size 0x{:x}, compressed file size 0x{:x}, uncompressed file size 0x{:x}, chunks: 0x{:x}, features: {}",
+                "\t {}: {}, compressed size {}, uncompressed size {}, chunk size: {}, chunk count: {}, features: {}",
                 idx,
                 blob.blob_id(),
-                blob.compressed_data_size(),
                 blob.compressed_size(),
                 blob.uncompressed_size(),
+                blob.chunk_size(),
                 blob.chunk_count(),
                 format_blob_features(blob.features()),
             );

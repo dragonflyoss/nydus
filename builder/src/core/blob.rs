@@ -120,6 +120,9 @@ impl Blob {
             && (ctx.blob_inline_meta || ctx.features.is_enabled(Feature::BlobToc))
         {
             if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
+                if blob_ctx.external {
+                    return Ok(());
+                }
                 blob_ctx.write_tar_header(
                     blob_writer,
                     toc::TOC_ENTRY_BLOB_RAW,

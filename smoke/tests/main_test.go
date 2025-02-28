@@ -7,8 +7,6 @@ package tests
 import (
 	"os"
 	"testing"
-
-	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 )
 
 const (
@@ -17,21 +15,21 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	registryPort := os.Getenv("REGISTRY_PORT")
-	if registryPort == "" {
-		registryPort = "5077"
-		os.Setenv("REGISTRY_PORT", registryPort)
-	}
+	// registryPort := os.Getenv("REGISTRY_PORT")
+	// if registryPort == "" {
+	// 	registryPort = "5077"
+	// 	os.Setenv("REGISTRY_PORT", registryPort)
+	// }
 
-	var reg *tool.Registry
-	if os.Getenv("DISABLE_REGISTRY") == "" {
-		reg = tool.NewRegistry()
-	}
+	// var reg *tool.Registry
+	// if os.Getenv("DISABLE_REGISTRY") == "" {
+	// 	reg = tool.NewRegistry()
+	// }
 
 	code := m.Run()
 
-	if reg != nil {
-		reg.Destroy()
-	}
+	// if reg != nil {
+	// 	reg.Destroy()
+	// }
 	os.Exit(code)
 }

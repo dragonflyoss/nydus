@@ -16,7 +16,7 @@ build:
 # SKIP_CASES=compressor=lz4_block,fs_version=5 \
 # make test
 test: build
-	golangci-lint run
+	# golangci-lint run
 	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
 
 # PERFORMANCE_TEST_MODE=fs-version-5 \

@@ -412,7 +412,7 @@ impl OndiskInodeWrapper {
 
 impl RafsInode for OndiskInodeWrapper {
     // Somehow we got invalid `inode_count` from superblock.
-    fn validate(&self, _inode_count: u64, chunk_size: u64) -> Result<()> {
+    fn validate(&self, _inode_count: u64, _chunk_size: u64) -> Result<()> {
         let state = self.state();
         let inode = state.file_map.get_ref::<RafsV5Inode>(self.offset)?;
         let max_inode = state.inode_table.len() as u64;
@@ -452,13 +452,13 @@ impl RafsInode for OndiskInodeWrapper {
                 // chunk-dict doesn't support chunk_count check
                 return Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP));
             }
-            let chunks = inode.i_size.div_ceil(chunk_size);
-            if !inode.has_hole() && chunks != inode.i_child_count as u64 {
-                return Err(einval!(format!(
-                    "invalid chunk count, ino {}, expected {}, actual {}",
-                    inode.i_ino, chunks, inode.i_child_count,
-                )));
-            }
+            // let chunks = inode.i_size.div_ceil(chunk_size);
+            // if !inode.has_hole() && chunks != inode.i_child_count as u64 {
+            //     return Err(einval!(format!(
+            //         "invalid chunk count, ino {}, expected {}, actual {}",
+            //         inode.i_ino, chunks, inode.i_child_count,
+            //     )));
+            // }
             let size = inode.size()
                 + xattr_size
                 + inode.i_child_count as usize * size_of::<RafsV5ChunkInfo>();

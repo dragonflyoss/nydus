@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
@@ -18,7 +19,14 @@ import (
 const BLOB_PATH = "/content.v1/docker/registry/v2/blobs/%s/%s/%s/data"
 const REPOS_PATH = "/content.v1/docker/registry/v2/repositories"
 const MANIFEST_PATH = "/_manifests/tags/%s/current/link"
-const WEIGHT_MEDIA_TYPE = "application/vnd.cnai.model.weight.v1.tar"
+
+const (
+	DefaultFileChunkSize = "4MiB"
+)
+
+var mediaTypeChunkSizeMap = map[string]string{
+	"application/vnd.cnai.model.weight.v1.tar": "16MiB",
+}
 
 var _ backend.Handler = &Handler{}
 
@@ -41,10 +49,12 @@ type blobInfo struct {
 	// Index in the blobs array
 	blobIndex  uint32
 	blobDigest string
+	blobSize   string
 }
 
 type chunk struct {
 	blobDigest    string
+	blobSize      string
 	objectID      uint32
 	objectContent Object
 	objectOffset  uint64
@@ -66,7 +76,7 @@ func (c *chunk) FilePath() string {
 	return c.objectContent.Path
 }
 
-func (c *chunk) LimitChunkSize() uint64 {
+func (c *chunk) LimitChunkSize() string {
 	return c.objectContent.ChunkSize
 }
 
@@ -74,9 +84,13 @@ func (c *chunk) BlobDigest() string {
 	return c.blobDigest
 }
 
+func (c *chunk) BlobSize() string {
+	return c.blobSize
+}
+
 type Object struct {
 	Path      string
-	ChunkSize uint64
+	ChunkSize string
 }
 
 type Manifest struct {
@@ -102,6 +116,13 @@ type Option struct {
 	Namespace    string `json:"namespace"`
 	ImageName    string `json:"image_name"`
 	Tag          string `json:"tag"`
+}
+
+func getChunkSizeByMediaType(mediaType string) string {
+	if chunkSize, ok := mediaTypeChunkSizeMap[mediaType]; ok {
+		return chunkSize
+	}
+	return DefaultFileChunkSize
 }
 
 func NewHandler(opt Option) (*Handler, error) {
@@ -150,11 +171,8 @@ func (handler *Handler) Handle(ctx context.Context, file backend.File) ([]backen
 	if needIgnore {
 		return nil, nil
 	}
-
-	chunkSize := backend.DefaultFileChunkSize
-	if blobInfo.mediaType == WEIGHT_MEDIA_TYPE {
-		chunkSize = backend.DefaultModctlFileChunkSize
-	}
+	// MEMO 按照不同类型来处理chunk大小
+	chunkSize := getChunkSizeByMediaType(blobInfo.mediaType)
 
 	// read the tar file and get the meta of files
 	files, err := handler.readBlob(filepath.Join(handler.root, file.RelativePath))
@@ -162,15 +180,20 @@ func (handler *Handler) Handle(ctx context.Context, file backend.File) ([]backen
 		return nil, errors.Wrap(err, "read blob failed")
 	}
 
+	chunkSizeInInt, err := humanize.ParseBytes(chunkSize)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse chunk size failed")
+	}
 	for _, f := range files {
-		objectOffsets := backend.SplitObjectOffsets(int64(f.size), int64(chunkSize))
+		objectOffsets := backend.SplitObjectOffsets(int64(f.size), int64(chunkSizeInInt))
 		for _, objectOffset := range objectOffsets {
 			chunks = append(chunks, &chunk{
 				blobDigest: blobInfo.blobDigest,
+				blobSize:   blobInfo.blobSize,
 				objectID:   blobInfo.blobIndex,
 				objectContent: Object{
 					Path:      f.name,
-					ChunkSize: uint64(chunkSize),
+					ChunkSize: chunkSize,
 				},
 				objectOffset: f.offset + objectOffset,
 			})
@@ -187,7 +210,7 @@ func (handler *Handler) Backend(ctx context.Context) (*backend.Backend, error) {
 	}
 	bkd.Backends = []backend.BackendConfig{
 		{
-			Type: "model_registry",
+			Type: "registry",
 		},
 	}
 	bkd.Blobs = handler.blobs
@@ -212,6 +235,7 @@ func (handler *Handler) setBlobsMap() {
 			mediaType:  blob.Config.MediaType,
 			blobIndex:  uint32(i),
 			blobDigest: blob.Config.Digest,
+			blobSize:   blob.Config.Size,
 		}
 	}
 }
@@ -258,12 +282,14 @@ func (handler *Handler) convertToBlobs(m *Manifest) []backend.Blob {
 			layer.Digest = digest[1]
 		}
 
+		chunkSize := getChunkSizeByMediaType(layer.MediaType)
 		return backend.Blob{
 			Backend: 0,
 			Config: backend.BlobConfig{
 				MediaType: layer.MediaType,
 				Digest:    layer.Digest,
-				Size:      layer.Size,
+				Size:      fmt.Sprintf("%d", layer.Size),
+				ChunkSize: chunkSize,
 			},
 		}
 	}
@@ -307,22 +333,21 @@ func (handler *Handler) readBlob(path string) ([]fileInfo, error) {
 	var files []fileInfo
 	tarReader := tar.NewReader(f)
 	for {
-		headerOffset, err := f.Seek(0, io.SeekCurrent)
+		header, err := tarReader.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, errors.Wrap(err, "read tar file failed")
+		}
+		currentOffset, err := f.Seek(0, io.SeekCurrent)
 		if err != nil {
 			return nil, errors.Wrap(err, "seek tar file failed")
 		}
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, errors.Wrap(err, "read tar file failed")
-		}
-		dataOffset := headerOffset + 512
 		files = append(files, fileInfo{
 			name:   header.Name,
 			size:   uint64(header.Size),
-			offset: uint64(dataOffset),
+			offset: uint64(currentOffset),
 		})
 	}
 	return files, nil

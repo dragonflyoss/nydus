@@ -59,26 +59,27 @@ type InflightMetrics struct {
 }
 
 type NydusdConfig struct {
-	EnablePrefetch  bool
-	NydusdPath      string
-	BootstrapPath   string
-	ConfigPath      string
-	BackendType     string
-	BackendConfig   string
-	ExternalBackend string
-	BlobCacheDir    string
-	APISockPath     string
-	MountPath       string
-	RafsMode        string
-	DigestValidate  bool
-	CacheType       string
-	CacheCompressed bool
-	IOStatsFiles    bool
-	LatestReadFiles bool
-	AccessPattern   bool
-	PrefetchFiles   []string
-	AmplifyIO       uint64
-	ChunkDedupDb    string
+	EnablePrefetch               bool
+	NydusdPath                   string
+	BootstrapPath                string
+	ConfigPath                   string
+	BackendType                  string
+	BackendConfig                string
+	ExternalBackendConfigPath    string
+	ExternalBackendProxyCacheDir string
+	BlobCacheDir                 string
+	APISockPath                  string
+	MountPath                    string
+	RafsMode                     string
+	DigestValidate               bool
+	CacheType                    string
+	CacheCompressed              bool
+	IOStatsFiles                 bool
+	LatestReadFiles              bool
+	AccessPattern                bool
+	PrefetchFiles                []string
+	AmplifyIO                    uint64
+	ChunkDedupDb                 string
 	// Hot Upgrade config.
 	Upgrade            bool
 	SupervisorSockPath string
@@ -109,7 +110,9 @@ var configTpl = `
 			 "type": "{{.CacheType}}",
 			 "config": {
 				 "compressed": {{.CacheCompressed}},
-				 "work_dir": "{{.BlobCacheDir}}"
+				 "work_dir": "{{.BlobCacheDir}}",
+				 "external_backend_config_path": "{{.ExternalBackendConfigPath}}",
+				 "external_backend_proxy_cache_dir": "{{.ExternalBackendProxyCacheDir}}"
 			 }
 		 }
 	 },
@@ -190,7 +193,9 @@ func newNydusd(conf NydusdConfig) (*Nydusd, error) {
 		"--apisock",
 		conf.APISockPath,
 		"--log-level",
-		"error",
+		"debug",
+		"--thread-num",
+		"10",
 	}
 	if len(conf.ConfigPath) > 0 {
 		args = append(args, "--config", conf.ConfigPath)

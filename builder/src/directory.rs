@@ -70,15 +70,8 @@ impl FilesystemTreeBuilder {
             }
 
             let (mut child, mut external_child) = (Tree::new(child.clone()), Tree::new(child));
-
-            let external = ctx.attributes.is_external(&target);
-            if external {
-                info!("ignore external file data: {:?}", path);
-            }
-
             let (child_children, external_children) =
                 self.load_children(ctx, &child.node, layer_idx)?;
-
             child.children = child_children;
             external_child.children = external_children;
             child
@@ -88,10 +81,12 @@ impl FilesystemTreeBuilder {
                 .borrow_mut_node()
                 .v5_set_dir_size(ctx.fs_version, &external_child.children);
 
-            if external {
+            if ctx.attributes.is_external(&target) {
                 external_trees.push(external_child);
             } else {
-                trees.push(child.clone());
+                // TODO: need to implement type=ignore for nydus attributes,
+                // let's ignore the tree for workaround.
+                // trees.push(child.clone());
                 if ctx.attributes.is_prefix_external(target) {
                     external_trees.push(external_child);
                 }
@@ -149,14 +144,8 @@ impl DirectoryBuilder {
         bootstrap_mgr: &mut BootstrapManager,
         blob_mgr: &mut BlobManager,
         blob_writer: &mut Box<dyn Artifact>,
-        _tree: Tree,
+        tree: Tree,
     ) -> Result<BuildOutput> {
-        let layer_idx = u16::from(bootstrap_mgr.f_parent_path.is_some());
-
-        // Scan source directory to build upper layer tree.
-        let (tree, _external_tree) =
-            timing_tracer!({ self.build_tree(ctx, layer_idx) }, "build_tree")?;
-
         // Build bootstrap
         let mut bootstrap_ctx = bootstrap_mgr.create_ctx()?;
         let mut bootstrap = timing_tracer!(

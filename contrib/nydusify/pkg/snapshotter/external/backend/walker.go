@@ -82,6 +82,7 @@ func (walker *Walker) Walk(ctx context.Context, root string, handler Handler) (*
 			if cf != lastFile {
 				fa := FileAttribute{
 					BlobId:                 c.BlobDigest(),
+					BlobSize:               c.BlobSize(),
 					BlobIndex:              c.ObjectID(),
 					Chunk0CompressedOffset: c.ObjectOffset(),
 					ChunkSize:              c.LimitChunkSize(),
@@ -98,10 +99,6 @@ func (walker *Walker) Walk(ctx context.Context, root string, handler Handler) (*
 	walkFiles := []func() error{}
 
 	if err := bfsWalk(root, func(path string, info fs.FileInfo) error {
-		// if info.Size() < DefaultThrottleFileSize {
-		// 	return nil
-		// }
-
 		target, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
