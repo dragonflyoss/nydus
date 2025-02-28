@@ -4,12 +4,6 @@ import (
 	"context"
 )
 
-const (
-	DefaultFileChunkSize       = 1024 * 1024 * 1   // 1 MB
-	DefaultModctlFileChunkSize = 1024 * 1024 * 256 // 256 MB
-	DefaultThrottleFileSize    = 1024 * 1024 * 2   // 2 MB
-)
-
 type Backend struct {
 	Version  string          `json:"version"`
 	Backends []BackendConfig `json:"backends"`
@@ -29,7 +23,8 @@ type Blob struct {
 type BlobConfig struct {
 	MediaType string `json:"media_type"`
 	Digest    string `json:"digest"`
-	Size      uint64 `json:"size"`
+	Size      string `json:"size"`
+	ChunkSize string `json:"chunk_size"`
 }
 
 type Result struct {
@@ -42,7 +37,8 @@ type FileAttribute struct {
 	RelativePath           string
 	BlobIndex              uint32
 	BlobId                 string
-	ChunkSize              uint64
+	BlobSize               string
+	ChunkSize              string
 	Chunk0CompressedOffset uint64
 	Type                   string
 }
@@ -70,8 +66,9 @@ type Chunk interface {
 	// 存储chunk在blob tar文件中的偏移
 	ObjectOffset() uint64
 	FilePath() string
-	LimitChunkSize() uint64
+	LimitChunkSize() string
 	BlobDigest() string
+	BlobSize() string
 }
 
 // SplitObjectOffsets splits the total size into object offsets

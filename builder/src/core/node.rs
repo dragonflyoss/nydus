@@ -27,6 +27,7 @@ use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::digest::{DigestHasher, RafsDigest};
 use nydus_utils::{compress, crypt};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
+use parse_size::parse_size;
 use sha2::digest::Digest;
 
 use crate::{BlobContext, BlobManager, BuildContext, ChunkDict, ConversionType, Overlay};
@@ -274,6 +275,84 @@ impl Node {
         } else {
             None
         };
+
+        if blob_mgr.external {
+            let external_values = ctx.attributes.get_values(self.target()).unwrap();
+            let external_blob_index = external_values
+                .get("blob_index")
+                .and_then(|v| v.parse::<u32>().ok())
+                .ok_or_else(|| anyhow!("failed to parse blob_index"))?;
+            let external_blob_id = external_values
+                .get("blob_id")
+                .ok_or_else(|| anyhow!("failed to parse blob_id"))?;
+            let external_chunk_size = external_values
+                .get("chunk_size")
+                .and_then(|v| parse_size(v).ok())
+                .ok_or_else(|| anyhow!("failed to parse chunk_size"))?;
+            let mut external_compressed_offset = external_values
+                .get("chunk_0_compressed_offset")
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or_else(|| anyhow!("failed to parse chunk_0_compressed_offset"))?;
+            let external_compressed_size = external_values
+                .get("compressed_size")
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or_else(|| anyhow!("failed to parse compressed_size"))?;
+            let (_, external_blob_ctx) =
+                blob_mgr.get_or_create_blob_by_idx(ctx, external_blob_index)?;
+            external_blob_ctx.blob_id = external_blob_id.to_string();
+            external_blob_ctx.compressed_blob_size = external_compressed_size;
+            external_blob_ctx.uncompressed_blob_size = external_compressed_size;
+            let chunk_count = self
+                .chunk_count(external_chunk_size as u64)
+                .with_context(|| {
+                    format!("failed to get chunk count for {}", self.path().display())
+                })?;
+            self.inode.set_child_count(chunk_count);
+
+            info!(
+                "target {:?}, file_size {}, blob_index {}, blob_id {}, chunk_size {}, chunk_count {}",
+                self.target(),
+                self.inode.size(),
+                external_blob_index,
+                external_blob_id,
+                external_chunk_size,
+                chunk_count
+            );
+            for i in 0..self.inode.child_count() {
+                let mut chunk = self.inode.create_chunk();
+                let file_offset = i as u64 * external_chunk_size as u64;
+                let compressed_size = if i == self.inode.child_count() - 1 {
+                    self.inode.size() % external_chunk_size as u64
+                } else {
+                    external_chunk_size
+                } as u32;
+                chunk.set_blob_index(external_blob_index);
+                chunk.set_index(external_blob_ctx.alloc_chunk_index()?);
+                chunk.set_compressed_offset(external_compressed_offset);
+                chunk.set_compressed_size(compressed_size);
+                chunk.set_uncompressed_offset(external_compressed_offset);
+                chunk.set_uncompressed_size(compressed_size);
+                chunk.set_compressed(false);
+                chunk.set_file_offset(file_offset);
+                external_compressed_offset += compressed_size as u64;
+                external_blob_ctx.chunk_size = external_chunk_size as u32;
+
+                if let Some(h) = inode_hasher.as_mut() {
+                    h.digest_update(chunk.id().as_ref());
+                }
+
+                self.chunks.push(NodeChunk {
+                    source: ChunkSource::Build,
+                    inner: Arc::new(chunk),
+                });
+            }
+
+            if let Some(h) = inode_hasher {
+                self.inode.set_digest(h.digest_finalize());
+            }
+
+            return Ok(0);
+        }
 
         // `child_count` of regular file is reused as `chunk_count`.
         for i in 0..self.inode.child_count() {

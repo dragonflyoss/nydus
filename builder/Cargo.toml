@@ -22,6 +22,7 @@ sha2 = "0.10.2"
 tar = "0.4.40"
 vmm-sys-util = "0.12.1"
 xattr = "1.0.1"
+parse-size = "1.1.0"
 
 nydus-api = { version = "0.3", path = "../api" }
 nydus-rafs = { version = "0.3", path = "../rafs" }

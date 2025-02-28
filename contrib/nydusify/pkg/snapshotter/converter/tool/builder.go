@@ -84,7 +84,7 @@ func buildPackArgs(option PackOption) ([]string, error) {
 	args := []string{
 		"create",
 		"--log-level",
-		"warn",
+		"debug",
 		"--prefetch-policy",
 		"fs",
 		"--blob",
@@ -183,7 +183,6 @@ func Pack(option PackOption) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("\tCommand: %s %s", option.BuilderPath, strings.Join(args, " "))
 	logrus.Debugf("\tCommand: %s %s", option.BuilderPath, strings.Join(args, " "))
 
 	cmd := exec.CommandContext(ctx, option.BuilderPath, args...)

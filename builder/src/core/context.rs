@@ -929,7 +929,7 @@ impl BlobManager {
         self.current_blob_index = Some(index as u32)
     }
 
-    fn new_blob_ctx(&self, ctx: &BuildContext) -> Result<BlobContext> {
+    pub fn new_blob_ctx(&self, ctx: &BuildContext) -> Result<BlobContext> {
         let (cipher_object, cipher_ctx) = match ctx.cipher {
             crypt::Algorithm::None => (Default::default(), None),
             crypt::Algorithm::Aes128Xts => {
@@ -985,6 +985,21 @@ impl BlobManager {
         }
         // Safe to unwrap because the blob context has been added.
         Ok(self.get_current_blob().unwrap())
+    }
+
+    pub fn get_or_create_blob_by_idx(
+        &mut self,
+        ctx: &BuildContext,
+        blob_idx: u32,
+    ) -> Result<(u32, &mut BlobContext)> {
+        let blob_idx = blob_idx as usize;
+        if blob_idx >= self.blobs.len() {
+            for _ in self.blobs.len()..=blob_idx {
+                let blob_ctx = self.new_blob_ctx(ctx)?;
+                self.add_blob(blob_ctx);
+            }
+        }
+        return Ok((blob_idx as u32, &mut self.blobs[blob_idx as usize]));
     }
 
     /// Get the current blob object.

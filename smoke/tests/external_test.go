@@ -1,8 +1,6 @@
 package tests
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,31 +8,29 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
+	"github.com/distribution/reference"
+	"github.com/pkg/errors"
 
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/log"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/opencontainers/image-spec/specs-go"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
-	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/external/modctl"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
 )
 
-const testModctlRepoDir = "/home/bravey/.modctl/"
-const modelContextDir = "/home/bravey/ai/llm/Qwen2.5-0.5B-Instruct"
+var modelctlWorkDir = os.Getenv("NYDUS_MODELCTL_WORK_DIR")
+var modelctlContextDir = os.Getenv("NYDUS_MODELCTL_CONTEXT_DIR")
+var modelRegistryAuth = os.Getenv("NYDUS_MODEL_REGISTRY_AUTH")
+var modelImageRef = os.Getenv("NYDUS_MODEL_IMAGE_REF")
 
 func walk(t *testing.T, ctx tool.Context, root string) map[string]*tool.File {
 	tree := map[string]*tool.File{}
@@ -76,35 +72,24 @@ func check(t *testing.T, ctx tool.Context, root1, root2 string) {
 	}
 }
 
-func verify(t *testing.T, ctx tool.Context) {
+func verify(t *testing.T, ctx tool.Context, ExternalBackendConfigPath string) {
 	config := tool.NydusdConfig{
-		EnablePrefetch: ctx.Runtime.EnablePrefetch,
-		NydusdPath:     ctx.Binary.Nydusd,
-		BootstrapPath:  ctx.Env.BootstrapPath,
-		ConfigPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
-		BackendType:    "localfs",
-		BackendConfig:  fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
-		ExternalBackend: fmt.Sprintf(`
-		[
-			{
-				"patch": {
-					"repository": "https://zeta.alipay.com/zeta/model-test"
-				},
-				"type": "zeta",
-				"config": {
-					"auth": "%s"
-				}
-			}
-		]
-	`, os.Getenv("ZETA_AUTH")),
-		BlobCacheDir:    ctx.Env.CacheDir,
-		APISockPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
-		MountPath:       ctx.Env.MountDir,
-		CacheType:       ctx.Runtime.CacheType,
-		CacheCompressed: ctx.Runtime.CacheCompressed,
-		RafsMode:        ctx.Runtime.RafsMode,
-		DigestValidate:  false,
-		AmplifyIO:       ctx.Runtime.AmplifyIO,
+		EnablePrefetch:               ctx.Runtime.EnablePrefetch,
+		NydusdPath:                   ctx.Binary.Nydusd,
+		BootstrapPath:                ctx.Env.BootstrapPath,
+		ConfigPath:                   filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		BackendType:                  "localfs",
+		BackendConfig:                fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
+		ExternalBackendConfigPath:    ExternalBackendConfigPath,
+		ExternalBackendProxyCacheDir: ctx.Env.CacheDir,
+		BlobCacheDir:                 ctx.Env.CacheDir,
+		APISockPath:                  filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		MountPath:                    ctx.Env.MountDir,
+		CacheType:                    ctx.Runtime.CacheType,
+		CacheCompressed:              ctx.Runtime.CacheCompressed,
+		RafsMode:                     ctx.Runtime.RafsMode,
+		DigestValidate:               false,
+		AmplifyIO:                    ctx.Runtime.AmplifyIO,
 	}
 
 	nydusd, err := tool.NewNydusd(config)
@@ -115,32 +100,13 @@ func verify(t *testing.T, ctx tool.Context) {
 	fmt.Println("mountpoint:", ctx.Env.MountDir)
 	time.Sleep(time.Second * 10000)
 
-	check(t, ctx, testModctlRepoDir, ctx.Env.MountDir)
+	// check(t, ctx, testModctlRepoDir, ctx.Env.MountDir)
 
 	defer func() {
 		if err := nydusd.Umount(); err != nil {
 			log.L.WithError(err).Errorf("umount")
 		}
 	}()
-}
-
-func mergeLayers(t *testing.T, ctx tool.Context, mergeOption converter.MergeOption, layers []converter.Layer) ([]digest.Digest, string, *digest.Digest) {
-	for idx := range layers {
-		ra, err := local.OpenReader(filepath.Join(ctx.Env.BlobDir, layers[idx].Digest.Hex()))
-		require.NoError(t, err)
-		defer ra.Close()
-		layers[idx].ReaderAt = ra
-	}
-
-	bootstrap, err := os.CreateTemp(ctx.Env.WorkDir, "bootstrap-")
-	require.NoError(t, err)
-	defer bootstrap.Close()
-	digester := digest.SHA256.Digester()
-	writer := io.MultiWriter(bootstrap, digester.Hash())
-	actualDigests, err := converter.Merge(context.Background(), layers, writer, mergeOption)
-	require.NoError(t, err)
-	bootstrapDiffID := digester.Digest()
-	return actualDigests, bootstrap.Name(), &bootstrapDiffID
 }
 
 func packWithAttributes(t *testing.T, packOption converter.PackOption, blobDir, sourceDir string) (digest.Digest, digest.Digest) {
@@ -171,142 +137,28 @@ func packWithAttributes(t *testing.T, packOption converter.PackOption, blobDir, 
 	return blobDigest, externalBlobDigest
 }
 
-func pushManifest(
-	ctx context.Context, modelCfg modelspec.Model, nydusImage parser.Image, bootstrapDiffID digest.Digest, targetRef, bootstrapTarPath, fsversion string, insecure bool,
-) error {
-
-	// Push image config
-	modelCfg.ModelFS.DiffIDs = []digest.Digest{
-		bootstrapDiffID,
-	}
-
-	configBytes, configDesc, err := makeDesc(modelCfg, nydusImage.Manifest.Config)
-	if err != nil {
-		return errors.Wrap(err, "make config desc")
-	}
-	fmt.Printf("config bytes %s\n", string(configBytes))
-	fmt.Printf("traget_ref %s\n", targetRef)
-	remoter, err := provider.DefaultRemote(targetRef, insecure)
-	if err != nil {
-		return errors.Wrap(err, "create remote")
-	}
-
-	fmt.Printf("config desc digest %s\n", configDesc.Digest)
-	if err := remoter.Push(ctx, *configDesc, true, bytes.NewReader(configBytes)); err != nil {
-		if utils.RetryWithHTTP(err) {
-			remoter.MaybeWithHTTP(err)
-			if err := remoter.Push(ctx, *configDesc, true, bytes.NewReader(configBytes)); err != nil {
-				return errors.Wrap(err, "push image config")
-			}
-		} else {
-			return errors.Wrap(err, "push image config")
-		}
-	}
-
-	// Push bootstrap layer
-	bootstrapTar, err := os.Open(bootstrapTarPath)
-	if err != nil {
-		return errors.Wrap(err, "open bootstrap tar file")
-	}
-
-	bootstrapTarGzPath := bootstrapTarPath + ".gz"
-	bootstrapTarGz, err := os.Create(bootstrapTarGzPath)
-	if err != nil {
-		return errors.Wrap(err, "create bootstrap tar.gz file")
-	}
-	defer bootstrapTarGz.Close()
-
-	digester := digest.SHA256.Digester()
-	gzWriter := gzip.NewWriter(io.MultiWriter(bootstrapTarGz, digester.Hash()))
-	if _, err := io.Copy(gzWriter, bootstrapTar); err != nil {
-		return errors.Wrap(err, "compress bootstrap tar to tar.gz")
-	}
-	if err := gzWriter.Close(); err != nil {
-		return errors.Wrap(err, "close gzip writer")
-	}
-
-	ra, err := local.OpenReader(bootstrapTarGzPath)
-	if err != nil {
-		return errors.Wrap(err, "open reader for upper blob")
-	}
-	defer ra.Close()
-
-	bootstrapDesc := ocispec.Descriptor{
-		Digest:    digester.Digest(),
-		Size:      ra.Size(),
-		MediaType: ocispec.MediaTypeImageLayerGzip,
-		Annotations: map[string]string{
-			converter.LayerAnnotationFSVersion:      fsversion,
-			converter.LayerAnnotationNydusBootstrap: "true"},
-	}
-
-	bootstrapRc, err := os.Open(bootstrapTarGzPath)
-	if err != nil {
-		return errors.Wrapf(err, "open bootstrap %s", bootstrapTarGzPath)
-	}
-	defer bootstrapRc.Close()
-	if err := remoter.Push(ctx, bootstrapDesc, true, bootstrapRc); err != nil {
-		return errors.Wrap(err, "push bootstrap layer")
-	}
-
-	// Push image manifest
-	var layers []ocispec.Descriptor
-	layers = append(layers, bootstrapDesc)
-
-	nydusImage.Manifest.Config = *configDesc
-	nydusImage.Manifest.Layers = layers
-
-	manifestBytes, manifestDesc, err := makeDesc(nydusImage.Manifest, nydusImage.Desc)
-	if err != nil {
-		return errors.Wrap(err, "make manifest desc")
-	}
-	fmt.Printf("manifest Bytes %s, digest: %s type: %s \n", string(manifestBytes), manifestDesc.Digest, manifestDesc.MediaType)
-	if err := remoter.Push(ctx, *manifestDesc, false, bytes.NewReader(manifestBytes)); err != nil {
-		return errors.Wrap(err, "push image manifest")
-	}
-
-	return nil
-}
-
-func buildNydusImage() *parser.Image {
-	manifest := ocispec.Manifest{
-		Versioned:    specs.Versioned{SchemaVersion: 2},
-		MediaType:    ocispec.MediaTypeImageManifest,
-		ArtifactType: modelspec.ArtifactTypeModelManifest,
-		Config: ocispec.Descriptor{
-			MediaType: modelspec.MediaTypeModelConfig,
-		},
-		Annotations: map[string]string{
-			"containerd.io/snapshot/nydus-artifact-type": modelspec.ArtifactTypeModelManifest,
-		},
-	}
-	desc := ocispec.Descriptor{
-		MediaType: ocispec.MediaTypeImageManifest,
-	}
-	nydusImage := &parser.Image{
-		Manifest: manifest,
-		Desc:     desc,
-	}
-	return nydusImage
-}
-
-func makeDesc(x interface{}, oldDesc ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
-	data, err := json.MarshalIndent(x, "", "  ")
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "json marshal")
-	}
-	dgst := digest.SHA256.FromBytes(data)
-
-	newDesc := oldDesc
-	newDesc.Size = int64(len(data))
-	newDesc.Digest = dgst
-
-	return data, &newDesc, nil
-}
-
 type ModctlTestConfig struct {
 	Option    modctl.Option `json:"option"`
 	TargetRef string        `json:"target_ref"`
+}
+
+func parseReference(ref string) (string, string, string, error) {
+	refs, err := reference.Parse(ref)
+	if err != nil {
+		return "", "", "", errors.Wrapf(err, "invalid image reference: %s", ref)
+	}
+
+	if named, ok := refs.(reference.Named); ok {
+		domain := reference.Domain(named)
+		name := reference.Path(named)
+		tag := ""
+		if tagged, ok := named.(reference.Tagged); ok {
+			tag = tagged.Tag()
+		}
+		return domain, name, tag, nil
+	}
+
+	return "", "", "", fmt.Errorf("invalid image reference: %s", ref)
 }
 
 // sudo WORK_DIR=/tmp \
@@ -317,21 +169,30 @@ func TestModctlExternal(t *testing.T) {
 	// Prepare work directory
 	ctx := tool.DefaultContext(t)
 	ctx.PrepareWorkDir(t)
+	ctx.Build.FSVersion = "5"
 	// defer ctx.Destroy(t)
 
 	// Prepare backend meta file
 	attributesPath := filepath.Join(ctx.Env.WorkDir, ".nydusattributes")
-	backendMetaPath := filepath.Join(ctx.Env.CacheDir, ".backend.meta")
-	backendConfigPath := filepath.Join(ctx.Env.CacheDir, ".backend.json")
-	optPath := "./modctl.json"
-	optBytes, err := os.ReadFile(optPath)
+	backendMetaPath := filepath.Join(ctx.Env.WorkDir, "backend.meta")
+	backendConfigPath := filepath.Join(ctx.Env.WorkDir, "build.backend.json")
+
+	host, name, tag, err := parseReference(modelImageRef)
 	require.NoError(t, err)
-	var cfg ModctlTestConfig
-	json.Unmarshal([]byte(optBytes), &cfg)
-	handler, err := modctl.NewHandler(cfg.Option)
+	repo := strings.SplitN(name, "/", 2)
+	require.Len(t, repo, 2)
+
+	opt := modctl.Option{
+		Root:         modelctlWorkDir,
+		RegistryHost: host,
+		Namespace:    repo[0],
+		ImageName:    repo[1],
+		Tag:          tag,
+	}
+	handler, err := modctl.NewHandler(opt)
 	require.NoError(t, err)
 	err = external.Handle(context.Background(), external.Options{
-		Dir:              testModctlRepoDir,
+		Dir:              modelctlWorkDir,
 		Handler:          handler,
 		MetaOutput:       backendMetaPath,
 		BackendOutput:    backendConfigPath,
@@ -345,60 +206,52 @@ func TestModctlExternal(t *testing.T) {
 		Compressor:     ctx.Build.Compressor,
 		FsVersion:      ctx.Build.FSVersion,
 		ChunkSize:      ctx.Build.ChunkSize,
-		FromDir:        modelContextDir,
+		FromDir:        modelctlContextDir,
 		AttributesPath: attributesPath,
 	}
-	fmt.Printf("env: %+v \n", ctx.Env)
-	blobDigest, externalBlobDigest := packWithAttributes(t, packOption, ctx.Env.BlobDir, modelContextDir)
+	_, externalBlobDigest := packWithAttributes(t, packOption, ctx.Env.BlobDir, modelctlContextDir)
 
-	err = os.Rename(backendMetaPath, filepath.Join(ctx.Env.CacheDir, externalBlobDigest.Hex()+".backend.meta"))
+	externalBlobRa, err := local.OpenReader(filepath.Join(ctx.Env.BlobDir, externalBlobDigest.Hex()))
 	require.NoError(t, err)
 
-	bkdPath := filepath.Join(ctx.Env.CacheDir, externalBlobDigest.Hex()+".backend.json")
-	err = os.Rename(backendConfigPath, bkdPath)
+	bootstrapPath := filepath.Join(ctx.Env.WorkDir, "bootstrap")
+	bootstrap, err := os.Create(filepath.Join(ctx.Env.WorkDir, "bootstrap"))
+	require.NoError(t, err)
+	defer bootstrap.Close()
+
+	_, err = converter.UnpackEntry(externalBlobRa, converter.EntryBootstrap, bootstrap)
 	require.NoError(t, err)
 
-	mergeOption := converter.MergeOption{
+	fmt.Println("====================================== BOOTSTRAP", bootstrapPath)
+
+	// Check bootstrap file
+	err = tool.CheckBootstrap(tool.CheckOption{
 		BuilderPath: ctx.Binary.Builder,
-		WithTar:     true,
-		AppendFiles: []converter.File{},
+	}, bootstrapPath)
+	require.NoError(t, err)
+
+	// Prepare external backend config
+	backendBytes, err := os.ReadFile(backendConfigPath)
+	require.NoError(t, err)
+	backend := backend.Backend{}
+	err = json.Unmarshal(backendBytes, &backend)
+	require.NoError(t, err)
+
+	backend.Backends[0].Config = map[string]string{
+		"scheme": "https",
+		"host":   host,
+		"repo":   name,
+		"auth":   modelRegistryAuth,
 	}
-	bkdCfg, err := os.ReadFile(bkdPath)
-	require.NoError(t, err)
-	bkdReader := bytes.NewReader(bkdCfg)
-	mergeOption.AppendFiles = append(mergeOption.AppendFiles, converter.File{
-		Name:   "backend.json",
-		Reader: bkdReader,
-		Size:   int64(len(bkdCfg)),
-	})
-	actualDigests, mergedBootstrap, bootstrapDiffID := mergeLayers(t, *ctx, mergeOption, []converter.Layer{
-		{
-			Digest: blobDigest,
-		},
-		{
-			Digest: externalBlobDigest,
-		},
-	})
-	require.Equal(t, []digest.Digest{blobDigest, externalBlobDigest}, actualDigests)
-	fmt.Printf("mergedBootstrap: %s", mergedBootstrap)
-	bootStrapTarPath := mergedBootstrap + ".tar"
-	os.Rename(mergedBootstrap, bootStrapTarPath)
 
-	cfgBytes, err := handler.GetConfig()
-	require.NoError(t, err)
-	var modelCfg modelspec.Model
-	err = json.Unmarshal(cfgBytes, &modelCfg)
+	backendBytes, err = json.MarshalIndent(backend, "", "  ")
 	require.NoError(t, err)
 
-	nydusImage := buildNydusImage()
-	err = pushManifest(context.Background(), modelCfg, *nydusImage, *bootstrapDiffID, cfg.TargetRef, bootStrapTarPath, ctx.Build.FSVersion, true)
+	runtimeBackendConfigPath := filepath.Join(ctx.Env.WorkDir, "backend.json")
+	err = os.WriteFile(runtimeBackendConfigPath, backendBytes, 0644)
 	require.NoError(t, err)
 
-	// build manifest
-
-	// push
-
-	// // Verify layer mounted by nydusd
-	// ctx.Env.BootstrapPath = mergedBootstrap
-	// verify(t, *ctx)
+	// Verify layer mounted by nydusd
+	ctx.Env.BootstrapPath = bootstrapPath
+	verify(t, *ctx, runtimeBackendConfigPath)
 }

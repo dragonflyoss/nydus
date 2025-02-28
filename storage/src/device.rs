@@ -280,7 +280,8 @@ impl BlobInfo {
 
     /// Get the id of the blob, with special handling of `inlined-meta` case.
     pub fn blob_id(&self) -> String {
-        if (self.has_feature(BlobFeatures::INLINED_FS_META)
+        if (!self.has_feature(BlobFeatures::EXTERNAL)
+            && self.has_feature(BlobFeatures::INLINED_FS_META)
             && !self.has_feature(BlobFeatures::SEPARATE))
             || !self.has_feature(BlobFeatures::CAP_TAR_TOC)
         {

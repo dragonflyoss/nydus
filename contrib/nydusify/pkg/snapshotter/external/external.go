@@ -42,8 +42,8 @@ func Handle(ctx context.Context, opts Options) error {
 	bkd := ret.Backend
 	attributes := []Attribute{}
 	for _, file := range ret.Files {
-		p := fmt.Sprintf("/%s type=%s blob_index=%d blob_id=%s chunk_size=%dMB chunk_0_compressed_offset=%d",
-			file.RelativePath, file.Type, file.BlobIndex, file.BlobId, file.ChunkSize/1024/1024, file.Chunk0CompressedOffset)
+		p := fmt.Sprintf("/%s type=%s blob_index=%d blob_id=%s chunk_size=%s chunk_0_compressed_offset=%d compressed_size=%s",
+			file.RelativePath, file.Type, file.BlobIndex, file.BlobId, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize)
 		attributes = append(attributes, Attribute{
 			Pattern: p,
 		})

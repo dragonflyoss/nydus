@@ -23,7 +23,7 @@ pub struct Item {
 
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct Attributes {
-    pub items: Vec<Item>,
+    pub items: HashMap<PathBuf, HashMap<String, String>>,
 }
 
 impl Attributes {
@@ -32,7 +32,7 @@ impl Attributes {
         let content = fs::read(path)?;
         let _items = parse(&content);
 
-        let mut items = Vec::new();
+        let mut items = HashMap::new();
         for _item in _items {
             let _item = _item?;
             if let Kind::Pattern(pattern) = _item.0 {
@@ -47,30 +47,39 @@ impl Attributes {
                     let state = line.state.as_bstr().unwrap_or_default();
                     attributes.insert(name.to_string(), state.to_string());
                 }
-                items.push(Item {
-                    pattern: path,
-                    attributes,
-                });
+                items.insert(path, attributes);
             }
         }
 
         Ok(Attributes { items })
     }
 
-    fn check_external(&self, item: &Item) -> bool {
-        item.attributes.get(KEY_TYPE) == Some(&VAL_EXTERNAL.to_string())
+    fn check_external(&self, attributes: &HashMap<String, String>) -> bool {
+        attributes.get(KEY_TYPE) == Some(&VAL_EXTERNAL.to_string())
     }
 
     pub fn is_external<P: AsRef<Path>>(&self, path: P) -> bool {
-        self.items
-            .iter()
-            .any(|item| item.pattern == path.as_ref() && self.check_external(item))
+        if let Some(attributes) = self.items.get(path.as_ref()) {
+            return self.check_external(attributes);
+        }
+        false
     }
 
     pub fn is_prefix_external<P: AsRef<Path>>(&self, target: P) -> bool {
         self.items
             .iter()
-            .any(|item| item.pattern.starts_with(&target) && self.check_external(item))
+            .any(|item| item.0.starts_with(&target) && self.check_external(item.1))
+    }
+
+    pub fn get_value<P: AsRef<Path>, K: AsRef<str>>(&self, path: P, key: K) -> Option<String> {
+        if let Some(attributes) = self.items.get(path.as_ref()) {
+            return attributes.get(key.as_ref()).map(|s| s.to_string());
+        }
+        None
+    }
+
+    pub fn get_values<P: AsRef<Path>>(&self, path: P) -> Option<&HashMap<String, String>> {
+        self.items.get(path.as_ref())
     }
 }
 
