@@ -5,11 +5,32 @@
 package converter
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"io"
 	"os"
+	"path/filepath"
 
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
+	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/external/modctl"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
+	snapConv "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
+
+	"encoding/json"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
+	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+
 	"github.com/goharbor/acceleration-service/pkg/converter"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
 	"github.com/pkg/errors"
@@ -23,6 +44,9 @@ type Opt struct {
 	Source       string
 	Target       string
 	ChunkDictRef string
+
+	SourceBackendType   string
+	SourceBackendConfig string
 
 	SourceInsecure    bool
 	TargetInsecure    bool
@@ -54,7 +78,16 @@ type Opt struct {
 	OutputJSON string
 }
 
+type SourceBackendConfig struct {
+	Context string `json:"context"`
+	WorkDir string `json:"work_dir"`
+}
+
 func Convert(ctx context.Context, opt Opt) error {
+	if opt.SourceBackendType == "modelfile" {
+		return convertModelFile(ctx, opt)
+	}
+
 	ctx = namespaces.WithNamespace(ctx, "nydusify")
 	platformMC, err := platformutil.ParsePlatforms(opt.AllPlatforms, opt.Platforms)
 	if err != nil {
@@ -97,4 +130,332 @@ func Convert(ctx context.Context, opt Opt) error {
 		dumpMetric(metric, opt.OutputJSON)
 	}
 	return err
+}
+
+func convertModelFile(ctx context.Context, opt Opt) error {
+	if _, err := os.Stat(opt.WorkDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.MkdirAll(opt.WorkDir, 0755); err != nil {
+				return errors.Wrap(err, "prepare work directory")
+			}
+			// We should only clean up when the work directory not exists
+			// before, otherwise it may delete user data by mistake.
+			defer os.RemoveAll(opt.WorkDir)
+		} else {
+			return errors.Wrap(err, "stat work directory")
+		}
+	}
+	tmpDir, err := os.MkdirTemp(opt.WorkDir, "nydusify-")
+	if err != nil {
+		return errors.Wrap(err, "create temp directory")
+	}
+	defer os.RemoveAll(tmpDir)
+	attributesPath := filepath.Join(tmpDir, ".nydusattributes")
+	backendMetaPath := filepath.Join(tmpDir, ".backend.meta")
+	backendConfigPath := filepath.Join(tmpDir, ".backend.json")
+
+	var srcBkdCfg SourceBackendConfig
+	json.Unmarshal([]byte(opt.SourceBackendConfig), &srcBkdCfg)
+	modctlHandler, err := newModctlHandler(opt, srcBkdCfg.WorkDir)
+	if err != nil {
+		return errors.Wrap(err, "create modctl handler")
+	}
+
+	if err := external.Handle(context.Background(), external.Options{
+		Dir:              srcBkdCfg.WorkDir,
+		Handler:          modctlHandler,
+		MetaOutput:       backendMetaPath,
+		BackendOutput:    backendConfigPath,
+		AttributesOutput: attributesPath,
+	}); err != nil {
+		return errors.Wrap(err, "handle modctl")
+	}
+
+	// Make nydus layer with external blob
+	packOption := snapConv.PackOption{
+		BuilderPath:    opt.NydusImagePath,
+		Compressor:     opt.Compressor,
+		FsVersion:      opt.FsVersion,
+		ChunkSize:      opt.ChunkSize,
+		FromDir:        srcBkdCfg.Context,
+		AttributesPath: attributesPath,
+	}
+	blobDigest, externalBlobDigest, err := packWithAttributes(ctx, packOption, tmpDir)
+	if err != nil {
+		return errors.Wrap(err, "pack to blob")
+	}
+
+	bkdPath, err := renamePathWithDigest(tmpDir, backendMetaPath, backendConfigPath, externalBlobDigest)
+	if err != nil {
+		return errors.Wrap(err, "rename file")
+	}
+
+	// Merge layers to get the final bootstrap
+	mergeOption, err := buildMergeOption(bkdPath, opt)
+	if err != nil {
+		return errors.Wrap(err, "build merge option")
+	}
+	_, mergedBootstrap, bootstrapDiffID, err := mergeLayers(tmpDir, *mergeOption, []snapConv.Layer{
+		{
+			Digest: blobDigest,
+		},
+		{
+			Digest: externalBlobDigest,
+		},
+	})
+	bootStrapTarPath := mergedBootstrap + ".tar"
+	if err := os.Rename(mergedBootstrap, bootStrapTarPath); err != nil {
+		return errors.Wrap(err, "rename bootstrap tar file")
+	}
+
+	modelCfg, err := buildModelConfig(modctlHandler)
+	if err != nil {
+		return errors.Wrap(err, "build model config")
+	}
+
+	nydusImage := buildNydusImage()
+	return pushManifest(context.Background(), *modelCfg, *nydusImage, *bootstrapDiffID, opt.Target, bootStrapTarPath, opt.FsVersion, opt.TargetInsecure)
+}
+
+func newModctlHandler(opt Opt, workDir string) (*modctl.Handler, error) {
+	modctlOpt, err := modctl.GetOption(opt.Source, workDir)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse modctl option")
+	}
+	return modctl.NewHandler(*modctlOpt)
+}
+
+func renamePathWithDigest(workDir, backendMetaPath, backendConfigPath string, digest digest.Digest) (string, error) {
+	digestPath := filepath.Join(workDir, digest.Hex())
+	if err := os.Rename(backendMetaPath, digestPath+".backend.meta"); err != nil {
+		return "", errors.Wrap(err, "rename backend meta file")
+	}
+
+	bkdPath := digestPath + ".backend.json"
+	if err := os.Rename(backendConfigPath, bkdPath); err != nil {
+		return "", errors.Wrap(err, "rename backend config file")
+	}
+	return bkdPath, nil
+}
+
+func buildMergeOption(bkdPath string, opt Opt) (*snapConv.MergeOption, error) {
+	mergeOption := snapConv.MergeOption{
+		BuilderPath: opt.NydusImagePath,
+		WithTar:     true,
+		AppendFiles: []snapConv.File{},
+	}
+	bkdCfg, err := os.ReadFile(bkdPath)
+	if err != nil {
+		return nil, errors.Wrap(err, "read backend config file")
+	}
+	bkdReader := bytes.NewReader(bkdCfg)
+	mergeOption.AppendFiles = append(mergeOption.AppendFiles, snapConv.File{
+		Name:   "backend.json",
+		Reader: bkdReader,
+		Size:   int64(len(bkdCfg)),
+	})
+	return &mergeOption, nil
+}
+func packWithAttributes(ctx context.Context, packOption snapConv.PackOption, blobDir string) (digest.Digest, digest.Digest, error) {
+	blob, err := os.CreateTemp(blobDir, "blob-")
+	if err != nil {
+		return "", "", errors.Wrap(err, "create temp file for blob")
+	}
+	defer blob.Close()
+
+	externalBlob, err := os.CreateTemp(blobDir, "external-blob-")
+	if err != nil {
+		return "", "", errors.Wrap(err, "create temp file for external blob")
+	}
+	defer externalBlob.Close()
+
+	blobDigester := digest.Canonical.Digester()
+	blobWriter := io.MultiWriter(blob, blobDigester.Hash())
+	externalBlobDigester := digest.Canonical.Digester()
+	packOption.ExternalBlobWriter = io.MultiWriter(externalBlob, externalBlobDigester.Hash())
+	_, err = snapConv.Pack(ctx, blobWriter, packOption)
+	if err != nil {
+		return "", "", errors.Wrap(err, "pack to blob")
+	}
+
+	blobDigest := blobDigester.Digest()
+	err = os.Rename(blob.Name(), filepath.Join(blobDir, blobDigest.Hex()))
+	if err != nil {
+		return "", "", errors.Wrap(err, "rename blob file")
+	}
+
+	externalBlobDigest := externalBlobDigester.Digest()
+	err = os.Rename(externalBlob.Name(), filepath.Join(blobDir, externalBlobDigest.Hex()))
+	if err != nil {
+		return "", "", errors.Wrap(err, "rename external blob file")
+	}
+
+	return blobDigest, externalBlobDigest, nil
+}
+
+func mergeLayers(workDir string, mergeOption snapConv.MergeOption, layers []snapConv.Layer) ([]digest.Digest, string, *digest.Digest, error) {
+	for idx := range layers {
+		ra, err := local.OpenReader(filepath.Join(workDir, layers[idx].Digest.Hex()))
+		if err != nil {
+			return nil, "", nil, errors.Wrap(err, "open reader for blob")
+		}
+		defer ra.Close()
+		layers[idx].ReaderAt = ra
+	}
+
+	bootstrap, err := os.CreateTemp(workDir, "bootstrap-")
+	if err != nil {
+		return nil, "", nil, errors.Wrap(err, "create temp file for bootstrap")
+	}
+	defer bootstrap.Close()
+	digester := digest.SHA256.Digester()
+	writer := io.MultiWriter(bootstrap, digester.Hash())
+	actualDigests, err := snapConv.Merge(context.Background(), layers, writer, mergeOption)
+	if err != nil {
+		return nil, "", nil, errors.Wrap(err, "merge layers")
+	}
+	bootstrapDiffID := digester.Digest()
+	return actualDigests, bootstrap.Name(), &bootstrapDiffID, nil
+}
+
+func buildNydusImage() *parser.Image {
+	manifest := ocispec.Manifest{
+		Versioned:    specs.Versioned{SchemaVersion: 2},
+		MediaType:    ocispec.MediaTypeImageManifest,
+		ArtifactType: modelspec.ArtifactTypeModelManifest,
+		Config: ocispec.Descriptor{
+			MediaType: modelspec.MediaTypeModelConfig,
+		},
+		Annotations: map[string]string{
+			"containerd.io/snapshot/nydus-artifact-type": modelspec.ArtifactTypeModelManifest,
+		},
+	}
+	desc := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageManifest,
+	}
+	nydusImage := &parser.Image{
+		Manifest: manifest,
+		Desc:     desc,
+	}
+	return nydusImage
+}
+
+func buildModelConfig(modctlHandler *modctl.Handler) (*modelspec.Model, error) {
+	cfgBytes, err := modctlHandler.GetConfig()
+	if err != nil {
+		return nil, errors.Wrap(err, "get modctl config")
+	}
+	var modelCfg modelspec.Model
+	if err := json.Unmarshal(cfgBytes, &modelCfg); err != nil {
+		return nil, errors.Wrap(err, "unmarshal modctl config")
+	}
+	return &modelCfg, nil
+}
+
+func pushManifest(
+	ctx context.Context, modelCfg modelspec.Model, nydusImage parser.Image, bootstrapDiffID digest.Digest, targetRef, bootstrapTarPath, fsversion string, insecure bool,
+) error {
+
+	// Push image config
+	modelCfg.ModelFS.DiffIDs = []digest.Digest{
+		bootstrapDiffID,
+	}
+
+	configBytes, configDesc, err := makeDesc(modelCfg, nydusImage.Manifest.Config)
+	if err != nil {
+		return errors.Wrap(err, "make config desc")
+	}
+
+	remoter, err := pkgPvd.DefaultRemote(targetRef, insecure)
+	if err != nil {
+		return errors.Wrap(err, "create remote")
+	}
+
+	if err := remoter.Push(ctx, *configDesc, true, bytes.NewReader(configBytes)); err != nil {
+		if utils.RetryWithHTTP(err) {
+			remoter.MaybeWithHTTP(err)
+			if err := remoter.Push(ctx, *configDesc, true, bytes.NewReader(configBytes)); err != nil {
+				return errors.Wrap(err, "push image config")
+			}
+		} else {
+			return errors.Wrap(err, "push image config")
+		}
+	}
+
+	// Push bootstrap layer
+	bootstrapTar, err := os.Open(bootstrapTarPath)
+	if err != nil {
+		return errors.Wrap(err, "open bootstrap tar file")
+	}
+
+	bootstrapTarGzPath := bootstrapTarPath + ".gz"
+	bootstrapTarGz, err := os.Create(bootstrapTarGzPath)
+	if err != nil {
+		return errors.Wrap(err, "create bootstrap tar.gz file")
+	}
+	defer bootstrapTarGz.Close()
+
+	digester := digest.SHA256.Digester()
+	gzWriter := gzip.NewWriter(io.MultiWriter(bootstrapTarGz, digester.Hash()))
+	if _, err := io.Copy(gzWriter, bootstrapTar); err != nil {
+		return errors.Wrap(err, "compress bootstrap tar to tar.gz")
+	}
+	if err := gzWriter.Close(); err != nil {
+		return errors.Wrap(err, "close gzip writer")
+	}
+
+	ra, err := local.OpenReader(bootstrapTarGzPath)
+	if err != nil {
+		return errors.Wrap(err, "open reader for upper blob")
+	}
+	defer ra.Close()
+
+	bootstrapDesc := ocispec.Descriptor{
+		Digest:    digester.Digest(),
+		Size:      ra.Size(),
+		MediaType: ocispec.MediaTypeImageLayerGzip,
+		Annotations: map[string]string{
+			snapConv.LayerAnnotationFSVersion:      fsversion,
+			snapConv.LayerAnnotationNydusBootstrap: "true"},
+	}
+
+	bootstrapRc, err := os.Open(bootstrapTarGzPath)
+	if err != nil {
+		return errors.Wrapf(err, "open bootstrap %s", bootstrapTarGzPath)
+	}
+	defer bootstrapRc.Close()
+	if err := remoter.Push(ctx, bootstrapDesc, true, bootstrapRc); err != nil {
+		return errors.Wrap(err, "push bootstrap layer")
+	}
+
+	// Push image manifest
+	var layers []ocispec.Descriptor
+	layers = append(layers, bootstrapDesc)
+
+	nydusImage.Manifest.Config = *configDesc
+	nydusImage.Manifest.Layers = layers
+
+	manifestBytes, manifestDesc, err := makeDesc(nydusImage.Manifest, nydusImage.Desc)
+	if err != nil {
+		return errors.Wrap(err, "make manifest desc")
+	}
+	if err := remoter.Push(ctx, *manifestDesc, false, bytes.NewReader(manifestBytes)); err != nil {
+		return errors.Wrap(err, "push image manifest")
+	}
+
+	return nil
+}
+
+func makeDesc(x interface{}, oldDesc ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
+	data, err := json.MarshalIndent(x, "", "  ")
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "json marshal")
+	}
+	dgst := digest.SHA256.FromBytes(data)
+
+	newDesc := oldDesc
+	newDesc.Size = int64(len(data))
+	newDesc.Digest = dgst
+
+	return data, &newDesc, nil
 }
