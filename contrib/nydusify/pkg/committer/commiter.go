@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/containerd/labels"
+
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/reference/docker"
@@ -35,6 +37,7 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// Opt defines the options for committing container changes
 type Opt struct {
 	WorkDir           string
 	ContainerdAddress string
@@ -92,9 +95,11 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "inspect container")
 	}
 
+	originalSourceRef := inspect.Image
+
 	logrus.Infof("pulling base bootstrap")
 	start := time.Now()
-	image, committedLayers, err := cm.pullBootstrap(ctx, inspect.Image, "bootstrap-base", opt.SourceInsecure)
+	image, committedLayers, err := cm.pullBootstrap(ctx, originalSourceRef, "bootstrap-base", opt.SourceInsecure)
 	if err != nil {
 		return errors.Wrap(err, "pull base bootstrap")
 	}
@@ -105,6 +110,18 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 	}
 	if opt.FsVersion, opt.Compressor, err = cm.obtainBootStrapInfo(ctx, "bootstrap-base"); err != nil {
 		return errors.Wrap(err, "obtain bootstrap FsVersion and Compressor")
+	}
+
+	// Push lower blobs
+	for idx := range image.Manifest.Layers {
+		layer := image.Manifest.Layers[idx]
+		if layer.MediaType == utils.MediaTypeNydusBlob {
+			name := fmt.Sprintf("blob-mount-%d", idx)
+			_, err := cm.pushBlob(ctx, name, layer.Digest, originalSourceRef, targetRef, opt.TargetInsecure, image)
+			if err != nil {
+				return errors.Wrap(err, "push lower blob")
+			}
+		}
 	}
 
 	mountList := NewMountList()
@@ -123,7 +140,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 			}
 			logrus.Infof("pushing blob for upper")
 			start := time.Now()
-			upperBlobDesc, err := cm.pushBlob(ctx, "blob-upper", *upperBlobDigest, opt.TargetRef, opt.TargetInsecure)
+			upperBlobDesc, err := cm.pushBlob(ctx, "blob-upper", *upperBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image)
 			if err != nil {
 				return errors.Wrap(err, "push upper blob")
 			}
@@ -150,7 +167,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 						}
 						logrus.Infof("pushing blob for mount")
 						start := time.Now()
-						mountBlobDesc, err := cm.pushBlob(ctx, name, *mountBlobDigest, opt.TargetRef, opt.TargetInsecure)
+						mountBlobDesc, err := cm.pushBlob(ctx, name, *mountBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image)
 						if err != nil {
 							return errors.Wrap(err, "push mount blob")
 						}
@@ -172,7 +189,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 		appendedEg := errgroup.Group{}
 		appendedMutex := sync.Mutex{}
 		if len(mountList.paths) > 0 {
-			logrus.Infof("need commit appened mount path: %s", strings.Join(mountList.paths, ", "))
+			logrus.Infof("need commit appended mount path: %s", strings.Join(mountList.paths, ", "))
 		}
 		for idx := range mountList.paths {
 			func(idx int) {
@@ -188,7 +205,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 					}
 					logrus.Infof("pushing blob for appended mount")
 					start := time.Now()
-					mountBlobDesc, err := cm.pushBlob(ctx, name, *mountBlobDigest, opt.TargetRef, opt.TargetInsecure)
+					mountBlobDesc, err := cm.pushBlob(ctx, name, *mountBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image)
 					if err != nil {
 						return errors.Wrap(err, "push appended mount blob")
 					}
@@ -261,7 +278,7 @@ func (cm *Committer) pullBootstrap(ctx context.Context, ref, bootstrapName strin
 	_commitBlobs := bootstrapDesc.Annotations[utils.LayerAnnotationNydusCommitBlobs]
 	if _commitBlobs != "" {
 		committedLayers = len(strings.Split(_commitBlobs, ","))
-		logrus.Infof("detected the committed layers: %d", committedLayers)
+		logrus.Infof("detected committed layers: %d", committedLayers)
 	}
 
 	target := filepath.Join(cm.workDir, bootstrapName)
@@ -269,10 +286,19 @@ func (cm *Committer) pullBootstrap(ctx context.Context, ref, bootstrapName strin
 	if err != nil {
 		return nil, 0, errors.Wrap(err, "pull bootstrap layer")
 	}
-	defer reader.Close()
+	var closeErr error
+	defer func() {
+		if err := reader.Close(); err != nil {
+			closeErr = errors.Wrap(err, "close bootstrap reader")
+		}
+	}()
 
 	if err := utils.UnpackFile(reader, utils.BootstrapFileNameInLayer, target); err != nil {
 		return nil, 0, errors.Wrap(err, "unpack bootstrap layer")
+	}
+
+	if closeErr != nil {
+		return nil, 0, closeErr
 	}
 
 	return parsed.NydusImage, committedLayers, nil
@@ -315,37 +341,153 @@ func (cm *Committer) commitUpperByDiff(ctx context.Context, appendMount func(pat
 	return &blobDigest, nil
 }
 
-func (cm *Committer) pushBlob(ctx context.Context, blobName string, blobDigest digest.Digest, targetRef string, insecure bool) (*ocispec.Descriptor, error) {
-	blobRa, err := local.OpenReader(filepath.Join(cm.workDir, blobName))
+// getDistributionSourceLabel returns the source label key and value for the image distribution
+func getDistributionSourceLabel(sourceRef string) (string, string) {
+	named, err := docker.ParseDockerRef(sourceRef)
 	if err != nil {
-		return nil, errors.Wrap(err, "open reader for upper blob")
+		return "", ""
+	}
+	host := docker.Domain(named)
+	labelValue := docker.Path(named)
+	labelKey := fmt.Sprintf("%s.%s", labels.LabelDistributionSource, host)
+
+	return labelKey, labelValue
+}
+
+// pushBlob pushes a blob to the target registry
+func (cm *Committer) pushBlob(ctx context.Context, blobName string, blobDigest digest.Digest, sourceRef string, targetRef string, insecure bool, image *parserPkg.Image) (*ocispec.Descriptor, error) {
+	logrus.Infof("pushing blob: %s, digest: %s", blobName, blobDigest)
+
+	targetRemoter, err := provider.DefaultRemote(targetRef, insecure)
+	if err != nil {
+		return nil, errors.Wrap(err, "create target remote")
 	}
 
-	blobDesc := ocispec.Descriptor{
-		Digest:    blobDigest,
-		Size:      blobRa.Size(),
-		MediaType: utils.MediaTypeNydusBlob,
-		Annotations: map[string]string{
+	// Check if this is a lower blob (starts with "blob-mount-" but not in workDir)
+	isLowerBlob := strings.HasPrefix(blobName, "blob-mount-")
+	blobPath := filepath.Join(cm.workDir, blobName)
+
+	var blobDesc ocispec.Descriptor
+	var reader io.Reader
+	var readerCloser io.Closer
+	var closeErr error
+
+	defer func() {
+		if readerCloser != nil {
+			if err := readerCloser.Close(); err != nil {
+				closeErr = errors.Wrap(err, "close blob reader")
+			}
+		}
+	}()
+
+	if isLowerBlob {
+		logrus.Debugf("handling lower blob: %s", blobName)
+		// For lower blobs, use remote access
+		blobDesc = ocispec.Descriptor{
+			Digest:    blobDigest,
+			MediaType: utils.MediaTypeNydusBlob,
+		}
+
+		// Find corresponding layer in source manifest to get size
+		var sourceLayer *ocispec.Descriptor
+		for _, layer := range image.Manifest.Layers {
+			if layer.Digest == blobDigest {
+				sourceLayer = &layer
+				blobDesc.Size = layer.Size
+				break
+			}
+		}
+
+		if sourceLayer == nil {
+			return nil, fmt.Errorf("layer not found in source image: %s", blobDigest)
+		}
+
+		if blobDesc.Size <= 0 {
+			return nil, fmt.Errorf("invalid blob size: %d", blobDesc.Size)
+		}
+		logrus.Debugf("lower blob size: %d", blobDesc.Size)
+
+		// Use source image remoter to get blob data
+		sourceRemoter, err := provider.DefaultRemote(sourceRef, insecure)
+		if err != nil {
+			return nil, errors.Wrap(err, "create source remote")
+		}
+
+		// Get ReaderAt for remote blob
+		readerAt, err := sourceRemoter.ReaderAt(ctx, *sourceLayer, true)
+		if err != nil {
+			return nil, errors.Wrap(err, "create remote reader for lower blob")
+		}
+		if readerAt == nil {
+			return nil, fmt.Errorf("got nil reader for lower blob: %s", blobName)
+		}
+		reader = io.NewSectionReader(readerAt, 0, readerAt.Size())
+		if closer, ok := readerAt.(io.Closer); ok {
+			readerCloser = closer
+		}
+
+		// Add required annotations
+		blobDesc.Annotations = map[string]string{
 			utils.LayerAnnotationUncompressed: blobDigest.String(),
 			utils.LayerAnnotationNydusBlob:    "true",
-		},
+		}
+	} else {
+		logrus.Debugf("handling local blob: %s", blobName)
+		// Handle local blob
+		blobRa, err := local.OpenReader(blobPath)
+		if err != nil {
+			return nil, errors.Wrap(err, "open reader for blob")
+		}
+		if blobRa == nil {
+			return nil, fmt.Errorf("got nil reader for local blob: %s", blobName)
+		}
+		size := blobRa.Size()
+		if size <= 0 {
+			blobRa.Close()
+			return nil, fmt.Errorf("invalid local blob size: %d", size)
+		}
+		logrus.Debugf("local blob size: %d", size)
+		reader = io.NewSectionReader(blobRa, 0, size)
+		readerCloser = blobRa
+
+		blobDesc = ocispec.Descriptor{
+			Digest:    blobDigest,
+			Size:      size,
+			MediaType: utils.MediaTypeNydusBlob,
+			Annotations: map[string]string{
+				utils.LayerAnnotationUncompressed: blobDigest.String(),
+				utils.LayerAnnotationNydusBlob:    "true",
+			},
+		}
 	}
 
-	remoter, err := provider.DefaultRemote(targetRef, insecure)
-	if err != nil {
-		return nil, errors.Wrap(err, "create remote")
+	// Add distribution source label
+	distributionSourceLabel, distributionSourceLabelValue := getDistributionSourceLabel(sourceRef)
+	if distributionSourceLabel != "" {
+		if blobDesc.Annotations == nil {
+			blobDesc.Annotations = make(map[string]string)
+		}
+		blobDesc.Annotations[distributionSourceLabel] = distributionSourceLabelValue
 	}
 
-	if err := remoter.Push(ctx, blobDesc, true, io.NewSectionReader(blobRa, 0, blobRa.Size())); err != nil {
+	logrus.Debugf("pushing blob: digest=%s, size=%d", blobDesc.Digest, blobDesc.Size)
+
+	if err := targetRemoter.Push(ctx, blobDesc, true, reader); err != nil {
 		if utils.RetryWithHTTP(err) {
-			remoter.MaybeWithHTTP(err)
-			if err := remoter.Push(ctx, blobDesc, true, io.NewSectionReader(blobRa, 0, blobRa.Size())); err != nil {
-				return nil, errors.Wrap(err, "push blob")
+			targetRemoter.MaybeWithHTTP(err)
+			logrus.Debugf("retrying push with HTTP")
+			if err := targetRemoter.Push(ctx, blobDesc, true, reader); err != nil {
+				return nil, errors.Wrap(err, "push blob with HTTP")
 			}
 		} else {
 			return nil, errors.Wrap(err, "push blob")
 		}
 	}
+
+	if closeErr != nil {
+		return nil, closeErr
+	}
+
 	return &blobDesc, nil
 }
 
