@@ -63,6 +63,8 @@ define_libc_error_macro!(ealready, EALREADY);
 define_libc_error_macro!(enosys, ENOSYS);
 define_libc_error_macro!(epipe, EPIPE);
 define_libc_error_macro!(eio, EIO);
+define_libc_error_macro!(erange, ERANGE);
+define_libc_error_macro!(enodata, ENODATA);
 
 /// Return EINVAL error with formatted error message.
 #[macro_export]
