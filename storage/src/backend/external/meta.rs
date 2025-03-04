@@ -7,7 +7,7 @@ use std::mem::size_of;
 use std::path::Path;
 use std::{fs::File, os::unix::fs::MetadataExt};
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use nydus_utils::filemap::FileMapState;
 
