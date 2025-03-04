@@ -40,14 +40,32 @@ impl Attributes {
                 if !path.is_absolute() {
                     path = path::Path::new("/").join(path);
                 }
+                let mut current_path = path.clone();
                 let mut attributes = HashMap::new();
+                let mut _type = String::new();
                 for line in _item.1 {
                     let line = line?;
                     let name = line.name.as_str();
                     let state = line.state.as_bstr().unwrap_or_default();
+                    if name == KEY_TYPE {
+                        _type = state.to_string();
+                    }
                     attributes.insert(name.to_string(), state.to_string());
                 }
                 items.insert(path, attributes);
+
+                // process parent directory
+                while let Some(parent) = current_path.parent() {
+                    if parent == Path::new("/") {
+                        break;
+                    }
+                    let mut attributes = HashMap::new();
+                    if !items.contains_key(parent) {
+                        attributes.insert(KEY_TYPE.to_string(), VAL_EXTERNAL.to_string());
+                        items.insert(parent.to_path_buf(), attributes);
+                    }
+                    current_path = parent.to_path_buf();
+                }
             }
         }
 
@@ -97,7 +115,7 @@ mod tests {
             file.as_path(),
             "/foo type=external
             /bar type=external
-            /models/foo type=external",
+            /models/foo/bar type=external",
         )
         .unwrap();
 
@@ -107,24 +125,32 @@ mod tests {
             .cloned()
             .collect();
 
-        assert_eq!(
-            attributes,
-            Attributes {
-                items: vec![
-                    Item {
-                        pattern: PathBuf::from("/foo"),
-                        attributes: _attributes.clone()
-                    },
-                    Item {
-                        pattern: PathBuf::from("/bar"),
-                        attributes: _attributes.clone()
-                    },
-                    Item {
-                        pattern: PathBuf::from("/models/foo"),
-                        attributes: _attributes.clone()
-                    }
-                ]
+        let items_map: HashMap<PathBuf, HashMap<String, String>> = vec![
+            Item {
+                pattern: PathBuf::from("/foo"),
+                attributes: _attributes.clone(),
             },
-        );
+            Item {
+                pattern: PathBuf::from("/bar"),
+                attributes: _attributes.clone(),
+            },
+            Item {
+                pattern: PathBuf::from("/models"),
+                attributes: _attributes.clone(),
+            },
+            Item {
+                pattern: PathBuf::from("/models/foo"),
+                attributes: _attributes.clone(),
+            },
+            Item {
+                pattern: PathBuf::from("/models/foo/bar"),
+                attributes: _attributes.clone(),
+            },
+        ]
+        .into_iter()
+        .map(|item| (item.pattern, item.attributes))
+        .collect();
+
+        assert_eq!(attributes, Attributes { items: items_map });
     }
 }
