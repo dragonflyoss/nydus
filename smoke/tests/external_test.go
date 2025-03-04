@@ -31,6 +31,12 @@ var modelctlContextDir = os.Getenv("NYDUS_MODELCTL_CONTEXT_DIR")
 var modelRegistryAuth = os.Getenv("NYDUS_MODEL_REGISTRY_AUTH")
 var modelImageRef = os.Getenv("NYDUS_MODEL_IMAGE_REF")
 
+type proxy struct {
+	CacheDir string `json:"cache_dir"`
+	URL      string `json:"url"`
+	Fallback bool   `json:"fallback"`
+}
+
 func walk(t *testing.T, root string) map[string]*tool.File {
 	tree := map[string]*tool.File{}
 
@@ -218,11 +224,16 @@ func TestModctlExternal(t *testing.T) {
 	err = json.Unmarshal(backendBytes, &backend)
 	require.NoError(t, err)
 
-	backend.Backends[0].Config = map[string]string{
+	backend.Backends[0].Config = map[string]interface{}{
 		"scheme": "https",
 		"host":   host,
 		"repo":   name,
 		"auth":   modelRegistryAuth,
+		"proxy": proxy{
+			CacheDir: ctx.Env.CacheDir,
+			URL:      "",
+			Fallback: true,
+		},
 	}
 
 	backendBytes, err = json.MarshalIndent(backend, "", "  ")

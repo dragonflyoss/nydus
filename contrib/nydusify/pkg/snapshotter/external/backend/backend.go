@@ -11,8 +11,8 @@ type Backend struct {
 }
 
 type BackendConfig struct {
-	Type   string            `json:"type"`
-	Config map[string]string `json:"config,omitempty"`
+	Type   string                 `json:"type"`
+	Config map[string]interface{} `json:"config,omitempty"`
 }
 
 type Blob struct {

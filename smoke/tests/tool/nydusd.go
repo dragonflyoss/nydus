@@ -106,13 +106,14 @@ var configTpl = `
 			 "type": "{{.BackendType}}",
 			 "config": {{.BackendConfig}}
 		 },
+		 "external_backend": {
+		 	 "config_path": "{{.ExternalBackendConfigPath}}"
+		 },
 		 "cache": {
 			 "type": "{{.CacheType}}",
 			 "config": {
 				 "compressed": {{.CacheCompressed}},
-				 "work_dir": "{{.BlobCacheDir}}",
-				 "external_backend_config_path": "{{.ExternalBackendConfigPath}}",
-				 "external_backend_proxy_cache_dir": "{{.ExternalBackendProxyCacheDir}}"
+				 "work_dir": "{{.BlobCacheDir}}"
 			 }
 		 }
 	 },
