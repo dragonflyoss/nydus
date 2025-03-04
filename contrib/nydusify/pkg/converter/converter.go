@@ -256,6 +256,7 @@ func buildMergeOption(bkdPath string, opt Opt) (*snapConv.MergeOption, error) {
 	})
 	return &mergeOption, nil
 }
+
 func packWithAttributes(ctx context.Context, packOption snapConv.PackOption, blobDir string) (digest.Digest, digest.Digest, error) {
 	blob, err := os.CreateTemp(blobDir, "blob-")
 	if err != nil {
@@ -431,6 +432,7 @@ func pushManifest(
 	// Push image manifest
 	var layers []ocispec.Descriptor
 	layers = append(layers, bootstrapDesc)
+	// TODO: add layers from modctl's manifest
 
 	nydusImage.Manifest.Config = *configDesc
 	nydusImage.Manifest.Layers = layers

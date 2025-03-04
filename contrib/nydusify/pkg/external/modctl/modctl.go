@@ -1,3 +1,7 @@
+// Copyright 2025 Nydus Developers. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+
 package modctl
 
 import (
@@ -37,9 +41,9 @@ type Handler struct {
 	imageName    string
 	tag          string
 	blobs        []backend.Blob
-	// key 为blob的sha256，value为blob的mediaType类型和索引
+	// key is the blob's sha256, value is the blob's mediaType type and index
 	blobsMap map[string]blobInfo
-	// config layer
+	// config layer in modctl's manifest
 	blobConfig BlobConfig
 	objectID   uint32
 }
@@ -60,6 +64,7 @@ type chunk struct {
 	objectOffset  uint64
 }
 
+// ObjectID returns the blob index of the chunk
 func (c *chunk) ObjectID() uint32 {
 	return c.objectID
 }
@@ -68,6 +73,7 @@ func (c *chunk) ObjectContent() interface{} {
 	return c.objectContent
 }
 
+// ObjectOffset returns the offset of the chunk in the blob file
 func (c *chunk) ObjectOffset() uint64 {
 	return c.objectOffset
 }
@@ -171,7 +177,6 @@ func (handler *Handler) Handle(ctx context.Context, file backend.File) ([]backen
 	if needIgnore {
 		return nil, nil
 	}
-	// MEMO 按照不同类型来处理chunk大小
 	chunkSize := getChunkSizeByMediaType(blobInfo.mediaType)
 
 	// read the tar file and get the meta of files
@@ -204,6 +209,7 @@ func (handler *Handler) Handle(ctx context.Context, file backend.File) ([]backen
 
 	return chunks, nil
 }
+
 func (handler *Handler) Backend(ctx context.Context) (*backend.Backend, error) {
 	bkd := backend.Backend{
 		Version: "v1",
@@ -239,6 +245,7 @@ func (handler *Handler) setBlobsMap() {
 		}
 	}
 }
+
 func (handler *Handler) extractManifest() (*Manifest, error) {
 	tagPath := fmt.Sprintf(MANIFEST_PATH, handler.tag)
 	manifestPath := filepath.Join(handler.root, REPOS_PATH, handler.registryHost, handler.namespace, handler.imageName, tagPath)
