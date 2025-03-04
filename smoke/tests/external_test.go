@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distribution/reference"
 	"github.com/pkg/errors"
@@ -32,7 +31,7 @@ var modelctlContextDir = os.Getenv("NYDUS_MODELCTL_CONTEXT_DIR")
 var modelRegistryAuth = os.Getenv("NYDUS_MODEL_REGISTRY_AUTH")
 var modelImageRef = os.Getenv("NYDUS_MODEL_IMAGE_REF")
 
-func walk(t *testing.T, ctx tool.Context, root string) map[string]*tool.File {
+func walk(t *testing.T, root string) map[string]*tool.File {
 	tree := map[string]*tool.File{}
 
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -40,6 +39,9 @@ func walk(t *testing.T, ctx tool.Context, root string) map[string]*tool.File {
 
 		targetPath, err := filepath.Rel(root, path)
 		require.NoError(t, err)
+		if targetPath == "." {
+			return nil
+		}
 
 		file := tool.NewFile(t, path, targetPath)
 		tree[targetPath] = file
@@ -51,28 +53,20 @@ func walk(t *testing.T, ctx tool.Context, root string) map[string]*tool.File {
 	return tree
 }
 
-func check(t *testing.T, ctx tool.Context, root1, root2 string) {
-	tree1 := walk(t, ctx, root1)
-	tree2 := walk(t, ctx, root2)
+func check(t *testing.T, source, target string) {
+	sourceTree := walk(t, source)
+	targetTree := walk(t, target)
 
-	for path, file := range tree1 {
-		if tree2[path] != nil {
-			tree2[path].Compare(t, file)
+	for targetPath, targetFile := range targetTree {
+		if sourceFile := sourceTree[targetPath]; sourceFile != nil {
+			sourceFile.Compare(t, targetFile)
 		} else {
-			t.Fatalf("not found file %s in tree2", path)
-		}
-	}
-
-	for path, file := range tree2 {
-		if tree1[path] != nil {
-			tree1[path].Compare(t, file)
-		} else {
-			t.Fatalf("not found file %s in tree1", path)
+			t.Fatalf("not found file %s in source", targetPath)
 		}
 	}
 }
 
-func verify(t *testing.T, ctx tool.Context, ExternalBackendConfigPath string) {
+func verify(t *testing.T, ctx tool.Context, externalBackendConfigPath string) {
 	config := tool.NydusdConfig{
 		EnablePrefetch:               ctx.Runtime.EnablePrefetch,
 		NydusdPath:                   ctx.Binary.Nydusd,
@@ -80,7 +74,7 @@ func verify(t *testing.T, ctx tool.Context, ExternalBackendConfigPath string) {
 		ConfigPath:                   filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
 		BackendType:                  "localfs",
 		BackendConfig:                fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
-		ExternalBackendConfigPath:    ExternalBackendConfigPath,
+		ExternalBackendConfigPath:    externalBackendConfigPath,
 		ExternalBackendProxyCacheDir: ctx.Env.CacheDir,
 		BlobCacheDir:                 ctx.Env.CacheDir,
 		APISockPath:                  filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
@@ -97,10 +91,7 @@ func verify(t *testing.T, ctx tool.Context, ExternalBackendConfigPath string) {
 	err = nydusd.Mount()
 	require.NoError(t, err)
 
-	fmt.Println("mountpoint:", ctx.Env.MountDir)
-	time.Sleep(time.Second * 10000)
-
-	// check(t, ctx, testModctlRepoDir, ctx.Env.MountDir)
+	check(t, modelctlContextDir, ctx.Env.MountDir)
 
 	defer func() {
 		if err := nydusd.Umount(); err != nil {
@@ -137,11 +128,6 @@ func packWithAttributes(t *testing.T, packOption converter.PackOption, blobDir, 
 	return blobDigest, externalBlobDigest
 }
 
-type ModctlTestConfig struct {
-	Option    modctl.Option `json:"option"`
-	TargetRef string        `json:"target_ref"`
-}
-
 func parseReference(ref string) (string, string, string, error) {
 	refs, err := reference.Parse(ref)
 	if err != nil {
@@ -161,18 +147,15 @@ func parseReference(ref string) (string, string, string, error) {
 	return "", "", "", fmt.Errorf("invalid image reference: %s", ref)
 }
 
-// sudo WORK_DIR=/tmp \
-// NYDUS_BUILDER=/home/imeoer/nydus-rs/target/release/nydus-image \
-// NYDUS_NYDUSD=/home/imeoer/nydus-rs/target/release/nydusd \
-// ./test -test.run ^TestExternal$
 func TestModctlExternal(t *testing.T) {
 	// Prepare work directory
 	ctx := tool.DefaultContext(t)
 	ctx.PrepareWorkDir(t)
+	ctx.Build.Compressor = "lz4_block"
 	ctx.Build.FSVersion = "5"
-	// defer ctx.Destroy(t)
+	defer ctx.Destroy(t)
 
-	// Prepare backend meta file
+	// Generate nydus attributes
 	attributesPath := filepath.Join(ctx.Env.WorkDir, ".nydusattributes")
 	backendMetaPath := filepath.Join(ctx.Env.WorkDir, "backend.meta")
 	backendConfigPath := filepath.Join(ctx.Env.WorkDir, "build.backend.json")
@@ -200,7 +183,7 @@ func TestModctlExternal(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Make nydus layer with external blob
+	// Build external bootstrap
 	packOption := converter.PackOption{
 		BuilderPath:    ctx.Binary.Builder,
 		Compressor:     ctx.Build.Compressor,
@@ -222,9 +205,7 @@ func TestModctlExternal(t *testing.T) {
 	_, err = converter.UnpackEntry(externalBlobRa, converter.EntryBootstrap, bootstrap)
 	require.NoError(t, err)
 
-	fmt.Println("====================================== BOOTSTRAP", bootstrapPath)
-
-	// Check bootstrap file
+	// Check external bootstrap
 	err = tool.CheckBootstrap(tool.CheckOption{
 		BuilderPath: ctx.Binary.Builder,
 	}, bootstrapPath)
@@ -251,7 +232,7 @@ func TestModctlExternal(t *testing.T) {
 	err = os.WriteFile(runtimeBackendConfigPath, backendBytes, 0644)
 	require.NoError(t, err)
 
-	// Verify layer mounted by nydusd
+	// Verify nydus filesystem with model context directory
 	ctx.Env.BootstrapPath = bootstrapPath
 	verify(t, *ctx, runtimeBackendConfigPath)
 }

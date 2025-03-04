@@ -193,7 +193,7 @@ func newNydusd(conf NydusdConfig) (*Nydusd, error) {
 		"--apisock",
 		conf.APISockPath,
 		"--log-level",
-		"debug",
+		"info",
 		"--thread-num",
 		"10",
 	}
