@@ -322,7 +322,7 @@ impl Node {
                 let mut chunk = self.inode.create_chunk();
                 let file_offset = i as u64 * external_chunk_size as u64;
                 let compressed_size = if i == self.inode.child_count() - 1 {
-                    self.inode.size() % external_chunk_size as u64
+                    self.inode.size() - (external_chunk_size * i as u64)
                 } else {
                     external_chunk_size
                 } as u32;

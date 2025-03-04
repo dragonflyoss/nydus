@@ -640,7 +640,7 @@ func Merge(ctx context.Context, layers []Layer, dest io.Writer, opt MergeOption)
 	if err != nil {
 		return nil, errors.Wrap(err, "ensure work directory")
 	}
-	// defer os.RemoveAll(workDir)
+	defer os.RemoveAll(workDir)
 
 	getBootstrapPath := func(layerIdx int) string {
 		digestHex := layers[layerIdx].Digest.Hex()
