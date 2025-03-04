@@ -29,7 +29,7 @@ impl LocalBackend {
         let root = PathBuf::from(
             config
                 .get("root")
-                .ok_or_else(|| format!("root is not specified in local backend config"))?,
+                .ok_or_else(|| "root is not specified in local backend config".to_string())?,
         );
         Ok(Self { meta_map, root })
     }
@@ -44,7 +44,7 @@ impl ExternalBlobReader for LocalBackend {
             .map_err(|e| e.to_string())?;
 
         let object: Object = rmp_serde::from_slice(&object_bytes)
-            .map_err(|e| format!("failed to deserialize object: {}", e.to_string()))?;
+            .map_err(|e| format!("failed to deserialize object: {}", e))?;
 
         let path = self.root.join(&object.path);
 

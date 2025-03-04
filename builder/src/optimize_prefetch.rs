@@ -54,9 +54,10 @@ impl PrefetchBlobState {
         blob_info.set_separated_with_prefetch_files_feature(true);
         let mut blob_ctx = BlobContext::from(ctx, &blob_info, ChunkSource::Build)?;
         blob_ctx.blob_meta_info_enabled = true;
-        let blob_writer = ArtifactWriter::new(crate::ArtifactStorage::FileDir(
-            (blobs_dir_path.to_path_buf(), String::new()),
-        ))
+        let blob_writer = ArtifactWriter::new(crate::ArtifactStorage::FileDir((
+            blobs_dir_path.to_path_buf(),
+            String::new(),
+        )))
         .map(|writer| Box::new(writer) as Box<dyn Artifact>)?;
         Ok(Self {
             blob_info,

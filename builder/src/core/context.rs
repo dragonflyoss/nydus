@@ -999,7 +999,7 @@ impl BlobManager {
                 self.add_blob(blob_ctx);
             }
         }
-        return Ok((blob_idx as u32, &mut self.blobs[blob_idx as usize]));
+        Ok((blob_idx as u32, &mut self.blobs[blob_idx as usize]))
     }
 
     /// Get the current blob object.
