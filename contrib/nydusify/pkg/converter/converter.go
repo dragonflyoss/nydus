@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
+	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
@@ -180,32 +182,14 @@ func convertModelFile(ctx context.Context, opt Opt) error {
 		FromDir:        srcBkdCfg.Context,
 		AttributesPath: attributesPath,
 	}
-	blobDigest, externalBlobDigest, err := packWithAttributes(ctx, packOption, tmpDir)
+	_, externalBlobDigest, err := packWithAttributes(ctx, packOption, tmpDir)
 	if err != nil {
 		return errors.Wrap(err, "pack to blob")
 	}
 
-	bkdPath, err := renamePathWithDigest(tmpDir, backendMetaPath, backendConfigPath, externalBlobDigest)
+	bootStrapTarPath, err := packFinalBootstrap(tmpDir, backendConfigPath, externalBlobDigest)
 	if err != nil {
-		return errors.Wrap(err, "rename file")
-	}
-
-	// Merge layers to get the final bootstrap
-	mergeOption, err := buildMergeOption(bkdPath, opt)
-	if err != nil {
-		return errors.Wrap(err, "build merge option")
-	}
-	_, mergedBootstrap, bootstrapDiffID, err := mergeLayers(tmpDir, *mergeOption, []snapConv.Layer{
-		{
-			Digest: blobDigest,
-		},
-		{
-			Digest: externalBlobDigest,
-		},
-	})
-	bootStrapTarPath := mergedBootstrap + ".tar"
-	if err := os.Rename(mergedBootstrap, bootStrapTarPath); err != nil {
-		return errors.Wrap(err, "rename bootstrap tar file")
+		return errors.Wrap(err, "pack final bootstrap")
 	}
 
 	modelCfg, err := buildModelConfig(modctlHandler)
@@ -213,8 +197,10 @@ func convertModelFile(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "build model config")
 	}
 
+	modelLayers := buildLayers(modctlHandler)
+
 	nydusImage := buildNydusImage()
-	return pushManifest(context.Background(), *modelCfg, *nydusImage, *bootstrapDiffID, opt.Target, bootStrapTarPath, opt.FsVersion, opt.TargetInsecure)
+	return pushManifest(context.Background(), opt, *modelCfg, modelLayers, *nydusImage, bootStrapTarPath)
 }
 
 func newModctlHandler(opt Opt, workDir string) (*modctl.Handler, error) {
@@ -223,38 +209,6 @@ func newModctlHandler(opt Opt, workDir string) (*modctl.Handler, error) {
 		return nil, errors.Wrap(err, "parse modctl option")
 	}
 	return modctl.NewHandler(*modctlOpt)
-}
-
-func renamePathWithDigest(workDir, backendMetaPath, backendConfigPath string, digest digest.Digest) (string, error) {
-	digestPath := filepath.Join(workDir, digest.Hex())
-	if err := os.Rename(backendMetaPath, digestPath+".backend.meta"); err != nil {
-		return "", errors.Wrap(err, "rename backend meta file")
-	}
-
-	bkdPath := digestPath + ".backend.json"
-	if err := os.Rename(backendConfigPath, bkdPath); err != nil {
-		return "", errors.Wrap(err, "rename backend config file")
-	}
-	return bkdPath, nil
-}
-
-func buildMergeOption(bkdPath string, opt Opt) (*snapConv.MergeOption, error) {
-	mergeOption := snapConv.MergeOption{
-		BuilderPath: opt.NydusImagePath,
-		WithTar:     true,
-		AppendFiles: []snapConv.File{},
-	}
-	bkdCfg, err := os.ReadFile(bkdPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "read backend config file")
-	}
-	bkdReader := bytes.NewReader(bkdCfg)
-	mergeOption.AppendFiles = append(mergeOption.AppendFiles, snapConv.File{
-		Name:   "backend.json",
-		Reader: bkdReader,
-		Size:   int64(len(bkdCfg)),
-	})
-	return &mergeOption, nil
 }
 
 func packWithAttributes(ctx context.Context, packOption snapConv.PackOption, blobDir string) (digest.Digest, digest.Digest, error) {
@@ -294,29 +248,53 @@ func packWithAttributes(ctx context.Context, packOption snapConv.PackOption, blo
 	return blobDigest, externalBlobDigest, nil
 }
 
-func mergeLayers(workDir string, mergeOption snapConv.MergeOption, layers []snapConv.Layer) ([]digest.Digest, string, *digest.Digest, error) {
-	for idx := range layers {
-		ra, err := local.OpenReader(filepath.Join(workDir, layers[idx].Digest.Hex()))
-		if err != nil {
-			return nil, "", nil, errors.Wrap(err, "open reader for blob")
-		}
-		defer ra.Close()
-		layers[idx].ReaderAt = ra
+// Pack bootstrap and backend config into final bootstrap tar file.
+func packFinalBootstrap(workDir, backendConfigPath string, externalBlobDigest digest.Digest) (string, error) {
+	bkdCfg, err := os.ReadFile(backendConfigPath)
+	if err != nil {
+		return "", errors.Wrap(err, "read backend config file")
+	}
+	bkdReader := bytes.NewReader(bkdCfg)
+	files := []snapConv.File{
+		{
+			Name:   "backend.json",
+			Reader: bkdReader,
+			Size:   int64(len(bkdCfg)),
+		},
 	}
 
+	externalBlobRa, err := local.OpenReader(filepath.Join(workDir, externalBlobDigest.Hex()))
+	if err != nil {
+		return "", errors.Wrap(err, "open reader for upper blob")
+	}
 	bootstrap, err := os.CreateTemp(workDir, "bootstrap-")
 	if err != nil {
-		return nil, "", nil, errors.Wrap(err, "create temp file for bootstrap")
+		return "", errors.Wrap(err, "create temp file for bootstrap")
 	}
 	defer bootstrap.Close()
-	digester := digest.SHA256.Digester()
-	writer := io.MultiWriter(bootstrap, digester.Hash())
-	actualDigests, err := snapConv.Merge(context.Background(), layers, writer, mergeOption)
-	if err != nil {
-		return nil, "", nil, errors.Wrap(err, "merge layers")
+
+	if _, err := snapConv.UnpackEntry(externalBlobRa, snapConv.EntryBootstrap, bootstrap); err != nil {
+		return "", errors.Wrap(err, "unpack bootstrap from nydus")
 	}
-	bootstrapDiffID := digester.Digest()
-	return actualDigests, bootstrap.Name(), &bootstrapDiffID, nil
+
+	files = append(files, snapConv.File{
+		Name:   snapConv.EntryBootstrap,
+		Reader: content.NewReader(externalBlobRa),
+		Size:   externalBlobRa.Size(),
+	})
+
+	bootStrapTarPath := fmt.Sprintf("%s-final.tar", bootstrap.Name())
+	bootstrapTar, err := os.Create(bootStrapTarPath)
+	if err != nil {
+		return "", errors.Wrap(err, "open bootstrap tar file")
+	}
+	defer bootstrap.Close()
+	rc := snapConv.PackToTar(files, false)
+	defer rc.Close()
+	if _, err = io.Copy(bootstrapTar, rc); err != nil {
+		return "", errors.Wrap(err, "copy merged bootstrap")
+	}
+	return bootStrapTarPath, nil
 }
 
 func buildNydusImage() *parser.Image {
@@ -326,9 +304,6 @@ func buildNydusImage() *parser.Image {
 		ArtifactType: modelspec.ArtifactTypeModelManifest,
 		Config: ocispec.Descriptor{
 			MediaType: modelspec.MediaTypeModelConfig,
-		},
-		Annotations: map[string]string{
-			"containerd.io/snapshot/nydus-artifact-type": modelspec.ArtifactTypeModelManifest,
 		},
 	}
 	desc := ocispec.Descriptor{
@@ -353,21 +328,31 @@ func buildModelConfig(modctlHandler *modctl.Handler) (*modelspec.Model, error) {
 	return &modelCfg, nil
 }
 
+func buildLayers(modctlHandler *modctl.Handler) []ocispec.Descriptor {
+	modelLayers := modctlHandler.GetLayers()
+	ociLayers := make([]ocispec.Descriptor, 0, len(modelLayers))
+	for _, layer := range modelLayers {
+		desc := ocispec.Descriptor{
+			MediaType: layer.MediaType,
+			Digest:    digest.Digest(layer.Digest),
+			Size:      int64(layer.Size),
+		}
+		ociLayers = append(ociLayers, desc)
+	}
+	return ociLayers
+}
+
 func pushManifest(
-	ctx context.Context, modelCfg modelspec.Model, nydusImage parser.Image, bootstrapDiffID digest.Digest, targetRef, bootstrapTarPath, fsversion string, insecure bool,
+	ctx context.Context, opt Opt, modelCfg modelspec.Model, modelLayers []ocispec.Descriptor, nydusImage parser.Image, bootstrapTarPath string,
 ) error {
 
 	// Push image config
-	modelCfg.ModelFS.DiffIDs = []digest.Digest{
-		bootstrapDiffID,
-	}
-
 	configBytes, configDesc, err := makeDesc(modelCfg, nydusImage.Manifest.Config)
 	if err != nil {
 		return errors.Wrap(err, "make config desc")
 	}
 
-	remoter, err := pkgPvd.DefaultRemote(targetRef, insecure)
+	remoter, err := pkgPvd.DefaultRemote(opt.Target, opt.TargetInsecure)
 	if err != nil {
 		return errors.Wrap(err, "create remote")
 	}
@@ -416,8 +401,10 @@ func pushManifest(
 		Size:      ra.Size(),
 		MediaType: ocispec.MediaTypeImageLayerGzip,
 		Annotations: map[string]string{
-			snapConv.LayerAnnotationFSVersion:      fsversion,
-			snapConv.LayerAnnotationNydusBootstrap: "true"},
+			snapConv.LayerAnnotationFSVersion:         opt.FsVersion,
+			snapConv.LayerAnnotationNydusBootstrap:    "true",
+			snapConv.LayerAnnotationNydusArtifactType: modelspec.ArtifactTypeModelManifest,
+		},
 	}
 
 	bootstrapRc, err := os.Open(bootstrapTarGzPath)
@@ -430,22 +417,42 @@ func pushManifest(
 	}
 
 	// Push image manifest
-	var layers []ocispec.Descriptor
+	layers := make([]ocispec.Descriptor, 0, len(modelLayers)+1)
+	for _, layer := range modelLayers {
+		layers = append(layers, ocispec.Descriptor{
+			Digest:    layer.Digest,
+			Size:      int64(layer.Size),
+			MediaType: layer.MediaType,
+		})
+	}
 	layers = append(layers, bootstrapDesc)
-	// TODO: add layers from modctl's manifest
+
+	subject, err := getSourceManifestSubject(ctx, opt.Source, opt.SourceInsecure)
+	if err != nil {
+		return errors.Wrap(err, "get source manifest subject")
+	}
 
 	nydusImage.Manifest.Config = *configDesc
 	nydusImage.Manifest.Layers = layers
+	nydusImage.Manifest.Subject = subject
 
 	manifestBytes, manifestDesc, err := makeDesc(nydusImage.Manifest, nydusImage.Desc)
 	if err != nil {
 		return errors.Wrap(err, "make manifest desc")
 	}
+
 	if err := remoter.Push(ctx, *manifestDesc, false, bytes.NewReader(manifestBytes)); err != nil {
 		return errors.Wrap(err, "push image manifest")
 	}
-
 	return nil
+}
+
+func getSourceManifestSubject(ctx context.Context, sourceRef string, inscure bool) (*ocispec.Descriptor, error) {
+	remoter, err := pkgPvd.DefaultRemote(sourceRef, inscure)
+	if err != nil {
+		return nil, errors.Wrap(err, "create remote")
+	}
+	return remoter.Resolve(ctx)
 }
 
 func makeDesc(x interface{}, oldDesc ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {

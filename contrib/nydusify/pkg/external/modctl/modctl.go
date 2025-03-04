@@ -40,6 +40,7 @@ type Handler struct {
 	namespace    string
 	imageName    string
 	tag          string
+	manifest     Manifest
 	blobs        []backend.Blob
 	// key is the blob's sha256, value is the blob's mediaType type and index
 	blobsMap map[string]blobInfo
@@ -145,6 +146,7 @@ func NewHandler(opt Option) (*Handler, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "extract manifest failed")
 	}
+	handler.manifest = *m
 	handler.setBlobs(m)
 	handler.setBlobConfig(m)
 	handler.setBlobsMap()
@@ -225,6 +227,10 @@ func (handler *Handler) Backend(ctx context.Context) (*backend.Backend, error) {
 
 func (handler *Handler) GetConfig() ([]byte, error) {
 	return handler.extractBlobs(handler.blobConfig.Digest)
+}
+
+func (handler *Handler) GetLayers() []BlobConfig {
+	return handler.manifest.Layers
 }
 
 func (handler *Handler) setBlobs(m *Manifest) {

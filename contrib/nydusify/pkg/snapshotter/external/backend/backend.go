@@ -54,16 +54,11 @@ type Handler interface {
 	Backend(ctx context.Context) (*Backend, error)
 	// Handle handles the file and returns the object information.
 	Handle(ctx context.Context, file File) ([]Chunk, error)
-	// Get the config descriptor in manifest
-	GetConfig() ([]byte, error)
 }
 
 type Chunk interface {
-	// 存储blobIndex
 	ObjectID() uint32
-	// 存储原始文件名， ChunkSize
 	ObjectContent() interface{}
-	// 存储chunk在blob tar文件中的偏移
 	ObjectOffset() uint64
 	FilePath() string
 	LimitChunkSize() string
