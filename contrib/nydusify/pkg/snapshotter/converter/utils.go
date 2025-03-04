@@ -89,7 +89,7 @@ func newSeekReader(ra io.ReaderAt) *seekReader {
 }
 
 // packToTar packs files to .tar(.gz) stream then return reader.
-func packToTar(files []File, compress bool) io.ReadCloser {
+func PackToTar(files []File, compress bool) io.ReadCloser {
 	dirHdr := &tar.Header{
 		Name:     "image",
 		Mode:     0755,

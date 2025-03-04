@@ -725,7 +725,7 @@ func Merge(ctx context.Context, layers []Layer, dest io.Writer, opt MergeOption)
 	var rc io.ReadCloser
 
 	if opt.WithTar {
-		rc = packToTar(files, false)
+		rc = PackToTar(files, false)
 	} else {
 		rc, err = os.Open(targetBootstrapPath)
 		if err != nil {

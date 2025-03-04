@@ -22,6 +22,7 @@ const (
 	LayerAnnotationNydusEncryptedBlob = "containerd.io/snapshot/nydus-encrypted-blob"
 	LayerAnnotationNydusSourceDigest  = "containerd.io/snapshot/nydus-source-digest"
 	LayerAnnotationNydusTargetDigest  = "containerd.io/snapshot/nydus-target-digest"
+	LayerAnnotationNydusArtifactType  = "containerd.io/snapshot/nydus-artifact-type"
 
 	LayerAnnotationNydusReferenceBlobIDs = "containerd.io/snapshot/nydus-reference-blob-ids"
 
