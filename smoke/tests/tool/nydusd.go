@@ -390,7 +390,7 @@ func (nydusd *Nydusd) UmountByAPI(subPath string) error {
 }
 
 func (nydusd *Nydusd) WaitStatus(states ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*60)
 	defer cancel()
 
 	var currentState string
