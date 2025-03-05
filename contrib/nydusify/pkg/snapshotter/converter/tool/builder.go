@@ -84,7 +84,7 @@ func buildPackArgs(option PackOption) ([]string, error) {
 	args := []string{
 		"create",
 		"--log-level",
-		"debug",
+		"warn",
 		"--prefetch-policy",
 		"fs",
 		"--blob",
