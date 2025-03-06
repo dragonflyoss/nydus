@@ -1285,7 +1285,7 @@ func main() {
 				&cli.StringFlag{
 					Name:     "container",
 					Required: true,
-					Usage:    "Target container id",
+					Usage:    "Target container ID (supports short ID, full ID)",
 					EnvVars:  []string{"CONTAINER"},
 				},
 				&cli.StringFlag{
@@ -1358,7 +1358,11 @@ func main() {
 				}
 				cm, err := committer.NewCommitter(opt)
 				if err != nil {
-					return errors.Wrap(err, "create commiter")
+					return errors.Wrap(err, "failed to create committer instance")
+				}
+				// Resolve container ID to full ID
+				if err := cm.ResolveContainerID(c.Context, &opt); err != nil {
+					return errors.Wrap(err, "failed to resolve container ID")
 				}
 				return cm.Commit(c.Context, opt)
 			},
