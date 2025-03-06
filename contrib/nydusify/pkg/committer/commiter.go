@@ -113,12 +113,10 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 	}
 
 	// Push lower blobs
-	for idx := range image.Manifest.Layers {
-		layer := image.Manifest.Layers[idx]
+	for idx, layer := range image.Manifest.Layers {
 		if layer.MediaType == utils.MediaTypeNydusBlob {
 			name := fmt.Sprintf("blob-mount-%d", idx)
-			_, err := cm.pushBlob(ctx, name, layer.Digest, originalSourceRef, targetRef, opt.TargetInsecure, image)
-			if err != nil {
+			if _, err := cm.pushBlob(ctx, name, layer.Digest, originalSourceRef, targetRef, opt.TargetInsecure, image); err != nil {
 				return errors.Wrap(err, "push lower blob")
 			}
 		}
