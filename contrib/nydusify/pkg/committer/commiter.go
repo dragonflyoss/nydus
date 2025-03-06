@@ -21,6 +21,7 @@ import (
 
 	"github.com/containerd/containerd/labels"
 
+	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/reference/docker"
@@ -62,6 +63,7 @@ type Committer struct {
 	manager *Manager
 }
 
+// NewCommitter creates a new Committer instance
 func NewCommitter(opt Opt) (*Committer, error) {
 	if err := os.MkdirAll(opt.WorkDir, 0755); err != nil {
 		return nil, errors.Wrap(err, "prepare work dir")
@@ -76,6 +78,7 @@ func NewCommitter(opt Opt) (*Committer, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "new container manager")
 	}
+
 	return &Committer{
 		workDir: workDir,
 		builder: opt.NydusImagePath,
@@ -84,6 +87,11 @@ func NewCommitter(opt Opt) (*Committer, error) {
 }
 
 func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
+	// Resolve container ID first
+	if err := cm.resolveContainerID(ctx, &opt); err != nil {
+		return errors.Wrap(err, "failed to resolve container ID")
+	}
+
 	ctx = namespaces.WithNamespace(ctx, opt.Namespace)
 	targetRef, err := ValidateRef(opt.TargetRef)
 	if err != nil {
@@ -842,4 +850,53 @@ func (cm *Committer) obtainBootStrapInfo(ctx context.Context, BootstrapName stri
 		return "", "", errors.Wrapf(err, "unmarshal output json file %s", outputJSONPath)
 	}
 	return output.FsVersion, strings.ToLower(output.Compressor), nil
+}
+
+// resolveContainerID resolves the container ID to its full ID
+func (cm *Committer) resolveContainerID(ctx context.Context, opt *Opt) error {
+	// If the ID is already a full ID (64 characters), return it directly
+	if len(opt.ContainerID) == 64 {
+		logrus.Debugf("container ID %s is already a full ID", opt.ContainerID)
+		return nil
+	}
+
+	logrus.Infof("resolving container ID prefix %s to full ID", opt.ContainerID)
+
+	var (
+		fullID     string
+		matchCount int
+	)
+
+	// Create containerd client directly
+	client, err := containerd.New(cm.manager.address)
+	if err != nil {
+		return fmt.Errorf("failed to create containerd client: %w", err)
+	}
+	defer client.Close()
+
+	// Set namespace in context
+	ctx = namespaces.WithNamespace(ctx, opt.Namespace)
+
+	walker := NewContainerWalker(client, func(_ context.Context, found Found) error {
+		fullID = found.Container.ID()
+		matchCount = found.MatchCount
+		return nil
+	})
+
+	n, err := walker.Walk(ctx, opt.ContainerID)
+	if err != nil {
+		return fmt.Errorf("failed to walk containers: %w", err)
+	}
+
+	if n == 0 {
+		return fmt.Errorf("no container found with ID : %s", opt.ContainerID)
+	}
+
+	if matchCount > 1 {
+		return fmt.Errorf("ambiguous container ID  '%s' matches multiple containers, please provide a more specific ID", opt.ContainerID)
+	}
+
+	opt.ContainerID = fullID
+	logrus.Infof("resolved container ID to full ID: %s", fullID)
+	return nil
 }
