@@ -20,17 +20,21 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 )
 
-const BLOB_PATH = "/content.v1/docker/registry/v2/blobs/%s/%s/%s/data"
-const REPOS_PATH = "/content.v1/docker/registry/v2/repositories"
-const MANIFEST_PATH = "/_manifests/tags/%s/current/link"
+const (
+	BLOB_PATH                = "/content.v1/docker/registry/v2/blobs/%s/%s/%s/data"
+	REPOS_PATH               = "/content.v1/docker/registry/v2/repositories"
+	MANIFEST_PATH            = "/_manifests/tags/%s/current/link"
+	MODEL_WEIGHT_MEDIA_TYPE  = "application/vnd.cnai.model.weight.v1.tar"
+	MODEL_DATASET_MEDIA_TYPE = "application/vnd.cnai.model.dataset.v1.tar"
+)
 
 const (
 	DefaultFileChunkSize = "4MiB"
 )
 
 var mediaTypeChunkSizeMap = map[string]string{
-	"application/vnd.cnai.model.weight.v1.tar":  "64MiB",
-	"application/vnd.cnai.model.dataset.v1.tar": "64MiB",
+	MODEL_WEIGHT_MEDIA_TYPE:  "64MiB",
+	MODEL_DATASET_MEDIA_TYPE: "64MiB",
 }
 
 var _ backend.Handler = &Handler{}
@@ -119,11 +123,23 @@ type fileInfo struct {
 }
 
 type Option struct {
-	Root         string `json:"root"`
-	RegistryHost string `json:"registry_host"`
-	Namespace    string `json:"namespace"`
-	ImageName    string `json:"image_name"`
-	Tag          string `json:"tag"`
+	Root            string `json:"root"`
+	RegistryHost    string `json:"registry_host"`
+	Namespace       string `json:"namespace"`
+	ImageName       string `json:"image_name"`
+	Tag             string `json:"tag"`
+	WeightChunkSize uint64 `josn:"weight_chunk_size"`
+}
+
+func setWeightChunkSize(chunkSize uint64) {
+	if chunkSize == 0 {
+		chunkSize = 64 * 1024 * 1024
+	}
+	chunkSizeStr := humanize.IBytes(chunkSize)
+	// remove space in chunkSizeStr `16 Mib` -> `16Mib`
+	chunkSizeStr = strings.ReplaceAll(chunkSizeStr, " ", "")
+	mediaTypeChunkSizeMap[MODEL_WEIGHT_MEDIA_TYPE] = chunkSizeStr
+	mediaTypeChunkSizeMap[MODEL_DATASET_MEDIA_TYPE] = chunkSizeStr
 }
 
 func getChunkSizeByMediaType(mediaType string) string {
@@ -143,6 +159,9 @@ func NewHandler(opt Option) (*Handler, error) {
 		objectID:     0,
 		blobsMap:     make(map[string]blobInfo),
 	}
+	if opt.WeightChunkSize != 0 {
+		setWeightChunkSize(opt.WeightChunkSize)
+	}
 	m, err := handler.extractManifest()
 	if err != nil {
 		return nil, errors.Wrap(err, "extract manifest failed")
@@ -155,7 +174,7 @@ func NewHandler(opt Option) (*Handler, error) {
 	return handler, nil
 }
 
-func GetOption(srcRef, modCtlRoot string) (*Option, error) {
+func GetOption(srcRef, modCtlRoot string, weight_chunk_size uint64) (*Option, error) {
 	parts := strings.Split(srcRef, "/")
 	if len(parts) != 3 {
 		return nil, errors.New("invalid target ref")
@@ -165,11 +184,12 @@ func GetOption(srcRef, modCtlRoot string) (*Option, error) {
 		return nil, errors.New("invalid target ref for name and tag")
 	}
 	opt := Option{
-		Root:         modCtlRoot,
-		RegistryHost: parts[0],
-		Namespace:    parts[1],
-		ImageName:    nameTagParts[0],
-		Tag:          nameTagParts[1],
+		Root:            modCtlRoot,
+		RegistryHost:    parts[0],
+		Namespace:       parts[1],
+		ImageName:       nameTagParts[0],
+		Tag:             nameTagParts[1],
+		WeightChunkSize: weight_chunk_size,
 	}
 	return &opt, nil
 }

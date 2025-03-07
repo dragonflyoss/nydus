@@ -412,8 +412,8 @@ func main() {
 				},
 				&cli.StringFlag{
 					Name:    "fs-chunk-size",
-					Value:   "0x100000",
-					Usage:   "size of nydus image data chunk, must be power of two and between 0x1000-0x100000, [default: 0x100000]",
+					Value:   "0x4000000",
+					Usage:   "size of nydus image data chunk, must be power of two and between 0x1000-0x10000000, [default: 0x4000000]",
 					EnvVars: []string{"FS_CHUNK_SIZE"},
 					Aliases: []string{"chunk-size"},
 				},
