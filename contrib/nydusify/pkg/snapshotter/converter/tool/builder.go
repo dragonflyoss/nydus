@@ -147,7 +147,7 @@ func buildPackArgs(option PackOption) ([]string, error) {
 	if option.AlignedChunk {
 		args = append(args, "--aligned-chunk")
 	}
-	if option.ChunkSize != "" {
+	if option.ChunkSize != "" && option.AttributesPath == "" {
 		args = append(args, "--chunk-size", option.ChunkSize)
 	}
 	if option.Features.Contains(FeatureBatchSize) {

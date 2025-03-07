@@ -12,6 +12,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -204,7 +206,12 @@ func convertModelFile(ctx context.Context, opt Opt) error {
 }
 
 func newModctlHandler(opt Opt, workDir string) (*modctl.Handler, error) {
-	modctlOpt, err := modctl.GetOption(opt.Source, workDir)
+	chunkSizeStr := strings.TrimPrefix(opt.ChunkSize, "0x")
+	chunkSize, err := strconv.ParseUint(chunkSizeStr, 16, 64)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse chunk size to uint64")
+	}
+	modctlOpt, err := modctl.GetOption(opt.Source, workDir, chunkSize)
 	if err != nil {
 		return nil, errors.Wrap(err, "parse modctl option")
 	}
