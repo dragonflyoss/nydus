@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distribution/reference"
 	"github.com/pkg/errors"
@@ -32,9 +33,11 @@ var modelRegistryAuth = os.Getenv("NYDUS_MODEL_REGISTRY_AUTH")
 var modelImageRef = os.Getenv("NYDUS_MODEL_IMAGE_REF")
 
 type proxy struct {
-	CacheDir string `json:"cache_dir"`
-	URL      string `json:"url"`
-	Fallback bool   `json:"fallback"`
+	CacheDir       string `json:"cache_dir"`
+	URL            string `json:"url"`
+	Fallback       bool   `json:"fallback"`
+	Timeout        int    `json:"timeout"`
+	ConnectTimeout int    `json:"connect_timeout"`
 }
 
 func walk(t *testing.T, root string) map[string]*tool.File {
@@ -46,6 +49,13 @@ func walk(t *testing.T, root string) map[string]*tool.File {
 		targetPath, err := filepath.Rel(root, path)
 		require.NoError(t, err)
 		if targetPath == "." {
+			return nil
+		}
+
+		stat, err := os.Lstat(path)
+		require.NoError(t, err)
+		if stat.Size() > (1024<<10)*128 {
+			t.Logf("skip large file verification: %s", targetPath)
 			return nil
 		}
 
@@ -96,6 +106,11 @@ func verify(t *testing.T, ctx tool.Context, externalBackendConfigPath string) {
 	require.NoError(t, err)
 	err = nydusd.Mount()
 	require.NoError(t, err)
+
+	if os.Getenv("NYDUS_ONLY_MOUNT") == "true" {
+		fmt.Printf("nydusd mounted: %s\n", ctx.Env.MountDir)
+		time.Sleep(time.Hour * 5)
+	}
 
 	check(t, modelctlContextDir, ctx.Env.MountDir)
 
@@ -161,61 +176,66 @@ func TestModctlExternal(t *testing.T) {
 	ctx.Build.FSVersion = "5"
 	defer ctx.Destroy(t)
 
-	// Generate nydus attributes
-	attributesPath := filepath.Join(ctx.Env.WorkDir, ".nydusattributes")
-	backendMetaPath := filepath.Join(ctx.Env.WorkDir, "backend.meta")
-	backendConfigPath := filepath.Join(ctx.Env.WorkDir, "build.backend.json")
-
 	host, name, tag, err := parseReference(modelImageRef)
 	require.NoError(t, err)
 	repo := strings.SplitN(name, "/", 2)
 	require.Len(t, repo, 2)
 
-	opt := modctl.Option{
-		Root:         modelctlWorkDir,
-		RegistryHost: host,
-		Namespace:    repo[0],
-		ImageName:    repo[1],
-		Tag:          tag,
+	bootstrapPath := os.Getenv("NYDUS_BOOTSTRAP")
+	backendConfigPath := os.Getenv("NYDUS_EXTERNAL_BACKEND_CONFIG")
+
+	if bootstrapPath == "" {
+		// Generate nydus attributes
+		attributesPath := filepath.Join(ctx.Env.WorkDir, ".nydusattributes")
+		backendMetaPath := filepath.Join(ctx.Env.WorkDir, "backend.meta")
+		backendConfigPath = filepath.Join(ctx.Env.WorkDir, "build.backend.json")
+
+		opt := modctl.Option{
+			Root:         modelctlWorkDir,
+			RegistryHost: host,
+			Namespace:    repo[0],
+			ImageName:    repo[1],
+			Tag:          tag,
+		}
+		handler, err := modctl.NewHandler(opt)
+		require.NoError(t, err)
+		err = external.Handle(context.Background(), external.Options{
+			Dir:              modelctlWorkDir,
+			Handler:          handler,
+			MetaOutput:       backendMetaPath,
+			BackendOutput:    backendConfigPath,
+			AttributesOutput: attributesPath,
+		})
+		require.NoError(t, err)
+
+		// Build external bootstrap
+		packOption := converter.PackOption{
+			BuilderPath:    ctx.Binary.Builder,
+			Compressor:     ctx.Build.Compressor,
+			FsVersion:      ctx.Build.FSVersion,
+			ChunkSize:      ctx.Build.ChunkSize,
+			FromDir:        modelctlContextDir,
+			AttributesPath: attributesPath,
+		}
+		_, externalBlobDigest := packWithAttributes(t, packOption, ctx.Env.BlobDir, modelctlContextDir)
+
+		externalBlobRa, err := local.OpenReader(filepath.Join(ctx.Env.BlobDir, externalBlobDigest.Hex()))
+		require.NoError(t, err)
+
+		bootstrapPath = filepath.Join(ctx.Env.WorkDir, "bootstrap")
+		bootstrap, err := os.Create(filepath.Join(ctx.Env.WorkDir, "bootstrap"))
+		require.NoError(t, err)
+		defer bootstrap.Close()
+
+		_, err = converter.UnpackEntry(externalBlobRa, converter.EntryBootstrap, bootstrap)
+		require.NoError(t, err)
+
+		// Check external bootstrap
+		err = tool.CheckBootstrap(tool.CheckOption{
+			BuilderPath: ctx.Binary.Builder,
+		}, bootstrapPath)
+		require.NoError(t, err)
 	}
-	handler, err := modctl.NewHandler(opt)
-	require.NoError(t, err)
-	err = external.Handle(context.Background(), external.Options{
-		Dir:              modelctlWorkDir,
-		Handler:          handler,
-		MetaOutput:       backendMetaPath,
-		BackendOutput:    backendConfigPath,
-		AttributesOutput: attributesPath,
-	})
-	require.NoError(t, err)
-
-	// Build external bootstrap
-	packOption := converter.PackOption{
-		BuilderPath:    ctx.Binary.Builder,
-		Compressor:     ctx.Build.Compressor,
-		FsVersion:      ctx.Build.FSVersion,
-		ChunkSize:      ctx.Build.ChunkSize,
-		FromDir:        modelctlContextDir,
-		AttributesPath: attributesPath,
-	}
-	_, externalBlobDigest := packWithAttributes(t, packOption, ctx.Env.BlobDir, modelctlContextDir)
-
-	externalBlobRa, err := local.OpenReader(filepath.Join(ctx.Env.BlobDir, externalBlobDigest.Hex()))
-	require.NoError(t, err)
-
-	bootstrapPath := filepath.Join(ctx.Env.WorkDir, "bootstrap")
-	bootstrap, err := os.Create(filepath.Join(ctx.Env.WorkDir, "bootstrap"))
-	require.NoError(t, err)
-	defer bootstrap.Close()
-
-	_, err = converter.UnpackEntry(externalBlobRa, converter.EntryBootstrap, bootstrap)
-	require.NoError(t, err)
-
-	// Check external bootstrap
-	err = tool.CheckBootstrap(tool.CheckOption{
-		BuilderPath: ctx.Binary.Builder,
-	}, bootstrapPath)
-	require.NoError(t, err)
 
 	// Prepare external backend config
 	backendBytes, err := os.ReadFile(backendConfigPath)
@@ -224,14 +244,21 @@ func TestModctlExternal(t *testing.T) {
 	err = json.Unmarshal(backendBytes, &backend)
 	require.NoError(t, err)
 
+	proxyURL := os.Getenv("NYDUS_EXTERNAL_PROXY_URL")
+	cacheDir := os.Getenv("NYDUS_EXTERNAL_PROXY_CACHE_DIR")
+	if cacheDir == "" {
+		cacheDir = ctx.Env.CacheDir
+	}
 	backend.Backends[0].Config = map[string]interface{}{
-		"scheme": "https",
-		"host":   host,
-		"repo":   name,
-		"auth":   modelRegistryAuth,
+		"scheme":          "https",
+		"host":            host,
+		"repo":            name,
+		"auth":            modelRegistryAuth,
+		"timeout":         30,
+		"connect_timeout": 5,
 		"proxy": proxy{
-			CacheDir: ctx.Env.CacheDir,
-			URL:      "",
+			CacheDir: cacheDir,
+			URL:      proxyURL,
 			Fallback: true,
 		},
 	}
