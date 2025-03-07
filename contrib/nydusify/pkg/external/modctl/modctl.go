@@ -29,7 +29,8 @@ const (
 )
 
 var mediaTypeChunkSizeMap = map[string]string{
-	"application/vnd.cnai.model.weight.v1.tar": "16MiB",
+	"application/vnd.cnai.model.weight.v1.tar":  "64MiB",
+	"application/vnd.cnai.model.dataset.v1.tar": "64MiB",
 }
 
 var _ backend.Handler = &Handler{}
