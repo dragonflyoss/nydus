@@ -65,6 +65,7 @@ type NydusdConfig struct {
 	ConfigPath      string
 	BackendType     string
 	BackendConfig   string
+	ExternalBackend string
 	BlobCacheDir    string
 	APISockPath     string
 	MountPath       string
