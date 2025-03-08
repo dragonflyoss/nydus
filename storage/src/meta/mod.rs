@@ -340,6 +340,15 @@ impl BlobCompressionContextHeader {
         }
     }
 
+    /// Set flag indicating the blob is external.
+    pub fn set_external(&mut self, external: bool) {
+        if external {
+            self.s_features |= BlobFeatures::EXTERNAL.bits();
+        } else {
+            self.s_features &= !BlobFeatures::EXTERNAL.bits();
+        }
+    }
+
     /// Get blob meta feature flags.
     pub fn features(&self) -> u32 {
         self.s_features
@@ -1097,6 +1106,10 @@ impl BlobCompressionContext {
 
     pub(crate) fn is_encrypted(&self) -> bool {
         self.blob_features & BlobFeatures::ENCRYPTED.bits() != 0
+    }
+
+    pub(crate) fn is_external(&self) -> bool {
+        self.blob_features & BlobFeatures::EXTERNAL.bits() != 0
     }
 }
 
@@ -2030,6 +2043,9 @@ pub fn format_blob_features(features: BlobFeatures) -> String {
     }
     if features.contains(BlobFeatures::IS_CHUNKDICT_GENERATED) {
         output += "is-chunkdict-generated ";
+    }
+    if features.contains(BlobFeatures::EXTERNAL) {
+        output += "external ";
     }
     output.trim_end().to_string()
 }
