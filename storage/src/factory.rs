@@ -133,11 +133,13 @@ impl BlobFactory {
             return mgr.get_blob_cache(blob_info);
         }
         let backend = Self::new_backend(backend_cfg, &blob_info.blob_id())?;
+        let external_backends = Arc::new(config.external_backends.clone());
         let mgr = match cache_cfg.cache_type.as_str() {
             "blobcache" | "filecache" => {
                 let mgr = FileCacheMgr::new(
                     cache_cfg,
                     backend,
+                    external_backends,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
                     user_io_batch_size,
@@ -150,6 +152,7 @@ impl BlobFactory {
                 let mgr = crate::cache::FsCacheMgr::new(
                     cache_cfg,
                     backend,
+                    external_backends,
                     ASYNC_RUNTIME.clone(),
                     &config.id,
                     user_io_batch_size,
