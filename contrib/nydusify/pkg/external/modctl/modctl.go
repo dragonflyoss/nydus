@@ -203,7 +203,13 @@ func (handler *Handler) Handle(ctx context.Context, file backend.File) ([]backen
 	chunkSize := getChunkSizeByMediaType(blobInfo.mediaType)
 
 	// read the tar file and get the meta of files
-	files, err := handler.readBlob(filepath.Join(handler.root, file.RelativePath))
+	f, err := os.Open(filepath.Join(handler.root, file.RelativePath))
+	if err != nil {
+		return nil, errors.Wrap(err, "open tar file failed")
+	}
+	defer f.Close()
+
+	files, err := handler.readBlob(f)
 	if err != nil {
 		return nil, errors.Wrap(err, "read blob failed")
 	}
@@ -358,14 +364,10 @@ func (handler *Handler) needIgnore(relPath string) (bool, *blobInfo) {
 	return false, &blobInfo
 }
 
-func (handler *Handler) readBlob(path string) ([]fileInfo, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, errors.Wrap(err, "open tar file failed")
-	}
-	defer f.Close()
+func (handler *Handler) readBlob(r io.ReadSeeker) ([]fileInfo, error) {
+
 	var files []fileInfo
-	tarReader := tar.NewReader(f)
+	tarReader := tar.NewReader(r)
 	for {
 		header, err := tarReader.Next()
 		if err != nil {
@@ -374,7 +376,7 @@ func (handler *Handler) readBlob(path string) ([]fileInfo, error) {
 			}
 			return nil, errors.Wrap(err, "read tar file failed")
 		}
-		currentOffset, err := f.Seek(0, io.SeekCurrent)
+		currentOffset, err := r.Seek(0, io.SeekCurrent)
 		if err != nil {
 			return nil, errors.Wrap(err, "seek tar file failed")
 		}

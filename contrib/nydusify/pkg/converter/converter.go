@@ -75,6 +75,7 @@ type Opt struct {
 	PrefetchPatterns string
 	OCIRef           bool
 	WithReferrer     bool
+	WithPlainHTTP    bool
 
 	AllPlatforms bool
 	Platforms    string
@@ -364,6 +365,10 @@ func pushManifest(
 		return errors.Wrap(err, "create remote")
 	}
 
+	if opt.WithPlainHTTP {
+		remoter.WithHTTP()
+	}
+
 	if err := remoter.Push(ctx, *configDesc, true, bytes.NewReader(configBytes)); err != nil {
 		if utils.RetryWithHTTP(err) {
 			remoter.MaybeWithHTTP(err)
@@ -434,7 +439,7 @@ func pushManifest(
 	}
 	layers = append(layers, bootstrapDesc)
 
-	subject, err := getSourceManifestSubject(ctx, opt.Source, opt.SourceInsecure)
+	subject, err := getSourceManifestSubject(ctx, opt.Source, opt.SourceInsecure, opt.WithPlainHTTP)
 	if err != nil {
 		return errors.Wrap(err, "get source manifest subject")
 	}
@@ -454,12 +459,23 @@ func pushManifest(
 	return nil
 }
 
-func getSourceManifestSubject(ctx context.Context, sourceRef string, inscure bool) (*ocispec.Descriptor, error) {
+func getSourceManifestSubject(ctx context.Context, sourceRef string, inscure, plainHttp bool) (*ocispec.Descriptor, error) {
 	remoter, err := pkgPvd.DefaultRemote(sourceRef, inscure)
 	if err != nil {
 		return nil, errors.Wrap(err, "create remote")
 	}
-	return remoter.Resolve(ctx)
+	if plainHttp {
+		remoter.WithHTTP()
+	}
+	desc, err := remoter.Resolve(ctx)
+	if utils.RetryWithHTTP(err) {
+		remoter.MaybeWithHTTP(err)
+		desc, err = remoter.Resolve(ctx)
+	}
+	if err != nil {
+		return nil, errors.Wrap(err, "resolve source manifest subject")
+	}
+	return desc, nil
 }
 
 func makeDesc(x interface{}, oldDesc ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
