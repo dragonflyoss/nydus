@@ -441,6 +441,12 @@ func main() {
 					Usage:   "File path to save the metrics collected during conversion in JSON format, for example: './output.json'",
 					EnvVars: []string{"OUTPUT_JSON"},
 				},
+				&cli.BoolFlag{
+					Name:    "plain-http",
+					Value:   false,
+					Usage:   "Enable plain http for Nydus image push",
+					EnvVars: []string{"PLAIN_HTTP"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -539,7 +545,8 @@ func main() {
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
 
-					OutputJSON: c.String("output-json"),
+					OutputJSON:    c.String("output-json"),
+					WithPlainHTTP: c.Bool("plain-http"),
 				}
 
 				return converter.Convert(context.Background(), opt)
