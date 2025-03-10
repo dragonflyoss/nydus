@@ -561,19 +561,39 @@ func main() {
 				},
 
 				&cli.StringFlag{
-					Name:    "backend-type",
+					Name:    "source-backend-type",
 					Value:   "",
-					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified, possible values: 'oss', 's3'",
+					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
 					EnvVars: []string{"BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
-					Name:    "backend-config",
+					Name:    "source-backend-config",
 					Value:   "",
-					Usage:   "Json string for storage backend configuration",
+					Usage:   "Json configuration string for storage backend",
 					EnvVars: []string{"BACKEND_CONFIG"},
 				},
 				&cli.PathFlag{
-					Name:      "backend-config-file",
+					Name:      "source-backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
+
+				&cli.StringFlag{
+					Name:    "target-backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "target-backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "target-backend-config-file",
 					Value:     "",
 					TakesFile: true,
 					Usage:     "Json configuration file for storage backend",
@@ -614,7 +634,12 @@ func main() {
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
-				backendType, backendConfig, err := getBackendConfig(c, "", false)
+				sourceBackendType, sourceBackendConfig, err := getBackendConfig(c, "source-", false)
+				if err != nil {
+					return err
+				}
+
+				targetBackendType, targetBackendConfig, err := getBackendConfig(c, "target-", false)
 				if err != nil {
 					return err
 				}
@@ -625,16 +650,20 @@ func main() {
 				}
 
 				checker, err := checker.New(checker.Opt{
-					WorkDir:        c.String("work-dir"),
-					Source:         c.String("source"),
-					Target:         c.String("target"),
+					WorkDir: c.String("work-dir"),
+
+					Source:              c.String("source"),
+					Target:              c.String("target"),
+					SourceInsecure:      c.Bool("source-insecure"),
+					TargetInsecure:      c.Bool("target-insecure"),
+					SourceBackendType:   sourceBackendType,
+					SourceBackendConfig: sourceBackendConfig,
+					TargetBackendType:   targetBackendType,
+					TargetBackendConfig: targetBackendConfig,
+
 					MultiPlatform:  c.Bool("multi-platform"),
-					SourceInsecure: c.Bool("source-insecure"),
-					TargetInsecure: c.Bool("target-insecure"),
 					NydusImagePath: c.String("nydus-image"),
 					NydusdPath:     c.String("nydusd"),
-					BackendType:    backendType,
-					BackendConfig:  backendConfig,
 					ExpectedArch:   arch,
 				})
 				if err != nil {
