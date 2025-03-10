@@ -88,6 +88,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
         false
     }
 
+    fn has_crc(&self) -> bool {
+        false
+    }
+
     fn is_compressed(&self) -> bool {
         self.compressed_size() != self.uncompressed_size()
     }
@@ -114,6 +118,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
 
     fn get_uncompressed_offset_in_batch_buf(&self) -> Result<u32> {
         unimplemented!()
+    }
+
+    fn crc32(&self) -> u32 {
+        0
     }
 
     fn get_data(&self) -> u64 {

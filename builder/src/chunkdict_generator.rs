@@ -270,6 +270,7 @@ impl Generator {
             chunk.set_uncompressed_size(chunk_info.chunk_uncompressed_size);
             chunk.set_uncompressed_offset(chunk_info.chunk_uncompressed_offset);
             chunk.set_id(RafsDigest::from_string(&chunk_info.chunk_digest));
+            // TODO: set crc32 of chunk.
 
             node.chunks.push(NodeChunk {
                 source: ChunkSource::Build,
