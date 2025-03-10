@@ -55,7 +55,7 @@ impl PrefetchBlobState {
         let mut blob_ctx = BlobContext::from(ctx, &blob_info, ChunkSource::Build)?;
         blob_ctx.blob_meta_info_enabled = true;
         let blob_writer = ArtifactWriter::new(crate::ArtifactStorage::FileDir(
-            blobs_dir_path.to_path_buf(),
+            (blobs_dir_path.to_path_buf(), String::new()),
         ))
         .map(|writer| Box::new(writer) as Box<dyn Artifact>)?;
         Ok(Self {
@@ -100,7 +100,7 @@ impl OptimizePrefetch {
         debug!("prefetch blob id: {}", ctx.blob_id);
 
         Self::build_dump_bootstrap(tree, ctx, bootstrap_mgr, blob_table)?;
-        BuildOutput::new(&blob_mgr, &bootstrap_mgr.bootstrap_storage)
+        BuildOutput::new(&blob_mgr, None, &bootstrap_mgr.bootstrap_storage, &None)
     }
 
     fn build_dump_bootstrap(
@@ -142,7 +142,7 @@ impl OptimizePrefetch {
             }
         }
 
-        let mut blob_mgr = BlobManager::new(ctx.digester);
+        let mut blob_mgr = BlobManager::new(ctx.digester, false);
         blob_mgr.add_blob(blob_state.blob_ctx.clone());
         blob_mgr.set_current_blob_index(0);
         Blob::finalize_blob_data(&ctx, &mut blob_mgr, blob_state.blob_writer.as_mut())?;

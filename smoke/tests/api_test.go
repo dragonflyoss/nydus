@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/containerd/log"
-	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dragonflyoss/nydus/smoke/tests/texture"

@@ -20,8 +20,8 @@ import (
 	originprovider "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/goharbor/acceleration-service/pkg/remote"
 
-	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/dustin/go-humanize"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
