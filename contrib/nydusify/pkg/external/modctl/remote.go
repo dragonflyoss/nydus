@@ -1,0 +1,147 @@
+// Copyright 2025 Nydus Developers. All rights reserved.
+//
+// SPDX-License-Identifier: Apache-2.0
+package modctl
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
+	"github.com/pkg/errors"
+
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
+	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+)
+
+type RemoteHandler struct {
+	ctx      context.Context
+	imageRef string
+	remoter  *remote.Remote
+	manifest ocispec.Manifest
+	// convert from the manifes.Layers, same order to manifest.Layers
+	blobs []backend.Blob
+}
+
+func NewRemoteHandler(ctx context.Context, imageRef string) (*RemoteHandler, error) {
+	remoter, err := pkgPvd.DefaultRemote(imageRef, true)
+	if err != nil {
+		return nil, errors.Wrap(err, "new remote failed")
+	}
+	handler := &RemoteHandler{
+		ctx:      ctx,
+		imageRef: imageRef,
+		remoter:  remoter,
+	}
+	if err = handler.setManifest(); err != nil {
+		return nil, errors.Wrap(err, "set manifest failed")
+	}
+	handler.blobs = convertToBlobs(&handler.manifest)
+	return handler, nil
+}
+
+func (handler *RemoteHandler) Handle(ctx context.Context) (*backend.Backend, []backend.FileAttribute, error) {
+	var fileAttrs []backend.FileAttribute
+	for idx, layer := range handler.manifest.Layers {
+		fa, err := handler.handle(ctx, layer, int32(idx))
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "handle layer failed")
+		}
+		fileAttrs = append(fileAttrs, fa...)
+	}
+	bkd, err := handler.backend()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "get backend failed")
+	}
+
+	return bkd, fileAttrs, nil
+}
+
+func (handler *RemoteHandler) GetModelConfig() (*modelspec.Model, error) {
+	var modelCfg modelspec.Model
+	rc, err := handler.remoter.Pull(handler.ctx, handler.manifest.Config, true)
+	if err != nil {
+		return nil, errors.Wrap(err, "pull model config failed")
+	}
+	defer rc.Close()
+	var buf bytes.Buffer
+	if _, err = io.Copy(&buf, rc); err != nil {
+		return nil, errors.Wrap(err, "copy model config failed")
+	}
+	if err = json.Unmarshal(buf.Bytes(), &modelCfg); err != nil {
+		return nil, errors.Wrap(err, "unmarshal model config failed")
+	}
+	return &modelCfg, nil
+}
+
+func (handler *RemoteHandler) GetLayers() []ocispec.Descriptor {
+	return handler.manifest.Layers
+}
+
+func (handler *RemoteHandler) setManifest() error {
+	maniDesc, err := handler.remoter.Resolve(handler.ctx)
+	if err != nil {
+		return errors.Wrap(err, "resolve image manifest failed")
+	}
+	rc, err := handler.remoter.Pull(handler.ctx, *maniDesc, true)
+	if err != nil {
+		return errors.Wrap(err, "pull manifest failed")
+	}
+	defer rc.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, rc)
+	var manifest ocispec.Manifest
+	if err = json.Unmarshal(buf.Bytes(), &manifest); err != nil {
+		return errors.Wrap(err, "unmarshal manifest failed")
+	}
+	handler.manifest = manifest
+	return nil
+}
+
+func (handler *RemoteHandler) backend() (*backend.Backend, error) {
+	bkd := backend.Backend{
+		Version: "v1",
+	}
+	bkd.Backends = []backend.BackendConfig{
+		{
+			Type: "registry",
+		},
+	}
+	bkd.Blobs = handler.blobs
+	return &bkd, nil
+}
+
+func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descriptor, index int32) ([]backend.FileAttribute, error) {
+	chunkSize := getChunkSizeByMediaType(layer.MediaType)
+	rsc, err := handler.remoter.ReadSeekCloser(ctx, layer, true)
+	if err != nil {
+		return nil, errors.Wrap(err, "read seek closer failed")
+	}
+	defer rsc.Close()
+	files, err := readTarBlob(rsc)
+	if err != nil {
+		return nil, errors.Wrap(err, "read tar blob failed")
+	}
+
+	blobInfo := handler.blobs[index].Config
+	fileAttrs := make([]backend.FileAttribute, len(files))
+	for idx, f := range files {
+		fileAttrs[idx] = backend.FileAttribute{
+			BlobId:                 blobInfo.Digest,
+			BlobIndex:              uint32(index),
+			BlobSize:               blobInfo.Size,
+			FileSize:               f.size,
+			Chunk0CompressedOffset: f.offset,
+			ChunkSize:              chunkSize,
+			RelativePath:           f.name,
+			Type:                   "external",
+			Mode:                   f.mode,
+		}
+	}
+
+	return fileAttrs, nil
+}

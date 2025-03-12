@@ -677,6 +677,7 @@ impl Node {
 
 // build node object from a filesystem object.
 impl Node {
+    #[allow(clippy::too_many_arguments)]
     /// Create a new instance of [Node] from a filesystem object.
     pub fn from_fs_object(
         version: RafsVersion,
@@ -684,6 +685,7 @@ impl Node {
         path: PathBuf,
         overlay: Overlay,
         chunk_size: u32,
+        file_size: u64,
         explicit_uidgid: bool,
         v6_force_extended_inode: bool,
     ) -> Result<Node> {
@@ -716,7 +718,7 @@ impl Node {
             v6_dirents: Vec::new(),
         };
 
-        node.build_inode(chunk_size)
+        node.build_inode(chunk_size, file_size)
             .context("failed to build Node from fs object")?;
         if version.is_v6() {
             node.v6_set_inode_compact();
@@ -799,7 +801,7 @@ impl Node {
         Ok(())
     }
 
-    fn build_inode(&mut self, chunk_size: u32) -> Result<()> {
+    fn build_inode(&mut self, chunk_size: u32, file_size: u64) -> Result<()> {
         let size = self.name().byte_size();
         if size > u16::MAX as usize {
             bail!("file name length 0x{:x} is too big", size,);
@@ -811,6 +813,12 @@ impl Node {
             .with_context(|| format!("failed to get xattr for {}", self.path().display()))?;
         self.build_inode_stat()
             .with_context(|| format!("failed to build inode {}", self.path().display()))?;
+
+        // If the file size is not 0, and the inode size is 0,
+        // it means the file is an external dummy file.
+        if !self.is_dir() && file_size != 0 && self.inode.size() == 0 {
+            self.inode.set_size(file_size);
+        }
 
         if self.is_reg() {
             let chunk_count = self.chunk_count(chunk_size as u64).with_context(|| {

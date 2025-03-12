@@ -38,9 +38,11 @@ type FileAttribute struct {
 	BlobIndex              uint32
 	BlobId                 string
 	BlobSize               string
+	FileSize               uint64
 	ChunkSize              string
 	Chunk0CompressedOffset uint64
 	Type                   string
+	Mode                   uint32
 }
 
 type File struct {
@@ -54,6 +56,11 @@ type Handler interface {
 	Backend(ctx context.Context) (*Backend, error)
 	// Handle handles the file and returns the object information.
 	Handle(ctx context.Context, file File) ([]Chunk, error)
+}
+
+type RemoteHanlder interface {
+	// Handle handles the file and returns the object information.
+	Handle(ctx context.Context) (*Backend, []FileAttribute, error)
 }
 
 type Chunk interface {

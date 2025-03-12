@@ -93,6 +93,10 @@ func Convert(ctx context.Context, opt Opt) error {
 		return convertModelFile(ctx, opt)
 	}
 
+	if opt.SourceBackendType == "model-artifact" {
+		return convertModelArtifact(ctx, opt)
+	}
+
 	ctx = namespaces.WithNamespace(ctx, "nydusify")
 	platformMC, err := platformutil.ParsePlatforms(opt.AllPlatforms, opt.Platforms)
 	if err != nil {
@@ -200,7 +204,79 @@ func convertModelFile(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "build model config")
 	}
 
-	modelLayers := buildLayers(modctlHandler)
+	modelLayers := modctlHandler.GetLayers()
+
+	nydusImage := buildNydusImage()
+	return pushManifest(context.Background(), opt, *modelCfg, modelLayers, *nydusImage, bootStrapTarPath)
+}
+
+func convertModelArtifact(ctx context.Context, opt Opt) error {
+	if _, err := os.Stat(opt.WorkDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.MkdirAll(opt.WorkDir, 0755); err != nil {
+				return errors.Wrap(err, "prepare work directory")
+			}
+			// We should only clean up when the work directory not exists
+			// before, otherwise it may delete user data by mistake.
+			defer os.RemoveAll(opt.WorkDir)
+		} else {
+			return errors.Wrap(err, "stat work directory")
+		}
+	}
+	tmpDir, err := os.MkdirTemp(opt.WorkDir, "nydusify-")
+	if err != nil {
+		return errors.Wrap(err, "create temp directory")
+	}
+	defer os.RemoveAll(tmpDir)
+	contextDir, err := os.MkdirTemp(tmpDir, "context-")
+	if err != nil {
+		return errors.Wrap(err, "create temp directory")
+	}
+	defer os.RemoveAll(contextDir)
+
+	attributesPath := filepath.Join(tmpDir, ".nydusattributes")
+	backendMetaPath := filepath.Join(tmpDir, ".backend.meta")
+	backendConfigPath := filepath.Join(tmpDir, ".backend.json")
+
+	handler, err := modctl.NewRemoteHandler(ctx, opt.Source)
+	if err != nil {
+		return errors.Wrap(err, "create modctl handler")
+	}
+	if err := external.RemoteHandle(ctx, external.Options{
+		ContextDir:       contextDir,
+		RemoteHandler:    handler,
+		MetaOutput:       backendMetaPath,
+		BackendOutput:    backendConfigPath,
+		AttributesOutput: attributesPath,
+	}); err != nil {
+		return errors.Wrap(err, "remote handle")
+	}
+
+	// Make nydus layer with external blob
+	packOption := snapConv.PackOption{
+		BuilderPath:    opt.NydusImagePath,
+		Compressor:     opt.Compressor,
+		FsVersion:      opt.FsVersion,
+		ChunkSize:      opt.ChunkSize,
+		FromDir:        contextDir,
+		AttributesPath: attributesPath,
+	}
+	_, externalBlobDigest, err := packWithAttributes(ctx, packOption, tmpDir)
+	if err != nil {
+		return errors.Wrap(err, "pack to blob")
+	}
+
+	bootStrapTarPath, err := packFinalBootstrap(tmpDir, backendConfigPath, externalBlobDigest)
+	if err != nil {
+		return errors.Wrap(err, "pack final bootstrap")
+	}
+
+	modelCfg, err := handler.GetModelConfig()
+	if err != nil {
+		return errors.Wrap(err, "build model config")
+	}
+
+	modelLayers := handler.GetLayers()
 
 	nydusImage := buildNydusImage()
 	return pushManifest(context.Background(), opt, *modelCfg, modelLayers, *nydusImage, bootStrapTarPath)
@@ -334,20 +410,6 @@ func buildModelConfig(modctlHandler *modctl.Handler) (*modelspec.Model, error) {
 		return nil, errors.Wrap(err, "unmarshal modctl config")
 	}
 	return &modelCfg, nil
-}
-
-func buildLayers(modctlHandler *modctl.Handler) []ocispec.Descriptor {
-	modelLayers := modctlHandler.GetLayers()
-	ociLayers := make([]ocispec.Descriptor, 0, len(modelLayers))
-	for _, layer := range modelLayers {
-		desc := ocispec.Descriptor{
-			MediaType: layer.MediaType,
-			Digest:    digest.Digest(layer.Digest),
-			Size:      int64(layer.Size),
-		}
-		ociLayers = append(ociLayers, desc)
-	}
-	return ociLayers
 }
 
 func pushManifest(
