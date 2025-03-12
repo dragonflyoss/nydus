@@ -15,9 +15,11 @@ import (
 	"strings"
 
 	"github.com/dustin/go-humanize"
+
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
@@ -45,12 +47,12 @@ type Handler struct {
 	namespace    string
 	imageName    string
 	tag          string
-	manifest     Manifest
+	manifest     ocispec.Manifest
 	blobs        []backend.Blob
 	// key is the blob's sha256, value is the blob's mediaType type and index
 	blobsMap map[string]blobInfo
 	// config layer in modctl's manifest
-	blobConfig BlobConfig
+	blobConfig ocispec.Descriptor
 	objectID   uint32
 }
 
@@ -105,19 +107,9 @@ type Object struct {
 	ChunkSize string
 }
 
-type Manifest struct {
-	Config BlobConfig   `json:"config"`
-	Layers []BlobConfig `json:"layers"`
-}
-
-type BlobConfig struct {
-	MediaType string `json:"mediaType"`
-	Digest    string `json:"digest"`
-	Size      uint64 `json:"size"`
-}
-
 type fileInfo struct {
 	name   string
+	mode   uint32
 	size   uint64
 	offset uint64
 }
@@ -167,7 +159,7 @@ func NewHandler(opt Option) (*Handler, error) {
 		return nil, errors.Wrap(err, "extract manifest failed")
 	}
 	handler.manifest = *m
-	handler.setBlobs(m)
+	handler.blobs = convertToBlobs(&handler.manifest)
 	handler.setBlobConfig(m)
 	handler.setBlobsMap()
 
@@ -209,7 +201,7 @@ func (handler *Handler) Handle(ctx context.Context, file backend.File) ([]backen
 	}
 	defer f.Close()
 
-	files, err := handler.readBlob(f)
+	files, err := readTarBlob(f)
 	if err != nil {
 		return nil, errors.Wrap(err, "read blob failed")
 	}
@@ -253,18 +245,14 @@ func (handler *Handler) Backend(ctx context.Context) (*backend.Backend, error) {
 }
 
 func (handler *Handler) GetConfig() ([]byte, error) {
-	return handler.extractBlobs(handler.blobConfig.Digest)
+	return handler.extractBlobs(handler.blobConfig.Digest.String())
 }
 
-func (handler *Handler) GetLayers() []BlobConfig {
+func (handler *Handler) GetLayers() []ocispec.Descriptor {
 	return handler.manifest.Layers
 }
 
-func (handler *Handler) setBlobs(m *Manifest) {
-	handler.blobs = handler.convertToBlobs(m)
-}
-
-func (handler *Handler) setBlobConfig(m *Manifest) {
+func (handler *Handler) setBlobConfig(m *ocispec.Manifest) {
 	handler.blobConfig = m.Config
 }
 
@@ -279,7 +267,7 @@ func (handler *Handler) setBlobsMap() {
 	}
 }
 
-func (handler *Handler) extractManifest() (*Manifest, error) {
+func (handler *Handler) extractManifest() (*ocispec.Manifest, error) {
 	tagPath := fmt.Sprintf(MANIFEST_PATH, handler.tag)
 	manifestPath := filepath.Join(handler.root, REPOS_PATH, handler.registryHost, handler.namespace, handler.imageName, tagPath)
 	line, err := os.ReadFile(manifestPath)
@@ -291,7 +279,7 @@ func (handler *Handler) extractManifest() (*Manifest, error) {
 		return nil, errors.Wrap(err, "extract blobs failed")
 	}
 
-	var m Manifest
+	var m ocispec.Manifest
 	if err := json.Unmarshal(content, &m); err != nil {
 		return nil, errors.Wrap(err, "unmarshal manifest blobs file failed")
 	}
@@ -315,11 +303,12 @@ func (handler *Handler) extractBlobs(digest string) ([]byte, error) {
 
 }
 
-func (handler *Handler) convertToBlobs(m *Manifest) []backend.Blob {
-	createBlob := func(layer BlobConfig) backend.Blob {
-		digest := strings.Split(layer.Digest, ":")
-		if len(digest) == 2 {
-			layer.Digest = digest[1]
+func convertToBlobs(m *ocispec.Manifest) []backend.Blob {
+	createBlob := func(layer ocispec.Descriptor) backend.Blob {
+		digestStr := layer.Digest.String()
+		digestParts := strings.Split(digestStr, ":")
+		if len(digestParts) == 2 {
+			digestStr = digestParts[1]
 		}
 
 		chunkSize := getChunkSizeByMediaType(layer.MediaType)
@@ -327,7 +316,7 @@ func (handler *Handler) convertToBlobs(m *Manifest) []backend.Blob {
 			Backend: 0,
 			Config: backend.BlobConfig{
 				MediaType: layer.MediaType,
-				Digest:    layer.Digest,
+				Digest:    digestStr,
 				Size:      fmt.Sprintf("%d", layer.Size),
 				ChunkSize: chunkSize,
 			},
@@ -364,8 +353,7 @@ func (handler *Handler) needIgnore(relPath string) (bool, *blobInfo) {
 	return false, &blobInfo
 }
 
-func (handler *Handler) readBlob(r io.ReadSeeker) ([]fileInfo, error) {
-
+func readTarBlob(r io.ReadSeeker) ([]fileInfo, error) {
 	var files []fileInfo
 	tarReader := tar.NewReader(r)
 	for {
@@ -382,6 +370,7 @@ func (handler *Handler) readBlob(r io.ReadSeeker) ([]fileInfo, error) {
 		}
 		files = append(files, fileInfo{
 			name:   header.Name,
+			mode:   uint32(header.Mode),
 			size:   uint64(header.Size),
 			offset: uint64(currentOffset),
 		})

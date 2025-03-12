@@ -97,3 +97,29 @@ func (remote *Remote) ReaderAt(ctx context.Context, desc ocispec.Descriptor, byD
 	provider := FromFetcher(fetcher)
 	return provider.ReaderAt(ctx, desc)
 }
+
+func (remote *Remote) ReadSeekCloser(ctx context.Context, desc ocispec.Descriptor, byDigest bool) (io.ReadSeekCloser, error) {
+	var ref string
+	if byDigest {
+		ref = remote.parsed.Name()
+	} else {
+		ref = reference.TagNameOnly(remote.parsed).String()
+	}
+
+	// Create a new resolver instance for the request
+	fetcher, err := remote.resolverFunc(remote.withHttp).Fetcher(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+
+	rc, err := fetcher.Fetch(ctx, desc)
+	if err != nil {
+		return nil, err
+	}
+
+	rsc, ok := rc.(io.ReadSeekCloser)
+	if !ok {
+		return nil, errors.New("fetcher does not support ReadSeekCloser")
+	}
+	return rsc, nil
+}

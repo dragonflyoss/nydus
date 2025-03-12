@@ -5,7 +5,7 @@
 use std::fs;
 use std::fs::DirEntry;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use nydus_utils::{event_tracer, lazy_drop, root_tracer, timing_tracer};
 
 use crate::core::context::{Artifact, NoopArtifactWriter};
@@ -48,12 +48,35 @@ impl FilesystemTreeBuilder {
         for child in children {
             let path = child.path();
             let target = Node::generate_target(&path, &ctx.source_path);
+            let mut file_size: u64 = 0;
+            if ctx.attributes.is_external(&target) {
+                if let Some(value) = ctx.attributes.get_value(&target, "file_size") {
+                    file_size = value.parse::<u64>().ok().ok_or_else(|| {
+                        anyhow!(
+                            "failed to parse file_size for external file {}",
+                            &target.display()
+                        )
+                    })?;
+                }
+                // file_size = ctx
+                //     .attributes
+                //     .get_value(&target, "file_size")
+                //     .and_then(|v| v.parse::<u64>().ok())
+                //     .ok_or_else(|| {
+                //         anyhow!(
+                //             "failed to parse file_size for external file {}",
+                //             &target.display()
+                //         )
+                //     })?;
+            }
+
             let mut child = Node::from_fs_object(
                 ctx.fs_version,
                 ctx.source_path.clone(),
                 path.clone(),
                 Overlay::UpperAddition,
                 ctx.chunk_size,
+                file_size,
                 parent.info.explicit_uidgid,
                 true,
             )
@@ -116,6 +139,7 @@ impl DirectoryBuilder {
             ctx.source_path.clone(),
             Overlay::UpperAddition,
             ctx.chunk_size,
+            0,
             ctx.explicit_uidgid,
             true,
         )?;

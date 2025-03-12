@@ -920,6 +920,7 @@ mod tests {
             pa_aa.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             false,
             false,
         )
@@ -947,6 +948,7 @@ mod tests {
             pa.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             false,
             false,
         )
@@ -1043,6 +1045,7 @@ mod tests {
             pa_reg.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             false,
             false,
         )
@@ -1056,6 +1059,7 @@ mod tests {
             pa_pyc.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             false,
             false,
         )
