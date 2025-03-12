@@ -285,6 +285,7 @@ impl Node {
             let external_blob_id = external_values
                 .get("blob_id")
                 .ok_or_else(|| anyhow!("failed to parse blob_id"))?;
+            warn!("exterbal_blob_id: {}", external_blob_id);
             let external_chunk_size = external_values
                 .get("chunk_size")
                 .and_then(|v| parse_size(v).ok())
@@ -300,6 +301,7 @@ impl Node {
             let (_, external_blob_ctx) =
                 blob_mgr.get_or_create_blob_by_idx(ctx, external_blob_index)?;
             external_blob_ctx.blob_id = external_blob_id.to_string();
+            warn!("blob_id: {}", external_blob_ctx.blob_id);
             external_blob_ctx.compressed_blob_size = external_compressed_size;
             external_blob_ctx.uncompressed_blob_size = external_compressed_size;
             let chunk_count = self

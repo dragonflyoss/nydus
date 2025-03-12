@@ -238,7 +238,7 @@ func convertModelArtifact(ctx context.Context, opt Opt) error {
 	backendMetaPath := filepath.Join(tmpDir, ".backend.meta")
 	backendConfigPath := filepath.Join(tmpDir, ".backend.json")
 
-	handler, err := modctl.NewRemoteHandler(ctx, opt.Source)
+	handler, err := modctl.NewRemoteHandler(ctx, opt.Source, opt.WithPlainHTTP)
 	if err != nil {
 		return errors.Wrap(err, "create modctl handler")
 	}
