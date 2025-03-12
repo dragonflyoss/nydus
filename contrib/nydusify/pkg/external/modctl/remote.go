@@ -11,6 +11,7 @@ import (
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
 
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
@@ -27,10 +28,13 @@ type RemoteHandler struct {
 	blobs []backend.Blob
 }
 
-func NewRemoteHandler(ctx context.Context, imageRef string) (*RemoteHandler, error) {
+func NewRemoteHandler(ctx context.Context, imageRef string, plainHttp bool) (*RemoteHandler, error) {
 	remoter, err := pkgPvd.DefaultRemote(imageRef, true)
 	if err != nil {
 		return nil, errors.Wrap(err, "new remote failed")
+	}
+	if plainHttp {
+		remoter.WithHTTP()
 	}
 	handler := &RemoteHandler{
 		ctx:      ctx,
@@ -84,9 +88,14 @@ func (handler *RemoteHandler) GetLayers() []ocispec.Descriptor {
 
 func (handler *RemoteHandler) setManifest() error {
 	maniDesc, err := handler.remoter.Resolve(handler.ctx)
+	if utils.RetryWithHTTP(err) {
+		handler.remoter.MaybeWithHTTP(err)
+		maniDesc, err = handler.remoter.Resolve(handler.ctx)
+	}
 	if err != nil {
 		return errors.Wrap(err, "resolve image manifest failed")
 	}
+
 	rc, err := handler.remoter.Pull(handler.ctx, *maniDesc, true)
 	if err != nil {
 		return errors.Wrap(err, "pull manifest failed")
