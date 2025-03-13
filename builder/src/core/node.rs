@@ -759,7 +759,7 @@ impl Node {
         Ok(())
     }
 
-    fn build_inode_stat(&mut self) -> Result<()> {
+    fn build_inode_stat(&mut self, file_size: u64) -> Result<()> {
         let meta = self
             .meta()
             .with_context(|| format!("failed to get metadata of {}", self.path().display()))?;
@@ -794,7 +794,13 @@ impl Node {
         // directory entries, so let's ignore the value provided by source filesystem and
         // calculate it later by ourself.
         if !self.is_dir() {
-            self.inode.set_size(meta.st_size());
+            // If the file size is not 0, and the meta size is 0, it means the file is an
+            // external dummy file. Weeneed to set the size to file_size.
+            if file_size != 0 && meta.st_size() == 0 {
+                self.inode.set_size(file_size);
+            } else {
+                self.inode.set_size(meta.st_size());
+            }
             self.v5_set_inode_blocks();
         }
         self.info = Arc::new(info);
@@ -812,14 +818,8 @@ impl Node {
         // NOTE: Always retrieve xattr before attr so that we can know the size of xattr pairs.
         self.build_inode_xattr()
             .with_context(|| format!("failed to get xattr for {}", self.path().display()))?;
-        self.build_inode_stat()
+        self.build_inode_stat(file_size)
             .with_context(|| format!("failed to build inode {}", self.path().display()))?;
-
-        // If the file size is not 0, and the inode size is 0,
-        // it means the file is an external dummy file.
-        if !self.is_dir() && file_size != 0 && self.inode.size() == 0 {
-            self.inode.set_size(file_size);
-        }
 
         if self.is_reg() {
             let chunk_count = self.chunk_count(chunk_size as u64).with_context(|| {

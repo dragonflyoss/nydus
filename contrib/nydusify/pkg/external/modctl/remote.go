@@ -27,7 +27,7 @@ type RemoteHandler struct {
 	imageRef string
 	remoter  *remote.Remote
 	manifest ocispec.Manifest
-	// convert from the manifes.Layers, same order to manifest.Layers
+	// convert from the manifest.Layers, same order as manifest.Layers
 	blobs []backend.Blob
 }
 
