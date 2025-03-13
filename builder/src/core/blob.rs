@@ -5,7 +5,7 @@
 use std::borrow::Cow;
 use std::slice;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use nydus_rafs::metadata::RAFS_MAX_CHUNK_SIZE;
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{toc, BlobMetaChunkArray};
@@ -17,6 +17,8 @@ use super::layout::BlobLayout;
 use super::node::Node;
 use crate::core::context::Artifact;
 use crate::{BlobContext, BlobManager, BuildContext, ConversionType, Feature};
+
+const VALID_BLOB_ID_LENGTH: usize = 64;
 
 /// Generator for RAFS data blob.
 pub(crate) struct Blob {}
@@ -140,6 +142,20 @@ impl Blob {
                         blob_ctx.compressed_blob_size,
                         blob_ctx.uncompressed_blob_size,
                     )?;
+                }
+            }
+        }
+
+        // check blobs to make sure all blobs are valid.
+        if blob_mgr.external {
+            for (index, blob_ctx) in blob_mgr.get_blobs().iter().enumerate() {
+                if blob_ctx.blob_id.len() != VALID_BLOB_ID_LENGTH {
+                    bail!(
+                        "invalid blob id:{}, length:{}, index:{}",
+                        blob_ctx.blob_id,
+                        blob_ctx.blob_id.len(),
+                        index
+                    );
                 }
             }
         }

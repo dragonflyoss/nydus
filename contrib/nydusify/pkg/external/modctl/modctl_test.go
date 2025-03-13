@@ -144,7 +144,7 @@ func TestReadTarBlob(t *testing.T) {
 	})
 }
 
-func TestChomoe(t *testing.T) {
+func TestChmod(t *testing.T) {
 	mode := uint32(0640)
 	assert.Equal(t, uint32(0640), mode)
 	testFile := "test.txt"

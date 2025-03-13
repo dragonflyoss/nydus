@@ -17,7 +17,6 @@ import (
 
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/sirupsen/logrus"
 
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/content/local"
@@ -212,7 +211,6 @@ func convertModelFile(ctx context.Context, opt Opt) error {
 }
 
 func convertModelArtifact(ctx context.Context, opt Opt) error {
-	logrus.Infof("convert model artifact")
 	if _, err := os.Stat(opt.WorkDir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if err := os.MkdirAll(opt.WorkDir, 0755); err != nil {
@@ -240,12 +238,10 @@ func convertModelArtifact(ctx context.Context, opt Opt) error {
 	backendMetaPath := filepath.Join(tmpDir, ".backend.meta")
 	backendConfigPath := filepath.Join(tmpDir, ".backend.json")
 
-	logrus.Info("new remote handler")
 	handler, err := modctl.NewRemoteHandler(ctx, opt.Source, opt.WithPlainHTTP)
 	if err != nil {
 		return errors.Wrap(err, "create modctl handler")
 	}
-	logrus.Info("remote handle")
 	if err := external.RemoteHandle(ctx, external.Options{
 		ContextDir:       contextDir,
 		RemoteHandler:    handler,
@@ -265,30 +261,24 @@ func convertModelArtifact(ctx context.Context, opt Opt) error {
 		FromDir:        contextDir,
 		AttributesPath: attributesPath,
 	}
-	logrus.Info("pack with attributes")
 	_, externalBlobDigest, err := packWithAttributes(ctx, packOption, tmpDir)
 	if err != nil {
 		return errors.Wrap(err, "pack to blob")
 	}
 
-	logrus.Info("pack final bootstrap")
 	bootStrapTarPath, err := packFinalBootstrap(tmpDir, backendConfigPath, externalBlobDigest)
 	if err != nil {
 		return errors.Wrap(err, "pack final bootstrap")
 	}
 
-	logrus.Info("build model config")
 	modelCfg, err := handler.GetModelConfig()
 	if err != nil {
 		return errors.Wrap(err, "build model config")
 	}
 
-	logrus.Info("GetLayers")
 	modelLayers := handler.GetLayers()
 
-	logrus.Info("build nydus image")
 	nydusImage := buildNydusImage()
-	logrus.Info("push manifest")
 	return pushManifest(context.Background(), opt, *modelCfg, modelLayers, *nydusImage, bootStrapTarPath)
 }
 
@@ -441,7 +431,6 @@ func pushManifest(
 		remoter.WithHTTP()
 	}
 
-	logrus.Info("push image config")
 	if err := remoter.Push(ctx, *configDesc, true, bytes.NewReader(configBytes)); err != nil {
 		if utils.RetryWithHTTP(err) {
 			remoter.MaybeWithHTTP(err)
@@ -497,7 +486,6 @@ func pushManifest(
 		return errors.Wrapf(err, "open bootstrap %s", bootstrapTarGzPath)
 	}
 	defer bootstrapRc.Close()
-	logrus.Info("push bootstrap layer")
 	if err := remoter.Push(ctx, bootstrapDesc, true, bootstrapRc); err != nil {
 		return errors.Wrap(err, "push bootstrap layer")
 	}
@@ -513,7 +501,6 @@ func pushManifest(
 	}
 	layers = append(layers, bootstrapDesc)
 
-	logrus.Info("getSourceManifestSubject")
 	subject, err := getSourceManifestSubject(ctx, opt.Source, opt.SourceInsecure, opt.WithPlainHTTP)
 	if err != nil {
 		return errors.Wrap(err, "get source manifest subject")
@@ -528,7 +515,6 @@ func pushManifest(
 		return errors.Wrap(err, "make manifest desc")
 	}
 
-	logrus.Info("push image manifest")
 	if err := remoter.Push(ctx, *manifestDesc, false, bytes.NewReader(manifestBytes)); err != nil {
 		return errors.Wrap(err, "push image manifest")
 	}

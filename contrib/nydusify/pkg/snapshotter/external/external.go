@@ -64,7 +64,7 @@ func Handle(ctx context.Context, opts Options) error {
 	if err := os.WriteFile(opts.BackendOutput, backendBytes, 0644); err != nil {
 		return errors.Wrapf(err, "write backend json to %s", opts.BackendOutput)
 	}
-	logrus.Infof("backend json: %s", backendBytes)
+	logrus.Debugf("backend json: %s", backendBytes)
 
 	attributeContent := []string{}
 	for _, attribute := range attributes {
@@ -73,7 +73,7 @@ func Handle(ctx context.Context, opts Options) error {
 	if err := os.WriteFile(opts.AttributesOutput, []byte(strings.Join(attributeContent, "\n")), 0644); err != nil {
 		return errors.Wrapf(err, "write attributes to %s", opts.AttributesOutput)
 	}
-	logrus.Infof("attributes: %v", strings.Join(attributeContent, "\n"))
+	logrus.Debugf("attributes: %v", strings.Join(attributeContent, "\n"))
 
 	return nil
 }
@@ -100,7 +100,7 @@ func RemoteHandle(ctx context.Context, opts Options) error {
 	if err := os.WriteFile(opts.BackendOutput, backendBytes, 0644); err != nil {
 		return errors.Wrapf(err, "write backend json to %s", opts.BackendOutput)
 	}
-	logrus.Infof("backend json: %s", backendBytes)
+	logrus.Debugf("backend json: %s", backendBytes)
 
 	attributeContent := []string{}
 	for _, attribute := range attributes {
@@ -109,7 +109,7 @@ func RemoteHandle(ctx context.Context, opts Options) error {
 	if err := os.WriteFile(opts.AttributesOutput, []byte(strings.Join(attributeContent, "\n")), 0644); err != nil {
 		return errors.Wrapf(err, "write attributes to %s", opts.AttributesOutput)
 	}
-	logrus.Infof("attributes: %v", strings.Join(attributeContent, "\n"))
+	logrus.Debugf("attributes: %v", strings.Join(attributeContent, "\n"))
 
 	// Build dummy files with empty content.
 	if err := buildEmptyFiles(fileAttrs, opts.ContextDir); err != nil {

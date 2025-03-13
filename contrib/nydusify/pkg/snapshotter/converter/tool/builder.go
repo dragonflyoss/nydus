@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -187,7 +188,7 @@ func Pack(option PackOption) error {
 
 	cmd := exec.CommandContext(ctx, option.BuilderPath, args...)
 	cmd.Stdout = logger.Writer()
-	cmd.Stderr = logger.Writer()
+	cmd.Stderr = io.MultiWriter(os.Stderr, logger.WriterLevel(logrus.ErrorLevel))
 	cmd.Stdin = strings.NewReader(option.PrefetchPatterns)
 
 	if err := cmd.Run(); err != nil {

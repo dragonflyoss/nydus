@@ -27,7 +27,7 @@ type RemoteHandler struct {
 	imageRef string
 	remoter  *remote.Remote
 	manifest ocispec.Manifest
-	// convert from the manifes.Layers, same order to manifest.Layers
+	// convert from the manifest.Layers, same order as manifest.Layers
 	blobs []backend.Blob
 }
 
@@ -52,7 +52,6 @@ func NewRemoteHandler(ctx context.Context, imageRef string, plainHttp bool) (*Re
 }
 
 func (handler *RemoteHandler) Handle(ctx context.Context) (*backend.Backend, []backend.FileAttribute, error) {
-	logrus.Infof("handle image: %s", handler.imageRef)
 	var fileAttrs []backend.FileAttribute
 	for idx, layer := range handler.manifest.Layers {
 		fa, err := handler.handle(ctx, layer, int32(idx))
@@ -129,19 +128,17 @@ func (handler *RemoteHandler) backend() (*backend.Backend, error) {
 }
 
 func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descriptor, index int32) ([]backend.FileAttribute, error) {
-	logrus.Infof("handle layer: %s", layer.Digest.String())
+	logrus.Debugf("handle layer: %s", layer.Digest.String())
 	chunkSize := getChunkSizeByMediaType(layer.MediaType)
 	rsc, err := handler.remoter.ReadSeekCloser(ctx, layer, true)
 	if err != nil {
 		return nil, errors.Wrap(err, "read seek closer failed")
 	}
 	defer rsc.Close()
-	logrus.Info("read tar blob")
 	files, err := readTarBlob(rsc)
 	if err != nil {
 		return nil, errors.Wrap(err, "read tar blob failed")
 	}
-	logrus.Info("convert to file attributes")
 
 	blobInfo := handler.blobs[index].Config
 	fileAttrs := make([]backend.FileAttribute, len(files))
