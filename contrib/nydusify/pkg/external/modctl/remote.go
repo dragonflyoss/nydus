@@ -8,11 +8,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"strconv"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
@@ -138,7 +141,27 @@ func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descript
 
 	blobInfo := handler.blobs[index].Config
 	fileAttrs := make([]backend.FileAttribute, len(files))
+	hackFile := os.Getenv("HACK_FILE")
+	if hackFile == "" {
+		hackFile = "config.json"
+	}
 	for idx, f := range files {
+		if f.name == hackFile {
+			// HACK to chmod config.json to 0640
+			hackMode := uint32(0640)
+			// etc 640.
+			hackModeStr := os.Getenv("HACK_MODE")
+			if hackModeStr != "" {
+				modeValue, err := strconv.ParseUint(hackModeStr, 8, 32)
+				if err != nil {
+					logrus.Errorf("Invalid HACK_MODE value: %s, using default 0640", hackModeStr)
+				} else {
+					hackMode = uint32(modeValue)
+				}
+			}
+			f.mode = hackMode
+			logrus.Infof("hack file: %s mode: %o", f.name, f.mode)
+		}
 		fileAttrs[idx] = backend.FileAttribute{
 			BlobId:                 blobInfo.Digest,
 			BlobIndex:              uint32(index),
