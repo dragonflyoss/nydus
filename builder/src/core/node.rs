@@ -285,7 +285,6 @@ impl Node {
             let external_blob_id = external_values
                 .get("blob_id")
                 .ok_or_else(|| anyhow!("failed to parse blob_id"))?;
-            warn!("exterbal_blob_id: {}", external_blob_id);
             let external_chunk_size = external_values
                 .get("chunk_size")
                 .and_then(|v| parse_size(v).ok())

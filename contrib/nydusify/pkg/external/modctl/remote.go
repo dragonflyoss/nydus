@@ -8,11 +8,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"strconv"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
@@ -49,6 +52,7 @@ func NewRemoteHandler(ctx context.Context, imageRef string, plainHttp bool) (*Re
 }
 
 func (handler *RemoteHandler) Handle(ctx context.Context) (*backend.Backend, []backend.FileAttribute, error) {
+	logrus.Infof("handle image: %s", handler.imageRef)
 	var fileAttrs []backend.FileAttribute
 	for idx, layer := range handler.manifest.Layers {
 		fa, err := handler.handle(ctx, layer, int32(idx))
@@ -125,20 +129,40 @@ func (handler *RemoteHandler) backend() (*backend.Backend, error) {
 }
 
 func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descriptor, index int32) ([]backend.FileAttribute, error) {
+	logrus.Infof("handle layer: %s", layer.Digest.String())
 	chunkSize := getChunkSizeByMediaType(layer.MediaType)
 	rsc, err := handler.remoter.ReadSeekCloser(ctx, layer, true)
 	if err != nil {
 		return nil, errors.Wrap(err, "read seek closer failed")
 	}
 	defer rsc.Close()
+	logrus.Info("read tar blob")
 	files, err := readTarBlob(rsc)
 	if err != nil {
 		return nil, errors.Wrap(err, "read tar blob failed")
 	}
+	logrus.Info("convert to file attributes")
 
 	blobInfo := handler.blobs[index].Config
 	fileAttrs := make([]backend.FileAttribute, len(files))
+	hackFile := os.Getenv("HACK_FILE")
 	for idx, f := range files {
+		if hackFile != "" && f.name == hackFile {
+			// HACK to chmod config.json to 0640
+			hackMode := uint32(0640)
+			// etc 640.
+			hackModeStr := os.Getenv("HACK_MODE")
+			if hackModeStr != "" {
+				modeValue, err := strconv.ParseUint(hackModeStr, 8, 32)
+				if err != nil {
+					logrus.Errorf("Invalid HACK_MODE value: %s, using default 0640", hackModeStr)
+				} else {
+					hackMode = uint32(modeValue)
+				}
+			}
+			f.mode = hackMode
+			logrus.Infof("hack file: %s mode: %o", f.name, f.mode)
+		}
 		fileAttrs[idx] = backend.FileAttribute{
 			BlobId:                 blobInfo.Digest,
 			BlobIndex:              uint32(index),

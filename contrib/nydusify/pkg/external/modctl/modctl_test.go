@@ -143,3 +143,13 @@ func TestReadTarBlob(t *testing.T) {
 		assert.Contains(t, err.Error(), "read tar file failed")
 	})
 }
+
+func TestChomoe(t *testing.T) {
+	mode := uint32(0640)
+	assert.Equal(t, uint32(0640), mode)
+	testFile := "test.txt"
+	f, err := os.Stat(testFile)
+	require.Nil(t, err)
+	assert.Equal(t, mode, uint32(f.Mode()))
+	t.Logf("fmode: %o, mode: %o", f.Mode(), mode)
+}
