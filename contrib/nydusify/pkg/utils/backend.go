@@ -20,9 +20,12 @@ type RegistryBackendConfig struct {
 }
 
 type BackendProxyConfig struct {
-	URL      string `json:"url"`
-	Fallback bool   `json:"fallback"`
-	PingURL  string `json:"ping_url"`
+	CacheDir       string `json:"cache_dir"`
+	URL            string `json:"url"`
+	Fallback       bool   `json:"fallback"`
+	PingURL        string `json:"ping_url"`
+	Timeout        int    `json:"timeout"`
+	ConnectTimeout int    `json:"connect_timeout"`
 }
 
 func NewRegistryBackendConfig(parsed reference.Named, insecure bool) (RegistryBackendConfig, error) {

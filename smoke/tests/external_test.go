@@ -265,7 +265,6 @@ func TestModctlExternal(t *testing.T) {
 
 	backendBytes, err = json.MarshalIndent(backend, "", "  ")
 	require.NoError(t, err)
-
 	runtimeBackendConfigPath := filepath.Join(ctx.Env.WorkDir, "backend.json")
 	err = os.WriteFile(runtimeBackendConfigPath, backendBytes, 0644)
 	require.NoError(t, err)

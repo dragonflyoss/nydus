@@ -14,24 +14,28 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strings"
 	"text/template"
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 type NydusdConfig struct {
-	EnablePrefetch bool
-	NydusdPath     string
-	BootstrapPath  string
-	ConfigPath     string
-	BackendType    string
-	BackendConfig  string
-	BlobCacheDir   string
-	APISockPath    string
-	MountPath      string
-	Mode           string
-	DigestValidate bool
+	EnablePrefetch               bool
+	NydusdPath                   string
+	BootstrapPath                string
+	ConfigPath                   string
+	BackendType                  string
+	BackendConfig                string
+	ExternalBackendConfigPath    string
+	ExternalBackendProxyCacheDir string
+	BlobCacheDir                 string
+	APISockPath                  string
+	MountPath                    string
+	Mode                         string
+	DigestValidate               bool
 }
 
 // Nydusd runs nydusd binary.
@@ -49,6 +53,9 @@ var configTpl = `
 		"backend": {
 			"type": "{{.BackendType}}",
 			"config": {{.BackendConfig}}
+		},
+		"external_backend": {
+			"config_path": "{{.ExternalBackendConfigPath}}"
 		},
 		"cache": {
 			"type": "blobcache",
@@ -178,6 +185,7 @@ func (nydusd *Nydusd) Mount() error {
 	}
 
 	cmd := exec.Command(nydusd.NydusdPath, args...)
+	logrus.Debugf("Command: %s %s", nydusd.NydusdPath, strings.Join(args, " "))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
