@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/containerd/log"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	"github.com/stretchr/testify/require"
 
 	"github.com/dragonflyoss/nydus/smoke/tests/texture"

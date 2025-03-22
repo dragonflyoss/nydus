@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	snapConv "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
+	snapConv "github.com/BraveY/snapshotter-converter/converter"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 

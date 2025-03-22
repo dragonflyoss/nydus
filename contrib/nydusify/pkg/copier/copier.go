@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
@@ -25,7 +26,6 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	nydusifyUtils "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/dustin/go-humanize"
 	"github.com/goharbor/acceleration-service/pkg/errdefs"

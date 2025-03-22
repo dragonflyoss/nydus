@@ -24,9 +24,9 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
 	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 
+	snapConv "github.com/BraveY/snapshotter-converter/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/external/modctl"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	snapConv "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 
 	"encoding/json"

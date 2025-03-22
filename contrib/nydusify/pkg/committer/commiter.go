@@ -21,6 +21,7 @@ import (
 
 	"github.com/containerd/containerd/labels"
 
+	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/namespaces"
@@ -28,7 +29,6 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer/diff"
 	parserPkg "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/dustin/go-humanize"
 	"github.com/opencontainers/go-digest"

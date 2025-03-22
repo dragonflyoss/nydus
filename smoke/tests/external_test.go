@@ -18,8 +18,8 @@ import (
 	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/log"
 
+	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/external/modctl"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
