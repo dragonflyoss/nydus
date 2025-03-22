@@ -164,7 +164,9 @@ func convertModelFile(ctx context.Context, opt Opt) error {
 	backendConfigPath := filepath.Join(tmpDir, ".backend.json")
 
 	var srcBkdCfg SourceBackendConfig
-	json.Unmarshal([]byte(opt.SourceBackendConfig), &srcBkdCfg)
+	if err := json.Unmarshal([]byte(opt.SourceBackendConfig), &srcBkdCfg); err != nil {
+		return errors.Wrap(err, "unmarshal source backend config")
+	}
 	modctlHandler, err := newModctlHandler(opt, srcBkdCfg.WorkDir)
 	if err != nil {
 		return errors.Wrap(err, "create modctl handler")

@@ -300,7 +300,6 @@ func (handler *Handler) extractBlobs(digest string) ([]byte, error) {
 		return nil, errors.Wrap(err, "read  blobs file failed")
 	}
 	return content, nil
-
 }
 
 func convertToBlobs(m *ocispec.Manifest) []backend.Blob {

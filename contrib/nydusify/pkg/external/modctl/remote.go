@@ -11,7 +11,6 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
@@ -22,10 +21,18 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+type RemoteInterface interface {
+	Resolve(ctx context.Context) (*ocispec.Descriptor, error)
+	Pull(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadCloser, error)
+	ReadSeekCloser(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadSeekCloser, error)
+	WithHTTP()
+	MaybeWithHTTP(err error)
+}
+
 type RemoteHandler struct {
 	ctx      context.Context
 	imageRef string
-	remoter  *remote.Remote
+	remoter  RemoteInterface
 	manifest ocispec.Manifest
 	// convert from the manifest.Layers, same order as manifest.Layers
 	blobs []backend.Blob
