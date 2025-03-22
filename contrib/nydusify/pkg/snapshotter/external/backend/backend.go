@@ -5,12 +5,12 @@ import (
 )
 
 type Backend struct {
-	Version  string          `json:"version"`
-	Backends []BackendConfig `json:"backends"`
-	Blobs    []Blob          `json:"blobs"`
+	Version  string   `json:"version"`
+	Backends []Config `json:"backends"`
+	Blobs    []Blob   `json:"blobs"`
 }
 
-type BackendConfig struct {
+type Config struct {
 	Type   string                 `json:"type"`
 	Config map[string]interface{} `json:"config,omitempty"`
 }
@@ -36,7 +36,7 @@ type Result struct {
 type FileAttribute struct {
 	RelativePath           string
 	BlobIndex              uint32
-	BlobId                 string
+	BlobID                 string
 	BlobSize               string
 	FileSize               uint64
 	ChunkSize              string

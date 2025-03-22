@@ -23,11 +23,11 @@ import (
 )
 
 const (
-	BLOB_PATH                = "/content.v1/docker/registry/v2/blobs/%s/%s/%s/data"
-	REPOS_PATH               = "/content.v1/docker/registry/v2/repositories"
-	MANIFEST_PATH            = "/_manifests/tags/%s/current/link"
-	MODEL_WEIGHT_MEDIA_TYPE  = "application/vnd.cnai.model.weight.v1.tar"
-	MODEL_DATASET_MEDIA_TYPE = "application/vnd.cnai.model.dataset.v1.tar"
+	BlobPath              = "/content.v1/docker/registry/v2/blobs/%s/%s/%s/data"
+	ReposPath             = "/content.v1/docker/registry/v2/repositories"
+	ManifestPath          = "/_manifests/tags/%s/current/link"
+	ModelWeightMediaType  = "application/vnd.cnai.model.weight.v1.tar"
+	ModelDatasetMediaType = "application/vnd.cnai.model.dataset.v1.tar"
 )
 
 const (
@@ -35,8 +35,8 @@ const (
 )
 
 var mediaTypeChunkSizeMap = map[string]string{
-	MODEL_WEIGHT_MEDIA_TYPE:  "64MiB",
-	MODEL_DATASET_MEDIA_TYPE: "64MiB",
+	ModelWeightMediaType:  "64MiB",
+	ModelDatasetMediaType: "64MiB",
 }
 
 var _ backend.Handler = &Handler{}
@@ -120,7 +120,7 @@ type Option struct {
 	Namespace       string `json:"namespace"`
 	ImageName       string `json:"image_name"`
 	Tag             string `json:"tag"`
-	WeightChunkSize uint64 `josn:"weight_chunk_size"`
+	WeightChunkSize uint64 `josn:"weightChunkSize"`
 }
 
 func setWeightChunkSize(chunkSize uint64) {
@@ -130,8 +130,8 @@ func setWeightChunkSize(chunkSize uint64) {
 	chunkSizeStr := humanize.IBytes(chunkSize)
 	// remove space in chunkSizeStr `16 Mib` -> `16Mib`
 	chunkSizeStr = strings.ReplaceAll(chunkSizeStr, " ", "")
-	mediaTypeChunkSizeMap[MODEL_WEIGHT_MEDIA_TYPE] = chunkSizeStr
-	mediaTypeChunkSizeMap[MODEL_DATASET_MEDIA_TYPE] = chunkSizeStr
+	mediaTypeChunkSizeMap[ModelWeightMediaType] = chunkSizeStr
+	mediaTypeChunkSizeMap[ModelDatasetMediaType] = chunkSizeStr
 }
 
 func getChunkSizeByMediaType(mediaType string) string {
@@ -166,7 +166,7 @@ func NewHandler(opt Option) (*Handler, error) {
 	return handler, nil
 }
 
-func GetOption(srcRef, modCtlRoot string, weight_chunk_size uint64) (*Option, error) {
+func GetOption(srcRef, modCtlRoot string, weightChunkSize uint64) (*Option, error) {
 	parts := strings.Split(srcRef, "/")
 	if len(parts) != 3 {
 		return nil, errors.New("invalid target ref")
@@ -181,7 +181,7 @@ func GetOption(srcRef, modCtlRoot string, weight_chunk_size uint64) (*Option, er
 		Namespace:       parts[1],
 		ImageName:       nameTagParts[0],
 		Tag:             nameTagParts[1],
-		WeightChunkSize: weight_chunk_size,
+		WeightChunkSize: weightChunkSize,
 	}
 	return &opt, nil
 }
@@ -235,7 +235,7 @@ func (handler *Handler) Backend(ctx context.Context) (*backend.Backend, error) {
 	bkd := backend.Backend{
 		Version: "v1",
 	}
-	bkd.Backends = []backend.BackendConfig{
+	bkd.Backends = []backend.Config{
 		{
 			Type: "registry",
 		},
@@ -268,8 +268,8 @@ func (handler *Handler) setBlobsMap() {
 }
 
 func (handler *Handler) extractManifest() (*ocispec.Manifest, error) {
-	tagPath := fmt.Sprintf(MANIFEST_PATH, handler.tag)
-	manifestPath := filepath.Join(handler.root, REPOS_PATH, handler.registryHost, handler.namespace, handler.imageName, tagPath)
+	tagPath := fmt.Sprintf(ManifestPath, handler.tag)
+	manifestPath := filepath.Join(handler.root, ReposPath, handler.registryHost, handler.namespace, handler.imageName, tagPath)
 	line, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "read manifest digest file failed")
@@ -293,7 +293,7 @@ func (handler *Handler) extractBlobs(digest string) ([]byte, error) {
 		return nil, errors.New("invalid digest string")
 	}
 
-	blobPath := fmt.Sprintf(BLOB_PATH, digestSplit[0], digestSplit[1][:2], digestSplit[1])
+	blobPath := fmt.Sprintf(BlobPath, digestSplit[0], digestSplit[1][:2], digestSplit[1])
 	blobPath = filepath.Join(handler.root, blobPath)
 	content, err := os.ReadFile(blobPath)
 	if err != nil {

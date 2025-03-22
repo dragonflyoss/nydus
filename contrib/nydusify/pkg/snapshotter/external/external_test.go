@@ -41,10 +41,10 @@ func TestHandle(t *testing.T) {
 	attributesOutput := filepath.Join(tmpDir, "attributes.txt")
 
 	mockHandler := &mockHandler{
-		backendFunc: func(ctx context.Context) (*backend.Backend, error) {
+		backendFunc: func(_ context.Context) (*backend.Backend, error) {
 			return &backend.Backend{Version: "mock"}, nil
 		},
-		handleFunc: func(ctx context.Context, file backend.File) ([]backend.Chunk, error) {
+		handleFunc: func(_ context.Context, file backend.File) ([]backend.Chunk, error) {
 			return []backend.Chunk{}, nil
 		},
 	}
@@ -82,7 +82,7 @@ func TestRemoteHandle(t *testing.T) {
 						Type:                   "regular",
 						FileSize:               1024,
 						BlobIndex:              0,
-						BlobId:                 "blob1",
+						BlobID:                 "blob1",
 						ChunkSize:              "1MB",
 						Chunk0CompressedOffset: 0,
 						BlobSize:               "10MB",

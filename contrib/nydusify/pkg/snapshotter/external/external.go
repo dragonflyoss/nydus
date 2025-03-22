@@ -47,7 +47,7 @@ func Handle(ctx context.Context, opts Options) error {
 	attributes := []Attribute{}
 	for _, file := range ret.Files {
 		p := fmt.Sprintf("/%s type=%s blob_index=%d blob_id=%s chunk_size=%s chunk_0_compressed_offset=%d compressed_size=%s",
-			file.RelativePath, file.Type, file.BlobIndex, file.BlobId, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize)
+			file.RelativePath, file.Type, file.BlobIndex, file.BlobID, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize)
 		attributes = append(attributes, Attribute{
 			Pattern: p,
 		})
@@ -86,7 +86,7 @@ func RemoteHandle(ctx context.Context, opts Options) error {
 	attributes := []Attribute{}
 	for _, file := range fileAttrs {
 		p := fmt.Sprintf("/%s type=%s file_size=%d blob_index=%d blob_id=%s chunk_size=%s chunk_0_compressed_offset=%d compressed_size=%s",
-			file.RelativePath, file.Type, file.FileSize, file.BlobIndex, file.BlobId, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize)
+			file.RelativePath, file.Type, file.FileSize, file.BlobIndex, file.BlobID, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize)
 		attributes = append(attributes, Attribute{
 			Pattern: p,
 		})

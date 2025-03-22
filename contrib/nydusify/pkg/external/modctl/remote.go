@@ -38,12 +38,12 @@ type RemoteHandler struct {
 	blobs []backend.Blob
 }
 
-func NewRemoteHandler(ctx context.Context, imageRef string, plainHttp bool) (*RemoteHandler, error) {
+func NewRemoteHandler(ctx context.Context, imageRef string, plainHTTP bool) (*RemoteHandler, error) {
 	remoter, err := pkgPvd.DefaultRemote(imageRef, true)
 	if err != nil {
 		return nil, errors.Wrap(err, "new remote failed")
 	}
-	if plainHttp {
+	if plainHTTP {
 		remoter.WithHTTP()
 	}
 	handler := &RemoteHandler{
@@ -125,7 +125,7 @@ func (handler *RemoteHandler) backend() (*backend.Backend, error) {
 	bkd := backend.Backend{
 		Version: "v1",
 	}
-	bkd.Backends = []backend.BackendConfig{
+	bkd.Backends = []backend.Config{
 		{
 			Type: "registry",
 		},
@@ -168,7 +168,7 @@ func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descript
 			logrus.Infof("hack file: %s mode: %o", f.name, f.mode)
 		}
 		fileAttrs[idx] = backend.FileAttribute{
-			BlobId:                 blobInfo.Digest,
+			BlobID:                 blobInfo.Digest,
 			BlobIndex:              uint32(index),
 			BlobSize:               blobInfo.Size,
 			FileSize:               f.size,

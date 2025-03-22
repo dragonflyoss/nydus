@@ -235,7 +235,7 @@ jobs:
       run: |
         CARGO_HOME=${HOME}/.cargo
         CARGO_BIN=$(which cargo)
-        sudo -E CARGO=${CARGO_BIN} make ut-nextest
+        sudo -E CARGO=${CARGO_BIN} make ut
 
   contrib-unit-test-coverage:
     runs-on: ubuntu-latest

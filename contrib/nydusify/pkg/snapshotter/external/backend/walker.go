@@ -55,11 +55,6 @@ func bfsWalk(path string, fn func(string, fs.FileInfo) error) error {
 	return nil
 }
 
-type object struct {
-	ChunkSize uint64
-	Path      string
-}
-
 func (walker *Walker) Walk(ctx context.Context, root string, handler Handler) (*Result, error) {
 	chunks := []Chunk{}
 	files := []FileAttribute{}
@@ -81,7 +76,7 @@ func (walker *Walker) Walk(ctx context.Context, root string, handler Handler) (*
 			cf := c.FilePath()
 			if cf != lastFile {
 				fa := FileAttribute{
-					BlobId:                 c.BlobDigest(),
+					BlobID:                 c.BlobDigest(),
 					BlobSize:               c.BlobSize(),
 					BlobIndex:              c.ObjectID(),
 					Chunk0CompressedOffset: c.ObjectOffset(),

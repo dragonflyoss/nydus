@@ -58,7 +58,7 @@ func TestBfsWalk(t *testing.T) {
 
 	t.Run("Single file", func(t *testing.T) {
 		called := false
-		err := bfsWalk(filepath.Join(tmpDir, "dir", "subdir"), func(path string, info os.FileInfo) error {
+		err := bfsWalk(filepath.Join(tmpDir, "dir", "subdir"), func(path string, _ os.FileInfo) error {
 			called = true
 			assert.Equal(t, filepath.Join(tmpDir, "dir", "subdir", "file2"), path)
 			return nil
@@ -85,7 +85,7 @@ func TestBfsWalk(t *testing.T) {
 
 	t.Run("Directory with files and subdirectories", func(t *testing.T) {
 		var paths []string
-		err := bfsWalk(filepath.Join(tmpDir, "dir"), func(path string, info os.FileInfo) error {
+		err := bfsWalk(filepath.Join(tmpDir, "dir"), func(path string, _ os.FileInfo) error {
 			paths = append(paths, path)
 			return nil
 		})

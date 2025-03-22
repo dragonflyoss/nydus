@@ -88,7 +88,7 @@ func (remote *Remote) ReaderAt(ctx context.Context, desc ocispec.Descriptor, byD
 	}
 
 	// Create a new resolver instance for the request
-	fetcher, err := remote.resolverFunc(remote.withHttp).Fetcher(ctx, ref)
+	fetcher, err := remote.resolverFunc(remote.withHTTP).Fetcher(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (remote *Remote) ReadSeekCloser(ctx context.Context, desc ocispec.Descripto
 	}
 
 	// Create a new resolver instance for the request
-	fetcher, err := remote.resolverFunc(remote.withHttp).Fetcher(ctx, ref)
+	fetcher, err := remote.resolverFunc(remote.withHTTP).Fetcher(ctx, ref)
 	if err != nil {
 		return nil, err
 	}

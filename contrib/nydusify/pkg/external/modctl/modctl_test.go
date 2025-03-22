@@ -38,7 +38,7 @@ func TestReadImageRefBlob(t *testing.T) {
 	// Pull manifest
 	maniDesc, err := remoter.Resolve(ctx)
 	require.Nil(t, err)
-	t.Logf("mainfest desc: %v", maniDesc)
+	t.Logf("manifest desc: %v", maniDesc)
 	rc, err := remoter.Pull(ctx, *maniDesc, true)
 	require.Nil(t, err)
 	defer rc.Close()
@@ -190,7 +190,7 @@ func TestHandle(t *testing.T) {
 
 	handler.blobsMap = make(map[string]blobInfo)
 	handler.blobsMap["test_digest"] = blobInfo{
-		mediaType: MODEL_WEIGHT_MEDIA_TYPE,
+		mediaType: ModelWeightMediaType,
 	}
 	t.Run("Open file failure", func(t *testing.T) {
 		file := backend.File{RelativePath: "test/test_digest/nonexistent-file"}
@@ -250,28 +250,28 @@ func TestConvertToBlobs(t *testing.T) {
 		Layers: []ocispec.Descriptor{
 			{
 				Digest:    digest.Digest("sha256:abc123"),
-				MediaType: MODEL_WEIGHT_MEDIA_TYPE,
+				MediaType: ModelWeightMediaType,
 				Size:      100,
 			},
 		},
 	}
 	actualBlobs1 := convertToBlobs(manifestWithColon)
 	assert.Equal(t, 1, len(actualBlobs1))
-	assert.Equal(t, MODEL_WEIGHT_MEDIA_TYPE, actualBlobs1[0].Config.MediaType)
+	assert.Equal(t, ModelWeightMediaType, actualBlobs1[0].Config.MediaType)
 	assert.Equal(t, "abc123", actualBlobs1[0].Config.Digest)
 
 	manifestWithoutColon := &ocispec.Manifest{
 		Layers: []ocispec.Descriptor{
 			{
 				Digest:    digest.Digest("abc123"),
-				MediaType: MODEL_DATASET_MEDIA_TYPE,
+				MediaType: ModelDatasetMediaType,
 				Size:      100,
 			},
 		},
 	}
 	actualBlobs2 := convertToBlobs(manifestWithoutColon)
 	assert.Equal(t, 1, len(actualBlobs2))
-	assert.Equal(t, MODEL_DATASET_MEDIA_TYPE, actualBlobs2[0].Config.MediaType)
+	assert.Equal(t, ModelDatasetMediaType, actualBlobs2[0].Config.MediaType)
 	assert.Equal(t, "abc123", actualBlobs2[0].Config.Digest)
 }
 
@@ -279,8 +279,10 @@ func TestExtractManifest(t *testing.T) {
 	handler := &Handler{
 		root: "/tmp/test",
 	}
-	tagPath := fmt.Sprintf(MANIFEST_PATH, handler.tag)
-	manifestPath := filepath.Join(handler.root, REPOS_PATH, handler.registryHost, handler.namespace, handler.imageName, tagPath)
+	tagPath := fmt.Sprintf(ManifestPath, handler.tag)
+	manifestPath := filepath.Join(handler.root, ReposPath, handler.registryHost, handler.namespace, handler.imageName, tagPath)
+	dir := filepath.Dir(manifestPath)
+	os.MkdirAll(dir, 0755)
 	maniFile, err := os.Create(manifestPath)
 	assert.NoError(t, err)
 	_, err = maniFile.WriteString("sha256:abc1234")
@@ -295,7 +297,7 @@ func TestExtractManifest(t *testing.T) {
 
 	var m = ocispec.Manifest{
 		Config: ocispec.Descriptor{
-			MediaType: MODEL_WEIGHT_MEDIA_TYPE,
+			MediaType: ModelWeightMediaType,
 			Digest:    "sha256:abc1234",
 			Size:      10,
 		},
@@ -334,14 +336,14 @@ func TestSetBlobsMap(t *testing.T) {
 func TestSetWeightChunkSize(t *testing.T) {
 	setWeightChunkSize(0)
 	expectedDefault := "64MiB"
-	assert.Equal(t, expectedDefault, mediaTypeChunkSizeMap[MODEL_WEIGHT_MEDIA_TYPE], "Weight media type should be set to default value")
-	assert.Equal(t, expectedDefault, mediaTypeChunkSizeMap[MODEL_DATASET_MEDIA_TYPE], "Dataset media type should be set to default value")
+	assert.Equal(t, expectedDefault, mediaTypeChunkSizeMap[ModelWeightMediaType], "Weight media type should be set to default value")
+	assert.Equal(t, expectedDefault, mediaTypeChunkSizeMap[ModelDatasetMediaType], "Dataset media type should be set to default value")
 
 	chunkSize := uint64(16 * 1024 * 1024)
 	setWeightChunkSize(chunkSize)
 	expectedNonDefault := humanize.IBytes(chunkSize)
 	expectedNonDefault = strings.ReplaceAll(expectedNonDefault, " ", "")
 
-	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[MODEL_WEIGHT_MEDIA_TYPE], "Weight media type should match the specified chunk size")
-	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[MODEL_DATASET_MEDIA_TYPE], "Dataset media type should match the specified chunk size")
+	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[ModelWeightMediaType], "Weight media type should match the specified chunk size")
+	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[ModelDatasetMediaType], "Dataset media type should match the specified chunk size")
 }

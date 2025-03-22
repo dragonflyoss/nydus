@@ -497,7 +497,7 @@ func pushManifest(
 	for _, layer := range modelLayers {
 		layers = append(layers, ocispec.Descriptor{
 			Digest:    layer.Digest,
-			Size:      int64(layer.Size),
+			Size:      layer.Size,
 			MediaType: layer.MediaType,
 		})
 	}
@@ -523,12 +523,12 @@ func pushManifest(
 	return nil
 }
 
-func getSourceManifestSubject(ctx context.Context, sourceRef string, inscure, plainHttp bool) (*ocispec.Descriptor, error) {
+func getSourceManifestSubject(ctx context.Context, sourceRef string, inscure, plainHTTP bool) (*ocispec.Descriptor, error) {
 	remoter, err := pkgPvd.DefaultRemote(sourceRef, inscure)
 	if err != nil {
 		return nil, errors.Wrap(err, "create remote")
 	}
-	if plainHttp {
+	if plainHTTP {
 		remoter.WithHTTP()
 	}
 	desc, err := remoter.Resolve(ctx)
