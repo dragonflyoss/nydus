@@ -154,16 +154,21 @@ func NewHandler(opt Option) (*Handler, error) {
 	if opt.WeightChunkSize != 0 {
 		setWeightChunkSize(opt.WeightChunkSize)
 	}
+	if err := initHandler(handler); err != nil {
+		return nil, errors.Wrap(err, "init handler")
+	}
+	return handler, nil
+}
+func initHandler(handler *Handler) error {
 	m, err := handler.extractManifest()
 	if err != nil {
-		return nil, errors.Wrap(err, "extract manifest failed")
+		return errors.Wrap(err, "extract manifest failed")
 	}
 	handler.manifest = *m
 	handler.blobs = convertToBlobs(&handler.manifest)
 	handler.setBlobConfig(m)
 	handler.setBlobsMap()
-
-	return handler, nil
+	return nil
 }
 
 func GetOption(srcRef, modCtlRoot string, weightChunkSize uint64) (*Option, error) {

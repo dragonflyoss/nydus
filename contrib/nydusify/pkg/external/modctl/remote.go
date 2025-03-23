@@ -51,11 +51,18 @@ func NewRemoteHandler(ctx context.Context, imageRef string, plainHTTP bool) (*Re
 		imageRef: imageRef,
 		remoter:  remoter,
 	}
-	if err = handler.setManifest(); err != nil {
-		return nil, errors.Wrap(err, "set manifest failed")
+	if err := initRemoteHandler(handler); err != nil {
+		return nil, errors.Wrap(err, "init remote handler failed")
+	}
+	return handler, nil
+}
+
+func initRemoteHandler(handler *RemoteHandler) error {
+	if err := handler.setManifest(); err != nil {
+		return errors.Wrap(err, "set manifest failed")
 	}
 	handler.blobs = convertToBlobs(&handler.manifest)
-	return handler, nil
+	return nil
 }
 
 func (handler *RemoteHandler) Handle(ctx context.Context) (*backend.Backend, []backend.FileAttribute, error) {
@@ -152,20 +159,7 @@ func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descript
 	hackFile := os.Getenv("HACK_FILE")
 	for idx, f := range files {
 		if hackFile != "" && f.name == hackFile {
-			// HACK to chmod config.json to 0640
-			hackMode := uint32(0640)
-			// etc 640.
-			hackModeStr := os.Getenv("HACK_MODE")
-			if hackModeStr != "" {
-				modeValue, err := strconv.ParseUint(hackModeStr, 8, 32)
-				if err != nil {
-					logrus.Errorf("Invalid HACK_MODE value: %s, using default 0640", hackModeStr)
-				} else {
-					hackMode = uint32(modeValue)
-				}
-			}
-			f.mode = hackMode
-			logrus.Infof("hack file: %s mode: %o", f.name, f.mode)
+			hackFileWrapper(&f)
 		}
 		fileAttrs[idx] = backend.FileAttribute{
 			BlobID:                 blobInfo.Digest,
@@ -179,6 +173,22 @@ func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descript
 			Mode:                   f.mode,
 		}
 	}
-
 	return fileAttrs, nil
+}
+
+func hackFileWrapper(f *fileInfo) {
+	// HACK to chmod config.json to 0640
+	hackMode := uint32(0640)
+	// etc 640.
+	hackModeStr := os.Getenv("HACK_MODE")
+	if hackModeStr != "" {
+		modeValue, err := strconv.ParseUint(hackModeStr, 8, 32)
+		if err != nil {
+			logrus.Errorf("Invalid HACK_MODE value: %s, using default 0640", hackModeStr)
+		} else {
+			hackMode = uint32(modeValue)
+		}
+	}
+	f.mode = hackMode
+	logrus.Infof("hack file: %s mode: %o", f.name, f.mode)
 }

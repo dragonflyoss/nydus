@@ -6,9 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"testing"
 
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
+	"github.com/agiledragon/gomonkey/v2"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
@@ -118,12 +122,11 @@ func TestRemoteHandler_Handle(t *testing.T) {
 }
 
 func TestGetModelConfig(t *testing.T) {
-
 	mockRemote := &MockRemote{
-		ResolveFunc: func(ctx context.Context) (*ocispec.Descriptor, error) {
+		ResolveFunc: func(context.Context) (*ocispec.Descriptor, error) {
 			return &ocispec.Descriptor{}, nil
 		},
-		PullFunc: func(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadCloser, error) {
+		PullFunc: func(_ context.Context, desc ocispec.Descriptor, _ bool) (io.ReadCloser, error) {
 			desc = ocispec.Descriptor{
 				MediaType: modelspec.MediaTypeModelConfig,
 				Size:      desc.Size,
@@ -147,10 +150,10 @@ func TestGetModelConfig(t *testing.T) {
 
 func TestSetManifest(t *testing.T) {
 	mockRemote := &MockRemote{
-		ResolveFunc: func(ctx context.Context) (*ocispec.Descriptor, error) {
+		ResolveFunc: func(context.Context) (*ocispec.Descriptor, error) {
 			return &ocispec.Descriptor{}, nil
 		},
-		PullFunc: func(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadCloser, error) {
+		PullFunc: func(context.Context, ocispec.Descriptor, bool) (io.ReadCloser, error) {
 			mani := ocispec.Manifest{
 				MediaType: ocispec.MediaTypeImageManifest,
 			}
@@ -187,4 +190,38 @@ func TestBackend(t *testing.T) {
 	assert.NotNil(t, backend)
 	assert.Equal(t, "v1", backend.Version)
 	assert.Equal(t, "registry", backend.Backends[0].Type)
+}
+
+func TestNewRemoteHandler(t *testing.T) {
+	var remoter = remote.Remote{}
+	defaultRemotePatches := gomonkey.ApplyFunc(provider.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+		return &remoter, nil
+	})
+	defer defaultRemotePatches.Reset()
+
+	initRemoteHandlerPatches := gomonkey.ApplyFunc(initRemoteHandler, func(*RemoteHandler) error {
+		return nil
+	})
+	defer initRemoteHandlerPatches.Reset()
+
+	remoteHandler, err := NewRemoteHandler(context.Background(), "test", false)
+	assert.Nil(t, err)
+	assert.NotNil(t, remoteHandler)
+}
+
+func TestInitRemoteHandlerError(t *testing.T) {
+	handler := &RemoteHandler{}
+	setManifestPatches := gomonkey.ApplyPrivateMethod(handler, "setManifest", func(*RemoteHandler) error {
+		return nil
+	})
+	defer setManifestPatches.Reset()
+	err := initRemoteHandler(handler)
+	assert.NoError(t, err)
+}
+
+func TestHackFileWrapper(t *testing.T) {
+	f := &fileInfo{}
+	os.Setenv("HACK_MODE", "0640")
+	hackFileWrapper(f)
+	assert.Equal(t, uint32(0640), f.mode)
 }

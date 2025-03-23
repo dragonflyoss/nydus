@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agiledragon/gomonkey/v2"
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 
@@ -345,4 +346,34 @@ func TestSetWeightChunkSize(t *testing.T) {
 
 	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[ModelWeightMediaType], "Weight media type should match the specified chunk size")
 	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[ModelDatasetMediaType], "Dataset media type should match the specified chunk size")
+}
+
+func TestNewHandler(t *testing.T) {
+	// handler := &Handler{}
+	t.Run("Run extract manifest failed", func(t *testing.T) {
+		_, err := NewHandler(Option{})
+		assert.Error(t, err)
+	})
+
+	t.Run("Run Normal", func(t *testing.T) {
+		initHandlerPatches := gomonkey.ApplyFunc(initHandler, func(*Handler) error {
+			return nil
+		})
+		defer initHandlerPatches.Reset()
+		handler, err := NewHandler(Option{})
+		assert.NoError(t, err)
+		assert.NotNil(t, handler)
+	})
+}
+
+func TestInitHandler(t *testing.T) {
+	t.Run("Run initHandler failed", func(t *testing.T) {
+		handler := &Handler{}
+		extractManifestPatches := gomonkey.ApplyPrivateMethod(handler, "extractManifest", func() (*ocispec.Manifest, error) {
+			return &ocispec.Manifest{}, nil
+		})
+		defer extractManifestPatches.Reset()
+		err := initHandler(handler)
+		assert.NoError(t, err)
+	})
 }
