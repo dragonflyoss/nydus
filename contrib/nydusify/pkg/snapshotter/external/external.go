@@ -44,14 +44,7 @@ func Handle(ctx context.Context, opts Options) error {
 		return err
 	}
 	bkd := ret.Backend
-	attributes := []Attribute{}
-	for _, file := range ret.Files {
-		p := fmt.Sprintf("/%s type=%s blob_index=%d blob_id=%s chunk_size=%s chunk_0_compressed_offset=%d compressed_size=%s",
-			file.RelativePath, file.Type, file.BlobIndex, file.BlobID, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize)
-		attributes = append(attributes, Attribute{
-			Pattern: p,
-		})
-	}
+	attributes := buildAttr(ret)
 
 	if err := os.WriteFile(opts.MetaOutput, ret.Meta, 0644); err != nil {
 		return errors.Wrapf(err, "write meta to %s", opts.MetaOutput)
@@ -76,6 +69,18 @@ func Handle(ctx context.Context, opts Options) error {
 	logrus.Debugf("attributes: %v", strings.Join(attributeContent, "\n"))
 
 	return nil
+}
+
+func buildAttr(ret *Result) []Attribute {
+	attributes := []Attribute{}
+	for _, file := range ret.Files {
+		p := fmt.Sprintf("/%s type=%s blob_index=%d blob_id=%s chunk_size=%s chunk_0_compressed_offset=%d compressed_size=%s",
+			file.RelativePath, file.Type, file.BlobIndex, file.BlobID, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize)
+		attributes = append(attributes, Attribute{
+			Pattern: p,
+		})
+	}
+	return attributes
 }
 
 func RemoteHandle(ctx context.Context, opts Options) error {

@@ -72,7 +72,7 @@ func (m *mockReadSeekCloeser) Read(p []byte) (n int, err error) {
 	return m.buf.Read(p)
 }
 
-func (m *mockReadSeekCloeser) Seek(offset int64, whence int) (int64, error) {
+func (m *mockReadSeekCloeser) Seek(int64, int) (int64, error) {
 	return 0, nil
 }
 
@@ -90,9 +90,9 @@ func TestReadSeekCloser(t *testing.T) {
 	t.Run("Run not ReadSeekCloser", func(t *testing.T) {
 		remote.resolverFunc = func(bool) remotes.Resolver {
 			return &MockResolver{
-				FetcherFunc: func(ctx context.Context, ref string) (remotes.Fetcher, error) {
+				FetcherFunc: func(context.Context, string) (remotes.Fetcher, error) {
 					var buf bytes.Buffer
-					return remotes.FetcherFunc(func(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+					return remotes.FetcherFunc(func(context.Context, ocispec.Descriptor) (io.ReadCloser, error) {
 						// return io.ReadSeekCloser
 						return &readerAt{
 							Reader: &buf,
@@ -110,9 +110,9 @@ func TestReadSeekCloser(t *testing.T) {
 		// mock io.ReadSeekCloser
 		remote.resolverFunc = func(bool) remotes.Resolver {
 			return &MockResolver{
-				FetcherFunc: func(ctx context.Context, ref string) (remotes.Fetcher, error) {
+				FetcherFunc: func(context.Context, string) (remotes.Fetcher, error) {
 					var buf bytes.Buffer
-					return remotes.FetcherFunc(func(ctx context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+					return remotes.FetcherFunc(func(context.Context, ocispec.Descriptor) (io.ReadCloser, error) {
 						return &mockReadSeekCloeser{
 							buf: buf,
 						}, nil

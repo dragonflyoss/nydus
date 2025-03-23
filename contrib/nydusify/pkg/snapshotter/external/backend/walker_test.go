@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -96,4 +97,74 @@ func TestBfsWalk(t *testing.T) {
 		}
 		assert.Equal(t, expectedPaths, paths)
 	})
+}
+
+type MockChunk struct {
+	ID        uint32
+	Content   interface{}
+	Offset    uint64
+	Path      string
+	ChunkSize string
+	Digest    string
+	Size      string
+}
+
+func (m *MockChunk) ObjectID() uint32 {
+	return m.ID
+}
+func (m *MockChunk) ObjectContent() interface{} {
+	return m.Content
+}
+
+func (m *MockChunk) ObjectOffset() uint64 {
+	return m.Offset
+}
+func (m *MockChunk) FilePath() string {
+	return m.Path
+}
+func (m *MockChunk) LimitChunkSize() string {
+	return m.ChunkSize
+}
+func (m *MockChunk) BlobDigest() string {
+	return m.Digest
+}
+func (m *MockChunk) BlobSize() string {
+	return m.Size
+}
+
+type MockHandler struct {
+	BackendFunc func(ctx context.Context) (*Backend, error)
+	HandleFunc  func(ctx context.Context, file File) ([]Chunk, error)
+}
+
+func (m MockHandler) Backend(ctx context.Context) (*Backend, error) {
+	if m.BackendFunc == nil {
+		return &Backend{}, nil
+	}
+	return m.BackendFunc(ctx)
+}
+
+func (m MockHandler) Handle(ctx context.Context, file File) ([]Chunk, error) {
+	if m.HandleFunc == nil {
+		return []Chunk{
+			&MockChunk{
+				Path: "test1",
+			},
+			&MockChunk{
+				Path: "test2",
+			},
+		}, nil
+	}
+	return m.HandleFunc(ctx, file)
+}
+
+func TestWalk(t *testing.T) {
+	walker := &Walker{}
+	handler := MockHandler{}
+	root := "/tmp/nydusify"
+	os.MkdirAll(root, 0755)
+	defer os.RemoveAll(root)
+	os.CreateTemp(root, "test")
+	_, err := walker.Walk(context.Background(), root, handler)
+	assert.NoError(t, err)
 }

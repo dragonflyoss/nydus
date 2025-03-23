@@ -139,3 +139,15 @@ func TestBuildEmptyFiles(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, os.FileMode(0755), info.Mode())
 }
+
+func TestBuildAttr(t *testing.T) {
+	ret := Result{
+		Files: []backend.FileAttribute{
+			{
+				RelativePath: "dir1/file1",
+			},
+		},
+	}
+	attrs := buildAttr(&ret)
+	assert.Equal(t, len(attrs), 1)
+}

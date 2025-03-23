@@ -16,9 +16,12 @@ import (
 	"github.com/containerd/containerd/content/local"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/external/modctl"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
+	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -425,4 +428,177 @@ func TestMakeDesc(t *testing.T) {
 	}
 	_, _, err := makeDesc(input, oldDesc)
 	assert.NoError(t, err)
+}
+
+func TestBuildModelConfig(t *testing.T) {
+	modctlHander := &modctl.Handler{}
+	_, err := buildModelConfig(modctlHander)
+	assert.Error(t, err)
+}
+
+func TestPushManifest(t *testing.T) {
+	remoter := &remote.Remote{}
+	t.Run("Run make desc failed", func(t *testing.T) {
+		makeDescPatches := gomonkey.ApplyFunc(makeDesc, func(interface{}, ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
+			return nil, nil, errors.New("make desc mock error")
+		})
+		defer makeDescPatches.Reset()
+		err := pushManifest(context.Background(), Opt{}, modelspec.Model{}, nil, parser.Image{}, "")
+		assert.Error(t, err)
+	})
+
+	t.Run("Run default remote failed", func(t *testing.T) {
+		makeDescPatches := gomonkey.ApplyFunc(makeDesc, func(interface{}, ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
+			return []byte{}, &ocispec.Descriptor{}, nil
+		})
+		defer makeDescPatches.Reset()
+
+		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+			return nil, errors.New("default remote failed mock error")
+		})
+		defer defaultRemotePatches.Reset()
+		err := pushManifest(context.Background(), Opt{}, modelspec.Model{}, nil, parser.Image{}, "")
+		assert.Error(t, err)
+	})
+
+	t.Run("Run push failed", func(t *testing.T) {
+		makeDescPatches := gomonkey.ApplyFunc(makeDesc, func(interface{}, ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
+			return []byte{}, &ocispec.Descriptor{}, nil
+		})
+		defer makeDescPatches.Reset()
+
+		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+			return remoter, nil
+		})
+		defer defaultRemotePatches.Reset()
+
+		pushPatches := gomonkey.ApplyMethod(remoter, "Push", func(*remote.Remote, context.Context, ocispec.Descriptor, bool, io.Reader) error {
+			return errors.New("push mock timeout error")
+		})
+		defer pushPatches.Reset()
+		err := pushManifest(context.Background(), Opt{WithPlainHTTP: true}, modelspec.Model{}, nil, parser.Image{}, "")
+		assert.Error(t, err)
+	})
+
+	t.Run("Run open failed", func(t *testing.T) {
+		makeDescPatches := gomonkey.ApplyFunc(makeDesc, func(interface{}, ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
+			return []byte{}, &ocispec.Descriptor{}, nil
+		})
+		defer makeDescPatches.Reset()
+
+		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+			return remoter, nil
+		})
+		defer defaultRemotePatches.Reset()
+
+		pushPatches := gomonkey.ApplyMethod(remoter, "Push", func(*remote.Remote, context.Context, ocispec.Descriptor, bool, io.Reader) error {
+			return nil
+		})
+		defer pushPatches.Reset()
+
+		err := pushManifest(context.Background(), Opt{WithPlainHTTP: true}, modelspec.Model{}, nil, parser.Image{}, "")
+		assert.Error(t, err)
+	})
+
+	t.Run("Run getSourceManifestSubject failed", func(t *testing.T) {
+		makeDescPatches := gomonkey.ApplyFunc(makeDesc, func(interface{}, ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
+			return []byte{}, &ocispec.Descriptor{}, nil
+		})
+		defer makeDescPatches.Reset()
+
+		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+			return remoter, nil
+		})
+		defer defaultRemotePatches.Reset()
+
+		pushPatches := gomonkey.ApplyMethod(remoter, "Push", func(*remote.Remote, context.Context, ocispec.Descriptor, bool, io.Reader) error {
+			return nil
+		})
+		defer pushPatches.Reset()
+
+		bootstrapPath := "/tmp/nydusify/bootstrap"
+		os.Mkdir("/tmp/nydusify/", 0755)
+		os.Create(bootstrapPath)
+		defer os.RemoveAll("/tmp/nydusify/")
+		defer os.Remove(bootstrapPath)
+
+		getSourceManifestSubjectPatches := gomonkey.ApplyFunc(getSourceManifestSubject, func(context.Context, string, bool, bool) (*ocispec.Descriptor, error) {
+			return nil, errors.New("get source manifest subject mock error")
+		})
+		defer getSourceManifestSubjectPatches.Reset()
+		err := pushManifest(context.Background(), Opt{WithPlainHTTP: true}, modelspec.Model{}, nil, parser.Image{}, bootstrapPath)
+		assert.Error(t, err)
+	})
+
+	t.Run("Run normal", func(t *testing.T) {
+		makeDescPatches := gomonkey.ApplyFunc(makeDesc, func(interface{}, ocispec.Descriptor) ([]byte, *ocispec.Descriptor, error) {
+			return []byte{}, &ocispec.Descriptor{}, nil
+		})
+		defer makeDescPatches.Reset()
+
+		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+			return remoter, nil
+		})
+		defer defaultRemotePatches.Reset()
+
+		pushPatches := gomonkey.ApplyMethod(remoter, "Push", func(*remote.Remote, context.Context, ocispec.Descriptor, bool, io.Reader) error {
+			return nil
+		})
+		defer pushPatches.Reset()
+
+		bootstrapPath := "/tmp/nydusify/bootstrap"
+		os.Mkdir("/tmp/nydusify/", 0755)
+		os.Create(bootstrapPath)
+		defer os.RemoveAll("/tmp/nydusify/")
+		defer os.Remove(bootstrapPath)
+
+		getSourceManifestSubjectPatches := gomonkey.ApplyFunc(getSourceManifestSubject, func(context.Context, string, bool, bool) (*ocispec.Descriptor, error) {
+			return &ocispec.Descriptor{}, nil
+		})
+		defer getSourceManifestSubjectPatches.Reset()
+		err := pushManifest(context.Background(), Opt{WithPlainHTTP: true}, modelspec.Model{}, nil, parser.Image{}, bootstrapPath)
+		assert.NoError(t, err)
+	})
+}
+
+func TestGetSourceManifestSubject(t *testing.T) {
+	remoter := &remote.Remote{}
+	t.Run("Run default remote failed", func(t *testing.T) {
+		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+			return nil, errors.New("default remote failed mock error")
+		})
+		defer defaultRemotePatches.Reset()
+		_, err := getSourceManifestSubject(context.Background(), "", false, false)
+		assert.Error(t, err)
+	})
+
+	t.Run("Run resolve failed", func(t *testing.T) {
+		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+			return remoter, nil
+		})
+		defer defaultRemotePatches.Reset()
+
+		remoterReolvePatches := gomonkey.ApplyMethod(remoter, "Resolve", func(*remote.Remote, context.Context) (*ocispec.Descriptor, error) {
+			return nil, errors.New("resolve failed mock error timeout")
+		})
+		defer remoterReolvePatches.Reset()
+		_, err := getSourceManifestSubject(context.Background(), "", false, false)
+		assert.Error(t, err)
+	})
+
+	t.Run("Run normal", func(t *testing.T) {
+		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+			return remoter, nil
+		})
+		defer defaultRemotePatches.Reset()
+
+		remoterReolvePatches := gomonkey.ApplyMethod(remoter, "Resolve", func(*remote.Remote, context.Context) (*ocispec.Descriptor, error) {
+			return &ocispec.Descriptor{}, nil
+		})
+		defer remoterReolvePatches.Reset()
+		desc, err := getSourceManifestSubject(context.Background(), "", false, false)
+		assert.NoError(t, err)
+		assert.NotNil(t, desc)
+	})
+
 }
