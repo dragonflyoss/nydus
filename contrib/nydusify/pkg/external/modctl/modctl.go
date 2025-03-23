@@ -169,11 +169,11 @@ func NewHandler(opt Option) (*Handler, error) {
 func GetOption(srcRef, modCtlRoot string, weightChunkSize uint64) (*Option, error) {
 	parts := strings.Split(srcRef, "/")
 	if len(parts) != 3 {
-		return nil, errors.New("invalid target ref")
+		return nil, errors.Errorf("invalid source ref:%s", srcRef)
 	}
 	nameTagParts := strings.Split(parts[2], ":")
 	if len(nameTagParts) != 2 {
-		return nil, errors.New("invalid target ref for name and tag")
+		return nil, errors.New("invalid source ref for name and tag")
 	}
 	opt := Option{
 		Root:            modCtlRoot,

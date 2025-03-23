@@ -377,6 +377,7 @@ func packFinalBootstrap(workDir, backendConfigPath string, externalBlobDigest di
 	defer bootstrap.Close()
 	rc := snapConv.PackToTar(files, false)
 	defer rc.Close()
+	println("copy bootstrap to tar file")
 	if _, err = io.Copy(bootstrapTar, rc); err != nil {
 		return "", errors.Wrap(err, "copy merged bootstrap")
 	}
