@@ -352,7 +352,7 @@ func TestPackWithAttributes(t *testing.T) {
 
 type mockReaderAt struct{}
 
-func (m *mockReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
+func (m *mockReaderAt) ReadAt([]byte, int64) (n int, err error) {
 	return 0, errors.New("mock error")
 }
 func (m *mockReaderAt) Close() error {

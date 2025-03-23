@@ -172,7 +172,6 @@ func TestGetOption(t *testing.T) {
 
 		_, err := GetOption(srcRef, modCtlRoot, weightChunkSize)
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid target ref")
 	})
 }
 

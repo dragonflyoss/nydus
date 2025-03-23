@@ -52,13 +52,13 @@ func (r *readSeekCloser) Close() error {
 
 func TestRemoteHandler_Handle(t *testing.T) {
 	mockRemote := &MockRemote{
-		ResolveFunc: func(ctx context.Context) (*ocispec.Descriptor, error) {
+		ResolveFunc: func(context.Context) (*ocispec.Descriptor, error) {
 			return &ocispec.Descriptor{}, nil
 		},
-		PullFunc: func(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadCloser, error) {
+		PullFunc: func(context.Context, ocispec.Descriptor, bool) (io.ReadCloser, error) {
 			return io.NopCloser(bytes.NewReader([]byte("{}"))), nil
 		},
-		ReadSeekCloserFunc: func(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadSeekCloser, error) {
+		ReadSeekCloserFunc: func(context.Context, ocispec.Descriptor, bool) (io.ReadSeekCloser, error) {
 			// prepare tar
 
 			var buf bytes.Buffer
@@ -88,7 +88,7 @@ func TestRemoteHandler_Handle(t *testing.T) {
 			return &readSeekCloser{reader}, nil
 		},
 		WithHTTPFunc:      func() {},
-		MaybeWithHTTPFunc: func(err error) {},
+		MaybeWithHTTPFunc: func(error) {},
 	}
 
 	handler := &RemoteHandler{
