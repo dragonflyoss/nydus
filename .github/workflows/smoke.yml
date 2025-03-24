@@ -235,7 +235,8 @@ jobs:
       run: |
         CARGO_HOME=${HOME}/.cargo
         CARGO_BIN=$(which cargo)
-        sudo -E CARGO=${CARGO_BIN} make ut-nextest
+        RUSTUP_BIN=$(which rustup)
+        sudo -E RUSTUP=${RUSTUP_BIN} make ut-nextest
 
   contrib-unit-test-coverage:
     runs-on: ubuntu-latest
@@ -277,7 +278,8 @@ jobs:
         run: |
           CARGO_HOME=${HOME}/.cargo
           CARGO_BIN=$(which cargo)
-          sudo -E CARGO=${CARGO_BIN} make coverage-codecov
+          RUSTUP_BIN=$(which rustup)
+          sudo -E RUSTUP=${RUSTUP_BIN} make coverage-codecov
       - name: Upload nydus coverage file
         uses: actions/upload-artifact@v4
         with:
