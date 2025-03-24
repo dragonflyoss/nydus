@@ -46,6 +46,7 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 
 	scenarios := tool.DescartesIterator{}
 	scenarios.
+		Dimension(paramNydusdVersion, []interface{}{"v0.1.0", "latest"}).
 		Dimension(paramCompressor, []interface{}{"zstd", "none", "lz4_block"}).
 		Dimension(paramFSVersion, []interface{}{"5", "6"}).
 		Dimension(paramChunkSize, []interface{}{"0x100000", "0x200000"}).
@@ -58,6 +59,15 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 		Dimension(paramAmplifyIO, []interface{}{uint64(0x100000)}).
 		Dimension(paramChunkDedupDb, []interface{}{"", "/tmp/cas.db"}).
 		Skip(func(param *tool.DescartesItem) bool {
+			if param.GetString(paramNydusdVersion) == "v0.1.0" {
+				return (param.GetString(paramRafsMode) != "direct" ||
+					param.GetString(paramCompressor) != "lz4_block" ||
+					param.GetString(paramFSVersion) != "5" ||
+					param.GetString(paramBatch) != "0" ||
+					param.GetBool(paramEncrypt) != false ||
+					param.GetString(paramChunkDedupDb) != "")
+			}
+
 			// rafs v6 not support cached mode nor dummy cache
 			if param.GetString(paramFSVersion) == "6" {
 				return param.GetString(paramRafsMode) == "cached" || param.GetString(paramCacheType) == ""
@@ -82,8 +92,11 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 		}
 		scenario := scenarios.Next()
 
+		nydusdPath := tool.GetBinary(n.t, "NYDUS_NYDUSD", scenario.GetString(paramNydusdVersion))
+
 		return scenario.Str(), func(t *testing.T) {
 			ctx := tool.DefaultContext(n.t)
+			ctx.Binary.Nydusd = nydusdPath
 			ctx.Build.Compressor = scenario.GetString(paramCompressor)
 			ctx.Build.FSVersion = scenario.GetString(paramFSVersion)
 			ctx.Build.ChunkSize = scenario.GetString(paramChunkSize)
@@ -154,6 +167,61 @@ func (n *NativeLayerTestSuite) TestAmplifyIO() test.Generator {
 			n.testMakeLayers(*ctx, t)
 		}
 	}
+}
+
+func (n *NativeLayerTestSuite) TestMergeLayerWithParentBootstrap(t *testing.T) {
+	ctx := tool.DefaultContext(t)
+	ctx.Build.FSVersion = "5"
+	ctx.Build.Compressor = "lz4_block"
+
+	packOption := converter.PackOption{
+		BuilderPath: ctx.Binary.Builder,
+		Compressor:  ctx.Build.Compressor,
+		FsVersion:   ctx.Build.FSVersion,
+		ChunkSize:   ctx.Build.ChunkSize,
+	}
+
+	// Prepare work directory
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	// Make thin lower layer
+	lowerLayer := texture.MakeThinLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "source-lower"))
+	lowerBlobDigest := lowerLayer.Pack(t, packOption, ctx.Env.BlobDir)
+
+	mergeOption := converter.MergeOption{
+		BuilderPath: ctx.Binary.Builder,
+	}
+	actualDigests, lowerBootstrap := tool.MergeLayers(t, *ctx, mergeOption, []converter.Layer{
+		{
+			Digest: lowerBlobDigest,
+		},
+	})
+	require.Equal(t, []digest.Digest{lowerBlobDigest}, actualDigests)
+
+	// Make upper layer (the upper layer will opaque all files of the lower layer)
+	upperLayer := texture.MakeUpperLayer(t, filepath.Join(ctx.Env.WorkDir, "source-upper"))
+	upperBlobDigest := upperLayer.Pack(t, packOption, ctx.Env.BlobDir)
+
+	mergeOption = converter.MergeOption{
+		ParentBootstrapPath: lowerBootstrap,
+		BuilderPath:         ctx.Binary.Builder,
+	}
+	actualDigests, overlayBootstrap := tool.MergeLayers(t, *ctx, mergeOption, []converter.Layer{
+		{
+			Digest: lowerBlobDigest,
+		},
+		{
+			Digest: upperBlobDigest,
+		},
+	})
+	require.Equal(t, []digest.Digest{upperBlobDigest}, actualDigests)
+
+	// Verify overlay (lower + upper) layer mounted by nydusd
+	lowerLayer.Overlay(t, upperLayer)
+
+	ctx.Env.BootstrapPath = overlayBootstrap
+	tool.Verify(t, *ctx, lowerLayer.FileTree)
 }
 
 func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
