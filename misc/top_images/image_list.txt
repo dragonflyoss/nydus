@@ -15,7 +15,6 @@ mariadb
 amazoncorretto
 docker
 rabbitmq
-centos
 hello-world
 registry
 debian
