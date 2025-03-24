@@ -304,15 +304,40 @@ impl Merger {
             ctx.chunk_size = chunk_size;
         }
 
+        // After merging all trees, we need to re-calculate the blob index of
+        // referenced blobs, as the upper tree might have deleted some files
+        // or directories by opaques, and some blobs are dereferenced.
+        let mut used_blobs = HashMap::new(); // HashMap<blob_id, new_blob_index>
+        let mut used_blob_mgr = BlobManager::new(ctx.digester);
+        let origin_blobs = blob_mgr.get_blobs();
+        tree.walk_bfs(true, &mut |n| {
+            let mut node = n.borrow_mut_node();
+            for chunk in &mut node.chunks {
+                let origin_blob_index = chunk.inner.blob_index() as usize;
+                let blob_ctx = origin_blobs[origin_blob_index].clone();
+                let origin_blob_id = blob_ctx.blob_id();
+                let new_blob_index = if let Some(new_blob_index) = used_blobs.get(&origin_blob_id) {
+                    *new_blob_index
+                } else {
+                    let new_blob_index = used_blob_mgr.len();
+                    used_blobs.insert(origin_blob_id, new_blob_index);
+                    used_blob_mgr.add_blob(blob_ctx);
+                    new_blob_index
+                };
+                chunk.set_blob_index(new_blob_index as u32);
+            }
+            Ok(())
+        })?;
+
         let mut bootstrap_ctx = BootstrapContext::new(Some(target.clone()), false)?;
         let mut bootstrap = Bootstrap::new(tree)?;
         bootstrap.build(ctx, &mut bootstrap_ctx)?;
-        let blob_table = blob_mgr.to_blob_table(ctx)?;
+        let blob_table = used_blob_mgr.to_blob_table(ctx)?;
         let mut bootstrap_storage = Some(target.clone());
         bootstrap
             .dump(ctx, &mut bootstrap_storage, &mut bootstrap_ctx, &blob_table)
             .context(format!("dump bootstrap to {:?}", target.display()))?;
-        BuildOutput::new(&blob_mgr, &bootstrap_storage)
+        BuildOutput::new(&used_blob_mgr, &bootstrap_storage)
     }
 }
 
