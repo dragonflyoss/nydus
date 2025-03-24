@@ -111,6 +111,19 @@ func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.La
 	return layer
 }
 
+func MakeThinLowerLayer(t *testing.T, workDir string) *tool.Layer {
+	layer := tool.NewLayer(t, workDir)
+
+	layer.CreateDir(t, "dir-1")
+	layer.CreateFile(t, "dir-1/file-2", []byte("dir-1/file-2"))
+
+	layer.CreateDir(t, "dir-2")
+	layer.CreateFile(t, "dir-2/file-1", []byte("dir-2/file-1"))
+	layer.CreateFile(t, "dir-2/file-2", []byte("dir-2/file-2"))
+
+	return layer
+}
+
 func MakeUpperLayer(t *testing.T, workDir string) *tool.Layer {
 	layer := tool.NewLayer(t, workDir)
 
