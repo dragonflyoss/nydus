@@ -31,7 +31,7 @@ type Remote struct {
 	resolverFunc func(insecure bool) remotes.Resolver
 	pushed       sync.Map
 
-	retryWithHTTP bool
+	withHTTP bool
 }
 
 // New creates remote instance from docker remote resolver
@@ -55,13 +55,16 @@ func (remote *Remote) MaybeWithHTTP(err error) {
 		// If the error message includes the current registry host string, it
 		// implies that we can retry the request with plain HTTP.
 		if strings.Contains(err.Error(), fmt.Sprintf("/%s/", host)) {
-			remote.retryWithHTTP = true
+			remote.withHTTP = true
 		}
 	}
 }
 
+func (remote *Remote) WithHTTP() {
+	remote.withHTTP = true
+}
 func (remote *Remote) IsWithHTTP() bool {
-	return remote.retryWithHTTP
+	return remote.withHTTP
 }
 
 // Push pushes blob to registry
@@ -83,7 +86,7 @@ func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDiges
 	}
 
 	// Create a new resolver instance for the request
-	pusher, err := remote.resolverFunc(remote.retryWithHTTP).Pusher(ctx, ref)
+	pusher, err := remote.resolverFunc(remote.withHTTP).Pusher(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -110,7 +113,7 @@ func (remote *Remote) Pull(ctx context.Context, desc ocispec.Descriptor, byDiges
 	}
 
 	// Create a new resolver instance for the request
-	puller, err := remote.resolverFunc(remote.retryWithHTTP).Fetcher(ctx, ref)
+	puller, err := remote.resolverFunc(remote.withHTTP).Fetcher(ctx, ref)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +131,7 @@ func (remote *Remote) Resolve(ctx context.Context) (*ocispec.Descriptor, error) 
 	ref := reference.TagNameOnly(remote.parsed).String()
 
 	// Create a new resolver instance for the request
-	_, desc, err := remote.resolverFunc(remote.retryWithHTTP).Resolve(ctx, ref)
+	_, desc, err := remote.resolverFunc(remote.withHTTP).Resolve(ctx, ref)
 	if err != nil {
 		return nil, err
 	}

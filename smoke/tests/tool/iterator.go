@@ -25,12 +25,30 @@ type DescartesItem struct {
 	vals map[string]interface{}
 }
 
+func (d *DescartesItem) Exists(name string) bool {
+	_, ok := d.vals[name]
+	return ok
+}
+
 func (d *DescartesItem) GetString(name string) string {
+	if !d.Exists(name) {
+		return ""
+	}
 	return d.vals[name].(string)
 }
 
 func (d *DescartesItem) GetBool(name string) bool {
+	if !d.Exists(name) {
+		return false
+	}
 	return d.vals[name].(bool)
+}
+
+func (d *DescartesItem) GetUInt64(name string) uint64 {
+	if !d.Exists(name) {
+		return 0
+	}
+	return d.vals[name].(uint64)
 }
 
 func (d *DescartesItem) Str() string {
@@ -60,10 +78,6 @@ func (d *DescartesItem) Str() string {
 		}
 	}
 	return sb.String()
-}
-
-func (d *DescartesItem) GetUInt64(name string) uint64 {
-	return d.vals[name].(uint64)
 }
 
 // Generator of Cartesian product.

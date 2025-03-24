@@ -46,6 +46,7 @@ pub use self::optimize_prefetch::OptimizePrefetch;
 pub use self::stargz::StargzBuilder;
 pub use self::tarball::TarballBuilder;
 
+pub mod attributes;
 mod chunkdict_generator;
 mod compact;
 mod core;
@@ -120,9 +121,14 @@ fn dump_bootstrap(
     if ctx.blob_inline_meta {
         assert_ne!(ctx.conversion_type, ConversionType::TarToTarfs);
         // Ensure the blob object is created in case of no chunks generated for the blob.
-        let (_, blob_ctx) = blob_mgr
-            .get_or_create_current_blob(ctx)
-            .map_err(|_e| anyhow!("failed to get current blob object"))?;
+        let blob_ctx = if blob_mgr.external {
+            &mut blob_mgr.new_blob_ctx(ctx)?
+        } else {
+            let (_, blob_ctx) = blob_mgr
+                .get_or_create_current_blob(ctx)
+                .map_err(|_e| anyhow!("failed to get current blob object"))?;
+            blob_ctx
+        };
         let bootstrap_offset = blob_writer.pos()?;
         let uncompressed_bootstrap = bootstrap_ctx.writer.as_bytes()?;
         let uncompressed_size = uncompressed_bootstrap.len();

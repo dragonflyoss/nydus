@@ -31,11 +31,11 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage, BlobCacheGenerator,
-    BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput, Builder,
-    ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature, Features,
-    Generator, HashChunkDict, Merger, OptimizePrefetch, Prefetch, PrefetchPolicy, StargzBuilder,
-    TarballBuilder, Tree, TreeNode, WhiteoutSpec,
+    attributes::Attributes, parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage,
+    BlobCacheGenerator, BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput,
+    Builder, ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature,
+    Features, Generator, HashChunkDict, Merger, OptimizePrefetch, Prefetch, PrefetchPolicy,
+    StargzBuilder, TarballBuilder, Tree, TreeNode, WhiteoutSpec,
 };
 
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
@@ -81,6 +81,10 @@ pub struct OutputSerializer {
     /// only include the layer that does have a blob, and should be deprecated
     /// in future, use `artifacts` field to replace.
     blobs: Vec<String>,
+    /// external RAFS meta data file path.
+    external_bootstrap: String,
+    /// external RAFS blob meta data file path.
+    external_blobs: Vec<String>,
     /// Performance trace info for current build.
     trace: serde_json::Map<String, serde_json::Value>,
     /// RAFS filesystem version (5 or 6).
@@ -114,6 +118,8 @@ impl OutputSerializer {
                 version,
                 bootstrap: build_output.bootstrap_path.unwrap_or_default(),
                 blobs: build_output.blobs,
+                external_bootstrap: build_output.external_bootstrap_path.unwrap_or_default(),
+                external_blobs: build_output.external_blobs,
                 trace,
                 fs_version: fs_version.to_string(),
                 compressor: compressor.to_string(),
@@ -150,7 +156,9 @@ impl OutputSerializer {
             let output = Self {
                 version,
                 bootstrap: bootstrap.display().to_string(),
+                external_bootstrap: String::new(),
                 blobs: blob_ids,
+                external_blobs: Vec::new(),
                 trace,
                 fs_version: fs_version.to_string(),
                 compressor: compressor.to_string(),
@@ -254,6 +262,12 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .long("blob")
                         .short('b')
                         .help("File path to save the generated RAFS data blob")
+                        .required_unless_present_any(["type", "blob-dir"]),
+                )
+                .arg(
+                    Arg::new("external-blob")
+                        .long("external-blob")
+                        .help("File path to save the generated RAFS external blob")
                         .required_unless_present_any(["type", "blob-dir"]),
                 )
                 .arg(
@@ -387,6 +401,13 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .conflicts_with("blob")
                         .conflicts_with("blob-dir")
                         .conflicts_with("compressor")
+                        .required(false)
+                )
+                .arg(
+                    Arg::new("attributes")
+                        .long("attributes")
+                        .help("Nydus attributes file path (usually .nydusattributes file)")
+                        .value_parser(clap::value_parser!(PathBuf))
                         .required(false)
                 )
         );
@@ -1190,6 +1211,14 @@ impl Command {
             compressor = compress::Algorithm::None;
         }
 
+        let attributes = matches
+            .get_one::<PathBuf>("attributes")
+            .map(Attributes::from)
+            .transpose()?
+            .unwrap_or_default();
+        let external_blob_storage = matches
+            .get_one::<String>("external-blob")
+            .map(|b| ArtifactStorage::SingleFile(b.into()));
         let mut build_ctx = BuildContext::new(
             blob_id,
             aligned_chunk,
@@ -1202,9 +1231,11 @@ impl Command {
             source_path,
             prefetch,
             blob_storage,
+            external_blob_storage,
             blob_inline_meta,
             features,
             encrypt,
+            attributes,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
@@ -1223,7 +1254,7 @@ impl Command {
         config.internal.set_blob_accessible(true);
         build_ctx.set_configuration(config.clone());
 
-        let mut blob_mgr = BlobManager::new(digester);
+        let mut blob_mgr = BlobManager::new(digester, false);
         if let Some(chunk_dict_arg) = matches.get_one::<String>("chunk-dict") {
             let config = RafsSuperConfig {
                 version,
@@ -1434,7 +1465,7 @@ impl Command {
             .insert(BlobFeatures::IS_CHUNKDICT_GENERATED);
         build_ctx.is_chunkdict_generated = true;
 
-        let mut blob_mgr = BlobManager::new(build_ctx.digester);
+        let mut blob_mgr = BlobManager::new(build_ctx.digester, false);
 
         let bootstrap_path = Self::get_bootstrap_storage(matches)?;
         let mut bootstrap_mgr = BootstrapManager::new(Some(bootstrap_path), None);
@@ -1658,12 +1689,12 @@ impl Command {
         let mut blob_ids = Vec::new();
         for (idx, blob) in blobs.iter().enumerate() {
             println!(
-                "\t {}: {}, compressed data size 0x{:x}, compressed file size 0x{:x}, uncompressed file size 0x{:x}, chunks: 0x{:x}, features: {}",
+                "\t {}: {}, compressed size {}, uncompressed size {}, chunk size: {}, chunk count: {}, features: {}",
                 idx,
                 blob.blob_id(),
-                blob.compressed_data_size(),
                 blob.compressed_size(),
                 blob.uncompressed_size(),
+                blob.chunk_size(),
                 blob.chunk_count(),
                 format_blob_features(blob.features()),
             );
@@ -1875,7 +1906,7 @@ impl Command {
             if !d.exists() {
                 bail!("Directory to store blobs does not exist")
             }
-            Ok(ArtifactStorage::FileDir(d))
+            Ok(ArtifactStorage::FileDir((d, String::new())))
         } else {
             bail!("both --bootstrap and --blob-dir are missing, please specify one to store the generated metadata blob file");
         }
@@ -1900,7 +1931,10 @@ impl Command {
             if !p.exists() {
                 bail!("directory to store blob cache does not exist")
             }
-            Ok(Some(ArtifactStorage::FileDir(p.to_owned())))
+            Ok(Some(ArtifactStorage::FileDir((
+                p.to_owned(),
+                String::new(),
+            ))))
         } else {
             Ok(None)
         }
@@ -1933,7 +1967,7 @@ impl Command {
             if !d.exists() {
                 bail!("directory to store blobs does not exist")
             }
-            Ok(Some(ArtifactStorage::FileDir(d)))
+            Ok(Some(ArtifactStorage::FileDir((d, String::new()))))
         } else if let Some(config_json) = matches.get_one::<String>("backend-config") {
             let config: serde_json::Value = serde_json::from_str(config_json).unwrap();
             warn!("using --backend-type=localfs is DEPRECATED. Use --blob-dir instead.");

@@ -236,14 +236,14 @@ func Changes(ctx context.Context, appendMount func(path string), withPaths []str
 }
 
 // checkDelete checks if the specified file is a whiteout
-func checkDelete(_ string, path string, base string, f os.FileInfo) (delete, skip bool, _ error) {
+func checkDelete(_ string, path string, base string, f os.FileInfo) (isDelete, skip bool, _ error) {
 	if f.Mode()&os.ModeCharDevice != 0 {
 		if _, ok := f.Sys().(*syscall.Stat_t); ok {
-			maj, min, err := devices.DeviceInfo(f)
+			maj, minor, err := devices.DeviceInfo(f)
 			if err != nil {
 				return false, false, errors.Wrapf(err, "failed to get device info")
 			}
-			if maj == 0 && min == 0 {
+			if maj == 0 && minor == 0 {
 				// This file is a whiteout (char 0/0) that indicates this is deleted from the base
 				if _, err := os.Lstat(filepath.Join(base, path)); err != nil {
 					if !os.IsNotExist(err) {

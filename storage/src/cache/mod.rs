@@ -26,7 +26,7 @@ use nydus_utils::compress::zlib_random::ZranDecoder;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::{compress, digest};
 
-use crate::backend::{BlobBackend, BlobReader};
+use crate::backend::{external::ExternalBlobReader, BlobBackend, BlobReader};
 use crate::cache::state::ChunkMap;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject, BlobPrefetchRequest,
@@ -53,6 +53,9 @@ pub use fscache::FsCacheMgr;
 
 /// Timeout in milli-seconds to retrieve blob data from backend storage.
 pub const SINGLE_INFLIGHT_WAIT_TIMEOUT: u64 = 2000;
+
+pub const EXTERNAL_BLOB_BACKEND_META_FILE_SUFFIX: &str = ".backend.meta";
+pub const EXTERNAL_BLOB_BACKEND_CONFIG_FILE_SUFFIX: &str = ".backend.json";
 
 struct BlobIoMergeState<'a, F: FnMut(BlobIoRange)> {
     cb: F,
@@ -193,11 +196,16 @@ pub trait BlobCache: Send + Sync {
         false
     }
 
+    /// Check whether the blob is external.
+    fn is_external(&self) -> bool;
+
     /// Check whether need to validate the data chunk by digest value.
     fn need_validation(&self) -> bool;
 
     /// Get the [BlobReader](../backend/trait.BlobReader.html) to read data from storage backend.
     fn reader(&self) -> &dyn BlobReader;
+
+    fn external_reader(&self) -> &dyn ExternalBlobReader;
 
     /// Get the underlying `ChunkMap` object.
     fn get_chunk_map(&self) -> &Arc<dyn ChunkMap>;
@@ -261,10 +269,19 @@ pub trait BlobCache: Send + Sync {
         // Read requested data from the backend by altogether.
         let mut c_buf = alloc_buf(blob_size);
         let start = Instant::now();
-        let nr_read = self
-            .reader()
-            .read(c_buf.as_mut_slice(), blob_offset)
-            .map_err(|e| eio!(e))?;
+        let chunks = chunks
+            .iter()
+            .map(|v| v.as_ref())
+            .collect::<Vec<&dyn BlobChunkInfo>>();
+        let nr_read = if self.is_external() {
+            self.external_reader()
+                .read(c_buf.as_mut_slice(), chunks.as_slice())
+                .map_err(|e| eio!(e))?
+        } else {
+            self.reader()
+                .read(c_buf.as_mut_slice(), blob_offset)
+                .map_err(|e| eio!(e))?
+        };
         if nr_read != blob_size {
             return Err(eio!(format!(
                 "request for {} bytes but got {} bytes",
@@ -281,7 +298,6 @@ pub trait BlobCache: Send + Sync {
             duration
         );
 
-        let chunks = chunks.iter().map(|v| v.as_ref()).collect();
         Ok(ChunkDecompressState::new(blob_offset, self, chunks, c_buf))
     }
 
@@ -301,7 +317,14 @@ pub trait BlobCache: Send + Sync {
         if self.is_zran() || self.is_batch() {
             return Err(enosys!("read_chunk_from_backend"));
         } else if !chunk.is_compressed() && !chunk.is_encrypted() {
-            let size = self.reader().read(buffer, offset).map_err(|e| eio!(e))?;
+            let size = if self.is_external() {
+                let chunks: &[&dyn BlobChunkInfo] = std::slice::from_ref(&chunk);
+                self.external_reader()
+                    .read(buffer, chunks)
+                    .map_err(|e| eio!(e))?
+            } else {
+                self.reader().read(buffer, offset).map_err(|e| eio!(e))?
+            };
             if size != buffer.len() {
                 return Err(eio!("storage backend returns less data than requested"));
             }

@@ -8,6 +8,7 @@ package utils
 import (
 	"archive/tar"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -247,6 +248,8 @@ func TestWithRetry(t *testing.T) {
 
 func TestRetryWithHTTP(t *testing.T) {
 	require.True(t, RetryWithHTTP(errors.Wrap(http.ErrSchemeMismatch, "parse Nydus image")))
+	require.True(t, RetryWithHTTP(fmt.Errorf("dial tcp 192.168.0.1:443: i/o timeout")))
+	require.True(t, RetryWithHTTP(fmt.Errorf("dial tcp 192.168.0.1:443: connect: connection refused")))
 	require.False(t, RetryWithHTTP(nil))
 }
 

@@ -7,3 +7,6 @@
 __pycache__
 .DS_Store
 go.work.sum
+dist/
+nydus-static/
+.goreleaser.yml

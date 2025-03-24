@@ -239,3 +239,85 @@ jobs:
         generate_release_notes: true
         files: |
           ${{ env.tarballs }}
+
+
+  goreleaser:
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+        os: [linux]
+    needs: [nydus-linux, contrib-linux]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup Golang
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.work'
+          cache-dependency-path: "**/*.sum"
+      - name: download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nydus-artifacts-${{ matrix.os }}-${{ matrix.arch }}*
+          merge-multiple: true
+          path: nydus-static
+      - name: prepare context
+        run: |
+          chmod +x nydus-static/*
+          export GOARCH=${{ matrix.arch }}
+          echo "GOARCH: $GOARCH"
+          sh ./goreleaser.sh
+      - name: Check GoReleaser config
+        uses: goreleaser/goreleaser-action@90a3faa9d0182683851fbfa97ca1a2cb983bfca3
+        with:
+          version: latest
+          args: check
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@90a3faa9d0182683851fbfa97ca1a2cb983bfca3
+        id: run-goreleaser
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate subject
+        id: hash
+        env:
+          ARTIFACTS: "${{ steps.run-goreleaser.outputs.artifacts }}"
+        run: |
+          set -euo pipefail
+          hashes=$(echo $ARTIFACTS | jq --raw-output '.[] | {name, "digest": (.extra.Digest // .extra.Checksum)} | select(.digest) | {digest} + {name} | join("  ") | sub("^sha256:";"")' | base64 -w0)
+          if test "$hashes" = ""; then # goreleaser < v1.13.0
+            checksum_file=$(echo "$ARTIFACTS" | jq -r '.[] | select (.type=="Checksum") | .path')
+            hashes=$(cat $checksum_file | base64 -w0)
+          fi
+          echo "hashes=$hashes" >> $GITHUB_OUTPUT
+
+      - name: Set tag output
+        id: tag
+        run: echo "tag_name=${GITHUB_REF#refs/*/}" >> "$GITHUB_OUTPUT"
+
+  provenance:
+    needs: [goreleaser]
+    permissions:
+      actions: read # To read the workflow path.
+      id-token: write # To sign the provenance.
+      contents: write # To add assets to a release.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: "${{ needs.goreleaser.outputs.hashes }}"
+      upload-assets: true # upload to a new release
+      upload-tag-name: "${{ needs.release.outputs.tag_name }}"
+      draft-release: true

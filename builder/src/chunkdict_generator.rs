@@ -88,7 +88,7 @@ impl Generator {
         let storage = &mut bootstrap_mgr.bootstrap_storage;
         bootstrap.dump(ctx, storage, &mut bootstrap_ctx, &blob_table)?;
 
-        BuildOutput::new(blob_mgr, &bootstrap_mgr.bootstrap_storage)
+        BuildOutput::new(blob_mgr, None, &bootstrap_mgr.bootstrap_storage, &None)
     }
 
     /// Validate tree.

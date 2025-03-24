@@ -1,6 +1,8 @@
 module github.com/dragonflyoss/nydus/contrib/nydusify
 
-go 1.21
+go 1.23.1
+
+toolchain go1.23.6
 
 require (
 	github.com/aliyun/aliyun-oss-go-sdk v3.0.2+incompatible
@@ -37,8 +39,11 @@ require (
 require (
 	github.com/AdaLogics/go-fuzz-headers v0.0.0-20230811130428-ced1acdcaa24 // indirect
 	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20231105174938-2b5cbb29f3e2 // indirect
+	github.com/BraveY/snapshotter-converter v0.0.5 // indirect
+	github.com/CloudNativeAI/model-spec v0.0.2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Microsoft/hcsshim v0.11.5 // indirect
+	github.com/agiledragon/gomonkey/v2 v2.13.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.5.4 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.14.11 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.2.10 // indirect

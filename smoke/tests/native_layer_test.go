@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/dragonflyoss/nydus/smoke/tests/texture"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool/test"
@@ -189,7 +189,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 			Digest: lowerBlobDigest,
 		},
 	})
-	require.Equal(t, actualDigests, []digest.Digest{chunkDictBlobDigest})
+	require.Equal(t, actualDigests, []digest.Digest{chunkDictBlobDigest, lowerBlobDigest})
 
 	// Verify lower layer mounted by nydusd
 	ctx.Env.BootstrapPath = lowerBootstrap
@@ -215,7 +215,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 			Digest: upperBlobDigest,
 		},
 	})
-	require.Equal(t, actualDigests, []digest.Digest{chunkDictBlobDigest, upperBlobDigest})
+	require.Equal(t, actualDigests, []digest.Digest{chunkDictBlobDigest, lowerBlobDigest, upperBlobDigest})
 
 	// Verify overlay (lower+upper) layer mounted by nydusd
 	lowerLayer.Overlay(t, upperLayer)

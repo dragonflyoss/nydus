@@ -8,6 +8,7 @@ const (
 	ManifestOSFeatureNydus   = "nydus.remoteimage.v1"
 	MediaTypeNydusBlob       = "application/vnd.oci.image.layer.nydus.blob.v1"
 	BootstrapFileNameInLayer = "image/image.boot"
+	BackendFileNameInLayer   = "image/backend.json"
 
 	ManifestNydusCache = "containerd.io/snapshot/nydus-cache"
 
