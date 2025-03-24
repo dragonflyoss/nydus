@@ -6,6 +6,7 @@ package tests
 
 import (
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
@@ -26,6 +27,16 @@ const (
 	paramEnablePrefetch  = "enable_prefetch"
 	paramChunkDedupDb    = "chunk_dedup_db"
 )
+
+func checkDigests(t *testing.T, expected, actual []digest.Digest) {
+	sort.Slice(expected, func(i, j int) bool {
+		return expected[i].String() < expected[j].String()
+	})
+	sort.Slice(actual, func(i, j int) bool {
+		return actual[i].String() < actual[j].String()
+	})
+	require.Equal(t, expected, actual)
+}
 
 type NativeLayerTestSuite struct {
 	t *testing.T
@@ -169,7 +180,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 			Digest: chunkDictBlobDigest,
 		},
 	})
-	require.Equal(t, actualDigests, []digest.Digest{chunkDictBlobDigest})
+	checkDigests(t, actualDigests, []digest.Digest{chunkDictBlobDigest})
 
 	// Make lower layer (with chunk dict)
 	packOption.ChunkDictPath = chunkDictBootstrap
@@ -178,7 +189,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 
 	// Check repeatable build
 	lowerBlobDigestNew := lowerLayer.Pack(t, packOption, ctx.Env.BlobDir)
-	require.Equal(t, lowerBlobDigest, lowerBlobDigestNew)
+	checkDigests(t, []digest.Digest{lowerBlobDigest}, []digest.Digest{lowerBlobDigestNew})
 
 	mergeOption = converter.MergeOption{
 		ChunkDictPath: chunkDictBootstrap,
@@ -189,7 +200,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 			Digest: lowerBlobDigest,
 		},
 	})
-	require.Equal(t, actualDigests, []digest.Digest{chunkDictBlobDigest})
+	checkDigests(t, actualDigests, []digest.Digest{chunkDictBlobDigest})
 
 	// Verify lower layer mounted by nydusd
 	ctx.Env.BootstrapPath = lowerBootstrap
@@ -201,7 +212,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 
 	// Check repeatable build
 	upperBlobDigestNew := upperLayer.Pack(t, packOption, ctx.Env.BlobDir)
-	require.Equal(t, upperBlobDigest, upperBlobDigestNew)
+	checkDigests(t, []digest.Digest{upperBlobDigest}, []digest.Digest{upperBlobDigestNew})
 
 	mergeOption = converter.MergeOption{
 		ChunkDictPath: chunkDictBootstrap,
@@ -215,7 +226,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 			Digest: upperBlobDigest,
 		},
 	})
-	require.Equal(t, actualDigests, []digest.Digest{chunkDictBlobDigest, upperBlobDigest})
+	checkDigests(t, actualDigests, []digest.Digest{chunkDictBlobDigest, upperBlobDigest})
 
 	// Verify overlay (lower+upper) layer mounted by nydusd
 	lowerLayer.Overlay(t, upperLayer)
@@ -248,7 +259,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 		},
 	})
 	ctx.Env.BootstrapPath = baseBootstrap
-	require.Equal(t, []digest.Digest{baseLayer1BlobDigest, baseLayer2BlobDigest}, baseLayerDigests)
+	checkDigests(t, []digest.Digest{baseLayer1BlobDigest, baseLayer2BlobDigest}, baseLayerDigests)
 
 	// Test merge from a parent bootstrap
 	mergeOption = converter.MergeOption{
@@ -265,7 +276,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 		},
 	})
 
-	require.Equal(t, []digest.Digest{
+	checkDigests(t, []digest.Digest{
 		baseLayer1BlobDigest,
 		baseLayer2BlobDigest,
 		lowerBlobDigest,

@@ -819,7 +819,7 @@ impl BlobContext {
     }
 
     /// Get blob id if the blob has some chunks.
-    pub fn blob_id(&mut self) -> Option<String> {
+    pub fn blob_id(&self) -> Option<String> {
         if self.uncompressed_blob_size > 0 {
             Some(self.blob_id.to_string())
         } else {
