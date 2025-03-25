@@ -61,6 +61,9 @@ type Opt struct {
 	Platforms    string
 
 	PushChunkSize int64
+
+	BackendType   string
+	BackendConfig string
 }
 
 // the information generated during building
@@ -269,8 +272,10 @@ func Optimize(ctx context.Context, opt Opt) error {
 	}
 	defer os.RemoveAll(buildDir)
 
-	if err := fetchBlobs(ctx, opt, buildDir); err != nil {
-		return errors.Wrap(err, "prepare nydus blobs")
+	if opt.BackendType == "localfs" {
+		if err := fetchBlobs(ctx, opt, buildDir); err != nil {
+			return errors.Wrap(err, "prepare nydus blobs")
+		}
 	}
 
 	originalBootstrap := filepath.Join(buildDir, "nydus_bootstrap")
@@ -289,12 +294,17 @@ func Optimize(ctx context.Context, opt Opt) error {
 
 	compressAlgo := bootstrapDesc.Digest.Algorithm().String()
 	blobDir := filepath.Join(buildDir + "/content/blobs/" + compressAlgo)
+	if err := os.MkdirAll(blobDir, 0755); err != nil {
+		return errors.Wrap(err, "create blob directory")
+	}
 	outPutJSONPath := filepath.Join(buildDir, "output.json")
 	newBootstrapPath := filepath.Join(buildDir, "optimized_bootstrap")
 	builderOpt := BuildOption{
 		BuilderPath:         opt.NydusImagePath,
 		PrefetchFilesPath:   opt.PrefetchFilesPath,
 		BootstrapPath:       originalBootstrap,
+		BackendType:         opt.BackendType,
+		BackendConfig:       opt.BackendConfig,
 		BlobDir:             blobDir,
 		OutputBootstrapPath: newBootstrapPath,
 		OutputJSONPath:      outPutJSONPath,
