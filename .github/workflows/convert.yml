@@ -139,7 +139,7 @@ jobs:
                 --source localhost:5000/$I \
                 --target localhost:5000/$I:nydus-nightly-oci-ref
 
-            sudo fsck.erofs -d1 output/nydus_bootstrap
+            sudo fsck.erofs -d1 ./output/target/nydus_bootstrap/image/image.boot
             sudo rm -rf ./output
           done
       - name: Save Nydusify Metric
@@ -256,7 +256,7 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
                 --target localhost:5000/$I:nydus-nightly-v6
 
-            sudo fsck.erofs -d1 output/nydus_bootstrap
+            sudo fsck.erofs -d1 ./output/target/nydus_bootstrap/image/image.boot
             sudo rm -rf ./output
           done
       - name: Save Nydusify Metric
@@ -321,7 +321,7 @@ jobs:
             sudo DOCKER_CONFIG=$HOME/.docker nydusify check --source $I:latest \
                 --target localhost:5000/$I:nydus-nightly-v6-batch
 
-            sudo fsck.erofs -d1 output/nydus_bootstrap
+            sudo fsck.erofs -d1 ./output/target/nydus_bootstrap/image/image.boot
             sudo rm -rf ./output
           done
       - name: Save Nydusify Metric
