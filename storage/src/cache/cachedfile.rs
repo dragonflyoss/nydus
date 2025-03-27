@@ -24,7 +24,7 @@ use nix::sys::uio;
 use nydus_utils::compress::Decoder;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
-use nydus_utils::{compress, digest, round_up_usize, DelayType, Delayer, FileRangeReader};
+use nydus_utils::{compress, crc, digest, round_up_usize, DelayType, Delayer, FileRangeReader};
 use tokio::runtime::Runtime;
 
 use crate::backend::BlobReader;
@@ -572,6 +572,10 @@ impl BlobCache for FileCacheEntry {
 
     fn blob_digester(&self) -> digest::Algorithm {
         self.blob_info.digester()
+    }
+
+    fn blob_crc_checker(&self) -> crc::Algorithm {
+        self.blob_info.crc_checker()
     }
 
     fn is_legacy_stargz(&self) -> bool {

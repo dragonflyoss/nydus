@@ -179,6 +179,7 @@ impl Merger {
                 crypt::Algorithm::Aes128Xts => ctx.cipher = crypt::Algorithm::Aes128Xts,
                 _ => bail!("invalid per layer bootstrap, only supports aes-128-xts"),
             }
+            ctx.crc_checker = rs.meta.get_crc_checker();
             ctx.explicit_uidgid = rs.meta.explicit_uidgid();
             if config.as_ref().unwrap().is_tarfs_mode {
                 ctx.conversion_type = ConversionType::TarToTarfs;

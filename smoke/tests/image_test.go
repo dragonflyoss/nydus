@@ -21,6 +21,7 @@ const (
 	paramZran      = "zran"
 	paramBatch     = "batch"
 	paramEncrypt   = "encrypt"
+	paramCrc       = "crc"
 	paramAmplifyIO = "amplify_io"
 )
 
@@ -38,6 +39,7 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 		Dimension(paramZran, []interface{}{false, true}).
 		Dimension(paramBatch, []interface{}{"0", "0x100000"}).
 		Dimension(paramEncrypt, []interface{}{false, true}).
+		Dimension(paramCrc, []interface{}{false, true}).
 		Skip(
 			func(param *tool.DescartesItem) bool {
 				// Zran and Batch not work with rafs v5.
@@ -48,8 +50,10 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 
 				// Zran and Batch can not work together.
 				// Zran and Encrypt can not work together.
+				// Zran and Crc can not work together.
 				return (param.GetBool(paramZran) && param.GetString(paramBatch) != "0") ||
-					(param.GetBool(paramZran) && param.GetBool(paramEncrypt))
+					(param.GetBool(paramZran) && param.GetBool(paramEncrypt)) ||
+					(param.GetBool(paramZran) && param.GetBool(paramCrc))
 			})
 
 	return func() (name string, testCase test.Case) {
@@ -63,6 +67,7 @@ func (i *ImageTestSuite) TestConvertImages() test.Generator {
 		ctx.Build.OCIRef = scenario.GetBool(paramZran)
 		ctx.Build.BatchSize = scenario.GetString(paramBatch)
 		ctx.Build.Encrypt = scenario.GetBool(paramEncrypt)
+		ctx.Build.CrcEnable = scenario.GetBool(paramCrc)
 
 		image := i.prepareImage(i.T, scenario.GetString(paramImage))
 		return scenario.Str(), func(t *testing.T) {
@@ -93,6 +98,11 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 		enableEncrypt = "--encrypt"
 	}
 
+	enableCrc := ""
+	if ctx.Build.CrcEnable {
+		enableCrc = "--crc"
+	}
+
 	target := fmt.Sprintf("%s-nydus-%s", source, uuid.NewString())
 	fsVersion := fmt.Sprintf("--fs-version %s", ctx.Build.FSVersion)
 	logLevel := "--log-level warn"
@@ -107,8 +117,9 @@ func (i *ImageTestSuite) TestConvertAndCopyImage(t *testing.T, ctx tool.Context,
 
 	// Convert image
 	convertCmd := fmt.Sprintf(
-		"%s %s convert --source %s --target %s %s %s %s %s --nydus-image %s --work-dir %s %s",
-		ctx.Binary.Nydusify, logLevel, source, target, fsVersion, enableOCIRef, enableBatchSize, enableEncrypt, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
+		"%s %s convert --source %s --target %s %s %s %s %s %s --nydus-image %s --work-dir %s %s",
+		ctx.Binary.Nydusify, logLevel, source, target, fsVersion, enableOCIRef, enableBatchSize,
+		enableEncrypt, enableCrc, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
 	)
 	tool.RunWithoutOutput(t, convertCmd)
 

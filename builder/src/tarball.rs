@@ -691,6 +691,7 @@ mod tests {
             false,
             Features::new(),
             false,
+            false,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);
@@ -723,6 +724,7 @@ mod tests {
             false,
             Features::new(),
             true,
+            false,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::FileDir(tmp_dir)), None);

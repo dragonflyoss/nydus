@@ -687,6 +687,7 @@ impl Bootstrap {
         ext_sb.set_compressor(ctx.compressor);
         ext_sb.set_digester(ctx.digester);
         ext_sb.set_cipher(ctx.cipher);
+        ext_sb.set_crc_checker(ctx.crc_checker);
         ext_sb.set_chunk_size(ctx.chunk_size);
         ext_sb.set_blob_table_offset(blob_table_offset);
         ext_sb.set_blob_table_size(blob_table_size as u32);

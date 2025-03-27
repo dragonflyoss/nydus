@@ -620,6 +620,7 @@ impl BlobCompactor {
             false,
             Features::new(),
             false,
+            false,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
@@ -709,8 +710,7 @@ mod tests {
         pub uncompress_offset: u64,
         pub file_offset: u64,
         pub index: u32,
-        #[allow(unused)]
-        pub reserved: u32,
+        pub crc32: u32,
     }
 
     impl BlobChunkInfo for MockChunkInfo {
@@ -730,6 +730,18 @@ mod tests {
 
         fn is_encrypted(&self) -> bool {
             false
+        }
+
+        fn has_crc(&self) -> bool {
+            self.flags.contains(BlobChunkFlags::HAS_CRC)
+        }
+
+        fn crc32(&self) -> u32 {
+            if self.has_crc() {
+                self.crc32
+            } else {
+                0
+            }
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -815,7 +827,7 @@ mod tests {
             uncompress_offset: 0x1000,
             file_offset: 0x1000,
             index: 1,
-            reserved: 0,
+            crc32: 0,
         }) as Arc<dyn BlobChunkInfo>;
         let cw = ChunkWrapper::Ref(chunk);
         ChunkKey::from(&cw);
@@ -1141,6 +1153,7 @@ mod tests {
             false,
             Features::new(),
             false,
+            false,
         );
 
         let mut compactor = blob_compactor_load_and_dedup_chunks().unwrap();
@@ -1237,6 +1250,7 @@ mod tests {
             None,
             false,
             Features::new(),
+            false,
             false,
         );
         let mut blob_ctx1 = BlobContext::new(

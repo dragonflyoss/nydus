@@ -251,11 +251,11 @@ impl ChunkWrapper {
     /// Check whether the chunk is encrypted or not.
     pub fn is_encrypted(&self) -> bool {
         match self {
-            ChunkWrapper::V5(c) => c.flags.contains(BlobChunkFlags::ENCYPTED),
-            ChunkWrapper::V6(c) => c.flags.contains(BlobChunkFlags::ENCYPTED),
+            ChunkWrapper::V5(c) => c.flags.contains(BlobChunkFlags::ENCRYPTED),
+            ChunkWrapper::V6(c) => c.flags.contains(BlobChunkFlags::ENCRYPTED),
             ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref())
                 .flags()
-                .contains(BlobChunkFlags::ENCYPTED),
+                .contains(BlobChunkFlags::ENCRYPTED),
         }
     }
 
@@ -263,8 +263,8 @@ impl ChunkWrapper {
     pub fn set_encrypted(&mut self, encrypted: bool) {
         self.ensure_owned();
         match self {
-            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::ENCYPTED, encrypted),
-            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::ENCYPTED, encrypted),
+            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::ENCRYPTED, encrypted),
+            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::ENCRYPTED, encrypted),
             ChunkWrapper::Ref(_c) => panic!("unexpected"),
         }
     }
@@ -290,6 +290,46 @@ impl ChunkWrapper {
         }
     }
 
+    /// Set crc32 of chunk data.
+    pub fn set_crc32(&mut self, crc32: u32) {
+        self.ensure_owned();
+        match self {
+            ChunkWrapper::V5(c) => c.crc32 = crc32,
+            ChunkWrapper::V6(c) => c.crc32 = crc32,
+            ChunkWrapper::Ref(_c) => panic!("unexpected"),
+        }
+    }
+
+    /// Get crc32 of chunk data.
+    pub fn crc32(&self) -> u32 {
+        match self {
+            ChunkWrapper::V5(c) => c.crc32,
+            ChunkWrapper::V6(c) => c.crc32,
+            ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref()).crc32(),
+        }
+    }
+
+    /// Check whether the chunk has CRC or not.
+    pub fn has_crc(&self) -> bool {
+        match self {
+            ChunkWrapper::V5(c) => c.flags.contains(BlobChunkFlags::HAS_CRC),
+            ChunkWrapper::V6(c) => c.flags.contains(BlobChunkFlags::HAS_CRC),
+            ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref())
+                .flags()
+                .contains(BlobChunkFlags::HAS_CRC),
+        }
+    }
+
+    /// Set flag for whether chunk has CRC.
+    pub fn set_has_crc(&mut self, has_crc: bool) {
+        self.ensure_owned();
+        match self {
+            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::HAS_CRC, has_crc),
+            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::HAS_CRC, has_crc),
+            ChunkWrapper::Ref(_c) => panic!("unexpected"),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     /// Set a group of chunk information fields.
     pub fn set_chunk_info(
@@ -303,6 +343,7 @@ impl ChunkWrapper {
         compressed_size: u32,
         is_compressed: bool,
         is_encrypted: bool,
+        crc_enable: bool,
     ) -> Result<()> {
         self.ensure_owned();
         match self {
@@ -317,6 +358,9 @@ impl ChunkWrapper {
                 if is_compressed {
                     c.flags |= BlobChunkFlags::COMPRESSED;
                 }
+                if crc_enable {
+                    c.flags |= BlobChunkFlags::HAS_CRC;
+                }
             }
             ChunkWrapper::V6(c) => {
                 c.index = chunk_index;
@@ -330,7 +374,10 @@ impl ChunkWrapper {
                     c.flags |= BlobChunkFlags::COMPRESSED;
                 }
                 if is_encrypted {
-                    c.flags |= BlobChunkFlags::ENCYPTED;
+                    c.flags |= BlobChunkFlags::ENCRYPTED;
+                }
+                if crc_enable {
+                    c.flags |= BlobChunkFlags::HAS_CRC;
                 }
             }
             ChunkWrapper::Ref(_c) => panic!("unexpected"),
@@ -418,7 +465,7 @@ fn to_rafs_v5_chunk_info(cki: &dyn BlobV5ChunkInfo) -> RafsV5ChunkInfo {
         uncompressed_offset: cki.uncompressed_offset(),
         file_offset: cki.file_offset(),
         index: cki.index(),
-        reserved: 0u32,
+        crc32: cki.crc32(),
     }
 }
 
@@ -451,7 +498,7 @@ mod tests {
         wrapper.set_batch(true);
         assert!(wrapper.is_batch());
         wrapper
-            .set_chunk_info(2048, 2048, 2048, 2048, 2048, 2048, 2048, true, true)
+            .set_chunk_info(2048, 2048, 2048, 2048, 2048, 2048, 2048, true, true, true)
             .unwrap();
         assert_eq!(wrapper.blob_index(), 2048);
         assert_eq!(wrapper.compressed_offset(), 2048);
@@ -567,7 +614,7 @@ mod tests {
     fn test_chunk_wrapper_ref_set_chunk_info() {
         let mut wrapper = ChunkWrapper::Ref(Arc::new(MockChunkInfo::default()));
         wrapper
-            .set_chunk_info(2048, 2048, 2048, 2048, 2048, 2048, 2048, true, true)
+            .set_chunk_info(2048, 2048, 2048, 2048, 2048, 2048, 2048, true, true, true)
             .unwrap();
     }
 
