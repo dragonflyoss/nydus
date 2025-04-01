@@ -12,6 +12,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
@@ -59,7 +60,8 @@ func (rule *ManifestRule) validateConfig(sourceImage, targetImage *parser.Image)
 func (rule *ManifestRule) validateOCI(image *parser.Image) error {
 	// Check config diff IDs
 	layers := image.Manifest.Layers
-	if len(image.Config.RootFS.DiffIDs) != len(layers) {
+	artifact := image.Manifest.ArtifactType
+	if artifact != modelspec.ArtifactTypeModelManifest && len(image.Config.RootFS.DiffIDs) != len(layers) {
 		return fmt.Errorf("invalid diff ids in image config: %d (diff ids) != %d (layers)", len(image.Config.RootFS.DiffIDs), len(layers))
 	}
 
@@ -69,21 +71,26 @@ func (rule *ManifestRule) validateOCI(image *parser.Image) error {
 func (rule *ManifestRule) validateNydus(image *parser.Image) error {
 	// Check bootstrap and blob layers
 	layers := image.Manifest.Layers
+	manifestArtifact := image.Manifest.ArtifactType
 	for i, layer := range layers {
 		if i == len(layers)-1 {
 			if layer.Annotations[utils.LayerAnnotationNydusBootstrap] != "true" {
 				return errors.New("invalid bootstrap layer in nydus image manifest")
 			}
+			if manifestArtifact == modelspec.ArtifactTypeModelManifest && layer.Annotations[utils.LayerAnnotationNydusArtifactType] != manifestArtifact {
+				return errors.New("invalid manifest artifact type in nydus image manifest")
+			}
 		} else {
-			if layer.MediaType != utils.MediaTypeNydusBlob ||
-				layer.Annotations[utils.LayerAnnotationNydusBlob] != "true" {
+			if manifestArtifact != modelspec.ArtifactTypeModelManifest &&
+				(layer.MediaType != utils.MediaTypeNydusBlob ||
+					layer.Annotations[utils.LayerAnnotationNydusBlob] != "true") {
 				return errors.New("invalid blob layer in nydus image manifest")
 			}
 		}
 	}
 
 	// Check config diff IDs
-	if len(image.Config.RootFS.DiffIDs) != len(layers) {
+	if manifestArtifact != modelspec.ArtifactTypeModelManifest && len(image.Config.RootFS.DiffIDs) != len(layers) {
 		return fmt.Errorf("invalid diff ids in image config: %d (diff ids) != %d (layers)", len(image.Config.RootFS.DiffIDs), len(layers))
 	}
 

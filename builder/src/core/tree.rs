@@ -423,6 +423,7 @@ mod tests {
             tmpfile.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             true,
             false,
         )
@@ -439,6 +440,7 @@ mod tests {
             tmpfile.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             true,
             false,
         )
@@ -458,6 +460,7 @@ mod tests {
             tmpfile.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             true,
             false,
         )
@@ -471,6 +474,7 @@ mod tests {
             tmpfile2.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             true,
             false,
         )
@@ -485,6 +489,7 @@ mod tests {
             tmpfile3.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             true,
             false,
         )

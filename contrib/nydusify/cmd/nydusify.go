@@ -228,6 +228,18 @@ func main() {
 					EnvVars:  []string{"TARGET"},
 				},
 				&cli.StringFlag{
+					Name:    "source-backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "source-backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.StringFlag{
 					Name:     "target-suffix",
 					Required: false,
 					Usage:    "Generate the target image reference by adding a suffix to the source image reference, conflicts with --target",
@@ -401,7 +413,7 @@ func main() {
 				&cli.StringFlag{
 					Name:    "fs-chunk-size",
 					Value:   "0x100000",
-					Usage:   "size of nydus image data chunk, must be power of two and between 0x1000-0x100000, [default: 0x100000]",
+					Usage:   "size of nydus image data chunk, must be power of two and between 0x1000-0x10000000, [default: 0x4000000]",
 					EnvVars: []string{"FS_CHUNK_SIZE"},
 					Aliases: []string{"chunk-size"},
 				},
@@ -428,6 +440,12 @@ func main() {
 					Value:   "",
 					Usage:   "File path to save the metrics collected during conversion in JSON format, for example: './output.json'",
 					EnvVars: []string{"OUTPUT_JSON"},
+				},
+				&cli.BoolFlag{
+					Name:    "plain-http",
+					Value:   false,
+					Usage:   "Enable plain http for Nydus image push",
+					EnvVars: []string{"PLAIN_HTTP"},
 				},
 			},
 			Action: func(c *cli.Context) error {
@@ -494,10 +512,12 @@ func main() {
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
 
-					Source:         c.String("source"),
-					Target:         targetRef,
-					SourceInsecure: c.Bool("source-insecure"),
-					TargetInsecure: c.Bool("target-insecure"),
+					SourceBackendType:   c.String("source-backend-type"),
+					SourceBackendConfig: c.String("source-backend-config"),
+					Source:              c.String("source"),
+					Target:              targetRef,
+					SourceInsecure:      c.Bool("source-insecure"),
+					TargetInsecure:      c.Bool("target-insecure"),
 
 					BackendType:      backendType,
 					BackendConfig:    backendConfig,
@@ -525,7 +545,8 @@ func main() {
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
 
-					OutputJSON: c.String("output-json"),
+					OutputJSON:    c.String("output-json"),
+					WithPlainHTTP: c.Bool("plain-http"),
 				}
 
 				return converter.Convert(context.Background(), opt)

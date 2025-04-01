@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/require"
@@ -52,6 +52,7 @@ func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.La
 	// Create regular file
 	layer.CreateFile(t, "file-1", []byte("file-1"))
 	layer.CreateFile(t, "file-2", []byte("file-2"))
+	layer.CreateLargeFile(t, "file-external-1", 3)
 
 	// Create directory
 	layer.CreateDir(t, "dir-1")
@@ -86,6 +87,9 @@ func MakeLowerLayer(t *testing.T, workDir string, makers ...LayerMaker) *tool.La
 
 	// Create empty file
 	layer.CreateFile(t, "empty.txt", []byte(""))
+
+	// Create external file in sub directory
+	layer.CreateLargeFile(t, "dir-1/file-external-1", 2)
 
 	layer.CreateFile(t, "dir-1/file-2", []byte("dir-1/file-2"))
 	// Set file xattr (only `security.capability` xattr is supported in OCI layer)

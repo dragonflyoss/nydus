@@ -2,11 +2,13 @@ package utils
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 
 	"github.com/distribution/reference"
 	dockerconfig "github.com/docker/cli/cli/config"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/pkg/errors"
 )
 
@@ -20,9 +22,12 @@ type RegistryBackendConfig struct {
 }
 
 type BackendProxyConfig struct {
-	URL      string `json:"url"`
-	Fallback bool   `json:"fallback"`
-	PingURL  string `json:"ping_url"`
+	CacheDir       string `json:"cache_dir"`
+	URL            string `json:"url"`
+	Fallback       bool   `json:"fallback"`
+	PingURL        string `json:"ping_url"`
+	Timeout        int    `json:"timeout"`
+	ConnectTimeout int    `json:"connect_timeout"`
 }
 
 func NewRegistryBackendConfig(parsed reference.Named, insecure bool) (RegistryBackendConfig, error) {
@@ -54,4 +59,55 @@ func NewRegistryBackendConfig(parsed reference.Named, insecure bool) (RegistryBa
 	backendConfig.Auth = auth
 
 	return backendConfig, nil
+}
+
+// The external backend configuration extracted from the manifest is missing the runtime configuration.
+// Therefore, it is necessary to construct the runtime configuration using the available backend configuration.
+func BuildRuntimeExternalBackendConfig(backendConfig, externalBackendConfigPath string) error {
+	extBkdCfg := backend.Backend{}
+	extBkdCfgBytes, err := os.ReadFile(externalBackendConfigPath)
+	if err != nil {
+		return errors.Wrap(err, "failed to read external backend config file")
+	}
+
+	if err := json.Unmarshal(extBkdCfgBytes, &extBkdCfg); err != nil {
+		return errors.Wrap(err, "failed to unmarshal external backend config file")
+	}
+
+	bkdCfg := RegistryBackendConfig{}
+	if err := json.Unmarshal([]byte(backendConfig), &bkdCfg); err != nil {
+		return errors.Wrap(err, "failed to unmarshal registry backend config file")
+	}
+
+	proxyURL := os.Getenv("NYDUS_EXTERNAL_PROXY_URL")
+	if proxyURL == "" {
+		proxyURL = bkdCfg.Proxy.URL
+	}
+	cacheDir := os.Getenv("NYDUS_EXTERNAL_PROXY_CACHE_DIR")
+	if cacheDir == "" {
+		cacheDir = bkdCfg.Proxy.CacheDir
+	}
+
+	extBkdCfg.Backends[0].Config = map[string]interface{}{
+		"scheme":          bkdCfg.Scheme,
+		"host":            bkdCfg.Host,
+		"repo":            bkdCfg.Repo,
+		"auth":            bkdCfg.Auth,
+		"timeout":         30,
+		"connect_timeout": 5,
+		"proxy": BackendProxyConfig{
+			CacheDir: cacheDir,
+			URL:      proxyURL,
+			Fallback: true,
+		},
+	}
+
+	extBkdCfgBytes, err = json.MarshalIndent(extBkdCfg, "", "  ")
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal external backend config file")
+	}
+	if err = os.WriteFile(externalBackendConfigPath, extBkdCfgBytes, 0644); err != nil {
+		return errors.Wrap(err, "failed to write external backend config file")
+	}
+	return nil
 }

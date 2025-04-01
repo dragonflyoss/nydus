@@ -18,7 +18,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/containerd/containerd/images"
-	digest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -295,23 +295,23 @@ func (cache *Cache) layerToRecord(layer *ocispec.Descriptor) *Record {
 	return nil
 }
 
-func mergeRecord(old, new *Record) *Record {
-	if old == nil {
-		old = &Record{
-			SourceChainID: new.SourceChainID,
+func mergeRecord(oldRec, newRec *Record) *Record {
+	if oldRec == nil {
+		oldRec = &Record{
+			SourceChainID: newRec.SourceChainID,
 		}
 	}
 
-	if new.NydusBootstrapDesc != nil {
-		old.NydusBootstrapDesc = new.NydusBootstrapDesc
-		old.NydusBootstrapDiffID = new.NydusBootstrapDiffID
+	if newRec.NydusBootstrapDesc != nil {
+		oldRec.NydusBootstrapDesc = newRec.NydusBootstrapDesc
+		oldRec.NydusBootstrapDiffID = newRec.NydusBootstrapDiffID
 	}
 
-	if new.NydusBlobDesc != nil {
-		old.NydusBlobDesc = new.NydusBlobDesc
+	if newRec.NydusBlobDesc != nil {
+		oldRec.NydusBlobDesc = newRec.NydusBlobDesc
 	}
 
-	return old
+	return oldRec
 }
 
 func (cache *Cache) importRecordsFromLayers(layers []ocispec.Descriptor) {

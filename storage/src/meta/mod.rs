@@ -340,6 +340,15 @@ impl BlobCompressionContextHeader {
         }
     }
 
+    /// Set flag indicating the blob is external.
+    pub fn set_external(&mut self, external: bool) {
+        if external {
+            self.s_features |= BlobFeatures::EXTERNAL.bits();
+        } else {
+            self.s_features &= !BlobFeatures::EXTERNAL.bits();
+        }
+    }
+
     /// Get blob meta feature flags.
     pub fn features(&self) -> u32 {
         self.s_features

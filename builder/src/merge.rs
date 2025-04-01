@@ -129,7 +129,7 @@ impl Merger {
         }
 
         let mut tree: Option<Tree> = None;
-        let mut blob_mgr = BlobManager::new(ctx.digester);
+        let mut blob_mgr = BlobManager::new(ctx.digester, false);
         let mut blob_idx_map = HashMap::new();
         let mut parent_layers = 0;
 
@@ -308,7 +308,7 @@ impl Merger {
         // referenced blobs, as the upper tree might have deleted some files
         // or directories by opaques, and some blobs are dereferenced.
         let mut used_blobs = HashMap::new(); // HashMap<blob_id, new_blob_index>
-        let mut used_blob_mgr = BlobManager::new(ctx.digester);
+        let mut used_blob_mgr = BlobManager::new(ctx.digester, false);
         let origin_blobs = blob_mgr.get_blobs();
         tree.walk_bfs(true, &mut |n| {
             let mut node = n.borrow_mut_node();
@@ -337,7 +337,7 @@ impl Merger {
         bootstrap
             .dump(ctx, &mut bootstrap_storage, &mut bootstrap_ctx, &blob_table)
             .context(format!("dump bootstrap to {:?}", target.display()))?;
-        BuildOutput::new(&used_blob_mgr, &bootstrap_storage)
+        BuildOutput::new(&used_blob_mgr, None, &bootstrap_storage, &None)
     }
 }
 

@@ -16,9 +16,11 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func prettyDump(obj interface{}, name string) error {
@@ -113,12 +115,23 @@ func (checker *Checker) Output(
 		}
 
 		diffIDs := parsed.NydusImage.Config.RootFS.DiffIDs
-		if diffIDs[len(diffIDs)-1] != diffID.Digest() {
+		manifest := parsed.NydusImage.Manifest
+		if manifest.ArtifactType != modelspec.ArtifactTypeModelManifest && diffIDs[len(diffIDs)-1] != diffID.Digest() {
 			return errors.Errorf(
 				"invalid bootstrap layer diff id: %s (calculated) != %s (in image config)",
 				diffID.Digest().String(),
 				diffIDs[len(diffIDs)-1].String(),
 			)
+		}
+
+		if manifest.ArtifactType == modelspec.ArtifactTypeModelManifest {
+			if manifest.Subject == nil {
+				return errors.New("missing subject in manifest")
+			}
+
+			if manifest.Subject.MediaType != ocispec.MediaTypeImageManifest {
+				return errors.Errorf("invalid subject media type: %s", manifest.Subject.MediaType)
+			}
 		}
 	}
 

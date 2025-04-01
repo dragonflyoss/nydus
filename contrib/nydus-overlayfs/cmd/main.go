@@ -8,7 +8,7 @@ import (
 	"syscall"
 
 	"github.com/pkg/errors"
-	"github.com/urfave/cli/v2"
+	cli "github.com/urfave/cli/v2"
 	"golang.org/x/sys/unix"
 )
 
