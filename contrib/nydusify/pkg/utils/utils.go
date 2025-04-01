@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/archive/compression"
+	"github.com/goharbor/acceleration-service/pkg/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -79,7 +80,7 @@ func WithRetry(op func() error) error {
 }
 
 func RetryWithHTTP(err error) bool {
-	return err != nil && (errors.Is(err, http.ErrSchemeMismatch) || errors.Is(err, syscall.ECONNREFUSED))
+	return err != nil && (errors.Is(err, http.ErrSchemeMismatch) || errors.Is(err, syscall.ECONNREFUSED)) || errdefs.NeedsRetryWithHTTP(err)
 }
 
 func MarshalToDesc(data interface{}, mediaType string) (*ocispec.Descriptor, []byte, error) {

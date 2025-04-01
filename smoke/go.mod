@@ -1,11 +1,10 @@
 module github.com/dragonflyoss/nydus/smoke
 
-go 1.21
+go 1.23.1
 
 require (
 	github.com/containerd/containerd v1.7.11
 	github.com/containerd/log v0.1.0
-	github.com/containerd/nydus-snapshotter v0.13.4
 	github.com/google/uuid v1.5.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/pkg/errors v0.9.1
@@ -35,6 +34,8 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.12.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
+	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/mod v0.14.0 // indirect
 	golang.org/x/sync v0.5.0 // indirect

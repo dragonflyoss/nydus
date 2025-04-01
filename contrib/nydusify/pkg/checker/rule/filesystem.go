@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"syscall"
 
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	"github.com/distribution/reference"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
@@ -201,17 +202,18 @@ func (rule *FilesystemRule) mountNydusImage(image *Image, dir string) (func() er
 	}
 
 	nydusdConfig := tool.NydusdConfig{
-		EnablePrefetch: true,
-		NydusdPath:     rule.NydusdPath,
-		BackendType:    backendType,
-		BackendConfig:  backendConfig,
-		BootstrapPath:  filepath.Join(rule.WorkDir, dir, "nydus_bootstrap/image/image.boot"),
-		ConfigPath:     filepath.Join(nydusdDir, "config.json"),
-		BlobCacheDir:   filepath.Join(nydusdDir, "cache"),
-		APISockPath:    filepath.Join(nydusdDir, "api.sock"),
-		MountPath:      mountDir,
-		Mode:           "direct",
-		DigestValidate: digestValidate,
+		EnablePrefetch:            true,
+		NydusdPath:                rule.NydusdPath,
+		BackendType:               backendType,
+		BackendConfig:             backendConfig,
+		BootstrapPath:             filepath.Join(rule.WorkDir, dir, "nydus_bootstrap/image/image.boot"),
+		ExternalBackendConfigPath: filepath.Join(rule.WorkDir, dir, "nydus_bootstrap/image/backend.json"),
+		ConfigPath:                filepath.Join(nydusdDir, "config.json"),
+		BlobCacheDir:              filepath.Join(nydusdDir, "cache"),
+		APISockPath:               filepath.Join(nydusdDir, "api.sock"),
+		MountPath:                 mountDir,
+		Mode:                      "direct",
+		DigestValidate:            digestValidate,
 	}
 
 	if err := os.MkdirAll(nydusdConfig.BlobCacheDir, 0755); err != nil {
@@ -249,6 +251,12 @@ func (rule *FilesystemRule) mountNydusImage(image *Image, dir string) (func() er
 				return nil, errors.Wrap(err, "parse registry backend config")
 			}
 			nydusdConfig.BackendConfig = string(bytes)
+		}
+	}
+
+	if image.Parsed.NydusImage.Manifest.ArtifactType == modelspec.ArtifactTypeModelManifest {
+		if err := utils.BuildRuntimeExternalBackendConfig(nydusdConfig.BackendConfig, nydusdConfig.ExternalBackendConfigPath); err != nil {
+			return nil, errors.Wrap(err, "failed to build external backend config file")
 		}
 	}
 

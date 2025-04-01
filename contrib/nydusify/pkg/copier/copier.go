@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
@@ -21,7 +22,6 @@ import (
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/containerd/remotes"
 	containerdErrdefs "github.com/containerd/errdefs"
-	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"

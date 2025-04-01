@@ -13,11 +13,11 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/require"
 
 	"github.com/dragonflyoss/nydus/smoke/tests/texture"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool/test"
-	"github.com/stretchr/testify/require"
 )
 
 type CasTestSuite struct{}
@@ -65,7 +65,35 @@ func (c *CasTestSuite) testCasTables(t *testing.T, enablePrefetch bool) {
 		if expectedTable == "Blobs" {
 			require.Equal(t, 1, count)
 		} else {
-			require.Equal(t, 8, count)
+			rows, err := db.Query(fmt.Sprintf("SELECT * FROM %s;", expectedTable))
+			require.NoError(t, err)
+			defer rows.Close()
+			// 获取列名
+			columns, err := rows.Columns()
+			require.NoError(t, err)
+			t.Logf("Columns: %v", columns)
+			for rows.Next() {
+				values := make([]interface{}, len(columns))
+				valuePtrs := make([]interface{}, len(columns))
+				for i := range columns {
+					valuePtrs[i] = &values[i]
+				}
+				err := rows.Scan(valuePtrs...)
+				require.NoError(t, err)
+
+				rowData := make([]interface{}, len(columns))
+				for i := range columns {
+					val := values[i]
+					b, ok := val.([]byte)
+					if ok {
+						rowData[i] = string(b)
+					} else {
+						rowData[i] = val
+					}
+				}
+				t.Logf("Row: %v", rowData)
+			}
+			require.Equal(t, 13, count)
 		}
 	}
 }

@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,25 +60,27 @@ type InflightMetrics struct {
 }
 
 type NydusdConfig struct {
-	EnablePrefetch  bool
-	NydusdPath      string
-	BootstrapPath   string
-	ConfigPath      string
-	BackendType     string
-	BackendConfig   string
-	BlobCacheDir    string
-	APISockPath     string
-	MountPath       string
-	RafsMode        string
-	DigestValidate  bool
-	CacheType       string
-	CacheCompressed bool
-	IOStatsFiles    bool
-	LatestReadFiles bool
-	AccessPattern   bool
-	PrefetchFiles   []string
-	AmplifyIO       uint64
-	ChunkDedupDb    string
+	EnablePrefetch               bool
+	NydusdPath                   string
+	BootstrapPath                string
+	ConfigPath                   string
+	BackendType                  string
+	BackendConfig                string
+	ExternalBackendConfigPath    string
+	ExternalBackendProxyCacheDir string
+	BlobCacheDir                 string
+	APISockPath                  string
+	MountPath                    string
+	RafsMode                     string
+	DigestValidate               bool
+	CacheType                    string
+	CacheCompressed              bool
+	IOStatsFiles                 bool
+	LatestReadFiles              bool
+	AccessPattern                bool
+	PrefetchFiles                []string
+	AmplifyIO                    uint64
+	ChunkDedupDb                 string
 	// Hot Upgrade config.
 	Upgrade            bool
 	SupervisorSockPath string
@@ -103,6 +106,9 @@ var configTpl = `
 		 "backend": {
 			 "type": "{{.BackendType}}",
 			 "config": {{.BackendConfig}}
+		 },
+		 "external_backend": {
+		 	 "config_path": "{{.ExternalBackendConfigPath}}"
 		 },
 		 "cache": {
 			 "type": "{{.CacheType}}",
@@ -189,7 +195,9 @@ func newNydusd(conf NydusdConfig) (*Nydusd, error) {
 		"--apisock",
 		conf.APISockPath,
 		"--log-level",
-		"error",
+		"info",
+		"--thread-num",
+		"10",
 	}
 	if len(conf.ConfigPath) > 0 {
 		args = append(args, "--config", conf.ConfigPath)
@@ -210,6 +218,7 @@ func newNydusd(conf NydusdConfig) (*Nydusd, error) {
 		args = append(args, "--writable")
 	}
 
+	logrus.Infof("commad:%s %s", conf.NydusdPath, strings.Join(args, " "))
 	cmd := exec.Command(conf.NydusdPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -383,7 +392,7 @@ func (nydusd *Nydusd) UmountByAPI(subPath string) error {
 }
 
 func (nydusd *Nydusd) WaitStatus(states ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*60)
 	defer cancel()
 
 	var currentState string

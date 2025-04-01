@@ -16,7 +16,7 @@ build:
 # SKIP_CASES=compressor=lz4_block,fs_version=5 \
 # make test
 test: build
-	golangci-lint run
+	golangci-lint run --timeout=5m
 	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
 
 # PERFORMANCE_TEST_MODE=fs-version-5 \
@@ -51,5 +51,5 @@ test-compatibility: build
 # SNAPSHOTTER=nydus
 # TAKEOVER_TEST_IMAGE=wordpress
 # NEW_NYDUSD_BINARY_PATH=target/release/nydusd
-test-takeover: build 
+test-takeover: build
 	TAKEOVER_TEST=true sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestTakeover

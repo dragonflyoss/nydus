@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/dragonflyoss/nydus/smoke/tests/texture"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool/test"

@@ -21,7 +21,7 @@ use nydus_rafs::metadata::layout::v6::{
 };
 use nydus_rafs::metadata::RafsStore;
 use nydus_rafs::RafsIoWrite;
-use nydus_storage::device::BlobFeatures;
+use nydus_storage::device::{BlobFeatures, BlobInfo};
 use nydus_utils::{root_tracer, round_down, round_up, timing_tracer};
 
 use super::chunk_dict::DigestWithBlobIndex;
@@ -41,6 +41,7 @@ impl Node {
         orig_meta_addr: u64,
         meta_addr: u64,
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
+        blobs: &[Arc<BlobInfo>],
     ) -> Result<()> {
         let xattr_inline_count = self.info.xattrs.count_v6();
         ensure!(
@@ -70,7 +71,7 @@ impl Node {
         if self.is_dir() {
             self.v6_dump_dir(ctx, f_bootstrap, meta_addr, meta_offset, &mut inode)?;
         } else if self.is_reg() {
-            self.v6_dump_file(ctx, f_bootstrap, chunk_cache, &mut inode)?;
+            self.v6_dump_file(ctx, f_bootstrap, chunk_cache, &mut inode, &blobs)?;
         } else if self.is_symlink() {
             self.v6_dump_symlink(ctx, f_bootstrap, &mut inode)?;
         } else {
@@ -452,6 +453,7 @@ impl Node {
         f_bootstrap: &mut dyn RafsIoWrite,
         chunk_cache: &mut BTreeMap<DigestWithBlobIndex, Arc<ChunkWrapper>>,
         inode: &mut Box<dyn RafsV6OndiskInode>,
+        blobs: &[Arc<BlobInfo>],
     ) -> Result<()> {
         let mut is_continuous = true;
         let mut prev = None;
@@ -473,8 +475,15 @@ impl Node {
             v6_chunk.set_block_addr(blk_addr);
 
             chunks.extend(v6_chunk.as_ref());
+            let external =
+                blobs[chunk.inner.blob_index() as usize].has_feature(BlobFeatures::EXTERNAL);
+            let chunk_index = if external {
+                Some(chunk.inner.index())
+            } else {
+                None
+            };
             chunk_cache.insert(
-                DigestWithBlobIndex(*chunk.inner.id(), chunk.inner.blob_index() + 1),
+                DigestWithBlobIndex(*chunk.inner.id(), chunk.inner.blob_index() + 1, chunk_index),
                 chunk.inner.clone(),
             );
             if let Some((prev_idx, prev_pos)) = prev {
@@ -709,6 +718,7 @@ impl Bootstrap {
                         orig_meta_addr,
                         meta_addr,
                         &mut chunk_cache,
+                        &blobs,
                     )
                 })
             },
@@ -910,6 +920,7 @@ mod tests {
             pa_aa.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             false,
             false,
         )
@@ -937,6 +948,7 @@ mod tests {
             pa.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             false,
             false,
         )
@@ -1033,6 +1045,7 @@ mod tests {
             pa_reg.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             false,
             false,
         )
@@ -1046,6 +1059,7 @@ mod tests {
             pa_pyc.as_path().to_path_buf(),
             Overlay::UpperAddition,
             RAFS_DEFAULT_CHUNK_SIZE as u32,
+            0,
             false,
             false,
         )
