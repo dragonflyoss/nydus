@@ -416,11 +416,11 @@ mod tests {
             .initialize_fscache_service(None, 1, p.to_str().unwrap(), None)
             .is_err());
 
-        // let tmp_dir = TempDir::new().unwrap();
-        // let dir = tmp_dir.as_path().to_str().unwrap();
-        // assert!(service_controller
-        //     .initialize_fscache_service(None, 1, dir, None)
-        //     .is_ok());
+        let tmp_dir = TempDir::new().unwrap();
+        let dir = tmp_dir.as_path().to_str().unwrap();
+        assert!(service_controller
+            .initialize_fscache_service(None, 1, dir, None)
+            .is_ok());
 
         assert_eq!(service_controller.id(), Some(String::from("id")));
         assert_eq!(
