@@ -65,7 +65,8 @@ func (n *NativeLayerTestSuite) TestMakeLayers() test.Generator {
 					param.GetString(paramFSVersion) != "5" ||
 					param.GetString(paramBatch) != "0" ||
 					param.GetBool(paramEncrypt) != false ||
-					param.GetString(paramChunkDedupDb) != "")
+					param.GetString(paramChunkDedupDb) != "" ||
+					param.GetString(paramCacheType) != "")
 			}
 
 			// rafs v6 not support cached mode nor dummy cache
