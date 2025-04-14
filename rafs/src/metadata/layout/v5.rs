@@ -44,7 +44,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
 use nydus_utils::digest::{self, DigestHasher, RafsDigest};
-use nydus_utils::{compress, ByteSize};
+use nydus_utils::{compress, crc, ByteSize};
 #[allow(unused_imports)]
 use vm_memory::VolatileMemory;
 // With Rafs v5, the storage manager needs to access file system metadata to decompress the
@@ -238,6 +238,14 @@ impl RafsV5SuperBlock {
 
         self.s_flags &= !RafsSuperFlags::HASH_BLAKE3.bits();
         self.s_flags &= !RafsSuperFlags::HASH_SHA256.bits();
+        self.s_flags |= c.bits();
+    }
+
+    /// Set CRC algorithm to handle chunk of the Rafs filesystem.
+    pub fn set_crc_checker(&mut self, crc_checker: crc::Algorithm) {
+        let c: RafsSuperFlags = crc_checker.into();
+        self.s_flags &= !RafsSuperFlags::CRC_NONE.bits();
+        self.s_flags &= !RafsSuperFlags::HAS_CRC.bits();
         self.s_flags |= c.bits();
     }
 
@@ -579,6 +587,7 @@ impl RafsV5BlobTable {
 
         blob_info.set_compressor(flags.into());
         blob_info.set_digester(flags.into());
+        blob_info.set_crc_checker(flags.into());
         blob_info.set_prefetch_info(prefetch_offset as u64, prefetch_size as u64);
         if is_chunkdict {
             blob_info.set_chunkdict_generated(true);
@@ -1114,8 +1123,8 @@ pub struct RafsV5ChunkInfo {
     pub file_offset: u64, // 72
     /// chunk index, it's allocated sequentially and starting from 0 for one blob.
     pub index: u32,
-    /// reserved
-    pub reserved: u32, //80
+    /// crc32 of the chunk
+    pub crc32: u32, //80
 }
 
 impl RafsV5ChunkInfo {
@@ -1143,7 +1152,7 @@ impl Display for RafsV5ChunkInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(
             f,
-            "file_offset {}, compress_offset {}, compress_size {}, uncompress_offset {}, uncompress_size {}, blob_index {}, block_id {}, index {}, is_compressed {}",
+            "file_offset {}, compress_offset {}, compress_size {}, uncompress_offset {}, uncompress_size {}, blob_index {}, block_id {}, index {}, is_compressed {}, crc32 {}",
             self.file_offset,
             self.compressed_offset,
             self.compressed_size,
@@ -1153,6 +1162,7 @@ impl Display for RafsV5ChunkInfo {
             self.block_id,
             self.index,
             self.flags.contains(BlobChunkFlags::COMPRESSED),
+            self.crc32,
         )
     }
 }
@@ -1335,6 +1345,7 @@ fn add_chunk_to_bio_desc(
         compressed_size: chunk.compressed_size(),
         uncompressed_size: chunk.uncompressed_size(),
         flags: chunk.flags(),
+        crc32: chunk.crc32(),
     }) as Arc<dyn BlobChunkInfo>;
     let bio = BlobIoDesc::new(
         blob,
@@ -1610,8 +1621,7 @@ pub mod tests {
         pub uncompress_offset: u64,
         pub file_offset: u64,
         pub index: u32,
-        #[allow(unused)]
-        pub reserved: u32,
+        pub crc32: u32,
     }
 
     impl MockChunkInfo {
@@ -1639,6 +1649,18 @@ pub mod tests {
 
         fn is_encrypted(&self) -> bool {
             false
+        }
+
+        fn has_crc(&self) -> bool {
+            self.flags.contains(BlobChunkFlags::HAS_CRC)
+        }
+
+        fn crc32(&self) -> u32 {
+            if self.has_crc() {
+                self.crc32
+            } else {
+                0
+            }
         }
 
         fn as_any(&self) -> &dyn Any {

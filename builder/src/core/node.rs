@@ -25,7 +25,7 @@ use nydus_rafs::metadata::{Inode, RafsVersion};
 use nydus_storage::device::BlobFeatures;
 use nydus_storage::meta::{BlobChunkInfoV2Ondisk, BlobMetaChunkInfo};
 use nydus_utils::digest::{DigestHasher, RafsDigest};
-use nydus_utils::{compress, crypt};
+use nydus_utils::{compress, crc, crypt};
 use nydus_utils::{div_round_up, event_tracer, root_tracer, try_round_up_4k, ByteSize};
 use parse_size::parse_size;
 use sha2::digest::Digest;
@@ -337,6 +337,10 @@ impl Node {
                 external_compressed_offset += compressed_size as u64;
                 external_blob_ctx.chunk_size = external_chunk_size as u32;
 
+                if ctx.crc_checker != crc::Algorithm::None {
+                    self.set_external_crc32(ctx, &mut chunk, i)?
+                }
+
                 if let Some(h) = inode_hasher.as_mut() {
                     h.digest_update(chunk.id().as_ref());
                 }
@@ -427,6 +431,26 @@ impl Node {
         Ok(blob_size)
     }
 
+    fn set_external_crc32(
+        &self,
+        ctx: &BuildContext,
+        chunk: &mut ChunkWrapper,
+        i: u32,
+    ) -> Result<()> {
+        if let Some(crcs) = ctx.attributes.get_crcs(self.target()) {
+            if (i as usize) >= crcs.len() {
+                return Err(anyhow!(
+                    "invalid crc index {} for file {}",
+                    i,
+                    self.target().display()
+                ));
+            }
+            chunk.set_has_crc(true);
+            chunk.set_crc32(crcs[i as usize]);
+        }
+        Ok(())
+    }
+
     fn read_file_chunk<R: Read>(
         &self,
         ctx: &BuildContext,
@@ -469,6 +493,10 @@ impl Node {
         // For tar-tarfs case, no need to compute chunk id.
         if ctx.conversion_type != ConversionType::TarToTarfs && !external {
             chunk.set_id(RafsDigest::from_buf(buf, ctx.digester));
+            if ctx.crc_checker != crc::Algorithm::None {
+                chunk.set_has_crc(true);
+                chunk.set_crc32(crc::Crc32::new(ctx.crc_checker).from_buf(buf));
+            }
         }
 
         if ctx.cipher != crypt::Algorithm::None && !external {
@@ -506,6 +534,7 @@ impl Node {
 
         let mut chunk_info = None;
         let encrypted = blob_ctx.blob_cipher != crypt::Algorithm::None;
+        let crc_enalbe = blob_ctx.blob_crc_checker != crc::Algorithm::None;
         let mut dumped_size = None;
 
         if ctx.blob_batch_generator.is_some()
@@ -522,6 +551,7 @@ impl Node {
                     pre_d_offset,
                     d_size,
                     encrypted,
+                    crc_enalbe,
                 )?);
                 batch.append_chunk_data_buf(chunk_data);
             } else {
@@ -541,6 +571,7 @@ impl Node {
                     pre_d_offset,
                     d_size,
                     encrypted,
+                    crc_enalbe,
                 )?);
                 batch.append_chunk_data_buf(chunk_data);
             }
@@ -992,12 +1023,12 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufReader;
+    use std::{collections::HashMap, io::BufReader};
 
     use nydus_utils::{digest, BufReaderInfo};
     use vmm_sys_util::tempfile::TempFile;
 
-    use crate::{ArtifactWriter, BlobCacheGenerator, HashChunkDict};
+    use crate::{attributes::Attributes, ArtifactWriter, BlobCacheGenerator, HashChunkDict};
 
     use super::*;
 
@@ -1204,5 +1235,44 @@ mod tests {
         assert!(node.inode.has_xattr());
         node.remove_xattr(OsStr::new("system.posix_acl_default.key"));
         assert!(!node.inode.has_xattr());
+    }
+
+    #[test]
+    fn test_set_external_crc32() {
+        let mut ctx = BuildContext {
+            crc_checker: crc::Algorithm::Crc32Iscsi,
+            attributes: Attributes {
+                crcs: HashMap::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let target = PathBuf::from("/test_file");
+        ctx.attributes
+            .crcs
+            .insert(target.clone(), vec![0x12345678, 0x87654321]);
+
+        let node = Node::new(
+            InodeWrapper::new(RafsVersion::V5),
+            NodeInfo {
+                path: target.clone(),
+                target: target.clone(),
+                ..Default::default()
+            },
+            1,
+        );
+
+        let mut chunk = node.inode.create_chunk();
+        print!("target: {}", node.target().display());
+        let result = node.set_external_crc32(&ctx, &mut chunk, 1);
+        assert!(result.is_ok());
+        assert_eq!(chunk.crc32(), 0x87654321);
+        assert!(chunk.has_crc());
+
+        // test invalid crc index
+        let result = node.set_external_crc32(&ctx, &mut chunk, 2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid crc index 2 for file /test_file"));
     }
 }

@@ -226,6 +226,7 @@ pub struct V5IoChunk {
     pub compressed_size: u32,
     pub uncompressed_size: u32,
     pub flags: BlobChunkFlags,
+    pub crc32: u32,
 }
 
 impl BlobChunkInfo for V5IoChunk {
@@ -247,6 +248,18 @@ impl BlobChunkInfo for V5IoChunk {
 
     fn is_encrypted(&self) -> bool {
         false
+    }
+
+    fn has_crc(&self) -> bool {
+        self.flags.contains(BlobChunkFlags::HAS_CRC)
+    }
+
+    fn crc32(&self) -> u32 {
+        if self.has_crc() {
+            self.crc32
+        } else {
+            0
+        }
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -275,6 +288,7 @@ mod tests {
             compressed_size: 10,
             uncompressed_size: 20,
             flags: BlobChunkFlags::BATCH,
+            crc32: 0,
         };
 
         assert_eq!(info.chunk_id(), &RafsDigest::default());

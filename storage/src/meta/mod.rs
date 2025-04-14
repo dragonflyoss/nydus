@@ -1201,6 +1201,7 @@ impl BlobMetaChunkArray {
         uncompressed_size: u32,
         compressed: bool,
         encrypted: bool,
+        has_crc: bool,
         is_batch: bool,
         data: u64,
     ) {
@@ -1213,6 +1214,7 @@ impl BlobMetaChunkArray {
                 meta.set_uncompressed_size(uncompressed_size);
                 meta.set_compressed(compressed);
                 meta.set_encrypted(encrypted);
+                meta.set_has_crc(has_crc);
                 meta.set_batch(is_batch);
                 meta.set_data(data);
                 v.push(meta);
@@ -1397,6 +1399,20 @@ impl BlobMetaChunkArray {
         match self {
             BlobMetaChunkArray::V1(v) => v[index].is_encrypted(),
             BlobMetaChunkArray::V2(v) => v[index].is_encrypted(),
+        }
+    }
+
+    fn has_crc(&self, index: usize) -> bool {
+        match self {
+            BlobMetaChunkArray::V1(v) => v[index].has_crc(),
+            BlobMetaChunkArray::V2(v) => v[index].has_crc(),
+        }
+    }
+
+    fn crc32(&self, index: usize) -> u32 {
+        match self {
+            BlobMetaChunkArray::V1(v) => v[index].crc32(),
+            BlobMetaChunkArray::V2(v) => v[index].crc32(),
         }
     }
 
@@ -1898,6 +1914,14 @@ impl BlobChunkInfo for BlobMetaChunk {
         self.meta.chunk_info_array.is_encrypted(self.chunk_index)
     }
 
+    fn has_crc(&self) -> bool {
+        self.meta.chunk_info_array.has_crc(self.chunk_index)
+    }
+
+    fn crc32(&self) -> u32 {
+        self.meta.chunk_info_array.crc32(self.chunk_index)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1970,6 +1994,9 @@ pub trait BlobMetaChunkInfo {
     /// Check whether chunk data is encrypted or not.
     fn is_encrypted(&self) -> bool;
 
+    /// Check whether chunk data has CRC or not.
+    fn has_crc(&self) -> bool;
+
     /// Check whether the blob chunk is compressed or not.
     ///
     /// Assume the image builder guarantee that compress_size < uncompress_size if the chunk is
@@ -1993,6 +2020,9 @@ pub trait BlobMetaChunkInfo {
 
     /// Get offset of uncompressed chunk data inside the batch chunk.
     fn get_uncompressed_offset_in_batch_buf(&self) -> Result<u32>;
+
+    /// Get CRC32 of the chunk.
+    fn crc32(&self) -> u32;
 
     /// Get data associated with the entry. V2 only, V1 just returns zero.
     fn get_data(&self) -> u64;

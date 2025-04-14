@@ -18,7 +18,8 @@ const CHUNK_V2_FLAG_COMPRESSED: u64 = 0x1 << 56;
 const CHUNK_V2_FLAG_ZRAN: u64 = 0x2 << 56;
 const CHUNK_V2_FLAG_BATCH: u64 = 0x4 << 56;
 const CHUNK_V2_FLAG_ENCRYPTED: u64 = 0x8 << 56;
-const CHUNK_V2_FLAG_VALID: u64 = 0xf << 56;
+const CHUNK_V2_FLAG_HAS_CRC: u64 = 0x10 << 56;
+const CHUNK_V2_FLAG_VALID: u64 = 0x1f << 56;
 
 /// Chunk compression information on disk format V2.
 #[repr(C, packed)]
@@ -46,6 +47,14 @@ impl BlobChunkInfoV2Ondisk {
             self.uncomp_info |= u64::to_le(CHUNK_V2_FLAG_ENCRYPTED);
         } else {
             self.uncomp_info &= u64::to_le(!CHUNK_V2_FLAG_ENCRYPTED);
+        }
+    }
+
+    pub(crate) fn set_has_crc(&mut self, has_crc: bool) {
+        if has_crc {
+            self.uncomp_info |= u64::to_le(CHUNK_V2_FLAG_HAS_CRC);
+        } else {
+            self.uncomp_info &= u64::to_le(!CHUNK_V2_FLAG_HAS_CRC);
         }
     }
 
@@ -161,6 +170,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         u64::from_le(self.uncomp_info) & CHUNK_V2_FLAG_COMPRESSED != 0
     }
 
+    fn has_crc(&self) -> bool {
+        u64::from_le(self.uncomp_info) & CHUNK_V2_FLAG_HAS_CRC != 0
+    }
+
     fn is_zran(&self) -> bool {
         u64::from_le(self.uncomp_info) & CHUNK_V2_FLAG_ZRAN != 0
     }
@@ -199,6 +212,10 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         Ok(u64::from_le(self.data) as u32)
     }
 
+    fn crc32(&self) -> u32 {
+        u64::from_le(self.data) as u32
+    }
+
     fn get_data(&self) -> u64 {
         u64::from_le(self.data)
     }
@@ -211,11 +228,12 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
             || (!self.is_encrypted()
                 && !self.is_compressed()
                 && self.uncompressed_size() != self.compressed_size())
+            || (self.has_crc() && self.crc32() == 0)
         {
             return Err(Error::new(
                 ErrorKind::Other,
                 format!(
-                    "invalid chunk, blob: index {}/c_size 0x{:x}/d_size 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {} batch {} zran {} encrypted {}",
+                    "invalid chunk, blob: index {}/c_size 0x{:x}/d_size 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {} batch {} zran {} encrypted {} has_crc {}, crc32 {}",
                     state.blob_index,
                     state.compressed_size,
                     state.uncompressed_size,
@@ -224,7 +242,9 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
                     self.is_compressed(),
                     self.is_batch(),
                     self.is_zran(),
-                self.is_encrypted()
+                    self.is_encrypted(),
+                    self.has_crc(),
+                    self.crc32(),
                 ),
             ));
         }

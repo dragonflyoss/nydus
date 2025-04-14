@@ -28,7 +28,7 @@ use nydus_storage::device::{
 };
 use nydus_storage::meta::toc::TocEntryList;
 use nydus_utils::digest::{self, RafsDigest};
-use nydus_utils::{compress, crypt};
+use nydus_utils::{compress, crc, crypt};
 use serde::Serialize;
 
 use self::layout::v5::RafsV5PrefetchTable;
@@ -305,10 +305,12 @@ bitflags! {
         const ENCRYPTION_NONE = 0x0100_0000;
         /// Data chunks are encrypted with AES-128-XTS.
         const ENCRYPTION_ASE_128_XTS = 0x0200_0000;
+        /// Data chunks are not checksumed by CRC.
+        const CRC_NONE = 0x0400_0000;
+        /// Data chunks have CRC checksum.
+        const HAS_CRC = 0x0800_0000;
 
         // Reserved for future compatible changes.
-        const PRESERVED_COMPAT_5 = 0x0400_0000;
-        const PRESERVED_COMPAT_4 = 0x0800_0000;
         const PRESERVED_COMPAT_3 = 0x1000_0000;
         const PRESERVED_COMPAT_2 = 0x2000_0000;
         const PRESERVED_COMPAT_1 = 0x4000_0000;
@@ -387,6 +389,25 @@ impl From<crypt::Algorithm> for RafsSuperFlags {
             // NOTE: only aes-128-xts encryption algorithm supported.
             crypt::Algorithm::Aes128Xts => RafsSuperFlags::ENCRYPTION_ASE_128_XTS,
             _ => RafsSuperFlags::ENCRYPTION_NONE,
+        }
+    }
+}
+
+impl From<RafsSuperFlags> for crc::Algorithm {
+    fn from(flags: RafsSuperFlags) -> Self {
+        match flags {
+            // NOTE: only Crc32Iscsi algorithm supported.
+            x if x.contains(RafsSuperFlags::HAS_CRC) => crc::Algorithm::Crc32Iscsi,
+            _ => crc::Algorithm::None,
+        }
+    }
+}
+
+impl From<crc::Algorithm> for RafsSuperFlags {
+    fn from(c: crc::Algorithm) -> RafsSuperFlags {
+        match c {
+            crc::Algorithm::Crc32Iscsi => RafsSuperFlags::HAS_CRC,
+            crc::Algorithm::None => RafsSuperFlags::CRC_NONE,
         }
     }
 }
@@ -575,6 +596,15 @@ impl RafsSuperMeta {
             self.flags.into()
         } else {
             crypt::Algorithm::None
+        }
+    }
+
+    /// Get CRC algorithm to validate chunk data for the filesystem.
+    pub fn get_crc_checker(&self) -> crc::Algorithm {
+        if self.is_v5() || self.is_v6() {
+            self.flags.into()
+        } else {
+            crc::Algorithm::None
         }
     }
 

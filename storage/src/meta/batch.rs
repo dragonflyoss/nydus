@@ -118,6 +118,7 @@ impl BatchContextGenerator {
         uncompressed_offset: u64,
         uncompressed_size: u32,
         encrypted: bool,
+        crc_enable: bool,
     ) -> Result<BlobChunkInfoV2Ondisk> {
         let mut chunk = BlobChunkInfoV2Ondisk::default();
         chunk.set_compressed_offset(compressed_offset);
@@ -129,6 +130,7 @@ impl BatchContextGenerator {
         chunk.set_uncompressed_offset_in_batch_buf(self.chunk_data_buf_len() as u32);
         chunk.set_compressed(true);
         chunk.set_encrypted(encrypted);
+        chunk.set_has_crc(crc_enable);
 
         Ok(chunk)
     }
@@ -197,7 +199,9 @@ mod tests {
         assert!(generator.chunk_data_buf_is_empty());
         assert_eq!(generator.chunk_data_buf_len(), 0);
 
-        let chunk_info = generator.generate_chunk_info(0, 0, 4, false).unwrap();
+        let chunk_info = generator
+            .generate_chunk_info(0, 0, 4, false, false)
+            .unwrap();
         assert!(chunk_info.is_batch());
     }
 }
