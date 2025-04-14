@@ -90,8 +90,8 @@ func RemoteHandle(ctx context.Context, opts Options) error {
 	}
 	attributes := []Attribute{}
 	for _, file := range fileAttrs {
-		p := fmt.Sprintf("/%s type=%s file_size=%d blob_index=%d blob_id=%s chunk_size=%s chunk_0_compressed_offset=%d compressed_size=%s",
-			file.RelativePath, file.Type, file.FileSize, file.BlobIndex, file.BlobID, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize)
+		p := fmt.Sprintf("/%s type=%s file_size=%d blob_index=%d blob_id=%s chunk_size=%s chunk_0_compressed_offset=%d compressed_size=%s crcs=%s",
+			file.RelativePath, file.Type, file.FileSize, file.BlobIndex, file.BlobID, file.ChunkSize, file.Chunk0CompressedOffset, file.BlobSize, file.Crcs)
 		attributes = append(attributes, Attribute{
 			Pattern: p,
 		})
