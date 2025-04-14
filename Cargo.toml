@@ -53,7 +53,7 @@ tar = "0.4.40"
 tokio = { version = "1.35.1", features = ["macros"] }
 
 # Build static linked openssl library
-openssl = { version = '0.10.70', features = ["vendored"] }
+openssl = { version = '0.10.72', features = ["vendored"] }
 
 nydus-api = { version = "0.3.0", path = "api", features = [
     "error-backtrace",
