@@ -11,6 +11,7 @@ use gix_attributes::parse;
 use gix_attributes::parse::Kind;
 
 const KEY_TYPE: &str = "type";
+const KEY_CRCS: &str = "crcs";
 const VAL_EXTERNAL: &str = "external";
 
 pub struct Parser {}
@@ -24,6 +25,7 @@ pub struct Item {
 #[derive(Clone, Debug, Eq, PartialEq, Default)]
 pub struct Attributes {
     pub items: HashMap<PathBuf, HashMap<String, String>>,
+    pub crcs: HashMap<PathBuf, Vec<u32>>,
 }
 
 impl Attributes {
@@ -33,6 +35,7 @@ impl Attributes {
         let _items = parse(&content);
 
         let mut items = HashMap::new();
+        let mut crcs = HashMap::new();
         for _item in _items {
             let _item = _item?;
             if let Kind::Pattern(pattern) = _item.0 {
@@ -43,6 +46,7 @@ impl Attributes {
                 let mut current_path = path.clone();
                 let mut attributes = HashMap::new();
                 let mut _type = String::new();
+                let mut crc_arr = vec![];
                 for line in _item.1 {
                     let line = line?;
                     let name = line.name.as_str();
@@ -50,8 +54,24 @@ impl Attributes {
                     if name == KEY_TYPE {
                         _type = state.to_string();
                     }
+                    if name == KEY_CRCS {
+                        crc_arr = state
+                            .to_string()
+                            .split(',')
+                            .map(|s| {
+                                let trimmed = s.trim();
+                                let hex_str = if let Some(stripped) = trimmed.strip_prefix("0x") {
+                                    stripped
+                                } else {
+                                    trimmed
+                                };
+                                u32::from_str_radix(hex_str, 16).map_err(|e| anyhow::anyhow!(e))
+                            })
+                            .collect::<Result<Vec<u32>, _>>()?;
+                    }
                     attributes.insert(name.to_string(), state.to_string());
                 }
+                crcs.insert(path.clone(), crc_arr);
                 items.insert(path, attributes);
 
                 // process parent directory
@@ -69,7 +89,7 @@ impl Attributes {
             }
         }
 
-        Ok(Attributes { items })
+        Ok(Attributes { items, crcs })
     }
 
     fn check_external(&self, attributes: &HashMap<String, String>) -> bool {
@@ -99,6 +119,10 @@ impl Attributes {
     pub fn get_values<P: AsRef<Path>>(&self, path: P) -> Option<&HashMap<String, String>> {
         self.items.get(path.as_ref())
     }
+
+    pub fn get_crcs<P: AsRef<Path>>(&self, path: P) -> Option<&Vec<u32>> {
+        self.crcs.get(path.as_ref())
+    }
 }
 
 #[cfg(test)]
@@ -113,17 +137,25 @@ mod tests {
         let file = TempFile::new().unwrap();
         fs::write(
             file.as_path(),
-            "/foo type=external
-            /bar type=external
+            "/foo type=external crcs=0x1234,0x5678
+            /bar type=external crcs=0x1234,0x5678
             /models/foo/bar type=external",
         )
         .unwrap();
 
         let attributes = Attributes::from(file.as_path()).unwrap();
-        let _attributes: HashMap<String, String> = [("type".to_string(), "external".to_string())]
-            .iter()
-            .cloned()
-            .collect();
+        let _attributes_base: HashMap<String, String> =
+            [("type".to_string(), "external".to_string())]
+                .iter()
+                .cloned()
+                .collect();
+        let _attributes: HashMap<String, String> = [
+            ("type".to_string(), "external".to_string()),
+            ("crcs".to_string(), "0x1234,0x5678".to_string()),
+        ]
+        .iter()
+        .cloned()
+        .collect();
 
         let items_map: HashMap<PathBuf, HashMap<String, String>> = vec![
             Item {
@@ -136,21 +168,22 @@ mod tests {
             },
             Item {
                 pattern: PathBuf::from("/models"),
-                attributes: _attributes.clone(),
+                attributes: _attributes_base.clone(),
             },
             Item {
                 pattern: PathBuf::from("/models/foo"),
-                attributes: _attributes.clone(),
+                attributes: _attributes_base.clone(),
             },
             Item {
                 pattern: PathBuf::from("/models/foo/bar"),
-                attributes: _attributes.clone(),
+                attributes: _attributes_base.clone(),
             },
         ]
         .into_iter()
         .map(|item| (item.pattern, item.attributes))
         .collect();
 
-        assert_eq!(attributes, Attributes { items: items_map });
+        assert_eq!(attributes.items, items_map);
+        assert_eq!(attributes.get_crcs("/foo"), Some(&vec![0x1234, 0x5678]))
     }
 }

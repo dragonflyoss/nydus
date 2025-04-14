@@ -854,6 +854,20 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
         false
     }
 
+    fn has_crc(&self) -> bool {
+        self.chunk(self.state().deref())
+            .flags
+            .contains(BlobChunkFlags::HAS_CRC)
+    }
+
+    fn crc32(&self) -> u32 {
+        if self.has_crc() {
+            self.chunk(self.state().deref()).crc32
+        } else {
+            0
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

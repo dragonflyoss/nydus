@@ -66,8 +66,7 @@ pub(crate) struct MockChunkInfo {
     pub uncompress_offset: u64,
     pub file_offset: u64,
     pub index: u32,
-    #[allow(unused)]
-    pub reserved: u32,
+    pub crc32: u32,
 }
 
 impl MockChunkInfo {
@@ -95,6 +94,18 @@ impl BlobChunkInfo for MockChunkInfo {
 
     fn is_encrypted(&self) -> bool {
         false
+    }
+
+    fn has_crc(&self) -> bool {
+        self.flags.contains(BlobChunkFlags::HAS_CRC)
+    }
+
+    fn crc32(&self) -> u32 {
+        if self.has_crc() {
+            self.crc32
+        } else {
+            0
+        }
     }
 
     fn as_any(&self) -> &dyn Any {

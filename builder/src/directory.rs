@@ -99,7 +99,7 @@ impl FilesystemTreeBuilder {
             } else {
                 // TODO: need to implement type=ignore for nydus attributes,
                 // let's ignore the tree for workaround.
-                // trees.push(child.clone());
+                trees.push(child.clone());
                 if ctx.attributes.is_prefix_external(target) {
                     external_trees.push(external_child);
                 }

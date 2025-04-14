@@ -25,7 +25,7 @@ use std::sync::Arc;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_api::CacheConfigV2;
 use nydus_utils::crypt::{Algorithm, Cipher, CipherContext};
-use nydus_utils::{compress, digest};
+use nydus_utils::{compress, crc, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::{ChunkMap, NoopChunkMap};
@@ -42,6 +42,7 @@ struct DummyCache {
     chunk_map: Arc<dyn ChunkMap>,
     reader: Arc<dyn BlobReader>,
     compressor: compress::Algorithm,
+    crc_checker: crc::Algorithm,
     digester: digest::Algorithm,
     is_legacy_stargz: bool,
     need_validation: bool,
@@ -78,6 +79,10 @@ impl BlobCache for DummyCache {
 
     fn blob_digester(&self) -> digest::Algorithm {
         self.digester
+    }
+
+    fn blob_crc_checker(&self) -> crc::Algorithm {
+        self.crc_checker
     }
 
     fn is_legacy_stargz(&self) -> bool {
@@ -232,6 +237,7 @@ impl BlobCacheMgr for DummyCacheMgr {
             reader,
             compressor: blob_info.compressor(),
             digester: blob_info.digester(),
+            crc_checker: blob_info.crc_checker(),
             is_legacy_stargz: blob_info.is_legacy_stargz(),
             need_validation: self.need_validation && !blob_info.is_legacy_stargz(),
         }))
@@ -303,6 +309,7 @@ mod tests {
             chunk_map: Arc::new(chunkmap),
             reader: reader.clone(),
             compressor: compress::Algorithm::None,
+            crc_checker: crc::Algorithm::Crc32Iscsi,
             digester: digest::Algorithm::Blake3,
             is_legacy_stargz: false,
             need_validation: false,
@@ -313,6 +320,7 @@ mod tests {
             blob_info: Arc::new(info.clone()),
             chunk_map: Arc::new(chunkmap_unuse),
             reader,
+            crc_checker: crc::Algorithm::Crc32Iscsi,
             compressor: compress::Algorithm::None,
             digester: digest::Algorithm::Blake3,
             is_legacy_stargz: false,
@@ -365,7 +373,7 @@ mod tests {
             uncompress_offset: 0,
             file_offset: 0,
             index: 0,
-            reserved: 0,
+            crc32: 0,
         });
         iovec.push(BlobIoDesc::new(
             Arc::new(info.clone()),
@@ -391,7 +399,7 @@ mod tests {
             uncompress_offset: 0,
             file_offset: 0,
             index: 0,
-            reserved: 0,
+            crc32: 0,
         });
 
         let chunk3: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
@@ -404,7 +412,7 @@ mod tests {
             uncompress_offset: 0,
             file_offset: 0,
             index: 0,
-            reserved: 0,
+            crc32: 0,
         });
 
         let mut iovec = BlobIoVec::new(Arc::new(info.clone()));
