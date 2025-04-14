@@ -43,6 +43,7 @@ type FileAttribute struct {
 	Chunk0CompressedOffset uint64
 	Type                   string
 	Mode                   uint32
+	Crcs                   string
 }
 
 type File struct {

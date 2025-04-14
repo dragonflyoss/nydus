@@ -38,6 +38,20 @@ type RemoteHandler struct {
 	blobs []backend.Blob
 }
 
+type FileCrcList struct {
+	Files []FileCrcInfo `json:"files"`
+}
+
+type FileCrcInfo struct {
+	FilePath  string `json:"file_path"`
+	ChunkCrcs string `json:"chunk_crcs"`
+}
+
+const (
+	filePathKey = "org.cnai.model.filepath"
+	crcsKey     = "org.cnai.nydus.crcs"
+)
+
 func NewRemoteHandler(ctx context.Context, imageRef string, plainHTTP bool) (*RemoteHandler, error) {
 	remoter, err := pkgPvd.DefaultRemote(imageRef, true)
 	if err != nil {
@@ -154,6 +168,19 @@ func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descript
 		return nil, errors.Wrap(err, "read tar blob failed")
 	}
 
+	var fileCrcList = FileCrcList{}
+	var fileCrcMap = make(map[string]string)
+	if layer.Annotations != nil {
+		if c, ok := layer.Annotations[crcsKey]; ok {
+			if err := json.Unmarshal([]byte(c), &fileCrcList); err != nil {
+				return nil, errors.Wrap(err, "unmarshal crcs failed")
+			}
+			for _, f := range fileCrcList.Files {
+				fileCrcMap[f.FilePath] = f.ChunkCrcs
+			}
+		}
+	}
+
 	blobInfo := handler.blobs[index].Config
 	fileAttrs := make([]backend.FileAttribute, len(files))
 	hackFile := os.Getenv("HACK_FILE")
@@ -161,6 +188,7 @@ func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descript
 		if hackFile != "" && f.name == hackFile {
 			hackFileWrapper(&f)
 		}
+
 		fileAttrs[idx] = backend.FileAttribute{
 			BlobID:                 blobInfo.Digest,
 			BlobIndex:              uint32(index),
@@ -171,6 +199,9 @@ func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descript
 			RelativePath:           f.name,
 			Type:                   "external",
 			Mode:                   f.mode,
+		}
+		if crcs, ok := fileCrcMap[f.name]; ok {
+			fileAttrs[idx].Crcs = crcs
 		}
 	}
 	return fileAttrs, nil

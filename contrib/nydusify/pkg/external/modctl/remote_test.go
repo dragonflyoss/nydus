@@ -16,6 +16,7 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type MockRemote struct {
@@ -95,13 +96,32 @@ func TestRemoteHandler_Handle(t *testing.T) {
 		MaybeWithHTTPFunc: func(error) {},
 	}
 
+	fileCrcInfo := &FileCrcInfo{
+		ChunkCrcs: "0x1234,0x5678",
+		FilePath:  "file1.txt",
+	}
+	fileCrcList := &FileCrcList{
+		Files: []FileCrcInfo{
+			*fileCrcInfo,
+		},
+	}
+	crcs, err := json.Marshal(fileCrcList)
+	require.NoError(t, err)
+	annotations := map[string]string{
+		filePathKey: "file1.txt",
+		crcsKey:     string(crcs),
+	}
 	handler := &RemoteHandler{
 		ctx:      context.Background(),
 		imageRef: "test-image",
 		remoter:  mockRemote,
 		manifest: ocispec.Manifest{
 			Layers: []ocispec.Descriptor{
-				{MediaType: "test-media-type", Digest: "test-digest"},
+				{
+					MediaType:   "test-media-type",
+					Digest:      "test-digest",
+					Annotations: annotations,
+				},
 			},
 		},
 		blobs: []backend.Blob{
@@ -119,6 +139,15 @@ func TestRemoteHandler_Handle(t *testing.T) {
 	assert.NotNil(t, backend)
 	assert.NotEmpty(t, fileAttrs)
 	assert.Equal(t, 3, len(fileAttrs))
+	assert.Equal(t, fileCrcInfo.ChunkCrcs, fileAttrs[0].Crcs)
+	assert.Equal(t, "", fileAttrs[1].Crcs)
+
+	handler.manifest.Layers[0].Annotations = map[string]string{
+		filePathKey: "file1.txt",
+		crcsKey:     "0x1234,0x5678",
+	}
+	_, _, err = handler.Handle(context.Background())
+	assert.Error(t, err)
 }
 
 func TestGetModelConfig(t *testing.T) {
