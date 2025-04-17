@@ -625,7 +625,6 @@ impl BlobCompactor {
             Features::new(),
             false,
             Attributes::default(),
-            false,
         );
         let mut bootstrap_mgr =
             BootstrapManager::new(Some(ArtifactStorage::SingleFile(d_bootstrap)), None);
@@ -739,12 +738,12 @@ mod tests {
             false
         }
 
-        fn has_crc(&self) -> bool {
-            self.flags.contains(BlobChunkFlags::HAS_CRC)
+        fn has_crc32(&self) -> bool {
+            self.flags.contains(BlobChunkFlags::HAS_CRC32)
         }
 
         fn crc32(&self) -> u32 {
-            if self.has_crc() {
+            if self.has_crc32() {
                 self.crc32
             } else {
                 0
@@ -1166,7 +1165,6 @@ mod tests {
             Features::new(),
             false,
             Attributes::default(),
-            false,
         );
 
         let mut compactor = blob_compactor_load_and_dedup_chunks().unwrap();
@@ -1271,7 +1269,6 @@ mod tests {
             Features::new(),
             false,
             Attributes::default(),
-            false,
         );
         let mut blob_ctx1 = BlobContext::new(
             "blob_id1".to_owned(),

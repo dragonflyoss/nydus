@@ -10,7 +10,7 @@ use fuse_backend_rs::file_buf::FileVolatileSlice;
 use libc::{fcntl, radvisory};
 use nix::sys::uio::preadv;
 use nydus_utils::{
-    crc,
+    crc32,
     digest::{self, RafsDigest},
     round_down_4k,
 };
@@ -345,8 +345,8 @@ pub fn check_hash(data: &[u8], digest: &RafsDigest, digester: digest::Algorithm)
 }
 
 /// Check CRC of data matches provided one
-pub fn check_crc(data: &[u8], crc_digest: u32, crc_checker: crc::Algorithm) -> bool {
-    crc_digest == crc::Crc32::new(crc_checker).from_buf(data)
+pub fn check_crc(data: &[u8], crc_digest: u32) -> bool {
+    crc_digest == crc32::Crc32::new(crc32::Algorithm::Crc32Iscsi).from_buf(data)
 }
 
 #[cfg(test)]

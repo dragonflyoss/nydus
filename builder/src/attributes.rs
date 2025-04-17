@@ -46,7 +46,7 @@ impl Attributes {
                 let mut current_path = path.clone();
                 let mut attributes = HashMap::new();
                 let mut _type = String::new();
-                let mut crc_arr = vec![];
+                let mut _crcs = vec![];
                 for line in _item.1 {
                     let line = line?;
                     let name = line.name.as_str();
@@ -55,7 +55,7 @@ impl Attributes {
                         _type = state.to_string();
                     }
                     if name == KEY_CRCS {
-                        crc_arr = state
+                        _crcs = state
                             .to_string()
                             .split(',')
                             .map(|s| {
@@ -71,7 +71,7 @@ impl Attributes {
                     }
                     attributes.insert(name.to_string(), state.to_string());
                 }
-                crcs.insert(path.clone(), crc_arr);
+                crcs.insert(path.clone(), _crcs);
                 items.insert(path, attributes);
 
                 // process parent directory

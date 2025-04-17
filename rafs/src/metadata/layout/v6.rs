@@ -20,7 +20,7 @@ use nydus_storage::meta::{
 };
 use nydus_storage::{RAFS_MAX_CHUNKS_PER_BLOB, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::crypt::{self, Cipher, CipherContext};
-use nydus_utils::{compress, crc, digest, round_up, ByteSize};
+use nydus_utils::{compress, digest, round_up, ByteSize};
 
 use crate::metadata::inode::InodeWrapper;
 use crate::metadata::layout::v5::RafsV5ChunkInfo;
@@ -580,15 +580,6 @@ impl RafsV6SuperBlockExt {
 
         self.s_flags &= !RafsSuperFlags::ENCRYPTION_NONE.bits();
         self.s_flags &= !RafsSuperFlags::ENCRYPTION_ASE_128_XTS.bits();
-        self.s_flags |= c.bits();
-    }
-
-    /// Set CRC algorithm to handle chunk of the Rafs filesystem.
-    pub fn set_crc_checker(&mut self, crc_algo: crc::Algorithm) {
-        let c: RafsSuperFlags = crc_algo.into();
-
-        self.s_flags &= !RafsSuperFlags::CRC_NONE.bits();
-        self.s_flags &= !RafsSuperFlags::HAS_CRC.bits();
         self.s_flags |= c.bits();
     }
 
@@ -1452,10 +1443,8 @@ struct RafsV6Blob {
     cipher_iv: [u8; 8],
     // Crypt algorithm for chunks in the blob.
     cipher_algo: u32,
-    // CRC algorithm for chunks in the blob.
-    crc_algo: u32,
 
-    reserved2: [u8; 32],
+    reserved2: [u8; 36],
 }
 
 impl Default for RafsV6Blob {
@@ -1481,9 +1470,8 @@ impl Default for RafsV6Blob {
             blob_toc_size: 0u32,
             cipher_iv: [0u8; 8],
             cipher_algo: (crypt::Algorithm::None as u32).to_le(),
-            crc_algo: (crc::Algorithm::None as u32).to_le(),
 
-            reserved2: [0u8; 32],
+            reserved2: [0u8; 36],
         }
     }
 }
@@ -1515,9 +1503,6 @@ impl RafsV6Blob {
         let digest = digest::Algorithm::try_from(u32::from_le(self.digest_algo))
             .map_err(|_| einval!("invalid digest algorithm in Rafs v6 blob entry"))?;
         blob_info.set_digester(digest);
-        let crc = crc::Algorithm::try_from(u32::from_le(self.crc_algo))
-            .map_err(|_| einval!("invalid crc algorithm in Rafs v6 blob entry"))?;
-        blob_info.set_crc_checker(crc);
         let cipher = crypt::Algorithm::try_from(u32::from_le(self.cipher_algo))
             .map_err(|_| einval!("invalid cipher algorithm in Rafs v6 blob entry"))?;
         let cipher_object = cipher
@@ -1622,9 +1607,8 @@ impl RafsV6Blob {
             blob_toc_size: blob_info.blob_toc_size(),
             cipher_iv,
             cipher_algo: (blob_info.cipher() as u32).to_le(),
-            crc_algo: (blob_info.crc_checker() as u32).to_le(),
 
-            reserved2: [0u8; 32],
+            reserved2: [0u8; 36],
         })
     }
 
@@ -1683,11 +1667,10 @@ impl RafsV6Blob {
             || compress::Algorithm::try_from(u32::from_le(self.ci_compressor)).is_err()
             || digest::Algorithm::try_from(u32::from_le(self.digest_algo)).is_err()
             || crypt::Algorithm::try_from(self.cipher_algo).is_err()
-            || crc::Algorithm::try_from(self.crc_algo).is_err()
         {
             error!(
-                "RafsV6Blob: idx {} invalid compression_algo {} ci_compressor {} digest_algo {} cipher_algo {} crc_algo {}",
-                blob_index, self.compression_algo, self.ci_compressor, self.digest_algo, self.cipher_algo, self.crc_algo,
+                "RafsV6Blob: idx {} invalid compression_algo {} ci_compressor {} digest_algo {} cipher_algo {}",
+                blob_index, self.compression_algo, self.ci_compressor, self.digest_algo, self.cipher_algo,
             );
             return false;
         }
@@ -1856,7 +1839,6 @@ impl RafsV6BlobTable {
         blob_info.set_compressor(flags.into());
         blob_info.set_digester(flags.into());
         blob_info.set_cipher(flags.into());
-        blob_info.set_crc_checker(flags.into());
         blob_info.set_prefetch_info(prefetch_offset as u64, prefetch_size as u64);
         blob_info.set_blob_meta_info(
             header.ci_compressed_offset(),

@@ -1461,11 +1461,11 @@ impl BlobChunkInfo for DirectChunkInfoV6 {
             .contains(BlobChunkFlags::ENCRYPTED)
     }
 
-    fn has_crc(&self) -> bool {
+    fn has_crc32(&self) -> bool {
         let state = self.state();
         self.v5_chunk(&state)
             .flags
-            .contains(BlobChunkFlags::HAS_CRC)
+            .contains(BlobChunkFlags::HAS_CRC32)
     }
 
     fn crc32(&self) -> u32 {
@@ -1562,7 +1562,7 @@ impl BlobChunkInfo for TarfsChunkInfoV6 {
         false
     }
 
-    fn has_crc(&self) -> bool {
+    fn has_crc32(&self) -> bool {
         false
     }
 

@@ -38,6 +38,7 @@ pub struct ChunkdictChunkInfo {
     pub version: String,
     pub chunk_blob_id: String,
     pub chunk_digest: String,
+    pub chunk_crc32: u32,
     pub chunk_compressed_size: u32,
     pub chunk_uncompressed_size: u32,
     pub chunk_compressed_offset: u64,
@@ -270,7 +271,7 @@ impl Generator {
             chunk.set_uncompressed_size(chunk_info.chunk_uncompressed_size);
             chunk.set_uncompressed_offset(chunk_info.chunk_uncompressed_offset);
             chunk.set_id(RafsDigest::from_string(&chunk_info.chunk_digest));
-            // TODO: set crc32 of chunk.
+            chunk.set_crc32(chunk_info.chunk_crc32);
 
             node.chunks.push(NodeChunk {
                 source: ChunkSource::Build,

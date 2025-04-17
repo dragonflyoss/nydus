@@ -88,7 +88,7 @@ impl BlobMetaChunkInfo for BlobChunkInfoV1Ondisk {
         false
     }
 
-    fn has_crc(&self) -> bool {
+    fn has_crc32(&self) -> bool {
         false
     }
 

@@ -1201,7 +1201,7 @@ impl BlobMetaChunkArray {
         uncompressed_size: u32,
         compressed: bool,
         encrypted: bool,
-        has_crc: bool,
+        has_crc32: bool,
         is_batch: bool,
         data: u64,
     ) {
@@ -1214,7 +1214,7 @@ impl BlobMetaChunkArray {
                 meta.set_uncompressed_size(uncompressed_size);
                 meta.set_compressed(compressed);
                 meta.set_encrypted(encrypted);
-                meta.set_has_crc(has_crc);
+                meta.set_has_crc32(has_crc32);
                 meta.set_batch(is_batch);
                 meta.set_data(data);
                 v.push(meta);
@@ -1402,10 +1402,10 @@ impl BlobMetaChunkArray {
         }
     }
 
-    fn has_crc(&self, index: usize) -> bool {
+    fn has_crc32(&self, index: usize) -> bool {
         match self {
-            BlobMetaChunkArray::V1(v) => v[index].has_crc(),
-            BlobMetaChunkArray::V2(v) => v[index].has_crc(),
+            BlobMetaChunkArray::V1(v) => v[index].has_crc32(),
+            BlobMetaChunkArray::V2(v) => v[index].has_crc32(),
         }
     }
 
@@ -1914,8 +1914,8 @@ impl BlobChunkInfo for BlobMetaChunk {
         self.meta.chunk_info_array.is_encrypted(self.chunk_index)
     }
 
-    fn has_crc(&self) -> bool {
-        self.meta.chunk_info_array.has_crc(self.chunk_index)
+    fn has_crc32(&self) -> bool {
+        self.meta.chunk_info_array.has_crc32(self.chunk_index)
     }
 
     fn crc32(&self) -> u32 {
@@ -1995,7 +1995,7 @@ pub trait BlobMetaChunkInfo {
     fn is_encrypted(&self) -> bool;
 
     /// Check whether chunk data has CRC or not.
-    fn has_crc(&self) -> bool;
+    fn has_crc32(&self) -> bool;
 
     /// Check whether the blob chunk is compressed or not.
     ///

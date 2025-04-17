@@ -854,14 +854,14 @@ impl BlobChunkInfo for DirectChunkInfoV5 {
         false
     }
 
-    fn has_crc(&self) -> bool {
+    fn has_crc32(&self) -> bool {
         self.chunk(self.state().deref())
             .flags
-            .contains(BlobChunkFlags::HAS_CRC)
+            .contains(BlobChunkFlags::HAS_CRC32)
     }
 
     fn crc32(&self) -> u32 {
-        if self.has_crc() {
+        if self.has_crc32() {
             self.chunk(self.state().deref()).crc32
         } else {
             0

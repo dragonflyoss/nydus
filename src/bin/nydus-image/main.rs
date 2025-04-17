@@ -410,13 +410,6 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                         .value_parser(clap::value_parser!(PathBuf))
                         .required(false)
                 )
-                .arg(
-                    Arg::new("crc")
-                        .long("crc")
-                        .help("Enable CRC algorithm to checksum data chunks")
-                        .action(ArgAction::SetTrue)
-                        .required(false)
-                )
         );
 
     let app = app.subcommand(
@@ -1022,7 +1015,6 @@ impl Command {
                 .unwrap_or_default(),
         )?;
         let encrypt = matches.get_flag("encrypt");
-        let crc_enable = matches.get_flag("crc");
         match conversion_type {
             ConversionType::DirectoryToRafs => {
                 Self::ensure_directory(&source_path)?;
@@ -1083,12 +1075,6 @@ impl Command {
                 if encrypt {
                     bail!(
                         "conversion type '{}' conflicts with '--encrypt'",
-                        conversion_type
-                    )
-                }
-                if crc_enable {
-                    bail!(
-                        "conversion type '{}' conflicts with '--crc'",
                         conversion_type
                     )
                 }
@@ -1250,7 +1236,6 @@ impl Command {
             features,
             encrypt,
             attributes,
-            crc_enable,
         );
         build_ctx.set_fs_version(version);
         build_ctx.set_chunk_size(chunk_size);
@@ -1309,9 +1294,6 @@ impl Command {
                 if encrypt {
                     build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
                     build_ctx.blob_features.insert(BlobFeatures::ENCRYPTED);
-                }
-                if crc_enable {
-                    build_ctx.blob_features.insert(BlobFeatures::CHUNK_INFO_V2);
                 }
                 Box::new(DirectoryBuilder::new())
             }

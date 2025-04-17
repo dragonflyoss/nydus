@@ -24,7 +24,7 @@ use std::time::Instant;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_utils::compress::zlib_random::ZranDecoder;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
-use nydus_utils::{compress, crc, digest};
+use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader};
 use crate::cache::state::ChunkMap;
@@ -163,9 +163,6 @@ pub trait BlobCache: Send + Sync {
 
     /// Get message digest algorithm to handle chunks in the blob.
     fn blob_digester(&self) -> digest::Algorithm;
-
-    /// Get crc32 algorithm to handle chunks in the blob.
-    fn blob_crc_checker(&self) -> crc::Algorithm;
 
     /// Check whether the cache object is for an stargz image with legacy chunk format.
     fn is_legacy_stargz(&self) -> bool;
@@ -387,7 +384,7 @@ pub trait BlobCache: Send + Sync {
         let d_size = chunk.uncompressed_size() as usize;
         if buffer.len() != d_size {
             Err(eio!("uncompressed size and buffer size doesn't match"))
-        } else if (self.need_validation() || chunk.has_crc() || force_validation)
+        } else if (self.need_validation() || chunk.has_crc32() || force_validation)
             && !self.is_legacy_stargz()
             && !self.check_digest(chunk, buffer)
         {
@@ -401,8 +398,8 @@ pub trait BlobCache: Send + Sync {
     }
 
     fn check_digest(&self, chunk: &dyn BlobChunkInfo, buffer: &[u8]) -> bool {
-        if chunk.has_crc() {
-            check_crc(buffer, chunk.crc32(), self.blob_crc_checker())
+        if chunk.has_crc32() {
+            check_crc(buffer, chunk.crc32())
         } else {
             check_hash(buffer, chunk.chunk_id(), self.blob_digester())
         }

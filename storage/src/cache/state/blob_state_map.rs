@@ -440,7 +440,7 @@ pub(crate) mod tests {
             false
         }
 
-        fn has_crc(&self) -> bool {
+        fn has_crc32(&self) -> bool {
             unimplemented!();
         }
 
