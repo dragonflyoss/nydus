@@ -58,7 +58,7 @@ impl Display for ChunkWrapper {
             self.uncompressed_size(),
         );
 
-        let full_format = if self.has_crc() {
+        let full_format = if self.has_crc32() {
             format!("{}, crc32 {:#x}", base_format, self.crc32())
         } else {
             base_format
@@ -316,22 +316,22 @@ impl ChunkWrapper {
     }
 
     /// Check whether the chunk has CRC or not.
-    pub fn has_crc(&self) -> bool {
+    pub fn has_crc32(&self) -> bool {
         match self {
-            ChunkWrapper::V5(c) => c.flags.contains(BlobChunkFlags::HAS_CRC),
-            ChunkWrapper::V6(c) => c.flags.contains(BlobChunkFlags::HAS_CRC),
+            ChunkWrapper::V5(c) => c.flags.contains(BlobChunkFlags::HAS_CRC32),
+            ChunkWrapper::V6(c) => c.flags.contains(BlobChunkFlags::HAS_CRC32),
             ChunkWrapper::Ref(c) => as_blob_v5_chunk_info(c.deref())
                 .flags()
-                .contains(BlobChunkFlags::HAS_CRC),
+                .contains(BlobChunkFlags::HAS_CRC32),
         }
     }
 
     /// Set flag for whether chunk has CRC.
-    pub fn set_has_crc(&mut self, has_crc: bool) {
+    pub fn set_has_crc32(&mut self, has_crc: bool) {
         self.ensure_owned();
         match self {
-            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::HAS_CRC, has_crc),
-            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::HAS_CRC, has_crc),
+            ChunkWrapper::V5(c) => c.flags.set(BlobChunkFlags::HAS_CRC32, has_crc),
+            ChunkWrapper::V6(c) => c.flags.set(BlobChunkFlags::HAS_CRC32, has_crc),
             ChunkWrapper::Ref(_c) => panic!("unexpected"),
         }
     }
@@ -349,7 +349,7 @@ impl ChunkWrapper {
         compressed_size: u32,
         is_compressed: bool,
         is_encrypted: bool,
-        crc_enable: bool,
+        has_crc32: bool,
     ) -> Result<()> {
         self.ensure_owned();
         match self {
@@ -364,8 +364,8 @@ impl ChunkWrapper {
                 if is_compressed {
                     c.flags |= BlobChunkFlags::COMPRESSED;
                 }
-                if crc_enable {
-                    c.flags |= BlobChunkFlags::HAS_CRC;
+                if has_crc32 {
+                    c.flags |= BlobChunkFlags::HAS_CRC32;
                 }
             }
             ChunkWrapper::V6(c) => {
@@ -382,8 +382,8 @@ impl ChunkWrapper {
                 if is_encrypted {
                     c.flags |= BlobChunkFlags::ENCRYPTED;
                 }
-                if crc_enable {
-                    c.flags |= BlobChunkFlags::HAS_CRC;
+                if has_crc32 {
+                    c.flags |= BlobChunkFlags::HAS_CRC32;
                 }
             }
             ChunkWrapper::Ref(_c) => panic!("unexpected"),

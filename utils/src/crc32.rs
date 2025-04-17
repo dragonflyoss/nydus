@@ -75,10 +75,6 @@ impl Crc32 {
         self.crc.checksum(bytes)
     }
 
-    // pub fn check_crc(&self, bytes: &[u8], crc_result: u32) -> bool {
-    //     self.crc.checksum(bytes) == crc_result
-    // }
-
     /// Compute message crc32 by read data from the reader.
     pub fn from_reader<R: Read>(&self, reader: &mut R) -> std::io::Result<u32> {
         let mut digester = self.crc.digest();

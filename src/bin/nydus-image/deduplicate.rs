@@ -283,6 +283,7 @@ impl Deduplicate<SqliteDatabase> {
                         version: version.to_string(),
                         chunk_blob_id,
                         chunk_digest: chunk.inner.id().to_string(),
+                        chunk_crc32: chunk.inner.crc32(),
                         chunk_compressed_size: chunk.inner.compressed_size(),
                         chunk_uncompressed_size: chunk.inner.uncompressed_size(),
                         chunk_compressed_offset: chunk.inner.compressed_offset(),
@@ -436,6 +437,7 @@ impl Algorithm<SqliteDatabase> {
                 version: all_chunks[i].version.clone(),
                 chunk_blob_id: all_chunks[i].chunk_blob_id.clone(),
                 chunk_digest: all_chunks[i].chunk_digest.clone(),
+                chunk_crc32: all_chunks[i].chunk_crc32,
                 chunk_compressed_offset: all_chunks[i].chunk_compressed_offset,
                 chunk_uncompressed_offset: all_chunks[i].chunk_uncompressed_offset,
                 chunk_compressed_size: all_chunks[i].chunk_compressed_size,
@@ -972,7 +974,7 @@ impl ChunkTable {
             .map_err(|e| DatabaseError::PoisonError(e.to_string()))?;
         let mut stmt: rusqlite::Statement<'_> = conn_guard
             .prepare(
-                "SELECT id, image_reference, version, chunk_blob_id, chunk_digest, chunk_compressed_size,
+                "SELECT id, image_reference, version, chunk_blob_id, chunk_digest,chunk_crc32, chunk_compressed_size,
                 chunk_uncompressed_size, chunk_compressed_offset, chunk_uncompressed_offset from chunk
                 WHERE chunk_blob_id = ?1
                 ORDER BY id LIMIT ?2 OFFSET ?3",
@@ -983,10 +985,11 @@ impl ChunkTable {
                 version: row.get(2)?,
                 chunk_blob_id: row.get(3)?,
                 chunk_digest: row.get(4)?,
-                chunk_compressed_size: row.get(5)?,
-                chunk_uncompressed_size: row.get(6)?,
-                chunk_compressed_offset: row.get(7)?,
-                chunk_uncompressed_offset: row.get(8)?,
+                chunk_crc32: row.get(5)?,
+                chunk_compressed_size: row.get(6)?,
+                chunk_uncompressed_size: row.get(7)?,
+                chunk_compressed_offset: row.get(8)?,
+                chunk_uncompressed_offset: row.get(9)?,
             })
         })?;
         let mut chunks = Vec::new();
@@ -1081,6 +1084,7 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
                     version          TEXT,
                     chunk_blob_id    TEXT NOT NULL,
                     chunk_digest     TEXT,
+                    chunk_crc32      INT,
                     chunk_compressed_size  INT,
                     chunk_uncompressed_size  INT,
                     chunk_compressed_offset  INT,
@@ -1102,18 +1106,20 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
                     version,
                     chunk_blob_id,
                     chunk_digest,
+                    chunk_crc32,
                     chunk_compressed_size,
                     chunk_uncompressed_size,
                     chunk_compressed_offset,
                     chunk_uncompressed_offset
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9);
                 ",
                 rusqlite::params![
                     chunk.image_reference,
                     chunk.version,
                     chunk.chunk_blob_id,
                     chunk.chunk_digest,
+                    chunk.chunk_crc32,
                     chunk.chunk_compressed_size,
                     chunk.chunk_uncompressed_size,
                     chunk.chunk_compressed_offset,
@@ -1153,7 +1159,7 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
             .map_err(|e| DatabaseError::PoisonError(e.to_string()))?;
         let mut stmt: rusqlite::Statement<'_> = conn_guard
             .prepare(
-                "SELECT id, image_reference, version, chunk_blob_id, chunk_digest, chunk_compressed_size,
+                "SELECT id, image_reference, version, chunk_blob_id, chunk_digest,chunk_crc32, chunk_compressed_size,
                 chunk_uncompressed_size, chunk_compressed_offset, chunk_uncompressed_offset from chunk
                 ORDER BY id LIMIT ?1 OFFSET ?2",
             )?;
@@ -1163,10 +1169,11 @@ impl Table<ChunkdictChunkInfo, DatabaseError> for ChunkTable {
                 version: row.get(2)?,
                 chunk_blob_id: row.get(3)?,
                 chunk_digest: row.get(4)?,
-                chunk_compressed_size: row.get(5)?,
-                chunk_uncompressed_size: row.get(6)?,
-                chunk_compressed_offset: row.get(7)?,
-                chunk_uncompressed_offset: row.get(8)?,
+                chunk_crc32: row.get(5)?,
+                chunk_compressed_size: row.get(6)?,
+                chunk_uncompressed_size: row.get(7)?,
+                chunk_compressed_offset: row.get(8)?,
+                chunk_uncompressed_offset: row.get(9)?,
             })
         })?;
         let mut chunks = Vec::new();
@@ -1407,6 +1414,7 @@ mod tests {
             version: "1.0.0".to_string(),
             chunk_blob_id: "BLOB123".to_string(),
             chunk_digest: "DIGEST123".to_string(),
+            chunk_crc32: 0x1234,
             chunk_compressed_size: 512,
             chunk_uncompressed_size: 1024,
             chunk_compressed_offset: 0,
@@ -1418,6 +1426,7 @@ mod tests {
             version: "1.0.0".to_string(),
             chunk_blob_id: "BLOB456".to_string(),
             chunk_digest: "DIGEST123".to_string(),
+            chunk_crc32: 0x1234,
             chunk_compressed_size: 512,
             chunk_uncompressed_size: 1024,
             chunk_compressed_offset: 0,
@@ -1490,6 +1499,7 @@ mod tests {
                 version: format!("1.0.0{}", i),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", i),
+                chunk_crc32: i,
                 chunk_compressed_size: i,
                 chunk_uncompressed_size: i * 2,
                 chunk_compressed_offset: i64 * 3,
@@ -1521,6 +1531,7 @@ mod tests {
                 version: format!("1.0.0{}", (i + 1) / 100),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 2),
+                chunk_crc32: i,
                 chunk_compressed_size: i,
                 chunk_uncompressed_size: i * 2,
                 chunk_compressed_offset: i64 * 3,
@@ -1553,6 +1564,7 @@ mod tests {
                 version: format!("1.0.0{}", (i + 1) / 100),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 2),
+                chunk_crc32: i,
                 chunk_compressed_size: i,
                 chunk_uncompressed_size: i * 2,
                 chunk_compressed_offset: i64 * 3,
@@ -1582,6 +1594,7 @@ mod tests {
                 version: format!("1.0.0{}", (i + 1) / 100),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 4),
+                chunk_crc32: i,
                 chunk_compressed_size: 1,
                 chunk_uncompressed_size: 1,
                 chunk_compressed_offset: i64 * 3,
@@ -1597,6 +1610,7 @@ mod tests {
                 version: format!("1.0.0{}", (i + 1) / 100),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 4),
+                chunk_crc32: i,
                 chunk_compressed_size: 1,
                 chunk_uncompressed_size: 1,
                 chunk_compressed_offset: i64 * 3,
@@ -1625,6 +1639,7 @@ mod tests {
                     version: format!("1.0.0{}", j / 10),
                     chunk_blob_id: format!("BLOB{}", j),
                     chunk_digest: format!("DIGEST{}", j + (i / 100) * 100),
+                    chunk_crc32: j,
                     chunk_compressed_size: 1,
                     chunk_uncompressed_size: 1,
                     chunk_compressed_offset: 1,
@@ -1655,6 +1670,7 @@ mod tests {
                     version: format!("1.0.0{}", j / 10),
                     chunk_blob_id: format!("BLOB{}", j),
                     chunk_digest: format!("DIGEST{}", j + (i / 100) * 100),
+                    chunk_crc32: j,
                     chunk_compressed_size: 1,
                     chunk_uncompressed_size: 1,
                     chunk_compressed_offset: 1,
@@ -1690,6 +1706,7 @@ mod tests {
                     version: format!("1.0.0{}", (j + 1) / 100),
                     chunk_blob_id: format!("BLOB{}", j),
                     chunk_digest: format!("DIGEST{}", j + (i / 100) * 100),
+                    chunk_crc32: j,
                     chunk_compressed_size: 1,
                     chunk_uncompressed_size: 1,
                     chunk_compressed_offset: 1,
@@ -1716,6 +1733,7 @@ mod tests {
                     version: format!("1.0.0{}", j / 10),
                     chunk_blob_id: format!("BLOB{}", j),
                     chunk_digest: format!("DIGEST{}", j + (i / 100) * 100),
+                    chunk_crc32: j,
                     chunk_compressed_size: 1,
                     chunk_uncompressed_size: 1,
                     chunk_compressed_offset: 1,
@@ -1752,6 +1770,7 @@ mod tests {
                 version: format!("1.0.0{}", (i + 1) / 20),
                 chunk_blob_id: format!("BLOB{}", i),
                 chunk_digest: format!("DIGEST{}", (i + 1) % 2),
+                chunk_crc32: i,
                 chunk_compressed_size: i,
                 chunk_uncompressed_size: i * 2,
                 chunk_compressed_offset: i64 * 3,

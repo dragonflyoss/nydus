@@ -940,7 +940,6 @@ mod tests {
             Features::new(),
             false,
             Attributes::default(),
-            false,
         );
         ctx.fs_version = RafsVersion::V6;
         ctx.conversion_type = ConversionType::EStargzToRafs;
@@ -961,7 +960,7 @@ mod tests {
             )]
         );
         assert_eq!(builder.blob_size, Some(4128));
-        tmp_dir.push("635045fe1f947e916bb4b818019a44f2d5cf010aa2e6bd0af078e6629753e1a6");
+        tmp_dir.push("e60676aef5cc0d5caca9f4c8031f5b0c8392a0611d44c8e1bbc46dbf7fe7bfef");
         assert_eq!(
             builder.bootstrap_path.unwrap(),
             tmp_dir.to_str().unwrap().to_string()

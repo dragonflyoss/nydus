@@ -111,7 +111,7 @@ impl BlobChunkInfo for MockChunkInfo {
         false
     }
 
-    fn has_crc(&self) -> bool {
+    fn has_crc32(&self) -> bool {
         false
     }
 

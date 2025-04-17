@@ -71,12 +71,12 @@ impl BlobChunkInfo for MockChunkInfo {
         false
     }
 
-    fn has_crc(&self) -> bool {
-        self.c_flags.contains(BlobChunkFlags::HAS_CRC)
+    fn has_crc32(&self) -> bool {
+        self.c_flags.contains(BlobChunkFlags::HAS_CRC32)
     }
 
     fn crc32(&self) -> u32 {
-        if self.has_crc() {
+        if self.has_crc32() {
             self.crc32
         } else {
             0

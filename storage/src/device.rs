@@ -38,7 +38,6 @@ use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 
 use nydus_api::ConfigV2;
 use nydus_utils::compress;
-use nydus_utils::crc::{self};
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::digest::{self, RafsDigest};
 
@@ -143,8 +142,6 @@ pub struct BlobInfo {
     cipher: crypt::Algorithm,
     /// Message digest algorithm to process the blob.
     digester: digest::Algorithm,
-    /// CRC checker to process the chunk.
-    crc_checker: crc::Algorithm,
     /// Starting offset of the data to prefetch.
     prefetch_offset: u32,
     /// Size of blob data to prefetch.
@@ -210,7 +207,6 @@ impl BlobInfo {
             compressor: compress::Algorithm::None,
             cipher: crypt::Algorithm::None,
             digester: digest::Algorithm::Blake3,
-            crc_checker: crc::Algorithm::Crc32Iscsi,
             prefetch_offset: 0,
             prefetch_size: 0,
             is_legacy_stargz: false,
@@ -408,14 +404,6 @@ impl BlobInfo {
     /// Set compression algorithm for the blob.
     pub fn set_digester(&mut self, digester: digest::Algorithm) {
         self.digester = digester;
-    }
-    /// Get the crc algorithm for the blob.
-    pub fn crc_checker(&self) -> crc::Algorithm {
-        self.crc_checker
-    }
-    /// Set CRC algorithm for the blob.
-    pub fn set_crc_checker(&mut self, crc_checker: crc::Algorithm) {
-        self.crc_checker = crc_checker;
     }
 
     /// Get blob data prefetching offset.
@@ -660,7 +648,7 @@ bitflags! {
         /// Chunk data is merged into a batch chunk.
         const BATCH = 0x0000_0008;
         /// Chunk data includes a CRC checksum.
-        const HAS_CRC = 0x0000_0010;
+        const HAS_CRC32 = 0x0000_0010;
     }
 }
 
@@ -729,7 +717,7 @@ pub trait BlobChunkInfo: Any + Sync + Send {
     fn is_encrypted(&self) -> bool;
 
     /// Check whether the chunk has CRC checksum or not.
-    fn has_crc(&self) -> bool;
+    fn has_crc32(&self) -> bool;
 
     /// Get the crc32 checksum of the chunk.
     fn crc32(&self) -> u32;
@@ -791,8 +779,8 @@ impl BlobChunkInfo for BlobIoChunk {
         self.0.is_encrypted()
     }
 
-    fn has_crc(&self) -> bool {
-        self.0.has_crc()
+    fn has_crc32(&self) -> bool {
+        self.0.has_crc32()
     }
 
     fn crc32(&self) -> u32 {

@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::{fmt, fs};
 
 use anyhow::{anyhow, Context, Error, Result};
-use nydus_utils::crc;
+use nydus_utils::crc32;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
@@ -483,7 +483,6 @@ pub struct BlobContext {
     pub blob_compressor: compress::Algorithm,
     pub blob_digester: digest::Algorithm,
     pub blob_cipher: crypt::Algorithm,
-    pub blob_crc_checker: crc::Algorithm,
     pub blob_prefetch_size: u64,
     /// Whether to generate blob metadata information.
     pub blob_meta_info_enabled: bool,
@@ -556,7 +555,6 @@ impl BlobContext {
             blob_compressor: compressor,
             blob_digester: digester,
             blob_cipher: cipher,
-            blob_crc_checker: crc::Algorithm::Crc32Iscsi,
             blob_prefetch_size: 0,
             blob_meta_info_enabled: false,
             blob_meta_info,
@@ -811,7 +809,7 @@ impl BlobContext {
                         self.blob_meta_info.add_v2_info(info);
                     } else {
                         let mut data: u64 = 0;
-                        if chunk.has_crc() {
+                        if chunk.has_crc32() {
                             data = chunk.crc32() as u64;
                         }
                         self.blob_meta_info.add_v2(
@@ -821,7 +819,7 @@ impl BlobContext {
                             chunk.uncompressed_size(),
                             chunk.is_compressed(),
                             chunk.is_encrypted(),
-                            chunk.has_crc(),
+                            chunk.has_crc32(),
                             chunk.is_batch(),
                             data,
                         );
@@ -1180,7 +1178,6 @@ impl BlobManager {
                         .ok_or_else(|| anyhow!("invalid blob features"))?;
                     flags |= RafsSuperFlags::from(ctx.blob_compressor);
                     flags |= RafsSuperFlags::from(ctx.blob_digester);
-                    flags |= RafsSuperFlags::from(ctx.blob_crc_checker);
                     table.add(
                         blob_id,
                         0,
@@ -1198,7 +1195,6 @@ impl BlobManager {
                     flags |= RafsSuperFlags::from(ctx.blob_compressor);
                     flags |= RafsSuperFlags::from(ctx.blob_digester);
                     flags |= RafsSuperFlags::from(ctx.blob_cipher);
-                    flags |= RafsSuperFlags::from(ctx.blob_crc_checker);
                     table.add(
                         blob_id,
                         0,
@@ -1356,7 +1352,7 @@ pub struct BuildContext {
     pub digester: digest::Algorithm,
     /// Blob encryption algorithm flag.
     pub cipher: crypt::Algorithm,
-    pub crc_checker: crc::Algorithm,
+    pub crc32_algorithm: crc32::Algorithm,
     /// Save host uid gid in each inode.
     pub explicit_uidgid: bool,
     /// whiteout spec: overlayfs or oci
@@ -1419,7 +1415,6 @@ impl BuildContext {
         features: Features,
         encrypt: bool,
         attributes: Attributes,
-        crc_enable: bool,
     ) -> Self {
         // It's a flag for images built with new nydus-image 2.2 and newer.
         let mut blob_features = BlobFeatures::CAP_TAR_TOC;
@@ -1441,11 +1436,7 @@ impl BuildContext {
             crypt::Algorithm::None
         };
 
-        let crc_checker = if crc_enable {
-            crc::Algorithm::Crc32Iscsi
-        } else {
-            crc::Algorithm::None
-        };
+        let crc32_algorithm = crc32::Algorithm::Crc32Iscsi;
         BuildContext {
             blob_id,
             aligned_chunk,
@@ -1453,7 +1444,7 @@ impl BuildContext {
             compressor,
             digester,
             cipher,
-            crc_checker,
+            crc32_algorithm,
             explicit_uidgid,
             whiteout_spec,
 
@@ -1513,7 +1504,7 @@ impl Default for BuildContext {
             compressor: compress::Algorithm::default(),
             digester: digest::Algorithm::default(),
             cipher: crypt::Algorithm::None,
-            crc_checker: crc::Algorithm::None,
+            crc32_algorithm: crc32::Algorithm::default(),
             explicit_uidgid: true,
             whiteout_spec: WhiteoutSpec::default(),
 
