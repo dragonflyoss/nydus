@@ -10,11 +10,13 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/errgroup"
 
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
@@ -80,14 +82,31 @@ func initRemoteHandler(handler *RemoteHandler) error {
 }
 
 func (handler *RemoteHandler) Handle(ctx context.Context) (*backend.Backend, []backend.FileAttribute, error) {
-	var fileAttrs []backend.FileAttribute
+	var (
+		fileAttrs []backend.FileAttribute
+		mu        sync.Mutex
+		eg        *errgroup.Group
+	)
+	eg, ctx = errgroup.WithContext(ctx)
+	eg.SetLimit(5)
+
 	for idx, layer := range handler.manifest.Layers {
-		fa, err := handler.handle(ctx, layer, int32(idx))
-		if err != nil {
-			return nil, nil, errors.Wrap(err, "handle layer failed")
-		}
-		fileAttrs = append(fileAttrs, fa...)
+		eg.Go(func() error {
+			fa, err := handler.handle(ctx, layer, int32(idx))
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			fileAttrs = append(fileAttrs, fa...)
+			mu.Unlock()
+			return nil
+		})
 	}
+
+	if err := eg.Wait(); err != nil {
+		return nil, nil, errors.Wrap(err, "wait for handle failed")
+	}
+
 	bkd, err := handler.backend()
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "get backend failed")

@@ -262,7 +262,6 @@ func convertModelArtifact(ctx context.Context, opt Opt) error {
 		ChunkSize:      opt.ChunkSize,
 		FromDir:        contextDir,
 		AttributesPath: attributesPath,
-		Crc32:          true,
 	}
 	_, externalBlobDigest, err := packWithAttributes(ctx, packOption, tmpDir)
 	if err != nil {
