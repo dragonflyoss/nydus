@@ -12,6 +12,9 @@ import (
 	"os"
 	"testing"
 
+	"github.com/agiledragon/gomonkey/v2"
+	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v2"
 )
@@ -340,4 +343,51 @@ func TestGetPrefetchPatterns(t *testing.T) {
 	patterns, err = getPrefetchPatterns(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "/", patterns)
+}
+
+func TestGetGlobalFlags(t *testing.T) {
+	flags := getGlobalFlags()
+	require.Equal(t, 3, len(flags))
+}
+
+func TestSetupLogLevelWithLogFile(t *testing.T) {
+	logFilePath := "test_log_file.log"
+	defer os.Remove(logFilePath)
+
+	c := &cli.Context{}
+
+	patches := gomonkey.ApplyMethodSeq(c, "String", []gomonkey.OutputCell{
+		{Values: []interface{}{"info"}, Times: 1},
+		{Values: []interface{}{"test_log_file.log"}, Times: 2},
+	})
+	defer patches.Reset()
+	setupLogLevel(c)
+
+	file, err := os.Open(logFilePath)
+	assert.NoError(t, err)
+	assert.NotNil(t, file)
+	file.Close()
+
+	logrusOutput := logrus.StandardLogger().Out
+	assert.NotNil(t, logrusOutput)
+
+	logrus.Info("This is a test log message")
+	content, err := os.ReadFile(logFilePath)
+	assert.NoError(t, err)
+	assert.Contains(t, string(content), "This is a test log message")
+}
+
+func TestSetupLogLevelWithInvalidLogFile(t *testing.T) {
+
+	c := &cli.Context{}
+
+	patches := gomonkey.ApplyMethodSeq(c, "String", []gomonkey.OutputCell{
+		{Values: []interface{}{"info"}, Times: 1},
+		{Values: []interface{}{"test/test_log_file.log"}, Times: 2},
+	})
+	defer patches.Reset()
+	setupLogLevel(c)
+
+	logrusOutput := logrus.StandardLogger().Out
+	assert.NotNil(t, logrusOutput)
 }

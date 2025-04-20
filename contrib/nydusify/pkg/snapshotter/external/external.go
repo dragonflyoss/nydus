@@ -95,7 +95,7 @@ func RemoteHandle(ctx context.Context, opts Options) error {
 		attributes = append(attributes, Attribute{
 			Pattern: p,
 		})
-		logrus.Infof("file attr: %s, file_mode: %o", p, file.Mode)
+		logrus.Debugf("file attr: %s, file_mode: %o", p, file.Mode)
 	}
 
 	backendBytes, err := json.MarshalIndent(bkd, "", "  ")

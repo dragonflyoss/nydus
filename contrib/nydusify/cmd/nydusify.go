@@ -193,22 +193,7 @@ func main() {
 	}
 
 	// global options
-	app.Flags = []cli.Flag{
-		&cli.BoolFlag{
-			Name:     "debug",
-			Aliases:  []string{"D"},
-			Required: false,
-			Value:    false,
-			Usage:    "Enable debug log level, overwrites the 'log-level' option",
-			EnvVars:  []string{"DEBUG_LOG_LEVEL"}},
-		&cli.StringFlag{
-			Name:    "log-level",
-			Aliases: []string{"l"},
-			Value:   "info",
-			Usage:   "Set log level (panic, fatal, error, warn, info, debug, trace)",
-			EnvVars: []string{"LOG_LEVEL"},
-		},
-	}
+	app.Flags = getGlobalFlags()
 
 	app.Commands = []*cli.Command{
 		{
@@ -1439,4 +1424,38 @@ func setupLogLevel(c *cli.Context) {
 	}
 
 	logrus.SetLevel(logLevel)
+
+	if c.String("log-file") != "" {
+		f, err := os.OpenFile(c.String("log-file"), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		if err != nil {
+			logrus.Errorf("failed to open log file: %+v", err)
+			return
+		}
+		logrus.SetOutput(f)
+	}
+}
+
+func getGlobalFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.BoolFlag{
+			Name:     "debug",
+			Aliases:  []string{"D"},
+			Required: false,
+			Value:    false,
+			Usage:    "Enable debug log level, overwrites the 'log-level' option",
+			EnvVars:  []string{"DEBUG_LOG_LEVEL"}},
+		&cli.StringFlag{
+			Name:    "log-level",
+			Aliases: []string{"l"},
+			Value:   "info",
+			Usage:   "Set log level (panic, fatal, error, warn, info, debug, trace)",
+			EnvVars: []string{"LOG_LEVEL"},
+		},
+		&cli.StringFlag{
+			Name:     "log-file",
+			Required: false,
+			Usage:    "Write logs to a file",
+			EnvVars:  []string{"LOG_FILE"},
+		},
+	}
 }
