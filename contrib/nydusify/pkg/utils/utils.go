@@ -6,6 +6,7 @@ package utils
 
 import (
 	"archive/tar"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -77,6 +78,23 @@ func WithRetry(op func() error) error {
 		}
 	}
 	return err
+}
+
+func RetryWithAttempts(handle func() error, attempts int) error {
+	for {
+		attempts--
+		err := handle()
+		if err == nil {
+			return nil
+		}
+
+		if attempts > 0 && !errors.Is(err, context.Canceled) {
+			logrus.WithError(err).Warnf("retry (remain %d times)", attempts)
+			continue
+		}
+
+		return err
+	}
 }
 
 func RetryWithHTTP(err error) bool {
