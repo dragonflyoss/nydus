@@ -67,23 +67,6 @@ type output struct {
 	Blobs []string
 }
 
-func withRetry(handle func() error, total int) error {
-	for {
-		total--
-		err := handle()
-		if err == nil {
-			return nil
-		}
-
-		if total > 0 && !errors.Is(err, context.Canceled) {
-			logrus.WithError(err).Warnf("retry (remain %d times)", total)
-			continue
-		}
-
-		return err
-	}
-}
-
 func hosts(opt Opt) remote.HostFunc {
 	maps := map[string]bool{
 		opt.Source: opt.SourceInsecure,
@@ -189,7 +172,7 @@ func pushBlobFromBackend(
 					},
 				}
 
-				if err := withRetry(func() error {
+				if err := nydusifyUtils.RetryWithAttempts(func() error {
 					pusher, err := getPusherInChunked(ctx, pvd, blobDescs[idx], opt)
 					if err != nil {
 						if errdefs.NeedsRetryWithHTTP(err) {

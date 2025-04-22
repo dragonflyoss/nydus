@@ -88,11 +88,16 @@ func (handler *RemoteHandler) Handle(ctx context.Context) (*backend.Backend, []b
 		eg        *errgroup.Group
 	)
 	eg, ctx = errgroup.WithContext(ctx)
-	eg.SetLimit(5)
+	eg.SetLimit(10)
 
 	for idx, layer := range handler.manifest.Layers {
 		eg.Go(func() error {
-			fa, err := handler.handle(ctx, layer, int32(idx))
+			var fa []backend.FileAttribute
+			err := utils.RetryWithAttempts(func() error {
+				_fa, err := handler.handle(ctx, layer, int32(idx))
+				fa = _fa
+				return err
+			}, 5)
 			if err != nil {
 				return err
 			}

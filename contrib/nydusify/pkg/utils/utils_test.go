@@ -8,6 +8,7 @@ package utils
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -272,4 +273,31 @@ func TestGetNydusFsVersionOrDefault(t *testing.T) {
 	testAnnotations[LayerAnnotationNydusFsVersion] = "7"
 	fsVersion = GetNydusFsVersionOrDefault(testAnnotations, V5)
 	require.Equal(t, fsVersion, V5)
+}
+
+func TestRetryWithAttempts_SuccessOnFirstAttempt(t *testing.T) {
+	err := RetryWithAttempts(func() error {
+		return nil
+	}, 3)
+	require.NoError(t, err)
+
+	attempts := 0
+	err = RetryWithAttempts(func() error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("first attempt failed")
+		}
+		return nil
+	}, 3)
+	require.NoError(t, err)
+
+	err = RetryWithAttempts(func() error {
+		return errors.New("always fails")
+	}, 3)
+	require.Error(t, err)
+
+	err = RetryWithAttempts(func() error {
+		return context.Canceled
+	}, 3)
+	require.Equal(t, context.Canceled, err)
 }
