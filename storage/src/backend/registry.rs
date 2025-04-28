@@ -120,20 +120,13 @@ impl<T> HashCache<T> {
 }
 
 #[derive(Clone, serde::Deserialize)]
-struct TokenRegistryResponse {
-    /// Registry token string.
-    /// This field might vary depending on the registry server.
-    token: Option<String>,
-    access_token: Option<String>,
-    /// Registry token period of validity, in seconds.
-    #[serde(default = "default_expires_in")]
-    expires_in: u64,
-}
-
-#[derive(Clone, serde::Deserialize)]
 struct TokenResponse {
     /// Registry token string.
+    /// This field might vary depending on the registry server.
+    #[serde(default)]
     token: String,
+    #[serde(default)]
+    access_token: String,
     /// Registry token period of validity, in seconds.
     #[serde(default = "default_expires_in")]
     expires_in: u64,
@@ -141,6 +134,26 @@ struct TokenResponse {
 
 fn default_expires_in() -> u64 {
     REGISTRY_DEFAULT_TOKEN_EXPIRATION
+}
+
+impl TokenResponse {
+    // Extract the bearer token from the registry auth server response
+    fn from_resp(resp: Response) -> Result<Self> {
+        let mut token: TokenResponse = resp.json().map_err(|e| {
+            einval!(format!(
+                "failed to decode registry auth server response: {:?}",
+                e
+            ))
+        })?;
+
+        if token.token.is_empty() {
+            if token.access_token.is_empty() {
+                return Err(einval!("failed to get auth token from registry"));
+            }
+            token.token = token.access_token.clone();
+        }
+        Ok(token)
+    }
 }
 
 #[derive(Debug)]
@@ -278,7 +291,7 @@ impl RegistryState {
             }
         };
 
-        let ret: TokenResponse = extract_token(resp)
+        let ret = TokenResponse::from_resp(resp)
             .map_err(|e| einval!(format!("failed to get auth token from registry: {:?}", e)))?;
 
         if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
@@ -443,25 +456,6 @@ impl RegistryState {
     fn fallback_http(&self) {
         self.scheme.0.store(false, Ordering::Relaxed);
     }
-}
-
-// Extract the bearer token from the registry auth server response
-fn extract_token(resp: Response) -> Result<TokenResponse> {
-    let token_registry: TokenRegistryResponse = resp.json().map_err(|e| {
-        einval!(format!(
-            "failed to decode registry auth server response: {:?}",
-            e
-        ))
-    })?;
-
-    let token = TokenResponse {
-        token: token_registry
-            .token
-            .or(token_registry.access_token)
-            .ok_or_else(|| einval!("failed to get token"))?,
-        expires_in: token_registry.expires_in,
-    };
-    Ok(token)
 }
 
 #[derive(Clone)]
@@ -1202,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_token() {
+    fn test_token_response_from_resp() {
         // Case 1: Response contains "token"
         let json_with_token = json!({
             "token": "test_token_value",
@@ -1213,7 +1207,7 @@ mod tests {
                 .body(json_with_token.to_string())
                 .unwrap(),
         );
-        let result = extract_token(response).unwrap();
+        let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_token_value");
         assert_eq!(result.expires_in, 3600);
 
@@ -1227,7 +1221,7 @@ mod tests {
                 .body(json_with_access_token.to_string())
                 .unwrap(),
         );
-        let result = extract_token(response).unwrap();
+        let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_access_token_value");
         assert_eq!(result.expires_in, 7200);
 
@@ -1240,7 +1234,7 @@ mod tests {
                 .body(json_with_default_expiration.to_string())
                 .unwrap(),
         );
-        let result = extract_token(response).unwrap();
+        let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "default_expiration_token");
         assert_eq!(result.expires_in, REGISTRY_DEFAULT_TOKEN_EXPIRATION);
 
@@ -1254,7 +1248,7 @@ mod tests {
                 .body(json_with_both_tokens.to_string())
                 .unwrap(),
         );
-        let result = extract_token(response).unwrap();
+        let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_token_value");
 
         // Case 5: Response contains no token
@@ -1264,7 +1258,7 @@ mod tests {
                 .body(json_with_no_token.to_string())
                 .unwrap(),
         );
-        let result = extract_token(response);
+        let result = TokenResponse::from_resp(response);
         assert!(result.is_err());
     }
 }
