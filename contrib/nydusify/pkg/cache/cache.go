@@ -12,16 +12,16 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
-	"github.com/sirupsen/logrus"
-
-	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
 // Opt configures Nydus cache
@@ -39,7 +39,7 @@ type Opt struct {
 	// we can't use rafs v5 cache layers for rafs v6 image.
 	FsVersion string
 	// Make cache image manifest compatible with the docker v2 media
-	// type defined in github.com/containerd/containerd/images.
+	// type defined in github.com/containerd/containerd/v2/core/images.
 	DockerV2Format bool
 	// The blob layer record will not be written to cache image if
 	// the backend be specified, because the blob layer will be uploaded

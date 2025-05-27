@@ -10,10 +10,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containerd/containerd/mount"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
+	"github.com/containerd/containerd/v2/core/mount"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 )
 
 func mkMounts(dirs []string) []mount.Mount {

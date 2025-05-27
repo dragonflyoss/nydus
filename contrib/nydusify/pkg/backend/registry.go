@@ -5,10 +5,11 @@ import (
 	"io"
 	"os"
 
-	"github.com/containerd/containerd/remotes"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
+	"github.com/containerd/containerd/v2/core/remotes"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 )
 
 type Registry struct {

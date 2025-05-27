@@ -17,26 +17,24 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/distribution/reference"
+	accerr "github.com/goharbor/acceleration-service/pkg/errdefs"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
+	accremote "github.com/goharbor/acceleration-service/pkg/remote"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 
-	"github.com/containerd/containerd/content/local"
-	"github.com/containerd/containerd/reference/docker"
-
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/namespaces"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer"
 	converterpvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
-	accerr "github.com/goharbor/acceleration-service/pkg/errdefs"
-	accremote "github.com/goharbor/acceleration-service/pkg/remote"
-
-	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -212,7 +210,7 @@ func fetchBlobs(ctx context.Context, opt Opt, buildDir string) error {
 		return err
 	}
 
-	sourceNamed, err := docker.ParseDockerRef(opt.Source)
+	sourceNamed, err := reference.ParseDockerRef(opt.Source)
 	if err != nil {
 		return errors.Wrap(err, "parse source reference")
 	}

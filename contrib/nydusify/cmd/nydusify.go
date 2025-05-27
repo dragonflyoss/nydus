@@ -16,9 +16,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/optimizer"
-
-	"github.com/containerd/containerd/reference/docker"
 	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
@@ -30,6 +27,7 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/copier"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/optimizer"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/packer"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
@@ -103,14 +101,14 @@ func getBackendConfig(c *cli.Context, prefix string, required bool) (string, str
 // Source: localhost:5000/nginx:latest
 // Target: localhost:5000/nginx:latest-suffix
 func addReferenceSuffix(source, suffix string) (string, error) {
-	named, err := docker.ParseDockerRef(source)
+	named, err := reference.ParseDockerRef(source)
 	if err != nil {
 		return "", fmt.Errorf("invalid source image reference: %s", err)
 	}
-	if _, ok := named.(docker.Digested); ok {
+	if _, ok := named.(reference.Digested); ok {
 		return "", fmt.Errorf("unsupported digested image reference: %s", named.String())
 	}
-	named = docker.TagNameOnly(named)
+	named = reference.TagNameOnly(named)
 	target := named.String() + suffix
 	return target, nil
 }
@@ -141,11 +139,11 @@ func getCacheReference(c *cli.Context, target string) (string, error) {
 		return "", fmt.Errorf("--build-cache conflicts with --build-cache-tag")
 	}
 	if cacheTag != "" {
-		named, err := docker.ParseDockerRef(target)
+		named, err := reference.ParseDockerRef(target)
 		if err != nil {
 			return "", fmt.Errorf("invalid target image reference: %s", err)
 		}
-		cache = fmt.Sprintf("%s/%s:%s", docker.Domain(named), docker.Path(named), cacheTag)
+		cache = fmt.Sprintf("%s/%s:%s", reference.Domain(named), reference.Path(named), cacheTag)
 	}
 	return cache, nil
 }

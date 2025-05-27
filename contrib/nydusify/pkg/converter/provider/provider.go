@@ -15,13 +15,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images/archive"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/remotes"
-	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images/archive"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/goharbor/acceleration-service/pkg/cache"
 	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
@@ -130,7 +130,7 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 	if err != nil {
 		return err
 	}
-	rc := &containerd.RemoteContext{
+	rc := &client.RemoteContext{
 		Resolver:               resolver,
 		PlatformMatcher:        pvd.platformMC,
 		MaxConcurrentDownloads: LayerConcurrentLimit,
@@ -161,7 +161,7 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 	if err != nil {
 		return err
 	}
-	rc := &containerd.RemoteContext{
+	rc := &client.RemoteContext{
 		Resolver:                    resolver,
 		PlatformMatcher:             pvd.platformMC,
 		MaxConcurrentUploadedLayers: LayerConcurrentLimit,

@@ -9,9 +9,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/oci"
-
+	containerdclient "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/pkg/errors"
 )
 
@@ -39,7 +38,7 @@ func NewManager(addr string) (*Manager, error) {
 }
 
 func (m *Manager) Pause(ctx context.Context, containerID string) error {
-	client, err := containerd.New(m.address)
+	client, err := containerdclient.New(m.address)
 	if err != nil {
 		return errors.Wrapf(err, "create client")
 	}
@@ -56,7 +55,7 @@ func (m *Manager) Pause(ctx context.Context, containerID string) error {
 }
 
 func (m *Manager) UnPause(ctx context.Context, containerID string) error {
-	client, err := containerd.New(m.address)
+	client, err := containerdclient.New(m.address)
 	if err != nil {
 		return errors.Wrapf(err, "create client")
 	}
@@ -73,7 +72,7 @@ func (m *Manager) UnPause(ctx context.Context, containerID string) error {
 }
 
 func (m *Manager) Inspect(ctx context.Context, containerID string) (*InspectResult, error) {
-	client, err := containerd.New(m.address)
+	client, err := containerdclient.New(m.address)
 	if err != nil {
 		return nil, errors.Wrapf(err, "create client")
 	}
@@ -93,7 +92,7 @@ func (m *Manager) Inspect(ctx context.Context, containerID string) (*InspectResu
 	}
 	pid := int(task.Pid())
 
-	containerInfo, err := container.Info(ctx, containerd.WithoutRefreshedMetadata)
+	containerInfo, err := container.Info(ctx, containerdclient.WithoutRefreshedMetadata)
 	if err != nil {
 		return nil, errors.Wrapf(err, "obtain container info")
 	}
