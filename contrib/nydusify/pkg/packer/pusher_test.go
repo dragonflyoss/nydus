@@ -11,12 +11,13 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/containerd/containerd/remotes"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
+	"github.com/containerd/containerd/v2/core/remotes"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 )
 
 type mockBackend struct {

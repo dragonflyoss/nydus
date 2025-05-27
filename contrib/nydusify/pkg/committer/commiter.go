@@ -19,23 +19,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/labels"
-
 	"github.com/BraveY/snapshotter-converter/converter"
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/content/local"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/reference/docker"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer/diff"
-	parserPkg "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
+	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/pkg/labels"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer/diff"
+	parserPkg "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
 // Opt defines the options for committing container changes
@@ -357,12 +357,12 @@ func (cm *Committer) commitUpperByDiff(ctx context.Context, appendMount func(pat
 
 // getDistributionSourceLabel returns the source label key and value for the image distribution
 func getDistributionSourceLabel(sourceRef string) (string, string) {
-	named, err := docker.ParseDockerRef(sourceRef)
+	named, err := reference.ParseDockerRef(sourceRef)
 	if err != nil {
 		return "", ""
 	}
-	host := docker.Domain(named)
-	labelValue := docker.Path(named)
+	host := reference.Domain(named)
+	labelValue := reference.Path(named)
 	labelKey := fmt.Sprintf("%s.%s", labels.LabelDistributionSource, host)
 
 	return labelKey, labelValue
@@ -840,14 +840,14 @@ func withRetry(handle func() error, total int) error {
 
 // ValidateRef validate the target image reference.
 func ValidateRef(ref string) (string, error) {
-	named, err := docker.ParseDockerRef(ref)
+	named, err := reference.ParseDockerRef(ref)
 	if err != nil {
 		return "", errors.Wrapf(err, "invalid image reference: %s", ref)
 	}
-	if _, ok := named.(docker.Digested); ok {
+	if _, ok := named.(reference.Digested); ok {
 		return "", fmt.Errorf("unsupported digested image reference: %s", ref)
 	}
-	named = docker.TagNameOnly(named)
+	named = reference.TagNameOnly(named)
 	return named.String(), nil
 }
 
@@ -906,7 +906,7 @@ func (cm *Committer) resolveContainerID(ctx context.Context, opt *Opt) error {
 	)
 
 	// Create containerd client directly
-	client, err := containerd.New(cm.manager.address)
+	client, err := client.New(cm.manager.address)
 	if err != nil {
 		return fmt.Errorf("failed to create containerd client: %w", err)
 	}

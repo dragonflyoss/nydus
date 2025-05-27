@@ -11,13 +11,13 @@ import (
 	"io"
 	"strings"
 
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
-
-	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/v2/core/images"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
 // Parser parses OCI & Nydus image manifest, manifest index and

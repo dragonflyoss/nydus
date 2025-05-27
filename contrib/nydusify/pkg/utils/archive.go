@@ -12,11 +12,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sys/unix"
-
-	"github.com/containerd/containerd/archive"
-	"github.com/containerd/containerd/archive/compression"
+	"github.com/containerd/containerd/v2/pkg/archive"
+	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/opencontainers/go-digest"
+	"golang.org/x/sys/unix"
 )
 
 // PackTargz makes .tar(.gz) stream of file named `name` and return reader

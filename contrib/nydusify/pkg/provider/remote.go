@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containerd/containerd/remotes"
-	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
 	dockerconfig "github.com/docker/cli/cli/config"
 	"github.com/pkg/errors"
 

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,29 +17,24 @@ import (
 	"strings"
 	"time"
 
-	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/content/local"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
-	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
-
 	snapConv "github.com/BraveY/snapshotter-converter/converter"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/external/modctl"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
-
-	"encoding/json"
-
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
-	"github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/specs-go"
-
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/goharbor/acceleration-service/pkg/converter"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
+	"github.com/opencontainers/go-digest"
+	"github.com/opencontainers/image-spec/specs-go"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/external/modctl"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
+	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
 type Opt struct {

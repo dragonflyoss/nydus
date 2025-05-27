@@ -12,17 +12,17 @@ import (
 	snapConv "github.com/BraveY/snapshotter-converter/converter"
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	"github.com/agiledragon/gomonkey/v2"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/content/local"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/stretchr/testify/assert"
+
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/external/modctl"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
-	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-
-	"github.com/stretchr/testify/assert"
 )
 
 func TestConvert(t *testing.T) {

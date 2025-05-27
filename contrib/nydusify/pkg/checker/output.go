@@ -11,16 +11,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containerd/containerd/archive/compression"
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
+	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
-	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func prettyDump(obj interface{}, name string) error {

@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containerd/containerd/archive/compression"
+	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/goharbor/acceleration-service/pkg/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"

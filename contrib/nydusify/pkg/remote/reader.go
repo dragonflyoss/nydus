@@ -8,8 +8,8 @@ import (
 	"context"
 	"io"
 
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/distribution/reference"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"

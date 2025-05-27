@@ -10,7 +10,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/moby/buildkit/util/overlay"
 	"github.com/pkg/errors"
 

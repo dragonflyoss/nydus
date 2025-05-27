@@ -14,31 +14,31 @@ import (
 	"strings"
 
 	"github.com/BraveY/snapshotter-converter/converter"
-	"github.com/containerd/containerd/archive/compression"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/reference/docker"
-	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/pkg/archive/compression"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	containerdErrdefs "github.com/containerd/errdefs"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	nydusifyUtils "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
+	"github.com/containerd/platforms"
+	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
 	"github.com/goharbor/acceleration-service/pkg/errdefs"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
 	"github.com/goharbor/acceleration-service/pkg/remote"
 	"github.com/goharbor/acceleration-service/pkg/utils"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
 
-	"github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
+	nydusifyUtils "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
 type Opt struct {
@@ -363,7 +363,7 @@ func Copy(ctx context.Context, opt Opt) error {
 		}
 		logrus.Infof("imported source image %s", source)
 	} else {
-		sourceNamed, err := docker.ParseDockerRef(opt.Source)
+		sourceNamed, err := reference.ParseDockerRef(opt.Source)
 		if err != nil {
 			return errors.Wrap(err, "parse source reference")
 		}
@@ -412,7 +412,7 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	targetDescs := make([]ocispec.Descriptor, len(sourceDescs))
 
-	targetNamed, err := docker.ParseDockerRef(opt.Target)
+	targetNamed, err := reference.ParseDockerRef(opt.Target)
 	if err != nil {
 		return errors.Wrap(err, "parse target reference")
 	}

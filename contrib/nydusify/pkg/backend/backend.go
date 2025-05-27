@@ -9,11 +9,12 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/containerd/containerd/remotes"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
+	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
 // Backend transfers artifacts generated during image conversion to a backend storage such as:

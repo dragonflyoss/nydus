@@ -9,12 +9,12 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/v2/client"
 	"github.com/sirupsen/logrus"
 )
 
 type Found struct {
-	Container  containerd.Container
+	Container  client.Container
 	Req        string // The raw request string. name, short ID, or long ID.
 	MatchIndex int    // Begins with 0, up to MatchCount - 1.
 	MatchCount int    // 1 on exact match. > 1 on ambiguous match. Never be <= 0.
@@ -23,11 +23,11 @@ type Found struct {
 type OnFound func(ctx context.Context, found Found) error
 
 type ContainerWalker struct {
-	Client  *containerd.Client
+	Client  *client.Client
 	OnFound OnFound
 }
 
-func NewContainerWalker(client *containerd.Client, onFound OnFound) *ContainerWalker {
+func NewContainerWalker(client *client.Client, onFound OnFound) *ContainerWalker {
 	return &ContainerWalker{
 		Client:  client,
 		OnFound: onFound,
