@@ -86,6 +86,8 @@ define_error_macro!(eother, std::io::Error::new(std::io::ErrorKind::Other, ""));
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Error, ErrorKind};
+
     fn check_size(size: usize) -> std::io::Result<()> {
         if size > 0x1000 {
             return Err(einval!());
@@ -100,5 +102,151 @@ mod tests {
             check_size(0x2000).unwrap_err().kind(),
             std::io::Error::from_raw_os_error(libc::EINVAL).kind()
         );
+    }
+
+    #[test]
+    fn test_make_error() {
+        let original_error = Error::new(ErrorKind::Other, "test error");
+        let debug_info = "debug information";
+        let file = "test.rs";
+        let line = 42;
+
+        let result_error = super::make_error(original_error, debug_info, file, line);
+        assert_eq!(result_error.kind(), ErrorKind::Other);
+    }
+
+    #[test]
+    fn test_libc_error_macros() {
+        // Test einval macro
+        let err = einval!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EINVAL).kind());
+
+        // Test enoent macro
+        let err = enoent!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::ENOENT).kind());
+
+        // Test ebadf macro
+        let err = ebadf!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EBADF).kind());
+
+        // Test eacces macro
+        let err = eacces!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EACCES).kind());
+
+        // Test enotdir macro
+        let err = enotdir!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::ENOTDIR).kind());
+
+        // Test eisdir macro
+        let err = eisdir!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EISDIR).kind());
+
+        // Test ealready macro
+        let err = ealready!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EALREADY).kind());
+
+        // Test enosys macro
+        let err = enosys!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::ENOSYS).kind());
+
+        // Test epipe macro
+        let err = epipe!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EPIPE).kind());
+
+        // Test eio macro
+        let err = eio!();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EIO).kind());
+    }
+
+    #[test]
+    fn test_libc_error_macros_with_context() {
+        let test_msg = "test context";
+
+        // Test einval macro with context
+        let err = einval!(test_msg);
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EINVAL).kind());
+
+        // Test enoent macro with context
+        let err = enoent!(test_msg);
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::ENOENT).kind());
+
+        // Test eio macro with context
+        let err = eio!(test_msg);
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EIO).kind());
+    }
+
+    #[test]
+    fn test_custom_error_macros() {
+        // Test last_error macro
+        let err = last_error!();
+        // We can't predict the exact error, but we can check it's a valid error
+        assert!(!err.to_string().is_empty());
+
+        // Test eother macro
+        let err = eother!();
+        assert_eq!(err.kind(), ErrorKind::Other);
+
+        // Test eother macro with context
+        let err = eother!("custom context");
+        assert_eq!(err.kind(), ErrorKind::Other);
+    }
+
+    fn test_bail_einval_function() -> std::io::Result<()> {
+        bail_einval!("test error message");
+    }
+
+    fn test_bail_eio_function() -> std::io::Result<()> {
+        bail_eio!("test error message");
+    }
+
+    #[test]
+    fn test_bail_macros() {
+        // Test bail_einval macro
+        let result = test_bail_einval_function();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EINVAL).kind());
+        // The error message format is controlled by the macro, so just check it's not empty
+        assert!(!err.to_string().is_empty());
+
+        // Test bail_eio macro
+        let result = test_bail_eio_function();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EIO).kind());
+        // The error message format is controlled by the macro, so just check it's not empty
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_bail_macros_with_formatting() {
+        fn test_bail_with_format(code: i32) -> std::io::Result<()> {
+            if code == 1 {
+                bail_einval!("error code: {}", code);
+            } else if code == 2 {
+                bail_eio!("I/O error with code: {}", code);
+            }
+            Ok(())
+        }
+
+        // Test bail_einval with formatting
+        let result = test_bail_with_format(1);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EINVAL).kind());
+        // The error message format is controlled by the macro, so just check it's not empty
+        assert!(!err.to_string().is_empty());
+
+        // Test bail_eio with formatting
+        let result = test_bail_with_format(2);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), Error::from_raw_os_error(libc::EIO).kind());
+        // The error message format is controlled by the macro, so just check it's not empty
+        assert!(!err.to_string().is_empty());
+
+        // Test success case
+        let result = test_bail_with_format(3);
+        assert!(result.is_ok());
     }
 }
