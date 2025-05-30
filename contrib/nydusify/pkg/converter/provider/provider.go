@@ -10,8 +10,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -23,7 +21,6 @@ import (
 	"github.com/containerd/containerd/remotes"
 	"github.com/containerd/containerd/remotes/docker"
 	"github.com/goharbor/acceleration-service/pkg/cache"
-	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
 	"github.com/goharbor/acceleration-service/pkg/remote"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -45,14 +42,16 @@ type Provider struct {
 }
 
 func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64) (*Provider, error) {
-	contentDir := filepath.Join(root, "content")
-	if err := os.MkdirAll(contentDir, 0755); err != nil {
-		return nil, err
-	}
-	store, err := accelcontent.NewContent(hosts, contentDir, root, "0MB")
-	if err != nil {
-		return nil, err
-	}
+	// contentDir := filepath.Join(root, "content")
+	// if err := os.MkdirAll(contentDir, 0755); err != nil {
+	// 	return nil, err
+	// }
+	// store, err := accelcontent.NewContent(hosts, contentDir, root, "0MB")
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	store := NewMemoryContentStore()
 
 	return &Provider{
 		images:       make(map[string]*ocispec.Descriptor),
