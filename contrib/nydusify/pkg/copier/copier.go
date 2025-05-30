@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
@@ -358,24 +359,6 @@ func Copy(ctx context.Context, opt Opt) error {
 		return errors.Wrap(err, "find image from store")
 	}
 
-	isLocalTarget, outputPath, err := getLocalPath(opt.Target)
-	if err != nil {
-		return errors.Wrap(err, "parse target path")
-	}
-	if isLocalTarget {
-		logrus.Infof("exporting source image to %s", outputPath)
-		f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		if err := pvd.Export(ctx, f, sourceImage, source); err != nil {
-			return errors.Wrap(err, "export source image to target tar file")
-		}
-		logrus.Infof("exported image %s", source)
-		return nil
-	}
-
 	sourceDescs, err := utils.GetManifests(ctx, pvd.ContentStore(), *sourceImage, platformMC)
 	if err != nil {
 		return errors.Wrap(err, "get image manifests")
@@ -388,20 +371,23 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	target := targetNamed.String()
 
-	sem := semaphore.NewWeighted(1)
-	eg := errgroup.Group{}
-	for idx := range sourceDescs {
-		func(idx int) {
-			eg.Go(func() error {
-				sem.Acquire(context.Background(), 1)
-				defer sem.Release(1)
+	descCh := make(chan int, len(sourceDescs))
+	errCh := make(chan error, len(sourceDescs))
+	concurrency := 4 // 可根据实际情况调整并发数
+	var wg sync.WaitGroup
 
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range descCh {
 				sourceDesc := sourceDescs[idx]
 				targetDesc := &sourceDesc
 				if bkd != nil {
 					descs, _targetDesc, err := pushBlobFromBackend(ctx, pvd, bkd, sourceDesc, opt)
 					if err != nil {
-						return errors.Wrap(err, "get resolver")
+						errCh <- errors.Wrap(err, "get resolver")
+						continue
 					}
 					if _targetDesc == nil {
 						logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Warnf("%s is not a nydus image", source)
@@ -418,20 +404,29 @@ func Copy(ctx context.Context, opt Opt) error {
 					if errdefs.NeedsRetryWithHTTP(err) {
 						pvd.UsePlainHTTP()
 						if err := pvd.Push(ctx, *targetDesc, target); err != nil {
-							return errors.Wrap(err, "try to push image manifest")
+							errCh <- errors.Wrap(err, "try to push image manifest")
+							continue
 						}
 					} else {
-						return errors.Wrap(err, "push target image manifest")
+						errCh <- errors.Wrap(err, "push target image manifest")
+						continue
 					}
 				}
 				logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Infof("pushed target manifest %s", targetDesc.Digest)
-
-				return nil
-			})
-		}(idx)
+			}
+		}()
 	}
-	if err := eg.Wait(); err != nil {
-		return errors.Wrap(err, "push image manifests")
+
+	for idx := range sourceDescs {
+		descCh <- idx
+	}
+	close(descCh)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return err
+	default:
 	}
 
 	if len(targetDescs) > 1 && (sourceImage.MediaType == ocispec.MediaTypeImageIndex ||
