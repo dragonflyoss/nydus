@@ -1122,9 +1122,21 @@ func main() {
 					Usage:   "Path to the nydus-image binary, default to search in PATH",
 					EnvVars: []string{"NYDUS_IMAGE"},
 				},
+				&cli.BoolFlag{
+					Name:    "verbose",
+					Value:   false,
+					Usage:   "Enable verbose logging to see detailed stream transfer progress",
+					EnvVars: []string{"VERBOSE"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
+
+				// 如果启用了verbose，设置debug日志级别
+				if c.Bool("verbose") {
+					logrus.SetLevel(logrus.DebugLevel)
+					logrus.Debug("Verbose logging enabled")
+				}
 
 				sourceBackendType, sourceBackendConfig, err := getBackendConfig(c, "source-", false)
 				if err != nil {

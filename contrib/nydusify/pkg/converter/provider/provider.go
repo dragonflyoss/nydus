@@ -5,8 +5,10 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -25,6 +27,7 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 var LayerConcurrentLimit = 5
@@ -87,6 +90,13 @@ func newDefaultClient(skipTLSVerify bool) *http.Client {
 }
 
 func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunkSize int64) remotes.Resolver {
+	// 强制记录调试信息
+	if plainHTTP {
+		logrus.Debugf("创建纯HTTP模式解析器，所有请求将使用HTTP协议")
+	} else {
+		logrus.Debugf("创建标准HTTPS模式解析器")
+	}
+
 	registryHosts := docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(
 			docker.NewDockerAuthorizer(
@@ -96,6 +106,7 @@ func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunk
 		),
 		docker.WithClient(newDefaultClient(insecure)),
 		docker.WithPlainHTTP(func(_ string) (bool, error) {
+			// 保证始终返回当前设置的HTTP模式
 			return plainHTTP, nil
 		}),
 		docker.WithChunkSize(chunkSize),
@@ -107,7 +118,12 @@ func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunk
 }
 
 func (pvd *Provider) UsePlainHTTP() {
-	pvd.usePlainHTTP = true
+	pvd.mutex.Lock()
+	defer pvd.mutex.Unlock()
+	if !pvd.usePlainHTTP {
+		pvd.usePlainHTTP = true
+		logrus.Debug("已设置使用纯HTTP模式，所有后续连接将使用HTTP协议")
+	}
 }
 
 func (pvd *Provider) Resolver(ref string) (remotes.Resolver, error) {
@@ -115,7 +131,23 @@ func (pvd *Provider) Resolver(ref string) (remotes.Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newResolver(insecure, pvd.usePlainHTTP, credFunc, pvd.chunkSize), nil
+
+	// 获取当前HTTP设置状态，避免竞态条件
+	pvd.mutex.Lock()
+	usePlainHTTP := pvd.usePlainHTTP
+	pvd.mutex.Unlock()
+
+	// 使用当前HTTP设置创建解析器
+	resolver := newResolver(insecure, usePlainHTTP, credFunc, pvd.chunkSize)
+
+	// 记录当前连接模式
+	if usePlainHTTP {
+		logrus.Debugf("为 %s 创建了纯HTTP连接解析器", ref)
+	} else {
+		logrus.Debugf("为 %s 创建了标准HTTPS连接解析器", ref)
+	}
+
+	return resolver, nil
 }
 
 func (pvd *Provider) Pull(ctx context.Context, ref string) error {
@@ -207,4 +239,117 @@ func (pvd *Provider) NewRemoteCache(ctx context.Context, ref string) (context.Co
 		return cache.New(ctx, ref, "", pvd.cacheSize, pvd)
 	}
 	return ctx, nil
+}
+
+// FetchImageInfo fetches basic image information without downloading all content
+func (pvd *Provider) FetchImageInfo(ctx context.Context, ref string) error {
+	resolver, err := pvd.Resolver(ref)
+	if err != nil {
+		return err
+	}
+
+	name, desc, err := resolver.Resolve(ctx, ref)
+	if err != nil {
+		return errors.Wrap(err, "resolve reference")
+	}
+
+	fetcher, err := resolver.Fetcher(ctx, name)
+	if err != nil {
+		return errors.Wrap(err, "create fetcher")
+	}
+
+	// 获取并存储顶层索引/清单
+	rc, err := fetcher.Fetch(ctx, desc)
+	if err != nil {
+		return errors.Wrap(err, "fetch descriptor")
+	}
+	defer rc.Close()
+
+	// 读取内容
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return errors.Wrap(err, "read descriptor content")
+	}
+
+	// 将内容写入内容存储
+	if err := content.WriteBlob(ctx, pvd.store, desc.Digest.String(), bytes.NewReader(data), desc); err != nil {
+		return errors.Wrap(err, "write descriptor content")
+	}
+
+	// 如果是索引类型，还需要获取其中的清单
+	if desc.MediaType == ocispec.MediaTypeImageIndex || desc.MediaType == "application/vnd.docker.distribution.manifest.list.v2+json" {
+		var index ocispec.Index
+		if err := json.Unmarshal(data, &index); err != nil {
+			return errors.Wrap(err, "unmarshal index")
+		}
+
+		// 获取每个清单
+		for _, manifestDesc := range index.Manifests {
+			rc, err := fetcher.Fetch(ctx, manifestDesc)
+			if err != nil {
+				return errors.Wrap(err, "fetch manifest")
+			}
+
+			manifestData, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				return errors.Wrap(err, "read manifest")
+			}
+
+			if err := content.WriteBlob(ctx, pvd.store, manifestDesc.Digest.String(), bytes.NewReader(manifestData), manifestDesc); err != nil {
+				return errors.Wrap(err, "write manifest")
+			}
+
+			// 解析清单获取配置描述符
+			var manifest ocispec.Manifest
+			if err := json.Unmarshal(manifestData, &manifest); err != nil {
+				return errors.Wrap(err, "unmarshal manifest")
+			}
+
+			// 获取配置
+			rc, err = fetcher.Fetch(ctx, manifest.Config)
+			if err != nil {
+				return errors.Wrap(err, "fetch config")
+			}
+
+			configData, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				return errors.Wrap(err, "read config")
+			}
+
+			if err := content.WriteBlob(ctx, pvd.store, manifest.Config.Digest.String(), bytes.NewReader(configData), manifest.Config); err != nil {
+				return errors.Wrap(err, "write config")
+			}
+		}
+	} else if desc.MediaType == ocispec.MediaTypeImageManifest || desc.MediaType == "application/vnd.docker.distribution.manifest.v2+json" {
+		// 对于单一清单，获取配置
+		var manifest ocispec.Manifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return errors.Wrap(err, "unmarshal manifest")
+		}
+
+		// 获取配置
+		rc, err := fetcher.Fetch(ctx, manifest.Config)
+		if err != nil {
+			return errors.Wrap(err, "fetch config")
+		}
+
+		configData, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return errors.Wrap(err, "read config")
+		}
+
+		if err := content.WriteBlob(ctx, pvd.store, manifest.Config.Digest.String(), bytes.NewReader(configData), manifest.Config); err != nil {
+			return errors.Wrap(err, "write config")
+		}
+	}
+
+	// 存储镜像描述符
+	pvd.mutex.Lock()
+	defer pvd.mutex.Unlock()
+	pvd.images[ref] = &desc
+
+	return nil
 }
