@@ -30,7 +30,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var LayerConcurrentLimit = 5
+var LayerConcurrentLimit = 16
 
 type Provider struct {
 	mutex        sync.Mutex

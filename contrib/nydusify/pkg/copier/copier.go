@@ -6,6 +6,7 @@ package copier
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
@@ -275,7 +277,7 @@ func streamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.W
 	logrus.Infof("开始流式传输，预期大小: %d 字节，预期摘要: %s", size, expectedDigest)
 
 	// 使用带有进度报告的io.Copy
-	buf := make([]byte, 1024*1024) // 1MB 缓冲区
+	buf := make([]byte, 1024*1024*16) // 16MB 缓冲区
 	var totalCopied int64
 
 	for {
@@ -292,8 +294,8 @@ func streamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.W
 
 			totalCopied += int64(n)
 
-			// 每传输10MB记录一次日志
-			if totalCopied%(10*1024*1024) < int64(n) {
+			// 每传输100MB记录一次日志
+			if totalCopied%(100*1024*1024) < int64(n) {
 				logrus.Infof("流式传输进度: %d/%d 字节 (%.2f%%)",
 					totalCopied, size, float64(totalCopied)*100/float64(size))
 			}
@@ -309,11 +311,131 @@ func streamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.W
 
 	logrus.Infof("流式传输完成，总共传输: %d 字节", totalCopied)
 
-	if err := targetWriter.Commit(ctx, size, expectedDigest); err != nil {
+	// 检查大小是否匹配，但只发出警告而不中断操作
+	if size > 0 && size != totalCopied {
+		logrus.Warnf("大小不匹配，期望: %d，实际: %d，将使用实际大小", size, totalCopied)
+	}
+
+	if err := targetWriter.Commit(ctx, totalCopied, expectedDigest); err != nil {
 		return errors.Wrap(err, "commit target content")
 	}
 	logrus.Infof("成功提交目标内容，摘要: %s", expectedDigest)
 
+	return nil
+}
+
+// trueStreamCopy 实现真正的流式传输，同时进行拉取和推送
+func trueStreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
+	logrus.Infof("开始真正的流式传输，预期大小: %d 字节，预期摘要: %s", size, expectedDigest)
+
+	// 对于小文件（小于128字节），直接读取全部内容再提交，避免流式传输的复杂性
+	if size <= 128 {
+		logrus.Debugf("文件很小(%d字节)，使用简化处理方式", size)
+		data, err := io.ReadAll(srcReader)
+		if err != nil {
+			return errors.Wrap(err, "读取小文件数据失败")
+		}
+
+		// 确保数据大小正确
+		if int64(len(data)) != size {
+			logrus.Warnf("小文件大小不匹配: 期望 %d 字节, 实际 %d 字节", size, len(data))
+		}
+
+		// 计算实际摘要
+		hasher := sha256.New()
+		hasher.Write(data)
+		actualDigest := digest.NewDigestFromBytes(digest.SHA256, hasher.Sum(nil))
+
+		// 检查摘要是否匹配
+		if expectedDigest != "" && expectedDigest != actualDigest {
+			return fmt.Errorf("小文件摘要不匹配: 期望 %s, 实际 %s", expectedDigest, actualDigest)
+		}
+
+		// 写入数据
+		if _, err := targetWriter.Write(data); err != nil {
+			return errors.Wrap(err, "写入小文件数据失败")
+		}
+
+		// 提交内容
+		if err := targetWriter.Commit(ctx, size, expectedDigest); err != nil {
+			return errors.Wrap(err, "提交小文件内容失败")
+		}
+
+		logrus.Infof("流式传输完成，总共传输: %d 字节", len(data))
+		logrus.Infof("成功提交目标内容，摘要: %s", actualDigest)
+		return nil
+	}
+
+	// 使用更大的缓冲区大小，减少系统调用次数
+	bufSize := 16 * 1024 * 1024 // 16MB 缓冲区
+
+	// 计算哈希值
+	hasher := sha256.New()
+
+	// 直接进行内存传输，不使用goroutine和通道，避免多余的内存复制和上下文切换
+	buf := make([]byte, bufSize)
+	var totalCopied int64
+
+	for {
+		// 检查上下文是否已取消
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// 读取数据
+		n, readErr := srcReader.Read(buf)
+		if n > 0 {
+			// 计算哈希
+			hasher.Write(buf[:n])
+
+			// 写入数据
+			writeN, writeErr := targetWriter.Write(buf[:n])
+			if writeErr != nil {
+				return errors.Wrap(writeErr, "write data in stream copy")
+			}
+			if writeN != n {
+				return errors.New("short write in stream copy")
+			}
+
+			totalCopied += int64(n)
+
+			// 每传输100MB记录一次日志
+			if totalCopied%(100*1024*1024) < int64(n) {
+				logrus.Infof("流式传输进度: %d/%d 字节 (%.2f%%)",
+					totalCopied, size, float64(totalCopied)*100/float64(size))
+			}
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return errors.Wrap(readErr, "read data in stream copy")
+		}
+	}
+
+	// 计算最终摘要
+	actualDigest := digest.NewDigestFromBytes(digest.SHA256, hasher.Sum(nil))
+	logrus.Infof("流式传输完成，总共传输: %d 字节", totalCopied)
+
+	// 检查摘要是否匹配
+	if expectedDigest != "" && expectedDigest != actualDigest {
+		return fmt.Errorf("摘要不匹配，期望: %s，实际: %s", expectedDigest, actualDigest)
+	}
+
+	// 检查大小是否匹配，但只发出警告而不中断操作
+	if size > 0 && size != totalCopied {
+		logrus.Warnf("大小不匹配，期望: %d，实际: %d，将使用实际大小", size, totalCopied)
+	}
+
+	// 提交内容
+	if err := targetWriter.Commit(ctx, totalCopied, actualDigest); err != nil {
+		return errors.Wrap(err, "commit target content")
+	}
+
+	logrus.Infof("成功提交目标内容，摘要: %s", actualDigest)
 	return nil
 }
 
@@ -426,6 +548,8 @@ func Copy(ctx context.Context, opt Opt) error {
 
 		if useStream {
 			// 流式传输模式：只获取最小必要的信息（清单和索引）
+			// 统计一下这一段时间
+			start := time.Now()
 			logrus.Infof("获取镜像 %s 的基本信息", source)
 			if err := pvd.FetchImageInfo(ctx, source); err != nil {
 				if errdefs.NeedsRetryWithHTTP(err) {
@@ -437,6 +561,8 @@ func Copy(ctx context.Context, opt Opt) error {
 					return errors.Wrap(err, "获取镜像信息失败")
 				}
 			}
+			elapsed := time.Since(start)
+			logrus.Infof("获取镜像 %s 的基本信息耗时: %s", source, elapsed)
 			logrus.Infof("成功获取镜像 %s 的基本信息", source)
 		} else {
 			// 传统模式：拉取全部数据
@@ -496,6 +622,10 @@ func Copy(ctx context.Context, opt Opt) error {
 		// 为每个平台的清单创建流式传输
 		var wg sync.WaitGroup
 		errCh := make(chan error, len(sourceDescs))
+
+		// 记录开始时间
+		streamStartTime := time.Now()
+
 		for idx, sourceDesc := range sourceDescs {
 			wg.Add(1)
 			go func(idx int, sourceDesc ocispec.Descriptor) {
@@ -605,7 +735,7 @@ func Copy(ctx context.Context, opt Opt) error {
 						}
 
 						if configWriter != nil {
-							if err := streamCopy(streamCtx, configRC, configWriter, manifest.Config.Size, manifest.Config.Digest); err != nil {
+							if err := trueStreamCopy(streamCtx, configRC, configWriter, manifest.Config.Size, manifest.Config.Digest); err != nil {
 								return errors.Wrap(err, "stream copy config")
 							}
 						}
@@ -617,23 +747,26 @@ func Copy(ctx context.Context, opt Opt) error {
 					}
 				}()
 
+				// 创建一个等待组，用于等待所有层处理完成
+				eg, egCtx := errgroup.WithContext(streamCtx)
+				eg.SetLimit(provider.LayerConcurrentLimit) // 设置最大并发数
+
 				// 处理每一层
 				for i, layer := range manifest.Layers {
-					layerWg.Add(1)
-					go func(i int, layer ocispec.Descriptor) {
-						defer layerWg.Done()
+					i, layer := i, layer // 避免闭包问题
+					eg.Go(func() error {
 						logrus.Infof("[%s] 开始流式传输第 %d/%d 层 %s，大小: %d 字节",
 							platformStr, i+1, len(manifest.Layers), layer.Digest, layer.Size)
 
 						// 通过闭包处理HTTP/HTTPS切换逻辑
 						handleLayerTransfer := func() error {
-							layerRC, err := sourceFetcher.Fetch(streamCtx, layer)
+							layerRC, err := sourceFetcher.Fetch(egCtx, layer)
 							if err != nil {
 								return errors.Wrap(err, "fetch layer")
 							}
 							defer layerRC.Close()
 
-							layerWriter, err := targetPusher.Push(streamCtx, layer)
+							layerWriter, err := targetPusher.Push(egCtx, layer)
 							if err != nil {
 								if containerdErrdefs.IsAlreadyExists(err) {
 									logrus.Infof("[%s] 第 %d/%d 层已存在于目标注册表",
@@ -652,14 +785,14 @@ func Copy(ctx context.Context, opt Opt) error {
 									}
 									targetResolver = newResolver
 
-									newPusher, err := targetResolver.Pusher(streamCtx, target)
+									newPusher, err := targetResolver.Pusher(egCtx, target)
 									if err != nil {
 										return errors.Wrap(err, "create new pusher for layer")
 									}
 									targetPusher = newPusher
 
 									// 重试
-									layerWriter, err = targetPusher.Push(streamCtx, layer)
+									layerWriter, err = targetPusher.Push(egCtx, layer)
 									if err != nil {
 										if containerdErrdefs.IsAlreadyExists(err) {
 											logrus.Infof("[%s] 第 %d/%d 层已存在于目标注册表",
@@ -674,7 +807,7 @@ func Copy(ctx context.Context, opt Opt) error {
 							}
 
 							if layerWriter != nil {
-								if err := streamCopy(streamCtx, layerRC, layerWriter, layer.Size, layer.Digest); err != nil {
+								if err := trueStreamCopy(egCtx, layerRC, layerWriter, layer.Size, layer.Digest); err != nil {
 									return errors.Wrap(err, "stream copy layer")
 								}
 							}
@@ -683,14 +816,15 @@ func Copy(ctx context.Context, opt Opt) error {
 							return nil
 						}
 
-						if err := handleLayerTransfer(); err != nil {
-							layerErrCh <- err
-						}
-					}(i, layer)
+						return handleLayerTransfer()
+					})
 				}
 
 				// 等待所有层处理完成
-				layerWg.Wait()
+				if err := eg.Wait(); err != nil {
+					errCh <- err
+					return
+				}
 
 				// 检查是否有错误
 				select {
@@ -759,6 +893,10 @@ func Copy(ctx context.Context, opt Opt) error {
 		wg.Wait()
 
 		logrus.Infof("已完成 %d/%d 个平台清单的流式传输", successCount, len(sourceDescs))
+
+		// 计算并打印总耗时
+		streamElapsed := time.Since(streamStartTime)
+		logrus.Infof("流式传输总耗时: %s", streamElapsed)
 
 		// 检查是否有错误
 		select {
