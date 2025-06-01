@@ -30,30 +30,25 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var LayerConcurrentLimit = 16
+// LayerConcurrentLimit 控制并发层处理数量
+var LayerConcurrentLimit = 4
 
+// Provider 提供镜像内容的存储和操作能力
 type Provider struct {
-	mutex        sync.Mutex
-	usePlainHTTP bool
+	mutex        sync.RWMutex // 保护状态的读写锁
+	usePlainHTTP bool         // 是否使用纯HTTP模式
 	images       map[string]*ocispec.Descriptor
-	store        content.Store
-	hosts        remote.HostFunc
-	platformMC   platforms.MatchComparer
-	cacheSize    int
-	cacheVersion string
-	chunkSize    int64
+	store        content.Store           // 内容存储
+	hosts        remote.HostFunc         // 主机配置函数
+	platformMC   platforms.MatchComparer // 平台匹配器
+	cacheSize    int                     // 缓存大小
+	cacheVersion string                  // 缓存版本
+	chunkSize    int64                   // 传输块大小
 }
 
+// New 创建一个新的Provider实例
 func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64) (*Provider, error) {
-	// contentDir := filepath.Join(root, "content")
-	// if err := os.MkdirAll(contentDir, 0755); err != nil {
-	// 	return nil, err
-	// }
-	// store, err := accelcontent.NewContent(hosts, contentDir, root, "0MB")
-	// if err != nil {
-	// 	return nil, err
-	// }
-
+	// 使用内存内容存储
 	store := NewMemoryContentStore()
 
 	return &Provider{
@@ -67,7 +62,8 @@ func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string
 	}, nil
 }
 
-func newDefaultClient(skipTLSVerify bool) *http.Client {
+// newHTTPClient 创建HTTP客户端，支持配置TLS验证
+func newHTTPClient(skipTLSVerify bool) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
@@ -89,24 +85,25 @@ func newDefaultClient(skipTLSVerify bool) *http.Client {
 	}
 }
 
+// newResolver 创建远程内容解析器
 func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunkSize int64) remotes.Resolver {
-	// 强制记录调试信息
-	if plainHTTP {
-		logrus.Debugf("创建纯HTTP模式解析器，所有请求将使用HTTP协议")
-	} else {
-		logrus.Debugf("创建标准HTTPS模式解析器")
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		if plainHTTP {
+			logrus.Debugf("创建纯HTTP模式解析器")
+		} else {
+			logrus.Debugf("创建标准HTTPS模式解析器")
+		}
 	}
 
 	registryHosts := docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(
 			docker.NewDockerAuthorizer(
-				docker.WithAuthClient(newDefaultClient(insecure)),
+				docker.WithAuthClient(newHTTPClient(insecure)),
 				docker.WithAuthCreds(credFunc),
 			),
 		),
-		docker.WithClient(newDefaultClient(insecure)),
+		docker.WithClient(newHTTPClient(insecure)),
 		docker.WithPlainHTTP(func(_ string) (bool, error) {
-			// 保证始终返回当前设置的HTTP模式
 			return plainHTTP, nil
 		}),
 		docker.WithChunkSize(chunkSize),
@@ -117,44 +114,49 @@ func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunk
 	})
 }
 
+// UsePlainHTTP 设置使用纯HTTP模式进行传输
 func (pvd *Provider) UsePlainHTTP() {
 	pvd.mutex.Lock()
 	defer pvd.mutex.Unlock()
+
 	if !pvd.usePlainHTTP {
 		pvd.usePlainHTTP = true
-		logrus.Debug("已设置使用纯HTTP模式，所有后续连接将使用HTTP协议")
+		logrus.Info("已切换至HTTP模式，所有后续连接将使用HTTP协议")
 	}
 }
 
+// Resolver 获取指定引用的解析器
 func (pvd *Provider) Resolver(ref string) (remotes.Resolver, error) {
 	credFunc, insecure, err := pvd.hosts(ref)
 	if err != nil {
 		return nil, err
 	}
 
-	// 获取当前HTTP设置状态，避免竞态条件
-	pvd.mutex.Lock()
+	// 获取当前HTTP设置状态
+	pvd.mutex.RLock()
 	usePlainHTTP := pvd.usePlainHTTP
-	pvd.mutex.Unlock()
+	pvd.mutex.RUnlock()
 
-	// 使用当前HTTP设置创建解析器
 	resolver := newResolver(insecure, usePlainHTTP, credFunc, pvd.chunkSize)
 
-	// 记录当前连接模式
-	if usePlainHTTP {
-		logrus.Debugf("为 %s 创建了纯HTTP连接解析器", ref)
-	} else {
-		logrus.Debugf("为 %s 创建了标准HTTPS连接解析器", ref)
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		if usePlainHTTP {
+			logrus.Debugf("为 %s 创建了HTTP连接解析器", ref)
+		} else {
+			logrus.Debugf("为 %s 创建了HTTPS连接解析器", ref)
+		}
 	}
 
 	return resolver, nil
 }
 
+// Pull 拉取指定引用的镜像
 func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 	resolver, err := pvd.Resolver(ref)
 	if err != nil {
 		return err
 	}
+
 	rc := &containerd.RemoteContext{
 		Resolver:               resolver,
 		PlatformMatcher:        pvd.platformMC,
@@ -173,11 +175,13 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 	return nil
 }
 
+// Push 推送指定的内容描述符到目标引用
 func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref string) error {
 	resolver, err := pvd.Resolver(ref)
 	if err != nil {
 		return err
 	}
+
 	rc := &containerd.RemoteContext{
 		Resolver:                    resolver,
 		PlatformMatcher:             pvd.platformMC,
@@ -187,6 +191,7 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 	return push(ctx, pvd.store, rc, desc, ref)
 }
 
+// Import 从读取器导入镜像
 func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, error) {
 	iopts := importOpts{
 		dgstRefT: func(dgst digest.Digest) string {
@@ -195,13 +200,14 @@ func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, erro
 		skipDgstRef:     func(name string) bool { return name != "" },
 		platformMatcher: pvd.platformMC,
 	}
+
 	images, err := load(ctx, reader, pvd.store, iopts)
 	if err != nil {
 		return "", err
 	}
 
 	if len(images) != 1 {
-		return "", errors.New("incorrect tarball format")
+		return "", errors.New("不正确的tar包格式")
 	}
 	image := images[0]
 
@@ -212,28 +218,34 @@ func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, erro
 	return image.Name, nil
 }
 
+// Export 导出镜像到写入器
 func (pvd *Provider) Export(ctx context.Context, writer io.Writer, img *ocispec.Descriptor, name string) error {
 	opts := []archive.ExportOpt{archive.WithManifest(*img, name), archive.WithPlatform(pvd.platformMC)}
 	return archive.Export(ctx, pvd.store, writer, opts...)
 }
 
+// Image 获取指定引用的镜像描述符
 func (pvd *Provider) Image(_ context.Context, ref string) (*ocispec.Descriptor, error) {
-	pvd.mutex.Lock()
-	defer pvd.mutex.Unlock()
+	pvd.mutex.RLock()
+	defer pvd.mutex.RUnlock()
+
 	if desc, ok := pvd.images[ref]; ok {
 		return desc, nil
 	}
 	return nil, errdefs.ErrNotFound
 }
 
+// ContentStore 获取内容存储
 func (pvd *Provider) ContentStore() content.Store {
 	return pvd.store
 }
 
+// SetContentStore 设置内容存储
 func (pvd *Provider) SetContentStore(store content.Store) {
 	pvd.store = store
 }
 
+// NewRemoteCache 创建远程缓存
 func (pvd *Provider) NewRemoteCache(ctx context.Context, ref string) (context.Context, *cache.RemoteCache) {
 	if ref != "" {
 		return cache.New(ctx, ref, "", pvd.cacheSize, pvd)
@@ -241,115 +253,121 @@ func (pvd *Provider) NewRemoteCache(ctx context.Context, ref string) (context.Co
 	return ctx, nil
 }
 
-// FetchImageInfo fetches basic image information without downloading all content
+// FetchImageInfo 仅获取镜像基本信息而不下载全部内容
 func (pvd *Provider) FetchImageInfo(ctx context.Context, ref string) error {
 	resolver, err := pvd.Resolver(ref)
 	if err != nil {
 		return err
 	}
 
+	// 解析引用获取描述符
 	name, desc, err := resolver.Resolve(ctx, ref)
 	if err != nil {
-		return errors.Wrap(err, "resolve reference")
+		return errors.Wrap(err, "解析引用")
 	}
 
+	// 创建拉取器
 	fetcher, err := resolver.Fetcher(ctx, name)
 	if err != nil {
-		return errors.Wrap(err, "create fetcher")
+		return errors.Wrap(err, "创建拉取器")
 	}
 
-	// 获取并存储顶层索引/清单
+	// 获取顶层索引/清单
 	rc, err := fetcher.Fetch(ctx, desc)
 	if err != nil {
-		return errors.Wrap(err, "fetch descriptor")
+		return errors.Wrap(err, "获取描述符")
 	}
 	defer rc.Close()
 
 	// 读取内容
 	data, err := io.ReadAll(rc)
 	if err != nil {
-		return errors.Wrap(err, "read descriptor content")
+		return errors.Wrap(err, "读取描述符内容")
 	}
 
-	// 将内容写入内容存储
+	// 将内容写入存储
 	if err := content.WriteBlob(ctx, pvd.store, desc.Digest.String(), bytes.NewReader(data), desc); err != nil {
-		return errors.Wrap(err, "write descriptor content")
+		return errors.Wrap(err, "写入描述符内容")
 	}
 
-	// 如果是索引类型，还需要获取其中的清单
-	if desc.MediaType == ocispec.MediaTypeImageIndex || desc.MediaType == "application/vnd.docker.distribution.manifest.list.v2+json" {
-		var index ocispec.Index
-		if err := json.Unmarshal(data, &index); err != nil {
-			return errors.Wrap(err, "unmarshal index")
-		}
-
-		// 获取每个清单
-		for _, manifestDesc := range index.Manifests {
-			rc, err := fetcher.Fetch(ctx, manifestDesc)
-			if err != nil {
-				return errors.Wrap(err, "fetch manifest")
-			}
-
-			manifestData, err := io.ReadAll(rc)
-			rc.Close()
-			if err != nil {
-				return errors.Wrap(err, "read manifest")
-			}
-
-			if err := content.WriteBlob(ctx, pvd.store, manifestDesc.Digest.String(), bytes.NewReader(manifestData), manifestDesc); err != nil {
-				return errors.Wrap(err, "write manifest")
-			}
-
-			// 解析清单获取配置描述符
-			var manifest ocispec.Manifest
-			if err := json.Unmarshal(manifestData, &manifest); err != nil {
-				return errors.Wrap(err, "unmarshal manifest")
-			}
-
-			// 获取配置
-			rc, err = fetcher.Fetch(ctx, manifest.Config)
-			if err != nil {
-				return errors.Wrap(err, "fetch config")
-			}
-
-			configData, err := io.ReadAll(rc)
-			rc.Close()
-			if err != nil {
-				return errors.Wrap(err, "read config")
-			}
-
-			if err := content.WriteBlob(ctx, pvd.store, manifest.Config.Digest.String(), bytes.NewReader(configData), manifest.Config); err != nil {
-				return errors.Wrap(err, "write config")
-			}
-		}
-	} else if desc.MediaType == ocispec.MediaTypeImageManifest || desc.MediaType == "application/vnd.docker.distribution.manifest.v2+json" {
-		// 对于单一清单，获取配置
-		var manifest ocispec.Manifest
-		if err := json.Unmarshal(data, &manifest); err != nil {
-			return errors.Wrap(err, "unmarshal manifest")
-		}
-
-		// 获取配置
-		rc, err := fetcher.Fetch(ctx, manifest.Config)
-		if err != nil {
-			return errors.Wrap(err, "fetch config")
-		}
-
-		configData, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return errors.Wrap(err, "read config")
-		}
-
-		if err := content.WriteBlob(ctx, pvd.store, manifest.Config.Digest.String(), bytes.NewReader(configData), manifest.Config); err != nil {
-			return errors.Wrap(err, "write config")
-		}
+	// 处理索引和清单
+	if err := pvd.fetchDescriptorChildren(ctx, fetcher, data, desc); err != nil {
+		return err
 	}
 
 	// 存储镜像描述符
 	pvd.mutex.Lock()
 	defer pvd.mutex.Unlock()
 	pvd.images[ref] = &desc
+
+	return nil
+}
+
+// fetchDescriptorChildren 获取描述符的子内容（如清单和配置）
+func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remotes.Fetcher, data []byte, desc ocispec.Descriptor) error {
+	// 如果是索引类型，获取其中的清单
+	if desc.MediaType == ocispec.MediaTypeImageIndex || desc.MediaType == "application/vnd.docker.distribution.manifest.list.v2+json" {
+		var index ocispec.Index
+		if err := json.Unmarshal(data, &index); err != nil {
+			return errors.Wrap(err, "解析索引")
+		}
+
+		// 获取每个清单
+		for _, manifestDesc := range index.Manifests {
+			if err := pvd.fetchManifest(ctx, fetcher, manifestDesc); err != nil {
+				return err
+			}
+		}
+	} else if desc.MediaType == ocispec.MediaTypeImageManifest || desc.MediaType == "application/vnd.docker.distribution.manifest.v2+json" {
+		// 对于单一清单，直接处理
+		return pvd.processManifest(ctx, fetcher, data)
+	}
+
+	return nil
+}
+
+// fetchManifest 获取清单及其配置
+func (pvd *Provider) fetchManifest(ctx context.Context, fetcher remotes.Fetcher, manifestDesc ocispec.Descriptor) error {
+	rc, err := fetcher.Fetch(ctx, manifestDesc)
+	if err != nil {
+		return errors.Wrap(err, "获取清单")
+	}
+
+	manifestData, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return errors.Wrap(err, "读取清单")
+	}
+
+	if err := content.WriteBlob(ctx, pvd.store, manifestDesc.Digest.String(), bytes.NewReader(manifestData), manifestDesc); err != nil {
+		return errors.Wrap(err, "写入清单")
+	}
+
+	return pvd.processManifest(ctx, fetcher, manifestData)
+}
+
+// processManifest 处理清单数据，获取配置
+func (pvd *Provider) processManifest(ctx context.Context, fetcher remotes.Fetcher, manifestData []byte) error {
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return errors.Wrap(err, "解析清单")
+	}
+
+	// 获取配置
+	rc, err := fetcher.Fetch(ctx, manifest.Config)
+	if err != nil {
+		return errors.Wrap(err, "获取配置")
+	}
+
+	configData, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return errors.Wrap(err, "读取配置")
+	}
+
+	if err := content.WriteBlob(ctx, pvd.store, manifest.Config.Digest.String(), bytes.NewReader(configData), manifest.Config); err != nil {
+		return errors.Wrap(err, "写入配置")
+	}
 
 	return nil
 }

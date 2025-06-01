@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"log"
 	"sync"
 
 	"github.com/containerd/containerd/content"
@@ -17,6 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// memoryBlob 表示内存中存储的完整内容
 type memoryBlob struct {
 	data   []byte
 	digest digest.Digest
@@ -25,23 +25,23 @@ type memoryBlob struct {
 
 // streamBlob 支持流式传输的blob
 type streamBlob struct {
-	pr        *io.PipeReader
-	pw        *io.PipeWriter
-	digest    digest.Digest
-	size      int64
-	done      chan struct{}
-	err       error
-	dataCache *bytes.Buffer // 缓存已读取的数据，支持随机读取
-	mu        sync.Mutex
+	pr        *io.PipeReader // 用于流式读取的管道
+	pw        *io.PipeWriter // 用于流式写入的管道
+	digest    digest.Digest  // 内容的摘要
+	size      int64          // 内容的大小
+	done      chan struct{}  // 传输完成信号
+	dataCache *bytes.Buffer  // 缓存已读取的数据，支持随机读取
+	mu        sync.RWMutex   // 保护数据缓存的互斥锁
 }
 
+// memoryContentStore 实现了内存中的内容存储
 type memoryContentStore struct {
-	mu    sync.Mutex
-	blobs map[digest.Digest]*memoryBlob
-	// 支持流式传输的blobs
+	mu          sync.RWMutex
+	blobs       map[digest.Digest]*memoryBlob
 	streamBlobs map[digest.Digest]*streamBlob
 }
 
+// NewMemoryContentStore 创建新的内存内容存储
 func NewMemoryContentStore() content.Store {
 	return &memoryContentStore{
 		blobs:       make(map[digest.Digest]*memoryBlob),
@@ -49,6 +49,7 @@ func NewMemoryContentStore() content.Store {
 	}
 }
 
+// memoryWriter 用于写入普通内容
 type memoryWriter struct {
 	store *memoryContentStore
 	buf   *bytes.Buffer
@@ -65,6 +66,7 @@ type streamWriter struct {
 	closed bool
 }
 
+// Writer 根据上下文创建合适的writer
 func (m *memoryContentStore) Writer(ctx context.Context, opts ...content.WriterOpt) (content.Writer, error) {
 	if useStream, _ := ctx.Value("useStream").(bool); useStream {
 		// 创建支持流式传输的writer
@@ -75,22 +77,22 @@ func (m *memoryContentStore) Writer(ctx context.Context, opts ...content.WriterO
 			done:      make(chan struct{}),
 			dataCache: new(bytes.Buffer),
 		}
-		w := &streamWriter{
+		return &streamWriter{
 			store: m,
 			blob:  blob,
 			hash:  sha256.New(),
-		}
-		return w, nil
+		}, nil
 	}
 
 	// 原有的非流式writer
-	w := &memoryWriter{
+	return &memoryWriter{
 		store: m,
 		buf:   new(bytes.Buffer),
 		hash:  sha256.New(),
-	}
-	return w, nil
+	}, nil
 }
+
+// memoryWriter的实现 ========================================
 
 func (w *memoryWriter) Write(p []byte) (int, error) {
 	n, err := w.buf.Write(p)
@@ -139,14 +141,17 @@ func (w *memoryWriter) Size() int64 {
 	return w.off
 }
 
-// streamWriter的实现
+// streamWriter的实现 ========================================
+
 func (w *streamWriter) Write(p []byte) (int, error) {
-	logrus.Debugf("streamWriter: 正在写入 %d 字节的数据", len(p))
 	if w.closed {
 		return 0, io.ErrClosedPipe
 	}
+
+	// 写入管道
 	n, err := w.blob.pw.Write(p)
 	if n > 0 {
+		// 更新哈希和偏移量
 		w.hash.Write(p[:n])
 		w.off += int64(n)
 
@@ -155,40 +160,47 @@ func (w *streamWriter) Write(p []byte) (int, error) {
 		w.blob.dataCache.Write(p[:n])
 		w.blob.mu.Unlock()
 
-		logrus.Debugf("streamWriter: 成功写入 %d 字节，当前总计 %d 字节", n, w.off)
+		if logrus.IsLevelEnabled(logrus.DebugLevel) {
+			logrus.Debugf("流式写入: %d 字节，总计: %d 字节", n, w.off)
+		}
 	}
 	return n, err
 }
 
 func (w *streamWriter) Close() error {
+	if w.closed {
+		return nil
+	}
 	w.closed = true
 	return w.blob.pw.Close()
 }
 
 func (w *streamWriter) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
-	logrus.Infof("streamWriter: 提交数据，大小: %d 字节", w.off)
+	logrus.Infof("提交流式数据，大小: %d 字节", w.off)
+
+	// 设置blob属性
 	w.blob.size = w.off
 	w.blob.digest = digest.NewDigestFromBytes(digest.SHA256, w.hash.Sum(nil))
 
-	logrus.Infof("streamWriter: 计算得到的摘要: %s", w.blob.digest)
-
-	// 检查计算出的摘要与期望的摘要是否一致
+	// 检查摘要
 	if expected != "" && expected != w.blob.digest {
-		logrus.Errorf("streamWriter: 摘要不匹配，期望: %s, 计算得到: %s", expected, w.blob.digest)
-		return fmt.Errorf("unexpected digest: %s, expected: %s", w.blob.digest, expected)
+		logrus.Errorf("摘要不匹配: 期望 %s, 计算得到 %s", expected, w.blob.digest)
+		return fmt.Errorf("摘要不匹配: 期望 %s, 计算得到 %s", expected, w.blob.digest)
 	}
 
-	// 检查实际大小与期望大小是否一致
+	// 检查大小
 	if size > 0 && size != w.off {
-		logrus.Errorf("streamWriter: 大小不匹配，期望: %d, 实际: %d", size, w.off)
-		return fmt.Errorf("unexpected size %d, expected %d", w.off, size)
+		logrus.Warnf("大小不匹配: 期望 %d, 实际 %d", size, w.off)
 	}
 
+	// 添加到存储
 	w.store.mu.Lock()
 	w.store.streamBlobs[w.blob.digest] = w.blob
 	w.store.mu.Unlock()
 
+	// 标记完成
 	close(w.blob.done)
+	logrus.Infof("成功提交流式数据，摘要: %s", w.blob.digest)
 	return nil
 }
 
@@ -210,15 +222,11 @@ func (w *streamWriter) Size() int64 {
 	return w.off
 }
 
+// memoryReaderAt 用于随机读取普通内容 ==============================
+
 type memoryReaderAt struct {
 	data []byte
 	size int64
-}
-
-// streamReaderAt 支持流式传输的reader
-type streamReaderAt struct {
-	blob *streamBlob
-	off  int64 // 当前已读取的位置
 }
 
 func (r *memoryReaderAt) ReadAt(p []byte, off int64) (int, error) {
@@ -254,51 +262,55 @@ func (r *memoryReaderAt) Size() int64 {
 	return r.size
 }
 
-// streamReaderAt的实现
-func (r *streamReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	logrus.Debugf("streamReaderAt: 请求从偏移量 %d 读取 %d 字节", off, len(p))
+// streamReaderAt 支持流式传输的随机读取器 ============================
 
-	r.blob.mu.Lock()
+type streamReaderAt struct {
+	blob *streamBlob
+	off  int64 // 当前已读取的位置
+}
+
+func (r *streamReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	// 获取当前缓存数据的只读视图
+	r.blob.mu.RLock()
 	cachedData := r.blob.dataCache.Bytes()
 	cachedSize := len(cachedData)
-	r.blob.mu.Unlock()
+	r.blob.mu.RUnlock()
 
-	logrus.Debugf("streamReaderAt: 当前缓存大小: %d 字节", cachedSize)
-
+	// 检查偏移量是否超出缓存范围
 	if off >= int64(cachedSize) {
-		// 如果请求的偏移超出已缓存数据，需要等待更多数据写入
 		select {
 		case <-r.blob.done:
-			// 流已经结束，但请求的偏移仍然超出范围
-			logrus.Debugf("streamReaderAt: 流已结束，但请求的偏移量超出范围")
+			// 如果已完成但偏移量仍超出范围，返回EOF
 			return 0, io.EOF
 		default:
-			// 返回错误，表示需要等待更多数据
-			logrus.Debugf("streamReaderAt: 等待更多数据")
+			// 数据还在传输中，等待更多数据
 			return 0, io.ErrUnexpectedEOF
 		}
 	}
 
+	// 复制可用数据
 	n := copy(p, cachedData[off:])
-	logrus.Debugf("streamReaderAt: 已读取 %d 字节数据", n)
 
-	if n < len(p) && off+int64(n) >= r.blob.size {
-		// 已读取到末尾
-		logrus.Debugf("streamReaderAt: 已达到数据末尾")
-		return n, io.EOF
+	// 检查是否已读取到末尾
+	if n < len(p) {
+		select {
+		case <-r.blob.done:
+			// 如果已完成并且读取到末尾，返回EOF
+			if off+int64(n) >= r.blob.size {
+				return n, io.EOF
+			}
+		default:
+			// 数据还在传输中
+		}
 	}
+
 	return n, nil
 }
 
 func (r *streamReaderAt) Read(p []byte) (int, error) {
-	logrus.Debugf("streamReaderAt.Read: 尝试读取 %d 字节", len(p))
 	n, err := r.blob.pr.Read(p)
 	if n > 0 {
 		r.off += int64(n)
-		logrus.Debugf("streamReaderAt.Read: 成功读取 %d 字节，当前总计 %d 字节", n, r.off)
-	}
-	if err != nil {
-		logrus.Debugf("streamReaderAt.Read: 读取时发生错误: %v", err)
 	}
 	return n, err
 }
@@ -312,62 +324,70 @@ func (r *streamReaderAt) Size() int64 {
 	case <-r.blob.done:
 		return r.blob.size
 	default:
-		return 0 // 如果流未结束，返回0表示尚未知道大小
+		return 0 // 传输未完成，大小未知
 	}
 }
 
+// ReaderAt 创建内容的随机读取器 ====================================
+
 func (m *memoryContentStore) ReaderAt(ctx context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
-	m.mu.Lock()
+	// 先使用读锁尝试查找
+	m.mu.RLock()
 	blob, ok := m.blobs[desc.Digest]
 	if !ok {
-		// 如果在普通blob中找不到，尝试在流式blob中查找
 		streamBlob, streamOk := m.streamBlobs[desc.Digest]
-		m.mu.Unlock()
+		m.mu.RUnlock()
+
 		if streamOk {
 			return &streamReaderAt{blob: streamBlob}, nil
 		}
 		return nil, errdefs.ErrNotFound
 	}
-	m.mu.Unlock()
+	m.mu.RUnlock()
+
 	return &memoryReaderAt{data: blob.data, size: blob.size}, nil
 }
 
+// 其余方法实现 ==================================================
+
 func (m *memoryContentStore) Reader(ctx context.Context, desc digest.Digest) (io.ReadCloser, error) {
-	m.mu.Lock()
+	m.mu.RLock()
 	blob, ok := m.blobs[desc]
 	if !ok {
-		// 如果在普通blob中找不到，尝试在流式blob中查找
 		streamBlob, streamOk := m.streamBlobs[desc]
-		m.mu.Unlock()
+		m.mu.RUnlock()
+
 		if streamOk {
 			return streamBlob.pr, nil
 		}
 		return nil, errdefs.ErrNotFound
 	}
-	m.mu.Unlock()
+	m.mu.RUnlock()
+
 	return io.NopCloser(bytes.NewReader(blob.data)), nil
 }
 
 func (m *memoryContentStore) Info(ctx context.Context, dgst digest.Digest) (content.Info, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	blob, ok := m.blobs[dgst]
-	if !ok {
-		// 如果在普通blob中找不到，尝试在流式blob中查找
-		streamBlob, streamOk := m.streamBlobs[dgst]
-		if streamOk {
-			return content.Info{
-				Digest: dgst,
-				Size:   streamBlob.size,
-			}, nil
-		}
-		return content.Info{}, errdefs.ErrNotFound
+	if ok {
+		return content.Info{
+			Digest: dgst,
+			Size:   blob.size,
+		}, nil
 	}
-	return content.Info{
-		Digest: dgst,
-		Size:   blob.size,
-	}, nil
+
+	streamBlob, streamOk := m.streamBlobs[dgst]
+	if streamOk {
+		return content.Info{
+			Digest: dgst,
+			Size:   streamBlob.size,
+		}, nil
+	}
+
+	return content.Info{}, errdefs.ErrNotFound
 }
 
 func (m *memoryContentStore) Abort(ctx context.Context, ref string) error {
@@ -383,7 +403,6 @@ func (m *memoryContentStore) ListStatuses(ctx context.Context, filters ...string
 }
 
 func (m *memoryContentStore) Delete(ctx context.Context, dgst digest.Digest) error {
-	log.Printf("[memoryContentStore] Delete: delete blob %s", dgst.String())
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -397,8 +416,8 @@ func (m *memoryContentStore) Update(ctx context.Context, info content.Info, fiel
 }
 
 func (m *memoryContentStore) Walk(ctx context.Context, fn content.WalkFunc, filters ...string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	// 遍历普通blob
 	for dgst, blob := range m.blobs {

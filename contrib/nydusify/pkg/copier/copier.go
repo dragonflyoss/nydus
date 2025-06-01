@@ -5,6 +5,7 @@
 package copier
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -25,6 +26,7 @@ import (
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/reference/docker"
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/containerd/nydus-snapshotter/pkg/remote/remotes"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
@@ -272,109 +274,63 @@ func getLocalPath(ref string) (isLocalPath bool, absPath string, err error) {
 	return true, absPath, nil
 }
 
-// streamCopy 实现边下载边上传的流式传输
-func streamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
+// trueStreamCopy 实现真正的流式传输，同时进行拉取和推送
+func trueStreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
 	logrus.Infof("开始流式传输，预期大小: %d 字节，预期摘要: %s", size, expectedDigest)
 
-	// 使用带有进度报告的io.Copy
-	buf := make([]byte, 1024*1024*16) // 16MB 缓冲区
-	var totalCopied int64
-
-	for {
-		n, readErr := srcReader.Read(buf)
-		if n > 0 {
-			// 写入数据
-			writeN, writeErr := targetWriter.Write(buf[:n])
-			if writeErr != nil {
-				return errors.Wrap(writeErr, "write data in stream copy")
-			}
-			if writeN != n {
-				return errors.New("short write in stream copy")
-			}
-
-			totalCopied += int64(n)
-
-			// 每传输100MB记录一次日志
-			if totalCopied%(100*1024*1024) < int64(n) {
-				logrus.Infof("流式传输进度: %d/%d 字节 (%.2f%%)",
-					totalCopied, size, float64(totalCopied)*100/float64(size))
-			}
-		}
-
-		if readErr != nil {
-			if readErr == io.EOF {
-				break
-			}
-			return errors.Wrap(readErr, "read data in stream copy")
-		}
+	// 对于小文件，使用简化处理
+	if size <= 128 {
+		return handleSmallFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest)
 	}
 
-	logrus.Infof("流式传输完成，总共传输: %d 字节", totalCopied)
+	// 使用16MB缓冲区进行高效传输
+	return handleLargeFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest)
+}
 
-	// 检查大小是否匹配，但只发出警告而不中断操作
-	if size > 0 && size != totalCopied {
-		logrus.Warnf("大小不匹配，期望: %d，实际: %d，将使用实际大小", size, totalCopied)
+// handleSmallFileTransfer 处理小文件的传输，直接读取全部内容再提交
+func handleSmallFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
+	logrus.Debugf("文件较小(%d字节)，使用简化处理方式", size)
+
+	// 读取全部内容
+	data, err := io.ReadAll(srcReader)
+	if err != nil {
+		return errors.Wrap(err, "读取小文件数据失败")
 	}
 
-	if err := targetWriter.Commit(ctx, totalCopied, expectedDigest); err != nil {
-		return errors.Wrap(err, "commit target content")
+	// 确保数据大小正确
+	if int64(len(data)) != size && size > 0 {
+		logrus.Warnf("小文件大小不匹配: 期望 %d 字节, 实际 %d 字节", size, len(data))
 	}
-	logrus.Infof("成功提交目标内容，摘要: %s", expectedDigest)
 
+	// 计算实际摘要
+	actualDigest := digest.FromBytes(data)
+
+	// 检查摘要是否匹配
+	if expectedDigest != "" && expectedDigest != actualDigest {
+		return fmt.Errorf("小文件摘要不匹配: 期望 %s, 实际 %s", expectedDigest, actualDigest)
+	}
+
+	// 写入数据并提交
+	if _, err := targetWriter.Write(data); err != nil {
+		return errors.Wrap(err, "写入小文件数据失败")
+	}
+
+	if err := targetWriter.Commit(ctx, int64(len(data)), actualDigest); err != nil {
+		return errors.Wrap(err, "提交小文件内容失败")
+	}
+
+	logrus.Infof("小文件传输完成: %d 字节，摘要: %s", len(data), actualDigest)
 	return nil
 }
 
-// trueStreamCopy 实现真正的流式传输，同时进行拉取和推送
-func trueStreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
-	logrus.Infof("开始真正的流式传输，预期大小: %d 字节，预期摘要: %s", size, expectedDigest)
-
-	// 对于小文件（小于128字节），直接读取全部内容再提交，避免流式传输的复杂性
-	if size <= 128 {
-		logrus.Debugf("文件很小(%d字节)，使用简化处理方式", size)
-		data, err := io.ReadAll(srcReader)
-		if err != nil {
-			return errors.Wrap(err, "读取小文件数据失败")
-		}
-
-		// 确保数据大小正确
-		if int64(len(data)) != size {
-			logrus.Warnf("小文件大小不匹配: 期望 %d 字节, 实际 %d 字节", size, len(data))
-		}
-
-		// 计算实际摘要
-		hasher := sha256.New()
-		hasher.Write(data)
-		actualDigest := digest.NewDigestFromBytes(digest.SHA256, hasher.Sum(nil))
-
-		// 检查摘要是否匹配
-		if expectedDigest != "" && expectedDigest != actualDigest {
-			return fmt.Errorf("小文件摘要不匹配: 期望 %s, 实际 %s", expectedDigest, actualDigest)
-		}
-
-		// 写入数据
-		if _, err := targetWriter.Write(data); err != nil {
-			return errors.Wrap(err, "写入小文件数据失败")
-		}
-
-		// 提交内容
-		if err := targetWriter.Commit(ctx, size, expectedDigest); err != nil {
-			return errors.Wrap(err, "提交小文件内容失败")
-		}
-
-		logrus.Infof("流式传输完成，总共传输: %d 字节", len(data))
-		logrus.Infof("成功提交目标内容，摘要: %s", actualDigest)
-		return nil
-	}
-
-	// 使用更大的缓冲区大小，减少系统调用次数
+// handleLargeFileTransfer 处理大文件的传输，使用分块读取并及时更新进度
+func handleLargeFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
 	bufSize := 16 * 1024 * 1024 // 16MB 缓冲区
-
-	// 计算哈希值
-	hasher := sha256.New()
-
-	// 直接进行内存传输，不使用goroutine和通道，避免多余的内存复制和上下文切换
 	buf := make([]byte, bufSize)
+	hasher := sha256.New()
 	var totalCopied int64
+	lastLoggedProgress := int64(0)
+	logInterval := int64(100 * 1024 * 1024) // 每100MB记录一次日志
 
 	for {
 		// 检查上下文是否已取消
@@ -386,56 +342,56 @@ func trueStreamCopy(ctx context.Context, srcReader io.Reader, targetWriter conte
 
 		// 读取数据
 		n, readErr := srcReader.Read(buf)
-		if n > 0 {
-			// 计算哈希
-			hasher.Write(buf[:n])
-
-			// 写入数据
-			writeN, writeErr := targetWriter.Write(buf[:n])
-			if writeErr != nil {
-				return errors.Wrap(writeErr, "write data in stream copy")
-			}
-			if writeN != n {
-				return errors.New("short write in stream copy")
-			}
-
-			totalCopied += int64(n)
-
-			// 每传输100MB记录一次日志
-			if totalCopied%(100*1024*1024) < int64(n) {
-				logrus.Infof("流式传输进度: %d/%d 字节 (%.2f%%)",
-					totalCopied, size, float64(totalCopied)*100/float64(size))
-			}
-		}
-
-		if readErr != nil {
+		if n <= 0 {
 			if readErr == io.EOF {
 				break
 			}
-			return errors.Wrap(readErr, "read data in stream copy")
+			return errors.Wrap(readErr, "读取数据失败")
+		}
+
+		// 计算哈希
+		hasher.Write(buf[:n])
+
+		// 写入数据
+		writeN, writeErr := targetWriter.Write(buf[:n])
+		if writeErr != nil {
+			return errors.Wrap(writeErr, "写入数据失败")
+		}
+		if writeN != n {
+			return errors.New("写入的数据长度不符")
+		}
+
+		totalCopied += int64(n)
+
+		// 定期记录进度
+		if totalCopied-lastLoggedProgress >= logInterval {
+			logrus.Infof("流式传输进度: %.2f%% (%s/%s)",
+				float64(totalCopied)*100/float64(size),
+				humanize.Bytes(uint64(totalCopied)),
+				humanize.Bytes(uint64(size)))
+			lastLoggedProgress = totalCopied
 		}
 	}
 
 	// 计算最终摘要
 	actualDigest := digest.NewDigestFromBytes(digest.SHA256, hasher.Sum(nil))
-	logrus.Infof("流式传输完成，总共传输: %d 字节", totalCopied)
 
 	// 检查摘要是否匹配
 	if expectedDigest != "" && expectedDigest != actualDigest {
-		return fmt.Errorf("摘要不匹配，期望: %s，实际: %s", expectedDigest, actualDigest)
+		return fmt.Errorf("摘要不匹配: 期望 %s, 实际 %s", expectedDigest, actualDigest)
 	}
 
-	// 检查大小是否匹配，但只发出警告而不中断操作
+	// 检查大小是否匹配
 	if size > 0 && size != totalCopied {
-		logrus.Warnf("大小不匹配，期望: %d，实际: %d，将使用实际大小", size, totalCopied)
+		logrus.Warnf("大小不匹配: 期望 %d 字节, 实际 %d 字节, 将使用实际大小", size, totalCopied)
 	}
 
 	// 提交内容
 	if err := targetWriter.Commit(ctx, totalCopied, actualDigest); err != nil {
-		return errors.Wrap(err, "commit target content")
+		return errors.Wrap(err, "提交内容失败")
 	}
 
-	logrus.Infof("成功提交目标内容，摘要: %s", actualDigest)
+	logrus.Infof("流式传输完成: %s, 摘要: %s", humanize.Bytes(uint64(totalCopied)), actualDigest)
 	return nil
 }
 
@@ -446,8 +402,288 @@ func newStreamContext(ctx context.Context) context.Context {
 
 // enableStreamTransfer 检查是否应该启用流式传输
 func enableStreamTransfer(opt Opt) bool {
-	// 可以根据实际情况添加更多的条件判断
 	return opt.PushChunkSize > 0
+}
+
+// httpModeManager 管理HTTP模式切换的线程安全的实用工具
+type httpModeManager struct {
+	mu       sync.Mutex
+	enabled  bool
+	provider *provider.Provider
+}
+
+// newHTTPModeManager 创建一个新的HTTP模式管理器
+func newHTTPModeManager(pvd *provider.Provider) *httpModeManager {
+	return &httpModeManager{
+		provider: pvd,
+	}
+}
+
+// switchToHTTP 切换到HTTP模式，如果已经是HTTP模式则不做任何事情
+func (m *httpModeManager) switchToHTTP() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.enabled {
+		logrus.Info("全局切换到HTTP模式")
+		m.provider.UsePlainHTTP()
+		m.enabled = true
+	}
+}
+
+// isEnabled 检查是否已启用HTTP模式
+func (m *httpModeManager) isEnabled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.enabled
+}
+
+// streamTransferManager 管理流式传输的组件
+type streamTransferManager struct {
+	provider    *provider.Provider
+	httpManager *httpModeManager
+	sourceRef   string
+	targetRef   string
+	opt         Opt
+	// 避免存储接口类型，直接存储操作所需的组件
+	sourceFetcher remotes.Fetcher
+	targetPusher  remotes.Pusher
+}
+
+// newStreamTransferManager 创建流式传输管理器
+func newStreamTransferManager(ctx context.Context, pvd *provider.Provider, httpManager *httpModeManager, opt Opt) (*streamTransferManager, error) {
+	// 为源准备解析器
+	sourceResolver, err := pvd.Resolver(opt.Source)
+	if err != nil {
+		return nil, errors.Wrap(err, "获取源解析器")
+	}
+
+	// 为目标准备解析器
+	targetResolver, err := pvd.Resolver(opt.Target)
+	if err != nil {
+		return nil, errors.Wrap(err, "获取目标解析器")
+	}
+
+	// 解析引用获取名称
+	sourceName, _, err := sourceResolver.Resolve(ctx, opt.Source)
+	if err != nil {
+		return nil, errors.Wrap(err, "解析源引用")
+	}
+
+	// 获取源镜像的拉取器
+	sourceFetcher, err := sourceResolver.Fetcher(ctx, sourceName)
+	if err != nil {
+		return nil, errors.Wrap(err, "创建源拉取器")
+	}
+
+	// 获取目标镜像的推送器
+	targetPusher, err := targetResolver.Pusher(ctx, opt.Target)
+	if err != nil {
+		return nil, errors.Wrap(err, "创建目标推送器")
+	}
+
+	return &streamTransferManager{
+		sourceFetcher: sourceFetcher,
+		targetPusher:  targetPusher,
+		httpManager:   httpManager,
+		provider:      pvd,
+		sourceRef:     opt.Source,
+		targetRef:     opt.Target,
+		opt:           opt,
+	}, nil
+}
+
+// refreshPusher 在需要时刷新推送器（如切换到HTTP模式后）
+func (m *streamTransferManager) refreshPusher(ctx context.Context) error {
+	// 获取新的解析器
+	resolver, err := m.provider.Resolver(m.targetRef)
+	if err != nil {
+		return errors.Wrap(err, "获取新解析器")
+	}
+
+	// 获取新的推送器
+	newPusher, err := resolver.Pusher(ctx, m.targetRef)
+	if err != nil {
+		return errors.Wrap(err, "创建新推送器")
+	}
+
+	// 更新推送器
+	m.targetPusher = newPusher
+	return nil
+}
+
+// pushContent 推送内容，处理HTTP/HTTPS切换和已存在内容的逻辑
+func (m *streamTransferManager) pushContent(ctx context.Context, desc ocispec.Descriptor, reader io.Reader) error {
+	writer, err := m.targetPusher.Push(ctx, desc)
+	if err != nil {
+		// 如果内容已存在，直接返回成功
+		if containerdErrdefs.IsAlreadyExists(err) {
+			logrus.Infof("内容已存在: %s", desc.Digest)
+			return nil
+		}
+
+		// 检查是否需要切换到HTTP模式
+		if errdefs.NeedsRetryWithHTTP(err) {
+			logrus.Warn("切换到HTTP模式重试")
+			m.httpManager.switchToHTTP()
+
+			// 刷新推送器
+			if err := m.refreshPusher(ctx); err != nil {
+				return err
+			}
+
+			// 重试推送
+			writer, err = m.targetPusher.Push(ctx, desc)
+			if err != nil {
+				if containerdErrdefs.IsAlreadyExists(err) {
+					logrus.Infof("内容已存在: %s", desc.Digest)
+					return nil
+				}
+				return errors.Wrap(err, "HTTP模式推送失败")
+			}
+		} else {
+			return errors.Wrap(err, "推送失败")
+		}
+	}
+
+	if writer == nil {
+		// 内容已存在，无需传输
+		return nil
+	}
+
+	// 进行流式传输
+	if err := trueStreamCopy(ctx, reader, writer, desc.Size, desc.Digest); err != nil {
+		return errors.Wrap(err, "流式传输失败")
+	}
+
+	return nil
+}
+
+// streamTransferLayer 流式传输单个层
+func (m *streamTransferManager) streamTransferLayer(ctx context.Context, desc ocispec.Descriptor, info string) error {
+	logrus.Infof("开始流式传输 %s: %s，大小: %s",
+		info, desc.Digest, humanize.Bytes(uint64(desc.Size)))
+
+	// 获取源内容
+	rc, err := m.sourceFetcher.Fetch(ctx, desc)
+	if err != nil {
+		return errors.Wrap(err, fmt.Sprintf("获取%s失败", info))
+	}
+	defer rc.Close()
+
+	// 推送到目标
+	if err := m.pushContent(ctx, desc, rc); err != nil {
+		return err
+	}
+
+	logrus.Infof("完成流式传输 %s: %s", info, desc.Digest)
+	return nil
+}
+
+// streamPlatformManifest 处理单个平台的清单传输
+func (m *streamTransferManager) streamPlatformManifest(ctx context.Context, manifestDesc ocispec.Descriptor) (ocispec.Descriptor, error) {
+	platformStr := getPlatform(manifestDesc.Platform)
+	logrus.Infof("[%s] 开始处理平台清单", platformStr)
+
+	// 获取清单内容
+	rc, err := m.sourceFetcher.Fetch(ctx, manifestDesc)
+	if err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "获取清单失败")
+	}
+	defer rc.Close()
+
+	// 读取清单内容
+	manifestBytes, err := io.ReadAll(rc)
+	if err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "读取清单失败")
+	}
+
+	// 解析清单
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "解析清单失败")
+	}
+
+	// 先传输配置文件
+	if err := m.streamTransferLayer(ctx, manifest.Config, "配置文件"); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	// 创建一个等待组，用于等待所有层处理完成
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(provider.LayerConcurrentLimit) // 设置最大并发数
+
+	// 处理每一层
+	for i, layer := range manifest.Layers {
+		i, layer := i, layer // 避免闭包问题
+		eg.Go(func() error {
+			layerInfo := fmt.Sprintf("第 %d/%d 层", i+1, len(manifest.Layers))
+			return m.streamTransferLayer(egCtx, layer, layerInfo)
+		})
+	}
+
+	// 等待所有层处理完成
+	if err := eg.Wait(); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	// 最后推送清单
+	if err := m.pushContent(ctx, manifestDesc, bytes.NewReader(manifestBytes)); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	logrus.Infof("[%s] 完成平台清单处理", platformStr)
+	return manifestDesc, nil
+}
+
+// streamManifestList 处理多平台清单列表的传输
+func (m *streamTransferManager) streamManifestList(ctx context.Context, indexDesc ocispec.Descriptor, platformDescs []ocispec.Descriptor) error {
+	if len(platformDescs) <= 1 {
+		return nil // 单平台不需要处理索引
+	}
+
+	// 获取源索引内容
+	rc, err := m.sourceFetcher.Fetch(ctx, indexDesc)
+	if err != nil {
+		return errors.Wrap(err, "获取索引失败")
+	}
+	defer rc.Close()
+
+	// 读取索引内容
+	indexBytes, err := io.ReadAll(rc)
+	if err != nil {
+		return errors.Wrap(err, "读取索引失败")
+	}
+
+	// 解析索引
+	var index ocispec.Index
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		return errors.Wrap(err, "解析索引失败")
+	}
+
+	// 更新索引中的清单引用
+	index.Manifests = platformDescs
+
+	// 重新序列化索引
+	updatedIndexBytes, err := json.Marshal(index)
+	if err != nil {
+		return errors.Wrap(err, "序列化更新后的索引失败")
+	}
+
+	// 创建更新后的索引描述符
+	updatedIndexDesc := ocispec.Descriptor{
+		Digest:    digest.FromBytes(updatedIndexBytes),
+		Size:      int64(len(updatedIndexBytes)),
+		MediaType: indexDesc.MediaType,
+	}
+
+	// 推送更新后的索引
+	if err := m.pushContent(ctx, updatedIndexDesc, bytes.NewReader(updatedIndexBytes)); err != nil {
+		return errors.Wrap(err, "推送索引失败")
+	}
+
+	logrus.Infof("完成镜像索引推送: %s", updatedIndexDesc.Digest)
+	return nil
 }
 
 // Copy copies an image from the source to the target.
@@ -490,23 +726,6 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// 添加全局HTTP模式标志和互斥锁
-	var (
-		httpModeMutex   sync.Mutex
-		httpModeEnabled bool = false
-	)
-
-	// 设置HTTP模式的辅助函数
-	setHTTPMode := func() {
-		httpModeMutex.Lock()
-		defer httpModeMutex.Unlock()
-		if !httpModeEnabled {
-			logrus.Info("全局切换到HTTP模式")
-			pvd.UsePlainHTTP()
-			httpModeEnabled = true
-		}
-	}
-
 	// 检查是否启用流式传输
 	useStream := enableStreamTransfer(opt)
 	if useStream {
@@ -515,13 +734,17 @@ func Copy(ctx context.Context, opt Opt) error {
 		logrus.Info("使用传统传输模式（先拉取后推送）")
 	}
 
+	// 创建HTTP模式管理器
+	httpManager := newHTTPModeManager(pvd)
+
 	isLocalSource, inputPath, err := getLocalPath(opt.Source)
 	if err != nil {
-		return errors.Wrap(err, "parse source path")
+		return errors.Wrap(err, "解析源路径")
 	}
+
 	var source string
 	if isLocalSource {
-		logrus.Infof("importing source image from %s", inputPath)
+		logrus.Infof("从本地路径导入源镜像: %s", inputPath)
 
 		f, err := os.Open(inputPath)
 		if err != nil {
@@ -536,356 +759,102 @@ func Copy(ctx context.Context, opt Opt) error {
 		defer ds.Close()
 
 		if source, err = pvd.Import(ctx, ds); err != nil {
-			return errors.Wrap(err, "import source image")
+			return errors.Wrap(err, "导入源镜像")
 		}
-		logrus.Infof("imported source image %s", source)
+		logrus.Infof("已导入源镜像: %s", source)
 	} else {
 		sourceNamed, err := docker.ParseDockerRef(opt.Source)
 		if err != nil {
-			return errors.Wrap(err, "parse source reference")
+			return errors.Wrap(err, "解析源引用")
 		}
 		source = sourceNamed.String()
 
 		if useStream {
-			// 流式传输模式：只获取最小必要的信息（清单和索引）
-			// 统计一下这一段时间
+			// 流式传输模式：只获取最小必要的信息
 			start := time.Now()
 			logrus.Infof("获取镜像 %s 的基本信息", source)
-			if err := pvd.FetchImageInfo(ctx, source); err != nil {
-				if errdefs.NeedsRetryWithHTTP(err) {
-					setHTTPMode()
-					if err := pvd.FetchImageInfo(ctx, source); err != nil {
-						return errors.Wrap(err, "获取镜像信息失败")
-					}
-				} else {
-					return errors.Wrap(err, "获取镜像信息失败")
-				}
+
+			err := pvd.FetchImageInfo(ctx, source)
+			if err != nil && errdefs.NeedsRetryWithHTTP(err) {
+				httpManager.switchToHTTP()
+				err = pvd.FetchImageInfo(ctx, source)
 			}
+
+			if err != nil {
+				return errors.Wrap(err, "获取镜像信息失败")
+			}
+
 			elapsed := time.Since(start)
-			logrus.Infof("获取镜像 %s 的基本信息耗时: %s", source, elapsed)
-			logrus.Infof("成功获取镜像 %s 的基本信息", source)
+			logrus.Infof("获取镜像基本信息耗时: %s", elapsed)
 		} else {
 			// 传统模式：拉取全部数据
-			logrus.Infof("拉取源镜像 %s", source)
-			if err := pvd.Pull(ctx, source); err != nil {
-				if errdefs.NeedsRetryWithHTTP(err) {
-					setHTTPMode()
-					if err := pvd.Pull(ctx, source); err != nil {
-						return errors.Wrap(err, "拉取镜像失败")
-					}
-				} else {
-					return errors.Wrap(err, "拉取源镜像")
-				}
+			logrus.Infof("拉取源镜像: %s", source)
+
+			err := pvd.Pull(ctx, source)
+			if err != nil && errdefs.NeedsRetryWithHTTP(err) {
+				httpManager.switchToHTTP()
+				err = pvd.Pull(ctx, source)
 			}
-			logrus.Infof("已完成拉取源镜像 %s", source)
+
+			if err != nil {
+				return errors.Wrap(err, "拉取源镜像失败")
+			}
+
+			logrus.Infof("已完成拉取源镜像: %s", source)
 		}
 	}
 
 	targetNamed, err := docker.ParseDockerRef(opt.Target)
 	if err != nil {
-		return errors.Wrap(err, "parse target reference")
+		return errors.Wrap(err, "解析目标引用")
 	}
 	target := targetNamed.String()
 
-	// 先获取源镜像的索引信息
+	// 获取源镜像的索引信息
 	sourceImage, err := pvd.Image(ctx, source)
 	if err != nil {
-		return errors.Wrap(err, "find image from store")
+		return errors.Wrap(err, "查找镜像")
 	}
 
 	// 获取所有平台的清单
 	sourceDescs, err := utils.GetManifests(ctx, pvd.ContentStore(), *sourceImage, platformMC)
 	if err != nil {
-		return errors.Wrap(err, "get image manifests")
+		return errors.Wrap(err, "获取镜像清单")
 	}
 	targetDescs := make([]ocispec.Descriptor, len(sourceDescs))
 
 	// 如果启用了流式传输，使用流式传输模式
 	if useStream && !isLocalSource {
 		logrus.Info("开始流式传输镜像")
+		streamStartTime := time.Now()
 
-		// 为源准备解析器
-		sourceResolver, err := pvd.Resolver(opt.Source)
+		// 创建流式传输管理器
+		streamManager, err := newStreamTransferManager(ctx, pvd, httpManager, opt)
 		if err != nil {
-			return errors.Wrap(err, "get source resolver")
+			return err
 		}
-
-		// 为目标准备解析器
-		targetResolver, err := pvd.Resolver(opt.Target)
-		if err != nil {
-			return errors.Wrap(err, "get target resolver")
-		}
-
-		// 在这里添加进度统计
-		var successCount int32
 
 		// 为每个平台的清单创建流式传输
 		var wg sync.WaitGroup
 		errCh := make(chan error, len(sourceDescs))
-
-		// 记录开始时间
-		streamStartTime := time.Now()
+		var successCount int32
 
 		for idx, sourceDesc := range sourceDescs {
 			wg.Add(1)
 			go func(idx int, sourceDesc ocispec.Descriptor) {
 				defer wg.Done()
 
-				platformStr := getPlatform(sourceDesc.Platform)
-				logrus.Infof("[%s] 开始处理平台清单", platformStr)
-
 				// 创建流式上下文
 				streamCtx := newStreamContext(ctx)
 
-				// 获取源镜像的拉取器
-				sourceFetcher, err := sourceResolver.Fetcher(streamCtx, source)
+				// 处理平台清单
+				targetDesc, err := streamManager.streamPlatformManifest(streamCtx, sourceDesc)
 				if err != nil {
-					errCh <- errors.Wrap(err, "create source fetcher")
-					return
-				}
-
-				// 获取目标镜像的推送器
-				targetPusher, err := targetResolver.Pusher(streamCtx, target)
-				if err != nil {
-					errCh <- errors.Wrap(err, "create target pusher")
-					return
-				}
-
-				// 获取清单数据
-				logrus.Infof("[%s] 开始流式传输清单 %s", platformStr, sourceDesc.Digest)
-
-				// 读取清单内容
-				rc, err := sourceFetcher.Fetch(streamCtx, sourceDesc)
-				if err != nil {
-					errCh <- errors.Wrap(err, "fetch source manifest")
-					return
-				}
-				defer rc.Close()
-
-				manifestBytes, err := io.ReadAll(rc)
-				if err != nil {
-					errCh <- errors.Wrap(err, "read source manifest")
-					return
-				}
-
-				var manifest ocispec.Manifest
-				if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
-					errCh <- errors.Wrap(err, "unmarshal manifest")
-					return
-				}
-
-				// 创建一个子错误通道，用于配置和各层的并行处理
-				layerErrCh := make(chan error, len(manifest.Layers)+1) // +1 for config
-
-				// 并行处理配置文件和层
-				var layerWg sync.WaitGroup
-
-				// 处理配置文件
-				layerWg.Add(1)
-				go func() {
-					defer layerWg.Done()
-					logrus.Infof("[%s] 开始流式传输配置文件 %s，大小: %d 字节",
-						platformStr, manifest.Config.Digest, manifest.Config.Size)
-
-					// 通过闭包处理HTTP/HTTPS切换逻辑
-					handleConfigTransfer := func() error {
-						configRC, err := sourceFetcher.Fetch(streamCtx, manifest.Config)
-						if err != nil {
-							return errors.Wrap(err, "fetch config")
-						}
-						defer configRC.Close()
-
-						configWriter, err := targetPusher.Push(streamCtx, manifest.Config)
-						if err != nil {
-							if containerdErrdefs.IsAlreadyExists(err) {
-								logrus.Infof("[%s] 配置文件已存在于目标注册表", platformStr)
-								return nil
-							}
-
-							if errdefs.NeedsRetryWithHTTP(err) {
-								logrus.Warn("将目标注册表连接切换为HTTP (config)")
-								setHTTPMode()
-
-								// 重新获取解析器
-								newResolver, err := pvd.Resolver(opt.Target)
-								if err != nil {
-									return errors.Wrap(err, "get new resolver for config")
-								}
-								targetResolver = newResolver
-
-								// 重新获取推送器
-								newPusher, err := targetResolver.Pusher(streamCtx, target)
-								if err != nil {
-									return errors.Wrap(err, "create new pusher for config")
-								}
-								targetPusher = newPusher
-
-								// 重试
-								configWriter, err = targetPusher.Push(streamCtx, manifest.Config)
-								if err != nil {
-									if containerdErrdefs.IsAlreadyExists(err) {
-										logrus.Infof("[%s] 配置文件已存在于目标注册表", platformStr)
-										return nil
-									}
-									return errors.Wrap(err, "push config after HTTP switch")
-								}
-							} else {
-								return errors.Wrap(err, "push config")
-							}
-						}
-
-						if configWriter != nil {
-							if err := trueStreamCopy(streamCtx, configRC, configWriter, manifest.Config.Size, manifest.Config.Digest); err != nil {
-								return errors.Wrap(err, "stream copy config")
-							}
-						}
-						return nil
-					}
-
-					if err := handleConfigTransfer(); err != nil {
-						layerErrCh <- err
-					}
-				}()
-
-				// 创建一个等待组，用于等待所有层处理完成
-				eg, egCtx := errgroup.WithContext(streamCtx)
-				eg.SetLimit(provider.LayerConcurrentLimit) // 设置最大并发数
-
-				// 处理每一层
-				for i, layer := range manifest.Layers {
-					i, layer := i, layer // 避免闭包问题
-					eg.Go(func() error {
-						logrus.Infof("[%s] 开始流式传输第 %d/%d 层 %s，大小: %d 字节",
-							platformStr, i+1, len(manifest.Layers), layer.Digest, layer.Size)
-
-						// 通过闭包处理HTTP/HTTPS切换逻辑
-						handleLayerTransfer := func() error {
-							layerRC, err := sourceFetcher.Fetch(egCtx, layer)
-							if err != nil {
-								return errors.Wrap(err, "fetch layer")
-							}
-							defer layerRC.Close()
-
-							layerWriter, err := targetPusher.Push(egCtx, layer)
-							if err != nil {
-								if containerdErrdefs.IsAlreadyExists(err) {
-									logrus.Infof("[%s] 第 %d/%d 层已存在于目标注册表",
-										platformStr, i+1, len(manifest.Layers))
-									return nil
-								}
-
-								if errdefs.NeedsRetryWithHTTP(err) {
-									logrus.Warn("将目标注册表连接切换为HTTP (layer)")
-									setHTTPMode()
-
-									// 重新获取解析器和推送器
-									newResolver, err := pvd.Resolver(opt.Target)
-									if err != nil {
-										return errors.Wrap(err, "get new resolver for layer")
-									}
-									targetResolver = newResolver
-
-									newPusher, err := targetResolver.Pusher(egCtx, target)
-									if err != nil {
-										return errors.Wrap(err, "create new pusher for layer")
-									}
-									targetPusher = newPusher
-
-									// 重试
-									layerWriter, err = targetPusher.Push(egCtx, layer)
-									if err != nil {
-										if containerdErrdefs.IsAlreadyExists(err) {
-											logrus.Infof("[%s] 第 %d/%d 层已存在于目标注册表",
-												platformStr, i+1, len(manifest.Layers))
-											return nil
-										}
-										return errors.Wrap(err, "push layer after HTTP switch")
-									}
-								} else {
-									return errors.Wrap(err, "push layer")
-								}
-							}
-
-							if layerWriter != nil {
-								if err := trueStreamCopy(egCtx, layerRC, layerWriter, layer.Size, layer.Digest); err != nil {
-									return errors.Wrap(err, "stream copy layer")
-								}
-							}
-
-							logrus.Infof("[%s] 完成流式传输第 %d/%d 层", platformStr, i+1, len(manifest.Layers))
-							return nil
-						}
-
-						return handleLayerTransfer()
-					})
-				}
-
-				// 等待所有层处理完成
-				if err := eg.Wait(); err != nil {
 					errCh <- err
 					return
 				}
 
-				// 检查是否有错误
-				select {
-				case err := <-layerErrCh:
-					errCh <- err
-					return
-				default:
-				}
-
-				// 最后推送清单
-				manifestWriter, err := targetPusher.Push(streamCtx, sourceDesc)
-				if err != nil {
-					if !containerdErrdefs.IsAlreadyExists(err) {
-						// 检查是否需要使用HTTP
-						if errdefs.NeedsRetryWithHTTP(err) {
-							logrus.Warn("将目标注册表连接切换为HTTP (manifest)")
-							setHTTPMode()
-
-							// 重新获取解析器
-							newResolver, err := pvd.Resolver(opt.Target)
-							if err != nil {
-								errCh <- errors.Wrap(err, "get new resolver for manifest")
-								return
-							}
-							targetResolver = newResolver
-
-							// 重新获取推送器
-							newPusher, err := targetResolver.Pusher(streamCtx, target)
-							if err != nil {
-								errCh <- errors.Wrap(err, "create new pusher for manifest")
-								return
-							}
-							targetPusher = newPusher
-
-							// 重试
-							manifestWriter, err = targetPusher.Push(streamCtx, sourceDesc)
-							if err != nil && !containerdErrdefs.IsAlreadyExists(err) {
-								errCh <- errors.Wrap(err, "push manifest after HTTP switch")
-								return
-							}
-						} else {
-							errCh <- errors.Wrap(err, "push manifest")
-							return
-						}
-					}
-				}
-
-				// 如果没有错误或者资源已存在，继续处理
-				if manifestWriter != nil {
-					if _, err := manifestWriter.Write(manifestBytes); err != nil {
-						errCh <- errors.Wrap(err, "write manifest")
-						return
-					}
-					if err := manifestWriter.Commit(streamCtx, sourceDesc.Size, sourceDesc.Digest); err != nil {
-						errCh <- errors.Wrap(err, "commit manifest")
-						return
-					}
-				}
-
-				targetDescs[idx] = sourceDesc
-				logrus.Infof("[%s] 完成平台清单处理", platformStr)
+				targetDescs[idx] = targetDesc
 				atomic.AddInt32(&successCount, 1)
 			}(idx, sourceDesc)
 		}
@@ -893,10 +862,6 @@ func Copy(ctx context.Context, opt Opt) error {
 		wg.Wait()
 
 		logrus.Infof("已完成 %d/%d 个平台清单的流式传输", successCount, len(sourceDescs))
-
-		// 计算并打印总耗时
-		streamElapsed := time.Since(streamStartTime)
-		logrus.Infof("流式传输总耗时: %s", streamElapsed)
 
 		// 检查是否有错误
 		select {
@@ -909,104 +874,15 @@ func Copy(ctx context.Context, opt Opt) error {
 		if len(targetDescs) > 1 && (sourceImage.MediaType == ocispec.MediaTypeImageIndex ||
 			sourceImage.MediaType == images.MediaTypeDockerSchema2ManifestList) {
 
-			// 创建一个新的fetch上下文
-			indexFetchCtx := newStreamContext(ctx)
-
-			// 获取源索引文件
-			indexFetcher, err := sourceResolver.Fetcher(indexFetchCtx, source)
-			if err != nil {
-				return errors.Wrap(err, "create index fetcher")
-			}
-
-			indexRC, err := indexFetcher.Fetch(indexFetchCtx, *sourceImage)
-			if err != nil {
-				return errors.Wrap(err, "fetch index")
-			}
-			defer indexRC.Close()
-
-			indexBytes, err := io.ReadAll(indexRC)
-			if err != nil {
-				return errors.Wrap(err, "read index")
-			}
-
-			var index ocispec.Index
-			if err := json.Unmarshal(indexBytes, &index); err != nil {
-				return errors.Wrap(err, "unmarshal index")
-			}
-
-			// 更新索引中的清单引用
-			index.Manifests = targetDescs
-
-			// 重新序列化索引
-			updatedIndexBytes, err := json.Marshal(index)
-			if err != nil {
-				return errors.Wrap(err, "marshal updated index")
-			}
-
-			// 推送更新后的索引
-			indexDesc := *sourceImage
-			indexDesc.Size = int64(len(updatedIndexBytes))
-			indexDesc.Digest = digest.FromBytes(updatedIndexBytes)
-
-			// 获取索引文件的推送器
-			indexPusher, err := targetResolver.Pusher(indexFetchCtx, target)
-			if err != nil {
-				return errors.Wrap(err, "create index pusher")
-			}
-
-			// 处理索引推送
-			handleIndexPush := func() error {
-				indexWriter, err := indexPusher.Push(indexFetchCtx, indexDesc)
-				if err != nil {
-					if containerdErrdefs.IsAlreadyExists(err) {
-						return nil
-					}
-
-					if errdefs.NeedsRetryWithHTTP(err) {
-						logrus.Warn("将目标注册表连接切换为HTTP (index)")
-						setHTTPMode()
-
-						// 重新获取解析器和推送器
-						newResolver, err := pvd.Resolver(opt.Target)
-						if err != nil {
-							return errors.Wrap(err, "get new index resolver")
-						}
-						targetResolver = newResolver
-
-						newPusher, err := targetResolver.Pusher(indexFetchCtx, target)
-						if err != nil {
-							return errors.Wrap(err, "create new index pusher")
-						}
-						indexPusher = newPusher
-
-						// 重试
-						indexWriter, err = indexPusher.Push(indexFetchCtx, indexDesc)
-						if err != nil && !containerdErrdefs.IsAlreadyExists(err) {
-							return errors.Wrap(err, "push index after HTTP switch")
-						}
-					} else {
-						return errors.Wrap(err, "push index")
-					}
-				}
-
-				// 如果没有错误或者资源已存在，继续处理
-				if indexWriter != nil {
-					if _, err := indexWriter.Write(updatedIndexBytes); err != nil {
-						return errors.Wrap(err, "write index")
-					}
-					if err := indexWriter.Commit(indexFetchCtx, indexDesc.Size, indexDesc.Digest); err != nil {
-						return errors.Wrap(err, "commit index")
-					}
-				}
-				return nil
-			}
-
-			if err := handleIndexPush(); err != nil {
+			indexCtx := newStreamContext(ctx)
+			if err := streamManager.streamManifestList(indexCtx, *sourceImage, targetDescs); err != nil {
 				return err
 			}
-
-			logrus.Infof("流式传输镜像索引 %s 已完成", target)
 		}
+
+		// 计算并打印总耗时
+		streamElapsed := time.Since(streamStartTime)
+		logrus.Infof("流式传输总耗时: %s", streamElapsed)
 
 		return nil
 	}
@@ -1027,11 +903,11 @@ func Copy(ctx context.Context, opt Opt) error {
 				if bkd != nil {
 					descs, _targetDesc, err := pushBlobFromBackend(ctx, pvd, bkd, sourceDesc, opt)
 					if err != nil {
-						errCh <- errors.Wrap(err, "get resolver")
+						errCh <- errors.Wrap(err, "获取解析器")
 						continue
 					}
 					if _targetDesc == nil {
-						logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Warnf("%s is not a nydus image", source)
+						logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Warnf("%s 不是Nydus镜像", source)
 					} else {
 						targetDesc = _targetDesc
 						store := newStore(pvd.ContentStore(), descs)
@@ -1041,17 +917,14 @@ func Copy(ctx context.Context, opt Opt) error {
 				targetDescs[idx] = *targetDesc
 
 				logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Infof("推送目标清单 %s", targetDesc.Digest)
-				if err := pvd.Push(ctx, *targetDesc, target); err != nil {
-					if errdefs.NeedsRetryWithHTTP(err) {
-						setHTTPMode()
-						if err := pvd.Push(ctx, *targetDesc, target); err != nil {
-							errCh <- errors.Wrap(err, "try to push image manifest")
-							continue
-						}
-					} else {
-						errCh <- errors.Wrap(err, "push target image manifest")
-						continue
-					}
+				err := pvd.Push(ctx, *targetDesc, target)
+				if err != nil && errdefs.NeedsRetryWithHTTP(err) {
+					httpManager.switchToHTTP()
+					err = pvd.Push(ctx, *targetDesc, target)
+				}
+				if err != nil {
+					errCh <- errors.Wrap(err, "推送目标清单失败")
+					continue
 				}
 				logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Infof("推送目标清单 %s 已完成", targetDesc.Digest)
 			}
@@ -1074,24 +947,24 @@ func Copy(ctx context.Context, opt Opt) error {
 		sourceImage.MediaType == images.MediaTypeDockerSchema2ManifestList) {
 		targetIndex := ocispec.Index{}
 		if _, err := utils.ReadJSON(ctx, pvd.ContentStore(), &targetIndex, *sourceImage); err != nil {
-			return errors.Wrap(err, "read source manifest list")
+			return errors.Wrap(err, "读取源清单列表")
 		}
 		targetIndex.Manifests = targetDescs
 
 		targetImage, err := utils.WriteJSON(ctx, pvd.ContentStore(), targetIndex, *sourceImage, target, nil)
 		if err != nil {
-			return errors.Wrap(err, "write target manifest list")
+			return errors.Wrap(err, "写入目标清单列表")
 		}
-		if err := pvd.Push(ctx, *targetImage, target); err != nil {
-			if errdefs.NeedsRetryWithHTTP(err) {
-				setHTTPMode()
-				if err := pvd.Push(ctx, *targetImage, target); err != nil {
-					return errors.Wrap(err, "try to push image")
-				}
-			} else {
-				return errors.Wrap(err, "push target image")
-			}
+
+		err = pvd.Push(ctx, *targetImage, target)
+		if err != nil && errdefs.NeedsRetryWithHTTP(err) {
+			httpManager.switchToHTTP()
+			err = pvd.Push(ctx, *targetImage, target)
 		}
+		if err != nil {
+			return errors.Wrap(err, "推送目标镜像失败")
+		}
+
 		logrus.Infof("推送镜像 %s 已完成", target)
 	}
 
