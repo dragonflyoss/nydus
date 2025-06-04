@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -81,6 +82,9 @@ type Opt struct {
 	Platforms    string
 
 	OutputJSON string
+
+	PushRetryCount int
+	PushRetryDelay string
 }
 
 type SourceBackendConfig struct {
@@ -124,6 +128,15 @@ func Convert(ctx context.Context, opt Opt) error {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
+
+	// Parse retry delay
+	retryDelay, err := time.ParseDuration(opt.PushRetryDelay)
+	if err != nil {
+		return errors.Wrap(err, "parse push retry delay")
+	}
+
+	// Set push retry configuration
+	pvd.SetPushRetryConfig(opt.PushRetryCount, retryDelay)
 
 	cvt, err := converter.New(
 		converter.WithProvider(pvd),

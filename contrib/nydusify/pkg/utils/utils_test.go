@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -243,7 +244,7 @@ func TestWithRetry(t *testing.T) {
 	err := WithRetry(func() error {
 		_, err := http.Get("http://localhost:5000")
 		return err
-	})
+	}, 3, 5*time.Second)
 	require.ErrorIs(t, err, syscall.ECONNREFUSED)
 }
 

@@ -432,6 +432,18 @@ func main() {
 					Usage:   "Enable plain http for Nydus image push",
 					EnvVars: []string{"PLAIN_HTTP"},
 				},
+				&cli.IntFlag{
+					Name:    "push-retry-count",
+					Value:   3,
+					Usage:   "Number of retries when pushing to registry fails",
+					EnvVars: []string{"PUSH_RETRY_COUNT"},
+				},
+				&cli.StringFlag{
+					Name:    "push-retry-delay",
+					Value:   "5s",
+					Usage:   "Delay between push retries (e.g. 5s, 1m, 1h)",
+					EnvVars: []string{"PUSH_RETRY_DELAY"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
@@ -530,8 +542,10 @@ func main() {
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
 
-					OutputJSON:    c.String("output-json"),
-					WithPlainHTTP: c.Bool("plain-http"),
+					OutputJSON:     c.String("output-json"),
+					WithPlainHTTP:  c.Bool("plain-http"),
+					PushRetryCount: c.Int("push-retry-count"),
+					PushRetryDelay: c.String("push-retry-delay"),
 				}
 
 				return converter.Convert(context.Background(), opt)
@@ -1443,7 +1457,8 @@ func getGlobalFlags() []cli.Flag {
 			Required: false,
 			Value:    false,
 			Usage:    "Enable debug log level, overwrites the 'log-level' option",
-			EnvVars:  []string{"DEBUG_LOG_LEVEL"}},
+			EnvVars:  []string{"DEBUG_LOG_LEVEL"},
+		},
 		&cli.StringFlag{
 			Name:    "log-level",
 			Aliases: []string{"l"},
