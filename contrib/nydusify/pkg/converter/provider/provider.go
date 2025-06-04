@@ -28,20 +28,23 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 var LayerConcurrentLimit = 5
 
 type Provider struct {
-	mutex        sync.Mutex
-	usePlainHTTP bool
-	images       map[string]*ocispec.Descriptor
-	store        content.Store
-	hosts        remote.HostFunc
-	platformMC   platforms.MatchComparer
-	cacheSize    int
-	cacheVersion string
-	chunkSize    int64
+	mutex          sync.Mutex
+	usePlainHTTP   bool
+	images         map[string]*ocispec.Descriptor
+	store          content.Store
+	hosts          remote.HostFunc
+	platformMC     platforms.MatchComparer
+	cacheSize      int
+	cacheVersion   string
+	chunkSize      int64
+	pushRetryCount int
+	pushRetryDelay time.Duration
 }
 
 func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64) (*Provider, error) {
@@ -55,13 +58,15 @@ func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string
 	}
 
 	return &Provider{
-		images:       make(map[string]*ocispec.Descriptor),
-		store:        store,
-		hosts:        hosts,
-		cacheSize:    int(cacheSize),
-		platformMC:   platformMC,
-		cacheVersion: cacheVersion,
-		chunkSize:    chunkSize,
+		images:         make(map[string]*ocispec.Descriptor),
+		store:          store,
+		hosts:          hosts,
+		cacheSize:      int(cacheSize),
+		platformMC:     platformMC,
+		cacheVersion:   cacheVersion,
+		chunkSize:      chunkSize,
+		pushRetryCount: 3,
+		pushRetryDelay: 5 * time.Second,
 	}, nil
 }
 
@@ -142,6 +147,14 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 	return nil
 }
 
+// SetPushRetryConfig sets the retry configuration for push operations
+func (pvd *Provider) SetPushRetryConfig(count int, delay time.Duration) {
+	pvd.mutex.Lock()
+	defer pvd.mutex.Unlock()
+	pvd.pushRetryCount = count
+	pvd.pushRetryDelay = delay
+}
+
 func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref string) error {
 	resolver, err := pvd.Resolver(ref)
 	if err != nil {
@@ -153,7 +166,28 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 		MaxConcurrentUploadedLayers: LayerConcurrentLimit,
 	}
 
-	return push(ctx, pvd.store, rc, desc, ref)
+	// Add retry logic
+	var lastErr error
+	for i := 0; i < pvd.pushRetryCount; i++ {
+		err := push(ctx, pvd.store, rc, desc, ref)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if i < pvd.pushRetryCount-1 {
+			logrus.WithError(err).
+				WithField("attempt", i+1).
+				WithField("total_attempts", pvd.pushRetryCount).
+				WithField("retry_delay", pvd.pushRetryDelay).
+				Warn("Push failed, will retry")
+			time.Sleep(pvd.pushRetryDelay)
+		} else {
+			logrus.WithError(err).
+				WithField("total_attempts", pvd.pushRetryCount).
+				Error("Push failed after all attempts")
+		}
+	}
+	return lastErr
 }
 
 func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, error) {
