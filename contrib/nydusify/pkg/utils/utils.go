@@ -30,9 +30,6 @@ import (
 const SupportedOS = "linux"
 const SupportedArch = runtime.GOARCH
 
-const defaultRetryAttempts = 3
-const defaultRetryInterval = time.Second * 2
-
 const (
 	PlatformArchAMD64 string = "amd64"
 	PlatformArchARM64 string = "arm64"
@@ -61,23 +58,49 @@ func GetNydusFsVersionOrDefault(annotations map[string]string, defaultVersion Fs
 	return defaultVersion
 }
 
-func WithRetry(op func() error) error {
-	var err error
-	attempts := defaultRetryAttempts
-	for attempts > 0 {
-		attempts--
-		if err != nil {
-			if RetryWithHTTP(err) {
-				return err
-			}
-			logrus.Warnf("Retry due to error: %s", err)
-			time.Sleep(defaultRetryInterval)
-		}
-		if err = op(); err == nil {
-			break
-		}
+// WithRetry retries the given function with the specified retry count and delay.
+// If retryCount is 0, it will use the default value of 3.
+// If retryDelay is 0, it will use the default value of 5 seconds.
+func WithRetry(f func() error, retryCount int, retryDelay time.Duration) error {
+	const (
+		defaultRetryCount = 3
+		defaultRetryDelay = 5 * time.Second
+	)
+
+	if retryCount <= 0 {
+		retryCount = defaultRetryCount
 	}
-	return err
+	if retryDelay <= 0 {
+		retryDelay = defaultRetryDelay
+	}
+
+	var lastErr error
+	for i := 0; i < retryCount; i++ {
+		if lastErr != nil {
+			if !RetryWithHTTP(lastErr) {
+				return lastErr
+			}
+			logrus.WithError(lastErr).
+				WithField("attempt", i+1).
+				WithField("total_attempts", retryCount).
+				WithField("retry_delay", retryDelay.String()).
+				Warn("Operation failed, will retry")
+			time.Sleep(retryDelay)
+		}
+		if err := f(); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+
+	if lastErr != nil {
+		logrus.WithError(lastErr).
+			WithField("total_attempts", retryCount).
+			Error("Operation failed after all attempts")
+	}
+
+	return lastErr
 }
 
 func RetryWithAttempts(handle func() error, attempts int) error {
@@ -98,7 +121,22 @@ func RetryWithAttempts(handle func() error, attempts int) error {
 }
 
 func RetryWithHTTP(err error) bool {
-	return err != nil && (errors.Is(err, http.ErrSchemeMismatch) || errors.Is(err, syscall.ECONNREFUSED)) || errdefs.NeedsRetryWithHTTP(err)
+	if err == nil {
+		return false
+	}
+
+	// Check for HTTP status code errors
+	if strings.Contains(err.Error(), "503 Service Unavailable") ||
+		strings.Contains(err.Error(), "502 Bad Gateway") ||
+		strings.Contains(err.Error(), "504 Gateway Timeout") ||
+		strings.Contains(err.Error(), "401 Unauthorized") {
+		return true
+	}
+
+	// Check for connection errors
+	return errors.Is(err, http.ErrSchemeMismatch) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errdefs.NeedsRetryWithHTTP(err)
 }
 
 func MarshalToDesc(data interface{}, mediaType string) (*ocispec.Descriptor, []byte, error) {

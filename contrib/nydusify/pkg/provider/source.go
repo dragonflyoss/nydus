@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd/mount"
 	"github.com/opencontainers/go-digest"
@@ -113,7 +114,7 @@ func (sl *defaultSourceLayer) Mount(ctx context.Context) ([]mount.Mount, func() 
 		}
 
 		return nil
-	}); err != nil {
+	}, 3, 5*time.Second); err != nil {
 		return nil, nil, err
 	}
 
