@@ -18,16 +18,15 @@ import (
 
 	"github.com/pkg/errors"
 
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
-	BlobPath              = "/content.v1/docker/registry/v2/blobs/%s/%s/%s/data"
-	ReposPath             = "/content.v1/docker/registry/v2/repositories"
-	ManifestPath          = "/_manifests/tags/%s/current/link"
-	ModelWeightMediaType  = "application/vnd.cnai.model.weight.v1.tar"
-	ModelDatasetMediaType = "application/vnd.cnai.model.dataset.v1.tar"
+	BlobPath     = "/content.v1/docker/registry/v2/blobs/%s/%s/%s/data"
+	ReposPath    = "/content.v1/docker/registry/v2/repositories"
+	ManifestPath = "/_manifests/tags/%s/current/link"
 )
 
 const (
@@ -35,8 +34,10 @@ const (
 )
 
 var mediaTypeChunkSizeMap = map[string]string{
-	ModelWeightMediaType:  "64MiB",
-	ModelDatasetMediaType: "64MiB",
+	modelspec.MediaTypeModelWeight:     "64MiB",
+	modelspec.MediaTypeModelWeightRaw:  "64MiB",
+	modelspec.MediaTypeModelDataset:    "64MiB",
+	modelspec.MediaTypeModelDatasetRaw: "64MiB",
 }
 
 var _ backend.Handler = &Handler{}
@@ -130,8 +131,10 @@ func setWeightChunkSize(chunkSize uint64) {
 	chunkSizeStr := humanize.IBytes(chunkSize)
 	// remove space in chunkSizeStr `16 Mib` -> `16Mib`
 	chunkSizeStr = strings.ReplaceAll(chunkSizeStr, " ", "")
-	mediaTypeChunkSizeMap[ModelWeightMediaType] = chunkSizeStr
-	mediaTypeChunkSizeMap[ModelDatasetMediaType] = chunkSizeStr
+	mediaTypeChunkSizeMap[modelspec.MediaTypeModelWeight] = chunkSizeStr
+	mediaTypeChunkSizeMap[modelspec.MediaTypeModelWeightRaw] = chunkSizeStr
+	mediaTypeChunkSizeMap[modelspec.MediaTypeModelDataset] = chunkSizeStr
+	mediaTypeChunkSizeMap[modelspec.MediaTypeModelDatasetRaw] = chunkSizeStr
 }
 
 func getChunkSizeByMediaType(mediaType string) string {
@@ -206,9 +209,29 @@ func (handler *Handler) Handle(_ context.Context, file backend.File) ([]backend.
 	}
 	defer f.Close()
 
-	files, err := readTarBlob(f)
+	isTar, err := validateTarFile(f)
 	if err != nil {
-		return nil, errors.Wrap(err, "read blob failed")
+		return nil, errors.Wrap(err, "validate tar file failed")
+	}
+
+	var files []fileInfo
+	if isTar {
+		fs, err := readTarBlob(f)
+		if err != nil {
+			return nil, errors.Wrap(err, "read blob failed")
+		}
+		files = fs
+	} else {
+		fm, err := f.Stat()
+		if err != nil {
+			return nil, errors.Wrap(err, "stat file failed")
+		}
+		files = append(files, fileInfo{
+			fm.Name(),
+			uint32(fm.Mode()),
+			uint64(fm.Size()),
+			0,
+		})
 	}
 
 	chunkSizeInInt, err := humanize.ParseBytes(chunkSize)
@@ -380,4 +403,45 @@ func readTarBlob(r io.ReadSeeker) ([]fileInfo, error) {
 		})
 	}
 	return files, nil
+}
+
+func readRawBlob(layer ocispec.Descriptor) ([]fileInfo, error) {
+	if !strings.HasSuffix(layer.MediaType, "raw") {
+		return nil, fmt.Errorf("invalid media type: %s", layer.MediaType)
+	}
+
+	path, ok := layer.Annotations[filePathKey]
+	if !ok || len(path) == 0 {
+		return nil, fmt.Errorf("invalid file path")
+	}
+
+	b, ok := layer.Annotations[modelspec.AnnotationFileMetadata]
+	if !ok || len(b) == 0 {
+		return nil, errors.Errorf("missing file metadata annotation")
+	}
+
+	var fm modelspec.FileMetadata
+	if err := json.Unmarshal([]byte(b), &fm); err != nil {
+		return nil, errors.Wrap(err, "unmarshal file metadata failed")
+	}
+	file := fileInfo{
+		name:   path,
+		mode:   fm.Mode,
+		size:   uint64(fm.Size),
+		offset: 0,
+	}
+	return []fileInfo{file}, nil
+}
+
+func validateTarFile(f *os.File) (bool, error) {
+	tr := tar.NewReader(f)
+	_, err := tr.Next()
+	if err != nil && err != io.EOF {
+		return false, nil
+	}
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false, errors.Wrap(err, "reset file pointer failed")
+	}
+	return true, nil
 }

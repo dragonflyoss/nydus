@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
@@ -26,7 +28,7 @@ import (
 type RemoteInterface interface {
 	Resolve(ctx context.Context) (*ocispec.Descriptor, error)
 	Pull(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadCloser, error)
-	ReadSeekCloser(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadSeekCloser, error)
+	ReadSeekCloser(ctx context.Context, desc ocispec.Descriptor, byDigest bool) (io.ReadSeekCloser, error)
 	WithHTTP()
 	MaybeWithHTTP(err error)
 }
@@ -177,14 +179,9 @@ func (handler *RemoteHandler) backend() (*backend.Backend, error) {
 func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descriptor, index int32) ([]backend.FileAttribute, error) {
 	logrus.Debugf("handle layer: %s", layer.Digest.String())
 	chunkSize := getChunkSizeByMediaType(layer.MediaType)
-	rsc, err := handler.remoter.ReadSeekCloser(ctx, layer, true)
+	files, err := handler.getFileInfo(ctx, layer)
 	if err != nil {
-		return nil, errors.Wrap(err, "read seek closer failed")
-	}
-	defer rsc.Close()
-	files, err := readTarBlob(rsc)
-	if err != nil {
-		return nil, errors.Wrap(err, "read tar blob failed")
+		return nil, errors.Wrap(err, "get file info failed")
 	}
 
 	var fileCrcList = FileCrcList{}
@@ -224,6 +221,31 @@ func (handler *RemoteHandler) handle(ctx context.Context, layer ocispec.Descript
 		}
 	}
 	return fileAttrs, nil
+}
+
+func (handler *RemoteHandler) getFileInfo(ctx context.Context, layer ocispec.Descriptor) ([]fileInfo, error) {
+	var files []fileInfo
+	if strings.HasSuffix(layer.MediaType, "tar") {
+		rsc, err := handler.remoter.ReadSeekCloser(ctx, layer, true)
+		if err != nil {
+			return nil, errors.Wrap(err, "read seek closer failed")
+		}
+		defer rsc.Close()
+		fs, err := readTarBlob(rsc)
+		if err != nil {
+			return nil, errors.Wrap(err, "read tar blob failed")
+		}
+		files = fs
+	} else if strings.HasSuffix(layer.MediaType, "raw") {
+		fs, err := readRawBlob(layer)
+		if err != nil {
+			return nil, errors.Wrap(err, "read raw blob failed")
+		}
+		files = fs
+	} else {
+		return nil, fmt.Errorf("unsupported layer media type: %s", layer.MediaType)
+	}
+	return files, nil
 }
 
 func hackFileWrapper(f *fileInfo) {
