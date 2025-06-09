@@ -22,7 +22,7 @@ import (
 type MockRemote struct {
 	ResolveFunc        func(ctx context.Context) (*ocispec.Descriptor, error)
 	PullFunc           func(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadCloser, error)
-	ReadSeekCloserFunc func(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadSeekCloser, error)
+	ReadSeekCloserFunc func(ctx context.Context, desc ocispec.Descriptor, byDigest bool) (io.ReadSeekCloser, error)
 	WithHTTPFunc       func()
 	MaybeWithHTTPFunc  func(err error)
 }
@@ -35,8 +35,8 @@ func (m *MockRemote) Pull(ctx context.Context, desc ocispec.Descriptor, plainHTT
 	return m.PullFunc(ctx, desc, plainHTTP)
 }
 
-func (m *MockRemote) ReadSeekCloser(ctx context.Context, desc ocispec.Descriptor, plainHTTP bool) (io.ReadSeekCloser, error) {
-	return m.ReadSeekCloserFunc(ctx, desc, plainHTTP)
+func (m *MockRemote) ReadSeekCloser(ctx context.Context, desc ocispec.Descriptor, byDigest bool) (io.ReadSeekCloser, error) {
+	return m.ReadSeekCloserFunc(ctx, desc, byDigest)
 }
 
 func (m *MockRemote) WithHTTP() {
@@ -55,7 +55,7 @@ func (r *readSeekCloser) Close() error {
 	return nil
 }
 
-func TestRemoteHandler_Handle(t *testing.T) {
+func TestRemoteHandler_HandleTar(t *testing.T) {
 	mockRemote := &MockRemote{
 		ResolveFunc: func(context.Context) (*ocispec.Descriptor, error) {
 			return &ocispec.Descriptor{}, nil
@@ -118,7 +118,7 @@ func TestRemoteHandler_Handle(t *testing.T) {
 		manifest: ocispec.Manifest{
 			Layers: []ocispec.Descriptor{
 				{
-					MediaType:   "test-media-type",
+					MediaType:   modelspec.MediaTypeModelDataset,
 					Digest:      "test-digest",
 					Annotations: annotations,
 				},
@@ -141,6 +141,82 @@ func TestRemoteHandler_Handle(t *testing.T) {
 	assert.Equal(t, 3, len(fileAttrs))
 	assert.Equal(t, fileCrcInfo.ChunkCrcs, fileAttrs[0].Crcs)
 	assert.Equal(t, "", fileAttrs[1].Crcs)
+
+	handler.manifest.Layers[0].Annotations = map[string]string{
+		filePathKey: "file1.txt",
+		crcsKey:     "0x1234,0x5678",
+	}
+	_, _, err = handler.Handle(context.Background())
+	assert.Error(t, err)
+}
+
+func TestRemoteHandler_HandleRaw(t *testing.T) {
+	mockRemote := &MockRemote{
+		ResolveFunc: func(context.Context) (*ocispec.Descriptor, error) {
+			return &ocispec.Descriptor{}, nil
+		},
+		PullFunc: func(context.Context, ocispec.Descriptor, bool) (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader([]byte("{}"))), nil
+		},
+		ReadSeekCloserFunc: func(context.Context, ocispec.Descriptor, bool) (io.ReadSeekCloser, error) {
+			return nil, nil
+		},
+		WithHTTPFunc:      func() {},
+		MaybeWithHTTPFunc: func(error) {},
+	}
+
+	fileCrcInfo := &FileCrcInfo{
+		ChunkCrcs: "0x1234,0x5678",
+		FilePath:  "file1.txt",
+	}
+	fileCrcList := &FileCrcList{
+		Files: []FileCrcInfo{
+			*fileCrcInfo,
+		},
+	}
+	fm := modelspec.FileMetadata{
+		Name: "file1.txt",
+		Mode: 0644,
+		Size: 128 * 1024 * 1024 * 1024,
+	}
+	b, err := json.Marshal(fm)
+	require.NoError(t, err)
+	crcs, err := json.Marshal(fileCrcList)
+	require.NoError(t, err)
+	annotations := map[string]string{
+		filePathKey:                      "file1.txt",
+		crcsKey:                          string(crcs),
+		modelspec.AnnotationFileMetadata: string(b),
+	}
+	handler := &RemoteHandler{
+		ctx:      context.Background(),
+		imageRef: "test-image",
+		remoter:  mockRemote,
+		manifest: ocispec.Manifest{
+			Layers: []ocispec.Descriptor{
+				{
+					MediaType:   modelspec.MediaTypeModelDatasetRaw,
+					Digest:      "test-digest",
+					Annotations: annotations,
+				},
+			},
+		},
+		blobs: []backend.Blob{
+			{
+				Config: backend.BlobConfig{
+					Digest: "test-digest",
+					Size:   "100",
+				},
+			},
+		},
+	}
+
+	backend, fileAttrs, err := handler.Handle(context.Background())
+	assert.NoError(t, err)
+	assert.NotNil(t, backend)
+	assert.NotEmpty(t, fileAttrs)
+	assert.Equal(t, 1, len(fileAttrs))
+	assert.Equal(t, fileCrcInfo.ChunkCrcs, fileAttrs[0].Crcs)
 
 	handler.manifest.Layers[0].Annotations = map[string]string{
 		filePathKey: "file1.txt",

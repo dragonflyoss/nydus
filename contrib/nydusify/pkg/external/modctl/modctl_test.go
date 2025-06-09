@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	pkgPvd "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/opencontainers/go-digest"
@@ -151,6 +152,92 @@ func TestReadTarBlob(t *testing.T) {
 	})
 }
 
+func TestReadRawBlob(t *testing.T) {
+	layer := ocispec.Descriptor{
+		MediaType: modelspec.MediaTypeModelDatasetRaw,
+		Size:      100,
+	}
+	fm := modelspec.FileMetadata{
+		Name: "test.raw",
+		Mode: 0644,
+		Size: 100,
+	}
+	b, err := json.Marshal(fm)
+	require.NoError(t, err)
+	layer.Annotations = map[string]string{
+		filePathKey:                      "test.raw",
+		modelspec.AnnotationFileMetadata: string(b),
+	}
+	files, err := readRawBlob(layer)
+	assert.NoError(t, err)
+	assert.Equal(t, []fileInfo{{
+		name:   "test.raw",
+		mode:   0644,
+		size:   100,
+		offset: 0,
+	}}, files)
+}
+
+func TestValidateTar(t *testing.T) {
+	t.Run("Normal case: valid tar file", func(t *testing.T) {
+		tmpfile, err := os.CreateTemp("", "testvalid.tar")
+		require.NoError(t, err)
+		defer os.Remove(tmpfile.Name())
+		tw := tar.NewWriter(tmpfile)
+		err = tw.WriteHeader(&tar.Header{
+			Name: "testfile.txt",
+			Mode: 0600,
+			Size: 13,
+		})
+		require.NoError(t, err)
+		_, err = tw.Write([]byte("hello, world\n"))
+		require.NoError(t, err)
+		err = tw.Close()
+		require.NoError(t, err)
+		tmpfile.Close()
+
+		f, err := os.Open(tmpfile.Name())
+		require.NoError(t, err)
+		defer f.Close()
+
+		valid, err := validateTarFile(f)
+		assert.NoError(t, err)
+		assert.True(t, valid)
+	})
+
+	t.Run("Normal case: invalid tar file", func(t *testing.T) {
+		tmpfile, err := os.CreateTemp("", "testinvalid.tar")
+		require.NoError(t, err)
+		defer os.Remove(tmpfile.Name())
+		_, err = tmpfile.Write([]byte("invalid tar content"))
+		require.NoError(t, err)
+		tmpfile.Close()
+
+		f, err := os.Open(tmpfile.Name())
+		require.NoError(t, err)
+		defer f.Close()
+
+		valid, err := validateTarFile(f)
+		assert.NoError(t, err)
+		assert.False(t, valid)
+	})
+
+	t.Run("Empty tar file", func(t *testing.T) {
+		tmpfile, err := os.CreateTemp("", "testempty.tar")
+		require.NoError(t, err)
+		os.Truncate(tmpfile.Name(), 0)
+		tmpfile.Close()
+
+		f, err := os.Open(tmpfile.Name())
+		require.NoError(t, err)
+		defer f.Close()
+
+		valid, err := validateTarFile(f)
+		assert.NoError(t, err)
+		assert.True(t, valid)
+	})
+}
+
 func TestGetOption(t *testing.T) {
 	t.Run("Valid srcRef", func(t *testing.T) {
 		srcRef := "host/namespace/image:tag"
@@ -190,7 +277,7 @@ func TestHandle(t *testing.T) {
 
 	handler.blobsMap = make(map[string]blobInfo)
 	handler.blobsMap["test_digest"] = blobInfo{
-		mediaType: ModelWeightMediaType,
+		mediaType: modelspec.MediaTypeModelWeight,
 	}
 	t.Run("Open file failure", func(t *testing.T) {
 		file := backend.File{RelativePath: "test/test_digest/nonexistent-file"}
@@ -199,7 +286,7 @@ func TestHandle(t *testing.T) {
 		assert.Contains(t, err.Error(), "open tar file failed")
 	})
 
-	t.Run("Normal", func(t *testing.T) {
+	t.Run("Normal tar file", func(t *testing.T) {
 		os.MkdirAll("/tmp/test/test_digest/", 0755)
 		testFile, err := os.CreateTemp("/tmp/test/test_digest/", "test_tar")
 		assert.NoError(t, err)
@@ -215,6 +302,20 @@ func TestHandle(t *testing.T) {
 		_, err = tw.Write([]byte("test"))
 		assert.NoError(t, err)
 		tw.Close()
+		testFilePath := strings.TrimPrefix(testFile.Name(), "/tmp/")
+		file := backend.File{RelativePath: testFilePath}
+		chunks, err := handler.Handle(context.Background(), file)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, len(chunks))
+	})
+
+	t.Run("Normal raw file", func(t *testing.T) {
+		os.MkdirAll("/tmp/test/test_digest/", 0755)
+		testFile, err := os.CreateTemp("/tmp/test/test_digest/", "test_raw")
+		assert.NoError(t, err)
+		defer testFile.Close()
+		defer os.RemoveAll(testFile.Name())
+		testFile.Write([]byte("test"))
 		testFilePath := strings.TrimPrefix(testFile.Name(), "/tmp/")
 		file := backend.File{RelativePath: testFilePath}
 		chunks, err := handler.Handle(context.Background(), file)
@@ -250,28 +351,28 @@ func TestConvertToBlobs(t *testing.T) {
 		Layers: []ocispec.Descriptor{
 			{
 				Digest:    digest.Digest("sha256:abc123"),
-				MediaType: ModelWeightMediaType,
+				MediaType: modelspec.MediaTypeModelWeight,
 				Size:      100,
 			},
 		},
 	}
 	actualBlobs1 := convertToBlobs(manifestWithColon)
 	assert.Equal(t, 1, len(actualBlobs1))
-	assert.Equal(t, ModelWeightMediaType, actualBlobs1[0].Config.MediaType)
+	assert.Equal(t, modelspec.MediaTypeModelWeight, actualBlobs1[0].Config.MediaType)
 	assert.Equal(t, "abc123", actualBlobs1[0].Config.Digest)
 
 	manifestWithoutColon := &ocispec.Manifest{
 		Layers: []ocispec.Descriptor{
 			{
 				Digest:    digest.Digest("abc123"),
-				MediaType: ModelDatasetMediaType,
+				MediaType: modelspec.MediaTypeModelDataset,
 				Size:      100,
 			},
 		},
 	}
 	actualBlobs2 := convertToBlobs(manifestWithoutColon)
 	assert.Equal(t, 1, len(actualBlobs2))
-	assert.Equal(t, ModelDatasetMediaType, actualBlobs2[0].Config.MediaType)
+	assert.Equal(t, modelspec.MediaTypeModelDataset, actualBlobs2[0].Config.MediaType)
 	assert.Equal(t, "abc123", actualBlobs2[0].Config.Digest)
 }
 
@@ -297,7 +398,7 @@ func TestExtractManifest(t *testing.T) {
 
 	var m = ocispec.Manifest{
 		Config: ocispec.Descriptor{
-			MediaType: ModelWeightMediaType,
+			MediaType: modelspec.MediaTypeModelWeight,
 			Digest:    "sha256:abc1234",
 			Size:      10,
 		},
@@ -336,16 +437,16 @@ func TestSetBlobsMap(t *testing.T) {
 func TestSetWeightChunkSize(t *testing.T) {
 	setWeightChunkSize(0)
 	expectedDefault := "64MiB"
-	assert.Equal(t, expectedDefault, mediaTypeChunkSizeMap[ModelWeightMediaType], "Weight media type should be set to default value")
-	assert.Equal(t, expectedDefault, mediaTypeChunkSizeMap[ModelDatasetMediaType], "Dataset media type should be set to default value")
+	assert.Equal(t, expectedDefault, mediaTypeChunkSizeMap[modelspec.MediaTypeModelWeight], "Weight media type should be set to default value")
+	assert.Equal(t, expectedDefault, mediaTypeChunkSizeMap[modelspec.MediaTypeModelDataset], "Dataset media type should be set to default value")
 
 	chunkSize := uint64(16 * 1024 * 1024)
 	setWeightChunkSize(chunkSize)
 	expectedNonDefault := humanize.IBytes(chunkSize)
 	expectedNonDefault = strings.ReplaceAll(expectedNonDefault, " ", "")
 
-	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[ModelWeightMediaType], "Weight media type should match the specified chunk size")
-	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[ModelDatasetMediaType], "Dataset media type should match the specified chunk size")
+	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[modelspec.MediaTypeModelWeight], "Weight media type should match the specified chunk size")
+	assert.Equal(t, expectedNonDefault, mediaTypeChunkSizeMap[modelspec.MediaTypeModelDataset], "Dataset media type should match the specified chunk size")
 }
 
 func TestNewHandler(t *testing.T) {
