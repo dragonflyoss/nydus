@@ -257,8 +257,9 @@ impl RegistryState {
                     // we are likely to encounter these types of error:
                     // https://github.com/openssl/openssl/blob/6b3d28757620e0781bb1556032bb6961ee39af63/crypto/err/openssl.txt#L1574
                     // https://github.com/containerd/nerdctl/blob/225a70bdc3b93cdb00efac7db1ceb50c098a8a16/pkg/cmd/image/push.go#LL135C66-L135C66
-                    let fallback =
-                        msg.contains("wrong version number") || msg.contains("connection refused");
+                    let fallback = msg.contains("wrong version number")
+                        || msg.contains("connection refused")
+                        || msg.to_lowercase().contains("ssl");
                     if fallback {
                         warn!("fallback to http due to tls connection error: {}", err);
                     }
