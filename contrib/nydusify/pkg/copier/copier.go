@@ -5,23 +5,27 @@
 package copier
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 
-	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
+	containerdErrdefs "github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/reference/docker"
-	"github.com/containerd/containerd/remotes"
-	containerdErrdefs "github.com/containerd/errdefs"
+	"github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/containerd/nydus-snapshotter/pkg/remote/remotes"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
@@ -75,24 +79,6 @@ func hosts(opt Opt) remote.HostFunc {
 	return func(ref string) (remote.CredentialFunc, bool, error) {
 		return remote.NewDockerConfigCredFunc(), maps[ref], nil
 	}
-}
-
-func getPusherInChunked(ctx context.Context, pvd *provider.Provider, desc ocispec.Descriptor, opt Opt) (remotes.PusherInChunked, error) {
-	resolver, err := pvd.Resolver(opt.Target)
-	if err != nil {
-		return nil, errors.Wrap(err, "get resolver")
-	}
-	ref := opt.Target
-	if !strings.Contains(ref, "@") {
-		ref = ref + "@" + desc.Digest.String()
-	}
-
-	pusherInChunked, err := resolver.PusherInChunked(ctx, ref)
-	if err != nil {
-		return nil, errors.Wrap(err, "create pusher in chunked")
-	}
-
-	return pusherInChunked, nil
 }
 
 func pushBlobFromBackend(
@@ -173,41 +159,41 @@ func pushBlobFromBackend(
 				}
 
 				if err := nydusifyUtils.RetryWithAttempts(func() error {
-					pusher, err := getPusherInChunked(ctx, pvd, blobDescs[idx], opt)
+					resolver, err := pvd.Resolver(opt.Target)
 					if err != nil {
 						if errdefs.NeedsRetryWithHTTP(err) {
 							pvd.UsePlainHTTP()
-							pusher, err = getPusherInChunked(ctx, pvd, blobDescs[idx], opt)
+							resolver, err = pvd.Resolver(opt.Target)
 						}
 						if err != nil {
-							return errors.Wrapf(err, "get push writer: %s", blobDigest)
+							return errors.Wrapf(err, "get resolver: %s", blobDigest)
 						}
 					}
 
+					ref := opt.Target
+					if !strings.Contains(ref, "@") {
+						ref = ref + "@" + blobDescs[idx].Digest.String()
+					}
+
+					pusher, err := resolver.Pusher(ctx, ref)
+					if err != nil {
+						return errors.Wrapf(err, "get pusher: %s", blobDigest)
+					}
+
 					push := func() error {
-						if blobSize > opt.PushChunkSize {
-							rr, err := backend.RangeReader(blobID)
-							if err != nil {
-								return errors.Wrapf(err, "get push reader: %s", blobDigest)
-							}
-							if err := pusher.PushInChunked(ctx, blobDescs[idx], rr); err != nil {
-								return errors.Wrapf(err, "push blob in chunked: %s", blobDigest)
-							}
-						} else {
-							rc, err := backend.Reader(blobID)
-							if err != nil {
-								return errors.Wrap(err, "get blob reader")
-							}
-							defer rc.Close()
-							writer, err := pusher.Push(ctx, blobDescs[idx])
-							if err != nil {
-								return errors.Wrapf(err, "get push writer: %s", blobDigest)
-							}
-							if writer != nil {
-								defer writer.Close()
-								if err := content.Copy(ctx, writer, rc, blobSize, blobDigest); err != nil {
-									return errors.Wrapf(err, "push blob: %s", blobDigest)
-								}
+						rc, err := backend.Reader(blobID)
+						if err != nil {
+							return errors.Wrap(err, "get blob reader")
+						}
+						defer rc.Close()
+						writer, err := pusher.Push(ctx, blobDescs[idx])
+						if err != nil {
+							return errors.Wrapf(err, "get push writer: %s", blobDigest)
+						}
+						if writer != nil {
+							defer writer.Close()
+							if err := content.Copy(ctx, writer, rc, blobSize, blobDigest); err != nil {
+								return errors.Wrapf(err, "push blob: %s", blobDigest)
 							}
 						}
 						return nil
@@ -298,6 +284,399 @@ func getLocalPath(ref string) (isLocalPath bool, absPath string, err error) {
 	return true, absPath, nil
 }
 
+// trueStreamCopy implements true stream copy, pulling and pushing at the same time
+func StreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
+	// for small files, use simplified handling
+	if size <= 128 {
+		return handleSmallFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest)
+	}
+
+	// use 16MB buffer for efficient transfer
+	return handleLargeFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest)
+}
+
+// handleSmallFileTransfer handles small file transfer, reading all content and then committing
+func handleSmallFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
+	logrus.Debugf("file is small (%d bytes), using simplified handling", size)
+
+	// 读取全部内容
+	data, err := io.ReadAll(srcReader)
+	if err != nil {
+		return errors.Wrap(err, "read small file data failed")
+	}
+
+	// 确保数据大小正确
+	if int64(len(data)) != size && size > 0 {
+		logrus.Warnf("small file size mismatch: expected %d bytes, actual %d bytes", size, len(data))
+	}
+
+	// 计算实际摘要
+	actualDigest := digest.FromBytes(data)
+
+	// 检查摘要是否匹配
+	if expectedDigest != "" && expectedDigest != actualDigest {
+		return fmt.Errorf("small file digest mismatch: expected %s, actual %s", expectedDigest, actualDigest)
+	}
+
+	// 写入数据并提交
+	if _, err := targetWriter.Write(data); err != nil {
+		return errors.Wrap(err, "write small file data failed")
+	}
+
+	if err := targetWriter.Commit(ctx, int64(len(data)), actualDigest); err != nil {
+		return errors.Wrap(err, "commit small file content failed")
+	}
+
+	return nil
+}
+
+// handleLargeFileTransfer handles large file transfer, using chunked reading and updating progress in real-time
+func handleLargeFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
+	bufSize := 16 * 1024 * 1024 // 16MB buffer
+	buf := make([]byte, bufSize)
+	hasher := sha256.New()
+	var totalCopied int64
+	lastLoggedProgress := int64(0)
+	logInterval := int64(100 * 1024 * 1024) // log every 100MB
+
+	for {
+		// check if context is done
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// read data
+		n, readErr := srcReader.Read(buf)
+		if n <= 0 {
+			if readErr == io.EOF {
+				break
+			}
+			return errors.Wrap(readErr, "read data failed")
+		}
+
+		// calculate hash
+		hasher.Write(buf[:n])
+
+		// write data
+		writeN, writeErr := targetWriter.Write(buf[:n])
+		if writeErr != nil {
+			return errors.Wrap(writeErr, "write data failed")
+		}
+		if writeN != n {
+			return errors.New("write data length mismatch")
+		}
+
+		totalCopied += int64(n)
+
+		// log progress periodically
+		if totalCopied-lastLoggedProgress >= logInterval {
+			logrus.Infof("stream copy progress: %.2f%% (%s/%s)",
+				float64(totalCopied)*100/float64(size),
+				humanize.Bytes(uint64(totalCopied)),
+				humanize.Bytes(uint64(size)))
+			lastLoggedProgress = totalCopied
+		}
+	}
+
+	// calculate final digest
+	actualDigest := digest.NewDigestFromBytes(digest.SHA256, hasher.Sum(nil))
+
+	// check if digest matches
+	if expectedDigest != "" && expectedDigest != actualDigest {
+		return fmt.Errorf("digest mismatch: expected %s, actual %s", expectedDigest, actualDigest)
+	}
+
+	// check if size matches
+	if size > 0 && size != totalCopied {
+		logrus.Warnf("size mismatch: expected %d bytes, actual %d bytes, using actual size", size, totalCopied)
+	}
+
+	// commit content
+	if err := targetWriter.Commit(ctx, totalCopied, actualDigest); err != nil {
+		return errors.Wrap(err, "commit content failed")
+	}
+
+	return nil
+}
+
+// newStreamContext creates a context for stream transfer
+func newStreamContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, "useStream", true)
+}
+
+// enableStreamTransfer checks if stream transfer should be enabled
+func enableStreamTransfer(opt Opt) bool {
+	return opt.PushChunkSize > 0
+}
+
+// httpModeManager manages thread-safe HTTP mode switching
+type httpModeManager struct {
+	mu       sync.Mutex
+	enabled  bool
+	provider *provider.Provider
+}
+
+func newHTTPModeManager(pvd *provider.Provider) *httpModeManager {
+	return &httpModeManager{
+		provider: pvd,
+	}
+}
+
+// switchToHTTP switch to HTTP mode, if already in HTTP mode, do nothing
+func (m *httpModeManager) switchToHTTP() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if !m.enabled {
+		m.provider.UsePlainHTTP()
+		m.enabled = true
+	}
+}
+
+// streamTransferManager manages the components for stream transfer
+type streamTransferManager struct {
+	provider    *provider.Provider
+	httpManager *httpModeManager
+	sourceRef   string
+	targetRef   string
+	opt         Opt
+	// avoid storing interface types, directly store components needed for operations
+	sourceFetcher remotes.Fetcher
+	targetPusher  remotes.Pusher
+}
+
+// newStreamTransferManager creates a stream transfer manager
+func newStreamTransferManager(ctx context.Context, pvd *provider.Provider, httpManager *httpModeManager, opt Opt) (*streamTransferManager, error) {
+	// prepare source resolver
+	sourceResolver, err := pvd.Resolver(opt.Source)
+	if err != nil {
+		return nil, errors.Wrap(err, "get source resolver")
+	}
+
+	// prepare target resolver
+	targetResolver, err := pvd.Resolver(opt.Target)
+	if err != nil {
+		return nil, errors.Wrap(err, "get target resolver")
+	}
+
+	// parse reference to get name
+	sourceName, _, err := sourceResolver.Resolve(ctx, opt.Source)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse source reference")
+	}
+
+	// get source image fetcher
+	sourceFetcher, err := sourceResolver.Fetcher(ctx, sourceName)
+	if err != nil {
+		return nil, errors.Wrap(err, "create source fetcher")
+	}
+
+	// get target image pusher
+	targetPusher, err := targetResolver.Pusher(ctx, opt.Target)
+	if err != nil {
+		return nil, errors.Wrap(err, "create target pusher")
+	}
+
+	return &streamTransferManager{
+		sourceFetcher: sourceFetcher,
+		targetPusher:  targetPusher,
+		httpManager:   httpManager,
+		provider:      pvd,
+		sourceRef:     opt.Source,
+		targetRef:     opt.Target,
+		opt:           opt,
+	}, nil
+}
+
+// refreshPusher refreshes the pusher when needed (e.g. after switching to HTTP mode)
+func (m *streamTransferManager) refreshPusher(ctx context.Context) error {
+	// get new resolver
+	resolver, err := m.provider.Resolver(m.targetRef)
+	if err != nil {
+		return errors.Wrap(err, "get new resolver")
+	}
+
+	// get new pusher
+	newPusher, err := resolver.Pusher(ctx, m.targetRef)
+	if err != nil {
+		return errors.Wrap(err, "create new pusher")
+	}
+
+	// update pusher
+	m.targetPusher = newPusher
+	return nil
+}
+
+// pushContent pushes content, handles HTTP/HTTPS switch and existing content logic
+func (m *streamTransferManager) pushContent(ctx context.Context, desc ocispec.Descriptor, reader io.Reader) error {
+	writer, err := m.targetPusher.Push(ctx, desc)
+	if err != nil {
+		// if content already exists, return success
+		if containerdErrdefs.IsAlreadyExists(err) {
+			logrus.Infof("content already exists: %s", desc.Digest)
+			return nil
+		}
+
+		// check if need to switch to HTTP mode
+		if errdefs.NeedsRetryWithHTTP(err) {
+			logrus.Warn("switch to HTTP mode and retry")
+			m.httpManager.switchToHTTP()
+
+			// refresh pusher
+			if err := m.refreshPusher(ctx); err != nil {
+				return err
+			}
+
+			// retry push
+			writer, err = m.targetPusher.Push(ctx, desc)
+			if err != nil {
+				if containerdErrdefs.IsAlreadyExists(err) {
+					logrus.Infof("content already exists: %s", desc.Digest)
+					return nil
+				}
+				return errors.Wrap(err, "push failed in HTTP mode")
+			}
+		} else {
+			return errors.Wrap(err, "push failed")
+		}
+	}
+
+	if writer == nil {
+		// content already exists, no need to transfer
+		return nil
+	}
+
+	// stream transfer
+	if err := StreamCopy(ctx, reader, writer, desc.Size, desc.Digest); err != nil {
+		return errors.Wrap(err, "stream transfer failed")
+	}
+
+	return nil
+}
+
+// streamTransferLayer stream transfer a single layer
+func (m *streamTransferManager) streamTransferLayer(ctx context.Context, desc ocispec.Descriptor, info string) error {
+	logrus.Infof("start stream transfer %s: %s, size: %s",
+		info, desc.Digest, humanize.Bytes(uint64(desc.Size)))
+
+	// get source content
+	rc, err := m.sourceFetcher.Fetch(ctx, desc)
+	if err != nil {
+		return errors.Wrap(err, fmt.Sprintf("get %s failed", info))
+	}
+	defer rc.Close()
+
+	// push to target
+	if err := m.pushContent(ctx, desc, rc); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// streamPlatformManifest handles the transfer of a single platform manifest
+func (m *streamTransferManager) streamPlatformManifest(ctx context.Context, manifestDesc ocispec.Descriptor) (ocispec.Descriptor, error) {
+	// get manifest content
+	rc, err := m.sourceFetcher.Fetch(ctx, manifestDesc)
+	if err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "get manifest failed")
+	}
+	defer rc.Close()
+
+	// read manifest content
+	manifestBytes, err := io.ReadAll(rc)
+	if err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "read manifest failed")
+	}
+
+	// parse manifest
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "parse manifest failed")
+	}
+
+	// transfer config file first
+	if err := m.streamTransferLayer(ctx, manifest.Config, "config file"); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	// create a wait group to wait for all layers to be processed
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(provider.LayerConcurrentLimit) // set max concurrency
+
+	// process each layer
+	for i, layer := range manifest.Layers {
+		i, layer := i, layer // avoid closure problem
+		eg.Go(func() error {
+			layerInfo := fmt.Sprintf("%d/%d layer", i+1, len(manifest.Layers))
+			return m.streamTransferLayer(egCtx, layer, layerInfo)
+		})
+	}
+
+	// wait for all layers to be processed
+	if err := eg.Wait(); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	// push manifest last
+	if err := m.pushContent(ctx, manifestDesc, bytes.NewReader(manifestBytes)); err != nil {
+		return ocispec.Descriptor{}, err
+	}
+
+	return manifestDesc, nil
+}
+
+// streamManifestList handles the transfer of a multi-platform manifest list
+func (m *streamTransferManager) streamManifestList(ctx context.Context, indexDesc ocispec.Descriptor, platformDescs []ocispec.Descriptor) error {
+	if len(platformDescs) <= 1 {
+		return nil // single platform, no need to process index
+	}
+
+	// get source index content
+	rc, err := m.sourceFetcher.Fetch(ctx, indexDesc)
+	if err != nil {
+		return errors.Wrap(err, "get index failed")
+	}
+	defer rc.Close()
+
+	// read index content
+	indexBytes, err := io.ReadAll(rc)
+	if err != nil {
+		return errors.Wrap(err, "read index failed")
+	}
+
+	// parse index
+	var index ocispec.Index
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		return errors.Wrap(err, "parse index failed")
+	}
+
+	// update manifest references in index
+	index.Manifests = platformDescs
+
+	// re-serialize index
+	updatedIndexBytes, err := json.Marshal(index)
+	if err != nil {
+		return errors.Wrap(err, "serialize updated index failed")
+	}
+
+	// create updated index descriptor
+	updatedIndexDesc := ocispec.Descriptor{
+		Digest:    digest.FromBytes(updatedIndexBytes),
+		Size:      int64(len(updatedIndexBytes)),
+		MediaType: indexDesc.MediaType,
+	}
+
+	// push updated index
+	if err := m.pushContent(ctx, updatedIndexDesc, bytes.NewReader(updatedIndexBytes)); err != nil {
+		return errors.Wrap(err, "push index failed")
+	}
+
+	return nil
+}
+
 // Copy copies an image from the source to the target.
 func Copy(ctx context.Context, opt Opt) error {
 	// Containerd image fetch requires a namespace context.
@@ -338,14 +717,19 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
+	// check if stream transfer is enabled
+	useStream := enableStreamTransfer(opt)
+
+	// create http mode manager
+	httpManager := newHTTPModeManager(pvd)
+
 	isLocalSource, inputPath, err := getLocalPath(opt.Source)
 	if err != nil {
 		return errors.Wrap(err, "parse source path")
 	}
+
 	var source string
 	if isLocalSource {
-		logrus.Infof("importing source image from %s", inputPath)
-
 		f, err := os.Open(inputPath)
 		if err != nil {
 			return err
@@ -361,7 +745,6 @@ func Copy(ctx context.Context, opt Opt) error {
 		if source, err = pvd.Import(ctx, ds); err != nil {
 			return errors.Wrap(err, "import source image")
 		}
-		logrus.Infof("imported source image %s", source)
 	} else {
 		sourceNamed, err := docker.ParseDockerRef(opt.Source)
 		if err != nil {
@@ -369,48 +752,28 @@ func Copy(ctx context.Context, opt Opt) error {
 		}
 		source = sourceNamed.String()
 
-		logrus.Infof("pulling source image %s", source)
-		if err := pvd.Pull(ctx, source); err != nil {
-			if errdefs.NeedsRetryWithHTTP(err) {
-				pvd.UsePlainHTTP()
-				if err := pvd.Pull(ctx, source); err != nil {
-					return errors.Wrap(err, "try to pull image")
-				}
-			} else {
-				return errors.Wrap(err, "pull source image")
+		if useStream {
+			// stream transfer mode: only get the minimum necessary information
+			err := pvd.FetchImageInfo(ctx, source)
+			if err != nil && errdefs.NeedsRetryWithHTTP(err) {
+				httpManager.switchToHTTP()
+				err = pvd.FetchImageInfo(ctx, source)
+			}
+
+			if err != nil {
+				return errors.Wrap(err, "fetch image info failed")
+			}
+		} else {
+			err := pvd.Pull(ctx, source)
+			if err != nil && errdefs.NeedsRetryWithHTTP(err) {
+				httpManager.switchToHTTP()
+				err = pvd.Pull(ctx, source)
+			}
+			if err != nil {
+				return errors.Wrap(err, "pull source image failed")
 			}
 		}
-		logrus.Infof("pulled source image %s", source)
 	}
-
-	sourceImage, err := pvd.Image(ctx, source)
-	if err != nil {
-		return errors.Wrap(err, "find image from store")
-	}
-
-	isLocalTarget, outputPath, err := getLocalPath(opt.Target)
-	if err != nil {
-		return errors.Wrap(err, "parse target path")
-	}
-	if isLocalTarget {
-		logrus.Infof("exporting source image to %s", outputPath)
-		f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		if err := pvd.Export(ctx, f, sourceImage, source); err != nil {
-			return errors.Wrap(err, "export source image to target tar file")
-		}
-		logrus.Infof("exported image %s", source)
-		return nil
-	}
-
-	sourceDescs, err := utils.GetManifests(ctx, pvd.ContentStore(), *sourceImage, platformMC)
-	if err != nil {
-		return errors.Wrap(err, "get image manifests")
-	}
-	targetDescs := make([]ocispec.Descriptor, len(sourceDescs))
 
 	targetNamed, err := docker.ParseDockerRef(opt.Target)
 	if err != nil {
@@ -418,23 +781,95 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	target := targetNamed.String()
 
-	sem := semaphore.NewWeighted(1)
-	eg := errgroup.Group{}
-	for idx := range sourceDescs {
-		func(idx int) {
-			eg.Go(func() error {
-				sem.Acquire(context.Background(), 1)
-				defer sem.Release(1)
+	// get source image index info
+	sourceImage, err := pvd.Image(ctx, source)
+	if err != nil {
+		return errors.Wrap(err, "find image")
+	}
 
+	// get all platform manifests
+	sourceDescs, err := utils.GetManifests(ctx, pvd.ContentStore(), *sourceImage, platformMC)
+	if err != nil {
+		return errors.Wrap(err, "get image manifests")
+	}
+	targetDescs := make([]ocispec.Descriptor, len(sourceDescs))
+
+	// if stream transfer is enabled, use stream transfer mode
+	if useStream && !isLocalSource {
+		// create stream transfer manager
+		streamManager, err := newStreamTransferManager(ctx, pvd, httpManager, opt)
+		if err != nil {
+			return err
+		}
+
+		// create stream transfer for each platform manifest
+		var wg sync.WaitGroup
+		errCh := make(chan error, len(sourceDescs))
+		var successCount int32
+
+		for idx, sourceDesc := range sourceDescs {
+			wg.Add(1)
+			go func(idx int, sourceDesc ocispec.Descriptor) {
+				defer wg.Done()
+
+				// create stream context
+				streamCtx := newStreamContext(ctx)
+
+				// process platform manifest
+				targetDesc, err := streamManager.streamPlatformManifest(streamCtx, sourceDesc)
+				if err != nil {
+					errCh <- err
+					return
+				}
+
+				targetDescs[idx] = targetDesc
+				atomic.AddInt32(&successCount, 1)
+			}(idx, sourceDesc)
+		}
+
+		wg.Wait()
+
+		// check if there are errors
+		select {
+		case err := <-errCh:
+			return err
+		default:
+		}
+
+		// if there are multiple platforms, push index
+		if len(targetDescs) > 1 && (sourceImage.MediaType == ocispec.MediaTypeImageIndex ||
+			sourceImage.MediaType == images.MediaTypeDockerSchema2ManifestList) {
+
+			indexCtx := newStreamContext(ctx)
+			if err := streamManager.streamManifestList(indexCtx, *sourceImage, targetDescs); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}
+
+	// non-stream transfer logic
+	descCh := make(chan int, len(sourceDescs))
+	errCh := make(chan error, len(sourceDescs))
+	concurrency := 4
+	var wg sync.WaitGroup
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range descCh {
 				sourceDesc := sourceDescs[idx]
 				targetDesc := &sourceDesc
 				if bkd != nil {
 					descs, _targetDesc, err := pushBlobFromBackend(ctx, pvd, bkd, sourceDesc, opt)
 					if err != nil {
-						return errors.Wrap(err, "get resolver")
+						errCh <- errors.Wrap(err, "get resolver")
+						continue
 					}
 					if _targetDesc == nil {
-						logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Warnf("%s is not a nydus image", source)
+						logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Warnf("%s is not a Nydus image", source)
 					} else {
 						targetDesc = _targetDesc
 						store := newStore(pvd.ContentStore(), descs)
@@ -443,25 +878,29 @@ func Copy(ctx context.Context, opt Opt) error {
 				}
 				targetDescs[idx] = *targetDesc
 
-				logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Infof("pushing target manifest %s", targetDesc.Digest)
-				if err := pvd.Push(ctx, *targetDesc, target); err != nil {
-					if errdefs.NeedsRetryWithHTTP(err) {
-						pvd.UsePlainHTTP()
-						if err := pvd.Push(ctx, *targetDesc, target); err != nil {
-							return errors.Wrap(err, "try to push image manifest")
-						}
-					} else {
-						return errors.Wrap(err, "push target image manifest")
-					}
+				err := pvd.Push(ctx, *targetDesc, target)
+				if err != nil && errdefs.NeedsRetryWithHTTP(err) {
+					httpManager.switchToHTTP()
+					err = pvd.Push(ctx, *targetDesc, target)
 				}
-				logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Infof("pushed target manifest %s", targetDesc.Digest)
-
-				return nil
-			})
-		}(idx)
+				if err != nil {
+					errCh <- errors.Wrap(err, "push manifest failed")
+					continue
+				}
+			}
+		}()
 	}
-	if err := eg.Wait(); err != nil {
-		return errors.Wrap(err, "push image manifests")
+
+	for idx := range sourceDescs {
+		descCh <- idx
+	}
+	close(descCh)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		return err
+	default:
 	}
 
 	if len(targetDescs) > 1 && (sourceImage.MediaType == ocispec.MediaTypeImageIndex ||
@@ -476,17 +915,16 @@ func Copy(ctx context.Context, opt Opt) error {
 		if err != nil {
 			return errors.Wrap(err, "write target manifest list")
 		}
-		if err := pvd.Push(ctx, *targetImage, target); err != nil {
-			if errdefs.NeedsRetryWithHTTP(err) {
-				pvd.UsePlainHTTP()
-				if err := pvd.Push(ctx, *targetImage, target); err != nil {
-					return errors.Wrap(err, "try to push image")
-				}
-			} else {
-				return errors.Wrap(err, "push target image")
-			}
+
+		err = pvd.Push(ctx, *targetImage, target)
+		if err != nil && errdefs.NeedsRetryWithHTTP(err) {
+			httpManager.switchToHTTP()
+			err = pvd.Push(ctx, *targetImage, target)
 		}
-		logrus.Infof("pushed image %s", target)
+		if err != nil {
+			return errors.Wrap(err, "push target image failed")
+		}
+
 	}
 
 	return nil
