@@ -10,3 +10,4 @@ go.work.sum
 dist/
 nydus-static/
 .goreleaser.yml
+vendor/
