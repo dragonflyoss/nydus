@@ -237,7 +237,7 @@ impl DirectSuperBlockV6 {
         let block_size = state.block_size();
         let unit_size = size_of::<RafsV5ChunkInfo>();
         if size % unit_size != 0 {
-            return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+            return Err(einval!());
         }
 
         for idx in 0..(size / unit_size) {
