@@ -5,13 +5,13 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -24,7 +24,6 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/goharbor/acceleration-service/pkg/cache"
-	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
 	"github.com/goharbor/acceleration-service/pkg/remote"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -32,10 +31,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-var LayerConcurrentLimit = 5
+var LayerConcurrentLimit = 4
 
 type Provider struct {
-	mutex          sync.Mutex
+	mutex          sync.RWMutex
 	usePlainHTTP   bool
 	images         map[string]*ocispec.Descriptor
 	store          content.Store
@@ -49,14 +48,7 @@ type Provider struct {
 }
 
 func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64) (*Provider, error) {
-	contentDir := filepath.Join(root, "content")
-	if err := os.MkdirAll(contentDir, 0755); err != nil {
-		return nil, err
-	}
-	store, err := accelcontent.NewContent(hosts, contentDir, root, "0MB")
-	if err != nil {
-		return nil, err
-	}
+	store := NewMemoryContentStore()
 
 	return &Provider{
 		images:         make(map[string]*ocispec.Descriptor),
@@ -71,7 +63,7 @@ func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string
 	}, nil
 }
 
-func newDefaultClient(skipTLSVerify bool) *http.Client {
+func newHTTPClient(skipTLSVerify bool) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
@@ -94,14 +86,22 @@ func newDefaultClient(skipTLSVerify bool) *http.Client {
 }
 
 func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunkSize int64) remotes.Resolver {
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		if plainHTTP {
+			logrus.Debugf("create plain HTTP resolver")
+		} else {
+			logrus.Debugf("create HTTPS resolver")
+		}
+	}
+
 	registryHosts := docker.ConfigureDefaultRegistries(
 		docker.WithAuthorizer(
 			docker.NewDockerAuthorizer(
-				docker.WithAuthClient(newDefaultClient(insecure)),
+				docker.WithAuthClient(newHTTPClient(insecure)),
 				docker.WithAuthCreds(credFunc),
 			),
 		),
-		docker.WithClient(newDefaultClient(insecure)),
+		docker.WithClient(newHTTPClient(insecure)),
 		docker.WithPlainHTTP(func(_ string) (bool, error) {
 			return plainHTTP, nil
 		}),
@@ -114,7 +114,12 @@ func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunk
 }
 
 func (pvd *Provider) UsePlainHTTP() {
-	pvd.usePlainHTTP = true
+	pvd.mutex.Lock()
+	defer pvd.mutex.Unlock()
+
+	if !pvd.usePlainHTTP {
+		pvd.usePlainHTTP = true
+	}
 }
 
 func (pvd *Provider) Resolver(ref string) (remotes.Resolver, error) {
@@ -122,7 +127,22 @@ func (pvd *Provider) Resolver(ref string) (remotes.Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newResolver(insecure, pvd.usePlainHTTP, credFunc, pvd.chunkSize), nil
+
+	pvd.mutex.RLock()
+	usePlainHTTP := pvd.usePlainHTTP
+	pvd.mutex.RUnlock()
+
+	resolver := newResolver(insecure, usePlainHTTP, credFunc, pvd.chunkSize)
+
+	if logrus.IsLevelEnabled(logrus.DebugLevel) {
+		if usePlainHTTP {
+			logrus.Debugf("create HTTP resolver for %s", ref)
+		} else {
+			logrus.Debugf("create HTTPS resolver for %s", ref)
+		}
+	}
+
+	return resolver, nil
 }
 
 func (pvd *Provider) Pull(ctx context.Context, ref string) error {
@@ -130,7 +150,8 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 	if err != nil {
 		return err
 	}
-	rc := &client.RemoteContext{
+
+	rc := &containerd.RemoteContext{
 		Resolver:               resolver,
 		PlatformMatcher:        pvd.platformMC,
 		MaxConcurrentDownloads: LayerConcurrentLimit,
@@ -148,7 +169,6 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 	return nil
 }
 
-// SetPushRetryConfig sets the retry configuration for push operations
 func (pvd *Provider) SetPushRetryConfig(count int, delay time.Duration) {
 	pvd.mutex.Lock()
 	defer pvd.mutex.Unlock()
@@ -161,7 +181,8 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 	if err != nil {
 		return err
 	}
-	rc := &client.RemoteContext{
+
+	rc := &containerd.RemoteContext{
 		Resolver:                    resolver,
 		PlatformMatcher:             pvd.platformMC,
 		MaxConcurrentUploadedLayers: LayerConcurrentLimit,
@@ -186,13 +207,14 @@ func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, erro
 		skipDgstRef:     func(name string) bool { return name != "" },
 		platformMatcher: pvd.platformMC,
 	}
+
 	images, err := load(ctx, reader, pvd.store, iopts)
 	if err != nil {
 		return "", err
 	}
 
 	if len(images) != 1 {
-		return "", errors.New("incorrect tarball format")
+		return "", errors.New("invalid tar format")
 	}
 	image := images[0]
 
@@ -209,8 +231,9 @@ func (pvd *Provider) Export(ctx context.Context, writer io.Writer, img *ocispec.
 }
 
 func (pvd *Provider) Image(_ context.Context, ref string) (*ocispec.Descriptor, error) {
-	pvd.mutex.Lock()
-	defer pvd.mutex.Unlock()
+	pvd.mutex.RLock()
+	defer pvd.mutex.RUnlock()
+
 	if desc, ok := pvd.images[ref]; ok {
 		return desc, nil
 	}
@@ -230,4 +253,108 @@ func (pvd *Provider) NewRemoteCache(ctx context.Context, ref string) (context.Co
 		return cache.New(ctx, ref, "", pvd.cacheSize, pvd)
 	}
 	return ctx, nil
+}
+
+func (pvd *Provider) FetchImageInfo(ctx context.Context, ref string) error {
+	resolver, err := pvd.Resolver(ref)
+	if err != nil {
+		return err
+	}
+
+	name, desc, err := resolver.Resolve(ctx, ref)
+	if err != nil {
+		return errors.Wrap(err, "resolve reference")
+	}
+
+	fetcher, err := resolver.Fetcher(ctx, name)
+	if err != nil {
+		return errors.Wrap(err, "create fetcher")
+	}
+
+	rc, err := fetcher.Fetch(ctx, desc)
+	if err != nil {
+		return errors.Wrap(err, "fetch descriptor")
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return errors.Wrap(err, "read descriptor content")
+	}
+
+	if err := content.WriteBlob(ctx, pvd.store, desc.Digest.String(), bytes.NewReader(data), desc); err != nil {
+		return errors.Wrap(err, "write descriptor content")
+	}
+
+	if err := pvd.fetchDescriptorChildren(ctx, fetcher, data, desc); err != nil {
+		return err
+	}
+
+	pvd.mutex.Lock()
+	defer pvd.mutex.Unlock()
+	pvd.images[ref] = &desc
+
+	return nil
+}
+
+func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remotes.Fetcher, data []byte, desc ocispec.Descriptor) error {
+	if desc.MediaType == ocispec.MediaTypeImageIndex || desc.MediaType == "application/vnd.docker.distribution.manifest.list.v2+json" {
+		var index ocispec.Index
+		if err := json.Unmarshal(data, &index); err != nil {
+			return errors.Wrap(err, "unmarshal index")
+		}
+
+		for _, manifestDesc := range index.Manifests {
+			if err := pvd.fetchManifest(ctx, fetcher, manifestDesc); err != nil {
+				return err
+			}
+		}
+	} else if desc.MediaType == ocispec.MediaTypeImageManifest || desc.MediaType == "application/vnd.docker.distribution.manifest.v2+json" {
+		return pvd.processManifest(ctx, fetcher, data)
+	}
+
+	return nil
+}
+
+func (pvd *Provider) fetchManifest(ctx context.Context, fetcher remotes.Fetcher, manifestDesc ocispec.Descriptor) error {
+	rc, err := fetcher.Fetch(ctx, manifestDesc)
+	if err != nil {
+		return errors.Wrap(err, "fetch manifest")
+	}
+
+	manifestData, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return errors.Wrap(err, "read manifest")
+	}
+
+	if err := content.WriteBlob(ctx, pvd.store, manifestDesc.Digest.String(), bytes.NewReader(manifestData), manifestDesc); err != nil {
+		return errors.Wrap(err, "write manifest")
+	}
+
+	return pvd.processManifest(ctx, fetcher, manifestData)
+}
+
+func (pvd *Provider) processManifest(ctx context.Context, fetcher remotes.Fetcher, manifestData []byte) error {
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return errors.Wrap(err, "unmarshal manifest")
+	}
+
+	rc, err := fetcher.Fetch(ctx, manifest.Config)
+	if err != nil {
+		return errors.Wrap(err, "fetch config")
+	}
+
+	configData, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return errors.Wrap(err, "read config")
+	}
+
+	if err := content.WriteBlob(ctx, pvd.store, manifest.Config.Digest.String(), bytes.NewReader(configData), manifest.Config); err != nil {
+		return errors.Wrap(err, "write config")
+	}
+
+	return nil
 }

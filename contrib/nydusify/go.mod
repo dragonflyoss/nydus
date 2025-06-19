@@ -12,6 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.27
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.17.8
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.58.2
+	github.com/containerd/containerd v1.7.23
 	github.com/containerd/containerd/v2 v2.0.5
 	github.com/containerd/continuity v0.4.5
 	github.com/containerd/errdefs v1.0.0
@@ -59,7 +60,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/cgroups/v3 v3.0.5 // indirect
-	github.com/containerd/containerd v1.7.23 // indirect
 	github.com/containerd/containerd/api v1.9.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
