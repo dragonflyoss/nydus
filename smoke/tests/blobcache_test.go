@@ -216,7 +216,7 @@ func (a *BlobCacheTestSuite) TestGenerateBlobcache(t *testing.T) {
 		ctx.Binary.Builder, ctx.Env.BootstrapPath, blobcacheDir,
 		filepath.Join(ctx.Env.BlobDir, ociBlobDigest.Hex())))
 
-	a.compareTwoFiles(t, filepath.Join(blobcacheDir, fmt.Sprintf("%s.blob.data", ociBlobDigest.Hex())), filepath.Join(ctx.Env.CacheDir, fmt.Sprintf("%s.blob.data", ociBlobDigest.Hex())))
+	a.compareTwoFiles(t, filepath.Join(blobcacheDir, fmt.Sprintf("%s.blob.data", ociBlobDigest.Hex())), filepath.Join(ctx.Env.CacheDir, ociBlobDigest.Hex()))
 	a.compareTwoFiles(t, filepath.Join(blobcacheDir, fmt.Sprintf("%s.blob.meta", ociBlobDigest.Hex())), filepath.Join(ctx.Env.CacheDir, fmt.Sprintf("%s.blob.meta", ociBlobDigest.Hex())))
 }
 
