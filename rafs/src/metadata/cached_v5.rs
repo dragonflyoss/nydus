@@ -826,6 +826,7 @@ mod cached_tests {
     use crate::metadata::layout::{RafsXAttrs, RAFS_V5_ROOT_INODE};
     use crate::metadata::{
         RafsInode, RafsInodeWalkAction, RafsStore, RafsSuperBlock, RafsSuperInodes, RafsSuperMeta,
+        RAFS_MAX_NAME,
     };
     use crate::{BufWriter, RafsInodeExt, RafsIoRead, RafsIoReader};
     use vmm_sys_util::tempfile::TempFile;
@@ -1193,5 +1194,834 @@ mod cached_tests {
         assert_eq!(info.blob_index(), 1 as u32);
         assert!(info.is_compressed());
         assert!(!info.is_encrypted());
+    }
+
+    #[test]
+    fn test_cached_inode_v5_validation_errors() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+
+        // Test invalid inode number (0)
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 0;
+        assert!(inode.validate(100, 1024).is_err());
+
+        // Test invalid nlink (0)
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 1;
+        inode.i_nlink = 0;
+        assert!(inode.validate(100, 1024).is_err());
+
+        // Test invalid parent for non-root inode
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 2;
+        inode.i_nlink = 1;
+        inode.i_parent = 0;
+        assert!(inode.validate(100, 1024).is_err());
+
+        // Test invalid name length
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 1;
+        inode.i_nlink = 1;
+        inode.i_name = OsString::from("a".repeat(RAFS_MAX_NAME + 1));
+        assert!(inode.validate(100, 1024).is_err());
+
+        // Test empty name
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 1;
+        inode.i_nlink = 1;
+        inode.i_name = OsString::new();
+        assert!(inode.validate(100, 1024).is_err());
+
+        // Test invalid parent inode (parent >= child for non-hardlink)
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 5;
+        inode.i_nlink = 1;
+        inode.i_parent = 10;
+        inode.i_name = OsString::from("test");
+        assert!(inode.validate(100, 1024).is_err());
+    }
+
+    #[test]
+    fn test_cached_inode_v5_file_type_validation() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+
+        // Test regular file with invalid chunk count
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 1;
+        inode.i_nlink = 1;
+        inode.i_name = OsString::from("test");
+        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_size = 2048; // 2 chunks of 1024 bytes
+        inode.i_data = vec![]; // But no chunks
+        assert!(inode.validate(100, 1024).is_err());
+
+        // Test regular file with invalid block count
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 1;
+        inode.i_nlink = 1;
+        inode.i_name = OsString::from("test");
+        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_size = 1024;
+        inode.i_blocks = 100; // Invalid block count
+        inode.i_data = vec![Arc::new(CachedChunkInfoV5::new())];
+        assert!(inode.validate(100, 1024).is_err());
+
+        // Test directory with invalid child index
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 5;
+        inode.i_nlink = 1;
+        inode.i_name = OsString::from("test_dir");
+        inode.i_mode = libc::S_IFDIR as u32;
+        inode.i_child_cnt = 1;
+        inode.i_child_idx = 3; // child_idx <= inode number is invalid
+        assert!(inode.validate(100, 1024).is_err());
+
+        // Test symlink with empty target
+        let mut inode = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        inode.i_ino = 1;
+        inode.i_nlink = 1;
+        inode.i_name = OsString::from("test_link");
+        inode.i_mode = libc::S_IFLNK as u32;
+        inode.i_target = OsString::new(); // Empty target
+        assert!(inode.validate(100, 1024).is_err());
+    }
+
+    #[test]
+    fn test_cached_inode_v5_file_type_checks() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut inode = CachedInodeV5::new(blob_table, meta);
+
+        // Test block device
+        inode.i_mode = libc::S_IFBLK as u32;
+        assert!(inode.is_blkdev());
+        assert!(!inode.is_chrdev());
+        assert!(!inode.is_sock());
+        assert!(!inode.is_fifo());
+        assert!(!inode.is_dir());
+        assert!(!inode.is_symlink());
+        assert!(!inode.is_reg());
+
+        // Test character device
+        inode.i_mode = libc::S_IFCHR as u32;
+        assert!(!inode.is_blkdev());
+        assert!(inode.is_chrdev());
+        assert!(!inode.is_sock());
+        assert!(!inode.is_fifo());
+
+        // Test socket
+        inode.i_mode = libc::S_IFSOCK as u32;
+        assert!(!inode.is_blkdev());
+        assert!(!inode.is_chrdev());
+        assert!(inode.is_sock());
+        assert!(!inode.is_fifo());
+
+        // Test FIFO
+        inode.i_mode = libc::S_IFIFO as u32;
+        assert!(!inode.is_blkdev());
+        assert!(!inode.is_chrdev());
+        assert!(!inode.is_sock());
+        assert!(inode.is_fifo());
+
+        // Test hardlink detection
+        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_nlink = 2;
+        assert!(inode.is_hardlink());
+
+        inode.i_mode = libc::S_IFDIR as u32;
+        inode.i_nlink = 2;
+        assert!(!inode.is_hardlink()); // Directories are not considered hardlinks
+    }
+
+    #[test]
+    fn test_cached_inode_v5_xattr_operations() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut inode = CachedInodeV5::new(blob_table, meta);
+
+        // Test xattr flag
+        inode.i_flags = RafsInodeFlags::XATTR;
+        assert!(inode.has_xattr());
+
+        // Add some xattrs
+        inode
+            .i_xattr
+            .insert(OsString::from("user.test1"), vec![1, 2, 3]);
+        inode
+            .i_xattr
+            .insert(OsString::from("user.test2"), vec![4, 5, 6]);
+
+        // Test get_xattr
+        let value = inode.get_xattr(OsStr::new("user.test1")).unwrap();
+        assert_eq!(value, Some(vec![1, 2, 3]));
+
+        let value = inode.get_xattr(OsStr::new("user.nonexistent")).unwrap();
+        assert_eq!(value, None);
+
+        // Test get_xattrs
+        let xattrs = inode.get_xattrs().unwrap();
+        assert_eq!(xattrs.len(), 2);
+        assert!(xattrs.contains(&b"user.test1".to_vec()));
+        assert!(xattrs.contains(&b"user.test2".to_vec()));
+    }
+
+    #[test]
+    fn test_cached_inode_v5_symlink_operations() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut inode = CachedInodeV5::new(blob_table, meta);
+
+        // Test non-symlink
+        inode.i_mode = libc::S_IFREG as u32;
+        assert!(inode.get_symlink().is_err());
+        assert_eq!(inode.get_symlink_size(), 0);
+
+        // Test symlink
+        inode.i_mode = libc::S_IFLNK as u32;
+        inode.i_target = OsString::from("/path/to/target");
+
+        let target = inode.get_symlink().unwrap();
+        assert_eq!(target, OsString::from("/path/to/target"));
+        assert_eq!(inode.get_symlink_size(), "/path/to/target".len() as u16);
+    }
+
+    #[test]
+    fn test_cached_inode_v5_child_operations() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut parent = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        parent.i_ino = 1;
+        parent.i_mode = libc::S_IFDIR as u32;
+        parent.i_child_cnt = 2;
+
+        // Create child inodes
+        let mut child1 = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        child1.i_ino = 2;
+        child1.i_name = OsString::from("child_b");
+        child1.i_mode = libc::S_IFREG as u32;
+
+        let mut child2 = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        child2.i_ino = 3;
+        child2.i_name = OsString::from("child_a");
+        child2.i_mode = libc::S_IFREG as u32;
+
+        // Add children (they should be sorted by name)
+        parent.add_child(Arc::new(child1));
+        parent.add_child(Arc::new(child2));
+
+        // Test children are sorted
+        assert_eq!(parent.i_child[0].i_name, OsString::from("child_a"));
+        assert_eq!(parent.i_child[1].i_name, OsString::from("child_b"));
+
+        // Test get_child_by_name
+        let child = parent.get_child_by_name(OsStr::new("child_a")).unwrap();
+        assert_eq!(child.ino(), 3);
+
+        assert!(parent.get_child_by_name(OsStr::new("nonexistent")).is_err());
+
+        // Test get_child_by_index
+        let child = parent.get_child_by_index(0).unwrap();
+        assert_eq!(child.ino(), 3);
+
+        let child = parent.get_child_by_index(1).unwrap();
+        assert_eq!(child.ino(), 2);
+
+        assert!(parent.get_child_by_index(2).is_err());
+
+        // Test get_child_count
+        assert_eq!(parent.get_child_count(), 2);
+    }
+
+    #[test]
+    fn test_cached_inode_v5_walk_children() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut parent = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        parent.i_ino = 1;
+        parent.i_mode = libc::S_IFDIR as u32;
+        parent.i_child_cnt = 1;
+
+        let mut child = CachedInodeV5::new(blob_table, meta);
+        child.i_ino = 2;
+        child.i_name = OsString::from("test_child");
+        parent.add_child(Arc::new(child));
+
+        // Test walking from offset 0 (should see ".", "..", and "test_child")
+        let mut entries = Vec::new();
+        parent
+            .walk_children_inodes(0, &mut |_node, name, ino, offset| {
+                entries.push((name, ino, offset));
+                Ok(RafsInodeWalkAction::Continue)
+            })
+            .unwrap();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].0, OsString::from("."));
+        assert_eq!(entries[0].1, 1); // parent inode
+        assert_eq!(entries[1].0, OsString::from(".."));
+        assert_eq!(entries[1].1, 1); // root case
+        assert_eq!(entries[2].0, OsString::from("test_child"));
+        assert_eq!(entries[2].1, 2);
+
+        // Test walking from offset 1 (should skip ".")
+        let mut entries = Vec::new();
+        parent
+            .walk_children_inodes(1, &mut |_node, name, ino, _offset| {
+                entries.push((name, ino));
+                Ok(RafsInodeWalkAction::Continue)
+            })
+            .unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, OsString::from(".."));
+        assert_eq!(entries[1].0, OsString::from("test_child"));
+
+        // Test early break
+        let mut count = 0;
+        parent
+            .walk_children_inodes(0, &mut |_node, _name, _ino, _offset| {
+                count += 1;
+                if count == 1 {
+                    Ok(RafsInodeWalkAction::Break)
+                } else {
+                    Ok(RafsInodeWalkAction::Continue)
+                }
+            })
+            .unwrap();
+
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_cached_inode_v5_chunk_operations() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut inode = CachedInodeV5::new(blob_table, meta);
+
+        // Add some chunks
+        let mut chunk1 = CachedChunkInfoV5::new();
+        chunk1.index = 0;
+        chunk1.file_offset = 0;
+        chunk1.uncompressed_size = 1024;
+
+        let mut chunk2 = CachedChunkInfoV5::new();
+        chunk2.index = 1;
+        chunk2.file_offset = 1024;
+        chunk2.uncompressed_size = 1024;
+
+        inode.i_data.push(Arc::new(chunk1));
+        inode.i_data.push(Arc::new(chunk2));
+
+        // Note: get_chunk_count() currently returns i_child_cnt, not i_data.len()
+        // This appears to be a bug in the implementation, but we test current behavior
+        assert_eq!(inode.get_chunk_count(), 0); // i_child_cnt is 0 by default
+
+        // Test get_chunk_info
+        let chunk = inode.get_chunk_info(0).unwrap();
+        assert_eq!(chunk.uncompressed_size(), 1024);
+
+        let chunk = inode.get_chunk_info(1).unwrap();
+        assert_eq!(chunk.uncompressed_size(), 1024);
+
+        assert!(inode.get_chunk_info(2).is_err());
+
+        // Test actual data length
+        assert_eq!(inode.i_data.len(), 2);
+    }
+
+    #[test]
+    fn test_cached_inode_v5_collect_descendants() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+
+        // Create a directory structure
+        let mut root = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        root.i_ino = 1;
+        root.i_mode = libc::S_IFDIR as u32;
+        root.i_size = 0;
+
+        let mut subdir = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        subdir.i_ino = 2;
+        subdir.i_mode = libc::S_IFDIR as u32;
+        subdir.i_size = 0;
+
+        let mut file1 = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        file1.i_ino = 3;
+        file1.i_mode = libc::S_IFREG as u32;
+        file1.i_size = 1024;
+
+        let mut file2 = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        file2.i_ino = 4;
+        file2.i_mode = libc::S_IFREG as u32;
+        file2.i_size = 0; // Empty file should be skipped
+
+        let mut file3 = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        file3.i_ino = 5;
+        file3.i_mode = libc::S_IFREG as u32;
+        file3.i_size = 2048;
+
+        // Build structure: root -> [subdir, file1, file2], subdir -> [file3]
+        subdir.i_child.push(Arc::new(file3));
+        root.i_child.push(Arc::new(subdir));
+        root.i_child.push(Arc::new(file1));
+        root.i_child.push(Arc::new(file2));
+
+        let mut descendants = Vec::new();
+        root.collect_descendants_inodes(&mut descendants).unwrap();
+
+        // Should collect file1 (non-empty) and file3 (from subdirectory)
+        // file2 should be skipped because it's empty
+        assert_eq!(descendants.len(), 2);
+        let inodes: Vec<u64> = descendants.iter().map(|d| d.ino()).collect();
+        assert!(inodes.contains(&3)); // file1
+        assert!(inodes.contains(&5)); // file3
+        assert!(!inodes.contains(&4)); // file2 (empty)
+
+        // Test with non-directory
+        let file = CachedInodeV5::new(blob_table, meta);
+        let mut descendants = Vec::new();
+        assert!(file.collect_descendants_inodes(&mut descendants).is_err());
+    }
+
+    #[test]
+    fn test_cached_chunk_info_v5_detailed() {
+        let mut info = CachedChunkInfoV5::new();
+        info.block_id = Arc::new(RafsDigest::from_buf("test".as_bytes(), Algorithm::Blake3));
+        info.blob_index = 42;
+        info.index = 100;
+        info.file_offset = 2048;
+        info.compressed_offset = 1024;
+        info.uncompressed_offset = 3072;
+        info.compressed_size = 512;
+        info.uncompressed_size = 1024;
+        info.flags = BlobChunkFlags::COMPRESSED | BlobChunkFlags::HAS_CRC32;
+        info.crc32 = 0x12345678;
+
+        // Test basic properties
+        assert_eq!(info.id(), 100);
+        assert!(!info.is_batch());
+        assert!(info.is_compressed());
+        assert!(!info.is_encrypted());
+        assert!(info.has_crc32());
+        assert_eq!(info.crc32(), 0x12345678);
+
+        // Test getters
+        assert_eq!(info.blob_index(), 42);
+        assert_eq!(info.compressed_offset(), 1024);
+        assert_eq!(info.compressed_size(), 512);
+        assert_eq!(info.uncompressed_offset(), 3072);
+        assert_eq!(info.uncompressed_size(), 1024);
+
+        // Test V5-specific getters
+        assert_eq!(info.index(), 100);
+        assert_eq!(info.file_offset(), 2048);
+        assert_eq!(
+            info.flags(),
+            BlobChunkFlags::COMPRESSED | BlobChunkFlags::HAS_CRC32
+        );
+
+        // Test CRC32 without flag
+        info.flags = BlobChunkFlags::COMPRESSED;
+        assert!(!info.has_crc32());
+        assert_eq!(info.crc32(), 0);
+
+        // Test as_base
+        let base_info = info.as_base();
+        assert_eq!(base_info.blob_index(), 42);
+        assert!(base_info.is_compressed());
+    }
+
+    #[test]
+    fn test_cached_superblock_v5_inode_management() {
+        let md = RafsSuperMeta::default();
+        let mut sb = CachedSuperBlockV5::new(md, false);
+
+        // Test empty superblock
+        assert_eq!(sb.get_max_ino(), RAFS_V5_ROOT_INODE);
+        assert!(sb.get_inode(1, false).is_err());
+        assert!(sb.get_extended_inode(1, false).is_err());
+
+        // Test adding regular inode
+        let mut inode1 = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
+        inode1.i_ino = 10;
+        inode1.i_nlink = 1;
+        inode1.i_mode = libc::S_IFREG as u32;
+        let inode1_arc = Arc::new(inode1);
+        sb.hash_inode(inode1_arc.clone()).unwrap();
+
+        assert_eq!(sb.get_max_ino(), 10);
+        assert!(sb.get_inode(10, false).is_ok());
+        assert!(sb.get_extended_inode(10, false).is_ok());
+
+        // Test adding hardlink with data (should not replace existing)
+        let mut hardlink = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
+        hardlink.i_ino = 10; // Same inode number
+        hardlink.i_nlink = 2; // Hardlink
+        hardlink.i_mode = libc::S_IFREG as u32;
+        hardlink.i_data = vec![Arc::new(CachedChunkInfoV5::new())]; // Has data
+
+        let hardlink_arc = Arc::new(hardlink);
+        let _result = sb.hash_inode(hardlink_arc.clone()).unwrap();
+
+        // Since original inode has no data, the hardlink with data should replace it
+        let stored_inode = sb.get_inode(10, false).unwrap();
+        assert_eq!(
+            stored_inode
+                .as_any()
+                .downcast_ref::<CachedInodeV5>()
+                .unwrap()
+                .i_data
+                .len(),
+            1
+        );
+
+        // Test root inode
+        assert_eq!(sb.root_ino(), RAFS_V5_ROOT_INODE);
+
+        // Test destroy
+        sb.destroy();
+        assert_eq!(sb.s_inodes.len(), 0);
+    }
+
+    #[test]
+    fn test_cached_superblock_v5_blob_operations() {
+        let md = RafsSuperMeta::default();
+        let sb = CachedSuperBlockV5::new(md, false);
+
+        // Test get_blob_infos with empty blob table
+        let blobs = sb.get_blob_infos();
+        assert!(blobs.is_empty());
+
+        // Note: get_chunk_info() and set_blob_device() both panic with
+        // "not implemented: used by RAFS v6 only" so we can't test them directly
+    }
+
+    #[test]
+    fn test_cached_superblock_v5_hardlink_handling() {
+        let md = RafsSuperMeta::default();
+        let mut sb = CachedSuperBlockV5::new(md, false);
+
+        // Add inode without data
+        let mut inode1 = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
+        inode1.i_ino = 5;
+        inode1.i_nlink = 1;
+        inode1.i_mode = libc::S_IFREG as u32;
+        sb.hash_inode(Arc::new(inode1)).unwrap();
+
+        // Add hardlink with same inode number but no data - should replace
+        let mut hardlink = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
+        hardlink.i_ino = 5;
+        hardlink.i_nlink = 2;
+        hardlink.i_mode = libc::S_IFREG as u32;
+        hardlink.i_data = vec![]; // No data
+
+        sb.hash_inode(Arc::new(hardlink)).unwrap();
+
+        // Should have replaced the original
+        let stored = sb.get_inode(5, false).unwrap();
+        assert_eq!(
+            stored
+                .as_any()
+                .downcast_ref::<CachedInodeV5>()
+                .unwrap()
+                .i_nlink,
+            2
+        );
+    }
+
+    #[test]
+    fn test_from_rafs_v5_chunk_info() {
+        let mut ondisk_chunk = RafsV5ChunkInfo::new();
+        ondisk_chunk.block_id = RafsDigest::from_buf("test".as_bytes(), Algorithm::Blake3);
+        ondisk_chunk.blob_index = 1;
+        ondisk_chunk.index = 42;
+        ondisk_chunk.file_offset = 1024;
+        ondisk_chunk.compressed_offset = 512;
+        ondisk_chunk.uncompressed_offset = 2048;
+        ondisk_chunk.compressed_size = 256;
+        ondisk_chunk.uncompressed_size = 512;
+        ondisk_chunk.flags = BlobChunkFlags::COMPRESSED;
+
+        let cached_chunk = CachedChunkInfoV5::from(&ondisk_chunk);
+
+        assert_eq!(cached_chunk.blob_index(), 1);
+        assert_eq!(cached_chunk.index(), 42);
+        assert_eq!(cached_chunk.file_offset(), 1024);
+        assert_eq!(cached_chunk.compressed_offset(), 512);
+        assert_eq!(cached_chunk.uncompressed_offset(), 2048);
+        assert_eq!(cached_chunk.compressed_size(), 256);
+        assert_eq!(cached_chunk.uncompressed_size(), 512);
+        assert_eq!(cached_chunk.flags(), BlobChunkFlags::COMPRESSED);
+        assert!(cached_chunk.is_compressed());
+    }
+
+    #[test]
+    fn test_cached_inode_v5_accessor_methods() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut inode = CachedInodeV5::new(blob_table, meta);
+
+        // Set test values
+        inode.i_ino = 42;
+        inode.i_size = 8192;
+
+        inode.i_rdev = 0x0801; // Example device number
+        inode.i_projid = 1000;
+        inode.i_parent = 1;
+        inode.i_name = OsString::from("test_file");
+        inode.i_flags = RafsInodeFlags::XATTR;
+        inode.i_digest = RafsDigest::from_buf("test".as_bytes(), Algorithm::Blake3);
+        inode.i_child_idx = 10;
+
+        // Test basic getters
+        assert_eq!(inode.ino(), 42);
+        assert_eq!(inode.size(), 8192);
+        assert_eq!(inode.rdev(), 0x0801);
+        assert_eq!(inode.projid(), 1000);
+        assert_eq!(inode.parent(), 1);
+        assert_eq!(inode.name(), OsString::from("test_file"));
+        assert_eq!(inode.get_name_size(), "test_file".len() as u16);
+        assert_eq!(inode.flags(), RafsInodeFlags::XATTR.bits());
+        assert_eq!(inode.get_digest(), inode.i_digest);
+        assert_eq!(inode.get_child_index().unwrap(), 10);
+
+        // Test as_inode
+        let as_inode = inode.as_inode();
+        assert_eq!(as_inode.ino(), 42);
+    }
+
+    #[test]
+    fn test_cached_inode_v5_edge_cases() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut inode = CachedInodeV5::new(blob_table, meta);
+
+        // Test very large inode number
+        inode.i_ino = u64::MAX;
+        assert_eq!(inode.ino(), u64::MAX);
+
+        // Test edge case file modes
+        inode.i_mode = 0o777 | libc::S_IFREG as u32;
+        assert!(inode.is_reg());
+        assert_eq!(inode.i_mode & 0o777, 0o777);
+
+        // Test empty symlink target (should be invalid but we test getter)
+        inode.i_mode = libc::S_IFLNK as u32;
+        inode.i_target = OsString::new();
+        assert_eq!(inode.get_symlink_size(), 0);
+
+        // Test maximum name length
+        let max_name = "a".repeat(RAFS_MAX_NAME);
+        inode.i_name = OsString::from(max_name.clone());
+        assert_eq!(inode.name(), OsString::from(max_name));
+        assert_eq!(inode.get_name_size(), RAFS_MAX_NAME as u16);
+    }
+
+    #[test]
+    fn test_cached_inode_v5_zero_values() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let inode = CachedInodeV5::new(blob_table, meta);
+
+        // Test all zero/default values
+        assert_eq!(inode.ino(), 0);
+        assert_eq!(inode.size(), 0);
+        assert_eq!(inode.rdev(), 0);
+        assert_eq!(inode.projid(), 0);
+        assert_eq!(inode.parent(), 0);
+        assert_eq!(inode.flags(), 0);
+        assert_eq!(inode.get_name_size(), 0);
+        assert!(!inode.has_xattr());
+        assert!(!inode.is_hardlink());
+
+        // Test get_child operations on empty inode
+        assert_eq!(inode.get_child_count(), 0);
+        assert!(inode.get_child_by_index(0).is_err());
+        assert!(inode.get_child_by_name(OsStr::new("test")).is_err());
+
+        // Test chunk operations on empty inode
+        assert_eq!(inode.i_data.len(), 0);
+        assert!(inode.get_chunk_info(0).is_err());
+    }
+
+    #[test]
+    fn test_cached_chunk_info_v5_boundary_values() {
+        let mut info = CachedChunkInfoV5::new();
+
+        // Test maximum values
+        info.blob_index = u32::MAX;
+        info.index = u32::MAX;
+        info.file_offset = u64::MAX;
+        info.compressed_offset = u64::MAX;
+        info.uncompressed_offset = u64::MAX;
+        info.compressed_size = u32::MAX;
+        info.uncompressed_size = u32::MAX;
+        info.crc32 = u32::MAX;
+
+        assert_eq!(info.blob_index(), u32::MAX);
+        assert_eq!(info.index(), u32::MAX);
+        assert_eq!(info.file_offset(), u64::MAX);
+        assert_eq!(info.compressed_offset(), u64::MAX);
+        assert_eq!(info.uncompressed_offset(), u64::MAX);
+        assert_eq!(info.compressed_size(), u32::MAX);
+        assert_eq!(info.uncompressed_size(), u32::MAX);
+
+        // Test zero values
+        info.blob_index = 0;
+        info.index = 0;
+        info.file_offset = 0;
+        info.compressed_offset = 0;
+        info.uncompressed_offset = 0;
+        info.compressed_size = 0;
+        info.uncompressed_size = 0;
+        info.crc32 = 0;
+
+        assert_eq!(info.blob_index(), 0);
+        assert_eq!(info.index(), 0);
+        assert_eq!(info.file_offset(), 0);
+        assert_eq!(info.compressed_offset(), 0);
+        assert_eq!(info.uncompressed_offset(), 0);
+        assert_eq!(info.compressed_size(), 0);
+        assert_eq!(info.uncompressed_size(), 0);
+        assert_eq!(info.crc32(), 0);
+    }
+
+    #[test]
+    fn test_cached_inode_v5_special_names() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+        let mut inode = CachedInodeV5::new(blob_table, meta);
+
+        // Test special characters in names
+        let special_names = vec![
+            ".",
+            "..",
+            "file with spaces",
+            "file\twith\ttabs",
+            "file\nwith\nnewlines",
+            "file-with-dashes",
+            "file_with_underscores",
+            "file.with.dots",
+            "UPPERCASE_FILE",
+            "MiXeD_cAsE_fIlE",
+            "123456789",
+            "中文文件名", // Chinese characters
+            "файл",       // Cyrillic
+            "🦀🦀🦀",     // Emojis
+        ];
+
+        for name in special_names {
+            inode.i_name = OsString::from(name);
+            assert_eq!(inode.name(), OsString::from(name));
+            assert_eq!(inode.get_name_size(), name.len() as u16);
+        }
+    }
+
+    #[test]
+    fn test_cached_superblock_v5_edge_cases() {
+        let md = RafsSuperMeta::default();
+        let mut sb = CachedSuperBlockV5::new(md, false);
+
+        // Test with validation enabled
+        let md_validated = RafsSuperMeta::default();
+        let sb_validated = CachedSuperBlockV5::new(md_validated, true);
+        assert!(sb_validated.validate_inode);
+
+        // Test maximum inode number
+        let mut inode = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
+        inode.i_ino = u64::MAX;
+        inode.i_nlink = 1;
+        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_name = OsString::from("max_inode");
+
+        sb.hash_inode(Arc::new(inode)).unwrap();
+        assert_eq!(sb.get_max_ino(), u64::MAX);
+
+        // Test getting non-existent inode
+        assert!(sb.get_inode(u64::MAX - 1, false).is_err());
+        assert!(sb.get_extended_inode(u64::MAX - 1, false).is_err());
+
+        // Test blob operations
+        let blob_infos = sb.get_blob_infos();
+        assert!(blob_infos.is_empty());
+
+        let blob_extra_infos = sb.get_blob_extra_infos().unwrap();
+        assert!(blob_extra_infos.is_empty());
+    }
+
+    #[test]
+    fn test_cached_inode_v5_complex_directory_structure() {
+        let meta = Arc::new(RafsSuperMeta::default());
+        let blob_table = Arc::new(RafsV5BlobTable::new());
+
+        // Create a complex directory with many children
+        let mut root_dir = CachedInodeV5::new(blob_table.clone(), meta.clone());
+        root_dir.i_ino = 1;
+        root_dir.i_mode = libc::S_IFDIR as u32;
+        root_dir.i_name = OsString::from("root");
+
+        // Add many children with different names to test sorting
+        let child_names = [
+            "zzz_last",
+            "aaa_first",
+            "mmm_middle",
+            "000_numeric",
+            "ZZZ_upper",
+            "___underscore",
+            "...dots",
+            "111_mixed",
+            "yyy_second_last",
+            "bbb_second",
+        ];
+
+        // Set the correct child count for sorting to trigger
+        root_dir.i_child_cnt = child_names.len() as u32;
+
+        for (i, name) in child_names.iter().enumerate() {
+            let mut child = CachedInodeV5::new(blob_table.clone(), meta.clone());
+            child.i_ino = i as u64 + 2;
+            child.i_name = OsString::from(*name);
+            child.i_mode = if i % 2 == 0 {
+                libc::S_IFREG as u32
+            } else {
+                libc::S_IFDIR as u32
+            };
+            root_dir.add_child(Arc::new(child));
+        }
+
+        // Verify children are sorted by name (after all children are added)
+        assert_eq!(root_dir.i_child.len(), child_names.len());
+        for i in 1..root_dir.i_child.len() {
+            let prev_name = &root_dir.i_child[i - 1].i_name;
+            let curr_name = &root_dir.i_child[i].i_name;
+            assert!(
+                prev_name <= curr_name,
+                "Children not sorted: {:?} > {:?}",
+                prev_name,
+                curr_name
+            );
+        }
+
+        // Test walking all children
+        let mut visited_count = 0;
+        root_dir
+            .walk_children_inodes(0, &mut |_node, _name, _ino, _offset| {
+                visited_count += 1;
+                Ok(RafsInodeWalkAction::Continue)
+            })
+            .unwrap();
+
+        // Should visit ".", "..", and all children
+        assert_eq!(visited_count, 2 + child_names.len());
+
+        // Test collecting descendants
+        let mut descendants = Vec::new();
+        root_dir
+            .collect_descendants_inodes(&mut descendants)
+            .unwrap();
+        // Only regular files with size > 0 are collected, so should be empty
+        assert!(descendants.is_empty());
     }
 }

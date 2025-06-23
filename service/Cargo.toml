@@ -46,6 +46,9 @@ tokio-uring = "0.4"
 [dev-dependencies]
 vmm-sys-util = "0.12.1"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+procfs = "0.17.0"
+
 [features]
 default = ["fuse-backend-rs/fusedev"]
 virtiofs = [
