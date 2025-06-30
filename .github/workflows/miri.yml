@@ -1,0 +1,45 @@
+name: Miri Test
+
+on:
+  push:
+    branches: ["**", "stable/**"]
+    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
+  pull_request:
+    branches: ["**", "stable/**"]
+    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
+  schedule:
+    # Run daily sanity check at 03:00 clock UTC
+    - cron: "0 03 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  nydus-unit-test-with-miri:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        shared-key: Linux-cargo-amd64
+        save-if: ${{ github.ref == 'refs/heads/master' }}
+    - name: Install cargo nextest
+      uses: taiki-e/install-action@nextest
+    - name: Fscache Setup
+      run: sudo bash misc/fscache/setup.sh
+    - name: Install Miri
+      run: |
+        rustup toolchain install nightly --component miri
+        rustup override set nightly
+        cargo miri setup
+    - name: Unit Test with Miri
+      run: |
+        CARGO_HOME=${HOME}/.cargo
+        CARGO_BIN=$(which cargo)
+        RUSTUP_BIN=$(which rustup)
+        sudo -E RUSTUP=${RUSTUP_BIN} make miri-ut-nextest 2>&1 | tee miri-ut.log
+        grep -C 2 'Undefined Behavior' miri-ut.log
