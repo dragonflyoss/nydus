@@ -47,7 +47,7 @@ type Provider struct {
 	pushRetryDelay time.Duration
 }
 
-func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64) (*Provider, error) {
+func New(_ string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64) (*Provider, error) {
 	store := NewMemoryContentStore()
 
 	return &Provider{

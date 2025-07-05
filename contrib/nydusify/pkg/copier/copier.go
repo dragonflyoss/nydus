@@ -45,6 +45,13 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
+// contextKey is a type for context keys to avoid conflicts
+type contextKey string
+
+const (
+	streamContextKey contextKey = "useStream"
+)
+
 type Opt struct {
 	WorkDir        string
 	NydusImagePath string
@@ -299,26 +306,21 @@ func StreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.W
 func handleSmallFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
 	logrus.Debugf("file is small (%d bytes), using simplified handling", size)
 
-	// 读取全部内容
 	data, err := io.ReadAll(srcReader)
 	if err != nil {
 		return errors.Wrap(err, "read small file data failed")
 	}
 
-	// 确保数据大小正确
 	if int64(len(data)) != size && size > 0 {
 		logrus.Warnf("small file size mismatch: expected %d bytes, actual %d bytes", size, len(data))
 	}
 
-	// 计算实际摘要
 	actualDigest := digest.FromBytes(data)
 
-	// 检查摘要是否匹配
 	if expectedDigest != "" && expectedDigest != actualDigest {
 		return fmt.Errorf("small file digest mismatch: expected %s, actual %s", expectedDigest, actualDigest)
 	}
 
-	// 写入数据并提交
 	if _, err := targetWriter.Write(data); err != nil {
 		return errors.Wrap(err, "write small file data failed")
 	}
@@ -403,7 +405,7 @@ func handleLargeFileTransfer(ctx context.Context, srcReader io.Reader, targetWri
 
 // newStreamContext creates a context for stream transfer
 func newStreamContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, "useStream", true)
+	return context.WithValue(ctx, streamContextKey, true)
 }
 
 // enableStreamTransfer checks if stream transfer should be enabled
