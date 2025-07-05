@@ -409,7 +409,8 @@ func newStreamContext(ctx context.Context) context.Context {
 
 // enableStreamTransfer checks if stream transfer should be enabled
 func enableStreamTransfer(opt Opt) bool {
-	return opt.PushChunkSize > 0
+	return false
+	// return opt.PushChunkSize > 0
 }
 
 // httpModeManager manages thread-safe HTTP mode switching
