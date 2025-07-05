@@ -16,6 +16,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// contextKey is a type for context keys to avoid conflicts
+type contextKey string
+
+const (
+	streamContextKey contextKey = "useStream"
+)
+
 type memoryBlob struct {
 	// data is the content of the blob
 	data   []byte
@@ -63,8 +70,8 @@ type streamWriter struct {
 	closed bool
 }
 
-func (m *memoryContentStore) Writer(ctx context.Context, opts ...content.WriterOpt) (content.Writer, error) {
-	if useStream, _ := ctx.Value("useStream").(bool); useStream {
+func (m *memoryContentStore) Writer(ctx context.Context, _ ...content.WriterOpt) (content.Writer, error) {
+	if useStream, _ := ctx.Value(streamContextKey).(bool); useStream {
 		pr, pw := io.Pipe()
 		blob := &streamBlob{
 			pr:        pr,
@@ -99,7 +106,7 @@ func (w *memoryWriter) Close() error {
 	return nil
 }
 
-func (w *memoryWriter) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
+func (w *memoryWriter) Commit(_ context.Context, _ int64, _ digest.Digest, _ ...content.Opt) error {
 	dgst := digest.NewDigestFromBytes(digest.SHA256, w.hash.Sum(nil))
 
 	blob := &memoryBlob{
@@ -115,7 +122,7 @@ func (w *memoryWriter) Commit(ctx context.Context, size int64, expected digest.D
 	return nil
 }
 
-func (w *memoryWriter) Truncate(size int64) error {
+func (w *memoryWriter) Truncate(_ int64) error {
 	return nil
 }
 
@@ -158,7 +165,7 @@ func (w *streamWriter) Close() error {
 	return w.blob.pw.Close()
 }
 
-func (w *streamWriter) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
+func (w *streamWriter) Commit(_ context.Context, size int64, expected digest.Digest, _ ...content.Opt) error {
 	logrus.Infof("push stream data, size: %d bytes", w.off)
 
 	w.blob.size = w.off
@@ -181,7 +188,7 @@ func (w *streamWriter) Commit(ctx context.Context, size int64, expected digest.D
 	return nil
 }
 
-func (w *streamWriter) Truncate(size int64) error {
+func (w *streamWriter) Truncate(_ int64) error {
 	return nil
 }
 
@@ -293,7 +300,7 @@ func (r *streamReaderAt) Size() int64 {
 	}
 }
 
-func (m *memoryContentStore) ReaderAt(ctx context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
+func (m *memoryContentStore) ReaderAt(_ context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
 	m.mu.RLock()
 	blob, ok := m.blobs[desc.Digest]
 	if !ok {
@@ -310,7 +317,7 @@ func (m *memoryContentStore) ReaderAt(ctx context.Context, desc ocispec.Descript
 	return &memoryReaderAt{data: blob.data, size: blob.size}, nil
 }
 
-func (m *memoryContentStore) Reader(ctx context.Context, desc digest.Digest) (io.ReadCloser, error) {
+func (m *memoryContentStore) Reader(_ context.Context, desc digest.Digest) (io.ReadCloser, error) {
 	m.mu.RLock()
 	blob, ok := m.blobs[desc]
 	if !ok {
@@ -327,7 +334,7 @@ func (m *memoryContentStore) Reader(ctx context.Context, desc digest.Digest) (io
 	return io.NopCloser(bytes.NewReader(blob.data)), nil
 }
 
-func (m *memoryContentStore) Info(ctx context.Context, dgst digest.Digest) (content.Info, error) {
+func (m *memoryContentStore) Info(_ context.Context, dgst digest.Digest) (content.Info, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -350,19 +357,19 @@ func (m *memoryContentStore) Info(ctx context.Context, dgst digest.Digest) (cont
 	return content.Info{}, errdefs.ErrNotFound
 }
 
-func (m *memoryContentStore) Abort(ctx context.Context, ref string) error {
+func (m *memoryContentStore) Abort(_ context.Context, _ string) error {
 	return nil
 }
 
-func (m *memoryContentStore) Status(ctx context.Context, ref string) (content.Status, error) {
+func (m *memoryContentStore) Status(_ context.Context, ref string) (content.Status, error) {
 	return content.Status{Ref: ref}, nil
 }
 
-func (m *memoryContentStore) ListStatuses(ctx context.Context, filters ...string) ([]content.Status, error) {
+func (m *memoryContentStore) ListStatuses(_ context.Context, _ ...string) ([]content.Status, error) {
 	return nil, nil
 }
 
-func (m *memoryContentStore) Delete(ctx context.Context, dgst digest.Digest) error {
+func (m *memoryContentStore) Delete(_ context.Context, dgst digest.Digest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -371,11 +378,11 @@ func (m *memoryContentStore) Delete(ctx context.Context, dgst digest.Digest) err
 	return nil
 }
 
-func (m *memoryContentStore) Update(ctx context.Context, info content.Info, fieldpaths ...string) (content.Info, error) {
+func (m *memoryContentStore) Update(_ context.Context, info content.Info, _ ...string) (content.Info, error) {
 	return info, nil
 }
 
-func (m *memoryContentStore) Walk(ctx context.Context, fn content.WalkFunc, filters ...string) error {
+func (m *memoryContentStore) Walk(_ context.Context, fn content.WalkFunc, _ ...string) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
