@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-api"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "backtrace",
  "dbs-uhttp",
@@ -1449,7 +1449,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-builder"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1486,7 +1486,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-rafs"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1549,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-service"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytes",
  "dbs-allocator",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-storage"
-version = "0.6.4"
+version = "0.7.0"
 dependencies = [
  "arc-swap",
  "base64",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-upgrade"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dbs-snapshot",
  "sendfd",
@@ -1633,7 +1633,7 @@ dependencies = [
 
 [[package]]
 name = "nydus-utils"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "crc",
