@@ -1,6 +1,6 @@
 [package]
 name = "nydus-rafs"
-version = "0.3.2"
+version = "0.4.0"
 description = "The RAFS filesystem format for Nydus Image Service"
 authors = ["The Nydus Developers"]
 license = "Apache-2.0 OR BSD-3-Clause"
@@ -22,11 +22,11 @@ vm-memory = "0.14.1"
 fuse-backend-rs = "^0.12.0"
 thiserror = "1"
 
-nydus-api = { version = "0.3", path = "../api" }
-nydus-storage = { version = "0.6", path = "../storage", features = [
+nydus-api = { version = "0.4.0", path = "../api" }
+nydus-storage = { version = "0.7.0", path = "../storage", features = [
     "backend-localfs",
 ] }
-nydus-utils = { version = "0.4", path = "../utils" }
+nydus-utils = { version = "0.5.0", path = "../utils" }
 
 [dev-dependencies]
 vmm-sys-util = "0.12.1"
