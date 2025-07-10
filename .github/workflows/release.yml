@@ -242,6 +242,7 @@ jobs:
 
 
   goreleaser:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -310,6 +311,7 @@ jobs:
         run: echo "tag_name=${GITHUB_REF#refs/*/}" >> "$GITHUB_OUTPUT"
 
   provenance:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: [goreleaser]
     permissions:
       actions: read # To read the workflow path.

@@ -1,6 +1,6 @@
 [package]
 name = "nydus-utils"
-version = "0.4.3"
+version = "0.5.0"
 description = "Utilities and helpers for Nydus Image Service"
 authors = ["The Nydus Developers"]
 license = "Apache-2.0 OR BSD-3-Clause"
@@ -26,7 +26,7 @@ zstd = "0.11"
 nix = "0.24"
 crc = "3.2.1"
 
-nydus-api = { version = "0.3", path = "../api" }
+nydus-api = { version = "0.4.0", path = "../api" }
 
 # libz-ng-sys doesn't compile on ppc64. Have to fallback to stock zlib-sys
 [target.'cfg(target_arch = "powerpc64")'.dependencies]

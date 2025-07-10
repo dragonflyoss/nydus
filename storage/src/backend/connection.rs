@@ -652,7 +652,9 @@ impl Connection {
         let mut cb = Client::builder()
             .timeout(timeout)
             .connect_timeout(connect_timeout)
-            .redirect(Policy::none());
+            // same number of redirects as containerd
+            // https://github.com/containerd/containerd/blob/main/core/remotes/docker/resolver.go#L596
+            .redirect(Policy::limited(10));
 
         if config.skip_verify {
             cb = cb.danger_accept_invalid_certs(true);

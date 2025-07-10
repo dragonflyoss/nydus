@@ -260,11 +260,11 @@ impl FsService for VirtioFsService {
         &self.vfs
     }
 
-    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
+    fn upgrade_mgr(&self) -> Option<MutexGuard<'_, UpgradeManager>> {
         self.upgrade_mgr.as_ref().map(|mgr| mgr.lock().unwrap())
     }
 
-    fn backend_collection(&self) -> MutexGuard<FsBackendCollection> {
+    fn backend_collection(&self) -> MutexGuard<'_, FsBackendCollection> {
         self.backend_collection.lock().unwrap()
     }
 

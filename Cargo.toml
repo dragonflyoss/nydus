@@ -55,19 +55,19 @@ tokio = { version = "1.35.1", features = ["macros"] }
 # Build static linked openssl library
 openssl = { version = '0.10.72', features = ["vendored"] }
 
-nydus-api = { version = "0.3.0", path = "api", features = [
+nydus-api = { version = "0.4.0", path = "api", features = [
     "error-backtrace",
     "handler",
 ] }
-nydus-builder = { version = "0.1.0", path = "builder" }
-nydus-rafs = { version = "0.3.1", path = "rafs" }
-nydus-service = { version = "0.3.0", path = "service", features = [
+nydus-builder = { version = "0.2.0", path = "builder" }
+nydus-rafs = { version = "0.4.0", path = "rafs" }
+nydus-service = { version = "0.4.0", path = "service", features = [
     "block-device",
 ] }
-nydus-storage = { version = "0.6.3", path = "storage", features = [
+nydus-storage = { version = "0.7.0", path = "storage", features = [
     "prefetch-rate-limit",
 ] }
-nydus-utils = { version = "0.4.2", path = "utils" }
+nydus-utils = { version = "0.5.0", path = "utils" }
 
 vhost = { version = "0.11.0", features = ["vhost-user"], optional = true }
 vhost-user-backend = { version = "0.15.0", optional = true }

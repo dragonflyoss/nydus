@@ -122,7 +122,11 @@ impl<T> HashCache<T> {
 #[derive(Clone, serde::Deserialize)]
 struct TokenResponse {
     /// Registry token string.
+    /// This field might vary depending on the registry server.
+    #[serde(default)]
     token: String,
+    #[serde(default)]
+    access_token: String,
     /// Registry token period of validity, in seconds.
     #[serde(default = "default_expires_in")]
     expires_in: u64,
@@ -130,6 +134,26 @@ struct TokenResponse {
 
 fn default_expires_in() -> u64 {
     REGISTRY_DEFAULT_TOKEN_EXPIRATION
+}
+
+impl TokenResponse {
+    // Extract the bearer token from the registry auth server response
+    fn from_resp(resp: Response) -> Result<Self> {
+        let mut token: TokenResponse = resp.json().map_err(|e| {
+            einval!(format!(
+                "failed to decode registry auth server response: {:?}",
+                e
+            ))
+        })?;
+
+        if token.token.is_empty() {
+            if token.access_token.is_empty() {
+                return Err(einval!("failed to get auth token from registry"));
+            }
+            token.token = token.access_token.clone();
+        }
+        Ok(token)
+    }
 }
 
 #[derive(Debug)]
@@ -233,8 +257,9 @@ impl RegistryState {
                     // we are likely to encounter these types of error:
                     // https://github.com/openssl/openssl/blob/6b3d28757620e0781bb1556032bb6961ee39af63/crypto/err/openssl.txt#L1574
                     // https://github.com/containerd/nerdctl/blob/225a70bdc3b93cdb00efac7db1ceb50c098a8a16/pkg/cmd/image/push.go#LL135C66-L135C66
-                    let fallback =
-                        msg.contains("wrong version number") || msg.contains("connection refused");
+                    let fallback = msg.contains("wrong version number")
+                        || msg.contains("connection refused")
+                        || msg.to_lowercase().contains("ssl");
                     if fallback {
                         warn!("fallback to http due to tls connection error: {}", err);
                     }
@@ -267,12 +292,8 @@ impl RegistryState {
             }
         };
 
-        let ret: TokenResponse = resp.json().map_err(|e| {
-            einval!(format!(
-                "registry auth server response decode failed: {:?}",
-                e
-            ))
-        })?;
+        let ret = TokenResponse::from_resp(resp)
+            .map_err(|e| einval!(format!("failed to get auth token from registry: {:?}", e)))?;
 
         if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
             self.token_expired_at
@@ -1023,6 +1044,8 @@ fn trim(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::response;
+    use serde_json::json;
 
     #[test]
     fn test_string_cache() {
@@ -1171,5 +1194,72 @@ mod tests {
         }
 
         assert_eq!(*val.load().as_ref(), 2);
+    }
+
+    #[test]
+    fn test_token_response_from_resp() {
+        // Case 1: Response contains "token"
+        let json_with_token = json!({
+            "token": "test_token_value",
+            "expires_in": 3600
+        });
+        let response = Response::from(
+            response::Builder::new()
+                .body(json_with_token.to_string())
+                .unwrap(),
+        );
+        let result = TokenResponse::from_resp(response).unwrap();
+        assert_eq!(result.token, "test_token_value");
+        assert_eq!(result.expires_in, 3600);
+
+        // Case 2: Response contains "access_token"
+        let json_with_access_token = json!({
+            "access_token": "test_access_token_value",
+            "expires_in": 7200
+        });
+        let response = Response::from(
+            response::Builder::new()
+                .body(json_with_access_token.to_string())
+                .unwrap(),
+        );
+        let result = TokenResponse::from_resp(response).unwrap();
+        assert_eq!(result.token, "test_access_token_value");
+        assert_eq!(result.expires_in, 7200);
+
+        // Case 3: Default expiration time when "expires_in" is missing
+        let json_with_default_expiration = json!({
+            "token": "default_expiration_token"
+        });
+        let response = Response::from(
+            response::Builder::new()
+                .body(json_with_default_expiration.to_string())
+                .unwrap(),
+        );
+        let result = TokenResponse::from_resp(response).unwrap();
+        assert_eq!(result.token, "default_expiration_token");
+        assert_eq!(result.expires_in, REGISTRY_DEFAULT_TOKEN_EXPIRATION);
+
+        // Case 4: Response contains both token and access_token
+        let json_with_both_tokens = json!({
+            "token": "test_token_value",
+            "access_token": "test_access_token_value",
+        });
+        let response = Response::from(
+            response::Builder::new()
+                .body(json_with_both_tokens.to_string())
+                .unwrap(),
+        );
+        let result = TokenResponse::from_resp(response).unwrap();
+        assert_eq!(result.token, "test_token_value");
+
+        // Case 5: Response contains no token
+        let json_with_no_token = json!({});
+        let response = Response::from(
+            response::Builder::new()
+                .body(json_with_no_token.to_string())
+                .unwrap(),
+        );
+        let result = TokenResponse::from_resp(response);
+        assert!(result.is_err());
     }
 }
