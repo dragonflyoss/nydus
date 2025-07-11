@@ -235,7 +235,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 	// and not yet visible in the overlay filesystem's upper directory
 	logrus.Infof("syncing filesystem before commit")
 	if err := cm.syncFilesystem(ctx, opt.ContainerID); err != nil {
-		logrus.Warnf("failed to sync filesystem, continuing anyway: %v", err)
+		return errors.Wrap(err, "failed to sync filesystem")
 	}
 
 	if err := cm.pause(ctx, opt.ContainerID, commit); err != nil {
