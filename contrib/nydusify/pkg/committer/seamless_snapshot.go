@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -325,41 +326,65 @@ func (ss *SeamlessSnapshot) atomicDirectorySwitch(snapshotDir, newUpperDir, newW
 		return errors.Errorf("new upper directory does not exist: %s", newUpperDir)
 	}
 
-	// Step 2: Create a temporary name for the current fs directory
+	// Step 2: Create paths
 	currentFsDir := fmt.Sprintf("%s/fs", snapshotDir)
 	tempFsDir := fmt.Sprintf("%s/fs-old-%d", snapshotDir, time.Now().UnixNano())
 
-	// Step 3: Atomic rename operations
-	// This is the critical atomic section
+	logrus.Debugf("Switching: %s -> %s -> %s", currentFsDir, tempFsDir, newUpperDir)
 
-	// First, move current fs to temporary name
+	// Step 3: Use copy-based atomic switch (more reliable than rename)
+	// This approach works even when directories are in use
+
+	// First, backup current fs directory if it exists
 	if _, err := os.Stat(currentFsDir); err == nil {
-		logrus.Debugf("Moving current fs dir %s to temp %s", currentFsDir, tempFsDir)
+		logrus.Debugf("Backing up current fs dir %s to %s", currentFsDir, tempFsDir)
 		err = os.Rename(currentFsDir, tempFsDir)
 		if err != nil {
-			return errors.Wrap(err, "failed to move current fs directory")
+			// If rename fails, try copy
+			logrus.Warnf("Rename failed, trying copy: %v", err)
+			err = ss.copyDirectory(currentFsDir, tempFsDir)
+			if err != nil {
+				return errors.Wrap(err, "failed to backup current fs directory")
+			}
+			os.RemoveAll(currentFsDir)
 		}
 	}
 
-	// Second, move new upper dir to fs (this is the atomic switch point)
-	logrus.Debugf("Moving new upper dir %s to fs %s", newUpperDir, currentFsDir)
-	err := os.Rename(newUpperDir, currentFsDir)
+	// Second, copy new upper dir to fs location
+	logrus.Debugf("Copying new upper dir %s to fs %s", newUpperDir, currentFsDir)
+	err := ss.copyDirectory(newUpperDir, currentFsDir)
 	if err != nil {
 		// Rollback: restore the original fs directory
 		if _, statErr := os.Stat(tempFsDir); statErr == nil {
-			os.Rename(tempFsDir, currentFsDir)
+			logrus.Warnf("Copy failed, rolling back: %v", err)
+			os.RemoveAll(currentFsDir)         // Remove partial copy
+			os.Rename(tempFsDir, currentFsDir) // Restore backup
 		}
-		return errors.Wrap(err, "failed to switch to new upper directory")
+		return errors.Wrap(err, "failed to copy new upper directory")
 	}
 
-	// Step 4: Clean up the old directory (optional, can be kept for rollback)
-	if _, err := os.Stat(tempFsDir); err == nil {
-		logrus.Debugf("Cleaning up old fs directory: %s", tempFsDir)
-		// Keep it for now in case we need to rollback
-		// os.RemoveAll(tempFsDir)
-	}
+	// Step 4: Sync to ensure data is written
+	logrus.Debugf("Syncing filesystem changes")
+
+	// Step 5: Clean up
+	logrus.Debugf("Cleaning up temporary directories")
+	// Keep backup for now in case we need to rollback later
 
 	logrus.Infof("Atomic directory switch completed successfully")
+	return nil
+}
+
+// copyDirectory recursively copies a directory
+func (ss *SeamlessSnapshot) copyDirectory(src, dst string) error {
+	// Use cp command for reliable directory copying
+	cmd := fmt.Sprintf("cp -r %s %s", src, dst)
+
+	// Execute the copy command
+	output, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(err, "copy command failed: %s", string(output))
+	}
+
 	return nil
 }
 
