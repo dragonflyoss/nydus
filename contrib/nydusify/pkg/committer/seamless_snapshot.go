@@ -351,10 +351,17 @@ func (ss *SeamlessSnapshot) atomicDirectorySwitch(snapshotDir, newUpperDir, newW
 	}
 
 	// Second, copy new upper dir to fs location
-	logrus.Debugf("Copying new upper dir %s to fs %s", newUpperDir, currentFsDir)
+	logrus.Infof("About to copy new upper dir %s to fs %s", newUpperDir, currentFsDir)
+
+	// Check if source exists
+	if _, err := os.Stat(newUpperDir); os.IsNotExist(err) {
+		return errors.Errorf("source directory does not exist: %s", newUpperDir)
+	}
+
 	err := ss.copyDirectory(newUpperDir, currentFsDir)
 	if err != nil {
 		// Rollback: restore the original fs directory
+		logrus.Errorf("Copy operation failed: %v", err)
 		if _, statErr := os.Stat(tempFsDir); statErr == nil {
 			logrus.Warnf("Copy failed, rolling back: %v", err)
 			os.RemoveAll(currentFsDir)         // Remove partial copy
@@ -362,6 +369,13 @@ func (ss *SeamlessSnapshot) atomicDirectorySwitch(snapshotDir, newUpperDir, newW
 		}
 		return errors.Wrap(err, "failed to copy new upper directory")
 	}
+
+	// Verify the copy was successful
+	if _, err := os.Stat(currentFsDir); os.IsNotExist(err) {
+		return errors.Errorf("copy verification failed: fs directory %s was not created", currentFsDir)
+	}
+
+	logrus.Infof("Successfully copied new upper dir to fs location")
 
 	// Step 4: Sync to ensure data is written
 	logrus.Debugf("Syncing filesystem changes")
