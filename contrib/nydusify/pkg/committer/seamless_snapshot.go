@@ -390,24 +390,43 @@ func (ss *SeamlessSnapshot) atomicDirectorySwitch(snapshotDir, newUpperDir, newW
 
 // copyDirectory recursively copies a directory
 func (ss *SeamlessSnapshot) copyDirectory(src, dst string) error {
-	logrus.Debugf("Copying directory from %s to %s", src, dst)
+	logrus.Infof("Starting copy operation: %s -> %s", src, dst)
+
+	// Check source exists
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		logrus.Errorf("Source directory does not exist: %s", src)
+		return errors.Errorf("source directory does not exist: %s", src)
+	}
+
+	// Remove destination if it exists
+	if _, err := os.Stat(dst); err == nil {
+		logrus.Infof("Removing existing destination: %s", dst)
+		if err := os.RemoveAll(dst); err != nil {
+			logrus.Errorf("Failed to remove existing destination: %v", err)
+			return errors.Wrapf(err, "failed to remove existing destination %s", dst)
+		}
+	}
 
 	// Use cp command for reliable directory copying
+	logrus.Infof("Executing: cp -r %s %s", src, dst)
 	cmd := exec.Command("cp", "-r", src, dst)
 
 	// Execute the copy command
 	output, err := cmd.CombinedOutput()
+	logrus.Infof("cp command output: '%s'", string(output))
+
 	if err != nil {
-		logrus.Errorf("Copy command failed: %s", string(output))
+		logrus.Errorf("cp command failed: %v, output: %s", err, string(output))
 		return errors.Wrapf(err, "copy command failed: %s", string(output))
 	}
 
 	// Verify the destination exists
 	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		logrus.Errorf("Copy verification failed: destination %s does not exist after copy", dst)
 		return errors.Errorf("copy verification failed: destination %s does not exist", dst)
 	}
 
-	logrus.Debugf("Successfully copied directory from %s to %s", src, dst)
+	logrus.Infof("Copy operation completed successfully: %s -> %s", src, dst)
 	return nil
 }
 
