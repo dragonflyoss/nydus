@@ -293,8 +293,8 @@ func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 
 	// Ensure we allow at least one commit operation
 	if tempOpt.MaximumTimes == 0 {
-		tempOpt.MaximumTimes = 1
-		logrus.Infof("setting MaximumTimes to 1 for snapshot commit")
+		tempOpt.MaximumTimes = 10
+		logrus.Infof("setting MaximumTimes to 10 for snapshot commit")
 	}
 
 	cm, err := NewCommitter(tempOpt)
