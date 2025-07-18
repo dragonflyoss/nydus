@@ -39,10 +39,11 @@ type SnapshotTask struct {
 
 // SnapshotResult contains the result of a seamless snapshot operation
 type SnapshotResult struct {
-	NewUpperDir string
-	OldUpperDir string
-	SnapshotID  string
-	PauseTime   time.Duration
+	NewUpperDir  string
+	OldUpperDir  string
+	SnapshotID   string
+	PauseTime    time.Duration
+	CompleteChan chan error // Channel to wait for background processing completion
 }
 
 // NewSeamlessSnapshot creates a new seamless snapshot instance
@@ -123,6 +124,7 @@ func (ss *SeamlessSnapshot) CreateSeamlessSnapshot(ctx context.Context, containe
 	}()
 
 	result.SnapshotID = snapshotID
+	result.CompleteChan = task.CompleteChan
 	return result, nil
 }
 
