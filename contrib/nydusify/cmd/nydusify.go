@@ -215,14 +215,14 @@ func main() {
 				&cli.StringFlag{
 					Name:    "source-backend-type",
 					Value:   "",
-					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
-					EnvVars: []string{"BACKEND_TYPE"},
+					Usage:   "Type of storage backend, possible values: 'modelfile', 'model-artifact'",
+					EnvVars: []string{"SOURCE_BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
 					Name:    "source-backend-config",
 					Value:   "",
 					Usage:   "Json configuration string for storage backend",
-					EnvVars: []string{"BACKEND_CONFIG"},
+					EnvVars: []string{"SOURCE_BACKEND_CONFIG"},
 				},
 				&cli.StringFlag{
 					Name:     "target-suffix",
