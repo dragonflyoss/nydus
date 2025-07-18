@@ -8,13 +8,10 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 
-	parserPkg "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -282,22 +279,9 @@ func (ss *SeamlessSnapshot) backgroundProcessor() {
 
 // processSnapshotTask processes a single snapshot task
 func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
-	ctx := context.Background()
-
 	logrus.Infof("starting background processing for snapshot: %s", task.SnapshotID)
 	logrus.Debugf("task options: target=%s, workdir=%s, fsversion=%s, compressor=%s",
 		task.TargetRef, task.Opt.WorkDir, task.Opt.FsVersion, task.Opt.Compressor)
-
-	// Create a temporary committer for this task
-	tempOpt := task.Opt
-	tempOpt.ContainerID = task.ContainerID
-
-	logrus.Infof("creating committer for background task")
-	cm, err := NewCommitter(tempOpt)
-	if err != nil {
-		logrus.Errorf("failed to create committer: %v", err)
-		return errors.Wrap(err, "create temporary committer")
-	}
 
 	// For the demonstration, we'll simulate the commit process
 	// In a production environment, this would involve proper integration with nydus-image
