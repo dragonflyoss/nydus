@@ -283,9 +283,11 @@ func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 	logrus.Debugf("task options: target=%s, workdir=%s, fsversion=%s, compressor=%s",
 		task.TargetRef, task.Opt.WorkDir, task.Opt.FsVersion, task.Opt.Compressor)
 
-	// Create a real committer for actual processing
-	logrus.Infof("creating real committer for snapshot: %s", task.SnapshotID)
+	// For a practical implementation, we'll commit the current container state
+	// This is more useful than trying to commit just the changes in the old upper dir
+	logrus.Infof("creating committer for container snapshot: %s", task.ContainerID)
 
+	// Create a new committer with the target configuration
 	tempOpt := task.Opt
 	tempOpt.ContainerID = task.ContainerID
 
@@ -295,29 +297,20 @@ func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 		return errors.Wrap(err, "create committer for background task")
 	}
 
-	// Check if the old upper directory exists
-	if _, err := os.Stat(task.OldUpperDir); os.IsNotExist(err) {
-		logrus.Warnf("old upper directory does not exist: %s", task.OldUpperDir)
-		logrus.Infof("using current container state for commit instead")
+	logrus.Infof("committing current container state to: %s", task.TargetRef)
 
-		// If old upper dir doesn't exist, commit the current container state
-		// This is actually more practical for a real snapshot
-	} else {
-		logrus.Infof("found old upper directory: %s", task.OldUpperDir)
-	}
-
-	logrus.Infof("committing container snapshot: %s", task.ContainerID)
-
-	// Use the regular commit process with the container ID
-	// This will create a real nydus image from the current container state and push it
+	// Use the regular commit process - this will:
+	// 1. Create a nydus image from the current container state
+	// 2. Push it to the target registry (ECR)
+	// 3. Handle authentication and networking
 	ctx := context.Background()
 	err = cm.Commit(ctx, tempOpt)
 	if err != nil {
-		logrus.Errorf("failed to commit snapshot: %v", err)
-		return errors.Wrap(err, "commit snapshot to target")
+		logrus.Errorf("failed to commit and push snapshot: %v", err)
+		return errors.Wrap(err, "commit and push snapshot to target")
 	}
 
-	logrus.Infof("successfully committed and pushed snapshot to: %s", task.TargetRef)
+	logrus.Infof("successfully committed and pushed container snapshot to: %s", task.TargetRef)
 
 	logrus.Infof("snapshot commit and push completed successfully")
 
