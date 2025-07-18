@@ -1547,10 +1547,19 @@ func main() {
 				// If wait flag is set, wait for background processing to complete
 				if c.Bool("wait") {
 					fmt.Printf("Waiting for background commit processing to complete...\n")
-					// Wait for background processing (simplified implementation)
-					// In a real implementation, you'd use the completion channel
-					time.Sleep(30 * time.Second) // Give enough time for background processing
-					fmt.Printf("Background processing wait period completed.\n")
+					// Wait for background processing using the completion channel
+					select {
+					case err := <-result.CompleteChan:
+						if err != nil {
+							fmt.Printf("Background processing failed: %v\n", err)
+							return errors.Wrap(err, "background commit processing failed")
+						} else {
+							fmt.Printf("Background processing completed successfully.\n")
+						}
+					case <-time.After(5 * time.Minute): // 5 minute timeout
+						fmt.Printf("Background processing timed out after 5 minutes.\n")
+						return errors.New("background processing timeout")
+					}
 				}
 
 				return nil
