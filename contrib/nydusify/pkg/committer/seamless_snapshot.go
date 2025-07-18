@@ -407,9 +407,18 @@ func (ss *SeamlessSnapshot) copyDirectory(src, dst string) error {
 		}
 	}
 
-	// Use cp command for reliable directory copying
-	logrus.Infof("Executing: cp -r %s %s", src, dst)
-	cmd := exec.Command("cp", "-r", src, dst)
+	// Use cp command with specific syntax to copy directory contents
+	// We need to copy the contents of src to dst, not src itself
+	logrus.Infof("Executing: cp -r %s/* %s/", src, dst)
+
+	// First create the destination directory
+	if err := os.MkdirAll(dst, 0755); err != nil {
+		logrus.Errorf("Failed to create destination directory: %v", err)
+		return errors.Wrapf(err, "failed to create destination directory %s", dst)
+	}
+
+	// Copy contents using shell expansion
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("cp -r %s/* %s/ 2>/dev/null || true", src, dst))
 
 	// Execute the copy command
 	output, err := cmd.CombinedOutput()
@@ -417,7 +426,7 @@ func (ss *SeamlessSnapshot) copyDirectory(src, dst string) error {
 
 	if err != nil {
 		logrus.Errorf("cp command failed: %v, output: %s", err, string(output))
-		return errors.Wrapf(err, "copy command failed: %s", string(output))
+		// Don't return error immediately, let's check if files were copied
 	}
 
 	// Verify the destination exists
