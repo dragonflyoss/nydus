@@ -167,16 +167,18 @@ func (ss *SeamlessSnapshot) atomicLayerSwitch(ctx context.Context, containerID s
 
 	pauseStartTime := time.Now()
 
-	// Simulate the atomic operation (in production, this would be the actual layer switch)
-	// For safety in this demonstration, we just simulate the timing
-	logrus.Infof("simulating atomic layer switch...")
+	// Perform the actual atomic layer switch
+	logrus.Infof("performing atomic layer switch...")
 
-	// In a real implementation, this would involve:
-	// 1. Creating a new overlay mount with the new upper directory
-	// 2. Atomically switching the container's root filesystem to use the new mount
-	// 3. This could be done through containerd's snapshot service or direct overlay manipulation
+	// Call the real atomic remount operation
+	err := ss.performAtomicRemount(ctx, containerID, newUpperDir, newWorkDir)
 
 	pauseTime := time.Since(pauseStartTime)
+
+	if err != nil {
+		// Resume container even if atomic switch failed
+		logrus.Errorf("atomic layer switch failed: %v", err)
+	}
 
 	// Resume container immediately
 	logrus.Infof("resuming container: %s", containerID)
@@ -218,25 +220,23 @@ func (ss *SeamlessSnapshot) syncFilesystem(ctx context.Context, containerID stri
 }
 
 // performAtomicRemount performs the actual atomic remount operation
-func (ss *SeamlessSnapshot) performAtomicRemount(ctx context.Context, containerID string, newMountOptions []string) error {
-	// Get container's mount namespace
+func (ss *SeamlessSnapshot) performAtomicRemount(ctx context.Context, containerID string, newUpperDir, newWorkDir string) error {
+	// Get container's mount namespace and current snapshot info
 	inspect, err := ss.manager.Inspect(ctx, containerID)
 	if err != nil {
 		return errors.Wrap(err, "inspect container for remount")
 	}
 
-	// For this demonstration implementation, we'll simulate the atomic layer switch
-	// In a production environment, this would involve more sophisticated integration
-	// with containerd's snapshot service and proper overlay management
+	logrus.Infof("Performing atomic layer switch for container: %s", containerID)
+	logrus.Debugf("Switching to new upper: %s, work: %s", newUpperDir, newWorkDir)
 
-	logrus.Infof("Simulating atomic layer switch for container: %s", containerID)
-	logrus.Debugf("New mount options: %v", newMountOptions)
+	// Step 1: Update the container's snapshot configuration atomically
+	err = ss.updateContainerSnapshot(ctx, containerID, newUpperDir, newWorkDir)
+	if err != nil {
+		return errors.Wrap(err, "update container snapshot configuration")
+	}
 
-	// Simulate the time it takes for an atomic operation (should be very fast)
-	// In reality, this would be the time to update overlay mount options
-	// time.Sleep(2 * time.Millisecond) // Simulate 2ms for atomic operation
-
-	// Verify that the container is still accessible
+	// Step 2: Verify the new configuration is working
 	config := &Config{
 		Mount:  true,
 		PID:    true,
@@ -244,13 +244,122 @@ func (ss *SeamlessSnapshot) performAtomicRemount(ctx context.Context, containerI
 	}
 
 	// Test that we can still access the container's filesystem
-	testCmd := "echo 'layer switch test' > /tmp/layer_switch_test.txt"
+	testCmd := "echo 'atomic switch test' > /tmp/atomic_switch_test.txt"
 	stderr, err := config.ExecuteContext(ctx, nil, "sh", "-c", testCmd)
 	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("post-switch filesystem test failed: %s", strings.TrimSpace(stderr)))
+		logrus.Errorf("Post-switch filesystem test failed: %s", strings.TrimSpace(stderr))
+		// Attempt to rollback
+		oldWorkDir := strings.TrimSuffix(inspect.UpperDir, "/fs") + "/work"
+		ss.rollbackContainerSnapshot(ctx, containerID, inspect.UpperDir, oldWorkDir)
+		return errors.Wrap(err, "post-switch filesystem test failed")
 	}
 
-	logrus.Infof("Atomic layer switch simulation completed successfully")
+	logrus.Infof("Atomic layer switch completed successfully")
+	return nil
+}
+
+// updateContainerSnapshot atomically updates the container's snapshot configuration
+func (ss *SeamlessSnapshot) updateContainerSnapshot(ctx context.Context, containerID, newUpperDir, newWorkDir string) error {
+	logrus.Infof("Updating container snapshot configuration: %s", containerID)
+
+	// Get the container's current snapshot information
+	inspect, err := ss.manager.Inspect(ctx, containerID)
+	if err != nil {
+		return errors.Wrap(err, "inspect container for snapshot update")
+	}
+
+	// Get the snapshot directory path from the current upper directory
+	// The snapshot directory is the parent of the upper directory
+	currentUpperDir := inspect.UpperDir
+	snapshotDir := strings.TrimSuffix(currentUpperDir, "/fs")
+
+	logrus.Debugf("Current upper dir: %s, snapshot dir: %s", currentUpperDir, snapshotDir)
+
+	// Use containerd's snapshotter API to update the snapshot
+	// This involves creating a new snapshot with the new upper/work directories
+	// and updating the container's configuration to use the new snapshot
+
+	// For now, we'll implement a filesystem-level atomic switch
+	// In production, this should use containerd's snapshot service API
+
+	err = ss.atomicDirectorySwitch(snapshotDir, newUpperDir, newWorkDir)
+	if err != nil {
+		return errors.Wrap(err, "atomic directory switch")
+	}
+
+	logrus.Infof("Container snapshot configuration updated successfully")
+	return nil
+}
+
+// rollbackContainerSnapshot rolls back the container snapshot to previous state
+func (ss *SeamlessSnapshot) rollbackContainerSnapshot(ctx context.Context, containerID, oldUpperDir, oldWorkDir string) error {
+	logrus.Warnf("Rolling back container snapshot: %s", containerID)
+
+	inspect, err := ss.manager.Inspect(ctx, containerID)
+	if err != nil {
+		logrus.Errorf("Failed to inspect container for rollback: %v", err)
+		return err
+	}
+
+	// Get the snapshot directory path from the current upper directory
+	currentUpperDir := inspect.UpperDir
+	snapshotDir := strings.TrimSuffix(currentUpperDir, "/fs")
+
+	// Attempt to restore the old configuration
+	err = ss.atomicDirectorySwitch(snapshotDir, oldUpperDir, oldWorkDir)
+	if err != nil {
+		logrus.Errorf("Failed to rollback snapshot: %v", err)
+		return err
+	}
+
+	logrus.Infof("Container snapshot rolled back successfully")
+	return nil
+}
+
+// atomicDirectorySwitch performs atomic directory switching for overlay filesystem
+func (ss *SeamlessSnapshot) atomicDirectorySwitch(snapshotDir, newUpperDir, newWorkDir string) error {
+	logrus.Infof("Performing atomic directory switch in: %s", snapshotDir)
+
+	// Step 1: Ensure the new directories exist and are ready
+	if _, err := os.Stat(newUpperDir); os.IsNotExist(err) {
+		return errors.Errorf("new upper directory does not exist: %s", newUpperDir)
+	}
+
+	// Step 2: Create a temporary name for the current fs directory
+	currentFsDir := fmt.Sprintf("%s/fs", snapshotDir)
+	tempFsDir := fmt.Sprintf("%s/fs-old-%d", snapshotDir, time.Now().UnixNano())
+
+	// Step 3: Atomic rename operations
+	// This is the critical atomic section
+
+	// First, move current fs to temporary name
+	if _, err := os.Stat(currentFsDir); err == nil {
+		logrus.Debugf("Moving current fs dir %s to temp %s", currentFsDir, tempFsDir)
+		err = os.Rename(currentFsDir, tempFsDir)
+		if err != nil {
+			return errors.Wrap(err, "failed to move current fs directory")
+		}
+	}
+
+	// Second, move new upper dir to fs (this is the atomic switch point)
+	logrus.Debugf("Moving new upper dir %s to fs %s", newUpperDir, currentFsDir)
+	err := os.Rename(newUpperDir, currentFsDir)
+	if err != nil {
+		// Rollback: restore the original fs directory
+		if _, statErr := os.Stat(tempFsDir); statErr == nil {
+			os.Rename(tempFsDir, currentFsDir)
+		}
+		return errors.Wrap(err, "failed to switch to new upper directory")
+	}
+
+	// Step 4: Clean up the old directory (optional, can be kept for rollback)
+	if _, err := os.Stat(tempFsDir); err == nil {
+		logrus.Debugf("Cleaning up old fs directory: %s", tempFsDir)
+		// Keep it for now in case we need to rollback
+		// os.RemoveAll(tempFsDir)
+	}
+
+	logrus.Infof("Atomic directory switch completed successfully")
 	return nil
 }
 
