@@ -100,13 +100,27 @@ func (ss *SeamlessSnapshot) CreateSeamlessSnapshot(ctx context.Context, containe
 		CompleteChan: make(chan error, 1),
 	}
 
-	select {
-	case ss.background <- task:
-		logrus.Infof("scheduled background commit for snapshot: %s", snapshotID)
-	default:
-		logrus.Warnf("background queue full, processing synchronously")
-		go ss.processSnapshotTask(task)
-	}
+	logrus.Infof("attempting to schedule background task for snapshot: %s", snapshotID)
+
+	// For debugging, let's process synchronously to see what happens
+	logrus.Infof("processing snapshot task synchronously for debugging")
+	go func() {
+		logrus.Infof("starting background goroutine for snapshot: %s", snapshotID)
+		err := ss.processSnapshotTask(task)
+		if err != nil {
+			logrus.Errorf("background processing failed for snapshot %s: %v", snapshotID, err)
+		} else {
+			logrus.Infof("background processing completed successfully for snapshot: %s", snapshotID)
+		}
+
+		// Send result to channel
+		select {
+		case task.CompleteChan <- err:
+			logrus.Debugf("sent result to completion channel for snapshot: %s", snapshotID)
+		default:
+			logrus.Warnf("completion channel not being read for snapshot: %s", snapshotID)
+		}
+	}()
 
 	result.SnapshotID = snapshotID
 	return result, nil
@@ -268,12 +282,18 @@ func (ss *SeamlessSnapshot) backgroundProcessor() {
 func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 	ctx := context.Background()
 
+	logrus.Infof("starting background processing for snapshot: %s", task.SnapshotID)
+	logrus.Debugf("task options: target=%s, workdir=%s, fsversion=%s, compressor=%s",
+		task.TargetRef, task.Opt.WorkDir, task.Opt.FsVersion, task.Opt.Compressor)
+
 	// Create a temporary committer for this task
 	tempOpt := task.Opt
 	tempOpt.ContainerID = task.ContainerID
 
+	logrus.Infof("creating committer for background task")
 	cm, err := NewCommitter(tempOpt)
 	if err != nil {
+		logrus.Errorf("failed to create committer: %v", err)
 		return errors.Wrap(err, "create temporary committer")
 	}
 
