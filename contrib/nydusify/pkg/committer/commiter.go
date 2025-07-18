@@ -58,9 +58,10 @@ type Opt struct {
 }
 
 type Committer struct {
-	workDir string
-	builder string
-	manager *Manager
+	workDir          string
+	builder          string
+	manager          *Manager
+	seamlessSnapshot *SeamlessSnapshot
 }
 
 // NewCommitter creates a new Committer instance
@@ -79,11 +80,16 @@ func NewCommitter(opt Opt) (*Committer, error) {
 		return nil, errors.Wrap(err, "new container manager")
 	}
 
-	return &Committer{
+	committer := &Committer{
 		workDir: workDir,
 		builder: opt.NydusImagePath,
 		manager: cm,
-	}, nil
+	}
+
+	// Initialize seamless snapshot
+	committer.seamlessSnapshot = NewSeamlessSnapshot(cm, workDir)
+
+	return committer, nil
 }
 
 func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
@@ -937,4 +943,31 @@ func (cm *Committer) resolveContainerID(ctx context.Context, opt *Opt) error {
 	opt.ContainerID = fullID
 	logrus.Infof("resolved container ID to full ID: %s", fullID)
 	return nil
+}
+
+// SeamlessCommit performs a seamless commit with minimal container pause time
+func (cm *Committer) SeamlessCommit(ctx context.Context, opt Opt) (*SnapshotResult, error) {
+	// Resolve container ID first
+	if err := cm.resolveContainerID(ctx, &opt); err != nil {
+		return nil, errors.Wrap(err, "failed to resolve container ID")
+	}
+
+	ctx = namespaces.WithNamespace(ctx, opt.Namespace)
+
+	// Validate target reference
+	_, err := ValidateRef(opt.TargetRef)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse target image name")
+	}
+
+	// Perform seamless snapshot
+	result, err := cm.seamlessSnapshot.CreateSeamlessSnapshot(ctx, opt.ContainerID, opt)
+	if err != nil {
+		return nil, errors.Wrap(err, "create seamless snapshot")
+	}
+
+	logrus.Infof("seamless commit completed: pause_time=%v, snapshot_id=%s",
+		result.PauseTime, result.SnapshotID)
+
+	return result, nil
 }
