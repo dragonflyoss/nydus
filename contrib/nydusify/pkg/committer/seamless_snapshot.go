@@ -505,10 +505,14 @@ func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 
 	logrus.Infof("snapshot commit and push completed successfully")
 
-	// Cleanup old upper directory after successful commit
-	if err := os.RemoveAll(task.OldUpperDir); err != nil {
-		logrus.Warnf("failed to cleanup old upper directory %s: %v", task.OldUpperDir, err)
-	}
+	// Note: We should NOT cleanup task.OldUpperDir because after atomic switch,
+	// it now points to the current fs directory that the container is using.
+	// The actual old directory was renamed to fs-old-* during the atomic switch.
+
+	// Instead, we can cleanup the fs-new-* directory since it's no longer needed
+	// The fs-old-* directories can be kept for rollback purposes or cleaned up later
+
+	logrus.Infof("commit completed, keeping current fs directory intact")
 
 	logrus.Infof("background snapshot processing completed: %s", task.SnapshotID)
 	return nil
