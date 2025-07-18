@@ -291,6 +291,12 @@ func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 	tempOpt := task.Opt
 	tempOpt.ContainerID = task.ContainerID
 
+	// Ensure we allow at least one commit operation
+	if tempOpt.MaximumTimes == 0 {
+		tempOpt.MaximumTimes = 1
+		logrus.Infof("setting MaximumTimes to 1 for snapshot commit")
+	}
+
 	cm, err := NewCommitter(tempOpt)
 	if err != nil {
 		logrus.Errorf("failed to create committer: %v", err)
