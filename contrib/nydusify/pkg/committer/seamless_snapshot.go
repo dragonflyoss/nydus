@@ -376,15 +376,24 @@ func (ss *SeamlessSnapshot) atomicDirectorySwitch(snapshotDir, newUpperDir, newW
 
 // copyDirectory recursively copies a directory
 func (ss *SeamlessSnapshot) copyDirectory(src, dst string) error {
+	logrus.Debugf("Copying directory from %s to %s", src, dst)
+
 	// Use cp command for reliable directory copying
-	cmd := fmt.Sprintf("cp -r %s %s", src, dst)
+	cmd := exec.Command("cp", "-r", src, dst)
 
 	// Execute the copy command
-	output, err := exec.Command("sh", "-c", cmd).CombinedOutput()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
+		logrus.Errorf("Copy command failed: %s", string(output))
 		return errors.Wrapf(err, "copy command failed: %s", string(output))
 	}
 
+	// Verify the destination exists
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		return errors.Errorf("copy verification failed: destination %s does not exist", dst)
+	}
+
+	logrus.Debugf("Successfully copied directory from %s to %s", src, dst)
 	return nil
 }
 
