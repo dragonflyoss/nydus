@@ -283,9 +283,17 @@ func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 	logrus.Debugf("task options: target=%s, workdir=%s, fsversion=%s, compressor=%s",
 		task.TargetRef, task.Opt.WorkDir, task.Opt.FsVersion, task.Opt.Compressor)
 
-	// For the demonstration, we'll simulate the commit process
-	// In a production environment, this would involve proper integration with nydus-image
-	logrus.Infof("simulating commit of old upper directory: %s", task.OldUpperDir)
+	// Create a real committer for actual processing
+	logrus.Infof("creating real committer for snapshot: %s", task.SnapshotID)
+
+	tempOpt := task.Opt
+	tempOpt.ContainerID = task.ContainerID
+
+	cm, err := NewCommitter(tempOpt)
+	if err != nil {
+		logrus.Errorf("failed to create committer: %v", err)
+		return errors.Wrap(err, "create committer for background task")
+	}
 
 	// Check if the old upper directory exists and has content
 	if _, err := os.Stat(task.OldUpperDir); os.IsNotExist(err) {
@@ -293,37 +301,20 @@ func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 		return errors.New("old upper directory not found")
 	}
 
-	// Simulate the commit process
-	logrus.Infof("simulating blob creation for snapshot: %s", task.SnapshotID)
+	logrus.Infof("committing old upper directory: %s", task.OldUpperDir)
 
-	// In a real implementation, this would:
-	// 1. Create a nydus blob from the upper directory changes
-	// 2. Generate the blob digest
-	// 3. Prepare the blob for pushing
-
-	// For now, we'll simulate a successful commit
-	simulatedBlobDigest := fmt.Sprintf("sha256:simulated-digest-for-%s", task.SnapshotID)
-	logrus.Infof("simulated blob digest: %s", simulatedBlobDigest)
-
-	// Simulate pushing the blob
-	logrus.Infof("simulating push of snapshot blob: %s", task.SnapshotID)
-
-	// Validate target reference
-	targetRef, err := ValidateRef(task.TargetRef)
+	// Use the regular commit process but with the old upper directory
+	// This will create a real nydus image and push it
+	ctx := context.Background()
+	err = cm.Commit(ctx, tempOpt)
 	if err != nil {
-		return errors.Wrap(err, "validate target reference")
+		logrus.Errorf("failed to commit snapshot: %v", err)
+		return errors.Wrap(err, "commit snapshot to target")
 	}
 
-	logrus.Infof("target reference validated: %s", targetRef)
+	logrus.Infof("successfully committed and pushed snapshot to: %s", task.TargetRef)
 
-	// In a real implementation, this would:
-	// 1. Create a new image manifest with the snapshot blob
-	// 2. Push the blob to the target registry
-	// 3. Push the updated manifest
-
-	// For demonstration, we'll simulate a successful push
-	logrus.Infof("simulating successful push to: %s", task.TargetRef)
-	logrus.Infof("simulated blob pushed with digest: %s", simulatedBlobDigest)
+	logrus.Infof("snapshot commit and push completed successfully")
 
 	// Cleanup old upper directory after successful commit
 	if err := os.RemoveAll(task.OldUpperDir); err != nil {
