@@ -295,16 +295,21 @@ func (ss *SeamlessSnapshot) processSnapshotTask(task *SnapshotTask) error {
 		return errors.Wrap(err, "create committer for background task")
 	}
 
-	// Check if the old upper directory exists and has content
+	// Check if the old upper directory exists
 	if _, err := os.Stat(task.OldUpperDir); os.IsNotExist(err) {
 		logrus.Warnf("old upper directory does not exist: %s", task.OldUpperDir)
-		return errors.New("old upper directory not found")
+		logrus.Infof("using current container state for commit instead")
+
+		// If old upper dir doesn't exist, commit the current container state
+		// This is actually more practical for a real snapshot
+	} else {
+		logrus.Infof("found old upper directory: %s", task.OldUpperDir)
 	}
 
-	logrus.Infof("committing old upper directory: %s", task.OldUpperDir)
+	logrus.Infof("committing container snapshot: %s", task.ContainerID)
 
-	// Use the regular commit process but with the old upper directory
-	// This will create a real nydus image and push it
+	// Use the regular commit process with the container ID
+	// This will create a real nydus image from the current container state and push it
 	ctx := context.Background()
 	err = cm.Commit(ctx, tempOpt)
 	if err != nil {
