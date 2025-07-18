@@ -230,6 +230,14 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 		return appendedEg.Wait()
 	}
 
+	// Ensure filesystem changes are written to disk before committing
+	// This prevents issues where changes are still in memory buffers
+	// and not yet visible in the overlay filesystem's upper directory
+	logrus.Infof("syncing filesystem before commit")
+	if err := cm.syncFilesystem(ctx, opt.ContainerID); err != nil {
+		return errors.Wrap(err, "failed to sync filesystem")
+	}
+
 	if err := cm.pause(ctx, opt.ContainerID, commit); err != nil {
 		return errors.Wrap(err, "pause container to commit")
 	}
@@ -513,6 +521,36 @@ func (cm *Committer) pause(ctx context.Context, containerID string, handle func(
 
 	logrus.Infof("unpausing container: %s", containerID)
 	return cm.manager.UnPause(ctx, containerID)
+}
+
+// syncFilesystem forces filesystem sync to ensure all changes are written to disk.
+// This is crucial for overlay filesystems where changes may still be in memory
+// buffers and not yet visible in the upper directory when committing.
+func (cm *Committer) syncFilesystem(ctx context.Context, containerID string) error {
+	inspect, err := cm.manager.Inspect(ctx, containerID)
+	if err != nil {
+		return errors.Wrap(err, "inspect container for sync")
+	}
+
+	// Use nsenter to execute sync command in the container's namespace
+	config := &Config{
+		Mount:  true,
+		PID:    true,
+		Target: inspect.Pid,
+	}
+
+	stderr, err := config.ExecuteContext(ctx, io.Discard, "sync")
+	if err != nil {
+		return errors.Wrap(err, fmt.Sprintf("execute sync in container namespace: %s", strings.TrimSpace(stderr)))
+	}
+
+	// Also sync the host filesystem to ensure overlay changes are written
+	cmd := exec.CommandContext(ctx, "sync")
+	if err := cmd.Run(); err != nil {
+		return errors.Wrap(err, "execute host sync")
+	}
+
+	return nil
 }
 
 func (cm *Committer) pushManifest(
