@@ -1560,6 +1560,28 @@ func main() {
 						fmt.Printf("Background processing timed out after 5 minutes.\n")
 						return errors.New("background processing timeout")
 					}
+				} else {
+					// Even without --wait, give the background goroutine time to start
+					// and begin processing before the main program exits
+					fmt.Printf("Background processing started. Use --wait to wait for completion.\n")
+
+					// Wait a bit to ensure the goroutine has started and begun processing
+					time.Sleep(3 * time.Second)
+
+					// Check if we can get an early indication of success
+					select {
+					case err := <-result.CompleteChan:
+						if err != nil {
+							fmt.Printf("Background processing failed: %v\n", err)
+							return errors.Wrap(err, "background commit processing failed")
+						} else {
+							fmt.Printf("Background processing completed successfully.\n")
+						}
+					default:
+						// Background processing is still running
+						fmt.Printf("Background processing is running. Check logs for completion status.\n")
+						fmt.Printf("Tip: Use --wait flag to wait for completion in future runs.\n")
+					}
 				}
 
 				return nil

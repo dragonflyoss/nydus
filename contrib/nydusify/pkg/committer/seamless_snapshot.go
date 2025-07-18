@@ -101,9 +101,19 @@ func (ss *SeamlessSnapshot) CreateSeamlessSnapshot(ctx context.Context, containe
 
 	logrus.Infof("attempting to schedule background task for snapshot: %s", snapshotID)
 
-	// For debugging, let's process synchronously to see what happens
-	logrus.Infof("processing snapshot task synchronously for debugging")
+	// Start background processing in a separate goroutine
+	logrus.Infof("starting background processing for snapshot: %s", snapshotID)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("background processing panicked for snapshot %s: %v", snapshotID, r)
+				select {
+				case task.CompleteChan <- fmt.Errorf("background processing panicked: %v", r):
+				default:
+				}
+			}
+		}()
+
 		logrus.Infof("starting background goroutine for snapshot: %s", snapshotID)
 		err := ss.processSnapshotTask(task)
 		if err != nil {
