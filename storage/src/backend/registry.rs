@@ -864,7 +864,7 @@ impl Registry {
         let id = id.ok_or_else(|| einval!("Registry backend requires blob_id"))?;
         let con_config: ConnectionConfig = config.clone().into();
 
-        if !config.proxy.url.is_empty() && !config.mirrors.is_empty() {
+        if !config.proxy.url.is_empty() {
             return Err(einval!(
                 "connection: proxy and mirrors cannot be configured at the same time."
             ));
