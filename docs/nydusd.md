@@ -319,64 +319,8 @@ or
   }
 }
 ```
-
-The `HttpProxy` backend also supports the `Proxy` and `Mirrors` configurations for remote usage like the `Registry backend` described above.
-
-##### Enable Mirrors for Storage Backend (Recommend)
-
-Nydus is deeply integrated with [Dragonfly](https://d7y.io/) P2P mirror mode, please refer the [doc](https://d7y.io/docs/next/operations/integrations/container-runtime/nydus/) to learn how configuring Nydus to use Dragonfly.
-
-Add `device.backend.config.mirrors` field to enable mirrors for storage backend. The mirror can be a P2P distribution server or registry. If the request to mirror server failed, it will fall back to the original registry.
-Currently, the mirror mode is only tested in the registry backend, and in theory, the OSS backend also supports it.
-
-<font color='red'>!!</font> The `mirrors` field conflicts with `proxy` field.
-
-```
-{
-  "device": {
-    "backend": {
-      "type": "registry",
-      "config": {
-        "mirrors": [
-          {
-            // Mirror server URL (including scheme), e.g. Dragonfly dfdaemon server URL
-            "host": "http://dragonfly1.io:65001",
-            // Headers for mirror server
-            "headers": {
-              // For Dragonfly dfdaemon server URL, we need to specify "X-Dragonfly-Registry" (including scheme).
-              // When Dragonfly does not cache data, nydusd will pull it from "X-Dragonfly-Registry".
-              // If not set "X-Dragonfly-Registry", Dragonfly will pull data from proxy.registryMirror.url.
-              "X-Dragonfly-Registry": "https://index.docker.io"
-            },
-            // This URL endpoint is used to check the health of mirror server, and if the mirror is unhealthy, 
-            // the request will fallback to the next mirror or the original registry server. 
-            // Use $host/v2 as default if left empty.
-            "ping_url": "http://127.0.0.1:40901/server/ping",
-            // Interval time (s) to check and recover unavailable mirror. Use 5 as default if left empty.
-            "health_check_interval": 5,
-            // Failure counts before disabling this mirror. Use 5 as default if left empty.
-            "failure_limit": 5,
-            // Elapsed time to pause mirror health check when the request is inactive, in seconds.
-            // Use 300 as default if left empty.
-            "health_check_pause_elapsed": 300,
-          },
-          {
-            "host": "http://dragonfly2.io:65001",
-            "headers": {
-              "X-Dragonfly-Registry": "https://index.docker.io"
-            },
-          }
-        ],
-        ...
-      }
-    },
-    ...
-  },
-  ...
-}
-```
-
-
+-
+- The `HttpProxy` backend also supports the `Proxy` configuration for remote usage like the `Registry backend` described above.
 ##### Enable P2P Proxy for Storage Backend
 
 Add `device.backend.config.proxy` field to enable HTTP proxy for storage backend. For example, use P2P distribution service to reduce network workload and latency in large scale container cluster using [Dragonfly](https://d7y.io/) (enable centralized dfdaemon mode).

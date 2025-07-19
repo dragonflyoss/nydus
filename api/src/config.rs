@@ -519,9 +519,6 @@ pub struct OssConfig {
     /// Enable HTTP proxy for the read request.
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Enable mirrors for the read request.
-    #[serde(default)]
-    pub mirrors: Vec<MirrorConfig>,
 }
 
 /// S3 configuration information to access blobs.
@@ -563,9 +560,6 @@ pub struct S3Config {
     /// Enable HTTP proxy for the read request.
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Enable mirrors for the read request.
-    #[serde(default)]
-    pub mirrors: Vec<MirrorConfig>,
 }
 
 /// Http proxy configuration information to access blobs.
@@ -592,9 +586,6 @@ pub struct HttpProxyConfig {
     /// Enable HTTP proxy for the read request.
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Enable mirrors for the read request.
-    #[serde(default)]
-    pub mirrors: Vec<MirrorConfig>,
 }
 
 /// Container registry configuration information to access blobs.
@@ -635,9 +626,6 @@ pub struct RegistryConfig {
     /// Enable HTTP proxy for the read request.
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Enable mirrors for the read request.
-    #[serde(default)]
-    pub mirrors: Vec<MirrorConfig>,
 }
 
 /// Configuration information for blob cache manager.
@@ -930,41 +918,6 @@ impl Default for ProxyConfig {
     }
 }
 
-/// Configuration for registry mirror.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct MirrorConfig {
-    /// Mirror server URL, for example http://127.0.0.1:65001.
-    pub host: String,
-    /// Ping URL to check mirror server health.
-    #[serde(default)]
-    pub ping_url: String,
-    /// HTTP request headers to be passed to mirror server.
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-    /// Interval for mirror health checking, in seconds.
-    #[serde(default = "default_check_interval")]
-    pub health_check_interval: u64,
-    /// Maximum number of failures before marking a mirror as unusable.
-    #[serde(default = "default_failure_limit")]
-    pub failure_limit: u8,
-    /// Elapsed time to pause mirror health check when the request is inactive, in seconds.
-    #[serde(default = "default_check_pause_elapsed")]
-    pub health_check_pause_elapsed: u64,
-}
-
-impl Default for MirrorConfig {
-    fn default() -> Self {
-        Self {
-            host: String::new(),
-            headers: HashMap::new(),
-            health_check_interval: 5,
-            failure_limit: 5,
-            ping_url: String::new(),
-            health_check_pause_elapsed: 300,
-        }
-    }
-}
-
 /// Configuration information for a cached blob`.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BlobCacheEntryConfigV2 {
@@ -1210,10 +1163,6 @@ fn default_check_interval() -> u64 {
 
 fn default_check_pause_elapsed() -> u64 {
     300
-}
-
-fn default_failure_limit() -> u8 {
-    5
 }
 
 fn default_work_dir() -> String {
@@ -1886,11 +1835,6 @@ mod tests {
         fallback = true
         check_interval = 10
         use_http = true
-        [[backend.oss.mirrors]]
-        host = "http://127.0.0.1:65001"
-        ping_url = "http://127.0.0.1:65001/ping"
-        health_check_interval = 10
-        failure_limit = 10
         "#;
         let config: ConfigV2 = toml::from_str(content).unwrap();
         assert_eq!(config.version, 2);
@@ -1917,14 +1861,6 @@ mod tests {
         assert_eq!(oss.proxy.check_interval, 10);
         assert!(oss.proxy.fallback);
         assert!(oss.proxy.use_http);
-
-        assert_eq!(oss.mirrors.len(), 1);
-        let mirror = &oss.mirrors[0];
-        assert_eq!(mirror.host, "http://127.0.0.1:65001");
-        assert_eq!(mirror.ping_url, "http://127.0.0.1:65001/ping");
-        assert!(mirror.headers.is_empty());
-        assert_eq!(mirror.health_check_interval, 10);
-        assert_eq!(mirror.failure_limit, 10);
     }
 
     #[test]
@@ -1950,11 +1886,6 @@ mod tests {
         fallback = true
         check_interval = 10
         use_http = true
-        [[backend.registry.mirrors]]
-        host = "http://127.0.0.1:65001"
-        ping_url = "http://127.0.0.1:65001/ping"
-        health_check_interval = 10
-        failure_limit = 10
         "#;
         let config: ConfigV2 = toml::from_str(content).unwrap();
         assert_eq!(config.version, 2);
@@ -1983,14 +1914,6 @@ mod tests {
         assert_eq!(registry.proxy.check_interval, 10);
         assert!(registry.proxy.fallback);
         assert!(registry.proxy.use_http);
-
-        assert_eq!(registry.mirrors.len(), 1);
-        let mirror = &registry.mirrors[0];
-        assert_eq!(mirror.host, "http://127.0.0.1:65001");
-        assert_eq!(mirror.ping_url, "http://127.0.0.1:65001/ping");
-        assert!(mirror.headers.is_empty());
-        assert_eq!(mirror.health_check_interval, 10);
-        assert_eq!(mirror.failure_limit, 10);
     }
 
     #[test]
@@ -2398,15 +2321,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_mirror_config() {
-        let cfg = MirrorConfig::default();
-        assert_eq!(cfg.host, "");
-        assert_eq!(cfg.health_check_interval, 5);
-        assert_eq!(cfg.failure_limit, 5);
-        assert_eq!(cfg.ping_url, "");
-    }
-
-    #[test]
     fn test_config_v2_from_file() {
         let content = r#"version=2
             [cache]
@@ -2615,7 +2529,6 @@ mod tests {
     #[test]
     fn test_default_value() {
         assert!(default_true());
-        assert_eq!(default_failure_limit(), 5);
         assert_eq!(default_prefetch_batch_size(), 1024 * 1024);
         assert_eq!(default_prefetch_threads_count(), 8);
     }

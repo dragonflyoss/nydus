@@ -74,12 +74,12 @@ pub enum NydusError {
 ## Development Guidelines
 
 ### Storage Backend Development
-When implementing new storage backends:
-- Implement the `BlobBackend` trait
-- Support timeout, retry, and connection management
-- Add configuration in the backend config structure
-- Consider mirror/proxy support for high availability
-- Implement proper error handling and logging
+- When implementing new storage backends:
+- - Implement the `BlobBackend` trait
+- - Support timeout, retry, and connection management
+- - Add configuration in the backend config structure
+- - Consider proxy support for high availability
+- - Implement proper error handling and logging  
 
 ### Daemon Service Development
 - Use the `NydusDaemon` trait for service implementations
