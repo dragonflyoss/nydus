@@ -10,6 +10,7 @@ readonly NERDCTL_VERSION=`curl -s https://api.github.com/repos/containerd/nerdct
 readonly CNI_PLUGINS_VERSION=`curl -s https://api.github.com/repos/containernetworking/plugins/releases/latest | grep tag_name | cut -f4 -d "\""`
 
 # setup nerdctl and nydusd env
+sudo chmod 755  contrib/nydusify/cmd/nydusify target/release/nydusd target/release/nydus-image
 sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
 sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/local/bin
 wget https://github.com/containerd/nydus-snapshotter/releases/download/$SNAPSHOTTER_VERSION/nydus-snapshotter-$SNAPSHOTTER_VERSION-linux-amd64.tar.gz
