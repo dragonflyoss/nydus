@@ -298,7 +298,8 @@ func (pvd *Provider) FetchImageInfo(ctx context.Context, ref string) error {
 }
 
 func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remotes.Fetcher, data []byte, desc ocispec.Descriptor) error {
-	if desc.MediaType == ocispec.MediaTypeImageIndex || desc.MediaType == "application/vnd.docker.distribution.manifest.list.v2+json" {
+	switch desc.MediaType {
+	case ocispec.MediaTypeImageIndex, "application/vnd.docker.distribution.manifest.list.v2+json":
 		var index ocispec.Index
 		if err := json.Unmarshal(data, &index); err != nil {
 			return errors.Wrap(err, "unmarshal index")
@@ -309,10 +310,9 @@ func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remote
 				return err
 			}
 		}
-	} else if desc.MediaType == ocispec.MediaTypeImageManifest || desc.MediaType == "application/vnd.docker.distribution.manifest.v2+json" {
+	case ocispec.MediaTypeImageManifest, "application/vnd.docker.distribution.manifest.v2+json":
 		return pvd.processManifest(ctx, fetcher, data)
 	}
-
 	return nil
 }
 
@@ -321,9 +321,9 @@ func (pvd *Provider) fetchManifest(ctx context.Context, fetcher remotes.Fetcher,
 	if err != nil {
 		return errors.Wrap(err, "fetch manifest")
 	}
+	defer rc.Close()
 
 	manifestData, err := io.ReadAll(rc)
-	rc.Close()
 	if err != nil {
 		return errors.Wrap(err, "read manifest")
 	}
@@ -345,9 +345,9 @@ func (pvd *Provider) processManifest(ctx context.Context, fetcher remotes.Fetche
 	if err != nil {
 		return errors.Wrap(err, "fetch config")
 	}
+	defer rc.Close()
 
 	configData, err := io.ReadAll(rc)
-	rc.Close()
 	if err != nil {
 		return errors.Wrap(err, "read config")
 	}
