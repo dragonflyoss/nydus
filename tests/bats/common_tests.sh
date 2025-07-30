@@ -29,14 +29,21 @@ get_rust_toolcahin() {
     echo "$version"
 }
 
+get_go_work_version() {
+    local base_dir=$1
+    grep '^go ' "$base_dir/go.work" | awk '{print $2}'
+}
+
 repo_base_dir="${BATS_TEST_DIRNAME}/../.."
 rust_toolchain=$(get_rust_toolcahin "$repo_base_dir")
+go_work_version=$(get_go_work_version "$repo_base_dir")
 compile_image="localhost/compile-image:${rust_toolchain}"
 nydus_snapshotter_repo="https://github.com/containerd/nydus-snapshotter.git"
 
 generate_rust_golang_dockerfile() {
   local dockerfile=${1:-"/tmp/rust_golang_dockerfile"}
   local rust_version=${2:-"${rust_toolchain}"}
+  local go_version=${3:-"${go_work_version}"}
   cat > $dockerfile <<EOF
 FROM rust:${rust_version}-bullseye
 
@@ -46,9 +53,9 @@ RUN apt-get update -y \
     && rm -rf /var/lib/apt/lists/*
 
 # install golang env
-Run wget https://go.dev/dl/go1.21.5.linux-amd64.tar.gz \
-    && tar -C /usr/local -xzf go1.21.5.linux-amd64.tar.gz \
-    && rm -rf go1.21.5.linux-amd64.tar.gz
+RUN wget https://go.dev/dl/go${go_version}.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go${go_version}.linux-amd64.tar.gz \
+    && rm -rf go${go_version}.linux-amd64.tar.gz
 
 ENV PATH \$PATH:/usr/local/go/bin
 RUN go env -w GO111MODULE=on
