@@ -437,17 +437,21 @@ impl RegistryState {
                 Some(Auth::Basic(BasicAuth { realm }))
             }
             "Bearer" => {
-                if !paras.contains_key("realm")
-                    || !paras.contains_key("service")
-                    || !paras.contains_key("scope")
-                {
+                if !paras.contains_key("realm") || !paras.contains_key("service") {
                     return None;
                 }
+
+                let scope = if let Some(scope) = paras.get("scope") {
+                    (*scope).to_string()
+                } else {
+                    debug!("no scope specified for token auth challenge");
+                    String::new()
+                };
 
                 Some(Auth::Bearer(BearerAuth {
                     realm: (*paras.get("realm").unwrap()).to_string(),
                     service: (*paras.get("service").unwrap()).to_string(),
-                    scope: (*paras.get("scope").unwrap()).to_string(),
+                    scope,
                 }))
             }
             _ => None,
@@ -1115,12 +1119,25 @@ mod tests {
             _ => panic!("failed to parse `Bearer` authentication header"),
         }
 
+        // No scope is accetpable
+        let str = "Bearer realm=\"https://auth.my-registry.com/token\",service=\"my-registry.com\"";
+        let header = HeaderValue::from_str(str).unwrap();
+        let auth = RegistryState::parse_auth(&header).unwrap();
+        match auth {
+            Auth::Bearer(auth) => {
+                assert_eq!(&auth.realm, "https://auth.my-registry.com/token");
+                assert_eq!(&auth.service, "my-registry.com");
+                assert_eq!(&auth.scope, "");
+            }
+            _ => panic!("failed to parse `Bearer` authentication header without scope"),
+        }
+
         let str = "Basic realm=\"https://auth.my-registry.com/token\"";
         let header = HeaderValue::from_str(str).unwrap();
         let auth = RegistryState::parse_auth(&header).unwrap();
         match auth {
             Auth::Basic(auth) => assert_eq!(&auth.realm, "https://auth.my-registry.com/token"),
-            _ => panic!("failed to parse `Bearer` authentication header"),
+            _ => panic!("failed to parse `Basic` authentication header"),
         }
 
         let str = "Base realm=\"https://auth.my-registry.com/token\"";
