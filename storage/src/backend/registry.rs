@@ -31,11 +31,6 @@ const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 const HEADER_AUTHORIZATION: &str = "Authorization";
 const HEADER_WWW_AUTHENTICATE: &str = "www-authenticate";
 
-const REDIRECTED_STATUS_CODE: [StatusCode; 2] = [
-    StatusCode::MOVED_PERMANENTLY,
-    StatusCode::TEMPORARY_REDIRECT,
-];
-
 const REGISTRY_DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60; // in seconds
 
 /// Error codes related to registry storage backend operations.
@@ -724,9 +719,11 @@ impl RegistryReader {
                 }
             };
             let status = resp.status();
+            let need_redirect =
+                status >= StatusCode::MULTIPLE_CHOICES && status < StatusCode::BAD_REQUEST;
 
             // Handle redirect request and cache redirect url
-            if REDIRECTED_STATUS_CODE.contains(&status) {
+            if need_redirect {
                 if let Some(location) = resp.headers().get("location") {
                     let location = location.to_str().unwrap();
                     let mut location = Url::parse(location)
