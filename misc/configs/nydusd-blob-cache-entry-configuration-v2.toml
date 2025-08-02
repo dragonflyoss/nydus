@@ -50,18 +50,6 @@ check_interval = 5
 # Replace URL to http to request source registry with proxy, and allow fallback to https if the proxy is unhealthy.
 use_http = false
 
-[[backend.oss.mirrors]]
-# Mirror server URL, for example http://127.0.0.1:65001.
-host = "http://127.0.0.1:65001"
-# Ping URL to check mirror server health.
-ping_url = "http://127.0.0.1:65001/ping"
-# HTTP request headers to be passed to mirror server.
-# headers =
-# Interval for mirror health checking, in seconds.
-health_check_interval = 5
-# Maximum number of failures before marking a mirror as unusable.
-failure_limit = 5
-
 [backend.registy]
 # Registry http scheme, either 'http' or 'https'
 scheme = "https"
@@ -98,18 +86,6 @@ fallback = true
 check_interval = 5
 # Replace URL to http to request source registry with proxy, and allow fallback to https if the proxy is unhealthy.
 use_http = false
-
-[[backend.registry.mirrors]]
-# Mirror server URL, for example http://127.0.0.1:65001.
-host = "http://127.0.0.1:65001"
-# Ping URL to check mirror server health.
-ping_url = "http://127.0.0.1:65001/ping"
-# HTTP request headers to be passed to mirror server.
-# headers =
-# Interval for mirror health checking, in seconds.
-health_check_interval = 5
-# Maximum number of failures before marking a mirror as unusable.
-failure_limit = 5
 
 [cache]
 # Type of blob cache: "blobcache", "filecache", "fscache", "dummycache" or ""

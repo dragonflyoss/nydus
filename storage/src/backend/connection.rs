@@ -7,14 +7,13 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{Read, Result};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fmt, thread};
 
 use log::{max_level, Level};
 
-use reqwest::header::{HeaderName, HeaderValue};
 use reqwest::{
     self,
     blocking::{Body, Client, Response},
@@ -23,7 +22,7 @@ use reqwest::{
     Method, StatusCode, Url,
 };
 
-use nydus_api::{HttpProxyConfig, MirrorConfig, OssConfig, ProxyConfig, RegistryConfig, S3Config};
+use nydus_api::{HttpProxyConfig, OssConfig, ProxyConfig, RegistryConfig, S3Config};
 use url::ParseError;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -43,8 +42,6 @@ pub enum ConnectionError {
     Format(reqwest::Error),
     Url(String, ParseError),
     Scheme(String),
-    MirrorHost,
-    MirrorPort,
 }
 
 impl fmt::Display for ConnectionError {
@@ -56,8 +53,6 @@ impl fmt::Display for ConnectionError {
             ConnectionError::Format(e) => write!(f, "{}", e),
             ConnectionError::Url(s, e) => write!(f, "failed to parse URL {}, {}", s, e),
             ConnectionError::Scheme(s) => write!(f, "invalid scheme {}", s),
-            ConnectionError::MirrorHost => write!(f, "invalid mirror host"),
-            ConnectionError::MirrorPort => write!(f, "invalid mirror port"),
         }
     }
 }
@@ -69,7 +64,6 @@ type ConnectionResult<T> = std::result::Result<T, ConnectionError>;
 #[derive(Debug, Clone)]
 pub(crate) struct ConnectionConfig {
     pub proxy: ProxyConfig,
-    pub mirrors: Vec<MirrorConfig>,
     pub skip_verify: bool,
     pub timeout: u32,
     pub connect_timeout: u32,
@@ -80,7 +74,6 @@ impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
             proxy: ProxyConfig::default(),
-            mirrors: Vec::<MirrorConfig>::new(),
             skip_verify: false,
             timeout: 5,
             connect_timeout: 5,
@@ -93,7 +86,6 @@ impl From<OssConfig> for ConnectionConfig {
     fn from(c: OssConfig) -> ConnectionConfig {
         ConnectionConfig {
             proxy: c.proxy,
-            mirrors: c.mirrors,
             skip_verify: c.skip_verify,
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
@@ -106,7 +98,6 @@ impl From<S3Config> for ConnectionConfig {
     fn from(c: S3Config) -> ConnectionConfig {
         ConnectionConfig {
             proxy: c.proxy,
-            mirrors: c.mirrors,
             skip_verify: c.skip_verify,
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
@@ -119,7 +110,6 @@ impl From<RegistryConfig> for ConnectionConfig {
     fn from(c: RegistryConfig) -> ConnectionConfig {
         ConnectionConfig {
             proxy: c.proxy,
-            mirrors: c.mirrors,
             skip_verify: c.skip_verify,
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
@@ -132,7 +122,6 @@ impl From<HttpProxyConfig> for ConnectionConfig {
     fn from(c: HttpProxyConfig) -> ConnectionConfig {
         ConnectionConfig {
             proxy: c.proxy,
-            mirrors: c.mirrors,
             skip_verify: c.skip_verify,
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
@@ -264,43 +253,9 @@ pub(crate) fn respond(resp: Response, catch_status: bool) -> ConnectionResult<Re
 pub(crate) struct Connection {
     client: Client,
     proxy: Option<Arc<Proxy>>,
-    pub mirrors: Vec<Arc<Mirror>>,
     pub shutdown: AtomicBool,
     /// Timestamp of connection's last active request, represents as duration since UNIX_EPOCH in seconds.
     last_active: Arc<AtomicU64>,
-}
-
-#[derive(Debug)]
-pub(crate) struct Mirror {
-    /// Information for mirror from configuration file.
-    pub config: MirrorConfig,
-    /// Mirror status, it will be set to false by atomic operation when mirror is not work.
-    status: AtomicBool,
-    /// Failed times requesting mirror, the status will be marked as false when failed_times = failure_limit.
-    failed_times: AtomicU8,
-    /// Failure count for which mirror is considered unavailable.
-    failure_limit: u8,
-}
-
-impl Mirror {
-    /// Convert original URL to mirror URL.
-    fn mirror_url(&self, url: &str) -> ConnectionResult<Url> {
-        let mirror_host = Url::parse(&self.config.host)
-            .map_err(|e| ConnectionError::Url(self.config.host.clone(), e))?;
-        let mut current_url =
-            Url::parse(url).map_err(|e| ConnectionError::Url(url.to_string(), e))?;
-
-        current_url
-            .set_scheme(mirror_host.scheme())
-            .map_err(|_| ConnectionError::Scheme(mirror_host.scheme().to_string()))?;
-        current_url
-            .set_host(mirror_host.host_str())
-            .map_err(|_| ConnectionError::MirrorHost)?;
-        current_url
-            .set_port(mirror_host.port())
-            .map_err(|_| ConnectionError::MirrorPort)?;
-        Ok(current_url)
-    }
 }
 
 impl Connection {
@@ -330,22 +285,9 @@ impl Connection {
             None
         };
 
-        let mut mirrors = Vec::new();
-        for mirror_config in config.mirrors.iter() {
-            if !mirror_config.host.is_empty() {
-                mirrors.push(Arc::new(Mirror {
-                    config: mirror_config.clone(),
-                    status: AtomicBool::from(true),
-                    failed_times: AtomicU8::from(0),
-                    failure_limit: mirror_config.failure_limit,
-                }));
-            }
-        }
-
         let connection = Arc::new(Connection {
             client,
             proxy,
-            mirrors,
             shutdown: AtomicBool::new(false),
             last_active: Arc::new(AtomicU64::new(
                 SystemTime::now()
@@ -357,9 +299,6 @@ impl Connection {
 
         // Start proxy's health checking thread.
         connection.start_proxy_health_thread(config.connect_timeout as u64);
-
-        // Start mirrors' health checking thread.
-        connection.start_mirrors_health_thread(config.timeout as u64);
 
         Ok(connection)
     }
@@ -414,72 +353,6 @@ impl Connection {
                     }
                 });
             }
-        }
-    }
-
-    fn start_mirrors_health_thread(&self, timeout: u64) {
-        for mirror in self.mirrors.iter() {
-            let mirror_cloned = mirror.clone();
-            let last_active = Arc::clone(&self.last_active);
-
-            // Spawn thread to update the health status of mirror server.
-            thread::spawn(move || {
-                let mirror_health_url = if mirror_cloned.config.ping_url.is_empty() {
-                    format!("{}/v2", mirror_cloned.config.host)
-                } else {
-                    mirror_cloned.config.ping_url.clone()
-                };
-                info!(
-                    "[mirror] start health check, ping url: {}",
-                    mirror_health_url
-                );
-
-                let client = Client::new();
-                loop {
-                    let elapsed = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        - last_active.load(Ordering::Relaxed);
-                    // If the connection is not active for a set time, skip mirror health check.
-                    if elapsed <= mirror_cloned.config.health_check_pause_elapsed {
-                        // Try to recover the mirror server when it is unavailable.
-                        if !mirror_cloned.status.load(Ordering::Relaxed) {
-                            info!(
-                                "[mirror] server unhealthy, try to recover: {}",
-                                mirror_cloned.config.host
-                            );
-
-                            let _ = client
-                                .get(mirror_health_url.as_str())
-                                .timeout(Duration::from_secs(timeout as u64))
-                                .send()
-                                .map(|resp| {
-                                    // If the response status is less than StatusCode::INTERNAL_SERVER_ERROR,
-                                    // the mirror server is recovered.
-                                    if resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
-                                        info!(
-                                            "[mirror] server recovered: {}",
-                                            mirror_cloned.config.host
-                                        );
-                                        mirror_cloned.failed_times.store(0, Ordering::Relaxed);
-                                        mirror_cloned.status.store(true, Ordering::Relaxed);
-                                    }
-                                })
-                                .map_err(|e| {
-                                    warn!(
-                                        "[mirror] failed to recover server: {}, {}",
-                                        mirror_cloned.config.host, e
-                                    );
-                                });
-                        }
-                    }
-
-                    thread::sleep(Duration::from_secs(
-                        mirror_cloned.config.health_check_interval,
-                    ));
-                }
-            });
         }
     }
 
@@ -560,69 +433,6 @@ impl Connection {
                     }
                 })
             }
-        }
-
-        let mut mirror_enabled = false;
-        if !self.mirrors.is_empty() {
-            mirror_enabled = true;
-            for mirror in self.mirrors.iter() {
-                if mirror.status.load(Ordering::Relaxed) {
-                    let data_cloned = data.as_ref().cloned();
-
-                    for (key, value) in mirror.config.headers.iter() {
-                        headers.insert(
-                            HeaderName::from_str(key).unwrap(),
-                            HeaderValue::from_str(value).unwrap(),
-                        );
-                    }
-
-                    let current_url = mirror.mirror_url(url)?;
-                    debug!("[mirror] replace to: {}", current_url);
-
-                    let result = self.call_inner(
-                        &self.client,
-                        method.clone(),
-                        current_url.as_str(),
-                        &query,
-                        data_cloned,
-                        headers,
-                        catch_status,
-                        false,
-                    );
-
-                    match result {
-                        Ok(resp) => {
-                            // If the response status >= INTERNAL_SERVER_ERROR, move to the next mirror server.
-                            if resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
-                                return Ok(resp);
-                            }
-                        }
-                        Err(err) => {
-                            warn!(
-                                "[mirror] request failed, server: {:?}, {:?}",
-                                mirror.config.host, err
-                            );
-                            mirror.failed_times.fetch_add(1, Ordering::Relaxed);
-
-                            if mirror.failed_times.load(Ordering::Relaxed) >= mirror.failure_limit {
-                                warn!(
-                                    "[mirror] exceed failure limit {}, server disabled: {:?}",
-                                    mirror.failure_limit, mirror
-                                );
-                                mirror.status.store(false, Ordering::Relaxed);
-                            }
-                        }
-                    }
-                }
-                // Remove mirror-related headers to avoid sending them to the next mirror server and original registry.
-                for (key, _) in mirror.config.headers.iter() {
-                    headers.remove(HeaderName::from_str(key).unwrap());
-                }
-            }
-        }
-
-        if mirror_enabled {
-            warn!("[mirror] request all servers failed, fallback to original server.");
         }
 
         self.call_inner(
@@ -788,6 +598,5 @@ mod tests {
         assert!(config.proxy.fallback);
         assert_eq!(config.proxy.ping_url, "");
         assert_eq!(config.proxy.url, "");
-        assert!(config.mirrors.is_empty());
     }
 }
