@@ -99,6 +99,8 @@ pub enum Error {
     Rafs(#[from] RafsError),
     #[error("VFS failed to handle request, {0:?}")]
     Vfs(#[from] VfsError),
+    #[error("VFS not initialized in time")]
+    VFSNotInit,
 
     // fusedev
     #[error("failed to create FUSE server, {0}")]
