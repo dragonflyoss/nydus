@@ -31,11 +31,6 @@ const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 const HEADER_AUTHORIZATION: &str = "Authorization";
 const HEADER_WWW_AUTHENTICATE: &str = "www-authenticate";
 
-const REDIRECTED_STATUS_CODE: [StatusCode; 2] = [
-    StatusCode::MOVED_PERMANENTLY,
-    StatusCode::TEMPORARY_REDIRECT,
-];
-
 const REGISTRY_DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60; // in seconds
 
 /// Error codes related to registry storage backend operations.
@@ -437,17 +432,21 @@ impl RegistryState {
                 Some(Auth::Basic(BasicAuth { realm }))
             }
             "Bearer" => {
-                if !paras.contains_key("realm")
-                    || !paras.contains_key("service")
-                    || !paras.contains_key("scope")
-                {
+                if !paras.contains_key("realm") || !paras.contains_key("service") {
                     return None;
                 }
+
+                let scope = if let Some(scope) = paras.get("scope") {
+                    (*scope).to_string()
+                } else {
+                    debug!("no scope specified for token auth challenge");
+                    String::new()
+                };
 
                 Some(Auth::Bearer(BearerAuth {
                     realm: (*paras.get("realm").unwrap()).to_string(),
                     service: (*paras.get("service").unwrap()).to_string(),
-                    scope: (*paras.get("scope").unwrap()).to_string(),
+                    scope,
                 }))
             }
             _ => None,
@@ -724,9 +723,11 @@ impl RegistryReader {
                 }
             };
             let status = resp.status();
+            let need_redirect =
+                status >= StatusCode::MULTIPLE_CHOICES && status < StatusCode::BAD_REQUEST;
 
             // Handle redirect request and cache redirect url
-            if REDIRECTED_STATUS_CODE.contains(&status) {
+            if need_redirect {
                 if let Some(location) = resp.headers().get("location") {
                     let location = location.to_str().unwrap();
                     let mut location = Url::parse(location)
@@ -863,12 +864,6 @@ impl Registry {
     pub fn new(config: &RegistryConfig, id: Option<&str>) -> Result<Registry> {
         let id = id.ok_or_else(|| einval!("Registry backend requires blob_id"))?;
         let con_config: ConnectionConfig = config.clone().into();
-
-        if !config.proxy.url.is_empty() && !config.mirrors.is_empty() {
-            return Err(einval!(
-                "connection: proxy and mirrors cannot be configured at the same time."
-            ));
-        }
 
         let retry_limit = con_config.retry_limit;
         let connection = Connection::new(&con_config)?;
@@ -1115,12 +1110,25 @@ mod tests {
             _ => panic!("failed to parse `Bearer` authentication header"),
         }
 
+        // No scope is accetpable
+        let str = "Bearer realm=\"https://auth.my-registry.com/token\",service=\"my-registry.com\"";
+        let header = HeaderValue::from_str(str).unwrap();
+        let auth = RegistryState::parse_auth(&header).unwrap();
+        match auth {
+            Auth::Bearer(auth) => {
+                assert_eq!(&auth.realm, "https://auth.my-registry.com/token");
+                assert_eq!(&auth.service, "my-registry.com");
+                assert_eq!(&auth.scope, "");
+            }
+            _ => panic!("failed to parse `Bearer` authentication header without scope"),
+        }
+
         let str = "Basic realm=\"https://auth.my-registry.com/token\"";
         let header = HeaderValue::from_str(str).unwrap();
         let auth = RegistryState::parse_auth(&header).unwrap();
         match auth {
             Auth::Basic(auth) => assert_eq!(&auth.realm, "https://auth.my-registry.com/token"),
-            _ => panic!("failed to parse `Bearer` authentication header"),
+            _ => panic!("failed to parse `Basic` authentication header"),
         }
 
         let str = "Base realm=\"https://auth.my-registry.com/token\"";

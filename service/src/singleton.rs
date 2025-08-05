@@ -370,6 +370,7 @@ mod tests {
 
     use super::*;
     use mio::{Poll, Token};
+    use procfs::sys::kernel::Version;
     use vmm_sys_util::tempdir::TempDir;
 
     fn create_service_controller() -> ServiceController {
@@ -415,6 +416,24 @@ mod tests {
         assert!(service_controller
             .initialize_fscache_service(None, 1, p.to_str().unwrap(), None)
             .is_err());
+
+        // skip test if user is not root
+        if !nix::unistd::Uid::effective().is_root() {
+            println!("Skip test_initialize_fscache_service, not root");
+            return;
+        }
+
+        // skip test if kernel is older than 5.19
+        if Version::current().unwrap() < Version::from_str("5.19.0").unwrap() {
+            println!("Skip test_initialize_fscache_service, kernel version is older than 5.19");
+            return;
+        }
+
+        // skip test if /dev/cachefiles does not exist
+        if !std::path::Path::new("/dev/cachefiles").exists() {
+            println!("Skip test_initialize_fscache_service, /dev/cachefiles does not exist");
+            return;
+        }
 
         let tmp_dir = TempDir::new().unwrap();
         let dir = tmp_dir.as_path().to_str().unwrap();
