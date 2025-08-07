@@ -49,6 +49,8 @@ impl From<UpgradeMgrError> for Error {
 /// FUSE fail-over policies.
 #[derive(PartialEq, Eq, Debug)]
 pub enum FailoverPolicy {
+    /// Do nothing.
+    None,
     /// Flush pending requests.
     Flush,
     /// Resend pending requests.
@@ -60,6 +62,7 @@ impl TryFrom<&str> for FailoverPolicy {
 
     fn try_from(p: &str) -> std::result::Result<Self, Self::Error> {
         match p {
+            "none" => Ok(FailoverPolicy::None),
             "flush" => Ok(FailoverPolicy::Flush),
             "resend" => Ok(FailoverPolicy::Resend),
             x => Err(einval!(format!("invalid FUSE fail-over mode {}", x))),
@@ -480,13 +483,13 @@ pub mod fusedev_upgrade {
 
         // restore fuse fd
         if let Some(f) = mgr.return_file() {
-            svc.as_any()
-                .downcast_ref::<FusedevFsService>()
-                .unwrap()
-                .session
-                .lock()
-                .unwrap()
-                .set_fuse_file(f);
+            let fuse_svc = svc.as_any().downcast_ref::<FusedevFsService>().unwrap();
+            fuse_svc.session.lock().unwrap().set_fuse_file(f);
+
+            // drain fuse requests
+            if let Err(e) = fuse_svc.drain_fuse_requests() {
+                warn!("Failed to drain fuse requests: {}", e);
+            }
         }
 
         // restore vfs
@@ -523,6 +526,10 @@ mod tests {
     #[test]
     fn test_failover_policy() {
         assert_eq!(
+            FailoverPolicy::try_from("none").unwrap(),
+            FailoverPolicy::None
+        );
+        assert_eq!(
             FailoverPolicy::try_from("flush").unwrap(),
             FailoverPolicy::Flush
         );
@@ -531,11 +538,16 @@ mod tests {
             FailoverPolicy::Resend
         );
 
-        let strs = vec!["flash", "Resend"];
+        let strs = vec!["null", "flash", "Resend"];
         for s in strs.clone().into_iter() {
             assert!(FailoverPolicy::try_from(s).is_err());
         }
 
+        let str = String::from("none");
+        assert_eq!(
+            FailoverPolicy::try_from(&str).unwrap(),
+            FailoverPolicy::None
+        );
         let str = String::from("flush");
         assert_eq!(
             FailoverPolicy::try_from(&str).unwrap(),
