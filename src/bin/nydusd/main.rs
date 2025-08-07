@@ -115,7 +115,7 @@ fn append_fuse_options(app: Command) -> Command {
             .long("failover-policy")
             .default_value("resend")
             .help("FUSE server failover policy")
-            .value_parser(["resend", "flush"])
+            .value_parser(["none", "resend", "flush"])
             .required(false),
     )
     .arg(

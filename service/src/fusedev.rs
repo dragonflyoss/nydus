@@ -8,8 +8,9 @@
 use std::any::Any;
 use std::ffi::{CStr, CString};
 use std::fs::metadata;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind, Result, Write};
 use std::ops::Deref;
+use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
 #[cfg(target_os = "linux")]
@@ -17,7 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicI32, AtomicU64, Ordering},
     mpsc::{channel, Receiver, Sender},
@@ -29,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fuse_backend_rs::abi::fuse_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
-use fuse_backend_rs::transport::{FuseChannel, FuseSession};
+use fuse_backend_rs::transport::{FuseChannel, FuseDevWriter, FuseSession};
 use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
@@ -145,6 +146,86 @@ impl FuseServer {
     }
 }
 
+struct FusedevNotifier<'a> {
+    session: &'a Mutex<FuseSession>,
+    server: &'a Arc<Server<Arc<Vfs>>>,
+}
+
+impl<'a> FusedevNotifier<'a> {
+    fn new(session: &'a Mutex<FuseSession>, server: &'a Arc<Server<Arc<Vfs>>>) -> Self {
+        FusedevNotifier { session, server }
+    }
+
+    fn notify_resend(&self) -> NydusResult<()> {
+        let session = self.session.lock().unwrap();
+        let file = session
+            .get_fuse_file()
+            .ok_or(NydusError::FuseDeviceNotFound)?;
+
+        let fd = file.as_raw_fd();
+        let mut buf = vec![0u8; session.bufsize()];
+        let writer: FuseDevWriter = FuseDevWriter::new(fd, &mut buf)?;
+
+        self.server
+            .notify_resend(writer)
+            .map_err(NydusError::FuseWriteError)?;
+        Ok(())
+    }
+}
+
+struct FuseSysfsNotifier<'a> {
+    conn: &'a AtomicU64,
+}
+
+impl<'a> FuseSysfsNotifier<'a> {
+    fn new(conn: &'a AtomicU64) -> Self {
+        Self { conn }
+    }
+
+    fn get_possible_base_paths() -> Vec<&'static str> {
+        vec!["/proc/sys/fs/fuse/connections", "/sys/fs/fuse/connections"]
+    }
+
+    fn try_notify_with_path(&self, base_path: &str, event: &str) -> NydusResult<()> {
+        let path = PathBuf::from(base_path)
+            .join(self.conn.load(Ordering::Acquire).to_string())
+            .join(event);
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .map_err(NydusError::SysfsOpenError)?;
+
+        file.write_all(b"1").map_err(NydusError::SysfsWriteError)?;
+        Ok(())
+    }
+
+    fn notify(&self, event: &str) -> NydusResult<()> {
+        let paths = Self::get_possible_base_paths();
+
+        for (idx, path) in paths.iter().enumerate() {
+            match self.try_notify_with_path(path, event) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if !matches!(e, NydusError::SysfsOpenError(_)) || idx == paths.len() - 1 {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn notify_resend(&self) -> NydusResult<()> {
+        self.notify("resend")
+    }
+
+    fn notify_flush(&self) -> NydusResult<()> {
+        self.notify("flush")
+    }
+}
+
 #[allow(dead_code)]
 pub struct FusedevFsService {
     /// Fuse connection ID which usually equals to `st_dev`
@@ -204,6 +285,23 @@ impl FusedevFsService {
         session.umount().map_err(NydusError::SessionShutdown)?;
         session.wake().map_err(NydusError::SessionShutdown)?;
         Ok(())
+    }
+
+    pub fn drain_fuse_requests(&self) -> NydusResult<()> {
+        let fusedev_notifier = FusedevNotifier::new(&self.session, &self.server);
+        let sysfs_notifier = FuseSysfsNotifier::new(&self.conn);
+
+        match self.failover_policy {
+            FailoverPolicy::None => Ok(()),
+            FailoverPolicy::Flush => sysfs_notifier.notify_flush(),
+            FailoverPolicy::Resend => fusedev_notifier.notify_resend().or_else(|e| {
+                error!(
+                    "Failed to notify resend by /dev/fuse, {:?}. Trying to do it by sysfs",
+                    e
+                );
+                sysfs_notifier.notify_resend()
+            }),
+        }
     }
 }
 
