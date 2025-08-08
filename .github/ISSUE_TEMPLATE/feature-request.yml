@@ -1,0 +1,45 @@
+name: Feature request
+title: "[Feature] Feature title"
+description: Suggest an idea for nydus
+labels: [ "feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a new feature. Please provide a clear and detailed description.
+
+  - type: textarea
+    attributes:
+      label: Feature Description
+      description: A clear and concise description of the feature you would like to see.
+      placeholder: >
+        Describe the feature you are requesting.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Problem and Use Case
+      description: What problem does this feature solve? Why is it important to you or other users?
+      placeholder: >
+        Describe the problem and a specific use case.
+    validations:
+      required: true
+
+  - type: textarea
+    attributes:
+      label: Related issues
+      description: Is there currently another issue associated with this?
+
+  - type: checkboxes
+    attributes:
+      label: Are you willing to submit PR?
+      description: >
+        This is absolutely not required, but we are happy to guide you in the contribution process
+        especially if you already have a good understanding of how to implement the fix.
+      options:
+        - label: Yes I am willing to submit a PR!
+
+  - type: markdown
+    attributes:
+      value: "Thanks for completing our form!"
