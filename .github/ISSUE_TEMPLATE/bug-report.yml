@@ -1,0 +1,86 @@
+name: Bug report
+title: "[Bug] Bug title"
+description: Problems and issues with code of nydus
+labels: [ "bug"]
+body:
+- type: markdown
+  attributes:
+    value: >
+      Thank you for taking the time to report an issue. To help us resolve it quickly, please fill out the following 
+      information.
+
+- type: textarea
+  attributes:
+    label: Problem Description
+    description: A clear and concise description of the bug you've encountered.
+    placeholder: >
+      Please clearly and concisely describe the error you encountered.
+  validations:
+    required: true
+
+- type: textarea
+  attributes:
+    label: Expected Behavior
+    description: What did you expect to happen?
+    placeholder: >
+     Explain the behavior you expected to see.
+  validations:
+    required: true
+
+- type: textarea
+  attributes:
+    label: Actual Behavior
+    description: What actually happened? Please provide any relevant logs, stack traces, or screenshots.
+    placeholder: >
+      Describe the actual behavior. Include logs or screenshots if possible.
+  validations:
+    required: true
+
+- type: textarea
+  attributes:
+    label: How to reproduce
+    description: Provide detailed steps to reproduce the issue.
+    placeholder: >
+      Please make sure you provide a reproducible step-by-step case of how to reproduce the problem
+      as minimally and precisely as possible.
+    value: |
+      1.
+      2.
+      3.
+  validations:
+    required: true
+
+- type: textarea
+  id: environment-details
+  attributes:
+    label: Environment Details
+    description: |
+      Please provide your environment information.
+    value: |
+      - Nydus-snapshotter version: 
+      - Nydus version:
+      - Container runtime:
+      - Operating System:
+      - Kernel version:
+  validations:
+    required: true
+
+- type: textarea
+  attributes:
+    label: Additional Information
+    description: Any other context or details that could be helpful.
+    placeholder: >
+      If you have any other information that might help us diagnose the issue, please provide it here.
+
+- type: checkboxes
+  attributes:
+    label: Are you willing to submit PR?
+    description: >
+      This is absolutely not required, but we are happy to guide you in the contribution process
+      especially if you already have a good understanding of how to implement the fix.
+    options:
+      - label: Yes I am willing to submit a PR!
+
+- type: markdown
+  attributes:
+    value: "Thanks for completing our form!"
