@@ -1,0 +1,50 @@
+name: Improvement Report
+title: "[Improvement] Improvement title"
+description: Suggest an improvement to an existing feature or process.
+labels: ["improvement"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping us improve nydus! Please provide a clear and detailed description of your suggestion.
+
+  - type: textarea
+    id: problem-summary
+    attributes:
+      label: Problem Summary
+      description: A brief, high-level summary of the issue or inefficiency you've identified.
+      placeholder: Describe the problem you want to solve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-improvement
+    attributes:
+      label: Proposed Improvement
+      description: A detailed description of your proposed change or improvement.
+      placeholder: Explain your proposed solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any other context or references that would be helpful (e.g., links to discussions, related issues).
+      placeholder: Add any additional context here.
+    validations:
+      required: false
+
+  - type: checkboxes
+    attributes:
+      label: Are you willing to submit PR?
+      description: >
+        This is absolutely not required, but we are happy to guide you in the contribution process
+        especially if you already have a good understanding of how to implement the fix.
+      options:
+        - label: Yes I am willing to submit a PR!
+
+  - type: markdown
+    attributes:
+      value: "Thanks for completing our form!"
