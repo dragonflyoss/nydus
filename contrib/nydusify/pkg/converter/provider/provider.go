@@ -36,6 +36,14 @@ import (
 
 var LayerConcurrentLimit = 5
 
+// Media type constants for container image formats
+const (
+	// Docker manifest list media type (legacy)
+	DockerManifestListMediaType = "application/vnd.docker.distribution.manifest.list.v2+json"
+	// Docker manifest media type (legacy)
+	DockerManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json"
+)
+
 type Provider struct {
 	mutex          sync.Mutex
 	usePlainHTTP   bool
@@ -237,7 +245,7 @@ func (pvd *Provider) NewRemoteCache(ctx context.Context, ref string) (context.Co
 func (pvd *Provider) FetchImageInfo(ctx context.Context, ref string) error {
 	resolver, err := pvd.Resolver(ref)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "create resolver")
 	}
 
 	name, desc, err := resolver.Resolve(ctx, ref)
@@ -278,7 +286,7 @@ func (pvd *Provider) FetchImageInfo(ctx context.Context, ref string) error {
 
 func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remotes.Fetcher, data []byte, desc ocispec.Descriptor) error {
 	switch desc.MediaType {
-	case ocispec.MediaTypeImageIndex, "application/vnd.docker.distribution.manifest.list.v2+json":
+	case ocispec.MediaTypeImageIndex, DockerManifestListMediaType:
 		var index ocispec.Index
 		if err := json.Unmarshal(data, &index); err != nil {
 			return errors.Wrap(err, "unmarshal index")
@@ -289,7 +297,7 @@ func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remote
 				return err
 			}
 		}
-	case ocispec.MediaTypeImageManifest, "application/vnd.docker.distribution.manifest.v2+json":
+	case ocispec.MediaTypeImageManifest, DockerManifestMediaType:
 		return pvd.processManifest(ctx, fetcher, data)
 	}
 	return nil
