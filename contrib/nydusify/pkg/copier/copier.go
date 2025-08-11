@@ -155,7 +155,7 @@ func (m *streamTransferManager) pushContent(ctx context.Context, desc ocispec.De
 			m.provider.UsePlainHTTP()
 
 			if err := m.refreshPusher(ctx); err != nil {
-				return err
+				return errors.Wrap(err, "refresh pusher")
 			}
 
 			writer, err = m.targetPusher.Push(ctx, desc)
