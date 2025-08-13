@@ -198,8 +198,6 @@ struct RegistryState {
     repo: String,
     // Base64 encoded registry auth
     auth: Option<String>,
-    username: String,
-    password: String,
     // Retry limit for read operation
     retry_limit: u8,
     // Scheme specified for blob server
@@ -273,13 +271,13 @@ impl RegistryState {
             .get(&self.host)
             .unwrap_or_default();
         let resp = if http_get {
-            self.get_token_with_get(&auth, connection)?
+            self.fetch_token(&auth, connection, Method::GET)?
         } else {
-            match self.get_token_with_post(&auth, connection) {
+            match self.fetch_token(&auth, connection, Method::POST) {
                 Ok(resp) => resp,
                 Err(_) => {
                     warn!("retry http GET method to get auth token");
-                    let resp = self.get_token_with_get(&auth, connection)?;
+                    let resp = self.fetch_token(&auth, connection, Method::GET)?;
                     // Cache http method for next use.
                     self.cached_auth_using_http_get.set(self.host.clone(), true);
                     resp
@@ -305,60 +303,15 @@ impl RegistryState {
         Ok(ret)
     }
 
-    // Get bearer token using a POST request
-    fn get_token_with_post(
+    // Fetches a bearer token from the registry's authentication
+    fn fetch_token(
         &self,
         auth: &BearerAuth,
         connection: &Arc<Connection>,
+        method: Method,
     ) -> Result<Response> {
-        let mut form = HashMap::new();
-        form.insert("service".to_string(), auth.service.clone());
-        form.insert("scope".to_string(), auth.scope.clone());
-        form.insert("grant_type".to_string(), "password".to_string());
-        form.insert("username".to_string(), self.username.clone());
-        form.insert("password".to_string(), self.password.clone());
-        form.insert("client_id".to_string(), REGISTRY_CLIENT_ID.to_string());
-
-        let token_resp = connection
-            .call::<&[u8]>(
-                Method::POST,
-                auth.realm.as_str(),
-                None,
-                Some(ReqBody::Form(form)),
-                &mut HeaderMap::new(),
-                true,
-            )
-            .map_err(|e| {
-                warn!(
-                    "failed to request registry auth server by POST method: {:?}",
-                    e
-                );
-                einval!()
-            })?;
-
-        Ok(token_resp)
-    }
-
-    // Get bearer token using a GET request
-    fn get_token_with_get(
-        &self,
-        auth: &BearerAuth,
-        connection: &Arc<Connection>,
-    ) -> Result<Response> {
-        let query = [
-            ("service", auth.service.as_str()),
-            ("scope", auth.scope.as_str()),
-            ("grant_type", "password"),
-            ("username", self.username.as_str()),
-            ("password", self.password.as_str()),
-            ("client_id", REGISTRY_CLIENT_ID),
-        ];
-
         let mut headers = HeaderMap::new();
 
-        // Insert the basic auth header to ensure the compatibility (e.g. Harbor registry)
-        // of fetching token by HTTP GET method.
-        // This refers containerd implementation: https://github.com/containerd/containerd/blob/dc7dba9c20f7210c38e8255487fc0ee12692149d/remotes/docker/auth/fetch.go#L187
         if let Some(auth) = &self.auth {
             headers.insert(
                 HEADER_AUTHORIZATION,
@@ -366,19 +319,43 @@ impl RegistryState {
             );
         }
 
+        let mut query: Option<&[(&str, &str)]> = None;
+        let mut body = None;
+
+        let query_params_get;
+
+        match method {
+            Method::GET => {
+                query_params_get = [
+                    ("service", auth.service.as_str()),
+                    ("scope", auth.scope.as_str()),
+                    ("client_id", REGISTRY_CLIENT_ID),
+                ];
+                query = Some(&query_params_get);
+            }
+            Method::POST => {
+                let mut form = HashMap::new();
+                form.insert("service".to_string(), auth.service.clone());
+                form.insert("scope".to_string(), auth.scope.clone());
+                form.insert("client_id".to_string(), REGISTRY_CLIENT_ID.to_string());
+                body = Some(ReqBody::Form(form));
+            }
+            _ => return Err(einval!()),
+        }
+
         let token_resp = connection
             .call::<&[u8]>(
-                Method::GET,
+                method.clone(),
                 auth.realm.as_str(),
-                Some(&query),
-                None,
+                query,
+                body,
                 &mut headers,
                 true,
             )
-            .map_err(|e| {
+            .map_err(move |e| {
                 warn!(
-                    "failed to request registry auth server by GET method: {:?}",
-                    e
+                    "failed to request registry auth server by {:?} method: {:?}",
+                    method, e
                 );
                 einval!()
             })?;
@@ -869,7 +846,7 @@ impl Registry {
         let connection = Connection::new(&con_config)?;
         let auth = trim(config.auth.clone());
         let registry_token = trim(config.registry_token.clone());
-        let (username, password) = Self::get_authorization_info(&auth)?;
+        Self::validate_authorization_info(&auth)?;
         let cached_auth = if let Some(registry_token) = registry_token {
             // Store the registry bearer token to cached_auth, prefer to
             // use the token stored in cached_auth to request registry.
@@ -890,8 +867,6 @@ impl Registry {
             repo: config.repo.clone(),
             auth,
             cached_auth,
-            username,
-            password,
             retry_limit,
             blob_url_scheme: config.blob_url_scheme.clone(),
             blob_redirected_host: config.blob_redirected_host.clone(),
@@ -914,7 +889,7 @@ impl Registry {
         Ok(registry)
     }
 
-    fn get_authorization_info(auth: &Option<String>) -> Result<(String, String)> {
+    fn validate_authorization_info(auth: &Option<String>) -> Result<()> {
         if let Some(auth) = &auth {
             let auth: Vec<u8> = base64::engine::general_purpose::STANDARD
                 .decode(auth.as_bytes())
@@ -934,11 +909,8 @@ impl Registry {
             if auth.len() < 2 {
                 return Err(einval!("Invalid registry auth config"));
             }
-
-            Ok((auth[0].to_string(), auth[1].to_string()))
-        } else {
-            Ok((String::new(), String::new()))
         }
+        Ok(())
     }
 
     fn start_refresh_token_thread(&self) {
@@ -1074,8 +1046,6 @@ mod tests {
             host: "alibaba-inc.com".to_string(),
             repo: "nydus".to_string(),
             auth: None,
-            username: "test".to_string(),
-            password: "password".to_string(),
             retry_limit: 5,
             blob_url_scheme: "https".to_string(),
             blob_redirected_host: "oss.alibaba-inc.com".to_string(),
