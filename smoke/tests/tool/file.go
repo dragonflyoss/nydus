@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"syscall"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/xattr"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,6 +61,15 @@ func NewFile(t *testing.T, path, target string) *File {
 		defer f.Close()
 		digester := digest.Canonical.Digester()
 		_, err = io.Copy(digester.Hash(), f)
+		if err != nil {
+			logrus.Infof("Current disk space Verify:")
+			cmd := exec.Command("df", "-h")
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				logrus.Fatalf("Failed to execute 'df -h': %v, Output: %s", err, out)
+			}
+			logrus.Infof("\n%s", string(out))
+		}
 		require.NoError(t, err)
 		hash = digester.Digest()
 	}
