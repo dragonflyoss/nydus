@@ -272,6 +272,7 @@ func (n *NativeLayerTestSuite) testMakeLayers(ctx tool.Context, t *testing.T) {
 
 	// Verify lower layer mounted by nydusd
 	ctx.Env.BootstrapPath = lowerBootstrap
+
 	tool.Verify(t, ctx, lowerLayer.FileTree)
 
 	// Make upper layer (with chunk dict)
