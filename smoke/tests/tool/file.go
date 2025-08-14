@@ -6,7 +6,6 @@ package tool
 
 import (
 	"fmt"
-	"github.com/sirupsen/logrus"
 	"io"
 	"os"
 	"syscall"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/xattr"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
