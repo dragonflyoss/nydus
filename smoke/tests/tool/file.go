@@ -6,15 +6,15 @@ package tool
 
 import (
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"io"
 	"os"
-	"os/exec"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/opencontainers/go-digest"
 	"github.com/pkg/xattr"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -56,22 +56,20 @@ func NewFile(t *testing.T, path, target string) *File {
 
 	hash := digest.Digest("")
 	if stat.Mode().IsRegular() {
-		f, err := os.Open(path)
-		require.NoError(t, err)
-		defer f.Close()
-		digester := digest.Canonical.Digester()
-		_, err = io.Copy(digester.Hash(), f)
-		if err != nil {
-			logrus.Infof("Current disk space Verify:")
-			cmd := exec.Command("df", "-h")
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				logrus.Fatalf("Failed to execute 'df -h': %v, Output: %s", err, out)
+		maxRetries := 10
+		var lastErr error
+		for i := 0; i < maxRetries; i++ {
+			var d digest.Digest
+			d, lastErr = tryReadAndHash(path)
+			if lastErr == nil {
+				hash = d
+				break
 			}
-			logrus.Infof("\n%s", string(out))
+
+			logrus.Infof("第 %v 次尝试读取文件 %s 失败: %v", i+1, path, lastErr)
+			time.Sleep(5 * time.Second)
 		}
-		require.NoError(t, err)
-		hash = digester.Digest()
+		require.NoError(t, lastErr, "文件 %s 在所有重试后仍然无法读取", path)
 	}
 
 	file := File{
@@ -86,6 +84,21 @@ func NewFile(t *testing.T, path, target string) *File {
 	}
 
 	return &file
+}
+
+func tryReadAndHash(path string) (digest.Digest, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	digester := digest.Canonical.Digester()
+	if _, err := io.Copy(digester.Hash(), f); err != nil {
+		return "", err
+	}
+
+	return digester.Digest(), nil
 }
 
 func (file *File) Compare(t *testing.T, target *File) {
