@@ -568,7 +568,7 @@ pub fn create_fuse_daemon(
     let daemon = FusedevDaemon::new(
         trigger,
         result_receiver,
-        vfs,
+        vfs.clone(),
         &mnt,
         threads_cnt,
         waker,
@@ -611,6 +611,22 @@ pub fn create_fuse_daemon(
         daemon
             .on_event(DaemonStateMachineInput::Start)
             .map_err(|e| eother!(e))?;
+
+        if let Some(upgrade_mgr) = &daemon.service.upgrade_mgr {
+            match daemon.service.wait_vfs_initialized(&vfs, 5000, 50) {
+                Ok(()) => {
+                    let mut mgr_guard = upgrade_mgr.lock().unwrap();
+                    mgr_guard.save_vfs_stat(vfs.as_ref())?;
+                }
+                Err(e) => {
+                    warn!(
+                        "Skip save_vfs_stat because {:?}. This only affects hot upgrade.",
+                        e
+                    );
+                }
+            }
+        }
+
         daemon
             .service
             .conn

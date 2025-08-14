@@ -6,13 +6,6 @@
 
 //! Infrastructure to define and implement filesystem services.
 
-use std::any::Any;
-use std::collections::HashMap;
-use std::ops::Deref;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::{Arc, MutexGuard};
-
 #[cfg(target_os = "linux")]
 use fuse_backend_rs::api::filesystem::{FileSystem, FsOptions, Layer};
 use fuse_backend_rs::api::vfs::VfsError;
@@ -26,6 +19,14 @@ use nydus_rafs::fs::Rafs;
 use nydus_rafs::{RafsError, RafsIoRead};
 use nydus_storage::factory::BLOB_FACTORY;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::{Arc, MutexGuard};
+use std::thread;
+use std::time::{Duration, Instant};
 use versionize::{VersionMap, Versionize, VersionizeResult};
 use versionize_derive::Versionize;
 
@@ -129,6 +130,54 @@ pub trait FsService: Send + Sync {
         }
 
         Ok(())
+    }
+
+    /// Waits for the VFS to be fully initialized
+    fn wait_vfs_initialized(
+        &self,
+        vfs: &Arc<Vfs>,
+        max_wait_ms: u64,
+        interval_ms: u64,
+    ) -> Result<()> {
+        let max_wait = Duration::from_millis(max_wait_ms);
+        let interval = Duration::from_millis(interval_ms);
+        let start_time = Instant::now();
+        let mut last_log_time = Instant::now();
+        let log_interval = Duration::from_secs(1);
+
+        if vfs.initialized() {
+            info!("VFS already initialized.");
+            return Ok(());
+        }
+
+        info!("Waiting for VFS to be initialized...");
+        loop {
+            let elapsed = start_time.elapsed();
+
+            if vfs.initialized() {
+                info!("VFS initialized after waiting {} ms", elapsed.as_millis());
+                return Ok(());
+            }
+
+            if elapsed >= max_wait {
+                warn!(
+                    "VFS still not initialized after waiting {} ms! vfs.initialized() returned: {}",
+                    elapsed.as_millis(),
+                    vfs.initialized()
+                );
+                return Err(Error::VFSNotInit);
+            }
+
+            if last_log_time.elapsed() >= log_interval {
+                info!(
+                    "Still waiting for VFS to be initialized... waited {} ms",
+                    elapsed.as_millis()
+                );
+                last_log_time = Instant::now();
+            }
+
+            thread::sleep(interval);
+        }
     }
 
     /// Remount a filesystem instance.
