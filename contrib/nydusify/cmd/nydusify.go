@@ -14,7 +14,9 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
@@ -351,6 +353,12 @@ func main() {
 					EnvVars: []string{"OCI"},
 				},
 				&cli.BoolFlag{
+					Name:    "reverse",
+					Value:   false,
+					Usage:   "Perform reverse conversion from Nydus format to OCI format. Do not use this option if the source is in OCI format, as it is not supported. Note: This Nydus to OCI reverse conversion feature is currently experimental.",
+					EnvVars: []string{"REVERSE"},
+				},
+				&cli.BoolFlag{
 					Name:   "docker-v2-format",
 					Value:  false,
 					Hidden: true,
@@ -503,6 +511,15 @@ func main() {
 					docker2OCI = true
 				}
 
+				// Check if this is a reverse conversion (Nydus to OCI)
+				if c.Bool("reverse") {
+					converted, err := tryReverseConvert(c, targetRef)
+					if converted {
+						return err
+					}
+				}
+
+				// Forward conversion: OCI to Nydus (existing logic)
 				opt := converter.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
@@ -1516,4 +1533,54 @@ func getGlobalFlags() []cli.Flag {
 			EnvVars:  []string{"LOG_FILE"},
 		},
 	}
+}
+
+// tryReverseConvert attempts to perform reverse conversion from Nydus to OCI
+func tryReverseConvert(c *cli.Context, targetRef string) (bool, error) {
+	// Source image is in Nydus format, perform reverse conversion
+	logrus.Info("Detected Nydus source image, performing reverse conversion to OCI")
+
+	// Parse retry delay parameter from string to seconds (int)
+	retryDelayStr := c.String("push-retry-delay")
+	retryDelaySeconds := 0
+	if retryDelayStr != "" {
+		// Try to parse as duration first (e.g., "5s", "1m", "1h")
+		duration, err := time.ParseDuration(retryDelayStr)
+		if err == nil {
+			retryDelaySeconds = int(duration.Seconds())
+		} else {
+			// Fallback to parsing as plain integer (for backward compatibility)
+			seconds, err := strconv.Atoi(retryDelayStr)
+			if err != nil || seconds < 0 {
+				logrus.Warnf("failed to parse push-retry-delay(%s): %+v\nusing default value(0 seconds)", retryDelayStr, err)
+				retryDelaySeconds = 0
+			} else {
+				retryDelaySeconds = seconds
+			}
+		}
+
+		if retryDelaySeconds < 0 {
+			logrus.Warnf("invalid push-retry-delay value(%s): must be non-negative\nusing default value(0 seconds)", retryDelayStr)
+			retryDelaySeconds = 0
+		}
+	}
+
+	// Build reverse conversion options
+	reverseOpt := converter.ReverseOpt{
+		WorkDir:        c.String("work-dir"),
+		NydusImagePath: c.String("nydus-image"),
+		Source:         c.String("source"),
+		Target:         targetRef,
+		SourceInsecure: c.Bool("source-insecure"),
+		TargetInsecure: c.Bool("target-insecure"),
+		AllPlatforms:   c.Bool("all-platforms"),
+		Platforms:      c.String("platform"),
+		OutputJSON:     c.String("output-json"),
+		PushRetryCount: c.Int("push-retry-count"),
+		PushRetryDelay: retryDelaySeconds,
+		WithPlainHTTP:  c.Bool("plain-http"),
+	}
+	// Execute reverse conversion
+	err := converter.ReverseConvert(context.Background(), reverseOpt)
+	return true, err
 }
