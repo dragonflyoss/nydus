@@ -59,6 +59,10 @@ log_rotation_max_size = 100
 [metrics]
 # Enable by assigning an address, empty indicates metrics server is disabled
 address = ":9110"
+# The maximum duration an I/O operation can be pending before it's considered hung.
+hung_io_interval = "30s"
+# The interval at which metrics are collected and updated.
+collect_interval = "1m"
 
 [remote]
 convert_vpc_registry = false
