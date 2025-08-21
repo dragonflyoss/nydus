@@ -70,7 +70,8 @@ type Opt struct {
 	AllPlatforms bool
 	Platforms    string
 
-	PushChunkSize int64
+	PushChunkSize    int64
+	EnableStreamCopy bool
 }
 
 type output struct {
@@ -175,7 +176,7 @@ func (m *streamTransferManager) pushContent(ctx context.Context, desc ocispec.De
 		return nil
 	}
 
-	if err := StreamCopy(ctx, reader, writer, desc.Size, desc.Digest); err != nil {
+	if err := StreamCopy(ctx, reader, writer, desc.Size, desc.Digest, m.opt.PushChunkSize); err != nil {
 		return errors.Wrap(err, "stream transfer failed")
 	}
 
@@ -296,14 +297,14 @@ func (m *streamTransferManager) streamManifestList(ctx context.Context, indexDes
 	return nil
 }
 
-func StreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
+func StreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest, pushChunkSize int64) error {
 	// for small files, use simplified handling
 	if size <= 128 {
 		return handleSmallFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest)
 	}
 
-	// use 16MB buffer for efficient transfer
-	return handleLargeFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest)
+	// use buffer for efficient transfer
+	return handleLargeFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest, pushChunkSize)
 }
 
 func handleSmallFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
@@ -332,8 +333,11 @@ func handleSmallFileTransfer(ctx context.Context, srcReader io.Reader, targetWri
 	return nil
 }
 
-func handleLargeFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
-	bufSize := 16 * 1024 * 1024
+func handleLargeFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest, pushChunkSize int64) error {
+	bufSize := 16 * 1024 * 1024 // 默认 16MB
+	if pushChunkSize > 0 {
+		bufSize = int(pushChunkSize)
+	}
 	buf := make([]byte, bufSize)
 	hasher := sha256.New()
 	var totalCopied int64
@@ -408,7 +412,7 @@ func handleLargeFileTransfer(ctx context.Context, srcReader io.Reader, targetWri
 }
 
 func enableStreamCopy(opt Opt) bool {
-	return opt.PushChunkSize > 0
+	return opt.EnableStreamCopy
 }
 
 func hosts(opt Opt) remote.HostFunc {

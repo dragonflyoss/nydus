@@ -1158,6 +1158,11 @@ func main() {
 					Value: "0MB",
 					Usage: "Chunk size for pushing a blob layer in chunked",
 				},
+				&cli.BoolFlag{
+					Name:  "enable-stream-copy",
+					Value: false,
+					Usage: "Enable stream copy mode for image transfer",
+				},
 
 				&cli.StringFlag{
 					Name:    "work-dir",
@@ -1203,7 +1208,8 @@ func main() {
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
 
-					PushChunkSize: int64(pushChunkSize),
+					PushChunkSize:    int64(pushChunkSize),
+					EnableStreamCopy: c.Bool("enable-stream-copy"),
 				}
 
 				return copier.Copy(context.Background(), opt)
