@@ -47,6 +47,14 @@ test-benchmark: build
 test-compatibility: build
 	make test TESTS=TestCompatibility
 
+# WORK_DIR=/tmp \
+# NYDUS_BUILDER=/path/to/latest/nydus-image \
+# NYDUS_NYDUSD=/path/to/latest/nydusd \
+# NYDUS_NYDUSIFY=/path/to/latest/nydusify \
+# make test-stream-copy
+test-stream-copy: build
+	sudo -E ./smoke.test -test.v -test.timeout 15m -test.parallel=4 -test.run=TestStreamCopy
+
 # SNAPSHOTTER_SYSTEM_SOCK=/run/containerd-nydus/system.sock
 # SNAPSHOTTER=nydus
 # TAKEOVER_TEST_IMAGE=wordpress
