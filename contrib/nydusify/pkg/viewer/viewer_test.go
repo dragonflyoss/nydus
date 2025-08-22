@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
@@ -45,6 +46,9 @@ func TestPullBootstrap(t *testing.T) {
 	}
 	fsViwer := FsViewer{
 		Opt: opt,
+		NydusdConfig: tool.NydusdConfig{
+			ExternalBackendConfigPath: "/tmp/backend.json",
+		},
 	}
 	os.MkdirAll(fsViwer.WorkDir, 0755)
 	defer os.RemoveAll(fsViwer.WorkDir)
