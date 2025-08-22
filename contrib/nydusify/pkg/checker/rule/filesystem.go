@@ -175,6 +175,7 @@ func (rule *FilesystemRule) mountNydusImage(image *Image, dir string) (func() er
 	logrus.WithField("type", tool.CheckImageType(image.Parsed)).WithField("image", image.Parsed.Remote.Ref).Info("mounting image")
 
 	digestValidate := false
+	isModelArtifact := false
 	if image.Parsed.NydusImage != nil {
 		nydusManifest := parser.FindNydusBootstrapDesc(&image.Parsed.NydusImage.Manifest)
 		if nydusManifest != nil {
@@ -186,6 +187,7 @@ func (rule *FilesystemRule) mountNydusImage(image *Image, dir string) (func() er
 				digestValidate = true
 			}
 		}
+		isModelArtifact = image.Parsed.NydusImage.Manifest.ArtifactType == modelspec.ArtifactTypeModelManifest
 	}
 
 	backendType := rule.SourceBackendType
@@ -202,18 +204,20 @@ func (rule *FilesystemRule) mountNydusImage(image *Image, dir string) (func() er
 	}
 
 	nydusdConfig := tool.NydusdConfig{
-		EnablePrefetch:            true,
-		NydusdPath:                rule.NydusdPath,
-		BackendType:               backendType,
-		BackendConfig:             backendConfig,
-		BootstrapPath:             filepath.Join(rule.WorkDir, dir, "nydus_bootstrap/image/image.boot"),
-		ExternalBackendConfigPath: filepath.Join(rule.WorkDir, dir, "nydus_bootstrap/image/backend.json"),
-		ConfigPath:                filepath.Join(nydusdDir, "config.json"),
-		BlobCacheDir:              filepath.Join(nydusdDir, "cache"),
-		APISockPath:               filepath.Join(nydusdDir, "api.sock"),
-		MountPath:                 mountDir,
-		Mode:                      "direct",
-		DigestValidate:            digestValidate,
+		EnablePrefetch: true,
+		NydusdPath:     rule.NydusdPath,
+		BackendType:    backendType,
+		BackendConfig:  backendConfig,
+		BootstrapPath:  filepath.Join(rule.WorkDir, dir, "nydus_bootstrap/image/image.boot"),
+		ConfigPath:     filepath.Join(nydusdDir, "config.json"),
+		BlobCacheDir:   filepath.Join(nydusdDir, "cache"),
+		APISockPath:    filepath.Join(nydusdDir, "api.sock"),
+		MountPath:      mountDir,
+		Mode:           "direct",
+		DigestValidate: digestValidate,
+	}
+	if isModelArtifact {
+		nydusdConfig.ExternalBackendConfigPath = filepath.Join(rule.WorkDir, dir, "nydus_bootstrap/image/backend.json")
 	}
 
 	if err := os.MkdirAll(nydusdConfig.BlobCacheDir, 0755); err != nil {
@@ -254,7 +258,7 @@ func (rule *FilesystemRule) mountNydusImage(image *Image, dir string) (func() er
 		}
 	}
 
-	if image.Parsed.NydusImage.Manifest.ArtifactType == modelspec.ArtifactTypeModelManifest {
+	if isModelArtifact {
 		if err := utils.BuildRuntimeExternalBackendConfig(nydusdConfig.BackendConfig, nydusdConfig.ExternalBackendConfigPath); err != nil {
 			return nil, errors.Wrap(err, "failed to build external backend config file")
 		}
