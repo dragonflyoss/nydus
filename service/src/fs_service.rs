@@ -86,7 +86,7 @@ impl FsBackendCollection {
         Ok(())
     }
 
-    fn del(&mut self, id: &str) {
+    pub fn del(&mut self, id: &str) {
         self.0.remove(id);
     }
 }
@@ -99,7 +99,7 @@ pub trait FsService: Send + Sync {
 
     /// Get the [BackFileSystem](https://docs.rs/fuse-backend-rs/latest/fuse_backend_rs/api/vfs/type.BackFileSystem.html)
     /// object associated with a mount point.
-    fn backend_from_mountpoint(&self, mp: &str) -> Result<Option<Arc<BackFileSystem>>> {
+    fn backend_from_mountpoint(&self, mp: &str) -> Result<Option<(Arc<BackFileSystem>, u8)>> {
         self.get_vfs().get_rootfs(mp).map_err(|e| e.into())
     }
 
@@ -133,7 +133,7 @@ pub trait FsService: Send + Sync {
 
     /// Remount a filesystem instance.
     fn remount(&self, cmd: FsBackendMountCmd) -> Result<()> {
-        let rootfs = self
+        let (rootfs, _) = self
             .backend_from_mountpoint(&cmd.mountpoint)?
             .ok_or(Error::NotFound)?;
         let mut bootstrap = <dyn RafsIoRead>::from_file(&cmd.source)?;
@@ -201,7 +201,7 @@ pub trait FsService: Send + Sync {
 
     /// Export information about the filesystem service.
     fn export_backend_info(&self, mountpoint: &str) -> Result<String> {
-        let fs = self
+        let (fs, _) = self
             .backend_from_mountpoint(mountpoint)?
             .ok_or(Error::NotFound)?;
         let any_fs = fs.deref().as_any();

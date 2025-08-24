@@ -193,6 +193,109 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func (a *APIV1TestSuite) TestSubMountCache(t *testing.T) {
+
+	ctx := tool.DefaultContext(t)
+
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	// lower contains more files than thinLower
+	lower := texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "rootfs"))
+	thinLower := texture.MakeThinLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "rootfs1"))
+
+	lowerBootstrap := a.buildLayer(t, ctx, lower)
+	thinLowerBootstrap := a.buildLayer(t, ctx, thinLower)
+
+	config := tool.NydusdConfig{
+		NydusdPath:  ctx.Binary.Nydusd,
+		MountPath:   ctx.Env.MountDir,
+		APISockPath: filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:  filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+	}
+
+	nydusd, err := tool.NewNydusd(config)
+	require.NoError(t, err)
+	err = nydusd.Mount()
+	require.NoError(t, err)
+	defer nydusd.Umount()
+
+	// child mount config template (copied every iteration)
+	childTpl := tool.NydusdConfig{
+		NydusdPath:      ctx.Binary.Nydusd,
+		MountPath:       "/mount",
+		APISockPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:      filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		BackendType:     "localfs",
+		BackendConfig:   fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
+		BlobCacheDir:    ctx.Env.CacheDir,
+		CacheType:       ctx.Runtime.CacheType,
+		CacheCompressed: ctx.Runtime.CacheCompressed,
+		RafsMode:        ctx.Runtime.RafsMode,
+		EnablePrefetch:  ctx.Runtime.EnablePrefetch,
+		DigestValidate:  false,
+		AmplifyIO:       ctx.Runtime.AmplifyIO,
+	}
+
+	// mount prefix where the daemon actually mounts sub-mounts
+	mountPrefix := ctx.Env.WorkDir + "/mnt"
+
+	// iterate 256 times; first mount uses thinlower (without some files), subsequent mounts use Lower.
+	for i := 0; i < 256; i++ {
+		curCfg := childTpl
+		if i == 0 {
+			curCfg.BootstrapPath = thinLowerBootstrap
+		} else {
+			curCfg.BootstrapPath = lowerBootstrap
+		}
+		curCfg.MountPath = childTpl.MountPath + fmt.Sprintf("-%d", i)
+		err = nydusd.MountByAPI(curCfg)
+		require.NoError(t, err, "failed to mount by API at iteration %d", i)
+
+		fullMount := filepath.Join(mountPrefix, curCfg.MountPath)
+
+		// VerifyByPath validates the file tree and also triggers the construction of inode and dentry caches.
+		if i == 0 {
+			nydusd.VerifyByPath(t, thinLower.FileTree, curCfg.MountPath)
+		} else {
+			// Verify specific files exist
+			_, err := os.Stat(filepath.Join(fullMount, "dir-1/file-1"))
+			require.NoError(t, err, "stat file-1 failed")
+
+			// Verify file contents
+			data, err := os.ReadFile(filepath.Join(fullMount, "file-2"))
+			require.NoError(t, err, "fail to read file-2")
+			require.Equal(t, []byte("file-2"), data, "file-2")
+
+			//  Verify directory contents
+			ents, err := os.ReadDir(filepath.Join(fullMount, "dir-1"))
+			require.NoError(t, err, "readdir dir-1 failed")
+
+			names := make(map[string]bool)
+			for _, e := range ents {
+				names[e.Name()] = true
+			}
+			expected := []string{
+				"file-1-hardlink-1",
+				"file-1-hardlink-2",
+				"file-1-symlink-1",
+				"file-1-symlink-2",
+				"file-external-1",
+				"file-2",
+			}
+
+			// Ensure directory contains all expected entries
+			for _, name := range expected {
+				require.True(t, names[name], "dir-1 should contain %s", name)
+			}
+
+			nydusd.VerifyByPath(t, lower.FileTree, curCfg.MountPath)
+
+		}
+		err = nydusd.UmountByAPI(curCfg.MountPath)
+		require.NoError(t, err, "failed to unmount by API at iteration %d", i)
+	}
+}
 func (a *APIV1TestSuite) TestMount(t *testing.T) {
 
 	ctx := tool.DefaultContext(t)
