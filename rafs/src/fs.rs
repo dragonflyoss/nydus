@@ -348,6 +348,11 @@ impl Rafs {
         self.sb.superblock.root_ino()
     }
 
+    pub fn get_root_inode(&self) -> Result<Arc<dyn RafsInode>> {
+        let root_ino = self.root_ino();
+        self.sb.get_inode(root_ino, self.digest_validate)
+    }
+
     fn do_prefetch(
         root_ino: u64,
         mut reader: RafsIoReader,

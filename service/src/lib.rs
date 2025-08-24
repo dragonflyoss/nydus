@@ -114,6 +114,8 @@ pub enum Error {
     SysfsOpenError(#[source] io::Error),
     #[error("Sysfs write error, {0}")]
     SysfsWriteError(#[source] io::Error),
+    #[error("failed to walk and notify invalidation: {0}")]
+    WalkNotifyInvalidation(#[from] std::io::Error),
 
     // virtio-fs
     #[error("failed to handle event other than input event")]

@@ -40,7 +40,7 @@ hex = "0.4.3"
 hyper = "0.14.11"
 hyperlocal = "0.8.0"
 lazy_static = "1"
-libc = "0.2"
+libc = "0.2.175"
 log = "0.4.8"
 log-panics = { version = "2.1.0", features = ["with-backtrace"] }
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
@@ -139,4 +139,4 @@ vm-memory = "0.14.1"
 vmm-sys-util = "0.12.1"
 
 # fuse-backend-rs which depends on rust-vmm
-fuse-backend-rs = "0.12.0"
+fuse-backend-rs = "0.13.1"
