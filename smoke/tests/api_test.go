@@ -192,6 +192,66 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 	_, err = nydusd.GetBlobCacheMetrics("/pseudo_fs_1")
 	require.NoError(t, err)
 }
+func (a *APIV1TestSuite) TestSubMountCache(t *testing.T) {
+	ctx := tool.DefaultContext(t)
+
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	config := tool.NydusdConfig{
+		NydusdPath:  ctx.Binary.Nydusd,
+		MountPath:   ctx.Env.MountDir,
+		APISockPath: filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:  filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+	}
+
+	nydusd, err := tool.NewNydusd(config)
+	require.NoError(t, err)
+	err = nydusd.Mount()
+	require.NoError(t, err)
+	defer nydusd.Umount()
+
+	// child mount config template
+	childTpl := tool.NydusdConfig{
+		NydusdPath:      ctx.Binary.Nydusd,
+		MountPath:       "/mount",
+		APISockPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:      filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		BackendType:     "localfs",
+		BackendConfig:   fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
+		BlobCacheDir:    ctx.Env.CacheDir,
+		CacheType:       ctx.Runtime.CacheType,
+		CacheCompressed: ctx.Runtime.CacheCompressed,
+		RafsMode:        ctx.Runtime.RafsMode,
+		EnablePrefetch:  ctx.Runtime.EnablePrefetch,
+		DigestValidate:  false,
+		AmplifyIO:       ctx.Runtime.AmplifyIO,
+	}
+
+	// iterate more than 255 times, e.g. 300
+	for i := 0; i < 300; i++ {
+		// Generate a new layer with different file names and contents each time
+		layer := texture.MakeMatrixLayer(
+			t,
+			filepath.Join(ctx.Env.WorkDir, fmt.Sprintf("rootfs-%d", i)),
+			fmt.Sprintf("%d", i),
+		)
+		bootstrap := a.buildLayer(t, ctx, layer)
+
+		curCfg := childTpl
+		curCfg.BootstrapPath = bootstrap
+		curCfg.MountPath = childTpl.MountPath + fmt.Sprintf("-%d", i)
+
+		err = nydusd.MountByAPI(curCfg)
+		require.NoError(t, err, "failed to mount by API at iteration %d", i)
+
+		// Verify file tree
+		nydusd.VerifyByPath(t, layer.FileTree, curCfg.MountPath)
+
+		err = nydusd.UmountByAPI(curCfg.MountPath)
+		require.NoError(t, err, "failed to unmount by API at iteration %d", i)
+	}
+}
 
 func (a *APIV1TestSuite) TestMount(t *testing.T) {
 
