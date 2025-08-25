@@ -15,6 +15,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/optimizer"
 
@@ -198,18 +199,18 @@ func main() {
 	app.Commands = []*cli.Command{
 		{
 			Name:  "convert",
-			Usage: "Generate a Nydus image from an OCI image",
+			Usage: "Convert between OCI and Nydus image formats (bidirectional)",
 			Flags: []cli.Flag{
 				&cli.StringFlag{
 					Name:     "source",
 					Required: true,
-					Usage:    "Source OCI image reference",
+					Usage:    "Source image reference (OCI or Nydus format)",
 					EnvVars:  []string{"SOURCE"},
 				},
 				&cli.StringFlag{
 					Name:     "target",
 					Required: false,
-					Usage:    "Target (Nydus) image reference",
+					Usage:    "Target image reference (OCI or Nydus format)",
 					EnvVars:  []string{"TARGET"},
 				},
 				&cli.StringFlag{
@@ -349,7 +350,7 @@ func main() {
 				&cli.BoolFlag{
 					Name:    "oci",
 					Value:   false,
-					Usage:   "Convert Docker media types to OCI media types",
+					Usage:   "Convert to OCI format (if source is Nydus, performs reverse conversion; if source is OCI, converts Docker media types to OCI media types)",
 					EnvVars: []string{"OCI"},
 				},
 				&cli.BoolFlag{
@@ -505,6 +506,45 @@ func main() {
 					docker2OCI = true
 				}
 
+				// Check if this is a reverse conversion (Nydus to OCI)
+				if c.Bool("oci") {
+					// Try to detect if source is a Nydus image by checking for Nydus-specific media types
+					isNydusSource, err := converter.IsNydusImage(context.Background(), c.String("source"), c.Bool("source-insecure"))
+					if err != nil {
+						logrus.Warnf("Failed to detect source image type, assuming OCI to Nydus conversion: %v", err)
+						isNydusSource = false
+					}
+
+					if isNydusSource {
+						// Reverse conversion: Nydus to OCI
+						logrus.Info("Detected Nydus source image, performing reverse conversion to OCI")
+
+						// Parse retry delay
+						retryDelay := c.String("push-retry-delay")
+						if _, err := time.ParseDuration(retryDelay); err != nil {
+							return fmt.Errorf("invalid push retry delay: %v", err)
+						}
+
+						reverseOpt := converter.ReverseOpt{
+							WorkDir:        c.String("work-dir"),
+							NydusImagePath: c.String("nydus-image"),
+							Source:         c.String("source"),
+							Target:         targetRef,
+							SourceInsecure: c.Bool("source-insecure"),
+							TargetInsecure: c.Bool("target-insecure"),
+							AllPlatforms:   c.Bool("all-platforms"),
+							Platforms:      c.String("platform"),
+							OutputJSON:     c.String("output-json"),
+							PushRetryCount: c.Int("push-retry-count"),
+							PushRetryDelay: retryDelay,
+							WithPlainHTTP:  c.Bool("plain-http"),
+						}
+
+						return converter.ReverseConvert(context.Background(), reverseOpt)
+					}
+				}
+
+				// Forward conversion: OCI to Nydus (existing logic)
 				opt := converter.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
