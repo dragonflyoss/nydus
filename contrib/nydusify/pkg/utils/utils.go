@@ -300,3 +300,38 @@ func HashFile(path string) ([]byte, error) {
 
 	return hasher.Sum(nil), nil
 }
+
+
+// SanitizeIndexPlatform removes nydus-specific OS feature marker from image index manifests.
+// Some registries (e.g., Amazon ECR) reject a manifest list that includes
+// platform.os.features entries. To maximize compatibility, we strip the
+// "nydus.remoteimage.v1" feature when writing the index.
+//
+// Note: Removing this marker may make it harder for clients to distinguish
+// between OCI and Nydus variants by platform features alone. Downstream tools
+// should handle selection appropriately.
+func SanitizeIndexPlatform(idx *ocispec.Index) {
+	if idx == nil {
+		return
+	}
+	for i := range idx.Manifests {
+		p := idx.Manifests[i].Platform
+		if p == nil || len(p.OSFeatures) == 0 {
+			continue
+		}
+		filtered := make([]string, 0, len(p.OSFeatures))
+		for _, f := range p.OSFeatures {
+			if f == ManifestOSFeatureNydus {
+				continue
+			}
+			filtered = append(filtered, f)
+		}
+		if len(filtered) != len(p.OSFeatures) {
+			if len(filtered) == 0 {
+				idx.Manifests[i].Platform.OSFeatures = nil
+			} else {
+				idx.Manifests[i].Platform.OSFeatures = filtered
+			}
+		}
+	}
+}

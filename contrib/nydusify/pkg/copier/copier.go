@@ -471,6 +471,7 @@ func Copy(ctx context.Context, opt Opt) error {
 			return errors.Wrap(err, "read source manifest list")
 		}
 		targetIndex.Manifests = targetDescs
+		nydusifyUtils.SanitizeIndexPlatform(&targetIndex)
 
 		targetImage, err := utils.WriteJSON(ctx, pvd.ContentStore(), targetIndex, *sourceImage, target, nil)
 		if err != nil {
