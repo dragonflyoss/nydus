@@ -5,8 +5,10 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -33,6 +35,14 @@ import (
 )
 
 var LayerConcurrentLimit = 5
+
+// Media type constants for container image formats
+const (
+	// Docker manifest list media type (legacy)
+	DockerManifestListMediaType = "application/vnd.docker.distribution.manifest.list.v2+json"
+	// Docker manifest media type (legacy)
+	DockerManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json"
+)
 
 type Provider struct {
 	mutex          sync.Mutex
@@ -230,4 +240,108 @@ func (pvd *Provider) NewRemoteCache(ctx context.Context, ref string) (context.Co
 		return cache.New(ctx, ref, "", pvd.cacheSize, pvd)
 	}
 	return ctx, nil
+}
+
+func (pvd *Provider) FetchImageInfo(ctx context.Context, ref string) error {
+	resolver, err := pvd.Resolver(ref)
+	if err != nil {
+		return errors.Wrap(err, "create resolver")
+	}
+
+	name, desc, err := resolver.Resolve(ctx, ref)
+	if err != nil {
+		return errors.Wrap(err, "resolve reference")
+	}
+
+	fetcher, err := resolver.Fetcher(ctx, name)
+	if err != nil {
+		return errors.Wrap(err, "create fetcher")
+	}
+
+	rc, err := fetcher.Fetch(ctx, desc)
+	if err != nil {
+		return errors.Wrap(err, "fetch descriptor")
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return errors.Wrap(err, "read descriptor content")
+	}
+
+	if err := content.WriteBlob(ctx, pvd.store, desc.Digest.String(), bytes.NewReader(data), desc); err != nil {
+		return errors.Wrap(err, "write descriptor content")
+	}
+
+	if err := pvd.fetchDescriptorChildren(ctx, fetcher, data, desc); err != nil {
+		return err
+	}
+
+	pvd.mutex.Lock()
+	defer pvd.mutex.Unlock()
+	pvd.images[ref] = &desc
+
+	return nil
+}
+
+func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remotes.Fetcher, data []byte, desc ocispec.Descriptor) error {
+	switch desc.MediaType {
+	case ocispec.MediaTypeImageIndex, DockerManifestListMediaType:
+		var index ocispec.Index
+		if err := json.Unmarshal(data, &index); err != nil {
+			return errors.Wrap(err, "unmarshal index")
+		}
+
+		for _, manifestDesc := range index.Manifests {
+			if err := pvd.fetchManifest(ctx, fetcher, manifestDesc); err != nil {
+				return err
+			}
+		}
+	case ocispec.MediaTypeImageManifest, DockerManifestMediaType:
+		return pvd.processManifest(ctx, fetcher, data)
+	}
+	return nil
+}
+
+func (pvd *Provider) fetchManifest(ctx context.Context, fetcher remotes.Fetcher, manifestDesc ocispec.Descriptor) error {
+	rc, err := fetcher.Fetch(ctx, manifestDesc)
+	if err != nil {
+		return errors.Wrap(err, "fetch manifest")
+	}
+	defer rc.Close()
+
+	manifestData, err := io.ReadAll(rc)
+	if err != nil {
+		return errors.Wrap(err, "read manifest")
+	}
+
+	if err := content.WriteBlob(ctx, pvd.store, manifestDesc.Digest.String(), bytes.NewReader(manifestData), manifestDesc); err != nil {
+		return errors.Wrap(err, "write manifest")
+	}
+
+	return pvd.processManifest(ctx, fetcher, manifestData)
+}
+
+func (pvd *Provider) processManifest(ctx context.Context, fetcher remotes.Fetcher, manifestData []byte) error {
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return errors.Wrap(err, "unmarshal manifest")
+	}
+
+	rc, err := fetcher.Fetch(ctx, manifest.Config)
+	if err != nil {
+		return errors.Wrap(err, "fetch config")
+	}
+	defer rc.Close()
+
+	configData, err := io.ReadAll(rc)
+	if err != nil {
+		return errors.Wrap(err, "read config")
+	}
+
+	if err := content.WriteBlob(ctx, pvd.store, manifest.Config.Digest.String(), bytes.NewReader(configData), manifest.Config); err != nil {
+		return errors.Wrap(err, "write config")
+	}
+
+	return nil
 }
