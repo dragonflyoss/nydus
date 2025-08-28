@@ -16,11 +16,9 @@
       "size": 1367,
       "platform": {
         "architecture": "amd64",
-        "os": "linux",
-        "os.features": [
-          "nydus.remoteimage.v1"
-        ]
-      }
+        "os": "linux"
+      },
+      "artifactType": "application/vnd.nydus.image.manifest.v1+json"
     }
   ]
 }
