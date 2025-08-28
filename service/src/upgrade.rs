@@ -437,7 +437,8 @@ pub mod fusedev_upgrade {
     /// Save state information for a FUSE daemon.
     pub fn save(daemon: &FusedevDaemon) -> Result<()> {
         let svc = daemon.get_default_fs_service().ok_or(Error::NotFound)?;
-        if !svc.get_vfs().initialized() {
+        let vfs = svc.get_vfs();
+        if !vfs.initialized() {
             return Err(Error::NotReady);
         }
 
@@ -446,6 +447,8 @@ pub mod fusedev_upgrade {
 
         let state = backend_stat.save().map_err(UpgradeMgrError::Serialize)?;
         mgr.save(&state)?;
+
+        mgr.save_vfs_stat(vfs)?;
 
         Ok(())
     }
