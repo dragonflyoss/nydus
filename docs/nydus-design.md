@@ -68,7 +68,7 @@ Rafs is a filesystem image containing a separated metadata blob and several data
 |            |           |                                                 |
 +------------+-----------+-------------------------------------------------+
 ```
-   
+
 ##    3. Integrity Validation
 ### 3.1 Metadata Integrity Validation
 Firstly, Nydus does basic verification of metadata values, looking for values that are in range (and hence not detected by automated verification checks) but are not correct.
@@ -185,9 +185,9 @@ pub struct OndiskInodeWrapper<'a> {
     pub inode: &'a OndiskInode,
 }
 ```
- 
+
 The OndiskInode struct size is padded to 128 bytes.
-   
+
 * If it's a directory, all its children are indexed contiguously in `inode table`, and `i_child_index` is the index of the first child and `i_child_count` is the amount of its children.
 * If it's a file, `i_child_index` is not used.
 *`i_name_size` is the length of its name.
@@ -248,7 +248,7 @@ pub struct OndiskXAttrs {
 }
 ```
 
-A list of `OndiskChunkInfo` is also stored after xattr if the inode contains file data.  Each chunk info tells us where to find data in blob file, it contains 
+A list of `OndiskChunkInfo` is also stored after xattr if the inode contains file data.  Each chunk info tells us where to find data in blob file, it contains
 - the hash value `block_id` calculated from the chunk data,
 - the blob file it belongs to,
 - whether the chunk is compressed,
@@ -323,7 +323,7 @@ pub struct OndiskBlobTable {
 Nydus manifest is designed to be fully compatible with OCI image spec and distribution spec by adding an extra manifest file to store the pointers of nydus bootstrap (i.e. metadata) and blobfile (i.e. data).
 
 ## 1. Image Index
-A typical image index enabling nydus points to two manifest files, one is the traditional OCI v1 image manifest, the other is the nydus manifest that takes advantage of `platform` and puts `os.features: ["nydus.remoteimage.v1"]` field under `platform`.
+A typical image index enabling nydus points to two manifest files, one is the traditional OCI v1 image manifest, the other is the nydus manifest that takes advantage of `artifactType` and puts `application/vnd.nydus.image.manifest.v1+json` as a value to identify the nydus image.
 
 ```json
 {
@@ -345,10 +345,8 @@ A typical image index enabling nydus points to two manifest files, one is the tr
       "platform": {
         "architecture": "amd64",
         "os": "linux",
-        "os.features": [
-          "nydus.remoteimage.v1"
-        ]
-      }
+      },
+      "artifactType": "application/vnd.nydus.image.manifest.v1+json"
     }
   ]
 }
