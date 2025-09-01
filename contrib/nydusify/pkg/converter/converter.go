@@ -134,6 +134,10 @@ func Convert(ctx context.Context, opt Opt) error {
 	// Set push retry configuration
 	pvd.SetPushRetryConfig(opt.PushRetryCount, retryDelay)
 
+	if opt.WithPlainHTTP {
+		pvd.UsePlainHTTP()
+	}
+
 	cvt, err := converter.New(
 		converter.WithProvider(pvd),
 		converter.WithDriver("nydus", getConfig(opt)),
