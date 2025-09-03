@@ -235,10 +235,22 @@ func (parser *Parser) Parse(ctx context.Context) (*Parsed, error) {
 			if desc.Platform != nil {
 				// Currently, parser only finds one interested image.
 				if parser.matchImagePlatform(&desc) {
-					if utils.IsNydusPlatform(desc.Platform) {
+					// Nydus images before v2.3.5 used `nydus.remoteimage.v1` in `platform.os.features`.
+					// Removed in later versions; check `ArtifactType` set via `merge-platform` option.
+					if desc.ArtifactType == utils.ArtifactTypeNydusImageManifest ||
+						utils.IsNydusPlatform(desc.Platform) {
 						nydusDesc = &desc
 					} else {
-						ociDesc = &desc
+						// Need to pull manifest to find out if it is a Nydus image.
+						manifest, err := parser.pullManifest(ctx, &desc)
+						if err != nil {
+							return nil, errors.Wrap(err, "pull image manifest")
+						}
+						if bootstrapDesc := FindNydusBootstrapDesc(manifest); bootstrapDesc != nil {
+							nydusDesc = &desc
+						} else {
+							ociDesc = &desc
+						}
 					}
 				}
 			} else {

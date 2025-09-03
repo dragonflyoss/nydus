@@ -5,10 +5,11 @@
 package utils
 
 const (
-	ManifestOSFeatureNydus   = "nydus.remoteimage.v1"
-	MediaTypeNydusBlob       = "application/vnd.oci.image.layer.nydus.blob.v1"
-	BootstrapFileNameInLayer = "image/image.boot"
-	BackendFileNameInLayer   = "image/backend.json"
+	ArtifactTypeNydusImageManifest = "application/vnd.nydus.image.manifest.v1+json"
+	ManifestOSFeatureNydus         = "nydus.remoteimage.v1"
+	MediaTypeNydusBlob             = "application/vnd.oci.image.layer.nydus.blob.v1"
+	BootstrapFileNameInLayer       = "image/image.boot"
+	BackendFileNameInLayer         = "image/backend.json"
 
 	ManifestNydusCache = "containerd.io/snapshot/nydus-cache"
 
