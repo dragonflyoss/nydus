@@ -108,6 +108,11 @@ jobs:
           sudo docker run -d --restart=always -p 5000:5000 registry
           sudo mkdir convert-zran
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            # skip influxdb which have some issue to convert use zran
+            if [ "$I" = "influxdb" ]; then
+              echo "skip influxdb image for zran conversion"
+              continue
+            fi
             echo "converting $I:latest to $I:nydus-nightly-oci-ref"
             ghcr_repo=${{ env.REGISTRY }}/${{ env.ORGANIZATION }}
 
