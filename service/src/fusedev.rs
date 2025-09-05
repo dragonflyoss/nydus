@@ -8,8 +8,9 @@
 use std::any::Any;
 use std::ffi::{CStr, CString};
 use std::fs::metadata;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, ErrorKind, Result, Write};
 use std::ops::Deref;
+use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
 #[cfg(target_os = "linux")]
@@ -29,7 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fuse_backend_rs::abi::fuse_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
-use fuse_backend_rs::transport::{FuseChannel, FuseSession};
+use fuse_backend_rs::transport::{FuseChannel, FuseDevWriter, FuseSession};
 use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
@@ -204,6 +205,66 @@ impl FusedevFsService {
         session.umount().map_err(NydusError::SessionShutdown)?;
         session.wake().map_err(NydusError::SessionShutdown)?;
         Ok(())
+    }
+
+    fn notify_resend_by_fusedev(&self) -> NydusResult<()> {
+        let session = self.session.lock().unwrap();
+        let file = session
+            .get_fuse_file()
+            .ok_or(NydusError::FuseFileNotFound)?;
+
+        let fd = file.as_raw_fd();
+        let mut buf = vec![0u8; session.bufsize()];
+        let writer: FuseDevWriter = FuseDevWriter::new(fd, &mut buf).unwrap();
+
+        self.server
+            .notify_resend(writer)
+            .map_err(NydusError::FuseWriteError)?;
+        Ok(())
+    }
+
+    fn notify_resend_by_sysfs(&self) -> NydusResult<()> {
+        // Notify the kernel to resend the request by writing to `/sys/fs/fuse/connections/<cid>/resend`
+        let path = format!(
+            "/sys/fs/fuse/connections/{}/resend",
+            self.conn.load(Ordering::Acquire)
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(NydusError::SysfsOpenError)?;
+
+        file.write_all(b"1").map_err(NydusError::SysfsWriteError)?;
+        Ok(())
+    }
+
+    fn notify_flush_by_sysfs(&self) -> NydusResult<()> {
+        // Notify the kernel to flush the request by writing to `/sys/fs/fuse/connections/<cid>/flush`
+        let path = format!(
+            "/sys/fs/fuse/connections/{}/flush",
+            self.conn.load(Ordering::Acquire)
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(NydusError::SysfsOpenError)?;
+
+        file.write_all(b"1").map_err(NydusError::SysfsWriteError)?;
+        Ok(())
+    }
+
+    pub fn do_failover(&self) -> NydusResult<()> {
+        match self.failover_policy {
+            FailoverPolicy::None => Ok(()),
+            FailoverPolicy::Flush => self.notify_flush_by_sysfs(),
+            FailoverPolicy::Resend => self.notify_resend_by_fusedev().or_else(|e| {
+                error!(
+                    "Failed to notify resend by /dev/fuse, {:?}. Trying to do it by sysfs",
+                    e
+                );
+                self.notify_resend_by_sysfs()
+            }),
+        }
     }
 }
 
