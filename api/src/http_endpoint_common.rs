@@ -195,3 +195,21 @@ impl EndpointHandler for TakeoverFuseFdHandler {
         }
     }
 }
+
+/// Request kernel to resend pending FUSE requests after recovery.
+pub struct ResendFuseHandler {}
+impl EndpointHandler for ResendFuseHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Put, None) => {
+                let r = kicker(ApiRequest::ResendFuseRequests);
+                Ok(convert_to_response(r, HttpError::Upgrade))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}

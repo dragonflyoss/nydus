@@ -17,6 +17,7 @@ use nydus_upgrade::backend::unix_domain_socket::UdsStorageBackend;
 use nydus_upgrade::backend::{StorageBackend, StorageBackendErr};
 
 use crate::fs_service::{FsBackendMountCmd, FsBackendUmountCmd};
+use crate::fs_service::FsService;
 use crate::{Error, Result};
 use fuse_backend_rs::api::Vfs;
 use versionize::{VersionMap, Versionize, VersionizeResult};
@@ -498,6 +499,16 @@ pub mod fusedev_upgrade {
                 //mgr.add_mounts_state(cmd.clone(), *vfs_idx);
                 Ok(())
             })?;
+
+        // If configured to resend pending FUSE requests, try to trigger it now.
+        if let Some(svc_impl) = svc.as_any().downcast_ref::<FusedevFsService>() {
+            if svc_impl.failover_policy == FailoverPolicy::Resend {
+                // Best-effort; may return Unsupported on platforms/crates without resend support.
+                if let Err(e) = svc_impl.resend_fuse_requests() {
+                    warn!("failed to trigger FUSE resend: {:?}", e);
+                }
+            }
+        }
 
         //restore upgrade manager fuse stat
         mgr.fuse_deamon_stat = state;

@@ -81,6 +81,8 @@ pub enum ApiRequest {
     SendFuseFd,
     /// Take over fuse fd from old daemon instance.
     TakeoverFuseFd,
+    /// Request kernel to resend pending FUSE requests after recovery.
+    ResendFuseRequests,
 
     // Filesystem Related
     /// Mount a filesystem.

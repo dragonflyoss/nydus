@@ -297,6 +297,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorMsg"
           description: Internal Server Error
+  /daemon/fuse/resend:
+    put:
+      responses:
+        "204":
+          description: Resend request accepted
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMsg"
+          description: Unsupported
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMsg"
+          description: Internal Server Error
 
 components:
   schemas:
