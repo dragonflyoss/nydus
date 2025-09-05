@@ -129,7 +129,7 @@ impl BatchContextGenerator {
         chunk.set_uncompressed_offset_in_batch_buf(self.chunk_data_buf_len() as u32);
         chunk.set_compressed(true);
         chunk.set_encrypted(encrypted);
-        chunk.set_has_crc32(true);
+        chunk.set_has_crc32(false); // Batch chunk cannot store CRC32 due to data field conflict
 
         Ok(chunk)
     }
