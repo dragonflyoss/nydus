@@ -37,6 +37,16 @@ Example request body:
 
 By now only the field `nydusd_path` is required in the request body. More fields (like `version`, `policy`, etc) may be used in the future.
 
+### FUSE resend after recovery (Resend policy)
+
+If you start nydusd with `--failover-policy=resend`, the new daemon will request the kernel to resend pending FUSE requests after it restores state during takeover. You can also trigger it manually via the HTTP API:
+
+- Method and path: `PUT /api/v1/daemon/fuse/resend`
+
+Usage notes:
+- This is best-effort. Actual resend support depends on the underlying kernel and FUSE stack capabilities.
+- If the policy is `flush` (default alternative), in-flight requests are flushed instead of being resent.
+
 ## Design
 
 ### State Machine of Nydusd

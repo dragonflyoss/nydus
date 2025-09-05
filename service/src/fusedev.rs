@@ -237,6 +237,12 @@ impl FsService for FusedevFsService {
         }
     }
 
+    fn resend_fuse_requests(&self) -> NydusResult<()> {
+        // Best-effort wake to nudge the session; actual resend semantics require kernel/crate support.
+        let session = self.session.lock().expect("Not expect poisoned lock.");
+        session.wake().map_err(NydusError::SessionShutdown)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

@@ -21,7 +21,7 @@ use crate::http::{
 };
 use crate::http_endpoint_common::{
     EventsHandler, ExitHandler, MetricsBackendHandler, MetricsBlobcacheHandler, MountHandler,
-    SendFuseFdHandler, StartHandler, TakeoverFuseFdHandler,
+    ResendFuseHandler, SendFuseFdHandler, StartHandler, TakeoverFuseFdHandler,
 };
 use crate::http_endpoint_v1::{
     FsBackendInfo, InfoHandler, MetricsFsAccessPatternHandler, MetricsFsFilesHandler,
@@ -145,6 +145,7 @@ lazy_static! {
         r.routes.insert(endpoint_v1!("/daemon/start"), Box::new(StartHandler{}));
         r.routes.insert(endpoint_v1!("/daemon/fuse/sendfd"), Box::new(SendFuseFdHandler{}));
         r.routes.insert(endpoint_v1!("/daemon/fuse/takeover"), Box::new(TakeoverFuseFdHandler{}));
+        r.routes.insert(endpoint_v1!("/daemon/fuse/resend"), Box::new(ResendFuseHandler{}));
         r.routes.insert(endpoint_v1!("/mount"), Box::new(MountHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/backend"), Box::new(MetricsBackendHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/blobcache"), Box::new(MetricsBlobcacheHandler{}));

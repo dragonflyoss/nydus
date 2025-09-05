@@ -215,6 +215,12 @@ pub trait FsService: Send + Sync {
     /// Export metrics about in-flight operations.
     fn export_inflight_ops(&self) -> Result<Option<String>>;
 
+    /// Request kernel to resend pending FUSE requests after recovery.
+    /// Default implementation returns Unsupported.
+    fn resend_fuse_requests(&self) -> Result<()> {
+        Err(Error::Unsupported)
+    }
+
     /// Cast `self` to trait object of [Any] to support object downcast.
     fn as_any(&self) -> &dyn Any;
 }

@@ -42,6 +42,7 @@ impl ApiServer {
             ApiRequest::Start => self.do_start(),
             ApiRequest::SendFuseFd => self.send_fuse_fd(),
             ApiRequest::TakeoverFuseFd => self.do_takeover(),
+            ApiRequest::ResendFuseRequests => self.resend_fuse_requests(),
             ApiRequest::Mount(mountpoint, info) => self.do_mount(mountpoint, info),
             ApiRequest::Remount(mountpoint, info) => self.do_remount(mountpoint, info),
             ApiRequest::Umount(mountpoint) => self.do_umount(mountpoint),
@@ -126,6 +127,13 @@ impl ApiServer {
     fn do_takeover(&self) -> ApiResponse {
         let d = self.get_daemon_object()?;
         d.trigger_takeover()
+            .map(|_| ApiResponsePayload::Empty)
+            .map_err(|e| ApiError::DaemonAbnormal(e.into()))
+    }
+
+    fn resend_fuse_requests(&self) -> ApiResponse {
+        let fs = self.get_default_fs_service()?;
+        fs.resend_fuse_requests()
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::DaemonAbnormal(e.into()))
     }
