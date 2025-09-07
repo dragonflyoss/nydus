@@ -210,7 +210,7 @@ func fetchBlobs(ctx context.Context, opt Opt, buildDir string) error {
 		return err
 	}
 
-	sourceNamed, err := reference.ParseDockerRef(opt.Source)
+	sourceNamed, err := reference.ParseNormalizedNamed(opt.Source)
 	if err != nil {
 		return errors.Wrap(err, "parse source reference")
 	}

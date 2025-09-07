@@ -15,14 +15,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/images/archive"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/remotes"
-	"github.com/containerd/containerd/remotes/docker"
+	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/images/archive"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/goharbor/acceleration-service/pkg/cache"
 	"github.com/goharbor/acceleration-service/pkg/remote"
@@ -106,7 +106,7 @@ func newResolver(insecure, plainHTTP bool, credFunc remote.CredentialFunc, chunk
 		docker.WithPlainHTTP(func(_ string) (bool, error) {
 			return plainHTTP, nil
 		}),
-		docker.WithChunkSize(chunkSize),
+		// docker.WithChunkSize was removed in containerd v2, chunk size is now handled differently
 	)
 
 	return docker.NewResolver(docker.ResolverOptions{
@@ -152,7 +152,7 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 		return err
 	}
 
-	rc := &containerd.RemoteContext{
+	rc := &client.RemoteContext{
 		Resolver:               resolver,
 		PlatformMatcher:        pvd.platformMC,
 		MaxConcurrentDownloads: LayerConcurrentLimit,
@@ -183,7 +183,7 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 		return err
 	}
 
-	rc := &containerd.RemoteContext{
+	rc := &client.RemoteContext{
 		Resolver:                    resolver,
 		PlatformMatcher:             pvd.platformMC,
 		MaxConcurrentUploadedLayers: LayerConcurrentLimit,

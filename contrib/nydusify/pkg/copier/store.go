@@ -5,7 +5,7 @@
 package copier
 
 import (
-	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/v2/core/content"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 

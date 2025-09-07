@@ -357,7 +357,7 @@ func (cm *Committer) commitUpperByDiff(ctx context.Context, appendMount func(pat
 
 // getDistributionSourceLabel returns the source label key and value for the image distribution
 func getDistributionSourceLabel(sourceRef string) (string, string) {
-	named, err := reference.ParseDockerRef(sourceRef)
+	named, err := reference.ParseNormalizedNamed(sourceRef)
 	if err != nil {
 		return "", ""
 	}
@@ -840,7 +840,7 @@ func withRetry(handle func() error, total int) error {
 
 // ValidateRef validate the target image reference.
 func ValidateRef(ref string) (string, error) {
-	named, err := reference.ParseDockerRef(ref)
+	named, err := reference.ParseNormalizedNamed(ref)
 	if err != nil {
 		return "", errors.Wrapf(err, "invalid image reference: %s", ref)
 	}

@@ -101,7 +101,7 @@ func getBackendConfig(c *cli.Context, prefix string, required bool) (string, str
 // Source: localhost:5000/nginx:latest
 // Target: localhost:5000/nginx:latest-suffix
 func addReferenceSuffix(source, suffix string) (string, error) {
-	named, err := reference.ParseDockerRef(source)
+	named, err := reference.ParseNormalizedNamed(source)
 	if err != nil {
 		return "", fmt.Errorf("invalid source image reference: %s", err)
 	}
@@ -139,7 +139,7 @@ func getCacheReference(c *cli.Context, target string) (string, error) {
 		return "", fmt.Errorf("--build-cache conflicts with --build-cache-tag")
 	}
 	if cacheTag != "" {
-		named, err := reference.ParseDockerRef(target)
+		named, err := reference.ParseNormalizedNamed(target)
 		if err != nil {
 			return "", fmt.Errorf("invalid target image reference: %s", err)
 		}

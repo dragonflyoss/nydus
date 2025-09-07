@@ -17,15 +17,15 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/containerd/containerd/archive/compression"
-	"github.com/containerd/containerd/content"
-	containerdErrdefs "github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/platforms"
-	"github.com/containerd/containerd/reference/docker"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/pkg/archive/compression"
+	"github.com/containerd/containerd/v2/pkg/namespaces"
+	containerdErrdefs "github.com/containerd/errdefs"
 	"github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/containerd/nydus-snapshotter/pkg/remote/remotes"
+	"github.com/containerd/platforms"
+	"github.com/distribution/reference"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/converter/provider"
@@ -751,7 +751,7 @@ func Copy(ctx context.Context, opt Opt) error {
 			return errors.Wrap(err, "import source image")
 		}
 	} else {
-		sourceNamed, err := reference.ParseDockerRef(opt.Source)
+		sourceNamed, err := reference.ParseNormalizedNamed(opt.Source)
 		if err != nil {
 			return errors.Wrap(err, "parse source reference")
 		}
@@ -783,7 +783,7 @@ func Copy(ctx context.Context, opt Opt) error {
 		}
 	}
 
-	targetNamed, err := docker.ParseDockerRef(opt.Target)
+	targetNamed, err := reference.ParseNormalizedNamed(opt.Target)
 	if err != nil {
 		return errors.Wrap(err, "parse target reference")
 	}
