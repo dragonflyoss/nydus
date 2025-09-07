@@ -414,7 +414,6 @@ func getLocalPath(ref string) (isLocalPath bool, absPath string, err error) {
 	return true, absPath, nil
 }
 
-
 // enableStreamTransfer checks if stream transfer should be enabled
 func enableStreamTransfer(opt Opt) bool {
 	return false
@@ -830,7 +829,7 @@ func Copy(ctx context.Context, opt Opt) error {
 	if useStream && !isLocalSource {
 		// create http mode manager
 		httpManager := newHTTPModeManager(pvd)
-		
+
 		// create stream transfer manager
 		streamManager, err := newStreamTransferManager(ctx, pvd, httpManager, opt)
 		if err != nil {
