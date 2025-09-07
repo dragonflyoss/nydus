@@ -78,223 +78,9 @@ type output struct {
 	Blobs []string
 }
 
-type streamTransferManager struct {
-	provider      *provider.Provider
-	sourceRef     string
-	targetRef     string
-	opt           Opt
-	sourceFetcher remotes.Fetcher
-	targetPusher  remotes.Pusher
-}
-
-func newStreamTransferManager(ctx context.Context, pvd *provider.Provider, opt Opt) (*streamTransferManager, error) {
-	sourceResolver, err := pvd.Resolver(opt.Source)
-	if err != nil {
-		return nil, errors.Wrap(err, "get source resolver")
-	}
-
-	targetResolver, err := pvd.Resolver(opt.Target)
-	if err != nil {
-		return nil, errors.Wrap(err, "get target resolver")
-	}
-
-	sourceName, _, err := sourceResolver.Resolve(ctx, opt.Source)
-	if err != nil {
-		return nil, errors.Wrap(err, "parse source reference")
-	}
-
-	sourceFetcher, err := sourceResolver.Fetcher(ctx, sourceName)
-	if err != nil {
-		return nil, errors.Wrap(err, "create source fetcher")
-	}
-
-	targetPusher, err := targetResolver.Pusher(ctx, opt.Target)
-	if err != nil {
-		return nil, errors.Wrap(err, "create target pusher")
-	}
-
-	return &streamTransferManager{
-		sourceFetcher: sourceFetcher,
-		targetPusher:  targetPusher,
-		provider:      pvd,
-		sourceRef:     opt.Source,
-		targetRef:     opt.Target,
-		opt:           opt,
-	}, nil
-}
-
 // newStreamContext creates a context for stream transfer
 func newStreamContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, streamContextKey, true)
-}
-
-func (m *streamTransferManager) refreshPusher(ctx context.Context) error {
-	resolver, err := m.provider.Resolver(m.targetRef)
-	if err != nil {
-		return errors.Wrap(err, "get new resolver")
-	}
-
-	newPusher, err := resolver.Pusher(ctx, m.targetRef)
-	if err != nil {
-		return errors.Wrap(err, "create new pusher")
-	}
-
-	m.targetPusher = newPusher
-	return nil
-}
-
-func (m *streamTransferManager) pushContent(ctx context.Context, desc ocispec.Descriptor, reader io.Reader) error {
-	writer, err := m.targetPusher.Push(ctx, desc)
-	if err != nil {
-		if containerdErrdefs.IsAlreadyExists(err) {
-			logrus.Infof("content already exits: %s", desc.Digest)
-			return nil
-		}
-
-		if errdefs.NeedsRetryWithHTTP(err) {
-			logrus.Warn("switch to HTTP mode and retry")
-			m.provider.UsePlainHTTP()
-
-			if err := m.refreshPusher(ctx); err != nil {
-				return errors.Wrap(err, "refresh pusher")
-			}
-
-			writer, err = m.targetPusher.Push(ctx, desc)
-			if err != nil {
-				if containerdErrdefs.IsAlreadyExists(err) {
-					logrus.Infof("content already exists: %s", desc.Digest)
-					return nil
-				}
-				return errors.Wrap(err, "push failed in HTTP mode")
-			}
-		} else {
-			return errors.Wrap(err, "push failed")
-		}
-	}
-
-	if writer == nil {
-		return nil
-	}
-
-	if err := StreamCopy(ctx, reader, writer, desc.Size, desc.Digest, m.opt.PushChunkSize); err != nil {
-		return errors.Wrap(err, "stream transfer failed")
-	}
-
-	return nil
-}
-
-func (m *streamTransferManager) streamTransferLayer(ctx context.Context, desc ocispec.Descriptor, info string) error {
-	logrus.Infof("start stream transfer %s: %s, size: %s",
-		info, desc.Digest, humanize.Bytes(uint64(desc.Size)))
-
-	rc, err := m.sourceFetcher.Fetch(ctx, desc)
-	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("get %s failed", info))
-	}
-	defer rc.Close()
-
-	if err := m.pushContent(ctx, desc, rc); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (m *streamTransferManager) streamPlatformManifest(ctx context.Context, manifestDesc ocispec.Descriptor) (ocispec.Descriptor, error) {
-	rc, err := m.sourceFetcher.Fetch(ctx, manifestDesc)
-	if err != nil {
-		return ocispec.Descriptor{}, errors.Wrap(err, "get manifest failed")
-	}
-	defer rc.Close()
-
-	// read manifest content
-	manifestBytes, err := io.ReadAll(rc)
-	if err != nil {
-		return ocispec.Descriptor{}, errors.Wrap(err, "read manifest failed")
-	}
-
-	var manifest ocispec.Manifest
-	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
-		return ocispec.Descriptor{}, errors.Wrap(err, "parse manifest failed")
-	}
-
-	// transfer config file first
-	if err := m.streamTransferLayer(ctx, manifest.Config, "config file"); err != nil {
-		return ocispec.Descriptor{}, err
-	}
-
-	eg, egCtx := errgroup.WithContext(ctx)
-	eg.SetLimit(provider.LayerConcurrentLimit)
-
-	// process each layer
-	for i, layer := range manifest.Layers {
-		i, layer := i, layer
-		eg.Go(func() error {
-			layerInfo := fmt.Sprintf("%d/%d, layer", i+1, len(manifest.Layers))
-			return m.streamTransferLayer(egCtx, layer, layerInfo)
-		})
-	}
-
-	// wait for all layers to be processed
-	if err := eg.Wait(); err != nil {
-		return ocispec.Descriptor{}, err
-	}
-
-	// push manifest last
-	if err := m.pushContent(ctx, manifestDesc, bytes.NewReader(manifestBytes)); err != nil {
-		return ocispec.Descriptor{}, err
-	}
-
-	return manifestDesc, nil
-}
-
-// streamManifestList handles the transfer of a multi-platform manifest list
-func (m *streamTransferManager) streamManifestList(ctx context.Context, indexDesc ocispec.Descriptor, platformDescs []ocispec.Descriptor) error {
-	if len(platformDescs) <= 1 {
-		return nil // single platform, no need to process index
-	}
-
-	// get source index content
-	rc, err := m.sourceFetcher.Fetch(ctx, indexDesc)
-	if err != nil {
-		return errors.Wrap(err, "get index failed")
-	}
-	defer rc.Close()
-
-	// read index content
-	indexBytes, err := io.ReadAll(rc)
-	if err != nil {
-		return errors.Wrap(err, "read index failed")
-	}
-
-	// parse index
-	var index ocispec.Index
-	if err := json.Unmarshal(indexBytes, &index); err != nil {
-		return errors.Wrap(err, "parse index failed")
-	}
-
-	// update manifest references in index
-	index.Manifests = platformDescs
-
-	// re-serialize index
-	updatedIndexBytes, err := json.Marshal(index)
-	if err != nil {
-		return errors.Wrap(err, "serialize updated index failed")
-	}
-
-	// create updated index descriptor
-	updatedIndexDesc := ocispec.Descriptor{
-		Digest:    digest.FromBytes(updatedIndexBytes),
-		Size:      int64(len(updatedIndexBytes)),
-		MediaType: indexDesc.MediaType,
-	}
-
-	// push updated index
-	if err := m.pushContent(ctx, updatedIndexDesc, bytes.NewReader(updatedIndexBytes)); err != nil {
-		return errors.Wrap(err, "push index failed")
-	}
-
-	return nil
 }
 
 func StreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest, pushChunkSize int64) error {
@@ -1120,6 +906,11 @@ func Copy(ctx context.Context, opt Opt) error {
 	}
 	target := targetNamed.String()
 
+	// Setup stream context if stream copy is enabled and source is remote
+	if useStream && !isLocalSource {
+		ctx = newStreamContext(ctx)
+	}
+
 	// get source image index info
 	sourceImage, err := pvd.Image(ctx, source)
 	if err != nil {
@@ -1229,8 +1020,9 @@ func Copy(ctx context.Context, opt Opt) error {
 						logrus.WithField("platform", getPlatform(sourceDesc.Platform)).Warnf("%s is not a Nydus image", source)
 					} else {
 						targetDesc = _targetDesc
-						store := newStore(pvd.ContentStore(), descs)
-						pvd.SetContentStore(store)
+						// Use StreamStore that can handle both regular and stream transfer
+						streamStore := newStore(pvd.ContentStore(), descs)
+						pvd.SetContentStore(streamStore)
 					}
 				}
 				targetDescs[idx] = *targetDesc

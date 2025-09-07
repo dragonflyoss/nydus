@@ -15,13 +15,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/v2/client"
-	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/containerd/v2/core/images/archive"
-	"github.com/containerd/containerd/v2/core/remotes"
-	"github.com/containerd/containerd/v2/core/remotes/docker"
-	"github.com/containerd/errdefs"
-	"github.com/containerd/platforms"
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/images/archive"
+	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/remotes"
+	"github.com/containerd/containerd/remotes/docker"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/goharbor/acceleration-service/pkg/cache"
 	"github.com/goharbor/acceleration-service/pkg/remote"
@@ -32,14 +33,6 @@ import (
 )
 
 var LayerConcurrentLimit = 4
-
-// Media type constants for container image formats
-const (
-	// Docker manifest list media type (legacy)
-	DockerManifestListMediaType = "application/vnd.docker.distribution.manifest.list.v2+json"
-	// Docker manifest media type (legacy)
-	DockerManifestMediaType = "application/vnd.docker.distribution.manifest.v2+json"
-)
 
 type Provider struct {
 	mutex          sync.RWMutex
@@ -307,7 +300,7 @@ func (pvd *Provider) FetchImageInfo(ctx context.Context, ref string) error {
 
 func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remotes.Fetcher, data []byte, desc ocispec.Descriptor) error {
 	switch desc.MediaType {
-	case ocispec.MediaTypeImageIndex, DockerManifestListMediaType:
+	case ocispec.MediaTypeImageIndex, images.MediaTypeDockerSchema2ManifestList:
 		var index ocispec.Index
 		if err := json.Unmarshal(data, &index); err != nil {
 			return errors.Wrap(err, "unmarshal index")
@@ -318,7 +311,7 @@ func (pvd *Provider) fetchDescriptorChildren(ctx context.Context, fetcher remote
 				return err
 			}
 		}
-	case ocispec.MediaTypeImageManifest, DockerManifestMediaType:
+	case ocispec.MediaTypeImageManifest, images.MediaTypeDockerSchema2Manifest:
 		return pvd.processManifest(ctx, fetcher, data)
 	}
 	return nil
