@@ -414,122 +414,6 @@ func getLocalPath(ref string) (isLocalPath bool, absPath string, err error) {
 	return true, absPath, nil
 }
 
-// trueStreamCopy implements true stream copy, pulling and pushing at the same time
-func StreamCopy(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
-	// for small files, use simplified handling
-	if size <= 128 {
-		return handleSmallFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest)
-	}
-
-	// use 16MB buffer for efficient transfer
-	return handleLargeFileTransfer(ctx, srcReader, targetWriter, size, expectedDigest)
-}
-
-// handleSmallFileTransfer handles small file transfer, reading all content and then committing
-func handleSmallFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
-	logrus.Debugf("file is small (%d bytes), using simplified handling", size)
-
-	data, err := io.ReadAll(srcReader)
-	if err != nil {
-		return errors.Wrap(err, "read small file data failed")
-	}
-
-	if int64(len(data)) != size && size > 0 {
-		logrus.Warnf("small file size mismatch: expected %d bytes, actual %d bytes", size, len(data))
-	}
-
-	actualDigest := digest.FromBytes(data)
-
-	if expectedDigest != "" && expectedDigest != actualDigest {
-		return fmt.Errorf("small file digest mismatch: expected %s, actual %s", expectedDigest, actualDigest)
-	}
-
-	if _, err := targetWriter.Write(data); err != nil {
-		return errors.Wrap(err, "write small file data failed")
-	}
-
-	if err := targetWriter.Commit(ctx, int64(len(data)), actualDigest); err != nil {
-		return errors.Wrap(err, "commit small file content failed")
-	}
-
-	return nil
-}
-
-// handleLargeFileTransfer handles large file transfer, using chunked reading and updating progress in real-time
-func handleLargeFileTransfer(ctx context.Context, srcReader io.Reader, targetWriter content.Writer, size int64, expectedDigest digest.Digest) error {
-	bufSize := 16 * 1024 * 1024 // 16MB buffer
-	buf := make([]byte, bufSize)
-	hasher := sha256.New()
-	var totalCopied int64
-	lastLoggedProgress := int64(0)
-	logInterval := int64(100 * 1024 * 1024) // log every 100MB
-
-	for {
-		// check if context is done
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// read data
-		n, readErr := srcReader.Read(buf)
-		if n <= 0 {
-			if readErr == io.EOF {
-				break
-			}
-			return errors.Wrap(readErr, "read data failed")
-		}
-
-		// calculate hash
-		hasher.Write(buf[:n])
-
-		// write data
-		writeN, writeErr := targetWriter.Write(buf[:n])
-		if writeErr != nil {
-			return errors.Wrap(writeErr, "write data failed")
-		}
-		if writeN != n {
-			return errors.New("write data length mismatch")
-		}
-
-		totalCopied += int64(n)
-
-		// log progress periodically
-		if totalCopied-lastLoggedProgress >= logInterval {
-			logrus.Infof("stream copy progress: %.2f%% (%s/%s)",
-				float64(totalCopied)*100/float64(size),
-				humanize.Bytes(uint64(totalCopied)),
-				humanize.Bytes(uint64(size)))
-			lastLoggedProgress = totalCopied
-		}
-	}
-
-	// calculate final digest
-	actualDigest := digest.NewDigestFromBytes(digest.SHA256, hasher.Sum(nil))
-
-	// check if digest matches
-	if expectedDigest != "" && expectedDigest != actualDigest {
-		return fmt.Errorf("digest mismatch: expected %s, actual %s", expectedDigest, actualDigest)
-	}
-
-	// check if size matches
-	if size > 0 && size != totalCopied {
-		logrus.Warnf("size mismatch: expected %d bytes, actual %d bytes, using actual size", size, totalCopied)
-	}
-
-	// commit content
-	if err := targetWriter.Commit(ctx, totalCopied, actualDigest); err != nil {
-		return errors.Wrap(err, "commit content failed")
-	}
-
-	return nil
-}
-
-// newStreamContext creates a context for stream transfer
-func newStreamContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, streamContextKey, true)
-}
 
 // enableStreamTransfer checks if stream transfer should be enabled
 func enableStreamTransfer(opt Opt) bool {
@@ -675,7 +559,7 @@ func (m *streamTransferManager) pushContent(ctx context.Context, desc ocispec.De
 	}
 
 	// stream transfer
-	if err := StreamCopy(ctx, reader, writer, desc.Size, desc.Digest); err != nil {
+	if err := StreamCopy(ctx, reader, writer, desc.Size, desc.Digest, m.opt.PushChunkSize); err != nil {
 		return errors.Wrap(err, "stream transfer failed")
 	}
 
@@ -944,8 +828,11 @@ func Copy(ctx context.Context, opt Opt) error {
 
 	// if stream transfer is enabled, use stream transfer mode
 	if useStream && !isLocalSource {
+		// create http mode manager
+		httpManager := newHTTPModeManager(pvd)
+		
 		// create stream transfer manager
-		streamManager, err := newStreamTransferManager(ctx, pvd, opt)
+		streamManager, err := newStreamTransferManager(ctx, pvd, httpManager, opt)
 		if err != nil {
 			return err
 		}
