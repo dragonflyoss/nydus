@@ -16,12 +16,12 @@ require (
 	github.com/containerd/containerd/v2 v2.0.5
 	github.com/containerd/continuity v0.4.5
 	github.com/containerd/errdefs v1.0.0
-	github.com/containerd/nydus-snapshotter v0.15.3
+	github.com/containerd/nydus-snapshotter v0.15.7
 	github.com/containerd/platforms v1.0.0-rc.1
 	github.com/distribution/reference v0.6.0
 	github.com/docker/cli v28.1.1+incompatible
 	github.com/dustin/go-humanize v1.0.1
-	github.com/goharbor/acceleration-service v0.2.22
+	github.com/goharbor/acceleration-service v0.2.24 
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-hclog v1.6.2
 	github.com/hashicorp/go-plugin v1.6.0
