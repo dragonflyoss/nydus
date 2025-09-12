@@ -5,8 +5,11 @@
 
 //! Nydus FUSE filesystem daemon.
 
+use core::option::Option::None;
+use nydus_rafs::fs::Rafs;
+use nydus_rafs::metadata::{RafsInode, RafsInodeWalkAction};
 use std::any::Any;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::metadata;
 use std::io::{Error, ErrorKind, Result};
 use std::ops::Deref;
@@ -29,20 +32,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fuse_backend_rs::abi::fuse_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
-use fuse_backend_rs::transport::{FuseChannel, FuseSession};
+use fuse_backend_rs::transport::{FuseChannel, FuseSession, FuseSessionExt};
 use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
 use nydus_api::BuildTimeInfo;
+use nydus_storage::factory::BLOB_FACTORY;
 use serde::Serialize;
 
 use crate::daemon::{
     DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
     NydusDaemon,
 };
-use crate::fs_service::{FsBackendCollection, FsBackendMountCmd, FsService};
+use crate::fs_service::{FsBackendCollection, FsBackendMountCmd, FsBackendUmountCmd, FsService};
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
 use crate::{Error as NydusError, FsBackendType, Result as NydusResult};
+
+const FS_IDX_SHIFT: u64 = 56;
+const ROOT_PARENT_INO: u64 = 1;
 
 #[derive(Serialize)]
 struct FuseOp {
@@ -198,6 +205,93 @@ impl FusedevFsService {
 
         inflight_op
     }
+    fn walk_and_notify_invalidation(
+        &self,
+        path: &str,
+        inode: Arc<dyn RafsInode>,
+        fs_idx: u8,
+    ) -> Result<()> {
+        let mut stack = Vec::new();
+        stack.push((
+            ROOT_PARENT_INO,
+            path.trim_start_matches('/').to_string(),
+            inode.clone(),
+            false,
+        ));
+
+        while let Some((parent_kernel_ino, cur_name, cur_inode, visited)) = stack.pop() {
+            // Convert rafs inode to inode id used by kernel
+            let cur_kernel_ino = ((fs_idx as u64) << FS_IDX_SHIFT) | cur_inode.ino();
+
+            if !visited {
+                // Always push back with `visited = true` so we can do post-order processing
+                stack.push((parent_kernel_ino, cur_name.clone(), cur_inode.clone(), true));
+
+                // If directory, walk children
+                if cur_inode.is_dir() {
+                    let mut entries = Vec::new();
+                    let mut handler = |child: Option<Arc<dyn RafsInode>>,
+                                       name: OsString,
+                                       _ino: u64,
+                                       _offset: u64| {
+                        if name.as_os_str() != OsStr::new(".")
+                            && name.as_os_str() != OsStr::new("..")
+                        {
+                            if let Some(child_inode) = child {
+                                let child_name = name.to_string_lossy().to_string();
+                                let parent_kernel_ino =
+                                    ((fs_idx as u64) << FS_IDX_SHIFT) | cur_inode.ino();
+                                entries.push((parent_kernel_ino, child_name, child_inode));
+                            }
+                        }
+                        Ok(RafsInodeWalkAction::Continue)
+                    };
+
+                    if let Err(e) = cur_inode.walk_children_inodes(0, &mut handler) {
+                        error!(
+                            "Failed to walk children of inode {:?}: {:?}",
+                            cur_inode.ino(),
+                            e
+                        );
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!(
+                                "failed to walk children of inode {}: {}",
+                                cur_inode.ino(),
+                                e
+                            ),
+                        ));
+                    }
+
+                    for entry in entries {
+                        stack.push((entry.0, entry.1, entry.2, false));
+                    }
+                }
+            } else {
+                let cstr_name =
+                    CString::new(cur_name.clone()).map_err(|_| eother!("invalid file name"))?;
+                // Invalidate inode cache
+                self.session.lock().unwrap().with_writer(|writer| {
+                    if let Err(e) = self.server.notify_inval_inode(writer, cur_kernel_ino, 0, 0) {
+                        warn!("notify_inval_inode failed: {} {:?}", cur_name, e);
+                    }
+                });
+
+                // Invalidate entry cache
+                self.session.lock().unwrap().with_writer(|writer| {
+                    if let Err(e) = self.server.notify_inval_entry(
+                        writer,
+                        parent_kernel_ino,
+                        cstr_name.as_c_str(),
+                    ) {
+                        warn!("notify_inval_entry failed: {} {:?}", cur_name, e);
+                    }
+                });
+            }
+        }
+
+        Ok(())
+    }
 
     fn umount(&self) -> NydusResult<()> {
         let mut session = self.session.lock().expect("Not expect poisoned lock.");
@@ -237,6 +331,31 @@ impl FsService for FusedevFsService {
         }
     }
 
+    fn umount(&self, cmd: FsBackendUmountCmd) -> NydusResult<()> {
+        let (fs, fs_idx) = self
+            .backend_from_mountpoint(&cmd.mountpoint)?
+            .ok_or(NydusError::NotFound)?;
+        let rafs = fs.deref().as_any().downcast_ref::<Rafs>().unwrap();
+
+        let root_ino = rafs.get_root_inode().unwrap();
+        self.walk_and_notify_invalidation(&cmd.mountpoint, root_ino, fs_idx)
+            .map_err(|e: Error| NydusError::WalkNotifyInvalidation(e))?;
+
+        drop(fs);
+
+        self.get_vfs().umount(&cmd.mountpoint)?;
+        self.backend_collection().del(&cmd.mountpoint);
+        if let Some(mut mgr_guard) = self.upgrade_mgr() {
+            // Remove mount opaque from UpgradeManager
+            mgr_guard.remove_mounts_state(cmd);
+            mgr_guard.save_vfs_stat(self.get_vfs())?;
+        }
+
+        debug!("try to gc unused blobs");
+        BLOB_FACTORY.gc(None);
+
+        Ok(())
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
