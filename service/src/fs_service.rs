@@ -100,7 +100,10 @@ pub trait FsService: Send + Sync {
     /// Get the [BackFileSystem](https://docs.rs/fuse-backend-rs/latest/fuse_backend_rs/api/vfs/type.BackFileSystem.html)
     /// object associated with a mount point.
     fn backend_from_mountpoint(&self, mp: &str) -> Result<Option<Arc<BackFileSystem>>> {
-        self.get_vfs().get_rootfs(mp).map_err(|e| e.into())
+        self.get_vfs()
+            .get_rootfs(mp)
+            .map(|opt| opt.map(|(fs, _)| fs))
+            .map_err(|e| e.into())
     }
 
     /// Get handle to the optional upgrade manager.
