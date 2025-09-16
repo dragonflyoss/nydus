@@ -191,7 +191,7 @@ func (generator *Generator) push(ctx context.Context, chunkdictBootstrapPath str
 		return err
 	}
 
-	pvd, err := provider.New(generator.WorkDir, hosts(generator), 200, "v1", platformMC, 0)
+	pvd, err := provider.New(generator.WorkDir, hosts(generator), 200, "v1", platformMC, 0, nil)
 	if err != nil {
 		return err
 	}

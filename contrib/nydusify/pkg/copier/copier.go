@@ -23,6 +23,7 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
+	accelcontent "github.com/goharbor/acceleration-service/pkg/content"
 	"github.com/goharbor/acceleration-service/pkg/errdefs"
 	"github.com/goharbor/acceleration-service/pkg/platformutil"
 	"github.com/goharbor/acceleration-service/pkg/remote"
@@ -332,7 +333,15 @@ func Copy(ctx context.Context, opt Opt) error {
 	if err != nil {
 		return errors.Wrap(err, "create temp directory")
 	}
-	pvd, err := provider.New(tmpDir, hosts(opt), 200, "v1", platformMC, opt.PushChunkSize)
+
+	// Use stream-based content store: avoids local ingestion of pulled layer data, reads remotely on demand
+	baseStore, err := accelcontent.NewContent(hosts(opt), filepath.Join(tmpDir, "content"), tmpDir, "0MB")
+	if err != nil {
+		return err
+	}
+	streamStore := provider.NewStreamContent(baseStore, hosts(opt))
+
+	pvd, err := provider.New(tmpDir, hosts(opt), 200, "v1", platformMC, opt.PushChunkSize, streamStore)
 	if err != nil {
 		return err
 	}
