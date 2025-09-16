@@ -119,7 +119,7 @@ func Convert(ctx context.Context, opt Opt) error {
 	if err != nil {
 		return errors.Wrap(err, "create temp directory")
 	}
-	pvd, err := provider.New(tmpDir, hosts(opt), opt.CacheMaxRecords, opt.CacheVersion, platformMC, 0)
+	pvd, err := provider.New(tmpDir, hosts(opt), opt.CacheMaxRecords, opt.CacheVersion, platformMC, 0, nil)
 	if err != nil {
 		return err
 	}

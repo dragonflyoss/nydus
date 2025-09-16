@@ -48,14 +48,23 @@ type Provider struct {
 	pushRetryDelay time.Duration
 }
 
-func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64) (*Provider, error) {
+// New creates a Provider with optional custom content.Store override.
+// If storeOverride is nil, defaults to using accelcontent.NewContent.
+func New(root string, hosts remote.HostFunc, cacheSize uint, cacheVersion string, platformMC platforms.MatchComparer, chunkSize int64, storeOverride content.Store) (*Provider, error) {
 	contentDir := filepath.Join(root, "content")
 	if err := os.MkdirAll(contentDir, 0755); err != nil {
 		return nil, err
 	}
-	store, err := accelcontent.NewContent(hosts, contentDir, root, "0MB")
-	if err != nil {
-		return nil, err
+
+	var store content.Store
+	var err error
+	if storeOverride != nil {
+		store = storeOverride
+	} else {
+		store, err = accelcontent.NewContent(hosts, contentDir, root, "0MB")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return &Provider{

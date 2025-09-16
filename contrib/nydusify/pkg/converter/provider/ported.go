@@ -90,6 +90,9 @@ func fetch(ctx context.Context, store content.Store, rCtx *client.RemoteContext,
 		},
 	)
 
+	// For stream-only store (no local content), AppendDistributionSourceLabel
+	// relies on Manager.Info/Update to succeed. Our StreamContent implements
+	// an in-memory label store; keep handler enabled.
 	appendDistSrcLabelHandler, err := docker.AppendDistributionSourceLabel(store, ref)
 	if err != nil {
 		return images.Image{}, err
@@ -116,6 +119,10 @@ func fetch(ctx context.Context, store content.Store, rCtx *client.RemoteContext,
 		limiter = semaphore.NewWeighted(int64(rCtx.MaxConcurrentDownloads))
 	}
 
+	// If using stream store, provide default ref for remote reads
+	if sc, ok := store.(*StreamContent); ok {
+		sc.SetDefaultRef(name)
+	}
 	if err := images.Dispatch(ctx, handler, limiter, desc); err != nil {
 		return images.Image{}, err
 	}

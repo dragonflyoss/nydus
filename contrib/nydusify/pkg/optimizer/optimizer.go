@@ -205,7 +205,7 @@ func fetchBlobs(ctx context.Context, opt Opt, buildDir string) error {
 	if err != nil {
 		return err
 	}
-	pvd, err := converterpvd.New(buildDir, hosts(opt), 200, "v1", platformMC, opt.PushChunkSize)
+	pvd, err := converterpvd.New(buildDir, hosts(opt), 200, "v1", platformMC, opt.PushChunkSize, nil)
 	if err != nil {
 		return err
 	}
