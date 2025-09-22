@@ -88,7 +88,7 @@ func ReverseConvert(ctx context.Context, opt ReverseOpt) error {
 	defer os.RemoveAll(tmpDir)
 
 	// Create provider for registry operations
-	pvd, err := provider.New(tmpDir, reverseHosts(opt), 0, "", platformMC, 0)
+	pvd, err := provider.New(tmpDir, reverseHosts(opt), 0, "", platformMC, 0, nil)
 	if err != nil {
 		return err
 	}
