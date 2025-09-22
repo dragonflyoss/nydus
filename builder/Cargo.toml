@@ -20,7 +20,7 @@ serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 sha2 = "0.10.2"
 tar = "0.4.40"
-vmm-sys-util = "0.12.1"
+vmm-sys-util = { workspace = true }
 xattr = "1.0.1"
 parse-size = "1.1.0"
 
