@@ -302,3 +302,42 @@ func TestRetryWithAttempts_SuccessOnFirstAttempt(t *testing.T) {
 	}, 3)
 	require.Equal(t, context.Canceled, err)
 }
+
+
+func TestSanitizeIndexPlatform_RemovesNydusFeature(t *testing.T) {
+	idx := ocispec.Index{
+		Manifests: []ocispec.Descriptor{
+			{Platform: &ocispec.Platform{OS: "linux", Architecture: "amd64", OSFeatures: []string{ManifestOSFeatureNydus}}},
+			{Platform: &ocispec.Platform{OS: "linux", Architecture: "arm64", OSFeatures: []string{"foo", ManifestOSFeatureNydus, "bar"}}},
+			{Platform: &ocispec.Platform{OS: "linux", Architecture: "s390x", OSFeatures: nil}},
+			{Platform: nil},
+		},
+	}
+
+	SanitizeIndexPlatform(&idx)
+
+	// Case 1: only nydus feature -> OSFeatures should become nil/empty
+	p0 := idx.Manifests[0].Platform
+	require.NotNil(t, p0)
+	require.Equal(t, "linux", p0.OS)
+	require.Equal(t, "amd64", p0.Architecture)
+	require.True(t, p0.OSFeatures == nil || len(p0.OSFeatures) == 0)
+
+	// Case 2: mixed features -> remove only nydus, keep order of others
+	p1 := idx.Manifests[1].Platform
+	require.NotNil(t, p1)
+	require.Equal(t, []string{"foo", "bar"}, p1.OSFeatures)
+
+	// Case 3: nil features remain nil
+	p2 := idx.Manifests[2].Platform
+	require.NotNil(t, p2)
+	require.Nil(t, p2.OSFeatures)
+
+	// Case 4: nil platform remains nil
+	require.Nil(t, idx.Manifests[3].Platform)
+
+	// Idempotency: calling again should not change results further
+	before := idx
+	SanitizeIndexPlatform(&idx)
+	require.Equal(t, before, idx)
+}
