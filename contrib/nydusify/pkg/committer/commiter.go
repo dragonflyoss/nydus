@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/BraveY/snapshotter-converter/converter"
@@ -24,6 +25,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/labels"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/containerd/fifo"
 	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
 	"github.com/opencontainers/go-digest"
@@ -32,7 +34,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer/diff"
 	parserPkg "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
@@ -138,8 +139,9 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 		eg := errgroup.Group{}
 		eg.Go(func() error {
 			var upperBlobDigest *digest.Digest
+			var upperBootstrapPath string
 			if err := withRetry(func() error {
-				upperBlobDigest, err = cm.commitUpperByDiff(ctx, mountList.Add, opt.WithPaths, opt.WithoutPaths, inspect.LowerDirs, inspect.UpperDir, "blob-upper", opt.FsVersion, opt.Compressor)
+				upperBlobDigest, upperBootstrapPath, err = cm.commitUpperByDiff(ctx, mountList.Add, opt.WithPaths, opt.WithoutPaths, inspect.LowerDirs, inspect.UpperDir, "blob-upper", opt.FsVersion, opt.Compressor)
 				return err
 			}, 3); err != nil {
 				return errors.Wrap(err, "commit upper")
@@ -151,8 +153,9 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 				return errors.Wrap(err, "push upper blob")
 			}
 			upperBlob = &Blob{
-				Name: "blob-upper",
-				Desc: *upperBlobDesc,
+				Name:          "blob-upper",
+				BootstrapPath: upperBootstrapPath,
+				Desc:          *upperBlobDesc,
 			}
 			logrus.Infof("pushed blob for upper, elapsed: %s", time.Since(start))
 			return nil
@@ -165,8 +168,9 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 						withPath := opt.WithPaths[idx]
 						name := fmt.Sprintf("blob-mount-%d", idx)
 						var mountBlobDigest *digest.Digest
+						var mountBootstrapPath string
 						if err := withRetry(func() error {
-							mountBlobDigest, err = cm.commitMountByNSEnter(ctx, inspect.Pid, withPath, name, opt.FsVersion, opt.Compressor)
+							mountBlobDigest, mountBootstrapPath, err = cm.commitMountByNSEnter(ctx, inspect.Pid, withPath, name, opt.FsVersion, opt.Compressor)
 							return err
 						}, 3); err != nil {
 							return errors.Wrap(err, "commit mount")
@@ -178,8 +182,9 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 							return errors.Wrap(err, "push mount blob")
 						}
 						mountBlobs[idx] = Blob{
-							Name: name,
-							Desc: *mountBlobDesc,
+							Name:          name,
+							BootstrapPath: mountBootstrapPath,
+							Desc:          *mountBlobDesc,
 						}
 						logrus.Infof("pushed blob for mount, elapsed: %s", time.Since(start))
 						return nil
@@ -203,8 +208,9 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 					mountPath := mountList.paths[idx]
 					name := fmt.Sprintf("blob-appended-mount-%d", idx)
 					var mountBlobDigest *digest.Digest
+					var mountBootstrapPath string
 					if err := withRetry(func() error {
-						mountBlobDigest, err = cm.commitMountByNSEnter(ctx, inspect.Pid, mountPath, name, opt.FsVersion, opt.Compressor)
+						mountBlobDigest, mountBootstrapPath, err = cm.commitMountByNSEnter(ctx, inspect.Pid, mountPath, name, opt.FsVersion, opt.Compressor)
 						return err
 					}, 3); err != nil {
 						return errors.Wrap(err, "commit appended mount")
@@ -217,8 +223,9 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 					}
 					appendedMutex.Lock()
 					mountBlobs = append(mountBlobs, Blob{
-						Name: name,
-						Desc: *mountBlobDesc,
+						Name:          name,
+						BootstrapPath: mountBootstrapPath,
+						Desc:          *mountBlobDesc,
 					})
 					appendedMutex.Unlock()
 					logrus.Infof("pushed blob for appended mount, elapsed: %s", time.Since(start))
@@ -318,41 +325,69 @@ func (cm *Committer) pullBootstrap(ctx context.Context, ref, bootstrapName strin
 	return parsed.NydusImage, committedLayers, nil
 }
 
-func (cm *Committer) commitUpperByDiff(ctx context.Context, appendMount func(path string), withPaths []string, withoutPaths []string, lowerDirs, upperDir, blobName, fsversion, compressor string) (*digest.Digest, error) {
+func (cm *Committer) commitUpperByDiff(ctx context.Context, appendMount func(path string), withPaths []string, withoutPaths []string, lowerDirs, upperDir, blobName, fsversion, compressor string) (*digest.Digest, string, error) {
 	logrus.Infof("committing upper")
 	start := time.Now()
 
 	blobPath := filepath.Join(cm.workDir, blobName)
-	blob, err := os.Create(blobPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "create upper blob file")
-	}
-	defer blob.Close()
+	bootstrapPath := filepath.Join(cm.workDir, blobName+".bootstrap")
 
+	// Create output file for blob
+	blobFile, err := os.Create(blobPath)
+	if err != nil {
+		return nil, "", errors.Wrap(err, "create upper blob file")
+	}
+	defer blobFile.Close()
+
+	// Create FIFO for nydus-image to write to
+	blobFifoPath := filepath.Join(cm.workDir, blobName+".fifo")
+	blobFifo, err := fifo.OpenFifo(ctx, blobFifoPath, syscall.O_CREAT|syscall.O_RDONLY|syscall.O_NONBLOCK, 0640)
+	if err != nil {
+		return nil, "", errors.Wrap(err, "create fifo for blob")
+	}
+	defer blobFifo.Close()
+
+	// Set up digest calculation and size counting
 	digester := digest.SHA256.Digester()
 	counter := Counter{}
-	tarWc, err := converter.Pack(ctx, io.MultiWriter(blob, digester.Hash(), &counter), converter.PackOption{
-		WorkDir:     cm.workDir,
-		FsVersion:   fsversion,
-		Compressor:  compressor,
-		BuilderPath: cm.builder,
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "initialize pack to blob")
+
+	// Copy from FIFO to file and digest concurrently with nydus-image
+	copyDone := make(chan error, 1)
+	go func() {
+		defer close(copyDone)
+		_, err := io.Copy(io.MultiWriter(blobFile, digester.Hash(), &counter), blobFifo)
+		copyDone <- err
+	}()
+
+	// Use nydus-image create directly on the overlay filesystem, writing to FIFO
+	args := []string{
+		"create",
+		"--whiteout-spec", "overlayfs",
+		"--fs-version", fsversion,
+		"--compressor", compressor,
+		"--blob", blobFifoPath,
+		"--bootstrap", bootstrapPath,
+		upperDir,
 	}
 
-	if err := diff.Diff(ctx, appendMount, withPaths, withoutPaths, tarWc, lowerDirs, upperDir); err != nil {
-		return nil, errors.Wrap(err, "make diff")
+	logrus.Debugf("executing: %s %s", cm.builder, strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, cm.builder, args...)
+	cmd.Stdout = logrus.StandardLogger().Writer()
+	cmd.Stderr = logrus.StandardLogger().Writer()
+
+	if err := cmd.Run(); err != nil {
+		return nil, "", errors.Wrapf(err, "run nydus-image create on upper directory %s", upperDir)
 	}
 
-	if err := tarWc.Close(); err != nil {
-		return nil, errors.Wrap(err, "pack to blob")
+	// Wait for copy to complete
+	if err := <-copyDone; err != nil {
+		return nil, "", errors.Wrap(err, "copy from fifo")
 	}
 
 	blobDigest := digester.Digest()
 	logrus.Infof("committed upper, size: %s, elapsed: %s", humanize.Bytes(uint64(counter.Size())), time.Since(start))
 
-	return &blobDigest, nil
+	return &blobDigest, bootstrapPath, nil
 }
 
 // getDistributionSourceLabel returns the source label key and value for the image distribution
@@ -692,91 +727,162 @@ func (cm *Committer) makeDesc(x interface{}, oldDesc ocispec.Descriptor) ([]byte
 	return data, &newDesc, nil
 }
 
-func (cm *Committer) commitMountByNSEnter(ctx context.Context, containerPid int, sourceDir, name, fsversion, compressor string) (*digest.Digest, error) {
+func (cm *Committer) commitMountByNSEnter(ctx context.Context, containerPid int, sourceDir, name, fsversion, compressor string) (*digest.Digest, string, error) {
 	logrus.Infof("committing mount: %s", sourceDir)
 	start := time.Now()
 
 	blobPath := filepath.Join(cm.workDir, name)
-	blob, err := os.Create(blobPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "create mount blob file")
-	}
-	defer blob.Close()
+	bootstrapPath := filepath.Join(cm.workDir, name+".bootstrap")
 
+	// Create output file for blob
+	blobFile, err := os.Create(blobPath)
+	if err != nil {
+		return nil, "", errors.Wrap(err, "create mount blob file")
+	}
+	defer blobFile.Close()
+
+	// Create FIFO for nydus-image to write to
+	blobFifoPath := filepath.Join(cm.workDir, name+".fifo")
+	blobFifo, err := fifo.OpenFifo(ctx, blobFifoPath, syscall.O_CREAT|syscall.O_RDONLY|syscall.O_NONBLOCK, 0640)
+	if err != nil {
+		return nil, "", errors.Wrap(err, "create fifo for blob")
+	}
+	defer blobFifo.Close()
+
+	// Set up digest calculation and size counting
 	digester := digest.SHA256.Digester()
 	counter := Counter{}
-	tarWc, err := converter.Pack(ctx, io.MultiWriter(blob, &counter, digester.Hash()), converter.PackOption{
-		WorkDir:     cm.workDir,
-		FsVersion:   fsversion,
-		Compressor:  compressor,
-		BuilderPath: cm.builder,
-	})
+
+	// Copy from FIFO to file and digest concurrently
+	copyDone := make(chan error, 1)
+	go func() {
+		defer close(copyDone)
+		_, err := io.Copy(io.MultiWriter(blobFile, digester.Hash(), &counter), blobFifo)
+		copyDone <- err
+	}()
+
+	// Create temporary directory to extract mount data
+	tempDir, err := os.MkdirTemp(cm.workDir, name+"-temp-")
 	if err != nil {
-		return nil, errors.Wrap(err, "initialize pack to blob")
+		return nil, "", errors.Wrap(err, "create temp directory for mount")
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Copy data from container to temp directory
+	tempTarPath := filepath.Join(tempDir, "mount.tar")
+	tempTarFile, err := os.Create(tempTarPath)
+	if err != nil {
+		return nil, "", errors.Wrap(err, "create temp tar file")
 	}
 
-	if err := copyFromContainer(ctx, containerPid, sourceDir, tarWc); err != nil {
-		return nil, errors.Wrapf(err, "copy %s from pid %d", sourceDir, containerPid)
+	if err := copyFromContainer(ctx, containerPid, sourceDir, tempTarFile); err != nil {
+		tempTarFile.Close()
+		return nil, "", errors.Wrapf(err, "copy %s from pid %d", sourceDir, containerPid)
+	}
+	tempTarFile.Close()
+
+	// Extract tar to temp directory
+	extractDir := filepath.Join(tempDir, "extracted")
+	if err := os.MkdirAll(extractDir, 0755); err != nil {
+		return nil, "", errors.Wrap(err, "create extract directory")
 	}
 
-	if err := tarWc.Close(); err != nil {
-		return nil, errors.Wrap(err, "pack to blob")
+	extractCmd := exec.CommandContext(ctx, "tar", "-xf", tempTarPath, "-C", extractDir)
+	if err := extractCmd.Run(); err != nil {
+		return nil, "", errors.Wrap(err, "extract tar file")
+	}
+
+	// Use nydus-image create on extracted directory, writing to FIFO
+	args := []string{
+		"create",
+		"--fs-version", fsversion,
+		"--compressor", compressor,
+		"--blob", blobFifoPath,
+		"--bootstrap", bootstrapPath,
+		extractDir,
+	}
+
+	logrus.Debugf("executing: %s %s", cm.builder, strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, cm.builder, args...)
+	cmd.Stdout = logrus.StandardLogger().Writer()
+	cmd.Stderr = logrus.StandardLogger().Writer()
+
+	if err := cmd.Run(); err != nil {
+		return nil, "", errors.Wrapf(err, "run nydus-image create on mount directory %s", extractDir)
+	}
+
+	// Wait for copy to complete
+	if err := <-copyDone; err != nil {
+		return nil, "", errors.Wrap(err, "copy from fifo")
 	}
 
 	mountBlobDigest := digester.Digest()
-
 	logrus.Infof("committed mount: %s, size: %s, elapsed %s", sourceDir, humanize.Bytes(uint64(counter.Size())), time.Since(start))
 
-	return &mountBlobDigest, nil
+	return &mountBlobDigest, bootstrapPath, nil
 }
 
 func (cm *Committer) mergeBootstrap(
 	ctx context.Context, upperBlob Blob, mountBlobs []Blob, baseBootstrapName, mergedBootstrapName string,
 ) ([]digest.Digest, *digest.Digest, error) {
 	baseBootstrap := filepath.Join(cm.workDir, baseBootstrapName)
-	upperBlobRa, err := local.OpenReader(filepath.Join(cm.workDir, upperBlob.Name))
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "open reader for upper blob")
+	mergedBootstrap := filepath.Join(cm.workDir, mergedBootstrapName)
+
+	// Collect all bootstrap paths to merge
+	sourceBootstrapPaths := []string{}
+	blobDigests := []digest.Digest{}
+
+	// Add mount blob bootstraps first
+	for _, mountBlob := range mountBlobs {
+		if mountBlob.BootstrapPath != "" {
+			sourceBootstrapPaths = append(sourceBootstrapPaths, mountBlob.BootstrapPath)
+			blobDigests = append(blobDigests, mountBlob.Desc.Digest)
+		}
 	}
 
-	mergedBootstrap := filepath.Join(cm.workDir, mergedBootstrapName)
-	bootstrap, err := os.Create(mergedBootstrap)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "create upper blob file")
+	// Add upper blob bootstrap
+	if upperBlob.BootstrapPath != "" {
+		sourceBootstrapPaths = append(sourceBootstrapPaths, upperBlob.BootstrapPath)
+		blobDigests = append(blobDigests, upperBlob.Desc.Digest)
 	}
-	defer bootstrap.Close()
+
+	// Use nydus-image merge command directly with bootstrap files
+	args := []string{
+		"merge",
+		"--log-level", "warn",
+		"--prefetch-policy", "fs",
+		"--bootstrap", mergedBootstrap,
+	}
+
+	if baseBootstrap != "" {
+		args = append(args, "--parent-bootstrap", baseBootstrap)
+	}
+
+	// Add source bootstrap paths
+	args = append(args, sourceBootstrapPaths...)
+
+	logrus.Debugf("executing: %s %s", cm.builder, strings.Join(args, " "))
+	cmd := exec.CommandContext(ctx, cm.builder, args...)
+	cmd.Stdout = logrus.StandardLogger().Writer()
+	cmd.Stderr = logrus.StandardLogger().Writer()
+
+	if err := cmd.Run(); err != nil {
+		return nil, nil, errors.Wrapf(err, "run nydus-image merge")
+	}
+
+	// Calculate merged bootstrap digest
+	bootstrapFile, err := os.Open(mergedBootstrap)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "open merged bootstrap file")
+	}
+	defer bootstrapFile.Close()
 
 	digester := digest.SHA256.Digester()
-	writer := io.MultiWriter(bootstrap, digester.Hash())
-
-	layers := []converter.Layer{}
-	layers = append(layers, converter.Layer{
-		Digest:   upperBlob.Desc.Digest,
-		ReaderAt: upperBlobRa,
-	})
-	for idx := range mountBlobs {
-		mountBlob := mountBlobs[idx]
-		mountBlobRa, err := local.OpenReader(filepath.Join(cm.workDir, mountBlob.Name))
-		if err != nil {
-			return nil, nil, errors.Wrap(err, "open reader for mount blob")
-		}
-		layers = append(layers, converter.Layer{
-			Digest:   mountBlob.Desc.Digest,
-			ReaderAt: mountBlobRa,
-		})
+	if _, err := io.Copy(digester.Hash(), bootstrapFile); err != nil {
+		return nil, nil, errors.Wrap(err, "calculate merged bootstrap digest")
 	}
 
-	blobDigests, err := converter.Merge(ctx, layers, writer, converter.MergeOption{
-		WorkDir:             cm.workDir,
-		ParentBootstrapPath: baseBootstrap,
-		WithTar:             true,
-		BuilderPath:         cm.builder,
-	})
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "merge bootstraps")
-	}
 	bootstrapDiffID := digester.Digest()
-
 	return blobDigests, &bootstrapDiffID, nil
 }
 
@@ -818,6 +924,7 @@ func (ml *MountList) Add(path string) {
 type Blob struct {
 	Name          string
 	BootstrapName string
+	BootstrapPath string // Path to separate bootstrap file
 	Desc          ocispec.Descriptor
 }
 
