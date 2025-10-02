@@ -368,6 +368,8 @@ func (cm *Committer) commitUpperByDiff(ctx context.Context, appendMount func(pat
 		"--compressor", compressor,
 		"--blob", blobFifoPath,
 		"--bootstrap", bootstrapPath,
+		// TODO investigate if we need this
+		"--external-blob", "/dev/null",
 		upperDir,
 	}
 
