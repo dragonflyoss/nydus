@@ -827,7 +827,8 @@ func (cm *Committer) mergeBootstrap(
 	ctx context.Context, upperBlob Blob, mountBlobs []Blob, baseBootstrapName, mergedBootstrapName string,
 ) ([]digest.Digest, *digest.Digest, error) {
 	baseBootstrap := filepath.Join(cm.workDir, baseBootstrapName)
-	mergedBootstrap := filepath.Join(cm.workDir, mergedBootstrapName)
+	rawBootstrapPath := filepath.Join(cm.workDir, mergedBootstrapName+".raw")
+	tarBootstrapPath := filepath.Join(cm.workDir, mergedBootstrapName)
 
 	// Collect all bootstrap paths to merge
 	sourceBootstrapPaths := []string{}
@@ -847,12 +848,12 @@ func (cm *Committer) mergeBootstrap(
 		blobDigests = append(blobDigests, upperBlob.Desc.Digest)
 	}
 
-	// Use nydus-image merge command directly with bootstrap files
+	// Use nydus-image merge command to create raw bootstrap file
 	args := []string{
 		"merge",
 		"--log-level", "warn",
 		"--prefetch-policy", "fs",
-		"--bootstrap", mergedBootstrap,
+		"--bootstrap", rawBootstrapPath, // Write to .raw file first
 	}
 
 	if baseBootstrap != "" {
@@ -872,7 +873,6 @@ func (cm *Committer) mergeBootstrap(
 	}
 
 	// Package the raw bootstrap file into a tar with the correct internal structure
-	tarBootstrapPath := filepath.Join(cm.workDir, mergedBootstrapName)
 	tarFile, err := os.Create(tarBootstrapPath)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "create bootstrap tar file")
@@ -885,7 +885,7 @@ func (cm *Committer) mergeBootstrap(
 	defer tarWriter.Close()
 
 	// Add the merged bootstrap file to the tar as image/image.boot
-	bootstrapContent, err := os.ReadFile(mergedBootstrap)
+	bootstrapContent, err := os.ReadFile(rawBootstrapPath)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "read merged bootstrap file")
 	}
@@ -917,6 +917,9 @@ func (cm *Committer) mergeBootstrap(
 	if err := tarWriter.Close(); err != nil {
 		return nil, nil, errors.Wrap(err, "close tar writer")
 	}
+
+	// Clean up the temporary raw bootstrap file
+	os.Remove(rawBootstrapPath)
 
 	bootstrapDiffID := digester.Digest()
 	return blobDigests, &bootstrapDiffID, nil
