@@ -56,7 +56,6 @@ type Opt struct {
 	Compressor     string
 
 	WithPaths    []string
-	WithoutPaths []string
 }
 
 type Committer struct {
@@ -141,7 +140,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 		var upperBlobDigest *digest.Digest
 		var upperBootstrapPath string
 		if err := withRetry(func() error {
-			upperBlobDigest, upperBootstrapPath, err = cm.commitUpperByDiff(ctx, mountList.Add, opt.WithPaths, opt.WithoutPaths, inspect.LowerDirs, inspect.UpperDir, "blob-upper", opt.FsVersion, opt.Compressor, "bootstrap-base")
+			upperBlobDigest, upperBootstrapPath, err = cm.commitUpperByDiff(ctx, mountList.Add, opt.WithPaths, inspect.UpperDir, "blob-upper", opt.FsVersion, opt.Compressor, "bootstrap-base")
 			return err
 		}, 3); err != nil {
 			return errors.Wrap(err, "commit upper")
@@ -354,7 +353,7 @@ func (cm *Committer) pullBootstrap(ctx context.Context, ref, bootstrapName strin
 	return parsed.NydusImage, committedLayers, nil
 }
 
-func (cm *Committer) commitUpperByDiff(ctx context.Context, appendMount func(path string), withPaths []string, withoutPaths []string, lowerDirs, upperDir, blobName, fsversion, compressor, parentBootstrap string) (*digest.Digest, string, error) {
+func (cm *Committer) commitUpperByDiff(ctx context.Context, appendMount func(path string), withPaths []string, upperDir, blobName, fsversion, compressor, parentBootstrap string) (*digest.Digest, string, error) {
 	logrus.Infof("committing upper")
 	start := time.Now()
 

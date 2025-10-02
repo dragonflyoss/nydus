@@ -1433,25 +1433,25 @@ func main() {
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
-				parsePaths := func(paths []string) ([]string, []string) {
+				parsePaths := func(paths []string) ([]string, error) {
 					withPaths := []string{}
-					withoutPaths := []string{}
 
 					for _, path := range paths {
 						path = strings.TrimSpace(path)
 						if strings.HasPrefix(path, "!") {
-							path = strings.TrimLeft(path, "!")
-							path = strings.TrimRight(path, "/")
-							withoutPaths = append(withoutPaths, path)
+							return nil, errors.New("! patterns are not supported in --with-path anymore");
 						} else {
 							withPaths = append(withPaths, path)
 						}
 					}
 
-					return withPaths, withoutPaths
+					return withPaths, nil
 				}
 
-				withPaths, withoutPaths := parsePaths(c.StringSlice("with-path"))
+				withPaths, err := parsePaths(c.StringSlice("with-path"))
+				if err != nil {
+					return err
+				}
 				opt := committer.Opt{
 					WorkDir:           c.String("work-dir"),
 					NydusImagePath:    c.String("nydus-image"),
@@ -1463,7 +1463,6 @@ func main() {
 					TargetInsecure:    c.Bool("target-insecure"),
 					MaximumTimes:      c.Int("maximum-times"),
 					WithPaths:         withPaths,
-					WithoutPaths:      withoutPaths,
 				}
 				cm, err := committer.NewCommitter(opt)
 				if err != nil {
