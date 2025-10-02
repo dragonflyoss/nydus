@@ -862,6 +862,15 @@ func (cm *Committer) mergeBootstrap(
 		args = append(args, "--parent-bootstrap", baseBootstrap)
 	}
 
+	// Add blob digests as comma-separated SHA256 hex strings in the same order as source bootstraps
+	if len(blobDigests) > 0 {
+		blobDigestStrs := make([]string, len(blobDigests))
+		for i, digest := range blobDigests {
+			blobDigestStrs[i] = digest.Hex()
+		}
+		args = append(args, "--blob-digests", strings.Join(blobDigestStrs, ","))
+	}
+
 	// Add source bootstrap paths
 	args = append(args, sourceBootstrapPaths...)
 
