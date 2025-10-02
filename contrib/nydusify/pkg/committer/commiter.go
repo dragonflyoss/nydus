@@ -5,6 +5,7 @@
 package committer
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -870,16 +871,51 @@ func (cm *Committer) mergeBootstrap(
 		return nil, nil, errors.Wrapf(err, "run nydus-image merge")
 	}
 
-	// Calculate merged bootstrap digest
-	bootstrapFile, err := os.Open(mergedBootstrap)
+	// Package the raw bootstrap file into a tar with the correct internal structure
+	tarBootstrapPath := filepath.Join(cm.workDir, mergedBootstrapName)
+	tarFile, err := os.Create(tarBootstrapPath)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "open merged bootstrap file")
+		return nil, nil, errors.Wrap(err, "create bootstrap tar file")
 	}
-	defer bootstrapFile.Close()
+	defer tarFile.Close()
 
 	digester := digest.SHA256.Digester()
-	if _, err := io.Copy(digester.Hash(), bootstrapFile); err != nil {
-		return nil, nil, errors.Wrap(err, "calculate merged bootstrap digest")
+	writer := io.MultiWriter(tarFile, digester.Hash())
+	tarWriter := tar.NewWriter(writer)
+	defer tarWriter.Close()
+
+	// Add the merged bootstrap file to the tar as image/image.boot
+	bootstrapContent, err := os.ReadFile(mergedBootstrap)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "read merged bootstrap file")
+	}
+
+	// Create image directory entry
+	imageDir := &tar.Header{
+		Name:     "image",
+		Mode:     0755,
+		Typeflag: tar.TypeDir,
+	}
+	if err := tarWriter.WriteHeader(imageDir); err != nil {
+		return nil, nil, errors.Wrap(err, "write image directory header")
+	}
+
+	// Create bootstrap file entry
+	bootstrapHeader := &tar.Header{
+		Name: utils.BootstrapFileNameInLayer, // "image/image.boot"
+		Mode: 0644,
+		Size: int64(len(bootstrapContent)),
+	}
+	if err := tarWriter.WriteHeader(bootstrapHeader); err != nil {
+		return nil, nil, errors.Wrap(err, "write bootstrap file header")
+	}
+
+	if _, err := tarWriter.Write(bootstrapContent); err != nil {
+		return nil, nil, errors.Wrap(err, "write bootstrap file content")
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		return nil, nil, errors.Wrap(err, "close tar writer")
 	}
 
 	bootstrapDiffID := digester.Digest()
