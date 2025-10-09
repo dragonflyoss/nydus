@@ -106,14 +106,8 @@ pub enum Error {
     // Fuse session has been shutdown.
     #[error("FUSE session has been shut down, {0}")]
     SessionShutdown(FuseTransportError),
-    #[error("FUSE device not found")]
-    FuseDeviceNotFound,
-    #[error("Fuse write error, {0}")]
-    FuseWriteError(#[source] FuseError),
-    #[error("Sysfs file open error, {0}")]
-    SysfsOpenError(#[source] io::Error),
-    #[error("Sysfs write error, {0}")]
-    SysfsWriteError(#[source] io::Error),
+    #[error("FUSE notify error, {0}")]
+    NotifyError(#[from] FuseNotifyError),
     #[error("failed to walk and notify invalidation: {0}")]
     WalkNotifyInvalidation(#[from] std::io::Error),
 
@@ -125,7 +119,7 @@ pub enum Error {
     #[error("fail to walk descriptor chain")]
     IterateQueue,
     #[error("invalid Virtio descriptor chain, {0}")]
-    InvalidDescriptorChain(#[from] FuseTransportError),
+    InvalidDescriptorChain(FuseTransportError),
     #[error("failed to process FUSE request, {0}")]
     ProcessQueue(#[from] FuseError),
     #[error("failed to create epoll context, {0}")]
@@ -158,6 +152,18 @@ impl From<Error> for DaemonErrorKind {
 
 /// Specialized `Result` for Nydus library.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(thiserror::Error, Debug)]
+pub enum FuseNotifyError {
+    #[error("Session failure error, {0}")]
+    SessionFailure(#[from] FuseTransportError),
+    #[error("Fuse write error, {0}")]
+    FuseWriteError(#[source] FuseError),
+    #[error("Sysfs file open error, {0}")]
+    SysfsOpenError(#[source] io::Error),
+    #[error("Sysfs write error, {0}")]
+    SysfsWriteError(#[source] io::Error),
+}
 
 /// Type of supported backend filesystems.
 #[derive(Clone, Debug, Serialize, PartialEq, Deserialize, Versionize)]
