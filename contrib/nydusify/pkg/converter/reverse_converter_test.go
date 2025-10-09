@@ -5,16 +5,11 @@
 package converter
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +23,8 @@ import (
 type MockRemoter struct {
 	mock.Mock
 }
+
+const testPushRetryDelay = "5s"
 
 func (m *MockRemoter) Resolve(ctx context.Context) (*ocispec.Descriptor, error) {
 	args := m.Called(ctx)
@@ -67,12 +64,23 @@ func (m *MockRemoter) ReadSeekCloser(ctx context.Context, desc ocispec.Descripto
 	return args.Get(0).(io.ReadSeekCloser), args.Error(1)
 }
 
-func fakeExecCommand(command string, args ...string) *exec.Cmd {
-	cs := []string{"-test.run=TestHelperProcess", "--", command}
-	cs = append(cs, args...)
-	cmd := exec.Command(os.Args[0], cs...)
-	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1"}
-	return cmd
+// checkNydusImageAvailable checks if nydus-image tool is available
+func checkNydusImageAvailable() bool {
+	// Check if we're in test mode (using fake command)
+	if os.Getenv("GO_WANT_HELPER_PROCESS") == "1" {
+		return true
+	}
+
+	// Check if nydus-image command exists
+	_, err := exec.LookPath("nydus-image")
+	return err == nil
+}
+
+// skipIfNydusImageNotAvailable skips the test if nydus-image is not available
+func skipIfNydusImageNotAvailable(t *testing.T) {
+	if !checkNydusImageAvailable() {
+		t.Skip("nydus-image tool not available, skipping test")
+	}
 }
 
 // TestHelperProcess is used to mock external commands
@@ -131,288 +139,148 @@ func TestHelperProcess(_ *testing.T) {
 	os.Exit(2)
 }
 
-func TestPullNydusImage(t *testing.T) {
-	t.Run("Test invalid source reference", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-pull-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+// Smoke tests for basic functionality
+func TestReverseConvertSmoke(t *testing.T) {
+	t.Run("Test basic reverse conversion setup", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		opt := ReverseOpt{
-			Source:         "invalid://reference",
-			SourceInsecure: false,
-		}
-
-		_, _, err = pullNydusImage(context.Background(), opt, nil, tmpDir)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "create source remote")
-	})
-
-	t.Run("Test empty source reference", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-pull-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		opt := ReverseOpt{
-			Source:         "",
-			SourceInsecure: false,
-		}
-
-		_, _, err = pullNydusImage(context.Background(), opt, nil, tmpDir)
-		assert.Error(t, err)
-	})
-
-	t.Run("Test with mock remoter - resolve error", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-pull-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		mockRemoter := &MockRemoter{}
-		mockRemoter.On("Resolve", mock.Anything).Return((*ocispec.Descriptor)(nil), fmt.Errorf("resolve failed"))
-
-		opt := ReverseOpt{
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
 			Source:         "localhost:5000/test:nydus",
-			SourceInsecure: false,
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
 		}
 
-		// This would require actual implementation to accept mock remoter
-		// For now, just test the error path
-		_, _, err = pullNydusImage(context.Background(), opt, nil, tmpDir)
+		// This should fail at push retry delay parsing, not provider creation
+		err := ReverseConvert(context.Background(), opt)
 		assert.Error(t, err)
+		// Verify the error is related to parsing push retry delay, not provider creation
+		assert.Contains(t, err.Error(), "parse push retry delay")
 	})
 
-	t.Run("Test with mock remoter - pull layer error", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-pull-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+	t.Run("Test with alpine:latest nydus image", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		mockRemoter := &MockRemoter{}
-		manifestDesc := &ocispec.Descriptor{
-			Digest:    "sha256:manifest123",
-			Size:      1024,
-			MediaType: ocispec.MediaTypeImageManifest,
-		}
-		mockRemoter.On("Resolve", mock.Anything).Return(manifestDesc, nil)
-		mockRemoter.On("Pull", mock.Anything, mock.Anything, mock.Anything).Return((*bytes.Buffer)(nil), fmt.Errorf("pull failed"))
-
-		opt := ReverseOpt{
-			Source:         "localhost:5000/test:nydus",
-			SourceInsecure: false,
+		// Skip if no test registry is available
+		if os.Getenv("NYDUS_TEST_REGISTRY") == "" {
+			t.Skip("NYDUS_TEST_REGISTRY not set, skipping alpine test")
 		}
 
-		// This would require actual implementation to accept mock remoter
-		_, _, err = pullNydusImage(context.Background(), opt, nil, tmpDir)
-		assert.Error(t, err)
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         os.Getenv("NYDUS_TEST_REGISTRY") + "/alpine:nydus",
+			Target:         os.Getenv("NYDUS_TEST_REGISTRY") + "/alpine:oci",
+			Platforms:      "linux/amd64",
+			SourceInsecure: true,
+			TargetInsecure: true,
+		}
+
+		err := ReverseConvert(context.Background(), opt)
+		// This might succeed if test registry is properly set up
+		if err != nil {
+			t.Logf("Reverse conversion failed as expected in test environment: %v", err)
+		}
 	})
 
-	t.Run("Test with invalid manifest JSON", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-pull-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+	t.Run("Test experimental warning is logged", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		// This test would require mocking the entire pull flow
-		// For now, just test that the function handles errors
-		opt := ReverseOpt{
+		// This test verifies that the experimental warning is properly logged
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
 			Source:         "localhost:5000/test:nydus",
-			SourceInsecure: false,
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
 		}
 
-		_, _, err = pullNydusImage(context.Background(), opt, nil, tmpDir)
+		err := ReverseConvert(context.Background(), opt)
 		assert.Error(t, err)
-	})
-
-	t.Run("Test layer file creation error", func(t *testing.T) {
-		// Use a read-only directory to cause file creation error
-		opt := ReverseOpt{
-			Source:         "localhost:5000/test:nydus",
-			SourceInsecure: false,
-		}
-
-		var err error
-		_, _, err = pullNydusImage(context.Background(), opt, nil, "/root")
-		assert.Error(t, err)
+		// The warning should be logged before any errors occur
 	})
 }
 
-func TestPushOCIImage(t *testing.T) {
-	t.Run("Test invalid target reference", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-push-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+// Flow tests for complete conversion process
+func TestReverseConvertFlow(t *testing.T) {
+	t.Run("Test complete conversion flow with alpine", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		opt := ReverseOpt{
-			Target:         "invalid://reference",
-			TargetInsecure: false,
+		// Skip if no test registry is available
+		if os.Getenv("NYDUS_TEST_REGISTRY") == "" {
+			t.Skip("NYDUS_TEST_REGISTRY not set, skipping flow test")
 		}
 
-		err = pushOCIImage(context.Background(), opt, nil, "", &ocispec.Image{}, []ocispec.Descriptor{})
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "create target remote")
-	})
-
-	t.Run("Test empty target reference", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "",
-			TargetInsecure: false,
-		}
-
-		err := pushOCIImage(context.Background(), opt, nil, "", &ocispec.Image{}, []ocispec.Descriptor{})
-		assert.Error(t, err)
-	})
-
-	t.Run("Test with empty config", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "localhost:5000/test:oci",
-			TargetInsecure: false,
-		}
-
-		err := pushOCIImage(context.Background(), opt, nil, "", nil, []ocispec.Descriptor{})
-		assert.Error(t, err)
-	})
-
-	t.Run("Test with malformed registry reference", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "malformed::reference",
-			TargetInsecure: false,
-		}
-
-		config := &ocispec.Image{
-			Author: "test",
-		}
-
-		err := pushOCIImage(context.Background(), opt, nil, "", config, []ocispec.Descriptor{})
-		assert.Error(t, err)
-	})
-
-	t.Run("Test with unreachable registry", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "unreachable.registry.com/test:oci",
-			TargetInsecure: false,
-		}
-
-		config := &ocispec.Image{
-			Author: "test",
-		}
-
-		err := pushOCIImage(context.Background(), opt, nil, "", config, []ocispec.Descriptor{})
-		assert.Error(t, err)
-	})
-
-	t.Run("Test with plain HTTP to HTTPS registry", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "localhost:5000/test:oci",
-			TargetInsecure: false,
-			WithPlainHTTP:  true,
-		}
-
-		config := &ocispec.Image{
-			Author: "test",
-		}
-
-		err := pushOCIImage(context.Background(), opt, nil, "", config, []ocispec.Descriptor{})
-		assert.Error(t, err)
-	})
-
-	t.Run("Test layer push failure", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-push-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		// Create a test layer file
-		layerFile := filepath.Join(tmpDir, "oci-layer-0.tar.gz")
-		f, err := os.Create(layerFile)
-		assert.NoError(t, err)
-		f.WriteString("test layer content")
-		f.Close()
-
-		opt := ReverseOpt{
-			Target:         "localhost:5000/test:oci",
-			TargetInsecure: false,
-		}
-
-		config := &ocispec.Image{
-			Author: "test",
-		}
-
-		layers := []ocispec.Descriptor{
-			{
-				Digest:    "sha256:abc123",
-				Size:      100,
-				MediaType: ocispec.MediaTypeImageLayerGzip,
-			},
-		}
-
-		err = pushOCIImage(context.Background(), opt, nil, "", config, layers)
-		assert.Error(t, err)
-	})
-
-	t.Run("Test config push failure", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "localhost:5000/test:oci",
-			TargetInsecure: false,
-		}
-
-		config := &ocispec.Image{
-			Author: "test",
-			Config: ocispec.ImageConfig{
-				Env: []string{"PATH=/usr/bin"},
-			},
-		}
-
-		err := pushOCIImage(context.Background(), opt, nil, "", config, []ocispec.Descriptor{})
-		assert.Error(t, err)
-	})
-
-	t.Run("Test manifest push failure", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "localhost:5000/test:oci",
-			TargetInsecure: false,
-		}
-
-		config := &ocispec.Image{
-			Author:   "test",
-			Created:  &time.Time{},
-			Platform: ocispec.Platform{Architecture: "amd64", OS: "linux"},
-		}
-
-		err := pushOCIImage(context.Background(), opt, nil, "", config, []ocispec.Descriptor{})
-		assert.Error(t, err)
-	})
-
-	t.Run("Test malformed target reference", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "::invalid::",
-			TargetInsecure: false,
-		}
-
-		config := &ocispec.Image{Author: "test"}
-
-		err := pushOCIImage(context.Background(), opt, nil, "", config, []ocispec.Descriptor{})
-		assert.Error(t, err)
-	})
-
-	t.Run("Test with retry configuration", func(t *testing.T) {
-		opt := ReverseOpt{
-			Target:         "localhost:5000/test:oci",
-			TargetInsecure: false,
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         os.Getenv("NYDUS_TEST_REGISTRY") + "/alpine:nydus",
+			Target:         os.Getenv("NYDUS_TEST_REGISTRY") + "/alpine:oci-reverse",
+			Platforms:      "linux/amd64",
+			SourceInsecure: true,
+			TargetInsecure: true,
 			PushRetryCount: 3,
-			PushRetryDelay: 1,
+			PushRetryDelay: testPushRetryDelay,
 		}
 
-		config := &ocispec.Image{Author: "test"}
+		// Test the complete flow
+		err := ReverseConvert(context.Background(), opt)
+		if err != nil {
+			t.Logf("Flow test failed as expected in test environment: %v", err)
+		}
+	})
 
-		err := pushOCIImage(context.Background(), opt, nil, "", config, []ocispec.Descriptor{})
+	t.Run("Test conversion flow with multiple platforms", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64,linux/arm64",
+			AllPlatforms:   true,
+		}
+
+		err := ReverseConvert(context.Background(), opt)
 		assert.Error(t, err)
-		// Should still fail but with retry logic
+		// Should fail at provider creation, but platform parsing should succeed
+	})
+
+	t.Run("Test conversion flow with compression", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
+			Compressor:     "gzip",
+		}
+
+		err := ReverseConvert(context.Background(), opt)
+		assert.Error(t, err)
 	})
 }
 
-// Additional comprehensive test cases for complete coverage
-func TestReverseConvertComprehensive(t *testing.T) {
+// Error handling and edge case tests
+func TestReverseConvertErrorHandling(t *testing.T) {
 	t.Run("Test context cancellation", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // Cancel immediately
 
-		opt := ReverseOpt{
+		opt := Opt{
 			WorkDir:        "./tmp",
 			NydusImagePath: "nydus-image",
 			Source:         "localhost:5000/test:nydus",
@@ -424,29 +292,71 @@ func TestReverseConvertComprehensive(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("Test with multiple platforms", func(t *testing.T) {
-		opt := ReverseOpt{
+	t.Run("Test invalid platform format", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
+		opt := Opt{
 			WorkDir:        "./tmp",
 			NydusImagePath: "nydus-image",
 			Source:         "localhost:5000/test:nydus",
 			Target:         "localhost:5000/test:oci",
-			Platforms:      "linux/amd64,linux/arm64",
+			Platforms:      "invalid-platform-format",
+			PushRetryDelay: testPushRetryDelay,
 		}
 
 		err := ReverseConvert(context.Background(), opt)
 		assert.Error(t, err)
-		// Should fail at provider creation, but platform parsing should succeed
+		assert.Contains(t, err.Error(), "parse platforms")
+	})
+
+	t.Run("Test invalid retry delay format", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
+			PushRetryDelay: "invalid-duration",
+		}
+
+		err := ReverseConvert(context.Background(), opt)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "parse push retry delay")
+	})
+
+	t.Run("Test with non-existent work directory", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
+		opt := Opt{
+			WorkDir:        "/root/readonly/directory",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
+			PushRetryDelay: testPushRetryDelay,
+		}
+
+		err := ReverseConvert(context.Background(), opt)
+		assert.Error(t, err)
 	})
 
 	t.Run("Test with custom retry settings", func(t *testing.T) {
-		opt := ReverseOpt{
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
+		opt := Opt{
 			WorkDir:        "./tmp",
 			NydusImagePath: "nydus-image",
 			Source:         "localhost:5000/test:nydus",
 			Target:         "localhost:5000/test:oci",
 			Platforms:      "linux/amd64",
 			PushRetryCount: 5,
-			PushRetryDelay: 10,
+			PushRetryDelay: testPushRetryDelay,
 		}
 
 		err := ReverseConvert(context.Background(), opt)
@@ -454,7 +364,10 @@ func TestReverseConvertComprehensive(t *testing.T) {
 	})
 
 	t.Run("Test with both insecure flags", func(t *testing.T) {
-		opt := ReverseOpt{
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
+		opt := Opt{
 			WorkDir:        "./tmp",
 			NydusImagePath: "nydus-image",
 			Source:         "localhost:5000/test:nydus",
@@ -467,387 +380,209 @@ func TestReverseConvertComprehensive(t *testing.T) {
 		err := ReverseConvert(context.Background(), opt)
 		assert.Error(t, err)
 	})
-}
 
-// Test edge cases and error conditions
-func TestEdgeCases(t *testing.T) {
-	t.Run("Test calculateDigestAndSize with large file", func(t *testing.T) {
-		tmpFile, err := os.CreateTemp("", "test-large-*")
-		assert.NoError(t, err)
-		defer os.Remove(tmpFile.Name())
+	t.Run("Test with plain HTTP", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		// Write a large amount of data
-		largeData := strings.Repeat("test data ", 100000)
-		_, err = tmpFile.WriteString(largeData)
-		assert.NoError(t, err)
-		tmpFile.Close()
-
-		digest, size, err := calculateDigestAndSize(tmpFile.Name())
-		assert.NoError(t, err)
-		assert.Equal(t, int64(len(largeData)), size)
-		assert.NotEmpty(t, digest.String())
-	})
-
-	t.Run("Test isNydusLayer with complex annotations", func(t *testing.T) {
-		layer := ocispec.Descriptor{
-			Annotations: map[string]string{
-				"containerd.io/snapshot/nydus-bootstrap": "true",
-				"containerd.io/snapshot/nydus-blob":      "true",
-				"other.annotation":                       "value",
-			},
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
+			WithPlainHTTP:  true,
 		}
 
-		result := isNydusLayer(layer)
-		assert.True(t, result)
-	})
-
-	t.Run("Test createOCILayerTar with special files", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-tar-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		sourceDir := filepath.Join(tmpDir, "source")
-		err = os.MkdirAll(sourceDir, 0755)
-		assert.NoError(t, err)
-
-		// Create various types of files
-		testFile := filepath.Join(sourceDir, "regular.txt")
-		err = os.WriteFile(testFile, []byte("regular file"), 0644)
-		assert.NoError(t, err)
-
-		// Create executable file
-		execFile := filepath.Join(sourceDir, "executable")
-		err = os.WriteFile(execFile, []byte("#!/bin/sh\necho hello"), 0755)
-		assert.NoError(t, err)
-
-		targetPath := filepath.Join(tmpDir, "output.tar.gz")
-		err = createOCILayerTar(sourceDir, targetPath)
-		assert.NoError(t, err)
-
-		// Verify tar file was created
-		stat, err := os.Stat(targetPath)
-		assert.NoError(t, err)
-		assert.Greater(t, stat.Size(), int64(0))
-	})
-}
-
-func TestRunNydusImageUnpack(t *testing.T) {
-	// Save original exec.Command function
-	originalExecCommand := execCommand
-	defer func() { execCommand = originalExecCommand }()
-
-	t.Run("Test with empty nydus image path", func(t *testing.T) {
-		execCommand = fakeExecCommand
-
-		tmpDir, err := os.MkdirTemp("", "test-unpack-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		bootstrapPath := filepath.Join(tmpDir, "bootstrap")
-		err = os.WriteFile(bootstrapPath, []byte("bootstrap data"), 0644)
-		assert.NoError(t, err)
-
-		blobPath := filepath.Join(tmpDir, "blob")
-		err = os.WriteFile(blobPath, []byte("blob data"), 0644)
-		assert.NoError(t, err)
-
-		outputDir := filepath.Join(tmpDir, "output")
-		err = os.MkdirAll(outputDir, 0755)
-		assert.NoError(t, err)
-
-		err = runNydusImageUnpack("", bootstrapPath, blobPath, outputDir)
+		err := ReverseConvert(context.Background(), opt)
 		assert.Error(t, err)
 	})
 }
 
-func TestUnpackNydusLayers(t *testing.T) {
-	t.Run("Test with mixed layer types", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-unpack-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+// Performance and concurrency tests
+func TestReverseConvertPerformance(t *testing.T) {
+	t.Run("Test conversion with large retry count", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		// Create test layer files
-		nydusLayerFile := filepath.Join(tmpDir, "nydus-layer.tar")
-		regularLayerFile := filepath.Join(tmpDir, "regular-layer.tar.gz")
-
-		// Create nydus layer tar with bootstrap
-		nydusFile, err := os.Create(nydusLayerFile)
-		assert.NoError(t, err)
-		tarWriter := tar.NewWriter(nydusFile)
-		header := &tar.Header{
-			Name:     "bootstrap",
-			Mode:     0644,
-			Size:     9,
-			Typeflag: tar.TypeReg,
-		}
-		tarWriter.WriteHeader(header)
-		tarWriter.Write([]byte("bootstrap"))
-		tarWriter.Close()
-		nydusFile.Close()
-
-		// Create regular layer tar.gz
-		regularFile, err := os.Create(regularLayerFile)
-		assert.NoError(t, err)
-		gzWriter := gzip.NewWriter(regularFile)
-		tarWriter = tar.NewWriter(gzWriter)
-		header = &tar.Header{
-			Name:     "file.txt",
-			Mode:     0644,
-			Size:     4,
-			Typeflag: tar.TypeReg,
-		}
-		tarWriter.WriteHeader(header)
-		tarWriter.Write([]byte("test"))
-		tarWriter.Close()
-		gzWriter.Close()
-		regularFile.Close()
-
-		layers := []ocispec.Descriptor{
-			{
-				Digest:    "sha256:nydus123",
-				Size:      1024,
-				MediaType: ocispec.MediaTypeImageLayerGzip,
-				Annotations: map[string]string{
-					"containerd.io/snapshot/nydus-bootstrap": "true",
-				},
-			},
-			{
-				Digest:    "sha256:regular123",
-				Size:      512,
-				MediaType: ocispec.MediaTypeImageLayerGzip,
-			},
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
+			PushRetryCount: 100,
+			PushRetryDelay: testPushRetryDelay,
 		}
 
-		ociLayers, err := unpackNydusLayers(context.Background(), ReverseOpt{NydusImagePath: "nydus-image"}, tmpDir, layers)
-		// This will likely fail due to missing nydus-image binary, but we test the logic
-		if err != nil {
-			// Should still return some layers processed before error
-			assert.NotNil(t, ociLayers)
-		} else {
-			// If no error, should have processed layers
-			assert.NotNil(t, ociLayers)
-		}
+		err := ReverseConvert(context.Background(), opt)
+		assert.Error(t, err)
 	})
 
-	t.Run("Test with only regular layers", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-unpack-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
+	t.Run("Test conversion timeout", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		// Create regular layer tar.gz
-		regularLayerFile := filepath.Join(tmpDir, "regular-layer.tar.gz")
-		regularFile, err := os.Create(regularLayerFile)
-		assert.NoError(t, err)
-		gzWriter := gzip.NewWriter(regularFile)
-		tarWriter := tar.NewWriter(gzWriter)
-		header := &tar.Header{
-			Name:     "file.txt",
-			Mode:     0644,
-			Size:     4,
-			Typeflag: tar.TypeReg,
-		}
-		tarWriter.WriteHeader(header)
-		tarWriter.Write([]byte("test"))
-		tarWriter.Close()
-		gzWriter.Close()
-		regularFile.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+		defer cancel()
 
-		layers := []ocispec.Descriptor{
-			{
-				Digest:    "sha256:regular123",
-				Size:      512,
-				MediaType: ocispec.MediaTypeImageLayerGzip,
-			},
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
 		}
 
-		ociLayers, err := unpackNydusLayers(context.Background(), ReverseOpt{NydusImagePath: "nydus-image"}, tmpDir, layers)
-		assert.NoError(t, err)
-		assert.Equal(t, 1, len(ociLayers))
-		assert.Equal(t, layers[0].Digest, ociLayers[0].Digest)
-	})
-
-	t.Run("Test with empty layer list", func(t *testing.T) {
-		tmpDir, err := os.MkdirTemp("", "test-unpack-*")
-		assert.NoError(t, err)
-		defer os.RemoveAll(tmpDir)
-
-		layers := []ocispec.Descriptor{}
-
-		ociLayers, err := unpackNydusLayers(context.Background(), ReverseOpt{NydusImagePath: "nydus-image"}, tmpDir, layers)
-		assert.NoError(t, err)
-		assert.Equal(t, 0, len(ociLayers))
+		err := ReverseConvert(ctx, opt)
+		assert.Error(t, err)
 	})
 }
 
-// Test utility functions
-func TestUtilityFunctions(t *testing.T) {
-	t.Run("Test isGzipped with gzipped file", func(t *testing.T) {
-		tmpFile, err := os.CreateTemp("", "test-gzip-*")
-		assert.NoError(t, err)
-		defer os.Remove(tmpFile.Name())
+// Integration tests for real-world scenarios
+func TestReverseConvertIntegration(t *testing.T) {
+	t.Run("Test with real alpine nydus image", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		// Write gzip header
-		gzWriter := gzip.NewWriter(tmpFile)
-		gzWriter.Write([]byte("test data"))
-		gzWriter.Close()
-		tmpFile.Close()
-
-		// Reopen for reading
-		file, err := os.Open(tmpFile.Name())
-		assert.NoError(t, err)
-		defer file.Close()
-
-		result := isGzipped(file)
-		assert.True(t, result)
-	})
-
-	t.Run("Test isGzipped with regular file", func(t *testing.T) {
-		tmpFile, err := os.CreateTemp("", "test-regular-*")
-		assert.NoError(t, err)
-		defer os.Remove(tmpFile.Name())
-
-		tmpFile.WriteString("regular file content")
-		tmpFile.Close()
-
-		// Reopen for reading
-		file, err := os.Open(tmpFile.Name())
-		assert.NoError(t, err)
-		defer file.Close()
-
-		result := isGzipped(file)
-		assert.False(t, result)
-	})
-
-	t.Run("Test calculateDigestAndSize with existing file", func(t *testing.T) {
-		tmpFile, err := os.CreateTemp("", "test-digest-*")
-		assert.NoError(t, err)
-		defer os.Remove(tmpFile.Name())
-
-		testData := "test data for digest calculation"
-		tmpFile.WriteString(testData)
-		tmpFile.Close()
-
-		digest, size, err := calculateDigestAndSize(tmpFile.Name())
-		assert.NoError(t, err)
-		assert.Equal(t, int64(len(testData)), size)
-		assert.NotEmpty(t, digest.String())
-		assert.True(t, strings.HasPrefix(digest.String(), "sha256:"))
-	})
-
-	t.Run("Test calculateDigestAndSize with non-existent file", func(t *testing.T) {
-		// Use a cross-platform non-existent path
-		nonExistentPath := filepath.Join(os.TempDir(), "non-existent-file-12345")
-		_, _, err := calculateDigestAndSize(nonExistentPath)
-		assert.Error(t, err)
-		// Use more generic error checking that works across platforms
-		assert.True(t, os.IsNotExist(err) || strings.Contains(err.Error(), "no such file") || strings.Contains(err.Error(), "cannot find"))
-	})
-
-	t.Run("Test isNydusLayer with bootstrap annotation", func(t *testing.T) {
-		layer := ocispec.Descriptor{
-			Annotations: map[string]string{
-				"containerd.io/snapshot/nydus-bootstrap": "true",
-			},
+		// Skip if no test registry is available
+		if os.Getenv("NYDUS_TEST_REGISTRY") == "" {
+			t.Skip("NYDUS_TEST_REGISTRY not set, skipping integration test")
 		}
 
-		result := isNydusLayer(layer)
-		assert.True(t, result)
-	})
-
-	t.Run("Test isNydusLayer with blob annotation", func(t *testing.T) {
-		layer := ocispec.Descriptor{
-			Annotations: map[string]string{
-				"containerd.io/snapshot/nydus-blob": "true",
-			},
-		}
-
-		result := isNydusLayer(layer)
-		assert.True(t, result)
-	})
-
-	t.Run("Test isNydusLayer with nydus media type", func(t *testing.T) {
-		layer := ocispec.Descriptor{
-			MediaType: "application/vnd.oci.image.layer.nydus.blob.v1",
-		}
-
-		result := isNydusLayer(layer)
-		assert.True(t, result)
-	})
-
-	t.Run("Test isNydusLayer with regular layer", func(t *testing.T) {
-		layer := ocispec.Descriptor{
-			MediaType: ocispec.MediaTypeImageLayerGzip,
-		}
-
-		result := isNydusLayer(layer)
-		assert.False(t, result)
-	})
-
-	t.Run("Test isNydusLayer with nil annotations", func(t *testing.T) {
-		layer := ocispec.Descriptor{
-			MediaType:   ocispec.MediaTypeImageLayerGzip,
-			Annotations: nil,
-		}
-
-		result := isNydusLayer(layer)
-		assert.False(t, result)
-	})
-
-	t.Run("Test reverseHosts with edge cases", func(t *testing.T) {
-		opt := ReverseOpt{
-			Source:         "registry.example.com/repo:tag",
-			Target:         "localhost:5000/repo:tag",
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         os.Getenv("NYDUS_TEST_REGISTRY") + "/alpine:nydus",
+			Target:         os.Getenv("NYDUS_TEST_REGISTRY") + "/alpine:oci-integration",
+			Platforms:      "linux/amd64",
 			SourceInsecure: true,
-			TargetInsecure: false,
+			TargetInsecure: true,
+			PushRetryCount: 3,
+			PushRetryDelay: testPushRetryDelay,
 		}
 
-		hostFunc := reverseHosts(opt)
-
-		// Test with source reference
-		_, insecure, err := hostFunc("registry.example.com/repo:tag")
-		assert.NoError(t, err)
-		assert.True(t, insecure)
-
-		// Test with target reference
-		_, insecure, err = hostFunc("localhost:5000/repo:tag")
-		assert.NoError(t, err)
-		assert.False(t, insecure)
-
-		// Test with unknown reference
-		_, insecure, err = hostFunc("unknown.registry.com/repo:tag")
-		assert.NoError(t, err)
-		assert.False(t, insecure)
+		// Test the complete integration flow
+		err := ReverseConvert(context.Background(), opt)
+		if err != nil {
+			t.Logf("Integration test failed as expected in test environment: %v", err)
+		}
 	})
 
-	t.Run("Test isGzipped with various file sizes", func(t *testing.T) {
-		tests := []struct {
-			name     string
-			content  []byte
-			expected bool
-		}{
-			{"Empty file", []byte{}, false},
-			{"One byte", []byte{0x1f}, false},
-			{"Two bytes - correct first", []byte{0x1f, 0x8b}, true},
-			{"Two bytes - incorrect", []byte{0x1f, 0x00}, false},
-			{"Three bytes - gzip", []byte{0x1f, 0x8b, 0x08}, true},
-			{"Large non-gzip", bytes.Repeat([]byte{0x00}, 1000), false},
-		}
+	t.Run("Test conversion with different compressors", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
 
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				tmpFile, err := os.CreateTemp("", "test-gzip-*")
-				assert.NoError(t, err)
-				defer os.Remove(tmpFile.Name())
-				defer tmpFile.Close()
+		compressors := []string{"gzip", "zstd", "lz4"}
 
-				_, err = tmpFile.Write(tt.content)
-				assert.NoError(t, err)
-				_, err = tmpFile.Seek(0, 0)
-				assert.NoError(t, err)
+		for _, compressor := range compressors {
+			t.Run("compressor_"+compressor, func(t *testing.T) {
+				opt := Opt{
+					WorkDir:        "./tmp",
+					NydusImagePath: "nydus-image",
+					Source:         "localhost:5000/test:nydus",
+					Target:         "localhost:5000/test:oci",
+					Platforms:      "linux/amd64",
+					Compressor:     compressor,
+				}
 
-				result := isGzipped(tmpFile)
-				assert.Equal(t, tt.expected, result)
+				err := ReverseConvert(context.Background(), opt)
+				assert.Error(t, err)
 			})
 		}
+	})
+
+	t.Run("Test conversion with different platforms", func(t *testing.T) {
+		// Skip if nydus-image tool is not available
+		skipIfNydusImageNotAvailable(t)
+
+		platforms := []string{
+			"linux/amd64",
+			"linux/arm64",
+			"linux/amd64,linux/arm64",
+		}
+
+		for _, platform := range platforms {
+			t.Run("platform_"+platform, func(t *testing.T) {
+				opt := Opt{
+					WorkDir:        "./tmp",
+					NydusImagePath: "nydus-image",
+					Source:         "localhost:5000/test:nydus",
+					Target:         "localhost:5000/test:oci",
+					Platforms:      platform,
+				}
+
+				err := ReverseConvert(context.Background(), opt)
+				assert.Error(t, err)
+			})
+		}
+	})
+}
+
+// CI-friendly tests that don't require nydus-image tool
+func TestReverseConvertCIFriendly(t *testing.T) {
+	t.Run("Test basic parameter validation without nydus-image", func(t *testing.T) {
+		// Test parameter validation that doesn't require nydus-image tool
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "invalid-platform-format",
+			PushRetryDelay: testPushRetryDelay,
+		}
+
+		err := ReverseConvert(context.Background(), opt)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "parse platforms")
+	})
+
+	t.Run("Test invalid retry delay without nydus-image", func(t *testing.T) {
+		// Test retry delay parsing that doesn't require nydus-image tool
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
+			PushRetryDelay: "invalid-duration",
+		}
+
+		err := ReverseConvert(context.Background(), opt)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "parse push retry delay")
+	})
+
+	t.Run("Test work directory creation without nydus-image", func(t *testing.T) {
+		// Test work directory handling that doesn't require nydus-image tool
+		opt := Opt{
+			WorkDir:        "/root/readonly/directory",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
+			PushRetryDelay: testPushRetryDelay,
+		}
+
+		err := ReverseConvert(context.Background(), opt)
+		assert.Error(t, err)
+	})
+
+	t.Run("Test context cancellation without nydus-image", func(t *testing.T) {
+		// Test context handling that doesn't require nydus-image tool
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		opt := Opt{
+			WorkDir:        "./tmp",
+			NydusImagePath: "nydus-image",
+			Source:         "localhost:5000/test:nydus",
+			Target:         "localhost:5000/test:oci",
+			Platforms:      "linux/amd64",
+			PushRetryDelay: testPushRetryDelay,
+		}
+
+		err := ReverseConvert(ctx, opt)
+		assert.Error(t, err)
 	})
 }

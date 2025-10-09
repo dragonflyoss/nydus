@@ -15,9 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
@@ -1583,33 +1581,8 @@ func tryReverseConvert(c *cli.Context, targetRef string) (bool, error) {
 	// Source image is in Nydus format, perform reverse conversion
 	logrus.Info("Detected Nydus source image, performing reverse conversion to OCI")
 
-	// Parse retry delay parameter from string to seconds (int)
-	retryDelayStr := c.String("push-retry-delay")
-	retryDelaySeconds := 0
-	if retryDelayStr != "" {
-		// Try to parse as duration first (e.g., "5s", "1m", "1h")
-		duration, err := time.ParseDuration(retryDelayStr)
-		if err == nil {
-			retryDelaySeconds = int(duration.Seconds())
-		} else {
-			// Fallback to parsing as plain integer (for backward compatibility)
-			seconds, err := strconv.Atoi(retryDelayStr)
-			if err != nil || seconds < 0 {
-				logrus.Warnf("failed to parse push-retry-delay(%s): %+v\nusing default value(0 seconds)", retryDelayStr, err)
-				retryDelaySeconds = 0
-			} else {
-				retryDelaySeconds = seconds
-			}
-		}
-
-		if retryDelaySeconds < 0 {
-			logrus.Warnf("invalid push-retry-delay value(%s): must be non-negative\nusing default value(0 seconds)", retryDelayStr)
-			retryDelaySeconds = 0
-		}
-	}
-
-	// Build reverse conversion options
-	reverseOpt := converter.ReverseOpt{
+	// Build reverse conversion options using unified Opt
+	reverseOpt := converter.Opt{
 		WorkDir:        c.String("work-dir"),
 		NydusImagePath: c.String("nydus-image"),
 		Source:         c.String("source"),
@@ -1620,7 +1593,7 @@ func tryReverseConvert(c *cli.Context, targetRef string) (bool, error) {
 		Platforms:      c.String("platform"),
 		OutputJSON:     c.String("output-json"),
 		PushRetryCount: c.Int("push-retry-count"),
-		PushRetryDelay: retryDelaySeconds,
+		PushRetryDelay: c.String("push-retry-delay"),
 		WithPlainHTTP:  c.Bool("plain-http"),
 	}
 	// Execute reverse conversion
