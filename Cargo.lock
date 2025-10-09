@@ -588,9 +588,9 @@ dependencies = [
 
 [[package]]
 name = "fuse-backend-rs"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5792186098090fbf991681085fbbfd0a0ea89ec05da8c049a1f117ce4ba1d23d"
+checksum = "39179fe2c126f4695984992b6ce08b3b90994b1b1b581c3c58ca29585a56ca81"
 dependencies = [
  "arc-swap",
  "bitflags 1.3.2",
@@ -1217,9 +1217,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.174"
+version = "0.2.177"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
+checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
 name = "libredox"
