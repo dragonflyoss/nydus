@@ -653,7 +653,17 @@ impl RafsV5BlobTable {
                         return Err(einval!());
                     }
                     let entry = &self.extended.entries[index];
-                    let blob_features = BlobFeatures::from_bits(entry.features).ok_or_else(|| einval!("invalid blob feature flags"))?;
+                    let blob_features = match BlobFeatures::try_from(entry.features) {
+                        Ok(f) => f,
+                        Err(_) => {
+                            let known = BlobFeatures::from_bits_truncate(entry.features);
+                            let unknown = entry.features & !known.bits();
+                            if unknown != 0 {
+                                warn!("Unknown blob feature flags 0x{:x}, unknown bits: 0x{:x}, truncating.", entry.features, unknown);
+                            }
+                            known
+                        }
+                    };
                     (entry.chunk_count, entry.uncompressed_size, entry.compressed_size, blob_features)
                 } else {
                     (0, 0, 0, BlobFeatures::_V5_NO_EXT_BLOB_TABLE)
@@ -1978,5 +1988,41 @@ pub mod tests {
         assert_eq!(xattrs.size(), 37);
         xattrs.remove(&OsString::from("user.key1"));
         assert_eq!(xattrs.size(), 19);
+    }
+
+    #[test]
+    fn test_unknown_blob_feature_flags() {
+        let mut ext_table = RafsV5ExtBlobTable::new();
+        ext_table.add(10, 1000, 500, 0x00001000);
+
+        let mut blob_table = RafsV5BlobTable::new();
+        blob_table.extended = ext_table;
+
+        let blob_id = "test_blob_id\0";
+        let mut blob_data = Vec::new();
+        blob_data.extend_from_slice(&u32::to_le_bytes(0));
+        blob_data.extend_from_slice(&u32::to_le_bytes(0));
+        blob_data.extend_from_slice(blob_id.as_bytes());
+
+        let tmp_file = TempFile::new().unwrap();
+        let mut tmp_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmp_file.as_path())
+            .unwrap();
+        tmp_file.write_all(&blob_data).unwrap();
+        tmp_file.flush().unwrap();
+
+        let mut reader: RafsIoReader = Box::new(tmp_file);
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        blob_table
+            .load(
+                &mut reader,
+                blob_data.len() as u32,
+                RAFS_DEFAULT_CHUNK_SIZE as u32,
+                RafsSuperFlags::empty(),
+            )
+            .unwrap();
+        assert_eq!(blob_table.entries.len(), 1);
     }
 }
