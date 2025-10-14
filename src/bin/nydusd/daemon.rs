@@ -11,7 +11,6 @@ use std::convert::From;
 use std::fmt::{Display, Formatter};
 use std::io::Result;
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
 use std::process::id;
 use std::str::FromStr;
 use std::sync::{
@@ -39,6 +38,7 @@ use nydus::FsBackendType;
 use nydus_app::BuildTimeInfo;
 use rafs::{
     fs::{Rafs, RafsConfig},
+    metadata::RafsPrefetchFileInfo,
     trim_backend_config, RafsError, RafsIoRead,
 };
 
@@ -168,6 +168,18 @@ impl From<VfsError> for DaemonError {
 
 pub type DaemonResult<T> = std::result::Result<T, DaemonError>;
 
+#[derive(Serialize)]
+pub struct DaemonExtendInfo {
+    pub image_state: u8,
+    pub cache_ratio: f32,
+    pub cumulative_read_latency: f64,
+    pub total_bio: u64,
+    pub decompressed_size: u64,
+    pub compressed_size: u64,
+    pub hint_file_missed: u32,
+    pub prefetch_time: f64,
+}
+
 /// Used to export daemon working state
 #[derive(Serialize)]
 pub struct DaemonInfo {
@@ -176,6 +188,8 @@ pub struct DaemonInfo {
     pub supervisor: Option<String>,
     pub state: DaemonState,
     pub backend_collection: FsBackendCollection,
+    pub image_state: u8,
+    pub extend_info: DaemonExtendInfo,
 }
 
 #[derive(Clone)]
@@ -185,6 +199,7 @@ pub struct FsBackendMountCmd {
     pub config: String,
     pub mountpoint: String,
     pub prefetch_files: Option<Vec<String>>,
+    pub download_hot: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize, Debug)]
@@ -263,12 +278,29 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
     fn backend_collection(&self) -> MutexGuard<FsBackendCollection>;
     fn version(&self) -> BuildTimeInfo;
     fn export_info(&self) -> DaemonResult<String> {
+        let backend_collection = self.backend_collection().deref().clone();
+        let extent_info = match self.export_daemon_extent_info(&backend_collection) {
+            Ok(info) => info,
+            Err(_) => DaemonExtendInfo {
+                image_state: 0,
+                cache_ratio: -1.00,
+                cumulative_read_latency: -1.00,
+                total_bio: 0,
+                decompressed_size: 0,
+                compressed_size: 0,
+                hint_file_missed: 0,
+                prefetch_time: -1.00,
+            },
+        };
+
         let response = DaemonInfo {
             version: self.version(),
             id: self.id(),
             supervisor: self.supervisor(),
             state: self.get_state(),
-            backend_collection: self.backend_collection().deref().clone(),
+            backend_collection,
+            image_state: extent_info.image_state,
+            extend_info: extent_info,
         };
 
         serde_json::to_string(&response).map_err(DaemonError::Serde)
@@ -283,6 +315,43 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
             .ok_or_else(|| DaemonError::FsTypeMismatch("to rafs".to_string()))?;
         let resp = serde_json::to_string(&rafs.sb.meta).map_err(DaemonError::Serde)?;
         Ok(resp)
+    }
+
+    fn export_daemon_extent_info(
+        &self,
+        backend_collection: &FsBackendCollection,
+    ) -> DaemonResult<DaemonExtendInfo> {
+        for (key, _) in backend_collection.0.clone() {
+            if key == "/" {
+                let fs = self
+                    .backend_from_mountpoint("/")?
+                    .ok_or(DaemonError::NotFound)?;
+                let any_fs = fs.deref().as_any();
+                let rafs = any_fs
+                    .downcast_ref::<Rafs>()
+                    .ok_or_else(|| DaemonError::FsTypeMismatch("to rafs".to_string()))?;
+                let (
+                    cache_ratio,
+                    cumulative_read_latency,
+                    total_bio,
+                    hint_file_missed,
+                    prefetch_time,
+                ) = rafs.get_io_analyze_result();
+                let (decompressed_size, compressed_size) = rafs.get_size_info();
+                let info = DaemonExtendInfo {
+                    image_state: rafs.data_state.load(Ordering::Acquire),
+                    cache_ratio: cache_ratio,
+                    cumulative_read_latency,
+                    total_bio,
+                    decompressed_size,
+                    compressed_size,
+                    hint_file_missed,
+                    prefetch_time,
+                };
+                return Ok(info);
+            }
+        }
+        Err(DaemonError::NotFound)
     }
 
     fn backend_from_mountpoint(&self, mp: &str) -> DaemonResult<Option<Arc<BackFileSystem>>> {
@@ -356,21 +425,22 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber {
 ///      <path1> <path2> <path3>
 /// And each path should be relative to rafs root, e.g.
 ///      /foo1/bar1 /foo2/bar2
+/// And each path can set one or more specific range, e.g.
+///      /foo1/bar1,0-128,512-4096
 /// Specifying both regular file and directory simultaneously is supported.
-fn input_prefetch_files_verify(input: &Option<Vec<String>>) -> DaemonResult<Option<Vec<PathBuf>>> {
-    let prefetch_files: Option<Vec<PathBuf>> = input
-        .as_ref()
-        .map(|files| files.iter().map(PathBuf::from).collect());
+fn input_prefetch_files_verify(
+    input: &Option<Vec<String>>,
+) -> DaemonResult<Option<Vec<RafsPrefetchFileInfo>>> {
+    if let Some(list) = input {
+        let files = list
+            .iter()
+            .filter_map(|input| RafsPrefetchFileInfo::from_input(input).ok())
+            .collect();
 
-    if let Some(files) = &prefetch_files {
-        for f in files.iter() {
-            if !f.starts_with(Path::new("/")) {
-                return Err(DaemonError::Common("Illegal prefetch list".to_string()));
-            }
-        }
+        Ok(Some(files))
+    } else {
+        Ok(None)
     }
-
-    Ok(prefetch_files)
 }
 fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
     let prefetch_files = input_prefetch_files_verify(&cmd.prefetch_files)?;
@@ -378,8 +448,13 @@ fn fs_backend_factory(cmd: &FsBackendMountCmd) -> DaemonResult<BackFileSystem> {
         FsBackendType::Rafs => {
             let rafs_config = RafsConfig::from_str(cmd.config.as_str())?;
             let mut bootstrap = <dyn RafsIoRead>::from_file(&cmd.source)?;
-            let mut rafs = Rafs::new(rafs_config, &cmd.mountpoint, &mut bootstrap)?;
-            rafs.import(bootstrap, prefetch_files)?;
+            let mut rafs = Rafs::new(
+                rafs_config,
+                &cmd.mountpoint,
+                &mut bootstrap,
+                &prefetch_files,
+            )?;
+            rafs.import(bootstrap, prefetch_files, cmd.download_hot)?;
             info!("Rafs imported");
             Ok(Box::new(rafs))
         }

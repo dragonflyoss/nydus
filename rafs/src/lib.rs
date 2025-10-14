@@ -31,6 +31,7 @@ use std::path::Path;
 pub mod fs;
 pub mod metadata;
 pub mod mock;
+pub mod observe;
 
 #[derive(Debug)]
 pub enum RafsError {

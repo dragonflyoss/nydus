@@ -255,6 +255,7 @@ impl ApiServer {
                 config: cmd.config,
                 source: cmd.source,
                 prefetch_files: cmd.prefetch_files,
+                download_hot: false,
             })
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::MountFailure(e.into()))
@@ -270,6 +271,7 @@ impl ApiServer {
                 config: cmd.config,
                 source: cmd.source,
                 prefetch_files: cmd.prefetch_files,
+                download_hot: false,
             })
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::MountFailure(e.into()))

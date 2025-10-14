@@ -10,10 +10,11 @@ use std::any::Any;
 use std::convert::TryFrom;
 use std::ffi::{CStr, OsStr};
 use std::fmt;
+use std::fs::File;
 use std::io::Result;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -24,9 +25,8 @@ use fuse_backend_rs::abi::linux_abi::Attr;
 use fuse_backend_rs::api::filesystem::*;
 use fuse_backend_rs::api::BackendFileSystem;
 
-use crate::metadata::{
-    layout::RAFS_ROOT_INODE, Inode, RafsInode, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE,
-};
+use crate::metadata::{Inode, RafsInode, RafsPrefetchFileInfo, RafsSuper, RAFS_DEFAULT_BLOCK_SIZE};
+use crate::observe::*;
 use crate::*;
 use nydus_utils::metrics::{self, FopRecorder, StatsFop::*};
 use storage::device::BlobPrefetchControl;
@@ -40,6 +40,12 @@ pub type Handle = u64;
 pub const RAFS_DEFAULT_ATTR_TIMEOUT: u64 = 1 << 32;
 /// Rafs default entry timeout value.
 pub const RAFS_DEFAULT_ENTRY_TIMEOUT: u64 = RAFS_DEFAULT_ATTR_TIMEOUT;
+
+const RAFS_IMAGE_STATE_NOLOAD: u8 = 1;
+const RAFS_IMAGE_STATE_HINTFILELOADING: u8 = 2;
+const RAFS_IMAGE_STATE_HINTFILELOADED: u8 = 3;
+const RAFS_IMAGE_STATE_FULLLOADING: u8 = 4;
+const RAFS_IMAGE_STATE_FULLLOADED: u8 = 5;
 
 const DOT: &str = ".";
 const DOTDOT: &str = "..";
@@ -105,6 +111,8 @@ pub struct RafsConfig {
     #[serde(default)]
     pub fs_prefetch: FsPrefetchControl,
     #[serde(default)]
+    pub fs_observe: FsObserveControl,
+    #[serde(default)]
     pub enable_xattr: bool,
     #[serde(default)]
     pub access_pattern: bool,
@@ -156,8 +164,10 @@ pub struct Rafs {
     prefetch_all: bool,
     initialized: bool,
     xattr_enabled: bool,
+    fs_observe: Arc<RafsObserve>,
     ios: Arc<metrics::GlobalIoStats>,
     amplify_io: u32,
+    pub data_state: Arc<AtomicU8>,
     // static inode attributes
     i_uid: u32,
     i_gid: u32,
@@ -183,7 +193,12 @@ impl TryFrom<&RafsConfig> for PrefetchWorker {
 }
 
 impl Rafs {
-    pub fn new(conf: RafsConfig, id: &str, r: &mut RafsIoReader) -> RafsResult<Self> {
+    pub fn new(
+        conf: RafsConfig,
+        id: &str,
+        r: &mut RafsIoReader,
+        prefetch_files: &Option<Vec<RafsPrefetchFileInfo>>,
+    ) -> RafsResult<Self> {
         let mut device_conf = conf.device.clone();
 
         device_conf.cache.cache_validate = conf.digest_validate;
@@ -209,6 +224,14 @@ impl Rafs {
             amplify_io: conf.amplify_io,
             prefetch_all: conf.fs_prefetch.prefetch_all,
             xattr_enabled: conf.enable_xattr,
+            data_state: Arc::new(AtomicU8::new(RAFS_IMAGE_STATE_NOLOAD)),
+            fs_observe: Arc::new(RafsObserve::new(
+                conf.fs_observe.enable,
+                conf.fs_observe.sample,
+                conf.fs_observe.period,
+                conf.fs_observe.hint_file,
+                prefetch_files,
+            )),
             i_uid: geteuid().into(),
             i_gid: getegid().into(),
             i_time: SystemTime::now()
@@ -260,11 +283,28 @@ impl Rafs {
         Ok(())
     }
 
+    pub fn get_io_analyze_result(&self) -> (f32, f64, u64, u32, f64) {
+        self.fs_observe.observer_export_io_analyze_result()
+    }
+
+    pub fn get_size_info(&self) -> (u64, u64) {
+        self.sb.superblock.get_blobs().iter().fold(
+            (0, 0),
+            |(decompressed_size, compressed_size), entry| {
+                (
+                    decompressed_size + entry.blob_cache_size,
+                    compressed_size + entry.compressed_blob_size,
+                )
+            },
+        )
+    }
+
     /// Import an rafs bootstrap to initialize the filesystem instance.
     pub fn import(
         &mut self,
         r: RafsIoReader,
-        prefetch_files: Option<Vec<PathBuf>>,
+        prefetch_files: Option<Vec<RafsPrefetchFileInfo>>,
+        download_hot: bool,
     ) -> RafsResult<()> {
         if self.initialized {
             return Err(RafsError::AlreadyMounted);
@@ -293,26 +333,20 @@ impl Rafs {
             let device = self.device.clone();
 
             let prefetch_all = self.prefetch_all;
-
+            let data_state = Arc::clone(&self.data_state);
+            let obs = self.fs_observe.clone();
             let _ = std::thread::spawn(move || {
+                data_state.store(
+                    if prefetch_files.is_none() {
+                        RAFS_IMAGE_STATE_FULLLOADING
+                    } else {
+                        RAFS_IMAGE_STATE_HINTFILELOADING
+                    },
+                    Ordering::Relaxed,
+                );
                 let mut reader = r;
-                let inodes = match prefetch_files {
-                    Some(files) => {
-                        let mut inodes = Vec::<Inode>::new();
-                        for f in files {
-                            if let Ok(inode) = sb.ino_from_path(f.as_path()) {
-                                inodes.push(inode);
-                            } else {
-                                continue;
-                            }
-                        }
-                        Some(inodes)
-                    }
-                    None => None,
-                };
-
                 // Prefetch procedure does not affect rafs mounting
-                sb.prefetch_hint_files(&mut reader, inodes, &|mut desc| {
+                sb.prefetch_hint_files(&mut reader, prefetch_files, &|mut desc| {
                     device.prefetch(&mut desc).unwrap_or_else(|e| {
                         warn!("Prefetch error, {:?}", e);
                         0
@@ -321,9 +355,22 @@ impl Rafs {
                 .unwrap_or_else(|e| {
                     info!("No file to be prefetched {:?}", e);
                 });
-
+                //FIXME: how to check the hintfile prefetch requests already done
+                if data_state.load(Ordering::Acquire) == RAFS_IMAGE_STATE_HINTFILELOADING {
+                    data_state.store(RAFS_IMAGE_STATE_HINTFILELOADED, Ordering::Relaxed);
+                }
+                let mut latency_start = SystemTime::now();
                 if prefetch_all {
-                    let root = vec![RAFS_ROOT_INODE];
+                    if download_hot {
+                        obs.wait_for_running();
+                    }
+                    latency_start = SystemTime::now();
+                    data_state.store(RAFS_IMAGE_STATE_FULLLOADING, Ordering::Relaxed);
+                    let root_file = RafsPrefetchFileInfo {
+                        file: Path::new("/").to_path_buf(),
+                        ranges: None,
+                    };
+                    let root = vec![root_file];
                     sb.prefetch_hint_files(&mut reader, Some(root), &|mut desc| {
                         device.prefetch(&mut desc).unwrap_or_else(|e| {
                             warn!("Prefetch error, {:?}", e);
@@ -334,15 +381,23 @@ impl Rafs {
                         info!("No file to be prefetched {:?}", e);
                     })
                 }
-
                 // For now, we only have hinted prefetch. So stopping prefetch workers once
                 // it's done is Okay. But if we involve more policies someday, we have to be
                 // careful when to stop prefetch progresses.
                 device
                     .stop_prefetch()
                     .unwrap_or_else(|_| error!("Failed in stopping prefetch workers"));
+                if let Ok(d) = SystemTime::elapsed(&latency_start) {
+                    let mut prefetch_time = obs.prefetch_time.lock().unwrap();
+                    *prefetch_time = d.as_micros() as f64 / 1000.0;
+                }
+                if data_state.load(Ordering::Acquire) == RAFS_IMAGE_STATE_FULLLOADING {
+                    data_state.store(RAFS_IMAGE_STATE_FULLLOADED, Ordering::Relaxed)
+                }
             });
         }
+        self.fs_observe.observer_io_result_analyze(self.ios.clone());
+        self.fs_observe.sampler_generate_hint_file();
 
         self.initialized = true;
         Ok(())
@@ -618,21 +673,32 @@ impl FileSystem for Rafs {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> Result<usize> {
+        let start = self.ios.latency_start();
         let mut recorder = FopRecorder::settle(Read, ino, &self.ios);
         let inode = self.sb.get_inode(ino, false)?;
+        let name = self.sb.path_from_ino(ino)?;
         if offset >= inode.size() {
             recorder.mark_success(0);
             return Ok(0);
         }
+        // when get first IO request, switch observe to running
+        self.fs_observe.switch_to_running();
+        self.fs_observe.observer_rating_rafs_hintfile(&name);
+        self.fs_observe
+            .sampler_collect_read_ios(name, offset, offset + size as u64);
+
         let mut desc = inode.alloc_bio_desc(offset, size as usize, true)?;
         let mut all_cached = true;
+        let mut cached_hit;
 
         if self.amplify_io != 0 {
             if let Some(d) = self.amplify_io.checked_sub(size) {
                 for b in &desc.bi_vec {
                     let c = b.chunkinfo.as_ref();
                     let blob = b.blob.as_ref();
-                    all_cached &= self.device.rw_layer.load().is_chunk_cached(c, blob);
+                    cached_hit = self.device.rw_layer.load().is_chunk_cached(c, blob);
+                    all_cached &= cached_hit;
+                    self.fs_observe.observer_statistics_rafs_io(!cached_hit);
                 }
                 // Try to amplify user io from here, aim at better performance.
                 if !all_cached {
@@ -652,7 +718,6 @@ impl FileSystem for Rafs {
             }
         }
 
-        let start = self.ios.latency_start();
         // Avoid copying `desc`
         let r = self.device.read_to(w, &mut desc).map(|r| {
             recorder.mark_success(r);
@@ -836,6 +901,7 @@ impl FileSystem for Rafs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn new_rafs_backend() -> Box<Rafs> {
         let config = r#"
@@ -871,7 +937,7 @@ mod tests {
         let bootstrapfile = source_path.to_str().unwrap();
         let mut bootstrap = <dyn RafsIoRead>::from_file(bootstrapfile).unwrap();
         let mut rafs = Rafs::new(rafs_config, mountpoint, &mut bootstrap).unwrap();
-        rafs.import(bootstrap, Some(vec![std::path::PathBuf::new()]))
+        rafs.import(bootstrap, Some(vec![std::path::PathBuf::new()]), false)
             .unwrap();
         Box::new(rafs)
     }

@@ -362,6 +362,10 @@ impl GlobalIoStats {
         }
     }
 
+    pub fn export_fop_cumulative_latency(&self, fop: StatsFop) -> u64 {
+        self.fop_cumulative_latency_total[fop as usize].count()
+    }
+
     fn export_files_stats(&self) -> Result<String, IoStatsError> {
         serde_json::to_string(
             self.file_counters

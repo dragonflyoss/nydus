@@ -20,6 +20,7 @@ use serde_with::{serde_as, DisplayFromStr};
 
 use fuse_backend_rs::abi::linux_abi::Attr;
 use fuse_backend_rs::api::filesystem::{Entry, ROOT_ID};
+use nix::NixPath;
 use nydus_utils::digest::{self, RafsDigest};
 use storage::compress;
 use storage::device::{RafsBioDesc, RafsBlobEntry, RafsChunkInfo};
@@ -243,6 +244,60 @@ impl Display for RafsMode {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RafsPrefetchFileRange {
+    offset: u64,
+    size: usize,
+}
+#[derive(Debug, Clone)]
+pub struct RafsPrefetchFileInfo {
+    pub file: PathBuf,
+    pub ranges: Option<Vec<RafsPrefetchFileRange>>,
+}
+
+impl RafsPrefetchFileInfo {
+    pub fn from_input(input: &str) -> Result<Self> {
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        let file = PathBuf::from(parts[0]);
+        if !file.is_absolute() {
+            return Err(einval!(format!("PrefetchFileInfo path is not absolute.")));
+        }
+
+        if parts.len() != 2 {
+            return Ok(RafsPrefetchFileInfo { file, ranges: None });
+        }
+        let range_strs = parts[1];
+        let mut ranges = Vec::new();
+        for range_s in range_strs.split(',') {
+            let range_parts: Vec<&str> = range_s.split('-').collect();
+            if range_parts.len() != 2 {
+                return Err(einval!(format!(
+                    "PrefetchFileInfo Range format is incorrect"
+                )));
+            }
+
+            let offset = range_parts[0]
+                .parse::<u64>()
+                .map_err(|_| enoent!("parse offset failed"))?;
+
+            let end = range_parts[1]
+                .parse::<u64>()
+                .map_err(|_| enoent!("parse size failed"))?;
+
+            let range = RafsPrefetchFileRange {
+                offset,
+                size: (end - offset) as usize,
+            };
+
+            ranges.push(range);
+        }
+        Ok(RafsPrefetchFileInfo {
+            file,
+            ranges: Some(ranges),
+        })
+    }
+}
+
 /// Cached Rafs super block and inode information.
 pub struct RafsSuper {
     pub mode: RafsMode,
@@ -328,7 +383,7 @@ impl RafsSuper {
     pub fn prefetch_hint_files(
         &self,
         r: &mut RafsIoReader,
-        files: Option<Vec<Inode>>,
+        files: Option<Vec<RafsPrefetchFileInfo>>,
         fetcher: &dyn Fn(&mut RafsBioDesc),
     ) -> RafsResult<()> {
         // Prefer to use the file list specified by daemon for prefetching, then
@@ -345,9 +400,21 @@ impl RafsSuper {
 
             // Try to prefetch according to the list of files specified by the
             // daemon's `--prefetch-files` option.
-            for f_ino in files {
-                self.build_prefetch_desc_v4v5(f_ino, &mut head_desc, &mut hardlinks, fetcher)
-                    .map_err(|e| RafsError::Prefetch(e.to_string()))?;
+            for file in files {
+                if let Ok(ino) = self
+                    .ino_from_path(file.file.as_path())
+                    .map_err(|e| RafsError::Prefetch(e.to_string()))
+                {
+                    if let Err(e) = self.build_prefetch_desc_v4v5(
+                        ino,
+                        file.ranges,
+                        &mut head_desc,
+                        &mut hardlinks,
+                        fetcher,
+                    ) {
+                        warn!("prefetch_data error {}", e.to_string());
+                    }
+                }
             }
             // The left chunks whose size is smaller than 4MB will be fetched here.
             fetcher(&mut head_desc);
@@ -461,7 +528,11 @@ impl RafsSuper {
         loop {
             inode = self.get_inode(cur_ino, false)?;
             let e: PathBuf = inode.name().into();
-            path = e.join(path);
+            if path.is_empty() {
+                path = e;
+            } else {
+                path = e.join(path);
+            }
 
             if inode.ino() == ROOT_ID {
                 break;
@@ -522,6 +593,7 @@ impl RafsSuper {
     fn build_prefetch_desc_v4v5(
         &self,
         ino: u64,
+        ranges: Option<Vec<RafsPrefetchFileRange>>,
         head_desc: &mut RafsBioDesc,
         hardlinks: &mut HashSet<u64>,
         fetcher: &dyn Fn(&mut RafsBioDesc),
@@ -571,11 +643,25 @@ impl RafsSuper {
                             hardlinks.insert(inode.ino());
                         }
                     }
-                    let mut desc = inode.alloc_bio_desc(0, inode.size() as usize, false)?;
-                    head_desc.bi_vec.append(desc.bi_vec.as_mut());
-                    head_desc.bi_size += desc.bi_size;
+                    match ranges {
+                        None => {
+                            let mut desc = inode.alloc_bio_desc(0, inode.size() as usize, false)?;
+                            head_desc.bi_vec.append(desc.bi_vec.as_mut());
+                            head_desc.bi_size += desc.bi_size;
 
-                    try_prefetch(head_desc);
+                            try_prefetch(head_desc);
+                        }
+                        Some(ranges) => {
+                            for range in ranges {
+                                let mut desc =
+                                    inode.alloc_bio_desc(range.offset, range.size, false)?;
+                                head_desc.bi_vec.append(desc.bi_vec.as_mut());
+                                head_desc.bi_size += desc.bi_size;
+
+                                try_prefetch(head_desc);
+                            }
+                        }
+                    }
                 }
             }
             Err(_) => {
@@ -624,8 +710,14 @@ impl RafsSuper {
                 break;
             }
             debug!("hint prefetch inode {}", ino);
-            self.build_prefetch_desc_v4v5(ino as u64, &mut head_desc, &mut hardlinks, fetcher)
-                .map_err(|e| RafsError::Prefetch(e.to_string()))?;
+            self.build_prefetch_desc_v4v5(
+                ino as u64,
+                None,
+                &mut head_desc,
+                &mut hardlinks,
+                fetcher,
+            )
+            .map_err(|e| RafsError::Prefetch(e.to_string()))?;
         }
         // The left chunks whose size is smaller than 4MB will be fetched here.
         fetcher(&mut head_desc);

@@ -243,6 +243,14 @@ fn main() -> Result<()> {
                 .min_values(1),
         )
         .arg(
+            Arg::with_name("download-hot")
+                .long("download-hot")
+                .help("Only download hot blob data")
+                .takes_value(false)
+                .required(false)
+                .global(true),
+        )
+        .arg(
             Arg::with_name("threads")
                 .long("thread-num")
                 .default_value("1")
@@ -300,6 +308,7 @@ fn main() -> Result<()> {
         .value_of("rlimit-nofile")
         .map(|n| n.parse().unwrap_or(rlimit_nofile_default))
         .unwrap_or(rlimit_nofile_default);
+    let download_hot = cmd_arguments_parsed.is_present("download-hot");
 
     let vfs = Vfs::new(VfsOptions::default());
     let mount_cmd = if let Some(shared_dir) = shared_dir {
@@ -318,6 +327,7 @@ fn main() -> Result<()> {
             config: "".to_string(),
             mountpoint: virtual_mnt.to_string(),
             prefetch_files: None,
+            download_hot: false,
         };
 
         Some(cmd)
@@ -326,9 +336,30 @@ fn main() -> Result<()> {
             DaemonError::InvalidArguments("config file is not provided".to_string())
         })?;
 
-        let prefetch_files: Option<Vec<String>> = cmd_arguments_parsed
-            .values_of("prefetch-files")
-            .map(|files| files.map(|s| s.to_string()).collect());
+        // read the prefetch list of files from prefetch-files
+        let prefetch_files: Option<Vec<String>> =
+            match cmd_arguments_parsed.value_of("prefetch-files") {
+                Some(v) => {
+                    let content = match std::fs::read_to_string(v) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let e = DaemonError::InvalidArguments(
+                                "the prefetch-files arg is not a file path".to_string(),
+                            );
+                            return Err(e.into());
+                        }
+                    };
+                    let mut prefetch_files: Vec<String> = Vec::new();
+                    for line in content.lines() {
+                        if line.is_empty() || line.trim().is_empty() {
+                            continue;
+                        }
+                        prefetch_files.push(line.trim().to_string());
+                    }
+                    Some(prefetch_files)
+                }
+                None => None,
+            };
 
         let cmd = FsBackendMountCmd {
             fs_type: FsBackendType::Rafs,
@@ -336,6 +367,7 @@ fn main() -> Result<()> {
             config: std::fs::read_to_string(config)?,
             mountpoint: virtual_mnt.to_string(),
             prefetch_files,
+            download_hot,
         };
 
         Some(cmd)
@@ -365,6 +397,7 @@ fn main() -> Result<()> {
         })?;
         create_nydus_daemon(daemon_id, supervisor, vu_sock, vfs, mount_cmd, bti)?
     };
+
     #[cfg(feature = "fusedev")]
     let daemon = {
         // threads means number of fuse service threads
