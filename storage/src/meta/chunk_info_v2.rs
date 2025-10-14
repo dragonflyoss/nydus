@@ -4,6 +4,7 @@
 
 use std::fmt::{Display, Formatter};
 use std::io::{Error, ErrorKind, Result};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::device::BlobFeatures;
 use crate::meta::{BlobCompressionContext, BlobMetaChunkInfo, BLOB_CCT_CHUNK_SIZE_MASK};
@@ -20,6 +21,8 @@ const CHUNK_V2_FLAG_BATCH: u64 = 0x4 << 56;
 const CHUNK_V2_FLAG_ENCRYPTED: u64 = 0x8 << 56;
 const CHUNK_V2_FLAG_HAS_CRC32: u64 = 0x10 << 56;
 const CHUNK_V2_FLAG_VALID: u64 = 0x1f << 56;
+
+static LAST_WARNED_FLAGS: AtomicU8 = AtomicU8::new(0xFF);
 
 /// Chunk compression information on disk format V2.
 #[repr(C, packed)]
@@ -251,10 +254,14 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
 
         let invalid_flags = self.check_flags();
         if invalid_flags != 0 {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("unknown chunk flags 0x{:x}", invalid_flags),
-            ));
+            let current = LAST_WARNED_FLAGS.load(Ordering::Relaxed);
+            if current != invalid_flags
+                && LAST_WARNED_FLAGS
+                    .compare_exchange(current, invalid_flags, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                warn!("Invalid flags 0x{:x} detected for chunks.", invalid_flags);
+            }
         }
 
         if state.blob_features & BlobFeatures::ZRAN.bits() == 0 && self.is_zran() {

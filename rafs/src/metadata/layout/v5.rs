@@ -653,7 +653,7 @@ impl RafsV5BlobTable {
                         return Err(einval!());
                     }
                     let entry = &self.extended.entries[index];
-                    let blob_features = BlobFeatures::from_bits(entry.features).ok_or_else(|| einval!("invalid blob feature flags"))?;
+                    let blob_features = BlobFeatures::from_bits_truncate(entry.features);
                     (entry.chunk_count, entry.uncompressed_size, entry.compressed_size, blob_features)
                 } else {
                     (0, 0, 0, BlobFeatures::_V5_NO_EXT_BLOB_TABLE)
