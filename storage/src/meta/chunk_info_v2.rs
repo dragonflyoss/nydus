@@ -4,6 +4,7 @@
 
 use std::fmt::{Display, Formatter};
 use std::io::{Error, ErrorKind, Result};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::device::BlobFeatures;
 use crate::meta::{BlobCompressionContext, BlobMetaChunkInfo, BLOB_CCT_CHUNK_SIZE_MASK};
@@ -20,6 +21,8 @@ const CHUNK_V2_FLAG_BATCH: u64 = 0x4 << 56;
 const CHUNK_V2_FLAG_ENCRYPTED: u64 = 0x8 << 56;
 const CHUNK_V2_FLAG_HAS_CRC32: u64 = 0x10 << 56;
 const CHUNK_V2_FLAG_VALID: u64 = 0x1f << 56;
+
+static LAST_WARNED_FLAGS: AtomicU8 = AtomicU8::new(0xFF);
 
 /// Chunk compression information on disk format V2.
 #[repr(C, packed)]
@@ -251,10 +254,14 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
 
         let invalid_flags = self.check_flags();
         if invalid_flags != 0 {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!("unknown chunk flags 0x{:x}", invalid_flags),
-            ));
+            let current = LAST_WARNED_FLAGS.load(Ordering::Relaxed);
+            if current != invalid_flags
+                && LAST_WARNED_FLAGS
+                    .compare_exchange(current, invalid_flags, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                warn!("Invalid flags 0x{:x} detected for chunks.", invalid_flags);
+            }
         }
 
         if state.blob_features & BlobFeatures::ZRAN.bits() == 0 && self.is_zran() {
@@ -521,6 +528,28 @@ mod tests {
         assert!(chunk.validate(&ctx).is_err());
 
         chunk.set_zran(false);
+        assert!(chunk.validate(&ctx).is_ok());
+    }
+
+    #[test]
+    fn test_unknown_chunk_flags() {
+        let ctx = BlobCompressionContext {
+            compressed_size: 0x10000,
+            uncompressed_size: 0x10000,
+            blob_features: 0,
+            ..Default::default()
+        };
+
+        let mut chunk = BlobChunkInfoV2Ondisk::default();
+        chunk.set_compressed_offset(0x100);
+        chunk.set_compressed_size(0x200);
+        chunk.set_uncompressed_offset(0x1000);
+        chunk.set_uncompressed_size(0x200);
+        chunk.set_compressed(true);
+
+        let invalid_flag = 0x20u64 << 56;
+        chunk.uncomp_info = u64::to_le(u64::from_le(chunk.uncomp_info) | invalid_flag);
+
         assert!(chunk.validate(&ctx).is_ok());
     }
 }
