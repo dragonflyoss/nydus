@@ -1,7 +1,8 @@
 # Nydusify
 
 The Nydusify CLI tool supports:
-1. Convert an OCI container image from source registry into a Nydus image using `nydus-image` CLI layer by layer, then push Nydus image to target registry.
+
+1. Convert an OCI container image from source registry or OCI image layout tar archive into a Nydus image using `nydus-image` CLI layer by layer, then push the resulting Nydus image to target registry or export it into another OCI image layout tar archive.
 2. Convert local file system dictionary into Nydus image using `nydus-image`, then push Nydus-image to target remote storage(e.g. oss) optionally.
 
 ### Get binaries from release page
@@ -11,12 +12,15 @@ Get `nydus-image`, `nydusd` and `nydusify` binaries from [release](https://githu
 ## Basic Usage
 
 Convert oci image:
+
 ```
 nydusify convert \
   --source myregistry/repo:tag \
   --target myregistry/repo:tag-nydus
 ```
+
 Pack local file system dictionary:
+
 ```
 nydusify pack \
   --bootstrap target.bootstrap \
@@ -146,6 +150,43 @@ nydusify pack --bootstrap target.bootstrap \
   --output-dir /path/to/output
 ```
 
+## Convert images to/from local OCI archives
+
+Nydusify supports converting images directly to and from local OCI image layout tar archives without requiring a registry. This is useful for offline conversion workflows or when working with local image files.
+
+### Convert from local OCI archive to registry
+
+``` shell
+# Convert OCI archive to Nydus image in registry
+nydusify convert \
+  --source myregistry/repo:tag \
+  --source-archive /path/to/source-oci-image.tar \
+  --target myregistry/repo:tag-nydus
+```
+
+### Convert from registry to local OCI archive
+
+``` shell
+# Convert registry image to Nydus OCI archive
+nydusify convert \
+  --source myregistry/repo:tag \
+  --target myregistry/repo:tag-nydus \
+  --target-archive /path/to/target-nydus-image.tar
+```
+
+### Convert between local OCI archives
+
+``` shell
+# Convert local OCI archive to local Nydus archive
+nydusify convert \
+  --source myregistry/repo:tag \
+  --source-archive /path/to/source-oci-image.tar \
+  --target myregistry/repo:tag-nydus \
+  --target-archive /path/to/target-nydus-image.tar
+```
+
+**Note:** When using `--source-archive`, the source archive file must exist and be accessible. When using `--target-archive`, the parent directory must exist and be writable. The `--source` and `--target` flags are still required to specify the image reference names used within the archives.
+
 ## Check Nydus image
 
 Nydusify provides a checker to validate Nydus image, the checklist includes image manifest, Nydus bootstrap, file metadata, and data consistency in rootfs with the original OCI image. Meanwhile, the checker dumps OCI & Nydus image information to `output` (default) directory.
@@ -188,7 +229,6 @@ nydusify check \
   --backend-type oss \
   --backend-config-file /path/to/backend-config.json
 ```
-
 
 ## Mount the nydus image as a filesystem
 
@@ -267,6 +307,7 @@ The original container ID need to be a full container ID rather than an abbrevia
 The nydusify optimize command can optimize a nydus image from prefetch files, prefetch files are file access patterns during container startup. This will generate a new bootstrap and a new blob wich contains all data indicated by prefetch files.
 
 The content of prefetch files likes this:
+
 ```json
 {
   "version": "v1",
