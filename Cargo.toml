@@ -64,7 +64,7 @@ nydus-rafs = { version = "0.4.0", path = "rafs" }
 nydus-service = { version = "0.4.0", path = "service", features = [
     "block-device",
 ] }
-nydus-storage = { version = "0.7.0", path = "storage", features = [
+nydus-storage = { version = "0.7.1", path = "storage", features = [
     "prefetch-rate-limit",
 ] }
 nydus-utils = { version = "0.5.0", path = "utils" }
