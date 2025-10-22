@@ -19,9 +19,13 @@ func isSignalKilled(err error) bool {
 }
 
 type BuildOption struct {
-	BuilderPath         string
-	PrefetchFilesPath   string
-	BootstrapPath       string
+	BuilderPath       string
+	PrefetchFilesPath string
+	BootstrapPath     string
+	BackendType       string
+	BackendConfig     string
+	// `BlobDir` is used to store optimized blob,
+	// Beside, `BlobDir` is also used to store the original blobs when backend is localfs
 	BlobDir             string
 	OutputBootstrapPath string
 	OutputJSONPath      string
@@ -42,12 +46,19 @@ func Build(option BuildOption) (string, error) {
 		option.PrefetchFilesPath,
 		"--bootstrap",
 		option.BootstrapPath,
-		"--blob-dir",
+		"--output-blob-dir",
 		option.BlobDir,
 		"--output-bootstrap",
 		option.OutputBootstrapPath,
 		"--output-json",
 		outputJSONPath,
+	}
+
+	if option.BackendType == "localfs" {
+		args = append(args, "--blob-dir", option.BlobDir)
+	} else {
+		args = append(args, "--backend-type", option.BackendType)
+		args = append(args, "--backend-config", option.BackendConfig)
 	}
 
 	ctx := context.Background()

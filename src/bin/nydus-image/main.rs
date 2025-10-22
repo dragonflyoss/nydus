@@ -31,11 +31,11 @@ use nix::unistd::{getegid, geteuid};
 use nydus::{get_build_time_info, setup_logging};
 use nydus_api::{BuildTimeInfo, ConfigV2, LocalFsConfig};
 use nydus_builder::{
-    attributes::Attributes, parse_chunk_dict_arg, update_ctx_from_bootstrap, ArtifactStorage,
-    BlobCacheGenerator, BlobCompactor, BlobManager, BootstrapManager, BuildContext, BuildOutput,
-    Builder, ChunkdictBlobInfo, ChunkdictChunkInfo, ConversionType, DirectoryBuilder, Feature,
-    Features, Generator, HashChunkDict, Merger, OptimizePrefetch, Prefetch, PrefetchPolicy,
-    StargzBuilder, TarballBuilder, Tree, TreeNode, WhiteoutSpec,
+    attributes::Attributes, generate_prefetch_file_info, parse_chunk_dict_arg,
+    update_ctx_from_bootstrap, ArtifactStorage, BlobCacheGenerator, BlobCompactor, BlobManager,
+    BootstrapManager, BuildContext, BuildOutput, Builder, ChunkdictBlobInfo, ChunkdictChunkInfo,
+    ConversionType, DirectoryBuilder, Feature, Features, Generator, HashChunkDict, Merger,
+    OptimizePrefetch, Prefetch, PrefetchPolicy, StargzBuilder, TarballBuilder, Tree, WhiteoutSpec,
 };
 
 use nydus_rafs::metadata::{MergeError, RafsSuper, RafsSuperConfig, RafsVersion};
@@ -577,6 +577,32 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
             )
             .arg(arg_config.clone())
             .arg(
+                Arg::new("backend-type")
+                    .long("backend-type")
+                    .help(format!(
+                        "Type of backend [possible values: {}]",
+                        BlobFactory::supported_backends()
+                            .into_iter()
+                            .filter(|x| x != "localfs")
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .required(false)
+            )
+            .arg(
+                Arg::new("backend-config")
+                    .long("backend-config")
+                    .help("Config string of backend")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("backend-config-file")
+                    .long("backend-config-file")
+                    .help("Config file of backend")
+                    .conflicts_with("backend-config")
+                    .required(false),
+            )
+            .arg(
                 Arg::new("blob-dir")
                     .long("blob-dir")
                     .short('D')
@@ -586,10 +612,21 @@ fn prepare_cmd_args(bti_string: &'static str) -> App {
                     ),
             )
             .arg(
+                Arg::new("blob")
+                    .long("blob")
+                    .short('b')
+                    .help("Path to RAFS data blob file")
+            )
+            .arg(
                 Arg::new("output-bootstrap")
                     .long("output-bootstrap")
                     .short('O')
                     .help("Output path of optimized bootstrap"),
+            )
+            .arg(
+                Arg::new("output-blob-dir")
+                    .long("output-blob-dir")
+                    .help("Directroy path for storing optimized blob"),
             )
             .arg(
                 arg_output_json.clone(),
@@ -1714,9 +1751,8 @@ impl Command {
     }
 
     fn optimize(matches: &ArgMatches, build_info: &BuildTimeInfo) -> Result<()> {
-        let blobs_dir_path = Self::get_blobs_dir(matches)?;
-        let prefetch_files = Self::get_prefetch_files(matches)?;
-        prefetch_files.iter().for_each(|f| println!("{}", f));
+        let output_blob_dir_path = Self::get_output_blob_dir(matches)?;
+        let prefetch_file = Self::get_prefetch_files(matches)?;
         let bootstrap_path = Self::get_bootstrap(matches)?;
         let dst_bootstrap = match matches.get_one::<String>("output-bootstrap") {
             None => ArtifactStorage::SingleFile(PathBuf::from("optimized_bootstrap")),
@@ -1731,19 +1767,17 @@ impl Command {
             ..Default::default()
         };
 
+        let (_c, backend) = match Self::get_backend(matches, "optimizer") {
+            Ok((c, b)) => (c, b),
+            Err(e) => {
+                bail!("{}, --blob-dir or --backend-type must be specified", e);
+            }
+        };
+
         let sb = update_ctx_from_bootstrap(&mut build_ctx, config, bootstrap_path)?;
         let mut tree = Tree::from_bootstrap(&sb, &mut ())?;
-
-        let mut prefetch_nodes: Vec<TreeNode> = Vec::new();
-        // Init prefetch nodes
-        for f in prefetch_files.iter() {
-            let path = PathBuf::from(f);
-            if let Some(tree) = tree.get_node(&path) {
-                prefetch_nodes.push(tree.node.clone());
-            }
-        }
-
         let mut bootstrap_mgr = BootstrapManager::new(Some(dst_bootstrap), None);
+        let prefetch_nodes = generate_prefetch_file_info(prefetch_file)?;
         let blobs = sb.superblock.get_blob_infos();
 
         let mut blob_table = match build_ctx.fs_version {
@@ -1759,8 +1793,9 @@ impl Command {
             &mut build_ctx,
             &mut bootstrap_mgr,
             &mut blob_table,
-            blobs_dir_path.to_path_buf(),
+            output_blob_dir_path.to_path_buf(),
             prefetch_nodes,
+            backend,
         )
         .with_context(|| "Failed to generate prefetch bootstrap")?;
 
@@ -1873,28 +1908,16 @@ impl Command {
         }
     }
 
-    fn get_blobs_dir(matches: &ArgMatches) -> Result<&Path> {
-        match matches.get_one::<String>("blob-dir") {
+    fn get_output_blob_dir(matches: &ArgMatches) -> Result<&Path> {
+        match matches.get_one::<String>("output-blob-dir") {
             Some(s) => Ok(Path::new(s)),
-            None => bail!("missing parameter `blob-dir`"),
+            None => bail!("missing parameter `output-blob-dir`"),
         }
     }
 
-    fn get_prefetch_files(matches: &ArgMatches) -> Result<Vec<String>> {
+    fn get_prefetch_files(matches: &ArgMatches) -> Result<&Path> {
         match matches.get_one::<String>("prefetch-files") {
-            Some(v) => {
-                let content = std::fs::read_to_string(v)
-                    .map_err(|e| anyhow!("failed to read prefetch files from {}: {}", v, e))?;
-
-                let mut prefetch_files: Vec<String> = Vec::new();
-                for line in content.lines() {
-                    if line.is_empty() || line.trim().is_empty() {
-                        continue;
-                    }
-                    prefetch_files.push(line.trim().to_string());
-                }
-                Ok(prefetch_files)
-            }
+            Some(s) => Ok(Path::new(s)),
             None => bail!("missing parameter `prefetch-files`"),
         }
     }

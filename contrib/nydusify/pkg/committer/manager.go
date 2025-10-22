@@ -115,9 +115,16 @@ func (m *Manager) Inspect(ctx context.Context, containerID string) (*InspectResu
 	if err != nil {
 		return nil, errors.Wrapf(err, "get snapshot mount")
 	}
-	// snapshot Mount Options[0] "workdir=$workdir", Options[1] "upperdir=$upperdir", Options[2] "lowerdir=$lowerdir".
-	lowerDirs = strings.TrimPrefix(mount[0].Options[2], "lowerdir=")
-	upperDir = strings.TrimPrefix(mount[0].Options[1], "upperdir=")
+
+	// Parse overlay mount options properly - they can be in any order
+	for _, option := range mount[0].Options {
+		if strings.HasPrefix(option, "lowerdir=") {
+			lowerDirs = strings.TrimPrefix(option, "lowerdir=")
+		} else if strings.HasPrefix(option, "upperdir=") {
+			upperDir = strings.TrimPrefix(option, "upperdir=")
+		}
+		// Skip workdir and other options as they're not needed
+	}
 
 	return &InspectResult{
 		LowerDirs: lowerDirs,

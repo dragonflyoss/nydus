@@ -14,7 +14,9 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/distribution/reference"
 	"github.com/dustin/go-humanize"
@@ -351,6 +353,12 @@ func main() {
 					EnvVars: []string{"OCI"},
 				},
 				&cli.BoolFlag{
+					Name:    "reverse",
+					Value:   false,
+					Usage:   "Perform reverse conversion from Nydus format to OCI format. Do not use this option if the source is in OCI format, as it is not supported. Note: This Nydus to OCI reverse conversion feature is currently experimental.",
+					EnvVars: []string{"REVERSE"},
+				},
+				&cli.BoolFlag{
 					Name:   "docker-v2-format",
 					Value:  false,
 					Hidden: true,
@@ -503,6 +511,15 @@ func main() {
 					docker2OCI = true
 				}
 
+				// Check if this is a reverse conversion (Nydus to OCI)
+				if c.Bool("reverse") {
+					converted, err := tryReverseConvert(c, targetRef)
+					if converted {
+						return err
+					}
+				}
+
+				// Forward conversion: OCI to Nydus (existing logic)
 				opt := converter.Opt{
 					WorkDir:        c.String("work-dir"),
 					NydusImagePath: c.String("nydus-image"),
@@ -1270,9 +1287,51 @@ func main() {
 					Value: "0MB",
 					Usage: "Chunk size for pushing a blob layer in chunked",
 				},
+
+				&cli.StringFlag{
+					Name:    "source-backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, enable verification of file data in Nydus image if specified, possible values: 'oss', 's3', 'localfs'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "source-backend-config",
+					Value:   "",
+					Usage:   "Json string for storage backend configuration",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "source-backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
 			},
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
+
+				backendType, backendConfig, err := getBackendConfig(c, "source-", false)
+				if err != nil {
+					return err
+				} else if backendConfig == "" {
+					backendType = "registry"
+					parsed, err := reference.ParseNormalizedNamed(c.String("target"))
+					if err != nil {
+						return err
+					}
+
+					backendConfigStruct, err := utils.NewRegistryBackendConfig(parsed, c.Bool("target-insecure"))
+					if err != nil {
+						return errors.Wrap(err, "parse registry backend configuration")
+					}
+
+					bytes, err := json.Marshal(backendConfigStruct)
+					if err != nil {
+						return errors.Wrap(err, "marshal registry backend configuration")
+					}
+					backendConfig = string(bytes)
+				}
 
 				pushChunkSize, err := humanize.ParseBytes(c.String("push-chunk-size"))
 				if err != nil {
@@ -1295,6 +1354,9 @@ func main() {
 
 					PushChunkSize:     int64(pushChunkSize),
 					PrefetchFilesPath: c.String("prefetch-files"),
+
+					BackendType:   backendType,
+					BackendConfig: backendConfig,
 				}
 
 				return optimizer.Optimize(context.Background(), opt)
@@ -1353,6 +1415,32 @@ func main() {
 					Usage:    "Skip verifying server certs for HTTPS target registry",
 					EnvVars:  []string{"TARGET_INSECURE"},
 				},
+
+				&cli.StringFlag{
+					Name:    "backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend for blobs, possible values: 'oss', 's3'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
+				&cli.BoolFlag{
+					Name:  "backend-force-push",
+					Value: false, Usage: "Force to push Nydus blobs even if they already exist in storage backend",
+					EnvVars: []string{"BACKEND_FORCE_PUSH"},
+				},
+
 				&cli.IntFlag{
 					Name:        "maximum-times",
 					Required:    false,
@@ -1389,6 +1477,11 @@ func main() {
 					return withPaths, withoutPaths
 				}
 
+				backendType, backendConfig, err := getBackendConfig(c, "", false)
+				if err != nil {
+					return err
+				}
+
 				withPaths, withoutPaths := parsePaths(c.StringSlice("with-path"))
 				opt := committer.Opt{
 					WorkDir:           c.String("work-dir"),
@@ -1402,6 +1495,10 @@ func main() {
 					MaximumTimes:      c.Int("maximum-times"),
 					WithPaths:         withPaths,
 					WithoutPaths:      withoutPaths,
+
+					BackendType:      backendType,
+					BackendConfig:    backendConfig,
+					BackendForcePush: c.Bool("backend-force-push"),
 				}
 				cm, err := committer.NewCommitter(opt)
 				if err != nil {
@@ -1471,4 +1568,54 @@ func getGlobalFlags() []cli.Flag {
 			EnvVars:  []string{"LOG_FILE"},
 		},
 	}
+}
+
+// tryReverseConvert attempts to perform reverse conversion from Nydus to OCI
+func tryReverseConvert(c *cli.Context, targetRef string) (bool, error) {
+	// Source image is in Nydus format, perform reverse conversion
+	logrus.Info("Detected Nydus source image, performing reverse conversion to OCI")
+
+	// Parse retry delay parameter from string to seconds (int)
+	retryDelayStr := c.String("push-retry-delay")
+	retryDelaySeconds := 0
+	if retryDelayStr != "" {
+		// Try to parse as duration first (e.g., "5s", "1m", "1h")
+		duration, err := time.ParseDuration(retryDelayStr)
+		if err == nil {
+			retryDelaySeconds = int(duration.Seconds())
+		} else {
+			// Fallback to parsing as plain integer (for backward compatibility)
+			seconds, err := strconv.Atoi(retryDelayStr)
+			if err != nil || seconds < 0 {
+				logrus.Warnf("failed to parse push-retry-delay(%s): %+v\nusing default value(0 seconds)", retryDelayStr, err)
+				retryDelaySeconds = 0
+			} else {
+				retryDelaySeconds = seconds
+			}
+		}
+
+		if retryDelaySeconds < 0 {
+			logrus.Warnf("invalid push-retry-delay value(%s): must be non-negative\nusing default value(0 seconds)", retryDelayStr)
+			retryDelaySeconds = 0
+		}
+	}
+
+	// Build reverse conversion options
+	reverseOpt := converter.ReverseOpt{
+		WorkDir:        c.String("work-dir"),
+		NydusImagePath: c.String("nydus-image"),
+		Source:         c.String("source"),
+		Target:         targetRef,
+		SourceInsecure: c.Bool("source-insecure"),
+		TargetInsecure: c.Bool("target-insecure"),
+		AllPlatforms:   c.Bool("all-platforms"),
+		Platforms:      c.String("platform"),
+		OutputJSON:     c.String("output-json"),
+		PushRetryCount: c.Int("push-retry-count"),
+		PushRetryDelay: retryDelaySeconds,
+		WithPlainHTTP:  c.Bool("plain-http"),
+	}
+	// Execute reverse conversion
+	err := converter.ReverseConvert(context.Background(), reverseOpt)
+	return true, err
 }

@@ -106,6 +106,16 @@ pub enum Error {
     // Fuse session has been shutdown.
     #[error("FUSE session has been shut down, {0}")]
     SessionShutdown(FuseTransportError),
+    #[error("FUSE device not found")]
+    FuseDeviceNotFound,
+    #[error("Fuse write error, {0}")]
+    FuseWriteError(#[source] FuseError),
+    #[error("Sysfs file open error, {0}")]
+    SysfsOpenError(#[source] io::Error),
+    #[error("Sysfs write error, {0}")]
+    SysfsWriteError(#[source] io::Error),
+    #[error("failed to walk and notify invalidation: {0}")]
+    WalkNotifyInvalidation(#[from] std::io::Error),
 
     // virtio-fs
     #[error("failed to handle event other than input event")]

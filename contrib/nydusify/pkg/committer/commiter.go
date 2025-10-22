@@ -32,6 +32,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/committer/diff"
 	parserPkg "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
@@ -55,6 +56,10 @@ type Opt struct {
 
 	WithPaths    []string
 	WithoutPaths []string
+
+	BackendType      string
+	BackendConfig    string
+	BackendForcePush bool
 }
 
 type Committer struct {
@@ -124,7 +129,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 	for idx, layer := range image.Manifest.Layers {
 		if layer.MediaType == utils.MediaTypeNydusBlob {
 			name := fmt.Sprintf("blob-mount-%d", idx)
-			if _, err := cm.pushBlob(ctx, name, layer.Digest, originalSourceRef, targetRef, opt.TargetInsecure, image); err != nil {
+			if _, err := cm.pushBlob(ctx, name, layer.Digest, originalSourceRef, targetRef, opt.TargetInsecure, image, opt); err != nil {
 				return errors.Wrap(err, "push lower blob")
 			}
 		}
@@ -146,7 +151,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 			}
 			logrus.Infof("pushing blob for upper")
 			start := time.Now()
-			upperBlobDesc, err := cm.pushBlob(ctx, "blob-upper", *upperBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image)
+			upperBlobDesc, err := cm.pushBlob(ctx, "blob-upper", *upperBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image, opt)
 			if err != nil {
 				return errors.Wrap(err, "push upper blob")
 			}
@@ -173,7 +178,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 						}
 						logrus.Infof("pushing blob for mount")
 						start := time.Now()
-						mountBlobDesc, err := cm.pushBlob(ctx, name, *mountBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image)
+						mountBlobDesc, err := cm.pushBlob(ctx, name, *mountBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image, opt)
 						if err != nil {
 							return errors.Wrap(err, "push mount blob")
 						}
@@ -211,7 +216,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 					}
 					logrus.Infof("pushing blob for appended mount")
 					start := time.Now()
-					mountBlobDesc, err := cm.pushBlob(ctx, name, *mountBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image)
+					mountBlobDesc, err := cm.pushBlob(ctx, name, *mountBlobDigest, originalSourceRef, targetRef, opt.TargetInsecure, image, opt)
 					if err != nil {
 						return errors.Wrap(err, "push appended mount blob")
 					}
@@ -249,7 +254,7 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 	}
 
 	logrus.Infof("pushing committed image to %s", targetRef)
-	if err := cm.pushManifest(ctx, *image, *bootstrapDiffID, targetRef, "bootstrap-merged.tar", opt.FsVersion, upperBlob, mountBlobs, opt.TargetInsecure); err != nil {
+	if err := cm.pushManifest(ctx, *image, *bootstrapDiffID, targetRef, "bootstrap-merged.tar", opt.FsVersion, upperBlob, mountBlobs, opt.TargetInsecure, opt); err != nil {
 		return errors.Wrap(err, "push manifest")
 	}
 
@@ -368,13 +373,20 @@ func getDistributionSourceLabel(sourceRef string) (string, string) {
 	return labelKey, labelValue
 }
 
-// pushBlob pushes a blob to the target registry
-func (cm *Committer) pushBlob(ctx context.Context, blobName string, blobDigest digest.Digest, sourceRef string, targetRef string, insecure bool, image *parserPkg.Image) (*ocispec.Descriptor, error) {
+// pushBlob pushes a blob to the target registry or backend storage
+func (cm *Committer) pushBlob(ctx context.Context, blobName string, blobDigest digest.Digest, sourceRef string, targetRef string, insecure bool, image *parserPkg.Image, opt Opt) (*ocispec.Descriptor, error) {
 	logrus.Infof("pushing blob: %s, digest: %s", blobName, blobDigest)
 
-	targetRemoter, err := provider.DefaultRemote(targetRef, insecure)
-	if err != nil {
-		return nil, errors.Wrap(err, "create target remote")
+	// Check if backend storage is configured for blobs
+	var blobBackend backend.Backend
+	var err error
+
+	if opt.BackendType != "" && strings.TrimSpace(opt.BackendConfig) != "" {
+		blobBackend, err = createBlobBackend(opt.BackendType, opt.BackendConfig)
+		if err != nil {
+			return nil, errors.Wrap(err, "create blob backend")
+		}
+		logrus.Debugf("using backend storage for blobs: %s", opt.BackendType)
 	}
 
 	// Check if this is a lower blob (starts with "blob-mount-" but not in workDir)
@@ -486,16 +498,60 @@ func (cm *Committer) pushBlob(ctx context.Context, blobName string, blobDigest d
 
 	logrus.Debugf("pushing blob: digest=%s, size=%d", blobDesc.Digest, blobDesc.Size)
 
-	if err := targetRemoter.Push(ctx, blobDesc, true, reader); err != nil {
-		if utils.RetryWithHTTP(err) {
-			targetRemoter.MaybeWithHTTP(err)
-			logrus.Debugf("retrying push with HTTP")
-			if err := targetRemoter.Push(ctx, blobDesc, true, reader); err != nil {
-				return nil, errors.Wrap(err, "push blob with HTTP")
+	// Push to backend storage if configured, otherwise use registry
+	if blobBackend != nil {
+		// For backend storage, we need to save the blob to a file first (for local blobs, reuse existing path)
+		var finalBlobPath string
+		if isLowerBlob {
+			// For lower blobs, we need to create a temporary file
+			tempFile, err := os.CreateTemp(cm.workDir, fmt.Sprintf("temp-blob-%s-*", blobDigest.Encoded()[:12]))
+			if err != nil {
+				return nil, errors.Wrap(err, "create temp file for lower blob")
 			}
+			finalBlobPath = tempFile.Name()
+			defer os.Remove(finalBlobPath)
+
+			// Copy the reader to the temp file
+			if _, err := io.Copy(tempFile, reader); err != nil {
+				tempFile.Close()
+				return nil, errors.Wrap(err, "copy lower blob to temp file")
+			}
+			tempFile.Close()
 		} else {
-			return nil, errors.Wrap(err, "push blob")
+			finalBlobPath = blobPath
 		}
+
+		// Upload to backend storage (use hex digest without sha256: prefix)
+		_, err := blobBackend.Upload(ctx, blobDigest.Hex(), finalBlobPath, blobDesc.Size, opt.BackendForcePush)
+		if err != nil {
+			return nil, errors.Wrap(err, "upload blob to backend storage")
+		}
+
+		// Finalize the backend upload
+		if err := blobBackend.Finalize(false); err != nil {
+			return nil, errors.Wrap(err, "finalize blob backend upload")
+		}
+
+		logrus.Infof("successfully pushed blob to backend storage: %s", blobDigest)
+	} else {
+		// Use registry storage
+		targetRemoter, err := provider.DefaultRemote(targetRef, insecure)
+		if err != nil {
+			return nil, errors.Wrap(err, "create target remote")
+		}
+
+		if err := targetRemoter.Push(ctx, blobDesc, true, reader); err != nil {
+			if utils.RetryWithHTTP(err) {
+				targetRemoter.MaybeWithHTTP(err)
+				logrus.Debugf("retrying push with HTTP")
+				if err := targetRemoter.Push(ctx, blobDesc, true, reader); err != nil {
+					return nil, errors.Wrap(err, "push blob with HTTP")
+				}
+			} else {
+				return nil, errors.Wrap(err, "push blob")
+			}
+		}
+		logrus.Infof("successfully pushed blob to registry: %s", blobDigest)
 	}
 
 	if closeErr != nil {
@@ -541,7 +597,8 @@ func (cm *Committer) syncFilesystem(ctx context.Context, containerID string) err
 
 	stderr, err := config.ExecuteContext(ctx, io.Discard, "sync")
 	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("execute sync in container namespace: %s", strings.TrimSpace(stderr)))
+		// Warn, as sync can be unavailable in some container environments (i.e. gvisor)
+		logrus.Warnf("execute sync in container namespace: %s", strings.TrimSpace(stderr))
 	}
 
 	// Also sync the host filesystem to ensure overlay changes are written
@@ -554,7 +611,7 @@ func (cm *Committer) syncFilesystem(ctx context.Context, containerID string) err
 }
 
 func (cm *Committer) pushManifest(
-	ctx context.Context, nydusImage parserPkg.Image, bootstrapDiffID digest.Digest, targetRef, bootstrapName, fsversion string, upperBlob *Blob, mountBlobs []Blob, insecure bool,
+	ctx context.Context, nydusImage parserPkg.Image, bootstrapDiffID digest.Digest, targetRef, bootstrapName, fsversion string, upperBlob *Blob, mountBlobs []Blob, insecure bool, opt Opt,
 ) error {
 	lowerBlobLayers := []ocispec.Descriptor{}
 	for idx := range nydusImage.Manifest.Layers {
@@ -571,11 +628,15 @@ func (cm *Committer) pushManifest(
 	for idx := range lowerBlobLayers {
 		config.RootFS.DiffIDs = append(config.RootFS.DiffIDs, lowerBlobLayers[idx].Digest)
 	}
-	for idx := range mountBlobs {
-		mountBlob := mountBlobs[idx]
-		config.RootFS.DiffIDs = append(config.RootFS.DiffIDs, mountBlob.Desc.Digest)
+
+	// When using S3 backend, skip adding new blob DiffIDs since they won't be in manifest
+	if opt.BackendType != "s3" {
+		for idx := range mountBlobs {
+			mountBlob := mountBlobs[idx]
+			config.RootFS.DiffIDs = append(config.RootFS.DiffIDs, mountBlob.Desc.Digest)
+		}
+		config.RootFS.DiffIDs = append(config.RootFS.DiffIDs, upperBlob.Desc.Digest)
 	}
-	config.RootFS.DiffIDs = append(config.RootFS.DiffIDs, upperBlob.Desc.Digest)
 	config.RootFS.DiffIDs = append(config.RootFS.DiffIDs, bootstrapDiffID)
 
 	configBytes, configDesc, err := cm.makeDesc(config, nydusImage.Manifest.Config)
@@ -657,11 +718,16 @@ func (cm *Committer) pushManifest(
 
 	// Push image manifest
 	layers := lowerBlobLayers
-	for idx := range mountBlobs {
-		mountBlob := mountBlobs[idx]
-		layers = append(layers, mountBlob.Desc)
+
+	// When using S3 backend, skip adding new blobs to manifest since they're referenced via URLs
+	// and Nydus only needs the bootstrap layer to function
+	if opt.BackendType != "s3" {
+		for idx := range mountBlobs {
+			mountBlob := mountBlobs[idx]
+			layers = append(layers, mountBlob.Desc)
+		}
+		layers = append(layers, upperBlob.Desc)
 	}
-	layers = append(layers, upperBlob.Desc)
 	layers = append(layers, bootstrapDesc)
 
 	nydusImage.Manifest.Config = *configDesc
@@ -849,6 +915,14 @@ func ValidateRef(ref string) (string, error) {
 	}
 	named = reference.TagNameOnly(named)
 	return named.String(), nil
+}
+
+// createBlobBackend creates a backend instance for blob storage if backend configuration is provided
+func createBlobBackend(backendType, backendConfig string) (backend.Backend, error) {
+	if backendType == "" || strings.TrimSpace(backendConfig) == "" {
+		return nil, nil
+	}
+	return backend.NewBackend(backendType, []byte(backendConfig), nil)
 }
 
 type outputJSON struct {

@@ -108,6 +108,11 @@ jobs:
           sudo docker run -d --restart=always -p 5000:5000 registry
           sudo mkdir convert-zran
           for I in $(cat ${{ env.IMAGE_LIST_PATH }}); do
+            # skip influxdb which have some issue to convert use zran
+            if [ "$I" = "influxdb" ]; then
+              echo "skip influxdb image for zran conversion"
+              continue
+            fi
             echo "converting $I:latest to $I:nydus-nightly-oci-ref"
             ghcr_repo=${{ env.REGISTRY }}/${{ env.ORGANIZATION }}
 
@@ -384,6 +389,15 @@ jobs:
             batchConversionElapsed=$(printf "%0.2f" "$(bc <<< "scale=2; $(jq -r '.ConversionElapsed' convert-native-v6-batch/${I}.json) / 1000000")")
             echo "|${I}:latest|${zranConversionElapsed}|${v5ConversionElapsed}|${v6ConversionElapsed}|${batchConversionElapsed}|" >> $GITHUB_STEP_SUMMARY
           done
-      - uses: geekyeggo/delete-artifact@v2
+      - uses: geekyeggo/delete-artifact@v5
         with:
-          name: '*'
+          name: |
+            nydusify-artifact
+            nydus-artifact
+            fsck-erofs-artifact
+            convert-zran-metric
+            convert-native-v5-metric
+            convert-native-v6-metric
+            convert-native-v6-batch-metric
+          useGlob: false
+          failOnError: false
