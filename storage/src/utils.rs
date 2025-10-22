@@ -249,7 +249,7 @@ impl<'a> MemSliceCursor<'a> {
     }
 
     /// Consume `size` bytes of memory content from the cursor.
-    pub fn consume(&mut self, mut size: usize) -> Vec<IoSliceMut> {
+    pub fn consume(&mut self, mut size: usize) -> Vec<IoSliceMut<'_>> {
         let mut vectors: Vec<IoSliceMut> = Vec::with_capacity(8);
 
         while size > 0 && self.index < self.mem_slice.len() {
@@ -289,7 +289,7 @@ impl<'a> MemSliceCursor<'a> {
     }
 
     /// Get the inner `FileVolatileSlice` array.
-    pub fn inner_slice(&self) -> &[FileVolatileSlice] {
+    pub fn inner_slice(&self) -> &[FileVolatileSlice<'_>] {
         self.mem_slice
     }
 }

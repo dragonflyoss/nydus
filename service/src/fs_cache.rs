@@ -842,7 +842,7 @@ impl FsCacheHandler {
 
         for i in 0..n {
             buf_le32.clone_from_slice(&data[i * 4..i * 4 + 4]);
-            let a = unsafe { std::mem::transmute::<[u8; 4], u32>(buf_le32) }.to_le();
+            let a = u32::from_ne_bytes(buf_le32).to_le();
             x ^= a;
             y ^= x;
             x = self.rol32(x, 7);
@@ -939,7 +939,7 @@ impl FsCacheHandler {
     }
 
     #[inline]
-    fn get_state(&self) -> MutexGuard<FsCacheState> {
+    fn get_state(&self) -> MutexGuard<'_, FsCacheState> {
         self.state.lock().unwrap()
     }
 

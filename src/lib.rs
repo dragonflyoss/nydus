@@ -31,7 +31,7 @@ impl<'a> SubCmdArgs<'a> {
     }
 
     /// Get reference to commandline option `key`.
-    pub fn values_of(&self, key: &str) -> Option<ValuesRef<String>> {
+    pub fn values_of(&self, key: &str) -> Option<ValuesRef<'_, String>> {
         if let Some(v) = self.subargs.get_many::<String>(key) {
             Some(v)
         } else {

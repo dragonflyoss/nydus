@@ -171,7 +171,7 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
         self.on_event(DaemonStateMachineInput::Start)
     }
 
-    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
+    fn upgrade_mgr(&self) -> Option<MutexGuard<'_, UpgradeManager>> {
         None
     }
 

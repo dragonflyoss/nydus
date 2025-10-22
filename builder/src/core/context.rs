@@ -146,7 +146,7 @@ pub enum ArtifactStorage {
 
 impl ArtifactStorage {
     /// Show file path to store the generated artifacts.
-    pub fn display(&self) -> Display {
+    pub fn display(&self) -> Display<'_> {
         match self {
             ArtifactStorage::SingleFile(p) => p.display(),
             ArtifactStorage::FileDir(p) => p.0.display(),
@@ -184,7 +184,7 @@ impl RafsIoWrite for ArtifactMemoryWriter {
         &self.0
     }
 
-    fn as_bytes(&mut self) -> std::io::Result<Cow<[u8]>> {
+    fn as_bytes(&mut self) -> std::io::Result<Cow<'_, [u8]>> {
         self.0.set_position(0);
         Ok(Cow::Borrowed(self.0.get_ref().as_slice()))
     }
@@ -223,7 +223,7 @@ impl RafsIoWrite for ArtifactFileWriter {
         self.0.finalize(name)
     }
 
-    fn as_bytes(&mut self) -> std::io::Result<Cow<[u8]>> {
+    fn as_bytes(&mut self) -> std::io::Result<Cow<'_, [u8]>> {
         self.0.file.flush()?;
         self.0.reader.seek_offset(0)?;
 
