@@ -159,7 +159,7 @@ impl BlobCacheMgr for FileCacheMgr {
         self.blobs.read().unwrap().len() == 0
     }
 
-    fn backend(&self) -> &(dyn BlobBackend) {
+    fn backend(&self) -> &dyn BlobBackend {
         self.backend.as_ref()
     }
 

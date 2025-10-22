@@ -95,7 +95,7 @@ impl<T> Channel<T> {
     }
 
     /// Lock the channel to block all queue operations.
-    pub fn lock_channel(&self) -> MutexGuard<VecDeque<T>> {
+    pub fn lock_channel(&self) -> MutexGuard<'_, VecDeque<T>> {
         self.requests.lock().unwrap()
     }
 

@@ -326,7 +326,7 @@ impl Cipher {
     }
 
     /// Tweak key for XTS mode.
-    pub fn tweak_key_for_xts(key: &[u8]) -> Cow<[u8]> {
+    pub fn tweak_key_for_xts(key: &[u8]) -> Cow<'_, [u8]> {
         let len = key.len() >> 1;
         if key[..len] == key[len..] {
             let mut buf = if key[len] == 0xa5 {

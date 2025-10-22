@@ -658,7 +658,7 @@ pub(crate) trait BlobCacheMgr: Send + Sync {
     fn gc(&self, _id: Option<&str>) -> bool;
 
     /// Get the underlying `BlobBackend` object of the blob cache object.
-    fn backend(&self) -> &(dyn BlobBackend);
+    fn backend(&self) -> &dyn BlobBackend;
 
     /// Get the blob cache to provide access to the `blob` object.
     fn get_blob_cache(&self, blob_info: &Arc<BlobInfo>) -> Result<Arc<dyn BlobCache>>;
