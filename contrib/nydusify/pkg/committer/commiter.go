@@ -630,7 +630,7 @@ func (cm *Committer) pushManifest(
 	}
 
 	// When using S3 backend, skip adding new blob DiffIDs since they won't be in manifest
-	if opt.BackendType != "s3" {
+	if opt.BackendType != "registry" {
 		for idx := range mountBlobs {
 			mountBlob := mountBlobs[idx]
 			config.RootFS.DiffIDs = append(config.RootFS.DiffIDs, mountBlob.Desc.Digest)
@@ -721,7 +721,7 @@ func (cm *Committer) pushManifest(
 
 	// When using S3 backend, skip adding new blobs to manifest since they're referenced via URLs
 	// and Nydus only needs the bootstrap layer to function
-	if opt.BackendType != "s3" {
+	if opt.BackendType != "registry" {
 		for idx := range mountBlobs {
 			mountBlob := mountBlobs[idx]
 			layers = append(layers, mountBlob.Desc)
