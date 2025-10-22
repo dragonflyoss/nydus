@@ -143,6 +143,10 @@ func Convert(ctx context.Context, opt Opt) error {
 		pvd.UsePlainHTTP()
 	}
 
+	if opt.WithPlainHTTP {
+		pvd.UsePlainHTTP()
+	}
+
 	cvt, err := converter.New(
 		converter.WithProvider(pvd),
 		converter.WithDriver("nydus", getConfig(opt)),
