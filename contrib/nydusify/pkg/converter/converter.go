@@ -42,9 +42,11 @@ type Opt struct {
 	ContainerdAddress string
 	NydusImagePath    string
 
-	Source       string
-	Target       string
-	ChunkDictRef string
+	Source        string
+	SourceArchive string
+	Target        string
+	TargetArchive string
+	ChunkDictRef  string
 
 	SourceBackendType   string
 	SourceBackendConfig string
@@ -133,6 +135,13 @@ func Convert(ctx context.Context, opt Opt) error {
 
 	// Set push retry configuration
 	pvd.SetPushRetryConfig(opt.PushRetryCount, retryDelay)
+	// Set potential local source/target archives
+	pvd.WithLocalSource(opt.SourceArchive)
+	pvd.WithLocalTarget(opt.TargetArchive)
+
+	if opt.WithPlainHTTP {
+		pvd.UsePlainHTTP()
+	}
 
 	if opt.WithPlainHTTP {
 		pvd.UsePlainHTTP()

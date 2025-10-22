@@ -15,8 +15,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/archive"
 	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
@@ -46,6 +48,8 @@ type Provider struct {
 	chunkSize      int64
 	pushRetryCount int
 	pushRetryDelay time.Duration
+	localSource    string
+	localTarget    string
 }
 
 // New creates a Provider with optional custom content.Store override.
@@ -134,10 +138,53 @@ func (pvd *Provider) Resolver(ref string) (remotes.Resolver, error) {
 	return newResolver(insecure, pvd.usePlainHTTP, credFunc, pvd.chunkSize), nil
 }
 
+// Implements the acceleration service Provider Pull
+// Will pull image from remote registry or import from local tar file based on configuration
 func (pvd *Provider) Pull(ctx context.Context, ref string) error {
+	var (
+		img images.Image
+		err error
+	)
+	if pvd.localSource != "" {
+		logrus.Infof("importing source image from %s", pvd.localSource)
+		if img, err = pvd.localPull(ctx, pvd.localSource); err != nil {
+			return err
+		}
+	} else {
+		logrus.Infof("pulling source image from %s", ref)
+		if img, err = pvd.remotePull(ctx, ref); err != nil {
+			return err
+		}
+	}
+
+	pvd.mutex.Lock()
+	defer pvd.mutex.Unlock()
+	pvd.images[ref] = &img.Target
+
+	return nil
+}
+
+func (pvd *Provider) localPull(ctx context.Context, path string) (images.Image, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return images.Image{}, err
+	}
+	defer f.Close()
+
+	ds, err := compression.DecompressStream(f)
+	if err != nil {
+		return images.Image{}, err
+	}
+	defer ds.Close()
+
+	img, err := pvd.Import(ctx, ds)
+	return img, err
+}
+
+func (pvd *Provider) remotePull(ctx context.Context, ref string) (images.Image, error) {
 	resolver, err := pvd.Resolver(ref)
 	if err != nil {
-		return err
+		return images.Image{}, err
 	}
 	rc := &client.RemoteContext{
 		Resolver:               resolver,
@@ -146,15 +193,7 @@ func (pvd *Provider) Pull(ctx context.Context, ref string) error {
 	}
 
 	img, err := fetch(ctx, pvd.store, rc, ref, 0)
-	if err != nil {
-		return err
-	}
-
-	pvd.mutex.Lock()
-	defer pvd.mutex.Unlock()
-	pvd.images[ref] = &img.Target
-
-	return nil
+	return img, err
 }
 
 // SetPushRetryConfig sets the retry configuration for push operations
@@ -165,7 +204,30 @@ func (pvd *Provider) SetPushRetryConfig(count int, delay time.Duration) {
 	pvd.pushRetryDelay = delay
 }
 
+// Implements the acceleration service Provider Push
+// Will push image to remote registry or export to local tar file based on configuration
 func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref string) error {
+	if pvd.localTarget != "" {
+		logrus.Infof("exporting target image to %s", pvd.localTarget)
+		return pvd.localPush(ctx, desc, ref, pvd.localTarget)
+	}
+	logrus.Infof("pushing target image to %s", ref)
+	return pvd.remotePush(ctx, desc, ref)
+}
+
+func (pvd *Provider) localPush(ctx context.Context, desc ocispec.Descriptor, ref string, path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := pvd.Export(ctx, f, &desc, ref); err != nil {
+		return errors.Wrap(err, "export target image to target tar file")
+	}
+	return nil
+}
+
+func (pvd *Provider) remotePush(ctx context.Context, desc ocispec.Descriptor, ref string) error {
 	resolver, err := pvd.Resolver(ref)
 	if err != nil {
 		return err
@@ -183,11 +245,10 @@ func (pvd *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref stri
 	if err != nil {
 		logrus.WithError(err).Error("Push failed after all attempts")
 	}
-
 	return err
 }
 
-func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, error) {
+func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (images.Image, error) {
 	iopts := importOpts{
 		dgstRefT: func(dgst digest.Digest) string {
 			return "nydus" + "@" + dgst.String()
@@ -195,21 +256,21 @@ func (pvd *Provider) Import(ctx context.Context, reader io.Reader) (string, erro
 		skipDgstRef:     func(name string) bool { return name != "" },
 		platformMatcher: pvd.platformMC,
 	}
-	images, err := load(ctx, reader, pvd.store, iopts)
+	imgs, err := load(ctx, reader, pvd.store, iopts)
 	if err != nil {
-		return "", err
+		return images.Image{}, err
 	}
 
-	if len(images) != 1 {
-		return "", errors.New("incorrect tarball format")
+	if len(imgs) != 1 {
+		return images.Image{}, errors.New("incorrect tarball format")
 	}
-	image := images[0]
+	image := imgs[0]
 
 	pvd.mutex.Lock()
 	defer pvd.mutex.Unlock()
 	pvd.images[image.Name] = &image.Target
 
-	return image.Name, nil
+	return image, nil
 }
 
 func (pvd *Provider) Export(ctx context.Context, writer io.Writer, img *ocispec.Descriptor, name string) error {
@@ -239,4 +300,12 @@ func (pvd *Provider) NewRemoteCache(ctx context.Context, ref string) (context.Co
 		return cache.New(ctx, ref, "", pvd.cacheSize, pvd)
 	}
 	return ctx, nil
+}
+
+func (pvd *Provider) WithLocalSource(path string) {
+	pvd.localSource = path
+}
+
+func (pvd *Provider) WithLocalTarget(path string) {
+	pvd.localTarget = path
 }

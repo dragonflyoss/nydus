@@ -8,24 +8,34 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/containerd/nydus-snapshotter/config"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool"
 	"github.com/dragonflyoss/nydus/smoke/tests/tool/test"
 	"github.com/google/uuid"
+	"github.com/pelletier/go-toml"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
 // Environment Requirement: Containerd, nerdctl >= 0.22, nydus-snapshotter, nydusd.
 // Prepare: setup nydus for containerd, reference: https://github.com/dragonflyoss/nydus/blob/master/docs/containerd-env-setup.md.
 
+const (
+	hotUpgradeRepeatCount = 6
+	configPath            = "/etc/nydus/config.toml"
+)
+
 var (
 	snapshotter           string
 	takeoverTestImage     string
 	snapshotterSystemSock string
+	nydusdPaths           []string
 )
 
 type TakeoverTestSuit struct {
@@ -80,16 +90,36 @@ func (f *TakeoverTestSuit) TestFailover(t *testing.T) {
 	time.Sleep(5 * time.Second)
 
 	// check the container by requesting its wait url
-	runArgs := tool.GetRunArgs(t, imageName)
-	resp, err := http.Get(runArgs.WaitURL)
-	require.NoError(t, err, "access to the wait url of the recovered container")
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		t.Fatalf("Failed to access the wait url of the recovered container")
+	checkContainerAccess(t, imageName)
+}
+
+func (f *TakeoverTestSuit) TestRestartSnapshotterHotUpgrade(t *testing.T) {
+	imageName := f.testImage
+
+	containerName := uuid.NewString()
+	tool.RunContainerSimple(t, imageName, snapshotter, containerName, false)
+	defer f.rmContainer(containerName)
+
+	// restart snapshotter trigger hot upgrade nydusd
+	for i := 0; i < hotUpgradeRepeatCount; i++ {
+		nydusdPath := nydusdPaths[i%2]
+		logrus.Debugf("Restart hot upgrade round %d, nydusd_path = %s", i+1, nydusdPath)
+
+		setNydusdPathInConfig(t, nydusdPath)
+
+		cmd := exec.Command("sudo", "systemctl", "restart", "nydus-snapshotter")
+		err := cmd.Run()
+		require.NoError(t, err, "restart nydus-snapshotter")
+
+		// wait for the nydus daemons recover
+		time.Sleep(5 * time.Second)
+
+		// check the container by requesting its wait url
+		checkContainerAccess(t, imageName)
 	}
 }
 
-func (f *TakeoverTestSuit) TestHotUpgrade(t *testing.T) {
+func (f *TakeoverTestSuit) TestAPIHotUpgrade(t *testing.T) {
 	imageName := f.testImage
 
 	containerName := uuid.NewString()
@@ -140,6 +170,33 @@ func getNydusdVersion(nydusdPath string) string {
 	return version
 }
 
+func setNydusdPathInConfig(t *testing.T, newNydusdPath string) {
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err, "read snapshotter config.toml")
+
+	cfg := &config.SnapshotterConfig{}
+	err = toml.Unmarshal(data, cfg)
+	require.NoError(t, err, "unmarshal snapshotter config.toml")
+
+	cfg.DaemonConfig.NydusdPath = newNydusdPath
+
+	newData, err := toml.Marshal(cfg)
+	require.NoError(t, err, "marshal config.toml")
+
+	err = os.WriteFile(configPath, newData, 0644)
+	require.NoError(t, err, "write config.toml")
+}
+
+func checkContainerAccess(t *testing.T, imageName string) {
+	runArgs := tool.GetRunArgs(t, imageName)
+	resp, err := http.Get(runArgs.WaitURL)
+	require.NoError(t, err, "access to the wait url of the recovered container")
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		t.Fatalf("Failed to access the wait url of the recovered container")
+	}
+}
+
 func TestTakeover(t *testing.T) {
 	if v, ok := os.LookupEnv("TAKEOVER_TEST"); !ok || v != "true" {
 		t.Skip("skipping takeover test")
@@ -155,6 +212,19 @@ func TestTakeover(t *testing.T) {
 	snapshotterSystemSock = os.Getenv("SNAPSHOTTER_SYSTEM_SOCK")
 	if snapshotterSystemSock == "" {
 		snapshotterSystemSock = defaultSnapshotterSystemSock
+	}
+	newNydusdPath := os.Getenv("NEW_NYDUSD_BINARY_PATH")
+	if newNydusdPath == "" {
+		newNydusdPath = "target/release/nydusd"
+	}
+	absNewNydusdPath, err := filepath.Abs("../" + newNydusdPath)
+	require.NoErrorf(t, err, "get the abs path of new nydusd path (%s)", newNydusdPath)
+	err = os.Chmod(absNewNydusdPath, 0755)
+	require.NoErrorf(t, err, "chmod nydusd binary file (%s)", absNewNydusdPath)
+
+	nydusdPaths = []string{
+		absNewNydusdPath,
+		"/usr/local/bin/nydusd",
 	}
 	suite := NewTakeoverTestSuit(t)
 	defer suite.clear()

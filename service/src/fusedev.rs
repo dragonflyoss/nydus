@@ -12,7 +12,6 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::metadata;
 use std::io::{Error, ErrorKind, Result, Write};
 use std::ops::Deref;
-use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;
 #[cfg(target_os = "linux")]
@@ -32,7 +31,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fuse_backend_rs::abi::fuse_abi::{InHeader, OutHeader};
 use fuse_backend_rs::api::server::{MetricsHook, Server};
 use fuse_backend_rs::api::Vfs;
-use fuse_backend_rs::transport::{FuseChannel, FuseDevWriter, FuseSession, FuseSessionExt};
+use fuse_backend_rs::transport::{FuseChannel, FuseSession, FuseSessionExt};
 use mio::Waker;
 #[cfg(target_os = "linux")]
 use nix::sys::stat::{major, minor};
@@ -45,7 +44,7 @@ use crate::daemon::{
 };
 use crate::fs_service::{FsBackendCollection, FsBackendMountCmd, FsService};
 use crate::upgrade::{self, FailoverPolicy, UpgradeManager};
-use crate::{Error as NydusError, FsBackendType, Result as NydusResult};
+use crate::{Error as NydusError, FsBackendType, FuseNotifyError, Result as NydusResult};
 
 const FS_IDX_SHIFT: u64 = 56;
 
@@ -161,19 +160,14 @@ impl<'a> FusedevNotifier<'a> {
     }
 
     fn notify_resend(&self) -> NydusResult<()> {
-        let session = self.session.lock().unwrap();
-        let file = session
-            .get_fuse_file()
-            .ok_or(NydusError::FuseDeviceNotFound)?;
-
-        let fd = file.as_raw_fd();
-        let mut buf = vec![0u8; session.bufsize()];
-        let writer: FuseDevWriter = FuseDevWriter::new(fd, &mut buf)?;
-
-        self.server
-            .notify_resend(writer)
-            .map_err(NydusError::FuseWriteError)?;
-        Ok(())
+        let mut session = self.session.lock().unwrap();
+        session
+            .try_with_writer(|writer| {
+                self.server
+                    .notify_resend(writer)
+                    .map_err(FuseNotifyError::FuseWriteError)
+            })
+            .map_err(NydusError::NotifyError)
     }
 }
 
@@ -190,7 +184,11 @@ impl<'a> FuseSysfsNotifier<'a> {
         vec!["/proc/sys/fs/fuse/connections", "/sys/fs/fuse/connections"]
     }
 
-    fn try_notify_with_path(&self, base_path: &str, event: &str) -> NydusResult<()> {
+    fn try_notify_with_path(
+        &self,
+        base_path: &str,
+        event: &str,
+    ) -> std::result::Result<(), FuseNotifyError> {
         let path = PathBuf::from(base_path)
             .join(self.conn.load(Ordering::Acquire).to_string())
             .join(event);
@@ -198,9 +196,10 @@ impl<'a> FuseSysfsNotifier<'a> {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .open(&path)
-            .map_err(NydusError::SysfsOpenError)?;
+            .map_err(FuseNotifyError::SysfsOpenError)?;
 
-        file.write_all(b"1").map_err(NydusError::SysfsWriteError)?;
+        file.write_all(b"1")
+            .map_err(FuseNotifyError::SysfsWriteError)?;
         Ok(())
     }
 
@@ -211,8 +210,8 @@ impl<'a> FuseSysfsNotifier<'a> {
             match self.try_notify_with_path(path, event) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    if !matches!(e, NydusError::SysfsOpenError(_)) || idx == paths.len() - 1 {
-                        return Err(e);
+                    if !matches!(e, FuseNotifyError::SysfsOpenError(_)) || idx == paths.len() - 1 {
+                        return Err(e.into());
                     }
                 }
             }
@@ -314,11 +313,11 @@ impl FsService for FusedevFsService {
         &self.vfs
     }
 
-    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>> {
+    fn upgrade_mgr(&self) -> Option<MutexGuard<'_, UpgradeManager>> {
         self.upgrade_mgr.as_ref().map(|mgr| mgr.lock().unwrap())
     }
 
-    fn backend_collection(&self) -> MutexGuard<FsBackendCollection> {
+    fn backend_collection(&self) -> MutexGuard<'_, FsBackendCollection> {
         self.backend_collection.lock().unwrap()
     }
 

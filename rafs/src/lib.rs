@@ -162,7 +162,7 @@ pub trait RafsIoWrite: Write + Seek + 'static {
     /// Return a slice to get all data written.
     ///
     /// No more data should be written after calling as_bytes().
-    fn as_bytes(&mut self) -> std::io::Result<Cow<[u8]>> {
+    fn as_bytes(&mut self) -> std::io::Result<Cow<'_, [u8]>> {
         unimplemented!()
     }
 }

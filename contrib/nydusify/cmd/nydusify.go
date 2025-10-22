@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -179,6 +180,30 @@ func getPrefetchPatterns(c *cli.Context) (string, error) {
 	return patterns, nil
 }
 
+// validateSourceAndTargetArchives validates that the source and target archives point to valid paths
+func validateSourceAndTargetArchives(c *cli.Context) error {
+	sourceArchive := c.String("source-archive")
+	// Validate source archive exists
+	if sourceArchive != "" {
+		if _, err := os.Stat(sourceArchive); err != nil {
+			return errors.Wrapf(err, "source archive not accessible: %s", sourceArchive)
+		}
+	}
+
+	// Validate target archive directory exists
+	targetArchive := c.String("target-archive")
+	if targetArchive != "" {
+		dir := filepath.Dir(targetArchive)
+		if dir != "" {
+			if _, err := os.Stat(dir); err != nil {
+				return errors.Wrapf(err, "target archive directory not accessible: %s", dir)
+			}
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp: true,
@@ -206,11 +231,23 @@ func main() {
 					Usage:    "Source OCI image reference",
 					EnvVars:  []string{"SOURCE"},
 				},
+				&cli.PathFlag{
+					Name:      "source-archive",
+					TakesFile: true,
+					Usage:     "Path to source OCI image layout tar archive",
+					EnvVars:   []string{"SOURCE_ARCHIVE"},
+				},
 				&cli.StringFlag{
 					Name:     "target",
 					Required: false,
 					Usage:    "Target (Nydus) image reference",
 					EnvVars:  []string{"TARGET"},
+				},
+				&cli.PathFlag{
+					Name:      "target-archive",
+					TakesFile: false,
+					Usage:     "Path to target OCI image layout tar archive",
+					EnvVars:   []string{"TARGET_ARCHIVE"},
 				},
 				&cli.StringFlag{
 					Name:    "source-backend-type",
@@ -454,6 +491,10 @@ func main() {
 			Action: func(c *cli.Context) error {
 				setupLogLevel(c)
 
+				if err := validateSourceAndTargetArchives(c); err != nil {
+					return err
+				}
+
 				targetRef, err := getTargetReference(c)
 				if err != nil {
 					return err
@@ -527,7 +568,9 @@ func main() {
 					SourceBackendType:   c.String("source-backend-type"),
 					SourceBackendConfig: c.String("source-backend-config"),
 					Source:              c.String("source"),
+					SourceArchive:       c.String("source-archive"),
 					Target:              targetRef,
+					TargetArchive:       c.String("target-archive"),
 					SourceInsecure:      c.Bool("source-insecure"),
 					TargetInsecure:      c.Bool("target-insecure"),
 

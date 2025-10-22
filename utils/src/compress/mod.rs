@@ -97,7 +97,7 @@ impl Algorithm {
 }
 
 /// Compress data with the specified compression algorithm.
-pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<[u8]>, bool)> {
+pub fn compress(src: &[u8], algorithm: Algorithm) -> Result<(Cow<'_, [u8]>, bool)> {
     let src_size = src.len();
     if src_size == 0 {
         return Ok((Cow::Borrowed(src), false));

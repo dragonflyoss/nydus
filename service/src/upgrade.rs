@@ -446,12 +446,12 @@ pub mod fusedev_upgrade {
         }
 
         let mut mgr = svc.upgrade_mgr().unwrap();
+        mgr.save_vfs_stat(vfs)?;
+
         let backend_stat = FusedevBackendState::from(&mgr.fuse_deamon_stat);
 
         let state = backend_stat.save().map_err(UpgradeMgrError::Serialize)?;
         mgr.save(&state)?;
-
-        mgr.save_vfs_stat(vfs)?;
 
         Ok(())
     }

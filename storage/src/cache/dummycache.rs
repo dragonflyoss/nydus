@@ -211,7 +211,7 @@ impl BlobCacheMgr for DummyCacheMgr {
         false
     }
 
-    fn backend(&self) -> &(dyn BlobBackend) {
+    fn backend(&self) -> &dyn BlobBackend {
         self.backend.as_ref()
     }
 

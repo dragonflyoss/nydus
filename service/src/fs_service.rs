@@ -106,7 +106,7 @@ pub trait FsService: Send + Sync {
     }
 
     /// Get handle to the optional upgrade manager.
-    fn upgrade_mgr(&self) -> Option<MutexGuard<UpgradeManager>>;
+    fn upgrade_mgr(&self) -> Option<MutexGuard<'_, UpgradeManager>>;
 
     /// Mount a new filesystem instance.
     // NOTE: This method is not thread-safe, however, it is acceptable as
@@ -213,7 +213,7 @@ pub trait FsService: Send + Sync {
     }
 
     /// Get list of metrics information objects about mounted filesystem instances.
-    fn backend_collection(&self) -> MutexGuard<FsBackendCollection>;
+    fn backend_collection(&self) -> MutexGuard<'_, FsBackendCollection>;
 
     /// Export information about the filesystem service.
     fn export_backend_info(&self, mountpoint: &str) -> Result<String> {

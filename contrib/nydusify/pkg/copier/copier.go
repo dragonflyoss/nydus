@@ -367,9 +367,11 @@ func Copy(ctx context.Context, opt Opt) error {
 		}
 		defer ds.Close()
 
-		if source, err = pvd.Import(ctx, ds); err != nil {
+		var sourceImage images.Image
+		if sourceImage, err = pvd.Import(ctx, ds); err != nil {
 			return errors.Wrap(err, "import source image")
 		}
+		source = sourceImage.Name
 		logrus.Infof("imported source image %s", source)
 	} else {
 		sourceNamed, err := reference.ParseDockerRef(opt.Source)

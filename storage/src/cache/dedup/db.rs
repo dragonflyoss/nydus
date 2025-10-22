@@ -211,7 +211,7 @@ impl CasDb {
 
     fn begin_transaction(
         conn: &mut PooledConnection<SqliteConnectionManager>,
-    ) -> Result<Transaction> {
+    ) -> Result<Transaction<'_>> {
         let mut tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.set_drop_behavior(DropBehavior::Rollback);
         Ok(tx)

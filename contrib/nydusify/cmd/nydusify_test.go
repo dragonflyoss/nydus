@@ -391,3 +391,96 @@ func TestSetupLogLevelWithInvalidLogFile(t *testing.T) {
 	logrusOutput := logrus.StandardLogger().Out
 	assert.NotNil(t, logrusOutput)
 }
+
+func TestValidateSourceAndTargetArchives(t *testing.T) {
+	// Create temporary source archive for valid cases
+	validSourceFile, err := os.CreateTemp("", "source-archive-*.tar")
+	require.NoError(t, err)
+	defer os.Remove(validSourceFile.Name())
+	validSourceFile.Close()
+
+	// Create temporary directory for valid target cases
+	validTargetDir, err := os.MkdirTemp("", "target-dir-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(validTargetDir)
+
+	tests := []struct {
+		name          string
+		sourceArchive string
+		targetArchive string
+		expectError   bool
+		errorContains string
+	}{
+		{
+			name:          "no archives specified",
+			sourceArchive: "",
+			targetArchive: "",
+			expectError:   false,
+		},
+		{
+			name:          "valid source archive only",
+			sourceArchive: validSourceFile.Name(),
+			targetArchive: "",
+			expectError:   false,
+		},
+		{
+			name:          "non-existent source archive",
+			sourceArchive: "/path/to/non-existent-source.tar",
+			targetArchive: "",
+			expectError:   true,
+			errorContains: "source archive not accessible",
+		},
+		{
+			name:          "valid target archive with existing directory",
+			sourceArchive: "",
+			targetArchive: fmt.Sprintf("%s/target-archive.tar", validTargetDir),
+			expectError:   false,
+		},
+		{
+			name:          "target archive with non-existent directory",
+			sourceArchive: "",
+			targetArchive: "/non/existent/directory/target.tar",
+			expectError:   true,
+			errorContains: "target archive directory not accessible",
+		},
+		{
+			name:          "valid source and target archives",
+			sourceArchive: validSourceFile.Name(),
+			targetArchive: fmt.Sprintf("%s/target-archive.tar", validTargetDir),
+			expectError:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := &cli.App{
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "source-archive",
+						Value: "",
+					},
+					&cli.StringFlag{
+						Name:  "target-archive",
+						Value: "",
+					},
+				},
+			}
+
+			flagSet := flag.NewFlagSet("test", flag.PanicOnError)
+			flagSet.String("source-archive", tt.sourceArchive, "")
+			flagSet.String("target-archive", tt.targetArchive, "")
+			ctx := cli.NewContext(app, flagSet, nil)
+
+			err := validateSourceAndTargetArchives(ctx)
+
+			if tt.expectError {
+				require.Error(t, err)
+				if tt.errorContains != "" {
+					require.Contains(t, err.Error(), tt.errorContains)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

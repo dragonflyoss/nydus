@@ -28,7 +28,7 @@ versionize = "0.2.0"
 
 nydus-api = { version = "0.4.0", path = "../api" }
 nydus-rafs = { version = "0.4.0", path = "../rafs" }
-nydus-storage = { version = "0.7.0", path = "../storage" }
+nydus-storage = { version = "0.7.1", path = "../storage" }
 nydus-upgrade = { version = "0.2.0", path = "../upgrade" }
 nydus-utils = { version = "0.5.0", path = "../utils" }
 

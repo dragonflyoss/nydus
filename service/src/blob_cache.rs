@@ -311,7 +311,7 @@ impl BlobCacheMgr {
     }
 
     #[inline]
-    fn get_state(&self) -> MutexGuard<BlobCacheState> {
+    fn get_state(&self) -> MutexGuard<'_, BlobCacheState> {
         self.state.lock().unwrap()
     }
 
