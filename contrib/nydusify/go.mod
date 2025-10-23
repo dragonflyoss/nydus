@@ -12,8 +12,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.27
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.17.8
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.58.2
-	github.com/containerd/containerd v1.7.23
-	github.com/containerd/containerd/v2 v2.0.5
+	github.com/containerd/containerd v1.7.27
+	github.com/containerd/containerd/v2 v2.1.2
 	github.com/containerd/continuity v0.4.5
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/nydus-snapshotter v0.15.3
@@ -35,7 +35,7 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/urfave/cli/v2 v2.27.6
 	github.com/vmihailenco/msgpack/v5 v5.4.1
-	golang.org/x/sync v0.14.0
+	golang.org/x/sync v0.15.0
 	golang.org/x/sys v0.33.0
 	lukechampine.com/blake3 v1.2.1
 )
@@ -124,9 +124,11 @@ require (
 	golang.org/x/text v0.24.0 // indirect
 	golang.org/x/time v0.11.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250218202821-56aae31c358a // indirect
-	google.golang.org/grpc v1.72.0 // indirect
+	google.golang.org/grpc v1.72.2 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace github.com/containerd/containerd/v2 => github.com/nydusaccelerator/containerd/v2 v2.0.0-20250528024712-b96732f49d37
+
+replace github.com/containerd/nydus-snapshotter => github.com/BraveY/nydus-snapshotter v0.0.0-20251009061430-bb6f37c05f7c
