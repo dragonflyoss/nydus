@@ -411,6 +411,8 @@ impl BlobCompressionContextInfo {
             return Err(einval!("invalid chunk count in blob meta header"));
         }
 
+        let meta_path_cached = format!("{}.{}.cached", blob_path, BLOB_CCT_FILE_SUFFIX);
+
         let uncompressed_size = blob_info.meta_ci_uncompressed_size() as usize;
         let meta_path = format!("{}.{}", blob_path, BLOB_CCT_FILE_SUFFIX);
         trace!(
@@ -419,16 +421,24 @@ impl BlobCompressionContextInfo {
             uncompressed_size,
             chunk_count
         );
+
+        let cache_exists = std::path::Path::new(&meta_path_cached).exists();
+        let target_path = if cache_exists {
+            &meta_path_cached
+        } else {
+            &meta_path
+        };
+
         let enable_write = reader.is_some();
         let file = OpenOptions::new()
             .read(true)
             .write(enable_write)
             .create(enable_write)
-            .open(&meta_path)
+            .open(target_path)
             .map_err(|err| {
                 einval!(format!(
                     "failed to open/create blob meta file {}: {}",
-                    meta_path, err
+                    target_path, err
                 ))
             })?;
 
@@ -442,7 +452,7 @@ impl BlobCompressionContextInfo {
         if file_size != expected_size as u64 {
             return Err(einval!(format!(
                 "size of blob meta file '{}' doesn't match, expect {:x}, got {:x}",
-                meta_path, expected_size, file_size
+                target_path, expected_size, file_size
             )));
         }
 
@@ -462,7 +472,7 @@ impl BlobCompressionContextInfo {
             } else {
                 return Err(enoent!(format!(
                     "blob meta header from file '{}' is invalid",
-                    meta_path
+                    target_path
                 )));
             }
         }
