@@ -280,6 +280,7 @@ impl FileCacheEntry {
                                 &delayed_chunk_map,
                                 chunk.as_ref(),
                                 false,
+                                &metrics,
                             );
                             return;
                         }
@@ -296,7 +297,12 @@ impl FileCacheEntry {
                 chunk.uncompressed_offset()
             };
             let res = Self::persist_cached_data(&file, offset, buf);
-            Self::_update_chunk_pending_status(&delayed_chunk_map, chunk.as_ref(), res.is_ok());
+            Self::_update_chunk_pending_status(
+                &delayed_chunk_map,
+                chunk.as_ref(),
+                res.is_ok(),
+                &metrics,
+            );
             #[cfg(feature = "dedup")]
             if let Some(mgr) = cas_mgr {
                 if let Err(e) = mgr.record_chunk(&blob_info, chunk.deref(), file_path.as_ref()) {
@@ -351,13 +357,14 @@ impl FileCacheEntry {
     }
 
     fn update_chunk_pending_status(&self, chunk: &dyn BlobChunkInfo, success: bool) {
-        Self::_update_chunk_pending_status(&self.chunk_map, chunk, success)
+        Self::_update_chunk_pending_status(&self.chunk_map, chunk, success, &self.metrics)
     }
 
     fn _update_chunk_pending_status(
         chunk_map: &Arc<dyn ChunkMap>,
         chunk: &dyn BlobChunkInfo,
         success: bool,
+        metrics: &Arc<BlobcacheMetrics>,
     ) {
         if success {
             if let Err(e) = chunk_map.set_ready_and_clear_pending(chunk) {
@@ -366,6 +373,9 @@ impl FileCacheEntry {
                     chunk.compressed_offset(),
                     e
                 )
+            } else {
+                // Increment the entries_count metric when a chunk becomes ready
+                metrics.entries_count.inc();
             }
         } else {
             error!(
@@ -1351,6 +1361,8 @@ impl FileCacheEntry {
         let buffer = if try_cache && self.read_file_cache(chunk.as_ref(), d.mut_slice()).is_ok() {
             self.metrics.whole_hits.inc();
             self.chunk_map.set_ready_and_clear_pending(chunk.as_ref())?;
+            // Increment the entries_count metric when recovering a chunk from cache
+            self.metrics.entries_count.inc();
             trace!(
                 "recover blob cache {} {} offset {} size {}",
                 chunk.id(),
@@ -1957,5 +1969,79 @@ mod tests {
 
         let c_end = blob_cci.get_compressed_end(&batch_chunk).unwrap();
         assert_eq!(c_end, 0x2000);
+    }
+
+    #[test]
+    fn test_entries_count_metric_increment() {
+        use crate::cache::state::{BlobStateMap, IndexedChunkMap};
+        use std::sync::Arc;
+        use vmm_sys_util::tempdir::TempDir;
+
+        // Create temporary directory and metrics
+        let tmpdir = TempDir::new().unwrap();
+        let metrics = BlobcacheMetrics::new("test", tmpdir.as_path().to_str().unwrap());
+
+        // Create a chunk map for testing
+        let chunk_count = 10;
+        let blob_path = tmpdir.as_path().join("blob-state");
+        let indexed_map =
+            IndexedChunkMap::new(blob_path.as_os_str().to_str().unwrap(), chunk_count, false)
+                .unwrap();
+        let chunk_map: Arc<dyn ChunkMap> = Arc::new(BlobStateMap::from(indexed_map));
+
+        // Verify initial entries_count is 0
+        assert_eq!(metrics.entries_count.count(), 0);
+
+        // Create mock chunk info
+        let chunk = MockChunkInfo {
+            index: 0,
+            ..Default::default()
+        };
+
+        // Test successful update increments the metric
+        FileCacheEntry::_update_chunk_pending_status(&chunk_map, &chunk, true, &metrics);
+        assert_eq!(
+            metrics.entries_count.count(),
+            1,
+            "entries_count should be incremented to 1 after successful chunk update"
+        );
+
+        // Test another successful update
+        let chunk2 = MockChunkInfo {
+            index: 1,
+            ..Default::default()
+        };
+        FileCacheEntry::_update_chunk_pending_status(&chunk_map, &chunk2, true, &metrics);
+        assert_eq!(
+            metrics.entries_count.count(),
+            2,
+            "entries_count should be incremented to 2 after second successful chunk update"
+        );
+
+        // Test failed update does NOT increment the metric
+        let chunk3 = MockChunkInfo {
+            index: 2,
+            ..Default::default()
+        };
+        FileCacheEntry::_update_chunk_pending_status(&chunk_map, &chunk3, false, &metrics);
+        assert_eq!(
+            metrics.entries_count.count(),
+            2,
+            "entries_count should remain 2 after failed chunk update"
+        );
+
+        // Test multiple successful updates
+        for idx in 3..6 {
+            let chunk = MockChunkInfo {
+                index: idx,
+                ..Default::default()
+            };
+            FileCacheEntry::_update_chunk_pending_status(&chunk_map, &chunk, true, &metrics);
+        }
+        assert_eq!(
+            metrics.entries_count.count(),
+            5,
+            "entries_count should be incremented to 5 after multiple successful updates"
+        );
     }
 }
