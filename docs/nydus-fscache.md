@@ -21,15 +21,15 @@ CONFIG_EROFS_FS=m
 CONFIG_EROFS_FS_ONDEMAND=y
 ```
 
-5. ``make -jX``
+4. ``make -jX``
 
-6. ``make modules_install && make install``
+5. ``make modules_install && make install``
 
-7. Reboot to the kernel just built
+6. Reboot to the kernel just built
 
-8. ``modprobe cachefiles`` if cachefiles is built as module
+7. ``modprobe cachefiles`` if cachefiles is built as module
 
-9.  ``[ -c /dev/cachefiles ] && echo ok``
+8.  ``[ -c /dev/cachefiles ] && echo ok``
 
 ### (2) Use OpenAnolis kernel
 If you want to use an existing kernel, you could use [OpenAnolis](https://openanolis.cn/download?lang=en), it adds support for fscache mode since kernel version 4.19.91-27 or 5.10.134-12.
