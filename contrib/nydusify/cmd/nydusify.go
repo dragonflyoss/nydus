@@ -1458,6 +1458,32 @@ func main() {
 					Usage:    "Skip verifying server certs for HTTPS target registry",
 					EnvVars:  []string{"TARGET_INSECURE"},
 				},
+
+				&cli.StringFlag{
+					Name:    "backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend for blobs, possible values: 'oss', 's3'",
+					EnvVars: []string{"BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+				},
+				&cli.BoolFlag{
+					Name:  "backend-force-push",
+					Value: false, Usage: "Force to push Nydus blobs even if they already exist in storage backend",
+					EnvVars: []string{"BACKEND_FORCE_PUSH"},
+				},
+
 				&cli.IntFlag{
 					Name:        "maximum-times",
 					Required:    false,
@@ -1494,6 +1520,11 @@ func main() {
 					return withPaths, withoutPaths
 				}
 
+				backendType, backendConfig, err := getBackendConfig(c, "", false)
+				if err != nil {
+					return err
+				}
+
 				withPaths, withoutPaths := parsePaths(c.StringSlice("with-path"))
 				opt := committer.Opt{
 					WorkDir:           c.String("work-dir"),
@@ -1507,6 +1538,10 @@ func main() {
 					MaximumTimes:      c.Int("maximum-times"),
 					WithPaths:         withPaths,
 					WithoutPaths:      withoutPaths,
+
+					BackendType:      backendType,
+					BackendConfig:    backendConfig,
+					BackendForcePush: c.Bool("backend-force-push"),
 				}
 				cm, err := committer.NewCommitter(opt)
 				if err != nil {
