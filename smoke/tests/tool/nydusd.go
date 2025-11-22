@@ -328,7 +328,16 @@ func (nydusd *Nydusd) Mount() error {
 		return err
 	}
 
-	return nydusd.WaitStatus("RUNNING")
+	err = nydusd.WaitStatus("RUNNING")
+	if err != nil {
+		return err
+	}
+
+	if nydusd.EnablePrefetch {
+		nydusd.waitPrefetch()
+	}
+
+	return nil
 }
 
 func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
@@ -361,8 +370,15 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 		"application/json",
 		bytes.NewBuffer(body),
 	)
+	if err != nil {
+		return err
+	}
 
-	return err
+	if config.EnablePrefetch {
+		nydusd.waitPrefetch()
+	}
+
+	return nil
 }
 
 func (nydusd *Nydusd) Umount() error {
@@ -695,4 +711,33 @@ func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
 	require.NoError(t, err)
 	defer nydusd.Umount()
 	nydusd.Verify(t, expectedFileTree)
+}
+
+func (nydusd *Nydusd) waitPrefetch() {
+	maxWait := 10 * time.Second
+	checkInterval := 500 * time.Millisecond
+	stableChecks := 0
+	var lastReadCount uint64
+
+	deadline := time.Now().Add(maxWait)
+	for time.Now().Before(deadline) {
+		time.Sleep(checkInterval)
+
+		metrics, err := nydusd.GetBackendMetrics()
+		if err != nil {
+			continue
+		}
+
+		if metrics.ReadCount == lastReadCount {
+			stableChecks++
+			if stableChecks >= 2 {
+				// Read count stable for 2 checks, prefetch likely done
+				time.Sleep(200 * time.Millisecond)
+				return
+			}
+		} else {
+			stableChecks = 0
+			lastReadCount = metrics.ReadCount
+		}
+	}
 }
