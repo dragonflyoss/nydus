@@ -26,7 +26,7 @@ Nydus takes in either [FUSE](https://www.kernel.org/doc/html/latest/filesystems/
 ![architecture](images/nydusd-arch.png)
 
 ##    2. Rafs
-Rafs is a filesystem image containing a separated metadata blob and several data-deduplicated content-addressable data blobs.  In a typical rafs filesystem, the metadata is stored in `bootstrap` while the data is stored in `blobfile`. Nydus splits container image into two parts, metadata and data, where metadata contains everything a container needs to start with, while data is stored in chunks with chunk size being 1MB. Currently, Rafs has two versions called `Rafs v5` (which is a FUSE-based filesystem) and `Rafs v6` (which is compatible with the in-kernel EROFS filesystem). Note that, the following details are all about `Rafs v5` and meterials about `Raft v6` are still working in progress.
+Rafs is a filesystem image containing a separated metadata blob and several data-deduplicated content-addressable data blobs.  In a typical rafs filesystem, the metadata is stored in `bootstrap` while the data is stored in `blobfile`. Nydus splits container image into two parts, metadata and data, where metadata contains everything a container needs to start with, while data is stored in chunks with chunk size being 1MB. Currently, Rafs has two versions called `Rafs v5` (which is a FUSE-based filesystem) and `Rafs v6` (which is compatible with the in-kernel EROFS filesystem). Note that, the following details are all about `Rafs v5` and materials about `Rafs v6` are still working in progress.
 
 ![rafs](./images/rafs-format.png)
 
@@ -344,7 +344,7 @@ A typical image index enabling nydus points to two manifest files, one is the tr
       "digest": "sha256:9e2bcf20f78c9ca1a5968a9228d73d85f27846904ddd9f6c10ef2263e13cec4f",
       "platform": {
         "architecture": "amd64",
-        "os": "linux",
+        "os": "linux"
       },
       "artifactType": "application/vnd.nydus.image.manifest.v1+json"
     }

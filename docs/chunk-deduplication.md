@@ -1,6 +1,6 @@
 ﻿# Chunk-Level Deduplication: Storage Optimization for Nydus Images
 
-## Probntroduction
+## Introduction
 
 In container images, there are often a large number of duplicate files or content, and these duplicate parts occupy a large amount of storage space, especially in high-density deployment scenarios. As the number of Nydus images grows, it will bring many problems such as low storage space utilization and excessive consumption of bandwidth resources. To do this, an effective deduplication mechanism (deduplication) needs to be designed to solve this problem.
 
