@@ -714,29 +714,31 @@ func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
 }
 
 func (nydusd *Nydusd) waitPrefetch() {
-	maxWait := 10 * time.Second
-	checkInterval := 500 * time.Millisecond
-	stableChecks := 0
+	// Wait for prefetch to start and stabilize
+	deadline := time.Now().Add(10 * time.Second)
 	var lastReadCount uint64
+	stableCount := 0
 
-	deadline := time.Now().Add(maxWait)
 	for time.Now().Before(deadline) {
-		time.Sleep(checkInterval)
+		time.Sleep(500 * time.Millisecond)
 
 		metrics, err := nydusd.GetBackendMetrics()
 		if err != nil {
 			continue
 		}
 
+		if metrics.ReadCount == 0 {
+			continue
+		}
+
+		// Check if read count is stable (prefetch completed)
 		if metrics.ReadCount == lastReadCount {
-			stableChecks++
-			if stableChecks >= 2 {
-				// Read count stable for 2 checks, prefetch likely done
-				time.Sleep(200 * time.Millisecond)
+			stableCount++
+			if stableCount >= 3 {
 				return
 			}
 		} else {
-			stableChecks = 0
+			stableCount = 0
 			lastReadCount = metrics.ReadCount
 		}
 	}
