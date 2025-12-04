@@ -250,6 +250,9 @@ impl Tree {
             if let Some(idx) = self.get_child_idx(&u.name) {
                 u_node.overlay = Overlay::UpperModification;
                 self.children[idx].node = u.node.clone();
+                if !u_node.is_dir() {
+                    self.children[idx].children.clear();
+                }
             } else {
                 u_node.overlay = Overlay::UpperAddition;
                 self.insert_child(Tree {
