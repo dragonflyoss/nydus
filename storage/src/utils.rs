@@ -14,7 +14,7 @@ use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
 };
-use std::alloc::{alloc, Layout};
+use std::alloc::{alloc_zeroed, Layout};
 use std::cmp::{self, min};
 use std::io::{ErrorKind, IoSliceMut, Result};
 use std::os::fd::{AsFd, AsRawFd};
@@ -335,7 +335,7 @@ pub fn alloc_buf(size: usize) -> Vec<u8> {
     let layout = Layout::from_size_align(size, 0x1000)
         .unwrap()
         .pad_to_align();
-    let ptr = unsafe { alloc(layout) };
+    let ptr = unsafe { alloc_zeroed(layout) };
     unsafe { Vec::from_raw_parts(ptr, size, layout.size()) }
 }
 
