@@ -12,7 +12,7 @@
 [![License](https://img.shields.io/crates/l/nydus-rs)](https://crates.io/crates/nydus-rs)
 [![Twitter](https://img.shields.io/twitter/url?style=social&url=https%3A%2F%2Ftwitter.com%2Fdragonfly_oss)](https://twitter.com/dragonfly_oss)
 [![Nydus Stars](https://img.shields.io/github/stars/dragonflyoss/nydus?label=Nydus%20Stars&style=social)](https://github.com/dragonflyoss/nydus)
-[<img src="https://app.devin.ai/devin_v4.png" width="20" title="deepwiki">](https://deepwiki.com/dragonflyoss/nydus)
+[![Nydus DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/dragonflyoss/nydus)
 
 [![Smoke Test](https://github.com/dragonflyoss/nydus/actions/workflows/smoke.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/smoke.yml?query=event%3Aschedule)
 [![Image Conversion](https://github.com/dragonflyoss/nydus/actions/workflows/convert.yml/badge.svg?event=schedule)](https://github.com/dragonflyoss/nydus/actions/workflows/convert.yml?query=event%3Aschedule)
