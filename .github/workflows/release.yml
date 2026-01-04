@@ -82,7 +82,7 @@ jobs:
           configs
 
   nydus-macos:
-    runs-on: macos-13
+    runs-on: macos-15
     strategy:
       matrix:
         arch: [amd64, arm64]
