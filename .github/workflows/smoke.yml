@@ -148,9 +148,8 @@ jobs:
         else
           RUST_TARGET="aarch64-apple-darwin"
         fi
-        cargo install --version 0.2.5 cross
         rustup target add ${RUST_TARGET}
-        make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
+        make -e RUST_TARGET_STATIC=$RUST_TARGET -e static-release
 
   nydus-integration-test:
     runs-on: ubuntu-latest
