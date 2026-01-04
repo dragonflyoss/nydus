@@ -101,9 +101,8 @@ jobs:
         else
           RUST_TARGET="aarch64-apple-darwin"
         fi
-        cargo install --version 0.2.5 cross
         rustup target add ${RUST_TARGET}
-        make -e RUST_TARGET_STATIC=$RUST_TARGET -e CARGO=cross static-release
+        make -e RUST_TARGET_STATIC=$RUST_TARGET static-release
         sudo mv target/$RUST_TARGET/release/nydusd .
         sudo mv target/$RUST_TARGET/release/nydusctl .
         sudo cp -r misc/configs .
