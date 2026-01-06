@@ -5,8 +5,9 @@
 // ! Storage backend driver to access the blobs through a http proxy.
 
 use http::{HeaderMap, HeaderValue, Method, Request};
-use hyper::Client as HyperClient;
-use hyper::{body, Body, Response};
+use http_body_util::{BodyExt, Full};
+use hyper::{body::Bytes, Response};
+use hyper_util::client::legacy::Client as HyperClient;
 use hyperlocal::Uri as HyperLocalUri;
 use hyperlocal::{UnixClientExt, UnixConnector};
 use nydus_api::HttpProxyConfig;
@@ -33,7 +34,7 @@ pub enum HttpProxyError {
     ParseStringToInteger(ParseIntError),
     ParseContentLengthFromHeader(http::header::ToStrError),
     /// Failed to get response from the local http server.
-    LocalRequest(hyper::Error),
+    LocalRequest(hyper_util::client::legacy::Error),
     /// Failed to get response from the remote http server.
     RemoteRequest(ConnectionError),
     /// Failed to build the tokio runtime.
@@ -114,7 +115,7 @@ pub struct HttpProxyReader {
 
 #[derive(Clone)]
 struct LocalClient {
-    client: Arc<HyperClient<UnixConnector>>,
+    client: Arc<HyperClient<UnixConnector, Full<Bytes>>>,
     runtime: Arc<Runtime>,
 }
 
@@ -152,13 +153,13 @@ impl LocalClient {
         only_head: bool,
         offset: u64,
         len: Option<usize>,
-    ) -> BackendResult<Response<Body>> {
+    ) -> BackendResult<Response<hyper::body::Incoming>> {
         let method = if only_head { Method::HEAD } else { Method::GET };
         let req = Request::builder()
             .method(method)
             .uri(uri.as_ref())
             .header(http::header::RANGE, range_str_for_header(offset, len))
-            .body(Body::default())
+            .body(Full::new(Bytes::new()))
             .map_err(HttpProxyError::BuildHttpRequest)?;
         let resp = self
             .client
@@ -181,10 +182,12 @@ impl LocalClient {
         self.runtime.block_on(async {
             let resp = self.do_req(uri, false, offset, Some(len)).await;
             match resp {
-                Ok(resp) => body::to_bytes(resp)
+                Ok(mut resp) => resp
+                    .body_mut()
+                    .collect()
                     .await
                     .map_err(|e| HttpProxyError::ReadResponseBody(e).into())
-                    .map(|bytes| bytes.to_vec()),
+                    .map(|b| b.to_bytes().to_vec()),
                 Err(e) => Err(e),
             }
         })
@@ -356,11 +359,12 @@ mod tests {
     };
 
     use http::{status, Request};
-    use hyper::{
-        service::{make_service_fn, service_fn},
-        Body, Response, Server,
-    };
-    use hyperlocal::UnixServerExt;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::service::service_fn;
+    use hyper::Response;
+    use hyper_util::rt::TokioIo;
+    use hyper_util::server::conn::auto::Builder;
     use nydus_api::HttpProxyConfig;
     use std::{
         cmp,
@@ -370,8 +374,10 @@ mod tests {
         thread,
         time::Duration,
     };
+    use tokio::net::{TcpListener, UnixListener};
 
     use super::build_tokio_runtime;
+    use super::Bytes;
 
     const CONTENT: &str = "some content for test";
     const SOCKET_PATH: &str = "/tmp/nydus-test-local-http-proxy.sock";
@@ -390,13 +396,15 @@ mod tests {
         (start, end)
     }
 
-    async fn server_handler(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+    async fn server_handler(
+        req: Request<Incoming>,
+    ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
         match *req.method() {
-            hyper::Method::HEAD => Ok::<_, hyper::Error>(
+            hyper::Method::HEAD => Ok::<_, std::convert::Infallible>(
                 Response::builder()
                     .status(200)
                     .header(http::header::CONTENT_LENGTH, CONTENT.len())
-                    .body(Body::empty())
+                    .body(Full::new(Bytes::new()))
                     .unwrap(),
             ),
             hyper::Method::GET => {
@@ -413,18 +421,18 @@ mod tests {
                     None => (CONTENT.len() - 1) as u64,
                 };
                 let content = CONTENT.as_bytes()[start as usize..(end + 1) as usize].to_vec();
-                Ok::<_, hyper::Error>(
+                Ok::<_, std::convert::Infallible>(
                     Response::builder()
                         .status(200)
                         .header(http::header::CONTENT_LENGTH, length)
-                        .body(Body::from(content))
+                        .body(Full::new(Bytes::from(content)))
                         .unwrap(),
                 )
             }
-            _ => Ok::<_, hyper::Error>(
+            _ => Ok::<_, std::convert::Infallible>(
                 Response::builder()
                     .status(status::StatusCode::METHOD_NOT_ALLOWED)
-                    .body(Body::empty())
+                    .body(Full::new(Bytes::new()))
                     .unwrap(),
             ),
         }
@@ -440,13 +448,17 @@ mod tests {
                 if path.exists() {
                     fs::remove_file(path).unwrap();
                 }
-                Server::bind_unix(path)
-                    .unwrap()
-                    .serve(make_service_fn(|_| async {
-                        Ok::<_, hyper::Error>(service_fn(server_handler))
-                    }))
-                    .await
-                    .unwrap();
+                let listener = UnixListener::bind(path).unwrap();
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let io = TokioIo::new(stream);
+                    tokio::spawn(async move {
+                        Builder::new(hyper_util::rt::TokioExecutor::new())
+                            .serve_connection(io, service_fn(server_handler))
+                            .await
+                            .ok();
+                    });
+                }
             });
         });
 
@@ -454,15 +466,22 @@ mod tests {
             let rt = build_tokio_runtime("test-remote-http-proxy-server", 1).unwrap();
             rt.block_on(async {
                 println!("\nstarting remote http proxy server......");
-                Server::bind(&SocketAddr::new(
+                let listener = TcpListener::bind(SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
                     9977,
                 ))
-                .serve(make_service_fn(|_| async {
-                    Ok::<_, hyper::Error>(service_fn(server_handler))
-                }))
                 .await
                 .unwrap();
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let io = TokioIo::new(stream);
+                    tokio::spawn(async move {
+                        Builder::new(hyper_util::rt::TokioExecutor::new())
+                            .serve_connection(io, service_fn(server_handler))
+                            .await
+                            .ok();
+                    });
+                }
             });
         });
 
