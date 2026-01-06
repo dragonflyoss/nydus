@@ -55,7 +55,7 @@ impl PersistMap {
 
         let mut file = OpenOptions::new()
             .read(true)
-            .write(create)
+            .write(true)
             .create(create)
             .truncate(!persist)
             .open(filename)
@@ -236,6 +236,8 @@ impl PersistMap {
             }
 
             if self.write_u8(index, current) {
+                // Sync the bitmap change to disk immediately to ensure it persists
+                let _ = self.filemap.sync_data();
                 if self.not_ready_count.fetch_sub(1, Ordering::AcqRel) == 1 {
                     self.mark_all_ready();
                 }
@@ -247,18 +249,111 @@ impl PersistMap {
     }
 
     fn mark_all_ready(&self) {
-        if self.filemap.sync_data().is_ok() {
-            /*
-            if let Ok(header) = self.filemap.get_mut::<Header>(0) {
-                header.all_ready = MAGIC_ALL_READY;
-                let _ = self.filemap.sync_data();
-            }
-             */
-        }
+        let _ = self.filemap.sync_data();
     }
 
     #[inline]
     pub fn is_range_all_ready(&self) -> bool {
         self.not_ready_count.load(Ordering::Acquire) == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use vmm_sys_util::tempdir::TempDir;
+
+    #[test]
+    fn test_chunk_ready_persistence_after_sync() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-test");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+
+        // Create a new PersistMap with 10 chunks
+        let chunk_count = 10u32;
+        {
+            let map = PersistMap::open(&blob_path, chunk_count, true, true).unwrap();
+            assert_eq!(map.not_ready_count.load(Ordering::Acquire), chunk_count);
+
+            // Mark chunks 0-4 as ready
+            for i in 0..5 {
+                map.set_chunk_ready(i).unwrap();
+                let (ready, _) = map.is_chunk_ready(i);
+                assert!(ready, "chunk {} should be marked as ready", i);
+            }
+
+            // Verify that chunks 0-4 are ready, 5-9 are not
+            for i in 0..5 {
+                let (ready, _) = map.is_chunk_ready(i);
+                assert!(ready, "chunk {} should be ready", i);
+            }
+            for i in 5..10 {
+                let (ready, _) = map.is_chunk_ready(i);
+                assert!(!ready, "chunk {} should not be ready", i);
+            }
+
+            assert_eq!(map.not_ready_count.load(Ordering::Acquire), 5);
+        }
+        // PersistMap is dropped here, file is closed
+
+        // Re-open the same PersistMap
+        {
+            let map = PersistMap::open(&blob_path, chunk_count, false, true).unwrap();
+            
+            // Verify that the ready state was persisted correctly
+            for i in 0..5 {
+                let (ready, _) = map.is_chunk_ready(i);
+                assert!(ready, "chunk {} should still be ready after reopening", i);
+            }
+            for i in 5..10 {
+                let (ready, _) = map.is_chunk_ready(i);
+                assert!(!ready, "chunk {} should still not be ready after reopening", i);
+            }
+
+            // The not_ready_count should be correctly reconstructed from the bitmap
+            assert_eq!(map.not_ready_count.load(Ordering::Acquire), 5);
+        }
+    }
+
+    #[test]
+    fn test_all_chunks_ready_persistence() {
+        let dir = TempDir::new().unwrap();
+        let blob_path = dir.as_path().join("blob-test-all");
+        let blob_path = blob_path.as_os_str().to_str().unwrap().to_string();
+
+        // Create a new PersistMap with 3 chunks
+        let chunk_count = 3u32;
+        {
+            let map = PersistMap::open(&blob_path, chunk_count, true, true).unwrap();
+            assert_eq!(map.not_ready_count.load(Ordering::Acquire), chunk_count);
+
+            // Mark all chunks as ready
+            for i in 0..chunk_count {
+                map.set_chunk_ready(i).unwrap();
+            }
+
+            // All chunks should be marked ready and not_ready_count should be 0
+            for i in 0..chunk_count {
+                let (ready, _) = map.is_chunk_ready(i);
+                assert!(ready, "chunk {} should be ready", i);
+            }
+            assert_eq!(map.not_ready_count.load(Ordering::Acquire), 0);
+        }
+        // PersistMap is dropped here, file is closed
+
+        // Re-open the same PersistMap
+        {
+            let map = PersistMap::open(&blob_path, chunk_count, false, true).unwrap();
+            
+            // All chunks should still be ready
+            for i in 0..chunk_count {
+                let (ready, _) = map.is_chunk_ready(i);
+                assert!(ready, "chunk {} should still be ready after reopening", i);
+            }
+
+            // not_ready_count should be 0
+            assert_eq!(map.not_ready_count.load(Ordering::Acquire), 0);
+        }
     }
 }
