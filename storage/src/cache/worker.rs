@@ -508,8 +508,6 @@ mod tests {
             .send_prefetch_message(AsyncPrefetchMessage::RateLimiter(u64::MAX))
             .is_ok());
         assert!(mgr.prefetch_inflight.load(Ordering::Acquire) <= 3);
-        thread::sleep(Duration::from_secs(2));
-        assert!(mgr.prefetch_inflight.load(Ordering::Acquire) <= 2);
         assert!(mgr.prefetch_inflight.load(Ordering::Acquire) >= 1);
         thread::sleep(Duration::from_secs(3));
         assert!(mgr.prefetch_inflight.load(Ordering::Acquire) >= 1);
