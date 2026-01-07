@@ -236,8 +236,7 @@ impl PersistMap {
             }
 
             if self.write_u8(index, current) {
-                // Sync the bitmap change to disk immediately to ensure it persists
-                let _ = self.filemap.sync_data();
+                let _ = self.filemap.sync_data_async();
                 if self.not_ready_count.fetch_sub(1, Ordering::AcqRel) == 1 {
                     self.mark_all_ready();
                 }
@@ -249,6 +248,7 @@ impl PersistMap {
     }
 
     fn mark_all_ready(&self) {
+        // Use blocking sync for final completion to ensure all data is written to disk
         let _ = self.filemap.sync_data();
     }
 

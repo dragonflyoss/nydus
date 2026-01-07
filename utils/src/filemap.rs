@@ -188,6 +188,22 @@ impl FileMapState {
         std::mem::forget(file);
         result
     }
+
+    /// Schedule an asynchronous sync of mapped file data to disk.
+    pub fn sync_data_async(&self) -> Result<()> {
+        let ret = unsafe {
+            libc::msync(
+                self.base as *mut libc::c_void,
+                self.size,
+                libc::MS_ASYNC,
+            )
+        };
+        if ret != 0 {
+            Err(last_error!("msync async failed"))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Duplicate a file object by `libc::dup()`.
