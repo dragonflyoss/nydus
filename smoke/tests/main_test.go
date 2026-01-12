@@ -5,6 +5,7 @@
 package tests
 
 import (
+	"log"
 	"os"
 	"testing"
 
@@ -27,6 +28,9 @@ func TestMain(m *testing.M) {
 	if os.Getenv("DISABLE_REGISTRY") == "" {
 		reg = tool.NewRegistry()
 	}
+
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
+	log.SetOutput(os.Stderr)
 
 	code := m.Run()
 

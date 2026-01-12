@@ -106,7 +106,7 @@ func (d *DescartesItem) Str() string {
 //	   //       age: 30, name: imoer
 //	   for products.HasNext(){
 //	       item := products.Next()
-//	       fmt.Println(item.Str())
+//	       log.Println(item.Str())
 //	   }
 type DescartesIterator struct {
 	cursors   []int
