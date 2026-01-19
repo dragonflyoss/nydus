@@ -28,9 +28,14 @@ func (reg *Registry) Destroy() {
 
 func PrepareImage(t *testing.T, source string) string {
 	registryPort := os.Getenv("REGISTRY_PORT")
-	Run(t, fmt.Sprintf("docker pull %s", source))
 	target := fmt.Sprintf("localhost:%s/%s", registryPort, source)
-	Run(t, fmt.Sprintf("docker tag %s %s", source, target))
+	if _, err := RunWithCombinedOutput(fmt.Sprintf("docker pull %s", target)); err == nil {
+		return target
+	}
+	if _, err := RunWithCombinedOutput(fmt.Sprintf("docker tag %s %s", source, target)); err != nil {
+		Run(t, fmt.Sprintf("docker pull %s", source))
+		Run(t, fmt.Sprintf("docker tag %s %s", source, target))
+	}
 	Run(t, fmt.Sprintf("docker push %s", target))
 	return target
 }
