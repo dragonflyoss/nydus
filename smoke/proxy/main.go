@@ -35,7 +35,7 @@ func main() {
 func httpsProxy(w http.ResponseWriter, r *http.Request) {
 	destAddr := r.URL.Host
 
-	fmt.Println("Tunneling established", destAddr)
+	log.Println("Tunneling established", destAddr)
 
 	destConn, err := net.DialTimeout("tcp", destAddr, 10*time.Second)
 	if err != nil {

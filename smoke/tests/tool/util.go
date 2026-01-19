@@ -7,6 +7,7 @@ package tool
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
@@ -23,6 +24,7 @@ var defaultBinary = map[string]string{
 }
 
 func RunWithCombinedOutput(cmd string) (string, error) {
+	log.Println("RunWithCombinedOutput:", cmd)
 	_cmd := exec.Command("sh", "-c", cmd)
 	output, err := _cmd.CombinedOutput()
 
@@ -30,6 +32,7 @@ func RunWithCombinedOutput(cmd string) (string, error) {
 }
 
 func Run(t *testing.T, cmd string) {
+	log.Println("Run:", cmd)
 	_cmd := exec.Command("sh", "-c", cmd)
 	_cmd.Stdout = os.Stdout
 	_cmd.Stderr = os.Stderr
@@ -38,6 +41,7 @@ func Run(t *testing.T, cmd string) {
 }
 
 func RunWithoutOutput(t *testing.T, cmd string) {
+	log.Println("RunWithoutOutput:", cmd)
 	_cmd := exec.Command("sh", "-c", cmd)
 	_cmd.Stdout = io.Discard
 	_cmd.Stderr = os.Stderr
@@ -46,6 +50,7 @@ func RunWithoutOutput(t *testing.T, cmd string) {
 }
 
 func RunWithOutput(cmd string) string {
+	log.Println("RunWithOutput:", cmd)
 	_cmd := exec.Command("sh", "-c", cmd)
 	_cmd.Stderr = os.Stderr
 

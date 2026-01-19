@@ -6,6 +6,7 @@ package tests
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,7 +218,7 @@ func (i *ImageTestSuite) TestChundict(t *testing.T, ctx tool.Context, images []s
 		target := fmt.Sprintf("%s-nydus-%s", image, uuid.NewString())
 		targets = append(targets, target)
 
-		fmt.Println("target:", target)
+		log.Println("target:", target)
 		convertCmd := fmt.Sprintf(
 			"%s %s convert --source %s --target %s %s %s %s %s --nydus-image %s --work-dir %s %s",
 			ctx.Binary.Nydusify, logLevel, image, target, fsVersion, enableOCIRef, "", enableEncrypt, ctx.Binary.Builder, ctx.Env.WorkDir, compressor,
@@ -228,13 +229,13 @@ func (i *ImageTestSuite) TestChundict(t *testing.T, ctx tool.Context, images []s
 
 	// Generate chunkdict.
 	chunkdict := fmt.Sprintf("%s/redis:nydus-chunkdict-%s", strings.SplitN(testImage, "/", 2)[0], uuid.NewString())
-	fmt.Println("chunkdict:", chunkdict)
+	log.Println("chunkdict:", chunkdict)
 	generateCmd := fmt.Sprintf(
 		"%s %s chunkdict generate --sources %s --target %s --source-insecure --target-insecure --nydus-image %s --work-dir %s",
 		ctx.Binary.Nydusify, logLevel, targetsStr, chunkdict, ctx.Binary.Builder, filepath.Join(ctx.Env.WorkDir, "generate"),
 	)
 	tool.RunWithoutOutput(t, generateCmd)
-	fmt.Println("generateCmd:", generateCmd)
+	log.Println("generateCmd:", generateCmd)
 
 	// Covert test image by chunkdict.
 	target := fmt.Sprintf("%s-nydus-%s", testImage, uuid.NewString())
@@ -250,7 +251,6 @@ func (i *ImageTestSuite) TestChundict(t *testing.T, ctx tool.Context, images []s
 		ctx.Binary.Nydusify, logLevel, target, ctx.Binary.Builder, ctx.Binary.Nydusd, filepath.Join(ctx.Env.WorkDir, "check"),
 	)
 	tool.RunWithoutOutput(t, checkCmd)
-	fmt.Println("checkCmd:", checkCmd)
 	ctx.Destroy(t)
 }
 
