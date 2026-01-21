@@ -41,7 +41,7 @@ virtio-queue = { workspace = true, optional = true }
 vm-memory = { workspace = true, features = ["backend-mmap"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-tokio-uring = "0.4"
+tokio-uring = "0.5"
 
 [dev-dependencies]
 vmm-sys-util = { workspace = true }
