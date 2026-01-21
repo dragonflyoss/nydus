@@ -367,7 +367,7 @@ func (nydusd *Nydusd) MountByAPI(config NydusdConfig) error {
 
 func (nydusd *Nydusd) Umount() error {
 	if _, err := os.Stat(nydusd.MountPath); err == nil {
-		cmd := exec.Command("umount", nydusd.MountPath)
+		cmd := exec.Command("umount", "-l", nydusd.MountPath)
 		cmd.Stdout = os.Stdout
 		if err := cmd.Run(); err != nil {
 			return err
