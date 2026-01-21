@@ -278,13 +278,13 @@ jobs:
           echo "GOARCH: $GOARCH"
           sh ./goreleaser.sh
       - name: Check GoReleaser config
-        uses: goreleaser/goreleaser-action@90a3faa9d0182683851fbfa97ca1a2cb983bfca3
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a
         with:
           version: latest
           args: check
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@90a3faa9d0182683851fbfa97ca1a2cb983bfca3
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a
         id: run-goreleaser
         with:
           version: latest
