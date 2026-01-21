@@ -161,13 +161,13 @@ jobs:
       uses: jpribyl/action-docker-layer-caching@v0.1.0
       continue-on-error: true
     - name: Download Nydus
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydus-artifact
         path: |
           target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -307,11 +307,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Download nydus coverage file
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydus-test-coverage-artifact
     - name: Download contrib coverage file
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: contrib-test-coverage-artifact
     - name: Upload coverage to Codecov
@@ -343,12 +343,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -367,12 +367,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
