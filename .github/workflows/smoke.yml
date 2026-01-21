@@ -55,7 +55,7 @@ jobs:
         go-version-file: 'go.work'
         cache: false
     - name: Lint
-      uses: golangci/golangci-lint-action@v6
+      uses: golangci/golangci-lint-action@v9
       with:
         version: v1.64
         working-directory: ${{ matrix.path }}
