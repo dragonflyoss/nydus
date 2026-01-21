@@ -87,17 +87,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download Nydus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydus-artifact
           path: /usr/local/bin
       - name: Download Nydusify
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydusify-artifact
           path: /usr/local/bin
       - name: Download fsck.erofs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: fsck-erofs-artifact
           path: /usr/local/bin
@@ -166,12 +166,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download Nydus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydus-artifact
           path: /usr/local/bin
       - name: Download Nydusify
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydusify-artifact
           path: /usr/local/bin
@@ -220,17 +220,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download Nydus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydus-artifact
           path: /usr/local/bin
       - name: Download Nydusify
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydusify-artifact
           path: /usr/local/bin
       - name: Download fsck.erofs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: fsck-erofs-artifact
           path: /usr/local/bin
@@ -283,17 +283,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download Nydus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydus-artifact
           path: /usr/local/bin
       - name: Download Nydusify
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydusify-artifact
           path: /usr/local/bin
       - name: Download fsck.erofs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: fsck-erofs-artifact
           path: /usr/local/bin
@@ -342,22 +342,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Download Zran Metric
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: convert-zran-metric
           path: convert-zran
       - name: Download V5 Metric
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: convert-native-v5-metric
           path: convert-native-v5
       - name: Download V6 Metric
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: convert-native-v6-metric
           path: convert-native-v6
       - name: Download V6 Batch Metric
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: convert-native-v6-batch-metric
           path: convert-native-v6-batch
