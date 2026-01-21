@@ -72,7 +72,7 @@ jobs:
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}
         path: |
@@ -108,7 +108,7 @@ jobs:
         sudo cp -r misc/configs .
         sudo chown -R $(id -un):$(id -gn) . ~/.cargo/
     - name: store-artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-artifacts-darwin-${{ matrix.arch }}
         path: |
@@ -136,7 +136,7 @@ jobs:
         sudo mv contrib/nydusify/cmd/nydusify .
         sudo mv contrib/nydus-overlayfs/bin/nydus-overlayfs .
     - name: store-artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-artifacts-linux-${{ matrix.arch }}-contrib
         path: |
@@ -170,7 +170,7 @@ jobs:
         sha256sum $tarball > $shasum
         echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-release-tarball-${{ matrix.os }}-${{ matrix.arch }}
         path: |
@@ -203,7 +203,7 @@ jobs:
         sha256sum $tarball > $shasum
         echo "tarball_shasum=${shasum}" >> $GITHUB_ENV
     - name: store-artifacts
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-release-tarball-${{ matrix.os }}-${{ matrix.arch }}
         path: |
