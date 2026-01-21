@@ -2124,21 +2124,22 @@ dependencies = [
 
 [[package]]
 name = "rust-fsm"
-version = "0.6.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "496dfc1e9384e6e6f53e1f0386825724d86c5b47a7f37ddcad84600744064144"
+checksum = "6c5404b670164c08c8759ac4c712951c610a23c0f7a02c5d4ad97a62c9a84659"
 dependencies = [
  "rust-fsm-dsl",
 ]
 
 [[package]]
 name = "rust-fsm-dsl"
-version = "0.6.2"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3967e3a7a0ff2cb3d652b971ddb7bb1404e4525f5074b2aa27a0ca723855109"
+checksum = "874568b8ce30b51302fb11895b99a7edbfb29418c2a8d4b9b4494973d001d6d1"
 dependencies = [
+ "proc-macro2",
  "quote",
- "syn 1.0.109",
+ "syn 2.0.96",
 ]
 
 [[package]]
