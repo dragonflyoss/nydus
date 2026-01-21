@@ -47,7 +47,7 @@ tokio-uring = "0.4"
 vmm-sys-util = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-procfs = "0.17.0"
+procfs = "0.18.0"
 
 [features]
 default = ["fuse-backend-rs/fusedev"]
