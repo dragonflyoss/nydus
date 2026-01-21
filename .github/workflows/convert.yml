@@ -29,7 +29,7 @@ jobs:
         curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/local/bin v1.61.0
         make -e DOCKER=false nydusify-release
     - name: Upload Nydusify
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd/nydusify
@@ -49,7 +49,7 @@ jobs:
       run: |
         make release
     - name: Upload Nydus Binaries
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-artifact
         path: |
@@ -68,7 +68,7 @@ jobs:
           cd erofs-utils && git checkout v1.6 && git apply ../${{ env.FSCK_PATCH_PATH }} && ./autogen.sh && ./configure && make && cd ..
           sudo cp erofs-utils/fsck/fsck.erofs /usr/local/bin/
       - name: Upload fsck.erofs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: fsck-erofs-artifact
           path: |
@@ -87,17 +87,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download Nydus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydus-artifact
           path: /usr/local/bin
       - name: Download Nydusify
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydusify-artifact
           path: /usr/local/bin
       - name: Download fsck.erofs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: fsck-erofs-artifact
           path: /usr/local/bin
@@ -148,7 +148,7 @@ jobs:
             sudo rm -rf ./output
           done
       - name: Save Nydusify Metric
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: convert-zran-metric
           path: convert-zran
@@ -166,12 +166,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download Nydus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydus-artifact
           path: /usr/local/bin
       - name: Download Nydusify
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydusify-artifact
           path: /usr/local/bin
@@ -202,7 +202,7 @@ jobs:
                 --target localhost:5000/$I:nydus-nightly-v5
           done
       - name: Save Nydusify Metric
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: convert-native-v5-metric
           path: convert-native-v5
@@ -220,17 +220,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download Nydus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydus-artifact
           path: /usr/local/bin
       - name: Download Nydusify
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydusify-artifact
           path: /usr/local/bin
       - name: Download fsck.erofs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: fsck-erofs-artifact
           path: /usr/local/bin
@@ -265,7 +265,7 @@ jobs:
             sudo rm -rf ./output
           done
       - name: Save Nydusify Metric
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: convert-native-v6-metric
           path: convert-native-v6
@@ -283,17 +283,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Download Nydus
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydus-artifact
           path: /usr/local/bin
       - name: Download Nydusify
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: nydusify-artifact
           path: /usr/local/bin
       - name: Download fsck.erofs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: fsck-erofs-artifact
           path: /usr/local/bin
@@ -330,7 +330,7 @@ jobs:
             sudo rm -rf ./output
           done
       - name: Save Nydusify Metric
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: convert-native-v6-batch-metric
           path: convert-native-v6-batch
@@ -342,22 +342,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       - name: Download Zran Metric
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: convert-zran-metric
           path: convert-zran
       - name: Download V5 Metric
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: convert-native-v5-metric
           path: convert-native-v5
       - name: Download V6 Metric
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: convert-native-v6-metric
           path: convert-native-v6
       - name: Download V6 Batch Metric
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: convert-native-v6-batch-metric
           path: convert-native-v6-batch

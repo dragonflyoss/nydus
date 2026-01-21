@@ -27,7 +27,7 @@ jobs:
       run: |
         make -e DOCKER=false nydusify-release
     - name: Upload Nydusify
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd/nydusify
@@ -47,7 +47,7 @@ jobs:
       run: |
         make release
     - name: Upload Nydus Binaries
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: nydus-artifact
         path: |
@@ -86,12 +86,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -106,7 +106,7 @@ jobs:
         export SNAPSHOTTER=overlayfs
         sudo -E make smoke-benchmark
     - name: Save BenchMark Result
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: benchmark-oci-${{ matrix.image }}
         path: smoke/${{ matrix.image }}-oci.json
@@ -133,12 +133,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -152,7 +152,7 @@ jobs:
         export BENCHMARK_METRIC_FILE=${{ matrix.image }}-fsversion-v5.json
         sudo -E make smoke-benchmark
     - name: Save BenchMark Result
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: benchmark-fsversion-v5-${{ matrix.image }}
         path: smoke/${{ matrix.image }}-fsversion-v5.json
@@ -179,12 +179,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -198,7 +198,7 @@ jobs:
         export BENCHMARK_METRIC_FILE=${{ matrix.image }}-fsversion-v6.json
         sudo -E make smoke-benchmark
     - name: Save BenchMark Result
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: benchmark-fsversion-v6-${{ matrix.image }}
         path: smoke/${{ matrix.image }}-fsversion-v6.json
@@ -225,12 +225,12 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Download Nydus
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydus-artifact
         path: target/release
     - name: Download Nydusify
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: nydusify-artifact
         path: contrib/nydusify/cmd
@@ -244,7 +244,7 @@ jobs:
         export BENCHMARK_METRIC_FILE=${{ matrix.image }}-zran.json
         sudo -E make smoke-benchmark
     - name: Save BenchMark Result
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: benchmark-zran-${{ matrix.image }}
         path: smoke/${{ matrix.image }}-zran.json
@@ -271,22 +271,22 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     - name: Download benchmark-oci
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: benchmark-oci-${{ matrix.image }}
         path: benchmark-result
     - name: Download benchmark-fsversion-v5
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: benchmark-fsversion-v5-${{ matrix.image }}
         path: benchmark-result
     - name: Download benchmark-fsversion-v6
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: benchmark-fsversion-v6-${{ matrix.image }}
         path: benchmark-result
     - name: Download benchmark-zran
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: benchmark-zran-${{ matrix.image }}
         path: benchmark-result
