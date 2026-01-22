@@ -57,7 +57,7 @@ jobs:
     - name: Lint
       uses: golangci/golangci-lint-action@v9
       with:
-        version: v1.64
+        version: v2.1
         working-directory: ${{ matrix.path }}
         args: --timeout=10m --verbose
 
@@ -227,7 +227,7 @@ jobs:
           export NYDUS_NYDUSIFY_$version_export=/usr/bin/nydus-$version/nydusify
         done
 
-        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v1.64.8
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v2.1.0
         sudo -E make smoke-only
 
   nydus-unit-test:
