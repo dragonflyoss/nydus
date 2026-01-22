@@ -81,8 +81,8 @@ func TestNewGenerators(t *testing.T) {
 
 		generators, err := NewGenerators(ret)
 		assert.NoError(t, err)
-		assert.Equal(t, 1, len(generators.MetaGenerator.Objects))
-		assert.Equal(t, 1, len(generators.MetaGenerator.Chunks))
+		assert.Equal(t, 1, len(generators.Objects))
+		assert.Equal(t, 1, len(generators.Chunks))
 		assert.Equal(t, "1.0", generators.Backend.Version)
 	})
 
@@ -95,8 +95,8 @@ func TestNewGenerators(t *testing.T) {
 
 		generators, err := NewGenerators(ret)
 		assert.NoError(t, err)
-		assert.Equal(t, 0, len(generators.MetaGenerator.Objects))
-		assert.Equal(t, 0, len(generators.MetaGenerator.Chunks))
+		assert.Equal(t, 0, len(generators.Objects))
+		assert.Equal(t, 0, len(generators.Chunks))
 	})
 }
 

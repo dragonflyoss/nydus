@@ -467,7 +467,7 @@ func (cache *Cache) Import(ctx context.Context) error {
 	// If utils.LayerAnnotationNydusFsVersion == "" and cache.opt.FsVersion == "5",
 	// it should be old cache image.
 	if manifest.Annotations[utils.LayerAnnotationNydusFsVersion] != cache.opt.FsVersion &&
-		!(manifest.Annotations[utils.LayerAnnotationNydusFsVersion] == "" && cache.opt.FsVersion == "5") {
+		(manifest.Annotations[utils.LayerAnnotationNydusFsVersion] != "" || cache.opt.FsVersion != "5") {
 		return fmt.Errorf(
 			"unmatched fs version %s, required to be %s",
 			manifest.Annotations[utils.LayerAnnotationNydusFsVersion], cache.opt.FsVersion,

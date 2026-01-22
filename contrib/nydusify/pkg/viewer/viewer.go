@@ -176,19 +176,19 @@ func (fsViewer *FsViewer) view(ctx context.Context) error {
 
 	isModelArtifact := targetParsed.NydusImage.Manifest.ArtifactType == modelspec.ArtifactTypeModelManifest
 	nydusdConfig := tool.NydusdConfig{
-		EnablePrefetch: fsViewer.Opt.Prefetch,
-		NydusdPath:     fsViewer.Opt.NydusdPath,
-		BackendType:    fsViewer.Opt.BackendType,
-		BackendConfig:  fsViewer.Opt.BackendConfig,
-		BootstrapPath:  filepath.Join(fsViewer.Opt.WorkDir, "nydus_bootstrap"),
-		ConfigPath:     filepath.Join(fsViewer.Opt.WorkDir, "fs/nydusd_config.json"),
-		BlobCacheDir:   filepath.Join(fsViewer.Opt.WorkDir, "fs/nydus_blobs"),
-		MountPath:      fsViewer.Opt.MountPath,
-		APISockPath:    filepath.Join(fsViewer.Opt.WorkDir, "fs/nydus_api.sock"),
+		EnablePrefetch: fsViewer.Prefetch,
+		NydusdPath:     fsViewer.NydusdPath,
+		BackendType:    fsViewer.BackendType,
+		BackendConfig:  fsViewer.BackendConfig,
+		BootstrapPath:  filepath.Join(fsViewer.WorkDir, "nydus_bootstrap"),
+		ConfigPath:     filepath.Join(fsViewer.WorkDir, "fs/nydusd_config.json"),
+		BlobCacheDir:   filepath.Join(fsViewer.WorkDir, "fs/nydus_blobs"),
+		MountPath:      fsViewer.MountPath,
+		APISockPath:    filepath.Join(fsViewer.WorkDir, "fs/nydus_api.sock"),
 		Mode:           "direct",
 	}
 	if isModelArtifact {
-		nydusdConfig.ExternalBackendConfigPath = filepath.Join(fsViewer.Opt.WorkDir, "fs/nydusd_backend.json")
+		nydusdConfig.ExternalBackendConfigPath = filepath.Join(fsViewer.WorkDir, "fs/nydusd_backend.json")
 	}
 	fsViewer.NydusdConfig = nydusdConfig
 
