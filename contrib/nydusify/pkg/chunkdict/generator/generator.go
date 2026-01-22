@@ -129,7 +129,7 @@ func (generator *Generator) pull(ctx context.Context) ([]string, error) {
 		}
 
 		// Create a directory to store the image bootstrap
-		nydusImageName := strings.Replace(generator.Sources[index], "/", ":", -1)
+		nydusImageName := strings.ReplaceAll(generator.Sources[index], "/", ":")
 		bootstrapDirPath := filepath.Join(generator.WorkDir, nydusImageName)
 		if err := os.MkdirAll(bootstrapDirPath, fs.ModePerm); err != nil {
 			return nil, errors.Wrap(err, "creat work directory")

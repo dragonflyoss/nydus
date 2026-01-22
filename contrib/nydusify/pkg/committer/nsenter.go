@@ -50,14 +50,14 @@ func (c *Config) Execute(writer io.Writer, program string, args ...string) (stri
 func (c *Config) ExecuteContext(ctx context.Context, writer io.Writer, program string, args ...string) (string, error) {
 	cmd, err := c.buildCommand(ctx)
 	if err != nil {
-		return "", fmt.Errorf("Error while building command: %v", err)
+		return "", fmt.Errorf("error while building command: %v", err)
 	}
 
 	// Prepare command
 	var srderr bytes.Buffer
 	rc, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("Open stdout pipe: %v", err)
+		return "", fmt.Errorf("open stdout pipe: %v", err)
 	}
 	defer rc.Close()
 
@@ -90,7 +90,7 @@ func (c *Config) ExecuteContext(ctx context.Context, writer io.Writer, program s
 
 func (c *Config) buildCommand(ctx context.Context) (*exec.Cmd, error) {
 	if c.Target == 0 {
-		return nil, fmt.Errorf("Target must be specified")
+		return nil, fmt.Errorf("target must be specified")
 	}
 
 	var args []string

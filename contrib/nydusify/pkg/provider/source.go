@@ -73,7 +73,7 @@ func (sp *defaultSourceProvider) Layers(_ context.Context) ([]SourceLayer, error
 	layers := sp.image.Manifest.Layers
 	diffIDs := sp.image.Config.RootFS.DiffIDs
 	if len(layers) != len(diffIDs) {
-		return nil, fmt.Errorf("Mismatched fs layers (%d) and diff ids (%d)", len(layers), len(diffIDs))
+		return nil, fmt.Errorf("mismatched fs layers (%d) and diff ids (%d)", len(layers), len(diffIDs))
 	}
 
 	var parentChainID *digest.Digest

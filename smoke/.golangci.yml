@@ -1,18 +1,45 @@
 # https://golangci-lint.run/usage/configuration#config-file
 
+version: "2"
+
 linters:
+  default: none
   enable:
     - staticcheck
     - unconvert
-    - gofmt
-    - goimports
     - revive
     - ineffassign
     - govet
     - unused
     - misspell
-  disable:
-    - errcheck
+
+  settings:
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
 run:
-  deadline: 4m
+  timeout: 4m

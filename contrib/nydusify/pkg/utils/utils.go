@@ -219,7 +219,7 @@ func UnpackFile(reader io.Reader, source, target string) error {
 	}
 
 	if !found {
-		return fmt.Errorf("Not found file %s in targz", source)
+		return fmt.Errorf("not found file %s in targz", source)
 	}
 
 	return nil

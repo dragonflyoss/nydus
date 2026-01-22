@@ -149,7 +149,7 @@ func (b *S3Backend) existObject(ctx context.Context, objectKey string) (bool, er
 	})
 	if err != nil {
 		var responseError *awshttp.ResponseError
-		if errors.As(err, &responseError) && responseError.ResponseError.HTTPStatusCode() == http.StatusNotFound {
+		if errors.As(err, &responseError) && responseError.HTTPStatusCode() == http.StatusNotFound {
 			return false, nil
 		}
 		return false, err
