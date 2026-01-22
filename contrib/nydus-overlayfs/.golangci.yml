@@ -1,5 +1,7 @@
 # https://golangci-lint.run/usage/configuration#config-file
 
+version: "2"
+
 linters:
   enable:
     - staticcheck
