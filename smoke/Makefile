@@ -53,3 +53,13 @@ test-compatibility: build
 # NEW_NYDUSD_BINARY_PATH=target/release/nydusd
 test-takeover: build
 	TAKEOVER_TEST=true sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestTakeover
+
+# Debug test for blobcache CI failures with nydusd v0.1.0
+# WORK_DIR=/tmp \
+# NYDUS_BUILDER=/path/to/latest/nydus-image \
+# NYDUS_NYDUSD=/path/to/latest/nydusd \
+# NYDUS_NYDUSD_v0_1_0=/path/to/v0.1.0/nydusd \
+# BLOBCACHE_DEBUG_TEST=true \
+# make test-blobcache-debug
+test-blobcache-debug: build
+	BLOBCACHE_DEBUG_TEST=true sudo -E ./smoke.test -test.v -test.timeout 20m -test.parallel=1 -test.run=TestBlobcacheV010Debug
