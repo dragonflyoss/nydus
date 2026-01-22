@@ -18,6 +18,3 @@ linters:
 
 run:
   timeout: 5m
-issues:
-  exclude-dirs:
-    - misc
