@@ -9,7 +9,7 @@ repository = "https://github.com/dragonflyoss/nydus"
 edition = "2021"
 
 [dependencies]
-thiserror = "1.0.30"
+thiserror = "2.0.11"
 blake3 = "1.3"
 httpdate = "1.0"
 lazy_static = "1.4"
