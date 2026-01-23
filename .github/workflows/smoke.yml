@@ -315,7 +315,7 @@ jobs:
       with:
         name: contrib-test-coverage-artifact
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v5
       with:
         files: ./codecov.json,./coverage.txt
         token: ${{ secrets.CODECOV_TOKEN }}
