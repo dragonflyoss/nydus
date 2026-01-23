@@ -30,10 +30,10 @@ nydus-api = { version = "0.4.0", path = "../api" }
 
 # libz-ng-sys doesn't compile on ppc64. Have to fallback to stock zlib-sys
 [target.'cfg(target_arch = "powerpc64")'.dependencies]
-libz-sys = { version = "1.1.12", features = ["stock-zlib"], default-features = false, optional = true }
+libz-sys = { version = "1.1.23", features = ["stock-zlib"], default-features = false, optional = true }
 flate2 = { version = "1.0.28", features = ["zlib"], default-features = false }
 [target.'cfg(not(target_arch = "powerpc64"))'.dependencies]
-libz-sys = { version = "1.1.8", features = ["zlib-ng"], default-features = false, optional = true }
+libz-sys = { version = "1.1.23", features = ["zlib-ng"], default-features = false, optional = true }
 flate2 = { version = "1.0.28", features = ["zlib-ng-compat"], default-features = false }
 
 [dev-dependencies]
