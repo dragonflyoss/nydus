@@ -126,7 +126,7 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - name: Setup Golang
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -261,7 +261,7 @@ jobs:
           submodules: recursive
 
       - name: Setup Golang
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: 'go.work'
           cache-dependency-path: "**/*.sum"
