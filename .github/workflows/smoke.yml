@@ -315,10 +315,11 @@ jobs:
       with:
         name: contrib-test-coverage-artifact
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v4
+      uses: codecov/codecov-action@v5
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with:
         files: ./codecov.json,./coverage.txt
-        token: ${{ secrets.CODECOV_TOKEN }}
         verbose: true
         fail_ci_if_error: true
 
