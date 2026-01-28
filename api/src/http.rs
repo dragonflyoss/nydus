@@ -51,6 +51,9 @@ pub struct DaemonConf {
     pub log_level: String,
 }
 
+// Set/update global configuration.
+pub type Config = std::collections::HashMap<String, String>;
+
 /// Identifier for cached blob objects.
 ///
 /// Domains are used to control the blob sharing scope. All blobs associated with the same domain
@@ -106,6 +109,10 @@ pub enum ApiRequest {
     ExportFsFilesMetrics(Option<String>, bool),
     /// Get information about filesystem inflight requests.
     ExportFsInflightMetrics,
+    /// Get global configuration.
+    GetConfig(Option<String>),
+    /// Update global configuration.
+    UpdateConfig(Option<String>, Config),
 
     // Nydus API v2
     /// Get daemon information excluding filesystem backends.
@@ -193,6 +200,8 @@ pub enum ApiResponsePayload {
     FsBackendInfo(String),
     // Filesystem Inflight Requests, v1.
     FsInflightMetrics(String),
+    // Global configuration, v1.
+    Config(Config),
 
     /// List of blob objects, v2
     BlobObjectList(String),

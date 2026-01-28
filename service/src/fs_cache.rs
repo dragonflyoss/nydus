@@ -573,7 +573,7 @@ impl FsCacheHandler {
         let mut blob_info = config.blob_info().deref().clone();
         blob_info.set_fscache_file(Some(file));
         let blob_ref = Arc::new(blob_info);
-        BLOB_FACTORY.new_blob_cache(config.config_v2(), &blob_ref)
+        BLOB_FACTORY.new_blob_cache(config.config_v2(), &blob_ref, "/")
     }
 
     fn fill_bootstrap_cache(bootstrap: Arc<FsCacheBootstrap>) -> Result<u64> {

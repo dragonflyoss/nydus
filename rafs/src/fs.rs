@@ -79,25 +79,30 @@ pub struct Rafs {
 
 impl Rafs {
     /// Create a new instance of `Rafs`.
-    pub fn new(cfg: &Arc<ConfigV2>, id: &str, path: &Path) -> RafsResult<(Self, RafsIoReader)> {
+    pub fn new(
+        cfg: &Arc<ConfigV2>,
+        mountpoint: &str,
+        metadata_path: &Path,
+    ) -> RafsResult<(Self, RafsIoReader)> {
         // Assume all meta/data blobs are accessible, otherwise it will always cause IO errors.
         cfg.internal.set_blob_accessible(true);
 
         let cache_cfg = cfg.get_cache_config().map_err(RafsError::LoadConfig)?;
         let rafs_cfg = cfg.get_rafs_config().map_err(RafsError::LoadConfig)?;
-        let (sb, reader) = RafsSuper::load_from_file(path, cfg.clone(), false)
+        let (sb, reader) = RafsSuper::load_from_file(metadata_path, cfg.clone(), false)
             .map_err(RafsError::FillSuperBlock)?;
         let blob_infos = sb.superblock.get_blob_infos();
-        let device = BlobDevice::new(cfg, &blob_infos).map_err(RafsError::CreateDevice)?;
+        let device =
+            BlobDevice::new(cfg, &blob_infos, mountpoint).map_err(RafsError::CreateDevice)?;
 
         if cfg.is_chunk_validation_enabled() && sb.meta.has_inlined_chunk_digest() {
             sb.superblock.set_blob_device(device.clone());
         }
 
         let rafs = Rafs {
-            id: id.to_string(),
+            id: mountpoint.to_string(),
             device,
-            ios: metrics::FsIoStats::new(id),
+            ios: metrics::FsIoStats::new(mountpoint),
             sb: Arc::new(sb),
 
             initialized: false,
@@ -140,7 +145,12 @@ impl Rafs {
     }
 
     /// Update storage backend for blobs.
-    pub fn update(&self, r: &mut RafsIoReader, conf: &Arc<ConfigV2>) -> RafsResult<()> {
+    pub fn update(
+        &self,
+        r: &mut RafsIoReader,
+        conf: &Arc<ConfigV2>,
+        mountpoint: &str,
+    ) -> RafsResult<()> {
         info!("update");
         if !self.initialized {
             warn!("Rafs is not yet initialized");
@@ -159,7 +169,7 @@ impl Rafs {
         // step 2: update device (only localfs is supported)
         let blob_infos = self.sb.superblock.get_blob_infos();
         self.device
-            .update(conf, &blob_infos, self.fs_prefetch)
+            .update(conf, &blob_infos, self.fs_prefetch, mountpoint)
             .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 

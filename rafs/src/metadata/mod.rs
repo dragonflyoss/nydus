@@ -847,7 +847,7 @@ impl RafsSuper {
     /// The `BlobDevice` object is needed to get meta information from RAFS V6 data blobs.
     pub fn create_blob_device(&self, config: Arc<ConfigV2>) -> Result<()> {
         let blobs = self.superblock.get_blob_infos();
-        let device = BlobDevice::new(&config, &blobs)?;
+        let device = BlobDevice::new(&config, &blobs, "/")?;
         self.superblock.set_blob_device(device);
         Ok(())
     }
