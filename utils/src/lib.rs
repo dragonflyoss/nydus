@@ -22,6 +22,7 @@ pub use self::types::*;
 pub mod async_helper;
 pub mod compact;
 pub mod compress;
+pub mod config;
 pub mod crc32;
 #[cfg(feature = "encryption")]
 pub mod crypt;

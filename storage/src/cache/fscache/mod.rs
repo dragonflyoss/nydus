@@ -9,6 +9,8 @@ use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
+use crate::cache::CasMgr;
+
 use nydus_api::CacheConfigV2;
 use nydus_utils::metrics::BlobcacheMetrics;
 use tokio::runtime::Runtime;
@@ -18,7 +20,7 @@ use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::filecache::BLOB_DATA_FILE_SUFFIX;
 use crate::cache::state::{BlobStateMap, IndexedChunkMap, RangeMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
-use crate::cache::{BlobCache, BlobCacheMgr, CasMgr};
+use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
 use crate::utils::get_path_from_file;

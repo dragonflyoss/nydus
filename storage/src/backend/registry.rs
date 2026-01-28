@@ -191,13 +191,12 @@ impl fmt::Display for Scheme {
 }
 
 struct RegistryState {
+    id: String,
     // HTTP scheme like: https, http
     scheme: Scheme,
     host: String,
     // Image repo name like: library/ubuntu
     repo: String,
-    // Base64 encoded registry auth
-    auth: Option<String>,
     // Retry limit for read operation
     retry_limit: u8,
     // Scheme specified for blob server
@@ -264,6 +263,20 @@ impl RegistryState {
         }
     }
 
+    fn get_config_auth(&self) -> String {
+        nydus_utils::config::get(&self.id, &nydus_utils::config::Keys::RegistryAuth)
+    }
+
+    fn set_config_auth(&self, auth: Option<String>) {
+        if let Some(auth) = auth {
+            nydus_utils::config::set(
+                &self.id,
+                &nydus_utils::config::Keys::RegistryAuth,
+                auth.clone(),
+            );
+        }
+    }
+
     // Request registry authentication server to get bearer token
     fn get_token(&self, auth: BearerAuth, connection: &Arc<Connection>) -> Result<TokenResponse> {
         let http_get = self
@@ -312,10 +325,11 @@ impl RegistryState {
     ) -> Result<Response> {
         let mut headers = HeaderMap::new();
 
-        if let Some(auth) = &self.auth {
+        let config_auth = self.get_config_auth();
+        if !config_auth.is_empty() {
             headers.insert(
                 HEADER_AUTHORIZATION,
-                format!("Basic {}", auth).parse().unwrap(),
+                format!("Basic {}", config_auth).parse().unwrap(),
             );
         }
 
@@ -365,11 +379,7 @@ impl RegistryState {
 
     fn get_auth_header(&self, auth: Auth, connection: &Arc<Connection>) -> Result<String> {
         match auth {
-            Auth::Basic(_) => self
-                .auth
-                .as_ref()
-                .map(|auth| format!("Basic {}", auth))
-                .ok_or_else(|| einval!("invalid auth config")),
+            Auth::Basic(_) => Ok(format!("Basic {}", self.get_config_auth())),
             Auth::Bearer(auth) => {
                 let token = self.get_token(auth, connection)?;
                 Ok(format!("Bearer {}", token.token))
@@ -862,10 +872,10 @@ impl Registry {
         };
 
         let state = Arc::new(RegistryState {
+            id: id.to_owned(),
             scheme,
             host: config.host.clone(),
             repo: config.repo.clone(),
-            auth,
             cached_auth,
             retry_limit,
             blob_url_scheme: config.blob_url_scheme.clone(),
@@ -875,6 +885,7 @@ impl Registry {
             token_expired_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),
         });
+        state.set_config_auth(auth);
 
         let registry = Registry {
             connection,
@@ -1015,8 +1026,10 @@ fn trim(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::response;
     use serde_json::json;
+
+    #[cfg(feature = "backend-registry")]
+    use http;
 
     #[test]
     fn test_string_cache() {
@@ -1046,10 +1059,10 @@ mod tests {
     #[test]
     fn test_state_url() {
         let state = RegistryState {
+            id: String::from("/"),
             scheme: Scheme::new(false),
             host: "alibaba-inc.com".to_string(),
             repo: "nydus".to_string(),
-            auth: None,
             retry_limit: 5,
             blob_url_scheme: "https".to_string(),
             blob_redirected_host: "oss.alibaba-inc.com".to_string(),
@@ -1185,8 +1198,8 @@ mod tests {
             "token": "test_token_value",
             "expires_in": 3600
         });
-        let response = Response::from(
-            response::Builder::new()
+        let response = reqwest::blocking::Response::from(
+            http::response::Builder::new()
                 .body(json_with_token.to_string())
                 .unwrap(),
         );
@@ -1199,8 +1212,8 @@ mod tests {
             "access_token": "test_access_token_value",
             "expires_in": 7200
         });
-        let response = Response::from(
-            response::Builder::new()
+        let response = reqwest::blocking::Response::from(
+            http::response::Builder::new()
                 .body(json_with_access_token.to_string())
                 .unwrap(),
         );
@@ -1212,8 +1225,8 @@ mod tests {
         let json_with_default_expiration = json!({
             "token": "default_expiration_token"
         });
-        let response = Response::from(
-            response::Builder::new()
+        let response = reqwest::blocking::Response::from(
+            http::response::Builder::new()
                 .body(json_with_default_expiration.to_string())
                 .unwrap(),
         );
@@ -1226,8 +1239,8 @@ mod tests {
             "token": "test_token_value",
             "access_token": "test_access_token_value",
         });
-        let response = Response::from(
-            response::Builder::new()
+        let response = reqwest::blocking::Response::from(
+            http::response::Builder::new()
                 .body(json_with_both_tokens.to_string())
                 .unwrap(),
         );
@@ -1236,8 +1249,8 @@ mod tests {
 
         // Case 5: Response contains no token
         let json_with_no_token = json!({});
-        let response = Response::from(
-            response::Builder::new()
+        let response = reqwest::blocking::Response::from(
+            http::response::Builder::new()
                 .body(json_with_no_token.to_string())
                 .unwrap(),
         );

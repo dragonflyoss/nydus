@@ -500,7 +500,7 @@ impl DataBlob {
     pub fn new(config: &Arc<DataBlobConfig>) -> Result<Self> {
         let blob_id = config.blob_info().blob_id();
         let blob = BLOB_FACTORY
-            .new_blob_cache(config.config_v2(), &config.blob_info)
+            .new_blob_cache(config.config_v2(), &config.blob_info, &blob_id)
             .inspect_err(|_e| {
                 warn!(
                     "blob_cache: failed to create cache object for blob {}",

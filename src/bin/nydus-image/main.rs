@@ -2041,7 +2041,7 @@ impl Command {
 
     fn get_backend(
         matches: &ArgMatches,
-        blob_id: &str,
+        id: &str,
     ) -> Result<(Arc<ConfigV2>, Arc<dyn BlobBackend + Send + Sync>)> {
         let config: Arc<ConfigV2>;
         let backend: Arc<dyn BlobBackend + Send + Sync>;
@@ -2060,12 +2060,12 @@ impl Command {
             if backend_type == "localfs" {
                 bail!("Use --blob-dir to specify localfs backend");
             } else {
-                backend = BlobFactory::new_backend_from_json(backend_type, &content, blob_id)?;
+                backend = BlobFactory::new_backend_from_json(backend_type, &content, id)?;
                 config = Arc::new(ConfigV2::default());
             }
         } else if let Some(dir) = matches.get_one::<String>("blob-dir") {
             config = Arc::new(ConfigV2::new_localfs("", dir)?);
-            backend = BlobFactory::new_backend(config.backend.as_ref().unwrap(), blob_id)?;
+            backend = BlobFactory::new_backend(config.backend.as_ref().unwrap(), id)?;
         } else {
             return Err(anyhow!("invalid backend configuration"));
         }

@@ -9,6 +9,8 @@ use std::io::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
+use crate::cache::CasMgr;
+
 use tokio::runtime::Runtime;
 
 use nydus_api::CacheConfigV2;
@@ -21,7 +23,7 @@ use crate::cache::state::{
     BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap, NoopChunkMap,
 };
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
-use crate::cache::{BlobCache, BlobCacheMgr, CasMgr};
+use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::utils::get_path_from_file;
 

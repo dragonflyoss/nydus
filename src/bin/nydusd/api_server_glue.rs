@@ -17,7 +17,8 @@ use nydus::daemon::NydusDaemon;
 use nydus::{FsBackendMountCmd, FsBackendType, FsBackendUmountCmd, FsService};
 use nydus_api::{
     start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
-    ApiResult, BlobCacheEntry, BlobCacheObjectId, DaemonConf, DaemonErrorKind, MetricsErrorKind,
+    ApiResult, BlobCacheEntry, BlobCacheObjectId, Config, DaemonConf, DaemonErrorKind,
+    MetricsErrorKind,
 };
 use nydus_utils::metrics;
 
@@ -56,6 +57,8 @@ impl ApiServer {
             ApiRequest::ExportFsAccessPatterns(id) => Self::export_access_patterns(id),
             ApiRequest::ExportFsBackendInfo(mountpoint) => self.backend_info(&mountpoint),
             ApiRequest::ExportFsInflightMetrics => self.export_inflight_metrics(),
+            ApiRequest::GetConfig(id) => self.get_config(id),
+            ApiRequest::UpdateConfig(id, config) => self.update_config(id, config),
 
             // Nydus API v2
             ApiRequest::GetDaemonInfoV2 => self.daemon_info(false),
@@ -321,6 +324,26 @@ impl ApiServer {
         d.trigger_start()
             .map(|_| ApiResponsePayload::Empty)
             .map_err(|e| ApiError::DaemonAbnormal(e.into()))
+    }
+
+    fn update_config(&self, id: Option<String>, config: Config) -> ApiResponse {
+        use std::convert::TryFrom;
+
+        let use_id = id.as_deref().unwrap_or("");
+        for (key_type, value) in config.iter() {
+            if let Ok(keys) = nydus_utils::config::Keys::try_from(key_type.as_str()) {
+                nydus_utils::config::set(use_id, &keys, value.clone());
+            } else {
+                return Err(ApiError::ResponsePayloadType);
+            }
+        }
+        Ok(ApiResponsePayload::Empty)
+    }
+
+    fn get_config(&self, id: Option<String>) -> ApiResponse {
+        let config_map = nydus_utils::config::get_all(id.as_deref().map(|s| s.to_string()));
+        let config: Config = config_map;
+        Ok(ApiResponsePayload::Config(config))
     }
 }
 

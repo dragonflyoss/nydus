@@ -117,6 +117,7 @@ impl BlobFactory {
         &self,
         config: &Arc<ConfigV2>,
         blob_info: &Arc<BlobInfo>,
+        id: &str,
     ) -> IOResult<Arc<dyn BlobCache>> {
         let backend_cfg = config.get_backend_config()?;
         let cache_cfg = config.get_cache_config()?;
@@ -132,7 +133,7 @@ impl BlobFactory {
         if let Some(mgr) = guard.get(&key) {
             return mgr.get_blob_cache(blob_info);
         }
-        let backend = Self::new_backend(backend_cfg, &blob_info.blob_id())?;
+        let backend = Self::new_backend(backend_cfg, id)?;
         let mgr = match cache_cfg.cache_type.as_str() {
             "blobcache" | "filecache" => {
                 let mgr = FileCacheMgr::new(
@@ -226,38 +227,32 @@ impl BlobFactory {
     #[allow(unused_variables)]
     pub fn new_backend(
         config: &BackendConfigV2,
-        blob_id: &str,
+        id: &str,
     ) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
         match config.backend_type.as_str() {
             #[cfg(feature = "backend-oss")]
-            "oss" => Ok(Arc::new(oss::Oss::new(
-                config.get_oss_config()?,
-                Some(blob_id),
-            )?)),
+            "oss" => Ok(Arc::new(oss::Oss::new(config.get_oss_config()?, Some(id))?)),
             #[cfg(feature = "backend-s3")]
-            "s3" => Ok(Arc::new(s3::S3::new(
-                config.get_s3_config()?,
-                Some(blob_id),
-            )?)),
+            "s3" => Ok(Arc::new(s3::S3::new(config.get_s3_config()?, Some(id))?)),
             #[cfg(feature = "backend-registry")]
             "registry" => Ok(Arc::new(registry::Registry::new(
                 config.get_registry_config()?,
-                Some(blob_id),
+                Some(id),
             )?)),
             #[cfg(feature = "backend-localfs")]
             "localfs" => Ok(Arc::new(localfs::LocalFs::new(
                 config.get_localfs_config()?,
-                Some(blob_id),
+                Some(id),
             )?)),
             #[cfg(feature = "backend-localdisk")]
             "localdisk" => Ok(Arc::new(localdisk::LocalDisk::new(
                 config.get_localdisk_config()?,
-                Some(blob_id),
+                Some(id),
             )?)),
             #[cfg(feature = "backend-http-proxy")]
             "http-proxy" => Ok(Arc::new(http_proxy::HttpProxy::new(
                 config.get_http_proxy_config()?,
-                Some(blob_id),
+                Some(id),
             )?)),
             _ => Err(einval!(format!(
                 "unsupported backend type '{}'",
@@ -269,38 +264,38 @@ impl BlobFactory {
     pub fn new_backend_from_json(
         backend_type: &str,
         content: &str,
-        blob_id: &str,
+        id: &str,
     ) -> IOResult<Arc<dyn BlobBackend + Send + Sync>> {
         match backend_type {
             #[cfg(feature = "backend-oss")]
             "oss" => {
                 let cfg = serde_json::from_str::<OssConfig>(&content)?;
-                Ok(Arc::new(oss::Oss::new(&cfg, Some(blob_id))?))
+                Ok(Arc::new(oss::Oss::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-s3")]
             "s3" => {
                 let cfg = serde_json::from_str::<S3Config>(&content)?;
-                Ok(Arc::new(s3::S3::new(&cfg, Some(blob_id))?))
+                Ok(Arc::new(s3::S3::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-registry")]
             "registry" => {
                 let cfg = serde_json::from_str::<RegistryConfig>(&content)?;
-                Ok(Arc::new(registry::Registry::new(&cfg, Some(blob_id))?))
+                Ok(Arc::new(registry::Registry::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-localfs")]
             "localfs" => {
                 let cfg = serde_json::from_str::<LocalFsConfig>(&content)?;
-                Ok(Arc::new(localfs::LocalFs::new(&cfg, Some(blob_id))?))
+                Ok(Arc::new(localfs::LocalFs::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-localdisk")]
             "localdisk" => {
                 let cfg = serde_json::from_str::<LocalDiskConfig>(&content)?;
-                Ok(Arc::new(localdisk::LocalDisk::new(&cfg, Some(blob_id))?))
+                Ok(Arc::new(localdisk::LocalDisk::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-http-proxy")]
             "http-proxy" => {
                 let cfg = serde_json::from_str::<HttpProxyConfig>(&content)?;
-                Ok(Arc::new(http_proxy::HttpProxy::new(&cfg, Some(blob_id))?))
+                Ok(Arc::new(http_proxy::HttpProxy::new(&cfg, Some(id))?))
             }
             _ => Err(einval!(format!(
                 "unsupported backend type '{}'",
