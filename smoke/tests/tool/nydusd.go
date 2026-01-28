@@ -653,6 +653,59 @@ func (nydusd *Nydusd) GetInflightMetrics() (*InflightMetrics, error) {
 	return &info, err
 }
 
+// Config represents the configuration that can be hot reloaded.
+type Config struct {
+	RegistryAuth string `json:"registry_auth,omitempty"`
+}
+
+// GetConfig retrieves the current configuration for the specified mountpoint.
+func (nydusd *Nydusd) GetConfig(id string) (*Config, error) {
+	resp, err := nydusd.client.Get(fmt.Sprintf("http://unix/api/v1/config?id=%s", id))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var config Config
+	if err = json.Unmarshal(body, &config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+// UpdateConfig updates the configuration for the specified mountpoint.
+func (nydusd *Nydusd) UpdateConfig(id string, config *Config) error {
+	body, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("PUT", fmt.Sprintf("http://unix/api/v1/config?id=%s", id), bytes.NewBuffer(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := nydusd.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to update config: %s", string(body))
+	}
+
+	return nil
+}
+
 func (nydusd *Nydusd) Verify(t *testing.T, expectedFileTree map[string]*File) {
 	nydusd.VerifyByPath(t, expectedFileTree, "")
 }

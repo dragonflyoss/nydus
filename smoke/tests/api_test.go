@@ -295,6 +295,74 @@ func (a *APIV1TestSuite) TestMount(t *testing.T) {
 	nydusd.VerifyByPath(t, rootFs.FileTree, config.MountPath)
 }
 
+func (a *APIV1TestSuite) TestHotReloadConfig(t *testing.T) {
+
+	ctx := tool.DefaultContext(t)
+
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	rootFs := texture.MakeLowerLayer(t, filepath.Join(ctx.Env.WorkDir, "root-fs"))
+
+	rafs := a.buildLayer(t, ctx, rootFs)
+
+	nydusd, err := tool.NewNydusd(tool.NydusdConfig{
+		NydusdPath:      ctx.Binary.Nydusd,
+		BootstrapPath:   rafs,
+		ConfigPath:      filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+		MountPath:       ctx.Env.MountDir,
+		APISockPath:     filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		BackendType:     "localfs",
+		BackendConfig:   fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir),
+		EnablePrefetch:  ctx.Runtime.EnablePrefetch,
+		BlobCacheDir:    ctx.Env.CacheDir,
+		CacheType:       ctx.Runtime.CacheType,
+		CacheCompressed: ctx.Runtime.CacheCompressed,
+		RafsMode:        ctx.Runtime.RafsMode,
+		DigestValidate:  false,
+	})
+	require.NoError(t, err)
+
+	err = nydusd.Mount()
+	require.NoError(t, err)
+	defer func() {
+		if err := nydusd.Umount(); err != nil {
+			log.L.WithError(err).Errorf("umount")
+		}
+	}()
+
+	// Get initial configuration for root mountpoint
+	config, err := nydusd.GetConfig("/")
+	require.NoError(t, err)
+	require.NotNil(t, config)
+
+	// Update configuration with new registry auth
+	testAuth := "dGVzdDp0ZXN0" // base64 encoded "test:test"
+	newConfig := &tool.Config{
+		RegistryAuth: testAuth,
+	}
+	err = nydusd.UpdateConfig("/", newConfig)
+	require.NoError(t, err)
+
+	// Query configuration to verify the update
+	updatedConfig, err := nydusd.GetConfig("/")
+	require.NoError(t, err)
+	require.Equal(t, testAuth, updatedConfig.RegistryAuth)
+
+	// Update with different auth value
+	testAuth2 := "dXNlcjpwYXNzd29yZA==" // base64 encoded "user:password"
+	newConfig2 := &tool.Config{
+		RegistryAuth: testAuth2,
+	}
+	err = nydusd.UpdateConfig("/", newConfig2)
+	require.NoError(t, err)
+
+	// Verify the second update
+	updatedConfig2, err := nydusd.GetConfig("/")
+	require.NoError(t, err)
+	require.Equal(t, testAuth2, updatedConfig2.RegistryAuth)
+}
+
 func (a *APIV1TestSuite) buildLayer(t *testing.T, ctx *tool.Context, rootFs *tool.Layer) string {
 	digest := rootFs.Pack(t,
 		converter.PackOption{
