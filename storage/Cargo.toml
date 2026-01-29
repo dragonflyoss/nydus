@@ -57,6 +57,7 @@ nydus-utils = { version = "0.5.0", path = "../utils", features = [
 ] }
 
 [dev-dependencies]
+http = "1.4.0"
 hyper-util = { version = "0.1.19", features = ["server"] }
 vmm-sys-util = { workspace = true }
 tar = "0.4.40"

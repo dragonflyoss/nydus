@@ -7,7 +7,7 @@
 
 use dbs_uhttp::{Method, Request, Response};
 
-use crate::http::{ApiError, ApiRequest, ApiResponse, ApiResponsePayload, HttpError};
+use crate::http::{ApiError, ApiRequest, ApiResponse, ApiResponsePayload, Config, HttpError};
 use crate::http_handler::{
     error_response, extract_query_part, parse_body, success_response, translate_status_code,
     EndpointHandler, HttpResult,
@@ -34,6 +34,10 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
                 FsFilesPatterns(d) => success_response(Some(d)),
                 FsBackendInfo(d) => success_response(Some(d)),
                 FsInflightMetrics(d) => success_response(Some(d)),
+                Config(conf) => {
+                    let json = serde_json::to_string(&conf).unwrap_or_else(|_| "{}".to_string());
+                    success_response(Some(json))
+                }
                 _ => panic!("Unexpected response message from API service"),
             }
         }
@@ -161,6 +165,31 @@ impl EndpointHandler for MetricsFsInflightHandler {
             (Method::Get, None) => {
                 let r = kicker(ApiRequest::ExportFsInflightMetrics);
                 Ok(convert_to_response(r, HttpError::InflightMetrics))
+            }
+            _ => Err(HttpError::BadRequest),
+        }
+    }
+}
+
+/// Update global configuration of the daemon.
+pub struct ConfigHandler {}
+impl EndpointHandler for ConfigHandler {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Get, None) => {
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::GetConfig(id));
+                Ok(convert_to_response(r, HttpError::Configure))
+            }
+            (Method::Put, Some(body)) => {
+                let conf: Config = parse_body(body)?;
+                let id = extract_query_part(req, "id");
+                let r = kicker(ApiRequest::UpdateConfig(id, conf));
+                Ok(convert_to_response(r, HttpError::Configure))
             }
             _ => Err(HttpError::BadRequest),
         }

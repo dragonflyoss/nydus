@@ -24,8 +24,8 @@ use crate::http_endpoint_common::{
     SendFuseFdHandler, StartHandler, TakeoverFuseFdHandler,
 };
 use crate::http_endpoint_v1::{
-    FsBackendInfo, InfoHandler, MetricsFsAccessPatternHandler, MetricsFsFilesHandler,
-    MetricsFsGlobalHandler, MetricsFsInflightHandler, HTTP_ROOT_V1,
+    ConfigHandler, FsBackendInfo, InfoHandler, MetricsFsAccessPatternHandler,
+    MetricsFsFilesHandler, MetricsFsGlobalHandler, MetricsFsInflightHandler, HTTP_ROOT_V1,
 };
 use crate::http_endpoint_v2::{BlobObjectListHandlerV2, InfoV2Handler, HTTP_ROOT_V2};
 
@@ -156,6 +156,7 @@ lazy_static! {
         r.routes.insert(endpoint_v1!("/metrics/files"), Box::new(MetricsFsFilesHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/inflight"), Box::new(MetricsFsInflightHandler{}));
         r.routes.insert(endpoint_v1!("/metrics/pattern"), Box::new(MetricsFsAccessPatternHandler{}));
+        r.routes.insert(endpoint_v1!("/config"), Box::new(ConfigHandler{}));
 
         // Nydus API, v2
         r.routes.insert(endpoint_v2!("/daemon"), Box::new(InfoV2Handler{}));

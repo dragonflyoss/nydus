@@ -454,3 +454,48 @@ mnt
 ├── pseudo_1
 └── pseudo_2
 ```
+
+### Hot Reload Configuration
+
+Nydusd supports hot reloading of configuration without restarting the daemon. This is useful for updating credentials or other settings at runtime.
+
+#### Update Configuration
+
+To update configuration (e.g., registry authentication):
+
+```shell
+curl --unix-socket /path/to/api.sock \
+  -X PUT "http://localhost/api/v1/config?id=/" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "registry_auth": "<base64_encoded_auth>"
+  }'
+```
+
+#### Query Current Configuration
+
+To retrieve the current configuration:
+
+```shell
+curl --unix-socket /path/to/api.sock \
+  -X GET "http://localhost/api/v1/config?id=/"
+```
+
+Example response:
+
+```json
+{
+  "registry_auth": "<base64_encoded_auth>"
+}
+```
+
+> **Note**: The `id` parameter specifies which mountpoint to configure. Use `/` for the root mountpoint or specify a sub-mountpoint path for multi-mount scenarios.
+
+#### Supported Configuration Fields
+
+The following fields can be updated via the hot reload API:
+
+| Field           | Description                                                               |
+| --------------- | ------------------------------------------------------------------------- |
+| `registry_auth` | Base64-encoded `username:password` credential for registry authentication |
+

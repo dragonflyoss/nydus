@@ -1174,10 +1174,14 @@ pub struct BlobDevice {
 
 impl BlobDevice {
     /// Create new blob device instance.
-    pub fn new(config: &Arc<ConfigV2>, blob_infos: &[Arc<BlobInfo>]) -> io::Result<BlobDevice> {
+    pub fn new(
+        config: &Arc<ConfigV2>,
+        blob_infos: &[Arc<BlobInfo>],
+        mountpoint: &str,
+    ) -> io::Result<BlobDevice> {
         let mut blobs = Vec::with_capacity(blob_infos.len());
         for blob_info in blob_infos.iter() {
-            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info, mountpoint)?;
             blobs.push(blob);
         }
 
@@ -1196,6 +1200,7 @@ impl BlobDevice {
         config: &Arc<ConfigV2>,
         blob_infos: &[Arc<BlobInfo>],
         fs_prefetch: bool,
+        mountpoint: &str,
     ) -> io::Result<()> {
         if self.blobs.load().len() != blob_infos.len() {
             return Err(einval!(
@@ -1205,7 +1210,7 @@ impl BlobDevice {
 
         let mut blobs = Vec::with_capacity(blob_infos.len());
         for blob_info in blob_infos.iter() {
-            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info)?;
+            let blob = BLOB_FACTORY.new_blob_cache(config, blob_info, mountpoint)?;
             blobs.push(blob);
         }
 

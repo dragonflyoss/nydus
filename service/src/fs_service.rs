@@ -146,7 +146,7 @@ pub trait FsService: Send + Sync {
         let rafs_cfg = ConfigV2::from_str(&cmd.config).map_err(RafsError::LoadConfig)?;
         let rafs_cfg = Arc::new(rafs_cfg);
 
-        rafs.update(&mut bootstrap, &rafs_cfg)
+        rafs.update(&mut bootstrap, &rafs_cfg, &cmd.mountpoint)
             .map_err(|e| match e {
                 RafsError::Unsupported => Error::Unsupported,
                 e => Error::Rafs(e),
