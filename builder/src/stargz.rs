@@ -506,7 +506,7 @@ impl StargzBuilder {
             // Regular file without chunk
             if entry.chunk_offset == 0 && entry.chunk_size == 0 {
                 Ok(entry.size)
-            } else if !entry.chunk_offset.is_multiple_of(ctx.chunk_size as u64) {
+            } else if entry.chunk_offset % ctx.chunk_size as u64 != 0 {
                 bail!(
                     "stargz: chunk offset (0x{:x}) is not aligned to 0x{:x}",
                     entry.chunk_offset,
@@ -519,7 +519,7 @@ impl StargzBuilder {
                 Ok(entry.chunk_size)
             }
         } else if entry.is_chunk() {
-            if !entry.chunk_offset.is_multiple_of(ctx.chunk_size as u64) {
+            if entry.chunk_offset % ctx.chunk_size as u64 != 0 {
                 bail!(
                     "stargz: chunk offset (0x{:x}) is not aligned to 0x{:x}",
                     entry.chunk_offset,
