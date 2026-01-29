@@ -15,8 +15,9 @@ use super::node::Node;
 use crate::core::tree::TreeNode;
 
 /// Filesystem data prefetch policy.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum PrefetchPolicy {
+    #[default]
     None,
     /// Prefetch will be issued from Fs layer, which leverages inode/chunkinfo to prefetch data
     /// from blob no matter where it resides(OSS/Localfs). Basically, it is willing to cache the
@@ -26,12 +27,6 @@ pub enum PrefetchPolicy {
     Fs,
     /// Prefetch will be issued directly from backend/blob layer
     Blob,
-}
-
-impl Default for PrefetchPolicy {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl FromStr for PrefetchPolicy {

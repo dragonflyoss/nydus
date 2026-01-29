@@ -57,11 +57,12 @@ pub const OVERLAYFS_WHITEOUT_OPAQUE: &str = "trusted.overlay.opaque";
 ///   may remove all of the children using an opaque whiteout entry.
 /// - An opaque whiteout entry is a file with the name .wh..wh..opq indicating that all siblings
 ///   are hidden in the lower layer.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Default, PartialEq)]
 pub enum WhiteoutSpec {
     /// Overlay whiteout rules according to the OCI image specification.
     ///
     /// https://github.com/opencontainers/image-spec/blob/master/layer.md#whiteouts
+    #[default]
     Oci,
     /// Overlay whiteout rules according to the Linux Overlayfs specification.
     ///
@@ -78,12 +79,6 @@ impl fmt::Display for WhiteoutSpec {
             WhiteoutSpec::Overlayfs => write!(f, "overlayfs"),
             WhiteoutSpec::None => write!(f, "none"),
         }
-    }
-}
-
-impl Default for WhiteoutSpec {
-    fn default() -> Self {
-        Self::Oci
     }
 }
 
@@ -208,7 +203,7 @@ impl Node {
             if t == WhiteoutType::OciRemoval {
                 // the whiteout filename prefixes the basename of the path to be deleted with ".wh.".
                 return Some(OsStr::from_bytes(
-                    name[OCISPEC_WHITEOUT_PREFIX.len()..].as_bytes(),
+                    &name.as_bytes()[OCISPEC_WHITEOUT_PREFIX.len()..],
                 ));
             } else if t == WhiteoutType::OverlayFsRemoval {
                 // the whiteout file has the same name as the file to be deleted.

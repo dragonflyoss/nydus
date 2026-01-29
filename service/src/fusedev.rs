@@ -10,7 +10,7 @@ use nydus_rafs::metadata::{RafsInode, RafsInodeWalkAction};
 use std::any::Any;
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::metadata;
-use std::io::{Error, ErrorKind, Result, Write};
+use std::io::{Error, Result, Write};
 use std::ops::Deref;
 #[cfg(target_os = "linux")]
 use std::os::linux::fs::MetadataExt;

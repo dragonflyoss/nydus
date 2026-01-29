@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     io::{self, Cursor, Error, ErrorKind, Read},
-    iter::{self, repeat},
+    iter::repeat,
     os::unix::prelude::{OsStrExt, OsStringExt},
     path::{Path, PathBuf},
     rc::Rc,
@@ -682,7 +682,7 @@ impl Util {
         let bs = header.as_bytes();
         let sum = bs[0..offset]
             .iter()
-            .chain(iter::repeat(&b' ').take(len))
+            .chain(std::iter::repeat_n(&b' ', len))
             .chain(&bs[offset + len..])
             .fold(0, |a, b| a + (*b as u32));
 

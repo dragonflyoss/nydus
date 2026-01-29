@@ -536,41 +536,40 @@ impl Node {
         let encrypted = blob_ctx.blob_cipher != crypt::Algorithm::None;
         let mut dumped_size = None;
 
-        if ctx.blob_batch_generator.is_some()
-            && self.inode.child_count() == 1
-            && d_size < ctx.batch_size / 2
-        {
-            // This chunk will be added into a batch chunk.
-            let mut batch = ctx.blob_batch_generator.as_ref().unwrap().lock().unwrap();
+        if let Some(batch_gen) = ctx.blob_batch_generator.as_ref() {
+            if self.inode.child_count() == 1 && d_size < ctx.batch_size / 2 {
+                // This chunk will be added into a batch chunk.
+                let mut batch = batch_gen.lock().unwrap();
 
-            if batch.chunk_data_buf_len() as u32 + d_size < ctx.batch_size {
-                // Add into current batch chunk directly.
-                chunk_info = Some(batch.generate_chunk_info(
-                    blob_ctx.current_compressed_offset,
-                    pre_d_offset,
-                    d_size,
-                    encrypted,
-                )?);
-                batch.append_chunk_data_buf(chunk_data);
-            } else {
-                // Dump current batch chunk if exists, and then add into a new batch chunk.
-                if !batch.chunk_data_buf_is_empty() {
-                    // Dump current batch chunk.
-                    let (_, c_size, _) =
-                        Self::write_chunk_data(ctx, blob_ctx, blob_writer, batch.chunk_data_buf())?;
-                    dumped_size = Some(c_size);
-                    batch.add_context(c_size);
-                    batch.clear_chunk_data_buf();
+                if batch.chunk_data_buf_len() as u32 + d_size < ctx.batch_size {
+                    // Add into current batch chunk directly.
+                    chunk_info = Some(batch.generate_chunk_info(
+                        blob_ctx.current_compressed_offset,
+                        pre_d_offset,
+                        d_size,
+                        encrypted,
+                    )?);
+                    batch.append_chunk_data_buf(chunk_data);
+                } else {
+                    // Dump current batch chunk if exists, and then add into a new batch chunk.
+                    if !batch.chunk_data_buf_is_empty() {
+                        // Dump current batch chunk.
+                        let (_, c_size, _) =
+                            Self::write_chunk_data(ctx, blob_ctx, blob_writer, batch.chunk_data_buf())?;
+                        dumped_size = Some(c_size);
+                        batch.add_context(c_size);
+                        batch.clear_chunk_data_buf();
+                    }
+
+                    // Add into a new batch chunk.
+                    chunk_info = Some(batch.generate_chunk_info(
+                        blob_ctx.current_compressed_offset,
+                        pre_d_offset,
+                        d_size,
+                        encrypted,
+                    )?);
+                    batch.append_chunk_data_buf(chunk_data);
                 }
-
-                // Add into a new batch chunk.
-                chunk_info = Some(batch.generate_chunk_info(
-                    blob_ctx.current_compressed_offset,
-                    pre_d_offset,
-                    d_size,
-                    encrypted,
-                )?);
-                batch.append_chunk_data_buf(chunk_data);
             }
         } else if !ctx.blob_features.contains(BlobFeatures::SEPARATE) {
             // For other case which needs to write chunk data to data blobs. Which means,

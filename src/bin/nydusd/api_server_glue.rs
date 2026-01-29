@@ -3,6 +3,8 @@
 //
 // SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
 
+#![allow(clippy::result_large_err)]
+
 use std::io::Result;
 use std::str::FromStr;
 use std::sync::mpsc::{channel, Receiver, Sender};
