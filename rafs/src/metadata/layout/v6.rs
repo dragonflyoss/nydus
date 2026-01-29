@@ -457,7 +457,7 @@ impl RafsV6SuperBlockExt {
         if blob_offset & (EROFS_BLOCK_SIZE_4096 - 1) != 0
             || blob_offset < EROFS_BLOCK_SIZE_4096
             || blob_offset < devslot_end
-            || blob_size % size_of::<RafsV6Blob>() as u64 != 0
+            || !blob_size.is_multiple_of(size_of::<RafsV6Blob>() as u64)
             || blob_offset.checked_add(blob_size).is_none()
             || blob_offset + blob_size > meta_size
         {
@@ -473,9 +473,9 @@ impl RafsV6SuperBlockExt {
             let chunk_tbl_offset = self.chunk_table_offset();
             let chunk_tbl_size = self.chunk_table_size();
             if chunk_tbl_offset < EROFS_BLOCK_SIZE_4096
-                || chunk_tbl_offset % EROFS_BLOCK_SIZE_4096 != 0
+                || !chunk_tbl_offset.is_multiple_of(EROFS_BLOCK_SIZE_4096)
                 || chunk_tbl_offset < devslot_end
-                || chunk_tbl_size % size_of::<RafsV5ChunkInfo>() as u64 != 0
+                || !chunk_tbl_size.is_multiple_of(size_of::<RafsV5ChunkInfo>() as u64)
                 || chunk_tbl_offset.checked_add(chunk_tbl_size).is_none()
                 || chunk_tbl_offset + chunk_tbl_size > meta_size
             {
@@ -499,7 +499,7 @@ impl RafsV6SuperBlockExt {
             let tbl_offset = self.prefetch_table_offset();
             let tbl_size = self.prefetch_table_size() as u64;
             if tbl_offset < EROFS_BLOCK_SIZE_4096
-                || tbl_size % size_of::<u32>() as u64 != 0
+                || !tbl_size.is_multiple_of(size_of::<u32>() as u64)
                 || tbl_offset < devslot_end
                 || tbl_offset.checked_add(tbl_size).is_none()
                 || tbl_offset + tbl_size > meta_size
@@ -1870,7 +1870,7 @@ impl RafsV6BlobTable {
         if blob_table_size == 0 {
             return Ok(());
         }
-        if blob_table_size as usize % size_of::<RafsV6Blob>() != 0 {
+        if !(blob_table_size as usize).is_multiple_of(size_of::<RafsV6Blob>()) {
             let msg = format!("invalid Rafs v6 blob table size {}", blob_table_size);
             return Err(einval!(msg));
         }

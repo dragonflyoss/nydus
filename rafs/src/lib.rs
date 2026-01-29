@@ -349,7 +349,7 @@ mod tests {
                 assert_eq!(path, PathBuf::from("/etc/DIR_COLORS.256color"));
             } else if idx == 11 {
                 assert_eq!(path, PathBuf::from("/etc/DIR_COLORS.lightbgcolor"));
-            } else if path == PathBuf::from("/var/yp") {
+            } else if path == Path::new("/var/yp") {
                 last = true;
             }
         }

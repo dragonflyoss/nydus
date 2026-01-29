@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, Result};
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
@@ -58,6 +58,7 @@ pub fn extract_query_part(req: &Request, key: &str) -> Option<String> {
 }
 
 /// Parse HTTP request body.
+#[allow(clippy::result_large_err)]
 pub(crate) fn parse_body<'a, F: Deserialize<'a>>(b: &'a Body) -> std::result::Result<F, HttpError> {
     serde_json::from_slice::<F>(b.raw()).map_err(HttpError::ParseBody)
 }
@@ -99,6 +100,7 @@ pub(crate) fn error_response(error: HttpError, status: StatusCode) -> Response {
 }
 
 /// Trait for HTTP endpoints to handle HTTP requests.
+#[allow(clippy::result_large_err)]
 pub trait EndpointHandler: Sync + Send {
     /// Handles an HTTP request.
     ///
@@ -165,6 +167,7 @@ lazy_static! {
     };
 }
 
+#[allow(clippy::result_large_err)]
 fn kick_api_server(
     to_api: &Sender<Option<ApiRequest>>,
     from_api: &Receiver<ApiResponse>,
@@ -250,7 +253,7 @@ pub fn start_http_thread(
         if let ServerError::IOError(e) = e {
             e
         } else {
-            Error::new(ErrorKind::Other, format!("{:?}", e))
+            Error::other(format!("{:?}", e))
         }
     })?;
     poll.registry().register(

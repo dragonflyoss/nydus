@@ -92,10 +92,7 @@ impl ConfigV2 {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let md = fs::metadata(path.as_ref())?;
         if md.len() > 0x100000 {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "configuration file size is too big",
-            ));
+            return Err(Error::other("configuration file size is too big"));
         }
         let content = fs::read_to_string(path)?;
         Self::from_str(&content)

@@ -18,7 +18,9 @@ use crate::cache::cachedfile::{FileCacheEntry, FileCacheMeta};
 use crate::cache::filecache::BLOB_DATA_FILE_SUFFIX;
 use crate::cache::state::{BlobStateMap, IndexedChunkMap, RangeMap};
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
-use crate::cache::{BlobCache, BlobCacheMgr, CasMgr};
+#[cfg(feature = "dedup")]
+use crate::cache::CasMgr;
+use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo, BlobObject};
 use crate::factory::BLOB_FACTORY;
 use crate::utils::get_path_from_file;
@@ -151,7 +153,7 @@ impl BlobCacheMgr for FsCacheMgr {
             }
         }
 
-        self.blobs.read().unwrap().len() == 0
+        self.blobs.read().unwrap().is_empty()
     }
 
     fn backend(&self) -> &dyn BlobBackend {

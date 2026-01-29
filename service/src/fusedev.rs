@@ -120,10 +120,7 @@ impl FuseServer {
 
         loop {
             if let Some((reader, writer)) = self.ch.get_request().map_err(|e| {
-                Error::new(
-                    ErrorKind::Other,
-                    format!("failed to get fuse request from /dev/fuse, {}", e),
-                )
+                Error::other(format!("failed to get fuse request from /dev/fuse, {}", e))
             })? {
                 if let Err(e) =
                     self.server

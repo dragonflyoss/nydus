@@ -189,10 +189,10 @@ impl ZranDecoder {
 /// 1) create a `ZranGenerator` object `zran`.
 /// 2) create a tar::Archive object from `zran`.
 /// 3) walk all entries in the tarball, for each tar regular file:
-///     3.1) get file size and split it into chunks, for each file data chunk
-///     3.2) call zran.begin_data_chunk()
-///     3.3) read file content from the tar Entry object
-///     3.4) call zran.end_data_chunk() to get chunk decompression information
+///    3.1) get file size and split it into chunks, for each file data chunk
+///    3.2) call zran.begin_data_chunk()
+///    3.3) read file content from the tar Entry object
+///    3.4) call zran.end_data_chunk() to get chunk decompression information
 /// 4) call zran.get_compression_info_array() to get all decompression context information for
 ///    random access later
 pub struct ZranGenerator<R> {
@@ -607,7 +607,7 @@ impl ZranStream {
     fn get_compression_info(&mut self, buf: &[u8], stream_switched: u8) -> ZranCompInfo {
         let previous_byte = if self.stream.data_type & 0x7 != 0 {
             assert!(self.stream.next_in as usize >= buf.as_ptr() as usize);
-            if self.stream.next_in as usize == buf.as_ptr() as usize {
+            if std::ptr::eq(self.stream.next_in, buf.as_ptr()) {
                 self.last_byte
             } else {
                 unsafe { *self.stream.next_in.sub(1) }
