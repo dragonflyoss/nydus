@@ -54,8 +54,9 @@ use crate::{ChunkDict, Feature, Features, HashChunkDict, Prefetch, PrefetchPolic
 pub const BUF_WRITER_CAPACITY: usize = 2 << 17;
 
 /// Filesystem conversion type supported by RAFS builder.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ConversionType {
+    #[default]
     DirectoryToRafs,
     DirectoryToStargz,
     DirectoryToTargz,
@@ -69,12 +70,6 @@ pub enum ConversionType {
     TarToRafs,
     TarToRef,
     TarToTarfs,
-}
-
-impl Default for ConversionType {
-    fn default() -> Self {
-        Self::DirectoryToRafs
-    }
 }
 
 impl FromStr for ConversionType {
@@ -1260,7 +1255,7 @@ impl BootstrapContext {
 
     /// Align the write position.
     pub fn align_offset(&mut self, align_size: u64) {
-        if self.offset % align_size > 0 {
+        if !self.offset.is_multiple_of(align_size) {
             self.offset = div_round_up(self.offset, align_size) * align_size;
         }
     }
@@ -1306,7 +1301,7 @@ impl BootstrapContext {
 
     // Append the block that `offset` belongs to corresponding deque.
     pub(crate) fn append_available_block(&mut self, offset: u64, block_size: u64) {
-        if offset % block_size != 0 {
+        if !offset.is_multiple_of(block_size) {
             let avail = block_size - offset % block_size;
             let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
             self.v6_available_blocks[idx].push_back(round_down(offset, block_size));

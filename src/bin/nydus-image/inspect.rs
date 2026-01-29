@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs::Permissions,
-    io::{Error, ErrorKind, Write},
+    io::{Error, Write},
     ops::DerefMut,
     os::unix::prelude::PermissionsExt,
     path::{Path, PathBuf},
@@ -213,7 +213,7 @@ impl RafsInspector {
                 if let Err(e) =
                     self.stat_single_file(Some(dir_inode.as_ref()), child_inode.as_ref())
                 {
-                    return Err(Error::new(ErrorKind::Other, e));
+                    return Err(Error::other(e));
                 }
 
                 let child_inode = dir_inode.get_child_by_name(&child_name)?;
