@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn test_make_error() {
-        let original_error = Error::new(ErrorKind::Other, "test error");
+        let original_error = Error::other("test error");
         let debug_info = "debug information";
         let file = "test.rs";
         let line = 42;

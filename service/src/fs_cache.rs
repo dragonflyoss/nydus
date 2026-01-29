@@ -828,7 +828,7 @@ impl FsCacheHandler {
 
     #[inline]
     fn round_up_u32(&self, size: usize) -> usize {
-        (size + 3) / 4 * 4
+        size.div_ceil(4) * 4
     }
 
     //address from kernel fscache_hash()

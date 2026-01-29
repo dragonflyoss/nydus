@@ -1732,8 +1732,7 @@ impl BlobMetaChunkArray {
                 let entry = Self::get_chunk_entry(state, chunk_info_array, index - 1)?;
                 if !entry.is_zran() {
                     // All chunks should be ZRan chunks.
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(std::io::Error::other(
                         "invalid ZRan compression information data",
                     ));
                 } else if entry.get_zran_index()? != first_zran_idx {
@@ -1746,8 +1745,7 @@ impl BlobMetaChunkArray {
 
             for entry in &chunk_info_array[index..] {
                 if entry.validate(state).is_err() || !entry.is_zran() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(std::io::Error::other(
                         "invalid ZRan compression information data",
                     ));
                 } else if entry.get_zran_index()? > last_zran_idx {

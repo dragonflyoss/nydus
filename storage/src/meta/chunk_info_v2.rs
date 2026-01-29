@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::{Display, Formatter};
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, Result};
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::device::BlobFeatures;
@@ -233,8 +233,7 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
                 && self.uncompressed_size() != self.compressed_size())
             || (self.has_crc32() && self.crc32() == 0)
         {
-            return Err(Error::new(
-                ErrorKind::Other,
+            return Err(Error::other(
                 format!(
                     "invalid chunk, blob: index {}/c_size 0x{:x}/d_size 0x{:x}, chunk: c_end 0x{:x}/d_end 0x{:x}/compressed {} batch {} zran {} encrypted {} has_crc {}, crc32 {}",
                     state.blob_index,
@@ -265,15 +264,13 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         }
 
         if state.blob_features & BlobFeatures::ZRAN.bits() == 0 && self.is_zran() {
-            return Err(Error::new(
-                ErrorKind::Other,
+            return Err(Error::other(
                 "invalid chunk flag ZRan for non-ZRan blob",
             ));
         } else if self.is_zran() {
             let index = self.get_zran_index()? as usize;
             if index >= state.zran_info_array.len() {
-                return Err(Error::new(
-                    ErrorKind::Other,
+                return Err(Error::other(
                     format!(
                         "ZRan index {} is too big, max {}",
                         index,
@@ -286,8 +283,7 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
             if zran_offset >= ctx.out_size()
                 || zran_offset + self.uncompressed_size() > ctx.out_size()
             {
-                return Err(Error::new(
-                    ErrorKind::Other,
+                return Err(Error::other(
                     format!(
                         "ZRan range 0x{:x}/0x{:x} is invalid, should be with in 0/0x{:x}",
                         zran_offset,
@@ -300,15 +296,13 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
 
         if self.is_batch() {
             if state.blob_features & BlobFeatures::BATCH.bits() == 0 {
-                return Err(Error::new(
-                    ErrorKind::Other,
+                return Err(Error::other(
                     "invalid chunk flag Batch for non-Batch blob",
                 ));
             } else {
                 let index = self.get_batch_index()? as usize;
                 if index >= state.batch_info_array.len() {
-                    return Err(Error::new(
-                        ErrorKind::Other,
+                    return Err(Error::other(
                         format!(
                             "Batch index {} is too big, max {}",
                             index,
@@ -322,7 +316,7 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
                         > ctx.uncompressed_batch_size()
                     || u64::MAX - self.compressed_offset() < ctx.compressed_size() as u64
                 {
-                    return Err(Error::new(ErrorKind::Other, format!(
+                    return Err(Error::other(format!(
                         "Batch Context is invalid: chunk: uncompressed_size 0x{:x}, uncompressed_offset_in_batch_buf 0x{:x}, uncompressed_batch_size 0x{:x}, batch context: index {}, compressed_size 0x{:x}, uncompressed_batch_size 0x{:x}",
                         self.uncompressed_size(),
                         self.get_uncompressed_offset_in_batch_buf()?,

@@ -106,33 +106,37 @@ impl CasMgr {
             drop(guard);
 
             // Open the source file for dedup on demand.
-            if d_file.is_none() {
-                match OpenOptions::new().read(true).open(&path) {
-                    Err(e) => warn!("failed to open dedup source file {}, {}", path, e),
-                    Ok(f) => {
-                        let mut guard = self.fds.write().unwrap();
-                        match guard.entry(path) {
-                            Entry::Vacant(e) => {
-                                let f = Arc::new(f);
-                                e.insert(f.clone());
-                                d_file = Some(f);
-                            }
-                            Entry::Occupied(f) => {
-                                // Somebody else has inserted the file, use it
-                                d_file = Some(f.get().clone());
+            match &d_file {
+                None => {
+                    match OpenOptions::new().read(true).open(&path) {
+                        Err(e) => warn!("failed to open dedup source file {}, {}", path, e),
+                        Ok(f) => {
+                            let mut guard = self.fds.write().unwrap();
+                            match guard.entry(path) {
+                                Entry::Vacant(e) => {
+                                    let f = Arc::new(f);
+                                    e.insert(f.clone());
+                                    d_file = Some(f);
+                                }
+                                Entry::Occupied(f) => {
+                                    // Somebody else has inserted the file, use it
+                                    d_file = Some(f.get().clone());
+                                }
                             }
                         }
                     }
                 }
-            } else if d_file.as_ref().unwrap().metadata().is_err() {
-                // If the blob file no longer exists, delete if from fds and db.
-                let mut guard = self.fds.write().unwrap();
-                guard.remove(&path);
-                let blob_ids: &[String] = &[path];
-                if let Err(e) = self.db.delete_blobs(&blob_ids) {
-                    warn!("failed to delete blobs: {}", e);
+                Some(file) if file.metadata().is_err() => {
+                    // If the blob file no longer exists, delete if from fds and db.
+                    let mut guard = self.fds.write().unwrap();
+                    guard.remove(&path);
+                    let blob_ids: &[String] = &[path];
+                    if let Err(e) = self.db.delete_blobs(&blob_ids) {
+                        warn!("failed to delete blobs: {}", e);
+                    }
+                    return false;
                 }
-                return false;
+                Some(_) => {}
             }
 
             if let Some(f) = d_file {

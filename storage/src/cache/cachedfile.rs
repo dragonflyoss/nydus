@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Result};
 use std::mem::ManuallyDrop;
+#[cfg(feature = "dedup")]
 use std::ops::Deref;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -236,16 +237,16 @@ impl FileCacheEntry {
     }
 
     fn delay_persist_chunk_data(&self, chunk: Arc<dyn BlobChunkInfo>, buffer: Arc<DataBuffer>) {
-        let blob_info = self.blob_info.clone();
+        let _blob_info = self.blob_info.clone();
         let delayed_chunk_map = self.chunk_map.clone();
         let file = self.file.clone();
-        let file_path = self.file_path.clone();
+        let _file_path = self.file_path.clone();
         let metrics = self.metrics.clone();
         let is_raw_data = self.is_raw_data;
         let is_cache_encrypted = self.is_cache_encrypted;
         let cipher_object = self.cache_cipher_object.clone();
         let cipher_context = self.cache_cipher_context.clone();
-        let cas_mgr = self.cas_mgr.clone();
+        let _cas_mgr = self.cas_mgr.clone();
 
         metrics.buffered_backend_size.add(buffer.size() as u64);
         self.runtime.spawn_blocking(move || {
@@ -304,8 +305,8 @@ impl FileCacheEntry {
                 &metrics,
             );
             #[cfg(feature = "dedup")]
-            if let Some(mgr) = cas_mgr {
-                if let Err(e) = mgr.record_chunk(&blob_info, chunk.deref(), file_path.as_ref()) {
+            if let Some(mgr) = _cas_mgr {
+                if let Err(e) = mgr.record_chunk(&_blob_info, chunk.deref(), _file_path.as_ref()) {
                     warn!(
                         "failed to record chunk state for dedup in delay_persist_chunk_data, {}",
                         e
@@ -1084,6 +1085,7 @@ impl FileCacheEntry {
         trace!("dispatch single io range {:?}", req);
         let mut blob_cci = BlobCCI::new();
         for (i, chunk) in req.chunks.iter().enumerate() {
+            #[allow(unused_mut)]
             let mut is_ready = match self.chunk_map.check_ready_and_mark_pending(chunk.as_ref()) {
                 Ok(true) => true,
                 Ok(false) => false,

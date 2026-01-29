@@ -460,17 +460,15 @@ impl TocEntryList {
         let header = Header::from_byte_slice(&buf[size..]);
         let entry_type = header.entry_type();
         if entry_type != EntryType::Regular {
-            return Err(Error::new(
-                ErrorKind::Other,
+            return Err(Error::other(
                 "Tar entry type for ToC is not a regular file",
             ));
         }
         let entry_size = header.entry_size().map_err(|_| {
-            Error::new(ErrorKind::Other, "failed to get entry size from tar header")
+            Error::other("failed to get entry size from tar header")
         })?;
         if entry_size > size as u64 {
-            return Err(Error::new(
-                ErrorKind::Other,
+            return Err(Error::other(
                 format!(
                     "invalid toc entry size in tar header, expect {}, got {}",
                     size, entry_size
@@ -478,14 +476,12 @@ impl TocEntryList {
             ));
         }
         let name = header.path().map_err(|_| {
-            Error::new(
-                ErrorKind::Other,
+            Error::other(
                 "failed to get ToC file name from tar header",
             )
         })?;
         if name != Path::new(TOC_ENTRY_BLOB_TOC) {
-            return Err(Error::new(
-                ErrorKind::Other,
+            return Err(Error::other(
                 format!(
                     "ToC file name from tar header doesn't match, {}",
                     name.display()
@@ -494,7 +490,7 @@ impl TocEntryList {
         }
         let _header = header
             .as_gnu()
-            .ok_or_else(|| Error::new(ErrorKind::Other, "invalid GNU tar header for ToC"))?;
+            .ok_or_else(|| Error::other("invalid GNU tar header for ToC"))?;
 
         let mut pos = size - entry_size as usize;
         let mut list = TocEntryList::new();
@@ -733,7 +729,7 @@ impl TocLocation {
     }
 
     fn validate(&self) -> Result<()> {
-        if !self.auto_detect && (!(512..=0x10000).contains(&self.size) || self.size % 128 != 0) {
+        if !self.auto_detect && (!(512..=0x10000).contains(&self.size) || !self.size.is_multiple_of(128)) {
             return Err(eother!(format!("invalid size {} of blob ToC", self.size)));
         }
 
@@ -839,7 +835,6 @@ mod tests {
         digest.data[0] = 0;
         let location = TocLocation::with_digest(9010, 1024, digest);
         assert!(TocEntryList::read_from_blob::<fs::File>(blob.as_ref(), None, &location).is_err());
-        digest.data[0] = 79u8;
 
         let location = TocLocation::new(9000, 1024);
         assert!(TocEntryList::read_from_blob::<fs::File>(blob.as_ref(), None, &location).is_err());

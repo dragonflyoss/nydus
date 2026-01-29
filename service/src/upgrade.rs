@@ -163,10 +163,7 @@ impl UpgradeManager {
 
     pub fn save_vfs_stat(&mut self, vfs: &Vfs) -> Result<()> {
         let vfs_state_data = vfs.save_to_bytes().map_err(|e| {
-            let io_err = io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to save vfs state: {:?}", e),
-            );
+            let io_err = io::Error::other(format!("Failed to save vfs state: {:?}", e));
             UpgradeMgrError::Serialize(io_err)
         })?;
         self.fuse_deamon_stat.vfs_state_data = vfs_state_data;

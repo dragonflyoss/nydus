@@ -21,7 +21,9 @@ use crate::cache::state::{
     BlobStateMap, ChunkMap, DigestedChunkMap, IndexedChunkMap, NoopChunkMap,
 };
 use crate::cache::worker::{AsyncPrefetchConfig, AsyncWorkerMgr};
-use crate::cache::{BlobCache, BlobCacheMgr, CasMgr};
+#[cfg(feature = "dedup")]
+use crate::cache::CasMgr;
+use crate::cache::{BlobCache, BlobCacheMgr};
 use crate::device::{BlobFeatures, BlobInfo};
 use crate::utils::get_path_from_file;
 
@@ -156,7 +158,7 @@ impl BlobCacheMgr for FileCacheMgr {
             }
         }
 
-        self.blobs.read().unwrap().len() == 0
+        self.blobs.read().unwrap().is_empty()
     }
 
     fn backend(&self) -> &dyn BlobBackend {

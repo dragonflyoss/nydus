@@ -11,7 +11,7 @@ use std::convert::{TryFrom, TryInto};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::fs::OpenOptions;
-use std::io::{Error, ErrorKind, Result};
+use std::io::{Error, Result};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
@@ -824,7 +824,7 @@ impl RafsSuper {
             return Ok(());
         }
 
-        Err(Error::new(ErrorKind::Other, "invalid RAFS superblock"))
+        Err(Error::other("invalid RAFS superblock"))
     }
 
     /// Set meta blob file path from which the `RafsSuper` object is loaded from.
@@ -930,7 +930,7 @@ impl RafsSuper {
     /// metadata in advance. There are ways to configure the file list to be prefetched.
     /// 1. Static file prefetch list configured during image building, recorded in prefetch list
     ///    in Rafs v5 file system metadata.
-    ///     Base on prefetch table which is persisted to bootstrap when building image.
+    ///    Base on prefetch table which is persisted to bootstrap when building image.
     /// 2. Dynamic file prefetch list configured by command line. The dynamic file prefetch list
     ///    has higher priority and the static file prefetch list will be ignored if there's dynamic
     ///    prefetch list. When a directory is specified for dynamic prefetch list, all sub directory

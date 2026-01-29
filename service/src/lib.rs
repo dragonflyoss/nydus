@@ -6,7 +6,7 @@
 //!
 //! The `nydus-service` crate provides facilities to manage Nydus services, such as:
 //! - `blobfs`: share processed RAFS metadata/data blobs to guest by virtio-fs, so the RAFS
-//!    filesystem can be mounted by EROFS inside guest.
+//!   filesystem can be mounted by EROFS inside guest.
 //! - `blockdev`: compose processed RAFS metadata/data as a block device, so it can be used as
 //!   backend for virtio-blk.
 //! - `fscache`: cooperate Linux fscache subsystem to mount RAFS filesystems by EROFS.

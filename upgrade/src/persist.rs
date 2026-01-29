@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::Debug;
-use std::io::{Error as IoError, ErrorKind, Result};
+use std::io::{Error as IoError, Result};
 use std::{any::TypeId, collections::HashMap};
 
 use dbs_snapshot::Snapshot;
@@ -45,10 +45,7 @@ pub trait Snapshotter: Versionize + Sized + Debug {
         let mut buf = Vec::new();
         let mut snapshot = Self::new_snapshot();
         snapshot.save(&mut buf, self).map_err(|e| {
-            IoError::new(
-                ErrorKind::Other,
-                format!("Failed to save snapshot: {:?}", e),
-            )
+            IoError::other(format!("Failed to save snapshot: {:?}", e))
         })?;
 
         Ok(buf)
@@ -58,10 +55,10 @@ pub trait Snapshotter: Versionize + Sized + Debug {
     fn restore(buf: &mut Vec<u8>) -> Result<Self> {
         match Snapshot::load(&mut buf.as_slice(), buf.len(), Self::new_version_map()) {
             Ok((o, _)) => Ok(o),
-            Err(e) => Err(IoError::new(
-                ErrorKind::Other,
-                format!("Failed to load snapshot: {:?}", e),
-            )),
+            Err(e) => Err(IoError::other(format!(
+                "Failed to load snapshot: {:?}",
+                e
+            ))),
         }
     }
 }

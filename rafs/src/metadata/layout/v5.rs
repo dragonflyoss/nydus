@@ -23,7 +23,7 @@
 //!    one and only one child entry having the inode number as its assigned `child index'.
 //! 5) A child index mapping table is introduced, which is used to map `child index` into offset
 //!    from the base of the super block. The formula to calculate the inode offset is:
-//!      `inode_offset_from_sb = inode_table[child_index] << 3`
+//!    `inode_offset_from_sb = inode_table[child_index] << 3`
 //! 6) The child index mapping table follows the super block by default.
 //!
 //! Giving above definition, we could get the inode object for an inode number or child index as:
