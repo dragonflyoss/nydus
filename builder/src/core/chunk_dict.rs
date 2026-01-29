@@ -189,7 +189,7 @@ impl HashChunkDict {
         }
 
         let unit_size = size_of::<RafsV5ChunkInfo>();
-        if !size.is_multiple_of(unit_size) {
+        if size % unit_size != 0 {
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL)).with_context(|| {
                 format!(
                     "load_chunk_table: invalid rafs v6 chunk table size {}",

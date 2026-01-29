@@ -1255,7 +1255,7 @@ impl BootstrapContext {
 
     /// Align the write position.
     pub fn align_offset(&mut self, align_size: u64) {
-        if !self.offset.is_multiple_of(align_size) {
+        if self.offset % align_size > 0 {
             self.offset = div_round_up(self.offset, align_size) * align_size;
         }
     }
@@ -1301,7 +1301,7 @@ impl BootstrapContext {
 
     // Append the block that `offset` belongs to corresponding deque.
     pub(crate) fn append_available_block(&mut self, offset: u64, block_size: u64) {
-        if !offset.is_multiple_of(block_size) {
+        if offset % block_size != 0 {
             let avail = block_size - offset % block_size;
             let idx = avail as usize / EROFS_INODE_SLOT_SIZE;
             self.v6_available_blocks[idx].push_back(round_down(offset, block_size));

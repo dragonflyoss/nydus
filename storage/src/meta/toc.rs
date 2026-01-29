@@ -721,9 +721,7 @@ impl TocLocation {
     }
 
     fn validate(&self) -> Result<()> {
-        if !self.auto_detect
-            && (!(512..=0x10000).contains(&self.size) || !self.size.is_multiple_of(128))
-        {
+        if !self.auto_detect && (!(512..=0x10000).contains(&self.size) || self.size % 128 != 0) {
             return Err(eother!(format!("invalid size {} of blob ToC", self.size)));
         }
 

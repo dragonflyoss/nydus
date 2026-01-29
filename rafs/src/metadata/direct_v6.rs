@@ -236,7 +236,7 @@ impl DirectSuperBlockV6 {
 
         let block_size = state.block_size();
         let unit_size = size_of::<RafsV5ChunkInfo>();
-        if !size.is_multiple_of(unit_size) {
+        if size % unit_size != 0 {
             return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
         }
 
@@ -438,7 +438,7 @@ impl OndiskInodeWrapper {
                 let len = match block_count.cmp(&(block_index + 1)) {
                     Ordering::Greater => (block_size - base) as usize,
                     Ordering::Equal => {
-                        if self.size().is_multiple_of(block_size) {
+                        if self.size() % block_size == 0 {
                             (block_size - base) as usize
                         } else {
                             (self.size() % block_size - base) as usize
@@ -732,7 +732,7 @@ impl OndiskInodeWrapper {
             .map_err(err_invalidate_data)?;
         let name_offset = head_entry.e_nameoff as usize;
         if name_offset as u64 >= EROFS_BLOCK_SIZE_4096
-            || !name_offset.is_multiple_of(size_of::<RafsV6Dirent>())
+            || name_offset % size_of::<RafsV6Dirent>() != 0
         {
             Err(enoent!(format!(
                 "v6: invalid e_nameoff {} from directory entry",
