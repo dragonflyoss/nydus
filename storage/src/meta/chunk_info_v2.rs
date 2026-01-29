@@ -264,51 +264,41 @@ impl BlobMetaChunkInfo for BlobChunkInfoV2Ondisk {
         }
 
         if state.blob_features & BlobFeatures::ZRAN.bits() == 0 && self.is_zran() {
-            return Err(Error::other(
-                "invalid chunk flag ZRan for non-ZRan blob",
-            ));
+            return Err(Error::other("invalid chunk flag ZRan for non-ZRan blob"));
         } else if self.is_zran() {
             let index = self.get_zran_index()? as usize;
             if index >= state.zran_info_array.len() {
-                return Err(Error::other(
-                    format!(
-                        "ZRan index {} is too big, max {}",
-                        index,
-                        state.zran_info_array.len()
-                    ),
-                ));
+                return Err(Error::other(format!(
+                    "ZRan index {} is too big, max {}",
+                    index,
+                    state.zran_info_array.len()
+                )));
             }
             let ctx = &state.zran_info_array[index];
             let zran_offset = self.get_zran_offset()?;
             if zran_offset >= ctx.out_size()
                 || zran_offset + self.uncompressed_size() > ctx.out_size()
             {
-                return Err(Error::other(
-                    format!(
-                        "ZRan range 0x{:x}/0x{:x} is invalid, should be with in 0/0x{:x}",
-                        zran_offset,
-                        self.uncompressed_size(),
-                        ctx.out_size()
-                    ),
-                ));
+                return Err(Error::other(format!(
+                    "ZRan range 0x{:x}/0x{:x} is invalid, should be with in 0/0x{:x}",
+                    zran_offset,
+                    self.uncompressed_size(),
+                    ctx.out_size()
+                )));
             }
         }
 
         if self.is_batch() {
             if state.blob_features & BlobFeatures::BATCH.bits() == 0 {
-                return Err(Error::other(
-                    "invalid chunk flag Batch for non-Batch blob",
-                ));
+                return Err(Error::other("invalid chunk flag Batch for non-Batch blob"));
             } else {
                 let index = self.get_batch_index()? as usize;
                 if index >= state.batch_info_array.len() {
-                    return Err(Error::other(
-                        format!(
-                            "Batch index {} is too big, max {}",
-                            index,
-                            state.batch_info_array.len()
-                        ),
-                    ));
+                    return Err(Error::other(format!(
+                        "Batch index {} is too big, max {}",
+                        index,
+                        state.batch_info_array.len()
+                    )));
                 }
                 let ctx = &state.batch_info_array[index];
                 if ctx.compressed_size() > ctx.uncompressed_batch_size()

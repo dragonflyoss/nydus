@@ -554,8 +554,12 @@ impl Node {
                     // Dump current batch chunk if exists, and then add into a new batch chunk.
                     if !batch.chunk_data_buf_is_empty() {
                         // Dump current batch chunk.
-                        let (_, c_size, _) =
-                            Self::write_chunk_data(ctx, blob_ctx, blob_writer, batch.chunk_data_buf())?;
+                        let (_, c_size, _) = Self::write_chunk_data(
+                            ctx,
+                            blob_ctx,
+                            blob_writer,
+                            batch.chunk_data_buf(),
+                        )?;
                         dumped_size = Some(c_size);
                         batch.add_context(c_size);
                         batch.clear_chunk_data_buf();

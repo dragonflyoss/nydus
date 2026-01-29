@@ -17,9 +17,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lazy_static::lazy_static;
-use nydus_api::{
-    default_user_io_batch_size, BackendConfigV2, ConfigV2,
-};
 #[cfg(feature = "backend-http-proxy")]
 use nydus_api::HttpProxyConfig;
 #[cfg(feature = "backend-localdisk")]
@@ -32,6 +29,7 @@ use nydus_api::OssConfig;
 use nydus_api::RegistryConfig;
 #[cfg(feature = "backend-s3")]
 use nydus_api::S3Config;
+use nydus_api::{default_user_io_batch_size, BackendConfigV2, ConfigV2};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time;
 

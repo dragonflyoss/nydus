@@ -44,9 +44,9 @@ pub trait Snapshotter: Versionize + Sized + Debug {
     fn save(&self) -> Result<Vec<u8>> {
         let mut buf = Vec::new();
         let mut snapshot = Self::new_snapshot();
-        snapshot.save(&mut buf, self).map_err(|e| {
-            IoError::other(format!("Failed to save snapshot: {:?}", e))
-        })?;
+        snapshot
+            .save(&mut buf, self)
+            .map_err(|e| IoError::other(format!("Failed to save snapshot: {:?}", e)))?;
 
         Ok(buf)
     }
@@ -55,10 +55,7 @@ pub trait Snapshotter: Versionize + Sized + Debug {
     fn restore(buf: &mut Vec<u8>) -> Result<Self> {
         match Snapshot::load(&mut buf.as_slice(), buf.len(), Self::new_version_map()) {
             Ok((o, _)) => Ok(o),
-            Err(e) => Err(IoError::other(format!(
-                "Failed to load snapshot: {:?}",
-                e
-            ))),
+            Err(e) => Err(IoError::other(format!("Failed to load snapshot: {:?}", e))),
         }
     }
 }
