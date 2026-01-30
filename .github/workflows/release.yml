@@ -19,7 +19,7 @@ jobs:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v6.0.2
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
       with:
@@ -87,7 +87,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v6.0.2
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
       with:
@@ -124,7 +124,7 @@ jobs:
     env:
       DOCKER: false
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v6.0.2
     - name: Setup Golang
       uses: actions/setup-go@v5
       with:
@@ -255,7 +255,7 @@ jobs:
       hashes: ${{ steps.hash.outputs.hashes }}
     steps:
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
         with:
           fetch-depth: 0
           submodules: recursive
