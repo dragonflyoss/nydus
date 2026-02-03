@@ -314,7 +314,6 @@ jobs:
       env:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with:
-        files: coverage/coverage.info,contrib/nydusify/coverage.txt
         verbose: true
         fail_ci_if_error: true
 
