@@ -17,19 +17,22 @@ build:
 # make test
 test: build
 	golangci-lint run --timeout=5m
-	sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
+	$(CARGO_COV_FLAGS) \
+		   sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=16 -test.run=$(TESTS)
 
 # PERFORMANCE_TEST_MODE=fs-version-5 \
 # PERFORMANCE_TEST_IMAGE=wordpress:latest \
 # make test-performance
 test-performance: build
-	PERFORMANCE_TEST=True sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestPerformance
+	$(CARGO_COV_FLAGS) PERFORMANCE_TEST=True \
+		   sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestPerformance
 
 # BENCHMARK_TEST_IMAGE=wordpress:6.1.1 \
 # BENCHMARK_MODE=fs-version-6 \
 # make test-benchmark
 test-benchmark: build
-	BENCHMARK_TEST=True sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestBenchmark
+	$(CARGO_COV_FLAGS) BENCHMARK_TEST=True \
+		   sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestBenchmark
 
 # WORK_DIR=/tmp \
 # NYDUS_STABLE_VERSION=v2.2.3 \
@@ -45,11 +48,12 @@ test-benchmark: build
 # NYDUS_NYDUSIFY_$NYDUS_STABLE_VERSION_EXPORT=/path/to/$NYDUS_STABLE_VERSION/nydusify \
 # make test TESTS=TestCompatibility
 test-compatibility: build
-	make test TESTS=TestCompatibility
+	$(CARGO_COV_FLAGS) make test TESTS=TestCompatibility
 
 # SNAPSHOTTER_SYSTEM_SOCK=/run/containerd-nydus/system.sock
 # SNAPSHOTTER=nydus
 # TAKEOVER_TEST_IMAGE=wordpress
 # NEW_NYDUSD_BINARY_PATH=target/release/nydusd
 test-takeover: build
-	TAKEOVER_TEST=true sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestTakeover
+	$(CARGO_COV_FLAGS) TAKEOVER_TEST=true \
+		   sudo -E ./smoke.test -test.v -test.timeout 10m -test.parallel=1 -test.run=TestTakeover

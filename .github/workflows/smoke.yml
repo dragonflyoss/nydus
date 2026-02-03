@@ -247,10 +247,7 @@ jobs:
       run: sudo bash misc/fscache/setup.sh
     - name: Unit Test
       run: |
-        CARGO_HOME=${HOME}/.cargo
-        CARGO_BIN=$(which cargo)
-        RUSTUP_BIN=$(which rustup)
-        sudo -E RUSTUP=${RUSTUP_BIN} make ut-nextest
+        sudo -E ENABLE_DEBUG=1 "PATH=$PATH" make ut-nextest
 
   contrib-unit-test-coverage:
     runs-on: ubuntu-latest
@@ -290,16 +287,14 @@ jobs:
         run: sudo bash misc/fscache/setup.sh
       - name: Generate code coverage
         run: |
-          CARGO_HOME=${HOME}/.cargo
-          CARGO_BIN=$(which cargo)
-          RUSTUP_BIN=$(which rustup)
-          sudo -E RUSTUP=${RUSTUP_BIN} make coverage-codecov
+          sudo -E ENABLE_DEBUG=1 "PATH=$PATH" make ut
+          sudo -E "PATH=$PATH" make generate-codecov
       - name: Upload nydus coverage file
         uses: actions/upload-artifact@v6
         with:
           name: nydus-test-coverage-artifact
           path: |
-            codecov.json
+            coverage/coverage.info
 
   upload-coverage-to-codecov:
     runs-on: ubuntu-latest
@@ -319,7 +314,7 @@ jobs:
       env:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with:
-        files: ./codecov.json,./coverage.txt
+        files: coverage/coverage.info,contrib/nydusify/coverage.txt
         verbose: true
         fail_ci_if_error: true
 

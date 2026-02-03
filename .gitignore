@@ -11,4 +11,5 @@ dist/
 nydus-static/
 .goreleaser.yml
 metadata.db
+coverage/
 tests/texture/zran/233c72f2b6b698c07021c4da367cfe2dff4f049efbaa885ca0ff760ea297865a

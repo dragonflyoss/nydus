@@ -15,6 +15,10 @@ build = "build.rs"
 [profile.release]
 panic = "abort"
 
+[profile.dev]
+opt-level = 1
+debug = true
+
 [[bin]]
 name = "nydusctl"
 path = "src/bin/nydusctl/main.rs"
