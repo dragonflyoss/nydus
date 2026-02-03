@@ -61,6 +61,44 @@ jobs:
         working-directory: ${{ matrix.path }}
         args: --timeout=10m --verbose
 
+  nydus-build-debug:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        shared-key: ${{ runner.os }}-cargo-amd64-debug
+        save-if: ${{ github.ref == 'refs/heads/master' }}
+    - uses: dsherret/rust-toolchain-file@v1
+    - name: Read Rust toolchain version
+      id: set_toolchain_version
+      run: |
+        RUST_TOOLCHAIN_VERSION=$(grep -oP '(?<=channel = ")[^"]*' rust-toolchain.toml)
+        echo "Rust toolchain version: $RUST_TOOLCHAIN_VERSION"
+        echo "rust-version=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_OUTPUT
+      shell: bash
+    - name: Build Nydus Debug Version
+      run: |
+        make -e ENABLE_DEBUG=1 build
+        mv target/$RUST_TARGET/debug/nydusd .
+        mv target/$RUST_TARGET/debug/nydus-image .
+    - name: Upload Nydus Binaries
+      uses: actions/upload-artifact@v6
+      with:
+        name: nydus-artifact-debug
+        path: |
+          nydus-image
+          nydusd
+    - name: Upload Nydus Build profraw
+      uses: actions/upload-artifact@v6
+      with:
+        name: nydus-profraw-build
+        path: |
+          coverage/*.profraw
+
   nydus-build:
     runs-on: ubuntu-latest
     strategy:
@@ -122,7 +160,7 @@ jobs:
       if: matrix.arch == 'amd64'
       uses: actions/upload-artifact@v6
       with:
-        name: nydus-artifact
+        name: nydus-artifact-release
         path: |
           nydus-image
           nydusd
@@ -153,7 +191,7 @@ jobs:
 
   nydus-integration-test:
     runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build]
+    needs: [contrib-build, nydus-build-debug]
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -163,9 +201,8 @@ jobs:
     - name: Download Nydus
       uses: actions/download-artifact@v7
       with:
-        name: nydus-artifact
-        path: |
-          target/release
+        name: nydus-artifact-debug
+        path: target/debug
     - name: Download Nydusify
       uses: actions/download-artifact@v7
       with:
@@ -210,9 +247,10 @@ jobs:
     - name: Integration Test
       run: |
         sudo mkdir -p /usr/bin/nydus-latest /home/runner/work/workdir
+        sudo chmod +x contrib/nydusify/cmd/nydusify target/debug/nydusd target/debug/nydus-image
         sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/bin/nydus-latest
-        sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/bin/nydus-latest
-        sudo bash misc/prepare.sh
+        sudo install -D -m 755 target/debug/nydusd target/debug/nydus-image /usr/bin/nydus-latest
+        sudo INSTALL_TARGET_TYPE=debug bash misc/prepare.sh
 
         export NYDUS_STABLE_VERSION=$(curl https://api.github.com/repos/Dragonflyoss/nydus/releases/latest | jq -r '.tag_name')
         export NYDUS_STABLE_VERSION_EXPORT="${NYDUS_STABLE_VERSION//./_}"
@@ -228,7 +266,13 @@ jobs:
         done
 
         curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v2.1.6
-        sudo -E make smoke-only
+        sudo -E ENABLE_DEBUG=1 make smoke-only
+    - name: Upload Nydus Smoke profraw
+      uses: actions/upload-artifact@v6
+      with:
+        name: nydus-profraw-smoke
+        path: |
+          coverage/*.profraw
 
   nydus-unit-test:
     runs-on: ubuntu-latest
@@ -248,13 +292,13 @@ jobs:
     - name: Unit Test
       run: |
         sudo -E ENABLE_DEBUG=1 "PATH=$PATH" make ut-nextest
-        sudo -E "PATH=$PATH" make generate-codecov
-    - name: Upload nydus coverage file
+        #sudo -E "PATH=$PATH" make generate-codecov
+    - name: Upload Nydus UT profraw
       uses: actions/upload-artifact@v6
       with:
-        name: nydus-test-coverage-artifact
+        name: nydus-profraw-ut
         path: |
-          coverage/coverage.info
+          coverage/*.profraw
 
   contrib-unit-test:
     runs-on: ubuntu-latest
@@ -278,7 +322,7 @@ jobs:
 
   upload-coverage-to-codecov:
     runs-on: ubuntu-latest
-    needs: [contrib-unit-test, nydus-unit-test]
+    needs: [contrib-unit-test, nydus-coverage]
     steps:
     - uses: actions/checkout@v6
     - name: Download nydus coverage file
@@ -320,7 +364,7 @@ jobs:
     - name: Download Nydus
       uses: actions/download-artifact@v7
       with:
-        name: nydus-artifact
+        name: nydus-artifact-release
         path: target/release
     - name: Download Nydusify
       uses: actions/download-artifact@v7
@@ -337,15 +381,15 @@ jobs:
 
   takeover-test:
     runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build]
+    needs: [contrib-build, nydus-build-debug]
     steps:
     - name: Checkout
       uses: actions/checkout@v6
     - name: Download Nydus
       uses: actions/download-artifact@v7
       with:
-        name: nydus-artifact
-        path: target/release
+        name: nydus-artifact-debug
+        path: target/debug
     - name: Download Nydusify
       uses: actions/download-artifact@v7
       with:
@@ -353,8 +397,56 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Container Environment
       run: |
-        sudo bash misc/prepare.sh takeover_test
+        sudo INSTALL_TARGET_TYPE=debug bash misc/prepare.sh takeover_test
     - name: Takeover Test
       run: |
-        export NEW_NYDUSD_BINARY_PATH=target/release/nydusd
-        sudo -E make smoke-takeover
+        export NEW_NYDUSD_BINARY_PATH=target/debug/nydusd
+        sudo chmod +x target/debug/nydus-image
+        sudo -E ENABLE_DEBUG=1 make smoke-takeover
+    - name: Upload Nydus Takeover
+      uses: actions/upload-artifact@v6
+      with:
+        name: nydus-profraw-takeover
+        path: |
+          coverage/*.profraw
+
+  nydus-coverage:
+    runs-on: ubuntu-latest
+    needs: [takeover-test,nydus-integration-test,nydus-unit-test]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+    - name: Download Nydus
+      uses: actions/download-artifact@v7
+      with:
+        name: nydus-artifact-debug
+        path: target/debug
+    - name: Download Nydus Build profraw
+      uses: actions/download-artifact@v7
+      with:
+        name: nydus-profraw-build
+        path: coverage/
+    - name: Download Nydus Smoke profraw
+      uses: actions/download-artifact@v7
+      with:
+        name: nydus-profraw-smoke
+        path: coverage/
+    - name: Download Nydus UT profraw
+      uses: actions/download-artifact@v7
+      with:
+        name: nydus-profraw-ut
+        path: coverage/
+    - name: Download Nydus Takeover profraw
+      uses: actions/download-artifact@v7
+      with:
+        name: nydus-profraw-takeover
+        path: coverage/
+    - name: Generate Nydus Codecov
+      run: |
+        ls coverage | wc -l
+        sudo -E "PATH=$PATH" make generate-codecov
+    - name: Upload Nydus Codecov
+      uses: actions/upload-artifact@v6
+      with:
+        name: nydus-test-coverage-artifact
+        path: coverage/coverage.info

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+: ${INSTALL_TARGET_TYPE:="release"}
+
 SNAPSHOTTER_CONFIG="misc/performance/snapshotter_config.toml"
 if [ "$1" == "takeover_test" ]; then
     sed -i 's/recover_policy = "restart"/recover_policy = "failover"/' "$SNAPSHOTTER_CONFIG"
@@ -11,7 +13,7 @@ readonly CNI_PLUGINS_VERSION=`curl -s https://api.github.com/repos/containernetw
 
 # setup nerdctl and nydusd env
 sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/local/bin
-sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/local/bin
+sudo install -D -m 755 target/$INSTALL_TARGET_TYPE/nydusd target/$INSTALL_TARGET_TYPE/nydus-image /usr/local/bin
 wget https://github.com/containerd/nydus-snapshotter/releases/download/$SNAPSHOTTER_VERSION/nydus-snapshotter-$SNAPSHOTTER_VERSION-linux-amd64.tar.gz
 tar zxvf nydus-snapshotter-$SNAPSHOTTER_VERSION-linux-amd64.tar.gz
 sudo install -D -m 755 bin/containerd-nydus-grpc /usr/local/bin
