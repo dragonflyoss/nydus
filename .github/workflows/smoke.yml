@@ -92,12 +92,6 @@ jobs:
         path: |
           nydus-image
           nydusd
-    - name: Upload Nydus Build profraw
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-profraw-build
-        path: |
-          coverage/*.profraw
 
   nydus-build:
     runs-on: ubuntu-latest
@@ -267,12 +261,15 @@ jobs:
 
         curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v2.1.6
         sudo -E ENABLE_DEBUG=1 make smoke-only
-    - name: Upload Nydus Smoke profraw
+        sudo -E "PATH=$PATH" make generate-codecov-markdown
+        grep Total coverage/coverage.md
+        sudo -E "PATH=$PATH" make generate-codecov
+        sudo cp coverage/coverage.info smoke-coverage.info
+    - name: Upload Nydus Smoke Coverage
       uses: actions/upload-artifact@v6
       with:
-        name: nydus-profraw-smoke
-        path: |
-          coverage/*.profraw
+        name: nydus-coverage-smoke
+        path: smoke-coverage.info
 
   nydus-unit-test:
     runs-on: ubuntu-latest
@@ -292,13 +289,15 @@ jobs:
     - name: Unit Test
       run: |
         sudo -E ENABLE_DEBUG=1 "PATH=$PATH" make ut-nextest
-        #sudo -E "PATH=$PATH" make generate-codecov
-    - name: Upload Nydus UT profraw
+        sudo -E "PATH=$PATH" make generate-codecov-markdown
+        grep Total coverage/coverage.md
+        sudo -E "PATH=$PATH" make generate-codecov
+        sudo cp coverage/coverage.info ut-coverage.info
+    - name: Upload Nydus UT Coverage
       uses: actions/upload-artifact@v6
       with:
-        name: nydus-profraw-ut
-        path: |
-          coverage/*.profraw
+        name: nydus-coverage-ut
+        path: ut-coverage.info
 
   contrib-unit-test:
     runs-on: ubuntu-latest
@@ -319,27 +318,6 @@ jobs:
         name: contrib-test-coverage-artifact
         path: |
           contrib/nydusify/coverage.txt
-
-  upload-coverage-to-codecov:
-    runs-on: ubuntu-latest
-    needs: [contrib-unit-test, nydus-coverage]
-    steps:
-    - uses: actions/checkout@v6
-    - name: Download nydus coverage file
-      uses: actions/download-artifact@v7
-      with:
-        name: nydus-test-coverage-artifact
-    - name: Download contrib coverage file
-      uses: actions/download-artifact@v7
-      with:
-        name: contrib-test-coverage-artifact
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v5
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      with:
-        verbose: true
-        fail_ci_if_error: true
 
   nydus-cargo-deny:
     name: cargo-deny
@@ -403,12 +381,15 @@ jobs:
         export NEW_NYDUSD_BINARY_PATH=target/debug/nydusd
         sudo chmod +x target/debug/nydus-image
         sudo -E ENABLE_DEBUG=1 make smoke-takeover
+        sudo -E "PATH=$PATH" make generate-codecov-markdown
+        grep Total coverage/coverage.md
+        sudo -E "PATH=$PATH" make generate-codecov
+        sudo cp coverage/coverage.info takeover-coverage.info
     - name: Upload Nydus Takeover
       uses: actions/upload-artifact@v6
       with:
-        name: nydus-profraw-takeover
-        path: |
-          coverage/*.profraw
+        name: nydus-coverage-takeover
+        path: takeover-coverage.info
 
   nydus-coverage:
     runs-on: ubuntu-latest
@@ -416,37 +397,27 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
-    - name: Download Nydus
+    - name: Download Nydus Smoke Coverage
       uses: actions/download-artifact@v7
       with:
-        name: nydus-artifact-debug
-        path: target/debug
-    - name: Download Nydus Build profraw
+        name: nydus-coverage-smoke
+    - name: Download Nydus UT Coverage
       uses: actions/download-artifact@v7
       with:
-        name: nydus-profraw-build
-        path: coverage/
-    - name: Download Nydus Smoke profraw
+        name: nydus-coverage-ut
+    - name: Download Nydus Takeover Coverage
       uses: actions/download-artifact@v7
       with:
-        name: nydus-profraw-smoke
-        path: coverage/
-    - name: Download Nydus UT profraw
+        name: nydus-coverage-takeover
+    - name: Download contrib coverage file
       uses: actions/download-artifact@v7
       with:
-        name: nydus-profraw-ut
-        path: coverage/
-    - name: Download Nydus Takeover profraw
-      uses: actions/download-artifact@v7
+        name: contrib-test-coverage-artifact
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v5
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with:
-        name: nydus-profraw-takeover
-        path: coverage/
-    - name: Generate Nydus Codecov
-      run: |
-        ls coverage | wc -l
-        sudo -E "PATH=$PATH" make generate-codecov
-    - name: Upload Nydus Codecov
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-test-coverage-artifact
-        path: coverage/coverage.info
+        files: smoke-coverage.info,ut-coverage.info,takeover-coverage.info,coverage.txt
+        verbose: true
+        fail_ci_if_error: true
