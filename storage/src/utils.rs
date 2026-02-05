@@ -14,7 +14,7 @@ use nydus_utils::{
     digest::{self, RafsDigest},
     round_down_4k,
 };
-use std::alloc::{alloc, Layout};
+use std::alloc::{alloc, handle_alloc_error, Layout};
 use std::cmp::{self, min};
 use std::io::{ErrorKind, IoSliceMut, Result};
 use std::os::fd::{AsFd, AsRawFd};
@@ -332,10 +332,16 @@ pub fn readahead(fd: libc::c_int, mut offset: u64, end: u64) {
 /// A customized buf allocator that avoids zeroing
 pub fn alloc_buf(size: usize) -> Vec<u8> {
     assert!(size < isize::MAX as usize);
+    if size == 0 {
+        return Vec::new();
+    }
     let layout = Layout::from_size_align(size, 0x1000)
         .unwrap()
         .pad_to_align();
     let ptr = unsafe { alloc(layout) };
+    if ptr.is_null() {
+        handle_alloc_error(layout);
+    }
     unsafe { Vec::from_raw_parts(ptr, size, layout.size()) }
 }
 
@@ -427,6 +433,13 @@ mod tests {
         assert_eq!(dst_buf2[1], 4);
         assert_eq!(dst_buf2[2], 5);
         assert_eq!(dst_buf2[3], 6);
+    }
+
+    #[test]
+    fn test_alloc_buf_zero_size() {
+        let buf = alloc_buf(0);
+        assert!(buf.is_empty());
+        assert_eq!(buf.capacity(), 0);
     }
 
     #[test]
