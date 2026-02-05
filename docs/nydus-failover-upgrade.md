@@ -23,6 +23,8 @@ Then restart the nydus-snapshotter service. In this way, when the nydusd process
 
 ### Hot Upgrade
 
+#### By calling a Unix Domain Socket API
+
 By making an HTTP call to the system unix domain socket exposed by nydus-snapshotter (default is `/run/containerd-nydus/system.sock`), you can upgrade the version of the nydusd binary file used by the nydusd process.
 
 The method and path of this HTTP call are: `PUT /api/v1/nydusd/upgrade`
@@ -36,6 +38,30 @@ Example request body:
 ```
 
 By now only the field `nydusd_path` is required in the request body. More fields (like `version`, `policy`, etc) may be used in the future.
+
+#### Hot Upgrade via Restarting nydus-snapshotter
+
+A hot upgrade is triggered when you restart the nydus-snapshotter service. Upon restart, the snapshotter compares the nydusd binary specified in its configuration with the version of the currently running nydusd process. If the versions are inconsistent, it automatically begins the hot upgrade. This approach works for two common deployment scenarios.
+
+##### Scenario A: Modify the config.toml file
+
+If you're deploying a new nydusd binary to a new path (for example, to keep the old version for rollback), you need to modify the config.toml file to point to this new location.
+
+Here's an example of how to modify the nydusd_path in your config.toml file:
+
+```toml
+# Old configuration
+# nydusd_path = "/usr/local/bin/old-nydusd"
+
+# New configuration
+nydusd_path = "/usr/local/bin/new-nydusd"
+```
+
+##### Scenario B: Update binary files directly
+
+If the path to your nydusd binary is fixed, you can simply overwrite the old binary with the new one. The path remains the same in the configuration, but the underlying binary's version is now different, which will be detected upon restart.
+
+After updating the binary file or the configuration, simply restart the nydus-snapshotter service to trigger the automatic detection and hot upgrade process.
 
 ## Design
 
