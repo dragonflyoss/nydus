@@ -17,7 +17,7 @@ libc = "0.2"
 log = "0.4"
 lz4-sys = "1.9.4"
 lz4 = "1.24.0"
-openssl = { version = "0.10.48", features = ["vendored"], optional = true }
+openssl = { version = "0.10.75", features = ["vendored"], optional = true }
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = ">=1.0.9"
 sha2 = "0.10.0"
