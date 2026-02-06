@@ -190,7 +190,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v6
     - name: Docker Cache
-      uses: jpribyl/action-docker-layer-caching@v0.1.0
+      uses: jpribyl/action-docker-layer-caching@v0.1.1
       continue-on-error: true
     - name: Download Nydus
       uses: actions/download-artifact@v7
