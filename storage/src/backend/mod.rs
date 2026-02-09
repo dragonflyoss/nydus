@@ -274,3 +274,174 @@ impl Read for BlobBufReader {
         Ok(sz)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    // Mock BlobReader for testing
+    struct MockBlobReader {
+        data: Vec<u8>,
+        metrics: Arc<BackendMetrics>,
+    }
+
+    impl MockBlobReader {
+        fn new(data: Vec<u8>) -> Self {
+            Self {
+                data,
+                metrics: BackendMetrics::new("mock", "mock-instance"),
+            }
+        }
+    }
+
+    impl BlobReader for MockBlobReader {
+        fn blob_size(&self) -> BackendResult<u64> {
+            Ok(self.data.len() as u64)
+        }
+
+        fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+            let offset = offset as usize;
+            if offset >= self.data.len() {
+                return Ok(0);
+            }
+            let len = std::cmp::min(buf.len(), self.data.len() - offset);
+            buf[..len].copy_from_slice(&self.data[offset..offset + len]);
+            Ok(len)
+        }
+
+        fn metrics(&self) -> &BackendMetrics {
+            &self.metrics
+        }
+
+        fn retry_limit(&self) -> u8 {
+            3
+        }
+    }
+
+    #[test]
+    fn test_backend_error_display() {
+        let err = BackendError::Unsupported("test operation".to_string());
+        assert_eq!(format!("{}", err), "test operation");
+
+        let err = BackendError::CopyData(StorageError::Unsupported);
+        assert!(format!("{}", err).contains("failed to copy data"));
+    }
+
+    #[test]
+    fn test_blob_reader_try_read() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let reader = MockBlobReader::new(data);
+
+        let mut buf = vec![0u8; 4];
+        let sz = reader.try_read(&mut buf, 0).unwrap();
+        assert_eq!(sz, 4);
+        assert_eq!(buf, vec![1, 2, 3, 4]);
+
+        let sz = reader.try_read(&mut buf, 4).unwrap();
+        assert_eq!(sz, 4);
+        assert_eq!(buf, vec![5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_blob_reader_read() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let reader = MockBlobReader::new(data);
+
+        let mut buf = vec![0u8; 4];
+        let sz = reader.read(&mut buf, 2).unwrap();
+        assert_eq!(sz, 4);
+        assert_eq!(buf, vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_blob_reader_read_all() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let reader = MockBlobReader::new(data);
+
+        let mut buf = vec![0u8; 10];
+        let sz = reader.read_all(&mut buf, 0).unwrap();
+        assert_eq!(sz, 8);
+        assert_eq!(&buf[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_blob_reader_blob_size() {
+        let data = vec![1, 2, 3, 4, 5];
+        let reader = MockBlobReader::new(data);
+        assert_eq!(reader.blob_size().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_blob_reader_retry_limit() {
+        let reader = MockBlobReader::new(vec![]);
+        assert_eq!(reader.retry_limit(), 3);
+    }
+
+    #[test]
+    fn test_blob_buf_reader_read() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let reader = Arc::new(MockBlobReader::new(data));
+        let mut buf_reader = BlobBufReader::new(4, reader, 0, 10);
+
+        let mut buf = vec![0u8; 3];
+        let sz = buf_reader.read(&mut buf).unwrap();
+        assert_eq!(sz, 3);
+        assert_eq!(buf, vec![1, 2, 3]);
+
+        let sz = buf_reader.read(&mut buf).unwrap();
+        assert_eq!(sz, 1);
+        assert_eq!(&buf[..1], &[4]);
+    }
+
+    #[test]
+    fn test_blob_buf_reader_read_eof() {
+        let data = vec![1, 2, 3, 4];
+        let reader = Arc::new(MockBlobReader::new(data));
+        let mut buf_reader = BlobBufReader::new(8, reader, 0, 4);
+
+        let mut buf = vec![0u8; 10];
+        let sz = buf_reader.read(&mut buf).unwrap();
+        assert_eq!(sz, 4);
+        assert_eq!(&buf[..4], &[1, 2, 3, 4]);
+
+        let sz = buf_reader.read(&mut buf).unwrap();
+        assert_eq!(sz, 0);
+    }
+
+    #[test]
+    fn test_blob_buf_reader_multiple_refills() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let reader = Arc::new(MockBlobReader::new(data));
+        let mut buf_reader = BlobBufReader::new(3, reader, 0, 8);
+
+        let mut buf = vec![0u8; 2];
+
+        // First read
+        let sz = buf_reader.read(&mut buf).unwrap();
+        assert_eq!(sz, 2);
+        assert_eq!(buf, vec![1, 2]);
+
+        // Second read (still from buffer)
+        let sz = buf_reader.read(&mut buf).unwrap();
+        assert_eq!(sz, 1);
+        assert_eq!(&buf[..1], &[3]);
+
+        // Third read (refill needed)
+        let sz = buf_reader.read(&mut buf).unwrap();
+        assert_eq!(sz, 2);
+        assert_eq!(buf, vec![4, 5]);
+    }
+
+    #[test]
+    fn test_blob_buf_reader_with_offset() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let reader = Arc::new(MockBlobReader::new(data));
+        let mut buf_reader = BlobBufReader::new(4, reader, 3, 5);
+
+        let mut buf = vec![0u8; 10];
+        let sz = buf_reader.read(&mut buf).unwrap();
+        assert_eq!(sz, 4);
+        assert_eq!(&buf[..4], &[4, 5, 6, 7]);
+    }
+}

@@ -224,8 +224,101 @@ mod tests {
     use crate::device::BlobFeatures;
     use crate::test::MockChunkInfo;
     use crate::RAFS_DEFAULT_CHUNK_SIZE;
-    use std::io::{Read, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
     use vmm_sys_util::tempfile::TempFile;
+
+    #[test]
+    fn test_cas_error_display() {
+        let io_err = CasError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test"));
+        assert!(format!("{}", io_err).contains("test"));
+
+        let db_err = CasError::Db(rusqlite::Error::InvalidQuery);
+        assert!(!format!("{}", db_err).is_empty());
+    }
+
+    #[test]
+    fn test_cas_error_from_rusqlite() {
+        let err: CasError = rusqlite::Error::InvalidQuery.into();
+        matches!(err, CasError::Db(_));
+    }
+
+    #[test]
+    fn test_cas_error_from_io() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test");
+        let err: CasError = io_err.into();
+        matches!(err, CasError::Io(_));
+    }
+
+    #[test]
+    fn test_cas_mgr_new() {
+        let dbfile = TempFile::new().unwrap();
+        let mgr = CasMgr::new(dbfile.as_path());
+        assert!(mgr.is_ok());
+    }
+
+    #[test]
+    fn test_cas_mgr_singleton() {
+        let dbfile = TempFile::new().unwrap();
+        let mgr = CasMgr::new(dbfile.as_path()).unwrap();
+
+        CasMgr::set_singleton(mgr);
+        let singleton = CasMgr::get_singleton();
+        assert!(singleton.is_some());
+
+        // Verify we can get it multiple times
+        let singleton2 = CasMgr::get_singleton();
+        assert!(singleton2.is_some());
+    }
+
+    #[test]
+    fn test_chunk_key_with_default_digest() {
+        let blob = BlobInfo::new(
+            1,
+            "test".to_string(),
+            8192,
+            8192,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            1,
+            BlobFeatures::empty(),
+        );
+        let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest::default();
+
+        let key = CasMgr::chunk_key(&blob, &chunk);
+        assert!(key.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_key_with_valid_digest() {
+        let blob = BlobInfo::new(
+            1,
+            "test".to_string(),
+            8192,
+            8192,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            1,
+            BlobFeatures::empty(),
+        );
+        let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest { data: [0xAAu8; 32] };
+
+        let key = CasMgr::chunk_key(&blob, &chunk);
+        assert!(!key.is_empty());
+        assert!(key.contains(":"));
+    }
+
+    #[test]
+    fn test_record_chunk_raw() {
+        let dbfile = TempFile::new().unwrap();
+        let mgr = CasMgr::new(dbfile.as_path()).unwrap();
+
+        let chunk_id = "test_chunk_id";
+        let path = "/tmp/test_blob";
+        let offset = 4096u64;
+
+        let result = mgr.record_chunk_raw(chunk_id, path, offset);
+        assert!(result.is_ok());
+    }
 
     #[test]
     fn test_cas_chunk_op() {
@@ -256,6 +349,7 @@ mod tests {
 
         let mut tmpfile3 = TempFile::new().unwrap().into_file();
         assert!(mgr.dedup_chunk(&blob, chunk.as_ref(), &tmpfile3));
+        tmpfile3.seek(SeekFrom::Start(0)).unwrap();
         let mut buf2 = vec![0x0u8; 8192];
         tmpfile3.read_exact(&mut buf2).unwrap();
         assert_eq!(buf, buf2);
@@ -285,6 +379,60 @@ mod tests {
         let tmpfile = TempFile::new().unwrap().into_file();
 
         assert!(!mgr.dedup_chunk(&new_blob, chunk.as_ref(), &tmpfile));
+    }
+
+    #[test]
+    fn test_cas_dedup_chunk_with_nonexistent_source() {
+        let dbfile = TempFile::new().unwrap();
+        let mgr = CasMgr::new(dbfile.as_path()).unwrap();
+
+        // Add a chunk record pointing to a non-existent file
+        mgr.record_chunk_raw("test:chunk123", "/nonexistent/path", 0)
+            .unwrap();
+
+        let blob = BlobInfo::new(
+            1,
+            "test_blob".to_string(),
+            8192,
+            8192,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            1,
+            BlobFeatures::empty(),
+        );
+        let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest { data: [0x42u8; 32] };
+        chunk.uncompress_offset = 0;
+        chunk.uncompress_size = 8192;
+        let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
+
+        let tmpfile = TempFile::new().unwrap().into_file();
+
+        // Should return false when source file doesn't exist
+        assert!(!mgr.dedup_chunk(&blob, chunk.as_ref(), &tmpfile));
+    }
+
+    #[test]
+    fn test_record_chunk_with_empty_key() {
+        let dbfile = TempFile::new().unwrap();
+        let mgr = CasMgr::new(dbfile.as_path()).unwrap();
+        let tmpfile = TempFile::new().unwrap();
+
+        let blob = BlobInfo::new(
+            1,
+            "test".to_string(),
+            8192,
+            8192,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            1,
+            BlobFeatures::empty(),
+        );
+        let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest::default(); // Empty digest
+        let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
+
+        // Should succeed but not actually record anything
+        let result = mgr.record_chunk(&blob, chunk.as_ref(), tmpfile.as_path());
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -323,5 +471,42 @@ mod tests {
 
         let all_blobs_after_gc = mgr.db.get_all_blobs().unwrap();
         assert_eq!(all_blobs_after_gc.len(), 0);
+    }
+
+    #[test]
+    fn test_cas_gc_with_existing_files() {
+        let dbfile = TempFile::new().unwrap();
+        let mgr = CasMgr::new(dbfile.as_path()).unwrap();
+
+        let tmpfile = TempFile::new().unwrap();
+        let blob_path = tmpfile
+            .as_path()
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string();
+
+        let blob = BlobInfo::new(
+            1,
+            blob_path.clone(),
+            8192,
+            8192,
+            RAFS_DEFAULT_CHUNK_SIZE as u32,
+            1,
+            BlobFeatures::empty(),
+        );
+        let mut chunk = MockChunkInfo::new();
+        chunk.block_id = RafsDigest { data: [5u8; 32] };
+        chunk.uncompress_offset = 0;
+        chunk.uncompress_size = 8192;
+        let chunk = Arc::new(chunk) as Arc<dyn BlobChunkInfo>;
+        mgr.record_chunk(&blob, chunk.as_ref(), &blob_path).unwrap();
+
+        // GC with file still existing
+        mgr.gc().unwrap();
+
+        let all_blobs_after_gc = mgr.db.get_all_blobs().unwrap();
+        // File still exists, so it should remain
+        assert_eq!(all_blobs_after_gc.len(), 1);
     }
 }

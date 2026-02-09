@@ -230,6 +230,100 @@ mod tests {
     use tar::{Archive, EntryType};
 
     #[test]
+    fn test_zran_inflate_context_getters() {
+        let ctx = ZranInflateContext {
+            in_offset: u64::to_le(1024),
+            out_offset: u64::to_le(2048),
+            dict_offset: u64::to_le(4096),
+            in_len: u32::to_le(100),
+            out_len: u32::to_le(200),
+            dict_size: u32::to_le(32),
+            ctx_byte: 0x42,
+            ctx_bits: 0x03,
+            __reserved1: 0,
+            __reserved2: 0,
+        };
+
+        assert_eq!(ctx.in_offset(), 1024);
+        assert_eq!(ctx.out_offset(), 2048);
+        assert_eq!(ctx.dict_offset(), 4096);
+        assert_eq!(ctx.in_size(), 100);
+        assert_eq!(ctx.out_size(), 200);
+        assert_eq!(ctx.dict_size(), 32);
+        assert_eq!(ctx.ctx_byte(), 0x42);
+        assert_eq!(ctx.ctx_bits(), 0x03);
+    }
+
+    #[test]
+    fn test_zran_inflate_context_as_slice() {
+        let ctx = ZranInflateContext {
+            in_offset: u64::to_le(1024),
+            out_offset: u64::to_le(2048),
+            dict_offset: u64::to_le(4096),
+            in_len: u32::to_le(100),
+            out_len: u32::to_le(200),
+            dict_size: u32::to_le(32),
+            ctx_byte: 0x42,
+            ctx_bits: 0x03,
+            __reserved1: 0,
+            __reserved2: 0,
+        };
+
+        let slice = ctx.as_slice();
+        assert_eq!(slice.len(), size_of::<ZranInflateContext>());
+    }
+
+    #[test]
+    fn test_zran_inflate_context_to_zran_context() {
+        let ctx = ZranInflateContext {
+            in_offset: u64::to_le(1024),
+            out_offset: u64::to_le(2048),
+            dict_offset: u64::to_le(4096),
+            in_len: u32::to_le(100),
+            out_len: u32::to_le(200),
+            dict_size: u32::to_le(32),
+            ctx_byte: 0x42,
+            ctx_bits: 0x03,
+            __reserved1: 0,
+            __reserved2: 0,
+        };
+
+        let zran_ctx: ZranContext = (&ctx).into();
+        assert_eq!(zran_ctx.in_offset, 1024);
+        assert_eq!(zran_ctx.out_offset, 2048);
+        assert_eq!(zran_ctx.in_len, 100);
+        assert_eq!(zran_ctx.out_len, 200);
+        assert_eq!(zran_ctx.ctx_byte, 0x42);
+        assert_eq!(zran_ctx.ctx_bits, 0x03);
+        assert!(zran_ctx.dict.is_empty());
+    }
+
+    #[test]
+    fn test_zran_inflate_context_zero_values() {
+        let ctx = ZranInflateContext {
+            in_offset: 0,
+            out_offset: 0,
+            dict_offset: 0,
+            in_len: 0,
+            out_len: 0,
+            dict_size: 0,
+            ctx_byte: 0,
+            ctx_bits: 0,
+            __reserved1: 0,
+            __reserved2: 0,
+        };
+
+        assert_eq!(ctx.in_offset(), 0);
+        assert_eq!(ctx.out_offset(), 0);
+        assert_eq!(ctx.dict_offset(), 0);
+        assert_eq!(ctx.in_size(), 0);
+        assert_eq!(ctx.out_size(), 0);
+        assert_eq!(ctx.dict_size(), 0);
+        assert_eq!(ctx.ctx_byte(), 0);
+        assert_eq!(ctx.ctx_bits(), 0);
+    }
+
+    #[test]
     fn test_generate_chunk_info() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
@@ -244,6 +338,7 @@ mod tests {
         generator.generator.set_max_uncompressed_size(4096);
 
         assert_eq!(generator.len(), 0);
+        assert!(generator.is_empty());
 
         let entries = tar.entries().unwrap();
         for entry in entries {
@@ -262,5 +357,43 @@ mod tests {
         }
 
         assert_eq!(generator.len(), 3);
+        assert!(!generator.is_empty());
+    }
+
+    #[test]
+    fn test_zran_context_generator_to_vec() {
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let path = PathBuf::from(root_dir).join("../tests/texture/zran/zran-two-streams.tar.gz");
+        let file = OpenOptions::new().read(true).open(path).unwrap();
+
+        let mut generator = ZranContextGenerator::new(file).unwrap();
+        let mut tar = Archive::new(generator.reader());
+        tar.set_ignore_zeros(true);
+
+        generator.generator.set_min_compressed_size(1024);
+        generator.generator.set_max_compressed_size(2048);
+        generator.generator.set_max_uncompressed_size(4096);
+
+        let entries = tar.entries().unwrap();
+        for entry in entries {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type() == EntryType::Regular {
+                loop {
+                    let _start = generator.start_chunk(4096).unwrap();
+                    let mut buf = vec![0u8; 4096];
+                    let sz = entry.read(&mut buf).unwrap();
+                    if sz == 0 {
+                        break;
+                    }
+                    let _chunk = generator.finish_chunk().unwrap();
+                }
+            }
+        }
+
+        let (data, count) = generator.to_vec().unwrap();
+        assert_eq!(count, 3);
+        assert!(!data.is_empty());
+        // Data should contain context entries + dictionaries
+        assert!(data.len() >= count as usize * size_of::<ZranInflateContext>());
     }
 }

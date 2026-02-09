@@ -132,4 +132,111 @@ mod tests {
         let res = reader.read(&mut buf).unwrap();
         assert_eq!(res, 0);
     }
+
+    #[test]
+    fn test_buf_reader_info_basic() {
+        let data = b"Hello, World!";
+        let buf_reader = BufReader::new(&data[..]);
+        let mut reader = BufReaderInfo::from_buf_reader(buf_reader);
+
+        assert_eq!(reader.position(), 0);
+
+        let mut buf = vec![0u8; 5];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"Hello");
+        assert_eq!(reader.position(), 5);
+    }
+
+    #[test]
+    fn test_buf_reader_info_digest() {
+        let data = b"test data";
+        let buf_reader = BufReader::new(&data[..]);
+        let mut reader = BufReaderInfo::from_buf_reader(buf_reader);
+
+        let mut buf = vec![0u8; 9];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 9);
+
+        // Just verify we can get the hash object
+        let _hash = reader.get_hash_object();
+        assert_eq!(reader.position(), 9);
+    }
+
+    #[test]
+    fn test_buf_reader_info_disable_digest() {
+        let data = b"test data";
+        let buf_reader = BufReader::new(&data[..]);
+        let mut reader = BufReaderInfo::from_buf_reader(buf_reader);
+
+        reader.enable_digest_calculation(false);
+
+        let mut buf = vec![0u8; 9];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 9);
+
+        // With digest calculation disabled, hash should remain at default
+        let hash = reader.get_hash_object();
+        let default_hash = Sha256::default();
+        assert_eq!(format!("{:?}", hash), format!("{:?}", default_hash));
+    }
+
+    #[test]
+    fn test_buf_reader_info_seek() {
+        let file = TempFile::new().unwrap();
+        std::fs::write(file.as_path(), b"0123456789").unwrap();
+        let f = File::open(file.as_path()).unwrap();
+        let buf_reader = BufReader::new(f);
+        let mut reader = BufReaderInfo::from_buf_reader(buf_reader);
+
+        // Seek to position 5
+        let pos = reader.seek(SeekFrom::Start(5)).unwrap();
+        assert_eq!(pos, 5);
+        assert_eq!(reader.position(), 5);
+
+        // Read from position 5
+        let mut buf = vec![0u8; 3];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(&buf, b"567");
+        assert_eq!(reader.position(), 8);
+    }
+
+    #[test]
+    fn test_buf_reader_info_clone() {
+        let data = b"test data";
+        let buf_reader = BufReader::new(&data[..]);
+        let mut reader = BufReaderInfo::from_buf_reader(buf_reader);
+
+        let mut buf = vec![0u8; 4];
+        let n = reader.read(&mut buf).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(reader.position(), 4);
+
+        // Clone should share the same state
+        let reader_clone = reader.clone();
+        assert_eq!(reader_clone.position(), 4);
+    }
+
+    #[test]
+    fn test_file_range_reader_partial_read() {
+        let file = TempFile::new().unwrap();
+        std::fs::write(file.as_path(), b"ABCDEFGHIJ").unwrap();
+        let mut reader = FileRangeReader::new(file.as_file(), 2, 4);
+
+        // Read less than available
+        let mut buf = vec![0u8; 2];
+        let res = reader.read(&mut buf).unwrap();
+        assert_eq!(res, 2);
+        assert_eq!(&buf, b"CD");
+
+        // Read remaining
+        let res = reader.read(&mut buf).unwrap();
+        assert_eq!(res, 2);
+        assert_eq!(&buf, b"EF");
+
+        // Should return 0 after range is exhausted
+        let res = reader.read(&mut buf).unwrap();
+        assert_eq!(res, 0);
+    }
 }

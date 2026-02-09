@@ -1497,6 +1497,96 @@ mod tests {
     use crate::test::MockChunkInfo;
 
     #[test]
+    fn test_blob_features_default() {
+        let features = BlobFeatures::default();
+        assert_eq!(features, BlobFeatures::empty());
+    }
+
+    #[test]
+    fn test_blob_features_is_tarfs() {
+        let features = BlobFeatures::CAP_TAR_TOC | BlobFeatures::TARFS;
+        assert!(features.is_tarfs());
+
+        let features = BlobFeatures::CAP_TAR_TOC;
+        assert!(!features.is_tarfs());
+
+        let features = BlobFeatures::TARFS;
+        assert!(!features.is_tarfs());
+
+        let features = BlobFeatures::empty();
+        assert!(!features.is_tarfs());
+    }
+
+    #[test]
+    fn test_blob_features_try_from_valid() {
+        let result = BlobFeatures::try_from(BlobFeatures::ALIGNED.bits());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), BlobFeatures::ALIGNED);
+
+        let result = BlobFeatures::try_from(0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), BlobFeatures::empty());
+    }
+
+    #[test]
+    fn test_blob_features_try_from_invalid() {
+        // Invalid feature flag
+        let result = BlobFeatures::try_from(0x0000_8000);
+        assert!(result.is_err());
+
+        // _V5_NO_EXT_BLOB_TABLE flag should be rejected
+        let result = BlobFeatures::try_from(BlobFeatures::_V5_NO_EXT_BLOB_TABLE.bits());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_blob_features_combined() {
+        let features = BlobFeatures::ALIGNED | BlobFeatures::SEPARATE | BlobFeatures::CHUNK_INFO_V2;
+        let result = BlobFeatures::try_from(features.bits());
+        assert!(result.is_ok());
+        let decoded = result.unwrap();
+        assert!(decoded.contains(BlobFeatures::ALIGNED));
+        assert!(decoded.contains(BlobFeatures::SEPARATE));
+        assert!(decoded.contains(BlobFeatures::CHUNK_INFO_V2));
+    }
+
+    #[test]
+    fn test_blob_info_new() {
+        let blob_info = BlobInfo::new(
+            1,
+            "test_blob_id".to_owned(),
+            1024,
+            512,
+            256,
+            4,
+            BlobFeatures::ALIGNED,
+        );
+
+        assert_eq!(blob_info.blob_index(), 1);
+        assert_eq!(blob_info.blob_id(), "test_blob_id");
+        assert_eq!(blob_info.uncompressed_size(), 1024);
+        assert_eq!(blob_info.compressed_size(), 512);
+        assert_eq!(blob_info.chunk_size(), 256);
+        assert_eq!(blob_info.chunk_count(), 4);
+    }
+
+    #[test]
+    fn test_blob_info_new_with_null_terminator() {
+        // Test that trailing null characters are stripped
+        let blob_info = BlobInfo::new(
+            1,
+            "test_blob_id\0\0".to_owned(),
+            1024,
+            512,
+            256,
+            4,
+            BlobFeatures::ALIGNED,
+        );
+
+        assert_eq!(blob_info.blob_id(), "test_blob_id");
+    }
+
+    #[test]
     fn test_blob_io_chunk() {
         let chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
             block_id: Default::default(),

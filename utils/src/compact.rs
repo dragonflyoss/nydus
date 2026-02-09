@@ -52,4 +52,22 @@ mod tests {
         assert_eq!(major_dev(dev), 0xffff_abcd);
         assert_eq!(minor_dev(dev), 0xabcd_ffff);
     }
+
+    #[test]
+    fn test_makedev() {
+        let major: u64 = 8;
+        let minor: u64 = 1;
+        let dev = makedev(major, minor);
+        assert_eq!(major_dev(dev), major);
+        assert_eq!(minor_dev(dev), minor);
+    }
+
+    #[test]
+    fn test_makedev_large_values() {
+        let major: u64 = 0xfff;
+        let minor: u64 = 0xfffff;
+        let dev = makedev(major, minor);
+        assert_eq!(major_dev(dev), major & 0xfff);
+        assert_eq!(minor_dev(dev), minor & 0xfffff);
+    }
 }
