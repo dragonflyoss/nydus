@@ -186,4 +186,126 @@ mod tests {
         assert_eq!(attributes.items, items_map);
         assert_eq!(attributes.get_crcs("/foo"), Some(&vec![0x1234, 0x5678]))
     }
+
+    #[test]
+    fn test_is_external() {
+        let file = TempFile::new().unwrap();
+        fs::write(file.as_path(), "/foo type=external\n/bar type=internal").unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        assert!(attributes.is_external("/foo"));
+        assert!(!attributes.is_external("/bar"));
+        assert!(!attributes.is_external("/nonexistent"));
+    }
+
+    #[test]
+    fn test_is_prefix_external() {
+        let file = TempFile::new().unwrap();
+        fs::write(file.as_path(), "/external/path type=external").unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        assert!(attributes.is_prefix_external("/external"));
+        assert!(!attributes.is_prefix_external("/nonexistent"));
+    }
+
+    #[test]
+    fn test_get_value() {
+        let file = TempFile::new().unwrap();
+        fs::write(file.as_path(), "/foo type=external crcs=0x1234").unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        assert_eq!(
+            attributes.get_value("/foo", "type"),
+            Some("external".to_string())
+        );
+        assert_eq!(
+            attributes.get_value("/foo", "crcs"),
+            Some("0x1234".to_string())
+        );
+        assert_eq!(attributes.get_value("/foo", "nonexistent"), None);
+        assert_eq!(attributes.get_value("/nonexistent", "type"), None);
+    }
+
+    #[test]
+    fn test_get_values() {
+        let file = TempFile::new().unwrap();
+        fs::write(file.as_path(), "/foo type=external crcs=0x1234").unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        let values = attributes.get_values("/foo");
+        assert!(values.is_some());
+        assert_eq!(values.unwrap().get("type"), Some(&"external".to_string()));
+        assert!(attributes.get_values("/nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_get_crcs() {
+        let file = TempFile::new().unwrap();
+        fs::write(
+            file.as_path(),
+            "/foo crcs=0x1234,0xabcd\n/bar type=external",
+        )
+        .unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        assert_eq!(attributes.get_crcs("/foo"), Some(&vec![0x1234, 0xabcd]));
+        assert_eq!(attributes.get_crcs("/bar"), Some(&vec![]));
+        assert_eq!(attributes.get_crcs("/nonexistent"), None);
+    }
+
+    #[test]
+    fn test_attribute_parse_relative_path() {
+        let file = TempFile::new().unwrap();
+        fs::write(file.as_path(), "foo/bar type=external").unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        assert!(attributes.is_external("/foo/bar"));
+        assert!(attributes.is_external("/foo"));
+    }
+
+    #[test]
+    fn test_attribute_parse_hex_without_prefix() {
+        let file = TempFile::new().unwrap();
+        fs::write(file.as_path(), "/foo crcs=1234,abcd").unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        assert_eq!(attributes.get_crcs("/foo"), Some(&vec![0x1234, 0xabcd]));
+    }
+
+    #[test]
+    fn test_attribute_parse_with_whitespace() {
+        let file = TempFile::new().unwrap();
+        fs::write(file.as_path(), "/foo crcs=0x1234,0xabcd").unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        assert_eq!(attributes.get_crcs("/foo"), Some(&vec![0x1234, 0xabcd]));
+    }
+
+    #[test]
+    fn test_check_external() {
+        let file = TempFile::new().unwrap();
+        fs::write(file.as_path(), "/foo type=external").unwrap();
+
+        let attributes = Attributes::from(file.as_path()).unwrap();
+        let values = attributes.get_values("/foo").unwrap();
+        assert!(attributes.check_external(values));
+
+        let mut non_external = HashMap::new();
+        non_external.insert("type".to_string(), "internal".to_string());
+        assert!(!attributes.check_external(&non_external));
+    }
+
+    #[test]
+    fn test_default_item() {
+        let item = Item::default();
+        assert_eq!(item.pattern, PathBuf::new());
+        assert!(item.attributes.is_empty());
+    }
+
+    #[test]
+    fn test_default_attributes() {
+        let attributes = Attributes::default();
+        assert!(attributes.items.is_empty());
+        assert!(attributes.crcs.is_empty());
+    }
 }

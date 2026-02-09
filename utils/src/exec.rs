@@ -65,4 +65,13 @@ mod tests {
         let val = exec("cat -", false, b"test").unwrap();
         assert_eq!(val, "");
     }
+
+    #[test]
+    fn test_exec_failure() {
+        let result = exec("false", true, b"");
+        assert!(result.is_err());
+
+        let result = exec("false", false, b"");
+        assert!(result.is_err());
+    }
 }

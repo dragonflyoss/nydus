@@ -277,8 +277,9 @@ impl BlobChunkInfo for V5IoChunk {
 mod tests {
     use super::*;
     // TODO: add unit test cases for RafsSuper::{try_load_v5, amplify_io}
+
     #[test]
-    fn test_v5_io_chunk() {
+    fn test_v5_io_chunk_basic() {
         let info = V5IoChunk {
             block_id: RafsDigest::default().into(),
             blob_index: 2,
@@ -295,5 +296,102 @@ mod tests {
         assert_eq!(info.id(), 3);
         assert!(!info.is_compressed());
         assert!(!info.is_encrypted());
+        assert!(!info.is_batch());
+        assert_eq!(info.blob_index(), 2);
+        assert_eq!(info.compressed_offset(), 1024);
+        assert_eq!(info.compressed_size(), 10);
+        assert_eq!(info.uncompressed_offset(), 2048);
+        assert_eq!(info.uncompressed_size(), 20);
+    }
+
+    #[test]
+    fn test_v5_io_chunk_compressed() {
+        let info = V5IoChunk {
+            block_id: RafsDigest::default().into(),
+            blob_index: 1,
+            index: 0,
+            compressed_offset: 0,
+            uncompressed_offset: 0,
+            compressed_size: 100,
+            uncompressed_size: 200,
+            flags: BlobChunkFlags::COMPRESSED,
+            crc32: 0x12345678,
+        };
+
+        assert!(info.is_compressed());
+        assert!(!info.is_encrypted());
+        assert!(!info.is_batch());
+    }
+
+    #[test]
+    fn test_v5_io_chunk_has_crc32() {
+        let info_with_crc = V5IoChunk {
+            block_id: RafsDigest::default().into(),
+            blob_index: 1,
+            index: 0,
+            compressed_offset: 0,
+            uncompressed_offset: 0,
+            compressed_size: 100,
+            uncompressed_size: 200,
+            flags: BlobChunkFlags::HAS_CRC32,
+            crc32: 0x12345678,
+        };
+
+        assert!(info_with_crc.has_crc32());
+        assert_eq!(info_with_crc.crc32(), 0x12345678);
+
+        let info_without_crc = V5IoChunk {
+            block_id: RafsDigest::default().into(),
+            blob_index: 1,
+            index: 0,
+            compressed_offset: 0,
+            uncompressed_offset: 0,
+            compressed_size: 100,
+            uncompressed_size: 200,
+            flags: BlobChunkFlags::empty(),
+            crc32: 0x12345678,
+        };
+
+        assert!(!info_without_crc.has_crc32());
+        assert_eq!(info_without_crc.crc32(), 0);
+    }
+
+    #[test]
+    fn test_v5_io_chunk_as_any() {
+        let info = V5IoChunk {
+            block_id: RafsDigest::default().into(),
+            blob_index: 1,
+            index: 0,
+            compressed_offset: 0,
+            uncompressed_offset: 0,
+            compressed_size: 100,
+            uncompressed_size: 200,
+            flags: BlobChunkFlags::empty(),
+            crc32: 0,
+        };
+
+        let any = info.as_any();
+        assert!(any.downcast_ref::<V5IoChunk>().is_some());
+    }
+
+    #[test]
+    fn test_v5_io_chunk_multiple_flags() {
+        let info = V5IoChunk {
+            block_id: RafsDigest::default().into(),
+            blob_index: 1,
+            index: 0,
+            compressed_offset: 0,
+            uncompressed_offset: 0,
+            compressed_size: 100,
+            uncompressed_size: 200,
+            flags: BlobChunkFlags::COMPRESSED | BlobChunkFlags::HAS_CRC32,
+            crc32: 0xABCDEF00,
+        };
+
+        assert!(info.is_compressed());
+        assert!(info.has_crc32());
+        assert_eq!(info.crc32(), 0xABCDEF00);
+        assert!(!info.is_encrypted());
+        assert!(!info.is_batch());
     }
 }

@@ -277,4 +277,124 @@ mod tests {
         assert_eq!(dict.get_real_blob_idx(0), Some(10));
         assert_eq!(dict.get_real_blob_idx(1), None);
     }
+
+    #[test]
+    fn test_parse_chunk_dict_arg() {
+        // Test with bootstrap type
+        let result = parse_chunk_dict_arg("bootstrap=/path/to/file").unwrap();
+        assert_eq!(result, PathBuf::from("/path/to/file"));
+
+        // Test without type prefix (defaults to bootstrap)
+        let result = parse_chunk_dict_arg("/path/to/file").unwrap();
+        assert_eq!(result, PathBuf::from("/path/to/file"));
+
+        // Test with relative path
+        let result = parse_chunk_dict_arg("~/image/image.boot").unwrap();
+        assert_eq!(result, PathBuf::from("~/image/image.boot"));
+
+        // Test with invalid type
+        let result = parse_chunk_dict_arg("boltdb=/var/db/dict.db");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid chunk dict type"));
+    }
+
+    #[test]
+    fn test_hash_chunk_dict_new() {
+        let dict = HashChunkDict::new(digest::Algorithm::Blake3);
+        assert_eq!(dict.digester(), digest::Algorithm::Blake3);
+        assert!(dict.hashmap().is_empty());
+        assert_eq!(dict.get_blobs().len(), 0);
+    }
+
+    #[test]
+    fn test_hash_chunk_dict_add_chunk() {
+        let mut dict = HashChunkDict::new(digest::Algorithm::Sha256);
+        let chunk1 = Arc::new(ChunkWrapper::new(RafsVersion::V5));
+
+        // Add chunk first time
+        dict.add_chunk(chunk1.clone(), digest::Algorithm::Sha256);
+        assert_eq!(dict.hashmap().len(), 1);
+        assert_eq!(
+            dict.hashmap()
+                .get(chunk1.id())
+                .unwrap()
+                .1
+                .load(Ordering::Acquire),
+            1
+        );
+
+        // Add same chunk again (should increment counter)
+        dict.add_chunk(chunk1.clone(), digest::Algorithm::Sha256);
+        assert_eq!(dict.hashmap().len(), 1);
+        assert_eq!(
+            dict.hashmap()
+                .get(chunk1.id())
+                .unwrap()
+                .1
+                .load(Ordering::Acquire),
+            2
+        );
+
+        // Add chunk with different digester (should be ignored)
+        let chunk2 = Arc::new(ChunkWrapper::new(RafsVersion::V5));
+        dict.add_chunk(chunk2.clone(), digest::Algorithm::Blake3);
+        assert_eq!(dict.hashmap().len(), 1);
+    }
+
+    #[test]
+    fn test_hash_chunk_dict_get_chunk() {
+        let mut dict = HashChunkDict::new(digest::Algorithm::Sha256);
+        let chunk = Arc::new(ChunkWrapper::new(RafsVersion::V5));
+
+        // Chunk not in dict
+        assert!(dict.get_chunk(chunk.id(), 0).is_none());
+
+        // Add chunk and retrieve it
+        dict.add_chunk(chunk.clone(), digest::Algorithm::Sha256);
+        assert!(dict.get_chunk(chunk.id(), 0).is_some());
+        assert!(dict
+            .get_chunk(chunk.id(), chunk.uncompressed_size())
+            .is_some());
+    }
+
+    #[test]
+    fn test_hash_chunk_dict_blob_management() {
+        let dict = HashChunkDict::new(digest::Algorithm::Sha256);
+
+        // No blobs initially
+        assert_eq!(dict.get_blobs().len(), 0);
+        assert!(dict.get_blob_by_inner_idx(0).is_none());
+
+        // Test blob index mapping
+        dict.set_real_blob_idx(0, 5);
+        assert_eq!(dict.get_real_blob_idx(0), Some(5));
+
+        dict.set_real_blob_idx(1, 10);
+        assert_eq!(dict.get_real_blob_idx(1), Some(10));
+
+        // Non-existent mapping
+        assert_eq!(dict.get_real_blob_idx(99), None);
+    }
+
+    #[test]
+    fn test_null_dict_digester() {
+        let dict = Box::new(()) as Box<dyn ChunkDict>;
+        assert_eq!(dict.digester(), digest::Algorithm::Sha256);
+    }
+
+    #[test]
+    fn test_digest_with_blob_index() {
+        let digest = RafsDigest::default();
+        let d1 = DigestWithBlobIndex(digest, 0, None);
+        let d2 = DigestWithBlobIndex(digest, 1, None);
+        let d3 = DigestWithBlobIndex(digest, 0, Some(5));
+
+        // Test ordering and equality
+        assert_ne!(d1, d2);
+        assert_ne!(d1, d3);
+        assert!(d1 != d2); // They should be ordered differently
+    }
 }

@@ -94,12 +94,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_algorithm_display() {
+        assert_eq!(format!("{}", Algorithm::None), "None");
+        assert_eq!(format!("{}", Algorithm::Crc32Iscsi), "Crc32Iscsi");
+    }
+
+    #[test]
+    fn test_algorithm_default() {
+        let algo = Algorithm::default();
+        assert_eq!(algo, Algorithm::Crc32Iscsi);
+    }
+
+    #[test]
+    fn test_algorithm_try_from_u32() {
+        assert_eq!(Algorithm::try_from(0u32), Ok(Algorithm::None));
+        assert_eq!(Algorithm::try_from(1u32), Ok(Algorithm::Crc32Iscsi));
+        assert_eq!(Algorithm::try_from(2u32), Err(()));
+        assert_eq!(Algorithm::try_from(999u32), Err(()));
+    }
+
+    #[test]
+    fn test_algorithm_try_from_u64() {
+        assert_eq!(Algorithm::try_from(0u64), Ok(Algorithm::None));
+        assert_eq!(Algorithm::try_from(1u64), Ok(Algorithm::Crc32Iscsi));
+        assert_eq!(Algorithm::try_from(2u64), Err(()));
+        assert_eq!(Algorithm::try_from(999u64), Err(()));
+    }
+
+    #[test]
+    fn test_crc32_default() {
+        let crc32 = Crc32::default();
+        let data = b"123456789";
+        let expected_checksum = 0xe3069283;
+        assert_eq!(crc32.from_buf(data), expected_checksum);
+    }
+
+    #[test]
+    fn test_crc32_new_with_none_algorithm() {
+        // Algorithm::None falls back to Crc32Iscsi
+        let crc32 = Crc32::new(Algorithm::None);
+        let data = b"123456789";
+        let expected_checksum = 0xe3069283;
+        assert_eq!(crc32.from_buf(data), expected_checksum);
+    }
+
+    #[test]
     fn test_crc32_from_buf() {
         let crc32 = Crc32::new(Algorithm::Crc32Iscsi);
         let data = b"123456789";
         let expected_checksum = 0xe3069283;
         let crc32_result = crc32.from_buf(data);
         assert_eq!(crc32_result, expected_checksum);
+    }
+
+    #[test]
+    fn test_crc32_from_buf_empty() {
+        let crc32 = Crc32::new(Algorithm::Crc32Iscsi);
+        let data = b"";
+        let crc32_result = crc32.from_buf(data);
+        // Empty buffer should have a known CRC32 value
+        assert_eq!(crc32_result, 0);
     }
 
     #[test]
@@ -110,5 +164,26 @@ mod tests {
         let mut reader = std::io::Cursor::new(data);
         let crc32_result = crc32.from_reader(&mut reader).unwrap();
         assert_eq!(crc32_result, expected_checksum);
+    }
+
+    #[test]
+    fn test_crc32_from_reader_empty() {
+        let crc32 = Crc32::new(Algorithm::Crc32Iscsi);
+        let data = b"";
+        let mut reader = std::io::Cursor::new(data);
+        let crc32_result = crc32.from_reader(&mut reader).unwrap();
+        assert_eq!(crc32_result, 0);
+    }
+
+    #[test]
+    fn test_crc32_from_reader_large_data() {
+        let crc32 = Crc32::new(Algorithm::Crc32Iscsi);
+        // Create data larger than the internal buffer (1MB)
+        let large_data = vec![0x42u8; 2 * 1024 * 1024];
+        let mut reader = std::io::Cursor::new(&large_data);
+        let crc32_result = crc32.from_reader(&mut reader).unwrap();
+        // Verify it matches direct buffer calculation
+        let expected = crc32.from_buf(&large_data);
+        assert_eq!(crc32_result, expected);
     }
 }
