@@ -230,7 +230,7 @@ jobs:
         cat $GITHUB_ENV
     - name: push release
       if: github.event_name == 'push'
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         name: "Nydus Image Service ${{ env.tag }}"
         body: |
