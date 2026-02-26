@@ -34,9 +34,7 @@ nydus-utils = { version = "0.5.0", path = "../utils" }
 
 vhost = { workspace = true, features = ["vhost-user"], optional = true }
 vhost-user-backend = { workspace = true, optional = true }
-virtio-bindings = { workspace = true, features = [
-    "virtio-v5_0_0",
-], optional = true }
+virtio-bindings = { workspace = true, optional = true }
 virtio-queue = { workspace = true, optional = true }
 vm-memory = { workspace = true, features = ["backend-mmap"], optional = true }
 
