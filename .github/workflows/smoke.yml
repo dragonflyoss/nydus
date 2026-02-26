@@ -61,38 +61,6 @@ jobs:
         working-directory: ${{ matrix.path }}
         args: --timeout=10m --verbose
 
-  nydus-build-debug:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v6
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-      with:
-        cache-on-failure: true
-        shared-key: ${{ runner.os }}-cargo-amd64-debug
-        save-if: ${{ github.ref == 'refs/heads/master' }}
-    - uses: dsherret/rust-toolchain-file@v1
-    - name: Read Rust toolchain version
-      id: set_toolchain_version
-      run: |
-        RUST_TOOLCHAIN_VERSION=$(grep -oP '(?<=channel = ")[^"]*' rust-toolchain.toml)
-        echo "Rust toolchain version: $RUST_TOOLCHAIN_VERSION"
-        echo "rust-version=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_OUTPUT
-      shell: bash
-    - name: Build Nydus Debug Version
-      run: |
-        make -e ENABLE_DEBUG=1 build
-        mv target/$RUST_TARGET/debug/nydusd .
-        mv target/$RUST_TARGET/debug/nydus-image .
-    - name: Upload Nydus Binaries
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-artifact-debug
-        path: |
-          nydus-image
-          nydusd
-
   nydus-build:
     runs-on: ubuntu-latest
     strategy:
@@ -154,7 +122,7 @@ jobs:
       if: matrix.arch == 'amd64'
       uses: actions/upload-artifact@v6
       with:
-        name: nydus-artifact-release
+        name: nydus-artifact
         path: |
           nydus-image
           nydusd
@@ -185,7 +153,7 @@ jobs:
 
   nydus-integration-test:
     runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build-debug]
+    needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -195,8 +163,9 @@ jobs:
     - name: Download Nydus
       uses: actions/download-artifact@v7
       with:
-        name: nydus-artifact-debug
-        path: target/debug
+        name: nydus-artifact
+        path: |
+          target/release
     - name: Download Nydusify
       uses: actions/download-artifact@v7
       with:
@@ -241,10 +210,9 @@ jobs:
     - name: Integration Test
       run: |
         sudo mkdir -p /usr/bin/nydus-latest /home/runner/work/workdir
-        sudo chmod +x contrib/nydusify/cmd/nydusify target/debug/nydusd target/debug/nydus-image
         sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/bin/nydus-latest
-        sudo install -D -m 755 target/debug/nydusd target/debug/nydus-image /usr/bin/nydus-latest
-        sudo INSTALL_TARGET_TYPE=debug bash misc/prepare.sh
+        sudo install -D -m 755 target/release/nydusd target/release/nydus-image /usr/bin/nydus-latest
+        sudo bash misc/prepare.sh
 
         export NYDUS_STABLE_VERSION=$(curl https://api.github.com/repos/Dragonflyoss/nydus/releases/latest | jq -r '.tag_name')
         export NYDUS_STABLE_VERSION_EXPORT="${NYDUS_STABLE_VERSION//./_}"
@@ -260,16 +228,7 @@ jobs:
         done
 
         curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v2.1.6
-        sudo -E ENABLE_DEBUG=1 make smoke-only
-        sudo -E "PATH=$PATH" make generate-codecov-markdown
-        grep Total coverage/coverage.md
-        sudo -E "PATH=$PATH" make generate-codecov
-        sudo cp coverage/coverage.info smoke-coverage.info
-    - name: Upload Nydus Smoke Coverage
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-coverage-smoke
-        path: smoke-coverage.info
+        sudo -E make smoke-only
 
   nydus-unit-test:
     runs-on: ubuntu-latest
@@ -288,18 +247,12 @@ jobs:
       run: sudo bash misc/fscache/setup.sh
     - name: Unit Test
       run: |
-        sudo -E ENABLE_DEBUG=1 "PATH=$PATH" make ut-nextest
-        sudo -E "PATH=$PATH" make generate-codecov-markdown
-        grep Total coverage/coverage.md
-        sudo -E "PATH=$PATH" make generate-codecov
-        sudo cp coverage/coverage.info ut-coverage.info
-    - name: Upload Nydus UT Coverage
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-coverage-ut
-        path: ut-coverage.info
+        CARGO_HOME=${HOME}/.cargo
+        CARGO_BIN=$(which cargo)
+        RUSTUP_BIN=$(which rustup)
+        sudo -E RUSTUP=${RUSTUP_BIN} make ut-nextest
 
-  contrib-unit-test:
+  contrib-unit-test-coverage:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
@@ -318,6 +271,57 @@ jobs:
         name: contrib-test-coverage-artifact
         path: |
           contrib/nydusify/coverage.txt
+
+  nydus-unit-test-coverage:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v6
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: Linux-cargo-amd64
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Fscache Setup
+        run: sudo bash misc/fscache/setup.sh
+      - name: Generate code coverage
+        run: |
+          CARGO_HOME=${HOME}/.cargo
+          CARGO_BIN=$(which cargo)
+          RUSTUP_BIN=$(which rustup)
+          sudo -E RUSTUP=${RUSTUP_BIN} make coverage-codecov
+      - name: Upload nydus coverage file
+        uses: actions/upload-artifact@v6
+        with:
+          name: nydus-test-coverage-artifact
+          path: |
+            codecov.json
+
+  upload-coverage-to-codecov:
+    runs-on: ubuntu-latest
+    needs: [contrib-unit-test-coverage, nydus-unit-test-coverage]
+    steps:
+    - uses: actions/checkout@v6
+    - name: Download nydus coverage file
+      uses: actions/download-artifact@v7
+      with:
+        name: nydus-test-coverage-artifact
+    - name: Download contrib coverage file
+      uses: actions/download-artifact@v7
+      with:
+        name: contrib-test-coverage-artifact
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v5
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      with:
+        files: ./codecov.json,./coverage.txt
+        verbose: true
+        fail_ci_if_error: true
 
   nydus-cargo-deny:
     name: cargo-deny
@@ -342,7 +346,7 @@ jobs:
     - name: Download Nydus
       uses: actions/download-artifact@v7
       with:
-        name: nydus-artifact-release
+        name: nydus-artifact
         path: target/release
     - name: Download Nydusify
       uses: actions/download-artifact@v7
@@ -359,15 +363,15 @@ jobs:
 
   takeover-test:
     runs-on: ubuntu-latest
-    needs: [contrib-build, nydus-build-debug]
+    needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout
       uses: actions/checkout@v6
     - name: Download Nydus
       uses: actions/download-artifact@v7
       with:
-        name: nydus-artifact-debug
-        path: target/debug
+        name: nydus-artifact
+        path: target/release
     - name: Download Nydusify
       uses: actions/download-artifact@v7
       with:
@@ -375,49 +379,8 @@ jobs:
         path: contrib/nydusify/cmd
     - name: Prepare Nydus Container Environment
       run: |
-        sudo INSTALL_TARGET_TYPE=debug bash misc/prepare.sh takeover_test
+        sudo bash misc/prepare.sh takeover_test
     - name: Takeover Test
       run: |
-        export NEW_NYDUSD_BINARY_PATH=target/debug/nydusd
-        sudo chmod +x target/debug/nydus-image
-        sudo -E ENABLE_DEBUG=1 make smoke-takeover
-        sudo -E "PATH=$PATH" make generate-codecov-markdown
-        grep Total coverage/coverage.md
-        sudo -E "PATH=$PATH" make generate-codecov
-        sudo cp coverage/coverage.info takeover-coverage.info
-    - name: Upload Nydus Takeover
-      uses: actions/upload-artifact@v6
-      with:
-        name: nydus-coverage-takeover
-        path: takeover-coverage.info
-
-  nydus-coverage:
-    runs-on: ubuntu-latest
-    needs: [takeover-test,nydus-integration-test,nydus-unit-test]
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v6
-    - name: Download Nydus Smoke Coverage
-      uses: actions/download-artifact@v7
-      with:
-        name: nydus-coverage-smoke
-    - name: Download Nydus UT Coverage
-      uses: actions/download-artifact@v7
-      with:
-        name: nydus-coverage-ut
-    - name: Download Nydus Takeover Coverage
-      uses: actions/download-artifact@v7
-      with:
-        name: nydus-coverage-takeover
-    - name: Download contrib coverage file
-      uses: actions/download-artifact@v7
-      with:
-        name: contrib-test-coverage-artifact
-    - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v5
-      env:
-        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-      with:
-        files: smoke-coverage.info,ut-coverage.info,takeover-coverage.info,coverage.txt
-        verbose: true
-        fail_ci_if_error: true
+        export NEW_NYDUSD_BINARY_PATH=target/release/nydusd
+        sudo -E make smoke-takeover

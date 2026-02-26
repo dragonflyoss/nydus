@@ -156,6 +156,10 @@ generate-codecov-markdown: prepare-codecov
 generate-codecov: prepare-codecov
 	grcov $(dir ${LLVM_PROFILE_FILE})/*.profraw -t lcov $(GRCOV_ARGS) --output-path coverage/coverage.info
 
+# write unit teset coverage to codecov.json, used for Github CI
+coverage-codecov:
+	TEST_WORKDIR_PREFIX=$(TEST_WORKDIR_PREFIX) ${RUSTUP} run stable cargo llvm-cov --codecov --output-path codecov.json --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) -- --skip integration --nocapture --test-threads=8
+
 
 contrib-build: nydusify nydus-overlayfs
 
