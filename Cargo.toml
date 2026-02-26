@@ -77,9 +77,7 @@ nydus-utils = { version = "0.5.0", path = "utils" }
 
 vhost = { workspace = true, features = ["vhost-user"], optional = true }
 vhost-user-backend = { workspace = true, optional = true }
-virtio-bindings = { workspace = true, features = [
-    "virtio-v5_0_0",
-], optional = true }
+virtio-bindings = { workspace = true, optional = true }
 virtio-queue = { workspace = true, optional = true }
 vm-memory = { workspace = true, features = [
     "backend-mmap",
@@ -140,12 +138,12 @@ members = [
 
 [workspace.dependencies]
 # rust-vmm crates
-vhost = "0.11.0"
-vhost-user-backend = "0.15.0"
-virtio-bindings = "0.1"
-virtio-queue = "0.12.0"
-vm-memory = "0.14.1"
-vmm-sys-util = "0.12.1"
+vhost = "0.15.0"
+virtio-bindings = "0.2.7"
+virtio-queue = "0.17.0"
+vm-memory = "=0.17.1"
+vmm-sys-util = "0.15.0"
+vhost-user-backend = "0.21.0"
 
 # fuse-backend-rs which depends on rust-vmm
-fuse-backend-rs = "0.13.1"
+fuse-backend-rs = "0.14.0"

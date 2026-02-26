@@ -25,7 +25,7 @@ use virtio_queue::QueueOwnedT;
 use vm_memory::mmap::NewBitmap;
 use vm_memory::{GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap};
 use vmm_sys_util::epoll::EventSet;
-use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::event::{EventConsumer, EventNotifier};
 
 use nydus::daemon::{
     DaemonState, DaemonStateMachineContext, DaemonStateMachineInput, DaemonStateMachineSubscriber,
@@ -50,7 +50,7 @@ type VhostUserBackendResult<T> = std::io::Result<T>;
 
 struct VhostUserFsBackend {
     event_idx: bool,
-    kill_evt: EventFd,
+    kill_evt: (EventConsumer, EventNotifier),
     mem: Option<GuestMemoryAtomic<GuestMemoryMmap>>,
     server: Arc<Server<Arc<Vfs>>>,
     // handle request from slave to master
@@ -89,9 +89,7 @@ impl VhostUserFsBackend {
                 .handle_message(
                     reader,
                     writer,
-                    self.vu_req
-                        .as_mut()
-                        .map(|x| x as &mut dyn FsCacheReqHandler),
+                    None as Option<&mut dyn FsCacheReqHandler>,
                     None,
                 )
                 .map_err(Error::ProcessQueue)?;
@@ -132,7 +130,10 @@ impl VhostUserFsBackendHandler {
     fn new(vfs: Arc<Vfs>) -> std::io::Result<Self> {
         let backend = VhostUserFsBackend {
             event_idx: false,
-            kill_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::Epoll)?,
+            kill_evt: vmm_sys_util::event::new_event_consumer_and_notifier(
+                vmm_sys_util::event::EventFlag::NONBLOCK,
+            )
+            .map_err(Error::Epoll)?,
             mem: None,
             server: Arc::new(Server::new(vfs)),
             vu_req: None,
@@ -183,10 +184,13 @@ impl VhostUserBackendMut for VhostUserFsBackendHandler {
         self.backend.lock().unwrap().vu_req = Some(vu_req);
     }
 
-    fn exit_event(&self, _thread_index: usize) -> Option<EventFd> {
+    fn exit_event(&self, _thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
         // FIXME: need to patch vhost-user-backend to return KILL_EVENT
         // so that daemon stop event gets popped up.
-        Some(self.backend.lock().unwrap().kill_evt.try_clone().unwrap())
+        let backend = self.backend.lock().unwrap();
+        let consumer = backend.kill_evt.0.try_clone().unwrap();
+        let notifier = backend.kill_evt.1.try_clone().unwrap();
+        Some((consumer, notifier))
     }
 
     fn handle_event(
@@ -316,7 +320,7 @@ where
     }
 
     fn start(&self) -> Result<()> {
-        let listener =
+        let mut listener =
             Listener::new(&self.sock, true).map_err(|e| Error::StartService(format!("{}", e)))?;
         let vu_daemon = self.daemon.clone();
         let _ = thread::Builder::new()
@@ -325,7 +329,7 @@ where
                 vu_daemon
                     .lock()
                     .unwrap()
-                    .start(listener)
+                    .start(&mut listener)
                     .unwrap_or_else(|e| error!("{:?}", e));
             })
             .map_err(Error::ThreadSpawn)?;
