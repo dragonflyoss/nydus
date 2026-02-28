@@ -42,6 +42,7 @@ yanked = "warn"
 # output a note when they are encountered.
 ignore = [
     { id = "RUSTSEC-2025-0141", reason = "No safe upgrade is available! The team considers version 1.3.3 a complete version of bincode that is not in need of any updates" },
+    { id = "RUSTSEC-2026-0009", reason = "The time crate is only used for build timestamps and S3 request signing, not for parsing RFC 2822 user input. Upgrading to the fixed version (>=0.3.47) requires Rust 1.85+ which is above the current toolchain (1.84.0)." },
 ]
 # Threshold for security vulnerabilities, any vulnerability with a CVSS score
 # lower than the range specified will be ignored. Note that ignored advisories
