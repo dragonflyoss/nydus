@@ -16,9 +16,9 @@ crate-type = ["cdylib", "staticlib"]
 libc = "0.2.137"
 log = "0.4.17"
 fuse-backend-rs = { workspace = true }
-nydus-api = { version = "0.4.0", path = "../api" }
-nydus-rafs = { version = "0.4.0", path = "../rafs" }
-nydus-storage = { version = "0.7.1", path = "../storage" }
+nydus-api = { version = "0.4.1", path = "../api" }
+nydus-rafs = { version = "0.4.1", path = "../rafs" }
+nydus-storage = { version = "0.7.2", path = "../storage" }
 
 [features]
 baekend-s3 = ["nydus-storage/backend-s3"]
