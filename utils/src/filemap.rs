@@ -6,6 +6,7 @@ use std::fs::File;
 use std::io::Result;
 use std::mem::size_of;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
+use std::ptr::NonNull;
 
 /// Struct to manage memory range mapped from file objects.
 ///
@@ -136,7 +137,12 @@ impl FileMapState {
                 self.base
             );
         }
-        Ok(unsafe { std::slice::from_raw_parts(start as *const T, count) })
+        let ptr = if size == 0 {
+            NonNull::<T>::dangling().as_ptr()
+        } else {
+            start as *const T
+        };
+        Ok(unsafe { std::slice::from_raw_parts(ptr, count) })
     }
 
     /// Get a mutable slice of 'T' at 'offset' with 'count' entries.
@@ -158,7 +164,12 @@ impl FileMapState {
                 self.base
             );
         }
-        Ok(unsafe { std::slice::from_raw_parts_mut(start as *mut T, count) })
+        let ptr = if size == 0 {
+            NonNull::<T>::dangling().as_ptr()
+        } else {
+            start as *mut T
+        };
+        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, count) })
     }
 
     /// Check whether the range [offset, offset + size) is valid and return the start address.
@@ -258,11 +269,13 @@ mod tests {
         assert!(map.get_slice::<usize>(0, usize::MAX).is_err());
         assert!(map.get_slice::<usize>(usize::MAX, 1).is_err());
         assert!(map.get_slice::<usize>(4096, 4096).is_err());
+        assert!(map.get_slice::<usize>(0, 0).is_ok());
         assert!(map.get_slice::<usize>(0, 128).is_ok());
 
         assert!(map.get_slice_mut::<usize>(0, usize::MAX).is_err());
         assert!(map.get_slice_mut::<usize>(usize::MAX, 1).is_err());
         assert!(map.get_slice_mut::<usize>(4096, 4096).is_err());
+        assert!(map.get_slice_mut::<usize>(0, 0).is_ok());
         assert!(map.get_slice_mut::<usize>(0, 128).is_ok());
     }
 }
