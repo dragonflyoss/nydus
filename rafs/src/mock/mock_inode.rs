@@ -66,7 +66,7 @@ impl MockInode {
             i_child_cnt: chunks.len() as u32,
             i_data: chunks,
             // Ignore other bits for now.
-            i_mode: libc::S_IFREG as u32,
+            i_mode: crate::metadata::mode_bits(libc::S_IFREG),
             // It can't be changed yet.
             i_blksize: CHUNK_SIZE,
             ..Default::default()
@@ -101,7 +101,7 @@ impl RafsInode for MockInode {
             size: self.i_size,
             blocks: self.i_blocks,
             mode: self.i_mode,
-            nlink: self.i_nlink as u32,
+            nlink: self.i_nlink,
             blksize: RAFS_ATTR_BLOCK_SIZE,
             rdev: self.i_rdev,
             ..Default::default()
@@ -177,34 +177,34 @@ impl RafsInode for MockInode {
 
     #[inline]
     fn is_blkdev(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFBLK)
     }
 
     #[inline]
     fn is_chrdev(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFCHR)
     }
 
     #[inline]
     fn is_sock(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFSOCK)
     }
 
     #[inline]
     fn is_fifo(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFIFO)
     }
 
     fn is_dir(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFDIR)
     }
 
     fn is_symlink(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFLNK)
     }
 
     fn is_reg(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFREG)
     }
 
     fn is_hardlink(&self) -> bool {
@@ -329,7 +329,7 @@ mod tests {
 
         let mut node = MockInode::mock(13, size, chunks);
         node.i_flags = RafsInodeFlags::XATTR;
-        node.i_mode = libc::S_IFDIR as u32;
+        node.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         node.i_name = "foo".into();
         node.i_digest = digest;
         node.i_parent = RAFS_V5_ROOT_INODE;
@@ -374,14 +374,14 @@ mod tests {
         assert_eq!(ent.attr, node.get_attr().into());
 
         assert!(node.get_symlink().is_err());
-        assert_eq!(node.get_symlink_size(), 0 as u16);
+        assert_eq!(node.get_symlink_size(), 0_u16);
 
         assert!(node.get_child_by_name(OsStr::new("child1")).is_ok());
         assert!(node.get_child_by_index(0).is_ok());
         assert!(node.get_child_by_index(1).is_ok());
-        assert_eq!(node.get_child_count(), 2 as u32);
-        assert_eq!(node.get_child_index().unwrap(), 2 as u32);
-        assert_eq!(node.get_chunk_count(), 2 as u32);
+        assert_eq!(node.get_child_count(), 2_u32);
+        assert_eq!(node.get_child_index().unwrap(), 2_u32);
+        assert_eq!(node.get_chunk_count(), 2_u32);
         assert!(node.has_xattr());
         assert_eq!(
             node.get_xattr(OsStr::new("attr2")).unwrap().unwrap(),

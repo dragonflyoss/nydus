@@ -1108,7 +1108,7 @@ impl BlobIoRange {
 
     fn tag_from_desc(bio: &BlobIoDesc) -> BlobIoTag {
         if bio.user_io {
-            BlobIoTag::User(BlobIoSegment::new(bio.offset, bio.size as u32))
+            BlobIoTag::User(BlobIoSegment::new(bio.offset, bio.size))
         } else {
             BlobIoTag::Internal
         }
@@ -1315,7 +1315,7 @@ impl BlobDevice {
                     req.len
                 );
                 if let Some(obj) = cache.get_blob_object() {
-                    obj.fetch_range_uncompressed(req.offset as u64, req.len as u64)
+                    obj.fetch_range_uncompressed(req.offset, req.len)
                         .map_err(|e| {
                             warn!(
                                 "Failed to prefetch data from blob {}, offset {}, size {}, {}",
@@ -1784,7 +1784,7 @@ mod tests {
                 uncompress_size: 2 * chunk_size,
                 uncompress_offset: 2 * chunk_idx as u64 * chunk_size as u64,
                 file_offset: 2 * chunk_idx as u64 * chunk_size as u64,
-                index: chunk_idx as u32,
+                index: chunk_idx,
                 crc32: 0,
             }) as Arc<dyn BlobChunkInfo>;
             let desc = BlobIoDesc::new(large_blob.clone(), BlobIoChunk(chunk), 0, chunk_size, true);
@@ -1828,5 +1828,130 @@ mod tests {
             id.unwrap(),
             "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef".to_owned()
         );
+    }
+
+    #[test]
+    fn test_blob_info_setter_getter_pairs() {
+        let mut blob_info = BlobInfo::new(
+            0,
+            "test-blob".to_owned(),
+            1024,
+            512,
+            1 << 20,
+            1,
+            BlobFeatures::empty(),
+        );
+
+        // set_chunk_count / chunk_count
+        blob_info.set_chunk_count(42);
+        assert_eq!(blob_info.chunk_count(), 42);
+
+        // set_compressed_size / compressed_size
+        blob_info.set_compressed_size(8192);
+        assert_eq!(blob_info.compressed_size(), 8192);
+
+        // set_uncompressed_size / uncompressed_size
+        blob_info.set_uncompressed_size(16384);
+        assert_eq!(blob_info.uncompressed_size(), 16384);
+
+        // set_meta_ci_compressed_size / meta_ci_compressed_size
+        blob_info.set_meta_ci_compressed_size(100);
+        assert_eq!(blob_info.meta_ci_compressed_size(), 100);
+
+        // set_meta_ci_uncompressed_size / meta_ci_uncompressed_size
+        blob_info.set_meta_ci_uncompressed_size(200);
+        assert_eq!(blob_info.meta_ci_uncompressed_size(), 200);
+
+        // set_meta_ci_offset / meta_ci_offset
+        blob_info.set_meta_ci_offset(64);
+        assert_eq!(blob_info.meta_ci_offset(), 64);
+
+        // set_chunkdict_generated / is_chunkdict_generated
+        assert!(!blob_info.is_chunkdict_generated());
+        blob_info.set_chunkdict_generated(true);
+        assert!(blob_info.is_chunkdict_generated());
+
+        // set_prefetch_info / prefetch_offset + prefetch_size
+        blob_info.set_prefetch_info(128, 256);
+        assert_eq!(blob_info.prefetch_offset(), 128);
+        assert_eq!(blob_info.prefetch_size(), 256);
+    }
+
+    #[test]
+    fn test_blob_info_compressor_and_digester() {
+        let mut blob_info = BlobInfo::new(
+            0,
+            "c-d-blob".to_owned(),
+            0,
+            0,
+            1 << 20,
+            0,
+            BlobFeatures::empty(),
+        );
+
+        // Default compressor is None
+        assert_eq!(blob_info.compressor(), compress::Algorithm::None);
+        blob_info.set_compressor(compress::Algorithm::Lz4Block);
+        assert_eq!(blob_info.compressor(), compress::Algorithm::Lz4Block);
+
+        // Default digester is Blake3
+        assert_eq!(blob_info.digester(), digest::Algorithm::Blake3);
+        blob_info.set_digester(digest::Algorithm::Sha256);
+        assert_eq!(blob_info.digester(), digest::Algorithm::Sha256);
+    }
+
+    #[test]
+    fn test_blob_info_toc_and_meta_digest() {
+        let mut blob_info = BlobInfo::new(
+            0,
+            "digest-blob".to_owned(),
+            0,
+            0,
+            1 << 20,
+            0,
+            BlobFeatures::empty(),
+        );
+
+        let toc_digest = [0xabu8; 32];
+        blob_info.set_blob_toc_digest(toc_digest);
+        assert_eq!(blob_info.blob_toc_digest(), &toc_digest);
+
+        blob_info.set_blob_toc_size(512);
+        assert_eq!(blob_info.blob_toc_size(), 512);
+
+        let meta_digest = [0xcdu8; 32];
+        blob_info.set_blob_meta_digest(meta_digest);
+        assert_eq!(blob_info.blob_meta_digest(), &meta_digest);
+
+        blob_info.set_blob_meta_size(4096);
+        assert_eq!(blob_info.blob_meta_size(), 4096);
+    }
+
+    #[test]
+    fn test_blob_info_raw_blob_id() {
+        // Without null terminator
+        let blob_info = BlobInfo::new(
+            0,
+            "rawid".to_owned(),
+            0,
+            0,
+            1 << 20,
+            0,
+            BlobFeatures::empty(),
+        );
+        assert_eq!(blob_info.raw_blob_id(), "rawid");
+
+        // new() strips trailing null bytes from the id
+        let blob_info2 = BlobInfo::new(
+            0,
+            "rawid\0\0".to_owned(),
+            0,
+            0,
+            1 << 20,
+            0,
+            BlobFeatures::empty(),
+        );
+        assert_eq!(blob_info2.raw_blob_id(), "rawid");
+        assert_eq!(blob_info2.blob_id(), "rawid");
     }
 }

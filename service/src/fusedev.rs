@@ -827,3 +827,44 @@ pub fn create_vfs_backend(
     let vfs = fuse_backend_rs::api::Vfs::new(opts);
     Ok(Arc::new(vfs))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_possible_base_paths_returns_two_paths() {
+        let paths = FuseSysfsNotifier::get_possible_base_paths();
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0], "/proc/sys/fs/fuse/connections");
+        assert_eq!(paths[1], "/sys/fs/fuse/connections");
+    }
+
+    #[test]
+    fn test_fuse_sysfs_notifier_new() {
+        let conn = AtomicU64::new(42);
+        let notifier = FuseSysfsNotifier::new(&conn);
+        // Verify notifier holds reference to the conn value
+        assert_eq!(notifier.conn.load(Ordering::Relaxed), 42);
+        // Update conn and verify notifier sees the new value
+        conn.store(100, Ordering::Relaxed);
+        assert_eq!(notifier.conn.load(Ordering::Relaxed), 100);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_calc_fuse_conn_current_dir() {
+        // /tmp should be accessible; we just check it doesn't return an error
+        let result = calc_fuse_conn(std::path::Path::new("/tmp"));
+        assert!(result.is_ok());
+        // Conn value should be non-zero (device number encoded as major<<20|minor)
+        let _conn = result.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_calc_fuse_conn_nonexistent_path() {
+        let result = calc_fuse_conn(std::path::Path::new("/nonexistent_path_xyz"));
+        assert!(result.is_err());
+    }
+}

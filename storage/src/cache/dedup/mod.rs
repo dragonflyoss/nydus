@@ -131,7 +131,7 @@ impl CasMgr {
                     let mut guard = self.fds.write().unwrap();
                     guard.remove(&path);
                     let blob_ids: &[String] = &[path];
-                    if let Err(e) = self.db.delete_blobs(&blob_ids) {
+                    if let Err(e) = self.db.delete_blobs(blob_ids) {
                         warn!("failed to delete blobs: {}", e);
                     }
                     return false;

@@ -23,6 +23,7 @@ const (
 var (
 	Version   = "development"
 	BuildTime = "unknown"
+	mountFn   = syscall.Mount
 )
 
 /*
@@ -112,7 +113,7 @@ func run(args cli.Args) error {
 	log.Printf("domount info: %v\n", margs)
 
 	flags, data := parseOptions(margs.options)
-	err = syscall.Mount(margs.fsType, margs.target, margs.fsType, uintptr(flags), data)
+	err = mountFn(margs.fsType, margs.target, margs.fsType, uintptr(flags), data)
 	if err != nil {
 		return errors.Wrap(err, "doMount err")
 	}

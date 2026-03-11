@@ -80,9 +80,8 @@ impl NbdService {
             .read(true)
             .write(true)
             .open(&nbd_path)
-            .map_err(|e| {
+            .inspect_err(|_e| {
                 error!("block_nbd: failed to open NBD device {}", nbd_path);
-                e
             })?;
         nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_BLOCK_SIZE, device.block_size())?;
         nbd_ioctl(nbd_dev.as_raw_fd(), NBD_SET_BLOCKS, device.blocks() as u64)?;
@@ -288,6 +287,7 @@ pub struct NbdDaemon {
 }
 
 impl NbdDaemon {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         nbd_path: String,
         threads: u32,
@@ -303,6 +303,7 @@ impl NbdDaemon {
         let cache_mgr = Arc::new(BlobCacheMgr::new());
         cache_mgr.add_blob_entry(&blob_entry)?;
         let block_device = BlockDevice::new_with_cache_manager(blob_id.clone(), cache_mgr.clone())?;
+        #[allow(clippy::arc_with_non_send_sync)]
         let nbd_service = NbdService::new(Arc::new(block_device), nbd_path)?;
 
         Ok(NbdDaemon {
@@ -541,6 +542,7 @@ mod tests {
     use std::time::Duration;
     use vmm_sys_util::tempdir::TempDir;
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn create_block_device(tmpdir: PathBuf) -> Result<Arc<BlockDevice>> {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);

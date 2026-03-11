@@ -1090,4 +1090,82 @@ mod tests {
         assert!(b0.release().is_ok());
         assert!(b1.release().is_ok());
     }
+
+    #[test]
+    fn test_basic_metric_set_sub_dec() {
+        let m = BasicMetric::default();
+        m.add(10);
+        assert_eq!(m.count(), 10);
+        // set overwrites the current value
+        m.set(100);
+        assert_eq!(m.count(), 100);
+        // sub decrements by given amount
+        m.sub(30);
+        assert_eq!(m.count(), 70);
+        // dec decrements by 1
+        m.dec();
+        assert_eq!(m.count(), 69);
+        // inc increments by 1
+        m.inc();
+        assert_eq!(m.count(), 70);
+    }
+
+    #[test]
+    fn test_inode_stats_error_counting() {
+        let stat = InodeIoStats::default();
+        stat.stats_fop_err_inc(StatsFop::Read);
+        stat.stats_fop_err_inc(StatsFop::Read);
+        stat.stats_fop_err_inc(StatsFop::Open);
+        assert_eq!(stat.fop_errors[StatsFop::Read as usize].count(), 2);
+        assert_eq!(stat.fop_errors[StatsFop::Open as usize].count(), 1);
+        // success counters remain untouched
+        assert_eq!(stat.fop_hits[StatsFop::Read as usize].count(), 0);
+    }
+
+    #[test]
+    fn test_access_pattern_idempotency() {
+        let ap = AccessPattern::default();
+        ap.record_access_time();
+        let first_secs = ap.first_access_time_secs.load(Ordering::Relaxed);
+        let first_nanos = ap.first_access_time_nanos.load(Ordering::Relaxed);
+        assert_ne!(first_secs, 0);
+        // A second call must NOT overwrite the first timestamp.
+        ap.record_access_time();
+        assert_eq!(
+            ap.first_access_time_secs.load(Ordering::Relaxed),
+            first_secs
+        );
+        assert_eq!(
+            ap.first_access_time_nanos.load(Ordering::Relaxed),
+            first_nanos
+        );
+    }
+
+    #[test]
+    fn test_fop_recorder_failure() {
+        // Use Arc::new(default) to avoid mutating the global FS_METRICS map.
+        let ios = Arc::new(FsIoStats::default());
+        {
+            let _recorder = FopRecorder::settle(StatsFop::Read, 0, &ios);
+            // Drop without calling mark_success() → counted as failure.
+        }
+        assert_eq!(ios.fop_errors[StatsFop::Read as usize].count(), 1);
+        assert_eq!(ios.data_read.count(), 0);
+    }
+
+    #[test]
+    fn test_backend_metrics_error_flag() {
+        let backend = BackendMetrics::new("test-error-flag-backend", "test");
+        let begin = backend.begin();
+        backend.end(&begin, 4096, false);
+        assert_eq!(backend.read_count.count(), 1);
+        assert_eq!(backend.read_errors.count(), 0);
+        assert_eq!(backend.read_amount_total.count(), 4096);
+
+        let begin2 = backend.begin();
+        backend.end(&begin2, 0, true);
+        assert_eq!(backend.read_count.count(), 2);
+        assert_eq!(backend.read_errors.count(), 1);
+        assert!(backend.release().is_ok());
+    }
 }

@@ -195,3 +195,207 @@ impl EndpointHandler for TakeoverFuseFdHandler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::{ApiResponse, ApiResponsePayload, HttpError};
+    use dbs_uhttp::Request;
+
+    fn get_req(url: &str) -> Request {
+        let raw = format!("GET {} HTTP/1.0\r\n\r\n", url);
+        Request::try_from(raw.as_bytes(), None).unwrap()
+    }
+
+    fn put_req_no_body(url: &str) -> Request {
+        let raw = format!("PUT {} HTTP/1.0\r\n\r\n", url);
+        Request::try_from(raw.as_bytes(), None).unwrap()
+    }
+
+    fn delete_req(url: &str) -> Request {
+        let raw = format!("DELETE {} HTTP/1.0\r\n\r\n", url);
+        Request::try_from(raw.as_bytes(), None).unwrap()
+    }
+
+    fn req_with_body(method: &str, url: &str, body: &str) -> Request {
+        let raw = format!(
+            "{} {} HTTP/1.0\r\nContent-Length: {}\r\n\r\n{}",
+            method,
+            url,
+            body.len(),
+            body
+        );
+        Request::try_from(raw.as_bytes(), None).unwrap()
+    }
+
+    fn ok_empty() -> ApiResponse {
+        Ok(ApiResponsePayload::Empty)
+    }
+
+    #[test]
+    fn test_start_handler_put() {
+        let handler = StartHandler {};
+        let req = put_req_no_body("http://localhost/api/v1/daemon/start");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_start_handler_bad_method() {
+        let handler = StartHandler {};
+        let req = get_req("http://localhost/api/v1/daemon/start");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_exit_handler_put() {
+        let handler = ExitHandler {};
+        let req = put_req_no_body("http://localhost/api/v1/daemon/exit");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_exit_handler_bad_method() {
+        let handler = ExitHandler {};
+        let req = get_req("http://localhost/api/v1/daemon/exit");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_events_handler_get() {
+        let handler = EventsHandler {};
+        let req = get_req("http://localhost/api/v1/daemon/events");
+        let result =
+            handler.handle_request(&req, &|_| Ok(ApiResponsePayload::Events("[]".to_string())));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_events_handler_bad_method() {
+        let handler = EventsHandler {};
+        let req = put_req_no_body("http://localhost/api/v1/daemon/events");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_metrics_backend_handler_get() {
+        let handler = MetricsBackendHandler {};
+        let req = get_req("http://localhost/api/v1/metrics/backend");
+        let result = handler.handle_request(&req, &|_| {
+            Ok(ApiResponsePayload::BackendMetrics("{}".to_string()))
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_metrics_backend_handler_bad_method() {
+        let handler = MetricsBackendHandler {};
+        let req = put_req_no_body("http://localhost/api/v1/metrics/backend");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_metrics_blobcache_handler_get() {
+        let handler = MetricsBlobcacheHandler {};
+        let req = get_req("http://localhost/api/v1/metrics/blobcache");
+        let result = handler.handle_request(&req, &|_| {
+            Ok(ApiResponsePayload::BlobcacheMetrics("{}".to_string()))
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_metrics_blobcache_handler_bad_method() {
+        let handler = MetricsBlobcacheHandler {};
+        let req = put_req_no_body("http://localhost/api/v1/metrics/blobcache");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_mount_handler_no_mountpoint() {
+        let handler = MountHandler {};
+        let req = delete_req("http://localhost/api/v1/mount");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::QueryString(_))));
+    }
+
+    #[test]
+    fn test_mount_handler_delete() {
+        let handler = MountHandler {};
+        let req = delete_req("http://localhost/api/v1/mount?mountpoint=/test");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mount_handler_bad_method() {
+        let handler = MountHandler {};
+        let req = get_req("http://localhost/api/v1/mount?mountpoint=/test");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_mount_handler_post_with_body() {
+        let handler = MountHandler {};
+        let body = r#"{"source":"/path","config":"{}"}"#;
+        let req = req_with_body(
+            "POST",
+            "http://localhost/api/v1/mount?mountpoint=/test",
+            body,
+        );
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mount_handler_put_with_body() {
+        let handler = MountHandler {};
+        let body = r#"{"source":"/path","config":"{}"}"#;
+        let req = req_with_body(
+            "PUT",
+            "http://localhost/api/v1/mount?mountpoint=/test",
+            body,
+        );
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_send_fuse_fd_handler_put() {
+        let handler = SendFuseFdHandler {};
+        let req = put_req_no_body("http://localhost/api/v1/daemon/fuse/sendfd");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_send_fuse_fd_handler_bad_method() {
+        let handler = SendFuseFdHandler {};
+        let req = get_req("http://localhost/api/v1/daemon/fuse/sendfd");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_takeover_fuse_fd_handler_put() {
+        let handler = TakeoverFuseFdHandler {};
+        let req = put_req_no_body("http://localhost/api/v1/daemon/fuse/takeover");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_takeover_fuse_fd_handler_bad_method() {
+        let handler = TakeoverFuseFdHandler {};
+        let req = get_req("http://localhost/api/v1/daemon/fuse/takeover");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+}

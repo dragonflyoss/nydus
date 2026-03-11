@@ -163,7 +163,7 @@ pub trait BlobReader: Send + Sync {
             left -= cnt;
         }
 
-        Ok(off as usize)
+        Ok(off)
     }
 
     /// Read a range of data from the blob file into the provided buffers.

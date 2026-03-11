@@ -110,3 +110,132 @@ impl EndpointHandler for BlobObjectListHandlerV2 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::{ApiError, ApiResponse, ApiResponsePayload, HttpError};
+    use dbs_uhttp::Request;
+
+    fn get_req(url: &str) -> Request {
+        let raw = format!("GET {} HTTP/1.0\r\n\r\n", url);
+        Request::try_from(raw.as_bytes(), None).unwrap()
+    }
+
+    fn put_req_body(url: &str, body: &str) -> Request {
+        let raw = format!(
+            "PUT {} HTTP/1.0\r\nContent-Length: {}\r\n\r\n{}",
+            url,
+            body.len(),
+            body
+        );
+        Request::try_from(raw.as_bytes(), None).unwrap()
+    }
+
+    fn delete_req(url: &str) -> Request {
+        let raw = format!("DELETE {} HTTP/1.0\r\n\r\n", url);
+        Request::try_from(raw.as_bytes(), None).unwrap()
+    }
+
+    fn ok_empty() -> ApiResponse {
+        Ok(ApiResponsePayload::Empty)
+    }
+
+    #[test]
+    fn test_info_v2_handler_get() {
+        let handler = InfoV2Handler {};
+        let req = get_req("http://localhost/api/v2/daemon");
+        let result = handler.handle_request(&req, &|_| {
+            Ok(ApiResponsePayload::DaemonInfo("{}".to_string()))
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_info_v2_handler_put() {
+        let handler = InfoV2Handler {};
+        let body = r#"{"log_level":"info"}"#;
+        let req = put_req_body("http://localhost/api/v2/daemon", body);
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_info_v2_handler_bad_method() {
+        let handler = InfoV2Handler {};
+        let raw = b"DELETE http://localhost/api/v2/daemon HTTP/1.0\r\n\r\n";
+        let req = Request::try_from(raw.as_slice(), None).unwrap();
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_blob_list_handler_get_with_domain_id() {
+        let handler = BlobObjectListHandlerV2 {};
+        let req = get_req("http://localhost/api/v2/blobs?domain_id=test_domain");
+        let result = handler.handle_request(&req, &|_| {
+            Ok(ApiResponsePayload::BlobObjectList("[]".to_string()))
+        });
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_blob_list_handler_get_without_domain_id() {
+        let handler = BlobObjectListHandlerV2 {};
+        let req = get_req("http://localhost/api/v2/blobs");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_blob_list_handler_put_invalid_config() {
+        // Valid JSON body for BlobCacheEntry but no config → prepare_configuration_info returns false
+        let handler = BlobObjectListHandlerV2 {};
+        let body = r#"{"type":"bootstrap","id":"test-blob"}"#;
+        let req = put_req_body("http://localhost/api/v2/blobs", body);
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_blob_list_handler_delete_with_domain_id() {
+        let handler = BlobObjectListHandlerV2 {};
+        let req = delete_req("http://localhost/api/v2/blobs?domain_id=test_domain");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_blob_list_handler_delete_with_blob_id_only() {
+        let handler = BlobObjectListHandlerV2 {};
+        let req = delete_req("http://localhost/api/v2/blobs?blob_id=test_blob");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_blob_list_handler_delete_without_params() {
+        let handler = BlobObjectListHandlerV2 {};
+        let req = delete_req("http://localhost/api/v2/blobs");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_blob_list_handler_bad_method() {
+        let handler = BlobObjectListHandlerV2 {};
+        let raw = b"POST http://localhost/api/v2/blobs HTTP/1.0\r\n\r\n";
+        let req = Request::try_from(raw.as_slice(), None).unwrap();
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_info_v2_handler_api_error_response() {
+        let handler = InfoV2Handler {};
+        let req = get_req("http://localhost/api/v2/daemon");
+        // kicker returns error → handler still returns Ok(error_response)
+        let result = handler.handle_request(&req, &|_| Err(ApiError::ResponsePayloadType));
+        assert!(result.is_ok());
+    }
+}

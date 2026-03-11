@@ -65,6 +65,17 @@ pub const DOT: &str = ".";
 /// File name for Unix parent directory.
 pub const DOTDOT: &str = "..";
 
+#[allow(clippy::useless_conversion)]
+#[inline]
+pub fn mode_bits(mode: libc::mode_t) -> u32 {
+    u32::from(mode)
+}
+
+#[inline]
+pub fn file_type_bits(mode: u32) -> u32 {
+    mode & mode_bits(libc::S_IFMT)
+}
+
 /// Type for RAFS filesystem inode number.
 pub type Inode = u64;
 pub type ArcRafsInodeExt = Arc<dyn RafsInodeExt>;
@@ -1263,7 +1274,7 @@ mod tests {
     #[test]
     fn test_rafs_super_config_check_compatibility_fail() {
         let meta1 = get_meta(
-            1024 as u32,
+            1024_u32,
             true,
             true,
             RafsSuperFlags::HASH_BLAKE3,
@@ -1272,7 +1283,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta2 = get_meta(
-            2048 as u32,
+            2048_u32,
             true,
             true,
             RafsSuperFlags::HASH_BLAKE3,
@@ -1281,7 +1292,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta3 = get_meta(
-            1024 as u32,
+            1024_u32,
             false,
             true,
             RafsSuperFlags::HASH_BLAKE3,
@@ -1290,7 +1301,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta4 = get_meta(
-            1024 as u32,
+            1024_u32,
             true,
             false,
             RafsSuperFlags::HASH_BLAKE3,
@@ -1299,7 +1310,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta5 = get_meta(
-            1024 as u32,
+            1024_u32,
             true,
             true,
             RafsSuperFlags::HASH_SHA256,
@@ -1308,7 +1319,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta6 = get_meta(
-            1024 as u32,
+            1024_u32,
             true,
             true,
             RafsSuperFlags::HASH_BLAKE3,

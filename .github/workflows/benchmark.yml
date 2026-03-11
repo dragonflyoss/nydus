@@ -14,7 +14,7 @@ env:
 
 jobs:
   contrib-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -33,7 +33,7 @@ jobs:
         path: contrib/nydusify/cmd/nydusify
 
   nydus-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -55,7 +55,7 @@ jobs:
           target/release/nydusd
 
   benchmark-description:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     steps:
     - name: Description
       run: |
@@ -65,7 +65,7 @@ jobs:
         echo "| ubuntu-22.04 | 2-core CPU (x86_64) | 7GB |" >> $GITHUB_STEP_SUMMARY
 
   benchmark-oci:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     needs: [contrib-build, nydus-build]
     strategy:
       matrix:
@@ -112,7 +112,7 @@ jobs:
         path: smoke/${{ matrix.image }}-oci.json
 
   benchmark-fsversion-v5:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     needs: [contrib-build, nydus-build]
     strategy:
       matrix:
@@ -158,7 +158,7 @@ jobs:
         path: smoke/${{ matrix.image }}-fsversion-v5.json
 
   benchmark-fsversion-v6:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     needs: [contrib-build, nydus-build]
     strategy:
       matrix:
@@ -204,7 +204,7 @@ jobs:
         path: smoke/${{ matrix.image }}-fsversion-v6.json
 
   benchmark-zran:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     needs: [contrib-build, nydus-build]
     strategy:
       matrix:
@@ -250,7 +250,7 @@ jobs:
         path: smoke/${{ matrix.image }}-zran.json
 
   benchmark-result:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     needs: [benchmark-oci, benchmark-fsversion-v5, benchmark-fsversion-v6, benchmark-zran]
     strategy:
       matrix:

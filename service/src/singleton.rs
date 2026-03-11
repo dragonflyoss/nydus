@@ -520,4 +520,90 @@ mod tests {
             .is_ok());
         assert!(blob_cache_mgr.get_config(&key).is_some());
     }
+
+    #[test]
+    fn test_state_and_properties() {
+        let service_controller = create_service_controller();
+
+        assert_eq!(service_controller.id(), Some(String::from("id")));
+        assert_eq!(
+            service_controller.version().git_commit,
+            String::from("git_commit")
+        );
+        assert_eq!(
+            service_controller.supervisor(),
+            Some(String::from("supervisor"))
+        );
+        assert!(service_controller
+            .as_any()
+            .downcast_ref::<ServiceController>()
+            .is_some());
+
+        assert_eq!(service_controller.get_state(), DaemonState::UNKNOWN);
+        service_controller.set_state(DaemonState::READY);
+        assert_eq!(service_controller.get_state(), DaemonState::READY);
+        service_controller.set_state(DaemonState::RUNNING);
+        assert_eq!(service_controller.get_state(), DaemonState::RUNNING);
+    }
+
+    #[test]
+    fn test_delete_blob_fscache_disabled() {
+        let service_controller = create_service_controller();
+        // fscache_enabled defaults to false, so delete_blob should return Unsupported
+        let result = service_controller.delete_blob("some-blob-id".to_string());
+        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::Unsupported)));
+    }
+
+    #[test]
+    fn test_delete_blob_fscache_enabled_but_not_initialized() {
+        let service_controller = create_service_controller();
+        // Enable fscache_enabled but leave fscache as None
+        service_controller
+            .fscache_enabled
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = service_controller.delete_blob("some-blob-id".to_string());
+        // fscache is None, so should still return Unsupported
+        assert!(result.is_err());
+        assert!(matches!(result, Err(Error::Unsupported)));
+    }
+
+    #[test]
+    fn test_get_fscache_file_not_initialized() {
+        let service_controller = create_service_controller();
+        // fscache mutex holds None by default, so should return an error
+        let result = service_controller.get_fscache_file();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wait_returns_ok() {
+        let service_controller = create_service_controller();
+        assert!(service_controller.wait().is_ok());
+    }
+
+    #[test]
+    fn test_upgrade_mgr_is_none() {
+        let service_controller = create_service_controller();
+        assert!(service_controller.upgrade_mgr().is_none());
+    }
+
+    #[test]
+    fn test_get_default_fs_service_is_none() {
+        let service_controller = create_service_controller();
+        assert!(service_controller.get_default_fs_service().is_none());
+    }
+
+    #[test]
+    fn test_get_blob_cache_mgr_is_some() {
+        let service_controller = create_service_controller();
+        assert!(service_controller.get_blob_cache_mgr().is_some());
+    }
+
+    #[test]
+    fn test_umount_returns_ok() {
+        let service_controller = create_service_controller();
+        // stop_services does nothing when fscache_enabled=false
+        assert!(service_controller.umount().is_ok());
+    }
 }

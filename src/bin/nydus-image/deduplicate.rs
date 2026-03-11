@@ -1718,7 +1718,7 @@ mod tests {
         assert_eq!(all_chunks.len(), 20000);
         let mut data_point = Algorithm::<SqliteDatabase>::divide_by_image(&all_chunks)?;
         let data_cluster = Algorithm::<SqliteDatabase>::dbsacn(&mut data_point, radius)?;
-        let datadict = Algorithm::<SqliteDatabase>::aggregate_chunk(&data_cluster)?;
+        let datadict = Algorithm::<SqliteDatabase>::aggregate_chunk(data_cluster)?;
         assert_eq!(datadict.len(), 2);
         Ok(())
     }

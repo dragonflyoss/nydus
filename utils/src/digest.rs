@@ -290,11 +290,11 @@ mod test {
     fn test_try_from() {
         assert!(Algorithm::try_from(Algorithm::Sha256 as u32).is_ok());
         assert!(Algorithm::try_from(Algorithm::Blake3 as u32).is_ok());
-        assert!(Algorithm::try_from(0xffff_abcd as u32).is_err());
+        assert!(Algorithm::try_from(0xffff_abcd_u32).is_err());
 
         assert!(Algorithm::try_from(Algorithm::Sha256 as u64).is_ok());
         assert!(Algorithm::try_from(Algorithm::Blake3 as u64).is_ok());
-        assert!(Algorithm::try_from(0xffff_abcd as u64).is_err());
+        assert!(Algorithm::try_from(0xffff_abcd_u64).is_err());
     }
 
     #[test]

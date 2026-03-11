@@ -42,7 +42,9 @@ func httpsProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer destConn.Close()
+	defer func() {
+		_ = destConn.Close()
+	}()
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
@@ -55,9 +57,11 @@ func httpsProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer clientConn.Close()
+	defer func() {
+		_ = clientConn.Close()
+	}()
 
-	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+	_, _ = clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
 	go transfer(destConn, clientConn)
 	transfer(clientConn, destConn)
@@ -83,17 +87,23 @@ func httpProxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Server Error", http.StatusInternalServerError)
 		log.Fatal("ServeHTTP:", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	log.Println(r.RemoteAddr, " ", resp.Status)
 
 	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func transfer(destination io.WriteCloser, source io.ReadCloser) {
-	defer destination.Close()
-	defer source.Close()
-	io.Copy(destination, source)
+	defer func() {
+		_ = destination.Close()
+	}()
+	defer func() {
+		_ = source.Close()
+	}()
+	_, _ = io.Copy(destination, source)
 }

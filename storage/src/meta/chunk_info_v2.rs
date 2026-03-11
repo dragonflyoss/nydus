@@ -387,7 +387,8 @@ mod tests {
         let before = chunk.uncomp_info;
         chunk.set_compressed(true);
         chunk.set_compressed(false);
-        assert_eq!(chunk.uncomp_info as u64, before);
+        let uncomp_info = chunk.uncomp_info;
+        assert_eq!(uncomp_info, before);
 
         chunk.set_encrypted(true);
         assert!(chunk.is_encrypted());
@@ -395,17 +396,21 @@ mod tests {
         let before = chunk.uncomp_info;
         chunk.set_batch(true);
         chunk.set_batch(false);
-        assert_eq!(chunk.uncomp_info as u64, before);
+        let uncomp_info = chunk.uncomp_info;
+        assert_eq!(uncomp_info, before);
 
         chunk.set_data(0x10);
-        assert_eq!(chunk.data as u64, 0x10);
+        let data = chunk.data;
+        assert_eq!(data, 0x10);
 
         chunk.set_batch(true);
         chunk.set_batch_index(0x20);
-        assert_eq!(chunk.data as u64, 137438953488);
+        let data = chunk.data;
+        assert_eq!(data, 137438953488);
 
         chunk.set_uncompressed_offset_in_batch_buf(0x30);
-        assert_eq!(chunk.data as u64, 137438953520);
+        let data = chunk.data;
+        assert_eq!(data, 137438953520);
 
         assert_eq!(chunk.flags(), 12);
         assert_eq!(chunk.get_batch_index().unwrap(), 32);

@@ -209,7 +209,9 @@ func (a *APIV1TestSuite) TestSubMountCache(t *testing.T) {
 	require.NoError(t, err)
 	err = nydusd.Mount()
 	require.NoError(t, err)
-	defer nydusd.Umount()
+	defer func() {
+		require.NoError(t, nydusd.Umount())
+	}()
 
 	// child mount config template
 	childTpl := tool.NydusdConfig{
@@ -290,8 +292,12 @@ func (a *APIV1TestSuite) TestMount(t *testing.T) {
 	err = nydusd.MountByAPI(config)
 	require.NoError(t, err)
 
-	defer nydusd.Umount()
-	defer nydusd.UmountByAPI(config.MountPath)
+	defer func() {
+		require.NoError(t, nydusd.Umount())
+	}()
+	defer func() {
+		require.NoError(t, nydusd.UmountByAPI(config.MountPath))
+	}()
 	nydusd.VerifyByPath(t, rootFs.FileTree, config.MountPath)
 }
 
@@ -387,9 +393,14 @@ func (a *APIV1TestSuite) visit(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
-	io.ReadAll(f)
+	_, err = io.ReadAll(f)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }

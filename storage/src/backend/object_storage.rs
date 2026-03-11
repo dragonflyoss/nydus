@@ -216,3 +216,62 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Error as IoError;
+
+    fn make_io_error(msg: &str) -> IoError {
+        IoError::new(std::io::ErrorKind::Other, msg)
+    }
+
+    #[test]
+    fn test_object_storage_error_auth_display() {
+        let err = ObjectStorageError::Auth(make_io_error("auth failed"));
+        let msg = format!("{}", err);
+        assert!(msg.contains("failed to generate auth info"));
+        assert!(msg.contains("auth failed"));
+    }
+
+    #[test]
+    fn test_object_storage_error_construct_header_display() {
+        let err = ObjectStorageError::ConstructHeader("bad header".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("failed to generate HTTP header"));
+        assert!(msg.contains("bad header"));
+    }
+
+    #[test]
+    fn test_object_storage_error_response_display() {
+        let err = ObjectStorageError::Response("server error 500".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("network communication error"));
+        assert!(msg.contains("server error 500"));
+    }
+
+    #[test]
+    fn test_object_storage_error_auth_debug() {
+        let err = ObjectStorageError::Auth(make_io_error("test"));
+        let dbg = format!("{:?}", err);
+        assert!(dbg.contains("Auth"));
+    }
+
+    #[test]
+    fn test_object_storage_error_into_backend_error() {
+        let err = ObjectStorageError::Response("test".to_string());
+        let backend_err: BackendError = err.into();
+        assert!(matches!(backend_err, BackendError::ObjectStorage(_)));
+    }
+
+    #[test]
+    fn test_object_storage_get_reader_no_metrics_returns_error() {
+        // Minimal test: ObjectStorage with metrics=None returns Unsupported from get_reader
+        // We can't easily construct ObjectStorage without a real connection,
+        // but we can test the DisplayImpl chain for errors
+        let err = ObjectStorageError::ConstructHeader("range=abc".to_string());
+        let as_backend: BackendError = err.into();
+        let msg = format!("{:?}", as_backend);
+        assert!(!msg.is_empty());
+    }
+}

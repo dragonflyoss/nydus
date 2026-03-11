@@ -49,7 +49,7 @@ func (l *Layer) CreateLargeFile(t *testing.T, name string, sizeMB int) {
 	f, err := os.Create(filepath.Join(l.workDir, name))
 	require.NoError(t, err)
 	defer func() {
-		f.Close()
+		_ = f.Close()
 	}()
 
 	_, err = io.CopyN(f, rand.Reader, int64(sizeMB)<<20)
@@ -60,7 +60,7 @@ func (l *Layer) CreateHoledFile(t *testing.T, name string, data []byte, offset, 
 	f, err := os.Create(filepath.Join(l.workDir, name))
 	require.NoError(t, err)
 	defer func() {
-		f.Close()
+		_ = f.Close()
 	}()
 
 	err = f.Truncate(fileSize)
@@ -116,13 +116,17 @@ func (l *Layer) TargetPath(t *testing.T, path string) string {
 func (l *Layer) Pack(t *testing.T, packOption converter.PackOption, blobDir string) digest.Digest {
 	// Output OCI tar stream
 	ociTar := l.ToOCITar(t)
-	defer ociTar.Close()
+	defer func() {
+		_ = ociTar.Close()
+	}()
 	l.recordFileTree(t)
 
 	// Pack OCI tar to nydus native blob
 	blob, err := os.CreateTemp(blobDir, "blob-")
 	require.NoError(t, err)
-	defer blob.Close()
+	defer func() {
+		_ = blob.Close()
+	}()
 	blobDigester := digest.Canonical.Digester()
 	blobWriter := io.MultiWriter(blob, blobDigester.Hash())
 	twc, err := converter.Pack(context.Background(), blobWriter, packOption)
@@ -143,11 +147,15 @@ func (l *Layer) PackWithAttributes(t *testing.T, packOption converter.PackOption
 
 	blob, err := os.CreateTemp(blobDir, "blob-")
 	require.NoError(t, err)
-	defer blob.Close()
+	defer func() {
+		_ = blob.Close()
+	}()
 
 	externalBlob, err := os.CreateTemp(blobDir, "external-blob-")
 	require.NoError(t, err)
-	defer externalBlob.Close()
+	defer func() {
+		_ = externalBlob.Close()
+	}()
 
 	blobDigester := digest.Canonical.Digester()
 	blobWriter := io.MultiWriter(blob, blobDigester.Hash())
@@ -171,7 +179,9 @@ func (l *Layer) PackWithAttributes(t *testing.T, packOption converter.PackOption
 func (l *Layer) PackRef(t *testing.T, ctx Context, blobDir string, compress bool) (digest.Digest, digest.Digest) {
 	// Output OCI tar stream
 	ociTar := l.ToOCITar(t)
-	defer ociTar.Close()
+	defer func() {
+		_ = ociTar.Close()
+	}()
 	l.recordFileTree(t)
 
 	var ociBlobReader io.ReadCloser
@@ -191,7 +201,9 @@ func (l *Layer) PackRef(t *testing.T, ctx Context, blobDir string, compress bool
 	// Pack OCI blob to nydus zran blob
 	rafsBlob, err := os.CreateTemp(blobDir, "rafs-blob-")
 	require.NoError(t, err)
-	defer rafsBlob.Close()
+	defer func() {
+		_ = rafsBlob.Close()
+	}()
 	rafsBlobDigester := digest.Canonical.Digester()
 	rafsBlobWriter := io.MultiWriter(rafsBlob, rafsBlobDigester.Hash())
 	twc, err := converter.Pack(context.Background(), rafsBlobWriter, converter.PackOption{
@@ -260,7 +272,7 @@ func (l *Layer) Overlay(_ *testing.T, upper *Layer) *Layer {
 
 func (l *Layer) recordFileTree(t *testing.T) {
 	l.FileTree = map[string]*File{}
-	filepath.Walk(l.workDir, func(path string, _ os.FileInfo, _ error) error {
+	err := filepath.Walk(l.workDir, func(path string, _ os.FileInfo, _ error) error {
 		targetPath := l.TargetPath(t, path)
 		if targetPath == "." || targetPath == ".." {
 			return nil
@@ -268,6 +280,7 @@ func (l *Layer) recordFileTree(t *testing.T) {
 		l.FileTree[targetPath] = NewFile(t, path, targetPath)
 		return nil
 	})
+	require.NoError(t, err)
 }
 
 func (l *Layer) ToOCITar(_ *testing.T) io.ReadCloser {
@@ -278,13 +291,17 @@ func MergeLayers(t *testing.T, ctx Context, mergeOption converter.MergeOption, l
 	for idx := range layers {
 		ra, err := local.OpenReader(filepath.Join(ctx.Env.BlobDir, layers[idx].Digest.Hex()))
 		require.NoError(t, err)
-		defer ra.Close()
+		defer func() {
+			_ = ra.Close()
+		}()
 		layers[idx].ReaderAt = ra
 	}
 
 	bootstrap, err := os.CreateTemp(ctx.Env.WorkDir, "bootstrap-")
 	require.NoError(t, err)
-	defer bootstrap.Close()
+	defer func() {
+		_ = bootstrap.Close()
+	}()
 	actualDigests, err := converter.Merge(context.Background(), layers, bootstrap, mergeOption)
 	require.NoError(t, err)
 

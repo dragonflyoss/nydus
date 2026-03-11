@@ -23,6 +23,8 @@ type CheckOption struct {
 func CheckBootstrap(option CheckOption, bootstrapPath string) error {
 	args := []string{
 		"check",
+		"--log-level",
+		"error",
 		"--bootstrap",
 		bootstrapPath,
 		"-v",

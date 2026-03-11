@@ -35,3 +35,33 @@ impl ChunkIndexGetter for NoopChunkMap {
         chunk.id()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test::MockChunkInfo;
+
+    #[test]
+    fn test_noop_chunk_map_ready_state() {
+        let chunk = MockChunkInfo {
+            index: 7,
+            ..Default::default()
+        };
+
+        let ready_map = NoopChunkMap::new(true);
+        assert!(ready_map.is_ready(&chunk).unwrap());
+
+        let not_ready_map = NoopChunkMap::new(false);
+        assert!(!not_ready_map.is_ready(&chunk).unwrap());
+    }
+
+    #[test]
+    fn test_noop_chunk_map_index_getter() {
+        let chunk = MockChunkInfo {
+            index: 42,
+            ..Default::default()
+        };
+
+        assert_eq!(NoopChunkMap::get_index(&chunk), 42);
+    }
+}

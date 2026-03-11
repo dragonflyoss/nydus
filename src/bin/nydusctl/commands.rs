@@ -485,3 +485,43 @@ impl CommandUmount {
             .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_param_interval() {
+        assert_eq!(load_param_interval(&None).unwrap(), None);
+
+        let empty_params = Some(HashMap::new());
+        assert_eq!(load_param_interval(&empty_params).unwrap(), None);
+
+        let mut params = HashMap::new();
+        params.insert("interval".to_string(), "30".to_string());
+        assert_eq!(load_param_interval(&Some(params)).unwrap(), Some(30));
+    }
+
+    #[test]
+    fn test_load_param_interval_invalid_value() {
+        let mut params = HashMap::new();
+        params.insert("interval".to_string(), "abc".to_string());
+
+        let err = load_param_interval(&Some(params)).unwrap_err();
+        assert!(err.to_string().contains("Invalid interval input"));
+    }
+
+    #[test]
+    fn test_metric_delta() {
+        let old = serde_json::json!({"read_count": 4});
+        let new = serde_json::json!({"read_count": 10});
+        assert_eq!(metric_delta(&old, &new, "read_count"), 6);
+    }
+
+    #[test]
+    fn test_metric_vec_delta() {
+        let old = serde_json::json!({"dist": [1, 2, 3]});
+        let new = serde_json::json!({"dist": [3, 5, 9]});
+        assert_eq!(metric_vec_delta(&old, &new, "dist"), vec![2, 3, 6]);
+    }
+}
