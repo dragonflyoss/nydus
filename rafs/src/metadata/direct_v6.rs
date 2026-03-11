@@ -184,11 +184,7 @@ impl DirectSuperBlockV6 {
         let file = clone_file(r.as_raw_fd())?;
         let md = file.metadata()?;
         let len = md.len();
-        let md_range = MetaRange::new(
-            EROFS_BLOCK_SIZE_4096 as u64,
-            len - EROFS_BLOCK_SIZE_4096 as u64,
-            true,
-        )?;
+        let md_range = MetaRange::new(EROFS_BLOCK_SIZE_4096, len - EROFS_BLOCK_SIZE_4096, true)?;
 
         // Validate blob table layout as blob_table_start and blob_table_offset is read from bootstrap.
         let old_state = self.state.load();
@@ -497,7 +493,7 @@ impl OndiskInodeWrapper {
             EROFS_INODE_FLAT_INLINE => match self.blocks_count().cmp(&(index as u64 + 1)) {
                 Ordering::Greater => Self::flat_data_block_offset(state, inode, index),
                 Ordering::Equal => {
-                    Ok(self.offset as usize + Self::inode_size(inode) + Self::xattr_size(inode))
+                    Ok(self.offset + Self::inode_size(inode) + Self::xattr_size(inode))
                 }
                 Ordering::Less => Err(RafsError::InvalidImageData),
             },
@@ -522,7 +518,7 @@ impl OndiskInodeWrapper {
     fn mode_format_bits(&self) -> u32 {
         let state = self.state();
         let i = self.disk_inode(&state);
-        i.mode() as u32 & libc::S_IFMT as u32
+        u32::from(i.mode() & libc::S_IFMT as u16)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -658,7 +654,7 @@ impl OndiskInodeWrapper {
         let mut last = (blocks_count - 1) as i64;
         while first <= last {
             let pivot = first + ((last - first) >> 1);
-            let entries_count = self.get_entry_count(&state, inode, pivot as usize)?;
+            let entries_count = self.get_entry_count(state, inode, pivot as usize)?;
             let h_name = self
                 .entry_name(state, inode, pivot as usize, 0, entries_count)
                 .map_err(err_invalidate_data)?;
@@ -728,7 +724,7 @@ impl OndiskInodeWrapper {
         block_index: usize,
     ) -> Result<usize> {
         let head_entry = self
-            .get_entry(&state, inode, block_index, 0)
+            .get_entry(state, inode, block_index, 0)
             .map_err(err_invalidate_data)?;
         let name_offset = head_entry.e_nameoff as usize;
         if name_offset as u64 >= EROFS_BLOCK_SIZE_4096
@@ -776,7 +772,7 @@ impl RafsInode for OndiskInodeWrapper {
             if self.get_child_count() as u64 >= max_inode {
                 return Err(einval!("invalid directory"));
             }
-            let xattr_size = Self::xattr_size(inode) as usize;
+            let xattr_size = Self::xattr_size(inode);
             let size = Self::inode_size(inode) + xattr_size;
             state.map.validate_range(self.offset, size)?;
         } else if self.is_symlink() && self.size() == 0 {
@@ -1332,7 +1328,7 @@ impl RafsInodeExt for OndiskInodeWrapper {
         let base = OndiskInodeWrapper::inode_xattr_size(inode)
             + (idx as usize * size_of::<RafsV6InodeChunkAddr>());
         let offset = base
-            .checked_add(self.offset as usize)
+            .checked_add(self.offset)
             .ok_or_else(|| einval!("v6: invalid offset or index to calculate chunk address"))?;
         let chunk_addr = state.map.get_ref::<RafsV6InodeChunkAddr>(offset)?;
         let has_device = self.mapping.device.lock().unwrap().has_device();
@@ -1627,5 +1623,66 @@ mod tests {
         assert_eq!(info1.index(), 0x0000_0002);
         assert_eq!(info1.file_offset(), 0x0000_0000);
         assert_eq!(info1.flags(), BlobChunkFlags::empty());
+    }
+
+    #[test]
+    fn test_tarfs_chunk_info_v6_zero_values() {
+        let info = TarfsChunkInfoV6::new(0, 0, 0, 0);
+        assert_eq!(info.blob_index(), 0);
+        assert_eq!(info.id(), 0);
+        assert_eq!(info.compressed_offset(), 0);
+        assert_eq!(info.compressed_size(), 0);
+        assert_eq!(info.uncompressed_offset(), 0);
+        assert_eq!(info.uncompressed_size(), 0);
+        assert!(!info.is_batch());
+        assert!(!info.is_compressed());
+        assert!(!info.is_encrypted());
+    }
+
+    #[test]
+    fn test_tarfs_chunk_info_v6_large_values() {
+        let info = TarfsChunkInfoV6::new(u32::MAX, u32::MAX, u64::MAX / 2, u32::MAX);
+        assert_eq!(info.blob_index(), u32::MAX);
+        assert_eq!(info.id(), u32::MAX);
+        assert_eq!(info.compressed_offset(), u64::MAX / 2);
+        assert_eq!(info.compressed_size(), u32::MAX);
+        assert_eq!(info.uncompressed_offset(), u64::MAX / 2);
+        assert_eq!(info.uncompressed_size(), u32::MAX);
+    }
+
+    #[test]
+    fn test_tarfs_chunk_info_v6_chunk_id_is_tarfs_digest() {
+        let info = TarfsChunkInfoV6::new(5, 10, 100, 200);
+        // chunk_id() returns TARFS_DIGEST regardless of arguments
+        assert_eq!(info.chunk_id().to_owned(), TARFS_DIGEST);
+    }
+
+    #[test]
+    fn test_tarfs_chunk_info_v6_blob_v5_interface() {
+        let info = TarfsChunkInfoV6::new(3, 7, 64, 128);
+        assert_eq!(info.index(), 7);
+        assert_eq!(info.file_offset(), 0);
+        assert_eq!(info.flags(), BlobChunkFlags::empty());
+        let base = info.as_base();
+        assert_eq!(base.blob_index(), 3);
+    }
+
+    #[test]
+    fn test_tarfs_chunk_info_v6_crc_fields() {
+        let info = TarfsChunkInfoV6::new(1, 2, 3, 4);
+        assert!(!info.has_crc32());
+        assert_eq!(info.crc32(), 0);
+    }
+
+    #[test]
+    fn test_direct_mapping_state_block_size_values() {
+        let mut meta = RafsSuperMeta::default();
+        // Default (non-tarfs) uses 4096 block size
+        let state = DirectMappingState::new(&meta);
+        assert_eq!(state.block_size(), EROFS_BLOCK_SIZE_4096);
+        // Tarfs mode uses 512 block size
+        meta.flags |= RafsSuperFlags::TARTFS_MODE;
+        let state = DirectMappingState::new(&meta);
+        assert_eq!(state.block_size(), EROFS_BLOCK_SIZE_512);
     }
 }

@@ -690,7 +690,7 @@ mod nbd {
                 "invalid blob cache entry configuration information"
             ));
         }
-        if entry.validate() == false {
+        if !entry.validate() {
             return Err(einval!(
                 "invalid blob cache entry configuration information"
             ));
@@ -714,9 +714,8 @@ mod nbd {
             supervisor,
             DAEMON_CONTROLLER.alloc_waker(),
         )
-        .map(|d| {
+        .inspect(|_| {
             info!("NBD daemon started!");
-            d
         })
         .map_err(|e| {
             error!("Failed in starting NBD daemon: {}", e);

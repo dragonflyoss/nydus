@@ -71,7 +71,7 @@ impl Node {
         if self.is_dir() {
             self.v6_dump_dir(ctx, f_bootstrap, meta_addr, meta_offset, &mut inode)?;
         } else if self.is_reg() {
-            self.v6_dump_file(ctx, f_bootstrap, chunk_cache, &mut inode, &blobs)?;
+            self.v6_dump_file(ctx, f_bootstrap, chunk_cache, &mut inode, blobs)?;
         } else if self.is_symlink() {
             self.v6_dump_symlink(ctx, f_bootstrap, &mut inode)?;
         } else {
@@ -171,7 +171,7 @@ impl Node {
                 let len = c.len() + size_of::<RafsV6Dirent>();
                 // erofs disk format requires dirent to be aligned to block size.
                 if (d_size % block_size) + len as u64 > block_size {
-                    d_size = round_up(d_size as u64, block_size);
+                    d_size = round_up(d_size, block_size);
                 }
                 d_size += len as u64;
             }
@@ -185,7 +185,7 @@ impl Node {
                 let len = child.name().len() + size_of::<RafsV6Dirent>();
                 // erofs disk format requires dirent to be aligned to block size.
                 if (d_size % block_size) + len as u64 > block_size {
-                    d_size = round_up(d_size as u64, block_size);
+                    d_size = round_up(d_size, block_size);
                 }
                 d_size += len as u64;
             }
@@ -380,7 +380,7 @@ impl Node {
                 }
 
                 f_bootstrap
-                    .seek(SeekFrom::Start(dirent_off as u64))
+                    .seek(SeekFrom::Start(dirent_off))
                     .context("failed seek file position for writing dirent")?;
                 f_bootstrap
                     .write(dir_data.as_slice())
@@ -736,7 +736,7 @@ impl Bootstrap {
                 ext_sb.set_prefetch_table_size(prefetch_table_size);
                 bootstrap_ctx
                     .writer
-                    .seek_offset(prefetch_table_offset as u64)
+                    .seek_offset(prefetch_table_offset)
                     .context("failed seek prefetch table offset")?;
                 pt.store(bootstrap_ctx.writer.as_mut()).unwrap();
             }

@@ -154,7 +154,7 @@ impl<R> Progress<R> {
 impl<R: Read + Send + 'static> Read for Progress<R> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         self.inner.read(buf).inspect(|&count| {
-            self.current += count as usize;
+            self.current += count;
             (self.callback)((self.current, self.total));
         })
     }
@@ -325,7 +325,7 @@ impl Connection {
                             let client = Client::new();
                             let _ = client
                                 .get(ping_url.clone())
-                                .timeout(Duration::from_secs(connect_timeout as u64))
+                                .timeout(Duration::from_secs(connect_timeout))
                                 .send()
                                 .map(|resp| {
                                     let success = is_success_status(resp.status());

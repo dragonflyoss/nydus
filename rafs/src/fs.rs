@@ -412,10 +412,7 @@ impl Rafs {
         }
 
         let fetcher = |desc: &mut BlobIoVec, last: bool| {
-            if desc.size() as u64 > RAFS_MAX_CHUNK_SIZE
-                || desc.len() > 1024
-                || (last && desc.size() > 0)
-            {
+            if desc.size() > RAFS_MAX_CHUNK_SIZE || desc.len() > 1024 || (last && desc.size() > 0) {
                 trace!(
                     "fs prefetch: 0x{:x} bytes for {} descriptors",
                     desc.size(),
@@ -1094,5 +1091,96 @@ mod tests {
         .unwrap();
         rafs.statfs(&Context::default(), Inode::default()).unwrap();
         rafs.destroy();
+    }
+
+    fn make_test_rafs() -> Rafs {
+        use nydus_utils::metrics::FsIoStats;
+        Rafs {
+            id: "test-id".into(),
+            device: BlobDevice::default(),
+            ios: FsIoStats::default().into(),
+            sb: Arc::new(RafsSuper::default()),
+            initialized: false,
+            digest_validate: false,
+            fs_prefetch: false,
+            prefetch_all: false,
+            xattr_enabled: true,
+            user_io_batch_size: 64,
+            prefetch_batch_size: 128,
+            i_uid: 1000,
+            i_gid: 1000,
+            i_time: 12345678,
+        }
+    }
+
+    #[test]
+    fn test_rafs_metadata_accessible() {
+        let rafs = make_test_rafs();
+        // metadata() should return a valid RafsSuperMeta reference
+        let meta = rafs.metadata();
+        // Default superblock should have default meta values
+        assert_eq!(meta.magic, 0);
+    }
+
+    #[test]
+    fn test_rafs_xattr_supported() {
+        let rafs = make_test_rafs();
+        // We set xattr_enabled = true
+        assert!(rafs.xattr_supported());
+    }
+
+    #[test]
+    fn test_rafs_forget_noop() {
+        let rafs = make_test_rafs();
+        // forget is a no-op, just verify it doesn't panic
+        rafs.forget(&Context::default(), Inode::default(), 1);
+    }
+
+    #[test]
+    fn test_rafs_batch_forget_noop() {
+        let rafs = make_test_rafs();
+        // batch_forget is also a no-op
+        rafs.batch_forget(&Context::default(), vec![(1, 1), (2, 1)]);
+    }
+
+    #[test]
+    fn test_rafs_negative_entry_timeouts() {
+        let rafs = make_test_rafs();
+        let ent = rafs.negative_entry();
+        assert_eq!(ent.inode, 0);
+        assert_eq!(ent.generation, 0);
+        // attr_timeout and entry_timeout come from sb.meta (default = 0)
+        assert_eq!(ent.attr_timeout, rafs.sb.meta.attr_timeout);
+        assert_eq!(ent.entry_timeout, rafs.sb.meta.entry_timeout);
+    }
+
+    #[test]
+    fn test_rafs_id_reflects_constructor_value() {
+        use nydus_utils::metrics::FsIoStats;
+        let rafs = Rafs {
+            id: "my-rafs-instance".into(),
+            device: BlobDevice::default(),
+            ios: FsIoStats::default().into(),
+            sb: Arc::new(RafsSuper::default()),
+            initialized: false,
+            digest_validate: false,
+            fs_prefetch: false,
+            prefetch_all: false,
+            xattr_enabled: false,
+            user_io_batch_size: 0,
+            prefetch_batch_size: 0,
+            i_uid: 0,
+            i_gid: 0,
+            i_time: 0,
+        };
+        assert_eq!(rafs.id(), "my-rafs-instance");
+    }
+
+    #[test]
+    fn test_convert_file_list_empty() {
+        let rafs = make_test_rafs();
+        let files: Vec<PathBuf> = vec![];
+        let result = Rafs::convert_file_list(&files, &rafs.sb);
+        assert!(result.is_empty());
     }
 }

@@ -150,8 +150,8 @@ impl RafsSuper {
                 inode.alloc_bio_vecs(device, window_base, size as usize, false)?;
             for vec in amplified_io_vec {
                 if last_desc.has_same_blob(&vec) {
-                    window_size = if window_size > vec.size() as u64 {
-                        window_size - vec.size() as u64
+                    window_size = if window_size > vec.size() {
+                        window_size - vec.size()
                     } else {
                         0
                     };
@@ -187,8 +187,8 @@ impl RafsSuper {
                     for vec in amplified_io_vec {
                         max_tries -= 1;
                         if last_desc.has_same_blob(&vec) {
-                            window_size = if window_size > vec.size() as u64 {
-                                window_size - vec.size() as u64
+                            window_size = if window_size > vec.size() {
+                                window_size - vec.size()
                             } else {
                                 0
                             };

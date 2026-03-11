@@ -770,6 +770,100 @@ mod tests {
     }
 
     #[test]
+    fn test_get_meta_info_rejects_invalid_metadata_path() {
+        let tmpdir = TempDir::new().unwrap();
+        let config = create_factory_config();
+        let content = config.replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap());
+        let mgr = BlobCacheMgr::new();
+
+        let mut empty_path_entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(empty_path_entry.prepare_configuration_info());
+        empty_path_entry.blob_config.as_mut().unwrap().metadata_path = Some(String::new());
+        assert!(mgr.get_meta_info(&empty_path_entry).is_err());
+
+        let mut dir_path_entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(dir_path_entry.prepare_configuration_info());
+        dir_path_entry.blob_config.as_mut().unwrap().metadata_path =
+            Some(tmpdir.as_path().to_str().unwrap().to_string());
+        assert!(mgr.get_meta_info(&dir_path_entry).is_err());
+
+        let mut missing_path_entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(missing_path_entry.prepare_configuration_info());
+        missing_path_entry
+            .blob_config
+            .as_mut()
+            .unwrap()
+            .metadata_path = Some(tmpdir.as_path().join("missing.boot").display().to_string());
+        assert!(mgr.get_meta_info(&missing_path_entry).is_err());
+    }
+
+    #[test]
+    fn test_remove_blob_entry_by_domain() {
+        let tmpdir = TempDir::new().unwrap();
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+
+        let config = r#"
+        {
+            "type": "bootstrap",
+            "id": "rafs-v6",
+            "domain_id": "domain2",
+            "config_v2": {
+                "version": 2,
+                "id": "factory1",
+                "backend": {
+                    "type": "localfs",
+                    "localfs": {
+                        "dir": "/tmp/nydus"
+                    }
+                },
+                "cache": {
+                    "type": "fscache",
+                    "fscache": {
+                        "work_dir": "/tmp/nydus"
+                    }
+                },
+                "metadata_path": "RAFS_V5"
+            }
+          }"#;
+        let content = config
+            .replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap())
+            .replace("RAFS_V5", &source_path.display().to_string());
+        let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(entry.prepare_configuration_info());
+
+        let mgr = BlobCacheMgr::new();
+        mgr.add_blob_entry(&entry).unwrap();
+
+        entry.blob_id = "rafs-v6-cloned".to_string();
+        mgr.add_blob_entry(&entry).unwrap();
+
+        entry.domain_id = "domain3".to_string();
+        entry.blob_id = "rafs-v6-domain3".to_string();
+        mgr.add_blob_entry(&entry).unwrap();
+
+        assert_eq!(mgr.get_state().id_to_config_map.len(), 5);
+
+        mgr.remove_blob_entry(&BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: String::new(),
+        })
+        .unwrap();
+
+        assert_eq!(mgr.get_state().id_to_config_map.len(), 2);
+        assert!(mgr.get_config("domain2/rafs-v6").is_none());
+        assert!(mgr.get_config("domain2/rafs-v6-cloned").is_none());
+        assert!(mgr
+            .get_config("domain2/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef")
+            .is_none());
+        assert!(mgr.get_config("domain3/rafs-v6-domain3").is_some());
+        assert!(mgr
+            .get_config("domain3/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef")
+            .is_some());
+    }
+
+    #[test]
     fn test_meta_blob() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);

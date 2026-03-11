@@ -453,7 +453,7 @@ impl RafsInode for CachedInodeV5 {
             size: self.i_size,
             blocks: self.i_blocks,
             mode: self.i_mode,
-            nlink: self.i_nlink as u32,
+            nlink: self.i_nlink,
             blksize: RAFS_ATTR_BLOCK_SIZE,
             rdev: self.i_rdev,
             ..Default::default()
@@ -1186,12 +1186,12 @@ mod cached_tests {
         info.blob_index = 1;
         info.flags = BlobChunkFlags::COMPRESSED;
 
-        assert_eq!(info.index(), 1024 as u32);
+        assert_eq!(info.index(), 1024_u32);
         assert!(info.is_compressed());
         assert!(!info.is_encrypted());
         let info = info.as_base();
 
-        assert_eq!(info.blob_index(), 1 as u32);
+        assert_eq!(info.blob_index(), 1_u32);
         assert!(info.is_compressed());
         assert!(!info.is_encrypted());
     }

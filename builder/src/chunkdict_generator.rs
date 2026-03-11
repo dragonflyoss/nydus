@@ -281,3 +281,59 @@ impl Generator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{BuildContext, ChunkdictChunkInfo, Generator};
+
+    fn chunk(blob_id: &str, size: u32) -> ChunkdictChunkInfo {
+        ChunkdictChunkInfo {
+            image_reference: "test/image:latest".to_string(),
+            version: "v1".to_string(),
+            chunk_blob_id: blob_id.to_string(),
+            chunk_digest: format!("digest-{blob_id}-{size}"),
+            chunk_crc32: 0,
+            chunk_compressed_size: size,
+            chunk_uncompressed_size: size,
+            chunk_compressed_offset: 0,
+            chunk_uncompressed_offset: 0,
+        }
+    }
+
+    #[test]
+    fn validate_and_remove_chunks_removes_small_blob_groups() {
+        let mut ctx = BuildContext::default();
+        let block = ctx.v6_block_size() as u32;
+        let mut chunks = vec![
+            chunk("small", block / 4),
+            chunk("small", block / 4),
+            chunk("keep", block),
+        ];
+
+        Generator::validate_and_remove_chunks(&mut ctx, &mut chunks);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chunk_blob_id, "keep");
+    }
+
+    #[test]
+    fn validate_and_remove_chunks_keeps_boundary_blob_groups() {
+        let mut ctx = BuildContext::default();
+        let block = ctx.v6_block_size() as u32;
+        let mut chunks = vec![chunk("keep", block / 2), chunk("keep", block / 2)];
+
+        Generator::validate_and_remove_chunks(&mut ctx, &mut chunks);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|chunk| chunk.chunk_blob_id == "keep"));
+    }
+
+    #[test]
+    fn build_root_tree_creates_directory_root() {
+        let mut ctx = BuildContext::default();
+        let tree = Generator::build_root_tree(&mut ctx).unwrap();
+
+        assert_eq!(tree.name(), b"/");
+        assert!(tree.borrow_mut_node().is_dir());
+    }
+}

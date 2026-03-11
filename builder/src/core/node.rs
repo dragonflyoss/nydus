@@ -302,11 +302,9 @@ impl Node {
             external_blob_ctx.blob_id = external_blob_id.to_string();
             external_blob_ctx.compressed_blob_size = external_compressed_size;
             external_blob_ctx.uncompressed_blob_size = external_compressed_size;
-            let chunk_count = self
-                .chunk_count(external_chunk_size as u64)
-                .with_context(|| {
-                    format!("failed to get chunk count for {}", self.path().display())
-                })?;
+            let chunk_count = self.chunk_count(external_chunk_size).with_context(|| {
+                format!("failed to get chunk count for {}", self.path().display())
+            })?;
             self.inode.set_child_count(chunk_count);
 
             info!(
@@ -320,7 +318,7 @@ impl Node {
             );
             for i in 0..self.inode.child_count() {
                 let mut chunk = self.inode.create_chunk();
-                let file_offset = i as u64 * external_chunk_size as u64;
+                let file_offset = i as u64 * external_chunk_size;
                 let compressed_size = if i == self.inode.child_count() - 1 {
                     self.inode.size() - (external_chunk_size * i as u64)
                 } else {

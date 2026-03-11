@@ -1027,9 +1027,58 @@ fn trim(value: Option<String>) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::error::Error as StdError;
+    use std::fmt::{Display, Formatter};
 
     #[cfg(feature = "backend-registry")]
     use http;
+
+    #[derive(Debug)]
+    struct NestedErr {
+        msg: &'static str,
+        source: Option<Box<dyn StdError + Send + Sync>>,
+    }
+
+    impl Display for NestedErr {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.msg)
+        }
+    }
+
+    impl StdError for NestedErr {
+        fn source(&self) -> Option<&(dyn StdError + 'static)> {
+            self.source
+                .as_ref()
+                .map(|source| &**source as &(dyn StdError + 'static))
+        }
+    }
+
+    fn create_state(use_https: bool) -> RegistryState {
+        RegistryState {
+            id: String::from("/"),
+            scheme: Scheme::new(use_https),
+            host: "example.com".to_string(),
+            repo: "library/test".to_string(),
+            retry_limit: 5,
+            blob_url_scheme: "https".to_string(),
+            blob_redirected_host: "blob.example.com".to_string(),
+            cached_auth_using_http_get: Default::default(),
+            cached_auth: Default::default(),
+            cached_redirect: Default::default(),
+            token_expired_at: ArcSwapOption::new(None),
+            cached_bearer_auth: ArcSwapOption::new(None),
+        }
+    }
+
+    fn nested_error(msg: &'static str) -> NestedErr {
+        NestedErr {
+            msg: "outer",
+            source: Some(Box::new(NestedErr {
+                msg: "middle",
+                source: Some(Box::new(NestedErr { msg, source: None })),
+            })),
+        }
+    }
 
     #[test]
     fn test_string_cache() {
@@ -1054,6 +1103,36 @@ mod tests {
         assert_eq!(cache.get("test"), Some("test1".to_owned()));
         cache.remove("test");
         assert_eq!(cache.get("test"), None);
+    }
+
+    #[test]
+    fn test_scheme_and_fallback_http() {
+        let state = create_state(true);
+        assert_eq!(state.scheme.to_string(), "https");
+        assert!(state.needs_fallback_http(&nested_error("wrong version number")));
+        assert!(state.needs_fallback_http(&nested_error("SSL routines")));
+        assert!(!state.needs_fallback_http(&nested_error("permission denied")));
+
+        let state = create_state(false);
+        assert_eq!(state.scheme.to_string(), "http");
+        assert!(!state.needs_fallback_http(&nested_error("wrong version number")));
+    }
+
+    #[test]
+    fn test_validate_authorization_info() {
+        assert!(Registry::validate_authorization_info(&None).is_ok());
+
+        let valid = Some(base64::engine::general_purpose::STANDARD.encode("user:pass"));
+        assert!(Registry::validate_authorization_info(&valid).is_ok());
+
+        let invalid_base64 = Some("%%%".to_string());
+        assert!(Registry::validate_authorization_info(&invalid_base64).is_err());
+
+        let invalid_utf8 = Some(base64::engine::general_purpose::STANDARD.encode([0xff, 0xfe]));
+        assert!(Registry::validate_authorization_info(&invalid_utf8).is_err());
+
+        let missing_colon = Some(base64::engine::general_purpose::STANDARD.encode("useronly"));
+        assert!(Registry::validate_authorization_info(&missing_colon).is_err());
     }
 
     #[test]

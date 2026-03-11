@@ -379,18 +379,18 @@ mod tests {
         let builder = TarBuilder::new(true, 0, RafsVersion::V6);
 
         let path = Path::new("/stargz.index.json");
-        assert!(builder.is_stargz_special_files(&path));
+        assert!(builder.is_stargz_special_files(path));
         let path = Path::new("/.prefetch.landmark");
-        assert!(builder.is_stargz_special_files(&path));
+        assert!(builder.is_stargz_special_files(path));
         let path = Path::new("/.no.prefetch.landmark");
-        assert!(builder.is_stargz_special_files(&path));
+        assert!(builder.is_stargz_special_files(path));
 
         let path = Path::new("/no.prefetch.landmark");
-        assert!(!builder.is_stargz_special_files(&path));
+        assert!(!builder.is_stargz_special_files(path));
         let path = Path::new("/prefetch.landmark");
-        assert!(!builder.is_stargz_special_files(&path));
+        assert!(!builder.is_stargz_special_files(path));
         let path = Path::new("/tar.index.json");
-        assert!(!builder.is_stargz_special_files(&path));
+        assert!(!builder.is_stargz_special_files(path));
     }
 
     #[test]

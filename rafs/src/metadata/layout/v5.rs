@@ -328,7 +328,7 @@ impl_bootstrap_converter!(RafsV5SuperBlock);
 impl Default for RafsV5SuperBlock {
     fn default() -> Self {
         Self {
-            s_magic: u32::to_le(RAFSV5_SUPER_MAGIC as u32),
+            s_magic: u32::to_le(RAFSV5_SUPER_MAGIC),
             s_fs_version: u32::to_le(RAFS_SUPER_VERSION_V5),
             s_sb_size: u32::to_le(RAFSV5_SUPERBLOCK_SIZE as u32),
             s_block_size: u32::to_le(RAFS_DEFAULT_CHUNK_SIZE as u32),
@@ -403,7 +403,7 @@ impl RafsV5InodeTable {
 
         // The offset is aligned with 8 bytes to make it easier to validate RafsV5Inode.
         let offset = offset >> 3;
-        self.data[(ino - 1) as usize] = u32::to_le(offset as u32);
+        self.data[(ino - 1) as usize] = u32::to_le(offset);
 
         Ok(())
     }
@@ -846,7 +846,7 @@ impl RafsV5ExtBlobTable {
         // Safe because it is already reserved enough space
         let (_, data, _) = unsafe {
             entries.set_len(count);
-            (&mut entries).align_to_mut::<u8>()
+            entries.align_to_mut::<u8>()
         };
 
         r.read_exact(data)?;
@@ -941,7 +941,6 @@ impl RafsV5Inode {
     pub fn size(&self) -> usize {
         size_of::<Self>()
             + (rafsv5_align(self.i_name_size as usize) + rafsv5_align(self.i_symlink_size as usize))
-                as usize
     }
 
     /// Get the uid and the gid of the inode.

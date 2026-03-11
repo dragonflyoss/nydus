@@ -106,12 +106,8 @@ impl Blob {
             if let Some((_, blob_ctx)) = blob_mgr.get_current_blob() {
                 let mut batch = batch.lock().unwrap();
                 if !batch.chunk_data_buf_is_empty() {
-                    let (_, compressed_size, _) = Node::write_chunk_data(
-                        &ctx,
-                        blob_ctx,
-                        blob_writer,
-                        batch.chunk_data_buf(),
-                    )?;
+                    let (_, compressed_size, _) =
+                        Node::write_chunk_data(ctx, blob_ctx, blob_writer, batch.chunk_data_buf())?;
                     batch.add_context(compressed_size);
                     batch.clear_chunk_data_buf();
                 }
@@ -226,7 +222,7 @@ impl Blob {
         header.set_ci_entries(blob_meta_info.len() as u32);
         header.set_ci_compressed_offset(compressed_offset);
         header.set_ci_compressed_size(compressed_size as u64);
-        header.set_ci_uncompressed_size(uncompressed_size as u64);
+        header.set_ci_uncompressed_size(uncompressed_size);
         header.set_aligned(true);
         match blob_meta_info {
             BlobMetaChunkArray::V1(_) => header.set_chunk_info_v2(false),
@@ -280,7 +276,7 @@ impl Blob {
                 hasher.digest_finalize(),
                 compressed_offset,
                 compressed_size as u64,
-                uncompressed_size as u64,
+                uncompressed_size,
             )?;
 
             let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);

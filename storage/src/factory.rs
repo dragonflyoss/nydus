@@ -278,32 +278,32 @@ impl BlobFactory {
         match backend_type {
             #[cfg(feature = "backend-oss")]
             "oss" => {
-                let cfg = serde_json::from_str::<OssConfig>(&content)?;
+                let cfg = serde_json::from_str::<OssConfig>(content)?;
                 Ok(Arc::new(oss::Oss::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-s3")]
             "s3" => {
-                let cfg = serde_json::from_str::<S3Config>(&content)?;
+                let cfg = serde_json::from_str::<S3Config>(content)?;
                 Ok(Arc::new(s3::S3::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-registry")]
             "registry" => {
-                let cfg = serde_json::from_str::<RegistryConfig>(&content)?;
+                let cfg = serde_json::from_str::<RegistryConfig>(content)?;
                 Ok(Arc::new(registry::Registry::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-localfs")]
             "localfs" => {
-                let cfg = serde_json::from_str::<LocalFsConfig>(&content)?;
+                let cfg = serde_json::from_str::<LocalFsConfig>(content)?;
                 Ok(Arc::new(localfs::LocalFs::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-localdisk")]
             "localdisk" => {
-                let cfg = serde_json::from_str::<LocalDiskConfig>(&content)?;
+                let cfg = serde_json::from_str::<LocalDiskConfig>(content)?;
                 Ok(Arc::new(localdisk::LocalDisk::new(&cfg, Some(id))?))
             }
             #[cfg(feature = "backend-http-proxy")]
             "http-proxy" => {
-                let cfg = serde_json::from_str::<HttpProxyConfig>(&content)?;
+                let cfg = serde_json::from_str::<HttpProxyConfig>(content)?;
                 Ok(Arc::new(http_proxy::HttpProxy::new(&cfg, Some(id))?))
             }
             _ => Err(einval!(format!(
@@ -324,5 +324,73 @@ impl BlobFactory {
 impl Default for BlobFactory {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::ErrorKind;
+
+    fn invalid_backend_config(backend_type: &str) -> BackendConfigV2 {
+        BackendConfigV2 {
+            backend_type: backend_type.to_string(),
+            localdisk: None,
+            localfs: None,
+            oss: None,
+            s3: None,
+            registry: None,
+            http_proxy: None,
+        }
+    }
+
+    #[test]
+    fn test_blob_factory_default_state() {
+        let factory = BlobFactory::default();
+
+        assert!(factory.mgrs.lock().unwrap().is_empty());
+        assert!(!factory.mgr_checker_active.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_supported_backends_are_known() {
+        let backends = BlobFactory::supported_backends();
+        let allowed = [
+            "oss",
+            "s3",
+            "registry",
+            "localfs",
+            "localdisk",
+            "http-proxy",
+        ];
+
+        for backend in &backends {
+            assert!(allowed.contains(&backend.as_str()));
+        }
+
+        let mut uniq = backends.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), backends.len());
+    }
+
+    #[test]
+    fn test_new_backend_rejects_unknown_backend_type() {
+        let err = match BlobFactory::new_backend(&invalid_backend_config("unknown"), "blob-1") {
+            Err(err) => err,
+            Ok(_) => panic!("unexpected backend creation success"),
+        };
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_new_backend_from_json_rejects_unknown_backend_type() {
+        let err = match BlobFactory::new_backend_from_json("unknown", "{}", "blob-1") {
+            Err(err) => err,
+            Ok(_) => panic!("unexpected backend creation success"),
+        };
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
     }
 }

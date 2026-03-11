@@ -29,7 +29,7 @@ impl BlobReader for MockBlobReader {
             return Ok(0_usize);
         }
 
-        let end = self.data.len().min(offset as usize + buf.len());
+        let end = self.data.len().min(offset + buf.len());
         buf.clone_from_slice(&self.data[offset..end]);
 
         Ok(end - offset)

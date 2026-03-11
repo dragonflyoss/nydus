@@ -315,7 +315,7 @@ impl BlockDevice {
         let path = match output {
             Some(v) => PathBuf::from(v),
             None => {
-                let path = match block_device.cache_mgr.get_config(&blob_id) {
+                let path = match block_device.cache_mgr.get_config(blob_id) {
                     Some(BlobConfig::MetaBlob(meta)) => meta.path().to_path_buf(),
                     _ => return Err(enoent!("block_device: failed to get meta blob")),
                 };
@@ -647,7 +647,7 @@ mod tests {
         }"#;
 
         // config with non-existing path
-        let entry: BlobCacheEntry = serde_json::from_str(&config).unwrap();
+        let entry: BlobCacheEntry = serde_json::from_str(config).unwrap();
         assert!(BlockDevice::new(entry).is_err());
 
         // config with correct path

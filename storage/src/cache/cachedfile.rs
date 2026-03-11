@@ -663,11 +663,8 @@ impl BlobCache for FileCacheEntry {
     ) -> StorageResult<usize> {
         // Handle blob prefetch request first, it may help performance.
         for req in prefetches {
-            let msg = AsyncPrefetchMessage::new_blob_prefetch(
-                blob_cache.clone(),
-                req.offset as u64,
-                req.len as u64,
-            );
+            let msg =
+                AsyncPrefetchMessage::new_blob_prefetch(blob_cache.clone(), req.offset, req.len);
             let _ = self.workers.send_prefetch_message(msg);
         }
 
@@ -679,7 +676,7 @@ impl BlobCache for FileCacheEntry {
         BlobIoMergeState::merge_and_issue(
             &bios,
             max_comp_size,
-            max_comp_size as u64 >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
+            max_comp_size >> RAFS_BATCH_SIZE_TO_GAP_SHIFT,
             |req: BlobIoRange| {
                 let msg = AsyncPrefetchMessage::new_fs_prefetch(blob_cache.clone(), req);
                 let _ = self.workers.send_prefetch_message(msg);
@@ -1776,9 +1773,11 @@ mod tests {
         let buf2 = unsafe { DataBuffer::from_mut_slice(buf1.as_mut_slice()) };
 
         assert_eq!(buf2.slice()[1], 0x1);
+        assert_eq!(buf2.size(), 0);
         let mut buf2 = buf2.convert_to_owned_buffer();
         buf2.mut_slice()[1] = 0x2;
         assert_eq!(buf1[1], 0x1);
+        assert!(buf2.size() >= buf2.slice().len());
     }
 
     #[test]
@@ -1853,6 +1852,17 @@ mod tests {
         assert_eq!(region.tags.len(), 0);
         assert!(!region.seg.is_empty());
         assert!(region.has_user_io());
+
+        let chunk: Arc<dyn BlobChunkInfo> = Arc::new(MockChunkInfo {
+            index: 1,
+            ..Default::default()
+        });
+        region
+            .append(0x6000, 0x1000, BlobIoTag::Internal, Some(chunk.clone()))
+            .unwrap();
+        assert_eq!(region.chunks.len(), 1);
+        assert_eq!(region.tags, vec![false]);
+        assert_eq!(region.chunks[0].id(), chunk.id());
     }
 
     #[test]
@@ -1886,6 +1896,53 @@ mod tests {
             .push(RegionType::CacheSlow, 0x5000, 0x2000, tag, None)
             .unwrap();
         assert_eq!(state.regions.len(), 2);
+
+        state.commit();
+        let tag = BlobIoTag::User(BlobIoSegment {
+            offset: 0x2000,
+            len: 0x1000,
+        });
+        state
+            .push(RegionType::CacheSlow, 0x7000, 0x1000, tag, None)
+            .unwrap();
+        assert_eq!(state.regions.len(), 3);
+
+        state.reset();
+        assert!(state.regions.is_empty());
+    }
+
+    #[test]
+    fn test_file_io_merge_state_splits_non_contiguous_user_io() {
+        let mut state = FileIoMergeState::new();
+
+        state
+            .push(
+                RegionType::Backend,
+                0x1000,
+                0x1000,
+                BlobIoTag::User(BlobIoSegment {
+                    offset: 0,
+                    len: 0x800,
+                }),
+                None,
+            )
+            .unwrap();
+        state
+            .push(
+                RegionType::Backend,
+                0x2000,
+                0x1000,
+                BlobIoTag::User(BlobIoSegment {
+                    offset: 0x100,
+                    len: 0x800,
+                }),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(state.regions.len(), 2);
+        assert_eq!(state.regions[0].r#type, RegionType::Backend);
+        assert_eq!(state.regions[1].r#type, RegionType::Backend);
     }
 
     #[test]

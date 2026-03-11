@@ -1113,7 +1113,7 @@ mod tests {
         assert_eq!(inode.i_name_size, 0x0000_0001);
         assert_eq!(inode.i_symlink_size, 0x0000_0002);
         assert_eq!(inode.uidgid(), (0x0000_0001, 0x0000_0002));
-        assert_eq!(inode.mtime(), (0x0000_0014 as u64, 0x0000_0013));
+        assert_eq!(inode.mtime(), (0x0000_0014_u64, 0x0000_0013));
         assert_eq!(inode.mode(), 0x0000_0000);
         assert!(!inode.is_chrdev());
         assert!(!inode.is_blkdev());

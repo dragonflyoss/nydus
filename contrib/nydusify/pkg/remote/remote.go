@@ -16,6 +16,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/distribution/reference"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 )
 
 // Remote provides the ability to access remote registry
@@ -67,6 +68,32 @@ func (remote *Remote) IsWithHTTP() bool {
 	return remote.withHTTP
 }
 
+func (remote *Remote) namedReference() (reference.Named, error) {
+	if remote.parsed != nil {
+		return remote.parsed, nil
+	}
+	if remote.Ref == "" {
+		return nil, errors.New("empty remote reference")
+	}
+	parsed, err := reference.ParseNormalizedNamed(remote.Ref)
+	if err != nil {
+		return nil, err
+	}
+	remote.parsed = parsed
+	return parsed, nil
+}
+
+func (remote *Remote) requestRef(byDigest bool) (string, error) {
+	parsed, err := remote.namedReference()
+	if err != nil {
+		return "", err
+	}
+	if byDigest {
+		return parsed.Name(), nil
+	}
+	return reference.TagNameOnly(parsed).String(), nil
+}
+
 // Push pushes blob to registry
 func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDigest bool, reader io.Reader) error {
 	// Concurrently push blob with same digest using containerd
@@ -78,11 +105,9 @@ func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDiges
 	lock.(*sync.Mutex).Lock()
 	defer lock.(*sync.Mutex).Unlock()
 
-	var ref string
-	if byDigest {
-		ref = remote.parsed.Name()
-	} else {
-		ref = reference.TagNameOnly(remote.parsed).String()
+	ref, err := remote.requestRef(byDigest)
+	if err != nil {
+		return err
 	}
 
 	// Create a new resolver instance for the request
@@ -105,11 +130,9 @@ func (remote *Remote) Push(ctx context.Context, desc ocispec.Descriptor, byDiges
 
 // Pull pulls blob from registry
 func (remote *Remote) Pull(ctx context.Context, desc ocispec.Descriptor, byDigest bool) (io.ReadCloser, error) {
-	var ref string
-	if byDigest {
-		ref = remote.parsed.Name()
-	} else {
-		ref = reference.TagNameOnly(remote.parsed).String()
+	ref, err := remote.requestRef(byDigest)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create a new resolver instance for the request
@@ -128,7 +151,10 @@ func (remote *Remote) Pull(ctx context.Context, desc ocispec.Descriptor, byDiges
 
 // Resolve parses descriptor for given image reference
 func (remote *Remote) Resolve(ctx context.Context) (*ocispec.Descriptor, error) {
-	ref := reference.TagNameOnly(remote.parsed).String()
+	ref, err := remote.requestRef(false)
+	if err != nil {
+		return nil, err
+	}
 
 	// Create a new resolver instance for the request
 	_, desc, err := remote.resolverFunc(remote.withHTTP).Resolve(ctx, ref)
