@@ -1,13 +1,14 @@
 PACKAGES ?= $(shell go list ./... | grep -v /vendor/)
 GOPROXY ?=
 TESTS ?= .*
+GO_TEST_BUILD_FLAGS ?=
 
 ifdef GOPROXY
 PROXY := GOPROXY=${GOPROXY}
 endif
 
 build:
-	go test -o smoke.test -c -race -v ./tests
+	go test $(GO_TEST_BUILD_FLAGS) -o smoke.test -c -race -v ./tests
 
 # WORK_DIR=/tmp \
 # NYDUS_BUILDER=/path/to/latest/nydus-image \

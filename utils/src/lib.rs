@@ -173,4 +173,32 @@ mod tests {
         assert_eq!(round_up_usize(100, 8), 104);
         assert_eq!(round_up_usize(1000, 8), 1000);
     }
+
+    #[test]
+    fn test_round_helpers() {
+        assert_eq!(div_round_up(0, 8), 0);
+        assert_eq!(div_round_up(1, 8), 1);
+        assert_eq!(div_round_up(9, 8), 2);
+
+        assert_eq!(round_up(0, 8), 0);
+        assert_eq!(round_up(9, 8), 16);
+        assert_eq!(round_up(16, 8), 16);
+
+        assert_eq!(round_down(0, 8), 0);
+        assert_eq!(round_down(15, 8), 8);
+        assert_eq!(round_down(16, 8), 16);
+    }
+
+    #[test]
+    fn test_delayer_attempts() {
+        let mut fixed = Delayer::new(DelayType::Fixed, Duration::from_millis(0));
+        fixed.delay();
+        fixed.delay();
+        assert_eq!(fixed.attempts, 2);
+
+        let mut backoff = Delayer::new(DelayType::BackOff, Duration::from_millis(0));
+        backoff.delay();
+        backoff.delay();
+        assert_eq!(backoff.attempts, 2);
+    }
 }

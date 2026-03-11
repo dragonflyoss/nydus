@@ -125,7 +125,7 @@ func runURLWaitContainer(t *testing.T, image string, snapshotter string, contain
 	for {
 		resp, err := http.Get(runArgs.WaitURL)
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -241,7 +241,9 @@ func getContainerBackendMetrics(t *testing.T) (*ContainerMetrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

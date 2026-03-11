@@ -134,11 +134,15 @@ func verify(t *testing.T, ctx tool.Context, externalBackendConfigPath string) {
 func packWithAttributes(t *testing.T, packOption converter.PackOption, blobDir, sourceDir string) (digest.Digest, digest.Digest) {
 	blob, err := os.CreateTemp(blobDir, "blob-")
 	require.NoError(t, err)
-	defer blob.Close()
+	defer func() {
+		_ = blob.Close()
+	}()
 
 	externalBlob, err := os.CreateTemp(blobDir, "external-blob-")
 	require.NoError(t, err)
-	defer externalBlob.Close()
+	defer func() {
+		_ = externalBlob.Close()
+	}()
 
 	blobDigester := digest.Canonical.Digester()
 	blobWriter := io.MultiWriter(blob, blobDigester.Hash())
@@ -238,7 +242,9 @@ func TestModctlExternal(t *testing.T) {
 		bootstrapPath = filepath.Join(ctx.Env.WorkDir, "bootstrap")
 		bootstrap, err := os.Create(filepath.Join(ctx.Env.WorkDir, "bootstrap"))
 		require.NoError(t, err)
-		defer bootstrap.Close()
+		defer func() {
+			_ = bootstrap.Close()
+		}()
 
 		_, err = converter.UnpackEntry(externalBlobRa, converter.EntryBootstrap, bootstrap)
 		require.NoError(t, err)

@@ -453,7 +453,7 @@ impl RafsInode for CachedInodeV5 {
             size: self.i_size,
             blocks: self.i_blocks,
             mode: self.i_mode,
-            nlink: self.i_nlink as u32,
+            nlink: self.i_nlink,
             blksize: RAFS_ATTR_BLOCK_SIZE,
             rdev: self.i_rdev,
             ..Default::default()
@@ -462,37 +462,37 @@ impl RafsInode for CachedInodeV5 {
 
     #[inline]
     fn is_blkdev(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFBLK)
     }
 
     #[inline]
     fn is_chrdev(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFCHR)
     }
 
     #[inline]
     fn is_sock(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFSOCK)
     }
 
     #[inline]
     fn is_fifo(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFIFO)
     }
 
     #[inline]
     fn is_dir(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFDIR)
     }
 
     #[inline]
     fn is_symlink(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFLNK)
     }
 
     #[inline]
     fn is_reg(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFREG)
     }
 
     #[inline]
@@ -859,7 +859,7 @@ mod cached_tests {
         ondisk_inode.i_ino = 3;
         ondisk_inode.i_parent = RAFS_V5_ROOT_INODE;
         ondisk_inode.i_size = 8192;
-        ondisk_inode.i_mode = libc::S_IFREG as u32;
+        ondisk_inode.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         ondisk_inode.i_nlink = 1;
         ondisk_inode.i_blocks = 16;
         let mut chunk = RafsV5ChunkInfo::new();
@@ -928,7 +928,7 @@ mod cached_tests {
         ondisk_inode.i_parent = RAFS_V5_ROOT_INODE;
         ondisk_inode.i_nlink = 1;
         ondisk_inode.i_symlink_size = symlink_name.byte_size() as u16;
-        ondisk_inode.i_mode = libc::S_IFLNK as u32;
+        ondisk_inode.i_mode = crate::metadata::mode_bits(libc::S_IFLNK);
 
         let inode = RafsV5InodeWrapper {
             name: file_name.as_os_str(),
@@ -970,7 +970,7 @@ mod cached_tests {
         ondisk_inode.i_parent = RAFS_V5_ROOT_INODE;
         ondisk_inode.i_nlink = 1;
         ondisk_inode.i_child_count = 4;
-        ondisk_inode.i_mode = libc::S_IFREG as u32;
+        ondisk_inode.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         ondisk_inode.i_size = 1024 * 1024 * 3 + 8192;
         ondisk_inode.i_blocks = 6160;
 
@@ -1056,14 +1056,14 @@ mod cached_tests {
         inode.i_nlink = 1;
         inode.i_child_idx = 2;
         inode.i_child_cnt = 3;
-        inode.i_mode = libc::S_IFDIR as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         sb.hash_inode(Arc::new(inode)).unwrap();
         assert_eq!(sb.max_inode, 1);
         assert_eq!(sb.s_inodes.len(), 1);
 
         let mut inode = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         inode.i_ino = 2;
-        inode.i_mode = libc::S_IFDIR as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         inode.i_nlink = 2;
         inode.i_parent = RAFS_V5_ROOT_INODE;
         sb.hash_inode(Arc::new(inode)).unwrap();
@@ -1072,7 +1072,7 @@ mod cached_tests {
 
         let mut inode = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         inode.i_ino = 2;
-        inode.i_mode = libc::S_IFDIR as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         inode.i_nlink = 2;
         inode.i_parent = RAFS_V5_ROOT_INODE;
         sb.hash_inode(Arc::new(inode)).unwrap();
@@ -1081,7 +1081,7 @@ mod cached_tests {
 
         let mut inode = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         inode.i_ino = 4;
-        inode.i_mode = libc::S_IFDIR as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         inode.i_nlink = 1;
         inode.i_parent = RAFS_V5_ROOT_INODE;
         sb.hash_inode(Arc::new(inode)).unwrap();
@@ -1114,13 +1114,13 @@ mod cached_tests {
             i_ino: 0,
             ..CachedInodeV5::default()
         };
-        node.i_mode |= libc::S_IFDIR as u32;
+        node.i_mode |= crate::metadata::mode_bits(libc::S_IFDIR);
         node.i_child_idx = 2;
         node.i_flags = RafsInodeFlags::SYMLINK;
         node.i_name = OsStr::new("foo").into();
         node.i_digest = digest;
         let mut child_node = CachedInodeV5::default();
-        child_node.i_mode |= libc::S_IFDIR as u32;
+        child_node.i_mode |= crate::metadata::mode_bits(libc::S_IFDIR);
         child_node.i_ino = 1;
         child_node.i_name = OsStr::new("bar").into();
         let mut blk = CachedSuperBlockV5::new(meta, false);
@@ -1154,7 +1154,6 @@ mod cached_tests {
         assert!(!node.is_sock());
         assert!(!node.is_fifo());
         assert_eq!(node.get_symlink_size(), 0);
-
         node.i_child_cnt = 1;
         let mut found = false;
         node.walk_children_inodes(0, &mut |_node, _child_name, child_ino, _offset| {
@@ -1186,12 +1185,12 @@ mod cached_tests {
         info.blob_index = 1;
         info.flags = BlobChunkFlags::COMPRESSED;
 
-        assert_eq!(info.index(), 1024 as u32);
+        assert_eq!(info.index(), 1024_u32);
         assert!(info.is_compressed());
         assert!(!info.is_encrypted());
         let info = info.as_base();
 
-        assert_eq!(info.blob_index(), 1 as u32);
+        assert_eq!(info.blob_index(), 1_u32);
         assert!(info.is_compressed());
         assert!(!info.is_encrypted());
     }
@@ -1252,7 +1251,7 @@ mod cached_tests {
         inode.i_ino = 1;
         inode.i_nlink = 1;
         inode.i_name = OsString::from("test");
-        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         inode.i_size = 2048; // 2 chunks of 1024 bytes
         inode.i_data = vec![]; // But no chunks
         assert!(inode.validate(100, 1024).is_err());
@@ -1262,7 +1261,7 @@ mod cached_tests {
         inode.i_ino = 1;
         inode.i_nlink = 1;
         inode.i_name = OsString::from("test");
-        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         inode.i_size = 1024;
         inode.i_blocks = 100; // Invalid block count
         inode.i_data = vec![Arc::new(CachedChunkInfoV5::new())];
@@ -1273,7 +1272,7 @@ mod cached_tests {
         inode.i_ino = 5;
         inode.i_nlink = 1;
         inode.i_name = OsString::from("test_dir");
-        inode.i_mode = libc::S_IFDIR as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         inode.i_child_cnt = 1;
         inode.i_child_idx = 3; // child_idx <= inode number is invalid
         assert!(inode.validate(100, 1024).is_err());
@@ -1283,7 +1282,7 @@ mod cached_tests {
         inode.i_ino = 1;
         inode.i_nlink = 1;
         inode.i_name = OsString::from("test_link");
-        inode.i_mode = libc::S_IFLNK as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFLNK);
         inode.i_target = OsString::new(); // Empty target
         assert!(inode.validate(100, 1024).is_err());
     }
@@ -1295,7 +1294,7 @@ mod cached_tests {
         let mut inode = CachedInodeV5::new(blob_table, meta);
 
         // Test block device
-        inode.i_mode = libc::S_IFBLK as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFBLK);
         assert!(inode.is_blkdev());
         assert!(!inode.is_chrdev());
         assert!(!inode.is_sock());
@@ -1305,32 +1304,32 @@ mod cached_tests {
         assert!(!inode.is_reg());
 
         // Test character device
-        inode.i_mode = libc::S_IFCHR as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFCHR);
         assert!(!inode.is_blkdev());
         assert!(inode.is_chrdev());
         assert!(!inode.is_sock());
         assert!(!inode.is_fifo());
-
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFIFO);
         // Test socket
-        inode.i_mode = libc::S_IFSOCK as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFSOCK);
         assert!(!inode.is_blkdev());
         assert!(!inode.is_chrdev());
         assert!(inode.is_sock());
         assert!(!inode.is_fifo());
 
         // Test FIFO
-        inode.i_mode = libc::S_IFIFO as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFIFO);
         assert!(!inode.is_blkdev());
         assert!(!inode.is_chrdev());
         assert!(!inode.is_sock());
         assert!(inode.is_fifo());
 
         // Test hardlink detection
-        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         inode.i_nlink = 2;
         assert!(inode.is_hardlink());
 
-        inode.i_mode = libc::S_IFDIR as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         inode.i_nlink = 2;
         assert!(!inode.is_hardlink()); // Directories are not considered hardlinks
     }
@@ -1374,12 +1373,12 @@ mod cached_tests {
         let mut inode = CachedInodeV5::new(blob_table, meta);
 
         // Test non-symlink
-        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         assert!(inode.get_symlink().is_err());
         assert_eq!(inode.get_symlink_size(), 0);
 
         // Test symlink
-        inode.i_mode = libc::S_IFLNK as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFLNK);
         inode.i_target = OsString::from("/path/to/target");
 
         let target = inode.get_symlink().unwrap();
@@ -1393,19 +1392,19 @@ mod cached_tests {
         let blob_table = Arc::new(RafsV5BlobTable::new());
         let mut parent = CachedInodeV5::new(blob_table.clone(), meta.clone());
         parent.i_ino = 1;
-        parent.i_mode = libc::S_IFDIR as u32;
+        parent.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         parent.i_child_cnt = 2;
 
         // Create child inodes
         let mut child1 = CachedInodeV5::new(blob_table.clone(), meta.clone());
         child1.i_ino = 2;
         child1.i_name = OsString::from("child_b");
-        child1.i_mode = libc::S_IFREG as u32;
+        child1.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
 
         let mut child2 = CachedInodeV5::new(blob_table.clone(), meta.clone());
         child2.i_ino = 3;
         child2.i_name = OsString::from("child_a");
-        child2.i_mode = libc::S_IFREG as u32;
+        child2.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
 
         // Add children (they should be sorted by name)
         parent.add_child(Arc::new(child1));
@@ -1440,7 +1439,7 @@ mod cached_tests {
         let blob_table = Arc::new(RafsV5BlobTable::new());
         let mut parent = CachedInodeV5::new(blob_table.clone(), meta.clone());
         parent.i_ino = 1;
-        parent.i_mode = libc::S_IFDIR as u32;
+        parent.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         parent.i_child_cnt = 1;
 
         let mut child = CachedInodeV5::new(blob_table, meta);
@@ -1539,27 +1538,27 @@ mod cached_tests {
         // Create a directory structure
         let mut root = CachedInodeV5::new(blob_table.clone(), meta.clone());
         root.i_ino = 1;
-        root.i_mode = libc::S_IFDIR as u32;
+        root.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         root.i_size = 0;
 
         let mut subdir = CachedInodeV5::new(blob_table.clone(), meta.clone());
         subdir.i_ino = 2;
-        subdir.i_mode = libc::S_IFDIR as u32;
+        subdir.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         subdir.i_size = 0;
 
         let mut file1 = CachedInodeV5::new(blob_table.clone(), meta.clone());
         file1.i_ino = 3;
-        file1.i_mode = libc::S_IFREG as u32;
+        file1.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         file1.i_size = 1024;
 
         let mut file2 = CachedInodeV5::new(blob_table.clone(), meta.clone());
         file2.i_ino = 4;
-        file2.i_mode = libc::S_IFREG as u32;
+        file2.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         file2.i_size = 0; // Empty file should be skipped
 
         let mut file3 = CachedInodeV5::new(blob_table.clone(), meta.clone());
         file3.i_ino = 5;
-        file3.i_mode = libc::S_IFREG as u32;
+        file3.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         file3.i_size = 2048;
 
         // Build structure: root -> [subdir, file1, file2], subdir -> [file3]
@@ -1647,7 +1646,7 @@ mod cached_tests {
         let mut inode1 = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         inode1.i_ino = 10;
         inode1.i_nlink = 1;
-        inode1.i_mode = libc::S_IFREG as u32;
+        inode1.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         let inode1_arc = Arc::new(inode1);
         sb.hash_inode(inode1_arc.clone()).unwrap();
 
@@ -1659,7 +1658,7 @@ mod cached_tests {
         let mut hardlink = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         hardlink.i_ino = 10; // Same inode number
         hardlink.i_nlink = 2; // Hardlink
-        hardlink.i_mode = libc::S_IFREG as u32;
+        hardlink.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         hardlink.i_data = vec![Arc::new(CachedChunkInfoV5::new())]; // Has data
 
         let hardlink_arc = Arc::new(hardlink);
@@ -1707,14 +1706,14 @@ mod cached_tests {
         let mut inode1 = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         inode1.i_ino = 5;
         inode1.i_nlink = 1;
-        inode1.i_mode = libc::S_IFREG as u32;
+        inode1.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         sb.hash_inode(Arc::new(inode1)).unwrap();
 
         // Add hardlink with same inode number but no data - should replace
         let mut hardlink = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         hardlink.i_ino = 5;
         hardlink.i_nlink = 2;
-        hardlink.i_mode = libc::S_IFREG as u32;
+        hardlink.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         hardlink.i_data = vec![]; // No data
 
         sb.hash_inode(Arc::new(hardlink)).unwrap();
@@ -1803,12 +1802,12 @@ mod cached_tests {
         assert_eq!(inode.ino(), u64::MAX);
 
         // Test edge case file modes
-        inode.i_mode = 0o777 | libc::S_IFREG as u32;
+        inode.i_mode = 0o777 | crate::metadata::mode_bits(libc::S_IFREG);
         assert!(inode.is_reg());
         assert_eq!(inode.i_mode & 0o777, 0o777);
 
         // Test empty symlink target (should be invalid but we test getter)
-        inode.i_mode = libc::S_IFLNK as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFLNK);
         inode.i_target = OsString::new();
         assert_eq!(inode.get_symlink_size(), 0);
 
@@ -1933,7 +1932,7 @@ mod cached_tests {
         let mut inode = CachedInodeV5::new(sb.s_blob.clone(), sb.s_meta.clone());
         inode.i_ino = u64::MAX;
         inode.i_nlink = 1;
-        inode.i_mode = libc::S_IFREG as u32;
+        inode.i_mode = crate::metadata::mode_bits(libc::S_IFREG);
         inode.i_name = OsString::from("max_inode");
 
         sb.hash_inode(Arc::new(inode)).unwrap();
@@ -1959,7 +1958,7 @@ mod cached_tests {
         // Create a complex directory with many children
         let mut root_dir = CachedInodeV5::new(blob_table.clone(), meta.clone());
         root_dir.i_ino = 1;
-        root_dir.i_mode = libc::S_IFDIR as u32;
+        root_dir.i_mode = crate::metadata::mode_bits(libc::S_IFDIR);
         root_dir.i_name = OsString::from("root");
 
         // Add many children with different names to test sorting
@@ -1984,9 +1983,9 @@ mod cached_tests {
             child.i_ino = i as u64 + 2;
             child.i_name = OsString::from(*name);
             child.i_mode = if i % 2 == 0 {
-                libc::S_IFREG as u32
+                crate::metadata::mode_bits(libc::S_IFREG)
             } else {
-                libc::S_IFDIR as u32
+                crate::metadata::mode_bits(libc::S_IFDIR)
             };
             root_dir.add_child(Arc::new(child));
         }

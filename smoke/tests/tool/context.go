@@ -120,5 +120,5 @@ func (ctx *Context) PrepareWorkDir(t *testing.T) {
 }
 
 func (ctx *Context) Destroy(_ *testing.T) {
-	os.RemoveAll(ctx.Env.WorkDir)
+	_ = os.RemoveAll(ctx.Env.WorkDir)
 }

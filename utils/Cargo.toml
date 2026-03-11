@@ -29,11 +29,12 @@ crc = "3.4.0"
 
 nydus-api = { version = "0.4.1", path = "../api" }
 
-# libz-ng-sys doesn't compile on ppc64. Have to fallback to stock zlib-sys
-[target.'cfg(target_arch = "powerpc64")'.dependencies]
+# libz-ng-sys doesn't compile on ppc64, and zlib-ng currently breaks test binary
+# linking on linux/aarch64 in this workspace. Fall back to stock zlib-sys there.
+[target.'cfg(any(target_arch = "powerpc64", all(target_os = "linux", target_arch = "aarch64")))'.dependencies]
 libz-sys = { version = "1.1.12", features = ["stock-zlib"], default-features = false, optional = true }
 flate2 = { version = "1.0.28", features = ["zlib"], default-features = false }
-[target.'cfg(not(target_arch = "powerpc64"))'.dependencies]
+[target.'cfg(not(any(target_arch = "powerpc64", all(target_os = "linux", target_arch = "aarch64"))))'.dependencies]
 libz-sys = { version = "1.1.8", features = ["zlib-ng"], default-features = false, optional = true }
 flate2 = { version = "1.0.28", features = ["zlib-ng-compat"], default-features = false }
 

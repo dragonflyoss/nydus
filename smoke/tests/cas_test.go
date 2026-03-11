@@ -52,7 +52,9 @@ func (c *CasTestSuite) testCasTables(t *testing.T, enablePrefetch bool) {
 
 	db, err := sql.Open("sqlite3", ctx.Runtime.ChunkDedupDb)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	for _, expectedTable := range []string{"Blobs", "Chunks"} {
 		// Manual execution WAL Checkpoint
@@ -122,7 +124,9 @@ func (c *CasTestSuite) testCasGcUmountByAPI(t *testing.T, enablePrefetch bool) {
 
 	db, err := sql.Open("sqlite3", config.ChunkDedupDb)
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	for _, expectedTable := range []string{"Blobs", "Chunks"} {
 		_, err = db.Exec("PRAGMA wal_checkpoint(FULL)")
@@ -135,10 +139,10 @@ func (c *CasTestSuite) testCasGcUmountByAPI(t *testing.T, enablePrefetch bool) {
 	}
 
 	// Mock nydus snapshotter clear cache
-	os.RemoveAll(filepath.Join(ctx.Env.WorkDir, "cache"))
+	require.NoError(t, os.RemoveAll(filepath.Join(ctx.Env.WorkDir, "cache")))
 	time.Sleep(1 * time.Second)
 
-	nydusd.UmountByAPI(config.MountPath)
+	require.NoError(t, nydusd.UmountByAPI(config.MountPath))
 
 	for _, expectedTable := range []string{"Blobs", "Chunks"} {
 		_, err = db.Exec("PRAGMA wal_checkpoint(FULL)")

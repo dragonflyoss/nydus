@@ -550,7 +550,7 @@ impl RafsInode for OndiskInodeWrapper {
             size: inode.i_size,
             blocks: inode.i_blocks,
             mode: inode.i_mode,
-            nlink: inode.i_nlink as u32,
+            nlink: inode.i_nlink,
             uid: inode.i_uid,
             gid: inode.i_gid,
             mtime: inode.i_mtime,

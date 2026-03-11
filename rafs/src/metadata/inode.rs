@@ -658,39 +658,39 @@ impl RafsV6Inode {
     /// Check whether the inode is a directory.
     #[inline]
     pub fn is_dir(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFDIR)
     }
 
     /// Check whether the inode is a symlink.
     #[inline]
     pub fn is_symlink(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFLNK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFLNK)
     }
 
     /// Check whether the inode is a regular file.
     #[inline]
     pub fn is_reg(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFREG as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFREG)
     }
 
     /// Check whether the inode is a char device node.
     pub fn is_chrdev(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFCHR as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFCHR)
     }
 
     /// Check whether the inode is a block device node.
     pub fn is_blkdev(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFBLK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFBLK)
     }
 
     /// Check whether the inode is a FIFO.
     pub fn is_fifo(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFIFO as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFIFO)
     }
 
     /// Check whether the inode is a socket.
     pub fn is_sock(&self) -> bool {
-        self.i_mode & libc::S_IFMT as u32 == libc::S_IFSOCK as u32
+        crate::metadata::file_type_bits(self.i_mode) == crate::metadata::mode_bits(libc::S_IFSOCK)
     }
 
     /// Check whether the inode is a hardlink.
@@ -1113,7 +1113,7 @@ mod tests {
         assert_eq!(inode.i_name_size, 0x0000_0001);
         assert_eq!(inode.i_symlink_size, 0x0000_0002);
         assert_eq!(inode.uidgid(), (0x0000_0001, 0x0000_0002));
-        assert_eq!(inode.mtime(), (0x0000_0014 as u64, 0x0000_0013));
+        assert_eq!(inode.mtime(), (0x0000_0014_u64, 0x0000_0013));
         assert_eq!(inode.mode(), 0x0000_0000);
         assert!(!inode.is_chrdev());
         assert!(!inode.is_blkdev());

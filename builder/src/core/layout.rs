@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn test_layout_blob_simple() {
         let mut inode = InodeWrapper::new(RafsVersion::V6);
-        inode.set_mode(0o755 | libc::S_IFREG as u32);
+        inode.set_mode(0o755 | crate::mode_bits(libc::S_IFREG));
         inode.set_size(1);
         let mut node1 = Node::new(inode.clone(), NodeInfo::default(), 1);
         node1.overlay = Overlay::UpperAddition;

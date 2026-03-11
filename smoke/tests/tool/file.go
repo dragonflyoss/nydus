@@ -56,7 +56,9 @@ func NewFile(t *testing.T, path, target string) *File {
 	if stat.Mode().IsRegular() {
 		f, err := os.Open(path)
 		require.NoError(t, err)
-		defer f.Close()
+		defer func() {
+			_ = f.Close()
+		}()
 		digester := digest.Canonical.Digester()
 		_, err = io.Copy(digester.Hash(), f)
 		require.NoError(t, err)

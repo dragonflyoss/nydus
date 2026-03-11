@@ -17,7 +17,7 @@ env:
 
 jobs:
   contrib-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     strategy:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
@@ -40,7 +40,7 @@ jobs:
         path: contrib/nydusify/cmd
 
   contrib-lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     strategy:
       matrix:
         include:
@@ -62,7 +62,7 @@ jobs:
         args: --timeout=10m --verbose
 
   nydus-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     strategy:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
@@ -152,7 +152,8 @@ jobs:
         make -e RUST_TARGET_STATIC=$RUST_TARGET -e static-release
 
   nydus-integration-test:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest-16-cores
     needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout
@@ -231,7 +232,7 @@ jobs:
         sudo -E make smoke-only
 
   nydus-unit-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -253,7 +254,7 @@ jobs:
         sudo -E RUSTUP=${RUSTUP_BIN} make ut-nextest
 
   contrib-unit-test-coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -273,7 +274,7 @@ jobs:
           contrib/nydusify/coverage.txt
 
   nydus-unit-test-coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -301,9 +302,228 @@ jobs:
           path: |
             codecov.json
 
+  nydus-integration-test-coverage:
+    if: github.event_name == 'pull_request'
+    needs: [contrib-build]
+    runs-on: ubuntu-latest-16-cores
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        shared-key: Linux-cargo-amd64-coverage
+        save-if: ${{ github.ref == 'refs/heads/master' }}
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Setup Golang
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.work'
+        cache-dependency-path: "**/*.sum"
+    - name: Build instrumented Nydusify
+      shell: bash
+      run: |
+        pushd contrib/nydusify >/dev/null
+        CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+          -cover \
+          -covermode=atomic \
+          -coverpkg=./... \
+          -o ./cmd/nydusify \
+          ./cmd
+        popd >/dev/null
+        echo "Built instrumented Go binary:"
+        ls -l contrib/nydusify/cmd/nydusify
+        contrib/nydusify/cmd/nydusify --version || true
+    - name: Fscache Setup
+      run: sudo bash misc/fscache/setup.sh
+    - name: Prepare Older Binaries
+      run: |
+        export NYDUS_STABLE_VERSION=$(curl https://api.github.com/repos/Dragonflyoss/nydus/releases/latest | jq -r '.tag_name')
+
+        versions=(v0.1.0 ${NYDUS_STABLE_VERSION})
+        version_archs=(v0.1.0-x86_64 ${NYDUS_STABLE_VERSION}-linux-amd64)
+        for i in ${!versions[@]}; do
+          version=${versions[$i]}
+          version_arch=${version_archs[$i]}
+
+          wget -q https://github.com/dragonflyoss/nydus/releases/download/$version/nydus-static-$version_arch.tgz
+          sudo mkdir -p nydus-$version /usr/bin/nydus-$version
+          sudo tar xzf nydus-static-$version_arch.tgz -C nydus-$version
+          sudo cp -r nydus-$version/nydus-static/* /usr/bin/nydus-$version/
+        done
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
+    - name: Generate integration coverage
+      shell: bash
+      run: |
+        export GO_BINARY_COVERDIR="${RUNNER_TEMP}/nydus-go-binary-coverage"
+        export GO_TEST_BUILD_FLAGS='-cover -covermode=atomic -coverpkg=./...'
+        rm -rf "${GO_BINARY_COVERDIR}"
+        mkdir -p "${GO_BINARY_COVERDIR}"
+
+        source <(cargo llvm-cov show-env --sh)
+        export LLVM_PROFILE_FILE="${CARGO_LLVM_COV_TARGET_DIR}/smoke-%p-%m.profraw"
+        echo "Coverage environment before build:"
+        echo "  LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE}"
+        echo "  CARGO_LLVM_COV_TARGET_DIR=${CARGO_LLVM_COV_TARGET_DIR}"
+        echo "  RUSTFLAGS=${RUSTFLAGS}"
+        echo "  GO_BINARY_COVERDIR=${GO_BINARY_COVERDIR}"
+        echo "  GO_TEST_BUILD_FLAGS=${GO_TEST_BUILD_FLAGS}"
+        cargo llvm-cov clean --workspace
+        cargo build --release --features=virtiofs --bins
+        echo "Built instrumented binaries:"
+        ls -l target/release/nydusd target/release/nydus-image contrib/nydusify/cmd/nydusify
+        target/release/nydusd --version || true
+        target/release/nydus-image --version || true
+        cargo llvm-cov clean --workspace --profraw-only
+        mapfile -t build_profraw_files < <(find "${CARGO_LLVM_COV_TARGET_DIR}" -maxdepth 1 -name '*.profraw' -print | sort)
+        echo "Residual profraw files after build cleanup: ${#build_profraw_files[@]}"
+        if [ ${#build_profraw_files[@]} -ne 0 ]; then
+          printf '%s\n' "${build_profraw_files[@]}"
+          echo "Build cleanup left profraw files behind" >&2
+          exit 1
+        fi
+
+        sudo mkdir -p /usr/bin/nydus-latest /home/runner/work/workdir
+        sudo install -D -m 755 contrib/nydusify/cmd/nydusify /usr/bin/nydus-latest/nydusify
+        sudo install -D -m 755 target/release/nydusd /usr/bin/nydus-latest/nydusd.real
+        sudo install -D -m 755 target/release/nydus-image /usr/bin/nydus-latest/nydus-image.real
+        sudo tee /usr/bin/nydus-latest/nydusd >/dev/null <<EOF
+        #!/bin/sh
+        export LLVM_PROFILE_FILE='${LLVM_PROFILE_FILE}'
+        exec /usr/bin/nydus-latest/nydusd.real "\$@"
+        EOF
+        sudo tee /usr/bin/nydus-latest/nydus-image >/dev/null <<EOF
+        #!/bin/sh
+        export LLVM_PROFILE_FILE='${LLVM_PROFILE_FILE}'
+        exec /usr/bin/nydus-latest/nydus-image.real "\$@"
+        EOF
+        sudo chmod 755 /usr/bin/nydus-latest/nydusd /usr/bin/nydus-latest/nydus-image
+        sudo bash misc/prepare.sh
+
+        echo "Installed latest binaries:"
+        ls -l /usr/bin/nydus-latest
+
+        export NYDUS_STABLE_VERSION=$(curl https://api.github.com/repos/Dragonflyoss/nydus/releases/latest | jq -r '.tag_name')
+        export NYDUS_STABLE_VERSION_EXPORT="${NYDUS_STABLE_VERSION//./_}"
+
+        versions=(v0.1.0 ${NYDUS_STABLE_VERSION} latest)
+        version_exports=(v0_1_0 ${NYDUS_STABLE_VERSION_EXPORT} latest)
+        for i in ${!version_exports[@]}; do
+          version=${versions[$i]}
+          version_export=${version_exports[$i]}
+          export NYDUS_BUILDER_$version_export=/usr/bin/nydus-$version/nydus-image
+          export NYDUS_NYDUSD_$version_export=/usr/bin/nydus-$version/nydusd
+          export NYDUS_NYDUSIFY_$version_export=/usr/bin/nydus-$version/nydusify
+        done
+
+        curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sudo sh -s -- -b /usr/bin v2.1.6
+        export GOCOVERDIR="${GO_BINARY_COVERDIR}"
+        echo "Smoke binary environment:"
+        env | grep '^NYDUS_' | sort
+        echo "GOCOVERDIR=${GOCOVERDIR}"
+        echo "GO_TEST_BUILD_FLAGS=${GO_TEST_BUILD_FLAGS}"
+        echo "LLVM_PROFILE_FILE=${LLVM_PROFILE_FILE}"
+        sudo -E env | grep '^LLVM_PROFILE_FILE='
+        sudo -E env | grep '^GOCOVERDIR='
+        sudo -E env | grep '^GO_TEST_BUILD_FLAGS='
+        sudo -E env | grep '^NYDUS_' | sort
+
+        echo "Rust binary coverage probe before smoke:"
+        sudo -E /usr/bin/nydus-latest/nydus-image --version || true
+        mapfile -t probe_profraw_files < <(find "${CARGO_LLVM_COV_TARGET_DIR}" -maxdepth 1 -name '*.profraw' -print | sort)
+        echo "Generated ${#probe_profraw_files[@]} probe profraw files"
+        printf '%s\n' "${probe_profraw_files[@]}"
+        cargo llvm-cov clean --workspace --profraw-only
+
+        sudo -E make smoke-only
+
+        mapfile -t profraw_files < <(find "${CARGO_LLVM_COV_TARGET_DIR}" -maxdepth 1 -name '*.profraw' -print | sort)
+        echo "Generated ${#profraw_files[@]} smoke profraw files"
+        if [ ${#profraw_files[@]} -eq 0 ]; then
+          echo "No smoke profraw files were generated under ${CARGO_LLVM_COV_TARGET_DIR}" >&2
+          exit 1
+        fi
+        printf '%s\n' "${profraw_files[@]}"
+        echo "Smoke profraw details:"
+        stat --printf='%n %s bytes %U:%G\n' "${profraw_files[@]}"
+
+        mapfile -t go_cover_files < <(find "${GO_BINARY_COVERDIR}" -maxdepth 1 -type f -print | sort)
+        echo "Generated ${#go_cover_files[@]} Go coverage raw files"
+        if [ ${#go_cover_files[@]} -eq 0 ]; then
+          echo "No Go coverage raw files were generated under ${GO_BINARY_COVERDIR}" >&2
+          exit 1
+        fi
+        printf '%s\n' "${go_cover_files[@]}"
+        echo "Go coverage raw file details:"
+        stat --printf='%n %s bytes %U:%G\n' "${go_cover_files[@]}"
+        go tool covdata percent -i="${GO_BINARY_COVERDIR}" | tee smoke-go-coverage-percent.txt
+        go tool covdata textfmt -i="${GO_BINARY_COVERDIR}" -o smoke-go-coverage.txt
+        go tool cover -func=smoke-go-coverage.txt | tee smoke-go-coverage-summary.txt
+        echo "Smoke Go coverage summary preview:"
+        sed -n '1,120p' smoke-go-coverage-summary.txt
+
+        cargo llvm-cov report --release --codecov --output-path smoke-codecov.json
+        cargo llvm-cov report --release --json --summary-only --output-path smoke-summary.json
+        cargo llvm-cov report --release --text --show-missing-lines --output-path smoke-missing-lines.txt || true
+
+        echo "Smoke coverage summary preview:"
+        python3 - <<'PY'
+        import json
+        from pathlib import Path
+
+        summary = json.loads(Path('smoke-summary.json').read_text())
+        data = summary.get('data', [])
+        totals = []
+        files = []
+        for item in data:
+            totals.extend(item.get('totals', []))
+            files.extend(item.get('files', []))
+        print({'data_sections': len(data), 'files': len(files), 'totals': totals[:1]})
+        top = []
+        for file_info in files:
+            filename = file_info.get('filename')
+            summary = file_info.get('summary', {})
+            lines = summary.get('lines', {})
+            count = lines.get('count', 0) or 0
+            covered = lines.get('covered', 0) or 0
+            percent = lines.get('percent', 0) or 0
+            top.append((percent, covered, count, filename))
+        for percent, covered, count, filename in sorted(top)[:20]:
+            print(f'{percent:6.2f}% {covered:5}/{count:<5} {filename}')
+        PY
+        echo "Smoke missing lines preview:"
+        sed -n '1,120p' smoke-missing-lines.txt || true
+    - name: Upload integration coverage file
+      uses: actions/upload-artifact@v6
+      with:
+        name: nydus-integration-test-coverage-artifact
+        path: |
+          smoke-codecov.json
+          smoke-go-coverage.txt
+          smoke-go-coverage-percent.txt
+          smoke-go-coverage-summary.txt
+          smoke-summary.json
+          smoke-missing-lines.txt
+
   upload-coverage-to-codecov:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest-16-cores
     needs: [contrib-unit-test-coverage, nydus-unit-test-coverage]
+    env:
+      COVERAGE_FILES: ./codecov.json ./coverage.txt
     steps:
     - uses: actions/checkout@v6
     - name: Download nydus coverage file
@@ -314,6 +534,78 @@ jobs:
       uses: actions/download-artifact@v7
       with:
         name: contrib-test-coverage-artifact
+    - name: Print aggregated coverage preview
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        import re
+        from pathlib import Path
+
+        files = os.environ["COVERAGE_FILES"].split()
+        aggregated_line_states = {}
+
+        def merge_line(target, path, line_no, covered):
+            key = (path, int(line_no))
+            target[key] = target.get(key, False) or covered
+
+        def parse_codecov_value(value):
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return value > 0
+            if isinstance(value, str):
+                if "/" in value:
+                    hit, _total = value.split("/", 1)
+                    return int(hit) > 0
+                try:
+                    return float(value) > 0
+                except ValueError:
+                    return None
+            return None
+
+        for file_name in files:
+            per_file_line_states = {}
+            path = Path(file_name)
+            if path.suffix == ".json":
+                data = json.loads(path.read_text())
+                for source, coverage in data.get("coverage", {}).items():
+                    for line_no, value in coverage.items():
+                        covered = parse_codecov_value(value)
+                        if covered is not None:
+                            merge_line(per_file_line_states, source, line_no, covered)
+            elif path.suffix == ".txt":
+                for raw in path.read_text().splitlines():
+                    raw = raw.strip()
+                    if not raw or raw.startswith("mode:"):
+                        continue
+                    match = re.match(r"(.+):(\d+)\.\d+,(\d+)\.\d+\s+\d+\s+(\d+)", raw)
+                    if not match:
+                        continue
+                    source, start_line, end_line, count = match.groups()
+                    covered = int(count) > 0
+                    for line_no in range(int(start_line), int(end_line) + 1):
+                        merge_line(per_file_line_states, source, line_no, covered)
+
+            per_file_total = len(per_file_line_states)
+            per_file_covered = sum(1 for covered in per_file_line_states.values() if covered)
+            per_file_ratio = (per_file_covered / per_file_total * 100.0) if per_file_total else 0.0
+            print(
+                f"Coverage preview for {file_name}: "
+                f"{per_file_covered}/{per_file_total} lines = {per_file_ratio:.2f}%"
+            )
+            for key, covered in per_file_line_states.items():
+                aggregated_line_states[key] = aggregated_line_states.get(key, False) or covered
+
+        total = len(aggregated_line_states)
+        covered = sum(1 for covered in aggregated_line_states.values() if covered)
+        ratio = (covered / total * 100.0) if total else 0.0
+        print(f"Aggregated coverage preview: {covered}/{total} lines = {ratio:.2f}%")
+        print("Coverage inputs:")
+        for file_name in files:
+            print(f"- {file_name}")
+        PY
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v5
       env:
@@ -323,16 +615,117 @@ jobs:
         verbose: true
         fail_ci_if_error: true
 
+  upload-pr-coverage-to-codecov:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest-16-cores
+    needs: [contrib-unit-test-coverage, nydus-unit-test-coverage, nydus-integration-test-coverage]
+    env:
+      COVERAGE_FILES: ./codecov.json ./coverage.txt ./smoke-codecov.json ./smoke-go-coverage.txt
+    steps:
+    - uses: actions/checkout@v6
+    - name: Download nydus coverage file
+      uses: actions/download-artifact@v7
+      with:
+        name: nydus-test-coverage-artifact
+    - name: Download contrib coverage file
+      uses: actions/download-artifact@v7
+      with:
+        name: contrib-test-coverage-artifact
+    - name: Download nydus integration coverage file
+      uses: actions/download-artifact@v7
+      with:
+        name: nydus-integration-test-coverage-artifact
+    - name: Print aggregated coverage preview
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        import re
+        from pathlib import Path
+
+        files = os.environ["COVERAGE_FILES"].split()
+        aggregated_line_states = {}
+
+        def merge_line(target, path, line_no, covered):
+            key = (path, int(line_no))
+            target[key] = target.get(key, False) or covered
+
+        def parse_codecov_value(value):
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return value > 0
+            if isinstance(value, str):
+                if "/" in value:
+                    hit, _total = value.split("/", 1)
+                    return int(hit) > 0
+                try:
+                    return float(value) > 0
+                except ValueError:
+                    return None
+            return None
+
+        for file_name in files:
+            per_file_line_states = {}
+            path = Path(file_name)
+            if path.suffix == ".json":
+                data = json.loads(path.read_text())
+                for source, coverage in data.get("coverage", {}).items():
+                    for line_no, value in coverage.items():
+                        covered = parse_codecov_value(value)
+                        if covered is not None:
+                            merge_line(per_file_line_states, source, line_no, covered)
+            elif path.suffix == ".txt":
+                for raw in path.read_text().splitlines():
+                    raw = raw.strip()
+                    if not raw or raw.startswith("mode:"):
+                        continue
+                    match = re.match(r"(.+):(\d+)\.\d+,(\d+)\.\d+\s+\d+\s+(\d+)", raw)
+                    if not match:
+                        continue
+                    source, start_line, end_line, count = match.groups()
+                    covered = int(count) > 0
+                    for line_no in range(int(start_line), int(end_line) + 1):
+                        merge_line(per_file_line_states, source, line_no, covered)
+
+            per_file_total = len(per_file_line_states)
+            per_file_covered = sum(1 for covered in per_file_line_states.values() if covered)
+            per_file_ratio = (per_file_covered / per_file_total * 100.0) if per_file_total else 0.0
+            print(
+                f"Coverage preview for {file_name}: "
+                f"{per_file_covered}/{per_file_total} lines = {per_file_ratio:.2f}%"
+            )
+            for key, covered in per_file_line_states.items():
+                aggregated_line_states[key] = aggregated_line_states.get(key, False) or covered
+
+        total = len(aggregated_line_states)
+        covered = sum(1 for covered in aggregated_line_states.values() if covered)
+        ratio = (covered / total * 100.0) if total else 0.0
+        print(f"Aggregated coverage preview: {covered}/{total} lines = {ratio:.2f}%")
+        print("Coverage inputs:")
+        for file_name in files:
+            print(f"- {file_name}")
+        PY
+    - name: Upload merged coverage to Codecov
+      uses: codecov/codecov-action@v5
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      with:
+        files: ./codecov.json,./coverage.txt,./smoke-codecov.json,./smoke-go-coverage.txt
+        verbose: true
+        fail_ci_if_error: true
+
   nydus-cargo-deny:
     name: cargo-deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   performance-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     needs: [contrib-build, nydus-build]
     strategy:
       matrix:
@@ -362,7 +755,7 @@ jobs:
         sudo -E make smoke-performance
 
   takeover-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest-16-cores
     needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout

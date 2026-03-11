@@ -542,7 +542,7 @@ mod tests {
                     e
                 })
                 .unwrap();
-            assert_eq!(size, CONTENT.len() as usize);
+            assert_eq!(size, CONTENT.len());
             assert_eq!(&buf[0..CONTENT.len()], CONTENT.as_bytes());
         }
     }

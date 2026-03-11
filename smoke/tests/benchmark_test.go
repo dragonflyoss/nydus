@@ -113,7 +113,9 @@ func (b *BenchmarkTestSuite) prepareImage(t *testing.T, ctx *tool.Context, image
 	convertCmd := fmt.Sprintf("%s %s convert --source %s --target %s --nydus-image %s --work-dir %s %s %s --output-json %s",
 		ctx.Binary.Nydusify, logLevel, source, target, ctx.Binary.Builder, ctx.Env.WorkDir, fsVersion, enableOCIRef, convertMetricFile)
 	tool.RunWithoutOutput(t, convertCmd)
-	defer os.Remove(convertMetricFile)
+	defer func() {
+		_ = os.Remove(convertMetricFile)
+	}()
 
 	metricData, err := os.ReadFile(convertMetricFile)
 	if err != nil {
@@ -143,7 +145,9 @@ func (b *BenchmarkTestSuite) dumpMetric() {
 	if err != nil {
 		b.t.Fatalf("create benchmark metric file")
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	encoder := json.NewEncoder(file)
 	if err := encoder.Encode(b.metric); err != nil {

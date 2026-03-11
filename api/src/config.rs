@@ -2176,7 +2176,7 @@ mod tests {
             }
           }"#;
 
-        let mut rafs_config = ConfigV2::from_str(&config).unwrap();
+        let mut rafs_config = ConfigV2::from_str(config).unwrap();
         let test_auth = "test_auth".to_string();
 
         rafs_config.update_registry_auth_info(&Some(test_auth.clone()));

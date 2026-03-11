@@ -29,7 +29,9 @@ func (c *ChunkDedupTestSuite) TestChunkDedup() test.Generator {
 	if err != nil {
 		panic(err)
 	}
-	defer os.Remove(file.Name())
+	defer func() {
+		_ = os.Remove(file.Name())
+	}()
 
 	return func() (name string, testCase test.Case) {
 		if !scenarios.HasNext() {
@@ -68,7 +70,9 @@ func (c *ChunkDedupTestSuite) testRemoteWithDedup(t *testing.T, dbPath string) {
 	require.NoError(t, err)
 	err = nydusd2.Mount()
 	require.NoError(t, err)
-	defer nydusd2.Umount()
+	defer func() {
+		require.NoError(t, nydusd2.Umount())
+	}()
 	nydusd2.Verify(t, layer2.FileTree)
 	metrics2, err := nydusd2.GetBackendMetrics()
 	require.NoError(t, err)

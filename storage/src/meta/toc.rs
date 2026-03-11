@@ -897,7 +897,7 @@ mod tests {
             .open(tmp_file.unwrap().as_path())
             .unwrap();
 
-        entry.extract_from_buf(&buf, &mut file)?;
+        entry.extract_from_buf(buf, &mut file)?;
 
         let mut hasher = RafsDigest::hasher(digest::Algorithm::Sha256);
         let mut buffer = [0; 1024];
@@ -975,5 +975,103 @@ mod tests {
             s.unwrap(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned()
         );
+    }
+
+    #[test]
+    fn test_toc_entry_name() {
+        // Empty name
+        let entry = TocEntry::default();
+        assert_eq!(entry.name().unwrap(), "");
+
+        // Normal name
+        let mut entry2 = TocEntry::default();
+        let name = "blob.meta";
+        entry2.name[..name.len()].copy_from_slice(name.as_bytes());
+        assert_eq!(entry2.name().unwrap(), "blob.meta");
+
+        // Invalid UTF-8 should return error
+        let mut entry3 = TocEntry::default();
+        entry3.name[0] = 0xff;
+        assert!(entry3.name().is_err());
+    }
+
+    #[test]
+    fn test_toc_entry_field_getters() {
+        let entry = TocEntry {
+            flags: 0,
+            reserved1: 0,
+            name: [0u8; 16],
+            uncompressed_digest: [0xabu8; 32],
+            compressed_offset: 0x1234,
+            compressed_size: 0x5678,
+            uncompressed_size: 0x9abc,
+            reserved2: [0u8; 48],
+        };
+
+        assert_eq!(entry.uncompressed_size(), 0x9abc);
+        assert_eq!(entry.compressed_offset(), 0x1234);
+        assert_eq!(entry.compressed_size(), 0x5678);
+        assert_eq!(entry.uncompressed_digest().data, [0xabu8; 32]);
+    }
+
+    #[test]
+    fn test_toc_entry_compressor_round_trip() {
+        let mut entry = TocEntry::default();
+
+        entry.set_compressor(compress::Algorithm::None).unwrap();
+        assert_eq!(entry.compressor().unwrap(), compress::Algorithm::None);
+
+        entry.set_compressor(compress::Algorithm::Zstd).unwrap();
+        assert_eq!(entry.compressor().unwrap(), compress::Algorithm::Zstd);
+
+        entry.set_compressor(compress::Algorithm::Lz4Block).unwrap();
+        assert_eq!(entry.compressor().unwrap(), compress::Algorithm::Lz4Block);
+
+        // Unsupported algorithm
+        assert!(entry.set_compressor(compress::Algorithm::GZip).is_err());
+    }
+
+    #[test]
+    fn test_toc_location_new() {
+        let loc = TocLocation::new(0x1000, 0x800);
+        assert!(!loc.auto_detect);
+        assert!(!loc.validate_digest);
+        assert_eq!(loc.offset, 0x1000);
+        assert_eq!(loc.size, 0x800);
+    }
+
+    #[test]
+    fn test_toc_location_with_digest() {
+        let digest = RafsDigest { data: [0x55u8; 32] };
+        let loc = TocLocation::with_digest(0x2000, 0x1000, digest);
+        assert!(!loc.auto_detect);
+        assert!(loc.validate_digest);
+        assert_eq!(loc.offset, 0x2000);
+        assert_eq!(loc.size, 0x1000);
+        assert_eq!(loc.digest.data, [0x55u8; 32]);
+    }
+
+    #[test]
+    fn test_toc_location_validate() {
+        // auto_detect=true skips validation
+        let auto = TocLocation::default();
+        assert!(auto.validate().is_ok());
+
+        // valid sizes (512–65536, multiple of 128)
+        assert!(TocLocation::new(0, 512).validate().is_ok());
+        assert!(TocLocation::new(0, 640).validate().is_ok());
+        assert!(TocLocation::new(0, 0x10000).validate().is_ok());
+
+        // invalid: below 512
+        assert!(TocLocation::new(0, 256).validate().is_err());
+        // invalid: above 0x10000
+        assert!(TocLocation::new(0, 0x10001).validate().is_err());
+        // invalid: not aligned to 128
+        assert!(TocLocation::new(0, 513).validate().is_err());
+    }
+
+    #[test]
+    fn test_toc_entry_struct_size() {
+        assert_eq!(std::mem::size_of::<TocEntry>(), 128);
     }
 }

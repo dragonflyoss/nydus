@@ -265,3 +265,26 @@ impl Builder for DirectoryBuilder {
         Ok(output)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_directory_builder_new() {
+        let _builder = DirectoryBuilder::new();
+        assert_eq!(std::mem::size_of::<DirectoryBuilder>(), 0);
+    }
+
+    #[test]
+    fn test_directory_builder_default() {
+        let _builder = DirectoryBuilder::default();
+        assert_eq!(std::mem::size_of::<DirectoryBuilder>(), 0);
+    }
+
+    #[test]
+    fn test_filesystem_tree_builder_new() {
+        let _builder = FilesystemTreeBuilder::new();
+        assert_eq!(std::mem::size_of::<FilesystemTreeBuilder>(), 0);
+    }
+}

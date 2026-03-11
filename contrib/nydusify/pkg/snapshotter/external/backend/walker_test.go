@@ -2,11 +2,13 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Helper function to create a temporary directory and files for testing
@@ -167,4 +169,75 @@ func TestWalk(t *testing.T) {
 	os.CreateTemp(root, "test")
 	_, err := walker.Walk(context.Background(), root, handler)
 	assert.NoError(t, err)
+}
+
+func TestNewWalker(t *testing.T) {
+	require.NotNil(t, NewWalker())
+}
+
+func TestWalkErrors(t *testing.T) {
+	t.Run("handler error", func(t *testing.T) {
+		root := t.TempDir()
+		_, err := os.CreateTemp(root, "test")
+		require.NoError(t, err)
+
+		walker := NewWalker()
+		_, err = walker.Walk(context.Background(), root, MockHandler{
+			HandleFunc: func(context.Context, File) ([]Chunk, error) {
+				return nil, errors.New("handle failed")
+			},
+		})
+		require.ErrorContains(t, err, "handle files")
+	})
+
+	t.Run("backend error", func(t *testing.T) {
+		root := t.TempDir()
+		_, err := os.CreateTemp(root, "test")
+		require.NoError(t, err)
+
+		walker := NewWalker()
+		_, err = walker.Walk(context.Background(), root, MockHandler{
+			HandleFunc: func(context.Context, File) ([]Chunk, error) {
+				return nil, nil
+			},
+			BackendFunc: func(context.Context) (*Backend, error) {
+				return nil, errors.New("backend failed")
+			},
+		})
+		require.ErrorContains(t, err, "backend failed")
+	})
+
+	t.Run("walk directory error", func(t *testing.T) {
+		walker := NewWalker()
+		_, err := walker.Walk(context.Background(), filepath.Join(t.TempDir(), "missing"), MockHandler{})
+		require.ErrorContains(t, err, "walk directory")
+	})
+}
+
+func TestWalkAggregatesChunksByFile(t *testing.T) {
+	root := t.TempDir()
+	_, err := os.CreateTemp(root, "test")
+	require.NoError(t, err)
+
+	result, err := NewWalker().Walk(context.Background(), root, MockHandler{
+		HandleFunc: func(context.Context, File) ([]Chunk, error) {
+			return []Chunk{
+				&MockChunk{ID: 1, Offset: 10, Path: "same-file", ChunkSize: "4096", Digest: "blob-1", Size: "100"},
+				&MockChunk{ID: 1, Offset: 20, Path: "same-file", ChunkSize: "4096", Digest: "blob-1", Size: "100"},
+				&MockChunk{ID: 2, Offset: 30, Path: "other-file", ChunkSize: "2048", Digest: "blob-2", Size: "200"},
+			}, nil
+		},
+		BackendFunc: func(context.Context) (*Backend, error) {
+			return &Backend{Version: "v1"}, nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Chunks, 3)
+	require.Len(t, result.Files, 2)
+	assert.Equal(t, "same-file", result.Files[0].RelativePath)
+	assert.Equal(t, uint32(1), result.Files[0].BlobIndex)
+	assert.Equal(t, uint64(10), result.Files[0].Chunk0CompressedOffset)
+	assert.Equal(t, "blob-1", result.Files[0].BlobID)
+	assert.Equal(t, "other-file", result.Files[1].RelativePath)
+	assert.Equal(t, "v1", result.Backend.Version)
 }

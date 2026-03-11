@@ -298,6 +298,17 @@ mod tests {
     }
 
     #[test]
+    fn test_backend_fs_type_invalid_inputs() {
+        let err = FsBackendType::from_str("").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("only 'rafs' and 'passthrough_fs' are supported"));
+
+        let err = FsBackendType::from_str("Rafs").unwrap_err();
+        assert!(err.to_string().contains("Rafs was specified"));
+    }
+
+    #[test]
     fn test_validate_thread_configuration() {
         assert_eq!(validate_threads_configuration("1").unwrap(), 1);
         assert_eq!(validate_threads_configuration("1024").unwrap(), 1024);

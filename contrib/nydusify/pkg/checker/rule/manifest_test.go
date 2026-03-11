@@ -7,8 +7,10 @@ package rule
 import (
 	"testing"
 
+	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 	"github.com/stretchr/testify/require"
 
 	"github.com/opencontainers/go-digest"
@@ -125,4 +127,69 @@ func TestManifestRuleValidate_TargetLayer(t *testing.T) {
 		},
 	}
 	require.NoError(t, rule.Validate())
+}
+
+func TestManifestRuleValidateOCI(t *testing.T) {
+	rule := ManifestRule{}
+	image := &parser.Image{
+		Manifest: ocispec.Manifest{Layers: []ocispec.Descriptor{{Digest: digest.FromString("layer1")}, {Digest: digest.FromString("layer2")}}},
+		Config: ocispec.Image{RootFS: ocispec.RootFS{DiffIDs: []digest.Digest{
+			digest.FromString("diff1"),
+		}}},
+	}
+
+	err := rule.validateOCI(image)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid diff ids")
+
+	image.Manifest.ArtifactType = modelspec.ArtifactTypeModelManifest
+	err = rule.validateOCI(image)
+	require.NoError(t, err)
+}
+
+func TestManifestRuleValidateNydus(t *testing.T) {
+	rule := ManifestRule{}
+	image := &parser.Image{
+		Manifest: ocispec.Manifest{
+			Layers: []ocispec.Descriptor{
+				{
+					MediaType: utils.MediaTypeNydusBlob,
+					Annotations: map[string]string{
+						utils.LayerAnnotationNydusBlob: "true",
+					},
+				},
+				{
+					MediaType: ocispec.MediaTypeImageLayerGzip,
+					Annotations: map[string]string{
+						utils.LayerAnnotationNydusBootstrap: "false",
+					},
+				},
+			},
+		},
+		Config: ocispec.Image{RootFS: ocispec.RootFS{DiffIDs: []digest.Digest{
+			digest.FromString("diff1"),
+			digest.FromString("diff2"),
+		}}},
+	}
+
+	err := rule.validateNydus(image)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid bootstrap layer")
+
+	image.Manifest.Layers[1].Annotations[utils.LayerAnnotationNydusBootstrap] = "true"
+	image.Manifest.Layers[0].MediaType = ocispec.MediaTypeImageLayerGzip
+	err = rule.validateNydus(image)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid blob layer")
+
+	image.Manifest.ArtifactType = modelspec.ArtifactTypeModelManifest
+	image.Manifest.Layers[0].MediaType = ocispec.MediaTypeImageLayerGzip
+	image.Manifest.Layers[1].Annotations[utils.LayerAnnotationNydusArtifactType] = "wrong"
+	err = rule.validateNydus(image)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid manifest artifact type")
+
+	image.Manifest.Layers[1].Annotations[utils.LayerAnnotationNydusArtifactType] = modelspec.ArtifactTypeModelManifest
+	err = rule.validateNydus(image)
+	require.NoError(t, err)
 }

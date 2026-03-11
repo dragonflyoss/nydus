@@ -21,7 +21,9 @@ func TestMain(m *testing.M) {
 	registryPort := os.Getenv("REGISTRY_PORT")
 	if registryPort == "" {
 		registryPort = "5077"
-		os.Setenv("REGISTRY_PORT", registryPort)
+		if err := os.Setenv("REGISTRY_PORT", registryPort); err != nil {
+			log.Fatalf("set REGISTRY_PORT: %v", err)
+		}
 	}
 
 	var reg *tool.Registry

@@ -415,7 +415,7 @@ impl RafsV6SuperBlockExt {
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
         r.read_exact(self.as_mut())?;
-        r.seek_to_offset(EROFS_BLOCK_SIZE_4096 as u64)?;
+        r.seek_to_offset(EROFS_BLOCK_SIZE_4096)?;
 
         Ok(())
     }
@@ -621,7 +621,7 @@ impl RafsV6SuperBlockExt {
 impl RafsStore for RafsV6SuperBlockExt {
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
-        w.seek_offset(EROFS_BLOCK_SIZE_4096 as u64)?;
+        w.seek_offset(EROFS_BLOCK_SIZE_4096)?;
 
         Ok(EROFS_BLOCK_SIZE_4096 as usize - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)
     }
@@ -1060,7 +1060,7 @@ pub fn new_v6_inode(
     i.set_data_layout(datalayout);
     i.set_xattr_inline_count(xattr_inline_count);
     if inode.is_special() {
-        i.set_rdev(inode.rdev() as u32);
+        i.set_rdev(inode.rdev());
     }
 
     i
@@ -1095,14 +1095,18 @@ impl RafsV6Dirent {
 
     /// Get file type from file mode.
     pub fn file_type(mode: u32) -> u8 {
-        let val = match mode as libc::mode_t & libc::S_IFMT {
-            libc::S_IFREG => EROFS_FILE_TYPE::EROFS_FT_REG_FILE,
-            libc::S_IFDIR => EROFS_FILE_TYPE::EROFS_FT_DIR,
-            libc::S_IFCHR => EROFS_FILE_TYPE::EROFS_FT_CHRDEV,
-            libc::S_IFBLK => EROFS_FILE_TYPE::EROFS_FT_BLKDEV,
-            libc::S_IFIFO => EROFS_FILE_TYPE::EROFS_FT_FIFO,
-            libc::S_IFSOCK => EROFS_FILE_TYPE::EROFS_FT_SOCK,
-            libc::S_IFLNK => EROFS_FILE_TYPE::EROFS_FT_SYMLINK,
+        let val = match mode & crate::metadata::mode_bits(libc::S_IFMT) {
+            x if x == crate::metadata::mode_bits(libc::S_IFREG) => {
+                EROFS_FILE_TYPE::EROFS_FT_REG_FILE
+            }
+            x if x == crate::metadata::mode_bits(libc::S_IFDIR) => EROFS_FILE_TYPE::EROFS_FT_DIR,
+            x if x == crate::metadata::mode_bits(libc::S_IFCHR) => EROFS_FILE_TYPE::EROFS_FT_CHRDEV,
+            x if x == crate::metadata::mode_bits(libc::S_IFBLK) => EROFS_FILE_TYPE::EROFS_FT_BLKDEV,
+            x if x == crate::metadata::mode_bits(libc::S_IFIFO) => EROFS_FILE_TYPE::EROFS_FT_FIFO,
+            x if x == crate::metadata::mode_bits(libc::S_IFSOCK) => EROFS_FILE_TYPE::EROFS_FT_SOCK,
+            x if x == crate::metadata::mode_bits(libc::S_IFLNK) => {
+                EROFS_FILE_TYPE::EROFS_FT_SYMLINK
+            }
             _ => EROFS_FILE_TYPE::EROFS_FT_UNKNOWN,
         };
 
@@ -2638,31 +2642,31 @@ mod tests {
         assert_eq!(dir.e_nameoff, 2048);
 
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFREG as u32),
+            RafsV6Dirent::file_type(crate::metadata::mode_bits(libc::S_IFREG)),
             EROFS_FILE_TYPE::EROFS_FT_REG_FILE as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFDIR as u32),
+            RafsV6Dirent::file_type(crate::metadata::mode_bits(libc::S_IFDIR)),
             EROFS_FILE_TYPE::EROFS_FT_DIR as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFCHR as u32),
+            RafsV6Dirent::file_type(crate::metadata::mode_bits(libc::S_IFCHR)),
             EROFS_FILE_TYPE::EROFS_FT_CHRDEV as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFBLK as u32),
+            RafsV6Dirent::file_type(crate::metadata::mode_bits(libc::S_IFBLK)),
             EROFS_FILE_TYPE::EROFS_FT_BLKDEV as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFIFO as u32),
+            RafsV6Dirent::file_type(crate::metadata::mode_bits(libc::S_IFIFO)),
             EROFS_FILE_TYPE::EROFS_FT_FIFO as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFSOCK as u32),
+            RafsV6Dirent::file_type(crate::metadata::mode_bits(libc::S_IFSOCK)),
             EROFS_FILE_TYPE::EROFS_FT_SOCK as u8
         );
         assert_eq!(
-            RafsV6Dirent::file_type(libc::S_IFLNK as u32),
+            RafsV6Dirent::file_type(crate::metadata::mode_bits(libc::S_IFLNK)),
             EROFS_FILE_TYPE::EROFS_FT_SYMLINK as u8
         );
     }

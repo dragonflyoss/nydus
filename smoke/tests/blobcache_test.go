@@ -28,13 +28,17 @@ func (a *BlobCacheTestSuite) compareTwoFiles(t *testing.T, left, right string) {
 
 	lf, err := os.Open(left)
 	require.NoError(t, err)
-	defer lf.Close()
+	defer func() {
+		_ = lf.Close()
+	}()
 	leftDigester, err := digest.FromReader(lf)
 	require.NoError(t, err)
 
 	rf, err := os.Open(right)
 	require.NoError(t, err)
-	defer rf.Close()
+	defer func() {
+		_ = rf.Close()
+	}()
 	rightDigester, err := digest.FromReader(rf)
 	require.NoError(t, err)
 

@@ -97,19 +97,22 @@ func DefaultRemote(ref string, insecure bool) (*remote.Remote, error) {
 // DefaultRemoteWithAuth creates a remote instance, it parses base64 encoded auth string
 // to communicate with remote registry.
 func DefaultRemoteWithAuth(ref string, insecure bool, auth string) (*remote.Remote, error) {
-	return withRemote(ref, insecure, func(_ string) (string, string, error) {
-		// Leave auth empty if no authorization be required
-		if strings.TrimSpace(auth) == "" {
-			return "", "", nil
-		}
+	username := ""
+	password := ""
+	if strings.TrimSpace(auth) != "" {
 		decoded, err := base64.StdEncoding.DecodeString(auth)
 		if err != nil {
-			return "", "", errors.Wrap(err, "Decode base64 encoded auth string")
+			return nil, errors.Wrap(err, "Decode base64 encoded auth string")
 		}
 		ary := strings.Split(string(decoded), ":")
 		if len(ary) != 2 {
-			return "", "", errors.New("Invalid base64 encoded auth string")
+			return nil, errors.New("Invalid base64 encoded auth string")
 		}
-		return ary[0], ary[1], nil
+		username = ary[0]
+		password = ary[1]
+	}
+
+	return withRemote(ref, insecure, func(_ string) (string, string, error) {
+		return username, password, nil
 	})
 }

@@ -234,22 +234,22 @@ impl TocEntry {
 
     /// Get access permission and file mode of the `TocEntry`.
     pub fn mode(&self) -> u32 {
-        let mut mode = 0;
+        let mut mode = 0u32;
         if self.is_dir() {
-            mode |= libc::S_IFDIR;
+            mode |= crate::mode_bits(libc::S_IFDIR);
         } else if self.is_reg() || self.is_hardlink() {
-            mode |= libc::S_IFREG;
+            mode |= crate::mode_bits(libc::S_IFREG);
         } else if self.is_symlink() {
-            mode |= libc::S_IFLNK;
+            mode |= crate::mode_bits(libc::S_IFLNK);
         } else if self.is_blockdev() {
-            mode |= libc::S_IFBLK;
+            mode |= crate::mode_bits(libc::S_IFBLK);
         } else if self.is_chardev() {
-            mode |= libc::S_IFCHR;
+            mode |= crate::mode_bits(libc::S_IFCHR);
         } else if self.is_fifo() {
-            mode |= libc::S_IFIFO;
+            mode |= crate::mode_bits(libc::S_IFIFO);
         }
 
-        self.mode & !libc::S_IFMT as u32 | mode as u32
+        self.mode & !crate::mode_bits(libc::S_IFMT) | mode
     }
 
     /// Get real device id associated with the `TocEntry`.
@@ -452,9 +452,9 @@ impl StargzBuilder {
                     flags: BlobChunkFlags::COMPRESSED,
                     compressed_size: 0,
                     uncompressed_size: uncompress_size as u32,
-                    compressed_offset: entry.offset as u64,
+                    compressed_offset: entry.offset,
                     uncompressed_offset: self.uncompressed_offset,
-                    file_offset: entry.chunk_offset as u64,
+                    file_offset: entry.chunk_offset,
                     index: 0,
                     crc32: 0,
                 });
@@ -656,7 +656,7 @@ impl StargzBuilder {
         inode.set_has_xattr(!xattrs.is_empty());
 
         let source = PathBuf::from("/");
-        let target = Node::generate_target(&path, &source);
+        let target = Node::generate_target(path, &source);
         let target_vec = Node::generate_target_vec(&target);
         let info = NodeInfo {
             explicit_uidgid: self.builder.explicit_uidgid,
@@ -997,7 +997,7 @@ mod tests {
         entry.toc_type = "dir".to_owned();
         assert!(entry.is_dir());
         assert!(entry.is_supported());
-        assert_eq!(entry.mode(), libc::S_IFDIR as u32);
+        assert_eq!(entry.mode(), crate::mode_bits(libc::S_IFDIR));
         assert_eq!(entry.rdev(), u32::MAX);
 
         entry.toc_type = "req".to_owned();
@@ -1005,20 +1005,20 @@ mod tests {
         entry.toc_type = "reg".to_owned();
         assert!(entry.is_reg());
         assert!(entry.is_supported());
-        assert_eq!(entry.mode(), libc::S_IFREG as u32);
+        assert_eq!(entry.mode(), crate::mode_bits(libc::S_IFREG));
         assert_eq!(entry.size(), 0x10);
 
         entry.toc_type = "symlink".to_owned();
         assert!(entry.is_symlink());
         assert!(entry.is_supported());
-        assert_eq!(entry.mode(), libc::S_IFLNK as u32);
+        assert_eq!(entry.mode(), crate::mode_bits(libc::S_IFLNK));
         assert_eq!(entry.symlink_link_path(), Path::new("link_name"));
         assert!(entry.normalize().is_ok());
 
         entry.toc_type = "hardlink".to_owned();
         assert!(entry.is_supported());
         assert!(entry.is_hardlink());
-        assert_eq!(entry.mode(), libc::S_IFREG as u32);
+        assert_eq!(entry.mode(), crate::mode_bits(libc::S_IFREG));
         assert_eq!(entry.hardlink_link_path(), Path::new("link_name"));
         assert!(entry.normalize().is_ok());
 
@@ -1032,18 +1032,18 @@ mod tests {
         entry.toc_type = "block".to_owned();
         assert!(entry.is_special());
         assert!(entry.is_blockdev());
-        assert_eq!(entry.mode(), libc::S_IFBLK as u32);
+        assert_eq!(entry.mode(), crate::mode_bits(libc::S_IFBLK));
 
         entry.toc_type = "char".to_owned();
         assert!(entry.is_special());
         assert!(entry.is_chardev());
-        assert_eq!(entry.mode(), libc::S_IFCHR as u32);
+        assert_eq!(entry.mode(), crate::mode_bits(libc::S_IFCHR));
         assert_ne!(entry.size(), 0x10);
 
         entry.toc_type = "fifo".to_owned();
         assert!(entry.is_fifo());
         assert!(entry.is_special());
-        assert_eq!(entry.mode(), libc::S_IFIFO as u32);
+        assert_eq!(entry.mode(), crate::mode_bits(libc::S_IFIFO));
         assert_eq!(entry.rdev(), 65313);
 
         assert_eq!(entry.name().unwrap().to_str(), Some("all-entry-type.tar"));
@@ -1051,7 +1051,7 @@ mod tests {
         assert_eq!(entry.name().unwrap().to_str(), Some("/"));
         assert_ne!(entry.path(), Path::new("all-entry-type.tar"));
 
-        assert_eq!(entry.block_id().unwrap().data, [0xaa as u8; 32]);
+        assert_eq!(entry.block_id().unwrap().data, [0xaa_u8; 32]);
 
         entry.name = PathBuf::from("");
         assert!(entry.normalize().is_err());

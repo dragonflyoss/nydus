@@ -67,6 +67,12 @@ pub trait Builder {
     ) -> Result<BuildOutput>;
 }
 
+#[allow(clippy::useless_conversion)]
+#[inline]
+pub(crate) fn mode_bits(mode: libc::mode_t) -> u32 {
+    u32::from(mode)
+}
+
 fn build_bootstrap(
     ctx: &mut BuildContext,
     bootstrap_mgr: &mut BootstrapManager,
@@ -332,7 +338,7 @@ impl TarBuilder {
         let name = &target_paths[target_paths.len() - 1];
         let mut inode = InodeWrapper::new(self.version);
         inode.set_ino(ino);
-        inode.set_mode(0o755 | libc::S_IFDIR as u32);
+        inode.set_mode(0o755 | crate::mode_bits(libc::S_IFDIR));
         inode.set_nlink(2);
         inode.set_name_size(name.len());
         inode.set_rdev(u32::MAX);
@@ -379,18 +385,18 @@ mod tests {
         let builder = TarBuilder::new(true, 0, RafsVersion::V6);
 
         let path = Path::new("/stargz.index.json");
-        assert!(builder.is_stargz_special_files(&path));
+        assert!(builder.is_stargz_special_files(path));
         let path = Path::new("/.prefetch.landmark");
-        assert!(builder.is_stargz_special_files(&path));
+        assert!(builder.is_stargz_special_files(path));
         let path = Path::new("/.no.prefetch.landmark");
-        assert!(builder.is_stargz_special_files(&path));
+        assert!(builder.is_stargz_special_files(path));
 
         let path = Path::new("/no.prefetch.landmark");
-        assert!(!builder.is_stargz_special_files(&path));
+        assert!(!builder.is_stargz_special_files(path));
         let path = Path::new("/prefetch.landmark");
-        assert!(!builder.is_stargz_special_files(&path));
+        assert!(!builder.is_stargz_special_files(path));
         let path = Path::new("/tar.index.json");
-        assert!(!builder.is_stargz_special_files(&path));
+        assert!(!builder.is_stargz_special_files(path));
     }
 
     #[test]

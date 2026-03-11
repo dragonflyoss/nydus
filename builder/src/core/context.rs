@@ -452,7 +452,7 @@ impl BlobCacheGenerator {
 
         guard.seek(std::io::SeekFrom::Start(chunk_info.uncompressed_offset()))?;
         guard
-            .write_all(&chunk_data)
+            .write_all(chunk_data)
             .context("failed to write blob cache")?;
         Ok(())
     }
@@ -1002,7 +1002,7 @@ impl BlobManager {
                 self.add_blob(blob_ctx);
             }
         }
-        Ok((blob_idx as u32, &mut self.blobs[blob_idx as usize]))
+        Ok((blob_idx as u32, &mut self.blobs[blob_idx]))
     }
 
     /// Get the current blob object.
@@ -1668,5 +1668,90 @@ mod tests {
         let blob_ctx = blob_ctx.unwrap();
         assert_eq!(blob_ctx.uncompressed_blob_size, 16);
         assert!(blob_ctx.blob_meta_info_enabled);
+    }
+
+    #[test]
+    fn test_conversion_type_from_str() {
+        assert_eq!(
+            ConversionType::from_str("dir-rafs").unwrap(),
+            ConversionType::DirectoryToRafs
+        );
+        assert_eq!(
+            ConversionType::from_str("dir-stargz").unwrap(),
+            ConversionType::DirectoryToStargz
+        );
+        assert_eq!(
+            ConversionType::from_str("targz-rafs").unwrap(),
+            ConversionType::TargzToRafs
+        );
+        assert_eq!(
+            ConversionType::from_str("tar-rafs").unwrap(),
+            ConversionType::TarToRafs
+        );
+        assert_eq!(
+            ConversionType::from_str("estargz-ref").unwrap(),
+            ConversionType::EStargzToRef
+        );
+        // backward compat aliases
+        assert_eq!(
+            ConversionType::from_str("directory").unwrap(),
+            ConversionType::DirectoryToRafs
+        );
+        assert_eq!(
+            ConversionType::from_str("stargz_index").unwrap(),
+            ConversionType::EStargzIndexToRef
+        );
+        // invalid
+        assert!(ConversionType::from_str("invalid-type").is_err());
+    }
+
+    #[test]
+    fn test_conversion_type_is_to_ref() {
+        assert!(ConversionType::EStargzToRef.is_to_ref());
+        assert!(ConversionType::EStargzIndexToRef.is_to_ref());
+        assert!(ConversionType::TargzToRef.is_to_ref());
+        assert!(ConversionType::TarToRef.is_to_ref());
+        assert!(ConversionType::TarToTarfs.is_to_ref());
+        assert!(!ConversionType::DirectoryToRafs.is_to_ref());
+        assert!(!ConversionType::TargzToRafs.is_to_ref());
+        assert!(!ConversionType::TarToRafs.is_to_ref());
+    }
+
+    #[test]
+    fn test_conversion_type_display() {
+        assert_eq!(ConversionType::DirectoryToRafs.to_string(), "dir-rafs");
+        assert_eq!(ConversionType::DirectoryToStargz.to_string(), "dir-stargz");
+        assert_eq!(ConversionType::TargzToRafs.to_string(), "targz-rafs");
+        assert_eq!(ConversionType::TarToRafs.to_string(), "tar-rafs");
+        assert_eq!(ConversionType::EStargzToRef.to_string(), "estargz-ref");
+        assert_eq!(ConversionType::TarToTarfs.to_string(), "tar-tarfs");
+    }
+
+    #[test]
+    fn test_artifact_storage_default() {
+        let storage = ArtifactStorage::default();
+        // Default is SingleFile with empty path
+        assert_eq!(storage.display().to_string(), "");
+    }
+
+    #[test]
+    fn test_artifact_storage_add_suffix_single_file() {
+        let mut storage = ArtifactStorage::SingleFile(PathBuf::from("/tmp/blob"));
+        storage.add_suffix("data");
+        assert_eq!(storage.display().to_string(), "/tmp/blob.data");
+    }
+
+    #[test]
+    fn test_noop_artifact_writer() {
+        let mut writer = NoopArtifactWriter::default();
+        assert_eq!(writer.pos().unwrap(), 0);
+        let n = writer.write(b"hello").unwrap();
+        assert_eq!(n, 5);
+        assert_eq!(writer.pos().unwrap(), 5);
+        writer.write_all(b"world!").unwrap();
+        assert_eq!(writer.pos().unwrap(), 11);
+        assert!(writer.flush().is_ok());
+        assert!(writer.finalize(None).is_ok());
+        assert_eq!(writer.pos().unwrap(), 11);
     }
 }

@@ -93,6 +93,7 @@ type NydusdConfig struct {
 type Nydusd struct {
 	client *http.Client
 	cmd    *exec.Cmd
+	waitCh chan error
 	NydusdConfig
 }
 
@@ -195,7 +196,7 @@ func newNydusd(conf NydusdConfig) (*Nydusd, error) {
 		"--apisock",
 		conf.APISockPath,
 		"--log-level",
-		"info",
+		"error",
 		"--thread-num",
 		"10",
 	}
@@ -308,18 +309,41 @@ func NewNydusdWithContext(ctx Context) (*Nydusd, error) {
 }
 
 func (nydusd *Nydusd) Run() (chan error, error) {
-	errChan := make(chan error)
+	errChan := make(chan error, 1)
 	if err := nydusd.cmd.Start(); err != nil {
 		return errChan, err
 	}
+	nydusd.waitCh = errChan
 
 	go func() {
 		errChan <- nydusd.cmd.Wait()
+		close(errChan)
 	}()
 
 	time.Sleep(2 * time.Second)
 
 	return errChan, nil
+}
+
+func (nydusd *Nydusd) waitForExit(timeout time.Duration) error {
+	if nydusd.waitCh == nil {
+		return nil
+	}
+
+	select {
+	case err, ok := <-nydusd.waitCh:
+		nydusd.waitCh = nil
+		if !ok {
+			return nil
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil
+		}
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("timeout to wait nydusd exit")
+	}
 }
 
 func (nydusd *Nydusd) Mount() error {
@@ -369,11 +393,17 @@ func (nydusd *Nydusd) Umount() error {
 	if _, err := os.Stat(nydusd.MountPath); err == nil {
 		cmd := exec.Command("umount", "-l", nydusd.MountPath)
 		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	if nydusd.waitCh == nil {
+		return nil
+	}
+
+	return nydusd.waitForExit(10 * time.Second)
 }
 
 func (nydusd *Nydusd) UmountByAPI(subPath string) error {
@@ -746,6 +776,8 @@ func Verify(t *testing.T, ctx Context, expectedFileTree map[string]*File) {
 	require.NoError(t, err)
 	err = nydusd.Mount()
 	require.NoError(t, err)
-	defer nydusd.Umount()
+	defer func() {
+		require.NoError(t, nydusd.Umount())
+	}()
 	nydusd.Verify(t, expectedFileTree)
 }

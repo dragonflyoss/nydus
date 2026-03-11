@@ -98,7 +98,9 @@ func (c *HotUpgradeTestSuite) TestHotUpgrade(t *testing.T) {
 	ss, err := supervisor.NewSupervisorSet(filepath.Join(ctx.Env.WorkDir))
 	require.NoError(t, err)
 	supervisor := ss.NewSupervisor("nydusd-supervisor")
-	defer ss.DestroySupervisor("nydusd-supervisor")
+	defer func() {
+		_ = ss.DestroySupervisor("nydusd-supervisor")
+	}()
 
 	// Start old nydusd to mount rootfs
 	oldNydusd := c.newNydusd(t, ctx, bootstrap, "old", false)
