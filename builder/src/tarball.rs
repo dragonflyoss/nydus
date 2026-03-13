@@ -505,15 +505,15 @@ impl<'a> TarballTreeBuilder<'a> {
             .mode()
             .context("tarball: failed to get permission/mode from tar entry")?;
         let ty = match header.entry_type() {
-            EntryType::Regular | EntryType::Link => libc::S_IFREG,
-            EntryType::Directory => libc::S_IFDIR,
-            EntryType::Symlink => libc::S_IFLNK,
-            EntryType::Block => libc::S_IFBLK,
-            EntryType::Char => libc::S_IFCHR,
-            EntryType::Fifo => libc::S_IFIFO,
+            EntryType::Regular | EntryType::Link => libc::S_IFREG as u32,
+            EntryType::Directory => libc::S_IFDIR as u32,
+            EntryType::Symlink => libc::S_IFLNK as u32,
+            EntryType::Block => libc::S_IFBLK as u32,
+            EntryType::Char => libc::S_IFCHR as u32,
+            EntryType::Fifo => libc::S_IFIFO as u32,
             _ => bail!("tarball: unsupported tar entry type"),
         };
-        Ok((mode & !libc::S_IFMT as u32) | ty as u32)
+        Ok((mode & !(libc::S_IFMT as u32)) | ty)
     }
 
     fn get_file_name(path: &Path) -> Result<&OsStr> {

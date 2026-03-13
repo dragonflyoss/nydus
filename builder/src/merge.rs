@@ -140,7 +140,7 @@ impl Merger {
                     .context(format!("load parent bootstrap {:?}", parent_bootstrap_path))?;
             let blobs = rs.superblock.get_blob_infos();
             for blob in &blobs {
-                let blob_ctx = BlobContext::from(ctx, &blob, ChunkSource::Parent)?;
+                let blob_ctx = BlobContext::from(ctx, blob, ChunkSource::Parent)?;
                 blob_idx_map.insert(blob_ctx.blob_id.clone(), blob_mgr.len());
                 blob_mgr.add_blob(blob_ctx);
             }
@@ -188,7 +188,7 @@ impl Merger {
             let mut parent_blob_added = false;
             let blobs = &rs.superblock.get_blob_infos();
             for blob in blobs {
-                let mut blob_ctx = BlobContext::from(ctx, &blob, ChunkSource::Parent)?;
+                let mut blob_ctx = BlobContext::from(ctx, blob, ChunkSource::Parent)?;
                 if let Some(chunk_size) = chunk_size {
                     ensure!(
                         chunk_size == blob_ctx.chunk_size,

@@ -1,12 +1,15 @@
 package viewer
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
@@ -19,6 +22,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func buildBootstrapArchive(t *testing.T, name string, data []byte) io.ReadCloser {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tarWriter := tar.NewWriter(gz)
+	require.NoError(t, tarWriter.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(data))}))
+	_, err := tarWriter.Write(data)
+	require.NoError(t, err)
+	require.NoError(t, tarWriter.Close())
+	require.NoError(t, gz.Close())
+	return io.NopCloser(bytes.NewReader(buf.Bytes()))
+}
 
 func TestNewFsViewer(t *testing.T) {
 	var remoter = remote.Remote{}
@@ -100,19 +116,17 @@ func TestGetBootstrapFile(t *testing.T) {
 	})
 
 	t.Run("Run normal", func(t *testing.T) {
-		var buf bytes.Buffer
+		target := filepath.Join(t.TempDir(), "nydus_bootstrap")
 		pullNydusBootstrapPatches := gomonkey.ApplyMethod(fsViwer.Parser, "PullNydusBootstrap", func(*parser.Parser, context.Context, *parser.Image) (io.ReadCloser, error) {
-			return io.NopCloser(&buf), nil
+			return buildBootstrapArchive(t, utils.BootstrapFileNameInLayer, []byte("bootstrap-data")), nil
 		})
 		defer pullNydusBootstrapPatches.Reset()
-
-		unpackPatches := gomonkey.ApplyFunc(utils.UnpackFile, func(io.Reader, string, string) error {
-			return nil
-		})
-		defer unpackPatches.Reset()
 		image := &parser.Image{}
-		err := fsViwer.getBootstrapFile(context.Background(), image, "", "")
+		err := fsViwer.getBootstrapFile(context.Background(), image, utils.BootstrapFileNameInLayer, target)
 		assert.NoError(t, err)
+		content, err := os.ReadFile(target)
+		require.NoError(t, err)
+		require.Equal(t, "bootstrap-data", string(content))
 	})
 }
 

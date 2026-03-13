@@ -173,7 +173,7 @@ pub trait FsService: Send + Sync {
         self.get_vfs()
             .restore_mount(backend, vfs_index, &cmd.mountpoint)
             .map_err(VfsError::RestoreMount)?;
-        self.backend_collection().add(&cmd.mountpoint, &cmd)?;
+        self.backend_collection().add(&cmd.mountpoint, cmd)?;
         info!("backend fs restored at {}", cmd.mountpoint);
         Ok(())
     }
@@ -427,10 +427,40 @@ mod tests {
         assert!(files.is_ok(), "failed to verify prefetch files");
         assert_eq!(1, files.unwrap().unwrap().len());
 
+        let files = validate_prefetch_file_list(&None).unwrap();
+        assert!(files.is_none());
+
         assert!(
             validate_prefetch_file_list(&Some(vec!["etc/passwd".to_string()])).is_err(),
             "should not pass verify"
         );
+
+        assert!(validate_prefetch_file_list(&Some(vec![
+            "/etc/passwd".to_string(),
+            "relative/path".to_string(),
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn it_should_add_passthrough_backend_and_override() {
+        let mut col: FsBackendCollection = Default::default();
+        let cmd = FsBackendMountCmd {
+            fs_type: FsBackendType::PassthroughFs,
+            config: String::new(),
+            mountpoint: "/tmp/mount".to_string(),
+            source: "/tmp/source".to_string(),
+            prefetch_files: None,
+        };
+        assert!(col.add("test", &cmd).is_ok());
+        assert_eq!(col.0.len(), 1);
+        assert!(col.0.get("test").unwrap().config.is_none());
+
+        assert!(col.add("test", &cmd).is_ok());
+        assert_eq!(col.0.len(), 1);
+
+        col.del("missing");
+        assert_eq!(col.0.len(), 1);
     }
 
     #[test]

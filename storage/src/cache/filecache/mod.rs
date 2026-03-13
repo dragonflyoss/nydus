@@ -868,3 +868,53 @@ pub mod blob_cache_tests {
        }
     */
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_blob_raw_file_suffix() {
+        assert_eq!(BLOB_RAW_FILE_SUFFIX, ".blob.raw");
+        assert!(BLOB_RAW_FILE_SUFFIX.starts_with('.'));
+        assert!(BLOB_RAW_FILE_SUFFIX.contains("blob"));
+    }
+
+    #[test]
+    fn test_blob_data_file_suffix() {
+        assert_eq!(BLOB_DATA_FILE_SUFFIX, ".blob.data");
+        assert!(BLOB_DATA_FILE_SUFFIX.starts_with('.'));
+        assert!(BLOB_DATA_FILE_SUFFIX.contains("blob"));
+    }
+
+    #[test]
+    fn test_blob_suffixes_are_distinct() {
+        assert_ne!(BLOB_RAW_FILE_SUFFIX, BLOB_DATA_FILE_SUFFIX);
+    }
+
+    #[test]
+    fn test_blob_suffix_path_composition() {
+        let blob_id = "teststestblob123";
+        let work_dir = "/tmp/cache";
+        let raw_path = format!("{}/{}{}", work_dir, blob_id, BLOB_RAW_FILE_SUFFIX);
+        let data_path = format!("{}/{}{}", work_dir, blob_id, BLOB_DATA_FILE_SUFFIX);
+        assert!(raw_path.ends_with(BLOB_RAW_FILE_SUFFIX));
+        assert!(data_path.ends_with(BLOB_DATA_FILE_SUFFIX));
+        assert!(raw_path.contains(blob_id));
+        assert!(data_path.contains(blob_id));
+        assert_ne!(raw_path, data_path);
+    }
+
+    #[test]
+    fn test_filecache_config_work_dir_file_path_is_invalid() {
+        use nydus_api::FileCacheConfig;
+        use vmm_sys_util::tempfile::TempFile;
+
+        let tmp_file = TempFile::new().unwrap();
+        let file_path = tmp_file.as_path().to_path_buf();
+        let mut config = FileCacheConfig::default();
+        config.work_dir = file_path.to_str().unwrap().to_owned();
+        // A regular file is not a valid work_dir (must be a directory).
+        assert!(config.get_work_dir().is_err());
+    }
+}

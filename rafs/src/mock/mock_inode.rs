@@ -101,7 +101,7 @@ impl RafsInode for MockInode {
             size: self.i_size,
             blocks: self.i_blocks,
             mode: self.i_mode,
-            nlink: self.i_nlink as u32,
+            nlink: self.i_nlink,
             blksize: RAFS_ATTR_BLOCK_SIZE,
             rdev: self.i_rdev,
             ..Default::default()
@@ -374,14 +374,14 @@ mod tests {
         assert_eq!(ent.attr, node.get_attr().into());
 
         assert!(node.get_symlink().is_err());
-        assert_eq!(node.get_symlink_size(), 0 as u16);
+        assert_eq!(node.get_symlink_size(), 0_u16);
 
         assert!(node.get_child_by_name(OsStr::new("child1")).is_ok());
         assert!(node.get_child_by_index(0).is_ok());
         assert!(node.get_child_by_index(1).is_ok());
-        assert_eq!(node.get_child_count(), 2 as u32);
-        assert_eq!(node.get_child_index().unwrap(), 2 as u32);
-        assert_eq!(node.get_chunk_count(), 2 as u32);
+        assert_eq!(node.get_child_count(), 2_u32);
+        assert_eq!(node.get_child_index().unwrap(), 2_u32);
+        assert_eq!(node.get_chunk_count(), 2_u32);
         assert!(node.has_xattr());
         assert_eq!(
             node.get_xattr(OsStr::new("attr2")).unwrap().unwrap(),

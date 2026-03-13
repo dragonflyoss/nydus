@@ -415,7 +415,7 @@ impl RafsV6SuperBlockExt {
     pub fn load(&mut self, r: &mut RafsIoReader) -> Result<()> {
         r.seek_to_offset((EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as u64)?;
         r.read_exact(self.as_mut())?;
-        r.seek_to_offset(EROFS_BLOCK_SIZE_4096 as u64)?;
+        r.seek_to_offset(EROFS_BLOCK_SIZE_4096)?;
 
         Ok(())
     }
@@ -621,7 +621,7 @@ impl RafsV6SuperBlockExt {
 impl RafsStore for RafsV6SuperBlockExt {
     fn store(&self, w: &mut dyn RafsIoWrite) -> Result<usize> {
         w.write_all(self.as_ref())?;
-        w.seek_offset(EROFS_BLOCK_SIZE_4096 as u64)?;
+        w.seek_offset(EROFS_BLOCK_SIZE_4096)?;
 
         Ok(EROFS_BLOCK_SIZE_4096 as usize - (EROFS_SUPER_OFFSET + EROFS_SUPER_BLOCK_SIZE) as usize)
     }
@@ -1060,7 +1060,7 @@ pub fn new_v6_inode(
     i.set_data_layout(datalayout);
     i.set_xattr_inline_count(xattr_inline_count);
     if inode.is_special() {
-        i.set_rdev(inode.rdev() as u32);
+        i.set_rdev(inode.rdev());
     }
 
     i

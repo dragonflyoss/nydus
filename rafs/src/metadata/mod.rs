@@ -1263,7 +1263,7 @@ mod tests {
     #[test]
     fn test_rafs_super_config_check_compatibility_fail() {
         let meta1 = get_meta(
-            1024 as u32,
+            1024_u32,
             true,
             true,
             RafsSuperFlags::HASH_BLAKE3,
@@ -1272,7 +1272,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta2 = get_meta(
-            2048 as u32,
+            2048_u32,
             true,
             true,
             RafsSuperFlags::HASH_BLAKE3,
@@ -1281,7 +1281,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta3 = get_meta(
-            1024 as u32,
+            1024_u32,
             false,
             true,
             RafsSuperFlags::HASH_BLAKE3,
@@ -1290,7 +1290,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta4 = get_meta(
-            1024 as u32,
+            1024_u32,
             true,
             false,
             RafsSuperFlags::HASH_BLAKE3,
@@ -1299,7 +1299,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta5 = get_meta(
-            1024 as u32,
+            1024_u32,
             true,
             true,
             RafsSuperFlags::HASH_SHA256,
@@ -1308,7 +1308,7 @@ mod tests {
             RAFS_SUPER_VERSION_V5,
         );
         let meta6 = get_meta(
-            1024 as u32,
+            1024_u32,
             true,
             true,
             RafsSuperFlags::HASH_BLAKE3,

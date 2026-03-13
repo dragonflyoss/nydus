@@ -229,9 +229,14 @@ mod tests {
         assert!(matches!(spec, WhiteoutSpec::Oci));
 
         assert!(WhiteoutSpec::from_str("oci").is_ok());
+        assert!(WhiteoutSpec::from_str("OCI").is_ok());
         assert!(WhiteoutSpec::from_str("overlayfs").is_ok());
         assert!(WhiteoutSpec::from_str("none").is_ok());
         assert!(WhiteoutSpec::from_str("foo").is_err());
+
+        assert_eq!(WhiteoutSpec::Oci.to_string(), "oci");
+        assert_eq!(WhiteoutSpec::Overlayfs.to_string(), "overlayfs");
+        assert_eq!(WhiteoutSpec::None.to_string(), "none");
     }
 
     #[test]
@@ -255,6 +260,10 @@ mod tests {
         assert!(t1.is_lower_layer());
         assert!(!t2.is_lower_layer());
         assert!(!t3.is_lower_layer());
+
+        assert_eq!(t1.to_string(), "LOWER");
+        assert_eq!(t2.to_string(), "ADDED");
+        assert_eq!(t3.to_string(), "MODIFIED");
     }
 
     #[test]

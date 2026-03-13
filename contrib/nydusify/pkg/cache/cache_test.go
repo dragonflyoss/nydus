@@ -17,6 +17,23 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
+func TestGetReferenceBlobs(t *testing.T) {
+	record := &Record{
+		NydusBootstrapDesc: &ocispec.Descriptor{
+			Annotations: map[string]string{
+				utils.LayerAnnotationNydusReferenceBlobIDs: `["blob1","blob2"]`,
+			},
+		},
+	}
+	assert.Equal(t, []string{"blob1", "blob2"}, record.GetReferenceBlobs())
+
+	record.NydusBootstrapDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs] = `not-json`
+	assert.Empty(t, record.GetReferenceBlobs())
+
+	record.NydusBootstrapDesc.Annotations = map[string]string{}
+	assert.Empty(t, record.GetReferenceBlobs())
+}
+
 func makeRecord(id int64, hashBlob bool) *Record {
 	var blobDesc *ocispec.Descriptor
 	idStr := strconv.FormatInt(id, 10)
@@ -134,4 +151,83 @@ func testWithBackend(t *testing.T, _backend backend.Backend) {
 func TestCache(t *testing.T) {
 	testWithBackend(t, &backend.Registry{})
 	testWithBackend(t, &backend.OSSBackend{})
+}
+
+func TestLayerToRecord(t *testing.T) {
+	cache, err := New(nil, Opt{Backend: &backend.Registry{}, FsVersion: "6"})
+	assert.NoError(t, err)
+
+	assert.Nil(t, cache.layerToRecord(&ocispec.Descriptor{}))
+
+	referenceLayer := &ocispec.Descriptor{
+		MediaType: utils.MediaTypeNydusBlob,
+		Digest:    digest.FromString("reference-blob"),
+		Size:      128,
+		Annotations: map[string]string{
+			utils.LayerAnnotationNydusBlob: "true",
+		},
+	}
+	referenceRecord := cache.layerToRecord(referenceLayer)
+	assert.NotNil(t, referenceRecord)
+	assert.Nil(t, referenceRecord.NydusBootstrapDesc)
+	assert.Equal(t, referenceLayer.Digest, referenceRecord.NydusBlobDesc.Digest)
+
+	invalidChainLayer := makeBootstrapLayer(1, false)
+	invalidChainLayer.Annotations[utils.LayerAnnotationNydusSourceChainID] = "bad-digest"
+	assert.Nil(t, cache.layerToRecord(&invalidChainLayer))
+
+	missingDiffIDLayer := makeBootstrapLayer(2, false)
+	delete(missingDiffIDLayer.Annotations, utils.LayerAnnotationUncompressed)
+	assert.Nil(t, cache.layerToRecord(&missingDiffIDLayer))
+
+	invalidBlobDigestLayer := makeBootstrapLayer(3, true)
+	invalidBlobDigestLayer.Annotations[utils.LayerAnnotationNydusBlobDigest] = "bad-digest"
+	assert.Nil(t, cache.layerToRecord(&invalidBlobDigestLayer))
+
+	invalidBlobSizeLayer := makeBootstrapLayer(4, true)
+	invalidBlobSizeLayer.Annotations[utils.LayerAnnotationNydusBlobSize] = "invalid"
+	assert.Nil(t, cache.layerToRecord(&invalidBlobSizeLayer))
+
+	blobLayer := makeBlobLayer(5)
+	record := cache.layerToRecord(&blobLayer)
+	assert.NotNil(t, record)
+	assert.Equal(t, digest.FromString("chain-5"), record.SourceChainID)
+	assert.Equal(t, blobLayer.Digest, record.NydusBlobDesc.Digest)
+	assert.Nil(t, record.NydusBootstrapDesc)
+}
+
+func TestRecordToLayer(t *testing.T) {
+	record := makeRecord(9, true)
+	record.NydusBootstrapDesc.Annotations = map[string]string{
+		utils.LayerAnnotationNydusReferenceBlobIDs: `["ref-1"]`,
+	}
+
+	registryCache, err := New(nil, Opt{Backend: &backend.Registry{}, FsVersion: "6"})
+	assert.NoError(t, err)
+	bootstrapDesc, blobDesc := registryCache.recordToLayer(record)
+	assert.NotNil(t, bootstrapDesc)
+	assert.NotNil(t, blobDesc)
+	assert.Equal(t, record.SourceChainID.String(), bootstrapDesc.Annotations[utils.LayerAnnotationNydusSourceChainID])
+	assert.Equal(t, `["ref-1"]`, bootstrapDesc.Annotations[utils.LayerAnnotationNydusReferenceBlobIDs])
+	assert.Equal(t, record.NydusBlobDesc.Digest, blobDesc.Digest)
+
+	ossCache, err := New(nil, Opt{Backend: &backend.OSSBackend{}, FsVersion: "6", DockerV2Format: true})
+	assert.NoError(t, err)
+	bootstrapDesc, blobDesc = ossCache.recordToLayer(record)
+	assert.NotNil(t, bootstrapDesc)
+	assert.Nil(t, blobDesc)
+	assert.Equal(t, record.NydusBlobDesc.Digest.String(), bootstrapDesc.Annotations[utils.LayerAnnotationNydusBlobDigest])
+	assert.Equal(t, fmt.Sprintf("%d", record.NydusBlobDesc.Size), bootstrapDesc.Annotations[utils.LayerAnnotationNydusBlobSize])
+
+	referenceRecord := &Record{
+		NydusBlobDesc: &ocispec.Descriptor{Digest: digest.FromString("ref-only"), Size: 10},
+	}
+	bootstrapDesc, blobDesc = registryCache.recordToLayer(referenceRecord)
+	assert.Nil(t, bootstrapDesc)
+	assert.NotNil(t, blobDesc)
+	assert.Equal(t, utils.MediaTypeNydusBlob, blobDesc.MediaType)
+
+	bootstrapDesc, blobDesc = ossCache.recordToLayer(referenceRecord)
+	assert.Nil(t, bootstrapDesc)
+	assert.Nil(t, blobDesc)
 }

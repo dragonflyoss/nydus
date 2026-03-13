@@ -90,6 +90,8 @@ type SourceBackendConfig struct {
 	WorkDir string `json:"work_dir"`
 }
 
+var defaultRemoteFunc = pkgPvd.DefaultRemote
+
 func Convert(ctx context.Context, opt Opt) error {
 	if opt.SourceBackendType == "modelfile" {
 		return convertModelFile(ctx, opt)
@@ -443,7 +445,7 @@ func pushManifest(
 		return errors.Wrap(err, "make config desc")
 	}
 
-	remoter, err := pkgPvd.DefaultRemote(opt.Target, opt.TargetInsecure)
+	remoter, err := defaultRemoteFunc(opt.Target, opt.TargetInsecure)
 	if err != nil {
 		return errors.Wrap(err, "create remote")
 	}
@@ -537,7 +539,7 @@ func pushManifest(
 }
 
 func getSourceManifestSubject(ctx context.Context, sourceRef string, inscure, plainHTTP bool) (*ocispec.Descriptor, error) {
-	remoter, err := pkgPvd.DefaultRemote(sourceRef, inscure)
+	remoter, err := defaultRemoteFunc(sourceRef, inscure)
 	if err != nil {
 		return nil, errors.Wrap(err, "create remote")
 	}

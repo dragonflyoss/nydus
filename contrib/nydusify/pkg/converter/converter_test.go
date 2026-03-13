@@ -13,6 +13,7 @@ import (
 	modelspec "github.com/CloudNativeAI/model-spec/specs-go/v1"
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/remotes"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -24,6 +25,26 @@ import (
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external"
 )
+
+type testResolver struct {
+	resolve func(context.Context, string) (string, ocispec.Descriptor, error)
+}
+
+func (r *testResolver) Resolve(ctx context.Context, ref string) (string, ocispec.Descriptor, error) {
+	return r.resolve(ctx, ref)
+}
+
+func (r *testResolver) Fetcher(context.Context, string) (remotes.Fetcher, error) {
+	return nil, errors.New("fetcher not implemented")
+}
+
+func (r *testResolver) Pusher(context.Context, string) (remotes.Pusher, error) {
+	return nil, errors.New("pusher not implemented")
+}
+
+func (r *testResolver) PusherInChunked(context.Context, string) (remotes.PusherInChunked, error) {
+	return nil, errors.New("chunked pusher not implemented")
+}
 
 func TestConvert(t *testing.T) {
 	t.Run("convert modelfile", func(t *testing.T) {
@@ -562,41 +583,50 @@ func TestPushManifest(t *testing.T) {
 }
 
 func TestGetSourceManifestSubject(t *testing.T) {
-	remoter := &remote.Remote{}
+	oldDefaultRemoteFunc := defaultRemoteFunc
+	defer func() {
+		defaultRemoteFunc = oldDefaultRemoteFunc
+	}()
+
 	t.Run("Run default remote failed", func(t *testing.T) {
-		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
+		defaultRemoteFunc = func(string, bool) (*remote.Remote, error) {
 			return nil, errors.New("default remote failed mock error")
-		})
-		defer defaultRemotePatches.Reset()
+		}
 		_, err := getSourceManifestSubject(context.Background(), "", false, false)
 		assert.Error(t, err)
 	})
 
 	t.Run("Run resolve failed", func(t *testing.T) {
-		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
-			return remoter, nil
+		remoter, err := remote.New("docker.io/library/busybox:latest", func(bool) remotes.Resolver {
+			return &testResolver{
+				resolve: func(context.Context, string) (string, ocispec.Descriptor, error) {
+					return "", ocispec.Descriptor{}, errors.New("resolve failed mock error timeout")
+				},
+			}
 		})
-		defer defaultRemotePatches.Reset()
+		assert.NoError(t, err)
 
-		remoterReolvePatches := gomonkey.ApplyMethod(remoter, "Resolve", func(*remote.Remote, context.Context) (*ocispec.Descriptor, error) {
-			return nil, errors.New("resolve failed mock error timeout")
-		})
-		defer remoterReolvePatches.Reset()
-		_, err := getSourceManifestSubject(context.Background(), "", false, false)
+		defaultRemoteFunc = func(string, bool) (*remote.Remote, error) {
+			return remoter, nil
+		}
+		_, err = getSourceManifestSubject(context.Background(), "", false, false)
 		assert.Error(t, err)
 	})
 
 	t.Run("Run normal", func(t *testing.T) {
-		defaultRemotePatches := gomonkey.ApplyFunc(pkgPvd.DefaultRemote, func(string, bool) (*remote.Remote, error) {
-			return remoter, nil
+		remoter, err := remote.New("docker.io/library/busybox:latest", func(bool) remotes.Resolver {
+			return &testResolver{
+				resolve: func(context.Context, string) (string, ocispec.Descriptor, error) {
+					return "docker.io/library/busybox:latest", ocispec.Descriptor{}, nil
+				},
+			}
 		})
-		defer defaultRemotePatches.Reset()
+		assert.NoError(t, err)
 
-		remoterReolvePatches := gomonkey.ApplyMethod(remoter, "Resolve", func(*remote.Remote, context.Context) (*ocispec.Descriptor, error) {
-			return &ocispec.Descriptor{}, nil
-		})
-		defer remoterReolvePatches.Reset()
-		desc, err := getSourceManifestSubject(context.Background(), "", false, false)
+		defaultRemoteFunc = func(string, bool) (*remote.Remote, error) {
+			return remoter, nil
+		}
+		desc, err := getSourceManifestSubject(context.Background(), "docker.io/library/busybox:latest", false, false)
 		assert.NoError(t, err)
 		assert.NotNil(t, desc)
 	})
