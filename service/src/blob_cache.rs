@@ -814,6 +814,120 @@ mod tests {
     }
 
     #[test]
+    fn test_get_blob_info() {
+        let tmpdir = TempDir::new().unwrap();
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+        let data_blob_id =
+            "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef";
+
+        let config = r#"
+        {
+            "type": "bootstrap",
+            "id": "rafs-v6",
+            "domain_id": "domain2",
+            "config_v2": {
+                "version": 2,
+                "id": "factory1",
+                "backend": {
+                    "type": "localfs",
+                    "localfs": {
+                        "dir": "/tmp/nydus"
+                    }
+                },
+                "cache": {
+                    "type": "fscache",
+                    "fscache": {
+                        "work_dir": "/tmp/nydus"
+                    }
+                },
+                "metadata_path": "RAFS_V5"
+            }
+          }"#;
+        let content = config
+            .replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap())
+            .replace("RAFS_V5", &source_path.display().to_string());
+        let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(entry.prepare_configuration_info());
+
+        let mgr = BlobCacheMgr::new();
+        mgr.add_blob_entry(&entry).unwrap();
+
+        // Query all blobs in domain2 — should return 1 meta + 1 data blob.
+        let param_all = BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: String::new(),
+        };
+        let info = mgr.get_blob_info(&param_all);
+        assert_eq!(info.blobs.len(), 2);
+
+        let meta = info.blobs.iter().find(|b| b.blob_type == "bootstrap");
+        let data = info.blobs.iter().find(|b| b.blob_type == "datablob");
+        assert!(meta.is_some());
+        assert!(data.is_some());
+
+        let meta = meta.unwrap();
+        assert_eq!(meta.blob_id, "rafs-v6");
+        assert_eq!(meta.domain_id, "domain2");
+        assert_eq!(meta.ref_count, 0);
+
+        let data = data.unwrap();
+        assert_eq!(data.blob_id, data_blob_id);
+        assert_eq!(data.domain_id, "domain2");
+        assert_eq!(data.ref_count, 1);
+
+        // Query a specific data blob by id.
+        let param_data = BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: data_blob_id.to_string(),
+        };
+        let info = mgr.get_blob_info(&param_data);
+        assert_eq!(info.blobs.len(), 1);
+        assert_eq!(info.blobs[0].blob_type, "datablob");
+        assert_eq!(info.blobs[0].ref_count, 1);
+
+        // Add a cloned bootstrap referencing the same data blob — ref_count should increase.
+        entry.blob_id = "rafs-v6-cloned".to_string();
+        mgr.add_blob_entry(&entry).unwrap();
+
+        let info = mgr.get_blob_info(&param_data);
+        assert_eq!(info.blobs.len(), 1);
+        assert_eq!(info.blobs[0].ref_count, 2);
+
+        // Query all blobs — should now have 2 meta + 1 data = 3.
+        let info = mgr.get_blob_info(&param_all);
+        assert_eq!(info.blobs.len(), 3);
+
+        // Query a non-existent domain — should return empty.
+        let param_missing = BlobCacheObjectId {
+            domain_id: "nonexistent".to_string(),
+            blob_id: String::new(),
+        };
+        let info = mgr.get_blob_info(&param_missing);
+        assert!(info.blobs.is_empty());
+
+        // Query a non-existent blob_id — should return empty.
+        let param_missing = BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: "does-not-exist".to_string(),
+        };
+        let info = mgr.get_blob_info(&param_missing);
+        assert!(info.blobs.is_empty());
+
+        // Remove the original bootstrap — data blob ref_count should decrease.
+        mgr.remove_blob_entry(&BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: "rafs-v6".to_string(),
+        })
+        .unwrap();
+
+        let info = mgr.get_blob_info(&param_data);
+        assert_eq!(info.blobs.len(), 1);
+        assert_eq!(info.blobs[0].ref_count, 1);
+    }
+
+    #[test]
     fn test_meta_blob() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let mut source_path = PathBuf::from(root_dir);
