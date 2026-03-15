@@ -68,6 +68,26 @@ pub struct BlobCacheObjectId {
     pub blob_id: String,
 }
 
+/// Information about a cached blob object returned by the GetBlobObject API.
+#[derive(Debug, Default, Serialize)]
+pub struct BlobCacheInfoEntry {
+    /// Type of blob object: "bootstrap" or "datablob".
+    pub blob_type: String,
+    /// Blob identifier.
+    pub blob_id: String,
+    /// Domain identifier.
+    pub domain_id: String,
+    /// Reference count for data blobs (number of active users).
+    pub ref_count: u32,
+}
+
+/// Response for the GetBlobObject API containing a list of blob cache entries.
+#[derive(Debug, Default, Serialize)]
+pub struct BlobCacheInfoList {
+    /// List of blob cache information entries.
+    pub blobs: Vec<BlobCacheInfoEntry>,
+}
+
 #[derive(Debug)]
 pub enum ApiRequest {
     /// Set daemon configuration.

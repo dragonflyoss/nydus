@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use nydus_api::{
-    BlobCacheEntry, BlobCacheList, BlobCacheObjectId, ConfigV2, BLOB_CACHE_TYPE_DATA_BLOB,
-    BLOB_CACHE_TYPE_META_BLOB,
+    BlobCacheEntry, BlobCacheInfoEntry, BlobCacheInfoList, BlobCacheList, BlobCacheObjectId,
+    ConfigV2, BLOB_CACHE_TYPE_DATA_BLOB, BLOB_CACHE_TYPE_META_BLOB,
 };
 use nydus_rafs::metadata::layout::v6::{EROFS_BLOCK_BITS_12, EROFS_BLOCK_SIZE_4096};
 use nydus_rafs::metadata::{RafsBlobExtraInfo, RafsSuper, RafsSuperFlags};
@@ -308,6 +308,50 @@ impl BlobCacheMgr {
     /// Get configuration information of the cached blob with specified `key`.
     pub fn get_config(&self, key: &str) -> Option<BlobConfig> {
         self.get_state().get(key)
+    }
+
+    /// Get information about cached blob objects matching the given query.
+    ///
+    /// If `param.blob_id` is empty, returns all blobs in the specified domain.
+    /// If both `domain_id` and `blob_id` are specified, returns info for that specific blob.
+    pub fn get_blob_info(&self, param: &BlobCacheObjectId) -> BlobCacheInfoList {
+        let state = self.get_state();
+        let mut entries = Vec::new();
+
+        let scoped_blob_prefix = if param.blob_id.is_empty() {
+            format!("{}{}", param.domain_id, ID_SPLITTER)
+        } else {
+            generate_blob_key(&param.domain_id, &param.blob_id)
+        };
+
+        for (key, config) in state.id_to_config_map.iter() {
+            let matches = if param.blob_id.is_empty() {
+                key.starts_with(&scoped_blob_prefix)
+            } else {
+                *key == scoped_blob_prefix
+            };
+            if !matches {
+                continue;
+            }
+
+            let entry = match config {
+                BlobConfig::MetaBlob(o) => BlobCacheInfoEntry {
+                    blob_type: BLOB_CACHE_TYPE_META_BLOB.to_string(),
+                    blob_id: o.blob_id.clone(),
+                    domain_id: param.domain_id.clone(),
+                    ref_count: 0,
+                },
+                BlobConfig::DataBlob(o) => BlobCacheInfoEntry {
+                    blob_type: BLOB_CACHE_TYPE_DATA_BLOB.to_string(),
+                    blob_id: o.blob_info.blob_id(),
+                    domain_id: param.domain_id.clone(),
+                    ref_count: o.ref_count.load(Ordering::Acquire),
+                },
+            };
+            entries.push(entry);
+        }
+
+        BlobCacheInfoList { blobs: entries }
     }
 
     #[inline]
@@ -767,6 +811,120 @@ mod tests {
         assert_eq!(mgr.get_state().id_to_config_map.len(), 0);
         assert!(mgr.get_config(&blob_id).is_none());
         assert!(mgr.get_config(&blob_id_cloned).is_none());
+    }
+
+    #[test]
+    fn test_get_blob_info() {
+        let tmpdir = TempDir::new().unwrap();
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+        let data_blob_id =
+            "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef";
+
+        let config = r#"
+        {
+            "type": "bootstrap",
+            "id": "rafs-v6",
+            "domain_id": "domain2",
+            "config_v2": {
+                "version": 2,
+                "id": "factory1",
+                "backend": {
+                    "type": "localfs",
+                    "localfs": {
+                        "dir": "/tmp/nydus"
+                    }
+                },
+                "cache": {
+                    "type": "fscache",
+                    "fscache": {
+                        "work_dir": "/tmp/nydus"
+                    }
+                },
+                "metadata_path": "RAFS_V5"
+            }
+          }"#;
+        let content = config
+            .replace("/tmp/nydus", tmpdir.as_path().to_str().unwrap())
+            .replace("RAFS_V5", &source_path.display().to_string());
+        let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(entry.prepare_configuration_info());
+
+        let mgr = BlobCacheMgr::new();
+        mgr.add_blob_entry(&entry).unwrap();
+
+        // Query all blobs in domain2 — should return 1 meta + 1 data blob.
+        let param_all = BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: String::new(),
+        };
+        let info = mgr.get_blob_info(&param_all);
+        assert_eq!(info.blobs.len(), 2);
+
+        let meta = info.blobs.iter().find(|b| b.blob_type == "bootstrap");
+        let data = info.blobs.iter().find(|b| b.blob_type == "datablob");
+        assert!(meta.is_some());
+        assert!(data.is_some());
+
+        let meta = meta.unwrap();
+        assert_eq!(meta.blob_id, "rafs-v6");
+        assert_eq!(meta.domain_id, "domain2");
+        assert_eq!(meta.ref_count, 0);
+
+        let data = data.unwrap();
+        assert_eq!(data.blob_id, data_blob_id);
+        assert_eq!(data.domain_id, "domain2");
+        assert_eq!(data.ref_count, 1);
+
+        // Query a specific data blob by id.
+        let param_data = BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: data_blob_id.to_string(),
+        };
+        let info = mgr.get_blob_info(&param_data);
+        assert_eq!(info.blobs.len(), 1);
+        assert_eq!(info.blobs[0].blob_type, "datablob");
+        assert_eq!(info.blobs[0].ref_count, 1);
+
+        // Add a cloned bootstrap referencing the same data blob — ref_count should increase.
+        entry.blob_id = "rafs-v6-cloned".to_string();
+        mgr.add_blob_entry(&entry).unwrap();
+
+        let info = mgr.get_blob_info(&param_data);
+        assert_eq!(info.blobs.len(), 1);
+        assert_eq!(info.blobs[0].ref_count, 2);
+
+        // Query all blobs — should now have 2 meta + 1 data = 3.
+        let info = mgr.get_blob_info(&param_all);
+        assert_eq!(info.blobs.len(), 3);
+
+        // Query a non-existent domain — should return empty.
+        let param_missing = BlobCacheObjectId {
+            domain_id: "nonexistent".to_string(),
+            blob_id: String::new(),
+        };
+        let info = mgr.get_blob_info(&param_missing);
+        assert!(info.blobs.is_empty());
+
+        // Query a non-existent blob_id — should return empty.
+        let param_missing = BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: "does-not-exist".to_string(),
+        };
+        let info = mgr.get_blob_info(&param_missing);
+        assert!(info.blobs.is_empty());
+
+        // Remove the original bootstrap — data blob ref_count should decrease.
+        mgr.remove_blob_entry(&BlobCacheObjectId {
+            domain_id: "domain2".to_string(),
+            blob_id: "rafs-v6".to_string(),
+        })
+        .unwrap();
+
+        let info = mgr.get_blob_info(&param_data);
+        assert_eq!(info.blobs.len(), 1);
+        assert_eq!(info.blobs[0].ref_count, 1);
     }
 
     #[test]
