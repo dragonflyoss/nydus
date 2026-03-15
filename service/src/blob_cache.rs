@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use nydus_api::{
-    BlobCacheEntry, BlobCacheList, BlobCacheObjectId, ConfigV2, BLOB_CACHE_TYPE_DATA_BLOB,
-    BLOB_CACHE_TYPE_META_BLOB,
+    BlobCacheEntry, BlobCacheInfoEntry, BlobCacheInfoList, BlobCacheList, BlobCacheObjectId,
+    ConfigV2, BLOB_CACHE_TYPE_DATA_BLOB, BLOB_CACHE_TYPE_META_BLOB,
 };
 use nydus_rafs::metadata::layout::v6::{EROFS_BLOCK_BITS_12, EROFS_BLOCK_SIZE_4096};
 use nydus_rafs::metadata::{RafsBlobExtraInfo, RafsSuper, RafsSuperFlags};
@@ -308,6 +308,50 @@ impl BlobCacheMgr {
     /// Get configuration information of the cached blob with specified `key`.
     pub fn get_config(&self, key: &str) -> Option<BlobConfig> {
         self.get_state().get(key)
+    }
+
+    /// Get information about cached blob objects matching the given query.
+    ///
+    /// If `param.blob_id` is empty, returns all blobs in the specified domain.
+    /// If both `domain_id` and `blob_id` are specified, returns info for that specific blob.
+    pub fn get_blob_info(&self, param: &BlobCacheObjectId) -> BlobCacheInfoList {
+        let state = self.get_state();
+        let mut entries = Vec::new();
+
+        let scoped_blob_prefix = if param.blob_id.is_empty() {
+            format!("{}{}", param.domain_id, ID_SPLITTER)
+        } else {
+            generate_blob_key(&param.domain_id, &param.blob_id)
+        };
+
+        for (key, config) in state.id_to_config_map.iter() {
+            let matches = if param.blob_id.is_empty() {
+                key.starts_with(&scoped_blob_prefix)
+            } else {
+                *key == scoped_blob_prefix
+            };
+            if !matches {
+                continue;
+            }
+
+            let entry = match config {
+                BlobConfig::MetaBlob(o) => BlobCacheInfoEntry {
+                    blob_type: BLOB_CACHE_TYPE_META_BLOB.to_string(),
+                    blob_id: o.blob_id.clone(),
+                    domain_id: param.domain_id.clone(),
+                    ref_count: 0,
+                },
+                BlobConfig::DataBlob(o) => BlobCacheInfoEntry {
+                    blob_type: BLOB_CACHE_TYPE_DATA_BLOB.to_string(),
+                    blob_id: o.blob_info.blob_id(),
+                    domain_id: param.domain_id.clone(),
+                    ref_count: o.ref_count.load(Ordering::Acquire),
+                },
+            };
+            entries.push(entry);
+        }
+
+        BlobCacheInfoList { blobs: entries }
     }
 
     #[inline]

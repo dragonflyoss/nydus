@@ -64,7 +64,7 @@ impl ApiServer {
 
             // Nydus API v2
             ApiRequest::GetDaemonInfoV2 => self.daemon_info(false),
-            ApiRequest::GetBlobObject(_param) => todo!(),
+            ApiRequest::GetBlobObject(param) => self.get_blob_object(&param),
             ApiRequest::CreateBlobObject(entry) => self.create_blob_cache_entry(&entry),
             ApiRequest::DeleteBlobObject(param) => self.remove_blob_cache_entry(&param),
             ApiRequest::DeleteBlobFile(blob_id) => self.blob_cache_gc(blob_id),
@@ -275,6 +275,23 @@ impl ApiServer {
     }
 
     // HTTP API v2
+    fn get_blob_object(&self, param: &BlobCacheObjectId) -> ApiResponse {
+        match DAEMON_CONTROLLER.get_blob_cache_mgr() {
+            None => Err(ApiError::DaemonAbnormal(DaemonErrorKind::Unsupported)),
+            Some(mgr) => {
+                let info = mgr.get_blob_info(param);
+                serde_json::to_string(&info)
+                    .map(ApiResponsePayload::BlobObjectList)
+                    .map_err(|e| {
+                        ApiError::DaemonAbnormal(DaemonErrorKind::Other(format!(
+                            "failed to serialize blob info: {}",
+                            e
+                        )))
+                    })
+            }
+        }
+    }
+
     fn create_blob_cache_entry(&self, entry: &BlobCacheEntry) -> ApiResponse {
         match DAEMON_CONTROLLER.get_blob_cache_mgr() {
             None => Err(ApiError::DaemonAbnormal(DaemonErrorKind::Unsupported)),
