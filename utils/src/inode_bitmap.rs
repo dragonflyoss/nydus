@@ -189,4 +189,60 @@ mod tests {
         assert!(!m.is_set(9000));
         assert_eq!(m.bitmap_to_array(), empty);
     }
+
+    #[test]
+    fn test_inode_bitmap_display_and_debug() {
+        let m = InodeBitmap::new();
+        m.set(1);
+        m.set(5);
+
+        // Display fmt (produces JSON with inode_range key)
+        let display_str = format!("{}", m);
+        assert!(display_str.contains("inode_range"));
+
+        // Debug fmt delegates to Display
+        let debug_str = format!("{:?}", m);
+        assert!(debug_str.contains("inode_range"));
+
+        // Empty bitmap display
+        let empty_m = InodeBitmap::new();
+        let empty_str = format!("{}", empty_m);
+        assert!(empty_str.contains("inode_range"));
+    }
+
+    #[test]
+    fn test_inode_bitmap_edge_cases() {
+        let m = InodeBitmap::new();
+
+        // is_set on never-set inode returns false (None path in get)
+        assert!(!m.is_set(42));
+        assert!(!m.is_set(0));
+
+        // clear on non-existent inode is a no-op (None path in if-let)
+        m.clear(99); // Should not panic
+        assert!(!m.is_set(99));
+
+        // bitmap_to_array_and_clear on empty bitmap returns empty
+        let result = m.bitmap_to_array_and_clear();
+        assert!(result.is_empty());
+
+        // set the same inode twice is idempotent
+        m.set(10);
+        m.set(10);
+        assert!(m.is_set(10));
+        assert_eq!(m.bitmap_to_array(), [[10]]);
+
+        // clear_all on empty bitmap is a no-op
+        let fresh = InodeBitmap::new();
+        fresh.clear_all(); // Should not panic
+        assert_eq!(fresh.bitmap_to_array(), Vec::<Vec<u64>>::new());
+    }
+
+    #[test]
+    fn test_inode_bitmap_range_to_vec() {
+        // range_to_vec with equal start/end returns single-element vec
+        assert_eq!(InodeBitmap::range_to_vec(5, 5), vec![5]);
+        // range_to_vec with different values returns two-element vec
+        assert_eq!(InodeBitmap::range_to_vec(3, 7), vec![3, 7]);
+    }
 }

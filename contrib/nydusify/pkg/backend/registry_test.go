@@ -70,3 +70,34 @@ func TestRegistryUploadFailuresAndHelpers(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, RegistryBackend, registry.Type())
 }
+
+func TestRegistryPanicMethods(t *testing.T) {
+	registry := &Registry{remote: &remote.Remote{}}
+
+	require.Panics(t, func() { registry.RangeReader("any") })
+	require.Panics(t, func() { registry.Reader("any") })
+	require.Panics(t, func() { registry.Size("any") })
+}
+
+func TestNewRegistryBackend(t *testing.T) {
+	r := &remote.Remote{}
+	b, err := newRegistryBackend(nil, r)
+	require.NoError(t, err)
+	require.NotNil(t, b)
+	require.Equal(t, RegistryBackend, b.Type())
+
+	b2, err := newRegistryBackend([]byte("ignored"), r)
+	require.NoError(t, err)
+	require.NotNil(t, b2)
+}
+
+func TestOSSBackendType(t *testing.T) {
+	b := tempOSSBackend()
+	require.Equal(t, OssBackend, b.Type())
+}
+
+func TestS3BackendFinalize(t *testing.T) {
+	b := tempS3Backend()
+	require.NoError(t, b.Finalize(false))
+	require.NoError(t, b.Finalize(true))
+}

@@ -443,6 +443,82 @@ mod tests {
     }
 
     #[test]
+    fn test_alloc_buf_non_zero_size() {
+        let mut buf = alloc_buf(4097);
+
+        assert_eq!(buf.len(), 4097);
+        assert!(buf.capacity() >= 4097);
+        assert_eq!(buf.as_ptr() as usize % 0x1000, 0);
+
+        buf[0] = 0x12;
+        buf[4096] = 0x34;
+        assert_eq!(buf[0], 0x12);
+        assert_eq!(buf[4096], 0x34);
+    }
+
+    #[test]
+    fn test_check_hash() {
+        let data = b"nydus-utils";
+        let digest = RafsDigest::from_buf(data, digest::Algorithm::Sha256);
+
+        assert!(check_hash(data, &digest, digest::Algorithm::Sha256));
+        assert!(!check_hash(
+            b"nydus-utils-mismatch",
+            &digest,
+            digest::Algorithm::Sha256
+        ));
+    }
+
+    #[test]
+    fn test_check_crc() {
+        let data = b"nydus-utils";
+        let digest = crc32::Crc32::new(crc32::Algorithm::Crc32Iscsi).from_buf(data);
+
+        assert!(check_crc(data, digest));
+        assert!(!check_crc(b"nydus-utils-mismatch", digest));
+    }
+
+    #[test]
+    fn test_copyv_offset_at_source_boundary() {
+        let mut dst_buf1 = vec![0x0u8; 2];
+        let mut dst_buf2 = vec![0x0u8; 2];
+        let volatile_slice_1 =
+            unsafe { FileVolatileSlice::from_raw_ptr(dst_buf1.as_mut_ptr(), dst_buf1.len()) };
+        let volatile_slice_2 =
+            unsafe { FileVolatileSlice::from_raw_ptr(dst_buf2.as_mut_ptr(), dst_buf2.len()) };
+        let dst_bufs = [volatile_slice_1, volatile_slice_2];
+
+        let src_buf_1 = vec![1u8, 2u8];
+        let src_buf_2 = vec![3u8, 4u8];
+        let src_bufs = vec![src_buf_1.as_slice(), src_buf_2.as_slice()];
+
+        assert_eq!(
+            copyv(&src_bufs, &dst_bufs, 2, 2, 0, 0).unwrap(),
+            (2, (1, 0))
+        );
+        assert_eq!(dst_buf1, vec![3u8, 4u8]);
+        assert_eq!(dst_buf2, vec![0u8, 0u8]);
+    }
+
+    #[test]
+    fn test_copyv_overflow_after_partial_copy() {
+        let mut dst_buf = vec![0x0u8; 3];
+        let volatile_slice =
+            unsafe { FileVolatileSlice::from_raw_ptr(dst_buf.as_mut_ptr(), dst_buf.len()) };
+        let dst_bufs = [volatile_slice];
+
+        let src_buf_1 = vec![1u8, 2u8];
+        let src_buf_2 = vec![3u8, 4u8];
+        let src_bufs = vec![src_buf_1.as_slice(), src_buf_2.as_slice()];
+
+        assert!(matches!(
+            copyv(&src_bufs, &dst_bufs, 0, 4, 0, 0),
+            Err(StorageError::MemOverflow)
+        ));
+        assert_eq!(dst_buf, vec![1u8, 2u8, 3u8]);
+    }
+
+    #[test]
     fn test_mem_slice_cursor_move() {
         let mut buf1 = vec![0x0u8; 2];
         let vs1 = unsafe { FileVolatileSlice::from_raw_ptr(buf1.as_mut_ptr(), buf1.len()) };
@@ -510,6 +586,34 @@ mod tests {
         assert_eq!(cursor.consume(2).len(), 0);
         assert_eq!(cursor.index, 2);
         assert_eq!(cursor.offset, 0);
+    }
+
+    #[test]
+    fn test_mem_slice_cursor_consume_from_middle_across_slices() {
+        let mut buf1 = vec![1u8, 2u8, 3u8];
+        let vs1 = unsafe { FileVolatileSlice::from_raw_ptr(buf1.as_mut_ptr(), buf1.len()) };
+        let mut buf2 = vec![4u8, 5u8];
+        let vs2 = unsafe { FileVolatileSlice::from_raw_ptr(buf2.as_mut_ptr(), buf2.len()) };
+        let vs = [vs1, vs2];
+
+        let mut cursor = MemSliceCursor::new(&vs);
+        cursor.move_cursor(2);
+
+        let mut slices = cursor.consume(3);
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0].len(), 1);
+        assert_eq!(slices[1].len(), 2);
+
+        slices[0][0] = 9;
+        slices[1][0] = 8;
+        slices[1][1] = 7;
+        drop(slices);
+
+        assert_eq!(cursor.index, 2);
+        assert_eq!(cursor.offset, 0);
+        assert_eq!(cursor.inner_slice().len(), 2);
+        assert_eq!(buf1, vec![1u8, 2u8, 9u8]);
+        assert_eq!(buf2, vec![8u8, 7u8]);
     }
 
     #[test]

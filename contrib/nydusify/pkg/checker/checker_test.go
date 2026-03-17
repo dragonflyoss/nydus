@@ -13,65 +13,43 @@ import (
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/rule"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 )
 
 func TestNew(t *testing.T) {
 	t.Run("target remote failed", func(t *testing.T) {
-		patches := gomonkey.ApplyFunc(provider.DefaultRemote, func(string, bool) (*remote.Remote, error) {
-			return nil, errors.New("target remote failed")
-		})
-		defer patches.Reset()
-
-		checker, err := New(Opt{Target: "target", ExpectedArch: "amd64"})
+		checker, err := New(Opt{Target: "not a valid reference", ExpectedArch: "amd64"})
 		require.Nil(t, checker)
 		require.ErrorContains(t, err, "init target image parser")
 	})
 
 	t.Run("target parser failed", func(t *testing.T) {
-		remotePatches := gomonkey.ApplyFunc(provider.DefaultRemote, func(string, bool) (*remote.Remote, error) {
-			return &remote.Remote{}, nil
-		})
-		defer remotePatches.Reset()
-
 		parserPatches := gomonkey.ApplyFunc(parser.New, func(*remote.Remote, string) (*parser.Parser, error) {
 			return nil, errors.New("parser failed")
 		})
 		defer parserPatches.Reset()
 
-		checker, err := New(Opt{Target: "target", ExpectedArch: "amd64"})
+		checker, err := New(Opt{Target: "docker.io/library/busybox:latest", ExpectedArch: "amd64"})
 		require.Nil(t, checker)
 		require.ErrorContains(t, err, "failed to create parser")
 	})
 
 	t.Run("source remote failed", func(t *testing.T) {
-		calls := 0
-		remotePatches := gomonkey.ApplyFunc(provider.DefaultRemote, func(ref string, insecure bool) (*remote.Remote, error) {
-			calls++
-			if calls == 1 {
-				return &remote.Remote{Ref: ref}, nil
-			}
-			return nil, errors.New("source remote failed")
-		})
-		defer remotePatches.Reset()
-
 		parserPatches := gomonkey.ApplyFunc(parser.New, func(remoter *remote.Remote, arch string) (*parser.Parser, error) {
 			return &parser.Parser{Remote: remoter}, nil
 		})
 		defer parserPatches.Reset()
 
-		checker, err := New(Opt{Target: "target", Source: "source", ExpectedArch: "amd64"})
+		checker, err := New(Opt{
+			Target:       "docker.io/library/busybox:latest",
+			Source:       "not a valid reference",
+			ExpectedArch: "amd64",
+		})
 		require.Nil(t, checker)
 		require.ErrorContains(t, err, "Init source image parser")
 	})
 
 	t.Run("source parser failed", func(t *testing.T) {
-		remotePatches := gomonkey.ApplyFunc(provider.DefaultRemote, func(ref string, insecure bool) (*remote.Remote, error) {
-			return &remote.Remote{Ref: ref}, nil
-		})
-		defer remotePatches.Reset()
-
 		calls := 0
 		parserPatches := gomonkey.ApplyFunc(parser.New, func(remoter *remote.Remote, arch string) (*parser.Parser, error) {
 			calls++
@@ -82,23 +60,26 @@ func TestNew(t *testing.T) {
 		})
 		defer parserPatches.Reset()
 
-		checker, err := New(Opt{Target: "target", Source: "source", ExpectedArch: "amd64"})
+		checker, err := New(Opt{
+			Target:       "docker.io/library/busybox:latest",
+			Source:       "docker.io/library/alpine:latest",
+			ExpectedArch: "amd64",
+		})
 		require.Nil(t, checker)
 		require.ErrorContains(t, err, "failed to create parser")
 	})
 
 	t.Run("success", func(t *testing.T) {
-		remotePatches := gomonkey.ApplyFunc(provider.DefaultRemote, func(ref string, insecure bool) (*remote.Remote, error) {
-			return &remote.Remote{Ref: ref}, nil
-		})
-		defer remotePatches.Reset()
-
 		parserPatches := gomonkey.ApplyFunc(parser.New, func(remoter *remote.Remote, arch string) (*parser.Parser, error) {
 			return &parser.Parser{Remote: remoter}, nil
 		})
 		defer parserPatches.Reset()
 
-		checker, err := New(Opt{Target: "target", Source: "source", ExpectedArch: "amd64"})
+		checker, err := New(Opt{
+			Target:       "docker.io/library/busybox:latest",
+			Source:       "docker.io/library/alpine:latest",
+			ExpectedArch: "amd64",
+		})
 		require.NoError(t, err)
 		require.NotNil(t, checker)
 		require.NotNil(t, checker.targetParser)
@@ -158,6 +139,21 @@ func TestCheck(t *testing.T) {
 }
 
 func TestCheckInternal(t *testing.T) {
+	t.Run("cleanup workdir failed", func(t *testing.T) {
+		checker := &Checker{
+			Opt:          Opt{WorkDir: "bad\x00path"},
+			targetParser: &parser.Parser{Remote: &remote.Remote{Ref: "target"}},
+		}
+
+		parsePatches := gomonkey.ApplyMethod(reflect.TypeOf(&parser.Parser{}), "Parse", func(p *parser.Parser, ctx context.Context) (*parser.Parsed, error) {
+			return &parser.Parsed{Remote: p.Remote}, nil
+		})
+		defer parsePatches.Reset()
+
+		err := checker.check(context.Background())
+		require.ErrorContains(t, err, "clean up work directory")
+	})
+
 	t.Run("source parse failed", func(t *testing.T) {
 		checker := &Checker{
 			Opt:          Opt{WorkDir: t.TempDir()},
@@ -175,6 +171,30 @@ func TestCheckInternal(t *testing.T) {
 
 		err := checker.check(context.Background())
 		require.ErrorContains(t, err, "parse source image")
+	})
+
+	t.Run("source output failed", func(t *testing.T) {
+		checker := &Checker{
+			Opt:          Opt{WorkDir: t.TempDir()},
+			targetParser: &parser.Parser{Remote: &remote.Remote{Ref: "target"}},
+			sourceParser: &parser.Parser{Remote: &remote.Remote{Ref: "source"}},
+		}
+
+		parsePatches := gomonkey.ApplyMethod(reflect.TypeOf(&parser.Parser{}), "Parse", func(p *parser.Parser, ctx context.Context) (*parser.Parsed, error) {
+			return &parser.Parsed{Remote: p.Remote}, nil
+		})
+		defer parsePatches.Reset()
+
+		outputPatches := gomonkey.ApplyMethod(reflect.TypeOf(&Checker{}), "Output", func(_ *Checker, _ context.Context, parsed *parser.Parsed, _ string) error {
+			if parsed.Remote.Ref == "source" {
+				return errors.New("source output failed")
+			}
+			return nil
+		})
+		defer outputPatches.Reset()
+
+		err := checker.check(context.Background())
+		require.ErrorContains(t, err, "output image information: source")
 	})
 
 	t.Run("output failed", func(t *testing.T) {

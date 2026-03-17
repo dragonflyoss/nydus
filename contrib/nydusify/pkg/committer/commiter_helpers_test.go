@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,4 +53,52 @@ func TestGetDistributionSourceLabel(t *testing.T) {
 	key, value = getDistributionSourceLabel("busybox:latest")
 	require.Equal(t, "containerd.io/distribution.source.docker.io", key)
 	require.Equal(t, "library/busybox", value)
+}
+
+func TestMountList(t *testing.T) {
+	ml := NewMountList()
+	require.NotNil(t, ml)
+	require.Empty(t, ml.paths)
+
+	ml.Add("/mnt/a")
+	ml.Add("/mnt/b")
+	require.Equal(t, []string{"/mnt/a", "/mnt/b"}, ml.paths)
+}
+
+func TestMakeDesc(t *testing.T) {
+	cm := &Committer{}
+	data := map[string]string{"key": "val"}
+	oldDesc := ocispec.Descriptor{MediaType: "application/json"}
+
+	bytes, desc, err := cm.makeDesc(data, oldDesc)
+	require.NoError(t, err)
+	require.NotNil(t, bytes)
+	require.NotNil(t, desc)
+	require.Equal(t, "application/json", desc.MediaType)
+	require.Greater(t, desc.Size, int64(0))
+	require.NotEmpty(t, desc.Digest)
+}
+
+func TestWithRetryImmediate(t *testing.T) {
+	err := withRetry(func() error { return nil }, 1)
+	require.NoError(t, err)
+}
+
+func TestValidateRefAddsTag(t *testing.T) {
+	ref, err := ValidateRef("example.com/repo")
+	require.NoError(t, err)
+	require.Contains(t, ref, ":latest")
+}
+
+func TestGetDistributionSourceLabelInvalid(t *testing.T) {
+	key, value := getDistributionSourceLabel("bad\nref")
+	require.Empty(t, key)
+	require.Empty(t, value)
+}
+
+func TestMakeDescMarshalError(t *testing.T) {
+	cm := &Committer{}
+	badData := make(chan int)
+	_, _, err := cm.makeDesc(badData, ocispec.Descriptor{})
+	require.Error(t, err)
 }

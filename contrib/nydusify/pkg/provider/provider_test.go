@@ -205,3 +205,86 @@ func TestDefaultSource(t *testing.T) {
 		require.Len(t, providers, 1)
 	})
 }
+
+func TestDefaultSourceProviderManifestAndConfig(t *testing.T) {
+	desc := ocispec.Descriptor{Digest: digest.FromString("manifest"), Size: 100}
+	config := ocispec.Image{Author: "test-author"}
+	sp := &defaultSourceProvider{
+		image: parser.Image{
+			Desc:   desc,
+			Config: config,
+		},
+	}
+
+	gotDesc, err := sp.Manifest(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, desc.Digest, gotDesc.Digest)
+
+	gotConfig, err := sp.Config(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "test-author", gotConfig.Author)
+}
+
+func TestDefaultSourceLayerGetters(t *testing.T) {
+	parentID := digest.FromString("parent")
+	layer := &defaultSourceLayer{
+		desc:          ocispec.Descriptor{Digest: digest.FromString("layer1"), Size: 2048},
+		chainID:       digest.FromString("chain1"),
+		parentChainID: &parentID,
+	}
+
+	require.Equal(t, digest.FromString("layer1"), layer.Digest())
+	require.Equal(t, int64(2048), layer.Size())
+	require.Equal(t, digest.FromString("chain1"), layer.ChainID())
+	require.NotNil(t, layer.ParentChainID())
+	require.Equal(t, parentID, *layer.ParentChainID())
+
+	// Test with nil parent
+	layer2 := &defaultSourceLayer{
+		desc:          ocispec.Descriptor{Digest: digest.FromString("first"), Size: 512},
+		chainID:       digest.FromString("chain0"),
+		parentChainID: nil,
+	}
+	require.Nil(t, layer2.ParentChainID())
+	require.Equal(t, int64(512), layer2.Size())
+}
+
+func TestDefaultLoggerFactory(t *testing.T) {
+	logger, err := DefaultLogger()
+	require.NoError(t, err)
+	require.NotNil(t, logger)
+}
+
+func TestDefaultRemote(t *testing.T) {
+	patches := gomonkey.ApplyFunc(withRemote, func(ref string, insecure bool, credFunc withCredentialFunc) (*remote.Remote, error) {
+		// Validate the credFunc handles docker hub
+		user, pass, err := credFunc("registry-1.docker.io")
+		_ = user
+		_ = pass
+		if err != nil {
+			return nil, err
+		}
+		// Also test with a non-dockerhub host
+		user, pass, err = credFunc("ghcr.io")
+		_ = user
+		_ = pass
+		if err != nil {
+			return nil, err
+		}
+		return &remote.Remote{Ref: ref}, nil
+	})
+	defer patches.Reset()
+
+	r, err := DefaultRemote("docker.io/library/nginx:latest", false)
+	require.NoError(t, err)
+	require.NotNil(t, r)
+	require.Equal(t, "docker.io/library/nginx:latest", r.Ref)
+}
+
+func TestDefaultRemoteWithAuthColonOnlyPass(t *testing.T) {
+	// Test with auth that has three colons (user:pass:extra should fail)
+	encoded := base64.StdEncoding.EncodeToString([]byte("u:p:extra"))
+	_, err := DefaultRemoteWithAuth("example.com/repo:tag", false, encoded)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Invalid base64 encoded auth string")
+}

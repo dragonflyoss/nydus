@@ -28,12 +28,15 @@ impl NydusdClient {
         let mut endpoint = format!("/api/{}", path);
 
         if let Some(q) = query {
-            let mut params = String::new();
-            for p in q {
-                params.push_str(&format!("{}={}", p.0, p.1))
-            }
+            let params = q
+                .into_iter()
+                .map(|(key, value)| format!("{}={}", key, value))
+                .collect::<Vec<_>>()
+                .join("&");
 
-            endpoint.push_str(&format!("?{}", params));
+            if !params.is_empty() {
+                endpoint.push_str(&format!("?{}", params));
+            }
         }
 
         Uri::new(&self.sock_path, endpoint.as_str()).into()
@@ -164,9 +167,7 @@ mod tests {
         let client = NydusdClient::new("/tmp/nydus.sock");
 
         let uri = client.build_uri("v1/daemon", None);
-        let uri_str = uri.to_string();
-        // The URI should contain the path
-        assert!(uri_str.contains("/api/v1/daemon"));
+        assert_eq!(uri.path_and_query().unwrap().as_str(), "/api/v1/daemon");
     }
 
     #[test]
@@ -175,9 +176,10 @@ mod tests {
 
         let query = vec![("key1", "value1")];
         let uri = client.build_uri("v1/daemon", Some(query));
-        let uri_str = uri.to_string();
-        assert!(uri_str.contains("/api/v1/daemon"));
-        assert!(uri_str.contains("key1=value1"));
+        assert_eq!(
+            uri.path_and_query().unwrap().as_str(),
+            "/api/v1/daemon?key1=value1"
+        );
     }
 
     #[test]
@@ -186,10 +188,18 @@ mod tests {
 
         let query = vec![("key1", "value1"), ("key2", "value2")];
         let uri = client.build_uri("v2/blobs", Some(query));
-        let uri_str = uri.to_string();
-        assert!(uri_str.contains("/api/v2/blobs"));
-        assert!(uri_str.contains("key1=value1"));
-        assert!(uri_str.contains("key2=value2"));
+        assert_eq!(
+            uri.path_and_query().unwrap().as_str(),
+            "/api/v2/blobs?key1=value1&key2=value2"
+        );
+    }
+
+    #[test]
+    fn test_build_uri_with_empty_query_list() {
+        let client = NydusdClient::new("/tmp/nydus.sock");
+
+        let uri = client.build_uri("v1/daemon", Some(vec![]));
+        assert_eq!(uri.path_and_query().unwrap().as_str(), "/api/v1/daemon");
     }
 
     #[test]
@@ -206,12 +216,14 @@ mod tests {
 
         for path in paths {
             let uri = client.build_uri(path, None);
-            let uri_str = uri.to_string();
             assert!(
-                uri_str.contains(&format!("/api/{}", path)),
+                uri.path_and_query()
+                    .unwrap()
+                    .as_str()
+                    .starts_with(&format!("/api/{}", path)),
                 "URI should contain /api/{}, got {}",
                 path,
-                uri_str
+                uri
             );
         }
     }

@@ -185,4 +185,96 @@ func TestBuild(t *testing.T) {
 			})
 		})
 	})
+
+	t.Run("empty blob list panics", func(t *testing.T) {
+		script := "#!/bin/sh\n" +
+			"output=\"\"\n" +
+			"while [ $# -gt 0 ]; do\n" +
+			"  if [ \"$1\" = \"--output-json\" ]; then output=\"$2\"; shift 2; continue; fi\n" +
+			"  shift\n" +
+			"done\n" +
+			"printf '{\"blobs\":[]}' > \"$output\"\n"
+		binaryPath, _ := createOptimizerBinary(t, script)
+		require.Panics(t, func() {
+			_, _ = Build(BuildOption{
+				BuilderPath:         binaryPath,
+				PrefetchFilesPath:   "/tmp/prefetch.files",
+				BootstrapPath:       "/tmp/bootstrap.boot",
+				BackendType:         "registry",
+				BackendConfig:       "{}",
+				BlobDir:             t.TempDir(),
+				OutputBootstrapPath: filepath.Join(t.TempDir(), "optimized.boot"),
+				OutputJSONPath:      filepath.Join(t.TempDir(), "output.json"),
+			})
+		})
+	})
+}
+
+func TestOptHosts(t *testing.T) {
+	opt := Opt{
+		Source:         "docker.io/library/alpine:latest",
+		Target:         "registry.example.com/alpine:opt",
+		SourceInsecure: true,
+		TargetInsecure: false,
+	}
+	hostFunc := hosts(opt)
+
+	credFunc, insecure, err := hostFunc(opt.Source)
+	require.NoError(t, err)
+	require.NotNil(t, credFunc)
+	require.True(t, insecure)
+
+	credFunc, insecure, err = hostFunc(opt.Target)
+	require.NoError(t, err)
+	require.NotNil(t, credFunc)
+	require.False(t, insecure)
+
+	credFunc, insecure, err = hostFunc("unknown")
+	require.NoError(t, err)
+	require.NotNil(t, credFunc)
+	require.False(t, insecure)
+}
+
+func TestRemoter(t *testing.T) {
+	// Valid reference
+	r, err := remoter(Opt{Target: "docker.io/library/busybox:latest", TargetInsecure: false})
+	require.NoError(t, err)
+	require.NotNil(t, r)
+
+	// Invalid reference
+	r, err = remoter(Opt{Target: "INVALID REF!!!", TargetInsecure: false})
+	require.Error(t, err)
+	require.Nil(t, r)
+}
+
+func TestPackToTarUncompressed(t *testing.T) {
+	files := []File{
+		{Name: EntryBootstrap, Reader: bytes.NewBufferString("boot"), Size: 4},
+		{Name: EntryPrefetchFiles, Reader: bytes.NewBufferString("files"), Size: 5},
+	}
+	reader := packToTar(files, false)
+	defer reader.Close()
+
+	tw := tar.NewReader(reader)
+
+	// Should have directory entry "image"
+	hdr, err := tw.Next()
+	require.NoError(t, err)
+	require.Equal(t, "image", hdr.Name)
+
+	// First file
+	hdr, err = tw.Next()
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join("image", EntryBootstrap), hdr.Name)
+	data, err := io.ReadAll(tw)
+	require.NoError(t, err)
+	require.Equal(t, "boot", string(data))
+
+	// Second file
+	hdr, err = tw.Next()
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join("image", EntryPrefetchFiles), hdr.Name)
+	data, err = io.ReadAll(tw)
+	require.NoError(t, err)
+	require.Equal(t, "files", string(data))
 }

@@ -377,3 +377,115 @@ func TestInitHandler(t *testing.T) {
 		assert.NoError(t, err)
 	})
 }
+
+func TestChunkMethods(t *testing.T) {
+	c := &chunk{
+		blobDigest: "sha256:abc123",
+		blobSize:   "1024",
+		objectID:   3,
+		objectContent: Object{
+			Path:      "/models/weight.bin",
+			ChunkSize: "64MiB",
+		},
+		objectOffset: 512,
+	}
+
+	assert.Equal(t, uint32(3), c.ObjectID())
+	assert.Equal(t, Object{Path: "/models/weight.bin", ChunkSize: "64MiB"}, c.ObjectContent().(Object))
+	assert.Equal(t, uint64(512), c.ObjectOffset())
+	assert.Equal(t, "/models/weight.bin", c.FilePath())
+	assert.Equal(t, "64MiB", c.LimitChunkSize())
+	assert.Equal(t, "sha256:abc123", c.BlobDigest())
+	assert.Equal(t, "1024", c.BlobSize())
+}
+
+func TestGetChunkSizeByMediaType(t *testing.T) {
+	// Save and restore original map values since other tests may modify them
+	origWeight := mediaTypeChunkSizeMap[ModelWeightMediaType]
+	origDataset := mediaTypeChunkSizeMap[ModelDatasetMediaType]
+	defer func() {
+		mediaTypeChunkSizeMap[ModelWeightMediaType] = origWeight
+		mediaTypeChunkSizeMap[ModelDatasetMediaType] = origDataset
+	}()
+	mediaTypeChunkSizeMap[ModelWeightMediaType] = "64MiB"
+	mediaTypeChunkSizeMap[ModelDatasetMediaType] = "64MiB"
+
+	assert.Equal(t, "64MiB", getChunkSizeByMediaType(ModelWeightMediaType))
+	assert.Equal(t, "64MiB", getChunkSizeByMediaType(ModelDatasetMediaType))
+	assert.Equal(t, DefaultFileChunkSize, getChunkSizeByMediaType("application/octet-stream"))
+	assert.Equal(t, DefaultFileChunkSize, getChunkSizeByMediaType(""))
+}
+
+func TestGetConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	handler := &Handler{
+		root: tmpDir,
+		blobConfig: ocispec.Descriptor{
+			Digest: digest.Digest("sha256:configdigest123"),
+		},
+	}
+	// Create blob data file
+	blobDir := filepath.Join(tmpDir, "content.v1/docker/registry/v2/blobs/sha256/co/configdigest123")
+	os.MkdirAll(blobDir, 0755)
+	expected := []byte(`{"key":"value"}`)
+	os.WriteFile(filepath.Join(blobDir, "data"), expected, 0644)
+
+	data, err := handler.GetConfig()
+	assert.NoError(t, err)
+	assert.Equal(t, expected, data)
+
+	// Test invalid digest
+	handler2 := &Handler{
+		root:       tmpDir,
+		blobConfig: ocispec.Descriptor{Digest: digest.Digest("invalid")},
+	}
+	_, err = handler2.GetConfig()
+	assert.Error(t, err)
+}
+
+func TestGetLayers(t *testing.T) {
+	layers := []ocispec.Descriptor{
+		{Digest: digest.Digest("sha256:layer1"), Size: 100},
+		{Digest: digest.Digest("sha256:layer2"), Size: 200},
+	}
+	handler := &Handler{
+		manifest: ocispec.Manifest{Layers: layers},
+	}
+	got := handler.GetLayers()
+	assert.Len(t, got, 2)
+	assert.Equal(t, layers[0].Digest, got[0].Digest)
+	assert.Equal(t, layers[1].Size, got[1].Size)
+
+	// Empty layers
+	handler2 := &Handler{manifest: ocispec.Manifest{}}
+	assert.Nil(t, handler2.GetLayers())
+}
+
+func TestNeedIgnore(t *testing.T) {
+	handler := &Handler{
+		blobsMap: map[string]blobInfo{
+			"abc123": {mediaType: ModelWeightMediaType, blobIndex: 0, blobDigest: "abc123"},
+		},
+	}
+
+	// link files are ignored
+	ignored, info := handler.needIgnore("repos/ns/image/_manifests/tags/latest/current/link")
+	assert.True(t, ignored)
+	assert.Nil(t, info)
+
+	// Too few parts
+	ignored, info = handler.needIgnore("a/b")
+	assert.True(t, ignored)
+	assert.Nil(t, info)
+
+	// Unknown digest
+	ignored, info = handler.needIgnore("blobs/sha256/unknown/data")
+	assert.True(t, ignored)
+	assert.Nil(t, info)
+
+	// Known digest
+	ignored, info = handler.needIgnore("blobs/sha256/abc123/data")
+	assert.False(t, ignored)
+	assert.NotNil(t, info)
+	assert.Equal(t, ModelWeightMediaType, info.mediaType)
+}

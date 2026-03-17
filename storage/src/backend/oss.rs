@@ -195,4 +195,61 @@ mod tests {
 
         oss.shutdown();
     }
+
+    #[test]
+    fn test_oss_new_no_id() {
+        let json_str = "{\"access_key_id\":\"key\",\"access_key_secret\":\"secret\",\"bucket_name\":\"images\",\"endpoint\":\"/oss\",\"object_prefix\":\"\",\"scheme\":\"https\",\"proxy\":{\"url\":\"\",\"ping_url\":\"\",\"fallback\":true,\"check_interval\":5},\"timeout\":5,\"connect_timeout\":5,\"retry_limit\":3}";
+        let config: OssConfig = serde_json::from_str(json_str).unwrap();
+        // Passing None as id means no metrics object — get_reader would fail, so just verify construction succeeds
+        let oss = Oss::new(&config, None).unwrap();
+        // shutdown should still work
+        oss.shutdown();
+    }
+
+    #[test]
+    fn test_oss_url_empty_query() {
+        let state = OssState {
+            access_key_id: "key".to_string(),
+            access_key_secret: "secret".to_string(),
+            scheme: "https".to_string(),
+            object_prefix: "prefix/".to_string(),
+            endpoint: "oss-cn-hangzhou.aliyuncs.com".to_string(),
+            bucket_name: "mybucket".to_string(),
+            retry_limit: 1,
+        };
+
+        // Empty query slice takes the first branch
+        let (resource, url) = state.url("myobj", &[]);
+        assert_eq!(resource, "/mybucket/prefix/myobj");
+        assert_eq!(
+            url,
+            "https://mybucket.oss-cn-hangzhou.aliyuncs.com/prefix/myobj"
+        );
+    }
+
+    #[test]
+    fn test_oss_sign_with_oss_headers() {
+        let state = OssState {
+            access_key_id: "ak".to_string(),
+            access_key_secret: "sk".to_string(),
+            scheme: "https".to_string(),
+            object_prefix: "".to_string(),
+            endpoint: "oss.example.com".to_string(),
+            bucket_name: "bucket".to_string(),
+            retry_limit: 0,
+        };
+
+        let mut headers = HeaderMap::new();
+        // Add an x-oss-* header to exercise the canonicalized_oss_headers branch
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-oss-meta-author"),
+            reqwest::header::HeaderValue::from_static("test"),
+        );
+        state
+            .sign(Method::GET, &mut headers, "/bucket/someobj", "")
+            .unwrap();
+
+        let auth = headers.get(HEADER_AUTHORIZATION).unwrap();
+        assert!(auth.to_str().unwrap().starts_with("OSS ak:"));
+    }
 }

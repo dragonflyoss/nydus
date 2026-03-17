@@ -72,6 +72,26 @@ func TestConvert(t *testing.T) {
 		err := Convert(context.Background(), opt)
 		assert.Error(t, err)
 	})
+
+	t.Run("standard convert invalid platform", func(t *testing.T) {
+		opt := Opt{
+			WorkDir:   t.TempDir(),
+			Platforms: "invalid-platform-format!!!",
+		}
+		err := Convert(context.Background(), opt)
+		assert.Error(t, err)
+	})
+
+	t.Run("standard convert invalid retry delay", func(t *testing.T) {
+		opt := Opt{
+			WorkDir:        t.TempDir(),
+			Platforms:      "linux/arm64",
+			PushRetryDelay: "not-a-duration",
+		}
+		err := Convert(context.Background(), opt)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "parse push retry delay")
+	})
 }
 
 func TestConvertModelFile(t *testing.T) {

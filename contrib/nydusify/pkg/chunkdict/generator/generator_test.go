@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 
@@ -182,4 +184,41 @@ func TestPull(t *testing.T) {
 		_, err := generator.pull(context.Background())
 		require.ErrorContains(t, err, "parse Nydus image")
 	})
+}
+
+func TestNewStore(t *testing.T) {
+	remotes := []ocispec.Descriptor{
+		{Digest: digest.FromString("blob1"), Size: 100},
+		{Digest: digest.FromString("blob2"), Size: 200},
+	}
+	s := newStore(nil, remotes)
+	require.NotNil(t, s)
+	require.Len(t, s.remotes, 2)
+}
+
+func TestStoreInfoFromRemotes(t *testing.T) {
+	dgst := digest.FromString("blob1")
+	remotes := []ocispec.Descriptor{
+		{Digest: dgst, Size: 100},
+	}
+	// Create a store with a nil base - Info will fail on base, then search remotes
+	baseDir := t.TempDir()
+	baseStore, err := local.NewStore(baseDir)
+	require.NoError(t, err)
+
+	s := newStore(baseStore, remotes)
+	info, err := s.Info(context.Background(), dgst)
+	require.NoError(t, err)
+	require.Equal(t, dgst, info.Digest)
+	require.Equal(t, int64(100), info.Size)
+}
+
+func TestStoreInfoNotFound(t *testing.T) {
+	baseDir := t.TempDir()
+	baseStore, err := local.NewStore(baseDir)
+	require.NoError(t, err)
+
+	s := newStore(baseStore, nil)
+	_, err = s.Info(context.Background(), digest.FromString("missing"))
+	require.Error(t, err)
 }

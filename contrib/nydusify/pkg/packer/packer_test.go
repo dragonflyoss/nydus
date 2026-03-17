@@ -6,6 +6,7 @@ package packer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -228,4 +229,181 @@ func setUpTmpDir(t *testing.T) (string, func()) {
 	return tmpDir, func() {
 		os.RemoveAll(tmpDir)
 	}
+}
+
+func TestGetChunkDictBlobsEmpty(t *testing.T) {
+	p := &Packer{logger: logrus.New()}
+	blobs, err := p.getChunkDictBlobs("")
+	require.NoError(t, err)
+	require.Empty(t, blobs)
+}
+
+func TestGetChunkDictBlobsInvalidFormat(t *testing.T) {
+	p := &Packer{logger: logrus.New()}
+	_, err := p.getChunkDictBlobs("no-equals-sign")
+	require.ErrorIs(t, err, ErrInvalidChunkDictArgs)
+}
+
+func TestGetChunkDictBlobsTooManyParts(t *testing.T) {
+	p := &Packer{logger: logrus.New()}
+	_, err := p.getChunkDictBlobs("a=b=c")
+	require.ErrorIs(t, err, ErrInvalidChunkDictArgs)
+}
+
+func TestGetChunkDictBlobsUnsupportedType(t *testing.T) {
+	p := &Packer{logger: logrus.New()}
+	_, err := p.getChunkDictBlobs("blob=/tmp/file")
+	require.ErrorIs(t, err, ErrNoSupport)
+}
+
+func TestTryCompactParentSkips(t *testing.T) {
+	p := &Packer{logger: logrus.New()}
+
+	t.Run("compact disabled", func(t *testing.T) {
+		req := &PackRequest{TryCompact: false, Parent: "/some/parent"}
+		require.NoError(t, p.tryCompactParent(req))
+	})
+
+	t.Run("no parent", func(t *testing.T) {
+		req := &PackRequest{TryCompact: true, Parent: ""}
+		require.NoError(t, p.tryCompactParent(req))
+	})
+
+	t.Run("no backend config", func(t *testing.T) {
+		req := &PackRequest{TryCompact: true, Parent: "/some/parent"}
+		err := p.tryCompactParent(req)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "backend configuration is needed")
+	})
+}
+
+func TestEnsureNydusImagePathErrors(t *testing.T) {
+	t.Run("empty path", func(t *testing.T) {
+		p := &Packer{logger: logrus.New(), nydusImagePath: ""}
+		err := p.ensureNydusImagePath()
+		require.ErrorIs(t, err, ErrNydusImageBinaryNotFound)
+	})
+
+	t.Run("whitespace only", func(t *testing.T) {
+		p := &Packer{logger: logrus.New(), nydusImagePath: "   "}
+		err := p.ensureNydusImagePath()
+		require.ErrorIs(t, err, ErrNydusImageBinaryNotFound)
+	})
+}
+
+func TestGetNewBlobsHashEdgeCases(t *testing.T) {
+	dir := t.TempDir()
+	artifact, err := NewArtifact(dir)
+	require.NoError(t, err)
+	p := &Packer{Artifact: artifact, logger: logrus.New()}
+	outputJSON := p.outputJSONPath()
+
+	t.Run("no new blobs", func(t *testing.T) {
+		data, _ := json.Marshal(BlobManifest{Blobs: []string{"aaa"}})
+		require.NoError(t, os.WriteFile(outputJSON, data, 0644))
+		hash, err := p.getNewBlobsHash([]string{"aaa"})
+		require.NoError(t, err)
+		require.Empty(t, hash)
+	})
+
+	t.Run("first new blob", func(t *testing.T) {
+		data, _ := json.Marshal(BlobManifest{Blobs: []string{"aaa", "bbb"}})
+		require.NoError(t, os.WriteFile(outputJSON, data, 0644))
+		hash, err := p.getNewBlobsHash([]string{"aaa"})
+		require.NoError(t, err)
+		require.Equal(t, "bbb", hash)
+	})
+
+	t.Run("file not found", func(t *testing.T) {
+		p2 := &Packer{Artifact: Artifact{OutputDir: "/nonexistent"}, logger: logrus.New()}
+		_, err := p2.getNewBlobsHash(nil)
+		require.Error(t, err)
+	})
+
+	t.Run("invalid json", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(outputJSON, []byte("{invalid}"), 0644))
+		_, err := p.getNewBlobsHash(nil)
+		require.Error(t, err)
+	})
+}
+
+func TestInitLogger(t *testing.T) {
+	logger, err := initLogger(logrus.DebugLevel)
+	require.NoError(t, err)
+	require.NotNil(t, logger)
+	require.Equal(t, logrus.DebugLevel, logger.Level)
+}
+
+func TestGetBlobsFromBootstrapEmpty(t *testing.T) {
+	p := &Packer{logger: logrus.New()}
+	blobs, err := p.getBlobsFromBootstrap("")
+	require.NoError(t, err)
+	require.Empty(t, blobs)
+}
+
+func TestGetBlobsFromBootstrapInvalidBinary(t *testing.T) {
+	p := &Packer{
+		logger:         logrus.New(),
+		nydusImagePath: "/nonexistent/nydus-image",
+	}
+	_, err := p.getBlobsFromBootstrap("/some/nonexistent/bootstrap")
+	require.Error(t, err)
+}
+
+func TestDumpBlobBackendConfigOpenError(t *testing.T) {
+	p := &Packer{
+		logger: logrus.New(),
+		BackendConfig: &S3BackendConfig{
+			BucketName: "test",
+		},
+	}
+	// Pass a path in a non-existent directory to trigger os.OpenFile error
+	_, err := p.dumpBlobBackendConfig("/nonexistent/dir/config.json")
+	require.Error(t, err)
+}
+
+func TestDumpBlobBackendConfigCleanupCalled(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := &Packer{
+		logger: logrus.New(),
+		BackendConfig: &S3BackendConfig{
+			Endpoint:        "s3.amazonaws.com",
+			Scheme:          "https",
+			AccessKeyID:     "ak",
+			AccessKeySecret: "sk",
+			Region:          "us-east-1",
+			BucketName:      "bucket",
+		},
+	}
+	filePath := filepath.Join(tmpDir, "config.json")
+	cleanup, err := p.dumpBlobBackendConfig(filePath)
+	require.NoError(t, err)
+	require.NotNil(t, cleanup)
+
+	// File should exist before cleanup
+	_, statErr := os.Stat(filePath)
+	require.NoError(t, statErr)
+
+	// Call the cleanup function — it should zero and remove the file
+	cleanup()
+
+	// File should be removed after cleanup
+	_, statErr = os.Stat(filePath)
+	require.True(t, os.IsNotExist(statErr))
+}
+
+func TestDumpBlobBackendConfigCleanupBadPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	p := &Packer{
+		logger:        logrus.New(),
+		BackendConfig: &S3BackendConfig{BucketName: "b"},
+	}
+	filePath := filepath.Join(tmpDir, "cfg.json")
+	cleanup, err := p.dumpBlobBackendConfig(filePath)
+	require.NoError(t, err)
+
+	// Remove the file before calling cleanup to trigger the open error path
+	require.NoError(t, os.Remove(filePath))
+	// Should not panic even though the file is missing
+	cleanup()
 }

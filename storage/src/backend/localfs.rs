@@ -211,9 +211,34 @@ impl Drop for LocalFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write;
     use std::os::unix::io::{FromRawFd, IntoRawFd};
-    use vmm_sys_util::tempfile::TempFile;
+    use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
+
+    fn new_localfs(
+        dir: &Path,
+        blob_file: Option<&Path>,
+        alt_dirs: Vec<&Path>,
+        id: &str,
+    ) -> LocalFs {
+        let config = LocalFsConfig {
+            blob_file: blob_file
+                .map(|path| path.to_str().unwrap().to_owned())
+                .unwrap_or_default(),
+            dir: dir.to_str().unwrap().to_owned(),
+            alt_dirs: alt_dirs
+                .into_iter()
+                .map(|path| path.to_str().unwrap().to_owned())
+                .collect(),
+        };
+
+        LocalFs::new(&config, Some(id)).unwrap()
+    }
+
+    fn write_blob(path: &Path, data: &[u8]) {
+        fs::write(path, data).unwrap();
+    }
 
     #[test]
     fn test_invalid_localfs_new() {
@@ -272,6 +297,80 @@ mod tests {
         };
         let fs = LocalFs::new(&config, Some(filename)).unwrap();
         assert_eq!(fs.get_blob_path(filename).unwrap().to_str(), path.to_str());
+    }
+
+    #[test]
+    fn test_localfs_get_blob_path_skips_zero_byte_alt_dirs() {
+        let main_dir = TempDir::new().unwrap();
+        let zero_alt_dir = TempDir::new().unwrap();
+        let valid_alt_dir = TempDir::new().unwrap();
+        let blob_id = "blob-alt-skip";
+
+        write_blob(&main_dir.as_path().join(blob_id), &[]);
+        write_blob(&zero_alt_dir.as_path().join(blob_id), &[]);
+        write_blob(&valid_alt_dir.as_path().join(blob_id), b"nydus");
+
+        let fs = new_localfs(
+            main_dir.as_path(),
+            None,
+            vec![zero_alt_dir.as_path(), valid_alt_dir.as_path()],
+            blob_id,
+        );
+
+        assert_eq!(
+            fs.get_blob_path(blob_id).unwrap(),
+            valid_alt_dir
+                .as_path()
+                .join(blob_id)
+                .canonicalize()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_localfs_get_blob_path_prefers_blob_file_over_dirs() {
+        let dir = TempDir::new().unwrap();
+        let blob_file = TempFile::new().unwrap();
+        let blob_id = "blob-priority";
+        let dir_blob = dir.as_path().join(blob_id);
+
+        write_blob(blob_file.as_path(), b"blob-file");
+        write_blob(&dir_blob, b"dir-file");
+
+        let fs = new_localfs(
+            dir.as_path(),
+            Some(blob_file.as_path()),
+            Vec::new(),
+            blob_id,
+        );
+
+        assert_eq!(
+            fs.get_blob_path(blob_id).unwrap(),
+            blob_file.as_path().canonicalize().unwrap()
+        );
+
+        let blob = fs.get_reader(blob_id).unwrap();
+        let mut buf = [0u8; 9];
+        assert_eq!(blob.read(&mut buf, 0).unwrap(), 9);
+        assert_eq!(&buf, b"blob-file");
+    }
+
+    #[test]
+    fn test_localfs_get_blob_path_errors_when_all_dirs_miss() {
+        let main_dir = TempDir::new().unwrap();
+        let alt_dir_1 = TempDir::new().unwrap();
+        let alt_dir_2 = TempDir::new().unwrap();
+        let blob_id = "blob-miss";
+
+        let fs = new_localfs(
+            main_dir.as_path(),
+            None,
+            vec![alt_dir_1.as_path(), alt_dir_2.as_path()],
+            blob_id,
+        );
+
+        assert!(fs.get_blob_path(blob_id).is_err());
+        assert!(fs.get_blob(blob_id).is_err());
     }
 
     #[test]
@@ -335,5 +434,30 @@ mod tests {
         assert_eq!(blob2.blob_size().unwrap(), 4);
         let blob4 = fs.get_blob(filename).unwrap();
         assert_eq!(blob4.blob_size().unwrap(), 4);
+    }
+
+    #[test]
+    fn test_localfs_reader_handles_empty_requests_and_eof() {
+        let tempfile = TempFile::new().unwrap();
+        let path = tempfile.as_path();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+
+        write_blob(path, b"data");
+
+        let fs = new_localfs(path.parent().unwrap(), None, Vec::new(), filename);
+        let blob = fs.get_reader(filename).unwrap();
+
+        let mut empty = [];
+        assert_eq!(blob.read(&mut empty, 0).unwrap(), 0);
+
+        let mut eof_buf = [0u8; 2];
+        assert_eq!(blob.read(&mut eof_buf, 4).unwrap(), 0);
+        assert_eq!(eof_buf, [0u8; 2]);
+
+        let mut readv_buf = [0xabu8; 2];
+        let bufs =
+            [unsafe { FileVolatileSlice::from_raw_ptr(readv_buf.as_mut_ptr(), readv_buf.len()) }];
+        assert_eq!(blob.readv(&bufs, 0, 0).unwrap(), 0);
+        assert_eq!(readv_buf, [0xab, 0xab]);
     }
 }

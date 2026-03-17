@@ -1781,6 +1781,17 @@ mod tests {
     }
 
     #[test]
+    fn test_data_buffer_already_allocated() {
+        // Covers the `else` branch of convert_to_owned_buffer (Allocated passthrough)
+        let data = vec![0x42u8; 16];
+        let buf = DataBuffer::Allocated(data);
+        assert_eq!(buf.size(), 16);
+        let converted = buf.convert_to_owned_buffer();
+        assert_eq!(converted.slice()[0], 0x42);
+        assert!(converted.size() >= 16);
+    }
+
+    #[test]
     fn test_region_type() {
         assert!(RegionType::CacheFast.joinable(RegionType::CacheFast));
         assert!(RegionType::CacheSlow.joinable(RegionType::CacheSlow));
@@ -2102,5 +2113,70 @@ mod tests {
             5,
             "entries_count should be incremented to 5 after multiple successful updates"
         );
+    }
+
+    #[test]
+    fn test_file_cache_meta_get_blob_meta_immediate_success() {
+        let meta = Arc::new(BlobCompressionContextInfo {
+            state: Arc::new(BlobCompressionContext::default()),
+        });
+        let file_cache_meta = FileCacheMeta {
+            has_error: Arc::new(AtomicBool::new(false)),
+            meta: Arc::new(Mutex::new(Some(meta.clone()))),
+        };
+
+        let result = file_cache_meta.get_blob_meta();
+        assert!(result.is_some());
+        assert!(Arc::ptr_eq(&result.unwrap(), &meta));
+    }
+
+    #[test]
+    fn test_file_cache_meta_get_blob_meta_waits_until_meta_ready() {
+        let file_cache_meta = FileCacheMeta {
+            has_error: Arc::new(AtomicBool::new(false)),
+            meta: Arc::new(Mutex::new(None)),
+        };
+        let meta_clone = file_cache_meta.clone();
+        let expected = Arc::new(BlobCompressionContextInfo {
+            state: Arc::new(BlobCompressionContext::default()),
+        });
+        let expected_clone = expected.clone();
+
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(10));
+            *meta_clone.meta.lock().unwrap() = Some(expected_clone);
+        });
+
+        let result = file_cache_meta.get_blob_meta();
+        assert!(result.is_some());
+        assert!(Arc::ptr_eq(&result.unwrap(), &expected));
+    }
+
+    #[test]
+    fn test_file_cache_meta_get_blob_meta_returns_none_on_error() {
+        let file_cache_meta = FileCacheMeta {
+            has_error: Arc::new(AtomicBool::new(true)),
+            meta: Arc::new(Mutex::new(None)),
+        };
+
+        assert!(file_cache_meta.get_blob_meta().is_none());
+    }
+
+    #[test]
+    fn test_file_cache_meta_clone_shares_state() {
+        let file_cache_meta = FileCacheMeta {
+            has_error: Arc::new(AtomicBool::new(false)),
+            meta: Arc::new(Mutex::new(None)),
+        };
+        let cloned = file_cache_meta.clone();
+        let shared = Arc::new(BlobCompressionContextInfo {
+            state: Arc::new(BlobCompressionContext::default()),
+        });
+
+        *cloned.meta.lock().unwrap() = Some(shared.clone());
+        assert!(Arc::ptr_eq(
+            &file_cache_meta.get_blob_meta().unwrap(),
+            &shared,
+        ));
     }
 }

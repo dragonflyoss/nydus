@@ -54,3 +54,46 @@ impl StorageBackend for UdsStorageBackend {
         Ok((fds, data))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn test_new_stores_socket_path() {
+        let path = PathBuf::from("/tmp/test_nydus_uds.sock");
+        let backend = UdsStorageBackend::new(path.clone());
+        assert_eq!(backend.socket_path, path);
+    }
+
+    #[test]
+    fn test_save_empty_fds_returns_no_enough_fds() {
+        let mut backend = UdsStorageBackend::new(PathBuf::from("/nonexistent.sock"));
+        let result = backend.save(&[], b"state-data");
+        assert!(matches!(result, Err(StorageBackendErr::NoEnoughFds)));
+    }
+
+    #[test]
+    fn test_save_invalid_socket_path_returns_create_unix_stream_error() {
+        let mut backend = UdsStorageBackend::new(PathBuf::from("/nonexistent/dir/test.sock"));
+        // Provide a non-empty fds slice so the empty-fds guard does not fire;
+        // the connect() call must fail first.
+        let result = backend.save(&[0i32], b"data");
+        assert!(matches!(
+            result,
+            Err(StorageBackendErr::CreateUnixStream(_))
+        ));
+    }
+
+    #[test]
+    fn test_restore_invalid_socket_path_returns_create_unix_stream_error() {
+        let mut backend = UdsStorageBackend::new(PathBuf::from("/nonexistent/dir/test.sock"));
+        let result = backend.restore();
+        assert!(matches!(
+            result,
+            Err(StorageBackendErr::CreateUnixStream(_))
+        ));
+    }
+}

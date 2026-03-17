@@ -52,7 +52,8 @@ type AccessPatternMetrics struct {
 }
 
 type BlobCacheMetrics struct {
-	PrefetchDataAmount uint64 `json:"prefetch_data_amount"`
+	PrefetchDataAmount    uint64 `json:"prefetch_data_amount"`
+	PrefetchRequestsCount uint64 `json:"prefetch_requests_count"`
 }
 
 type InflightMetrics struct {
@@ -103,6 +104,7 @@ type daemonInfo struct {
 
 var configTpl = `
  {
+	 "id": "{{.MountPath}}",
 	 "device": {
 		 "backend": {
 			 "type": "{{.BackendType}}",

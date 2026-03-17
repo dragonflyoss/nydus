@@ -512,6 +512,42 @@ mod tests {
     }
 
     #[test]
+    fn test_load_param_interval_boundary_values() {
+        let mut zero_params = HashMap::new();
+        zero_params.insert("interval".to_string(), "0".to_string());
+        assert_eq!(load_param_interval(&Some(zero_params)).unwrap(), Some(0));
+
+        let mut max_params = HashMap::new();
+        max_params.insert("interval".to_string(), u32::MAX.to_string());
+        assert_eq!(
+            load_param_interval(&Some(max_params)).unwrap(),
+            Some(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn test_load_param_interval_overflow_value() {
+        let mut params = HashMap::new();
+        params.insert(
+            "interval".to_string(),
+            (u64::from(u32::MAX) + 1).to_string(),
+        );
+
+        let err = load_param_interval(&Some(params)).unwrap_err();
+        assert!(err.to_string().contains("Invalid interval input"));
+    }
+
+    #[test]
+    fn test_configure_items_map_contains_expected_entry() {
+        assert_eq!(CONFIGURE_ITEMS_MAP.len(), 1);
+        assert_eq!(
+            CONFIGURE_ITEMS_MAP.get("log-level").map(String::as_str),
+            Some("log_level")
+        );
+        assert!(!CONFIGURE_ITEMS_MAP.contains_key("log_level"));
+    }
+
+    #[test]
     fn test_metric_delta() {
         let old = serde_json::json!({"read_count": 4});
         let new = serde_json::json!({"read_count": 10});
@@ -519,9 +555,39 @@ mod tests {
     }
 
     #[test]
+    fn test_metric_delta_zero_difference() {
+        let old = serde_json::json!({"read_count": 10});
+        let new = serde_json::json!({"read_count": 10});
+        assert_eq!(metric_delta(&old, &new, "read_count"), 0);
+    }
+
+    #[test]
     fn test_metric_vec_delta() {
         let old = serde_json::json!({"dist": [1, 2, 3]});
         let new = serde_json::json!({"dist": [3, 5, 9]});
         assert_eq!(metric_vec_delta(&old, &new, "dist"), vec![2, 3, 6]);
+    }
+
+    #[test]
+    fn test_metric_vec_delta_empty_array() {
+        let old = serde_json::json!({"dist": []});
+        let new = serde_json::json!({"dist": []});
+        assert!(metric_vec_delta(&old, &new, "dist").is_empty());
+    }
+
+    #[test]
+    fn test_metric_vec_delta_zero_difference() {
+        let old = serde_json::json!({"dist": [2, 4, 8]});
+        let new = serde_json::json!({"dist": [2, 4, 8]});
+        assert_eq!(metric_vec_delta(&old, &new, "dist"), vec![0, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_metric_vec_delta_panics_on_mismatched_lengths() {
+        let old = serde_json::json!({"dist": [1, 2]});
+        let new = serde_json::json!({"dist": [1, 2, 3]});
+
+        let _ = metric_vec_delta(&old, &new, "dist");
     }
 }

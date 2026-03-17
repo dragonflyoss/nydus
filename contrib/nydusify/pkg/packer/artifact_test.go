@@ -33,3 +33,29 @@ func TestArtifactPath(t *testing.T) {
 	require.Equal(t, "/tmp/test.blob", artifact.blobFilePath("test", false))
 	require.Equal(t, "/tmp/test", artifact.blobFilePath("test", true))
 }
+
+func TestOutputJSONPath(t *testing.T) {
+	artifact := Artifact{OutputDir: "/tmp/output"}
+	require.Equal(t, "/tmp/output/output.json", artifact.outputJSONPath())
+
+	artifact2 := Artifact{OutputDir: "."}
+	require.Equal(t, "output.json", artifact2.outputJSONPath())
+}
+
+func TestNewArtifactWithTempDir(t *testing.T) {
+	dir := t.TempDir()
+	a, err := NewArtifact(dir)
+	require.NoError(t, err)
+	require.Equal(t, dir, a.OutputDir)
+}
+
+func TestEnsureOutputDirCreatesDirectory(t *testing.T) {
+	base := t.TempDir()
+	nested := base + "/nested/dir"
+	a := &Artifact{OutputDir: nested}
+	require.NoError(t, a.ensureOutputDir())
+
+	info, err := os.Stat(nested)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+}
