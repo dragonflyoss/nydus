@@ -6,7 +6,9 @@ import (
 	"io"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -219,4 +221,139 @@ func TestResolvePullAndReaderAt(t *testing.T) {
 	require.Equal(t, 2, n)
 	require.Equal(t, "bc", string(buf))
 	require.Equal(t, int64(6), ra.Size())
+}
+
+func TestWithHTTP(t *testing.T) {
+	remote, err := New("docker.io/library/busybox:latest", func(bool) remotes.Resolver {
+		return &MockResolver{}
+	})
+	require.NoError(t, err)
+
+	require.False(t, remote.IsWithHTTP())
+	remote.WithHTTP()
+	require.True(t, remote.IsWithHTTP())
+}
+
+func TestNamedReferenceEdgeCases(t *testing.T) {
+	// When parsed is nil but Ref is valid, namedReference should parse and cache
+	remote := &Remote{Ref: "docker.io/library/alpine:latest"}
+	named, err := remote.namedReference()
+	require.NoError(t, err)
+	require.NotNil(t, named)
+	require.NotNil(t, remote.parsed)
+
+	// Subsequent calls should return cached value
+	named2, err := remote.namedReference()
+	require.NoError(t, err)
+	require.Equal(t, named, named2)
+
+	// Empty ref
+	remote2 := &Remote{Ref: ""}
+	_, err = remote2.namedReference()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "empty remote reference")
+}
+
+func TestRequestRef(t *testing.T) {
+	remote, err := New("docker.io/library/busybox:v1", func(bool) remotes.Resolver {
+		return &MockResolver{}
+	})
+	require.NoError(t, err)
+
+	ref, err := remote.requestRef(true)
+	require.NoError(t, err)
+	require.Equal(t, "docker.io/library/busybox", ref)
+
+	ref, err = remote.requestRef(false)
+	require.NoError(t, err)
+	require.Equal(t, "docker.io/library/busybox:v1", ref)
+}
+
+type mockPusher struct {
+	pushFunc func(ctx context.Context, desc ocispec.Descriptor) (content.Writer, error)
+}
+
+func (m *mockPusher) Push(ctx context.Context, desc ocispec.Descriptor) (content.Writer, error) {
+	if m.pushFunc != nil {
+		return m.pushFunc(ctx, desc)
+	}
+	return nil, errors.New("pushFunc not implemented")
+}
+
+type mockWriter struct {
+	bytes.Buffer
+	committed bool
+	digest    digest.Digest
+}
+
+func (w *mockWriter) Close() error          { return nil }
+func (w *mockWriter) Digest() digest.Digest { return w.digest }
+func (w *mockWriter) Commit(ctx context.Context, size int64, expected digest.Digest, opts ...content.Opt) error {
+	w.committed = true
+	return nil
+}
+func (w *mockWriter) Status() (content.Status, error) {
+	return content.Status{}, nil
+}
+func (w *mockWriter) Truncate(size int64) error { return nil }
+
+func TestPushSuccess(t *testing.T) {
+	data := []byte("hello world")
+	dgst := digest.FromBytes(data)
+	desc := ocispec.Descriptor{Digest: dgst, Size: int64(len(data))}
+
+	writer := &mockWriter{digest: dgst}
+	remote, err := New("docker.io/library/busybox:latest", func(bool) remotes.Resolver {
+		return &MockResolver{
+			PusherFunc: func(_ context.Context, ref string) (remotes.Pusher, error) {
+				return &mockPusher{
+					pushFunc: func(_ context.Context, _ ocispec.Descriptor) (content.Writer, error) {
+						return writer, nil
+					},
+				}, nil
+			},
+		}
+	})
+	require.NoError(t, err)
+
+	err = remote.Push(context.Background(), desc, false, bytes.NewReader(data))
+	require.NoError(t, err)
+	require.True(t, writer.committed)
+}
+
+func TestPushAlreadyExists(t *testing.T) {
+	desc := ocispec.Descriptor{Digest: digest.FromString("test"), Size: 4}
+
+	remote, err := New("docker.io/library/busybox:latest", func(bool) remotes.Resolver {
+		return &MockResolver{
+			PusherFunc: func(_ context.Context, ref string) (remotes.Pusher, error) {
+				return &mockPusher{
+					pushFunc: func(_ context.Context, _ ocispec.Descriptor) (content.Writer, error) {
+						return nil, errdefs.ErrAlreadyExists
+					},
+				}, nil
+			},
+		}
+	})
+	require.NoError(t, err)
+
+	err = remote.Push(context.Background(), desc, true, bytes.NewReader([]byte("test")))
+	require.NoError(t, err)
+}
+
+func TestFromFetcher(t *testing.T) {
+	fetcher := remotes.FetcherFunc(func(_ context.Context, desc ocispec.Descriptor) (io.ReadCloser, error) {
+		return &readSeekCloser{Reader: bytes.NewReader([]byte("content"))}, nil
+	})
+	provider := FromFetcher(fetcher)
+	require.NotNil(t, provider)
+
+	ra, err := provider.ReaderAt(context.Background(), ocispec.Descriptor{Size: 7})
+	require.NoError(t, err)
+	require.Equal(t, int64(7), ra.Size())
+	buf := make([]byte, 7)
+	n, err := ra.ReadAt(buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, 7, n)
+	require.Equal(t, "content", string(buf))
 }

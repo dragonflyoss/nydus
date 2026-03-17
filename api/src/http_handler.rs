@@ -405,4 +405,75 @@ mod tests {
         assert!(msg.is_none());
         let _ = thread.join().unwrap();
     }
+
+    #[test]
+    fn test_translate_status_code() {
+        use crate::{ApiError, DaemonErrorKind, MetricsError, MetricsErrorKind};
+
+        assert_eq!(
+            translate_status_code(&ApiError::DaemonAbnormal(DaemonErrorKind::NotReady)),
+            StatusCode::ServiceUnavailable
+        );
+        assert_eq!(
+            translate_status_code(&ApiError::DaemonAbnormal(DaemonErrorKind::Unsupported)),
+            StatusCode::NotImplemented
+        );
+        assert_eq!(
+            translate_status_code(&ApiError::DaemonAbnormal(DaemonErrorKind::UnexpectedEvent(
+                "ev".into()
+            ))),
+            StatusCode::BadRequest
+        );
+        // Other DaemonErrorKind → InternalServerError
+        assert_eq!(
+            translate_status_code(&ApiError::DaemonAbnormal(DaemonErrorKind::Other(
+                "x".into()
+            ))),
+            StatusCode::InternalServerError
+        );
+        // Metrics NoCounter → NotFound
+        assert_eq!(
+            translate_status_code(&ApiError::Metrics(MetricsErrorKind::Stats(
+                MetricsError::NoCounter
+            ))),
+            StatusCode::NotFound
+        );
+        // Catch-all → InternalServerError
+        assert_eq!(
+            translate_status_code(&ApiError::ResponsePayloadType),
+            StatusCode::InternalServerError
+        );
+        // MountFilesystem variant
+        assert_eq!(
+            translate_status_code(&ApiError::MountFilesystem(DaemonErrorKind::Unsupported)),
+            StatusCode::NotImplemented
+        );
+    }
+
+    #[test]
+    fn test_success_response() {
+        let resp_with_body = success_response(Some("hello".into()));
+        assert_eq!(resp_with_body.status(), StatusCode::OK);
+
+        let resp_no_body = success_response(None);
+        assert_eq!(resp_no_body.status(), StatusCode::NoContent);
+    }
+
+    #[test]
+    fn test_error_response() {
+        let resp = error_response(HttpError::NoRoute, StatusCode::NotFound);
+        assert_eq!(resp.status(), StatusCode::NotFound);
+    }
+
+    #[test]
+    fn test_parse_body() {
+        let body = Body::new(r#"{"key":"value"}"#.to_string());
+        let result: std::result::Result<serde_json::Value, HttpError> = parse_body(&body);
+        assert!(result.is_ok());
+
+        let bad_body = Body::new("not json".to_string());
+        let result: std::result::Result<serde_json::Value, HttpError> = parse_body(&bad_body);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), HttpError::ParseBody(_)));
+    }
 }

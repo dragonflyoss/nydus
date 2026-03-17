@@ -5,15 +5,25 @@
 package cache
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"testing"
 
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/remotes"
+	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/backend"
+	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
@@ -296,4 +306,335 @@ func TestRecordQueueBehavior(t *testing.T) {
 	assert.Equal(t, digest.FromString("chain-5"), cache.pushedRecords[0].SourceChainID)
 	assert.Equal(t, digest.FromString("chain-6"), cache.pushedRecords[1].SourceChainID)
 	assert.Equal(t, digest.FromString("chain-7"), cache.pushedRecords[2].SourceChainID)
+}
+
+func TestExportEmpty(t *testing.T) {
+	r, err := remote.New("docker.io/cache:v1", func(bool) remotes.Resolver { return nil })
+	require.NoError(t, err)
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6", Version: "1.0"})
+	require.NoError(t, err)
+
+	// Empty pushed records → should return nil immediately
+	err = cache.Export(context.Background())
+	require.NoError(t, err)
+}
+
+type mockWriter struct {
+	bytes.Buffer
+}
+
+func (w *mockWriter) Close() error          { return nil }
+func (w *mockWriter) Digest() digest.Digest { return digest.FromBytes(w.Bytes()) }
+func (w *mockWriter) Commit(_ context.Context, _ int64, _ digest.Digest, _ ...content.Opt) error {
+	return nil
+}
+func (w *mockWriter) Status() (content.Status, error) { return content.Status{}, nil }
+func (w *mockWriter) Truncate(_ int64) error          { return nil }
+
+type mockPusher struct {
+	pushErr error
+}
+
+func (p *mockPusher) Push(_ context.Context, desc ocispec.Descriptor) (content.Writer, error) {
+	if p.pushErr != nil {
+		return nil, p.pushErr
+	}
+	return &mockWriter{}, nil
+}
+
+type mockFetcher struct {
+	fetchData []byte
+	fetchErr  error
+}
+
+func (f *mockFetcher) Fetch(_ context.Context, _ ocispec.Descriptor) (io.ReadCloser, error) {
+	if f.fetchErr != nil {
+		return nil, f.fetchErr
+	}
+	return io.NopCloser(bytes.NewReader(f.fetchData)), nil
+}
+
+type mockResolver struct {
+	resolveDesc ocispec.Descriptor
+	resolveErr  error
+	pusher      *mockPusher
+	fetcher     *mockFetcher
+}
+
+func (r *mockResolver) Resolve(_ context.Context, _ string) (string, ocispec.Descriptor, error) {
+	return "", r.resolveDesc, r.resolveErr
+}
+
+func (r *mockResolver) Fetcher(_ context.Context, _ string) (remotes.Fetcher, error) {
+	return r.fetcher, nil
+}
+
+func (r *mockResolver) Pusher(_ context.Context, _ string) (remotes.Pusher, error) {
+	return r.pusher, nil
+}
+
+func (r *mockResolver) PusherInChunked(_ context.Context, _ string) (remotes.PusherInChunked, error) {
+	return nil, errors.New("not implemented")
+}
+
+func newMockRemote(t *testing.T, resolver *mockResolver) *remote.Remote {
+	t.Helper()
+	r, err := remote.New("docker.io/cache:v1", func(bool) remotes.Resolver {
+		return resolver
+	})
+	require.NoError(t, err)
+	return r
+}
+
+func TestExportSuccess(t *testing.T) {
+	resolver := &mockResolver{
+		pusher: &mockPusher{},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{
+		Backend:    &backend.Registry{},
+		FsVersion:  "6",
+		Version:    "1.0",
+		MaxRecords: 5,
+	})
+	require.NoError(t, err)
+
+	cache.Record([]*Record{makeRecord(1, true)})
+	err = cache.Export(context.Background())
+	require.NoError(t, err)
+}
+
+func TestExportPushError(t *testing.T) {
+	resolver := &mockResolver{
+		pusher: &mockPusher{pushErr: errors.New("push failed")},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{
+		Backend:    &backend.Registry{},
+		FsVersion:  "6",
+		Version:    "1.0",
+		MaxRecords: 5,
+	})
+	require.NoError(t, err)
+
+	cache.Record([]*Record{makeRecord(1, true)})
+	err = cache.Export(context.Background())
+	require.Error(t, err)
+}
+
+func TestExportAlreadyExists(t *testing.T) {
+	resolver := &mockResolver{
+		pusher: &mockPusher{pushErr: errdefs.ErrAlreadyExists},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{
+		Backend:    &backend.Registry{},
+		FsVersion:  "6",
+		Version:    "1.0",
+		MaxRecords: 5,
+	})
+	require.NoError(t, err)
+
+	cache.Record([]*Record{makeRecord(1, false)})
+	err = cache.Export(context.Background())
+	// AlreadyExists is handled gracefully by remote.Push
+	require.NoError(t, err)
+}
+
+func TestImportResolveError(t *testing.T) {
+	resolver := &mockResolver{
+		resolveErr: errors.New("not found"),
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6", Version: "1.0"})
+	require.NoError(t, err)
+
+	err = cache.Import(context.Background())
+	require.ErrorContains(t, err, "Resolve cache image")
+}
+
+func TestImportPullError(t *testing.T) {
+	resolver := &mockResolver{
+		fetcher: &mockFetcher{fetchErr: errors.New("network error")},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6", Version: "1.0"})
+	require.NoError(t, err)
+
+	err = cache.Import(context.Background())
+	require.ErrorContains(t, err, "Pull cache image")
+}
+
+func TestImportVersionMismatch(t *testing.T) {
+	manifest := Manifest{}
+	manifest.Annotations = map[string]string{
+		utils.ManifestNydusCache:            "2.0",
+		utils.LayerAnnotationNydusFsVersion: "6",
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	resolver := &mockResolver{
+		fetcher: &mockFetcher{fetchData: manifestBytes},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6", Version: "1.0"})
+	require.NoError(t, err)
+
+	err = cache.Import(context.Background())
+	require.ErrorContains(t, err, "unmatched cache image version")
+}
+
+func TestImportFsVersionMismatch(t *testing.T) {
+	manifest := Manifest{}
+	manifest.Annotations = map[string]string{
+		utils.ManifestNydusCache:            "1.0",
+		utils.LayerAnnotationNydusFsVersion: "5",
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	resolver := &mockResolver{
+		fetcher: &mockFetcher{fetchData: manifestBytes},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6", Version: "1.0"})
+	require.NoError(t, err)
+
+	err = cache.Import(context.Background())
+	require.ErrorContains(t, err, "unmatched fs version")
+}
+
+func TestImportSuccess(t *testing.T) {
+	layers := []ocispec.Descriptor{makeBootstrapLayer(1, true)}
+	manifest := Manifest{}
+	manifest.Layers = layers
+	manifest.Annotations = map[string]string{
+		utils.ManifestNydusCache:            "1.0",
+		utils.LayerAnnotationNydusFsVersion: "6",
+	}
+	manifestBytes, _ := json.Marshal(manifest)
+
+	resolver := &mockResolver{
+		fetcher: &mockFetcher{fetchData: manifestBytes},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.OSSBackend{}, FsVersion: "6", Version: "1.0"})
+	require.NoError(t, err)
+
+	err = cache.Import(context.Background())
+	require.NoError(t, err)
+	require.NotEmpty(t, cache.pulledRecords)
+}
+
+func TestCheckNotFound(t *testing.T) {
+	r := newMockRemote(t, &mockResolver{})
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6"})
+	require.NoError(t, err)
+
+	record, br, blob, err := cache.Check(context.Background(), digest.FromString("missing"))
+	require.NoError(t, err)
+	require.Nil(t, record)
+	require.Nil(t, br)
+	require.Nil(t, blob)
+}
+
+func TestCheckBootstrapPullError(t *testing.T) {
+	resolver := &mockResolver{
+		fetcher: &mockFetcher{fetchErr: errors.New("pull failed")},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6"})
+	require.NoError(t, err)
+
+	chainID := digest.FromString("chain-1")
+	cache.pulledRecords[chainID] = makeRecord(1, true)
+
+	_, _, _, err = cache.Check(context.Background(), chainID)
+	require.ErrorContains(t, err, "Check bootstrap layer")
+}
+
+func TestPush(t *testing.T) {
+	resolver := &mockResolver{
+		pusher: &mockPusher{},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6"})
+	require.NoError(t, err)
+
+	desc := ocispec.Descriptor{Digest: digest.FromString("test"), Size: 4}
+	err = cache.Push(context.Background(), desc, bytes.NewReader([]byte("test")))
+	require.NoError(t, err)
+}
+
+func TestPullBootstrapError(t *testing.T) {
+	resolver := &mockResolver{
+		fetcher: &mockFetcher{fetchErr: errors.New("pull failed")},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6"})
+	require.NoError(t, err)
+
+	err = cache.PullBootstrap(context.Background(), &ocispec.Descriptor{}, "/tmp/target")
+	require.ErrorContains(t, err, "Pull cached bootstrap layer")
+}
+
+func TestCheckSuccessRegistryBackendWithBlob(t *testing.T) {
+	resolver := &mockResolver{
+		fetcher: &mockFetcher{fetchData: []byte("bootstrap-data")},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6"})
+	require.NoError(t, err)
+
+	chainID := digest.FromString("chain-1")
+	cache.pulledRecords[chainID] = makeRecord(1, true)
+
+	record, bootstrapReader, blobReader, err := cache.Check(context.Background(), chainID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.NotNil(t, bootstrapReader)
+	require.NotNil(t, blobReader)
+	bootstrapReader.Close()
+	blobReader.Close()
+}
+
+func TestCheckSuccessRegistryNoBlobDesc(t *testing.T) {
+	resolver := &mockResolver{
+		fetcher: &mockFetcher{fetchData: []byte("bootstrap-data")},
+	}
+	r := newMockRemote(t, resolver)
+
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6"})
+	require.NoError(t, err)
+
+	chainID := digest.FromString("chain-no-blob")
+	cache.pulledRecords[chainID] = makeRecord(3, false)
+
+	record, bootstrapReader, blobReader, err := cache.Check(context.Background(), chainID)
+	require.NoError(t, err)
+	require.NotNil(t, record)
+	require.NotNil(t, bootstrapReader)
+	require.Nil(t, blobReader)
+	bootstrapReader.Close()
+}
+
+func TestRecordMaxRecords(t *testing.T) {
+	r := newMockRemote(t, &mockResolver{})
+	cache, err := New(r, Opt{Backend: &backend.Registry{}, FsVersion: "6", MaxRecords: 2})
+	require.NoError(t, err)
+
+	records := []*Record{makeRecord(1, true), makeRecord(2, true), makeRecord(3, true)}
+	cache.Record(records)
+	require.Len(t, cache.pushedRecords, 2)
 }

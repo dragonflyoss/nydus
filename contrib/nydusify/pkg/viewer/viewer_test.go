@@ -10,12 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/agiledragon/gomonkey/v2"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/checker/tool"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/parser"
-	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/provider"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/remote"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/snapshotter/external/backend"
 	"github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
@@ -43,23 +43,14 @@ func buildBootstrapArchive(t *testing.T, name string, data []byte) io.ReadCloser
 }
 
 func TestNewFsViewer(t *testing.T) {
-	var remoter = remote.Remote{}
-	defaultRemotePatches := gomonkey.ApplyFunc(provider.DefaultRemote, func(string, bool) (*remote.Remote, error) {
-		return &remoter, nil
-	})
-	defer defaultRemotePatches.Reset()
-
-	var targetParser = parser.Parser{}
-	parserNewPatches := gomonkey.ApplyFunc(parser.New, func(*remote.Remote, string) (*parser.Parser, error) {
-		return &targetParser, nil
-	})
-	defer parserNewPatches.Reset()
 	opt := Opt{
-		Target: "test",
+		Target:       "docker.io/library/busybox:latest",
+		ExpectedArch: runtime.GOARCH,
 	}
 	fsViewer, err := New(opt)
 	assert.NoError(t, err)
 	assert.NotNil(t, fsViewer)
+	assert.NotNil(t, fsViewer.Parser)
 }
 
 func TestNewFsViewerErrors(t *testing.T) {
@@ -70,29 +61,16 @@ func TestNewFsViewerErrors(t *testing.T) {
 	})
 
 	t.Run("default remote failed", func(t *testing.T) {
-		defaultRemotePatches := gomonkey.ApplyFunc(provider.DefaultRemote, func(string, bool) (*remote.Remote, error) {
-			return nil, errors.New("remote failed")
-		})
-		defer defaultRemotePatches.Reset()
-
-		fsViewer, err := New(Opt{Target: "test"})
+		fsViewer, err := New(Opt{Target: "not a valid reference"})
 		assert.Error(t, err)
+		assert.ErrorContains(t, err, "failed to create image provider")
 		assert.Nil(t, fsViewer)
 	})
 
 	t.Run("parser failed", func(t *testing.T) {
-		defaultRemotePatches := gomonkey.ApplyFunc(provider.DefaultRemote, func(string, bool) (*remote.Remote, error) {
-			return &remote.Remote{}, nil
-		})
-		defer defaultRemotePatches.Reset()
-
-		parserNewPatches := gomonkey.ApplyFunc(parser.New, func(*remote.Remote, string) (*parser.Parser, error) {
-			return nil, errors.New("parser failed")
-		})
-		defer parserNewPatches.Reset()
-
-		fsViewer, err := New(Opt{Target: "test"})
+		fsViewer, err := New(Opt{Target: "docker.io/library/busybox:latest", ExpectedArch: "unsupported-arch"})
 		assert.Error(t, err)
+		assert.ErrorContains(t, err, "failed to create image reference parser")
 		assert.Nil(t, fsViewer)
 	})
 }
@@ -337,4 +315,50 @@ func TestMountImage(t *testing.T) {
 
 		assert.NoError(t, fsViewer.MountImage())
 	})
+}
+
+func TestViewParseError(t *testing.T) {
+	workDir := t.TempDir()
+	fsViewer := FsViewer{
+		Opt: Opt{WorkDir: workDir},
+		Parser: &parser.Parser{
+			Remote: &remote.Remote{},
+		},
+	}
+
+	patches := gomonkey.ApplyMethod(&parser.Parser{}, "Parse", func(*parser.Parser, context.Context) (*parser.Parsed, error) {
+		return nil, errors.New("parse failed")
+	})
+	defer patches.Reset()
+
+	err := fsViewer.View(context.Background())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "parse")
+}
+
+func TestViewHTTPRetry(t *testing.T) {
+	workDir := t.TempDir()
+	fsViewer := FsViewer{
+		Opt: Opt{WorkDir: workDir},
+		Parser: &parser.Parser{
+			Remote: &remote.Remote{},
+		},
+	}
+
+	callCount := 0
+	patches := gomonkey.ApplyMethod(&parser.Parser{}, "Parse", func(*parser.Parser, context.Context) (*parser.Parsed, error) {
+		callCount++
+		return nil, errors.New("server gave HTTP response to HTTPS client")
+	})
+	defer patches.Reset()
+
+	retryPatches := gomonkey.ApplyFunc(utils.RetryWithHTTP, func(err error) bool {
+		return true
+	})
+	defer retryPatches.Reset()
+
+	err := fsViewer.View(context.Background())
+	// Should fail on the retry too (since Parse always fails)
+	assert.Error(t, err)
+	assert.True(t, callCount >= 2, "View should have retried with HTTP")
 }

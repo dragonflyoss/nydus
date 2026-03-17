@@ -663,4 +663,82 @@ mod tests {
             vec!["Stop".to_string(), "Exit".to_string()]
         );
     }
+
+    #[test]
+    fn it_should_format_all_daemon_state_variants() {
+        assert_eq!(DaemonState::INIT.to_string(), "INIT");
+        assert_eq!(DaemonState::READY.to_string(), "READY");
+        assert_eq!(DaemonState::UNKNOWN.to_string(), "UNKNOWN");
+    }
+
+    #[test]
+    fn it_should_convert_edge_int_values_to_daemon_state() {
+        assert_eq!(DaemonState::from(0), DaemonState::UNKNOWN);
+        assert_eq!(DaemonState::from(-1), DaemonState::UNKNOWN);
+        assert_eq!(DaemonState::from(99), DaemonState::UNKNOWN);
+        assert_eq!(DaemonState::from(6), DaemonState::UNKNOWN);
+    }
+
+    #[test]
+    fn it_should_trigger_takeover_and_start() {
+        let daemon = MockDaemon::new(DaemonState::INIT);
+        assert!(daemon.trigger_takeover().is_ok());
+        assert_eq!(daemon.events(), vec!["Takeover".to_string()]);
+
+        let daemon2 = MockDaemon::new(DaemonState::READY);
+        assert!(daemon2.trigger_start().is_ok());
+        assert_eq!(daemon2.events(), vec!["Start".to_string()]);
+    }
+
+    #[test]
+    fn it_should_use_daemon_controller_lifecycle() {
+        let ctrl = DaemonController::new();
+        assert!(ctrl.is_active());
+
+        // get_blob_cache_mgr and get_fs_service return None initially.
+        assert!(ctrl.get_blob_cache_mgr().is_none());
+        assert!(ctrl.get_fs_service().is_none());
+
+        ctrl.notify_shutdown();
+        assert!(!ctrl.is_active());
+    }
+
+    #[test]
+    fn it_should_use_daemon_controller_default() {
+        let ctrl = DaemonController::default();
+        assert!(ctrl.is_active());
+    }
+
+    #[test]
+    fn it_should_set_and_get_daemon() {
+        let ctrl = DaemonController::new();
+
+        // First set returns None (no previous daemon).
+        let d1: Arc<dyn NydusDaemon> = Arc::new(MockDaemon::new(DaemonState::INIT));
+        let prev = ctrl.set_daemon(d1);
+        assert!(prev.is_none());
+
+        // Second set returns the previously stored daemon.
+        let d2: Arc<dyn NydusDaemon> = Arc::new(MockDaemon::new(DaemonState::READY));
+        let prev = ctrl.set_daemon(d2);
+        assert!(prev.is_some());
+
+        // get_daemon returns the latest daemon.
+        assert_eq!(ctrl.get_daemon().get_state(), DaemonState::READY);
+    }
+
+    #[test]
+    fn it_should_set_singleton_mode() {
+        let ctrl = DaemonController::new();
+        // Should not panic; exercises the atomic write path.
+        ctrl.set_singleton_mode(true);
+        ctrl.set_singleton_mode(false);
+    }
+
+    #[test]
+    fn it_should_alloc_waker() {
+        let ctrl = DaemonController::new();
+        let _waker = ctrl.alloc_waker();
+        // alloc_waker returns a cloned Arc<Waker> — must not panic.
+    }
 }

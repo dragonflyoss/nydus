@@ -232,6 +232,7 @@ impl From<RafsDigest> for String {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_algorithm() {
@@ -321,6 +322,51 @@ mod test {
             str.as_bytes(),
             b"d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"
         );
+    }
+
+    #[test]
+    fn test_hash_from_reader_blake3() {
+        let text = b"The quick brown fox jumps over the lazy dog";
+        let mut reader = Cursor::new(text);
+
+        let digest = RafsDigest::from_reader(&mut reader, Algorithm::Blake3).unwrap();
+        let expected = RafsDigest::from_buf(text, Algorithm::Blake3);
+
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn test_hash_from_reader_sha256() {
+        let text = b"The quick brown fox jumps over the lazy dog";
+        let mut reader = Cursor::new(text);
+
+        let digest = RafsDigest::from_reader(&mut reader, Algorithm::Sha256).unwrap();
+        let expected = RafsDigest::from_buf(text, Algorithm::Sha256);
+
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn test_hash_from_string() {
+        let text = b"The quick brown fox jumps over the lazy dog";
+        let digest = RafsDigest::from_buf(text, Algorithm::Blake3);
+        let hex = String::from(digest);
+
+        assert_eq!(RafsDigest::from_string(&hex), digest);
+    }
+
+    #[test]
+    fn test_digest_as_ref() {
+        let digest = RafsDigest::from_buf(b"hello", Algorithm::Blake3);
+
+        assert_eq!(digest.as_ref(), &digest.data);
+        assert_eq!(digest.as_ref().len(), RAFS_DIGEST_LENGTH);
+    }
+
+    #[test]
+    fn test_algorithm_display() {
+        assert_eq!(format!("{}", Algorithm::Blake3), "Blake3");
+        assert_eq!(format!("{}", Algorithm::Sha256), "Sha256");
     }
 
     #[test]

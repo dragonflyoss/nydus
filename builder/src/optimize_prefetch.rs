@@ -454,6 +454,7 @@ fn range_overlap(chunk: &mut NodeChunk, range: &PrefetchFileRange) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nydus_rafs::metadata::chunk::ChunkWrapper;
     use std::io::Write;
     use vmm_sys_util::tempfile::TempFile;
 
@@ -557,5 +558,139 @@ mod tests {
         // PrefetchFileInfo implements Clone
         let cloned = infos[0].clone();
         assert_eq!(cloned.path, infos[0].path);
+    }
+
+    fn make_chunk(file_offset: u64, uncompressed_size: u32) -> NodeChunk {
+        let mut cw = ChunkWrapper::new(RafsVersion::V6);
+        cw.set_file_offset(file_offset);
+        cw.set_uncompressed_size(uncompressed_size);
+        NodeChunk {
+            source: ChunkSource::Build,
+            inner: Arc::new(cw),
+        }
+    }
+
+    #[test]
+    fn test_range_overlap_chunk_inside_range() {
+        // chunk [100, 150) is fully inside range [0, 500)
+        let mut chunk = make_chunk(100, 50);
+        let range = PrefetchFileRange {
+            offset: 0,
+            size: 500,
+        };
+        assert!(range_overlap(&mut chunk, &range));
+    }
+
+    #[test]
+    fn test_range_overlap_range_inside_chunk() {
+        // range [200, 300) is fully inside chunk [0, 1000)
+        let mut chunk = make_chunk(0, 1000);
+        let range = PrefetchFileRange {
+            offset: 200,
+            size: 100,
+        };
+        assert!(range_overlap(&mut chunk, &range));
+    }
+
+    #[test]
+    fn test_range_overlap_partial_overlap() {
+        // chunk [100, 200) overlaps with range [150, 350)
+        let mut chunk = make_chunk(100, 100);
+        let range = PrefetchFileRange {
+            offset: 150,
+            size: 200,
+        };
+        assert!(range_overlap(&mut chunk, &range));
+    }
+
+    #[test]
+    fn test_range_overlap_touching_boundary_counts_as_overlap() {
+        // range ends exactly where chunk starts: range [100, 200), chunk [200, 300)
+        // max(100, 200) = 200 <= min(200, 300) = 200 → true
+        let mut chunk = make_chunk(200, 100);
+        let range = PrefetchFileRange {
+            offset: 100,
+            size: 100,
+        };
+        assert!(range_overlap(&mut chunk, &range));
+    }
+
+    #[test]
+    fn test_range_overlap_no_overlap_range_before() {
+        // range [0, 100) is entirely before chunk [500, 600)
+        let mut chunk = make_chunk(500, 100);
+        let range = PrefetchFileRange {
+            offset: 0,
+            size: 100,
+        };
+        assert!(!range_overlap(&mut chunk, &range));
+    }
+
+    #[test]
+    fn test_range_overlap_no_overlap_range_after() {
+        // range [500, 600) is entirely after chunk [0, 100)
+        let mut chunk = make_chunk(0, 100);
+        let range = PrefetchFileRange {
+            offset: 500,
+            size: 100,
+        };
+        assert!(!range_overlap(&mut chunk, &range));
+    }
+
+    #[test]
+    fn test_rewrite_blob_id_matching_entry() {
+        let mut blob = BlobInfo::new(0, "old-id".to_string(), 0, 0, 0, 0, Default::default());
+        blob.set_blob_id("old-id".to_string());
+        let mut entries: Vec<Arc<BlobInfo>> = vec![Arc::new(blob)];
+        rewrite_blob_id(&mut entries, "old-id", "new-id".to_string());
+        assert_eq!(entries[0].blob_id(), "new-id");
+    }
+
+    #[test]
+    fn test_rewrite_blob_id_no_match() {
+        let mut blob = BlobInfo::new(0, "other-id".to_string(), 0, 0, 0, 0, Default::default());
+        blob.set_blob_id("other-id".to_string());
+        let mut entries: Vec<Arc<BlobInfo>> = vec![Arc::new(blob)];
+        rewrite_blob_id(&mut entries, "old-id", "new-id".to_string());
+        // Should not modify entries that don't match.
+        assert_eq!(entries[0].blob_id(), "other-id");
+    }
+
+    #[test]
+    fn test_rewrite_blob_id_multiple_entries() {
+        let blobs: Vec<Arc<BlobInfo>> = vec![
+            Arc::new(BlobInfo::new(
+                0,
+                "target".to_string(),
+                0,
+                0,
+                0,
+                0,
+                Default::default(),
+            )),
+            Arc::new(BlobInfo::new(
+                1,
+                "other".to_string(),
+                0,
+                0,
+                0,
+                0,
+                Default::default(),
+            )),
+            Arc::new(BlobInfo::new(
+                2,
+                "target".to_string(),
+                0,
+                0,
+                0,
+                0,
+                Default::default(),
+            )),
+        ];
+        let mut entries = blobs;
+        rewrite_blob_id(&mut entries, "target", "replaced".to_string());
+        assert_eq!(entries[0].blob_id(), "replaced");
+        assert_eq!(entries[1].blob_id(), "other");
+        assert_eq!(entries[2].blob_id(), "replaced");
     }
 }

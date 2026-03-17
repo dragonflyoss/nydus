@@ -1056,4 +1056,70 @@ mod tests {
         entry.name = PathBuf::from("");
         assert!(entry.normalize().is_err());
     }
+
+    #[test]
+    fn test_toc_entry_block_id_errors() {
+        // Wrong prefix → error.
+        let mut entry = TocEntry {
+            chunk_digest: "md5:".to_owned(),
+            ..Default::default()
+        };
+        entry.chunk_digest.extend(vec!['a'; 67].iter());
+        assert!(entry.block_id().is_err());
+
+        // Correct prefix but wrong total length (not 71) → error.
+        let mut entry = TocEntry {
+            chunk_digest: "sha256:".to_owned(),
+            ..Default::default()
+        };
+        entry.chunk_digest.extend(['a'; 10]); // len = 17
+        assert!(entry.block_id().is_err());
+
+        // Correct prefix+length but invalid hex → error.
+        let mut entry = TocEntry {
+            chunk_digest: "sha256:".to_owned(),
+            ..Default::default()
+        };
+        entry.chunk_digest.extend(['z'; 64]); // 'z' is not valid hex
+        assert!(entry.block_id().is_err());
+    }
+
+    #[test]
+    fn test_toc_entry_normalize_errors() {
+        // Unsupported type string → error.
+        let mut entry = TocEntry {
+            name: PathBuf::from("some_file"),
+            toc_type: "unknown_type".to_string(),
+            ..Default::default()
+        };
+        assert!(entry.normalize().is_err());
+
+        // symlink with empty link_name → error.
+        let mut entry = TocEntry {
+            name: PathBuf::from("link"),
+            toc_type: "symlink".to_string(),
+            link_name: PathBuf::from(""),
+            ..Default::default()
+        };
+        assert!(entry.normalize().is_err());
+
+        // hardlink with empty link_name → error.
+        let mut entry = TocEntry {
+            name: PathBuf::from("hard"),
+            toc_type: "hardlink".to_string(),
+            link_name: PathBuf::from(""),
+            ..Default::default()
+        };
+        assert!(entry.normalize().is_err());
+
+        // "reg" type with empty digest → error.
+        let mut entry = TocEntry {
+            name: PathBuf::from("reg_file"),
+            toc_type: "reg".to_string(),
+            digest: String::new(),
+            chunk_digest: String::new(),
+            ..Default::default()
+        };
+        assert!(entry.normalize().is_err());
+    }
 }

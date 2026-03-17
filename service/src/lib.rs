@@ -318,4 +318,82 @@ mod tests {
         assert!(validate_threads_configuration("1025").is_err());
         assert!(validate_threads_configuration("test").is_err());
     }
+
+    #[test]
+    fn test_error_into_io_error() {
+        let e = Error::NotFound;
+        let io_err: std::io::Error = e.into();
+        assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+
+        let e = Error::InvalidArguments("bad arg".into());
+        let io_err: std::io::Error = e.into();
+        assert_eq!(io_err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_error_to_daemon_error_kind() {
+        use nydus_api::DaemonErrorKind;
+
+        // NotReady branch
+        let kind = DaemonErrorKind::from(Error::NotReady);
+        assert!(matches!(kind, DaemonErrorKind::NotReady));
+
+        // Unsupported branch
+        let kind = DaemonErrorKind::from(Error::Unsupported);
+        assert!(matches!(kind, DaemonErrorKind::Unsupported));
+
+        // UpgradeManager branch
+        let kind = DaemonErrorKind::from(Error::UpgradeManager(
+            upgrade::UpgradeMgrError::MissingSupervisorPath,
+        ));
+        assert!(matches!(kind, DaemonErrorKind::UpgradeManager(_)));
+
+        // Serde branch
+        let serde_err = serde_json::from_str::<i32>("invalid_json").unwrap_err();
+        let kind = DaemonErrorKind::from(Error::Serde(serde_err));
+        assert!(matches!(kind, DaemonErrorKind::Serde(_)));
+
+        // UnexpectedEvent branch
+        use crate::daemon::DaemonStateMachineInput;
+        let kind = DaemonErrorKind::from(Error::UnexpectedEvent(DaemonStateMachineInput::Start));
+        assert!(matches!(kind, DaemonErrorKind::UnexpectedEvent(_)));
+
+        // Other (catch-all) branch
+        let kind = DaemonErrorKind::from(Error::AlreadyExists);
+        assert!(matches!(kind, DaemonErrorKind::Other(_)));
+        let kind = DaemonErrorKind::from(Error::NotFound);
+        assert!(matches!(kind, DaemonErrorKind::Other(_)));
+    }
+
+    #[test]
+    fn test_fuse_notify_error_display() {
+        let e = FuseNotifyError::SysfsOpenError(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no file",
+        ));
+        assert!(e.to_string().contains("Sysfs file open error"));
+
+        let e = FuseNotifyError::SysfsWriteError(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert!(e.to_string().contains("Sysfs write error"));
+    }
+
+    #[test]
+    fn test_error_display_variants() {
+        assert!(Error::AlreadyExists.to_string().contains("already exists"));
+        assert!(Error::NotFound.to_string().contains("doesn't exist"));
+        assert!(Error::NotReady.to_string().contains("not ready"));
+        assert!(Error::Unsupported.to_string().contains("unsupported"));
+        assert!(Error::InvalidPrefetchList
+            .to_string()
+            .contains("prefetch file list"));
+        assert!(Error::InvalidConfig("cfg".into())
+            .to_string()
+            .contains("cfg"));
+        assert!(Error::InvalidArguments("arg".into())
+            .to_string()
+            .contains("arg"));
+    }
 }

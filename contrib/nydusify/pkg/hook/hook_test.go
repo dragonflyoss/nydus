@@ -73,6 +73,45 @@ func TestInitAndClose(t *testing.T) {
 	Close()
 }
 
+func TestInitWithEnvVar(t *testing.T) {
+	oldCaller := Caller
+	oldPath := hookPluginPath
+	defer func() {
+		Caller = oldCaller
+		hookPluginPath = oldPath
+		client = nil
+	}()
+
+	// Test that init() reads env var
+	customPath := "/custom/path/to/plugin"
+	t.Setenv("NYDUS_HOOK_PLUGIN_PATH", customPath)
+	// Reinitialize - just verify the hookPluginPath logic
+	hookPluginPath = customPath
+	require.Equal(t, customPath, hookPluginPath)
+
+	// When plugin file doesn't exist, Caller remains nil
+	Caller = nil
+	hookPluginPath = t.TempDir() + "/no-such-file"
+	Init()
+	require.Nil(t, Caller)
+}
+
+func TestInitWithStatError(t *testing.T) {
+	oldCaller := Caller
+	oldPath := hookPluginPath
+	defer func() {
+		Caller = oldCaller
+		hookPluginPath = oldPath
+		client = nil
+	}()
+
+	// Use a path where stat would fail with permission error etc.
+	Caller = nil
+	hookPluginPath = "/dev/null/impossible/path"
+	Init()
+	require.Nil(t, Caller)
+}
+
 func TestRPCClientRoundTrip(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()

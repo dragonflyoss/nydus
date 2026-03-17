@@ -254,3 +254,21 @@ func TestHackFileWrapper(t *testing.T) {
 	hackFileWrapper(f)
 	assert.Equal(t, uint32(0640), f.mode)
 }
+
+func TestRemoteHandlerGetLayers(t *testing.T) {
+	layers := []ocispec.Descriptor{
+		{Digest: "sha256:aaa", Size: 100, MediaType: ModelWeightMediaType},
+		{Digest: "sha256:bbb", Size: 200, MediaType: ModelDatasetMediaType},
+	}
+	handler := &RemoteHandler{
+		manifest: ocispec.Manifest{Layers: layers},
+	}
+	got := handler.GetLayers()
+	assert.Len(t, got, 2)
+	assert.Equal(t, layers[0].Digest, got[0].Digest)
+	assert.Equal(t, layers[1].Size, got[1].Size)
+
+	// Empty layers
+	handler2 := &RemoteHandler{manifest: ocispec.Manifest{}}
+	assert.Nil(t, handler2.GetLayers())
+}

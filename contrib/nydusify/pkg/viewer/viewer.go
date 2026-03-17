@@ -59,7 +59,7 @@ func New(opt Opt) (*FsViewer, error) {
 		return nil, errors.Wrap(err, "failed to create image provider")
 	}
 	targetParser, err := parser.New(targetRemote, opt.ExpectedArch)
-	if targetParser == nil {
+	if err != nil {
 		return nil, errors.Wrap(err, "failed to create image reference parser")
 	}
 

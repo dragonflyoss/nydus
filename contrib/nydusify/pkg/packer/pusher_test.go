@@ -210,3 +210,97 @@ func TestNewPusher(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed to init backend for bootstrap blob")
 }
+
+func TestPusher_PushNoBlob(t *testing.T) {
+	tmpDir, tearDown := setUpTmpDir(t)
+	defer tearDown()
+
+	os.Create(filepath.Join(tmpDir, "mock.meta"))
+	content, _ := os.ReadFile(filepath.Join("testdata", "output.json"))
+	os.WriteFile(filepath.Join(tmpDir, "output.json"), content, 0755)
+
+	artifact, err := NewArtifact(tmpDir)
+	require.NoError(t, err)
+
+	mp := &mockBackend{}
+	pusher := Pusher{
+		Artifact:    artifact,
+		cfg:         &OssBackendConfig{BucketName: "b", MetaPrefix: "m/"},
+		logger:      logrus.New(),
+		metaBackend: mp,
+		blobBackend: mp,
+	}
+	mp.On("Upload", mock.Anything, "mock.meta", mock.Anything, mock.Anything, mock.Anything).Return(&ocispec.Descriptor{
+		URLs: []string{"oss://b/m/mock.meta"},
+	}, nil)
+
+	// Push with empty blob - should skip blob push
+	res, err := pusher.Push(PushRequest{
+		Meta: "mock.meta",
+		Blob: "",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "oss://b/m/mock.meta", res.RemoteMeta)
+	require.Empty(t, res.RemoteBlob)
+}
+
+func TestPusher_PushWithParentBlobs(t *testing.T) {
+	tmpDir, tearDown := setUpTmpDir(t)
+	defer tearDown()
+
+	os.Create(filepath.Join(tmpDir, "mock.meta"))
+	content, _ := os.ReadFile(filepath.Join("testdata", "output.json"))
+	os.WriteFile(filepath.Join(tmpDir, "output.json"), content, 0755)
+
+	// Create parent blob files
+	parentHash := "parent123abc456def"
+	os.Create(filepath.Join(tmpDir, parentHash))
+
+	artifact, err := NewArtifact(tmpDir)
+	require.NoError(t, err)
+
+	mp := &mockBackend{}
+	pusher := Pusher{
+		Artifact:    artifact,
+		cfg:         &OssBackendConfig{BucketName: "b", BlobPrefix: "blob/", MetaPrefix: "m/"},
+		logger:      logrus.New(),
+		metaBackend: mp,
+		blobBackend: mp,
+	}
+	mp.On("Upload", mock.Anything, parentHash, mock.Anything, mock.Anything, mock.Anything).Return(&ocispec.Descriptor{}, nil)
+	mp.On("Upload", mock.Anything, "mock.meta", mock.Anything, mock.Anything, mock.Anything).Return(&ocispec.Descriptor{
+		URLs: []string{"oss://b/m/mock.meta"},
+	}, nil)
+
+	res, err := pusher.Push(PushRequest{
+		Meta:        "mock.meta",
+		Blob:        "",
+		ParentBlobs: []string{parentHash},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "oss://b/m/mock.meta", res.RemoteMeta)
+}
+
+func TestParseBackendConfigFileErrors(t *testing.T) {
+	// Missing file
+	_, err := ParseBackendConfig("oss", "/nonexistent/path.json")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to open backend-config")
+
+	// Invalid JSON
+	tmpFile := filepath.Join(t.TempDir(), "bad.json")
+	os.WriteFile(tmpFile, []byte("not json"), 0644)
+	_, err = ParseBackendConfig("oss", tmpFile)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to decode backend-config")
+
+	// S3 with invalid JSON
+	_, err = ParseBackendConfig("s3", tmpFile)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to decode backend-config")
+
+	// Unsupported type
+	_, err = ParseBackendConfig("registry", tmpFile)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unsupported backend type")
+}

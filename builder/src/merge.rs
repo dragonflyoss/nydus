@@ -399,6 +399,171 @@ mod tests {
         assert!(Merger::get_size_from_list(&original_ids, 4).is_err());
     }
 
+    fn make_tmp_target() -> (ArtifactStorage, TempFile) {
+        let f = TempFile::new().unwrap();
+        let target = ArtifactStorage::SingleFile(f.as_path().to_path_buf());
+        (target, f)
+    }
+
+    #[test]
+    fn test_merger_merge_empty_sources() {
+        let mut ctx = BuildContext {
+            digester: digest::Algorithm::Sha256,
+            ..Default::default()
+        };
+        let (target, _f) = make_tmp_target();
+        let result = Merger::merge(
+            &mut ctx,
+            None,
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            None,
+            target,
+            None,
+            Arc::new(ConfigV2::new("cfg")),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("source bootstrap list is empty"));
+    }
+
+    #[test]
+    fn test_merger_merge_mismatched_blob_digests() {
+        let mut ctx = BuildContext {
+            digester: digest::Algorithm::Sha256,
+            ..Default::default()
+        };
+        let (target, _f) = make_tmp_target();
+        let result = Merger::merge(
+            &mut ctx,
+            None,
+            vec![PathBuf::from("/nonexistent1")],
+            Some(vec!["a".to_owned(), "b".to_owned()]), // len 2, sources len 1
+            None,
+            None,
+            None,
+            None,
+            target,
+            None,
+            Arc::new(ConfigV2::new("cfg")),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("blob digest entries"));
+    }
+
+    #[test]
+    fn test_merger_merge_mismatched_original_blob_ids() {
+        let mut ctx = BuildContext {
+            digester: digest::Algorithm::Sha256,
+            ..Default::default()
+        };
+        let (target, _f) = make_tmp_target();
+        let result = Merger::merge(
+            &mut ctx,
+            None,
+            vec![PathBuf::from("/nonexistent1")],
+            None,
+            Some(vec!["id1".to_owned(), "id2".to_owned()]), // len 2
+            None,
+            None,
+            None,
+            target,
+            None,
+            Arc::new(ConfigV2::new("cfg")),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("original blob id entries"));
+    }
+
+    #[test]
+    fn test_merger_merge_mismatched_blob_sizes() {
+        let mut ctx = BuildContext {
+            digester: digest::Algorithm::Sha256,
+            ..Default::default()
+        };
+        let (target, _f) = make_tmp_target();
+        let result = Merger::merge(
+            &mut ctx,
+            None,
+            vec![PathBuf::from("/nonexistent1")],
+            None,
+            None,
+            Some(vec![1u64, 2u64]), // len 2
+            None,
+            None,
+            target,
+            None,
+            Arc::new(ConfigV2::new("cfg")),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("blob size entries"));
+    }
+
+    #[test]
+    fn test_merger_merge_mismatched_toc_digests() {
+        let mut ctx = BuildContext {
+            digester: digest::Algorithm::Sha256,
+            ..Default::default()
+        };
+        let (target, _f) = make_tmp_target();
+        let result = Merger::merge(
+            &mut ctx,
+            None,
+            vec![PathBuf::from("/nonexistent1")],
+            None,
+            None,
+            None,
+            Some(vec!["d1".to_owned(), "d2".to_owned()]), // len 2
+            None,
+            target,
+            None,
+            Arc::new(ConfigV2::new("cfg")),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("toc digest entries"));
+    }
+
+    #[test]
+    fn test_merger_merge_mismatched_toc_sizes() {
+        let mut ctx = BuildContext {
+            digester: digest::Algorithm::Sha256,
+            ..Default::default()
+        };
+        let (target, _f) = make_tmp_target();
+        let result = Merger::merge(
+            &mut ctx,
+            None,
+            vec![PathBuf::from("/nonexistent1")],
+            None,
+            None,
+            None,
+            None,
+            Some(vec![10u64, 20u64]), // len 2
+            target,
+            None,
+            Arc::new(ConfigV2::new("cfg")),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("toc size entries"));
+    }
+
     #[test]
     fn test_merger_merge() {
         let mut ctx = BuildContext::default();

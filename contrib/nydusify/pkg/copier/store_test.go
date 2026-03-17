@@ -100,3 +100,45 @@ func TestStoreInfoReturnsNotFoundWhenDigestMissingEverywhere(t *testing.T) {
 	_, err := store.Info(context.Background(), digest.FromString("missing"))
 	require.ErrorIs(t, err, errdefs.ErrNotFound)
 }
+
+func TestNewStoreDirectly(t *testing.T) {
+	base := &stubStore{}
+	descs := []ocispec.Descriptor{
+		{Digest: digest.FromString("a"), Size: 10},
+		{Digest: digest.FromString("b"), Size: 20},
+	}
+	s := newStore(base, descs)
+	require.NotNil(t, s)
+	require.Equal(t, base, s.Store)
+	require.Len(t, s.remotes, 2)
+}
+
+func TestStoreInfoMultipleRemotes(t *testing.T) {
+	targetDigest := digest.FromString("target")
+	base := &stubStore{
+		infoFunc: func(context.Context, digest.Digest) (content.Info, error) {
+			return content.Info{}, errdefs.ErrNotFound
+		},
+	}
+	store := newStore(base, []ocispec.Descriptor{
+		{Digest: digest.FromString("a"), Size: 10},
+		{Digest: targetDigest, Size: 200},
+		{Digest: digest.FromString("c"), Size: 30},
+	})
+
+	info, err := store.Info(context.Background(), targetDigest)
+	require.NoError(t, err)
+	require.Equal(t, targetDigest, info.Digest)
+	require.EqualValues(t, 200, info.Size)
+}
+
+func TestStoreInfoEmptyRemotes(t *testing.T) {
+	base := &stubStore{
+		infoFunc: func(context.Context, digest.Digest) (content.Info, error) {
+			return content.Info{}, errdefs.ErrNotFound
+		},
+	}
+	store := newStore(base, []ocispec.Descriptor{})
+	_, err := store.Info(context.Background(), digest.FromString("missing"))
+	require.ErrorIs(t, err, errdefs.ErrNotFound)
+}

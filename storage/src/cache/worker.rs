@@ -469,6 +469,66 @@ mod tests {
             .is_err());
     }
 
+    #[test]
+    fn test_send_prefetch_message_disabled() {
+        let tmpdir = TempDir::new().unwrap();
+        let metrics = BlobcacheMetrics::new("test_disabled", tmpdir.as_path().to_str().unwrap());
+        let config = Arc::new(AsyncPrefetchConfig {
+            enable: false,
+            threads_count: 1,
+            batch_size: 0x100000,
+            bandwidth_limit: 0,
+        });
+
+        let mgr = AsyncWorkerMgr::new(metrics, config).unwrap();
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::Ping)
+            .is_err());
+        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_send_prefetch_message_enabled_increments_inflight() {
+        let tmpdir = TempDir::new().unwrap();
+        let metrics = BlobcacheMetrics::new("test_enabled", tmpdir.as_path().to_str().unwrap());
+        let config = Arc::new(AsyncPrefetchConfig {
+            enable: true,
+            threads_count: 1,
+            batch_size: 0x100000,
+            bandwidth_limit: 0,
+        });
+
+        let mgr = AsyncWorkerMgr::new(metrics, config).unwrap();
+        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 0);
+        assert!(mgr
+            .send_prefetch_message(AsyncPrefetchMessage::Ping)
+            .is_ok());
+        assert_eq!(mgr.prefetch_inflight.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn test_consume_prefetch_budget() {
+        let tmpdir = TempDir::new().unwrap();
+        let metrics = BlobcacheMetrics::new("test_budget", tmpdir.as_path().to_str().unwrap());
+        let config = Arc::new(AsyncPrefetchConfig {
+            enable: true,
+            threads_count: 1,
+            batch_size: 0x100000,
+            bandwidth_limit: 0,
+        });
+
+        let mgr = AsyncWorkerMgr::new(metrics, config).unwrap();
+        assert_eq!(mgr.prefetch_consumed.load(Ordering::Acquire), 0);
+
+        mgr.consume_prefetch_budget(100);
+        assert_eq!(mgr.prefetch_consumed.load(Ordering::Acquire), 0);
+
+        mgr.prefetch_inflight.store(1, Ordering::Release);
+        mgr.consume_prefetch_budget(256);
+        mgr.consume_prefetch_budget(512);
+        assert_eq!(mgr.prefetch_consumed.load(Ordering::Acquire), 768);
+    }
+
     #[cfg(feature = "prefetch-rate-limit")]
     #[test]
     fn test_worker_mgr_rate_limiter() {
