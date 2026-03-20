@@ -79,8 +79,8 @@ github.com/containerd/fifo v1.1.0 h1:4I2mbh5stb1u6ycIABlBw9zgtlK8viPI9QkQNRQEEmY
 github.com/containerd/fifo v1.1.0/go.mod h1:bmC4NWMbXlt2EZ0Hc7Fx7QzTFxgPID13eH0Qu+MAb2o=
 github.com/containerd/log v0.1.0 h1:TCJt7ioM2cr/tfR8GPbGf9/VRAX8D2B4PjzCpfX540I=
 github.com/containerd/log v0.1.0/go.mod h1:VRRf09a7mHDIRezVKTRCrOq78v577GXq3bSa3EhrzVo=
-github.com/containerd/nydus-snapshotter v0.15.9 h1:yFPr75WyO49sWJiBFMKNZo6kK4ed2hc13YxGn5KHWCU=
-github.com/containerd/nydus-snapshotter v0.15.9/go.mod h1:EWRd/QJ0b6UKHAqYgiV5gHlqLC2qq5cQiSlXEdVovrA=
+github.com/containerd/nydus-snapshotter v0.15.12 h1:m1rPRYll7QyxJb3kg5lyAHv9cGR0jLP1u2CmToR9xpU=
+github.com/containerd/nydus-snapshotter v0.15.12/go.mod h1:t95dwCb4I0RE4n1iOk0sJCWosNoACA8daOXmU5A2VHI=
 github.com/containerd/platforms v1.0.0-rc.1 h1:83KIq4yy1erSRgOVHNk1HYdPvzdJ5CnsWaRoJX4C41E=
 github.com/containerd/platforms v1.0.0-rc.1/go.mod h1:J71L7B+aiM5SdIEqmd9wp6THLVRzJGXfNuWCZCllLA4=
 github.com/containerd/plugin v1.0.0 h1:c8Kf1TNl6+e2TtMHZt+39yAPDbouRH9WAToRjex483Y=
