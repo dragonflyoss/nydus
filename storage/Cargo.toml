@@ -36,8 +36,8 @@ serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.53"
 sha1 = { version = "0.10.5", optional = true }
 sha2 = { version = "0.10.2", optional = true }
-tar = "0.4.40"
-time = { version = "0.3.14", features = ["formatting"], optional = true }
+tar = "0.4.45"
+time = { version = "0.3.47", features = ["formatting"], optional = true }
 tokio = { version = "1.19.0", features = [
     "macros",
     "rt",
@@ -60,7 +60,7 @@ nydus-utils = { version = "0.5.1", path = "../utils", features = [
 http = "1.4.0"
 hyper-util = { version = "0.1.19", features = ["server"] }
 vmm-sys-util = { workspace = true }
-tar = "0.4.40"
+tar = "0.4.45"
 regex = "1.7.0"
 toml = "0.5"
 
