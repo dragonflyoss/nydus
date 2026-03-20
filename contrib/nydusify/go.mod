@@ -12,14 +12,16 @@ require (
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.27
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.17.8
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.58.2
-	github.com/containerd/containerd v1.7.29
+	github.com/containerd/containerd v1.7.30
+	github.com/containerd/containerd/api v1.9.0
 	github.com/containerd/containerd/v2 v2.1.2
 	github.com/containerd/continuity v0.4.5
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/nydus-snapshotter v0.15.12
 	github.com/containerd/platforms v1.0.0-rc.1
+	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v28.1.1+incompatible
+	github.com/docker/cli v29.2.0+incompatible
 	github.com/dustin/go-humanize v1.0.1
 	github.com/goharbor/acceleration-service v0.2.24
 	github.com/google/uuid v1.6.0
@@ -28,6 +30,7 @@ require (
 	github.com/moby/buildkit v0.22.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
+	github.com/opencontainers/runtime-spec v1.2.1
 	github.com/pkg/errors v0.9.1
 	github.com/pkg/xattr v0.4.9
 	github.com/prometheus/client_golang v1.22.0
@@ -37,6 +40,7 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/sync v0.18.0
 	golang.org/x/sys v0.38.0
+	google.golang.org/protobuf v1.36.6
 	lukechampine.com/blake3 v1.2.1
 )
 
@@ -61,7 +65,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/cgroups/v3 v3.0.5 // indirect
-	github.com/containerd/containerd/api v1.9.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
@@ -69,7 +72,6 @@ require (
 	github.com/containerd/stargz-snapshotter v0.16.3 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3 // indirect
 	github.com/containerd/ttrpc v1.2.7 // indirect
-	github.com/containerd/typeurl/v2 v2.2.3 // indirect
 	github.com/containers/ocicrypt v1.2.1 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.5 // indirect
 	github.com/cyphar/filepath-securejoin v0.6.0 // indirect
@@ -101,8 +103,7 @@ require (
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/oklog/run v1.1.0 // indirect
-	github.com/opencontainers/runtime-spec v1.2.1 // indirect
-	github.com/opencontainers/selinux v1.13.0 // indirect
+	github.com/opencontainers/selinux v1.13.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
@@ -128,7 +129,6 @@ require (
 	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250218202821-56aae31c358a // indirect
 	google.golang.org/grpc v1.72.2 // indirect
-	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
