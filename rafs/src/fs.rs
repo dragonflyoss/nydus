@@ -462,9 +462,14 @@ impl Rafs {
         // chunk based full prefetch
         if !ignore_prefetch_all && (inlay_prefetch_all || prefetch_all || startup_prefetch_all) {
             if sb.meta.is_v6() {
+                let batch_size = if prefetch_batch_size == 0 {
+                    RAFS_DEFAULT_CHUNK_SIZE
+                } else {
+                    prefetch_batch_size
+                };
                 for blob in &blob_infos {
                     let blob_size = blob.compressed_data_size();
-                    let count = div_round_up(blob_size, prefetch_batch_size);
+                    let count = div_round_up(blob_size, batch_size);
 
                     let mut pre_offset = 0u64;
 
@@ -472,13 +477,13 @@ impl Rafs {
                         let req = BlobPrefetchRequest {
                             blob_id: blob.blob_id().to_owned(),
                             offset: pre_offset,
-                            len: cmp::min(prefetch_batch_size, blob_size - pre_offset),
+                            len: cmp::min(batch_size, blob_size - pre_offset),
                         };
                         device
                             .prefetch(&[], &[req])
                             .map_err(|e| warn!("failed to prefetch blob data, {}", e))
                             .unwrap_or_default();
-                        pre_offset += prefetch_batch_size;
+                        pre_offset += batch_size;
                         if pre_offset > blob_size {
                             break;
                         }
