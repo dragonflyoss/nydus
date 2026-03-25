@@ -13,8 +13,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  has:
+    runs-on: ubuntu-slim
+    outputs:
+      latest-16: ${{ env.HAS_LATEST_16 }}
+    env:
+      HAS_LATEST_16: ${{ (github.repository_owner == 'dragonflyoss' || vars.HAS_LATEST_16) && '1' || '' }}
+    steps:
+      - run: |
+          true
   contrib-build:
     runs-on: ubuntu-latest-16-cores
+    needs:
+      - has
+    if: needs.has.outputs.latest-16
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -34,6 +46,9 @@ jobs:
 
   nydus-build:
     runs-on: ubuntu-latest-16-cores
+    needs:
+      - has
+    if: needs.has.outputs.latest-16
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -56,6 +71,9 @@ jobs:
 
   benchmark-description:
     runs-on: ubuntu-latest-16-cores
+    needs:
+      - has
+    if: needs.has.outputs.latest-16
     steps:
     - name: Description
       run: |
@@ -66,7 +84,11 @@ jobs:
 
   benchmark-oci:
     runs-on: ubuntu-latest-16-cores
-    needs: [contrib-build, nydus-build]
+    if: needs.has.outputs.latest-16
+    needs:
+      - has
+      - contrib-build
+      - nydus-build
     strategy:
       matrix:
         include:
@@ -113,7 +135,11 @@ jobs:
 
   benchmark-fsversion-v5:
     runs-on: ubuntu-latest-16-cores
-    needs: [contrib-build, nydus-build]
+    needs:
+      - has
+      - contrib-build
+      - nydus-build
+    if: needs.has.outputs.latest-16
     strategy:
       matrix:
         include:
@@ -159,7 +185,11 @@ jobs:
 
   benchmark-fsversion-v6:
     runs-on: ubuntu-latest-16-cores
-    needs: [contrib-build, nydus-build]
+    needs:
+      - has
+      - contrib-build
+      - nydus-build
+    if: needs.has.outputs.latest-16
     strategy:
       matrix:
         include:
@@ -205,7 +235,11 @@ jobs:
 
   benchmark-zran:
     runs-on: ubuntu-latest-16-cores
-    needs: [contrib-build, nydus-build]
+    needs:
+      - has
+      - contrib-build
+      - nydus-build
+    if: needs.has.outputs.latest-16
     strategy:
       matrix:
         include:
@@ -251,7 +285,13 @@ jobs:
 
   benchmark-result:
     runs-on: ubuntu-latest-16-cores
-    needs: [benchmark-oci, benchmark-fsversion-v5, benchmark-fsversion-v6, benchmark-zran]
+    needs:
+      - has
+      - benchmark-oci
+      - benchmark-fsversion-v5
+      - benchmark-fsversion-v6
+      - benchmark-zran
+    if: needs.has.outputs.latest-16
     strategy:
       matrix:
         include:
