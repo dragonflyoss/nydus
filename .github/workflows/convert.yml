@@ -14,8 +14,20 @@ env:
   FSCK_PATCH_PATH: misc/top_images/fsck.patch
 
 jobs:
+  has:
+    runs-on: ubuntu-slim
+    outputs:
+      latest-16: ${{ env.HAS_LATEST_16 }}
+    env:
+      HAS_LATEST_16: ${{ (github.repository_owner == 'dragonflyoss' || vars.HAS_LATEST_16) && '1' || '' }}
+    steps:
+      - run: |
+          true
   nydusify-build:
     runs-on: ubuntu-latest-16-cores
+    needs:
+      - has
+    if: needs.has.outputs.latest-16
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -36,6 +48,9 @@ jobs:
 
   nydus-build:
     runs-on: ubuntu-latest-16-cores
+    needs:
+      - has
+    if: needs.has.outputs.latest-16
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -58,6 +73,9 @@ jobs:
 
   fsck-erofs-build:
     runs-on: ubuntu-latest-16-cores
+    needs:
+      - has
+    if: needs.has.outputs.latest-16
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -76,7 +94,12 @@ jobs:
 
   convert-zran:
     runs-on: ubuntu-latest-16-cores
-    needs: [nydusify-build, nydus-build, fsck-erofs-build]
+    needs:
+     - has
+     - nydusify-build
+     - nydus-build
+     - fsck-erofs-build
+    if: needs.has.outputs.latest-16
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -155,7 +178,11 @@ jobs:
 
   convert-native-v5:
     runs-on: ubuntu-latest-16-cores
-    needs: [nydusify-build, nydus-build]
+    needs:
+     - has
+     - nydusify-build
+     - nydus-build
+    if: needs.has.outputs.latest-16
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -209,7 +236,12 @@ jobs:
 
   convert-native-v6:
     runs-on: ubuntu-latest-16-cores
-    needs: [nydusify-build, nydus-build, fsck-erofs-build]
+    needs:
+     - has
+     - nydusify-build
+     - nydus-build
+     - fsck-erofs-build
+    if: needs.has.outputs.latest-16
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -272,7 +304,12 @@ jobs:
 
   convert-native-v6-batch:
     runs-on: ubuntu-latest-16-cores
-    needs: [nydusify-build, nydus-build, fsck-erofs-build]
+    needs:
+     - has
+     - nydusify-build
+     - nydus-build
+     - fsck-erofs-build
+    if: needs.has.outputs.latest-16
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -337,7 +374,13 @@ jobs:
 
   convert-metric:
     runs-on: ubuntu-latest-16-cores
-    needs: [convert-zran, convert-native-v5, convert-native-v6, convert-native-v6-batch]
+    needs:
+     - has
+     - convert-zran
+     - convert-native-v5
+     - convert-native-v6
+     - convert-native-v6-batch
+    if: needs.has.outputs.latest-16
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

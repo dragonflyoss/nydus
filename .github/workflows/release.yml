@@ -13,6 +13,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  has:
+    runs-on: ubuntu-slim
+    outputs:
+      latest-16: ${{ env.HAS_LATEST_16 }}
+    env:
+      HAS_LATEST_16: ${{ (github.repository_owner == 'dragonflyoss' || vars.HAS_LATEST_16) && '1' || '' }}
+    steps:
+      - run: |
+          true
   nydus-linux:
     runs-on: ubuntu-latest-16-cores
     strategy:
@@ -212,7 +221,11 @@ jobs:
 
   create-release:
     runs-on: ubuntu-latest-16-cores
-    needs: [prepare-tarball-linux, prepare-tarball-darwin]
+    needs:
+     - has
+     - prepare-tarball-linux
+     - prepare-tarball-darwin
+    if: needs.has.outputs.latest-16
     steps:
     - name: download artifacts
       uses: actions/download-artifact@v7
