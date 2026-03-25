@@ -307,6 +307,9 @@ jobs:
     runs-on: ubuntu-latest-16-cores
     env:
       CARGO_TERM_COLOR: always
+      HAS_CODECOV_CREDENTIALS: ${{ secrets.CODECOV_TOKEN != '' && '1' || '' }}
+    outputs:
+      has-codecov-credentials: ${{ env.HAS_CODECOV_CREDENTIALS }}
     steps:
       - uses: actions/checkout@v6
       - name: Rust Cache
@@ -549,7 +552,7 @@ jobs:
           smoke-missing-lines.txt
 
   upload-coverage-to-codecov:
-    if: github.event_name != 'pull_request' && needs.has.outputs.latest-16
+    if: github.event_name != 'pull_request' && needs.has.outputs.latest-16 && needs.nydus-unit-test-coverage.outputs.has-codecov-credentials
     runs-on: ubuntu-latest-16-cores
     needs:
      - has
