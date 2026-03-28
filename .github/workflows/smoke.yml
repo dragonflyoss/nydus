@@ -722,7 +722,16 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+      - name: Read Rust toolchain version
+        id: set_toolchain_version
+        run: |
+          RUST_TOOLCHAIN_VERSION=$(grep -oP '(?<=channel = ")[^"]*' rust-toolchain.toml)
+          echo "Rust toolchain version: $RUST_TOOLCHAIN_VERSION"
+          echo "rust-version=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_OUTPUT
+        shell: bash
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          rust-version: ${{ steps.set_toolchain_version.outputs.rust-version }}
 
   performance-test:
     runs-on: ubuntu-latest-16-cores
