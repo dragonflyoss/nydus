@@ -25,7 +25,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v6
     - name: Setup Golang
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -50,7 +50,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v6
     - name: Setup Golang
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: 'go.work'
         cache: false
@@ -189,7 +189,7 @@ jobs:
           sudo cp -r nydus-$version/nydus-static/* /usr/bin/nydus-$version/
         done
     - name: Setup Golang
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -259,7 +259,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v6
     - name: Setup Golang
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
@@ -320,7 +320,7 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
     - name: Setup Golang
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@v6
       with:
         go-version-file: 'go.work'
         cache-dependency-path: "**/*.sum"
