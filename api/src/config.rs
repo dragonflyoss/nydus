@@ -623,9 +623,6 @@ pub struct RegistryConfig {
     /// Enable HTTP proxy for the read request.
     #[serde(default)]
     pub proxy: ProxyConfig,
-    /// Disable background token refresh thread. Defaults to false.
-    #[serde(skip_deserializing)]
-    pub disable_token_refresh: bool,
 }
 
 /// Configuration information for blob cache manager.
@@ -1364,7 +1361,7 @@ impl TryFrom<RafsConfig> for ConfigV2 {
     type Error = std::io::Error;
 
     fn try_from(v: RafsConfig) -> std::result::Result<Self, Self::Error> {
-        let mut backend: BackendConfigV2 = (&v.device.backend).try_into()?;
+        let backend: BackendConfigV2 = (&v.device.backend).try_into()?;
         let mut cache: CacheConfigV2 = (&v.device.cache).try_into()?;
         let rafs = RafsConfigV2 {
             mode: v.mode,
@@ -1378,13 +1375,6 @@ impl TryFrom<RafsConfig> for ConfigV2 {
         };
         if !cache.prefetch.enable && rafs.prefetch.enable {
             cache.prefetch = rafs.prefetch.clone();
-        }
-
-        // If prefetch is enabled, disable token refresh by default
-        if cache.prefetch.enable {
-            if let Some(registry) = backend.registry.as_mut() {
-                registry.disable_token_refresh = true;
-            }
         }
 
         Ok(ConfigV2 {
@@ -1516,19 +1506,11 @@ impl TryFrom<&BlobCacheEntryConfig> for BlobCacheEntryConfigV2 {
             cache_validate: false,
             prefetch_config: v.prefetch_config.clone(),
         };
-        let mut backend: BackendConfigV2 = (&backend_config).try_into()?;
-
-        // If prefetch is enabled, disable token refresh by default
-        if cache_config.prefetch_config.enable {
-            if let Some(registry) = backend.registry.as_mut() {
-                registry.disable_token_refresh = true;
-            }
-        }
 
         Ok(BlobCacheEntryConfigV2 {
             version: 2,
             id: v.id.clone(),
-            backend,
+            backend: (&backend_config).try_into()?,
             external_backends: v.external_backends.clone(),
             cache: (&cache_config).try_into()?,
             metadata_path: v.metadata_path.clone(),
@@ -2115,15 +2097,6 @@ mod tests {
         "#;
         let config = ConfigV2::from_str(content).unwrap();
         assert_eq!(&config.id, "");
-        // token refresh should be disabled when prefetch is enabled
-        assert!(
-            config
-                .get_backend_config()
-                .unwrap()
-                .get_registry_config()
-                .unwrap()
-                .disable_token_refresh
-        );
     }
 
     #[test]

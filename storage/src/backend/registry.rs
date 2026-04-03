@@ -966,12 +966,8 @@ impl Registry {
             first: First::new(),
         };
 
-        if config.disable_token_refresh {
-            info!("Refresh token thread is disabled.");
-        } else {
-            registry.start_refresh_token_thread();
-            info!("Refresh token thread started.");
-        }
+        registry.start_refresh_token_thread();
+        info!("Refresh token thread started.");
 
         Ok(registry)
     }
