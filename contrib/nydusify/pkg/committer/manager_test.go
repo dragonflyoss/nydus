@@ -258,6 +258,55 @@ func TestManagerErrorPaths(t *testing.T) {
 	require.ErrorContains(t, err, "get snapshot mount")
 }
 
+func TestInspectParseMountOptionsPaths(t *testing.T) {
+	specBytes, err := json.Marshal(runtimespec.Spec{Mounts: []runtimespec.Mount{{Destination: "/dst", Source: "/src"}}})
+	require.NoError(t, err)
+
+	client := &containerdclient.Client{}
+	goodContainer := &mockContainer{
+		image: &mockImage{name: "test-image"},
+		task:  &mockTask{pid: 100},
+		info: containers.Container{
+			Spec:        &anypb.Any{TypeUrl: "test", Value: specBytes},
+			SnapshotKey: "snap-key",
+		},
+	}
+
+	patches := patchClientNewSeq([]gomonkey.OutputCell{
+		{Values: []interface{}{client, nil}, Times: 2},
+	})
+	defer patches.Reset()
+
+	loadPatches := patchLoadContainerSeq(client, []gomonkey.OutputCell{
+		{Values: []interface{}{goodContainer, nil}, Times: 2},
+	})
+	defer loadPatches.Reset()
+
+	snapshotPatches := gomonkey.ApplyMethodSeq(client, "SnapshotService",
+		[]gomonkey.OutputCell{
+			// First cell leads to an error from Inspect() due to missing mount options
+			{Values: []interface{}{snapshots.Snapshotter(&mockSnapshotter{
+				mounts: []mount.Mount{{Options: []string{"workdir=/work"}}},
+			})}, Times: 1},
+			// Inspect() will succeed: all necessary mount options present
+			{Values: []interface{}{snapshots.Snapshotter(&mockSnapshotter{
+				mounts: []mount.Mount{{Options: []string{"workdir=/work", "upperdir=/upper", "lowerdir=/lower"}}},
+			})}, Times: 1},
+		},
+	)
+	defer snapshotPatches.Reset()
+
+	_, err = (&Manager{address: "test"}).Inspect(context.Background(), "id")
+	require.ErrorContains(t, err, "parse snapshot mount options")
+
+	result, err := (&Manager{address: "test"}).Inspect(context.Background(), "id")
+	require.NoError(t, err)
+	require.Equal(t, "/lower", result.LowerDirs)
+	require.Equal(t, "/upper", result.UpperDir)
+	require.Equal(t, "test-image", result.Image)
+	require.Equal(t, 100, result.Pid)
+}
+
 func TestParseMountOptions(t *testing.T) {
 	tests := []struct {
 		Name         string
