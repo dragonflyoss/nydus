@@ -32,6 +32,7 @@ const HEADER_AUTHORIZATION: &str = "Authorization";
 const HEADER_WWW_AUTHENTICATE: &str = "www-authenticate";
 
 const REGISTRY_DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60; // in seconds
+const REGISTRY_CONFIG_POLL_INTERVAL: u64 = 5; // in seconds
 
 /// Error codes related to registry storage backend operations.
 #[derive(Debug)]
@@ -327,13 +328,14 @@ impl RegistryState {
                 self.cached_auth
                     .set(&last_cached_auth, format!("Basic {}", config_auth));
                 self.token_expired_at.store(None);
+                debug!("refreshed basic registry auth after registry_auth config update");
             }
             Some(ConfigAuthUpdate::RefreshBearer(auth)) => match self.get_token(auth, connection) {
                 Ok(token) => {
                     let last_cached_auth = self.cached_auth.get();
                     self.cached_auth
                         .set(&last_cached_auth, format!("Bearer {}", token.token));
-                    debug!("refreshed registry token after registry_auth config update");
+                    debug!("refreshed bearer registry token after registry_auth config update");
                 }
                 Err(err) => {
                     warn!(
@@ -619,8 +621,6 @@ impl RegistryReader {
         mut headers: HeaderMap,
         catch_status: bool,
     ) -> RegistryResult<Response> {
-        self.state.refresh_cached_auth_from_config(&self.connection);
-
         // Try get authorization header from cache for this request
         let mut last_cached_auth = String::new();
         let cached_auth = self.state.cached_auth.get();
@@ -1007,6 +1007,9 @@ impl Registry {
         let mut refresh_interval = REGISTRY_DEFAULT_TOKEN_EXPIRATION;
         thread::spawn(move || {
             loop {
+                // Check for config auth changes every tick.
+                state.refresh_cached_auth_from_config(&conn);
+
                 if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
                     if let Some(token_expired_at) = state.token_expired_at.load().as_deref() {
                         // If the token will expire within the next refresh interval,
@@ -1045,7 +1048,7 @@ impl Registry {
                 if conn.shutdown.load(Ordering::Acquire) {
                     break;
                 }
-                thread::sleep(Duration::from_secs(refresh_interval));
+                thread::sleep(Duration::from_secs(REGISTRY_CONFIG_POLL_INTERVAL));
                 if conn.shutdown.load(Ordering::Acquire) {
                     break;
                 }
