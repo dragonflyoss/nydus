@@ -23,7 +23,7 @@ require (
 	github.com/distribution/reference v0.6.0
 	github.com/docker/cli v28.1.1+incompatible
 	github.com/dustin/go-humanize v1.0.1
-	github.com/goharbor/acceleration-service v0.2.24
+	github.com/goharbor/acceleration-service v0.2.26
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/go-plugin v1.6.0
