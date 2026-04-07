@@ -206,6 +206,9 @@ struct RegistryState {
     repo: String,
     // Retry limit for read operation
     retry_limit: u8,
+    // When true, skip TLS certificate verification AND allow HTTPS-to-HTTP fallback.
+    // When false (default), TLS errors propagate as-is without falling back to HTTP.
+    skip_verify: bool,
     // Scheme specified for blob server
     blob_url_scheme: String,
     // Replace registry redirected url host with the given host
@@ -247,6 +250,9 @@ impl RegistryState {
     }
 
     fn needs_fallback_http(&self, e: &dyn Error) -> bool {
+        if !self.skip_verify {
+            return false;
+        }
         match e.source() {
             Some(err) => match err.source() {
                 Some(err) => {
@@ -950,6 +956,7 @@ impl Registry {
             cached_auth,
             cached_config_auth: Cache::new(auth.clone().unwrap_or_default()),
             retry_limit,
+            skip_verify: config.skip_verify,
             blob_url_scheme: config.blob_url_scheme.clone(),
             blob_redirected_host: config.blob_redirected_host.clone(),
             cached_auth_using_http_get: HashCache::new(),
@@ -1125,12 +1132,17 @@ mod tests {
     }
 
     fn create_state(use_https: bool) -> RegistryState {
+        create_state_with_skip_verify(use_https, false)
+    }
+
+    fn create_state_with_skip_verify(use_https: bool, skip_verify: bool) -> RegistryState {
         RegistryState {
             id: String::from("/"),
             scheme: Scheme::new(use_https),
             host: "example.com".to_string(),
             repo: "library/test".to_string(),
             retry_limit: 5,
+            skip_verify,
             blob_url_scheme: "https".to_string(),
             blob_redirected_host: "blob.example.com".to_string(),
             cached_auth_using_http_get: Default::default(),
@@ -1178,14 +1190,25 @@ mod tests {
     }
 
     #[test]
-    fn test_scheme_and_fallback_http() {
+    fn test_no_fallback_http_by_default() {
+        // With skip_verify=false (default), never fall back to http.
         let state = create_state(true);
+        assert_eq!(state.scheme.to_string(), "https");
+        assert!(!state.needs_fallback_http(&nested_error("wrong version number")));
+        assert!(!state.needs_fallback_http(&nested_error("SSL routines")));
+    }
+
+    #[test]
+    fn test_scheme_and_fallback_http() {
+        // With skip_verify=true and https, TLS errors trigger fallback.
+        let state = create_state_with_skip_verify(true, true);
         assert_eq!(state.scheme.to_string(), "https");
         assert!(state.needs_fallback_http(&nested_error("wrong version number")));
         assert!(state.needs_fallback_http(&nested_error("SSL routines")));
         assert!(!state.needs_fallback_http(&nested_error("permission denied")));
 
-        let state = create_state(false);
+        // With skip_verify=true and http, no fallback needed (already http).
+        let state = create_state_with_skip_verify(false, true);
         assert_eq!(state.scheme.to_string(), "http");
         assert!(!state.needs_fallback_http(&nested_error("wrong version number")));
     }
@@ -1216,6 +1239,7 @@ mod tests {
             host: "example.com".to_string(),
             repo: "library/test".to_string(),
             retry_limit: 5,
+            skip_verify: false,
             blob_url_scheme: "https".to_string(),
             blob_redirected_host: "blob.example.com".to_string(),
             cached_auth_using_http_get: Default::default(),
@@ -1250,6 +1274,7 @@ mod tests {
             host: "example.com".to_string(),
             repo: "library/test".to_string(),
             retry_limit: 5,
+            skip_verify: false,
             blob_url_scheme: "https".to_string(),
             blob_redirected_host: "blob.example.com".to_string(),
             cached_auth_using_http_get: Default::default(),
@@ -1295,6 +1320,7 @@ mod tests {
             host: "alibaba-inc.com".to_string(),
             repo: "nydus".to_string(),
             retry_limit: 5,
+            skip_verify: false,
             blob_url_scheme: "https".to_string(),
             blob_redirected_host: "oss.alibaba-inc.com".to_string(),
             cached_auth_using_http_get: Default::default(),
