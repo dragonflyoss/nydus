@@ -17,7 +17,7 @@ env:
 
 jobs:
   contrib-build:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     strategy:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
@@ -40,7 +40,7 @@ jobs:
         path: contrib/nydusify/cmd
 
   contrib-lint:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     strategy:
       matrix:
         include:
@@ -62,7 +62,7 @@ jobs:
         args: --timeout=10m --verbose
 
   nydus-build:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     strategy:
       matrix:
         arch: [amd64, arm64, ppc64le, riscv64]
@@ -153,7 +153,7 @@ jobs:
 
   nydus-integration-test:
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout
@@ -232,7 +232,7 @@ jobs:
         sudo -E make smoke-only
 
   nydus-unit-test:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -254,7 +254,7 @@ jobs:
         sudo -E RUSTUP=${RUSTUP_BIN} make ut-nextest
 
   contrib-unit-test-coverage:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -274,7 +274,7 @@ jobs:
           contrib/nydusify/coverage.txt
 
   nydus-unit-test-coverage:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     env:
       CARGO_TERM_COLOR: always
       HAS_CODECOV_CREDENTIALS: ${{ secrets.CODECOV_TOKEN != '' && '1' || '' }}
@@ -308,7 +308,7 @@ jobs:
   nydus-integration-test-coverage:
     if: github.event_name == 'pull_request'
     needs: [contrib-build]
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -523,7 +523,7 @@ jobs:
 
   upload-coverage-to-codecov:
     if: github.event_name != 'pull_request' && needs.nydus-unit-test-coverage.outputs.has-codecov-credentials
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: [contrib-unit-test-coverage, nydus-unit-test-coverage]
     env:
       COVERAGE_FILES: ./codecov.json ./coverage.txt
@@ -620,7 +620,7 @@ jobs:
 
   upload-pr-coverage-to-codecov:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: [contrib-unit-test-coverage, nydus-unit-test-coverage, nydus-integration-test-coverage]
     env:
       COVERAGE_FILES: ./codecov.json ./coverage.txt ./smoke-codecov.json ./smoke-go-coverage.txt
@@ -721,7 +721,7 @@ jobs:
 
   nydus-cargo-deny:
     name: cargo-deny
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -737,7 +737,7 @@ jobs:
           rust-version: ${{ steps.set_toolchain_version.outputs.rust-version }}
 
   performance-test:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: [contrib-build, nydus-build]
     strategy:
       matrix:
@@ -767,7 +767,7 @@ jobs:
         sudo -E make smoke-performance
 
   takeover-test:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout

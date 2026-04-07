@@ -17,7 +17,7 @@ env:
 
 jobs:
   nydus-unit-test-with-miri:
-    runs-on: ubuntu-latest-16-cores
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     steps:
     - name: Checkout
       uses: actions/checkout@v6
