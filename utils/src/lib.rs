@@ -34,6 +34,7 @@ pub mod logger;
 pub mod metrics;
 pub mod mpmc;
 pub mod reader;
+pub mod singleflight;
 pub mod trace;
 pub mod types;
 pub mod verity;
