@@ -49,6 +49,14 @@ pub mod registry;
 #[cfg(feature = "backend-s3")]
 pub mod s3;
 
+#[cfg(feature = "backend-hickory-dns")]
+pub mod hickory;
+pub mod pauser;
+#[cfg(feature = "backend-qps-limit")]
+pub mod qps;
+#[cfg(feature = "backend-oss")]
+pub mod url_encoding;
+
 /// Error codes related to storage backend operations.
 #[derive(Debug)]
 pub enum BackendError {
