@@ -16,19 +16,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  has:
-    runs-on: ubuntu-slim
-    outputs:
-      latest-16: ${{ env.HAS_LATEST_16 }}
-    env:
-      HAS_LATEST_16: ${{ (github.repository_owner == 'dragonflyoss' || vars.HAS_LATEST_16) && '1' || '' }}
-    steps:
-      - run: |
-          true
   contrib-build:
-    needs:
-     - has
-    if: needs.has.outputs.latest-16
     runs-on: ubuntu-latest-16-cores
     strategy:
       matrix:
@@ -52,9 +40,6 @@ jobs:
         path: contrib/nydusify/cmd
 
   contrib-lint:
-    needs:
-     - has
-    if: needs.has.outputs.latest-16
     runs-on: ubuntu-latest-16-cores
     strategy:
       matrix:
@@ -77,9 +62,6 @@ jobs:
         args: --timeout=10m --verbose
 
   nydus-build:
-    needs:
-     - has
-    if: needs.has.outputs.latest-16
     runs-on: ubuntu-latest-16-cores
     strategy:
       matrix:
@@ -170,12 +152,9 @@ jobs:
         make -e RUST_TARGET_STATIC=$RUST_TARGET -e static-release
 
   nydus-integration-test:
-    if: github.event_name != 'pull_request' && needs.has.outputs.latest-16
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest-16-cores
-    needs:
-     - has
-     - contrib-build
-     - nydus-build
+    needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -254,9 +233,6 @@ jobs:
 
   nydus-unit-test:
     runs-on: ubuntu-latest-16-cores
-    needs:
-      - has
-    if: needs.has.outputs.latest-16
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -279,9 +255,6 @@ jobs:
 
   contrib-unit-test-coverage:
     runs-on: ubuntu-latest-16-cores
-    needs:
-      - has
-    if: needs.has.outputs.latest-16
     steps:
     - name: Checkout
       uses: actions/checkout@v6
@@ -301,9 +274,6 @@ jobs:
           contrib/nydusify/coverage.txt
 
   nydus-unit-test-coverage:
-    needs:
-     - has
-    if: needs.has.outputs.latest-16
     runs-on: ubuntu-latest-16-cores
     env:
       CARGO_TERM_COLOR: always
@@ -552,12 +522,9 @@ jobs:
           smoke-missing-lines.txt
 
   upload-coverage-to-codecov:
-    if: github.event_name != 'pull_request' && needs.has.outputs.latest-16 && needs.nydus-unit-test-coverage.outputs.has-codecov-credentials
+    if: github.event_name != 'pull_request' && needs.nydus-unit-test-coverage.outputs.has-codecov-credentials
     runs-on: ubuntu-latest-16-cores
-    needs:
-     - has
-     - contrib-unit-test-coverage
-     - nydus-unit-test-coverage
+    needs: [contrib-unit-test-coverage, nydus-unit-test-coverage]
     env:
       COVERAGE_FILES: ./codecov.json ./coverage.txt
     steps:
@@ -652,13 +619,9 @@ jobs:
         fail_ci_if_error: true
 
   upload-pr-coverage-to-codecov:
-    if: github.event_name == 'pull_request' && needs.has.outputs.latest-16
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest-16-cores
-    needs:
-     - has
-     - contrib-unit-test-coverage
-     - nydus-unit-test-coverage
-     - nydus-integration-test-coverage
+    needs: [contrib-unit-test-coverage, nydus-unit-test-coverage, nydus-integration-test-coverage]
     env:
       COVERAGE_FILES: ./codecov.json ./coverage.txt ./smoke-codecov.json ./smoke-go-coverage.txt
     steps:
@@ -758,9 +721,6 @@ jobs:
 
   nydus-cargo-deny:
     name: cargo-deny
-    needs:
-     - has
-    if: needs.has.outputs.latest-16
     runs-on: ubuntu-latest-16-cores
     timeout-minutes: 10
     steps:
@@ -778,11 +738,7 @@ jobs:
 
   performance-test:
     runs-on: ubuntu-latest-16-cores
-    needs:
-     - has
-     - contrib-build
-     - nydus-build
-    if: needs.has.outputs.latest-16
+    needs: [contrib-build, nydus-build]
     strategy:
       matrix:
         include:
@@ -812,11 +768,7 @@ jobs:
 
   takeover-test:
     runs-on: ubuntu-latest-16-cores
-    needs:
-     - has
-     - contrib-build
-     - nydus-build
-    if: needs.has.outputs.latest-16
+    needs: [contrib-build, nydus-build]
     steps:
     - name: Checkout
       uses: actions/checkout@v6

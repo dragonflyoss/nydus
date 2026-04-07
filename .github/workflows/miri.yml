@@ -16,20 +16,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  has:
-    runs-on: ubuntu-slim
-    outputs:
-      latest-16: ${{ env.HAS_LATEST_16 }}
-    env:
-      HAS_LATEST_16: ${{ (github.repository_owner == 'dragonflyoss' || vars.HAS_LATEST_16) && '1' || '' }}
-    steps:
-      - run: |
-          true
   nydus-unit-test-with-miri:
     runs-on: ubuntu-latest-16-cores
-    needs:
-      - has
-    if: needs.has.outputs.latest-16
     steps:
     - name: Checkout
       uses: actions/checkout@v6
