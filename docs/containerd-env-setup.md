@@ -82,7 +82,7 @@ Please refer to the nydusd [doc](./nydusd.md) to learn more options.
 
 - The `device.backend.config.scheme` is the URL scheme for the registry. Leave it empty for automatic detection, or specify `https` or `http` depending on your registry server configuration.
 - The `device.backend.config.auth` is the base64 encoded `username:password` authentication string required by nydusd to lazily pull image data from an authenticated registry. The nydus snapshotter will automatically read it from the `$HOME/.docker/config.json` configuration file, or you can also fill it with your own.
-- The `device.backend.config.skip_verify` allows you to skip the insecure https certificate checks for the registry, only set it to `true` when necessary. Note that enabling this option is a security risk for the connection to registry, so you should only use this when you are sure it is safe.
+- The `device.backend.config.skip_verify` allows you to skip the insecure https certificate checks for the registry and enables automatic HTTPS-to-HTTP fallback on TLS errors. Only set it to `true` when necessary. Note that enabling this option is a security risk for the connection to registry, so you should only use this when you are sure it is safe.
 - The `fs_prefetch.enable` option enables nydusd to prefetch image data in background, which can make container startup faster when it needs to read a large amount of image data. Set this to `false` if you don't need this functionality when it brings disk and network pressure.
 
 2. [Optional] Cleanup snapshotter environment:

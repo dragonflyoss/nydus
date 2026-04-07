@@ -599,6 +599,7 @@ pub struct RegistryConfig {
     #[serde(default)]
     pub auth: Option<String>,
     /// Skip SSL certificate validation for HTTPS scheme.
+    /// When true, also allows automatic HTTPS-to-HTTP fallback on TLS errors.
     #[serde(default)]
     pub skip_verify: bool,
     /// Drop the read request once http request timeout, in seconds.

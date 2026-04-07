@@ -58,6 +58,7 @@ repo = "nydus"
 # Base64_encoded(username:password), the field should be sent to registry auth server to get a bearer token.
 auth = "base64_encoded"
 # Skip SSL certificate validation for HTTPS scheme.
+# When true, also allows automatic HTTPS-to-HTTP fallback on TLS errors.
 skip_verify = true
 # Drop the read request once http request timeout, in seconds.
 timeout = 10
