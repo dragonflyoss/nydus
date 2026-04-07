@@ -41,6 +41,8 @@ flate2 = { version = "1.0.28", features = ["zlib-ng-compat"], default-features =
 [dev-dependencies]
 vmm-sys-util = { workspace = true }
 tar = "0.4.40"
+futures = "0.3"
+tokio = { version = "1.19.0", features = ["macros", "rt-multi-thread", "time"] }
 
 [features]
 zran = ["libz-sys"]

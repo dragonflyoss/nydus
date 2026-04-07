@@ -72,6 +72,8 @@ nydus-service = { version = "0.4.0", path = "service", features = [
 ] }
 nydus-storage = { version = "0.7.2", path = "storage", features = [
     "prefetch-rate-limit",
+    "backend-hickory-dns",
+    "backend-qps-limit",
 ] }
 nydus-utils = { version = "0.5.1", path = "utils" }
 
