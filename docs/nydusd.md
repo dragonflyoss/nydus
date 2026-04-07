@@ -257,7 +257,8 @@ Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/
         "scheme": "",
         // Registry hostname with format `$host:$port`
         "host": "my-registry:5000",
-        // Skip SSL certificate validation for HTTPS scheme
+        // Skip SSL certificate validation for HTTPS scheme.
+        // When true, also allows automatic HTTPS-to-HTTP fallback on TLS errors.
         "skip_verify": false,
         // Use format `$namespace/$repo` (no image tag)
         "repo": "test/repo",
