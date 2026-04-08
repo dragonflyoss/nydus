@@ -16,16 +16,15 @@ use reqwest::Method;
 
 use nydus_utils::metrics::BackendMetrics;
 
-use super::connection::{Connection, ConnectionError};
-use super::{BackendError, BackendResult, BlobBackend, BlobReader};
+use super::request;
+use super::{BackendContext, BackendError, BackendResult, BlobBackend, BlobReader};
 
 /// Error codes related to object storage backend.
 #[derive(Debug)]
 pub enum ObjectStorageError {
     Auth(Error),
-    Request(ConnectionError),
     ConstructHeader(String),
-    Transport(reqwest::Error),
+    Transport(std::io::Error),
     Response(String),
 }
 
@@ -33,7 +32,6 @@ impl fmt::Display for ObjectStorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ObjectStorageError::Auth(e) => write!(f, "failed to generate auth info, {}", e),
-            ObjectStorageError::Request(e) => write!(f, "network communication error, {}", e),
             ObjectStorageError::ConstructHeader(e) => {
                 write!(f, "failed to generate HTTP header, {}", e)
             }
@@ -70,7 +68,7 @@ where
     T: ObjectStorageState,
 {
     blob_id: String,
-    connection: Arc<Connection>,
+    request: Arc<request::Request>,
     state: Arc<T>,
     metrics: Arc<BackendMetrics>,
 }
@@ -87,10 +85,20 @@ where
             .sign(Method::HEAD, &mut headers, resource.as_str(), url.as_str())
             .map_err(ObjectStorageError::Auth)?;
 
+        let mut ctx = BackendContext::default();
         let resp = self
-            .connection
-            .call::<&[u8]>(Method::HEAD, url.as_str(), None, None, &mut headers, true)
-            .map_err(ObjectStorageError::Request)?;
+            .request
+            .call::<&[u8]>(
+                Method::HEAD,
+                url.as_str(),
+                None,
+                None,
+                &mut headers,
+                true,
+                &mut ctx,
+                false,
+            )
+            .map_err(BackendError::Request)?;
         let content_length = resp
             .headers()
             .get(CONTENT_LENGTH)
@@ -107,7 +115,19 @@ where
             })?)
     }
 
-    fn try_read(&self, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+    fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+        self.try_read_ctx(buf, offset, None)
+    }
+
+    fn try_read_ctx(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<usize> {
+        let mut default_ctx = BackendContext::default();
+        let ctx = ctx.unwrap_or(&mut default_ctx);
+
         let query = &[];
         let (resource, url) = self.state.url(&self.blob_id, query);
         let mut headers = HeaderMap::new();
@@ -125,14 +145,24 @@ where
             .sign(Method::GET, &mut headers, resource.as_str(), url.as_str())
             .map_err(ObjectStorageError::Auth)?;
 
-        // Safe because the the call() is a synchronous operation.
-        let mut resp = self
-            .connection
-            .call::<&[u8]>(Method::GET, url.as_str(), None, None, &mut headers, true)
-            .map_err(ObjectStorageError::Request)?;
+        let resp = self
+            .request
+            .call::<&[u8]>(
+                Method::GET,
+                url.as_str(),
+                None,
+                None,
+                &mut headers,
+                true,
+                ctx,
+                false,
+            )
+            .map_err(BackendError::Request)?;
         Ok(resp
-            .copy_to(&mut buf)
-            .map_err(ObjectStorageError::Transport)
+            .copy_to(buf)
+            .map_err(|e| {
+                ObjectStorageError::Transport(std::io::Error::new(std::io::ErrorKind::Other, e))
+            })
             .map(|size| size as usize)?)
     }
 
@@ -150,7 +180,7 @@ pub struct ObjectStorage<T>
 where
     T: ObjectStorageState,
 {
-    connection: Arc<Connection>,
+    request: Arc<request::Request>,
     state: Arc<T>,
     metrics: Option<Arc<BackendMetrics>>,
     #[allow(unused)]
@@ -162,13 +192,13 @@ where
     T: ObjectStorageState,
 {
     pub(crate) fn new_object_storage(
-        connection: Arc<Connection>,
+        request: Arc<request::Request>,
         state: Arc<T>,
         metrics: Option<Arc<BackendMetrics>>,
         id: Option<String>,
     ) -> Self {
         ObjectStorage {
-            connection,
+            request,
             state,
             metrics,
             id,
@@ -181,7 +211,7 @@ where
     T: ObjectStorageState,
 {
     fn shutdown(&self) {
-        self.connection.shutdown();
+        self.request.shutdown();
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -195,7 +225,7 @@ where
             Ok(Arc::new(ObjectStorageReader {
                 blob_id: blob_id.to_string(),
                 state: self.state.clone(),
-                connection: self.connection.clone(),
+                request: self.request.clone(),
                 metrics: metrics.clone(),
             }))
         } else {
