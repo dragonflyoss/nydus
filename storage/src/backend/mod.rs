@@ -20,10 +20,7 @@ use std::thread::sleep;
 use std::{sync::Arc, time::Duration};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
-use nydus_utils::{
-    metrics::{BackendMetrics, ERROR_HOLDER},
-    DelayType, Delayer,
-};
+use nydus_utils::metrics::BackendMetrics;
 
 use crate::utils::{alloc_buf, copyv};
 use crate::StorageError;
@@ -53,7 +50,12 @@ pub mod s3;
 #[cfg(feature = "backend-hickory-dns")]
 pub mod hickory;
 pub mod pauser;
-#[cfg(feature = "backend-dragonfly-proxy")]
+#[cfg(any(
+    feature = "backend-oss",
+    feature = "backend-registry",
+    feature = "backend-s3",
+    feature = "backend-http-proxy",
+))]
 pub mod proxy;
 #[cfg(feature = "backend-qps-limit")]
 pub mod qps;
@@ -378,46 +380,38 @@ pub trait BlobReader: Send + Sync {
         self.try_read(buf, offset)
     }
 
+    /// Whether `read()` should enforce that the backend returns exactly the
+    /// requested number of bytes. Remote backends return `true` (default) so
+    /// that short reads are retried as transient errors. Local backends
+    /// override this to return `false`, since short reads at EOF are expected.
+    fn expect_exact_read(&self) -> bool {
+        true
+    }
+
     /// Read a range of data from the blob file into the provided buffer.
     ///
-    /// Read data of range [offset, offset + buf.len()) from the blob file, and returns:
-    /// - bytes of data read, which may be smaller than buf.len()
-    /// - error code if error happens
+    /// For remote backends, a short read is treated as a transient error and
+    /// retried. For local backends (`expect_exact_read() == false`), a short
+    /// read is returned as-is.
     ///
     /// It will try `BlobBackend::retry_limit()` times at most and return the first successfully
     /// read data.
     fn read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        let mut retry_count = self.retry_limit();
-        let begin_time = self.metrics().begin();
-
-        let mut delayer = Delayer::new(DelayType::BackOff, Duration::from_millis(500));
-
-        loop {
-            match self.try_read(buf, offset) {
-                Ok(size) => {
-                    self.metrics().end(&begin_time, buf.len(), false);
-                    return Ok(size);
-                }
-                Err(err) => {
-                    if retry_count > 0 {
-                        warn!(
-                            "Read from backend failed: {:?}, retry count {}",
-                            err, retry_count
-                        );
-                        retry_count -= 1;
-                        delayer.delay();
-                    } else {
-                        self.metrics().end(&begin_time, buf.len(), true);
-                        ERROR_HOLDER
-                            .lock()
-                            .unwrap()
-                            .push(&format!("{:?}", err))
-                            .unwrap_or_else(|_| error!("Failed when try to hold error"));
-                        return Err(err);
-                    }
-                }
+        let mut ctx = BackendContext::default();
+        let buf_len = buf.len();
+        let strict = self.expect_exact_read();
+        retry_op(self.metrics(), &mut ctx, buf_len, |ctx| {
+            let size = self.try_read_ctx(buf, offset, Some(ctx))?;
+            if strict && size != buf_len {
+                return Err(BackendError::CopyData(StorageError::CacheIndex(
+                    std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("expected {} bytes, got {}", buf_len, size),
+                    ),
+                )));
             }
-        }
+            Ok(size)
+        })
     }
 
     /// Read as much as possible data into buffer.
@@ -426,7 +420,15 @@ pub trait BlobReader: Send + Sync {
         let mut left = buf.len();
 
         while left > 0 {
-            let cnt = self.read(&mut buf[off..], offset + off as u64)?;
+            let mut ctx = BackendContext::default();
+            let current_off = off;
+            let cnt = retry_op(self.metrics(), &mut ctx, left, |ctx| {
+                self.try_read_ctx(
+                    &mut buf[current_off..],
+                    offset + current_off as u64,
+                    Some(ctx),
+                )
+            })?;
             if cnt == 0 {
                 break;
             }

@@ -6,7 +6,7 @@
 //! Storage backend driver to access blobs on Oss(Object Storage System).
 use std::io::Result;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
@@ -19,6 +19,7 @@ use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::connection::{Connection, ConnectionConfig};
 use crate::backend::object_storage::{ObjectStorage, ObjectStorageState};
+use crate::backend::request;
 
 const HEADER_DATE: &str = "Date";
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -40,6 +41,29 @@ pub struct OssState {
 impl OssState {
     fn resource(&self, object_key: &str, query_str: &str) -> String {
         format!("/{}/{}{}", self.bucket_name, object_key, query_str)
+    }
+
+    /// Generate a pre-signed URL query string for OSS access.
+    #[allow(dead_code)]
+    fn sign_by_url(&self, method: Method, resource: &str) -> Result<String> {
+        let expiry = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| einval!(e))?
+            .as_secs()
+            + 3600;
+        let string_to_sign = format!("{}\n\n\n{}\n{}", method.as_str(), expiry, resource);
+        let hmac = HmacSha1::new_from_slice(self.access_key_secret.as_bytes())
+            .map_err(|e| einval!(e))?
+            .chain_update(string_to_sign.as_bytes())
+            .finalize()
+            .into_bytes();
+        let signature = base64::engine::general_purpose::STANDARD.encode(hmac);
+        Ok(format!(
+            "OSSAccessKeyId={}&Expires={}&Signature={}",
+            self.access_key_id,
+            expiry,
+            super::url_encoding::encode(&signature)
+        ))
     }
 }
 
@@ -126,7 +150,9 @@ impl Oss {
     pub fn new(oss_config: &OssConfig, id: Option<&str>) -> Result<Oss> {
         let con_config: ConnectionConfig = oss_config.clone().into();
         let retry_limit = con_config.retry_limit;
+        let proxy_config = con_config.proxy.clone();
         let connection = Connection::new(&con_config)?;
+        let request = request::Request::new(connection, proxy_config, false);
         let state = Arc::new(OssState {
             scheme: oss_config.scheme.clone(),
             object_prefix: oss_config.object_prefix.clone(),
@@ -139,7 +165,7 @@ impl Oss {
         let metrics = id.map(|i| BackendMetrics::new(i, "oss"));
 
         Ok(ObjectStorage::new_object_storage(
-            connection,
+            request,
             state,
             metrics,
             id.map(|i| i.to_string()),
@@ -251,5 +277,44 @@ mod tests {
 
         let auth = headers.get(HEADER_AUTHORIZATION).unwrap();
         assert!(auth.to_str().unwrap().starts_with("OSS ak:"));
+    }
+
+    #[test]
+    fn test_sign_by_url() {
+        let state = OssState {
+            access_key_id: "test-key-id".to_string(),
+            access_key_secret: "test-key-secret".to_string(),
+            scheme: "https".to_string(),
+            object_prefix: "".to_string(),
+            endpoint: "oss.example.com".to_string(),
+            bucket_name: "test-bucket".to_string(),
+            retry_limit: 1,
+        };
+        let result = state.sign_by_url(Method::GET, "/test-bucket/myobject");
+        assert!(result.is_ok());
+        let query = result.unwrap();
+        assert!(query.contains("OSSAccessKeyId=test-key-id"));
+        assert!(query.contains("Expires="));
+        assert!(query.contains("Signature="));
+    }
+
+    #[test]
+    fn test_oss_url_preserves_path_separators() {
+        let state = OssState {
+            access_key_id: "key".to_string(),
+            access_key_secret: "secret".to_string(),
+            scheme: "https".to_string(),
+            object_prefix: "prefix/".to_string(),
+            endpoint: "oss.example.com".to_string(),
+            bucket_name: "mybucket".to_string(),
+            retry_limit: 1,
+        };
+        let (resource, url) = state.url("subdir/file.tar.gz", &[]);
+        // Both resource and URL preserve path separators
+        assert_eq!(resource, "/mybucket/prefix/subdir/file.tar.gz");
+        assert_eq!(
+            url,
+            "https://mybucket.oss.example.com/prefix/subdir/file.tar.gz"
+        );
     }
 }

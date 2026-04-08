@@ -12,11 +12,11 @@ use hyperlocal::Uri as HyperLocalUri;
 use hyperlocal::{UnixClientExt, UnixConnector};
 use nydus_api::HttpProxyConfig;
 use nydus_utils::metrics::BackendMetrics;
-use reqwest;
 use tokio::runtime::Runtime;
 
 use super::connection::{Connection, ConnectionConfig, ConnectionError};
-use super::{BackendError, BackendResult, BlobBackend, BlobReader};
+use super::{BackendContext, BackendError, BackendResult, BlobBackend, BlobReader};
+use crate::backend::request;
 use std::path::Path;
 use std::{
     fmt,
@@ -44,7 +44,7 @@ pub enum HttpProxyError {
     /// Failed to read the response body.
     ReadResponseBody(hyper::Error),
     /// Failed to transport the remote response body.
-    Transport(reqwest::Error),
+    Transport(Error),
     /// Failed to copy the buffer.
     CopyBuffer(Error),
     /// Invalid path.
@@ -122,7 +122,7 @@ struct LocalClient {
 #[derive(Clone)]
 enum Client {
     Local(LocalClient),
-    Remote(Arc<Connection>),
+    Remote(Arc<request::Request>),
 }
 
 enum Uri {
@@ -204,12 +204,13 @@ impl BlobReader for HttpProxyReader {
                 };
                 client.get_headers(uri)
             }
-            Client::Remote(connection) => {
+            Client::Remote(request) => {
                 let uri = match self.uri {
                     Uri::Local(_) => unreachable!(),
                     Uri::Remote(ref uri) => uri.clone(),
                 };
-                connection
+                let mut ctx = BackendContext::default();
+                request
                     .call::<&[u8]>(
                         Method::HEAD,
                         uri.as_str(),
@@ -217,9 +218,11 @@ impl BlobReader for HttpProxyReader {
                         None,
                         &mut HeaderMap::new(),
                         true,
+                        &mut ctx,
+                        false,
                     )
-                    .map(|resp| resp.headers().to_owned())
-                    .map_err(|e| HttpProxyError::RemoteRequest(e).into())
+                    .map(|resp| resp.headers().clone())
+                    .map_err(BackendError::Request)
             }
         };
         let content_length = headers?[http::header::CONTENT_LENGTH]
@@ -230,7 +233,16 @@ impl BlobReader for HttpProxyReader {
         Ok(content_length)
     }
 
-    fn try_read(&self, mut buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+    fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+        self.try_read_ctx(buf, offset, None)
+    }
+
+    fn try_read_ctx(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<usize> {
         match &self.client {
             Client::Local(client) => {
                 let uri = match self.uri {
@@ -238,11 +250,13 @@ impl BlobReader for HttpProxyReader {
                     Uri::Remote(_) => unreachable!(),
                 };
                 let content = client.try_read(uri, offset, buf.len())?;
-                let copied_size = std::io::copy(&mut content.as_slice(), &mut buf)
+                let copied_size = std::io::copy(&mut content.as_slice(), &mut &mut *buf)
                     .map_err(HttpProxyError::CopyBuffer)?;
                 Ok(copied_size as usize)
             }
-            Client::Remote(connection) => {
+            Client::Remote(request) => {
+                let mut default_ctx = BackendContext::default();
+                let ctx = ctx.unwrap_or(&mut default_ctx);
                 let uri = match self.uri {
                     Uri::Local(_) => unreachable!(),
                     Uri::Remote(ref uri) => uri.clone(),
@@ -256,13 +270,23 @@ impl BlobReader for HttpProxyReader {
                         .parse()
                         .map_err(|e| HttpProxyError::ConstructHeader(format!("{}", e)))?,
                 );
-                let mut resp = connection
-                    .call::<&[u8]>(Method::GET, uri.as_str(), None, None, &mut headers, true)
-                    .map_err(HttpProxyError::RemoteRequest)?;
-
+                let resp = request
+                    .call::<&[u8]>(
+                        Method::GET,
+                        uri.as_str(),
+                        None,
+                        None,
+                        &mut headers,
+                        true,
+                        ctx,
+                        false,
+                    )
+                    .map_err(BackendError::Request)?;
                 Ok(resp
-                    .copy_to(&mut buf)
-                    .map_err(HttpProxyError::Transport)
+                    .copy_to(buf)
+                    .map_err(|e| {
+                        HttpProxyError::Transport(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })
                     .map(|size| size as usize)?)
             }
         }
@@ -277,8 +301,10 @@ impl HttpProxy {
     pub fn new(config: &HttpProxyConfig, id: Option<&str>) -> Result<HttpProxy> {
         let client = if config.addr.starts_with("http://") || config.addr.starts_with("https://") {
             let conn_cfg: ConnectionConfig = config.clone().into();
+            let proxy_config = conn_cfg.proxy.clone();
             let conn = Connection::new(&conn_cfg)?;
-            Client::Remote(conn)
+            let request = request::Request::new(conn, proxy_config, false);
+            Client::Remote(request)
         } else {
             let client = HyperClient::unix();
             let runtime = build_tokio_runtime("http-proxy", HYPER_LOCAL_CLIENT_RUNTIME_THREAD_NUM)?;
@@ -300,11 +326,9 @@ impl HttpProxy {
 impl BlobBackend for HttpProxy {
     fn shutdown(&self) {
         match &self.client {
-            Client::Local(_) => {
-                // do nothing
-            }
-            Client::Remote(remote_client) => {
-                remote_client.shutdown();
+            Client::Local(_) => {}
+            Client::Remote(request) => {
+                request.shutdown();
             }
         }
     }
