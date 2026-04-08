@@ -21,6 +21,7 @@ use tokio::runtime::Runtime;
 use dragonfly_client_util::request::errors::Error;
 use dragonfly_client_util::request::Request;
 use dragonfly_client_util::request::{GetRequest, GetResponse, Proxy};
+use lazy_static::lazy_static;
 
 use crate::factory::ASYNC_RUNTIME;
 
@@ -86,12 +87,12 @@ impl Response {
     }
 
     pub fn headers(&self) -> &HeaderMap {
+        lazy_static! {
+            static ref EMPTY_HEADERS: HeaderMap = HeaderMap::new();
+        }
         match self {
             Self::HTTP(resp) => resp.headers(),
-            Self::ProxySDK(resp) => {
-                static EMPTY: HeaderMap = HeaderMap::new();
-                resp.header.as_ref().unwrap_or(&EMPTY)
-            }
+            Self::ProxySDK(resp) => resp.header.as_ref().unwrap_or(&EMPTY_HEADERS),
         }
     }
 
@@ -211,13 +212,13 @@ impl ProxySDKClients {
         {
             let guard = PROXY_SDK_CLIENT.read().unwrap();
             if let Some(client) = guard.get(endpoint) {
-                return Ok(client.clone());
+                return Ok(Arc::clone(client));
             }
         }
 
         let mut guard = PROXY_SDK_CLIENT.write().unwrap();
         if let Some(existing) = guard.get(endpoint) {
-            return Ok(existing.clone());
+            return Ok(Arc::clone(existing));
         }
 
         info!("[PERF] creating new proxy sdk client for {}", endpoint);
