@@ -16,6 +16,7 @@
 
 use std::fmt;
 use std::io::Read;
+use std::thread::sleep;
 use std::{sync::Arc, time::Duration};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
@@ -52,10 +53,64 @@ pub mod s3;
 #[cfg(feature = "backend-hickory-dns")]
 pub mod hickory;
 pub mod pauser;
+#[cfg(feature = "backend-dragonfly-proxy")]
+pub mod proxy;
 #[cfg(feature = "backend-qps-limit")]
 pub mod qps;
+#[cfg(any(
+    feature = "backend-oss",
+    feature = "backend-registry",
+    feature = "backend-s3",
+    feature = "backend-http-proxy",
+))]
+pub mod request;
 #[cfg(feature = "backend-oss")]
 pub mod url_encoding;
+
+/// Source of a backend read request, used for retry policy decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RequestSource {
+    /// On-demand read triggered by user I/O.
+    #[default]
+    OnDemand,
+    /// Background prefetch read.
+    Prefetch,
+}
+
+impl fmt::Display for RequestSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RequestSource::OnDemand => write!(f, "ondemand"),
+            RequestSource::Prefetch => write!(f, "prefetch"),
+        }
+    }
+}
+
+/// Per-request context for proxy-aware backend operations.
+///
+/// Tracks request source (on-demand vs prefetch), proxy routing state,
+/// and error information across retry attempts.
+#[derive(Debug, Clone, Default)]
+pub struct BackendContext {
+    /// Whether this request is on-demand or prefetch.
+    pub request_source: RequestSource,
+    /// Set to true to bypass the proxy and request directly from source.
+    pub disable_proxy: bool,
+    /// Set to true to disable Dragonfly SDK mode and fall back to HTTP proxy.
+    pub disable_proxy_sdk: bool,
+    /// Whether the current attempt is using Dragonfly SDK.
+    pub using_proxy_sdk: bool,
+    /// Error message from the last failed attempt.
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "backend-qps-limit")]
+lazy_static::lazy_static! {
+    /// Global QPS limiter for source backend fallback, limited to 1 QPS.
+    pub static ref BACKEND_QPS_LIMITER: self::qps::QpsLimiter = self::qps::QpsLimiter::new(1.0);
+    /// Global pauser for backend requests, allows pausing all requests.
+    pub static ref BACKEND_PAUSER: self::pauser::Pauser = self::pauser::Pauser::new();
+}
 
 /// Error codes related to storage backend operations.
 #[derive(Debug)]
@@ -79,6 +134,14 @@ pub enum BackendError {
     #[cfg(feature = "backend-http-proxy")]
     /// Error from local http proxy backend.
     HttpProxy(self::http_proxy::HttpProxyError),
+    #[cfg(any(
+        feature = "backend-oss",
+        feature = "backend-registry",
+        feature = "backend-s3",
+        feature = "backend-http-proxy",
+    ))]
+    /// Error from the request routing layer.
+    Request(self::request::RequestError),
 }
 
 impl fmt::Display for BackendError {
@@ -96,6 +159,13 @@ impl fmt::Display for BackendError {
             BackendError::LocalDisk(e) => write!(f, "{:?}", e),
             #[cfg(feature = "backend-http-proxy")]
             BackendError::HttpProxy(e) => write!(f, "{}", e),
+            #[cfg(any(
+                feature = "backend-oss",
+                feature = "backend-registry",
+                feature = "backend-s3",
+                feature = "backend-http-proxy",
+            ))]
+            BackendError::Request(e) => write!(f, "request error: {:?}", e),
         }
     }
 }
@@ -103,7 +173,187 @@ impl fmt::Display for BackendError {
 /// Specialized `Result` for storage backends.
 pub type BackendResult<T> = std::result::Result<T, BackendError>;
 
-/// Trait to read data from a on storage backend.
+impl BackendError {
+    /// Returns true if this error represents a proxy-forbidden (403) response.
+    pub fn is_proxy_forbidden(&self) -> bool {
+        #[cfg(all(
+            feature = "backend-dragonfly-proxy",
+            any(
+                feature = "backend-oss",
+                feature = "backend-registry",
+                feature = "backend-s3",
+                feature = "backend-http-proxy"
+            )
+        ))]
+        if let BackendError::Request(self::request::RequestError::Proxy(
+            self::proxy::ProxyError::Forbidden(_),
+        )) = self
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Returns true if this error represents a proxy rate-limit (429) response.
+    pub fn is_proxy_limited(&self) -> bool {
+        #[cfg(all(
+            feature = "backend-dragonfly-proxy",
+            any(
+                feature = "backend-oss",
+                feature = "backend-registry",
+                feature = "backend-s3",
+                feature = "backend-http-proxy"
+            )
+        ))]
+        if let BackendError::Request(self::request::RequestError::Proxy(
+            self::proxy::ProxyError::TooManyRequests(_),
+        )) = self
+        {
+            return true;
+        }
+        false
+    }
+
+    /// Returns true if this is a proxy SDK internal error.
+    pub fn is_proxy_sdk_internal(&self) -> bool {
+        #[cfg(all(
+            feature = "backend-dragonfly-proxy",
+            any(
+                feature = "backend-oss",
+                feature = "backend-registry",
+                feature = "backend-s3",
+                feature = "backend-http-proxy"
+            )
+        ))]
+        if let BackendError::Request(self::request::RequestError::Proxy(
+            self::proxy::ProxyError::Internal(_),
+        )) = self
+        {
+            return true;
+        }
+        false
+    }
+}
+
+#[cfg(feature = "backend-qps-limit")]
+fn random_duration(min_millis: u64, max_millis: u64) -> Duration {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    Duration::from_millis(rng.gen_range(min_millis..=max_millis))
+}
+
+/// Proxy-aware retry loop for backend read operations.
+///
+/// Retry policy:
+/// - On-demand requests get 3 retries, prefetch gets 1
+/// - Proxy-forbidden (403): return immediately, no retry
+/// - Proxy rate-limited (429) + prefetch: return immediately
+/// - Proxy rate-limited + on-demand: disable proxy, apply QPS limiter, retry via source
+/// - SDK internal error: disable SDK, retry via HTTP proxy
+/// - Last retry: disable proxy and apply QPS limiter for source fallback
+/// - Prefetch retries: random sleep 100ms-1s between attempts
+pub fn retry_op<T, F>(
+    metrics: &BackendMetrics,
+    context: &mut BackendContext,
+    data_len: usize,
+    mut op: F,
+) -> BackendResult<T>
+where
+    F: FnMut(&mut BackendContext) -> BackendResult<T>,
+{
+    let is_prefetch = context.request_source == RequestSource::Prefetch;
+    let mut retry_count: u32 = if is_prefetch { 1 } else { 3 };
+
+    loop {
+        context.using_proxy_sdk = false;
+        let begin_time = metrics.begin();
+        let ret = op(context);
+
+        match ret {
+            Ok(val) => {
+                context.error = None;
+                metrics.end(&begin_time, data_len, false);
+                return Ok(val);
+            }
+            Err(err) => {
+                context.error = Some(format!("{:?}", err));
+                metrics.end(&begin_time, data_len, true);
+
+                let proxy_forbidden = err.is_proxy_forbidden();
+                if proxy_forbidden {
+                    warn!("proxy blocked the request");
+                }
+
+                let proxy_limited = err.is_proxy_limited();
+                if proxy_limited {
+                    warn!("proxy rate limited the request");
+                }
+
+                let proxy_sdk_internal = err.is_proxy_sdk_internal();
+                if proxy_sdk_internal {
+                    warn!("proxy SDK internal error, fallback to proxy mode");
+                    context.disable_proxy_sdk = true;
+                }
+
+                // SDK retries internally, reduce retry count
+                if context.using_proxy_sdk && !proxy_sdk_internal {
+                    if is_prefetch {
+                        retry_count = 0;
+                    } else if retry_count > 1 {
+                        retry_count = 1;
+                    }
+                }
+
+                // Do not retry for:
+                // 1. No remaining retry count
+                // 2. Proxy forbidden
+                // 3. Proxy limited + prefetch
+                if retry_count > 0 && !proxy_forbidden && !(proxy_limited && is_prefetch) {
+                    retry_count -= 1;
+
+                    // Last retry or rate-limited on-demand: disable proxy, use QPS limiter
+                    if (retry_count == 0 || proxy_limited) && !is_prefetch {
+                        warn!(
+                            "retry via source backend with QPS limiter, remains: {}",
+                            retry_count
+                        );
+                        context.disable_proxy = true;
+                        #[cfg(feature = "backend-qps-limit")]
+                        {
+                            let limited = BACKEND_QPS_LIMITER.acquire();
+                            if limited {
+                                warn!("source backend request rate-limited by QPS limiter");
+                            }
+                        }
+                    } else {
+                        context.disable_proxy = false;
+                        if is_prefetch {
+                            #[cfg(feature = "backend-qps-limit")]
+                            {
+                                let duration = random_duration(100, 1000);
+                                warn!(
+                                    "retry prefetch, remains: {}, sleep: {:?}",
+                                    retry_count, duration
+                                );
+                                sleep(duration);
+                            }
+                            #[cfg(not(feature = "backend-qps-limit"))]
+                            {
+                                warn!("retry prefetch, remains: {}", retry_count);
+                                sleep(Duration::from_millis(500));
+                            }
+                        } else {
+                            warn!("retry via proxy, remains: {}", retry_count);
+                        }
+                    }
+                } else {
+                    break Err(err);
+                }
+            }
+        }
+    }
+}
+
 pub trait BlobReader: Send + Sync {
     /// Get size of the blob file.
     fn blob_size(&self) -> BackendResult<u64>;
@@ -114,6 +364,19 @@ pub trait BlobReader: Send + Sync {
     /// - bytes of data read, which may be smaller than buf.len()
     /// - error code if error happens
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize>;
+
+    /// Try to read a range of data from the blob file with optional context.
+    ///
+    /// The context carries proxy routing state for retry decisions.
+    /// Default implementation ignores the context and delegates to `try_read`.
+    fn try_read_ctx(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        _ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<usize> {
+        self.try_read(buf, offset)
+    }
 
     /// Read a range of data from the blob file into the provided buffer.
     ///
@@ -451,5 +714,96 @@ mod tests {
         let sz = buf_reader.read(&mut buf).unwrap();
         assert_eq!(sz, 4);
         assert_eq!(&buf[..4], &[4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_backend_context_default() {
+        let ctx = BackendContext::default();
+        assert!(matches!(ctx.request_source, RequestSource::OnDemand));
+        assert!(!ctx.disable_proxy);
+        assert!(!ctx.disable_proxy_sdk);
+        assert!(!ctx.using_proxy_sdk);
+        assert!(ctx.error.is_none());
+    }
+
+    #[test]
+    fn test_request_source_display() {
+        assert_eq!(format!("{}", RequestSource::OnDemand), "ondemand");
+        assert_eq!(format!("{}", RequestSource::Prefetch), "prefetch");
+    }
+
+    #[test]
+    fn test_backend_error_is_proxy_forbidden() {
+        let err = BackendError::Unsupported("test".to_string());
+        assert!(!err.is_proxy_forbidden());
+        assert!(!err.is_proxy_limited());
+        assert!(!err.is_proxy_sdk_internal());
+    }
+
+    #[test]
+    fn test_retry_op_success_on_first_try() {
+        let metrics = BackendMetrics::new("test-retry-success", "test");
+        let mut ctx = BackendContext::default();
+
+        let result = retry_op(&metrics, &mut ctx, 1024, |_ctx| Ok(42usize));
+
+        assert_eq!(result.unwrap(), 42);
+        assert!(ctx.error.is_none());
+    }
+
+    #[test]
+    fn test_retry_op_retries_on_failure() {
+        let metrics = BackendMetrics::new("test-retry-fail", "test");
+        let mut ctx = BackendContext::default();
+
+        let mut attempt = 0;
+        let result = retry_op(&metrics, &mut ctx, 1024, |_ctx| {
+            attempt += 1;
+            if attempt < 3 {
+                Err(BackendError::Unsupported(format!("attempt {}", attempt)))
+            } else {
+                Ok(99usize)
+            }
+        });
+
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(attempt, 3);
+    }
+
+    #[test]
+    fn test_retry_op_prefetch_fewer_retries() {
+        let metrics = BackendMetrics::new("test-retry-prefetch", "test");
+        let mut ctx = BackendContext {
+            request_source: RequestSource::Prefetch,
+            ..Default::default()
+        };
+
+        let mut attempt = 0;
+        let result: BackendResult<usize> = retry_op(&metrics, &mut ctx, 1024, |_ctx| {
+            attempt += 1;
+            Err(BackendError::Unsupported(format!("attempt {}", attempt)))
+        });
+
+        assert!(result.is_err());
+        // Prefetch gets 1 retry (initial attempt + 1 retry = 2 attempts max)
+        assert!(attempt <= 2);
+    }
+
+    #[test]
+    fn test_blob_reader_try_read_ctx_default() {
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let reader = MockBlobReader::new(data);
+
+        let mut buf = vec![0u8; 4];
+        // With None context, should delegate to try_read
+        let sz = reader.try_read_ctx(&mut buf, 0, None).unwrap();
+        assert_eq!(sz, 4);
+        assert_eq!(buf, vec![1, 2, 3, 4]);
+
+        // With Some context, should also work (default impl ignores context)
+        let mut ctx = BackendContext::default();
+        let sz = reader.try_read_ctx(&mut buf, 4, Some(&mut ctx)).unwrap();
+        assert_eq!(sz, 4);
+        assert_eq!(buf, vec![5, 6, 7, 8]);
     }
 }

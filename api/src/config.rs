@@ -901,6 +901,9 @@ pub struct ProxyConfig {
     /// Elapsed time to pause proxy health check when the request is inactive, in seconds.
     #[serde(default = "default_check_pause_elapsed")]
     pub check_pause_elapsed: u64,
+    /// Dragonfly scheduler endpoint URL for SDK-based proxy.
+    #[serde(default)]
+    pub dragonfly_scheduler_endpoint: String,
 }
 
 impl Default for ProxyConfig {
@@ -912,6 +915,7 @@ impl Default for ProxyConfig {
             check_interval: 5,
             use_http: false,
             check_pause_elapsed: 300,
+            dragonfly_scheduler_endpoint: String::new(),
         }
     }
 }
