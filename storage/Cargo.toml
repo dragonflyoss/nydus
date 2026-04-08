@@ -57,6 +57,10 @@ nydus-utils = { version = "0.5.1", path = "../utils", features = [
     "zran",
 ] }
 once_cell = { version = "1", optional = true }
+# dragonfly-client-util requires uuid >= 1.19 which pulls getrandom 0.4 (needs Cargo 1.85+/edition2024).
+# Uncomment when the project's minimum Rust toolchain supports edition2024.
+# dragonfly-client-util = { version = "1.2", optional = true }
+rand = { version = "0.8", optional = true }
 
 [dev-dependencies]
 futures = "0.3"
@@ -87,7 +91,10 @@ backend-http-proxy = [
 dedup = ["rusqlite", "r2d2", "r2d2_sqlite"]
 prefetch-rate-limit = ["leaky-bucket"]
 backend-hickory-dns = ["hickory-resolver", "once_cell", "reqwest"]
-backend-qps-limit = []
+backend-qps-limit = ["rand"]
+# dragonfly-client-util requires uuid >= 1.19 which pulls getrandom 0.4 (needs Cargo 1.85+).
+# Re-add ["dragonfly-client-util"] when the toolchain supports edition2024.
+backend-dragonfly-proxy = []
 
 [package.metadata.docs.rs]
 all-features = true
