@@ -23,8 +23,9 @@ use nydus_api::ProxyConfig;
 use crate::backend::connection::{Connection, ConnectionError, ReqBody};
 use crate::backend::BackendContext;
 
+use crate::backend::proxy;
 #[cfg(feature = "backend-dragonfly-proxy")]
-use crate::backend::proxy::{self, ProxySDKClients};
+use crate::backend::proxy::ProxySDKClients;
 #[cfg(feature = "backend-dragonfly-proxy")]
 use crate::backend::RequestSource;
 
@@ -75,8 +76,19 @@ pub fn is_success_status(status: StatusCode) -> bool {
 }
 
 impl Request {
+    /// Shut down the underlying connection.
+    pub fn shutdown(&self) {
+        self.connection.shutdown();
+    }
+
+    /// Check whether the connection has been shut down.
+    pub fn is_shutdown(&self) -> bool {
+        self.connection
+            .shutdown
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Create a new Request wrapping the given Connection.
-    #[allow(dead_code)]
     pub(crate) fn new(
         connection: Arc<Connection>,
         proxy_config: ProxyConfig,
@@ -112,15 +124,17 @@ impl Request {
         headers: &mut HeaderMap,
         catch_status: bool,
         context: &mut BackendContext,
-    ) -> RequestResult<reqwest::blocking::Response> {
+        temp_disable_proxy: bool,
+    ) -> RequestResult<proxy::Response> {
         // Inject custom headers from environment variables
         headers.extend(self.custom_headers.clone());
 
         // If proxy is disabled for this request or no proxy is configured, go direct
-        if context.disable_proxy || self.proxy_config.url.is_empty() {
+        if temp_disable_proxy || context.disable_proxy || self.proxy_config.url.is_empty() {
             return self
                 .connection
                 .call(method, url, query, data, headers, catch_status)
+                .map(proxy::Response::HTTP)
                 .map_err(RequestError::Connection);
         }
 
@@ -162,10 +176,7 @@ impl Request {
                                 status,
                             )));
                         }
-                        // SDK response path — backends will consume this in Phase 3
-                        Err(RequestError::Common(
-                            "SDK response path not yet wired to backends".to_string(),
-                        ))
+                        Ok(resp)
                     }
                     Err(err) => Err(RequestError::Proxy(err)),
                 };
@@ -202,6 +213,7 @@ impl Request {
         // Fall through to Connection which handles HTTP proxy + health + fallback
         self.connection
             .call(method, url, query, data, headers, catch_status)
+            .map(proxy::Response::HTTP)
             .map_err(RequestError::Connection)
     }
 }

@@ -13,7 +13,6 @@ use std::{fmt, thread};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use base64::Engine;
-use reqwest::blocking::Response;
 pub use reqwest::header::HeaderMap;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
@@ -22,10 +21,11 @@ use url::{ParseError, Url};
 use nydus_api::RegistryConfig;
 use nydus_utils::metrics::BackendMetrics;
 
-use crate::backend::connection::{
-    is_success_status, respond, Connection, ConnectionConfig, ConnectionError, ReqBody,
-};
-use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
+use crate::backend::connection::{Connection, ConnectionConfig, ConnectionError, ReqBody};
+use crate::backend::proxy;
+use crate::backend::request;
+use crate::backend::request::is_success_status;
+use crate::backend::{BackendContext, BackendError, BackendResult, BlobBackend, BlobReader};
 
 const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -44,7 +44,7 @@ pub enum RegistryError {
     Url(String, ParseError),
     Request(ConnectionError),
     Scheme(String),
-    Transport(reqwest::Error),
+    Transport(std::io::Error),
 }
 
 impl fmt::Display for RegistryError {
@@ -66,6 +66,26 @@ impl From<RegistryError> for BackendError {
 }
 
 type RegistryResult<T> = std::result::Result<T, RegistryError>;
+
+/// Convert a `RequestError` into a `RegistryError`, preserving `ConnectionError` variants.
+fn request_err_to_registry(e: request::RequestError) -> RegistryError {
+    match e {
+        request::RequestError::Connection(ce) => RegistryError::Request(ce),
+        other => RegistryError::Request(ConnectionError::ErrorWithMsg(format!("{:?}", other))),
+    }
+}
+
+/// Convert a proxy::Response into a RegistryResult, checking status if needed.
+fn respond(resp: proxy::Response, catch_status: bool) -> RegistryResult<proxy::Response> {
+    if !catch_status || is_success_status(resp.status()) {
+        Ok(resp)
+    } else {
+        let msg = resp
+            .text()
+            .unwrap_or_else(|e| format!("failed to read response body: {}", e));
+        Err(RegistryError::Request(ConnectionError::ErrorWithMsg(msg)))
+    }
+}
 
 #[derive(Default)]
 struct Cache(RwLock<String>);
@@ -143,8 +163,9 @@ fn default_expires_in() -> u64 {
 
 impl TokenResponse {
     // Extract the bearer token from the registry auth server response
-    fn from_resp(resp: Response) -> Result<Self> {
-        let mut token: TokenResponse = resp.json().map_err(|e| {
+    fn from_resp(resp: proxy::Response) -> Result<Self> {
+        let body = resp.text().map_err(|e| einval!(e))?;
+        let mut token: TokenResponse = serde_json::from_str(&body).map_err(|e| {
             einval!(format!(
                 "failed to decode registry auth server response: {:?}",
                 e
@@ -328,7 +349,7 @@ impl RegistryState {
         Some(ConfigAuthUpdate::Basic(config_auth))
     }
 
-    fn refresh_cached_auth_from_config(&self, connection: &Arc<Connection>) {
+    fn refresh_cached_auth_from_config(&self, request: &request::Request) {
         match self.detect_config_auth_update() {
             None => {}
             Some(ConfigAuthUpdate::Clear) => self.clear_cached_auth(),
@@ -339,7 +360,7 @@ impl RegistryState {
                 self.token_expired_at.store(None);
                 debug!("refreshed basic registry auth after registry_auth config update");
             }
-            Some(ConfigAuthUpdate::RefreshBearer(auth)) => match self.get_token(auth, connection) {
+            Some(ConfigAuthUpdate::RefreshBearer(auth)) => match self.get_token(auth, request) {
                 Ok(token) => {
                     let last_cached_auth = self.cached_auth.get();
                     self.cached_auth
@@ -358,19 +379,19 @@ impl RegistryState {
     }
 
     // Request registry authentication server to get bearer token
-    fn get_token(&self, auth: BearerAuth, connection: &Arc<Connection>) -> Result<TokenResponse> {
+    fn get_token(&self, auth: BearerAuth, request: &request::Request) -> Result<TokenResponse> {
         let http_get = self
             .cached_auth_using_http_get
             .get(&self.host)
             .unwrap_or_default();
         let resp = if http_get {
-            self.fetch_token(&auth, connection, Method::GET)?
+            self.fetch_token(&auth, request, Method::GET)?
         } else {
-            match self.fetch_token(&auth, connection, Method::POST) {
+            match self.fetch_token(&auth, request, Method::POST) {
                 Ok(resp) => resp,
                 Err(_) => {
                     warn!("retry http GET method to get auth token");
-                    let resp = self.fetch_token(&auth, connection, Method::GET)?;
+                    let resp = self.fetch_token(&auth, request, Method::GET)?;
                     // Cache http method for next use.
                     self.cached_auth_using_http_get.set(self.host.clone(), true);
                     resp
@@ -400,9 +421,9 @@ impl RegistryState {
     fn fetch_token(
         &self,
         auth: &BearerAuth,
-        connection: &Arc<Connection>,
+        request: &request::Request,
         method: Method,
-    ) -> Result<Response> {
+    ) -> Result<proxy::Response> {
         let mut headers = HeaderMap::new();
 
         let config_auth = self.get_config_auth();
@@ -437,7 +458,8 @@ impl RegistryState {
             _ => return Err(einval!()),
         }
 
-        let token_resp = connection
+        let mut ctx = BackendContext::default();
+        let token_resp = request
             .call::<&[u8]>(
                 method.clone(),
                 auth.realm.as_str(),
@@ -445,6 +467,8 @@ impl RegistryState {
                 body,
                 &mut headers,
                 true,
+                &mut ctx,
+                true, // temp_disable_proxy: auth always goes direct
             )
             .map_err(move |e| {
                 warn!(
@@ -457,11 +481,11 @@ impl RegistryState {
         Ok(token_resp)
     }
 
-    fn get_auth_header(&self, auth: Auth, connection: &Arc<Connection>) -> Result<String> {
+    fn get_auth_header(&self, auth: Auth, request: &request::Request) -> Result<String> {
         match auth {
             Auth::Basic(_) => Ok(format!("Basic {}", self.get_config_auth())),
             Auth::Bearer(auth) => {
-                let token = self.get_token(auth, connection)?;
+                let token = self.get_token(auth, request)?;
                 Ok(format!("Bearer {}", token.token))
             }
         }
@@ -589,7 +613,7 @@ impl First {
 
 struct RegistryReader {
     blob_id: String,
-    connection: Arc<Connection>,
+    request: Arc<request::Request>,
     state: Arc<RegistryState>,
     metrics: Arc<BackendMetrics>,
     first: First,
@@ -629,7 +653,8 @@ impl RegistryReader {
         data: Option<ReqBody<R>>,
         mut headers: HeaderMap,
         catch_status: bool,
-    ) -> RegistryResult<Response> {
+        context: &mut BackendContext,
+    ) -> RegistryResult<proxy::Response> {
         // Try get authorization header from cache for this request
         let mut last_cached_auth = String::new();
         let cached_auth = self.state.cached_auth.get();
@@ -645,16 +670,34 @@ impl RegistryReader {
         // after create_upload(), so we can request registry server directly
         if let Some(data) = data {
             return self
-                .connection
-                .call(method, url, None, Some(data), &mut headers, catch_status)
-                .map_err(RegistryError::Request);
+                .request
+                .call(
+                    method,
+                    url,
+                    None,
+                    Some(data),
+                    &mut headers,
+                    catch_status,
+                    context,
+                    false,
+                )
+                .map_err(request_err_to_registry);
         }
 
         // Try to request registry server with `authorization` header
         let mut resp = self
-            .connection
-            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
-            .map_err(RegistryError::Request)?;
+            .request
+            .call::<&[u8]>(
+                method.clone(),
+                url,
+                None,
+                None,
+                &mut headers,
+                false,
+                context,
+                false,
+            )
+            .map_err(request_err_to_registry)?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             if headers.contains_key(HEADER_AUTHORIZATION) {
                 // If we request registry (harbor server) with expired authorization token,
@@ -667,9 +710,18 @@ impl RegistryReader {
                 headers.remove(HEADER_AUTHORIZATION);
 
                 resp = self
-                    .connection
-                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
-                    .map_err(RegistryError::Request)?;
+                    .request
+                    .call::<&[u8]>(
+                        method.clone(),
+                        url,
+                        None,
+                        None,
+                        &mut headers,
+                        false,
+                        context,
+                        false,
+                    )
+                    .map_err(request_err_to_registry)?;
             };
 
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
@@ -677,7 +729,7 @@ impl RegistryReader {
                 if let Some(auth) = RegistryState::parse_auth(resp_auth_header) {
                     let auth_header = self
                         .state
-                        .get_auth_header(auth, &self.connection)
+                        .get_auth_header(auth, &self.request)
                         .map_err(|e| RegistryError::Common(e.to_string()))?;
 
                     headers.insert(
@@ -687,21 +739,30 @@ impl RegistryReader {
 
                     // Try to request registry server with `authorization` header again
                     let resp = self
-                        .connection
-                        .call(method, url, None, data, &mut headers, catch_status)
-                        .map_err(RegistryError::Request)?;
+                        .request
+                        .call(
+                            method,
+                            url,
+                            None,
+                            data,
+                            &mut headers,
+                            catch_status,
+                            context,
+                            false,
+                        )
+                        .map_err(request_err_to_registry)?;
 
                     let status = resp.status();
                     if is_success_status(status) {
                         // Cache authorization header for next request
                         self.state.cached_auth.set(&last_cached_auth, auth_header)
                     }
-                    return respond(resp, catch_status).map_err(RegistryError::Request);
+                    return respond(resp, catch_status);
                 }
             }
         }
 
-        respond(resp, catch_status).map_err(RegistryError::Request)
+        respond(resp, catch_status)
     }
 
     /// Read data from registry server
@@ -720,6 +781,7 @@ impl RegistryReader {
         mut buf: &mut [u8],
         offset: u64,
         allow_retry: bool,
+        context: &mut BackendContext,
     ) -> RegistryResult<usize> {
         let url = format!("/blobs/sha256:{}", self.blob_id);
         let url = self
@@ -736,7 +798,7 @@ impl RegistryReader {
 
         if let Some(cached_redirect) = cached_redirect {
             resp = self
-                .connection
+                .request
                 .call::<&[u8]>(
                     Method::GET,
                     cached_redirect.as_str(),
@@ -744,8 +806,10 @@ impl RegistryReader {
                     None,
                     &mut headers,
                     false,
+                    context,
+                    false,
                 )
-                .map_err(RegistryError::Request)?;
+                .map_err(request_err_to_registry)?;
 
             // The request has expired or has been denied, need to re-request
             if allow_retry
@@ -757,7 +821,7 @@ impl RegistryReader {
                 );
                 self.state.cached_redirect.remove(&self.blob_id);
                 // Try read again only once
-                return self._try_read(buf, offset, false);
+                return self._try_read(buf, offset, false, context);
             }
         } else {
             resp = match self.request::<&[u8]>(
@@ -766,6 +830,7 @@ impl RegistryReader {
                 None,
                 headers.clone(),
                 false,
+                context,
             ) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
@@ -777,7 +842,14 @@ impl RegistryReader {
                         .state
                         .url(url.as_str(), &[])
                         .map_err(|e| RegistryError::Url(url, e))?;
-                    self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?
+                    self.request::<&[u8]>(
+                        Method::GET,
+                        url.as_str(),
+                        None,
+                        headers.clone(),
+                        false,
+                        context,
+                    )?
                 }
                 Err(RegistryError::Request(ConnectionError::Common(e))) => {
                     if e.to_string().contains("self signed certificate") {
@@ -822,7 +894,7 @@ impl RegistryReader {
                         debug!("New redirected location {:?}", location.host_str());
                     }
                     let resp_ret = self
-                        .connection
+                        .request
                         .call::<&[u8]>(
                             Method::GET,
                             location.as_str(),
@@ -830,8 +902,10 @@ impl RegistryReader {
                             None,
                             &mut headers,
                             true,
+                            context,
+                            false,
                         )
-                        .map_err(RegistryError::Request);
+                        .map_err(request_err_to_registry);
                     match resp_ret {
                         Ok(_resp) => {
                             resp = _resp;
@@ -845,12 +919,14 @@ impl RegistryReader {
                     }
                 };
             } else {
-                resp = respond(resp, true).map_err(RegistryError::Request)?;
+                resp = respond(resp, true)?;
             }
         }
 
         resp.copy_to(&mut buf)
-            .map_err(RegistryError::Transport)
+            .map_err(|e| {
+                RegistryError::Transport(std::io::Error::new(std::io::ErrorKind::Other, e))
+            })
             .map(|size| size as usize)
     }
 }
@@ -864,12 +940,14 @@ impl BlobReader for RegistryReader {
                 .url(&url, &[])
                 .map_err(|e| RegistryError::Url(url, e))?;
 
+            let mut ctx = BackendContext::default();
             let resp = match self.request::<&[u8]>(
                 Method::HEAD,
                 url.as_str(),
                 None,
                 HeaderMap::new(),
                 true,
+                &mut ctx,
             ) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
@@ -881,7 +959,14 @@ impl BlobReader for RegistryReader {
                         .state
                         .url(&url, &[])
                         .map_err(|e| RegistryError::Url(url, e))?;
-                    self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?
+                    self.request::<&[u8]>(
+                        Method::HEAD,
+                        url.as_str(),
+                        None,
+                        HeaderMap::new(),
+                        true,
+                        &mut ctx,
+                    )?
                 }
                 Err(e) => {
                     return Err(BackendError::Registry(e));
@@ -903,8 +988,19 @@ impl BlobReader for RegistryReader {
     }
 
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+        self.try_read_ctx(buf, offset, None)
+    }
+
+    fn try_read_ctx(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<usize> {
+        let mut default_ctx = BackendContext::default();
+        let ctx = ctx.unwrap_or(&mut default_ctx);
         self.first.handle_force(&mut || -> BackendResult<usize> {
-            self._try_read(buf, offset, true)
+            self._try_read(buf, offset, true, ctx)
                 .map_err(BackendError::Registry)
         })
     }
@@ -920,7 +1016,7 @@ impl BlobReader for RegistryReader {
 
 /// Storage backend based on image registry.
 pub struct Registry {
-    connection: Arc<Connection>,
+    request: Arc<request::Request>,
     state: Arc<RegistryState>,
     metrics: Arc<BackendMetrics>,
     first: First,
@@ -933,7 +1029,9 @@ impl Registry {
         let con_config: ConnectionConfig = config.clone().into();
 
         let retry_limit = con_config.retry_limit;
+        let proxy_config = con_config.proxy.clone();
         let connection = Connection::new(&con_config)?;
+        let request = request::Request::new(connection, proxy_config, false);
         let auth = trim(config.auth.clone());
         let registry_token = trim(config.registry_token.clone());
         Self::validate_authorization_info(&auth)?;
@@ -970,7 +1068,7 @@ impl Registry {
         state.set_config_auth(auth);
 
         let registry = Registry {
-            connection,
+            request,
             state,
             metrics: BackendMetrics::new(id, "registry"),
             first: First::new(),
@@ -1007,12 +1105,12 @@ impl Registry {
     }
 
     fn start_refresh_token_thread(&self) {
-        let conn = self.connection.clone();
+        let request = self.request.clone();
         let state = self.state.clone();
         thread::spawn(move || {
             loop {
                 // Check for config auth changes every tick.
-                state.refresh_cached_auth_from_config(&conn);
+                state.refresh_cached_auth_from_config(&request);
 
                 if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
                     if let Some(token_expired_at) = state.token_expired_at.load().as_deref() {
@@ -1024,7 +1122,7 @@ impl Registry {
                                 state.cached_bearer_auth.load().as_deref()
                             {
                                 if let Ok(token) =
-                                    state.get_token(cached_bearer_auth.to_owned(), &conn)
+                                    state.get_token(cached_bearer_auth.to_owned(), &request)
                                 {
                                     let new_cached_auth = format!("Bearer {}", token.token);
                                     debug!(
@@ -1043,11 +1141,11 @@ impl Registry {
                     }
                 }
 
-                if conn.shutdown.load(Ordering::Acquire) {
+                if request.is_shutdown() {
                     break;
                 }
                 thread::sleep(Duration::from_secs(REGISTRY_CONFIG_POLL_INTERVAL));
-                if conn.shutdown.load(Ordering::Acquire) {
+                if request.is_shutdown() {
                     break;
                 }
             }
@@ -1057,7 +1155,7 @@ impl Registry {
 
 impl BlobBackend for Registry {
     fn shutdown(&self) {
-        self.connection.shutdown();
+        self.request.shutdown();
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -1068,7 +1166,7 @@ impl BlobBackend for Registry {
         Ok(Arc::new(RegistryReader {
             blob_id: blob_id.to_owned(),
             state: self.state.clone(),
-            connection: self.connection.clone(),
+            request: self.request.clone(),
             metrics: self.metrics.clone(),
             first: self.first.clone(),
         }))
@@ -1474,11 +1572,11 @@ mod tests {
             "token": "test_token_value",
             "expires_in": 3600
         });
-        let response = reqwest::blocking::Response::from(
+        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_token.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_token_value");
         assert_eq!(result.expires_in, 3600);
@@ -1488,11 +1586,11 @@ mod tests {
             "access_token": "test_access_token_value",
             "expires_in": 7200
         });
-        let response = reqwest::blocking::Response::from(
+        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_access_token.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_access_token_value");
         assert_eq!(result.expires_in, 7200);
@@ -1501,11 +1599,11 @@ mod tests {
         let json_with_default_expiration = json!({
             "token": "default_expiration_token"
         });
-        let response = reqwest::blocking::Response::from(
+        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_default_expiration.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "default_expiration_token");
         assert_eq!(result.expires_in, REGISTRY_DEFAULT_TOKEN_EXPIRATION);
@@ -1515,21 +1613,21 @@ mod tests {
             "token": "test_token_value",
             "access_token": "test_access_token_value",
         });
-        let response = reqwest::blocking::Response::from(
+        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_both_tokens.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_token_value");
 
         // Case 5: Response contains no token
         let json_with_no_token = json!({});
-        let response = reqwest::blocking::Response::from(
+        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_no_token.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response);
         assert!(result.is_err());
     }

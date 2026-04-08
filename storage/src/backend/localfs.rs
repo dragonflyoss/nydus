@@ -59,6 +59,10 @@ impl BlobReader for LocalFsEntry {
         })
     }
 
+    fn expect_exact_read(&self) -> bool {
+        false
+    }
+
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         uio::pread(self.file.as_raw_fd(), buf, offset as i64).map_err(|e| {
             let msg = format!("failed to read data from blob {}, {}", self.id, e);

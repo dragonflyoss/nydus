@@ -737,6 +737,7 @@ mod tests {
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
+    #[cfg(feature = "backend-localfs")]
     fn test_read_toc_list() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = Path::new(root_dir).join("../tests/texture/toc");
@@ -798,6 +799,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend-localfs")]
     fn test_parse_toc_list() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = Path::new(root_dir).join("../tests/texture/toc");
@@ -838,6 +840,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend-localfs")]
     fn test_read_from_cache_file() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = Path::new(root_dir).join("../tests/texture/toc");
