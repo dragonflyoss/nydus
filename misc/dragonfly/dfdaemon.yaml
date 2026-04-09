@@ -1,0 +1,35 @@
+# Minimal Dragonfly dfdaemon config for E2E testing.
+# Runs as seed peer, connects to local Manager.
+host:
+  schedulerClusterID: 1
+
+manager:
+  addr: http://127.0.0.1:65003
+
+seedPeer:
+  enable: true
+  type: super
+
+upload:
+  server:
+    port: 4000
+
+proxy:
+  server:
+    port: 4001
+
+storage:
+  dir: /tmp/dragonfly/storage
+
+server:
+  cacheDir: /tmp/dragonfly/cache/dfdaemon
+  logDir: /tmp/dragonfly/logs/dfdaemon
+
+download:
+  server:
+    socketPath: /tmp/dragonfly/dfdaemon.sock
+
+dynconfig:
+  refreshInterval: 1m
+
+console: true
