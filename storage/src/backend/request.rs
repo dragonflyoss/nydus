@@ -23,11 +23,17 @@ use nydus_api::ProxyConfig;
 use crate::backend::connection::{Connection, ConnectionError, ReqBody};
 use crate::backend::BackendContext;
 
+#[cfg(feature = "backend-dragonfly-proxy")]
 use crate::backend::proxy;
 #[cfg(feature = "backend-dragonfly-proxy")]
 use crate::backend::proxy::ProxySDKClients;
 #[cfg(feature = "backend-dragonfly-proxy")]
 use crate::backend::RequestSource;
+
+#[cfg(feature = "backend-dragonfly-proxy")]
+use dragonfly_client_util::request::GetResponse;
+#[cfg(feature = "backend-dragonfly-proxy")]
+use lazy_static::lazy_static;
 
 const HEADER_ENV_PREFIX: &str = "NYDUS_HEADER_";
 const HEADER_USER_AGENT: &str = "User-Agent";
@@ -42,6 +48,73 @@ pub enum RequestError {
 }
 
 pub type RequestResult<T> = std::result::Result<T, RequestError>;
+
+// --- Response enum: available for all network backends ---
+
+pub enum Response {
+    HTTP(reqwest::blocking::Response),
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    ProxySDK(GetResponse),
+}
+
+impl Response {
+    pub fn status(&self) -> StatusCode {
+        match self {
+            Self::HTTP(resp) => resp.status(),
+            #[cfg(feature = "backend-dragonfly-proxy")]
+            Self::ProxySDK(resp) => resp.status_code.unwrap_or(StatusCode::BAD_GATEWAY),
+        }
+    }
+
+    pub fn headers(&self) -> &HeaderMap {
+        #[cfg(feature = "backend-dragonfly-proxy")]
+        lazy_static! {
+            static ref EMPTY_HEADERS: HeaderMap = HeaderMap::new();
+        }
+        match self {
+            Self::HTTP(resp) => resp.headers(),
+            #[cfg(feature = "backend-dragonfly-proxy")]
+            Self::ProxySDK(resp) => resp.header.as_ref().unwrap_or(&EMPTY_HEADERS),
+        }
+    }
+
+    pub fn reader(self) -> Box<dyn Read + Send> {
+        match self {
+            Self::HTTP(resp) => Box::new(resp),
+            #[cfg(feature = "backend-dragonfly-proxy")]
+            Self::ProxySDK(resp) => {
+                let reader = resp.reader.unwrap_or(Box::new(tokio::io::empty()));
+                Box::new(proxy::SyncAdapter::new(reader))
+            }
+        }
+    }
+
+    pub fn text(self) -> Result<String, String> {
+        let mut content = String::new();
+        self.reader()
+            .read_to_string(&mut content)
+            .map_err(|e| format!("{}", e))?;
+        Ok(content)
+    }
+
+    pub fn copy_to(self, writer: &mut [u8]) -> Result<u64, String> {
+        match self {
+            Self::HTTP(resp) => {
+                std::io::copy(&mut Box::new(resp), &mut &mut *writer).map_err(|e| format!("{}", e))
+            }
+            #[cfg(feature = "backend-dragonfly-proxy")]
+            Self::ProxySDK(resp) => {
+                use crate::factory::ASYNC_RUNTIME;
+                let mut reader = resp.reader.unwrap_or(Box::new(tokio::io::empty()));
+                ASYNC_RUNTIME
+                    .block_on(async {
+                        tokio::io::copy(&mut reader, &mut std::io::Cursor::new(writer)).await
+                    })
+                    .map_err(|e| format!("{}", e))
+            }
+        }
+    }
+}
 
 fn parse_custom_headers_from_env() -> HeaderMap {
     let mut custom_headers = HeaderMap::new();
@@ -125,7 +198,7 @@ impl Request {
         catch_status: bool,
         context: &mut BackendContext,
         temp_disable_proxy: bool,
-    ) -> RequestResult<proxy::Response> {
+    ) -> RequestResult<Response> {
         // Inject custom headers from environment variables
         headers.extend(self.custom_headers.clone());
 
@@ -134,7 +207,7 @@ impl Request {
             return self
                 .connection
                 .call(method, url, query, data, headers, catch_status)
-                .map(proxy::Response::HTTP)
+                .map(Response::HTTP)
                 .map_err(RequestError::Connection);
         }
 
@@ -213,7 +286,7 @@ impl Request {
         // Fall through to Connection which handles HTTP proxy + health + fallback
         self.connection
             .call(method, url, query, data, headers, catch_status)
-            .map(proxy::Response::HTTP)
+            .map(Response::HTTP)
             .map_err(RequestError::Connection)
     }
 }
@@ -221,6 +294,20 @@ impl Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::connection::ConnectionConfig;
+
+    fn make_request(proxy_url: &str, scheduler_endpoint: &str) -> Arc<Request> {
+        let config = ConnectionConfig {
+            proxy: ProxyConfig {
+                url: proxy_url.to_string(),
+                dragonfly_scheduler_endpoint: scheduler_endpoint.to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let connection = Connection::new(&config).unwrap();
+        Request::new(connection, config.proxy.clone(), false)
+    }
 
     #[test]
     fn test_parse_custom_headers_from_env() {
@@ -247,10 +334,175 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_custom_headers_always_includes_user_agent() {
+        let headers = parse_custom_headers_from_env();
+        assert_eq!(headers.get("User-Agent").unwrap(), "nydusd/1.0.0");
+    }
+
+    #[test]
     fn test_is_success_status() {
         assert!(is_success_status(StatusCode::OK));
         assert!(is_success_status(StatusCode::MOVED_PERMANENTLY));
         assert!(!is_success_status(StatusCode::BAD_REQUEST));
         assert!(!is_success_status(StatusCode::INTERNAL_SERVER_ERROR));
+    }
+
+    #[test]
+    fn test_is_success_status_boundary() {
+        assert!(is_success_status(StatusCode::from_u16(200).unwrap()));
+        assert!(is_success_status(StatusCode::from_u16(399).unwrap()));
+        assert!(!is_success_status(StatusCode::from_u16(400).unwrap()));
+        assert!(!is_success_status(StatusCode::from_u16(100).unwrap()));
+    }
+
+    #[test]
+    fn test_request_new() {
+        let req = make_request("", "");
+        assert!(req.is_proxy_mode());
+        assert!(!req.is_shutdown());
+    }
+
+    #[test]
+    fn test_is_proxy_mode_no_scheduler() {
+        let req = make_request("http://proxy:8080", "");
+        assert!(req.is_proxy_mode());
+    }
+
+    #[test]
+    fn test_is_proxy_mode_with_scheduler() {
+        let req = make_request("http://proxy:8080", "http://scheduler:8002");
+        assert!(!req.is_proxy_mode());
+    }
+
+    #[test]
+    fn test_dragonfly_scheduler_endpoint() {
+        let req = make_request("", "http://scheduler:8002");
+        assert_eq!(req.dragonfly_scheduler_endpoint(), "http://scheduler:8002");
+    }
+
+    #[test]
+    fn test_dragonfly_scheduler_endpoint_empty() {
+        let req = make_request("", "");
+        assert_eq!(req.dragonfly_scheduler_endpoint(), "");
+    }
+
+    #[test]
+    fn test_shutdown_and_is_shutdown() {
+        let req = make_request("", "");
+        assert!(!req.is_shutdown());
+        req.shutdown();
+        assert!(req.is_shutdown());
+    }
+
+    #[test]
+    fn test_call_direct_no_proxy() {
+        let req = make_request("", "");
+        let mut headers = HeaderMap::new();
+        let mut ctx = BackendContext::default();
+
+        // Calling a non-existent URL should fail with ConnectionError
+        let result = req.call::<&[u8]>(
+            Method::GET,
+            "http://127.0.0.1:1/nonexistent",
+            None,
+            None,
+            &mut headers,
+            true,
+            &mut ctx,
+            false,
+        );
+        assert!(result.is_err());
+        assert!(matches!(result, Err(RequestError::Connection(_))));
+    }
+
+    #[test]
+    fn test_call_temp_disable_proxy_bypasses_proxy() {
+        let req = make_request("http://proxy:8080", "http://scheduler:8002");
+        let mut headers = HeaderMap::new();
+        let mut ctx = BackendContext::default();
+
+        // Even with proxy configured, temp_disable_proxy routes direct
+        let result = req.call::<&[u8]>(
+            Method::GET,
+            "http://127.0.0.1:1/nonexistent",
+            None,
+            None,
+            &mut headers,
+            true,
+            &mut ctx,
+            true, // temp_disable_proxy
+        );
+        assert!(result.is_err());
+        assert!(matches!(result, Err(RequestError::Connection(_))));
+    }
+
+    #[test]
+    fn test_call_context_disable_proxy_bypasses_proxy() {
+        let req = make_request("http://proxy:8080", "http://scheduler:8002");
+        let mut headers = HeaderMap::new();
+        let mut ctx = BackendContext {
+            disable_proxy: true,
+            ..Default::default()
+        };
+
+        let result = req.call::<&[u8]>(
+            Method::GET,
+            "http://127.0.0.1:1/nonexistent",
+            None,
+            None,
+            &mut headers,
+            true,
+            &mut ctx,
+            false,
+        );
+        assert!(result.is_err());
+        assert!(matches!(result, Err(RequestError::Connection(_))));
+    }
+
+    #[test]
+    fn test_call_injects_custom_headers() {
+        std::env::set_var("NYDUS_HEADER_X-TEST-INJECT", "injected");
+        let req = make_request("", "");
+        let mut headers = HeaderMap::new();
+        let mut ctx = BackendContext::default();
+
+        // The call will fail, but custom headers are injected before the attempt
+        let _ = req.call::<&[u8]>(
+            Method::GET,
+            "http://127.0.0.1:1/nonexistent",
+            None,
+            None,
+            &mut headers,
+            true,
+            &mut ctx,
+            false,
+        );
+
+        // Verify headers were injected into the mutable headers map
+        assert_eq!(headers.get("X-TEST-INJECT").unwrap(), "injected");
+        assert_eq!(headers.get("User-Agent").unwrap(), "nydusd/1.0.0");
+
+        std::env::remove_var("NYDUS_HEADER_X-TEST-INJECT");
+    }
+
+    #[test]
+    fn test_call_empty_proxy_url_goes_direct() {
+        // Even with scheduler configured, empty proxy URL → direct
+        let req = make_request("", "http://scheduler:8002");
+        let mut headers = HeaderMap::new();
+        let mut ctx = BackendContext::default();
+
+        let result = req.call::<&[u8]>(
+            Method::GET,
+            "http://127.0.0.1:1/nonexistent",
+            None,
+            None,
+            &mut headers,
+            true,
+            &mut ctx,
+            false,
+        );
+        assert!(result.is_err());
+        assert!(matches!(result, Err(RequestError::Connection(_))));
     }
 }

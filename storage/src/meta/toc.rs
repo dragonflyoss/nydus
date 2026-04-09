@@ -732,7 +732,9 @@ impl TocLocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "backend-localfs")]
     use crate::factory::BlobFactory;
+    #[cfg(feature = "backend-localfs")]
     use nydus_api::{BackendConfigV2, LocalFsConfig};
     use vmm_sys_util::tempfile::TempFile;
 
