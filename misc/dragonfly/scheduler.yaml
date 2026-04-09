@@ -1,0 +1,30 @@
+# Minimal Dragonfly Scheduler config for E2E testing.
+# Connects to local Redis and Manager.
+server:
+  port: 8002
+  logDir: /tmp/dragonfly/logs/scheduler
+  cacheDir: /tmp/dragonfly/cache/scheduler
+  logLevel: info
+
+scheduler:
+  algorithm: default
+  retryBackToSourceLimit: 3
+  retryLimit: 5
+  retryInterval: 2s
+
+database:
+  redis:
+    addrs:
+      - 127.0.0.1:6379
+    brokerDB: 1
+    backendDB: 2
+
+manager:
+  addr: 127.0.0.1:65003
+  schedulerClusterID: 1
+  keepAlive:
+    interval: 5s
+
+seedPeer: {}
+
+console: true
