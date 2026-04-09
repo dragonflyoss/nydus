@@ -528,18 +528,28 @@ impl DataBlob {
 
     /// Read data from the cached data blob in asynchronous mode.
     pub async fn async_read<T: IoBufMut>(&self, pos: u64, buf: T) -> (Result<usize>, T) {
-        match self.blob.get_blob_object() {
-            Some(obj) => match obj.fetch_range_uncompressed(pos, buf.bytes_total() as u64) {
-                Ok(_) => self.file.read_at(buf, pos).await,
-                Err(e) => (Err(e), buf),
-            },
-            None => (
-                Err(eio!(format!(
+        let len = buf.bytes_total() as u64;
+        let blob = self.blob.clone();
+        let blob_id = self.blob_id.clone();
+
+        // Blocking thread pool is needed because reqwest::blocking may be called
+        match tokio::task::spawn_blocking(move || -> Result<()> {
+            let obj = blob.get_blob_object().ok_or_else(|| {
+                eio!(format!(
                     "blob_cache: failed to get BlobObject for blob {}",
-                    self.blob_id
-                ))),
-                buf,
-            ),
+                    blob_id
+                ))
+            })?;
+            if len > 0 {
+                obj.fetch_range_uncompressed(pos, len)?;
+            }
+            Ok(())
+        })
+        .await
+        {
+            Ok(Ok(())) => self.file.read_at(buf, pos).await,
+            Ok(Err(e)) => (Err(e), buf),
+            Err(e) => (Err(eother!(format!("spawn_blocking join error: {e}"))), buf),
         }
     }
 }
