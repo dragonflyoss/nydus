@@ -92,6 +92,10 @@ jobs:
         cache-on-failure: true
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
     - uses: dsherret/rust-toolchain-file@v1
+    - name: Install protoc
+      uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
     - name: build
       run: |
         if [[ "${{matrix.arch}}" == "amd64" ]]; then
