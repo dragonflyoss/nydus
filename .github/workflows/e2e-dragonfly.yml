@@ -1,8 +1,10 @@
 name: E2E Test With Dragonfly
 
 on:
+  push:
+    branches: ["**", "stable/**"]
   pull_request:
-    branches: [main, release-*]
+    branches: ["**", "stable/**"]
     paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
   schedule:
     - cron: '0 4 * * *'
@@ -33,6 +35,12 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dsherret/rust-toolchain-file@v1
+
+      - name: Install protoc
+        run: |
+          curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v29.6/protoc-29.6-linux-x86_64.zip
+          sudo unzip -o protoc-29.6-linux-x86_64.zip -d /usr/local
+          rm protoc-29.6-linux-x86_64.zip
 
       - name: Build Nydus
         run: make release
@@ -83,6 +91,16 @@ jobs:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: [nydus-build, dragonfly-download]
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: http-proxy
+            image: ghcr.io/dragonflyoss/image-service/nginx:nydus-latest
+            config: misc/dragonfly/nydusd-config.json
+          - mode: sdk-proxy
+            image: ghcr.io/dragonflyoss/image-service/java:nydus-nightly-v5
+            config: misc/dragonfly/nydusd-sdk-config.json
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -233,7 +251,7 @@ jobs:
 
       - name: Extract nydus image bootstrap
         run: |
-          NYDUS_IMAGE="ghcr.io/dragonflyoss/image-service/nginx:nydus-latest"
+          NYDUS_IMAGE="${{ matrix.image }}"
           WORK_DIR="/tmp/nydus-test"
           mkdir -p "${WORK_DIR}"
 
@@ -298,7 +316,7 @@ jobs:
           mkdir -p "${WORK_DIR}/mnt"
 
           # Copy the nydusd config
-          cp misc/dragonfly/nydusd-config.json "${WORK_DIR}/nydusd-config.json"
+          cp ${{ matrix.config }} "${WORK_DIR}/nydusd-config.json"
 
           # Start nydusd in the background
           sudo nydusd \
@@ -329,28 +347,22 @@ jobs:
             exit 1
           fi
 
-      - name: Verify nydus image content
+      - name: Verify nydus image content (${{ matrix.mode }})
         run: |
           WORK_DIR="/tmp/nydus-test"
 
           echo "=== Listing mounted filesystem root ==="
           ls -la "${WORK_DIR}/mnt/" || true
 
-          echo "=== Checking for nginx config ==="
-          if [ -f "${WORK_DIR}/mnt/etc/nginx/nginx.conf" ]; then
-            echo "PASS: nginx.conf found"
-          else
-            echo "Checking alternate paths..."
-            find "${WORK_DIR}/mnt/etc" -name "nginx*" 2>/dev/null || true
-            find "${WORK_DIR}/mnt" -maxdepth 2 -type f 2>/dev/null | head -20
-          fi
+          echo "=== Listing files to verify filesystem structure ==="
+          find "${WORK_DIR}/mnt" -maxdepth 2 -type f 2>/dev/null | head -20
 
           echo "=== Reading a file to trigger on-demand loading ==="
           # Try reading files — if proxy isn't working, these may fail with I/O error
           if cat "${WORK_DIR}/mnt/etc/os-release" 2>/dev/null; then
-            echo "PASS: File content read successfully through Dragonfly proxy"
+            echo "PASS: File content read successfully through Dragonfly ${{ matrix.mode }}"
           elif cat "${WORK_DIR}/mnt/etc/hostname" 2>/dev/null; then
-            echo "PASS: File content read successfully through Dragonfly proxy"
+            echo "PASS: File content read successfully through Dragonfly ${{ matrix.mode }}"
           else
             echo "WARNING: File read failed — checking logs for diagnostics"
             echo "=== nydusd log (last 30 lines) ==="
@@ -363,7 +375,7 @@ jobs:
             cat "${WORK_DIR}/mnt/etc/os-release"
           fi
 
-      - name: Validate Dragonfly P2P download
+      - name: Validate Dragonfly P2P download (${{ matrix.mode }})
         run: |
           echo "=== Checking dfdaemon logs for proxy activity ==="
           # dfdaemon logs are in /var/log/dragonfly/ or in stdout log
@@ -380,7 +392,20 @@ jobs:
 
           echo "=== nydusd log (proxy-related entries) ==="
           grep -i "proxy\|mirror\|backend\|registry" /tmp/nydus-test/nydusd.log 2>/dev/null | tail -20 || true
-          echo "PASS: Dragonfly integration validation complete"
+
+          # SDK mode: verify SDK client was created
+          if [ "${{ matrix.mode }}" = "sdk-proxy" ]; then
+            echo "=== Checking for SDK proxy client creation ==="
+            if grep -q "creating new proxy sdk client" /tmp/nydus-test/nydusd.log 2>/dev/null; then
+              echo "PASS: Dragonfly SDK proxy client was created"
+            else
+              echo "WARNING: SDK proxy client creation log not found"
+              echo "=== Full nydusd log ==="
+              cat /tmp/nydus-test/nydusd.log 2>/dev/null || true
+            fi
+          fi
+
+          echo "PASS: Dragonfly ${{ matrix.mode }} integration validation complete"
 
       - name: Dump service logs
         if: always()
@@ -444,5 +469,5 @@ jobs:
         uses: actions/upload-artifact@v6
         if: always()
         with:
-          name: dragonfly-e2e-logs
+          name: dragonfly-e2e-logs-${{ matrix.mode }}
           path: /tmp/dragonfly-e2e-logs/
