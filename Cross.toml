@@ -1,2 +1,5 @@
 [build]
-pre-build = ["apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y cmake"]
+pre-build = [
+    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y cmake unzip",
+    "curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v29.6/protoc-29.6-linux-x86_64.zip && unzip -o protoc-29.6-linux-x86_64.zip -d /usr/local && rm protoc-29.6-linux-x86_64.zip"
+]

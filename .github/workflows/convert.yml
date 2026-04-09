@@ -45,6 +45,11 @@ jobs:
         cache-on-failure: true
         shared-key: Linux-cargo-amd64
     - uses: dsherret/rust-toolchain-file@v1
+    - name: Install protoc
+      run: |
+        curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v29.6/protoc-29.6-linux-x86_64.zip
+        sudo unzip -o protoc-29.6-linux-x86_64.zip -d /usr/local
+        rm protoc-29.6-linux-x86_64.zip
     - name: Build Nydus
       run: |
         make release
