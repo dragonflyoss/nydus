@@ -90,6 +90,11 @@ vmm-sys-util = { workspace = true, optional = true }
 [build-dependencies]
 time = { version = "0.3.14", features = ["formatting"] }
 
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+nydus-storage = { version = "0.7.2", path = "storage", features = [
+    "backend-dragonfly-proxy",
+] }
+
 [dev-dependencies]
 xattr = "1.0.1"
 vmm-sys-util = { workspace = true }
@@ -115,7 +120,9 @@ virtiofs = [
 ]
 block-nbd = ["nydus-service/block-nbd"]
 
-backend-http-proxy = ["nydus-storage/backend-http-proxy"]
+backend-http-proxy = [
+    "nydus-storage/backend-http-proxy",
+]
 backend-localdisk = [
     "nydus-storage/backend-localdisk",
     "nydus-storage/backend-localdisk-gpt",
