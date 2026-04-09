@@ -12,9 +12,14 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     pkg-config \
     cmake \
+    unzip \
     gcc-riscv64-linux-gnu \
     g++-riscv64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v29.6/protoc-29.6-linux-x86_64.zip \
+    && unzip -o protoc-29.6-linux-x86_64.zip -d /usr/local \
+    && rm protoc-29.6-linux-x86_64.zip
 
 RUN add-apt-repository ppa:ubuntu-toolchain-r/test \
     && apt-get update && apt-get install -y \

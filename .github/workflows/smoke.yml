@@ -139,6 +139,10 @@ jobs:
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
         save-if: ${{ github.ref == 'refs/heads/master' }}
     - uses: dsherret/rust-toolchain-file@v1
+    - name: Install protoc
+      uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
     - name: build
       run: |
         if [[ "${{matrix.arch}}" == "amd64" ]]; then
@@ -242,6 +246,11 @@ jobs:
         save-if: ${{ github.ref == 'refs/heads/master' }}
     - name: Install cargo nextest
       uses: taiki-e/install-action@nextest
+    - name: Install protoc
+      run: |
+        curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v29.6/protoc-29.6-linux-x86_64.zip
+        sudo unzip -o protoc-29.6-linux-x86_64.zip -d /usr/local
+        rm protoc-29.6-linux-x86_64.zip
     - name: Fscache Setup
       run: sudo bash misc/fscache/setup.sh
     - name: Unit Test
@@ -288,6 +297,11 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install protoc
+        run: |
+          curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v29.6/protoc-29.6-linux-x86_64.zip
+          sudo unzip -o protoc-29.6-linux-x86_64.zip -d /usr/local
+          rm protoc-29.6-linux-x86_64.zip
       - name: Fscache Setup
         run: sudo bash misc/fscache/setup.sh
       - name: Generate code coverage
@@ -320,6 +334,11 @@ jobs:
         save-if: ${{ github.ref == 'refs/heads/master' }}
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Install protoc
+      run: |
+        curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v29.6/protoc-29.6-linux-x86_64.zip
+        sudo unzip -o protoc-29.6-linux-x86_64.zip -d /usr/local
+        rm protoc-29.6-linux-x86_64.zip
     - name: Setup Golang
       uses: actions/setup-go@v6
       with:
