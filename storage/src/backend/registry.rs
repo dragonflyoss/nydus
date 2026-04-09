@@ -34,6 +34,9 @@ const HEADER_WWW_AUTHENTICATE: &str = "www-authenticate";
 const REGISTRY_DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60; // in seconds
 const REGISTRY_CONFIG_POLL_INTERVAL: u64 = 5; // in seconds
 
+// Refresh tokens this many seconds before they expire to avoid using an expired token.
+const REGISTRY_TOKEN_REFRESH_MARGIN: u64 = 20; // in seconds
+
 /// Error codes related to registry storage backend operations.
 #[derive(Debug)]
 pub enum RegistryError {
@@ -1006,8 +1009,6 @@ impl Registry {
     fn start_refresh_token_thread(&self) {
         let conn = self.connection.clone();
         let state = self.state.clone();
-        // FIXME: we'd better allow users to specify the expiration time.
-        let mut refresh_interval = REGISTRY_DEFAULT_TOKEN_EXPIRATION;
         thread::spawn(move || {
             loop {
                 // Check for config auth changes every tick.
@@ -1015,9 +1016,10 @@ impl Registry {
 
                 if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
                     if let Some(token_expired_at) = state.token_expired_at.load().as_deref() {
-                        // If the token will expire within the next refresh interval,
-                        // refresh it immediately.
-                        if now_timestamp.as_secs() + refresh_interval >= *token_expired_at {
+                        // Refresh the token if it will expire within the margin.
+                        if now_timestamp.as_secs() + REGISTRY_TOKEN_REFRESH_MARGIN
+                            >= *token_expired_at
+                        {
                             if let Some(cached_bearer_auth) =
                                 state.cached_bearer_auth.load().as_deref()
                             {
@@ -1028,16 +1030,9 @@ impl Registry {
                                     debug!(
                                         "[refresh_token_thread] registry token has been refreshed"
                                     );
-                                    // Refresh cached token.
                                     state
                                         .cached_auth
                                         .set(&state.cached_auth.get(), new_cached_auth);
-                                    // Reset refresh interval according to real expiration time,
-                                    // and advance 20s to handle the unexpected cases.
-                                    refresh_interval = token
-                                        .expires_in
-                                        .checked_sub(20)
-                                        .unwrap_or(token.expires_in);
                                 } else {
                                     error!(
                                         "[refresh_token_thread] failed to refresh registry token"
