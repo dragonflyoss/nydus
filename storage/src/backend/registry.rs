@@ -22,7 +22,6 @@ use nydus_api::RegistryConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::connection::{Connection, ConnectionConfig, ConnectionError, ReqBody};
-use crate::backend::proxy;
 use crate::backend::request;
 use crate::backend::request::is_success_status;
 use crate::backend::{BackendContext, BackendError, BackendResult, BlobBackend, BlobReader};
@@ -75,8 +74,8 @@ fn request_err_to_registry(e: request::RequestError) -> RegistryError {
     }
 }
 
-/// Convert a proxy::Response into a RegistryResult, checking status if needed.
-fn respond(resp: proxy::Response, catch_status: bool) -> RegistryResult<proxy::Response> {
+/// Convert a request::Response into a RegistryResult, checking status if needed.
+fn respond(resp: request::Response, catch_status: bool) -> RegistryResult<request::Response> {
     if !catch_status || is_success_status(resp.status()) {
         Ok(resp)
     } else {
@@ -163,7 +162,7 @@ fn default_expires_in() -> u64 {
 
 impl TokenResponse {
     // Extract the bearer token from the registry auth server response
-    fn from_resp(resp: proxy::Response) -> Result<Self> {
+    fn from_resp(resp: request::Response) -> Result<Self> {
         let body = resp.text().map_err(|e| einval!(e))?;
         let mut token: TokenResponse = serde_json::from_str(&body).map_err(|e| {
             einval!(format!(
@@ -423,7 +422,7 @@ impl RegistryState {
         auth: &BearerAuth,
         request: &request::Request,
         method: Method,
-    ) -> Result<proxy::Response> {
+    ) -> Result<request::Response> {
         let mut headers = HeaderMap::new();
 
         let config_auth = self.get_config_auth();
@@ -654,7 +653,7 @@ impl RegistryReader {
         mut headers: HeaderMap,
         catch_status: bool,
         context: &mut BackendContext,
-    ) -> RegistryResult<proxy::Response> {
+    ) -> RegistryResult<request::Response> {
         // Try get authorization header from cache for this request
         let mut last_cached_auth = String::new();
         let cached_auth = self.state.cached_auth.get();
@@ -1572,7 +1571,7 @@ mod tests {
             "token": "test_token_value",
             "expires_in": 3600
         });
-        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_token.to_string())
                 .unwrap(),
@@ -1586,7 +1585,7 @@ mod tests {
             "access_token": "test_access_token_value",
             "expires_in": 7200
         });
-        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_access_token.to_string())
                 .unwrap(),
@@ -1599,7 +1598,7 @@ mod tests {
         let json_with_default_expiration = json!({
             "token": "default_expiration_token"
         });
-        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_default_expiration.to_string())
                 .unwrap(),
@@ -1613,7 +1612,7 @@ mod tests {
             "token": "test_token_value",
             "access_token": "test_access_token_value",
         });
-        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_both_tokens.to_string())
                 .unwrap(),
@@ -1623,7 +1622,7 @@ mod tests {
 
         // Case 5: Response contains no token
         let json_with_no_token = json!({});
-        let response = proxy::Response::HTTP(reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_no_token.to_string())
                 .unwrap(),

@@ -50,12 +50,7 @@ pub mod s3;
 #[cfg(feature = "backend-hickory-dns")]
 pub mod hickory;
 pub mod pauser;
-#[cfg(any(
-    feature = "backend-oss",
-    feature = "backend-registry",
-    feature = "backend-s3",
-    feature = "backend-http-proxy",
-))]
+#[cfg(feature = "backend-dragonfly-proxy")]
 pub mod proxy;
 #[cfg(feature = "backend-qps-limit")]
 pub mod qps;
