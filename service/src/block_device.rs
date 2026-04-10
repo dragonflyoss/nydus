@@ -14,6 +14,7 @@
 use std::cmp::{max, min};
 use std::fs::OpenOptions;
 use std::io::Result;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -297,6 +298,140 @@ impl BlockDevice {
         }
 
         (Ok(total_size), buf)
+    }
+
+    /// Fetch block ranges (fd, offset, len, block_offset) for direct mmap access.
+    ///
+    /// Holes are always skipped (no data to return).
+    /// When `probe_only` is true, only ready chunks are returned.
+    pub async fn fetch_ranges(
+        &self,
+        mut start: u32,
+        mut blocks: u32,
+        probe_only: bool,
+    ) -> Result<Vec<(RawFd, u64, usize, u64)>> {
+        if start.checked_add(blocks).is_none() {
+            return Err(einval!(
+                "block_device: invalid parameters to fetch_ranges()"
+            ));
+        }
+
+        let mut ranges = Vec::new();
+        while blocks > 0 {
+            let (range, node) = match self.ranges.get_superset(&Range::new_point(start)) {
+                Some(v) => v,
+                None => {
+                    return Err(eio!(format!(
+                        "block_device: can not locate block 0x{:x} for meta blob {}",
+                        start, self.blob_id
+                    )));
+                }
+            };
+
+            if let NodeState::Valued(r) = node {
+                let count = min(range.max as u32 - start + 1, blocks);
+
+                match r {
+                    BlockRange::Hole => {
+                        // Skip holes - no data to return
+                    }
+                    BlockRange::MetaBlob(m) => {
+                        // Meta blob doesn't have chunk map, treat as fully ready
+                        let offset = self.blocks_to_size(start - range.min as u32);
+                        let sz = self.blocks_to_size(count) as usize;
+                        let block_offset = self.blocks_to_size(range.min as u32) + offset;
+                        ranges.push((m.file().as_raw_fd(), offset, sz, block_offset));
+                    }
+                    BlockRange::DataBlob(b) => {
+                        if probe_only {
+                            let data_ranges =
+                                self.probe_blob_ranges(b, start - range.min as u32, count)?;
+                            let fd = b.file().as_raw_fd();
+                            let base_offset = self.blocks_to_size(range.min as u32);
+                            for (blob_offset, blob_len) in data_ranges {
+                                ranges.push((fd, blob_offset, blob_len, base_offset + blob_offset));
+                            }
+                        } else {
+                            let offset = self.blocks_to_size(start - range.min as u32);
+                            let sz = self.blocks_to_size(count) as usize;
+                            b.async_fetch(offset, sz).await?;
+                            let block_offset = self.blocks_to_size(range.min as u32) + offset;
+                            ranges.push((b.file().as_raw_fd(), offset, sz, block_offset));
+                        }
+                    }
+                }
+
+                start += count;
+                blocks -= count;
+            } else {
+                return Err(eio!(format!(
+                    "block_device: block range 0x{:x}/0x{:x} of meta blob {} is unhandled",
+                    start, blocks, self.blob_id,
+                )));
+            }
+        }
+
+        Ok(ranges)
+    }
+
+    /// Probe ready ranges in a data blob.
+    fn probe_blob_ranges(
+        &self,
+        blob: &DataBlob,
+        start_block: u32,
+        num_blocks: u32,
+    ) -> Result<Vec<(u64, usize)>> {
+        let blob_info = blob.blob_info();
+        let chunk_size = blob_info.chunk_size() as u64;
+        let blob_size = blob_info.uncompressed_size();
+        let chunk_count = blob_info.chunk_count() as u64;
+
+        if chunk_size == 0 || chunk_count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let byte_start = self.blocks_to_size(start_block);
+        let byte_end = self.blocks_to_size(start_block + num_blocks).min(blob_size);
+        let start_chunk = (byte_start / chunk_size) as u32;
+        let end_chunk = (byte_end.div_ceil(chunk_size)).min(chunk_count) as u32;
+
+        let blob_cache = blob.blob();
+        let chunk_map = blob_cache.get_chunk_map();
+
+        let mut ranges = Vec::new();
+        let mut range_start: Option<u32> = None;
+
+        for chunk_idx in start_chunk..end_chunk {
+            let is_ready = blob_cache
+                .get_chunk_info(chunk_idx)
+                .map(|c| chunk_map.is_ready(c.as_ref()).unwrap_or(false))
+                .unwrap_or(false);
+
+            match (range_start, is_ready) {
+                (Some(start), false) => {
+                    let blob_offset = start as u64 * chunk_size;
+                    let blob_len =
+                        ((chunk_idx as u64 * chunk_size).min(blob_size) - blob_offset) as usize;
+                    if blob_len > 0 {
+                        ranges.push((blob_offset, blob_len));
+                    }
+                    range_start = None;
+                }
+                (None, true) => range_start = Some(chunk_idx),
+                _ => {}
+            }
+        }
+
+        // Handle the last range
+        if let Some(start) = range_start {
+            let blob_offset = start as u64 * chunk_size;
+            let blob_len = ((end_chunk as u64 * chunk_size).min(blob_size) - blob_offset) as usize;
+            if blob_len > 0 {
+                ranges.push((blob_offset, blob_len));
+            }
+        }
+
+        Ok(ranges)
     }
 
     /// Export a RAFS filesystem as a raw block disk image.
@@ -671,6 +806,18 @@ mod tests {
         device
     }
 
+    /// Like `create_block_device` but also returns TempDir to keep blob files alive
+    /// during async operations (async_fetch accesses cache files by path).
+    fn create_block_device_with_tmpdir() -> (BlockDevice, TempDir) {
+        let tmp_dir = TempDir::new().unwrap();
+        let entry = create_bootstrap_entry(&tmp_dir);
+
+        let device = BlockDevice::new(entry).unwrap();
+        assert_eq!(device.blocks(), 0x209);
+
+        (device, tmp_dir)
+    }
+
     #[test]
     fn test_block_size() {
         let mut device = create_block_device();
@@ -759,5 +906,221 @@ mod tests {
     fn test_export() {
         assert!(test_export_arg_thread(1).is_ok());
         assert!(test_export_arg_thread(2).is_ok());
+    }
+
+    #[test]
+    fn test_fetch_ranges_invalid() {
+        let device = create_block_device();
+        tokio_uring::start(async move {
+            // Overflow check
+            let res = device.fetch_ranges(u32::MAX, u32::MAX, false).await;
+            assert!(res.is_err());
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_out_of_range() {
+        let device = create_block_device();
+        tokio_uring::start(async move {
+            // Past device end
+            let res = device.fetch_ranges(0x20A, 1, false).await;
+            assert!(res.is_err());
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_meta_blob() {
+        let device = create_block_device();
+        tokio_uring::start(async move {
+            // Block 0 is MetaBlob
+            let ranges = device.fetch_ranges(0, 1, false).await.unwrap();
+            assert!(!ranges.is_empty());
+            let (fd, _offset, sz, _block_offset) = &ranges[0];
+            assert!(*fd >= 0);
+            assert_eq!(*sz, 4096);
+
+            // Multiple MetaBlob blocks
+            let ranges = device.fetch_ranges(0, 5, false).await.unwrap();
+            assert!(!ranges.is_empty());
+            let (fd, _offset, sz, _block_offset) = &ranges[0];
+            assert!(*fd >= 0);
+            assert_eq!(*sz, 5 * 4096);
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_meta_blob_probe() {
+        let device = create_block_device();
+        tokio_uring::start(async move {
+            // probe_only on MetaBlob should still return ranges (MetaBlob is always ready)
+            let ranges = device.fetch_ranges(0, 1, true).await.unwrap();
+            assert!(!ranges.is_empty());
+            let (fd, _offset, sz, _block_offset) = &ranges[0];
+            assert!(*fd >= 0);
+            assert_eq!(*sz, 4096);
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_data_blob() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // Block 0x200 is DataBlob
+            let ranges = device.fetch_ranges(0x200, 2, false).await.unwrap();
+            assert!(!ranges.is_empty());
+            let (fd, _offset, sz, _block_offset) = &ranges[0];
+            assert!(*fd >= 0);
+            assert_eq!(*sz, 2 * 4096);
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_data_blob_probe() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // probe_only on DataBlob exercises probe_blob_ranges
+            let ranges = device.fetch_ranges(0x200, 2, true).await.unwrap();
+            // May or may not have ready ranges depending on cache state,
+            // but should not error
+            for (fd, _offset, sz, _block_offset) in &ranges {
+                assert!(*fd >= 0);
+                assert!(*sz > 0);
+            }
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_mixed() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // Span across MetaBlob + Hole: blocks 0-5+
+            // MetaBlob is blocks 0-4, after that is Hole until DataBlob
+            let ranges = device.fetch_ranges(0, 6, false).await.unwrap();
+            // Should have at least MetaBlob range; Hole is skipped
+            assert!(!ranges.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_hole() {
+        let device = create_block_device();
+        tokio_uring::start(async move {
+            // Block 5 is in the hole region between MetaBlob and DataBlob
+            let ranges = device.fetch_ranges(5, 1, false).await.unwrap();
+            // Holes produce no ranges
+            assert!(ranges.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_zero_blocks() {
+        let device = create_block_device();
+        tokio_uring::start(async move {
+            let ranges = device.fetch_ranges(0, 0, false).await.unwrap();
+            assert!(ranges.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_meta_blob_offsets() {
+        let device = create_block_device();
+        tokio_uring::start(async move {
+            // Fetch blocks 2..5 from MetaBlob (blocks 0-4)
+            let ranges = device.fetch_ranges(2, 3, false).await.unwrap();
+            assert_eq!(ranges.len(), 1);
+            let (fd, offset, sz, block_offset) = &ranges[0];
+            assert!(*fd >= 0);
+            assert_eq!(*offset, 2 * 4096);
+            assert_eq!(*sz, 3 * 4096);
+            assert_eq!(*block_offset, 2 * 4096);
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_data_blob_offsets() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // Block 0x200 is the start of DataBlob region
+            let ranges = device.fetch_ranges(0x200, 1, false).await.unwrap();
+            assert_eq!(ranges.len(), 1);
+            let (_fd, offset, sz, block_offset) = &ranges[0];
+            assert_eq!(*sz, 4096);
+            assert_eq!(*block_offset, 0x200u64 * 4096);
+            // offset is relative to the DataBlob range start
+            assert_eq!(*offset, 0);
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_probe_after_fetch() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // First fetch to populate cache (makes chunks ready)
+            let ranges = device.fetch_ranges(0x200, 2, false).await.unwrap();
+            assert!(!ranges.is_empty());
+
+            // Now probe — chunks should be ready, exercising:
+            // - (None, true) branch in probe_blob_ranges
+            // - last-range closing logic
+            let probe_ranges = device.fetch_ranges(0x200, 2, true).await.unwrap();
+            assert!(!probe_ranges.is_empty());
+            for (fd, _offset, sz, _block_offset) in &probe_ranges {
+                assert!(*fd >= 0);
+                assert!(*sz > 0);
+            }
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_probe_cold() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // Probe without prior fetch — no chunks ready
+            let ranges = device.fetch_ranges(0x200, 2, true).await.unwrap();
+            // Empty or partial depending on cache state
+            // This exercises the (None, false) -> _ => {} branch
+            let _ = ranges;
+        });
+    }
+
+    #[test]
+    fn test_fetch_ranges_probe_mixed_ready() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // Fetch only 1 block to make some chunks ready
+            let _ = device.fetch_ranges(0x200, 1, false).await.unwrap();
+
+            // Probe 2 blocks — first block's chunks ready, second not yet
+            // Exercises (Some(start), false) transition in probe_blob_ranges
+            let ranges = device.fetch_ranges(0x200, 2, true).await.unwrap();
+            // Should have at least the ready range
+            for (fd, _offset, sz, _block_offset) in &ranges {
+                assert!(*fd >= 0);
+                assert!(*sz > 0);
+            }
+        });
+    }
+
+    #[test]
+    fn test_async_read_zero_buf() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // Zero-length read triggers async_fetch(pos, 0) short-circuit
+            let buf = vec![0u8; 0];
+            let (res, _buf) = device.async_read(0x200, 0, buf).await;
+            assert_eq!(res.unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn test_async_read_data_blob() {
+        let (device, _tmp_dir) = create_block_device_with_tmpdir();
+        tokio_uring::start(async move {
+            // Read from DataBlob — exercises async_fetch normal path
+            // and async_read Ok branch in blob_cache.rs
+            let buf = vec![0u8; 4096];
+            let (res, _buf) = device.async_read(0x200, 1, buf).await;
+            assert_eq!(res.unwrap(), 4096);
+        });
     }
 }

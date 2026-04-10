@@ -486,12 +486,17 @@ impl MetaBlob {
     pub async fn async_read<T: IoBufMut>(&self, pos: u64, buf: T) -> (Result<usize>, T) {
         self.file.read_at(buf, pos).await
     }
+
+    pub fn file(&self) -> &File {
+        &self.file
+    }
 }
 
 /// Structure representing a cached data blob.
 pub struct DataBlob {
     blob_id: String,
     blob: Arc<dyn BlobCache>,
+    blob_info: Arc<BlobInfo>,
     file: File,
 }
 
@@ -499,6 +504,7 @@ impl DataBlob {
     /// Create a new instance of [DataBlob].
     pub fn new(config: &Arc<DataBlobConfig>) -> Result<Self> {
         let blob_id = config.blob_info().blob_id();
+        let blob_info = config.blob_info().clone();
         let blob = BLOB_FACTORY
             .new_blob_cache(config.config_v2(), &config.blob_info, "/")
             .inspect_err(|_e| {
@@ -516,6 +522,7 @@ impl DataBlob {
                 Ok(DataBlob {
                     blob_id,
                     blob,
+                    blob_info,
                     file,
                 })
             }
@@ -526,31 +533,48 @@ impl DataBlob {
         }
     }
 
-    /// Read data from the cached data blob in asynchronous mode.
-    pub async fn async_read<T: IoBufMut>(&self, pos: u64, buf: T) -> (Result<usize>, T) {
-        let len = buf.bytes_total() as u64;
+    /// Ensure a range of data is available in the local cache, downloading if necessary.
+    pub async fn async_fetch(&self, pos: u64, len: usize) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+
         let blob = self.blob.clone();
         let blob_id = self.blob_id.clone();
 
         // Blocking thread pool is needed because reqwest::blocking may be called
-        match tokio::task::spawn_blocking(move || -> Result<()> {
+        tokio::task::spawn_blocking(move || -> Result<()> {
             let obj = blob.get_blob_object().ok_or_else(|| {
                 eio!(format!(
                     "blob_cache: failed to get BlobObject for blob {}",
                     blob_id
                 ))
             })?;
-            if len > 0 {
-                obj.fetch_range_uncompressed(pos, len)?;
-            }
-            Ok(())
+            obj.fetch_range_uncompressed(pos, len as u64)
         })
         .await
-        {
-            Ok(Ok(())) => self.file.read_at(buf, pos).await,
-            Ok(Err(e)) => (Err(e), buf),
-            Err(e) => (Err(eother!(format!("spawn_blocking join error: {e}"))), buf),
+        .map_err(|e| eother!(format!("spawn_blocking join error: {e}")))?
+    }
+
+    /// Read data from the cached data blob in asynchronous mode.
+    pub async fn async_read<T: IoBufMut>(&self, pos: u64, buf: T) -> (Result<usize>, T) {
+        let len = buf.bytes_total();
+        match self.async_fetch(pos, len).await {
+            Ok(()) => self.file.read_at(buf, pos).await,
+            Err(e) => (Err(e), buf),
         }
+    }
+
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    pub fn blob(&self) -> &Arc<dyn BlobCache> {
+        &self.blob
+    }
+
+    pub fn blob_info(&self) -> &Arc<BlobInfo> {
+        &self.blob_info
     }
 }
 
@@ -891,6 +915,121 @@ mod tests {
             assert_eq!(buf[1027], 0xe0);
             let (res, _buf) = meta_blob.async_read(0x6000, buf).await;
             assert_eq!(res.unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn test_meta_blob_file() {
+        use std::os::fd::AsRawFd;
+
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+        let mut source_path = PathBuf::from(root_dir);
+        source_path.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+
+        tokio_uring::start(async move {
+            let meta_blob = MetaBlob::new(&source_path).unwrap();
+            let file = meta_blob.file();
+            assert!(file.as_raw_fd() >= 0);
+        });
+    }
+
+    /// Helper to create a DataBlob from the test fixture bootstrap.
+    /// Returns (DataBlob, TempDir) — TempDir must be kept alive.
+    fn create_data_blob() -> (DataBlob, TempDir) {
+        use std::os::fd::AsRawFd;
+
+        let tmp_dir = TempDir::new().unwrap();
+        let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
+
+        // Copy blob file to tmpdir
+        let mut blob_src = PathBuf::from(root_dir);
+        blob_src.push("../tests/texture/blobs/be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+        let mut blob_dst = tmp_dir.as_path().to_path_buf();
+        blob_dst.push("be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef");
+        std::fs::copy(&blob_src, &blob_dst).unwrap();
+
+        let mut boot_path = PathBuf::from(root_dir);
+        boot_path.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+
+        let config = r#"
+        {
+            "type": "bootstrap",
+            "id": "rafs-v6",
+            "domain_id": "domain-test",
+            "config_v2": {
+                "version": 2,
+                "id": "factory1",
+                "backend": {
+                    "type": "localfs",
+                    "localfs": { "dir": "/tmp/nydus" }
+                },
+                "cache": {
+                    "type": "filecache",
+                    "filecache": { "work_dir": "/tmp/nydus" }
+                },
+                "metadata_path": "BOOT_PATH"
+            }
+        }"#;
+        let content = config
+            .replace("/tmp/nydus", tmp_dir.as_path().to_str().unwrap())
+            .replace("BOOT_PATH", &boot_path.display().to_string());
+        let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(entry.prepare_configuration_info());
+
+        let mgr = BlobCacheMgr::new();
+        mgr.add_blob_entry(&entry).unwrap();
+
+        let blob_key = generate_blob_key(
+            "domain-test",
+            "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef",
+        );
+        let blob_config = mgr.get_config(&blob_key).unwrap();
+        let data_blob_config = match blob_config {
+            BlobConfig::DataBlob(c) => c,
+            _ => panic!("expected DataBlob config"),
+        };
+
+        let data_blob = DataBlob::new(&data_blob_config).unwrap();
+        assert!(data_blob.file().as_raw_fd() >= 0);
+        (data_blob, tmp_dir)
+    }
+
+    #[test]
+    fn test_data_blob_getters() {
+        use std::os::fd::AsRawFd;
+
+        let (data_blob, _tmp_dir) = create_data_blob();
+
+        assert!(data_blob.file().as_raw_fd() >= 0);
+        assert!(!data_blob.blob_info().blob_id().is_empty());
+        // blob() returns the BlobCache reference
+        let _ = data_blob.blob();
+    }
+
+    #[test]
+    fn test_data_blob_async_fetch_zero_len() {
+        let (data_blob, _tmp_dir) = create_data_blob();
+        tokio_uring::start(async move {
+            // len=0 should short-circuit with Ok(())
+            let res = data_blob.async_fetch(0, 0).await;
+            assert!(res.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_data_blob_async_fetch_and_read() {
+        let (data_blob, _tmp_dir) = create_data_blob();
+        tokio_uring::start(async move {
+            // Normal fetch
+            let res = data_blob.async_fetch(0, 4096).await;
+            assert!(res.is_ok());
+
+            // Read after fetch
+            let buf = vec![0u8; 4096];
+            let (res, buf) = data_blob.async_read(0, buf).await;
+            assert_eq!(res.unwrap(), 4096);
+            // Verify we got actual data (not all zeros)
+            assert!(buf.iter().any(|&b| b != 0));
         });
     }
 }
