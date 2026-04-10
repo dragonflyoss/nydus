@@ -297,6 +297,8 @@ fn prepare_commandline_options() -> Command {
     let cmdline = append_virtiofs_subcmd_options(cmdline);
     #[cfg(feature = "block-nbd")]
     let cmdline = self::nbd::append_nbd_subcmd_options(cmdline);
+    #[cfg(feature = "block-uffd")]
+    let cmdline = self::uffd::append_uffd_subcmd_options(cmdline);
     append_singleton_subcmd_options(cmdline)
 }
 
@@ -727,6 +729,179 @@ mod nbd {
     }
 }
 
+#[cfg(feature = "block-uffd")]
+mod uffd {
+    use super::*;
+    use nydus_api::BlobCacheEntry;
+    use nydus_service::block_uffd::create_uffd_daemon;
+    use std::str::FromStr;
+
+    pub(super) fn append_uffd_subcmd_options(cmd: Command) -> Command {
+        let subcmd = Command::new("uffd")
+            .about("Export a RAFS v6 image as a block device through userfaultfd (Experiment)");
+        let subcmd = subcmd
+            .arg(
+                Arg::new("sock")
+                    .long("sock")
+                    .short('S')
+                    .help("Path to the UFFD service socket")
+                    .required(true),
+            )
+            .arg(
+                Arg::new("bootstrap")
+                    .long("bootstrap")
+                    .short('B')
+                    .help("Path to the RAFS filesystem metadata file")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("config")
+                    .long("config")
+                    .short('C')
+                    .help("Path to the configuration file")
+                    .required(false),
+            )
+            .arg(
+                Arg::new("localfs-dir")
+                    .long("localfs-dir")
+                    .requires("bootstrap")
+                    .short('D')
+                    .help(
+                        "Path to the `localfs` working directory, which also enables the `localfs` storage backend"
+                    )
+                    .conflicts_with("config"),
+            )
+            .arg(
+                Arg::new("threads")
+                    .long("threads")
+                    .default_value("4")
+                    .help("Number of worker threads to serve UFFD requests")
+                    .value_parser(thread_validator)
+                    .required(false),
+            );
+        cmd.subcommand(subcmd)
+    }
+
+    pub(super) fn process_uffd_service(
+        args: SubCmdArgs,
+        bti: BuildTimeInfo,
+        _apisock: Option<&str>,
+    ) -> Result<()> {
+        let mut entry = if let Some(v) = args.value_of("config") {
+            // Config file takes precedence
+            let mut cfg = ConfigV2::from_file(v)?;
+            if let Ok(auth) = std::env::var("IMAGE_PULL_AUTH") {
+                cfg.update_registry_auth_info(&Some(auth));
+            }
+
+            let backend = cfg.backend.clone().ok_or_else(|| {
+                Error::new(ErrorKind::InvalidInput, "missing backend in ConfigV2")
+            })?;
+            let cache = cfg
+                .cache
+                .clone()
+                .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "missing cache in ConfigV2"))?;
+            let bootstrap = args
+                .value_of("bootstrap")
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        "option `-B/--bootstrap` is required with `--config`",
+                    )
+                })?;
+            let entry_json = serde_json::json!({
+                "type": "bootstrap",
+                "id": "disk-default",
+                "domain_id": "block-uffd",
+                "config_v2": {
+                    "version": cfg.version,
+                    "id": cfg.id,
+                    "backend": backend,
+                    "external_backends": cfg.external_backends,
+                    "cache": cache,
+                    "metadata_path": bootstrap
+                }
+            });
+            serde_json::from_value(entry_json)?
+        } else if let Some(bootstrap) = args.value_of("bootstrap") {
+            let dir = args
+                .value_of("localfs-dir")
+                .ok_or_else(|| einval!("option `-D/--localfs-dir` is required by `--bootstrap`"))?;
+            let config = r#"
+            {
+                "type": "bootstrap",
+                "id": "disk-default",
+                "domain_id": "block-uffd",
+                "config_v2": {
+                    "version": 2,
+                    "id": "block-uffd-factory",
+                    "backend": {
+                        "type": "localfs",
+                        "localfs": {
+                            "dir": "LOCAL_FS_DIR"
+                        }
+                    },
+                    "cache": {
+                        "type": "filecache",
+                        "filecache": {
+                            "work_dir": "LOCAL_FS_DIR"
+                        }
+                    },
+                    "metadata_path": "META_FILE_PATH"
+                }
+            }"#;
+            let config = config
+                .replace("LOCAL_FS_DIR", dir)
+                .replace("META_FILE_PATH", bootstrap);
+            BlobCacheEntry::from_str(&config)?
+        } else {
+            return Err(einval!(
+                "both option `-C/--config` and `-B/--bootstrap` are missing"
+            ));
+        };
+        if !entry.prepare_configuration_info() {
+            return Err(einval!(
+                "invalid blob cache entry configuration information"
+            ));
+        }
+        if !entry.validate() {
+            return Err(einval!(
+                "invalid blob cache entry configuration information"
+            ));
+        }
+
+        // Safe to unwrap because `sock` is mandatory option.
+        let sock = args.value_of("sock").unwrap().to_string();
+        let id = args.value_of("id").map(|id| id.to_string());
+        let supervisor = args.value_of("supervisor").map(|s| s.to_string());
+        let threads: u32 = args
+            .value_of("threads")
+            .map(|n| n.parse().unwrap_or(1))
+            .unwrap_or(1);
+
+        let daemon = create_uffd_daemon(
+            sock,
+            threads,
+            entry,
+            bti,
+            id,
+            supervisor,
+            DAEMON_CONTROLLER.alloc_waker(),
+        )
+        .inspect(|_| {
+            info!("UFFD daemon started!");
+        })
+        .map_err(|e| {
+            error!("Failed in starting UFFD daemon: {}", e);
+            e
+        })?;
+        DAEMON_CONTROLLER.set_daemon(daemon);
+
+        Ok(())
+    }
+}
+
 extern "C" fn sig_exit(_sig: std::os::raw::c_int) {
     DAEMON_CONTROLLER.notify_shutdown();
 }
@@ -790,6 +965,13 @@ fn main() -> Result<()> {
             let subargs = args.subcommand_matches("nbd").unwrap();
             let subargs = SubCmdArgs::new(&args, subargs);
             self::nbd::process_nbd_service(subargs, bti, apisock)?;
+        }
+        #[cfg(feature = "block-uffd")]
+        Some("uffd") => {
+            // Safe to unwrap because the subcommand is `uffd`.
+            let subargs = args.subcommand_matches("uffd").unwrap();
+            let subargs = SubCmdArgs::new(&args, subargs);
+            self::uffd::process_uffd_service(subargs, bti, apisock)?;
         }
         _ => {
             let subargs = SubCmdArgs::new(&args, &args);

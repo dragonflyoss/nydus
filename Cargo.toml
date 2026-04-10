@@ -112,6 +112,7 @@ virtiofs = [
     "vmm-sys-util",
 ]
 block-nbd = ["nydus-service/block-nbd"]
+block-uffd = ["nydus-service/block-uffd"]
 
 backend-http-proxy = ["nydus-storage/backend-http-proxy"]
 backend-localdisk = [
