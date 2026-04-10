@@ -149,7 +149,7 @@ impl ProxySDKClient {
     }
 }
 
-pub struct ProxySDKClients {}
+pub struct ProxySDKClients;
 
 impl ProxySDKClients {
     pub fn get(endpoint: &str) -> Result<Arc<ProxySDKClient>, String> {
@@ -181,5 +181,72 @@ impl ProxySDKClients {
         guard.insert(endpoint.to_string(), client.clone());
 
         Ok(client)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sync_adapter_reads_data() {
+        let data = b"hello dragonfly proxy";
+        let cursor = tokio::io::BufReader::new(std::io::Cursor::new(data.to_vec()));
+        let mut adapter = SyncAdapter::new(cursor);
+        let mut buf = vec![0u8; 64];
+        let n = adapter.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], data);
+    }
+
+    #[test]
+    fn test_sync_adapter_empty() {
+        let mut adapter = SyncAdapter::new(tokio::io::empty());
+        let mut buf = vec![0u8; 16];
+        let n = adapter.read(&mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_sync_adapter_partial_reads() {
+        let data = b"abcdefghij";
+        let cursor = tokio::io::BufReader::new(std::io::Cursor::new(data.to_vec()));
+        let mut adapter = SyncAdapter::new(cursor);
+
+        let mut all = Vec::new();
+        let mut buf = [0u8; 3];
+        loop {
+            let n = adapter.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            all.extend_from_slice(&buf[..n]);
+        }
+        assert_eq!(all, data);
+    }
+
+    #[test]
+    fn test_priority_constants() {
+        assert_eq!(HEADER_VALUE_DRAGONFLY_PRIORITY_3, 3);
+        assert_eq!(HEADER_VALUE_DRAGONFLY_PRIORITY_6, 6);
+    }
+
+    #[test]
+    fn test_header_constants() {
+        assert_eq!(HEADER_DRAGONFLY_PRIORITY, "X-Dragonfly-Priority");
+        assert_eq!(HEADER_DRAGONFLY_USE_P2P, "X-Dragonfly-Use-P2P");
+        assert_eq!(HEADER_DRAGONFLY_OUTPUT_PATH, "X-Dragonfly-Output-Path");
+        assert_eq!(HEADER_DRAGONFLY_PIECE_LENGTH, "X-Dragonfly-Piece-Length");
+        assert_eq!(
+            HEADER_DRAGONFLY_FORCE_HARD_LINK,
+            "X-Dragonfly-Force-Hard-Link"
+        );
+        assert_eq!(
+            HEADER_DRAGONFLY_CONTENT_FOR_CALCULATING_TASK_ID,
+            "X-Dragonfly-Content-For-Calculating-Task-ID"
+        );
+        assert_eq!(HEADER_DRAGONFLY_PREFETCH, "X-Dragonfly-Prefetch");
+        assert_eq!(HEADER_DRAGONFLY_ERROR_TYPE, "X-Dragonfly-Error-Type");
+        assert_eq!(HEADER_VALUE_DRAGONFLY_USE_P2P_TRUE, "true");
+        assert_eq!(HEADER_VALUE_DRAGONFLY_ERROR_TYPE_PROXY, "proxy");
     }
 }
