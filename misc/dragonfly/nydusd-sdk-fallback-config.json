@@ -1,0 +1,41 @@
+{
+  "device": {
+    "backend": {
+      "type": "registry",
+      "config": {
+        "host": "ghcr.io",
+        "repo": "dragonflyoss/image-service/java",
+        "scheme": "https",
+        "skip_verify": true,
+        "timeout": 10,
+        "connect_timeout": 10,
+        "retry_limit": 2,
+        "proxy": {
+          "url": "http://127.0.0.1:4001",
+          "ping_url": "http://127.0.0.1:4001",
+          "fallback": true,
+          "check_interval": 5,
+          "use_http": false,
+          "dragonfly_scheduler_endpoint": "http://127.0.0.1:8002"
+        }
+      }
+    },
+    "cache": {
+      "type": "blobcache",
+      "config": {
+        "compressed": false,
+        "work_dir": "/tmp/nydus-test/cache/"
+      }
+    }
+  },
+  "mode": "direct",
+  "digest_validate": false,
+  "iostats_files": false,
+  "enable_xattr": true,
+  "fs_prefetch": {
+    "enable": true,
+    "threads_count": 10,
+    "merging_size": 131072,
+    "bandwidth_rate": 1048576
+  }
+}
