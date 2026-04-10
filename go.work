@@ -6,4 +6,5 @@ use (
 	./contrib/nydus-overlayfs
 	./contrib/nydusify
 	./smoke
+	./smoke/dragonfly
 )
