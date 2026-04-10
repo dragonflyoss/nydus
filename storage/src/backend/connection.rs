@@ -432,6 +432,11 @@ impl Connection {
                 // fallback to origin server, the policy only applicable to non-upload operation
                 warn!("Request proxy server failed, fallback to original server");
             } else {
+                if !proxy.fallback {
+                    return Err(ConnectionError::ErrorWithMsg(
+                        "proxy is not healthy and fallback is disabled".to_string(),
+                    ));
+                }
                 LAST_FALLBACK_AT.with(|f| {
                     let current = SystemTime::now();
                     if current.duration_since(*f.borrow()).unwrap().as_secs()
