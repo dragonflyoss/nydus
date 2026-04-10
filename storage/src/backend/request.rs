@@ -505,4 +505,157 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result, Err(RequestError::Connection(_))));
     }
+
+    // --- Response::ProxySDK tests ---
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    fn make_get_response(
+        status: Option<StatusCode>,
+        headers: Option<HeaderMap>,
+        body: Option<&[u8]>,
+    ) -> GetResponse {
+        let reader: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = body.map(|b| {
+            Box::new(tokio::io::BufReader::new(std::io::Cursor::new(b.to_vec())))
+                as Box<dyn tokio::io::AsyncRead + Unpin + Send>
+        });
+        GetResponse {
+            success: status.is_some_and(|s| s.is_success()),
+            status_code: status,
+            header: headers,
+            reader,
+        }
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_proxy_sdk_response_status_some() {
+        let resp = Response::ProxySDK(make_get_response(Some(StatusCode::OK), None, None));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_proxy_sdk_response_status_none() {
+        let resp = Response::ProxySDK(make_get_response(None, None, None));
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_proxy_sdk_response_headers_some() {
+        let mut hdr = HeaderMap::new();
+        hdr.insert("x-test", HeaderValue::from_static("value"));
+        let resp = Response::ProxySDK(make_get_response(Some(StatusCode::OK), Some(hdr), None));
+        assert_eq!(resp.headers().get("x-test").unwrap(), "value");
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_proxy_sdk_response_headers_none() {
+        let resp = Response::ProxySDK(make_get_response(Some(StatusCode::OK), None, None));
+        assert!(resp.headers().is_empty());
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_proxy_sdk_response_reader_with_data() {
+        let data = b"blob content here";
+        let resp = Response::ProxySDK(make_get_response(Some(StatusCode::OK), None, Some(data)));
+        let mut reader = resp.reader();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, data);
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_proxy_sdk_response_reader_none() {
+        let resp = Response::ProxySDK(make_get_response(Some(StatusCode::OK), None, None));
+        let mut reader = resp.reader();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        assert!(buf.is_empty());
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_proxy_sdk_response_text() {
+        let data = b"hello world";
+        let resp = Response::ProxySDK(make_get_response(Some(StatusCode::OK), None, Some(data)));
+        let text = resp.text().unwrap();
+        assert_eq!(text, "hello world");
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_proxy_sdk_response_copy_to() {
+        let data = b"copy this";
+        let resp = Response::ProxySDK(make_get_response(Some(StatusCode::OK), None, Some(data)));
+        let mut buf = vec![0u8; 64];
+        let n = resp.copy_to(&mut buf).unwrap();
+        assert_eq!(n as usize, data.len());
+        assert_eq!(&buf[..data.len()], data);
+    }
+
+    // --- Request::call() SDK routing tests ---
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_call_sdk_proxy_rejects_post() {
+        let req = make_request("http://proxy:8080", "http://scheduler:8002");
+        let mut headers = HeaderMap::new();
+        let mut ctx = BackendContext::default();
+
+        let result = req.call::<&[u8]>(
+            Method::POST,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+            &mut ctx,
+            false,
+        );
+        assert!(result.is_err());
+        match result {
+            Err(RequestError::Common(msg)) => {
+                assert!(msg.contains("only GET method is supported"));
+            }
+            other => panic!(
+                "expected RequestError::Common, got different error variant: {}",
+                match &other {
+                    Err(RequestError::Connection(_)) => "Connection",
+                    Err(RequestError::Proxy(_)) => "Proxy",
+                    Ok(_) => "Ok (unexpected success)",
+                    _ => "Unknown",
+                }
+            ),
+        }
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_call_sdk_proxy_skipped_when_disabled() {
+        let req = make_request("http://proxy:8080", "http://scheduler:8002");
+        let mut headers = HeaderMap::new();
+        let mut ctx = BackendContext {
+            disable_proxy_sdk: true,
+            ..Default::default()
+        };
+
+        // With SDK disabled, falls through to HTTP proxy → Connection error
+        let result = req.call::<&[u8]>(
+            Method::GET,
+            "http://127.0.0.1:1/nonexistent",
+            None,
+            None,
+            &mut headers,
+            true,
+            &mut ctx,
+            false,
+        );
+        assert!(result.is_err());
+        assert!(matches!(result, Err(RequestError::Connection(_))));
+        assert!(!ctx.using_proxy_sdk);
+    }
 }
