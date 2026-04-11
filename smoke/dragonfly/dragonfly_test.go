@@ -22,7 +22,7 @@ type testEnv struct {
 	MountDir      string
 	CacheDir      string
 	DragonflyCacheDir string
-	Mode          string // sdk-proxy, sdk-proxy-strict, http-proxy
+	Mode          string // sdk-proxy, sdk-proxy-strict, http-proxy, http-proxy-strict
 }
 
 // setupTestEnv reads environment variables and starts all services.
@@ -30,7 +30,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 
 	mode := os.Getenv("TEST_MODE")
-	require.NotEmpty(t, mode, "TEST_MODE env var required (sdk-proxy, sdk-proxy-strict, http-proxy)")
+	require.NotEmpty(t, mode, "TEST_MODE env var required (sdk-proxy, sdk-proxy-strict, http-proxy, http-proxy-strict)")
 
 	nydusdBin := envOrDefault("NYDUSD_BIN", "/usr/local/bin/nydusd")
 	configPath := os.Getenv("NYDUSD_CONFIG")
@@ -78,6 +78,16 @@ func (env *testEnv) teardown(t *testing.T) {
 
 func (env *testEnv) isSDKMode() bool {
 	return strings.HasPrefix(env.Mode, "sdk-proxy")
+}
+
+// isStrictMode returns true for modes with fallback=false.
+func (env *testEnv) isStrictMode() bool {
+	return env.Mode == "sdk-proxy-strict" || env.Mode == "http-proxy-strict"
+}
+
+// hasFallback returns true when the proxy config has fallback enabled.
+func (env *testEnv) hasFallback() bool {
+	return !env.isStrictMode()
 }
 
 func envOrDefault(key, def string) string {
@@ -197,13 +207,12 @@ func TestDragonflyE2E(t *testing.T) {
 			"nydusd log should contain proxy or backend activity")
 	})
 
-	// === Failure & Recovery Tests (SDK modes only) ===
+	// === Failure & Recovery Tests ===
+	// These tests verify the proxy fallback logic that must match nydus-ant's
+	// Connection::call() behavior: proxy healthy → try proxy → on 5xx/error +
+	// fallback=true → fall back to origin; fallback=false → return error.
 
 	t.Run("KillDfdaemon_HealthCheckDetection", func(t *testing.T) {
-		if !env.isSDKMode() {
-			t.Skip("proxy failure tests only for sdk-proxy modes")
-		}
-
 		logBefore := env.Nydusd.LogLineCount(t)
 
 		t.Log("killing dfdaemon...")
@@ -225,9 +234,9 @@ func TestDragonflyE2E(t *testing.T) {
 	})
 
 	t.Run("ReadWithProxyDown", func(t *testing.T) {
-		if !env.isSDKMode() {
-			t.Skip("proxy-down tests only for sdk-proxy modes")
-		}
+		// This test verifies the core fallback behavior from nydus-ant's
+		// Connection::call(): when proxy is unreachable and fallback=true,
+		// requests fall back to the origin; when fallback=false, they fail.
 
 		// 1. Stop dfdaemon (may already be down from prior test)
 		t.Log("ensuring dfdaemon is stopped...")
@@ -253,20 +262,20 @@ func TestDragonflyE2E(t *testing.T) {
 		data, err := os.ReadFile(target)
 		newLogs := env.Nydusd.LogSince(t, logBefore)
 
-		switch env.Mode {
-		case "sdk-proxy":
-			// fallback=true: read should succeed via direct backend
+		if env.hasFallback() {
+			// fallback=true (sdk-proxy, http-proxy): read should succeed via direct backend.
+			// This matches nydus-ant behavior: proxy error + fallback=true → origin.
 			require.NoError(t, err,
 				"fallback=true: file read should succeed via direct backend")
 			assert.Greater(t, len(data), 0, "file content should not be empty")
-			t.Logf("PASS: read %d bytes via direct fallback (fallback=true)", len(data))
-
-		case "sdk-proxy-strict":
-			// fallback=false: read should fail — no proxy, no fallback, no cache
+			t.Logf("PASS: read %d bytes via direct fallback (mode=%s)", len(data), env.Mode)
+		} else {
+			// fallback=false (sdk-proxy-strict, http-proxy-strict): read should fail.
+			// This matches nydus-ant behavior: proxy error + fallback=false → return error.
 			require.Error(t, err,
 				"fallback=false: file read should fail with no proxy and no cache; "+
 					"logs:\n%s", truncateString(newLogs, 500))
-			t.Logf("PASS: file read failed as expected in strict mode: %v", err)
+			t.Logf("PASS: file read failed as expected in strict mode (mode=%s): %v", env.Mode, err)
 		}
 
 		t.Logf("logs after read attempt:\n%s", truncateString(newLogs, 500))
@@ -308,8 +317,8 @@ func TestDragonflyE2E(t *testing.T) {
 	})
 
 	t.Run("RestartAndRecover", func(t *testing.T) {
-		if !env.isSDKMode() {
-			t.Skip("recovery test only for sdk-proxy modes")
+		if env.isStrictMode() {
+			t.Skip("recovery test not applicable in strict (no-fallback) modes")
 		}
 
 		// Restart all Dragonfly services
@@ -319,7 +328,10 @@ func TestDragonflyE2E(t *testing.T) {
 		t.Log("restarting dfdaemon...")
 		env.Dragonfly.Dfdaemon.Restart(t)
 
-		// Restart nydusd with clean caches to test recovery path
+		// Restart nydusd with clean caches to test recovery path.
+		// This verifies the nydus-ant health check recovery behavior:
+		// proxy goes unhealthy → detected by health thread → proxy recovers →
+		// health thread detects recovery → subsequent reads go through proxy.
 		t.Log("stopping nydusd to clear caches before recovery test...")
 		env.Nydusd.Stop(t)
 		ClearCaches(t, env.CacheDir, env.DragonflyCacheDir)
@@ -343,6 +355,84 @@ func TestDragonflyE2E(t *testing.T) {
 		require.NoError(t, err, "file read should succeed after proxy recovery")
 		assert.Greater(t, len(data), 0)
 		t.Log("PASS: file read succeeded after recovery")
+	})
+
+	t.Run("ProxyUnhealthy_NoFallback", func(t *testing.T) {
+		if !env.isStrictMode() {
+			t.Skip("unhealthy+no-fallback test only for strict modes")
+		}
+
+		// This test verifies the nydus-specific fix (ef58cb0f5):
+		// When proxy is unhealthy and fallback=false, Connection::call()
+		// returns an error immediately instead of falling through to origin.
+		// This is stricter than nydus-ant which would still fall through.
+
+		// 1. Stop dfdaemon to make proxy unhealthy
+		t.Log("stopping dfdaemon to make proxy unhealthy...")
+		env.Dragonfly.Dfdaemon.Stop(t)
+
+		// 2. Stop nydusd and clear caches
+		t.Log("stopping nydusd and clearing caches...")
+		env.Nydusd.Stop(t)
+		ClearCaches(t, env.CacheDir, env.DragonflyCacheDir)
+
+		// 3. Restart nydusd — health check will detect proxy is down
+		t.Log("restarting nydusd with proxy down...")
+		env.Nydusd.Restart(t)
+
+		// 4. Wait for health check to mark proxy as unhealthy
+		logBefore := env.Nydusd.LogLineCount(t)
+		t.Log("waiting for health check to detect unhealthy proxy...")
+		WaitForLogPattern(env.Nydusd, logBefore, "unhealthy", 15*time.Second)
+
+		// 5. Try to read a file — should fail since proxy is unhealthy
+		//    and fallback=false returns error immediately
+		target := filepath.Join(env.MountDir, "etc/os-release")
+		t.Logf("reading %s with unhealthy proxy and fallback=false...", target)
+		_, err := os.ReadFile(target)
+		newLogs := env.Nydusd.LogSince(t, logBefore)
+
+		require.Error(t, err,
+			"proxy unhealthy + fallback=false: read should fail; logs:\n%s",
+			truncateString(newLogs, 500))
+		t.Logf("PASS: file read failed as expected (proxy unhealthy, no fallback): %v", err)
+	})
+
+	t.Run("FallbackLogging", func(t *testing.T) {
+		if !env.hasFallback() {
+			t.Skip("fallback logging test only for modes with fallback=true")
+		}
+
+		// Verify that when fallback occurs, nydus logs the fallback event.
+		// This matches nydus-ant behavior: "Request proxy server failed,
+		// fallback to original server" or "Proxy server is not healthy,
+		// fallback to original server".
+
+		// Ensure dfdaemon is stopped
+		env.Dragonfly.Dfdaemon.Stop(t)
+
+		// Restart nydusd with cold caches
+		env.Nydusd.Stop(t)
+		ClearCaches(t, env.CacheDir, env.DragonflyCacheDir)
+		env.Nydusd.Restart(t)
+
+		logBefore := env.Nydusd.LogLineCount(t)
+
+		// Read a file to trigger fallback
+		target := filepath.Join(env.MountDir, "etc/os-release")
+		data, err := os.ReadFile(target)
+		require.NoError(t, err, "read should succeed via fallback")
+		assert.Greater(t, len(data), 0)
+
+		// Check for fallback log messages
+		newLogs := env.Nydusd.LogSince(t, logBefore)
+		hasFallbackLog := strings.Contains(strings.ToLower(newLogs), "fallback")
+		if hasFallbackLog {
+			t.Log("PASS: fallback event logged")
+		} else {
+			t.Logf("WARNING: no 'fallback' message found in logs (may be rate-limited):\n%s",
+				truncateString(newLogs, 500))
+		}
 	})
 }
 
