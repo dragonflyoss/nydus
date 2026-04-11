@@ -104,6 +104,9 @@ jobs:
           - mode: sdk-proxy-strict
             image: ghcr.io/dragonflyoss/image-service/java:nydus-nightly-v5
             config: misc/dragonfly/nydusd-sdk-config.json
+          - mode: http-proxy-strict
+            image: ghcr.io/dragonflyoss/image-service/nginx:nydus-latest
+            config: misc/dragonfly/nydusd-http-proxy-nofallback-config.json
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
