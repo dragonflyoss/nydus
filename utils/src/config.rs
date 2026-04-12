@@ -85,6 +85,17 @@ pub fn set(id: &str, key: &Keys, value: String) {
     CONFIG_MAP.store(Arc::new(map));
 }
 
+/// Set the value of the key only if it is not already set (or is empty).
+///
+/// This is useful for registering initial configuration values without
+/// overwriting values that may have been set by earlier initialization.
+pub fn set_if_empty(id: &str, key: &Keys, value: String) {
+    let current = get(id, key);
+    if current.is_empty() && !value.is_empty() {
+        set(id, key, value);
+    }
+}
+
 /// Return the value of the key and whether it has changed compared to previous value.
 ///
 /// This function checks if the current value differs from the provided previous value.
@@ -601,6 +612,62 @@ mod tests {
         let all = get_all(Some(String::from("id1")));
         assert_eq!(all.len(), 1);
         assert_eq!(all.get("registry_auth"), Some(&"value1".to_string()));
+
+        clear();
+    }
+
+    #[test]
+    fn test_set_if_empty_sets_when_missing() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "set_if_empty_test";
+        let key = Keys::ProxyURL;
+        set_if_empty(id, &key, "http://proxy:3128".to_string());
+        assert_eq!(get(id, &key), "http://proxy:3128");
+
+        clear();
+    }
+
+    #[test]
+    fn test_set_if_empty_does_not_overwrite() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "set_if_empty_test2";
+        let key = Keys::DragonflySchedulerEndpoint;
+        set(id, &key, "http://scheduler:8002".to_string());
+        set_if_empty(id, &key, "http://other:9999".to_string());
+        assert_eq!(get(id, &key), "http://scheduler:8002");
+
+        clear();
+    }
+
+    #[test]
+    fn test_set_if_empty_ignores_empty_value() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "set_if_empty_test3";
+        let key = Keys::ProxyURL;
+        set_if_empty(id, &key, "".to_string());
+        assert_eq!(get(id, &key), "");
+        assert!(!contains_key(id, &key));
+
+        clear();
+    }
+
+    #[test]
+    fn test_set_if_empty_sets_when_existing_is_empty_string() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "set_if_empty_test4";
+        let key = Keys::ProxyURL;
+        // Set an empty string — set_if_empty should overwrite it
+        set(id, &key, "".to_string());
+        set_if_empty(id, &key, "http://proxy:3128".to_string());
+        assert_eq!(get(id, &key), "http://proxy:3128");
 
         clear();
     }
