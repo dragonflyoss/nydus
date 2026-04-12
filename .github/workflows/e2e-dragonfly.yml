@@ -280,8 +280,7 @@ jobs:
           sudo umount /tmp/nydus-test/mnt 2>/dev/null || true
           # Kill any remaining processes
           for proc in nydusd dfdaemon scheduler manager; do
-            pid=$(pgrep -n "${proc}" 2>/dev/null)
-            if [ -n "${pid}" ]; then
+            if pid=$(pgrep -n "${proc}" 2>/dev/null); then
               sudo kill "${pid}" 2>/dev/null || true
             fi
           done
