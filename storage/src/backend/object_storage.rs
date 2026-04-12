@@ -160,9 +160,7 @@ where
             .map_err(BackendError::Request)?;
         Ok(resp
             .copy_to(buf)
-            .map_err(|e| {
-                ObjectStorageError::Transport(std::io::Error::new(std::io::ErrorKind::Other, e))
-            })
+            .map_err(|e| ObjectStorageError::Transport(std::io::Error::other(e)))
             .map(|size| size as usize)?)
     }
 
@@ -253,7 +251,7 @@ mod tests {
     use std::io::Error as IoError;
 
     fn make_io_error(msg: &str) -> IoError {
-        IoError::new(std::io::ErrorKind::Other, msg)
+        IoError::other(msg)
     }
 
     #[test]
