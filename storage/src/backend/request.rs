@@ -850,7 +850,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         let mut ctx = BackendContext::default();
 
-        let result = req.call::<&[u8]>(
+        let _result = req.call::<&[u8]>(
             Method::GET,
             &url,
             None,
@@ -1023,12 +1023,10 @@ mod tests {
             Err(_) => {
                 // Connection might fail due to proxy routing — that's OK,
                 // the important thing is it shouldn't be a ProxyError
-                match &result {
-                    Err(RequestError::Proxy(_)) => {
-                        panic!("200 without error header should not produce ProxyError");
-                    }
-                    _ => {} // Connection errors are acceptable (proxy health)
+                if let Err(RequestError::Proxy(_)) = &result {
+                    panic!("200 without error header should not produce ProxyError");
                 }
+                // Connection errors are acceptable (proxy health)
             }
         }
 

@@ -305,7 +305,7 @@ mod tests {
             let pauser = pauser.clone();
             let handle = thread::spawn(move || {
                 thread::sleep(Duration::from_millis(i * 10));
-                pauser.set_pause(Duration::from_millis(100 + i as u64 * 10));
+                pauser.set_pause(Duration::from_millis(100 + i * 10));
             });
             handles.push(handle);
         }

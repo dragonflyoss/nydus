@@ -777,7 +777,7 @@ impl RegistryReader {
     /// If responding 403, we need to repeat step one
     fn _try_read(
         &self,
-        mut buf: &mut [u8],
+        buf: &mut [u8],
         offset: u64,
         allow_retry: bool,
         context: &mut BackendContext,
@@ -922,10 +922,8 @@ impl RegistryReader {
             }
         }
 
-        resp.copy_to(&mut buf)
-            .map_err(|e| {
-                RegistryError::Transport(std::io::Error::new(std::io::ErrorKind::Other, e))
-            })
+        resp.copy_to(buf)
+            .map_err(|e| RegistryError::Transport(std::io::Error::other(e)))
             .map(|size| size as usize)
     }
 }
