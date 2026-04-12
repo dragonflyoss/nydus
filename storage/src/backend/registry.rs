@@ -1030,7 +1030,7 @@ impl Registry {
         let retry_limit = con_config.retry_limit;
         let proxy_config = con_config.proxy.clone();
         let connection = Connection::new(&con_config)?;
-        let request = request::Request::new(connection, proxy_config, false);
+        let request = request::Request::new(connection, proxy_config, false, id);
         let auth = trim(config.auth.clone());
         let registry_token = trim(config.registry_token.clone());
         Self::validate_authorization_info(&auth)?;

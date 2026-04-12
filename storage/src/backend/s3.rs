@@ -69,7 +69,7 @@ impl S3 {
         });
         let metrics = id.map(|i| BackendMetrics::new(i, "oss"));
 
-        let request = request::Request::new(connection, proxy_config, false);
+        let request = request::Request::new(connection, proxy_config, false, id.unwrap_or(""));
 
         Ok(ObjectStorage::new_object_storage(
             request,

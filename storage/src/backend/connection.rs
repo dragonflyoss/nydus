@@ -618,4 +618,133 @@ mod tests {
         assert_eq!(config.proxy.ping_url, "");
         assert_eq!(config.proxy.url, "");
     }
+
+    /// Helper to create a Connection with a proxy for testing fallback behavior.
+    fn make_connection_with_proxy(proxy_url: &str, fallback: bool) -> Arc<Connection> {
+        let config = ConnectionConfig {
+            proxy: ProxyConfig {
+                url: proxy_url.to_string(),
+                fallback,
+                check_interval: 5,
+                check_pause_elapsed: 300,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Connection::new(&config).unwrap()
+    }
+
+    #[test]
+    fn test_unhealthy_proxy_no_fallback_returns_error() {
+        // When proxy is unhealthy and fallback is disabled, call() must return
+        // an error immediately without attempting the origin server.
+        let conn = make_connection_with_proxy("http://127.0.0.1:1", false);
+
+        // Mark proxy as unhealthy
+        conn.proxy.as_ref().unwrap().health.set(false);
+
+        let mut headers = HeaderMap::new();
+        let result = conn.call::<Cursor<Vec<u8>>>(
+            Method::GET,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+        );
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("proxy is not healthy and fallback is disabled"),
+            "Expected 'proxy is not healthy and fallback is disabled' error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_unhealthy_proxy_with_fallback_attempts_origin() {
+        // When proxy is unhealthy but fallback IS enabled, call() should
+        // fall through to the origin server (which will fail with a connection
+        // error here since the URL is unreachable, but NOT with the
+        // "fallback is disabled" error).
+        let conn = make_connection_with_proxy("http://127.0.0.1:1", true);
+
+        // Mark proxy as unhealthy
+        conn.proxy.as_ref().unwrap().health.set(false);
+
+        let mut headers = HeaderMap::new();
+        let result = conn.call::<Cursor<Vec<u8>>>(
+            Method::GET,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+        );
+
+        // Should fail (unreachable server) but NOT with "fallback is disabled"
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("fallback is disabled"),
+            "Should not get 'fallback is disabled' error when fallback=true, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_healthy_proxy_no_fallback_returns_proxy_error() {
+        // When proxy is healthy and fallback is disabled, a failed proxy request
+        // should return the proxy error directly without falling back.
+        let conn = make_connection_with_proxy("http://127.0.0.1:1", false);
+
+        // Proxy stays healthy (default)
+        assert!(conn.proxy.as_ref().unwrap().health.ok());
+
+        let mut headers = HeaderMap::new();
+        let result = conn.call::<Cursor<Vec<u8>>>(
+            Method::GET,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+        );
+
+        // Should fail with the proxy connection error, not fallback
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("fallback is disabled"),
+            "Should get proxy error, not fallback error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_disconnected_connection_returns_error() {
+        // Verify that a shutdown connection returns Disconnected error
+        // regardless of proxy state.
+        let conn = make_connection_with_proxy("http://127.0.0.1:1", false);
+        conn.shutdown();
+
+        let mut headers = HeaderMap::new();
+        let result = conn.call::<Cursor<Vec<u8>>>(
+            Method::GET,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+        );
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("disconnected"),
+            "Expected disconnected error, got: {}",
+            err_msg
+        );
+    }
 }
