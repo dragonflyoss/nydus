@@ -284,9 +284,7 @@ impl BlobReader for HttpProxyReader {
                     .map_err(BackendError::Request)?;
                 Ok(resp
                     .copy_to(buf)
-                    .map_err(|e| {
-                        HttpProxyError::Transport(std::io::Error::new(std::io::ErrorKind::Other, e))
-                    })
+                    .map_err(|e| HttpProxyError::Transport(std::io::Error::other(e)))
                     .map(|size| size as usize)?)
             }
         }

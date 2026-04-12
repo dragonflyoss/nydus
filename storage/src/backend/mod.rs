@@ -399,10 +399,7 @@ pub trait BlobReader: Send + Sync {
             let size = self.try_read_ctx(buf, offset, Some(ctx))?;
             if strict && size != buf_len {
                 return Err(BackendError::CopyData(StorageError::CacheIndex(
-                    std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("expected {} bytes, got {}", buf_len, size),
-                    ),
+                    std::io::Error::other(format!("expected {} bytes, got {}", buf_len, size)),
                 )));
             }
             Ok(size)
