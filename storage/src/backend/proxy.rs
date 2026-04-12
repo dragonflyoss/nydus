@@ -24,7 +24,6 @@ use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 
 use crate::backend::request::Response;
-use crate::factory::ASYNC_RUNTIME;
 
 // --- Dragonfly header constants ---
 pub const HEADER_DRAGONFLY_PRIORITY: &str = "X-Dragonfly-Priority";
@@ -53,10 +52,18 @@ pub enum ProxyError {
 lazy_static! {
     static ref PROXY_SDK_CLIENT: Arc<RwLock<HashMap<String, Arc<ProxySDKClient>>>> =
         Arc::new(RwLock::new(HashMap::new()));
+    static ref PROXY_RUNTIME: Result<Runtime, String> = tokio::runtime::Builder::new_multi_thread()
+        .thread_name("nydus-backend-proxy-runtime")
+        .worker_threads(10)
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to create proxy tokio runtime: {}", e));
 }
 
-fn runtime() -> &'static Runtime {
-    &ASYNC_RUNTIME
+pub(crate) fn runtime() -> &'static Runtime {
+    PROXY_RUNTIME
+        .as_ref()
+        .expect("proxy tokio runtime failed to initialize")
 }
 
 pub(crate) struct SyncAdapter<R> {
@@ -222,6 +229,53 @@ mod tests {
             all.extend_from_slice(&buf[..n]);
         }
         assert_eq!(all, data);
+    }
+
+    #[test]
+    fn test_proxy_runtime_initializes() {
+        // Verify PROXY_RUNTIME initializes successfully
+        let rt = runtime();
+        // Verify it can execute async work
+        let result = rt.block_on(async { 42 });
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_proxy_runtime_is_multi_thread() {
+        // Verify the runtime supports spawning onto multiple threads
+        let rt = runtime();
+        let result = rt.block_on(async {
+            let handles: Vec<_> = (0..10)
+                .map(|i| tokio::spawn(async move { i * 2 }))
+                .collect();
+            let mut results = Vec::new();
+            for h in handles {
+                results.push(h.await.unwrap());
+            }
+            results
+        });
+        let expected: Vec<i32> = (0..10).map(|i| i * 2).collect();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_proxy_runtime_is_static_singleton() {
+        // Multiple calls to runtime() return the same runtime
+        let rt1 = runtime() as *const Runtime;
+        let rt2 = runtime() as *const Runtime;
+        assert_eq!(rt1, rt2, "runtime() should return the same static instance");
+    }
+
+    #[test]
+    fn test_sync_adapter_uses_proxy_runtime() {
+        // SyncAdapter uses the proxy runtime for async reads
+        let data = b"runtime test data";
+        let cursor = tokio::io::BufReader::new(std::io::Cursor::new(data.to_vec()));
+        let mut adapter = SyncAdapter::new(cursor);
+        let mut buf = vec![0u8; 64];
+        // This implicitly uses runtime() — verifies the runtime is functional
+        let n = adapter.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], data);
     }
 
     #[test]

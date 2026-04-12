@@ -303,7 +303,7 @@ impl HttpProxy {
             let conn_cfg: ConnectionConfig = config.clone().into();
             let proxy_config = conn_cfg.proxy.clone();
             let conn = Connection::new(&conn_cfg)?;
-            let request = request::Request::new(conn, proxy_config, false);
+            let request = request::Request::new(conn, proxy_config, false, id.unwrap_or(""));
             Client::Remote(request)
         } else {
             let client = HyperClient::unix();

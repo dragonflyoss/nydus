@@ -152,7 +152,7 @@ impl Oss {
         let retry_limit = con_config.retry_limit;
         let proxy_config = con_config.proxy.clone();
         let connection = Connection::new(&con_config)?;
-        let request = request::Request::new(connection, proxy_config, false);
+        let request = request::Request::new(connection, proxy_config, false, id.unwrap_or(""));
         let state = Arc::new(OssState {
             scheme: oss_config.scheme.clone(),
             object_prefix: oss_config.object_prefix.clone(),
