@@ -44,6 +44,8 @@ pub enum RegistryError {
     Request(ConnectionError),
     Scheme(String),
     Transport(std::io::Error),
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    Proxy(request::RequestError),
 }
 
 impl fmt::Display for RegistryError {
@@ -54,22 +56,33 @@ impl fmt::Display for RegistryError {
             RegistryError::Request(e) => write!(f, "failed to issue request, {}", e),
             RegistryError::Scheme(s) => write!(f, "invalid scheme, {}", s),
             RegistryError::Transport(e) => write!(f, "network transport error, {}", e),
+            #[cfg(feature = "backend-dragonfly-proxy")]
+            RegistryError::Proxy(e) => write!(f, "proxy error: {:?}", e),
         }
     }
 }
 
 impl From<RegistryError> for BackendError {
     fn from(error: RegistryError) -> Self {
+        // Proxy errors must surface as BackendError::Request so that
+        // retry_op's is_proxy_forbidden/is_proxy_limited checks match.
+        #[cfg(feature = "backend-dragonfly-proxy")]
+        if let RegistryError::Proxy(e) = error {
+            return BackendError::Request(e);
+        }
         BackendError::Registry(error)
     }
 }
 
 type RegistryResult<T> = std::result::Result<T, RegistryError>;
 
-/// Convert a `RequestError` into a `RegistryError`, preserving `ConnectionError` variants.
+/// Convert a `RequestError` into a `RegistryError`, preserving proxy error types
+/// so that retry_op's is_proxy_forbidden/is_proxy_limited checks work correctly.
 fn request_err_to_registry(e: request::RequestError) -> RegistryError {
     match e {
         request::RequestError::Connection(ce) => RegistryError::Request(ce),
+        #[cfg(feature = "backend-dragonfly-proxy")]
+        e @ request::RequestError::Proxy(_) => RegistryError::Proxy(e),
         other => RegistryError::Request(ConnectionError::ErrorWithMsg(format!("{:?}", other))),
     }
 }
@@ -966,7 +979,7 @@ impl BlobReader for RegistryReader {
                     )?
                 }
                 Err(e) => {
-                    return Err(BackendError::Registry(e));
+                    return Err(BackendError::from(e));
                 }
             };
             let content_length = resp
@@ -998,7 +1011,7 @@ impl BlobReader for RegistryReader {
         let ctx = ctx.unwrap_or(&mut default_ctx);
         self.first.handle_force(&mut || -> BackendResult<usize> {
             self._try_read(buf, offset, true, ctx)
-                .map_err(BackendError::Registry)
+                .map_err(BackendError::from)
         })
     }
 
