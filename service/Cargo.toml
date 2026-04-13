@@ -12,14 +12,17 @@ resolver = "2"
 [dependencies]
 bytes = { version = "1", optional = true }
 dbs-allocator = { version = "0.1.1", optional = true }
+flume = "0.12"
 fuse-backend-rs = { workspace = true, features = ["persist"] }
 libc = "0.2"
 log = "0.4.8"
 mio = { version = "0.8", features = ["os-poll", "os-ext"] }
 nix = "0.24.0"
 rust-fsm = "0.6.0"
+sendfd = "0.4"
 serde = { version = "1.0.110", features = ["serde_derive", "rc"] }
 serde_json = "1.0.51"
+serde_repr = "0.1"
 thiserror = "1.0"
 time = { version = "0.3.14", features = ["serde-human-readable"] }
 tokio = { version = "1.24", features = ["macros"] }
@@ -60,5 +63,6 @@ virtiofs = [
 
 block-device = ["dbs-allocator", "tokio/fs"]
 block-nbd = ["block-device", "bytes"]
+block-uffd = ["block-device"]
 
 coco = ["fuse-backend-rs/fusedev", "nydus-storage/backend-registry"]
