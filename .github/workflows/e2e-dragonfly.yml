@@ -292,3 +292,112 @@ jobs:
         with:
           name: dragonfly-e2e-logs-${{ matrix.mode }}
           path: /tmp/dragonfly-e2e-logs/
+
+  proxy-error-test:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    needs: nydus-build
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download Nydus artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: nydus-artifact
+          path: /usr/local/bin
+
+      - name: Install binaries
+        run: |
+          sudo chmod +x /usr/local/bin/nydusd
+          sudo chmod +x /usr/local/bin/nydus-image
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Install crane
+        run: go install github.com/google/go-containerregistry/cmd/crane@latest
+
+      - name: Extract nydus image bootstrap
+        run: |
+          NYDUS_IMAGE="ghcr.io/dragonflyoss/image-service/nginx:nydus-latest"
+          WORK_DIR="/tmp/nydus-proxy-error-test"
+          mkdir -p "${WORK_DIR}"
+
+          echo "Fetching manifest for ${NYDUS_IMAGE}..."
+          crane manifest --platform linux/amd64 "${NYDUS_IMAGE}" > "${WORK_DIR}/manifest.json"
+
+          BOOTSTRAP_DIGEST=$(python3 -c "
+          import json
+          with open('${WORK_DIR}/manifest.json') as f:
+              manifest = json.load(f)
+          for layer in manifest.get('layers', []):
+              annotations = layer.get('annotations', {})
+              if annotations.get('containerd.io/snapshot/nydus-bootstrap') == 'true':
+                  print(layer['digest'])
+                  break
+          else:
+              for layer in manifest.get('layers', []):
+                  if 'nydus' in layer.get('mediaType', '') and 'blob' not in layer.get('mediaType', ''):
+                      print(layer['digest'])
+                      break
+              else:
+                  import sys
+                  print('ERROR: Could not identify bootstrap layer', file=sys.stderr)
+                  sys.exit(1)
+          ")
+
+          echo "Bootstrap layer digest: ${BOOTSTRAP_DIGEST}"
+          crane blob "${NYDUS_IMAGE}@${BOOTSTRAP_DIGEST}" > "${WORK_DIR}/bootstrap-layer.tar.gz"
+
+          mkdir -p "${WORK_DIR}/bootstrap-extract"
+          tar -xf "${WORK_DIR}/bootstrap-layer.tar.gz" -C "${WORK_DIR}/bootstrap-extract"
+
+          BOOTSTRAP_FILE=$(find "${WORK_DIR}/bootstrap-extract" -name "*.boot" | head -1)
+          if [ -z "${BOOTSTRAP_FILE}" ]; then
+            BOOTSTRAP_FILE="${WORK_DIR}/bootstrap-extract/image.boot"
+          fi
+
+          cp "${BOOTSTRAP_FILE}" "${WORK_DIR}/bootstrap"
+          echo "Bootstrap extracted to ${WORK_DIR}/bootstrap"
+          ls -la "${WORK_DIR}/bootstrap"
+
+      - name: Run proxy error simulation tests
+        run: |
+          cd smoke/dragonfly
+          sudo -E env "PATH=$PATH" \
+            REPO_ROOT=${{ github.workspace }} \
+            NYDUSD_BIN=/usr/local/bin/nydusd \
+            BOOTSTRAP_PATH=/tmp/nydus-proxy-error-test/bootstrap \
+            WORK_DIR=/tmp/nydus-proxy-error-test \
+            go test -v -run TestProxyErrorSimulation -timeout 10m -count=1 ./...
+
+      - name: Dump logs
+        if: always()
+        continue-on-error: true
+        run: |
+          LOG_DIR="/tmp/proxy-error-test-logs"
+          mkdir -p "${LOG_DIR}"
+          cp /tmp/nydus-proxy-error-test/logs/*.log "${LOG_DIR}/" 2>/dev/null || true
+          cp /tmp/nydus-proxy-error-test/logs/*.log.stdout "${LOG_DIR}/" 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo umount /tmp/nydus-proxy-error-test/mnt 2>/dev/null || true
+          for proc in nydusd test-proxy; do
+            if pid=$(pgrep -n "${proc}" 2>/dev/null); then
+              sudo kill "${pid}" 2>/dev/null || true
+            fi
+          done
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: proxy-error-test-logs
+          path: /tmp/proxy-error-test-logs/
