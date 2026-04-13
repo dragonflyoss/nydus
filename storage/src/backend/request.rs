@@ -234,6 +234,17 @@ impl Request {
         // Try Dragonfly SDK path if configured and enabled
         #[cfg(feature = "backend-dragonfly-proxy")]
         {
+            // Always inject HEADER_DRAGONFLY_PREFETCH as it only goes through headers
+            if let Ok(val) =
+                HeaderValue::from_str((!self.disable_proxy_prefetch).to_string().as_str())
+            {
+                headers.insert(
+                    HeaderName::from_str(proxy::HEADER_DRAGONFLY_PREFETCH).unwrap(),
+                    val,
+                );
+            }
+
+            // #1: SDK proxy path
             let endpoint = self.dragonfly_scheduler_endpoint();
             if !endpoint.is_empty() && !context.disable_proxy_sdk {
                 if method != Method::GET {
@@ -274,12 +285,11 @@ impl Request {
                     Err(err) => Err(RequestError::Proxy(err)),
                 };
             }
-        }
 
-        // Inject Dragonfly priority headers for HTTP proxy mode.
-        // This runs for both pure HTTP proxy and SDK-fallback-to-HTTP paths.
-        #[cfg(feature = "backend-dragonfly-proxy")]
-        {
+            // #2: Http proxy path
+            // This runs for both pure HTTP proxy and SDK-fallback-to-HTTP paths.
+
+            // Inject Dragonfly priority headers for HTTP proxy mode.
             let priority_val = match context.request_source {
                 RequestSource::Prefetch => proxy::HEADER_VALUE_DRAGONFLY_PRIORITY_3.to_string(),
                 RequestSource::OnDemand => proxy::HEADER_VALUE_DRAGONFLY_PRIORITY_6.to_string(),
@@ -294,14 +304,6 @@ impl Request {
                 HeaderName::from_str(proxy::HEADER_DRAGONFLY_USE_P2P).unwrap(),
                 proxy::HEADER_VALUE_DRAGONFLY_USE_P2P_TRUE.parse().unwrap(),
             );
-            if let Ok(val) =
-                HeaderValue::from_str((!self.disable_proxy_prefetch).to_string().as_str())
-            {
-                headers.insert(
-                    HeaderName::from_str(proxy::HEADER_DRAGONFLY_PREFETCH).unwrap(),
-                    val,
-                );
-            }
         }
 
         // Fall through to Connection which handles HTTP proxy + health + fallback
