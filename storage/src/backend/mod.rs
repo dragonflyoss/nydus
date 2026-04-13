@@ -325,20 +325,12 @@ where
                     } else {
                         context.disable_proxy = false;
                         if is_prefetch {
-                            #[cfg(feature = "backend-qps-limit")]
-                            {
-                                let duration = random_duration(100, 1000);
-                                warn!(
-                                    "retry prefetch, remains: {}, sleep: {:?}",
-                                    retry_count, duration
-                                );
-                                sleep(duration);
-                            }
-                            #[cfg(not(feature = "backend-qps-limit"))]
-                            {
-                                warn!("retry prefetch, remains: {}", retry_count);
-                                sleep(Duration::from_millis(500));
-                            }
+                            let duration = random_duration(100, 1000);
+                            warn!(
+                                "retry prefetch, remains: {}, sleep: {:?}",
+                                retry_count, duration
+                            );
+                            sleep(duration);
                         } else {
                             warn!("retry via proxy, remains: {}", retry_count);
                         }
