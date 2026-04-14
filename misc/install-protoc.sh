@@ -1,4 +1,5 @@
-#! /bin/bash
+#!/bin/bash
+
 set -euo pipefail
 
 # Usage: bash misc/install-protoc.sh [arch] [system]
