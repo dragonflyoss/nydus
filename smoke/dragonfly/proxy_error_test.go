@@ -26,7 +26,6 @@ type proxyErrorEnv struct {
 	BootstrapPath    string
 	WorkDir          string
 	MountDir         string
-	CacheDir         string
 	LogDir           string
 	ApiSock          string
 	FallbackConfig   string
@@ -90,11 +89,16 @@ func setupProxyErrorEnv(t *testing.T) *proxyErrorEnv {
 
 	workDir := envOrDefault("WORK_DIR", "/tmp/nydus-proxy-error-test")
 	logDir := filepath.Join(workDir, "logs")
-	cacheDir := filepath.Join(workDir, "cache")
 	mountDir := filepath.Join(workDir, "mnt")
 	apiSock := filepath.Join(workDir, "nydusd-api.sock")
 
-	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+	fallbackConfig := filepath.Join(repoRoot, "misc", "dragonfly", "nydusd-proxy-error-fallback.json")
+	nofallbackConfig := filepath.Join(repoRoot, "misc", "dragonfly", "nydusd-proxy-error-nofallback.json")
+
+	// Create cache dirs from configs so nydusd can write to them
+	for _, cfg := range []string{fallbackConfig, nofallbackConfig} {
+		require.NoError(t, os.MkdirAll(ParseCacheDir(t, cfg), 0755))
+	}
 	require.NoError(t, os.MkdirAll(mountDir, 0755))
 	require.NoError(t, os.MkdirAll(logDir, 0755))
 
@@ -116,11 +120,10 @@ func setupProxyErrorEnv(t *testing.T) *proxyErrorEnv {
 		BootstrapPath:    bootstrapPath,
 		WorkDir:          workDir,
 		MountDir:         mountDir,
-		CacheDir:         cacheDir,
 		LogDir:           logDir,
 		ApiSock:          apiSock,
-		FallbackConfig:   filepath.Join(repoRoot, "misc", "dragonfly", "nydusd-proxy-error-fallback.json"),
-		NoFallbackConfig: filepath.Join(repoRoot, "misc", "dragonfly", "nydusd-proxy-error-nofallback.json"),
+		FallbackConfig:   fallbackConfig,
+		NoFallbackConfig: nofallbackConfig,
 	}
 }
 
@@ -148,8 +151,9 @@ func (env *proxyErrorEnv) startNydusdForTest(t *testing.T, configPath string) *N
 func (env *proxyErrorEnv) runReadTest(t *testing.T, configPath string, expectSuccess bool) {
 	t.Helper()
 
-	// Clear caches
-	ClearCaches(t, env.CacheDir)
+	// Clear caches using the work_dir from the nydusd config
+	cacheDir := ParseCacheDir(t, configPath)
+	ClearCaches(t, cacheDir)
 
 	// Start nydusd
 	nydusd := env.startNydusdForTest(t, configPath)
@@ -268,10 +272,11 @@ func TestProxyErrorSimulation(t *testing.T) {
 	t.Run("Recovery", func(t *testing.T) {
 		t.Run("HealthRecovery", func(t *testing.T) {
 			config := env.FallbackConfig
+			cacheDir := ParseCacheDir(t, config)
 
 			// Phase 1: Inject errors, verify reads still succeed via fallback
 			injectError(t, 500, 3)
-			ClearCaches(t, env.CacheDir)
+			ClearCaches(t, cacheDir)
 			nydusd := env.startNydusdForTest(t, config)
 
 			target := filepath.Join(env.MountDir, "etc/os-release")
@@ -283,7 +288,7 @@ func TestProxyErrorSimulation(t *testing.T) {
 			// Phase 2: Errors exhausted (count=3), proxy forwarding normally.
 			// Stop and restart nydusd with cold caches to force fresh requests.
 			nydusd.Stop(t)
-			ClearCaches(t, env.CacheDir)
+			ClearCaches(t, cacheDir)
 			clearInjection(t)
 
 			nydusd2 := env.startNydusdForTest(t, config)

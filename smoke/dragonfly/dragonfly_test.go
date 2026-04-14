@@ -40,7 +40,7 @@ func setupTestEnv(t *testing.T) *testEnv {
 
 	workDir := envOrDefault("WORK_DIR", "/tmp/nydus-test")
 	logDir := envOrDefault("LOG_DIR", "/tmp/dragonfly/logs")
-	cacheDir := filepath.Join(workDir, "cache")
+	cacheDir := ParseCacheDir(t, configPath)
 	mountDir := filepath.Join(workDir, "mnt")
 	logFile := filepath.Join(workDir, "nydusd.log")
 	apiSock := filepath.Join(workDir, "nydusd-api.sock")
