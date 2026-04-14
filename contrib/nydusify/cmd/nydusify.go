@@ -1444,6 +1444,12 @@ func main() {
 					Usage:    "Target nydus image reference",
 					EnvVars:  []string{"TARGET"},
 				},
+				&cli.StringFlag{
+					Name:     "source",
+					Required: false,
+					Usage:    "Override the source nydus image reference (useful when containerd uses hosts.toml remapping)",
+					EnvVars:  []string{"SOURCE"},
+				},
 				&cli.BoolFlag{
 					Name:     "source-insecure",
 					Required: false,
@@ -1499,6 +1505,7 @@ func main() {
 					ContainerdAddress: c.String("containerd-address"),
 					Namespace:         c.String("namespace"),
 					ContainerID:       c.String("container"),
+					SourceRef:         c.String("source"),
 					TargetRef:         c.String("target"),
 					SourceInsecure:    c.Bool("source-insecure"),
 					TargetInsecure:    c.Bool("target-insecure"),
