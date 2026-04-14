@@ -16,7 +16,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   DRAGONFLY_VERSION: "2.4.3"
-  CLIENT_VERSION: "1.3.2"
+  CLIENT_VERSION: "1.3.3"
 
 jobs:
   nydus-build:

@@ -32,8 +32,6 @@ use crate::backend::RequestSource;
 
 #[cfg(feature = "backend-dragonfly-proxy")]
 use dragonfly_client_util::request::GetResponse;
-#[cfg(feature = "backend-dragonfly-proxy")]
-use lazy_static::lazy_static;
 
 const HEADER_ENV_PREFIX: &str = "NYDUS_HEADER_";
 const HEADER_USER_AGENT: &str = "User-Agent";
@@ -67,14 +65,10 @@ impl Response {
     }
 
     pub fn headers(&self) -> &HeaderMap {
-        #[cfg(feature = "backend-dragonfly-proxy")]
-        lazy_static! {
-            static ref EMPTY_HEADERS: HeaderMap = HeaderMap::new();
-        }
         match self {
             Self::HTTP(resp) => resp.headers(),
             #[cfg(feature = "backend-dragonfly-proxy")]
-            Self::ProxySDK(resp) => resp.header.as_ref().unwrap_or(&EMPTY_HEADERS),
+            Self::ProxySDK(resp) => &resp.header,
         }
     }
 
@@ -266,21 +260,17 @@ impl Request {
                     )))
                 })?;
 
-                return match proxy_sdk_client.request(
-                    url,
-                    Some(headers.clone()),
-                    priority,
-                    catch_status,
-                ) {
-                    Ok(resp) => {
-                        let status = resp.status();
+                return match proxy_sdk_client.request(url, headers.clone(), priority, catch_status)
+                {
+                    Ok(get_resp) => {
+                        let status = get_resp.status_code.unwrap_or(StatusCode::BAD_GATEWAY);
                         if status >= StatusCode::INTERNAL_SERVER_ERROR {
                             return Err(RequestError::Common(format!(
                                 "proxy server returned error status: {}",
                                 status,
                             )));
                         }
-                        Ok(resp)
+                        Ok(Response::ProxySDK(get_resp))
                     }
                     Err(err) => Err(RequestError::Proxy(err)),
                 };
@@ -585,7 +575,7 @@ mod tests {
         GetResponse {
             success: status.is_some_and(|s| s.is_success()),
             status_code: status,
-            header: headers,
+            header: headers.unwrap_or_default(),
             reader,
         }
     }
