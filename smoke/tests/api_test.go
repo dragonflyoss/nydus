@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/BraveY/snapshotter-converter/converter"
 	"github.com/containerd/log"
@@ -185,8 +186,16 @@ func (a *APIV1TestSuite) TestPrefetch(t *testing.T) {
 	err = nydusd.MountByAPI(config)
 	require.NoError(t, err)
 
-	bcm, err := nydusd.GetBlobCacheMetrics("")
-	require.NoError(t, err)
+	// Prefetch runs asynchronously after mount; poll until data arrives.
+	var bcm *tool.BlobCacheMetrics
+	for i := 0; i < 10; i++ {
+		bcm, err = nydusd.GetBlobCacheMetrics("")
+		require.NoError(t, err)
+		if bcm.PrefetchDataAmount > 0 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	require.Greater(t, bcm.PrefetchDataAmount, uint64(0))
 
 	_, err = nydusd.GetBlobCacheMetrics("/pseudo_fs_1")
