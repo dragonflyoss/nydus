@@ -46,7 +46,7 @@ type Opt struct {
 	Namespace         string
 
 	ContainerID    string
-	SourceRef      string
+	SourceImageRef string
 	SourceInsecure bool
 	TargetRef      string
 	TargetInsecure bool
@@ -105,8 +105,8 @@ func (cm *Committer) Commit(ctx context.Context, opt Opt) error {
 	}
 
 	originalSourceRef := inspect.Image
-	if opt.SourceRef != "" {
-		originalSourceRef = opt.SourceRef
+	if opt.SourceImageRef != "" {
+		originalSourceRef = opt.SourceImageRef
 	}
 
 	logrus.Infof("pulling base bootstrap")
