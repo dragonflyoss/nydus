@@ -260,6 +260,15 @@ Document located at: https://github.com/adamqqqplay/nydus-localdisk/blob/master/
         // Skip SSL certificate validation for HTTPS scheme.
         // When true, also allows automatic HTTPS-to-HTTP fallback on TLS errors.
         "skip_verify": false,
+        // Paths to PEM-encoded CA certificate files to trust in addition to the system CA store, optional.
+        // Useful when the registry uses a private or self-signed CA.
+        "ca_cert_files": ["/etc/ssl/certs/my-ca.pem"],
+        // Path to a PEM-encoded client certificate file for mTLS authentication, optional.
+        // Must be used together with `client_key_file`.
+        "client_cert_file": "/etc/ssl/certs/client.pem",
+        // Path to a PEM-encoded private key file for mTLS authentication, optional.
+        // Must be used together with `client_cert_file`.
+        "client_key_file": "/etc/ssl/private/client-key.pem",
         // Use format `$namespace/$repo` (no image tag)
         "repo": "test/repo",
         // Username and password for auth
