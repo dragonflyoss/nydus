@@ -7,6 +7,7 @@ package dragonfly
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net"
@@ -353,6 +354,26 @@ func ClearCaches(t *testing.T, dirs ...string) {
 	}
 	// Drop kernel page cache
 	_ = os.WriteFile("/proc/sys/vm/drop_caches", []byte("3"), 0644)
+}
+
+// ParseCacheDir extracts the blobcache work_dir from a nydusd JSON config file.
+func ParseCacheDir(t *testing.T, configPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err, "read nydusd config %s", configPath)
+
+	var cfg struct {
+		Device struct {
+			Cache struct {
+				Config struct {
+					WorkDir string `json:"work_dir"`
+				} `json:"config"`
+			} `json:"cache"`
+		} `json:"device"`
+	}
+	require.NoError(t, json.Unmarshal(data, &cfg), "parse nydusd config %s", configPath)
+	require.NotEmpty(t, cfg.Device.Cache.Config.WorkDir, "work_dir not found in %s", configPath)
+	return cfg.Device.Cache.Config.WorkDir
 }
 
 // CountFiles counts regular files under root up to maxDepth.
