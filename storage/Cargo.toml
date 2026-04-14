@@ -57,7 +57,7 @@ nydus-utils = { version = "0.5.1", path = "../utils", features = [
     "zran",
 ] }
 once_cell = { version = "1" }
-dragonfly-client-util = { version = "1.2", optional = true }
+dragonfly-client-util = { version = "1.3.3", optional = true }
 rand = { version = "0.8" }
 
 [dev-dependencies]
@@ -88,7 +88,7 @@ backend-http-proxy = [
 ]
 dedup = ["rusqlite", "r2d2", "r2d2_sqlite"]
 
-backend-dragonfly-proxy = ["dragonfly-client-util"]
+backend-dragonfly-proxy = ["dragonfly-client-util", "reqwest"]
 
 [package.metadata.docs.rs]
 all-features = true

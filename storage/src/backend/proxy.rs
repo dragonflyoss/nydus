@@ -17,13 +17,11 @@ use tokio::runtime::Runtime;
 
 use dragonfly_client_util::request::errors::Error;
 use dragonfly_client_util::request::Request;
-use dragonfly_client_util::request::{GetRequest, GetResponse, Proxy};
+use dragonfly_client_util::request::{Body, GetRequest, GetResponse, Proxy};
 use lazy_static::lazy_static;
 use log::info;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
-
-use crate::backend::request::Response;
 
 // --- Dragonfly header constants ---
 pub const HEADER_DRAGONFLY_PRIORITY: &str = "X-Dragonfly-Priority";
@@ -90,10 +88,10 @@ impl ProxySDKClient {
     pub fn request(
         &self,
         url: &str,
-        headers: Option<HeaderMap>,
+        headers: HeaderMap,
         priority: Option<i32>,
         catch_status: bool,
-    ) -> Result<Response, ProxyError> {
+    ) -> Result<GetResponse<Body>, ProxyError> {
         let request = GetRequest {
             url: url.to_string(),
             header: headers,
@@ -102,13 +100,14 @@ impl ProxySDKClient {
             application: None,
             filtered_query_params: Vec::new(),
             content_for_calculating_task_id: None,
+            enable_task_id_based_blob_digest: true,
             priority,
             timeout: Duration::from_secs(5),
             client_cert: None,
         };
-        let resp = runtime().block_on(async { self.client.get(request).await });
+        let resp = runtime().block_on(async { self.client.get(&request).await });
         match resp {
-            Ok(resp) => Ok(Response::ProxySDK(resp)),
+            Ok(resp) => Ok(resp),
             Err(e) => match e {
                 Error::BackendError(err) => {
                     if catch_status {
@@ -127,12 +126,12 @@ impl ProxySDKClient {
                             }
                         }
                     }
-                    Ok(Response::ProxySDK(GetResponse {
+                    Ok(GetResponse {
                         success: true,
                         status_code: err.status_code,
-                        header: Some(header_map),
+                        header: header_map,
                         reader: None,
-                    }))
+                    })
                 }
                 Error::ProxyError(err) => match err.status_code {
                     Some(StatusCode::TOO_MANY_REQUESTS) => {
