@@ -95,8 +95,6 @@ jobs:
         push: false
         load: true
         tags: rust-cross-compile-riscv64:latest
-        cache-from: type=gha,scope=buildx-riscv64
-        cache-to: type=gha,mode=max,scope=buildx-riscv64
         build-args: |
           RUST_VERSION=${{ steps.set_toolchain_version.outputs.rust-version }}
     - name: Build Nydus Non-RISC-V
