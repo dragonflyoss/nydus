@@ -504,6 +504,9 @@ pub struct OssConfig {
     /// Skip SSL certificate validation for HTTPS scheme.
     #[serde(default)]
     pub skip_verify: bool,
+    /// Paths to PEM-encoded CA certificate files to trust in addition to the system CA store.
+    #[serde(default)]
+    pub ca_cert_files: Vec<String>,
     /// Drop the read request once http request timeout, in seconds.
     #[serde(default = "default_http_timeout")]
     pub timeout: u32,
@@ -545,6 +548,9 @@ pub struct S3Config {
     /// Skip SSL certificate validation for HTTPS scheme.
     #[serde(default)]
     pub skip_verify: bool,
+    /// Paths to PEM-encoded CA certificate files to trust in addition to the system CA store.
+    #[serde(default)]
+    pub ca_cert_files: Vec<String>,
     /// Drop the read request once http request timeout, in seconds.
     #[serde(default = "default_http_timeout")]
     pub timeout: u32,
@@ -602,6 +608,17 @@ pub struct RegistryConfig {
     /// When true, also allows automatic HTTPS-to-HTTP fallback on TLS errors.
     #[serde(default)]
     pub skip_verify: bool,
+    /// Paths to PEM-encoded CA certificate files to trust in addition to the system CA store.
+    #[serde(default)]
+    pub ca_cert_files: Vec<String>,
+    /// Path to a PEM-encoded client certificate file for mTLS authentication.
+    /// Must be used together with `client_key_file`.
+    #[serde(default)]
+    pub client_cert_file: Option<String>,
+    /// Path to a PEM-encoded private key file for mTLS authentication.
+    /// Must be used together with `client_cert_file`.
+    #[serde(default)]
+    pub client_key_file: Option<String>,
     /// Drop the read request once http request timeout, in seconds.
     #[serde(default = "default_http_timeout")]
     pub timeout: u32,

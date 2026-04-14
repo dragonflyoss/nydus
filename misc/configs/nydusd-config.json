@@ -5,7 +5,11 @@
       "config": {
         "timeout": 5,
         "connect_timeout": 5,
-        "retry_limit": 2
+        "retry_limit": 2,
+        "skip_verify": false,
+        "ca_cert_files": ["/etc/ssl/certs/my-ca.pem"],
+        "client_cert_file": "/etc/ssl/certs/client.pem",
+        "client_key_file": "/etc/ssl/private/client-key.pem"
       }
     },
     "cache": {
