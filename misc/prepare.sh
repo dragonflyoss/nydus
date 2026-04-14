@@ -28,3 +28,6 @@ sudo install -D misc/performance/nydusd_config.json /etc/nydus/nydusd-config.fus
 sudo install -D $SNAPSHOTTER_CONFIG /etc/nydus/config.toml
 sudo install -D misc/performance/nydus-snapshotter.service /etc/systemd/system/nydus-snapshotter.service
 sudo systemctl start nydus-snapshotter
+
+# setup protoc
+bash misc/install-protoc.sh
