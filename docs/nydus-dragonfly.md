@@ -367,8 +367,11 @@ and trigger fallback to the HTTP proxy path.
 | Feature | Deps | Purpose |
 |---------|------|---------|
 | `backend-dragonfly-proxy` | `dragonfly-client-util` | Dragonfly SDK integration. x86_64/aarch64 only (ring crate limitation). |
-| `backend-hickory-dns` | `hickory-resolver`, `once_cell`, `reqwest` | DNS resolution with caching and singleflight deduplication. |
-| `backend-qps-limit` | `rand` | QPS rate limiter for source fallback protection. |
+
+The following capabilities are always compiled in (no feature flag required):
+- **DNS resolution** (`hickory-resolver`, `once_cell`): Caching and singleflight deduplication via hickory-dns.
+- **QPS rate limiter** (`rand`): Source fallback protection to prevent thundering herd on origin.
+- **Prefetch rate limiter** (`leaky-bucket`): Bandwidth throttling for background prefetch.
 
 When `backend-dragonfly-proxy` is not enabled, all SDK-related code paths are
 compiled out. The HTTP proxy path and retry logic remain functional without it.

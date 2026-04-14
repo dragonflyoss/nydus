@@ -8,7 +8,6 @@
 //! in realistic scenarios: concurrent backend request simulation, sustained
 //! throughput measurement, and interaction with the pauser module.
 
-#[cfg(feature = "backend-qps-limit")]
 mod qps_integration {
     use nydus_storage::backend::qps::QpsLimiter;
     use std::sync::atomic::{AtomicUsize, Ordering};

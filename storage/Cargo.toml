@@ -20,9 +20,9 @@ hyper = { version = "1.8.1", features = ["client"], optional = true }
 hyperlocal = { version = "0.9.1", optional = true }
 hyper-util = { version = "0.1.19", optional = true }
 http-body-util = { version = "0.1.3", optional = true }
-hickory-resolver = { version = "0.25", optional = true }
+hickory-resolver = { version = "0.25" }
 lazy_static = "1.4.0"
-leaky-bucket = { version = "0.12.1", optional = true }
+leaky-bucket = { version = "0.12.1" }
 libc = "0.2"
 log = "0.4.8"
 nix = "0.24"
@@ -56,9 +56,9 @@ nydus-utils = { version = "0.5.1", path = "../utils", features = [
     "encryption",
     "zran",
 ] }
-once_cell = { version = "1", optional = true }
+once_cell = { version = "1" }
 dragonfly-client-util = { version = "1.2", optional = true }
-rand = { version = "0.8", optional = true }
+rand = { version = "0.8" }
 
 [dev-dependencies]
 futures = "0.3"
@@ -87,9 +87,7 @@ backend-http-proxy = [
     "url",
 ]
 dedup = ["rusqlite", "r2d2", "r2d2_sqlite"]
-prefetch-rate-limit = ["leaky-bucket"]
-backend-hickory-dns = ["hickory-resolver", "once_cell", "reqwest"]
-backend-qps-limit = ["rand"]
+
 backend-dragonfly-proxy = ["dragonfly-client-util"]
 
 [package.metadata.docs.rs]
