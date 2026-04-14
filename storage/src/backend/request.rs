@@ -216,6 +216,11 @@ impl Request {
         // Inject custom headers from environment variables
         headers.extend(self.custom_headers.clone());
 
+        // Populate context for diagnostic logging
+        context.method = method.to_string();
+        context.url = url.to_string();
+        context.using_proxy = false;
+
         // If proxy is disabled for this request or no proxy is configured, go direct
         if temp_disable_proxy || context.disable_proxy || self.proxy_config.url.is_empty() {
             return self
@@ -247,6 +252,7 @@ impl Request {
                     ));
                 }
 
+                context.using_proxy = true;
                 context.using_proxy_sdk = true;
                 let priority = Some(match context.request_source {
                     RequestSource::Prefetch => proxy::HEADER_VALUE_DRAGONFLY_PRIORITY_3,
@@ -278,6 +284,7 @@ impl Request {
 
             // #2: Http proxy path
             // This runs for both pure HTTP proxy and SDK-fallback-to-HTTP paths.
+            context.using_proxy = true;
 
             // Inject Dragonfly priority headers for HTTP proxy mode.
             let priority_val = match context.request_source {
