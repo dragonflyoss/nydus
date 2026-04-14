@@ -502,8 +502,8 @@ impl Connection {
         {
             let cert_pem = std::fs::read(cert_file).map_err(|e| einval!(e))?;
             let key_pem = std::fs::read(key_file).map_err(|e| einval!(e))?;
-            let identity = reqwest::Identity::from_pkcs8_pem(&cert_pem, &key_pem)
-                .map_err(|e| einval!(e))?;
+            let identity =
+                reqwest::Identity::from_pkcs8_pem(&cert_pem, &key_pem).map_err(|e| einval!(e))?;
             cb = cb.identity(identity);
         }
 
