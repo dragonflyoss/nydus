@@ -421,6 +421,7 @@ impl Connection {
                         }
                     }
                     Err(err) => {
+                        warn!("Request proxy server failed: {:?}", err);
                         if !proxy.fallback {
                             return Err(err);
                         }
