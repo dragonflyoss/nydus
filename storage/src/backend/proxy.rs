@@ -284,6 +284,44 @@ mod tests {
     }
 
     #[test]
+    fn test_proxy_error_debug_formatting() {
+        let err = ProxyError::Common("common error".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Common"));
+        assert!(debug.contains("common error"));
+
+        let err = ProxyError::Internal("internal error".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Internal"));
+        assert!(debug.contains("internal error"));
+
+        let err = ProxyError::TooManyRequests("rate limited".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("TooManyRequests"));
+        assert!(debug.contains("rate limited"));
+
+        let err = ProxyError::Forbidden("access denied".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("Forbidden"));
+        assert!(debug.contains("access denied"));
+    }
+
+    #[test]
+    fn test_proxy_error_variant_construction() {
+        let err = ProxyError::Common("msg".to_string());
+        assert!(matches!(err, ProxyError::Common(_)));
+
+        let err = ProxyError::Internal("msg".to_string());
+        assert!(matches!(err, ProxyError::Internal(_)));
+
+        let err = ProxyError::TooManyRequests("msg".to_string());
+        assert!(matches!(err, ProxyError::TooManyRequests(_)));
+
+        let err = ProxyError::Forbidden("msg".to_string());
+        assert!(matches!(err, ProxyError::Forbidden(_)));
+    }
+
+    #[test]
     fn test_header_constants() {
         assert_eq!(HEADER_DRAGONFLY_PRIORITY, "X-Dragonfly-Priority");
         assert_eq!(HEADER_DRAGONFLY_USE_P2P, "X-Dragonfly-Use-P2P");
