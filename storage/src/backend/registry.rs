@@ -1641,4 +1641,214 @@ mod tests {
         let result = TokenResponse::from_resp(response);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_registry_error_display() {
+        let err = RegistryError::Common("something went wrong".to_string());
+        assert!(err
+            .to_string()
+            .contains("failed to access blob from registry"));
+        assert!(err.to_string().contains("something went wrong"));
+
+        let pe = url::Url::parse("::not-a-url").unwrap_err();
+        let err = RegistryError::Url("::not-a-url".to_string(), pe);
+        assert!(err.to_string().contains("failed to parse URL"));
+        assert!(err.to_string().contains("::not-a-url"));
+
+        let err = RegistryError::Request(ConnectionError::ErrorWithMsg(
+            "connection refused".to_string(),
+        ));
+        assert!(err.to_string().contains("failed to issue request"));
+        assert!(err.to_string().contains("connection refused"));
+
+        let err = RegistryError::Scheme("ftp".to_string());
+        assert!(err.to_string().contains("invalid scheme"));
+        assert!(err.to_string().contains("ftp"));
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "transport failure");
+        let err = RegistryError::Transport(io_err);
+        assert!(err.to_string().contains("network transport error"));
+        assert!(err.to_string().contains("transport failure"));
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_registry_error_proxy_display() {
+        let proxy_err = request::RequestError::Common("proxy unreachable".to_string());
+        let err = RegistryError::Proxy(proxy_err);
+        let s = err.to_string();
+        assert!(s.contains("proxy"), "expected 'proxy' in '{}' ", s);
+    }
+
+    #[test]
+    fn test_registry_error_into_backend_error() {
+        // RegistryError::Common → BackendError::Registry
+        let err: BackendError = RegistryError::Common("test".to_string()).into();
+        assert!(
+            matches!(err, BackendError::Registry(RegistryError::Common(_))),
+            "expected BackendError::Registry, got: {:?}",
+            err
+        );
+
+        // RegistryError::Request → BackendError::Registry
+        let err: BackendError =
+            RegistryError::Request(ConnectionError::ErrorWithMsg("msg".to_string())).into();
+        assert!(
+            matches!(err, BackendError::Registry(RegistryError::Request(_))),
+            "expected BackendError::Registry(Request), got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_registry_error_proxy_into_backend_error() {
+        // RegistryError::Proxy → BackendError::Request (so retry_op checks work)
+        let proxy_req_err = request::RequestError::Common("proxy error".to_string());
+        let err: BackendError = RegistryError::Proxy(proxy_req_err).into();
+        assert!(
+            matches!(err, BackendError::Request(_)),
+            "expected BackendError::Request for proxy error, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_request_err_to_registry_connection() {
+        // RequestError::Connection → RegistryError::Request preserving inner ConnectionError
+        let ce = ConnectionError::ErrorWithMsg("conn failed".to_string());
+        let result = request_err_to_registry(request::RequestError::Connection(ce));
+        match result {
+            RegistryError::Request(ConnectionError::ErrorWithMsg(msg)) => {
+                assert_eq!(msg, "conn failed");
+            }
+            other => panic!(
+                "expected RegistryError::Request(ErrorWithMsg), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_request_err_to_registry_common() {
+        // RequestError::Common → RegistryError::Request(ErrorWithMsg) containing Debug repr
+        let result =
+            request_err_to_registry(request::RequestError::Common("unknown error".to_string()));
+        match result {
+            RegistryError::Request(ConnectionError::ErrorWithMsg(msg)) => {
+                // The Debug repr of RequestError::Common("unknown error") is embedded
+                assert!(
+                    msg.contains("unknown error"),
+                    "expected debug repr in message, got: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "expected RegistryError::Request(ErrorWithMsg), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_request_err_to_registry_proxy() {
+        use crate::backend::proxy::ProxyError;
+        // RequestError::Proxy → RegistryError::Proxy preserving the original error
+        let proxy_err = request::RequestError::Proxy(ProxyError::Common("proxy down".to_string()));
+        let result = request_err_to_registry(proxy_err);
+        assert!(
+            matches!(result, RegistryError::Proxy(_)),
+            "expected RegistryError::Proxy, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_first_handle_force_success() {
+        let first = First::new();
+        let mut call_count = 0u32;
+        let result: BackendResult<u32> = first.handle_force(&mut || {
+            call_count += 1;
+            Ok(42)
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count, 1);
+    }
+
+    #[test]
+    fn test_first_handle_force_failure() {
+        let first = First::new();
+        let mut call_count = 0u32;
+        let result: BackendResult<u32> = first.handle_force(&mut || {
+            call_count += 1;
+            Err(BackendError::Registry(RegistryError::Common(
+                "forced fail".to_string(),
+            )))
+        });
+        assert!(result.is_err());
+        // The Once fires the closure once; on error it renews, then handle returns
+        // Some(Err) and unwrap_or_else doesn't call the closure again.
+        assert_eq!(call_count, 1);
+    }
+
+    #[test]
+    fn test_first_handle_force_always_executes() {
+        // Fire the Once successfully so subsequent handle() calls return None.
+        let first = First::new();
+        first.once(|| {});
+
+        // handle() would return None; handle_force falls back to calling the fn directly.
+        let mut call_count = 0u32;
+        let result: BackendResult<u32> = first.handle_force(&mut || {
+            call_count += 1;
+            Ok(99)
+        });
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(
+            call_count, 1,
+            "handle_force must always execute the closure"
+        );
+    }
+
+    #[test]
+    fn test_registry_state_fallback_http() {
+        let state = create_state(true);
+        assert_eq!(state.scheme.to_string(), "https");
+        state.fallback_http();
+        assert_eq!(state.scheme.to_string(), "http");
+
+        // Calling again on already-http state is idempotent.
+        state.fallback_http();
+        assert_eq!(state.scheme.to_string(), "http");
+    }
+
+    #[test]
+    fn test_registry_state_clear_cached_auth() {
+        let state = create_state(true);
+
+        // Set a cached auth token and a token expiry.
+        let last = state.cached_auth.get();
+        state
+            .cached_auth
+            .set(&last, "Bearer eyJhbGciOiJSUzI1NiJ9".to_string());
+        state
+            .token_expired_at
+            .store(Some(Arc::new(9_999_999_999u64)));
+
+        assert_eq!(state.cached_auth.get(), "Bearer eyJhbGciOiJSUzI1NiJ9");
+        assert!(state.token_expired_at.load().is_some());
+
+        state.clear_cached_auth();
+
+        assert_eq!(
+            state.cached_auth.get(),
+            "",
+            "cached_auth should be empty after clear"
+        );
+        assert!(
+            state.token_expired_at.load().is_none(),
+            "token_expired_at should be None after clear"
+        );
+    }
 }

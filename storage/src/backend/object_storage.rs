@@ -250,9 +250,62 @@ mod tests {
     use super::*;
     use std::io::Error as IoError;
 
+    use nydus_api::ProxyConfig;
+    use nydus_utils::metrics::BackendMetrics;
+
+    use crate::backend::connection::{Connection, ConnectionConfig};
+
     fn make_io_error(msg: &str) -> IoError {
         IoError::other(msg)
     }
+
+    // ── Minimal mock for ObjectStorageState ────────────────────────────────
+
+    #[derive(Debug)]
+    struct MockState {
+        retry: u8,
+    }
+
+    impl MockState {
+        fn new(retry: u8) -> Self {
+            MockState { retry }
+        }
+    }
+
+    impl ObjectStorageState for MockState {
+        fn url(&self, object_key: &str, _query: &[&str]) -> (String, String) {
+            let resource = format!("/test-bucket/{}", object_key);
+            let url = format!("http://test.example.com{}", resource);
+            (resource, url)
+        }
+
+        fn sign(
+            &self,
+            _verb: Method,
+            _headers: &mut HeaderMap,
+            _canonicalized_resource: &str,
+            _full_resource_url: &str,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn retry_limit(&self) -> u8 {
+            self.retry
+        }
+    }
+
+    fn make_request() -> Arc<request::Request> {
+        let config = ConnectionConfig::default();
+        let connection = Connection::new(&config).unwrap();
+        request::Request::new(
+            connection,
+            ProxyConfig::default(),
+            false,
+            "test-object-storage",
+        )
+    }
+
+    // ── ObjectStorageError display/debug/conversion tests ─────────────────
 
     #[test]
     fn test_object_storage_error_auth_display() {
@@ -279,6 +332,14 @@ mod tests {
     }
 
     #[test]
+    fn test_object_storage_error_transport_display() {
+        let err = ObjectStorageError::Transport(make_io_error("network timeout"));
+        let msg = format!("{}", err);
+        assert!(msg.contains("network communication error"));
+        assert!(msg.contains("network timeout"));
+    }
+
+    #[test]
     fn test_object_storage_error_auth_debug() {
         let err = ObjectStorageError::Auth(make_io_error("test"));
         let dbg = format!("{:?}", err);
@@ -292,14 +353,85 @@ mod tests {
         assert!(matches!(backend_err, BackendError::ObjectStorage(_)));
     }
 
+    // ── ObjectStorage construction and lifecycle ───────────────────────────
+
     #[test]
-    fn test_object_storage_get_reader_no_metrics_returns_error() {
-        // Minimal test: ObjectStorage with metrics=None returns Unsupported from get_reader
-        // We can't easily construct ObjectStorage without a real connection,
-        // but we can test the DisplayImpl chain for errors
-        let err = ObjectStorageError::ConstructHeader("range=abc".to_string());
-        let as_backend: BackendError = err.into();
-        let msg = format!("{:?}", as_backend);
-        assert!(!msg.is_empty());
+    fn test_new_object_storage_metrics_and_shutdown() {
+        let metrics = BackendMetrics::new("obj-storage-lifecycle", "oss");
+        let storage = ObjectStorage::new_object_storage(
+            make_request(),
+            Arc::new(MockState::new(5)),
+            Some(metrics),
+            Some("lifecycle-id".to_string()),
+        );
+
+        // metrics() must return the same object on repeated calls
+        let m1 = storage.metrics() as *const BackendMetrics;
+        let m2 = storage.metrics() as *const BackendMetrics;
+        assert_eq!(
+            m1, m2,
+            "metrics() must return the same BackendMetrics instance"
+        );
+
+        // shutdown() must not panic
+        storage.shutdown();
+    }
+
+    #[test]
+    fn test_get_reader_with_metrics_returns_ok() {
+        let metrics = BackendMetrics::new("obj-storage-get-reader-ok", "oss");
+        let storage = ObjectStorage::new_object_storage(
+            make_request(),
+            Arc::new(MockState::new(3)),
+            Some(metrics),
+            Some("get-reader-ok-id".to_string()),
+        );
+
+        let result = storage.get_reader("test-blob-abc");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_get_reader_without_metrics_returns_error() {
+        let storage: ObjectStorage<MockState> = ObjectStorage::new_object_storage(
+            make_request(),
+            Arc::new(MockState::new(3)),
+            None,
+            None,
+        );
+
+        let result = storage.get_reader("any-blob");
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
+
+    // ── ObjectStorageReader behaviour ─────────────────────────────────────
+
+    #[test]
+    fn test_reader_retry_limit() {
+        let metrics = BackendMetrics::new("obj-storage-retry-limit", "oss");
+        let storage = ObjectStorage::new_object_storage(
+            make_request(),
+            Arc::new(MockState::new(5)),
+            Some(metrics),
+            Some("retry-limit-id".to_string()),
+        );
+
+        let reader = storage.get_reader("blob-retry").unwrap();
+        assert_eq!(reader.retry_limit(), 5);
+    }
+
+    #[test]
+    fn test_reader_metrics_same_as_storage() {
+        let metrics = BackendMetrics::new("obj-storage-reader-metrics", "oss");
+        let storage = ObjectStorage::new_object_storage(
+            make_request(),
+            Arc::new(MockState::new(2)),
+            Some(metrics),
+            Some("reader-metrics-id".to_string()),
+        );
+
+        let reader = storage.get_reader("blob-metrics").unwrap();
+        // The reader must expose the same BackendMetrics instance as the storage backend.
+        assert!(std::ptr::eq(reader.metrics(), storage.metrics()));
     }
 }
