@@ -25,14 +25,12 @@ use reqwest::{
 use nydus_api::{HttpProxyConfig, OssConfig, ProxyConfig, RegistryConfig, S3Config};
 use url::ParseError;
 
-#[cfg(feature = "backend-hickory-dns")]
 use crate::backend::hickory::HickoryDnsResolver;
 
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
 const RATE_LIMITED_LOG_TIME: u8 = 2;
 
-#[cfg(feature = "backend-hickory-dns")]
 lazy_static::lazy_static! {
     static ref HICKORY_DNS_RESOLVER: Arc<HickoryDnsResolver> =
         Arc::new(HickoryDnsResolver::default());
@@ -480,10 +478,7 @@ impl Connection {
             // https://github.com/containerd/containerd/blob/main/core/remotes/docker/resolver.go#L596
             .redirect(Policy::limited(10));
 
-        #[cfg(feature = "backend-hickory-dns")]
-        {
-            cb = cb.dns_resolver(HICKORY_DNS_RESOLVER.clone());
-        }
+        cb = cb.dns_resolver(HICKORY_DNS_RESOLVER.clone());
 
         if config.skip_verify {
             cb = cb.danger_accept_invalid_certs(true);

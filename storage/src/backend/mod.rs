@@ -47,12 +47,16 @@ pub mod registry;
 #[cfg(feature = "backend-s3")]
 pub mod s3;
 
-#[cfg(feature = "backend-hickory-dns")]
+#[cfg(any(
+    feature = "backend-oss",
+    feature = "backend-registry",
+    feature = "backend-s3",
+    feature = "backend-http-proxy",
+))]
 pub mod hickory;
 pub mod pauser;
 #[cfg(feature = "backend-dragonfly-proxy")]
 pub mod proxy;
-#[cfg(feature = "backend-qps-limit")]
 pub mod qps;
 #[cfg(any(
     feature = "backend-oss",
@@ -101,7 +105,6 @@ pub struct BackendContext {
     pub error: Option<String>,
 }
 
-#[cfg(feature = "backend-qps-limit")]
 lazy_static::lazy_static! {
     /// Global QPS limiter for source backend fallback, limited to 1 QPS.
     pub static ref BACKEND_QPS_LIMITER: self::qps::QpsLimiter = self::qps::QpsLimiter::new(1.0);
@@ -232,7 +235,6 @@ impl BackendError {
     }
 }
 
-#[cfg(feature = "backend-qps-limit")]
 fn random_duration(min_millis: u64, max_millis: u64) -> Duration {
     use rand::Rng;
     let mut rng = rand::thread_rng();
@@ -315,12 +317,9 @@ where
                             retry_count
                         );
                         context.disable_proxy = true;
-                        #[cfg(feature = "backend-qps-limit")]
-                        {
-                            let limited = BACKEND_QPS_LIMITER.acquire();
-                            if limited {
-                                warn!("source backend request rate-limited by QPS limiter");
-                            }
+                        let limited = BACKEND_QPS_LIMITER.acquire();
+                        if limited {
+                            warn!("source backend request rate-limited by QPS limiter");
                         }
                     } else {
                         context.disable_proxy = false;

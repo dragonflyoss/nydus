@@ -86,7 +86,6 @@ pub(crate) struct AsyncWorkerMgr {
     prefetch_delayed: AtomicU64,
     prefetch_inflight: AtomicU32,
     prefetch_consumed: AtomicUsize,
-    #[cfg(feature = "prefetch-rate-limit")]
     prefetch_limiter: Option<Arc<leaky_bucket::RateLimiter>>,
 }
 
@@ -96,7 +95,6 @@ impl AsyncWorkerMgr {
         metrics: Arc<BlobcacheMetrics>,
         prefetch_config: Arc<AsyncPrefetchConfig>,
     ) -> Result<Self> {
-        #[cfg(feature = "prefetch-rate-limit")]
         let prefetch_limiter = match prefetch_config.bandwidth_limit {
             0 => None,
             v => {
@@ -128,7 +126,6 @@ impl AsyncWorkerMgr {
             prefetch_delayed: AtomicU64::new(0),
             prefetch_inflight: AtomicU32::new(0),
             prefetch_consumed: AtomicUsize::new(0),
-            #[cfg(feature = "prefetch-rate-limit")]
             prefetch_limiter,
         })
     }
@@ -295,7 +292,6 @@ impl AsyncWorkerMgr {
     }
 
     async fn handle_prefetch_rate_limit(&self, _msg: &AsyncPrefetchMessage) {
-        #[cfg(feature = "prefetch-rate-limit")]
         // Allocate network bandwidth budget
         if let Some(limiter) = &self.prefetch_limiter {
             let size = match _msg {
@@ -529,7 +525,6 @@ mod tests {
         assert_eq!(mgr.prefetch_consumed.load(Ordering::Acquire), 768);
     }
 
-    #[cfg(feature = "prefetch-rate-limit")]
     #[test]
     fn test_worker_mgr_rate_limiter() {
         let tmpdir = TempDir::new().unwrap();
