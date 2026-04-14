@@ -37,10 +37,7 @@ jobs:
         uses: dsherret/rust-toolchain-file@v1
 
       - name: Install protoc
-        run: |
-          curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v29.6/protoc-29.6-linux-x86_64.zip
-          sudo unzip -o protoc-29.6-linux-x86_64.zip -d /usr/local
-          rm protoc-29.6-linux-x86_64.zip
+        run: bash misc/install-protoc.sh
 
       - name: Build Nydus
         run: make release
