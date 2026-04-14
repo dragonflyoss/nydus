@@ -33,7 +33,7 @@
   "iostats_files": false,
   "enable_xattr": true,
   "fs_prefetch": {
-    "enable": true,
+    "enable": false,
     "threads_count": 10,
     "merging_size": 131072,
     "bandwidth_rate": 1048576
