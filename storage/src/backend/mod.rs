@@ -17,6 +17,7 @@
 use std::fmt;
 use std::io::Read;
 use std::thread::sleep;
+use std::time::SystemTime;
 use std::{sync::Arc, time::Duration};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
@@ -95,6 +96,12 @@ impl fmt::Display for RequestSource {
 pub struct BackendContext {
     /// Whether this request is on-demand or prefetch.
     pub request_source: RequestSource,
+    /// HTTP method of the request (e.g., "GET").
+    pub method: String,
+    /// Request URL.
+    pub url: String,
+    /// Whether the current attempt is going through a proxy.
+    pub using_proxy: bool,
     /// Set to true to bypass the proxy and request directly from source.
     pub disable_proxy: bool,
     /// Set to true to disable Dragonfly SDK mode and fall back to HTTP proxy.
@@ -270,12 +277,38 @@ where
 
         match ret {
             Ok(val) => {
+                if let Ok(duration) = SystemTime::elapsed(&begin_time) {
+                    let high_latency_ms: u128 = if data_len > (4 << 20) { 1000 } else { 250 };
+                    if duration.as_millis() >= high_latency_ms {
+                        warn!(
+                            "backend request: {} {}, chunk: {} bytes, proxy: {}, proxy sdk: {}, takes {:?}: slow request",
+                            context.method,
+                            context.url,
+                            data_len,
+                            context.using_proxy,
+                            context.using_proxy_sdk,
+                            duration,
+                        );
+                    }
+                }
                 context.error = None;
                 metrics.end(&begin_time, data_len, false);
                 return Ok(val);
             }
             Err(err) => {
                 context.error = Some(format!("{:?}", err));
+                if let Ok(duration) = SystemTime::elapsed(&begin_time) {
+                    error!(
+                        "backend request: {} {}, chunk: {} bytes, proxy: {}, proxy sdk: {}, takes {:?}, error: {}",
+                        context.method,
+                        context.url,
+                        data_len,
+                        context.using_proxy,
+                        context.using_proxy_sdk,
+                        duration,
+                        context.error.as_deref().unwrap_or("unknown"),
+                    );
+                }
                 metrics.end(&begin_time, data_len, true);
 
                 let proxy_forbidden = err.is_proxy_forbidden();
