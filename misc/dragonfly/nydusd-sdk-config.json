@@ -24,7 +24,7 @@
       "type": "blobcache",
       "config": {
         "compressed": false,
-        "work_dir": "/tmp/nydus-test/cache/"
+        "work_dir": "/tmp/nydus-sdk-test/cache/"
       }
     }
   },
