@@ -12,7 +12,6 @@
         "retry_limit": 2,
         "proxy": {
           "url": "http://127.0.0.1:4001",
-          "ping_url": "http://127.0.0.1:4001",
           "fallback": true,
           "check_interval": 300,
           "use_http": true
@@ -32,7 +31,7 @@
   "iostats_files": false,
   "enable_xattr": true,
   "fs_prefetch": {
-    "enable": true,
+    "enable": false,
     "threads_count": 10,
     "merging_size": 131072,
     "bandwidth_rate": 1048576
