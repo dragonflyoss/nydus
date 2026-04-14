@@ -62,12 +62,23 @@ func (c *CasTestSuite) testCasTables(t *testing.T, enablePrefetch bool) {
 		require.NoError(t, err)
 		var count int
 		query := fmt.Sprintf("SELECT COUNT(*) FROM %s;", expectedTable)
-		err = db.QueryRow(query).Scan(&count)
-		require.NoError(t, err)
 		if expectedTable == "Blobs" {
+			err = db.QueryRow(query).Scan(&count)
+			require.NoError(t, err)
 			require.Equal(t, 1, count)
 		} else {
-			require.Equal(t, 13, count)
+			// Chunk dedup DB writes may lag behind reads; poll until stable.
+			expected := 13
+			for i := 0; i < 10; i++ {
+				err = db.QueryRow(query).Scan(&count)
+				require.NoError(t, err)
+				if count >= expected {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+				_, _ = db.Exec("PRAGMA wal_checkpoint(FULL)")
+			}
+			require.Equal(t, expected, count)
 		}
 	}
 }
