@@ -475,9 +475,10 @@ impl Connection {
         let mut cb = Client::builder()
             .timeout(timeout)
             .connect_timeout(connect_timeout)
-            // same number of redirects as containerd
-            // https://github.com/containerd/containerd/blob/main/core/remotes/docker/resolver.go#L596
-            .redirect(Policy::limited(10));
+            // Disable automatic redirect following so that registry.rs can
+            // cache 307 redirect URLs (cached_redirect) and skip the registry
+            // round-trip on subsequent chunk reads from the same blob.
+            .redirect(Policy::none());
 
         cb = cb.dns_resolver(HICKORY_DNS_RESOLVER.clone());
 
@@ -487,6 +488,11 @@ impl Connection {
 
         if !proxy.is_empty() {
             cb = cb.proxy(reqwest::Proxy::all(proxy).map_err(|e| einval!(e))?)
+        } else {
+            // Explicitly disable system proxy (HTTP_PROXY/HTTPS_PROXY env vars)
+            // so that the direct client truly bypasses any proxy, especially when
+            // retry_op() sets disable_proxy=true for fallback to origin.
+            cb = cb.no_proxy()
         }
 
         cb.build().map_err(|e| einval!(e))
