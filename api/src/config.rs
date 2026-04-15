@@ -577,6 +577,9 @@ pub struct HttpProxyConfig {
     /// Skip SSL certificate validation for HTTPS scheme.
     #[serde(default)]
     pub skip_verify: bool,
+    /// Paths to PEM-encoded CA certificate files to trust in addition to the system CA store.
+    #[serde(default)]
+    pub ca_cert_files: Vec<String>,
     /// Drop the read request once http request timeout, in seconds.
     #[serde(default = "default_http_timeout")]
     pub timeout: u32,
