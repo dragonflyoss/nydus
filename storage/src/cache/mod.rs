@@ -26,7 +26,7 @@ use nydus_utils::compress::zlib_random::ZranDecoder;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::{compress, digest};
 
-use crate::backend::{BlobBackend, BlobReader};
+use crate::backend::{BlobBackend, BlobReader, RequestSource};
 use crate::cache::state::ChunkMap;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject, BlobPrefetchRequest,
@@ -261,9 +261,14 @@ pub trait BlobCache: Send + Sync {
         // Read requested data from the backend by altogether.
         let mut c_buf = alloc_buf(blob_size);
         let start = Instant::now();
+        let source = if prefetch {
+            RequestSource::Prefetch
+        } else {
+            RequestSource::OnDemand
+        };
         let nr_read = self
             .reader()
-            .read(c_buf.as_mut_slice(), blob_offset)
+            .read_with_source(c_buf.as_mut_slice(), blob_offset, source)
             .map_err(|e| eio!(e))?;
         if nr_read != blob_size {
             return Err(eio!(format!(

@@ -421,7 +421,24 @@ pub trait BlobReader: Send + Sync {
     /// It will try `BlobBackend::retry_limit()` times at most and return the first successfully
     /// read data.
     fn read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        let mut ctx = BackendContext::default();
+        self.read_with_source(buf, offset, RequestSource::OnDemand)
+    }
+
+    /// Read with an explicit request source (on-demand vs prefetch).
+    ///
+    /// The request source propagates to `BackendContext.request_source`, which
+    /// controls the Dragonfly priority header: prefetch gets priority 3 (low),
+    /// on-demand gets priority 6 (high).
+    fn read_with_source(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        source: RequestSource,
+    ) -> BackendResult<usize> {
+        let mut ctx = BackendContext {
+            request_source: source,
+            ..Default::default()
+        };
         let buf_len = buf.len();
         let strict = self.expect_exact_read();
         retry_op(self.metrics(), &mut ctx, buf_len, |ctx| {
@@ -828,5 +845,31 @@ mod tests {
         let sz = reader.try_read_ctx(&mut buf, 4, Some(&mut ctx)).unwrap();
         assert_eq!(sz, 4);
         assert_eq!(buf, vec![5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn test_read_with_source_propagates_request_source() {
+        let data = vec![10u8; 16];
+        let reader = MockBlobReader::new(data);
+
+        // read() should default to OnDemand
+        let mut buf = vec![0u8; 4];
+        let sz = reader.read(&mut buf, 0).unwrap();
+        assert_eq!(sz, 4);
+
+        // read_with_source() with Prefetch
+        let mut buf = vec![0u8; 4];
+        let sz = reader
+            .read_with_source(&mut buf, 0, RequestSource::Prefetch)
+            .unwrap();
+        assert_eq!(sz, 4);
+        assert_eq!(buf, vec![10, 10, 10, 10]);
+
+        // read_with_source() with OnDemand
+        let mut buf = vec![0u8; 8];
+        let sz = reader
+            .read_with_source(&mut buf, 0, RequestSource::OnDemand)
+            .unwrap();
+        assert_eq!(sz, 8);
     }
 }
