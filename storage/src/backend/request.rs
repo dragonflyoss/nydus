@@ -1208,4 +1208,96 @@ mod tests {
         assert!(matches!(result, Err(RequestError::Connection(_))));
         assert!(!ctx.using_proxy_sdk);
     }
+
+    // --- Response::HTTP variant tests ---
+
+    #[test]
+    fn test_http_response_status() {
+        let resp = Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::NOT_FOUND)
+                .body("not found".to_string())
+                .unwrap(),
+        ));
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_http_response_headers() {
+        let resp = Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .header("x-test-header", "test-value")
+                .body("".to_string())
+                .unwrap(),
+        ));
+        assert_eq!(resp.headers().get("x-test-header").unwrap(), "test-value");
+    }
+
+    #[test]
+    fn test_http_response_text() {
+        let resp = Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .body("hello from registry".to_string())
+                .unwrap(),
+        ));
+        let text = resp.text().unwrap();
+        assert_eq!(text, "hello from registry");
+    }
+
+    #[test]
+    fn test_http_response_copy_to() {
+        let body = "copy this data";
+        let resp = Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .body(body.to_string())
+                .unwrap(),
+        ));
+        let mut buf = vec![0u8; 64];
+        let n = resp.copy_to(&mut buf).unwrap();
+        assert_eq!(n as usize, body.len());
+        assert_eq!(&buf[..body.len()], body.as_bytes());
+    }
+
+    #[test]
+    fn test_http_response_reader() {
+        let body = "reader content";
+        let resp = Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .body(body.to_string())
+                .unwrap(),
+        ));
+        let mut reader = resp.reader();
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), body);
+    }
+
+    #[test]
+    fn test_request_error_debug() {
+        let err = RequestError::Common("test error".to_string());
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("test error"));
+
+        let conn_err =
+            RequestError::Connection(ConnectionError::ErrorWithMsg("conn fail".to_string()));
+        let debug = format!("{:?}", conn_err);
+        assert!(debug.contains("conn fail"));
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_request_error_proxy_debug() {
+        let err = RequestError::Proxy(proxy::ProxyError::TooManyRequests("rate limited".into()));
+        let debug = format!("{:?}", err);
+        assert!(debug.contains("rate limited"));
+    }
+
+    #[test]
+    fn test_http_response_empty_body() {
+        let resp = Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new().body(String::new()).unwrap(),
+        ));
+        let text = resp.text().unwrap();
+        assert!(text.is_empty());
+    }
 }

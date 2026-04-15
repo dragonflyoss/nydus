@@ -1870,6 +1870,232 @@ mod tests {
     }
 
     #[test]
+    fn test_get_and_set_config_auth() {
+        let id = "/test-get-set-config-auth";
+        let state = RegistryState {
+            id: id.to_string(),
+            scheme: Scheme::new(true),
+            host: "example.com".to_string(),
+            repo: "library/test".to_string(),
+            retry_limit: 5,
+            skip_verify: false,
+            blob_url_scheme: String::new(),
+            blob_redirected_host: String::new(),
+            cached_auth_using_http_get: Default::default(),
+            cached_auth: Default::default(),
+            cached_config_auth: Default::default(),
+            cached_redirect: Default::default(),
+            token_expired_at: ArcSwapOption::new(None),
+            cached_bearer_auth: ArcSwapOption::new(None),
+        };
+
+        // Initially empty
+        assert_eq!(state.get_config_auth(), "");
+
+        // Set a value
+        state.set_config_auth(Some("dGVzdDpwYXNz".to_string()));
+        assert_eq!(state.get_config_auth(), "dGVzdDpwYXNz");
+
+        // set_config_auth(None) is a no-op
+        state.set_config_auth(None);
+        assert_eq!(state.get_config_auth(), "dGVzdDpwYXNz");
+
+        // Overwrite
+        state.set_config_auth(Some("bmV3OnZhbHVl".to_string()));
+        assert_eq!(state.get_config_auth(), "bmV3OnZhbHVl");
+
+        nydus_utils::config::remove(id, &nydus_utils::config::Keys::RegistryAuth);
+    }
+
+    #[test]
+    fn test_needs_fallback_http_connection_refused() {
+        let state = create_state_with_skip_verify(true, true);
+        assert!(state.needs_fallback_http(&nested_error("connection refused")));
+    }
+
+    #[test]
+    fn test_needs_fallback_http_non_tls_error_no_fallback() {
+        let state = create_state_with_skip_verify(true, true);
+        assert!(!state.needs_fallback_http(&nested_error("timeout")));
+        assert!(!state.needs_fallback_http(&nested_error("dns resolution failed")));
+    }
+
+    #[test]
+    fn test_needs_fallback_http_single_level_error() {
+        // Error with only one level of nesting (no source.source) returns false
+        let err = NestedErr {
+            msg: "wrong version number",
+            source: Some(Box::new(NestedErr {
+                msg: "no inner source",
+                source: None,
+            })),
+        };
+        let state = create_state_with_skip_verify(true, true);
+        assert!(!state.needs_fallback_http(&err));
+    }
+
+    #[test]
+    fn test_needs_fallback_http_no_source() {
+        let err = NestedErr {
+            msg: "no source at all",
+            source: None,
+        };
+        let state = create_state_with_skip_verify(true, true);
+        assert!(!state.needs_fallback_http(&err));
+    }
+
+    #[cfg(feature = "backend-registry")]
+    #[test]
+    fn test_respond_catch_status_disabled_passes_error_status() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body("server error".to_string())
+                .unwrap(),
+        ));
+        // catch_status=false, so even 500 is returned as Ok
+        let result = respond(response, false);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[cfg(feature = "backend-registry")]
+    #[test]
+    fn test_token_response_from_resp_invalid_json() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .body("not valid json {{{{".to_string())
+                .unwrap(),
+        ));
+        let result = TokenResponse::from_resp(response);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_request_err_to_registry_other_error() {
+        let other_err = request::RequestError::Common("some other error".to_string());
+        let result = request_err_to_registry(other_err);
+        assert!(matches!(
+            result,
+            RegistryError::Request(ConnectionError::ErrorWithMsg(msg))
+                if msg.contains("some other error")
+        ));
+    }
+
+    #[test]
+    fn test_hash_cache_remove_nonexistent() {
+        let cache: HashCache<String> = HashCache::new();
+        // Removing a key that doesn't exist should not panic
+        cache.remove("nonexistent");
+        assert_eq!(cache.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_cache_set_skips_when_last_equals_current() {
+        let cache = Cache::new("initial".to_owned());
+        // set() is a no-op when last == current (dedup guard)
+        cache.set("same_value", "same_value".to_owned());
+        assert_eq!(cache.get(), "initial");
+    }
+
+    #[test]
+    fn test_state_url_with_query() {
+        let state = create_state(true);
+        let url = state.url("/blobs/sha256:abc", &["scope=read"]).unwrap();
+        assert!(url.contains("scope=read"));
+        assert!(url.contains("/v2/library/test/blobs/sha256:abc"));
+    }
+
+    #[test]
+    fn test_state_url_with_multiple_queries() {
+        let state = create_state(true);
+        let url = state.url("/tags/list", &["n=100", "last=latest"]).unwrap();
+        assert!(url.contains("n=100"));
+        assert!(url.contains("last=latest"));
+        assert!(url.contains("&"));
+    }
+
+    #[test]
+    fn test_parse_auth_basic_with_realm() {
+        let hdr = HeaderValue::from_str(r#"Basic realm="https://registry.example.com""#).unwrap();
+        let auth = RegistryState::parse_auth(&hdr);
+        assert!(matches!(
+            auth,
+            Some(Auth::Basic(b)) if b.realm == "https://registry.example.com"
+        ));
+    }
+
+    #[test]
+    fn test_parse_auth_bearer_missing_service() {
+        let hdr =
+            HeaderValue::from_str(r#"Bearer realm="https://auth.example.com/token""#).unwrap();
+        let auth = RegistryState::parse_auth(&hdr);
+        assert!(auth.is_none(), "Bearer without service should return None");
+    }
+
+    #[test]
+    fn test_parse_auth_bearer_no_scope() {
+        let hdr = HeaderValue::from_str(
+            r#"Bearer realm="https://auth.example.com/token",service="example.com""#,
+        )
+        .unwrap();
+        let auth = RegistryState::parse_auth(&hdr);
+        assert!(matches!(
+            auth,
+            Some(Auth::Bearer(b)) if b.scope.is_empty() && b.realm == "https://auth.example.com/token"
+        ));
+    }
+
+    #[test]
+    fn test_parse_auth_unknown_scheme() {
+        let hdr = HeaderValue::from_str(r#"Digest realm="example.com""#).unwrap();
+        let auth = RegistryState::parse_auth(&hdr);
+        assert!(auth.is_none());
+    }
+
+    #[test]
+    fn test_first_renew_allows_re_execution() {
+        let first = First::new();
+        let mut count = 0u32;
+        first.once(|| count += 1);
+        assert_eq!(count, 1);
+
+        // Without renew, once is a no-op
+        first.once(|| count += 1);
+        assert_eq!(count, 1);
+
+        // After renew, once executes again
+        first.renew();
+        first.once(|| count += 1);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_first_handle_error_allows_retry() {
+        let first = First::new();
+        let mut attempts = 0u32;
+
+        // First handle() call fails — error triggers renew() inside once()
+        let result: Option<BackendResult<u32>> = first.handle(&mut || {
+            attempts += 1;
+            Err(BackendError::Registry(RegistryError::Common(
+                "fail".to_string(),
+            )))
+        });
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+        assert_eq!(attempts, 1);
+
+        // After error+renew, a second handle() call can execute again
+        let result2: Option<BackendResult<u32>> = first.handle(&mut || {
+            attempts += 1;
+            Ok(42)
+        });
+        assert_eq!(result2.unwrap().unwrap(), 42);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
     fn test_registry_state_clear_cached_auth() {
         let state = create_state(true);
 
