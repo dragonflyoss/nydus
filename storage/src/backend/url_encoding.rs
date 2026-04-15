@@ -142,3 +142,50 @@ fn to_hex_digit(digit: u8) -> u8 {
         10..=255 => b'A' - 10 + digit,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    #[test]
+    fn test_encode_borrows_safe_ascii() {
+        let encoded = encode("AZaz09-_.~");
+
+        assert!(matches!(encoded, Cow::Borrowed("AZaz09-_.~")));
+    }
+
+    #[test]
+    fn test_encode_percent_encodes_reserved_characters() {
+        assert_eq!(encode("hello world/?"), "hello%20world%2F%3F");
+        assert_eq!(encode("email@example.com"), "email%40example.com");
+    }
+
+    #[test]
+    fn test_encode_binary_percent_encodes_non_utf8_bytes() {
+        assert_eq!(encode_binary(&[0xff, b' ', 0x00]).as_ref(), "%FF%20%00");
+    }
+
+    #[test]
+    fn test_encoded_helpers_render_consistently() {
+        let encoded = Encoded::str("dir name/file");
+
+        assert_eq!(encoded.to_str().as_ref(), "dir%20name%2Ffile");
+        assert_eq!(encoded.to_string(), "dir%20name%2Ffile");
+        assert_eq!(format!("{}", encoded), "dir%20name%2Ffile");
+    }
+
+    #[test]
+    fn test_encoded_append_and_write() {
+        let encoded = Encoded::new("blob digest:sha256");
+        let mut rendered = String::from("prefix=");
+        let mut writer = Vec::new();
+
+        encoded.append_to(&mut rendered);
+        encoded.write(&mut writer).unwrap();
+
+        assert_eq!(rendered, "prefix=blob%20digest%3Asha256");
+        assert_eq!(String::from_utf8(writer).unwrap(), "blob%20digest%3Asha256");
+    }
+}
