@@ -223,6 +223,13 @@ impl Request {
 
         // If proxy is disabled for this request or no proxy is configured, go direct
         if temp_disable_proxy || context.disable_proxy || self.proxy_config.url.is_empty() {
+            trace!(
+                "request path: DIRECT (temp_disable={}, ctx_disable={}, no_proxy={}), url={}",
+                temp_disable_proxy,
+                context.disable_proxy,
+                self.proxy_config.url.is_empty(),
+                url,
+            );
             return self
                 .connection
                 .call(method, url, query, data, headers, catch_status)
@@ -254,6 +261,11 @@ impl Request {
 
                 context.using_proxy = true;
                 context.using_proxy_sdk = true;
+                trace!(
+                    "request path: SDK_PROXY, endpoint={}, url={}",
+                    endpoint,
+                    url,
+                );
                 let priority = Some(match context.request_source {
                     RequestSource::Prefetch => proxy::HEADER_VALUE_DRAGONFLY_PRIORITY_3,
                     RequestSource::OnDemand => proxy::HEADER_VALUE_DRAGONFLY_PRIORITY_6,
@@ -285,6 +297,11 @@ impl Request {
             // #2: Http proxy path
             // This runs for both pure HTTP proxy and SDK-fallback-to-HTTP paths.
             context.using_proxy = true;
+            trace!(
+                "request path: HTTP_PROXY, proxy_url={}, url={}",
+                self.proxy_config.url,
+                url,
+            );
 
             // Inject Dragonfly priority headers for HTTP proxy mode.
             let priority_val = match context.request_source {

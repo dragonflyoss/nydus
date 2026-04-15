@@ -920,6 +920,11 @@ impl RegistryReader {
                         .map_err(request_err_to_registry);
                     match resp_ret {
                         Ok(_resp) => {
+                            trace!(
+                                "redirect cache for blob={}, status={}",
+                                self.blob_id,
+                                status,
+                            );
                             resp = _resp;
                             self.state
                                 .cached_redirect
