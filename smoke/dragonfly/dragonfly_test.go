@@ -17,12 +17,12 @@ import (
 
 // testEnv holds all paths and processes for a Dragonfly E2E test run.
 type testEnv struct {
-	Dragonfly     *DragonflyEnv
-	Nydusd        *NydusdInstance
-	MountDir      string
-	CacheDir      string
+	Dragonfly         *DragonflyEnv
+	Nydusd            *NydusdInstance
+	MountDir          string
+	CacheDir          string
 	DragonflyCacheDir string
-	Mode          string // sdk-proxy, sdk-proxy-strict, http-proxy, http-proxy-strict
+	Mode              string // sdk-proxy, sdk-proxy-strict, http-proxy, http-proxy-strict
 }
 
 // setupTestEnv reads environment variables and starts all services.
@@ -130,34 +130,45 @@ func TestDragonflyE2E(t *testing.T) {
 	})
 
 	t.Run("BinaryFileRead", func(t *testing.T) {
-		// Find a shared library or binary
-		files := FindFiles(env.MountDir, 4, 100)
-		var binary string
+		// Read all files under /usr to exercise digest validation broadly.
+		// blob cache validate is enabled in dragonfly E2E nydusd configs.
+		usrDir := filepath.Join(env.MountDir, "usr")
+		logBefore := env.Nydusd.LogLineCount(t)
+
+		files := FindFiles(usrDir, 5, 50)
+		require.Greater(t, len(files), 0, "should find files under /usr")
+
+		var totalBytes int64
+		var readErrors []string
 		for _, f := range files {
-			if strings.HasSuffix(f, ".so") || strings.Contains(f, ".so.") {
-				binary = f
-				break
+			info, err := os.Stat(f)
+			if err != nil || info.IsDir() {
+				continue
 			}
-		}
-		if binary == "" {
-			// Try executables under /usr
-			usrFiles := FindFiles(filepath.Join(env.MountDir, "usr"), 3, 50)
-			for _, f := range usrFiles {
-				info, err := os.Stat(f)
-				if err == nil && info.Mode()&0111 != 0 && info.Size() > 0 {
-					binary = f
-					break
-				}
+			data, err := os.ReadFile(f)
+			if err != nil {
+				rel, _ := filepath.Rel(env.MountDir, f)
+				readErrors = append(readErrors, rel+": "+err.Error())
+				continue
 			}
-		}
-		if binary == "" {
-			t.Skip("no binary files found in image")
+			totalBytes += int64(len(data))
 		}
 
-		info, err := os.Stat(binary)
-		require.NoError(t, err)
-		assert.Greater(t, info.Size(), int64(0), "binary should have non-zero size")
-		t.Logf("binary: %s (%d bytes)", binary, info.Size())
+		t.Logf("read %d files under /usr, %d bytes total", len(files), totalBytes)
+
+		// Check nydusd logs for digest validation errors
+		newLogs := env.Nydusd.LogSince(t, logBefore)
+		assert.NotContains(t, strings.ToLower(newLogs), "data digest value doesn't match",
+			"nydusd should not report digest mismatch errors")
+		assert.NotContains(t, strings.ToLower(newLogs), "data digest value doesn't match",
+			"nydusd should not report digest validation errors")
+
+		if len(readErrors) > 0 {
+			t.Logf("read errors (%d):\n  %s", len(readErrors),
+				strings.Join(readErrors, "\n  "))
+		}
+		assert.Empty(t, readErrors,
+			"all files under /usr should be readable without digest errors")
 	})
 
 	t.Run("DirectoryTraversal", func(t *testing.T) {
