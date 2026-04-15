@@ -21,7 +21,7 @@ use std::time::SystemTime;
 use std::{sync::Arc, time::Duration};
 
 use fuse_backend_rs::file_buf::FileVolatileSlice;
-use nydus_utils::metrics::BackendMetrics;
+use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
 
 use crate::utils::{alloc_buf, copyv};
 use crate::StorageError;
@@ -368,6 +368,11 @@ where
                         }
                     }
                 } else {
+                    ERROR_HOLDER
+                        .lock()
+                        .unwrap()
+                        .push(&format!("{:?}", err))
+                        .unwrap_or_else(|_| error!("Failed when try to hold error"));
                     break Err(err);
                 }
             }
