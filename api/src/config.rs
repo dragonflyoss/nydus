@@ -611,14 +611,6 @@ pub struct RegistryConfig {
     /// Paths to PEM-encoded CA certificate files to trust in addition to the system CA store.
     #[serde(default)]
     pub ca_cert_files: Vec<String>,
-    /// Path to a PEM-encoded client certificate file for mTLS authentication.
-    /// Must be used together with `client_key_file`.
-    #[serde(default)]
-    pub client_cert_file: Option<String>,
-    /// Path to a PEM-encoded private key file for mTLS authentication.
-    /// Must be used together with `client_cert_file`.
-    #[serde(default)]
-    pub client_key_file: Option<String>,
     /// Drop the read request once http request timeout, in seconds.
     #[serde(default = "default_http_timeout")]
     pub timeout: u32,
