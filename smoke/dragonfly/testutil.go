@@ -413,7 +413,7 @@ func FindFiles(root string, maxDepth int, limit int) []string {
 			return filepath.SkipDir
 		}
 		result = append(result, path)
-		if len(result) >= limit {
+		if limit > 0 && len(result) >= limit {
 			return filepath.SkipAll
 		}
 		return nil

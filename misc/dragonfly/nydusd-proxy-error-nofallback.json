@@ -20,6 +20,7 @@
     },
     "cache": {
       "type": "blobcache",
+      "validate": true,
       "config": {
         "compressed": false,
         "work_dir": "/tmp/nydus-proxy-error-nofallback-test/cache/"
@@ -27,7 +28,7 @@
     }
   },
   "mode": "direct",
-  "digest_validate": false,
+  "digest_validate": true,
   "iostats_files": false,
   "enable_xattr": true,
   "fs_prefetch": {
