@@ -403,6 +403,11 @@ impl Connection {
                     }
                 }
 
+                debug!(
+                    "connection: routing via PROXY (fallback={}), url={} -> {}",
+                    proxy.fallback, url, replaced_url,
+                );
+
                 let result = self.call_inner(
                     &proxy.client,
                     method.clone(),
@@ -416,6 +421,11 @@ impl Connection {
 
                 match result {
                     Ok(resp) => {
+                        debug!(
+                            "connection: proxy returned status={}, fallback={}",
+                            resp.status(),
+                            proxy.fallback,
+                        );
                         if !proxy.fallback || resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
                             return Ok(resp);
                         }
@@ -448,6 +458,10 @@ impl Connection {
             }
         }
 
+        debug!(
+            "connection: routing DIRECT (no proxy or fallback), url={}",
+            url
+        );
         self.call_inner(
             &self.client,
             method,
