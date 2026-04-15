@@ -248,12 +248,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Error as IoError;
+    use std::io::{Error as IoError, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
 
     use nydus_api::ProxyConfig;
     use nydus_utils::metrics::BackendMetrics;
 
     use crate::backend::connection::{Connection, ConnectionConfig};
+
+    const OBJECT_STORAGE_TEST_CONTENT: &[u8] = b"object-storage-response-body";
 
     fn make_io_error(msg: &str) -> IoError {
         IoError::other(msg)
@@ -264,28 +271,52 @@ mod tests {
     #[derive(Debug)]
     struct MockState {
         retry: u8,
+        base_url: String,
+        sign_error: Option<String>,
+        signed_methods: Arc<Mutex<Vec<Method>>>,
     }
 
     impl MockState {
         fn new(retry: u8) -> Self {
-            MockState { retry }
+            MockState {
+                retry,
+                base_url: "http://test.example.com".to_string(),
+                sign_error: None,
+                signed_methods: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn with_base_url(retry: u8, base_url: String) -> Self {
+            let mut state = Self::new(retry);
+            state.base_url = base_url;
+            state
+        }
+
+        fn with_sign_error(retry: u8, msg: &str) -> Self {
+            let mut state = Self::new(retry);
+            state.sign_error = Some(msg.to_string());
+            state
         }
     }
 
     impl ObjectStorageState for MockState {
         fn url(&self, object_key: &str, _query: &[&str]) -> (String, String) {
             let resource = format!("/test-bucket/{}", object_key);
-            let url = format!("http://test.example.com{}", resource);
+            let url = format!("{}/{}", self.base_url.trim_end_matches('/'), object_key);
             (resource, url)
         }
 
         fn sign(
             &self,
-            _verb: Method,
+            verb: Method,
             _headers: &mut HeaderMap,
             _canonicalized_resource: &str,
             _full_resource_url: &str,
         ) -> std::io::Result<()> {
+            self.signed_methods.lock().unwrap().push(verb);
+            if let Some(msg) = self.sign_error.as_ref() {
+                return Err(IoError::other(msg.clone()));
+            }
             Ok(())
         }
 
@@ -303,6 +334,103 @@ mod tests {
             false,
             "test-object-storage",
         )
+    }
+
+    fn parse_range(request: &str) -> Option<String> {
+        request.lines().find_map(|line| {
+            let line = line.trim();
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("range") {
+                Some(value.trim().to_string())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    request.extend_from_slice(&buf[..n]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                Err(e) => panic!("failed to read mock request: {}", e),
+            }
+        }
+
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn start_object_storage_server(
+        include_content_length: bool,
+    ) -> (String, Arc<AtomicBool>, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let seen_ranges = Arc::new(Mutex::new(Vec::new()));
+        let shutdown_clone = shutdown.clone();
+        let seen_ranges_clone = seen_ranges.clone();
+
+        thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_http_request(&mut stream);
+                        let response = if request.starts_with("HEAD ") {
+                            if include_content_length {
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    OBJECT_STORAGE_TEST_CONTENT.len()
+                                )
+                            } else {
+                                "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_string()
+                            }
+                        } else {
+                            let range = parse_range(&request).unwrap();
+                            seen_ranges_clone.lock().unwrap().push(range.clone());
+                            let range = range.trim_start_matches("bytes=");
+                            let (start, end) = range.split_once('-').unwrap();
+                            let start: usize = start.parse().unwrap();
+                            let end: usize = end.parse().unwrap();
+                            let body = &OBJECT_STORAGE_TEST_CONTENT[start..=end];
+
+                            format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                body.len(),
+                                String::from_utf8_lossy(body)
+                            )
+                        };
+
+                        stream.write_all(response.as_bytes()).unwrap();
+                        stream.flush().unwrap();
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        thread::sleep(Duration::from_millis(50));
+
+        (format!("http://{}", addr), shutdown, seen_ranges)
     }
 
     // ── ObjectStorageError display/debug/conversion tests ─────────────────
@@ -433,5 +561,83 @@ mod tests {
         let reader = storage.get_reader("blob-metrics").unwrap();
         // The reader must expose the same BackendMetrics instance as the storage backend.
         assert!(std::ptr::eq(reader.metrics(), storage.metrics()));
+    }
+
+    #[test]
+    fn test_reader_blob_size_uses_head_request() {
+        let (base_url, shutdown, _seen_ranges) = start_object_storage_server(true);
+        let state = Arc::new(MockState::with_base_url(4, base_url));
+        let signed_methods = state.signed_methods.clone();
+        let metrics = BackendMetrics::new("obj-storage-blob-size", "oss");
+        let storage = ObjectStorage::new_object_storage(make_request(), state, Some(metrics), None);
+        let reader = storage.get_reader("blob-head").unwrap();
+
+        let size = reader.blob_size().unwrap();
+
+        shutdown.store(true, Ordering::Relaxed);
+        assert_eq!(size, OBJECT_STORAGE_TEST_CONTENT.len() as u64);
+        assert_eq!(signed_methods.lock().unwrap().as_slice(), &[Method::HEAD]);
+    }
+
+    #[test]
+    fn test_reader_blob_size_requires_content_length() {
+        let (base_url, shutdown, _seen_ranges) = start_object_storage_server(false);
+        let metrics = BackendMetrics::new("obj-storage-missing-length", "oss");
+        let storage = ObjectStorage::new_object_storage(
+            make_request(),
+            Arc::new(MockState::with_base_url(2, base_url)),
+            Some(metrics),
+            None,
+        );
+        let reader = storage.get_reader("blob-missing-length").unwrap();
+
+        let result = reader.blob_size();
+
+        shutdown.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            result,
+            Err(BackendError::ObjectStorage(ObjectStorageError::Response(msg)))
+                if msg == "invalid content length"
+        ));
+    }
+
+    #[test]
+    fn test_reader_try_read_ctx_reads_requested_range() {
+        let (base_url, shutdown, seen_ranges) = start_object_storage_server(true);
+        let state = Arc::new(MockState::with_base_url(3, base_url));
+        let signed_methods = state.signed_methods.clone();
+        let metrics = BackendMetrics::new("obj-storage-range-read", "oss");
+        let storage = ObjectStorage::new_object_storage(make_request(), state, Some(metrics), None);
+        let reader = storage.get_reader("blob-read").unwrap();
+        let mut buf = vec![0u8; 6];
+        let mut ctx = BackendContext::default();
+
+        let size = reader.try_read_ctx(&mut buf, 2, Some(&mut ctx)).unwrap();
+
+        shutdown.store(true, Ordering::Relaxed);
+        assert_eq!(size, 6);
+        assert_eq!(&buf, b"ject-s");
+        assert_eq!(seen_ranges.lock().unwrap().as_slice(), &["bytes=2-7"]);
+        assert_eq!(signed_methods.lock().unwrap().as_slice(), &[Method::GET]);
+    }
+
+    #[test]
+    fn test_reader_propagates_sign_errors() {
+        let metrics = BackendMetrics::new("obj-storage-sign-error", "oss");
+        let storage = ObjectStorage::new_object_storage(
+            make_request(),
+            Arc::new(MockState::with_sign_error(1, "sign failed")),
+            Some(metrics),
+            None,
+        );
+        let reader = storage.get_reader("blob-sign-error").unwrap();
+
+        let result = reader.blob_size();
+
+        assert!(matches!(
+            result,
+            Err(BackendError::ObjectStorage(ObjectStorageError::Auth(err)))
+                if err.to_string().contains("sign failed")
+        ));
     }
 }
