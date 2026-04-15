@@ -1750,6 +1750,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_respond_returns_ok_when_status_check_disabled() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::UNAUTHORIZED)
+                .body("denied".to_string())
+                .unwrap(),
+        ));
+
+        let result = respond(response, false).unwrap();
+
+        assert_eq!(result.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_respond_returns_ok_for_success_status() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::OK)
+                .body("ok".to_string())
+                .unwrap(),
+        ));
+
+        let result = respond(response, true).unwrap();
+
+        assert_eq!(result.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_respond_returns_request_error_for_failure_status() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body("rate limited".to_string())
+                .unwrap(),
+        ));
+
+        let result = respond(response, true);
+
+        assert!(matches!(
+            result,
+            Err(RegistryError::Request(ConnectionError::ErrorWithMsg(msg)))
+                if msg == "rate limited"
+        ));
+    }
+
     #[cfg(feature = "backend-dragonfly-proxy")]
     #[test]
     fn test_request_err_to_registry_proxy() {

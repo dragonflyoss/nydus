@@ -193,6 +193,12 @@ impl ProxySDKClients {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn test_sync_adapter_reads_data() {
@@ -339,5 +345,56 @@ mod tests {
         assert_eq!(HEADER_DRAGONFLY_ERROR_TYPE, "X-Dragonfly-Error-Type");
         assert_eq!(HEADER_VALUE_DRAGONFLY_USE_P2P_TRUE, "true");
         assert_eq!(HEADER_VALUE_DRAGONFLY_ERROR_TYPE_PROXY, "proxy");
+    }
+
+    fn start_scheduler_blackhole() -> (String, Arc<AtomicBool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+
+        thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 1024];
+                        let _ = stream.read(&mut buf);
+                        let _ = stream.write_all(b"not grpc");
+                        let _ = stream.flush();
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        (format!("http://{}", addr), shutdown)
+    }
+
+    #[test]
+    fn test_proxy_sdk_clients_surface_scheduler_connection_errors() {
+        let (endpoint, shutdown) = start_scheduler_blackhole();
+        let result = ProxySDKClients::get(&endpoint);
+
+        shutdown.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            result,
+            Err(msg)
+                if msg.contains("failed to connect to scheduler")
+                    || msg.contains("failed to create seed peer selector")
+        ));
+    }
+
+    #[test]
+    fn test_proxy_sdk_clients_reject_invalid_endpoint() {
+        let result = ProxySDKClients::get("not-a-valid-endpoint");
+
+        assert!(matches!(
+            result,
+            Err(msg) if msg.contains("relative URL without a base")
+        ));
     }
 }
