@@ -132,7 +132,7 @@ impl From<HttpProxyConfig> for ConnectionConfig {
             timeout: c.timeout,
             connect_timeout: c.connect_timeout,
             retry_limit: c.retry_limit,
-            ca_cert_files: Vec::new(),
+            ca_cert_files: c.ca_cert_files,
         }
     }
 }
