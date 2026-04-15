@@ -1703,6 +1703,7 @@ mod tests {
         let config: OssConfig = serde_json::from_str(content).unwrap();
         assert_eq!(config.scheme, "https");
         assert!(!config.skip_verify);
+        assert!(config.ca_cert_files.is_empty());
         assert_eq!(config.timeout, 5);
         assert_eq!(config.connect_timeout, 5);
     }
@@ -1720,6 +1721,7 @@ mod tests {
         let config: OssConfig = serde_json::from_str(content).unwrap();
         assert_eq!(config.scheme, "https");
         assert!(!config.skip_verify);
+        assert!(config.ca_cert_files.is_empty());
         assert_eq!(config.timeout, 5);
         assert_eq!(config.connect_timeout, 5);
     }
@@ -1733,11 +1735,15 @@ mod tests {
 	    "repo": "test/repo",
 	    "auth": "base64_encoded_auth",
 	    "registry_token": "bearer_token",
-	    "blob_redirected_host": "blob_redirected_host"
+	    "blob_redirected_host": "blob_redirected_host",
+        "ca_cert_files": ["/etc/ssl/certs/my-ca.pem","/etc/ssl/certs/my-ca2.pem"]
         }"#;
         let config: RegistryConfig = serde_json::from_str(content).unwrap();
         assert_eq!(config.scheme, "http");
         assert!(config.skip_verify);
+        assert_eq!(config.ca_cert_files.len(), 2);
+        assert_eq!(config.ca_cert_files[0], "/etc/ssl/certs/my-ca.pem");
+        assert_eq!(config.ca_cert_files[1], "/etc/ssl/certs/my-ca2.pem");
     }
 
     #[test]

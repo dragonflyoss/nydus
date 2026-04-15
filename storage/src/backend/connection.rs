@@ -611,5 +611,6 @@ mod tests {
         assert!(config.proxy.fallback);
         assert_eq!(config.proxy.ping_url, "");
         assert_eq!(config.proxy.url, "");
+        assert!(config.ca_cert_files.is_empty());
     }
 }
