@@ -221,7 +221,9 @@ impl Request {
         context.url = url.to_string();
         context.using_proxy = false;
 
-        // If proxy is disabled for this request or no proxy is configured, go direct
+        // If proxy is disabled for this request or no proxy is configured, go direct.
+        // When temp_disable_proxy is true (auth requests), also skip the Connection-level
+        // HTTP proxy to prevent use_http from rewriting the auth realm URL scheme.
         if temp_disable_proxy || context.disable_proxy || self.proxy_config.url.is_empty() {
             trace!(
                 "request path: DIRECT (temp_disable={}, ctx_disable={}, no_proxy={}), url={}",
@@ -232,7 +234,15 @@ impl Request {
             );
             return self
                 .connection
-                .call(method, url, query, data, headers, catch_status)
+                .call_with_proxy_control(
+                    method,
+                    url,
+                    query,
+                    data,
+                    headers,
+                    catch_status,
+                    temp_disable_proxy,
+                )
                 .map(Response::HTTP)
                 .map_err(RequestError::Connection);
         }

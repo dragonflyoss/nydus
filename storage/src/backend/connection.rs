@@ -378,6 +378,23 @@ impl Connection {
         headers: &mut HeaderMap,
         catch_status: bool,
     ) -> ConnectionResult<Response> {
+        self.call_with_proxy_control(method, url, query, data, headers, catch_status, false)
+    }
+
+    /// Like `call()`, but when `skip_proxy` is true, bypass the HTTP proxy
+    /// entirely and go direct to the origin. Used for auth token requests
+    /// that must not have their URL scheme rewritten by `use_http`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_with_proxy_control<R: Read + Clone + Send + 'static>(
+        &self,
+        method: Method,
+        url: &str,
+        query: Option<&[(&str, &str)]>,
+        data: Option<ReqBody<R>>,
+        headers: &mut HeaderMap,
+        catch_status: bool,
+        skip_proxy: bool,
+    ) -> ConnectionResult<Response> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(ConnectionError::Disconnected);
         }
@@ -389,74 +406,77 @@ impl Connection {
             Ordering::Relaxed,
         );
 
-        if let Some(proxy) = &self.proxy {
-            if proxy.health.ok() {
-                let data_cloned = data.as_ref().cloned();
+        if !skip_proxy {
+            if let Some(proxy) = &self.proxy {
+                if proxy.health.ok() {
+                    let data_cloned = data.as_ref().cloned();
 
-                let http_url: Option<String>;
-                let mut replaced_url = url;
+                    let http_url: Option<String>;
+                    let mut replaced_url = url;
 
-                if proxy.use_http {
-                    http_url = proxy.try_use_http(url);
-                    if let Some(ref r) = http_url {
-                        replaced_url = r.as_str();
-                    }
-                }
-
-                debug!(
-                    "connection: routing via PROXY (fallback={}), url={} -> {}",
-                    proxy.fallback, url, replaced_url,
-                );
-
-                let result = self.call_inner(
-                    &proxy.client,
-                    method.clone(),
-                    replaced_url,
-                    &query,
-                    data_cloned,
-                    headers,
-                    catch_status,
-                    true,
-                );
-
-                match result {
-                    Ok(resp) => {
-                        debug!(
-                            "connection: proxy returned status={}, fallback={}",
-                            resp.status(),
-                            proxy.fallback,
-                        );
-                        if !proxy.fallback || resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
-                            return Ok(resp);
+                    if proxy.use_http {
+                        http_url = proxy.try_use_http(url);
+                        if let Some(ref r) = http_url {
+                            replaced_url = r.as_str();
                         }
                     }
-                    Err(err) => {
-                        warn!("Request proxy server failed: {:?}", err);
-                        if !proxy.fallback {
-                            return Err(err);
+
+                    debug!(
+                        "connection: routing via PROXY (fallback={}), url={} -> {}",
+                        proxy.fallback, url, replaced_url,
+                    );
+
+                    let result = self.call_inner(
+                        &proxy.client,
+                        method.clone(),
+                        replaced_url,
+                        &query,
+                        data_cloned,
+                        headers,
+                        catch_status,
+                        true,
+                    );
+
+                    match result {
+                        Ok(resp) => {
+                            debug!(
+                                "connection: proxy returned status={}, fallback={}",
+                                resp.status(),
+                                proxy.fallback,
+                            );
+                            if !proxy.fallback || resp.status() < StatusCode::INTERNAL_SERVER_ERROR
+                            {
+                                return Ok(resp);
+                            }
+                        }
+                        Err(err) => {
+                            warn!("Request proxy server failed: {:?}", err);
+                            if !proxy.fallback {
+                                return Err(err);
+                            }
                         }
                     }
-                }
-                // If proxy server responds invalid status code or http connection failed, we need to
-                // fallback to origin server, the policy only applicable to non-upload operation
-                warn!("Request proxy server failed, fallback to original server");
-            } else {
-                if !proxy.fallback {
-                    return Err(ConnectionError::ErrorWithMsg(
-                        "proxy is not healthy and fallback is disabled".to_string(),
-                    ));
-                }
-                LAST_FALLBACK_AT.with(|f| {
-                    let current = SystemTime::now();
-                    if current.duration_since(*f.borrow()).unwrap().as_secs()
-                        >= RATE_LIMITED_LOG_TIME as u64
-                    {
-                        warn!("Proxy server is not healthy, fallback to original server");
-                        f.replace(current);
+                    // If proxy server responds invalid status code or http connection failed, we need to
+                    // fallback to origin server, the policy only applicable to non-upload operation
+                    warn!("Request proxy server failed, fallback to original server");
+                } else {
+                    if !proxy.fallback {
+                        return Err(ConnectionError::ErrorWithMsg(
+                            "proxy is not healthy and fallback is disabled".to_string(),
+                        ));
                     }
-                })
+                    LAST_FALLBACK_AT.with(|f| {
+                        let current = SystemTime::now();
+                        if current.duration_since(*f.borrow()).unwrap().as_secs()
+                            >= RATE_LIMITED_LOG_TIME as u64
+                        {
+                            warn!("Proxy server is not healthy, fallback to original server");
+                            f.replace(current);
+                        }
+                    })
+                }
             }
-        }
+        } // end if !skip_proxy
 
         debug!(
             "connection: routing DIRECT (no proxy or fallback), url={}",
