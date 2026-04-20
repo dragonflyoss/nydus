@@ -410,6 +410,22 @@ pub trait BlobCache: Send + Sync {
         }
     }
 
+    /// Cache pre-read compressed chunk data from a streaming source.
+    ///
+    /// Used by the streaming blob prefetcher which reads data via `stream_read()`
+    /// and needs to persist matched chunks. The data is compressed blob data that
+    /// gets decompressed before caching (when the cache stores uncompressed data).
+    ///
+    /// Returns `Ok(true)` if the chunk was newly cached, `Ok(false)` if already
+    /// cached, or `Err` on failure.
+    fn cache_chunk_data(
+        &self,
+        _chunk: &dyn BlobChunkInfo,
+        _compressed_data: &[u8],
+    ) -> Result<bool> {
+        Err(enosys!("cache_chunk_data not supported"))
+    }
+
     fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobCompressionContextInfo>>> {
         Ok(None)
     }

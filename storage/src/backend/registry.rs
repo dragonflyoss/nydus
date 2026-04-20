@@ -944,6 +944,51 @@ impl RegistryReader {
             .map_err(|e| RegistryError::Transport(std::io::Error::other(e)))
             .map(|size| size as usize)
     }
+
+    /// Start a streaming read from the blob at the given offset.
+    ///
+    /// When `offset` is 0, the request is sent WITHOUT a Range header, causing
+    /// Dragonfly dfdaemon to download and cache the entire blob. When `offset > 0`,
+    /// an open-ended Range header (`bytes=offset-`) is used.
+    fn _stream_read(
+        &self,
+        offset: u64,
+        allow_retry: bool,
+        context: &mut BackendContext,
+    ) -> RegistryResult<Box<dyn Read + Send>> {
+        let url = format!("/blobs/sha256:{}", self.blob_id);
+        let url = self
+            .state
+            .url(url.as_str(), &[])
+            .map_err(|e| RegistryError::Url(url, e))?;
+        let mut headers = HeaderMap::new();
+
+        // Only add Range header if offset > 0 (open-ended range to stream from offset).
+        // When offset == 0: NO Range header — dfdaemon downloads full blob and caches it.
+        if offset > 0 {
+            let range = format!("bytes={}-", offset);
+            headers.insert("Range", range.parse().unwrap());
+        }
+
+        let resp = self.request::<&[u8]>(
+            Method::GET,
+            url.as_str(),
+            None,
+            headers,
+            allow_retry,
+            context,
+        )?;
+
+        let status = resp.status();
+        if !is_success_status(status) {
+            return Err(RegistryError::Common(format!(
+                "stream_read failed, status: {}",
+                status,
+            )));
+        }
+
+        Ok(resp.reader())
+    }
 }
 
 impl BlobReader for RegistryReader {
@@ -1018,6 +1063,20 @@ impl BlobReader for RegistryReader {
             self._try_read(buf, offset, true, ctx)
                 .map_err(BackendError::from)
         })
+    }
+
+    fn try_stream_read(
+        &self,
+        offset: u64,
+        ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<Box<dyn Read + Send>> {
+        let mut default_ctx = BackendContext::default();
+        let ctx = ctx.unwrap_or(&mut default_ctx);
+        self.first
+            .handle_force(&mut || -> BackendResult<Box<dyn Read + Send>> {
+                self._stream_read(offset, true, ctx)
+                    .map_err(BackendError::from)
+            })
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -2127,5 +2186,34 @@ mod tests {
             state.token_expired_at.load().is_none(),
             "token_expired_at should be None after clear"
         );
+    }
+
+    #[test]
+    fn test_stream_read_default_returns_unsupported() {
+        // Verify the default BlobReader::try_stream_read() returns Unsupported.
+        // RegistryReader overrides this — tested via integration/e2e with a real server.
+        struct DummyReader;
+        impl BlobReader for DummyReader {
+            fn blob_size(&self) -> BackendResult<u64> {
+                Ok(100)
+            }
+            fn try_read(&self, _buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
+                Ok(0)
+            }
+            fn metrics(&self) -> &nydus_utils::metrics::BackendMetrics {
+                unimplemented!()
+            }
+        }
+
+        let reader = DummyReader;
+        let result = reader.try_stream_read(0, None);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match err {
+            BackendError::Unsupported(msg) => {
+                assert!(msg.contains("streaming read not supported"));
+            }
+            other => panic!("expected Unsupported, got: {:?}", other),
+        }
     }
 }

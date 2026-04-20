@@ -802,6 +802,83 @@ impl BlobCache for FileCacheEntry {
             Ok(None)
         }
     }
+
+    fn cache_chunk_data(&self, chunk: &dyn BlobChunkInfo, compressed_data: &[u8]) -> Result<bool> {
+        // Check if already cached
+        if matches!(self.chunk_map.is_ready(chunk), Ok(true)) {
+            return Ok(false);
+        }
+
+        // Mark as pending (returns true if already ready, false if now pending)
+        match self.chunk_map.check_ready_and_mark_pending(chunk) {
+            Ok(true) => return Ok(false), // Already ready
+            Ok(false) => {}               // Marked pending, proceed
+            Err(e) => {
+                return Err(eio!(format!("failed to mark chunk pending: {:?}", e)));
+            }
+        }
+
+        // All fallible operations are inside this closure so that
+        // update_chunk_pending_status is always called on any error path,
+        // preventing chunks from being permanently stuck in pending state.
+        let result = (|| -> Result<()> {
+            if self.is_raw_data {
+                // Cache stores compressed data directly
+                Self::persist_cached_data(&self.file, chunk.compressed_offset(), compressed_data)
+            } else {
+                // Decrypt blob-level encryption if needed
+                let decrypted = crypt::decrypt_with_context(
+                    compressed_data,
+                    &self.blob_cipher_object(),
+                    &self.blob_cipher_context(),
+                    chunk.is_encrypted(),
+                )
+                .map_err(|e| eio!(format!("failed to decrypt chunk: {:?}", e)))?;
+
+                // Decompress if needed
+                let data = if chunk.is_compressed() {
+                    let mut decompressed = alloc_buf(chunk.uncompressed_size() as usize);
+                    self.decompress_chunk_data(&decrypted, &mut decompressed, true)?;
+                    decompressed
+                } else {
+                    decrypted.to_vec()
+                };
+
+                // Encrypt for cache-level at-rest encryption if configured
+                let persist_data = if !self.is_cache_encrypted {
+                    data
+                } else {
+                    let (key, iv) = self
+                        .cache_cipher_context
+                        .generate_cipher_meta(&chunk.chunk_id().data);
+                    let mut encrypted = alloc_buf(round_up_usize(data.len(), ENCRYPTION_PAGE_SIZE));
+                    let mut pos = 0;
+                    while pos < data.len() {
+                        let mut s_buf;
+                        let block = if pos + ENCRYPTION_PAGE_SIZE > data.len() {
+                            s_buf = data[pos..].to_vec();
+                            s_buf.resize(ENCRYPTION_PAGE_SIZE, 0);
+                            &s_buf
+                        } else {
+                            &data[pos..pos + ENCRYPTION_PAGE_SIZE]
+                        };
+                        let enc = self
+                            .cache_cipher_object
+                            .encrypt(key, Some(&iv), block)
+                            .map_err(|e| eio!(format!("cache encryption failed: {:?}", e)))?;
+                        encrypted[pos..pos + ENCRYPTION_PAGE_SIZE].copy_from_slice(enc.as_ref());
+                        pos += ENCRYPTION_PAGE_SIZE;
+                    }
+                    encrypted
+                };
+
+                Self::persist_cached_data(&self.file, chunk.uncompressed_offset(), &persist_data)
+            }
+        })();
+
+        self.update_chunk_pending_status(chunk, result.is_ok());
+        result.map(|_| true)
+    }
 }
 
 impl BlobObject for FileCacheEntry {
