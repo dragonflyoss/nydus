@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::fmt::Debug;
-use std::io::{Error, Result};
+use std::io::{Error, Read, Result};
 use std::marker::Send;
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use reqwest::Method;
 
 use nydus_utils::metrics::BackendMetrics;
 
-use super::request;
+use super::request::{self, is_success_status};
 use super::{BackendContext, BackendError, BackendResult, BlobBackend, BlobReader};
 
 /// Error codes related to object storage backend.
@@ -162,6 +162,64 @@ where
             .copy_to(buf)
             .map_err(|e| ObjectStorageError::Transport(std::io::Error::other(e)))
             .map(|size| size as usize)?)
+    }
+
+    /// Start a streaming read from the blob at the given offset.
+    ///
+    /// When `offset` is 0, no Range header is sent so that Dragonfly dfdaemon
+    /// downloads and caches the entire blob. When `offset > 0`, an open-ended
+    /// Range header (`bytes=offset-`) is used.
+    fn try_stream_read(
+        &self,
+        offset: u64,
+        ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<Box<dyn Read + Send>> {
+        let mut default_ctx = BackendContext::default();
+        let ctx = ctx.unwrap_or(&mut default_ctx);
+
+        let query = &[];
+        let (resource, url) = self.state.url(&self.blob_id, query);
+        let mut headers = HeaderMap::new();
+
+        // Only add Range header if offset > 0 (open-ended range to stream from offset).
+        // When offset == 0: NO Range header — dfdaemon downloads full blob and caches it.
+        if offset > 0 {
+            let range = format!("bytes={}-", offset);
+            headers.insert(
+                "Range",
+                range
+                    .as_str()
+                    .parse()
+                    .map_err(|e| ObjectStorageError::ConstructHeader(format!("{}", e)))?,
+            );
+        }
+
+        self.state
+            .sign(Method::GET, &mut headers, resource.as_str(), url.as_str())
+            .map_err(ObjectStorageError::Auth)?;
+
+        let resp = self
+            .request
+            .call::<&[u8]>(
+                Method::GET,
+                url.as_str(),
+                None,
+                None,
+                &mut headers,
+                true,
+                ctx,
+                false,
+            )
+            .map_err(BackendError::Request)?;
+
+        let status = resp.status();
+        if !is_success_status(status) {
+            return Err(BackendError::ObjectStorage(ObjectStorageError::Response(
+                format!("stream_read failed, status: {}", status),
+            )));
+        }
+
+        Ok(resp.reader())
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -401,19 +459,35 @@ mod tests {
                             } else {
                                 "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_string()
                             }
-                        } else {
-                            let range = parse_range(&request).unwrap();
+                        } else if let Some(range) = parse_range(&request) {
                             seen_ranges_clone.lock().unwrap().push(range.clone());
                             let range = range.trim_start_matches("bytes=");
                             let (start, end) = range.split_once('-').unwrap();
                             let start: usize = start.parse().unwrap();
-                            let end: usize = end.parse().unwrap();
-                            let body = &OBJECT_STORAGE_TEST_CONTENT[start..=end];
-
+                            if end.is_empty() {
+                                // Open-ended range: bytes=N-
+                                let body = &OBJECT_STORAGE_TEST_CONTENT[start..];
+                                format!(
+                                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    body.len(),
+                                    String::from_utf8_lossy(body)
+                                )
+                            } else {
+                                let end: usize = end.parse().unwrap();
+                                let body = &OBJECT_STORAGE_TEST_CONTENT[start..=end];
+                                format!(
+                                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    body.len(),
+                                    String::from_utf8_lossy(body)
+                                )
+                            }
+                        } else {
+                            // No Range header — return full body
+                            seen_ranges_clone.lock().unwrap().push("none".to_string());
                             format!(
-                                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                body.len(),
-                                String::from_utf8_lossy(body)
+                                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                OBJECT_STORAGE_TEST_CONTENT.len(),
+                                String::from_utf8_lossy(OBJECT_STORAGE_TEST_CONTENT)
                             )
                         };
 
@@ -639,5 +713,42 @@ mod tests {
             Err(BackendError::ObjectStorage(ObjectStorageError::Auth(err)))
                 if err.to_string().contains("sign failed")
         ));
+    }
+
+    #[test]
+    fn test_stream_read_offset_zero_no_range_header() {
+        let (base_url, shutdown, seen_ranges) = start_object_storage_server(true);
+        let state = Arc::new(MockState::with_base_url(3, base_url));
+        let metrics = BackendMetrics::new("obj-storage-stream-zero", "oss");
+        let storage = ObjectStorage::new_object_storage(make_request(), state, Some(metrics), None);
+        let reader = storage.get_reader("blob-stream-zero").unwrap();
+        let mut ctx = BackendContext::default();
+
+        let mut stream = reader.try_stream_read(0, Some(&mut ctx)).unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).unwrap();
+
+        shutdown.store(true, Ordering::Relaxed);
+        assert_eq!(body, OBJECT_STORAGE_TEST_CONTENT);
+        // offset==0 means no Range header was sent
+        assert_eq!(seen_ranges.lock().unwrap().as_slice(), &["none"]);
+    }
+
+    #[test]
+    fn test_stream_read_offset_nonzero_open_range() {
+        let (base_url, shutdown, seen_ranges) = start_object_storage_server(true);
+        let state = Arc::new(MockState::with_base_url(3, base_url));
+        let metrics = BackendMetrics::new("obj-storage-stream-offset", "oss");
+        let storage = ObjectStorage::new_object_storage(make_request(), state, Some(metrics), None);
+        let reader = storage.get_reader("blob-stream-offset").unwrap();
+        let mut ctx = BackendContext::default();
+
+        let mut stream = reader.try_stream_read(7, Some(&mut ctx)).unwrap();
+        let mut body = Vec::new();
+        stream.read_to_end(&mut body).unwrap();
+
+        shutdown.store(true, Ordering::Relaxed);
+        assert_eq!(body, &OBJECT_STORAGE_TEST_CONTENT[7..]);
+        assert_eq!(seen_ranges.lock().unwrap().as_slice(), &["bytes=7-"]);
     }
 }
