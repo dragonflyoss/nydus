@@ -54,6 +54,7 @@ pub mod fs;
 pub mod metadata;
 #[cfg(test)]
 pub mod mock;
+pub mod prefetch;
 
 /// Error codes for rafs related operations.
 #[derive(thiserror::Error, Debug)]

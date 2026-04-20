@@ -1301,6 +1301,11 @@ impl BlobDevice {
         }
     }
 
+    /// Get a snapshot of all blob caches.
+    pub fn get_blobs(&self) -> Vec<Arc<dyn BlobCache>> {
+        self.blobs.load().as_ref().clone()
+    }
+
     /// fetch specified blob data in a synchronous way.
     pub fn fetch_range_synchronous(&self, prefetches: &[BlobPrefetchRequest]) -> io::Result<()> {
         for req in prefetches {

@@ -507,6 +507,38 @@ pub trait BlobReader: Send + Sync {
         }
     }
 
+    /// Start a streaming read from the blob at the given offset.
+    ///
+    /// When `offset` is 0, backends that support native streaming (like registry)
+    /// send the request WITHOUT a Range header, causing Dragonfly dfdaemon to
+    /// download and cache the entire blob. The returned reader streams blob data
+    /// from that offset to EOF.
+    ///
+    /// The default implementation returns `Unsupported` — only backends with
+    /// native streaming (registry) override this.
+    fn try_stream_read(
+        &self,
+        _offset: u64,
+        _ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<Box<dyn Read + Send>> {
+        Err(BackendError::Unsupported(
+            "streaming read not supported by this backend".to_string(),
+        ))
+    }
+
+    /// Stream-read with an explicit request source (prefetch vs on-demand).
+    fn stream_read(
+        &self,
+        offset: u64,
+        source: RequestSource,
+    ) -> BackendResult<Box<dyn Read + Send>> {
+        let mut ctx = BackendContext {
+            request_source: source,
+            ..Default::default()
+        };
+        self.try_stream_read(offset, Some(&mut ctx))
+    }
+
     /// Get metrics object.
     fn metrics(&self) -> &BackendMetrics;
 
