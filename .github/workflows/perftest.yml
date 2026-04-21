@@ -1,0 +1,308 @@
+name: Perftest Image (Dragonfly SDK Proxy)
+
+on:
+  push:
+    branches: ["**", "stable/**"]
+    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
+  pull_request:
+    branches: ["**", "stable/**"]
+    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
+  workflow_dispatch:
+    inputs:
+      nydus_image:
+        description: 'Nydus image to benchmark'
+        required: false
+        default: 'ghcr.io/dragonflyoss/image-service/nginx:nydus-latest'
+
+permissions:
+  contents: read
+
+env:
+  DRAGONFLY_VERSION: "2.4.3"
+  CLIENT_VERSION: "1.3.3"
+  PERFTEST_IMAGE: "nydus-perftest:ci"
+
+jobs:
+  build-image:
+    name: Build perftest image
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache cargo registry / git via Buildx
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/buildx-perftest
+          key: buildx-perftest-${{ hashFiles('Cargo.lock', 'misc/perftest/Dockerfile') }}
+          restore-keys: |
+            buildx-perftest-
+
+      - name: Build perftest image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: misc/perftest/Dockerfile
+          tags: ${{ env.PERFTEST_IMAGE }}
+          load: true
+          build-args: |
+            RUST_TARGET=x86_64-unknown-linux-musl
+          cache-from: type=local,src=~/.cache/buildx-perftest
+          cache-to: type=local,dest=~/.cache/buildx-perftest,mode=max
+
+      - name: Verify image bundles required binaries
+        run: |
+          docker run --rm --entrypoint /usr/local/bin/nydusd  ${PERFTEST_IMAGE} --version
+          docker run --rm --entrypoint /usr/local/bin/nydusctl ${PERFTEST_IMAGE} --help | head -5
+          docker run --rm --entrypoint /usr/local/bin/crane    ${PERFTEST_IMAGE} version
+          docker run --rm --entrypoint /usr/local/bin/workload ${PERFTEST_IMAGE} --help 2>&1 | head -10 || true
+          # Sanity-check the binaries are static (no dynamic linker references).
+          docker run --rm --entrypoint /bin/sh ${PERFTEST_IMAGE} -c \
+            'for b in /usr/local/bin/nydusd /usr/local/bin/nydusctl /usr/local/bin/workload; do
+               echo "=== $b ==="
+               file "$b" 2>/dev/null || true
+               ldd "$b" 2>&1 || true
+             done'
+
+      - name: Save image
+        run: |
+          docker save "${PERFTEST_IMAGE}" -o /tmp/perftest-image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: perftest-image
+          path: /tmp/perftest-image.tar
+          retention-days: 1
+
+  dragonfly-download:
+    name: Download Dragonfly binaries
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Cache Dragonfly binaries
+        id: cache-dragonfly
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dragonfly-bin
+          key: dragonfly-${{ env.DRAGONFLY_VERSION }}-client-${{ env.CLIENT_VERSION }}-linux-amd64
+
+      - name: Download Dragonfly server binaries
+        if: steps.cache-dragonfly.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/dragonfly-bin
+          wget -q -O /tmp/dragonfly-server.tar.gz \
+            "https://github.com/dragonflyoss/dragonfly/releases/download/v${DRAGONFLY_VERSION}/dragonfly-${DRAGONFLY_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/dragonfly-server.tar.gz -C /tmp/dragonfly-bin manager scheduler
+          rm /tmp/dragonfly-server.tar.gz
+
+      - name: Download Dragonfly client binaries
+        if: steps.cache-dragonfly.outputs.cache-hit != 'true'
+        run: |
+          wget -q -O /tmp/dragonfly-client.tar.gz \
+            "https://github.com/dragonflyoss/client/releases/download/v${CLIENT_VERSION}/dragonfly-client-v${CLIENT_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tar -xzf /tmp/dragonfly-client.tar.gz --strip-components=1 -C /tmp/dragonfly-bin
+          rm /tmp/dragonfly-client.tar.gz
+
+      - name: Upload Dragonfly Binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: dragonfly-artifact
+          path: /tmp/dragonfly-bin
+          retention-days: 1
+
+  perftest-run:
+    name: Run perftest against Dragonfly
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    needs: [build-image, dragonfly-download]
+    timeout-minutes: 30
+    env:
+      NYDUS_IMAGE: ${{ github.event.inputs.nydus_image || 'ghcr.io/dragonflyoss/image-service/nginx:nydus-latest' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download perftest image
+        uses: actions/download-artifact@v7
+        with:
+          name: perftest-image
+          path: /tmp
+
+      - name: Load perftest image
+        run: |
+          docker load -i /tmp/perftest-image.tar
+          docker images | grep nydus-perftest
+
+      - name: Download Dragonfly artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: dragonfly-artifact
+          path: /usr/local/bin
+
+      - name: Install Dragonfly binaries
+        run: |
+          sudo chmod +x /usr/local/bin/manager /usr/local/bin/scheduler /usr/local/bin/dfdaemon
+
+      # ---------- Dragonfly control plane (mirrors e2e-dragonfly.yml) ----------
+      - name: Start MySQL
+        run: |
+          docker run -d --name mysql \
+            -e MYSQL_ROOT_PASSWORD=dragonfly \
+            -e MYSQL_DATABASE=manager \
+            -p 3306:3306 \
+            mysql:8
+          for i in $(seq 1 60); do
+            if docker exec mysql mysqladmin ping -h 127.0.0.1 -u root -pdragonfly --silent 2>/dev/null; then
+              echo "MySQL is ready"; break
+            fi
+            if [ "$i" -eq 60 ]; then echo "ERROR: MySQL failed"; docker logs mysql; exit 1; fi
+            sleep 2
+          done
+
+      - name: Start Redis
+        run: |
+          docker run -d --name redis -p 6379:6379 redis:latest
+          for i in $(seq 1 30); do
+            if docker exec redis redis-cli ping 2>/dev/null | grep -q PONG; then
+              echo "Redis is ready"; break
+            fi
+            if [ "$i" -eq 30 ]; then echo "ERROR: Redis failed"; docker logs redis; exit 1; fi
+            sleep 1
+          done
+
+      - name: Setup Dragonfly configs
+        run: |
+          sudo mkdir -p /etc/dragonfly
+          sudo cp misc/dragonfly/manager.yaml   /etc/dragonfly/manager.yaml
+          sudo cp misc/dragonfly/scheduler.yaml /etc/dragonfly/scheduler.yaml
+          sudo cp misc/dragonfly/dfdaemon.yaml  /etc/dragonfly/dfdaemon.yaml
+          sudo mkdir -p /tmp/dragonfly/logs /tmp/dragonfly/cache /tmp/dragonfly/storage
+          sudo chmod 777 /tmp/dragonfly/logs /tmp/dragonfly/cache /tmp/dragonfly/storage
+          mkdir -p /tmp/perftest-results
+
+      - name: Start Manager
+        run: |
+          sudo nohup /usr/local/bin/manager --config /etc/dragonfly/manager.yaml \
+            > /tmp/dragonfly/logs/manager.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/healthy >/dev/null 2>&1; then
+              echo "Manager is ready"; break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "ERROR: Manager failed"; sudo cat /tmp/dragonfly/logs/manager.log || true; exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Start Scheduler
+        run: |
+          sudo nohup /usr/local/bin/scheduler --config /etc/dragonfly/scheduler.yaml \
+            > /tmp/dragonfly/logs/scheduler.log 2>&1 &
+          # Scheduler doesn't expose a friendly health endpoint here; just give it a moment
+          # and verify the gRPC port is listening.
+          for i in $(seq 1 30); do
+            if ss -tln 2>/dev/null | grep -q ':8002'; then
+              echo "Scheduler is listening on :8002"; break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: Scheduler failed"; sudo cat /tmp/dragonfly/logs/scheduler.log || true; exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Start dfdaemon
+        run: |
+          sudo nohup /usr/local/bin/dfdaemon --config /etc/dragonfly/dfdaemon.yaml \
+            > /tmp/dragonfly/logs/dfdaemon.log 2>&1 &
+          for i in $(seq 1 60); do
+            if ss -tln 2>/dev/null | grep -q ':4001'; then
+              echo "dfdaemon proxy is listening on :4001"; break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "ERROR: dfdaemon failed"; sudo cat /tmp/dragonfly/logs/dfdaemon.log || true; exit 1
+            fi
+            sleep 2
+          done
+
+      # ---------- Run the perftest container ----------
+      - name: Run perftest container
+        run: |
+          mkdir -p /tmp/perftest-results
+          # Allow the container to reach the host's dfdaemon via host.docker.internal.
+          docker run --rm \
+            --name nydus-perftest-run \
+            --add-host host.docker.internal:host-gateway \
+            --privileged \
+            --device /dev/fuse \
+            -e NYDUS_IMAGE="${NYDUS_IMAGE}" \
+            -e DRAGONFLY_PROXY_URL="http://host.docker.internal:4001" \
+            -e DRAGONFLY_SCHEDULER_ENDPOINT="http://host.docker.internal:8002" \
+            -e READ_PARALLELISM=8 \
+            -e MAX_FILES=200 \
+            -e MOUNT_READY_TIMEOUT=120 \
+            -v /tmp/perftest-results:/results \
+            "${PERFTEST_IMAGE}"
+
+      - name: Show result.json
+        if: always()
+        run: |
+          if [ -f /tmp/perftest-results/result.json ]; then
+            echo "=== result.json ==="
+            cat /tmp/perftest-results/result.json
+          else
+            echo "ERROR: result.json was not produced."
+            ls -la /tmp/perftest-results || true
+            exit 1
+          fi
+
+      - name: Assert benchmark succeeded
+        run: |
+          # Require: workload exited 0, at least one file was read, and bytes > 0.
+          jq -e '
+            (.workload_rc // 1) == 0
+            and (.workload.files_read // 0) > 0
+            and (.workload.bytes_read // 0) > 0
+          ' /tmp/perftest-results/result.json
+
+      - name: Upload result.json
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: perftest-result
+          path: /tmp/perftest-results/
+
+      - name: Dump service logs
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p /tmp/perftest-logs
+          sudo cp /tmp/dragonfly/logs/*.log /tmp/perftest-logs/ 2>/dev/null || true
+          sudo cp -r /var/log/dragonfly/dfdaemon/  /tmp/perftest-logs/dfdaemon/  2>/dev/null || true
+          sudo cp -r /var/log/dragonfly/scheduler/ /tmp/perftest-logs/scheduler/ 2>/dev/null || true
+          sudo cp -r /var/log/dragonfly/manager/   /tmp/perftest-logs/manager/   2>/dev/null || true
+          docker logs mysql > /tmp/perftest-logs/mysql.log 2>&1 || true
+          docker logs redis > /tmp/perftest-logs/redis.log 2>&1 || true
+          sudo chmod -R a+r /tmp/perftest-logs || true
+
+      - name: Upload service logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: perftest-service-logs
+          path: /tmp/perftest-logs/
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          docker rm -f nydus-perftest-run mysql redis 2>/dev/null || true
+          for proc in dfdaemon scheduler manager; do
+            if pid=$(pgrep -n "${proc}" 2>/dev/null); then
+              sudo kill "${pid}" 2>/dev/null || true
+            fi
+          done

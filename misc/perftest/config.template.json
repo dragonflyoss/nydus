@@ -1,0 +1,42 @@
+{
+  "device": {
+    "backend": {
+      "type": "registry",
+      "config": {
+        "scheme": "${REGISTRY_SCHEME}",
+        "host": "${REGISTRY_HOST}",
+        "repo": "${REGISTRY_REPO}",
+        "auth": "${REGISTRY_AUTH}",
+        "skip_verify": ${REGISTRY_SKIP_VERIFY},
+        "timeout": 30,
+        "connect_timeout": 10,
+        "retry_limit": 2,
+        "proxy": {
+          "url": "${DRAGONFLY_PROXY_URL}",
+          "ping_url": "${DRAGONFLY_PROXY_URL}",
+          "fallback": ${PROXY_FALLBACK},
+          "check_interval": 5,
+          "use_http": false,
+          "dragonfly_scheduler_endpoint": "${DRAGONFLY_SCHEDULER_ENDPOINT}"
+        }
+      }
+    },
+    "cache": {
+      "type": "blobcache",
+      "compressed": false,
+      "config": {
+        "work_dir": "${BLOB_CACHE_DIR}"
+      }
+    }
+  },
+  "mode": "direct",
+  "digest_validate": false,
+  "iostats_files": false,
+  "enable_xattr": true,
+  "fs_prefetch": {
+    "enable": ${PREFETCH_ENABLE},
+    "threads_count": ${PREFETCH_THREADS},
+    "merging_size": 131072,
+    "bandwidth_rate": 0
+  }
+}
