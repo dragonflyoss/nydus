@@ -45,6 +45,31 @@ PREFETCH_THREADS="${PREFETCH_THREADS:-8}"
 
 mkdir -p "${WORK_DIR}" "${RESULTS_DIR}" "${BLOB_CACHE_DIR}" "${MOUNT_POINT}"
 
+# If REGISTRY_AUTH is provided (base64 of "user:password"), materialise a
+# docker config.json so `crane` (used by fetch-bootstrap) can authenticate
+# against private registries. The nydusd registry backend already picks up
+# REGISTRY_AUTH via the rendered config below.
+if [ -n "${REGISTRY_AUTH}" ]; then
+    auth_host="${REGISTRY_HOST:-}"
+    if [ -z "${auth_host}" ] && [ -n "${NYDUS_IMAGE}" ]; then
+        ref="${NYDUS_IMAGE%@*}"; ref="${ref%:*}"
+        if [[ "${ref}" == */* ]]; then
+            first="${ref%%/*}"
+            if [[ "${first}" == *.* || "${first}" == *:* || "${first}" == "localhost" ]]; then
+                auth_host="${first}"
+            fi
+        fi
+        auth_host="${auth_host:-docker.io}"
+    fi
+    export DOCKER_CONFIG="${WORK_DIR}/.docker"
+    mkdir -p "${DOCKER_CONFIG}"
+    jq -n --arg host "${auth_host}" --arg auth "${REGISTRY_AUTH}" \
+        '{auths: {($host): {auth: $auth}}}' \
+        > "${DOCKER_CONFIG}/config.json"
+    chmod 600 "${DOCKER_CONFIG}/config.json"
+    log "Wrote registry credentials for ${auth_host} to ${DOCKER_CONFIG}/config.json"
+fi
+
 APISOCK="${WORK_DIR}/api.sock"
 NYDUSD_LOG="${WORK_DIR}/nydusd.log"
 RESULT_JSON="${RESULTS_DIR}/result.json"

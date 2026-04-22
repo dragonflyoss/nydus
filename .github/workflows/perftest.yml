@@ -156,6 +156,10 @@ jobs:
     env:
       NYDUS_IMAGE: ${{ github.event.inputs.nydus_image || 'ghcr.io/dragonflyoss/image-service/nginx:nydus-latest' }}
       PERFTEST_IMAGE: ${{ needs.build-image.outputs.image }}
+      # Optional. Base64("user:password") string forwarded into the perftest
+      # container so both `crane` (bootstrap fetch) and the nydusd registry
+      # backend can authenticate against private NYDUS_IMAGE registries.
+      REGISTRY_AUTH: ${{ secrets.PERFTEST_REGISTRY_AUTH }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -273,7 +277,10 @@ jobs:
             --add-host host.docker.internal:host-gateway \
             --privileged \
             --device /dev/fuse \
+            --security-opt apparmor=unconfined \
+            --security-opt seccomp=unconfined \
             -e NYDUS_IMAGE="${NYDUS_IMAGE}" \
+            -e REGISTRY_AUTH="${REGISTRY_AUTH:-}" \
             -e DRAGONFLY_PROXY_URL="http://host.docker.internal:4001" \
             -e DRAGONFLY_SCHEDULER_ENDPOINT="http://host.docker.internal:8002" \
             -e READ_PARALLELISM=8 \
