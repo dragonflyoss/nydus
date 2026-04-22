@@ -16,25 +16,61 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 env:
   DRAGONFLY_VERSION: "2.4.3"
   CLIENT_VERSION: "1.3.3"
-  PERFTEST_IMAGE: "nydus-perftest:ci"
+  # PERFTEST_IMAGE is computed per-job from the repository owner (lower-cased)
+  # and the commit SHA so each commit gets a unique, content-addressed tag.
 
 jobs:
   build-image:
     name: Build perftest image
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
+      - name: Compute image reference
+        id: meta
+        run: |
+          # GHCR requires lowercase repository names.
+          owner_lc="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner_lc}/nydus-perftest:${GITHUB_SHA}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "Resolved perftest image: ${image}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check whether image tag already exists
+        id: check
+        run: |
+          if docker manifest inspect "${{ steps.meta.outputs.image }}" > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image ${{ steps.meta.outputs.image }} already exists in GHCR; skipping build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Image ${{ steps.meta.outputs.image }} not found; will build and push."
+          fi
+
       - name: Set up Docker Buildx
+        if: steps.check.outputs.exists != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Cache cargo registry / git via Buildx
+        if: steps.check.outputs.exists != 'true'
         uses: actions/cache@v4
         with:
           path: |
@@ -43,20 +79,24 @@ jobs:
           restore-keys: |
             buildx-perftest-
 
-      - name: Build perftest image
+      - name: Build and push perftest image
+        if: steps.check.outputs.exists != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: misc/perftest/Dockerfile
-          tags: ${{ env.PERFTEST_IMAGE }}
-          load: true
+          tags: ${{ steps.meta.outputs.image }}
+          push: true
           build-args: |
             RUST_TARGET=x86_64-unknown-linux-musl
           cache-from: type=local,src=~/.cache/buildx-perftest
           cache-to: type=local,dest=~/.cache/buildx-perftest,mode=max
 
       - name: Verify image bundles required binaries
+        env:
+          PERFTEST_IMAGE: ${{ steps.meta.outputs.image }}
         run: |
+          docker pull "${PERFTEST_IMAGE}"
           docker run --rm --entrypoint /usr/local/bin/nydusd  ${PERFTEST_IMAGE} --version
           docker run --rm --entrypoint /usr/local/bin/nydusctl ${PERFTEST_IMAGE} --help | head -5
           docker run --rm --entrypoint /usr/local/bin/crane    ${PERFTEST_IMAGE} version
@@ -68,17 +108,6 @@ jobs:
                file "$b" 2>/dev/null || true
                ldd "$b" 2>&1 || true
              done'
-
-      - name: Save image
-        run: |
-          docker save "${PERFTEST_IMAGE}" -o /tmp/perftest-image.tar
-
-      - name: Upload image artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: perftest-image
-          path: /tmp/perftest-image.tar
-          retention-days: 1
 
   dragonfly-download:
     name: Download Dragonfly binaries
@@ -121,21 +150,26 @@ jobs:
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     needs: [build-image, dragonfly-download]
     timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
     env:
       NYDUS_IMAGE: ${{ github.event.inputs.nydus_image || 'ghcr.io/dragonflyoss/image-service/nginx:nydus-latest' }}
+      PERFTEST_IMAGE: ${{ needs.build-image.outputs.image }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Download perftest image
-        uses: actions/download-artifact@v7
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          name: perftest-image
-          path: /tmp
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Load perftest image
+      - name: Pull perftest image
         run: |
-          docker load -i /tmp/perftest-image.tar
+          docker pull "${PERFTEST_IMAGE}"
           docker images | grep nydus-perftest
 
       - name: Download Dragonfly artifacts
