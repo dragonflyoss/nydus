@@ -109,14 +109,29 @@ impl Group {
 
         // Check after acquiring lock.
         if let Some(CallState::InFlight(rx)) = calls.get(&key) {
-            let rx = rx.clone();
-            drop(calls);
-            return Self::wait_for_result::<T, E>(rx)
-                .await
-                .map(|value| CallResult {
-                    value,
-                    shared: true,
-                });
+            let is_stale = {
+                let borrowed = rx.borrow();
+                let empty = borrowed.is_none();
+                drop(borrowed);
+                empty && rx.has_changed().is_err()
+            };
+
+            if is_stale {
+                warn!(
+                    "singleflight was canceled during the previous call, remove the stale key: {}",
+                    key
+                );
+                calls.remove(&key);
+            } else {
+                let rx = rx.clone();
+                drop(calls);
+                return Self::wait_for_result::<T, E>(rx)
+                    .await
+                    .map(|value| CallResult {
+                        value,
+                        shared: true,
+                    });
+            }
         }
 
         // We are the one to perform the call.
@@ -216,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_call() {
-        let group = Group::new();
+        let group = Group::default();
         let call_count = Arc::new(AtomicU64::new(0));
 
         let count = call_count.clone();
@@ -334,9 +349,28 @@ mod tests {
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            SingleflightError::FunctionError(e) => assert_eq!(e, "something went wrong"),
+            SingleflightError::FunctionError(e) => {
+                assert_eq!(e, "something went wrong");
+                assert_eq!(
+                    SingleflightError::FunctionError(e).to_string(),
+                    "function error: something went wrong"
+                );
+            }
             _ => panic!("Expected FunctionError"),
         }
+
+        let type_mismatch: SingleflightError<String> = SingleflightError::TypeMismatch;
+        assert_eq!(
+            type_mismatch.to_string(),
+            "type mismatch in singleflight result"
+        );
+
+        let cancelled: SingleflightError<String> = SingleflightError::Cancelled;
+        assert_eq!(cancelled.to_string(), "singleflight call was cancelled");
+
+        let error_ref: &dyn std::error::Error = &cancelled;
+        assert!(error_ref.source().is_none());
+
         assert_eq!(call_count.load(Ordering::Relaxed), 1);
     }
 
@@ -378,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sequential_calls_after_completion() {
-        let group = Group::new();
+        let group = Arc::new(Group::new());
         let call_count = Arc::new(AtomicU64::new(0));
 
         // First call.
@@ -407,6 +441,38 @@ mod tests {
 
         // Both calls should have executed.
         assert_eq!(call_count.load(Ordering::Relaxed), 2);
+
+        // Forget should allow a new execution even while one call is still in flight.
+        let count = call_count.clone();
+        let group_clone = group.clone();
+        let handle = tokio::spawn(async move {
+            group_clone
+                .do_call("forced_refresh", || async move {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Ok::<_, String>("stale".to_string())
+                })
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        group.forget("forced_refresh").await;
+
+        let count = call_count.clone();
+        let refreshed = group
+            .do_call("forced_refresh", || async move {
+                count.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, String>("fresh".to_string())
+            })
+            .await
+            .expect("forget should allow a fresh execution");
+
+        assert_eq!(refreshed.value, "fresh");
+        assert!(!refreshed.shared);
+        assert_eq!(call_count.load(Ordering::Relaxed), 4);
+
+        handle.abort();
+        let _ = handle.await;
     }
 
     #[tokio::test]
@@ -470,8 +536,11 @@ mod tests {
 
         // Case 1: Subscriber arrives BEFORE data is ready (simulates standard waiting caller)
         let rx_early = rx.clone();
-        let early_handle =
-            tokio::spawn(async move { Group::wait_for_result::<String, String>(rx_early).await });
+        let early_handle = tokio::spawn(async move {
+            Group::wait_for_result::<String, String>(rx_early)
+                .await
+                .map(|boxed| boxed)
+        });
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -492,6 +561,7 @@ mod tests {
         {
             let late_result = Group::wait_for_result::<String, String>(rx_late2)
                 .await
+                .map(|boxed| boxed)
                 .unwrap();
             assert_eq!(
                 late_result, "success",
@@ -500,6 +570,7 @@ mod tests {
 
             let late_result2 = Group::wait_for_result::<String, String>(rx_late1)
                 .await
+                .map(|boxed| boxed)
                 .unwrap();
             assert_eq!(
                 late_result2, "success",
@@ -515,5 +586,380 @@ mod tests {
             "success".to_string(),
             "Early subscriber should receive notification"
         );
+
+        // Case 4: The receiver sees a value of the wrong concrete type.
+        let wrong_wrapper: ResultWrapper<u64, String> = ResultWrapper(Ok(7));
+        let wrong_boxed: BoxedResult = Arc::new(wrong_wrapper);
+        let (_tx, rx_type_mismatch) = tokio::sync::watch::channel::<
+            Option<Result<BoxedResult, String>>,
+        >(Some(Ok(wrong_boxed)));
+        let type_mismatch = Group::wait_for_result::<String, String>(rx_type_mismatch).await;
+        assert!(matches!(
+            type_mismatch,
+            Err(SingleflightError::TypeMismatch)
+        ));
+
+        // Case 5: The receiver sees an unexpected channel error payload.
+        let (_tx, rx_cancelled) = tokio::sync::watch::channel::<Option<Result<BoxedResult, String>>>(
+            Some(Err("sender failed".to_string())),
+        );
+        let cancelled = Group::wait_for_result::<String, String>(rx_cancelled).await;
+        assert!(matches!(cancelled, Err(SingleflightError::Cancelled)));
+    }
+
+    // =============================================================================
+    // Regression tests for two DNS-related paths:
+    //
+    // 1. The DNS query returns Err directly.
+    //    This is a normal completion path: the error is published to waiters and
+    //    the in-flight entry is removed.
+    //
+    // 2. The DNS query future is dropped by an external timeout.
+    //    This is the buggy path: the sender disappears before publishing any
+    //    result, leaving behind a stale in-flight receiver.
+    //
+    // The fix keeps the existing normal error flow unchanged and only teaches the
+    // next caller to detect and discard a stale receiver before waiting on it.
+    // =============================================================================
+
+    /// Scenario 1: func() returns Err directly (e.g., DNS lookup error after
+    /// hickory-resolver's internal 5s×2 retry timeout).
+    ///
+    /// The error flows through the normal code path: func().await returns Err,
+    /// it gets wrapped in ResultWrapper and sent via the watch channel, the
+    /// InFlight entry is removed. Subsequent calls are NOT affected.
+    ///
+    /// This test passes on BOTH old and new code — this path was never buggy.
+    #[tokio::test]
+    async fn test_func_error_does_not_cause_cancelled() {
+        let group = Arc::new(Group::new());
+        let call_count = Arc::new(AtomicU64::new(0));
+
+        // First call: func returns Err (simulates DNS lookup failure).
+        let group_clone = group.clone();
+        let count_clone = call_count.clone();
+        let result1 = group_clone
+            .do_call("dns_key", || async move {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+                // Simulate hickory-resolver returning an error after internal timeout.
+                Err::<String, String>("no record found for name".to_string())
+            })
+            .await;
+
+        // Should get FunctionError, NOT Cancelled.
+        assert!(
+            matches!(&result1, Err(SingleflightError::FunctionError(e)) if e == "no record found for name"),
+            "First call should return FunctionError, got: {:?}",
+            result1
+        );
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+
+        // Second call with same key: should execute a NEW call, not get Cancelled.
+        let group_clone = group.clone();
+        let count_clone = call_count.clone();
+        let result2 = group_clone
+            .do_call("dns_key", || async move {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, String>("resolved_now".to_string())
+            })
+            .await;
+
+        let call_result = result2.expect("Second call should succeed, NOT return Cancelled");
+        assert_eq!(call_result.value, "resolved_now");
+        assert!(!call_result.shared, "Should be a fresh call, not shared");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            2,
+            "Two actual calls should have been made"
+        );
+    }
+
+    /// Scenario 1b: func() returns Err with concurrent waiters.
+    ///
+    /// All waiters should get FunctionError (shared), and the next call
+    /// should work normally. No Cancelled anywhere.
+    #[tokio::test]
+    async fn test_func_error_with_concurrent_waiters_no_cancelled() {
+        let group = Arc::new(Group::new());
+        let call_count = Arc::new(AtomicU64::new(0));
+
+        // Spawn concurrent calls where the executor returns Err.
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let group_clone = group.clone();
+            let count_clone = call_count.clone();
+            let handle = tokio::spawn(async move {
+                group_clone
+                    .do_call("err_key", || async move {
+                        count_clone.fetch_add(1, Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        Err::<String, String>("dns timeout".to_string())
+                    })
+                    .await
+            });
+            handles.push(handle);
+        }
+
+        let results: Vec<_> = futures::future::join_all(handles).await;
+
+        // ALL should get FunctionError, NONE should get Cancelled.
+        for (i, result) in results.iter().enumerate() {
+            let inner = result.as_ref().unwrap();
+            assert!(
+                matches!(inner, Err(SingleflightError::FunctionError(e)) if e == "dns timeout"),
+                "Call {} should get FunctionError, got: {:?}",
+                i,
+                inner
+            );
+        }
+
+        // Only one actual call due to singleflight.
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+
+        // Next call should work normally — no stale state.
+        let group_clone = group.clone();
+        let count_clone = call_count.clone();
+        let result = group_clone
+            .do_call("err_key", || async move {
+                count_clone.fetch_add(1, Ordering::Relaxed);
+                Ok::<_, String>("ok_now".to_string())
+            })
+            .await;
+
+        assert_eq!(result.unwrap().value, "ok_now");
+        assert_eq!(call_count.load(Ordering::Relaxed), 2);
+    }
+
+    /// Scenario 2: External timeout cancels the do_call future (e.g., reqwest
+    /// drops the DNS resolve future after its connection timeout).
+    ///
+    /// The executor's future is dropped mid-flight: func().await never returns,
+    /// watch::Sender is dropped without sending any result, but the InFlight
+    /// entry stays in the HashMap.
+    ///
+    /// The cancelled executor leaves behind a stale receiver. The next caller
+    /// must detect that stale receiver and start a fresh execution instead of
+    /// returning Cancelled forever.
+    #[tokio::test]
+    async fn test_external_timeout_causes_cancelled() {
+        let group = Arc::new(Group::new());
+        let call_count = Arc::new(AtomicU64::new(0));
+
+        // Simulate reqwest's connection timeout cancelling the resolve future.
+        // tokio::time::timeout plays the role of reqwest's timeout wrapper.
+        let group_clone = group.clone();
+        let count_clone = call_count.clone();
+        let result = tokio::time::timeout(Duration::from_millis(100), async move {
+            group_clone
+                .do_call("timeout_key", || async move {
+                    count_clone.fetch_add(1, Ordering::Relaxed);
+                    // Simulate DNS query hanging due to network outage.
+                    // This will be cancelled by the outer timeout.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Ok::<_, String>("should_not_complete".to_string())
+                })
+                .await
+        })
+        .await;
+
+        // The outer timeout fires, dropping the do_call future.
+        assert!(result.is_err(), "Should timeout");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            1,
+            "func was entered once before cancellation"
+        );
+
+        // Now try the same key again. The stale receiver should be discarded and
+        // this call should execute normally.
+        let group_clone = group.clone();
+        let count_clone = call_count.clone();
+        let result = tokio::time::timeout(Duration::from_secs(5), async move {
+            group_clone
+                .do_call("timeout_key", || async move {
+                    count_clone.fetch_add(1, Ordering::Relaxed);
+                    Ok::<_, String>("recovered_after_timeout".to_string())
+                })
+                .await
+        })
+        .await;
+
+        let call_result = result
+            .expect("Should not timeout — stale entry should be cleaned up")
+            .expect("Should succeed, not return Cancelled");
+        assert_eq!(call_result.value, "recovered_after_timeout");
+        assert_eq!(
+            call_count.load(Ordering::Relaxed),
+            2,
+            "Recovery call should execute func again"
+        );
+    }
+
+    /// Regression test: when an executor task is cancelled (future dropped),
+    /// the in-flight entry must be cleaned up so subsequent calls can recover.
+    ///
+    /// **Reproduces the bug**: with the old code, after the executor is aborted,
+    /// the stale InFlight entry remains in the map forever. The second do_call
+    /// finds it, clones the dead rx, and immediately gets Cancelled — permanently.
+    #[tokio::test]
+    async fn test_cancelled_executor_recovers() {
+        let group = Arc::new(Group::new());
+        let call_count = Arc::new(AtomicU64::new(0));
+
+        // Start an executor that will be cancelled mid-flight.
+        let group_clone = group.clone();
+        let count_clone = call_count.clone();
+        let handle = tokio::spawn(async move {
+            group_clone
+                .do_call("cancel_key", || async move {
+                    count_clone.fetch_add(1, Ordering::Relaxed);
+                    // Simulate a long-running operation that will be cancelled.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Ok::<_, String>("should_not_complete".to_string())
+                })
+                .await
+        });
+
+        // Give the executor time to start and register in the map.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Cancel the executor task (simulates reqwest timeout dropping the future).
+        handle.abort();
+        let _ = handle.await;
+
+        // Now try to call with the same key. This must succeed (not hang or return Cancelled).
+        let group_clone = group.clone();
+        let count_clone = call_count.clone();
+        let result = tokio::time::timeout(Duration::from_secs(5), async move {
+            group_clone
+                .do_call("cancel_key", || async move {
+                    count_clone.fetch_add(1, Ordering::Relaxed);
+                    Ok::<_, String>("recovered".to_string())
+                })
+                .await
+        })
+        .await;
+
+        let call_result = result
+            .expect("Should not timeout - stale entry should be cleaned up")
+            .expect("Call should succeed after recovery");
+        assert_eq!(call_result.value, "recovered");
+        assert!(!call_result.shared);
+    }
+
+    /// Regression test: when an executor is cancelled with waiting callers,
+    /// the waiters get Cancelled but subsequent NEW callers can succeed.
+    ///
+    /// **Reproduces the bug**: with the old code, the stale entry stays in the map
+    /// after the executor is aborted, so the "new caller" at the end also gets
+    /// Cancelled or hangs forever.
+    #[tokio::test]
+    async fn test_cancelled_executor_with_waiting_callers() {
+        let group = Arc::new(Group::new());
+
+        // Start an executor.
+        let group_clone = group.clone();
+        let executor_handle = tokio::spawn(async move {
+            group_clone
+                .do_call("wait_key", || async move {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Ok::<_, String>("should_not_complete".to_string())
+                })
+                .await
+        });
+
+        // Give the executor time to register.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Start some waiting callers (they will wait on the same rx).
+        let mut waiter_handles = Vec::new();
+        for _ in 0..5 {
+            let group_clone = group.clone();
+            let handle = tokio::spawn(async move {
+                group_clone
+                    .do_call("wait_key", || async move {
+                        Ok::<_, String>("waiter_value".to_string())
+                    })
+                    .await
+            });
+            waiter_handles.push(handle);
+        }
+
+        // Give waiters time to start waiting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Cancel the executor.
+        executor_handle.abort();
+        let _ = executor_handle.await;
+
+        // Waiters that were already waiting on the dead sender get Cancelled.
+        for handle in waiter_handles {
+            let result = handle.await.unwrap();
+            assert!(
+                matches!(result, Err(SingleflightError::Cancelled)),
+                "Waiting callers should get Cancelled, got: {:?}",
+                result
+            );
+        }
+
+        // But a NEW caller must succeed once the stale entry is detected.
+        let group_clone = group.clone();
+        let result = tokio::time::timeout(Duration::from_secs(5), async move {
+            group_clone
+                .do_call("wait_key", || async move {
+                    Ok::<_, String>("new_caller_value".to_string())
+                })
+                .await
+        })
+        .await;
+
+        let call_result = result
+            .expect("Should not timeout")
+            .expect("New caller should succeed");
+        assert_eq!(call_result.value, "new_caller_value");
+    }
+
+    /// Repeat the cancel-and-recover flow to make sure stale receiver detection
+    /// keeps working across multiple rounds and does not leave corrupted state.
+    #[tokio::test]
+    async fn test_cancelled_executor_recovers_repeated() {
+        // Variant: cancel and recover multiple times to ensure no state corruption.
+        let group = Arc::new(Group::new());
+
+        for round in 0..5 {
+            // Start executor, then cancel it.
+            let group_clone = group.clone();
+            let handle = tokio::spawn(async move {
+                group_clone
+                    .do_call("repeat_key", || async move {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        Ok::<_, String>("never".to_string())
+                    })
+                    .await
+            });
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            handle.abort();
+            let _ = handle.await;
+
+            // Recover.
+            let group_clone = group.clone();
+            let expected = format!("recovered_{}", round);
+            let expected_clone = expected.clone();
+            let result = tokio::time::timeout(Duration::from_secs(5), async move {
+                group_clone
+                    .do_call(
+                        "repeat_key",
+                        || async move { Ok::<_, String>(expected_clone) },
+                    )
+                    .await
+            })
+            .await;
+
+            let call_result = result
+                .unwrap_or_else(|_| panic!("Timeout on round {}", round))
+                .unwrap_or_else(|e| panic!("Error on round {}: {:?}", round, e));
+            assert_eq!(call_result.value, expected);
+        }
     }
 }
