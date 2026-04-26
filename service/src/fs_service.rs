@@ -187,9 +187,11 @@ pub trait FsService: Send + Sync {
         if self.is_fuse() {
             if let Some(rafs) = fs.deref().as_any().downcast_ref::<Rafs>() {
                 let root_ino = rafs.get_root_inode().unwrap();
+                let (mountpoint_parent_ino, mountpoint_name) =
+                    mountpoint_invalidation_target(self.get_vfs(), &cmd.mountpoint)?;
                 self.walk_and_notify_invalidation(
-                    ROOT_ID,
-                    cmd.mountpoint.trim_start_matches('/'),
+                    mountpoint_parent_ino,
+                    mountpoint_name,
                     root_ino,
                     fs_idx,
                 )?;
@@ -248,6 +250,27 @@ pub trait FsService: Send + Sync {
     }
     /// Cast `self` to trait object of [Any] to support object downcast.
     fn as_any(&self) -> &dyn Any;
+}
+
+fn mountpoint_invalidation_target<'a>(vfs: &Vfs, mountpoint: &'a str) -> Result<(u64, &'a str)> {
+    if mountpoint == "/" {
+        // Keep root mountpoint invalidation compatible with the previous behavior.
+        // Path::file_name() does not produce a basename for "/".
+        return Ok((ROOT_ID, mountpoint.trim_start_matches('/')));
+    }
+
+    let name = Path::new(mountpoint)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            Error::InvalidArguments(format!("invalid mountpoint basename {mountpoint}"))
+        })?;
+    let root_pseudofs = vfs.get_root_pseudofs();
+    let mountpoint_ino = root_pseudofs.path_walk(mountpoint)?;
+    let ino = mountpoint_ino.ok_or(Error::NotFound)?;
+    let parent_ino = root_pseudofs.get_parent_inode(ino).ok_or(Error::NotFound)?;
+
+    Ok((parent_ino, name))
 }
 
 /// Validate prefetch file list from user input.
@@ -440,6 +463,57 @@ mod tests {
             "relative/path".to_string(),
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn it_should_resolve_root_mountpoint_invalidation_target() {
+        let vfs = Vfs::default();
+        let (parent_ino, name) = mountpoint_invalidation_target(&vfs, "/").unwrap();
+
+        assert_eq!(parent_ino, ROOT_ID);
+        assert_eq!(name, "");
+    }
+
+    #[test]
+    fn it_should_resolve_nested_mountpoint_invalidation_target() {
+        let vfs = Vfs::default();
+        let root_pseudofs = vfs.get_root_pseudofs();
+        root_pseudofs.mount("/a/b/c").unwrap();
+
+        let (parent_ino, name) = mountpoint_invalidation_target(&vfs, "/a/b/c").unwrap();
+        let expected_parent_ino = root_pseudofs.path_walk("/a/b").unwrap().unwrap();
+
+        assert_eq!(parent_ino, expected_parent_ino);
+        assert_eq!(name, "c");
+    }
+
+    #[test]
+    fn it_should_fail_to_resolve_missing_mountpoint_invalidation_target() {
+        let vfs = Vfs::default();
+
+        let err = mountpoint_invalidation_target(&vfs, "/a/b/c").unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&Error::NotFound)
+        );
+    }
+
+    #[test]
+    fn it_should_fail_to_resolve_relative_mountpoint_invalidation_target() {
+        let vfs = Vfs::default();
+
+        assert!(mountpoint_invalidation_target(&vfs, "a/b/c").is_err());
+    }
+
+    #[test]
+    fn it_should_reject_invalid_mountpoint_invalidation_basename() {
+        let vfs = Vfs::default();
+
+        let err = mountpoint_invalidation_target(&vfs, "/..").unwrap_err();
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&Error::InvalidArguments(String::new()))
+        );
     }
 
     #[test]
