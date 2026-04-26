@@ -264,6 +264,88 @@ func (a *APIV1TestSuite) TestSubMountCache(t *testing.T) {
 	}
 }
 
+func (a *APIV1TestSuite) TestNestedMountpointStatAfterRemount(t *testing.T) {
+	ctx := tool.DefaultContext(t)
+
+	ctx.PrepareWorkDir(t)
+	defer ctx.Destroy(t)
+
+	config := tool.NydusdConfig{
+		NydusdPath:  ctx.Binary.Nydusd,
+		MountPath:   ctx.Env.MountDir,
+		APISockPath: filepath.Join(ctx.Env.WorkDir, "nydusd-api.sock"),
+		ConfigPath:  filepath.Join(ctx.Env.WorkDir, "nydusd-config.fusedev.json"),
+	}
+
+	nydusd, err := tool.NewNydusd(config)
+	require.NoError(t, err)
+
+	err = nydusd.Mount()
+	require.NoError(t, err)
+
+	nestedMountpoint := "/a/b/c"
+	nestedMountHostPath := filepath.Join(ctx.Env.MountDir, "a/b/c")
+	nestedMounted := false
+	defer func() {
+		if nestedMounted {
+			if err := nydusd.UmountByAPI(nestedMountpoint); err != nil {
+				log.L.WithError(err).Errorf("umount nested mountpoint %s", nestedMountpoint)
+			}
+		}
+		if err := nydusd.Umount(); err != nil {
+			log.L.WithError(err).Errorf("umount")
+		}
+	}()
+
+	layer := tool.NewLayer(t, filepath.Join(ctx.Env.WorkDir, "nested-rootfs"))
+	layer.CreateFile(t, "file-1", []byte("file-1"))
+	layer.CreateDir(t, "dir-1")
+	layer.CreateFile(t, "dir-1/file-1", []byte("dir-1/file-1"))
+	bootstrap := a.buildLayer(t, ctx, layer)
+
+	childConfig := config
+	childConfig.BootstrapPath = bootstrap
+	childConfig.MountPath = nestedMountpoint
+	childConfig.BackendType = "localfs"
+	childConfig.BackendConfig = fmt.Sprintf(`{"dir": "%s"}`, ctx.Env.BlobDir)
+	childConfig.BlobCacheDir = ctx.Env.CacheDir
+	childConfig.CacheType = ctx.Runtime.CacheType
+	childConfig.CacheCompressed = ctx.Runtime.CacheCompressed
+	childConfig.RafsMode = ctx.Runtime.RafsMode
+	childConfig.EnablePrefetch = ctx.Runtime.EnablePrefetch
+	childConfig.DigestValidate = false
+	childConfig.AmplifyIO = ctx.Runtime.AmplifyIO
+
+	t.Logf("mount nested RAFS backend at %s", nestedMountpoint)
+	err = nydusd.MountByAPI(childConfig)
+	require.NoError(t, err)
+	nestedMounted = true
+
+	t.Logf("stat nested mountpoint after first mount: %s", nestedMountHostPath)
+	_, err = os.Stat(nestedMountHostPath)
+	require.NoError(t, err)
+	nydusd.VerifyByPath(t, layer.FileTree, nestedMountpoint)
+
+	t.Logf("unmount nested mountpoint %s", nestedMountpoint)
+	err = nydusd.UmountByAPI(nestedMountpoint)
+	require.NoError(t, err)
+	nestedMounted = false
+
+	t.Logf("remount nested RAFS backend at %s", nestedMountpoint)
+	err = nydusd.MountByAPI(childConfig)
+	require.NoError(t, err)
+	nestedMounted = true
+
+	t.Logf("stat nested mountpoint immediately after remount without reading parent directory: %s", nestedMountHostPath)
+	_, err = os.Stat(nestedMountHostPath)
+	require.NoError(t, err)
+	nydusd.VerifyByPath(t, layer.FileTree, nestedMountpoint)
+
+	err = nydusd.UmountByAPI(nestedMountpoint)
+	require.NoError(t, err)
+	nestedMounted = false
+}
+
 func (a *APIV1TestSuite) TestMount(t *testing.T) {
 
 	ctx := tool.DefaultContext(t)
