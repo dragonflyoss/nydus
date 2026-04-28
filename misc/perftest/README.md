@@ -5,8 +5,9 @@ benchmarks cold-cache parallel reads through **Dragonfly proxy SDK mode**.
 
 Dragonfly itself (dfdaemon + scheduler) is expected to run **outside** this
 container. The proxy and scheduler endpoints are passed in via environment
-variables; the nydusd binary is built statically (musl) so the image runs on
-any Linux host without glibc / kernel-userland coupling.
+variables. The image bundles a static nydusd by default; bind-mount a locally
+built nydusd over `/usr/local/bin/nydusd` when comparing daemon changes without
+rebuilding the image.
 
 ## What it measures
 
@@ -50,8 +51,9 @@ The Dockerfile has three stages:
 2. A Go builder (`golang:1.22-alpine`) that produces a static `crane` binary
    (for image manifest / bootstrap resolution) and a static `workload` binary
    built from `misc/perftest/workload/`.
-3. An alpine runtime containing only `nydusd`, `nydusctl`, `crane`,
-   `workload`, plus `bash`, `fuse3`, `jq`, `gettext`, `tar`, and `tini`.
+3. An Ubuntu runtime containing `nydusd`, `nydusctl`, `crane`, `workload`,
+   plus `bash`, `fuse3`, `jq`, `gettext-base`, `tar`, `tini`, and the
+   libraries needed by normal glibc-linked local nydusd builds.
 
 For arm64 hosts, set `--build-arg RUST_TARGET=aarch64-unknown-linux-musl`
 (or `make perftest-image RUST_TARGET_STATIC=aarch64-unknown-linux-musl`).
@@ -82,6 +84,29 @@ needed on Linux to make `host.docker.internal` resolve to the host gateway.
 The summary is written to `./results/result.json` and printed to stderr.
 
 ## Configuration
+
+### Using a locally built nydusd
+
+By default the harness runs the bundled `/usr/local/bin/nydusd`. To test a
+locally built daemon without rebuilding the perftest image, bind-mount it over
+that path:
+
+```bash
+docker run --rm \
+    --privileged \
+    --device /dev/fuse \
+    --security-opt apparmor=unconfined \
+    --security-opt seccomp=unconfined \
+    --add-host host.docker.internal:host-gateway \
+    -e NYDUS_IMAGE=ghcr.io/dragonflyoss/image-service/nginx:nydus-latest \
+    -v "$PWD/target/release/nydusd:/usr/local/bin/nydusd:ro" \
+    -v "$PWD/results:/results" \
+    nydus-perftest:latest
+```
+
+The entrypoint validates `/usr/local/bin/nydusd` before fetching the bootstrap,
+logs `nydusd --version`, and records the selected binary and version in
+`result.json` and the printed summary.
 
 ### Option A: bring your own nydusd config (recommended for real workloads)
 
@@ -151,6 +176,8 @@ bootstrap file and set `BOOTSTRAP_PATH=/path/to/bootstrap`.
                     "latency_ms": { "mean": 18.4, "p50": 9.1, "p90": 41.7, "p95": 63.2, "p99": 121.0 } },
   "workload_rc":  0,
   "nydusd": {
+    "binary":    "/usr/local/bin/nydusd",
+    "version":   "Version: ...",
     "info":      { ... },   // nydusctl info
     "backend":   { ... },   // backend metrics: bytes pulled, request count
     "blobcache": { ... },   // cache hit/miss

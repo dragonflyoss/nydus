@@ -9,7 +9,7 @@
 #   2. Resolve the bootstrap:
 #        - If $BOOTSTRAP_PATH is set and exists, use it.
 #        - Otherwise, fetch from $NYDUS_IMAGE via crane (see fetch-bootstrap).
-#   3. Start nydusd in FUSE mode with --apisock for telemetry.
+#   3. Start /usr/local/bin/nydusd in FUSE mode with --apisock for telemetry.
 #   4. Wait for FUSE to be mounted AND nydusd to report state RUNNING.
 #   5. Run the parallel-read workload over $MOUNT_POINT.
 #   6. Scrape nydusd metrics and emit a JSON summary to $RESULTS_DIR/result.json.
@@ -42,8 +42,17 @@ REGISTRY_SKIP_VERIFY="${REGISTRY_SKIP_VERIFY:-false}"
 PROXY_FALLBACK="${PROXY_FALLBACK:-true}"
 PREFETCH_ENABLE="${PREFETCH_ENABLE:-false}"
 PREFETCH_THREADS="${PREFETCH_THREADS:-8}"
+NYDUSD="/usr/local/bin/nydusd"
 
 mkdir -p "${WORK_DIR}" "${RESULTS_DIR}" "${BLOB_CACHE_DIR}" "${MOUNT_POINT}"
+
+if [ ! -x "${NYDUSD}" ]; then
+    die "nydusd is not executable: ${NYDUSD}"
+fi
+if ! NYDUSD_VERSION="$("${NYDUSD}" --version 2>&1 | tr '\n' ' ')"; then
+    die "failed to execute ${NYDUSD}: ${NYDUSD_VERSION}"
+fi
+log "Using nydusd binary: ${NYDUSD} (${NYDUSD_VERSION})"
 
 # If REGISTRY_AUTH is provided (base64 of "user:password"), materialise a
 # docker config.json so `crane` (used by fetch-bootstrap) can authenticate
@@ -123,10 +132,10 @@ else
 fi
 
 # ---- Phase 3: start nydusd -------------------------------------------------
-log "Starting nydusd: bootstrap=${BOOTSTRAP_PATH} mountpoint=${MOUNT_POINT}"
+log "Starting nydusd: binary=${NYDUSD} bootstrap=${BOOTSTRAP_PATH} mountpoint=${MOUNT_POINT}"
 T_DAEMON_START=$(date +%s.%N)
 
-nydusd \
+"${NYDUSD}" \
     --config "${CONFIG_PATH}" \
     --bootstrap "${BOOTSTRAP_PATH}" \
     --mountpoint "${MOUNT_POINT}" \
@@ -214,6 +223,8 @@ jq -n \
     --arg platform         "${PLATFORM}" \
     --arg config_path      "${CONFIG_PATH}" \
     --arg bootstrap_path   "${BOOTSTRAP_PATH}" \
+    --arg nydusd_bin       "${NYDUSD}" \
+    --arg nydusd_version   "${NYDUSD_VERSION}" \
     --arg proxy_url        "${DRAGONFLY_PROXY_URL}" \
     --arg scheduler        "${DRAGONFLY_SCHEDULER_ENDPOINT}" \
     --argjson proxy_fb     "$([ "${PROXY_FALLBACK}" = "true" ] && echo true || echo false)" \
@@ -235,6 +246,8 @@ jq -n \
         workload_rc:     $workload_rc,
         workload:        ($workload[0] // {}),
         nydusd: {
+            binary:    $nydusd_bin,
+            version:   $nydusd_version,
             info:      ($info[0]      // {}),
             backend:   ($backend[0]   // {}),
             blobcache: ($blobcache[0] // {}),
@@ -246,6 +259,8 @@ log "Wrote summary to ${RESULT_JSON}"
 echo "================ PERF TEST SUMMARY ================" >&2
 jq -r '
   "image            : \(.image)",
+  "nydusd_binary    : \(.nydusd.binary)",
+  "nydusd_version   : \(.nydusd.version)",
   "mount_ready_sec  : \(.timing_sec.mount_ready)",
   "workload_sec     : \(.timing_sec.workload)",
   "files_read       : \(.workload.files_read // 0)  (skipped=\(.workload.files_skipped // 0), errors=\(.workload.files_errored // 0))",

@@ -4,9 +4,11 @@
 #
 # This image bundles a statically-linked nydusd (musl) plus a small benchmark
 # harness that mounts a Nydus image via FUSE and reads every regular file
-# in parallel, exercising the Dragonfly SDK proxy path. Dragonfly (dfdaemon
-# + scheduler) is expected to be deployed OUTSIDE the container; the proxy
-# and scheduler endpoints are passed via environment variables.
+# in parallel, exercising the Dragonfly SDK proxy path. Bind-mount a local
+# nydusd over /usr/local/bin/nydusd to test a new daemon without rebuilding
+# this image. Dragonfly (dfdaemon + scheduler) is expected to be deployed
+# OUTSIDE the container; the proxy and scheduler endpoints are passed via
+# environment variables.
 #
 # See README.md in this directory for usage.
 
@@ -60,23 +62,30 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /out-workload ./...
 # -----------------------------------------------------------------------------
 # Stage 3: minimal runtime image.
 #
-# Alpine is fine here because nydusd/nydusctl are fully static (musl) and the
-# workload binary is a pure-Go static build. The only runtime tooling we need
-# beyond bash is fuse3 (for the FUSE mount), jq (for JSON munging), gettext
-# (envsubst), curl + tar + ca-certificates (used by crane via TLS).
+# Ubuntu keeps the bundled static musl binaries working while also allowing
+# /usr/local/bin/nydusd to be replaced by a normal glibc-linked nydusd
+# bind-mounted from a local host build. The only runtime tooling we need beyond
+# bash is fuse3 (for the FUSE mount), jq (for JSON munging), gettext-base
+# (envsubst), curl + tar + ca-certificates (used by crane via TLS), and tini.
 # -----------------------------------------------------------------------------
-FROM alpine:3.20
+FROM ubuntu:24.04
 
-RUN apk add --no-cache \
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
         ca-certificates \
         coreutils \
         curl \
+        file \
         fuse3 \
-        gettext \
+        gettext-base \
         jq \
+        libgcc-s1 \
         tar \
         tini \
+        util-linux \
+        zlib1g \
+    && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /etc/nydus /mnt/nydus /results /var/lib/nydus/cache /tmp/nydus
 
 COPY --from=builder    /out-nydusd   /usr/local/bin/nydusd
@@ -108,5 +117,5 @@ ENV NYDUS_IMAGE="ghcr.io/dragonflyoss/image-service/nginx:nydus-latest" \
     PLATFORM="linux/amd64"
 
 VOLUME ["/results"]
-ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/perftest-entrypoint"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/perftest-entrypoint"]
 CMD []
