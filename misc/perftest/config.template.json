@@ -30,13 +30,17 @@
     }
   },
   "mode": "direct",
-  "digest_validate": false,
+  "digest_validate": ${DIGEST_VALIDATE},
   "iostats_files": false,
   "enable_xattr": true,
   "fs_prefetch": {
     "enable": ${PREFETCH_ENABLE},
     "threads_count": ${PREFETCH_THREADS},
     "merging_size": 131072,
-    "bandwidth_rate": 0
+    "bandwidth_rate": 0,
+    "stream_prefetch": ${STREAM_PREFETCH},
+    "stream_prefetch_threads": ${STREAM_PREFETCH_THREADS},
+    "stream_prefetch_bandwidth": ${STREAM_PREFETCH_BANDWIDTH},
+    "stream_prefetch_max_retry": ${STREAM_PREFETCH_MAX_RETRY}
   }
 }

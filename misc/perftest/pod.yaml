@@ -1,0 +1,123 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nydus-perftest
+  labels:
+    app: nydus-perftest
+spec:
+  restartPolicy: Never
+  containers:
+    - name: perftest
+      image: nydus-perftest:latest
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        privileged: true
+      env:
+        # Image/bootstrap/config selection.
+        - name: NYDUS_IMAGE
+          value: "ghcr.io/dragonflyoss/image-service/nginx:nydus-latest"
+        - name: NYDUSD_CONFIG
+          value: ""
+        - name: BOOTSTRAP_PATH
+          value: ""
+        - name: PLATFORM
+          value: "linux/amd64"
+
+        # Registry and Dragonfly proxy config used when NYDUSD_CONFIG is empty.
+        - name: REGISTRY_HOST
+          value: ""
+        - name: REGISTRY_REPO
+          value: ""
+        - name: REGISTRY_SCHEME
+          value: "https"
+        - name: REGISTRY_AUTH
+          value: ""
+        - name: REGISTRY_SKIP_VERIFY
+          value: "false"
+        - name: DRAGONFLY_PROXY_URL
+          value: "http://dragonfly-dfdaemon.dragonfly-system.svc.cluster.local:4001"
+        - name: DRAGONFLY_SCHEDULER_ENDPOINT
+          value: "http://dragonfly-scheduler.dragonfly-system.svc.cluster.local:8002"
+        - name: PROXY_FALLBACK
+          value: "true"
+        - name: DIGEST_VALIDATE
+          value: "false"
+        - name: PREFETCH_ENABLE
+          value: "false"
+        - name: PREFETCH_THREADS
+          value: "8"
+        - name: STREAM_PREFETCH
+          value: "false"
+        - name: STREAM_PREFETCH_THREADS
+          value: "5"
+        - name: STREAM_PREFETCH_BANDWIDTH
+          value: "0"
+        - name: STREAM_PREFETCH_MAX_RETRY
+          value: "10"
+
+        # Runtime paths.
+        - name: MOUNT_POINT
+          value: "/mnt/nydus"
+        - name: RESULTS_DIR
+          value: "/results"
+        - name: WORK_DIR
+          value: "/tmp/nydus"
+        - name: BLOB_CACHE_DIR
+          value: "/var/lib/nydus/cache"
+
+        # Workload knobs.
+        - name: READ_PARALLELISM
+          value: "16"
+        - name: READ_CHUNK_SIZE
+          value: "1048576"
+        - name: MAX_FILES
+          value: "0"
+        - name: MOUNT_READY_TIMEOUT
+          value: "60"
+        - name: NYDUSD_LOG_LEVEL
+          value: "info"
+      volumeMounts:
+        - name: dev-fuse
+          mountPath: /dev/fuse
+        - name: results
+          mountPath: /results
+        - name: cache
+          mountPath: /var/lib/nydus/cache
+        - name: work
+          mountPath: /tmp/nydus
+        # To test a locally built daemon, mount it over the bundled binary:
+        # - name: local-nydusd
+        #   mountPath: /usr/local/bin/nydusd
+        #   readOnly: true
+        # If NYDUSD_CONFIG or BOOTSTRAP_PATH is set, mount the referenced file:
+        # - name: nydusd-config
+        #   mountPath: /etc/nydus/user.json
+        #   subPath: user.json
+        #   readOnly: true
+        # - name: bootstrap
+        #   mountPath: /bootstrap/image.boot
+        #   subPath: image.boot
+        #   readOnly: true
+  volumes:
+    - name: dev-fuse
+      hostPath:
+        path: /dev/fuse
+        type: CharDevice
+    - name: results
+      emptyDir: {}
+    - name: cache
+      emptyDir: {}
+    - name: work
+      emptyDir: {}
+    # To test a locally built daemon, uncomment this hostPath volume and the
+    # matching mount above. The file must exist on the node that runs the pod.
+    # - name: local-nydusd
+    #   hostPath:
+    #     path: /path/on/node/target/release/nydusd
+    #     type: File
+    # - name: nydusd-config
+    #   configMap:
+    #     name: nydus-perftest-config
+    # - name: bootstrap
+    #   configMap:
+    #     name: nydus-perftest-bootstrap

@@ -83,6 +83,11 @@ needed on Linux to make `host.docker.internal` resolve to the host gateway.
 
 The summary is written to `./results/result.json` and printed to stderr.
 
+For Kubernetes, `misc/perftest/pod.yaml` provides a Pod example with every
+perftest environment option listed explicitly. Update the image, Dragonfly
+service endpoints, registry credentials, and optional local nydusd hostPath
+before applying it.
+
 ## Configuration
 
 ### Using a locally built nydusd
@@ -137,9 +142,14 @@ env vars (defaults shown):
 | `DRAGONFLY_PROXY_URL`          | `http://host.docker.internal:4001`                           | dfdaemon proxy listen URL. |
 | `DRAGONFLY_SCHEDULER_ENDPOINT` | `http://host.docker.internal:8002`                           | Non-empty value enables SDK mode. |
 | `PROXY_FALLBACK`               | `true`                                                       | Fall back to direct registry if proxy is unhealthy. |
+| `DIGEST_VALIDATE`              | `false`                                                      | Enable RAFS metadata digest validation. |
 | `BLOB_CACHE_DIR`               | `/var/lib/nydus/cache`                                       | nydusd blobcache work_dir. |
 | `PREFETCH_ENABLE`              | `false`                                                      | Background prefetch threads. |
 | `PREFETCH_THREADS`             | `8`                                                          | |
+| `STREAM_PREFETCH`              | `false`                                                      | Enable Dragonfly streaming blob prefetch. |
+| `STREAM_PREFETCH_THREADS`      | `5`                                                          | Concurrent streaming prefetch workers. |
+| `STREAM_PREFETCH_BANDWIDTH`    | `0`                                                          | Streaming prefetch bandwidth limit in bytes/sec; 0 uses nydusd default. |
+| `STREAM_PREFETCH_MAX_RETRY`    | `10`                                                         | Maximum retry attempts per blob for streaming prefetch. |
 
 ### Workload knobs
 
