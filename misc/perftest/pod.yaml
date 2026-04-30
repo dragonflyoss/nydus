@@ -5,6 +5,11 @@ metadata:
   labels:
     app: nydus-perftest
 spec:
+  # The perftest needs outbound registry access and Dragonfly SDK mode needs a
+  # discoverable local IP address. hostNetwork avoids CNI/network-policy setups
+  # that leave this privileged benchmark pod without a default route.
+  hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
   restartPolicy: Never
   containers:
     - name: perftest

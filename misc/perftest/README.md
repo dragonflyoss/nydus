@@ -86,7 +86,9 @@ The summary is written to `./results/result.json` and printed to stderr.
 For Kubernetes, `misc/perftest/pod.yaml` provides a Pod example with every
 perftest environment option listed explicitly. Update the image, Dragonfly
 service endpoints, registry credentials, and optional local nydusd hostPath
-before applying it.
+before applying it. The example enables `hostNetwork` so registry access and
+Dragonfly SDK local-IP discovery use the node network; remove it only if your
+pod network provides a working default route.
 
 ## Configuration
 

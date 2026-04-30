@@ -79,6 +79,7 @@ RUN apt-get update \
         file \
         fuse3 \
         gettext-base \
+        iproute2 \
         jq \
         libgcc-s1 \
         tar \
