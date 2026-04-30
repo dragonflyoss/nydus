@@ -286,6 +286,8 @@ jobs:
             -e READ_PARALLELISM=8 \
             -e MAX_FILES=200 \
             -e MOUNT_READY_TIMEOUT=120 \
+            -e DIGEST_VALIDATE=true \
+            -e STREAM_PREFETCH=true \
             -v /tmp/perftest-results:/results \
             "${PERFTEST_IMAGE}"
 
