@@ -88,7 +88,10 @@ perftest environment option listed explicitly. Update the image, Dragonfly
 service endpoints, registry credentials, and optional local nydusd hostPath
 before applying it. The example enables `hostNetwork` so registry access and
 Dragonfly SDK local-IP discovery use the node network; remove it only if your
-pod network provides a working default route.
+pod network provides a working default route. If the pod has endpoint-specific
+routes but no default IPv4 route, set `ENABLE_DEFAULT_ROUTE_WORKAROUND=true`
+to let the entrypoint add a default route derived from the Dragonfly or registry
+route; this requires `CAP_NET_ADMIN` or a privileged container.
 
 ## Configuration
 
@@ -144,6 +147,7 @@ env vars (defaults shown):
 | `DRAGONFLY_PROXY_URL`          | `http://host.docker.internal:4001`                           | dfdaemon proxy listen URL. |
 | `DRAGONFLY_SCHEDULER_ENDPOINT` | `http://host.docker.internal:8002`                           | Non-empty value enables SDK mode. |
 | `PROXY_FALLBACK`               | `true`                                                       | Fall back to direct registry if proxy is unhealthy. |
+| `ENABLE_DEFAULT_ROUTE_WORKAROUND` | `false`                                                   | Add a default IPv4 route derived from Dragonfly/registry endpoint routes when none exists. Requires `CAP_NET_ADMIN` or privileged mode. |
 | `DIGEST_VALIDATE`              | `false`                                                      | Enable RAFS metadata digest validation. |
 | `BLOB_CACHE_DIR`               | `/var/lib/nydus/cache`                                       | nydusd blobcache work_dir. |
 | `PREFETCH_ENABLE`              | `false`                                                      | Background prefetch threads. |

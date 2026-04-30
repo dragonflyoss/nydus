@@ -19,6 +19,110 @@ set -euo pipefail
 log() { printf '[perftest] %s\n' "$*" >&2; }
 die() { printf '[perftest] ERROR: %s\n' "$*" >&2; exit 1; }
 
+is_ipv4() {
+    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+}
+
+endpoint_host() {
+    local endpoint="$1"
+    local authority host
+
+    [ -n "${endpoint}" ] || return 1
+    authority="${endpoint#*://}"
+    authority="${authority%%/*}"
+    if [[ "${authority}" == \[*\]* ]]; then
+        host="${authority#\[}"
+        host="${host%%\]*}"
+    else
+        host="${authority%%:*}"
+    fi
+    [ -n "${host}" ] || return 1
+    printf '%s\n' "${host}"
+}
+
+resolve_ipv4() {
+    local host="$1"
+    local ip=""
+
+    if is_ipv4 "${host}"; then
+        printf '%s\n' "${host}"
+        return 0
+    fi
+
+    if command -v getent >/dev/null 2>&1; then
+        ip="$(getent ahostsv4 "${host}" 2>/dev/null | awk 'NR == 1 {print $1}' || true)"
+    fi
+    if [ -z "${ip}" ] && command -v nslookup >/dev/null 2>&1; then
+        ip="$(nslookup "${host}" 2>/dev/null | awk '
+            /^Address[[:space:]]+[0-9]+: / {print $3; exit}
+            /^Address: / && $2 !~ /:53$/ {print $2; exit}
+        ' || true)"
+    fi
+    [ -n "${ip}" ] || return 1
+    printf '%s\n' "${ip}"
+}
+
+ensure_default_ipv4_route() {
+    local endpoint host ip route gateway="" dev=""
+    local -a fields
+
+    command -v ip >/dev/null 2>&1 || {
+        log "ip command not found; skipping default route workaround"
+        return
+    }
+    [ -z "$(ip -4 route show default 2>/dev/null)" ] || return
+
+    log "No default IPv4 route found; trying to derive one from reachable endpoints"
+    for endpoint in "${DRAGONFLY_SCHEDULER_ENDPOINT}" "${DRAGONFLY_PROXY_URL}" "${REGISTRY_HOST:-}"; do
+        host="$(endpoint_host "${endpoint}" 2>/dev/null || true)"
+        [ -n "${host}" ] || continue
+        ip="$(resolve_ipv4 "${host}" 2>/dev/null || true)"
+        [ -n "${ip}" ] || {
+            log "Could not resolve IPv4 address for ${host}; skipping"
+            continue
+        }
+
+        route="$(ip -4 route get "${ip}" 2>/dev/null || true)"
+        route="${route%%$'\n'*}"
+        [ -n "${route}" ] || {
+            log "No IPv4 route to ${host} (${ip}); skipping"
+            continue
+        }
+
+        fields=(${route})
+        gateway=""
+        dev=""
+        for ((i = 0; i < ${#fields[@]}; i++)); do
+            case "${fields[$i]}" in
+                via)
+                    gateway="${fields[$((i + 1))]:-}"
+                    ;;
+                dev)
+                    dev="${fields[$((i + 1))]:-}"
+                    ;;
+            esac
+        done
+
+        [ -n "${dev}" ] || {
+            log "Route to ${host} (${ip}) has no device: ${route}"
+            continue
+        }
+
+        if [ -n "${gateway}" ]; then
+            if ip route add default via "${gateway}" dev "${dev}" 2>/dev/null; then
+                log "Added default IPv4 route via ${gateway} dev ${dev} (derived from ${host}/${ip})"
+                return
+            fi
+        elif ip route add default dev "${dev}" 2>/dev/null; then
+            log "Added default IPv4 route dev ${dev} (derived from ${host}/${ip})"
+            return
+        fi
+        log "Failed to add default route from ${host}/${ip}: ${route}"
+    done
+
+    log "No default IPv4 route could be derived; Dragonfly SDK local IP discovery may fail"
+}
+
 # ---- Inputs ----------------------------------------------------------------
 NYDUS_IMAGE="${NYDUS_IMAGE:-}"
 NYDUSD_CONFIG="${NYDUSD_CONFIG:-}"
@@ -40,6 +144,7 @@ REGISTRY_SCHEME="${REGISTRY_SCHEME:-https}"
 REGISTRY_AUTH="${REGISTRY_AUTH:-}"
 REGISTRY_SKIP_VERIFY="${REGISTRY_SKIP_VERIFY:-false}"
 PROXY_FALLBACK="${PROXY_FALLBACK:-true}"
+ENABLE_DEFAULT_ROUTE_WORKAROUND="${ENABLE_DEFAULT_ROUTE_WORKAROUND:-false}"
 DIGEST_VALIDATE="${DIGEST_VALIDATE:-false}"
 PREFETCH_ENABLE="${PREFETCH_ENABLE:-false}"
 PREFETCH_THREADS="${PREFETCH_THREADS:-8}"
@@ -126,6 +231,11 @@ else
     log "Rendered config -> ${CONFIG_PATH}"
     log "  registry: ${REGISTRY_SCHEME}://${REGISTRY_HOST}/${REGISTRY_REPO}"
     log "  proxy:    ${DRAGONFLY_PROXY_URL}  scheduler: ${DRAGONFLY_SCHEDULER_ENDPOINT}"
+fi
+if [ "${ENABLE_DEFAULT_ROUTE_WORKAROUND}" = "true" ]; then
+    ensure_default_ipv4_route
+else
+    log "Default IPv4 route workaround disabled"
 fi
 
 # ---- Phase 2: resolve bootstrap -------------------------------------------

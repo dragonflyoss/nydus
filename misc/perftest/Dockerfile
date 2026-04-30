@@ -107,6 +107,7 @@ ENV NYDUS_IMAGE="ghcr.io/dragonflyoss/image-service/nginx:nydus-latest" \
     DRAGONFLY_PROXY_URL="http://host.docker.internal:4001" \
     DRAGONFLY_SCHEDULER_ENDPOINT="http://host.docker.internal:8002" \
     REGISTRY_SCHEME="https" \
+    ENABLE_DEFAULT_ROUTE_WORKAROUND="false" \
     DIGEST_VALIDATE="false" \
     STREAM_PREFETCH="false" \
     STREAM_PREFETCH_THREADS="5" \

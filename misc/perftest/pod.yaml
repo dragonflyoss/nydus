@@ -45,6 +45,8 @@ spec:
           value: "http://dragonfly-scheduler.dragonfly-system.svc.cluster.local:8002"
         - name: PROXY_FALLBACK
           value: "true"
+        - name: ENABLE_DEFAULT_ROUTE_WORKAROUND
+          value: "false"
         - name: DIGEST_VALIDATE
           value: "false"
         - name: PREFETCH_ENABLE
