@@ -86,6 +86,7 @@ RUN apt-get update \
         tini \
         util-linux \
         zlib1g \
+        busybox \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /etc/nydus /mnt/nydus /results /var/lib/nydus/cache /tmp/nydus
 
