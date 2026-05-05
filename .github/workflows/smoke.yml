@@ -383,7 +383,7 @@ jobs:
         echo "  GO_BINARY_COVERDIR=${GO_BINARY_COVERDIR}"
         echo "  GO_TEST_BUILD_FLAGS=${GO_TEST_BUILD_FLAGS}"
         cargo llvm-cov clean --workspace
-        cargo build --release --features=virtiofs --bins
+        cargo build --release --features=virtiofs,block-uffd --bins
         echo "Built instrumented binaries:"
         ls -l target/release/nydusd target/release/nydus-image contrib/nydusify/cmd/nydusify
         target/release/nydusd --version || true
