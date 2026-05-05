@@ -25,7 +25,7 @@ UNAME_M := $(shell uname -m)
 UNAME_S := $(shell uname -s)
 STATIC_TARGET = $(UNAME_M)-unknown-linux-musl
 ifeq ($(UNAME_S),Linux)
-	CARGO_COMMON += --features=virtiofs
+	CARGO_COMMON += --features=virtiofs,block-uffd
 ifeq ($(UNAME_M),ppc64le)
 	STATIC_TARGET = powerpc64le-unknown-linux-gnu
 endif

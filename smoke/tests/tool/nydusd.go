@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"text/template"
 	"time"
@@ -89,6 +90,9 @@ type NydusdConfig struct {
 	OvlUpperDir string
 	OvlWorkDir  string
 	Writable    bool
+	// UFFD config.
+	UffdSockPath string
+	LocalFsDir   string
 }
 
 type Nydusd struct {
@@ -264,6 +268,65 @@ func NewNydusd(conf NydusdConfig) (*Nydusd, error) {
 	}
 
 	return nydusd, nil
+}
+
+// NewNydusdUffd creates a Nydusd instance for uffd subcommand mode.
+// The uffd mode uses --bootstrap and --localfs-dir instead of a config template.
+func NewNydusdUffd(conf NydusdConfig) (*Nydusd, error) {
+	args := []string{
+		"uffd",
+		"--sock", conf.UffdSockPath,
+		"--bootstrap", conf.BootstrapPath,
+		"--localfs-dir", conf.LocalFsDir,
+		"--log-level", "info",
+		"--threads", "4",
+		"--rlimit-nofile", "0",
+	}
+	if len(conf.APISockPath) > 0 {
+		args = append(args, "--apisock", conf.APISockPath)
+	}
+
+	logrus.Infof("command: %s %s", conf.NydusdPath, strings.Join(args, " "))
+	cmd := exec.Command(conf.NydusdPath, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	transport := &http.Transport{
+		MaxIdleConns:          10,
+		IdleConnTimeout:       10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := &net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 5 * time.Second,
+			}
+			return dialer.DialContext(ctx, "unix", conf.APISockPath)
+		},
+	}
+
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+	}
+
+	nydusd := &Nydusd{
+		client:       client,
+		cmd:          cmd,
+		NydusdConfig: conf,
+	}
+
+	return nydusd, nil
+}
+
+// Shutdown stops a non-FUSE daemon (uffd, nbd) by sending SIGTERM.
+func (nydusd *Nydusd) Shutdown() error {
+	if nydusd.cmd != nil && nydusd.cmd.Process != nil {
+		_ = nydusd.cmd.Process.Signal(syscall.SIGTERM)
+	}
+	if nydusd.waitCh == nil {
+		return nil
+	}
+	return nydusd.waitForExit(10 * time.Second)
 }
 
 func NewNydusdWithOverlay(conf NydusdConfig) (*Nydusd, error) {
