@@ -736,8 +736,7 @@ impl Algorithm<SqliteDatabase> {
             // Adjust the radius size to select the dictionary that tests best.
             while radius <= max_radius {
                 let data_cluster = Self::dbsacn(&mut data_point, radius)?;
-                data_cluster_length = data_cluster.len();
-
+                data_cluster_length = data_cluster.iter().filter(|point| point.clustered).count();
                 let data_dict = Self::aggregate_chunk(data_cluster)?;
 
                 let all_chunks: HashSet<&ChunkdictChunkInfo> =
@@ -750,7 +749,6 @@ impl Algorithm<SqliteDatabase> {
                     }
                 }
                 test_chunk_sizes.push((radius, total_test_set_size));
-                min_test_size = total_test_set_size;
                 if total_test_set_size <= min_test_size {
                     min_test_size = total_test_set_size;
                     min_data_dict = data_dict;
