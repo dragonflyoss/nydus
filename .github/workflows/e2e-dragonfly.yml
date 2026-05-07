@@ -1,0 +1,400 @@
+name: E2E Test With Dragonfly
+
+on:
+  push:
+    branches: ["**", "stable/**"]
+  pull_request:
+    branches: ["**", "stable/**"]
+    paths-ignore: ['**.md', '**.png', '**.jpg', '**.svg', '**/docs/**']
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  DRAGONFLY_VERSION: "2.4.3"
+  CLIENT_VERSION: "1.3.3"
+
+jobs:
+  nydus-build:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: Linux-cargo-amd64
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Setup Rust toolchain
+        uses: dsherret/rust-toolchain-file@v1
+
+      - name: Install protoc
+        run: bash misc/install-protoc.sh
+
+      - name: Build Nydus
+        run: make release
+
+      - name: Upload Nydus Binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: nydus-artifact
+          path: |
+            target/release/nydus-image
+            target/release/nydusd
+
+  dragonfly-download:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - name: Cache Dragonfly binaries
+        id: cache-dragonfly
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dragonfly-bin
+          key: dragonfly-${{ env.DRAGONFLY_VERSION }}-client-${{ env.CLIENT_VERSION }}-linux-amd64
+
+      - name: Download Dragonfly server binaries
+        if: steps.cache-dragonfly.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p /tmp/dragonfly-bin
+          wget -q -O /tmp/dragonfly-server.tar.gz \
+            "https://github.com/dragonflyoss/dragonfly/releases/download/v${DRAGONFLY_VERSION}/dragonfly-${DRAGONFLY_VERSION}-linux-amd64.tar.gz"
+          tar -xzf /tmp/dragonfly-server.tar.gz -C /tmp/dragonfly-bin manager scheduler
+          rm /tmp/dragonfly-server.tar.gz
+
+      - name: Download Dragonfly client binaries
+        if: steps.cache-dragonfly.outputs.cache-hit != 'true'
+        run: |
+          wget -q -O /tmp/dragonfly-client.tar.gz \
+            "https://github.com/dragonflyoss/client/releases/download/v${CLIENT_VERSION}/dragonfly-client-v${CLIENT_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tar -xzf /tmp/dragonfly-client.tar.gz --strip-components=1 -C /tmp/dragonfly-bin
+          rm /tmp/dragonfly-client.tar.gz
+
+      - name: Upload Dragonfly Binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: dragonfly-artifact
+          path: /tmp/dragonfly-bin
+
+  e2e-test:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    needs: [nydus-build, dragonfly-download]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: http-proxy
+            image: ghcr.io/dragonflyoss/image-service/nginx:nydus-latest
+            config: misc/dragonfly/nydusd-config.json
+          - mode: sdk-proxy
+            image: ghcr.io/dragonflyoss/image-service/java:nydus-nightly-v5
+            config: misc/dragonfly/nydusd-sdk-fallback-config.json
+          - mode: sdk-proxy-strict
+            image: ghcr.io/dragonflyoss/image-service/java:nydus-nightly-v5
+            config: misc/dragonfly/nydusd-sdk-config.json
+          - mode: http-proxy-strict
+            image: ghcr.io/dragonflyoss/image-service/nginx:nydus-latest
+            config: misc/dragonfly/nydusd-http-proxy-nofallback-config.json
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download Nydus artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: nydus-artifact
+          path: /usr/local/bin
+
+      - name: Download Dragonfly artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: dragonfly-artifact
+          path: /usr/local/bin
+
+      - name: Install binaries
+        run: |
+          sudo chmod +x /usr/local/bin/nydusd
+          sudo chmod +x /usr/local/bin/nydus-image
+          sudo chmod +x /usr/local/bin/manager
+          sudo chmod +x /usr/local/bin/scheduler
+          sudo chmod +x /usr/local/bin/dfdaemon
+
+      - name: Start MySQL
+        run: |
+          docker run -d --name mysql \
+            -e MYSQL_ROOT_PASSWORD=dragonfly \
+            -e MYSQL_DATABASE=manager \
+            -p 3306:3306 \
+            mysql:8
+          for i in $(seq 1 60); do
+            if docker exec mysql mysqladmin ping -h 127.0.0.1 -u root -pdragonfly --silent 2>/dev/null; then
+              echo "MySQL is ready"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "ERROR: MySQL failed to start"
+              docker logs mysql
+              exit 1
+            fi
+            echo "Waiting for MySQL... ($i/60)"
+            sleep 2
+          done
+
+      - name: Start Redis
+        run: |
+          docker run -d --name redis \
+            -p 6379:6379 \
+            redis:latest
+          for i in $(seq 1 30); do
+            if docker exec redis redis-cli ping 2>/dev/null | grep -q PONG; then
+              echo "Redis is ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: Redis failed to start"
+              docker logs redis
+              exit 1
+            fi
+            echo "Waiting for Redis... ($i/30)"
+            sleep 1
+          done
+
+      - name: Setup Dragonfly config
+        run: |
+          sudo mkdir -p /etc/dragonfly
+          sudo cp misc/dragonfly/manager.yaml /etc/dragonfly/manager.yaml
+          sudo cp misc/dragonfly/scheduler.yaml /etc/dragonfly/scheduler.yaml
+          sudo cp misc/dragonfly/dfdaemon.yaml /etc/dragonfly/dfdaemon.yaml
+          mkdir -p /tmp/dragonfly/logs /tmp/dragonfly/cache /tmp/dragonfly/storage
+          mkdir -p /tmp/nydus-test/cache /tmp/nydus-test/mnt
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Install crane
+        run: go install github.com/google/go-containerregistry/cmd/crane@latest
+
+      - name: Extract nydus image bootstrap
+        run: |
+          NYDUS_IMAGE="${{ matrix.image }}"
+          WORK_DIR="/tmp/nydus-test"
+          mkdir -p "${WORK_DIR}"
+
+          echo "Fetching manifest for ${NYDUS_IMAGE}..."
+          crane manifest --platform linux/amd64 "${NYDUS_IMAGE}" > "${WORK_DIR}/manifest.json"
+          cat "${WORK_DIR}/manifest.json" | python3 -m json.tool
+
+          BOOTSTRAP_DIGEST=$(python3 -c "
+          import json
+          with open('${WORK_DIR}/manifest.json') as f:
+              manifest = json.load(f)
+          for layer in manifest.get('layers', []):
+              annotations = layer.get('annotations', {})
+              if annotations.get('containerd.io/snapshot/nydus-bootstrap') == 'true':
+                  print(layer['digest'])
+                  break
+          else:
+              for layer in manifest.get('layers', []):
+                  if 'nydus' in layer.get('mediaType', '') and 'blob' not in layer.get('mediaType', ''):
+                      print(layer['digest'])
+                      break
+              else:
+                  import sys
+                  print('ERROR: Could not identify bootstrap layer in manifest', file=sys.stderr)
+                  import json as j
+                  print(j.dumps(manifest.get('layers', []), indent=2), file=sys.stderr)
+                  sys.exit(1)
+          ")
+
+          echo "Bootstrap layer digest: ${BOOTSTRAP_DIGEST}"
+          crane blob "${NYDUS_IMAGE}@${BOOTSTRAP_DIGEST}" > "${WORK_DIR}/bootstrap-layer.tar.gz"
+
+          mkdir -p "${WORK_DIR}/bootstrap-extract"
+          if ! tar -xf "${WORK_DIR}/bootstrap-layer.tar.gz" -C "${WORK_DIR}/bootstrap-extract"; then
+            echo "ERROR: Failed to extract bootstrap layer."
+            file "${WORK_DIR}/bootstrap-layer.tar.gz"
+            exit 1
+          fi
+
+          BOOTSTRAP_FILE=$(find "${WORK_DIR}/bootstrap-extract" -name "*.boot" -o -name "image.boot" | head -1)
+          if [ -z "${BOOTSTRAP_FILE}" ]; then
+            BOOTSTRAP_FILE="${WORK_DIR}/bootstrap-extract/image.boot"
+          fi
+
+          cp "${BOOTSTRAP_FILE}" "${WORK_DIR}/bootstrap"
+          echo "Bootstrap extracted to ${WORK_DIR}/bootstrap"
+          ls -la "${WORK_DIR}/bootstrap"
+
+      - name: Run Dragonfly E2E tests (${{ matrix.mode }})
+        run: |
+          cd smoke/dragonfly
+          sudo -E env "PATH=$PATH" \
+            TEST_MODE=${{ matrix.mode }} \
+            NYDUSD_BIN=/usr/local/bin/nydusd \
+            NYDUSD_CONFIG=${{ github.workspace }}/${{ matrix.config }} \
+            BOOTSTRAP_PATH=/tmp/nydus-test/bootstrap \
+            WORK_DIR=/tmp/nydus-test \
+            LOG_DIR=/tmp/dragonfly/logs \
+            DRAGONFLY_CACHE_DIR=/tmp/dragonfly/cache \
+            MANAGER_CONFIG=/etc/dragonfly/manager.yaml \
+            SCHEDULER_CONFIG=/etc/dragonfly/scheduler.yaml \
+            DFDAEMON_CONFIG=/etc/dragonfly/dfdaemon.yaml \
+            go test -v -run TestDragonflyE2E -timeout 10m -count=1 ./...
+
+      - name: Dump service logs
+        if: always()
+        continue-on-error: true
+        run: |
+          LOG_DIR="/tmp/dragonfly-e2e-logs"
+          mkdir -p "${LOG_DIR}"
+
+          cp /tmp/nydus-test/nydusd.log "${LOG_DIR}/nydusd.log" 2>/dev/null || true
+          cp /tmp/nydus-test/nydusd.log.stdout "${LOG_DIR}/nydusd-stdout.log" 2>/dev/null || true
+          cp /tmp/dragonfly/logs/*.log "${LOG_DIR}/" 2>/dev/null || true
+          cp /tmp/dragonfly/logs/*.log.restart "${LOG_DIR}/" 2>/dev/null || true
+          cp /var/log/dragonfly/manager/*.log "${LOG_DIR}/" 2>/dev/null || true
+          cp /var/log/dragonfly/scheduler/*.log "${LOG_DIR}/" 2>/dev/null || true
+          cp -r /var/log/dragonfly/dfdaemon/ "${LOG_DIR}/dfdaemon/" 2>/dev/null || true
+          docker logs mysql > "${LOG_DIR}/mysql.log" 2>&1 || true
+          docker logs redis > "${LOG_DIR}/redis.log" 2>&1 || true
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo umount /tmp/nydus-test/mnt 2>/dev/null || true
+          # Kill any remaining processes
+          for proc in nydusd dfdaemon scheduler manager; do
+            if pid=$(pgrep -n "${proc}" 2>/dev/null); then
+              sudo kill "${pid}" 2>/dev/null || true
+            fi
+          done
+          docker rm -f mysql redis 2>/dev/null || true
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: dragonfly-e2e-logs-${{ matrix.mode }}
+          path: /tmp/dragonfly-e2e-logs/
+
+  proxy-error-test:
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
+    needs: nydus-build
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download Nydus artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: nydus-artifact
+          path: /usr/local/bin
+
+      - name: Install binaries
+        run: |
+          sudo chmod +x /usr/local/bin/nydusd
+          sudo chmod +x /usr/local/bin/nydus-image
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Install crane
+        run: go install github.com/google/go-containerregistry/cmd/crane@latest
+
+      - name: Extract nydus image bootstrap
+        run: |
+          NYDUS_IMAGE="ghcr.io/dragonflyoss/image-service/nginx:nydus-latest"
+          WORK_DIR="/tmp/nydus-proxy-error-test"
+          mkdir -p "${WORK_DIR}"
+
+          echo "Fetching manifest for ${NYDUS_IMAGE}..."
+          crane manifest --platform linux/amd64 "${NYDUS_IMAGE}" > "${WORK_DIR}/manifest.json"
+
+          BOOTSTRAP_DIGEST=$(python3 -c "
+          import json
+          with open('${WORK_DIR}/manifest.json') as f:
+              manifest = json.load(f)
+          for layer in manifest.get('layers', []):
+              annotations = layer.get('annotations', {})
+              if annotations.get('containerd.io/snapshot/nydus-bootstrap') == 'true':
+                  print(layer['digest'])
+                  break
+          else:
+              for layer in manifest.get('layers', []):
+                  if 'nydus' in layer.get('mediaType', '') and 'blob' not in layer.get('mediaType', ''):
+                      print(layer['digest'])
+                      break
+              else:
+                  import sys
+                  print('ERROR: Could not identify bootstrap layer', file=sys.stderr)
+                  sys.exit(1)
+          ")
+
+          echo "Bootstrap layer digest: ${BOOTSTRAP_DIGEST}"
+          crane blob "${NYDUS_IMAGE}@${BOOTSTRAP_DIGEST}" > "${WORK_DIR}/bootstrap-layer.tar.gz"
+
+          mkdir -p "${WORK_DIR}/bootstrap-extract"
+          tar -xf "${WORK_DIR}/bootstrap-layer.tar.gz" -C "${WORK_DIR}/bootstrap-extract"
+
+          BOOTSTRAP_FILE=$(find "${WORK_DIR}/bootstrap-extract" -name "*.boot" | head -1)
+          if [ -z "${BOOTSTRAP_FILE}" ]; then
+            BOOTSTRAP_FILE="${WORK_DIR}/bootstrap-extract/image.boot"
+          fi
+
+          cp "${BOOTSTRAP_FILE}" "${WORK_DIR}/bootstrap"
+          echo "Bootstrap extracted to ${WORK_DIR}/bootstrap"
+          ls -la "${WORK_DIR}/bootstrap"
+
+      - name: Run proxy error simulation tests
+        run: |
+          cd smoke/dragonfly
+          sudo -E env "PATH=$PATH" \
+            REPO_ROOT=${{ github.workspace }} \
+            NYDUSD_BIN=/usr/local/bin/nydusd \
+            BOOTSTRAP_PATH=/tmp/nydus-proxy-error-test/bootstrap \
+            WORK_DIR=/tmp/nydus-proxy-error-test \
+            go test -v -run TestProxyErrorSimulation -timeout 10m -count=1 ./...
+
+      - name: Dump logs
+        if: always()
+        continue-on-error: true
+        run: |
+          LOG_DIR="/tmp/proxy-error-test-logs"
+          mkdir -p "${LOG_DIR}"
+          cp /tmp/nydus-proxy-error-test/logs/*.log "${LOG_DIR}/" 2>/dev/null || true
+          cp /tmp/nydus-proxy-error-test/logs/*.log.stdout "${LOG_DIR}/" 2>/dev/null || true
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        run: |
+          sudo umount /tmp/nydus-proxy-error-test/mnt 2>/dev/null || true
+          for proc in nydusd test-proxy; do
+            if pid=$(pgrep -n "${proc}" 2>/dev/null); then
+              sudo kill "${pid}" 2>/dev/null || true
+            fi
+          done
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: proxy-error-test-logs
+          path: /tmp/proxy-error-test-logs/

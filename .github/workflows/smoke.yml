@@ -97,6 +97,8 @@ jobs:
         tags: rust-cross-compile-riscv64:latest
         build-args: |
           RUST_VERSION=${{ steps.set_toolchain_version.outputs.rust-version }}
+    - name: Install protoc
+      run: bash misc/install-protoc.sh ${{matrix.arch}} linux
     - name: Build Nydus Non-RISC-V
       if: matrix.arch != 'riscv64'
       run: |
@@ -139,6 +141,8 @@ jobs:
         shared-key: ${{ runner.os }}-cargo-${{ matrix.arch }}
         save-if: ${{ github.ref == 'refs/heads/master' }}
     - uses: dsherret/rust-toolchain-file@v1
+    - name: Install protoc
+      run: bash misc/install-protoc.sh ${{matrix.arch}} osx
     - name: build
       run: |
         if [[ "${{matrix.arch}}" == "amd64" ]]; then
@@ -242,6 +246,8 @@ jobs:
         save-if: ${{ github.ref == 'refs/heads/master' }}
     - name: Install cargo nextest
       uses: taiki-e/install-action@nextest
+    - name: Install protoc
+      run: bash misc/install-protoc.sh
     - name: Fscache Setup
       run: sudo bash misc/fscache/setup.sh
     - name: Unit Test
@@ -288,6 +294,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install protoc
+        run: bash misc/install-protoc.sh
       - name: Fscache Setup
         run: sudo bash misc/fscache/setup.sh
       - name: Generate code coverage
@@ -320,6 +328,8 @@ jobs:
         save-if: ${{ github.ref == 'refs/heads/master' }}
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
+    - name: Install protoc
+      run: bash misc/install-protoc.sh
     - name: Setup Golang
       uses: actions/setup-go@v6
       with:

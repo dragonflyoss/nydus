@@ -26,7 +26,7 @@ use nydus_utils::compress::zlib_random::ZranDecoder;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::{compress, digest};
 
-use crate::backend::{BlobBackend, BlobReader};
+use crate::backend::{BlobBackend, BlobReader, RequestSource};
 use crate::cache::state::ChunkMap;
 use crate::device::{
     BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoRange, BlobIoVec, BlobObject, BlobPrefetchRequest,
@@ -261,9 +261,14 @@ pub trait BlobCache: Send + Sync {
         // Read requested data from the backend by altogether.
         let mut c_buf = alloc_buf(blob_size);
         let start = Instant::now();
+        let source = if prefetch {
+            RequestSource::Prefetch
+        } else {
+            RequestSource::OnDemand
+        };
         let nr_read = self
             .reader()
-            .read(c_buf.as_mut_slice(), blob_offset)
+            .read_with_source(c_buf.as_mut_slice(), blob_offset, source)
             .map_err(|e| eio!(e))?;
         if nr_read != blob_size {
             return Err(eio!(format!(
@@ -403,6 +408,22 @@ pub trait BlobCache: Send + Sync {
         } else {
             check_hash(buffer, chunk.chunk_id(), self.blob_digester())
         }
+    }
+
+    /// Cache pre-read compressed chunk data from a streaming source.
+    ///
+    /// Used by the streaming blob prefetcher which reads data via `stream_read()`
+    /// and needs to persist matched chunks. The data is compressed blob data that
+    /// gets decompressed before caching (when the cache stores uncompressed data).
+    ///
+    /// Returns `Ok(true)` if the chunk was newly cached, `Ok(false)` if already
+    /// cached, or `Err` on failure.
+    fn cache_chunk_data(
+        &self,
+        _chunk: &dyn BlobChunkInfo,
+        _compressed_data: &[u8],
+    ) -> Result<bool> {
+        Err(enosys!("cache_chunk_data not supported"))
     }
 
     fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobCompressionContextInfo>>> {

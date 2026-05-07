@@ -4,8 +4,10 @@
 
 use crc::Crc;
 use crc::Table;
+use nix::sys::uio;
 use std::fmt;
 use std::fmt::Debug;
+use std::io::ErrorKind;
 use std::io::Read;
 
 #[repr(u32)]
@@ -87,11 +89,49 @@ impl Crc32 {
             digester.update(&buf[0..sz]);
         }
     }
+
+    pub fn digester(&self) -> crc::Digest<'_, u32, Table<16>> {
+        self.crc.digest()
+    }
+
+    pub fn from_raw_fd(&self, fd: i32, offset: u64, size: u64) -> std::io::Result<u32> {
+        let mut digester = self.crc.digest();
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut total_read: u64 = 0;
+        loop {
+            if total_read >= size {
+                break;
+            }
+            let bytes_to_read = std::cmp::min((size - total_read) as usize, buf.len());
+            let ret = uio::pread(fd, &mut buf[..bytes_to_read], (offset + total_read) as i64)
+                .map_err(|_| last_error!());
+            match ret {
+                Ok(read_size) => {
+                    if read_size == 0 {
+                        break;
+                    }
+                    digester.update(&buf[..read_size]);
+                    total_read += read_size as u64;
+                }
+                Err(err) => {
+                    if err.kind() != ErrorKind::Interrupted {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        Ok(digester.finalize())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use std::io::Write;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::io::FromRawFd;
 
     #[test]
     fn test_algorithm_display() {
@@ -185,5 +225,82 @@ mod tests {
         // Verify it matches direct buffer calculation
         let expected = crc32.from_buf(&large_data);
         assert_eq!(crc32_result, expected);
+    }
+
+    /// Create an anonymous in-memory file (memfd) with the given content and
+    /// return its raw file descriptor.  The caller is responsible for closing it.
+    #[cfg(target_os = "linux")]
+    fn make_memfd(content: &[u8]) -> i32 {
+        let fd = unsafe { libc::memfd_create(c"crc32_test".as_ptr(), 0) };
+        assert!(fd >= 0, "memfd_create failed");
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        file.write_all(content).unwrap();
+        // Leak the File wrapper so the fd stays open
+        std::mem::forget(file);
+        fd
+    }
+
+    #[test]
+    fn test_crc32_digester() {
+        let crc32 = Crc32::new(Algorithm::Crc32Iscsi);
+        let data = b"hello nydus world";
+
+        // Incremental update via digester() must match a single from_buf() call.
+        let mut digester = crc32.digester();
+        digester.update(&data[..5]);
+        digester.update(&data[5..]);
+        let incremental = digester.finalize();
+
+        assert_eq!(incremental, crc32.from_buf(data));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_crc32_from_raw_fd() {
+        let content = b"hello nydus world";
+        let fd = make_memfd(content);
+
+        let crc32 = Crc32::new(Algorithm::Crc32Iscsi);
+        let result = crc32
+            .from_raw_fd(fd, 0, content.len() as u64)
+            .expect("from_raw_fd failed");
+
+        assert_eq!(result, crc32.from_buf(content));
+
+        unsafe { libc::close(fd) };
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_crc32_from_raw_fd_with_offset() {
+        let content = b"prefixdata";
+        let offset = 6u64; // skip "prefix", checksum "data"
+        let fd = make_memfd(content);
+
+        let crc32 = Crc32::new(Algorithm::Crc32Iscsi);
+        let result = crc32
+            .from_raw_fd(fd, offset, (content.len() as u64) - offset)
+            .expect("from_raw_fd with offset failed");
+
+        assert_eq!(result, crc32.from_buf(&content[offset as usize..]));
+
+        unsafe { libc::close(fd) };
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_crc32_from_raw_fd_zero_size() {
+        let content = b"some content";
+        let fd = make_memfd(content);
+
+        let crc32 = Crc32::new(Algorithm::Crc32Iscsi);
+        let result = crc32
+            .from_raw_fd(fd, 0, 0)
+            .expect("from_raw_fd zero size failed");
+
+        // CRC of zero bytes must equal CRC of an empty slice.
+        assert_eq!(result, crc32.from_buf(b""));
+
+        unsafe { libc::close(fd) };
     }
 }

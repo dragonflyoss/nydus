@@ -154,7 +154,6 @@ pub enum MetricsErrorKind {
 }
 
 #[derive(Error, Debug)]
-#[allow(clippy::large_enum_variant)]
 pub enum ApiError {
     #[error("daemon internal error: {0:?}")]
     DaemonAbnormal(DaemonErrorKind),
@@ -165,7 +164,7 @@ pub enum ApiError {
     #[error("failed to mount filesystem: {0:?}")]
     MountFilesystem(DaemonErrorKind),
     #[error("failed to send request to the API service: {0:?}")]
-    RequestSend(#[from] SendError<Option<ApiRequest>>),
+    RequestSend(Box<SendError<Option<ApiRequest>>>),
     #[error("failed to parse response payload type")]
     ResponsePayloadType,
     #[error("failed to receive response from the API service: {0:?}")]

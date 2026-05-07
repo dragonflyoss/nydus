@@ -174,7 +174,9 @@ fn kick_api_server(
     from_api: &Receiver<ApiResponse>,
     request: ApiRequest,
 ) -> ApiResponse {
-    to_api.send(Some(request)).map_err(ApiError::RequestSend)?;
+    to_api
+        .send(Some(request))
+        .map_err(|e| ApiError::RequestSend(Box::new(e)))?;
     from_api.recv().map_err(ApiError::ResponseRecv)?
 }
 

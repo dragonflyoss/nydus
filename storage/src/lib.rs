@@ -85,6 +85,8 @@ pub enum StorageError {
     MemOverflow,
     NotContinuous,
     CacheIndex(std::io::Error),
+    ProxyForbidden(String),
+    ProxyLimited(String),
 }
 
 impl Display for StorageError {
@@ -96,9 +98,28 @@ impl Display for StorageError {
             StorageError::NotContinuous => write!(f, "address ranges are not continuous"),
             StorageError::VolatileSlice(e) => write!(f, "{}", e),
             StorageError::CacheIndex(e) => write!(f, "Wrong cache index {}", e),
+            StorageError::ProxyForbidden(s) => write!(f, "proxy forbidden: {}", s),
+            StorageError::ProxyLimited(s) => write!(f, "proxy rate limited: {}", s),
         }
     }
 }
 
 /// Specialized std::result::Result for storage subsystem.
 pub type StorageResult<T> = std::result::Result<T, StorageError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_storage_error_proxy_forbidden_display() {
+        let err = StorageError::ProxyForbidden("access denied".to_string());
+        assert!(format!("{}", err).contains("proxy forbidden"));
+    }
+
+    #[test]
+    fn test_storage_error_proxy_limited_display() {
+        let err = StorageError::ProxyLimited("rate limited".to_string());
+        assert!(format!("{}", err).contains("proxy rate limited"));
+    }
+}

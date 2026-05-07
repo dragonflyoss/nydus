@@ -1,0 +1,40 @@
+{
+  "device": {
+    "backend": {
+      "type": "registry",
+      "config": {
+        "host": "ghcr.io",
+        "repo": "dragonflyoss/image-service/nginx",
+        "scheme": "https",
+        "skip_verify": true,
+        "timeout": 5,
+        "connect_timeout": 5,
+        "retry_limit": 2,
+        "proxy": {
+          "url": "http://127.0.0.1:4001",
+          "fallback": false,
+          "check_interval": 300,
+          "use_http": true
+        }
+      }
+    },
+    "cache": {
+      "type": "blobcache",
+      "validate": true,
+      "config": {
+        "compressed": false,
+        "work_dir": "/tmp/nydus-proxy-error-nofallback-test/cache/"
+      }
+    }
+  },
+  "mode": "direct",
+  "digest_validate": true,
+  "iostats_files": false,
+  "enable_xattr": true,
+  "fs_prefetch": {
+    "enable": false,
+    "threads_count": 10,
+    "merging_size": 131072,
+    "bandwidth_rate": 1048576
+  }
+}

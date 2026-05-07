@@ -721,7 +721,9 @@ impl TocLocation {
     }
 
     fn validate(&self) -> Result<()> {
-        if !self.auto_detect && (!(512..=0x10000).contains(&self.size) || self.size % 128 != 0) {
+        if !self.auto_detect
+            && (!(512..=0x10000).contains(&self.size) || !self.size.is_multiple_of(128))
+        {
             return Err(eother!(format!("invalid size {} of blob ToC", self.size)));
         }
 
@@ -732,11 +734,14 @@ impl TocLocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "backend-localfs")]
     use crate::factory::BlobFactory;
+    #[cfg(feature = "backend-localfs")]
     use nydus_api::{BackendConfigV2, LocalFsConfig};
     use vmm_sys_util::tempfile::TempFile;
 
     #[test]
+    #[cfg(feature = "backend-localfs")]
     fn test_read_toc_list() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = Path::new(root_dir).join("../tests/texture/toc");
@@ -798,6 +803,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend-localfs")]
     fn test_parse_toc_list() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = Path::new(root_dir).join("../tests/texture/toc");
@@ -838,6 +844,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend-localfs")]
     fn test_read_from_cache_file() {
         let root_dir = &std::env::var("CARGO_MANIFEST_DIR").expect("$CARGO_MANIFEST_DIR");
         let path = Path::new(root_dir).join("../tests/texture/toc");

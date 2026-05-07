@@ -41,6 +41,7 @@ use nydus_utils::{
 use crate::metadata::{
     Inode, RafsInode, RafsInodeWalkAction, RafsSuper, RafsSuperMeta, DOT, DOTDOT,
 };
+use crate::prefetch::BlobPrefetcher;
 use crate::{RafsError, RafsIoReader, RafsResult};
 
 /// Type of RAFS fuse handle.
@@ -70,6 +71,13 @@ pub struct Rafs {
     xattr_enabled: bool,
     user_io_batch_size: u32,
     prefetch_batch_size: u64,
+
+    // Streaming blob prefetcher for Dragonfly proxy optimization
+    blob_prefetcher: Option<Arc<BlobPrefetcher>>,
+    stream_prefetch: bool,
+    stream_prefetch_threads: usize,
+    stream_prefetch_bandwidth: u64,
+    stream_prefetch_max_retry: u64,
 
     // static inode attributes
     i_uid: u32,
@@ -112,6 +120,12 @@ impl Rafs {
             prefetch_batch_size: rafs_cfg.prefetch.batch_size as u64,
             prefetch_all: rafs_cfg.prefetch.prefetch_all,
             xattr_enabled: rafs_cfg.enable_xattr,
+
+            blob_prefetcher: None,
+            stream_prefetch: rafs_cfg.prefetch.stream_prefetch,
+            stream_prefetch_threads: rafs_cfg.prefetch.stream_prefetch_threads,
+            stream_prefetch_bandwidth: rafs_cfg.prefetch.stream_prefetch_bandwidth,
+            stream_prefetch_max_retry: rafs_cfg.prefetch.stream_prefetch_max_retry,
 
             i_uid: geteuid().into(),
             i_gid: getegid().into(),
@@ -190,6 +204,35 @@ impl Rafs {
             self.device.start_prefetch();
             self.prefetch(r, prefetch_files);
         }
+
+        // Start streaming blob prefetcher for Dragonfly proxy optimization
+        info!(
+            "stream_prefetch: enabled={}, threads={}, bandwidth={}, max_retry={}",
+            self.stream_prefetch,
+            self.stream_prefetch_threads,
+            self.stream_prefetch_bandwidth,
+            self.stream_prefetch_max_retry,
+        );
+        if self.stream_prefetch {
+            let caches = self.device.get_blobs();
+            if !caches.is_empty() {
+                let prefetcher = BlobPrefetcher::new(
+                    self.sb.clone(),
+                    caches,
+                    self.stream_prefetch_threads,
+                    self.stream_prefetch_bandwidth,
+                    self.stream_prefetch_max_retry,
+                );
+                match prefetcher.start() {
+                    Ok(()) => {
+                        info!("BlobPrefetcher started for streaming prefetch");
+                        self.blob_prefetcher = Some(prefetcher);
+                    }
+                    Err(e) => error!("Failed to start BlobPrefetcher: {:?}", e),
+                }
+            }
+        }
+
         self.initialized = true;
 
         Ok(())
@@ -200,6 +243,12 @@ impl Rafs {
         info!("Destroy rafs");
 
         if self.initialized {
+            // Stop streaming blob prefetcher first
+            if let Some(ref prefetcher) = self.blob_prefetcher {
+                prefetcher.stop();
+            }
+            self.blob_prefetcher = None;
+
             Arc::get_mut(&mut self.sb)
                 .expect("Superblock is no longer used")
                 .destroy();
@@ -1065,6 +1114,11 @@ mod tests {
             xattr_enabled: false,
             user_io_batch_size: 0,
             prefetch_batch_size: 0,
+            blob_prefetcher: None,
+            stream_prefetch: false,
+            stream_prefetch_threads: 0,
+            stream_prefetch_bandwidth: 0,
+            stream_prefetch_max_retry: 0,
             i_uid: 0,
             i_gid: 0,
             i_time: 0,
@@ -1107,6 +1161,11 @@ mod tests {
             xattr_enabled: true,
             user_io_batch_size: 64,
             prefetch_batch_size: 128,
+            blob_prefetcher: None,
+            stream_prefetch: false,
+            stream_prefetch_threads: 0,
+            stream_prefetch_bandwidth: 0,
+            stream_prefetch_max_retry: 0,
             i_uid: 1000,
             i_gid: 1000,
             i_time: 12345678,
@@ -1169,6 +1228,11 @@ mod tests {
             xattr_enabled: false,
             user_io_batch_size: 0,
             prefetch_batch_size: 0,
+            blob_prefetcher: None,
+            stream_prefetch: false,
+            stream_prefetch_threads: 0,
+            stream_prefetch_bandwidth: 0,
+            stream_prefetch_max_retry: 0,
             i_uid: 0,
             i_gid: 0,
             i_time: 0,

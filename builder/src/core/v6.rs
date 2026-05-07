@@ -856,7 +856,7 @@ impl Bootstrap {
         // Dump blob table
         bootstrap_ctx
             .writer
-            .seek_offset(blob_table_offset as u64)
+            .seek_offset(blob_table_offset)
             .context("failed seek for extended blob table offset")?;
         blob_table
             .store(bootstrap_ctx.writer.as_mut())
