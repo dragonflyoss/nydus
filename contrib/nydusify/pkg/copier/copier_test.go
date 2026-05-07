@@ -2,6 +2,7 @@ package copier
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
+
+	nydusifyUtils "github.com/dragonflyoss/nydus/contrib/nydusify/pkg/utils"
 )
 
 func TestGetPlatform(t *testing.T) {
@@ -137,6 +140,18 @@ func TestCopyFailsWithUnsupportedBackendType(t *testing.T) {
 	require.Contains(t, err.Error(), "new backend")
 }
 
+func TestCopyFailsWithUnsupportedTargetBackendType(t *testing.T) {
+	err := Copy(context.Background(), Opt{
+		WorkDir:             t.TempDir(),
+		Source:              "docker.io/library/busybox:latest",
+		Target:              "registry.example.com/busybox:latest",
+		TargetBackendType:   "no-such-backend",
+		TargetBackendConfig: "{}",
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "new target backend")
+}
+
 func TestPushBlobFromBackendRejectsUnsupportedMediaType(t *testing.T) {
 	src := ocispec.Descriptor{
 		MediaType: ocispec.MediaTypeImageConfig,
@@ -147,6 +162,57 @@ func TestPushBlobFromBackendRejectsUnsupportedMediaType(t *testing.T) {
 	require.Nil(t, blobs)
 	require.Nil(t, target)
 	require.EqualError(t, err, "unsupported media type application/vnd.oci.image.config.v1+json")
+}
+
+func TestPushBlobToBackendRejectsUnsupportedMediaType(t *testing.T) {
+	src := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageConfig,
+		Digest:    digest.FromString("unsupported"),
+	}
+
+	blobs, target, err := pushBlobToBackend(context.Background(), nil, nil, nil, src, Opt{WorkDir: t.TempDir()})
+	require.Nil(t, blobs)
+	require.Nil(t, target)
+	require.EqualError(t, err, "unsupported media type application/vnd.oci.image.config.v1+json")
+}
+
+func TestRemoveBootstrapBackendConfig(t *testing.T) {
+	workDir := t.TempDir()
+	backendConfigPath := filepath.Join(workDir, nydusifyUtils.BackendFileNameInLayer)
+	require.NoError(t, os.MkdirAll(filepath.Dir(backendConfigPath), 0o755))
+	require.NoError(t, os.WriteFile(backendConfigPath, []byte("secret"), 0o644))
+
+	require.NoError(t, removeBootstrapBackendConfig(workDir))
+	_, err := os.Stat(backendConfigPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	require.NoError(t, removeBootstrapBackendConfig(workDir))
+}
+
+func TestRewriteManifestForTargetBackend(t *testing.T) {
+	manifest := &ocispec.Manifest{
+		Layers: []ocispec.Descriptor{
+			{Digest: digest.FromString("blob-1")},
+			{Digest: digest.FromString("blob-2")},
+			{Digest: digest.FromString("bootstrap-old")},
+		},
+	}
+	config := &ocispec.Image{
+		RootFS: ocispec.RootFS{
+			DiffIDs: []digest.Digest{
+				digest.FromString("blob-1"),
+				digest.FromString("blob-2"),
+				digest.FromString("bootstrap-old"),
+			},
+		},
+	}
+	bootstrapDesc := ocispec.Descriptor{Digest: digest.FromString("bootstrap-new")}
+	bootstrapDiffID := digest.FromString("bootstrap-diffid")
+
+	rewriteManifestForTargetBackend(manifest, config, bootstrapDesc, bootstrapDiffID)
+
+	require.Equal(t, []ocispec.Descriptor{bootstrapDesc}, manifest.Layers)
+	require.Equal(t, []digest.Digest{bootstrapDiffID}, config.RootFS.DiffIDs)
 }
 
 func TestCopyFailsWithInvalidPlatforms(t *testing.T) {
