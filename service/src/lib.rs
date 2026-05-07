@@ -49,8 +49,12 @@ pub mod blob_cache;
 pub mod block_device;
 #[cfg(all(target_os = "linux", feature = "block-nbd"))]
 pub mod block_nbd;
+#[cfg(all(target_os = "linux", feature = "block-uffd"))]
+pub mod block_uffd;
 #[cfg(target_os = "linux")]
 mod fs_cache;
+#[cfg(all(target_os = "linux", feature = "block-uffd"))]
+mod uffd_proto;
 
 #[cfg(target_os = "linux")]
 pub use fs_cache::FsCacheHandler;
