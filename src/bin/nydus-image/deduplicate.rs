@@ -631,7 +631,6 @@ impl Algorithm<SqliteDatabase> {
             if q_neighbors.len() >= min_points {
                 for &r_index in &q_neighbors {
                     if !data_point[r_index].visited {
-                        data_point[r_index].visited = true;
                         stack.push(r_index)
                     }
                     if !data_point[r_index].clustered {
@@ -639,8 +638,6 @@ impl Algorithm<SqliteDatabase> {
                         data_point[r_index].cluster_id = cluster_id;
                     }
                 }
-            } else {
-                data_point[i].clustered = false;
             }
         }
         Ok(())
