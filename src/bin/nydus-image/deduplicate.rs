@@ -807,9 +807,9 @@ impl Algorithm<SqliteDatabase> {
             train_set_size as f64 / 1024_f64 / 1024_f64
         );
 
-        let mut test_set_size = 0;
+        let mut test_set_size: u64 = 0;
         for i in &test {
-            test_set_size += i.chunk_compressed_size;
+            test_set_size += i.chunk_compressed_size as u64;
         }
         info!(
             "Test set size is {}",
@@ -822,12 +822,13 @@ impl Algorithm<SqliteDatabase> {
         let mut threshold = 0.5;
         let max_threshold = 0.8;
 
-        let mut test_total_size: u32 = 0;
-        let mut min_test_size: u32 = u32::MAX;
+        let mut min_test_size: u64 = u64::MAX;
         let mut min_data_dict = HashMap::new();
 
         while threshold <= max_threshold {
+            let mut test_total_size: u64 = 0;
             version_datadict.clear();
+
             for point in data_point.iter_mut() {
                 for single_dictionary in &datadict {
                     for (key, value) in single_dictionary.iter() {
@@ -870,7 +871,7 @@ impl Algorithm<SqliteDatabase> {
                 }
                 for chunk in point.chunk_list.iter() {
                     test_total_size = test_total_size
-                        .checked_add(chunk.chunk_compressed_size)
+                        .checked_add(chunk.chunk_compressed_size as u64)
                         .unwrap_or(test_total_size);
                 }
             }
