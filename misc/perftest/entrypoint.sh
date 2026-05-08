@@ -384,6 +384,48 @@ jq -r '
   "bytes_read       : \(.workload.bytes_read // 0)",
   "throughput_MBps  : \(.workload.throughput_mbps // 0)",
   "latency_ms p50/p95/p99 : \(.workload.latency_ms.p50 // 0) / \(.workload.latency_ms.p95 // 0) / \(.workload.latency_ms.p99 // 0)",
+  "cache_hit_ratio  : \(
+     if (.nydusd.blobcache.total // 0) > 0 then
+       ((.nydusd.blobcache.partial_hits // 0) + (.nydusd.blobcache.whole_hits // 0))
+       / .nydusd.blobcache.total * 100
+       | . * 10 | round / 10 | tostring + "%"
+     else "n/a (no cache reads)"
+     end
+   )  (partial=\(.nydusd.blobcache.partial_hits // 0), whole=\(.nydusd.blobcache.whole_hits // 0), total=\(.nydusd.blobcache.total // 0))",
+  "backend_io_size p50/p95/p99 : \(
+     (.nydusd.backend.read_count_block_size_dist // [0,0,0,0,0,0,0,0]) as $d |
+     ($d | add // 0) as $n |
+     if $n == 0 then "n/a (no backend reads)"
+     else
+       (reduce range(8) as $i ({cum: [], s: 0}; .s += $d[$i] | .cum += [.s])) |
+       .cum as $c |
+       (["<1K","1-4K","4-16K","16-64K","64-128K","128-512K","512K-1M",">=1M"]) as $lbl |
+       (($n * 0.50) as $t | first(range(8) | select($c[.] >= $t))) as $p50 |
+       (($n * 0.95) as $t | first(range(8) | select($c[.] >= $t))) as $p95 |
+       (($n * 0.99) as $t | first(range(8) | select($c[.] >= $t))) as $p99 |
+       "\($lbl[$p50]) / \($lbl[$p95]) / \($lbl[$p99])"
+     end
+   )  (total_backend_reads=\((.nydusd.backend.read_count // 0)))",
+  "backend_avg_latency_ms : \(
+     (.nydusd.backend.read_count // 0) as $rc |
+     if $rc > 0 then
+       (.nydusd.backend.read_cumulative_latency_millis_total // 0) / $rc
+       | . * 10 | round / 10
+     else "n/a (no backend reads)"
+     end
+   )",
+  "backend_fetch_MB  : \(
+     (.nydusd.backend.read_amount_total // 0) / 1000000
+     | . * 100 | round / 100
+   )",
+  "network_efficiency: \(
+     (.nydusd.backend.read_amount_total // 0) as $net |
+     (.nydusd.fs.data_read // 0) as $app |
+     if $net > 0 then
+       ($app / $net | . * 100 | round / 100 | tostring) + "x  (app_bytes=\($app), backend_bytes=\($net))"
+     else "n/a (no backend reads)"
+     end
+   )",
   "workload_rc      : \(.workload_rc)"
 ' "${RESULT_JSON}" >&2
 echo "===================================================" >&2
