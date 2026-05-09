@@ -384,6 +384,7 @@ jq -r '
   "bytes_read       : \(.workload.bytes_read // 0)",
   "throughput_MBps  : \(.workload.throughput_mbps // 0)",
   "latency_ms p50/p95/p99 : \(.workload.latency_ms.p50 // 0) / \(.workload.latency_ms.p95 // 0) / \(.workload.latency_ms.p99 // 0)",
+  "--- blob cache ---",
   "cache_hit_ratio  : \(
      if (.nydusd.blobcache.total // 0) > 0 then
        ((.nydusd.blobcache.partial_hits // 0) + (.nydusd.blobcache.whole_hits // 0))
@@ -392,6 +393,70 @@ jq -r '
      else "n/a (no cache reads)"
      end
    )  (partial=\(.nydusd.blobcache.partial_hits // 0), whole=\(.nydusd.blobcache.whole_hits // 0), total=\(.nydusd.blobcache.total // 0))",
+  "cache_entries    : \(.nydusd.blobcache.entries_count // 0) chunks",
+  "--- prefetch ---",
+  "prefetch_data_MB : \(
+     (.nydusd.blobcache.prefetch_data_amount // 0) as $pd |
+     (.nydusd.backend.read_amount_total // 0) as $net |
+     ($pd / 1000000 | . * 100 | round / 100 | tostring) +
+     if $net > 0 and $pd > 0 then
+       "  (\($pd / $net * 100 | . * 10 | round / 10)% of backend traffic)"
+     else ""
+     end
+   )",
+  "prefetch_avg_merge_KB : \(
+     (.nydusd.blobcache.prefetch_requests_count // 0) as $rc |
+     if $rc > 0 then
+       (.nydusd.blobcache.prefetch_data_amount // 0) / $rc / 1000
+       | . * 10 | round / 10
+     else "n/a"
+     end
+   )  (requests=\(.nydusd.blobcache.prefetch_requests_count // 0), unmerged_chunks=\(.nydusd.blobcache.prefetch_unmerged_chunks // 0))",
+  "prefetch_avg_latency_ms : \(
+     (.nydusd.blobcache.prefetch_requests_count // 0) as $rc |
+     if $rc > 0 then
+       (.nydusd.blobcache.prefetch_cumulative_time_millis // 0) / $rc
+       | . * 10 | round / 10
+     else "n/a"
+     end
+   )",
+  "prefetch_bandwidth_MBps : \(
+     ((.nydusd.blobcache.prefetch_end_time_secs // 0) +
+      (.nydusd.blobcache.prefetch_end_time_millis // 0) / 1000) as $end |
+     ((.nydusd.blobcache.prefetch_begin_time_secs // 0) +
+      (.nydusd.blobcache.prefetch_begin_time_millis // 0) / 1000) as $begin |
+     ($end - $begin) as $dur |
+     (.nydusd.blobcache.prefetch_data_amount // 0) as $pd |
+     if $dur > 0 and $pd > 0 then
+       $pd / 1000000 / $dur | . * 100 | round / 100
+     else "n/a"
+     end
+   )",
+  "--- io interaction ---",
+  "io_breakdown (prefetch/ondemand/total): \(
+     (.nydusd.blobcache.prefetch_data_amount // 0) as $pd |
+     (.nydusd.backend.read_amount_total // 0) as $net |
+     ($net - $pd) as $od |
+     ($pd / 1000000 | . * 100 | round / 100 | tostring) + " MB / " +
+     ($od / 1000000 | . * 100 | round / 100 | tostring) + " MB / " +
+     ($net / 1000000 | . * 100 | round / 100 | tostring) + " MB" +
+     if $net > 0 then
+       "  (prefetch_share=\($pd / $net * 100 | . * 10 | round / 10)%)"
+     else ""
+     end
+   )",
+  "ondemand_backend_reads : \(
+     (.nydusd.backend.read_count // 0) as $total_reads |
+     (.nydusd.blobcache.prefetch_requests_count // 0) as $prefetch_reads |
+     [($total_reads - $prefetch_reads), 0] | max as $od_reads |
+     ($od_reads | tostring) +
+     if $total_reads > 0 then
+       "  (\($od_reads / $total_reads * 100 | . * 10 | round / 10)% of total backend ops triggered by cache misses)"
+     else ""
+     end
+   )",
+  "prefetch_data_ready: \(.nydusd.blobcache.data_all_ready // false)",
+  "--- backend ---",
   "backend_io_size p50/p95/p99 : \(
      (.nydusd.backend.read_count_block_size_dist // [0,0,0,0,0,0,0,0]) as $d |
      ($d | add // 0) as $n |
@@ -417,7 +482,7 @@ jq -r '
   "backend_fetch_MB  : \(
      (.nydusd.backend.read_amount_total // 0) / 1000000
      | . * 100 | round / 100
-   )",
+   )  (errors=\(.nydusd.backend.read_errors // 0))",
   "network_efficiency: \(
      (.nydusd.backend.read_amount_total // 0) as $net |
      (.nydusd.fs.data_read // 0) as $app |
