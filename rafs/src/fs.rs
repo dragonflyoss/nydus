@@ -75,9 +75,8 @@ pub struct Rafs {
     // Streaming blob prefetcher for Dragonfly proxy optimization
     blob_prefetcher: Option<Arc<BlobPrefetcher>>,
     stream_prefetch: bool,
-    stream_prefetch_threads: usize,
-    stream_prefetch_bandwidth: u64,
-    stream_prefetch_max_retry: u64,
+    prefetch_threads: usize,
+    prefetch_bandwidth_limit: u32,
 
     // static inode attributes
     i_uid: u32,
@@ -123,9 +122,8 @@ impl Rafs {
 
             blob_prefetcher: None,
             stream_prefetch: rafs_cfg.prefetch.stream_prefetch,
-            stream_prefetch_threads: rafs_cfg.prefetch.stream_prefetch_threads,
-            stream_prefetch_bandwidth: rafs_cfg.prefetch.stream_prefetch_bandwidth,
-            stream_prefetch_max_retry: rafs_cfg.prefetch.stream_prefetch_max_retry,
+            prefetch_threads: rafs_cfg.prefetch.threads_count,
+            prefetch_bandwidth_limit: rafs_cfg.prefetch.bandwidth_limit,
 
             i_uid: geteuid().into(),
             i_gid: getegid().into(),
@@ -183,7 +181,12 @@ impl Rafs {
         // step 2: update device (only localfs is supported)
         let blob_infos = self.sb.superblock.get_blob_infos();
         self.device
-            .update(conf, &blob_infos, self.fs_prefetch, mountpoint)
+            .update(
+                conf,
+                &blob_infos,
+                self.fs_prefetch && !self.stream_prefetch,
+                mountpoint,
+            )
             .map_err(RafsError::SwapBackend)?;
         info!("update device is successful");
 
@@ -200,36 +203,34 @@ impl Rafs {
             return Err(RafsError::AlreadyMounted);
         }
         if self.fs_prefetch {
-            // Device should be ready before any prefetch.
-            self.device.start_prefetch();
-            self.prefetch(r, prefetch_files);
-        }
-
-        // Start streaming blob prefetcher for Dragonfly proxy optimization
-        info!(
-            "stream_prefetch: enabled={}, threads={}, bandwidth={}, max_retry={}",
-            self.stream_prefetch,
-            self.stream_prefetch_threads,
-            self.stream_prefetch_bandwidth,
-            self.stream_prefetch_max_retry,
-        );
-        if self.stream_prefetch {
-            let caches = self.device.get_blobs();
-            if !caches.is_empty() {
-                let prefetcher = BlobPrefetcher::new(
-                    self.sb.clone(),
-                    caches,
-                    self.stream_prefetch_threads,
-                    self.stream_prefetch_bandwidth,
-                    self.stream_prefetch_max_retry,
+            if self.stream_prefetch {
+                // When stream_prefetch is enabled, send rangeless GET requests to
+                // the Dragonfly proxy to cache entire blobs. Skip fs prefetch as
+                // the proxy will handle the caching.
+                info!(
+                    "stream_prefetch: enabled=true, threads={}, bandwidth={}",
+                    self.prefetch_threads, self.prefetch_bandwidth_limit,
                 );
-                match prefetcher.start() {
-                    Ok(()) => {
-                        info!("BlobPrefetcher started for streaming prefetch");
-                        self.blob_prefetcher = Some(prefetcher);
+                let caches = self.device.get_blobs();
+                if !caches.is_empty() {
+                    let prefetcher = BlobPrefetcher::new(
+                        self.sb.clone(),
+                        caches,
+                        self.prefetch_threads,
+                        self.prefetch_bandwidth_limit as u64,
+                    );
+                    match prefetcher.start() {
+                        Ok(()) => {
+                            info!("BlobPrefetcher started for streaming prefetch");
+                            self.blob_prefetcher = Some(prefetcher);
+                        }
+                        Err(e) => error!("Failed to start BlobPrefetcher: {:?}", e),
                     }
-                    Err(e) => error!("Failed to start BlobPrefetcher: {:?}", e),
                 }
+            } else {
+                // Device should be ready before any prefetch.
+                self.device.start_prefetch();
+                self.prefetch(r, prefetch_files);
             }
         }
 
@@ -252,7 +253,7 @@ impl Rafs {
             Arc::get_mut(&mut self.sb)
                 .expect("Superblock is no longer used")
                 .destroy();
-            if self.fs_prefetch {
+            if self.fs_prefetch && !self.stream_prefetch {
                 self.device.stop_prefetch();
             }
             self.device.close()?;
@@ -1121,9 +1122,8 @@ mod tests {
             prefetch_batch_size: 0,
             blob_prefetcher: None,
             stream_prefetch: false,
-            stream_prefetch_threads: 0,
-            stream_prefetch_bandwidth: 0,
-            stream_prefetch_max_retry: 0,
+            prefetch_threads: 0,
+            prefetch_bandwidth_limit: 0,
             i_uid: 0,
             i_gid: 0,
             i_time: 0,
@@ -1168,9 +1168,8 @@ mod tests {
             prefetch_batch_size: 128,
             blob_prefetcher: None,
             stream_prefetch: false,
-            stream_prefetch_threads: 0,
-            stream_prefetch_bandwidth: 0,
-            stream_prefetch_max_retry: 0,
+            prefetch_threads: 0,
+            prefetch_bandwidth_limit: 0,
             i_uid: 1000,
             i_gid: 1000,
             i_time: 12345678,
@@ -1235,9 +1234,8 @@ mod tests {
             prefetch_batch_size: 0,
             blob_prefetcher: None,
             stream_prefetch: false,
-            stream_prefetch_threads: 0,
-            stream_prefetch_bandwidth: 0,
-            stream_prefetch_max_retry: 0,
+            prefetch_threads: 0,
+            prefetch_bandwidth_limit: 0,
             i_uid: 0,
             i_gid: 0,
             i_time: 0,

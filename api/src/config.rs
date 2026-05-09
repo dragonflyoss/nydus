@@ -892,19 +892,13 @@ pub struct PrefetchConfigV2 {
     pub prefetch_all: bool,
     /// Enable streaming blob prefetch for Dragonfly proxy.
     ///
-    /// When enabled, sends rangeless GET to make the proxy cache entire blobs.
-    /// Only effective when a Dragonfly proxy is configured.
+    /// When enabled, sends rangeless GET to make the proxy cache entire blobs
+    /// instead of the normal per-chunk fs prefetch. Only effective when `enable`
+    /// is also true and a Dragonfly proxy is configured. Reuses `threads_count`
+    /// and `bandwidth_limit` for concurrency and bandwidth control; retries are
+    /// fixed at 10 attempts per blob.
     #[serde(default)]
     pub stream_prefetch: bool,
-    /// Number of concurrent streaming prefetch threads (default: 5).
-    #[serde(default = "default_stream_prefetch_threads")]
-    pub stream_prefetch_threads: usize,
-    /// Bandwidth limit for streaming prefetch in bytes/sec (0 = 10MB/s default).
-    #[serde(default)]
-    pub stream_prefetch_bandwidth: u64,
-    /// Maximum retry attempts per blob for streaming prefetch (default: 10).
-    #[serde(default = "default_stream_prefetch_max_retry")]
-    pub stream_prefetch_max_retry: u64,
 }
 
 /// Configuration information for network proxy.
@@ -1214,14 +1208,6 @@ fn default_prefetch_all() -> bool {
     true
 }
 
-fn default_stream_prefetch_threads() -> usize {
-    5
-}
-
-fn default_stream_prefetch_max_retry() -> u64 {
-    10
-}
-
 fn default_rafs_mode() -> String {
     "direct".to_string()
 }
@@ -1461,17 +1447,11 @@ struct FsPrefetchControl {
     pub prefetch_all: bool,
 
     /// Enable streaming blob prefetch for Dragonfly proxy.
+    ///
+    /// Reuses `threads_count` and `bandwidth_limit` for concurrency and bandwidth
+    /// control. Only effective when `enable` is true.
     #[serde(default)]
     pub stream_prefetch: bool,
-    /// Number of concurrent streaming prefetch threads.
-    #[serde(default = "default_stream_prefetch_threads")]
-    pub stream_prefetch_threads: usize,
-    /// Bandwidth limit for streaming prefetch in bytes/sec (0 = 10MB/s default).
-    #[serde(default)]
-    pub stream_prefetch_bandwidth: u64,
-    /// Maximum retry attempts per blob for streaming prefetch.
-    #[serde(default = "default_stream_prefetch_max_retry")]
-    pub stream_prefetch_max_retry: u64,
 }
 
 impl From<FsPrefetchControl> for PrefetchConfigV2 {
@@ -1483,9 +1463,6 @@ impl From<FsPrefetchControl> for PrefetchConfigV2 {
             bandwidth_limit: v.bandwidth_limit,
             prefetch_all: v.prefetch_all,
             stream_prefetch: v.stream_prefetch,
-            stream_prefetch_threads: v.stream_prefetch_threads,
-            stream_prefetch_bandwidth: v.stream_prefetch_bandwidth,
-            stream_prefetch_max_retry: v.stream_prefetch_max_retry,
         }
     }
 }

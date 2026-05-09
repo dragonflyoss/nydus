@@ -25,7 +25,6 @@ use nydus_storage::device::{BlobChunkInfo, BlobInfo};
 use crate::metadata::{RafsInodeExt, RafsSuper};
 
 const DEFAULT_THREADS: usize = 5;
-const DEFAULT_BANDWIDTH_RATE: u64 = 10 * 1024 * 1024; // 10 MB/s
 const DEFAULT_MAX_RETRY: u64 = 10;
 const STREAM_READ_SIZE: usize = 1024 * 1024; // 1MB per stream read
 
@@ -127,24 +126,17 @@ impl BlobPrefetcher {
         caches: Vec<Arc<dyn BlobCache>>,
         threads_count: usize,
         bandwidth_rate: u64,
-        max_retry: u64,
     ) -> Arc<Self> {
         let threads_count = if threads_count == 0 {
             DEFAULT_THREADS
         } else {
             threads_count
         };
-        let max_retry = if max_retry == 0 {
-            DEFAULT_MAX_RETRY
+        let rate_limiter = if bandwidth_rate == 0 {
+            None // 0 means no bandwidth limit
         } else {
-            max_retry
+            Some(Arc::new(Mutex::new(RateLimiter::new(bandwidth_rate))))
         };
-        let rate = if bandwidth_rate == 0 {
-            DEFAULT_BANDWIDTH_RATE
-        } else {
-            bandwidth_rate
-        };
-        let rate_limiter = Some(Arc::new(Mutex::new(RateLimiter::new(rate))));
 
         Arc::new(Self {
             sb,
@@ -156,7 +148,7 @@ impl BlobPrefetcher {
                 thread_cv: Condvar::new(),
                 threads_count,
                 rate_limiter,
-                max_retry_per_blob: max_retry,
+                max_retry_per_blob: DEFAULT_MAX_RETRY,
             }),
         })
     }
@@ -1180,19 +1172,11 @@ mod tests {
         use crate::metadata::RafsSuper;
         let sb = Arc::new(RafsSuper::default());
         // Passing 0 for all tunable parameters must fall back to the built-in defaults.
-        let p = BlobPrefetcher::new(sb, vec![], 0, 0, 0);
+        let p = BlobPrefetcher::new(sb, vec![], 0, 0);
         assert_eq!(p.state.threads_count, DEFAULT_THREADS);
         assert_eq!(p.state.max_retry_per_blob, DEFAULT_MAX_RETRY);
-        // Rate limiter capacity = 2 × rate; with default rate that is 2 × DEFAULT_BANDWIDTH_RATE.
-        let limiter = p
-            .state
-            .rate_limiter
-            .as_ref()
-            .expect("rate limiter should be set")
-            .lock()
-            .unwrap();
-        assert_eq!(limiter.rate, DEFAULT_BANDWIDTH_RATE);
-        assert_eq!(limiter.capacity, DEFAULT_BANDWIDTH_RATE * 2);
+        // bandwidth_rate=0 means no limit: rate_limiter should be None.
+        assert!(p.state.rate_limiter.is_none());
     }
 
     #[test]
@@ -1201,10 +1185,10 @@ mod tests {
         let sb = Arc::new(RafsSuper::default());
         let threads = 3usize;
         let rate = 5 * 1024 * 1024u64; // 5 MB/s
-        let retry = 7u64;
-        let p = BlobPrefetcher::new(sb, vec![], threads, rate, retry);
+        let p = BlobPrefetcher::new(sb, vec![], threads, rate);
         assert_eq!(p.state.threads_count, threads);
-        assert_eq!(p.state.max_retry_per_blob, retry);
+        // max_retry is always fixed at DEFAULT_MAX_RETRY regardless of input.
+        assert_eq!(p.state.max_retry_per_blob, DEFAULT_MAX_RETRY);
         let limiter = p
             .state
             .rate_limiter
@@ -1219,7 +1203,7 @@ mod tests {
     fn test_blob_prefetcher_progress_returns_state_ref() {
         use crate::metadata::RafsSuper;
         let sb = Arc::new(RafsSuper::default());
-        let p = BlobPrefetcher::new(sb, vec![], 1, 1024, 1);
+        let p = BlobPrefetcher::new(sb, vec![], 1, 1024);
         // progress() must expose the live counters; increment one and verify.
         p.state.progress.total_blobs.store(42, Ordering::Relaxed);
         assert_eq!(p.progress().total_blobs.load(Ordering::Relaxed), 42);
