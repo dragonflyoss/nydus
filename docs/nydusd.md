@@ -144,14 +144,11 @@ We are working on enabling cloud-hypervisor support for nydus.
     "bandwidth_rate": 1048576,
     // Enable streaming blob prefetch for Dragonfly proxy optimization.
     // When enabled, entire blobs are streamed via rangeless GET requests and
-    // cached locally, reducing per-chunk proxy round-trips.
-    "stream_prefetch": false,
-    // Number of concurrent streaming prefetch threads (default: 5)
-    "stream_prefetch_threads": 5,
-    // Bandwidth limit for streaming prefetch in bytes/sec (0 = 10MB/s default)
-    "stream_prefetch_bandwidth": 0,
-    // Maximum retry attempts per blob for streaming prefetch (default: 10)
-    "stream_prefetch_max_retry": 10
+    // cached locally, reducing per-chunk proxy round-trips. Only effective when
+    // "enable" is true. Reuses "threads_count" for concurrency and "bandwidth_rate"
+    // for bandwidth control (0 = no limit). Retries are fixed at 10 per blob.
+    // When stream_prefetch is true, normal fs prefetch is skipped.
+    "stream_prefetch": false
   }
 }
 ```
