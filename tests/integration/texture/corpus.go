@@ -49,7 +49,9 @@ func (c *Corpus) CreateLargeFile(t *testing.T, name string, sizeMB int) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
 	f, err := os.Create(c.path(name))
 	require.NoError(t, err)
-	defer f.Close()
+	t.Cleanup(func() {
+		require.NoError(t, f.Close())
+	})
 	_, err = io.CopyN(f, rand.Reader, int64(sizeMB)<<20)
 	require.NoError(t, err)
 }
@@ -59,7 +61,9 @@ func (c *Corpus) CreateRandomFile(t *testing.T, name string, size int) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
 	f, err := os.Create(c.path(name))
 	require.NoError(t, err)
-	defer f.Close()
+	t.Cleanup(func() {
+		require.NoError(t, f.Close())
+	})
 	_, err = io.CopyN(f, rand.Reader, int64(size))
 	require.NoError(t, err)
 }

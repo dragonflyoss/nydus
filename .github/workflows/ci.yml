@@ -37,6 +37,20 @@ jobs:
         run: |
           cargo check --all --all-targets
 
+  lint:
+    name: Golang lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Golangci lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.7
+          working-directory: tests/integration
+
   test:
     name: Run tests
     timeout-minutes: 30
@@ -69,7 +83,7 @@ jobs:
         run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
   integration-tests:
-    name: Run Integration Tests
+    name: Run integration tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
