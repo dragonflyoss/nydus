@@ -73,7 +73,7 @@ func mountEROFS(t *testing.T, leptonBin, img, blobdev, mnt string) (cleanup func
 
 	// Wait for mount.
 	mounted := false
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		if isMountpoint(mnt) {
 			mounted = true
 			break
@@ -385,7 +385,7 @@ func TestXfstests(t *testing.T) {
 		return // success
 	}
 	// Check for failures
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if strings.Contains(line, "Failures:") || strings.Contains(line, "Failed") {
 			t.Fatalf("xfstests reported failures:\n%s", output)
 		}

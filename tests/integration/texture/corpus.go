@@ -76,7 +76,7 @@ func (c *Corpus) CreatePatternFile(t *testing.T, name string, repeatCount int) {
 		pattern[i] = byte(i)
 	}
 	var buf []byte
-	for i := 0; i < repeatCount; i++ {
+	for range repeatCount {
 		buf = append(buf, pattern...)
 	}
 	require.NoError(t, os.WriteFile(c.path(name), buf, 0644))
@@ -205,7 +205,7 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreateDir(t, "dirs/many_entries")
 	for i := 1; i <= 200; i++ {
 		c.CreateFile(t, fmt.Sprintf("dirs/many_entries/file_%04d", i),
-			[]byte(fmt.Sprintf("entry_%d", i)))
+			fmt.Appendf(nil, "entry_%d", i))
 	}
 	c.CreateDir(t, "dirs/restricted")
 	c.Chmod(t, "dirs/restricted", 0500)

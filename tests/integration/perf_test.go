@@ -24,17 +24,18 @@ import (
 // Enable:        EROFS_RUN_PERF=1
 // C comparison:  EROFS_C_FUSE=/path/to/erofsfuse (auto-detected if omitted)
 // Tuning:
-//   EROFS_PERF_LARGE_FILE_COUNT  number of large files for read benchmarks (default: 8)
-//   EROFS_PERF_LARGE_FILE_MB     size in MiB of each large file (default: 64)
-//   EROFS_PERF_MEDIUM_FILE_COUNT number of medium files in corpus (default: 256)
-//   EROFS_PERF_MEDIUM_FILE_MB    size in MiB of each medium file (default: 1)
-//   EROFS_PERF_SMALL_FILE_COUNT  number of small files for stat benchmark (default: 10000)
-//   EROFS_PERF_FIO_SECS          fio benchmark duration in seconds (default: 20)
-//   EROFS_PERF_SEQ_THREADS       seq-read multi-thread job count (default: 4)
-//   EROFS_PERF_READDIR_DIRS   number of directories for readdir corpus (default: 128)
-//   EROFS_PERF_READDIR_FILES  files per directory for readdir corpus (default: 256)
-//   EROFS_PERF_READDIR_PASSES repeated os.ReadDir calls per directory in one iteration (default: 8)
-//   EROFS_PERF_META_SECS      metadata benchmark duration in seconds (default: 5)
+//
+//	EROFS_PERF_LARGE_FILE_COUNT  number of large files for read benchmarks (default: 8)
+//	EROFS_PERF_LARGE_FILE_MB     size in MiB of each large file (default: 64)
+//	EROFS_PERF_MEDIUM_FILE_COUNT number of medium files in corpus (default: 256)
+//	EROFS_PERF_MEDIUM_FILE_MB    size in MiB of each medium file (default: 1)
+//	EROFS_PERF_SMALL_FILE_COUNT  number of small files for stat benchmark (default: 10000)
+//	EROFS_PERF_FIO_SECS          fio benchmark duration in seconds (default: 20)
+//	EROFS_PERF_SEQ_THREADS       seq-read multi-thread job count (default: 4)
+//	EROFS_PERF_READDIR_DIRS   number of directories for readdir corpus (default: 128)
+//	EROFS_PERF_READDIR_FILES  files per directory for readdir corpus (default: 256)
+//	EROFS_PERF_READDIR_PASSES repeated os.ReadDir calls per directory in one iteration (default: 8)
+//	EROFS_PERF_META_SECS      metadata benchmark duration in seconds (default: 5)
 func TestPerf(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
@@ -102,21 +103,24 @@ func makePerfCorpus(t *testing.T, dir string) {
 	readdirFilesPerDir := envInt("EROFS_PERF_READDIR_FILES", 256)
 
 	// Larger corpus for read benchmarks to amplify sequential/random read cost.
-	for i := 0; i < largeFileCount; i++ {
+	for i := range largeFileCount {
 		c.CreateLargeFile(t, fmt.Sprintf("large/file_%d.bin", i), largeFileMB)
 	}
-	for i := 0; i < mediumFileCount; i++ {
+
+	for i := range mediumFileCount {
 		c.CreateRandomFile(t, fmt.Sprintf("medium/file_%04d.bin", i), mediumFileMB<<20)
 	}
-	for i := 0; i < smallFileCount; i++ {
+
+	for i := range smallFileCount {
 		c.CreateFile(t, fmt.Sprintf("small/file_%04d.txt", i),
-			[]byte(fmt.Sprintf("content of small file %d\n", i)))
+			fmt.Appendf(nil, "content of small file %d\n", i))
 	}
+
 	// Large directory fanout to amplify readdir cost and trigger repeated FUSE readdir calls.
-	for d := 0; d < readdirDirCount; d++ {
-		for f := 0; f < readdirFilesPerDir; f++ {
+	for d := range readdirDirCount {
+		for f := range readdirFilesPerDir {
 			c.CreateFile(t, fmt.Sprintf("dirs/d%02d/f%03d.txt", d, f),
-				[]byte(fmt.Sprintf("d%d/f%d", d, f)))
+				fmt.Appendf(nil, "d%d/f%d", d, f))
 		}
 	}
 }
@@ -166,7 +170,7 @@ func mountCErofsFuse(t *testing.T, cFuseBin, img, blobdev, mnt string) (cleanup 
 	require.NoError(t, cmd.Start(), "erofsfuse start")
 
 	mounted := false
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		if isMountpoint(mnt) {
 			mounted = true
 			break
@@ -329,7 +333,7 @@ func benchReaddir(t *testing.T, dir string) *benchResult {
 	deadline := start.Add(metaDuration)
 	for time.Now().Before(deadline) {
 		for _, d := range dirs {
-			for pass := 0; pass < passesPerDir; pass++ {
+			for range passesPerDir {
 				_, _ = os.ReadDir(d)
 			}
 		}
@@ -379,10 +383,10 @@ func printResultsTable(t *testing.T, rust, c map[string]*benchResult) {
 	var sb strings.Builder
 	sb.WriteString("\n")
 	if c != nil {
-		sb.WriteString(fmt.Sprintf("%-25s %8s  %12s  %12s  %8s\n", "Benchmark", "Unit", "Rust", "C", "Ratio"))
+		fmt.Fprintf(&sb, "%-25s %8s  %12s  %12s  %8s\n", "Benchmark", "Unit", "Rust", "C", "Ratio")
 		sb.WriteString(strings.Repeat("-", 72) + "\n")
 	} else {
-		sb.WriteString(fmt.Sprintf("%-25s %8s  %12s\n", "Benchmark", "Unit", "Rust"))
+		fmt.Fprintf(&sb, "%-25s %8s  %12s\n", "Benchmark", "Unit", "Rust")
 		sb.WriteString(strings.Repeat("-", 50) + "\n")
 	}
 
@@ -407,10 +411,10 @@ func printResultsTable(t *testing.T, rust, c map[string]*benchResult) {
 				}
 				ratio = fmt.Sprintf("%.2fx", pct)
 			}
-			sb.WriteString(fmt.Sprintf("%-25s %8s  %12.1f  %12.1f  %8s\n",
-				r.label, r.unit, rustVal, cVal, ratio))
+			fmt.Fprintf(&sb, "%-25s %8s  %12.1f  %12.1f  %8s\n",
+				r.label, r.unit, rustVal, cVal, ratio)
 		} else {
-			sb.WriteString(fmt.Sprintf("%-25s %8s  %12.1f\n", r.label, r.unit, rustVal))
+			fmt.Fprintf(&sb, "%-25s %8s  %12.1f\n", r.label, r.unit, rustVal)
 		}
 	}
 	t.Log(sb.String())
