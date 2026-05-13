@@ -5,7 +5,7 @@ edition = "2021"
 
 [[bin]]
 name = "lepton"
-path = "src/bin/lepton.rs"
+path = "src/bin/lepton/main.rs"
 
 [dependencies]
 anyhow = "1"
