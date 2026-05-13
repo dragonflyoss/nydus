@@ -69,6 +69,7 @@ jobs:
         run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
   integration-tests:
+    name: Run Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
