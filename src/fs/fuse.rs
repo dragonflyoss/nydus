@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus,
+    AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
+    INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus,
     ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
 
@@ -17,11 +18,6 @@ use super::{CachedDirEntry, ErofsReader};
 
 const FUSE_ROOT_ID: u64 = 1;
 const EROFS_FUSE_TIMEOUT: Duration = Duration::from_secs(86400 * 365 * 10);
-
-// FUSE open flags (FOPEN_*). fuser 0.16 does not re-export these constants;
-// values match include/uapi/linux/fuse.h.
-const FOPEN_KEEP_CACHE: u32 = 1 << 1;
-const FOPEN_CACHE_DIR: u32 = 1 << 3;
 
 pub struct ErofsFs {
     reader: Arc<ErofsReader>,
@@ -65,21 +61,20 @@ impl ErofsFs {
         let mtime_secs = inode.mtime(sb.epoch());
         let mtime_nsec = inode.mtime_nsec();
         let size = inode.size();
-        let blocks = ((size + block_size - 1) / block_size * block_size / 512) as u64;
+        let blocks = size.div_ceil(block_size) * block_size / 512;
         let time = UNIX_EPOCH + Duration::new(mtime_secs, mtime_nsec);
 
         let mode = inode.mode() as u32;
         let kind = mode_to_kind(mode);
-        let rdev = if (mode & libc::S_IFMT) == libc::S_IFCHR
-            || (mode & libc::S_IFMT) == libc::S_IFBLK
-        {
-            inode.rdev() as u32
-        } else {
-            0
-        };
+        let rdev =
+            if (mode & libc::S_IFMT) == libc::S_IFCHR || (mode & libc::S_IFMT) == libc::S_IFBLK {
+                inode.rdev()
+            } else {
+                0
+            };
 
         FileAttr {
-            ino,
+            ino: INodeNo(ino),
             size,
             blocks,
             atime: time,
@@ -88,7 +83,7 @@ impl ErofsFs {
             crtime: time,
             kind,
             perm: (mode & 0o7777) as u16,
-            nlink: inode.nlink() as u32,
+            nlink: inode.nlink(),
             uid: inode.uid(),
             gid: inode.gid(),
             rdev,
@@ -115,10 +110,7 @@ impl ErofsFs {
         let entries = self.reader.read_dir_cached(nid, &vi)?;
         let handle = self.next_dir_handle.fetch_add(1, Ordering::Relaxed);
         let dir_handle = Arc::new(DirHandle { entries });
-        self.dir_handles
-            .lock()
-            .unwrap()
-            .insert(handle, dir_handle);
+        self.dir_handles.lock().unwrap().insert(handle, dir_handle);
         Ok(handle)
     }
 
@@ -132,8 +124,8 @@ impl ErofsFs {
     }
 }
 
-fn io_errno(e: &io::Error) -> i32 {
-    e.raw_os_error().unwrap_or(libc::EIO)
+fn io_errno(e: &io::Error) -> Errno {
+    Errno::from_i32(e.raw_os_error().unwrap_or(libc::EIO))
 }
 
 fn mode_to_kind(mode: u32) -> FileType {
@@ -163,10 +155,10 @@ fn erofs_ft_to_kind(ft: u8) -> FileType {
 }
 
 impl Filesystem for ErofsFs {
-    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let target = name.as_bytes();
         let mut found = None;
-        let res = self.iterate_dir(parent, |entry_nid, _file_type, entry_name| {
+        let res = self.iterate_dir(parent.0, |entry_nid, _file_type, entry_name| {
             if entry_name == target {
                 found = Some(entry_nid);
                 return Ok(false);
@@ -182,20 +174,20 @@ impl Filesystem for ErofsFs {
             match self.reader.inode(child_nid) {
                 Ok(child_inode) => {
                     let attr = self.make_attr(child_nid, &child_inode);
-                    reply.entry(&EROFS_FUSE_TIMEOUT, &attr, 0);
+                    reply.entry(&EROFS_FUSE_TIMEOUT, &attr, Generation(0));
                 }
                 Err(e) => reply.error(io_errno(&e)),
             }
             return;
         }
 
-        reply.error(libc::ENOENT);
+        reply.error(Errno::ENOENT);
     }
 
-    fn forget(&mut self, _req: &Request<'_>, _ino: u64, _nlookup: u64) {}
+    fn forget(&self, _req: &Request, _ino: INodeNo, _nlookup: u64) {}
 
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let nid = self.to_nid(ino);
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        let nid = self.to_nid(ino.0);
         match self.reader.inode(nid) {
             Ok(vi) => {
                 let attr = self.make_attr(nid, &vi);
@@ -205,13 +197,13 @@ impl Filesystem for ErofsFs {
         }
     }
 
-    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
-        if flags & (libc::O_WRONLY | libc::O_RDWR) != 0 {
-            reply.error(libc::EROFS);
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        if flags.0 & (libc::O_WRONLY | libc::O_RDWR) != 0 {
+            reply.error(Errno::EROFS);
             return;
         }
 
-        let nid = self.to_nid(ino);
+        let nid = self.to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -220,21 +212,20 @@ impl Filesystem for ErofsFs {
             }
         };
         if (vi.mode() as u32 & libc::S_IFMT) != libc::S_IFREG {
-            reply.error(libc::EISDIR);
+            reply.error(Errno::EISDIR);
             return;
         }
 
-        // FOPEN_KEEP_CACHE
-        reply.opened(nid, FOPEN_KEEP_CACHE);
+        reply.opened(FileHandle(nid), FopenFlags::FOPEN_KEEP_CACHE);
     }
 
     fn release(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        _fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
@@ -242,17 +233,17 @@ impl Filesystem for ErofsFs {
     }
 
     fn read(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let nid = self.to_nid(ino);
+        let nid = self.to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -265,15 +256,15 @@ impl Filesystem for ErofsFs {
         let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
         match self
             .reader
-            .write_file_data_to(nid, &vi, offset as u64, size, &mut buf)
+            .write_file_data_to(nid, &vi, offset, size, &mut buf)
         {
             Ok(_) => reply.data(&buf),
             Err(e) => reply.error(io_errno(&e)),
         }
     }
 
-    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
-        let nid = self.to_nid(ino);
+    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let nid = self.to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -287,8 +278,8 @@ impl Filesystem for ErofsFs {
         }
     }
 
-    fn opendir(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
-        let nid = self.to_nid(ino);
+    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let nid = self.to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -297,26 +288,28 @@ impl Filesystem for ErofsFs {
             }
         };
         if (vi.mode() as u32 & libc::S_IFMT) != libc::S_IFDIR {
-            reply.error(libc::ENOTDIR);
+            reply.error(Errno::ENOTDIR);
             return;
         }
 
-        match self.create_dir_handle(ino) {
-            // FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR
-            Ok(handle) => reply.opened(handle, FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR),
+        match self.create_dir_handle(ino.0) {
+            Ok(handle) => reply.opened(
+                FileHandle(handle),
+                FopenFlags::FOPEN_KEEP_CACHE | FopenFlags::FOPEN_CACHE_DIR,
+            ),
             Err(e) => reply.error(io_errno(&e)),
         }
     }
 
     fn readdir(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
-        offset: i64,
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        let dir_handle = match self.get_dir_handle(fh) {
+        let dir_handle = match self.get_dir_handle(fh.0) {
             Ok(h) => h,
             Err(e) => {
                 reply.error(io_errno(&e));
@@ -328,7 +321,7 @@ impl Filesystem for ErofsFs {
             let ino = self.to_ino(entry.nid);
             let kind = erofs_ft_to_kind(entry.file_type);
             let name = OsStr::from_bytes(&entry.name);
-            if reply.add(ino, (idx as i64) + 1, kind, name) {
+            if reply.add(INodeNo(ino), (idx as u64) + 1, kind, name) {
                 break;
             }
         }
@@ -336,14 +329,14 @@ impl Filesystem for ErofsFs {
     }
 
     fn readdirplus(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
-        offset: i64,
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectoryPlus,
     ) {
-        let dir_handle = match self.get_dir_handle(fh) {
+        let dir_handle = match self.get_dir_handle(fh.0) {
             Ok(h) => h,
             Err(e) => {
                 reply.error(io_errno(&e));
@@ -363,12 +356,12 @@ impl Filesystem for ErofsFs {
             let ino = self.to_ino(entry.nid);
             let name = OsStr::from_bytes(&entry.name);
             if reply.add(
-                ino,
-                (idx as i64) + 1,
+                INodeNo(ino),
+                (idx as u64) + 1,
                 name,
                 &EROFS_FUSE_TIMEOUT,
                 &attr,
-                0,
+                Generation(0),
             ) {
                 break;
             }
@@ -377,18 +370,18 @@ impl Filesystem for ErofsFs {
     }
 
     fn releasedir(
-        &mut self,
-        _req: &Request<'_>,
-        _ino: u64,
-        fh: u64,
-        _flags: i32,
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
-        self.dir_handles.lock().unwrap().remove(&fh);
+        self.dir_handles.lock().unwrap().remove(&fh.0);
         reply.ok();
     }
 
-    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
         let sb = self.reader.sb();
         let block_size = 1u64 << sb.blkszbits;
         reply.statfs(
@@ -403,19 +396,12 @@ impl Filesystem for ErofsFs {
         );
     }
 
-    fn access(&mut self, _req: &Request<'_>, _ino: u64, _mask: i32, reply: ReplyEmpty) {
+    fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
         reply.ok();
     }
 
-    fn getxattr(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        name: &OsStr,
-        size: u32,
-        reply: ReplyXattr,
-    ) {
-        let nid = self.to_nid(ino);
+    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        let nid = self.to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -439,7 +425,7 @@ impl Filesystem for ErofsFs {
                     return;
                 }
                 if (size as usize) < xvalue.len() {
-                    reply.error(libc::ERANGE);
+                    reply.error(Errno::ERANGE);
                     return;
                 }
                 reply.data(xvalue);
@@ -447,11 +433,11 @@ impl Filesystem for ErofsFs {
             }
         }
 
-        reply.error(libc::ENODATA);
+        reply.error(Errno::ENODATA);
     }
 
-    fn listxattr(&mut self, _req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
-        let nid = self.to_nid(ino);
+    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let nid = self.to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -479,7 +465,7 @@ impl Filesystem for ErofsFs {
             return;
         }
         if (size as usize) < names_buf.len() {
-            reply.error(libc::ERANGE);
+            reply.error(Errno::ERANGE);
             return;
         }
         reply.data(&names_buf);

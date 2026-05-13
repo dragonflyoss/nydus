@@ -28,8 +28,8 @@ pub fn write_image(
     let feature_incompat =
         EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
 
-    let devt_slotoff: u16 = (EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE) as u16
-        / EROFS_DEVICESLOT_SIZE as u16;
+    let devt_slotoff: u16 =
+        (EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE) as u16 / EROFS_DEVICESLOT_SIZE as u16;
 
     // --- Block 0 ---
     let mut block0 = vec![0u8; block_size];

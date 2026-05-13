@@ -8,9 +8,9 @@ use super::*;
 
 #[repr(C, packed)]
 pub struct ErofsChunkIndex {
-    pub startblk_hi:  [u8; 2],
-    pub device_id:    [u8; 2],
-    pub startblk_lo:  [u8; 4],
+    pub startblk_hi: [u8; 2],
+    pub device_id: [u8; 2],
+    pub startblk_lo: [u8; 4],
 }
 
 const _: () = assert!(mem::size_of::<ErofsChunkIndex>() == EROFS_CHUNK_INDEX_SIZE);
@@ -19,10 +19,12 @@ impl ErofsChunkIndex {
     pub fn blkaddr(&self) -> u64 {
         let hi = get_u16(&self.startblk_hi) as u64;
         let lo = get_u32(&self.startblk_lo) as u64;
-        hi << 32 | lo
+        (hi << 32) | lo
     }
 
-    pub fn device_id(&self) -> u16 { get_u16(&self.device_id) }
+    pub fn device_id(&self) -> u16 {
+        get_u16(&self.device_id)
+    }
 
     pub fn new(blkaddr: u64, device_id: u16) -> Self {
         let mut v: Self = unsafe { mem::zeroed() };
@@ -39,12 +41,7 @@ impl ErofsChunkIndex {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self as *const _ as *const u8,
-                EROFS_CHUNK_INDEX_SIZE,
-            )
-        }
+        unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_CHUNK_INDEX_SIZE) }
     }
 }
 
@@ -54,12 +51,12 @@ impl ErofsChunkIndex {
 
 #[repr(C, packed)]
 pub struct ErofsDeviceSlot {
-    pub tag:        [u8; 64],
-    pub blocks_lo:  [u8; 4],
+    pub tag: [u8; 64],
+    pub blocks_lo: [u8; 4],
     pub uniaddr_lo: [u8; 4],
-    pub blocks_hi:  [u8; 4],
+    pub blocks_hi: [u8; 4],
     pub uniaddr_hi: [u8; 2],
-    pub _reserved:  [u8; 50],
+    pub _reserved: [u8; 50],
 }
 
 const _: () = assert!(mem::size_of::<ErofsDeviceSlot>() == EROFS_DEVICESLOT_SIZE);
@@ -73,11 +70,6 @@ impl ErofsDeviceSlot {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self as *const _ as *const u8,
-                EROFS_DEVICESLOT_SIZE,
-            )
-        }
+        unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_DEVICESLOT_SIZE) }
     }
 }

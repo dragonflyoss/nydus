@@ -19,6 +19,12 @@ pub struct MetadataLayout {
     pub meta_blkaddr: u32,
 }
 
+impl Default for MetadataLayout {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetadataLayout {
     pub fn new() -> Self {
         Self {

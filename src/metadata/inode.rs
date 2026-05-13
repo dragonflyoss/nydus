@@ -344,7 +344,7 @@ impl<'a> ErofsInode<'a> {
     }
 
     pub fn startblk(&self) -> u64 {
-        (self.nb() as u64) << 32 | self.i_u() as u64
+        ((self.nb() as u64) << 32) | self.i_u() as u64
     }
 }
 

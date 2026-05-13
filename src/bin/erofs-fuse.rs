@@ -13,7 +13,7 @@ use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::iterator::Signals;
 use simple_logger::SimpleLogger;
 
-use fuser::{MountOption, Session};
+use fuser::{Config, MountOption, Session};
 
 use mkfs_erofs::fs::{ErofsFs, ErofsReader};
 
@@ -29,6 +29,10 @@ struct Args {
     /// Optional blob device for chunk-based files
     #[arg(long)]
     blobdev: Option<String>,
+
+    /// Number of worker threads
+    #[arg(long, default_value_t = 4)]
+    threads: usize,
 
     /// Filesystem name shown in /proc/mounts SOURCE column
     #[arg(long, default_value = "erofs-fuse")]
@@ -54,7 +58,7 @@ fn main() -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(Error::other)?;
         rt.block_on(ErofsReader::open(&args.image, args.blobdev.as_deref()))?
     };
     info!(
@@ -66,38 +70,40 @@ fn main() -> Result<()> {
 
     let fs = ErofsFs::new(Arc::new(reader));
 
-    let mount_options = vec![
+    let mut config = Config::default();
+    config.mount_options = vec![
         MountOption::RO,
         MountOption::FSName(args.fsname.clone()),
         MountOption::DefaultPermissions,
     ];
+    config.n_threads = Some(args.threads);
+    config.clone_fd = args.threads > 1;
 
-    let mut session = Session::new(fs, mountpoint, &mount_options)
-        .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
+    let mut session =
+        Session::new(fs, mountpoint, &config).map_err(|e| Error::other(format!("{}", e)))?;
     info!("mounted on {}", args.mountpoint);
 
     let mut unmounter = session.unmount_callable();
 
     // Spawn a thread to wait for termination signals and trigger unmount.
-    let mut signals =
-        Signals::new(TERM_SIGNALS).map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+    let mut signals = Signals::new(TERM_SIGNALS).map_err(Error::other)?;
     std::thread::Builder::new()
         .name("erofs_fuse_signal".to_string())
         .spawn(move || {
-            for _sig in signals.forever() {
+            if let Some(_sig) = signals.forever().next() {
                 info!("received termination signal, unmounting...");
                 if let Err(e) = unmounter.unmount() {
                     error!("unmount error: {:?}", e);
                 }
-                break;
             }
         })
-        .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
+        .map_err(|e| Error::other(format!("{}", e)))?;
 
-    // Run the session loop on the main thread until the filesystem is unmounted.
-    session
-        .run()
-        .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
+    // Run the session loop in the background and wait for it to finish.
+    let bg = session
+        .spawn()
+        .map_err(|e| Error::other(format!("{}", e)))?;
+    bg.join().map_err(|e| Error::other(format!("{}", e)))?;
 
     Ok(())
 }

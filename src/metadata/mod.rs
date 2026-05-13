@@ -4,16 +4,16 @@
 //! runtime. All on-disk structs are `#[repr(C, packed)]` and can be cast
 //! directly from mmap'd memory (zero-copy) or constructed in-place for writing.
 
-pub mod superblock;
-pub mod inode;
-pub mod dir;
 pub mod chunk;
+pub mod dir;
+pub mod inode;
 pub mod layout;
+pub mod superblock;
 
-pub use superblock::*;
-pub use inode::*;
-pub use dir::*;
 pub use chunk::*;
+pub use dir::*;
+pub use inode::*;
+pub use superblock::*;
 
 use std::mem;
 
@@ -93,10 +93,9 @@ pub fn erofs_xattr_name_split(name: &[u8]) -> Option<(u8, &[u8])> {
         Some((EROFS_XATTR_INDEX_POSIX_ACL_ACCESS, suffix))
     } else if let Some(suffix) = name.strip_prefix(b"system.posix_acl_default" as &[u8]) {
         Some((EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT, suffix))
-    } else if let Some(suffix) = name.strip_prefix(b"lustre." as &[u8]) {
-        Some((EROFS_XATTR_INDEX_LUSTRE, suffix))
     } else {
-        None
+        name.strip_prefix(b"lustre." as &[u8])
+            .map(|suffix| (EROFS_XATTR_INDEX_LUSTRE, suffix))
     }
 }
 
@@ -136,17 +135,29 @@ pub const EROFS_DEVICESLOT_SIZE: usize = 128;
 // ---------- little-endian byte helpers ----------
 
 #[inline(always)]
-pub(crate) fn get_u16(b: &[u8; 2]) -> u16 { u16::from_le_bytes(*b) }
+pub(crate) fn get_u16(b: &[u8; 2]) -> u16 {
+    u16::from_le_bytes(*b)
+}
 #[inline(always)]
-pub(crate) fn get_u32(b: &[u8; 4]) -> u32 { u32::from_le_bytes(*b) }
+pub(crate) fn get_u32(b: &[u8; 4]) -> u32 {
+    u32::from_le_bytes(*b)
+}
 #[inline(always)]
-pub(crate) fn get_u64(b: &[u8; 8]) -> u64 { u64::from_le_bytes(*b) }
+pub(crate) fn get_u64(b: &[u8; 8]) -> u64 {
+    u64::from_le_bytes(*b)
+}
 #[inline(always)]
-pub(crate) fn set_u16(b: &mut [u8; 2], v: u16) { *b = v.to_le_bytes(); }
+pub(crate) fn set_u16(b: &mut [u8; 2], v: u16) {
+    *b = v.to_le_bytes();
+}
 #[inline(always)]
-pub(crate) fn set_u32(b: &mut [u8; 4], v: u32) { *b = v.to_le_bytes(); }
+pub(crate) fn set_u32(b: &mut [u8; 4], v: u32) {
+    *b = v.to_le_bytes();
+}
 #[inline(always)]
-pub(crate) fn set_u64(b: &mut [u8; 8], v: u64) { *b = v.to_le_bytes(); }
+pub(crate) fn set_u64(b: &mut [u8; 8], v: u64) {
+    *b = v.to_le_bytes();
+}
 
 /// Cast a byte slice to a reference of `T` (`#[repr(C, packed)]`).
 #[inline]
