@@ -16,8 +16,8 @@ fuser = "0.17"
 libc = "0.2"
 log = "0.4"
 memmap2 = "0.9"
+rolling-file = "0.2.0"
 signal-hook = "0.3"
-simple_logger = "4"
 tokio = { version = "1", features = [
   "fs",
   "io-util",
@@ -25,8 +25,19 @@ tokio = { version = "1", features = [
   "rt",
   "rt-multi-thread"
 ] }
+tracing = "0.1"
+tracing-appender = "0.2.4"
+tracing-panic = "0.1.2"
+tracing-subscriber = { version = "0.3", features = [
+  "chrono",
+  "env-filter",
+  "time"
+] }
 uuid = { version = "1", features = ["v4"] }
 xattr = "1"
+
+[dev-dependencies]
+tempfile = "3.25.0"
 
 [profile.bench]
 debug = true

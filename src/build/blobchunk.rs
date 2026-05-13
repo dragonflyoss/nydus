@@ -1,12 +1,10 @@
+use crate::metadata::EROFS_BLOCK_SIZE;
+use anyhow::{Context, Result};
+use blake3;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
-
-use anyhow::{Context, Result};
-use blake3;
-
-use crate::metadata::EROFS_BLOCK_SIZE;
 
 /// Represents a chunk stored in the blob device.
 #[derive(Clone)]

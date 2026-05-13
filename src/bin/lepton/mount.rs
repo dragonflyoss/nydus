@@ -1,17 +1,14 @@
-use std::path::Path;
-use std::sync::Arc;
-use std::thread::available_parallelism;
-
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, ValueEnum};
-use log::{error, info, LevelFilter};
+use fuser::{Config, MountOption, Session};
+use lepton::fs::{ErofsFs, ErofsReader};
+use lepton::tracing::init_tracing;
 use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::iterator::Signals;
-use simple_logger::SimpleLogger;
-
-use fuser::{Config, MountOption, Session};
-
-use lepton::fs::{ErofsFs, ErofsReader};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::available_parallelism;
+use tracing::{error, info, Level};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum Driver {
@@ -42,6 +39,31 @@ pub struct MountArgs {
     /// Filesystem name shown in /proc/mounts SOURCE column.
     #[arg(long, default_value = "lepton")]
     fsname: String,
+
+    #[arg(
+        short = 'l',
+        long,
+        default_value = "info",
+        help = "Specify the logging level [trace, debug, info, warn, error]"
+    )]
+    log_level: Level,
+
+    #[arg(
+        long,
+        default_value_os_t = PathBuf::from("/var/log/lepton/"),
+        help = "Specify the log directory"
+    )]
+    log_dir: PathBuf,
+
+    #[arg(
+        long,
+        default_value_t = 6,
+        help = "Specify the max number of log files"
+    )]
+    log_max_files: usize,
+
+    #[arg(long, default_value_t = true, help = "Specify whether to print log")]
+    console: bool,
 }
 
 /// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
@@ -53,10 +75,13 @@ fn default_threads() -> usize {
 
 /// Run the FUSE mount driverEROFS.
 pub fn run_fuse_mount(args: MountArgs) -> Result<()> {
-    SimpleLogger::new()
-        .with_level(LevelFilter::Info)
-        .init()
-        .map_err(|e| anyhow!("failed to init logger: {}", e))?;
+    init_tracing(
+        "lepton",
+        args.log_dir.clone(),
+        args.log_level,
+        args.log_max_files,
+        args.console,
+    );
 
     let mountpoint = Path::new(&args.mountpoint);
     if !mountpoint.is_dir() {

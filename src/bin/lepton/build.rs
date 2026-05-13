@@ -1,17 +1,17 @@
-use std::fs::File;
-use std::io::BufWriter;
-use std::path::PathBuf;
-use std::time::SystemTime;
-
 use anyhow::{bail, Context, Result};
 use clap::Args;
-
 use lepton::build::blobchunk::BlobWriter;
 use lepton::build::dir::{serialize_directory, DirChild};
 use lepton::build::image::write_image;
 use lepton::build::inode::{build_tree, inode_meta_size, serialize_inode, InodeData, InodeInfo};
 use lepton::metadata::layout::MetadataLayout;
 use lepton::metadata::*;
+use lepton::tracing::init_command_tracing;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::PathBuf;
+use std::time::SystemTime;
+use tracing::Level;
 
 #[derive(Args)]
 pub struct BuildArgs {
@@ -28,10 +28,23 @@ pub struct BuildArgs {
 
     /// Source directory.
     source: PathBuf,
+
+    #[arg(
+        short = 'l',
+        long,
+        default_value = "info",
+        help = "Specify the logging level [trace, debug, info, warn, error]"
+    )]
+    log_level: Level,
+
+    #[arg(long, default_value_t = true, help = "Specify whether to print log")]
+    console: bool,
 }
 
 /// Run the build process to create an lepton image from the source directory.
 pub fn run_build(args: BuildArgs) -> Result<()> {
+    init_command_tracing(args.log_level, args.console);
+
     // Validate chunksize.
     if args.chunksize < EROFS_BLOCK_SIZE {
         bail!(
