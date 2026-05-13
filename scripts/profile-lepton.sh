@@ -1,8 +1,8 @@
 #!/bin/bash
-# profile-erofs-fuse.sh — Automated flamegraph profiling for `lepton mount`
+# profile-lepton.sh — Automated flamegraph profiling for `lepton mount`
 #
-# Usage:   sudo ./scripts/profile-erofs-fuse.sh
-# Output:  /tmp/erofs-profile/flame.svg
+# Usage:   sudo ./scripts/profile-lepton.sh
+# Output:  /tmp/profile-lepton/flame.svg
 #
 # Prerequisites:
 #   - cargo build --release (with [profile.release] debug = true)
@@ -18,9 +18,9 @@ LEPTON="${PROJ_DIR}/target/release/lepton"
 for d in /home/*/.cargo/bin "${HOME}/.cargo/bin"; do
     [[ -d "$d" ]] && export PATH="$d:$PATH"
 done
-WORK_DIR="/tmp/erofs-profile"
+WORK_DIR="/tmp/profile-lepton"
 CORPUS_DIR="${WORK_DIR}/corpus"
-IMG="${WORK_DIR}/test.erofs"
+IMG="${WORK_DIR}/test.lepton"
 BLOB="${WORK_DIR}/test.blob"
 MNT="${WORK_DIR}/mnt"
 PERF_DATA="${WORK_DIR}/perf.data"
@@ -62,8 +62,8 @@ for i in 0 1 2 3; do
 done
 info "Corpus ready (~128 MB)"
 
-# ── build EROFS image ───────────────────────────────────────────────
-info "Building EROFS image (chunksize=1M)..."
+# ── build lepton image ───────────────────────────────────────────────
+info "Building lepton image (chunksize=1M)..."
 "${LEPTON}" build "${IMG}" --blobdev "${BLOB}" --chunksize 1048576 "${CORPUS_DIR}"
 
 # ── mount lepton ─────────────────────────────────────────────────────
@@ -128,4 +128,4 @@ perf report -i "${PERF_DATA}" --stdio --no-children --percent-limit 1 2>/dev/nul
 echo ""
 info "Done! Open ${FLAME_SVG} in a browser for interactive analysis."
 info "To re-run with different settings:"
-info "  PERF_DURATION=30 FUSE_THREADS=4 sudo ./scripts/profile-erofs-fuse.sh"
+info "  PERF_DURATION=30 FUSE_THREADS=4 sudo ./scripts/profile-lepton.sh"
