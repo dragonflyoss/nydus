@@ -6,34 +6,33 @@ use std::time::SystemTime;
 use anyhow::{bail, Context, Result};
 use clap::Args;
 
-use mkfs_erofs::build::blobchunk::BlobWriter;
-use mkfs_erofs::build::dir::{serialize_directory, DirChild};
-use mkfs_erofs::build::image::write_image;
-use mkfs_erofs::build::inode::{
-    build_tree, inode_meta_size, serialize_inode, InodeData, InodeInfo,
-};
-use mkfs_erofs::metadata::layout::MetadataLayout;
-use mkfs_erofs::metadata::*;
+use lepton::build::blobchunk::BlobWriter;
+use lepton::build::dir::{serialize_directory, DirChild};
+use lepton::build::image::write_image;
+use lepton::build::inode::{build_tree, inode_meta_size, serialize_inode, InodeData, InodeInfo};
+use lepton::metadata::layout::MetadataLayout;
+use lepton::metadata::*;
 
 #[derive(Args)]
 pub struct BuildArgs {
-    /// Output image file path
+    /// Output image file path.
     image: PathBuf,
 
-    /// Extra blob device to store chunked data
+    /// Extra blob device to store chunked data.
     #[arg(long)]
     blobdev: PathBuf,
 
-    /// Chunk size in bytes (must be a power of two, >= 4096)
+    /// Chunk size in bytes (must be a power of two, >= 4096).
     #[arg(long)]
     chunksize: u32,
 
-    /// Source directory
+    /// Source directory.
     source: PathBuf,
 }
 
+/// Run the build process to create an lepton image from the source directory.
 pub fn run_build(args: BuildArgs) -> Result<()> {
-    // Validate chunksize
+    // Validate chunksize.
     if args.chunksize < EROFS_BLOCK_SIZE {
         bail!(
             "chunksize {} must be >= block size {}",
@@ -46,7 +45,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
     }
     let chunkbits = args.chunksize.trailing_zeros();
 
-    // Validate source is a directory
+    // Validate source is a directory.
     if !args.source.is_dir() {
         bail!("source {} is not a directory", args.source.display());
     }
@@ -56,7 +55,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         .context("system time before UNIX epoch")?
         .as_secs();
 
-    // Phase 1: Build inode tree and write chunk data to blobdev
+    // Phase 1: Build inode tree and write chunk data to blobdev.
     eprintln!("Building filesystem tree from {}...", args.source.display());
     let mut blob_writer = BlobWriter::new(&args.blobdev, args.chunksize)?;
     let mut inodes = build_tree(&args.source, &mut blob_writer, args.chunksize)?;
@@ -69,12 +68,12 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         blob_writer.saved_by_dedup
     );
 
-    // Phase 2: Layout metadata
+    // Phase 2: Layout metadata.
     eprintln!("Laying out metadata...");
     let mut layout = MetadataLayout::new();
     let blkszbits = EROFS_BLKSZBITS as u32;
 
-    // Phase 2a: Allocate inode slots
+    // Phase 2a: Allocate inode slots.
     for inode in &mut inodes {
         let meta_size = inode_meta_size(inode, chunkbits, blkszbits);
         let (offset, nid) = layout.alloc_inode(meta_size);
@@ -82,10 +81,10 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         inode.nid = nid;
     }
 
-    // Set parent NIDs for directories
+    // Set parent NIDs for directories.
     set_parent_nids(&mut inodes);
 
-    // Phase 2b: Serialize and allocate directory data
+    // Phase 2b: Serialize and allocate directory data.
     layout.pad_to_block();
 
     let dir_infos: Vec<(usize, Vec<DirChild>, u64, u64)> = inodes
@@ -132,14 +131,14 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         inodes[idx].size = dir_data_len as u64;
     }
 
-    // Phase 2c: Serialize inodes into metadata buffer
+    // Phase 2c: Serialize inodes into metadata buffer.
     for inode in &inodes {
         let inode_bytes = serialize_inode(inode, epoch, chunkbits);
         let offset = inode.meta_offset;
         layout.write_at(offset, &inode_bytes);
     }
 
-    // Phase 3: Write image
+    // Phase 3: Write image.
     eprintln!("Writing image to {}...", args.image.display());
     let root_nid = inodes[0].nid;
     assert!(root_nid <= u16::MAX as u64, "root NID exceeds 16-bit range");

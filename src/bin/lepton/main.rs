@@ -1,4 +1,4 @@
-// lepton — single CLI for EROFS image creation and mounting.
+// lepton — single CLI for lepton image creation and mounting.
 //
 // Subcommands:
 //   lepton build <image> --blobdev <path> --chunksize <bytes> <source>
@@ -14,7 +14,7 @@ use crate::build::{run_build, BuildArgs};
 use crate::mount::{run_fuse_mount, Driver, MountArgs};
 
 #[derive(Parser)]
-#[command(name = "lepton", about = "EROFS filesystem tools")]
+#[command(name = "lepton", about = "Lepton filesystem tools")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -22,9 +22,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Create an EROFS filesystem image (chunk-based)
+    /// Create an lepton filesystem image (chunk-based).
     Build(BuildArgs),
-    /// Mount an EROFS image
+    /// Mount an lepton image.
     Mount(MountArgs),
 }
 

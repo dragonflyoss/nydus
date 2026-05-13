@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::thread::available_parallelism;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, ValueEnum};
@@ -10,39 +11,47 @@ use simple_logger::SimpleLogger;
 
 use fuser::{Config, MountOption, Session};
 
-use mkfs_erofs::fs::{ErofsFs, ErofsReader};
+use lepton::fs::{ErofsFs, ErofsReader};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum Driver {
-    /// Mount via FUSE
+    /// Mount via FUSE.
     Fuse,
 }
 
 #[derive(Args)]
 pub struct MountArgs {
-    /// EROFS image file
+    /// EROFS image file.
     image: String,
 
-    /// Mount point
+    /// Mount point.
     mountpoint: String,
 
-    /// Mount driver (default: fuse)
+    /// Mount driver (default: fuse).
     #[arg(long, value_enum, default_value_t = Driver::Fuse)]
     pub driver: Driver,
 
-    /// Optional blob device for chunk-based files
+    /// Optional blob device for chunk-based files.
     #[arg(long)]
     blobdev: Option<String>,
 
-    /// Number of worker threads
-    #[arg(long, default_value_t = 4)]
+    /// Number of worker threads.
+    #[arg(long, default_value_t = default_threads())]
     threads: usize,
 
-    /// Filesystem name shown in /proc/mounts SOURCE column
+    /// Filesystem name shown in /proc/mounts SOURCE column.
     #[arg(long, default_value = "lepton")]
     fsname: String,
 }
 
+/// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
+/// range.
+fn default_threads() -> usize {
+    let n = available_parallelism().map(|x| x.get()).unwrap_or(4);
+    n.clamp(4, 16)
+}
+
+/// Run the FUSE mount driverEROFS.
 pub fn run_fuse_mount(args: MountArgs) -> Result<()> {
     SimpleLogger::new()
         .with_level(LevelFilter::Info)
@@ -71,7 +80,6 @@ pub fn run_fuse_mount(args: MountArgs) -> Result<()> {
     );
 
     let fs = ErofsFs::new(Arc::new(reader));
-
     let mut config = Config::default();
     config.mount_options = vec![
         MountOption::RO,
@@ -79,7 +87,7 @@ pub fn run_fuse_mount(args: MountArgs) -> Result<()> {
         MountOption::DefaultPermissions,
     ];
     config.n_threads = Some(args.threads);
-    config.clone_fd = args.threads > 1;
+    config.clone_fd = true;
 
     let mut session =
         Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {}", e))?;
