@@ -23,13 +23,8 @@ memmap2 = "0.9"
 simple_logger = "4"
 signal-hook = "0.3"
 tokio = { version = "1", features = ["rt", "net", "io-util", "fs", "rt-multi-thread"] }
-async-trait = "0.1"
-fuse-backend-rs = { path = "../fuse-backend-rs", features = ["fusedev", "async-io"] }
+fuser = "0.16"
 xattr = "1"
 
 [profile.release]
 debug = true
-
-[features]
-default = ["async-io"]
-async-io = []

@@ -8,13 +8,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
-use log::{error, info, warn, LevelFilter};
+use log::{error, info, LevelFilter};
 use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::iterator::Signals;
 use simple_logger::SimpleLogger;
 
-use fuse_backend_rs::api::server::Server;
-use fuse_backend_rs::transport::FuseSession;
+use fuser::{MountOption, Session};
 
 use mkfs_erofs::fs::{ErofsFs, ErofsReader};
 
@@ -31,7 +30,7 @@ struct Args {
     #[arg(long)]
     blobdev: Option<String>,
 
-    /// Number of worker threads (default: 4)
+    /// Number of worker threads (currently unused; fuser uses a single session loop)
     #[arg(long, default_value_t = 4)]
     threads: u32,
 
@@ -47,6 +46,7 @@ fn main() -> Result<()> {
         .unwrap();
 
     let args = Args::parse();
+    let _ = args.threads; // fuser drives a single session loop; threads arg kept for CLI compat
 
     let mountpoint = Path::new(&args.mountpoint);
     if !mountpoint.is_dir() {
@@ -70,61 +70,38 @@ fn main() -> Result<()> {
     );
 
     let fs = ErofsFs::new(Arc::new(reader));
-    let server = Arc::new(Server::new(fs));
 
-    let mut se = FuseSession::new(mountpoint, &args.fsname, "", true)
-        .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
-    se.mount()
+    let mount_options = vec![
+        MountOption::RO,
+        MountOption::FSName(args.fsname.clone()),
+        MountOption::DefaultPermissions,
+    ];
+
+    let mut session = Session::new(fs, mountpoint, &mount_options)
         .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
     info!("mounted on {}", args.mountpoint);
 
-    for i in 0..args.threads {
-        let mut ch = se
-            .new_channel()
-            .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
-        let server = server.clone();
+    let mut unmounter = session.unmount_callable();
 
-        std::thread::Builder::new()
-            .name(format!("erofs_fuse_{}", i))
-            .spawn(move || {
-                info!("fuse worker {} started", i);
-                loop {
-                    match ch.get_request() {
-                        Ok(Some((reader, writer))) => {
-                            if let Err(e) = server.handle_message(reader, writer.into(), None, None)
-                            {
-                                match e {
-                                    fuse_backend_rs::Error::EncodeMessage(_) => break,
-                                    _ => {
-                                        error!("handle fuse message: {:?}", e);
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            error!("get fuse request: {:?}", e);
-                            break;
-                        }
-                    }
-                }
-                warn!("fuse worker {} exits", i);
-            })
-            .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
-    }
-
-    // Wait for termination signals
+    // Spawn a thread to wait for termination signals and trigger unmount.
     let mut signals =
         Signals::new(TERM_SIGNALS).map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
-    for _sig in signals.forever() {
-        break;
-    }
-
-    info!("unmounting...");
-    se.umount()
+    std::thread::Builder::new()
+        .name("erofs_fuse_signal".to_string())
+        .spawn(move || {
+            for _sig in signals.forever() {
+                info!("received termination signal, unmounting...");
+                if let Err(e) = unmounter.unmount() {
+                    error!("unmount error: {:?}", e);
+                }
+                break;
+            }
+        })
         .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
-    se.wake()
+
+    // Run the session loop on the main thread until the filesystem is unmounted.
+    session
+        .run()
         .map_err(|e| Error::new(std::io::ErrorKind::Other, format!("{}", e)))?;
 
     Ok(())

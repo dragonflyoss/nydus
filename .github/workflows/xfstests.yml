@@ -19,12 +19,6 @@ jobs:
       with:
         path: erofs-utils-rust
 
-    - name: Checkout fuse-backend-rs
-      uses: actions/checkout@v4
-      with:
-        repository: cloud-hypervisor/fuse-backend-rs
-        path: fuse-backend-rs
-
     - name: Install Rust
       uses: actions-rs/toolchain@v1
       with:
