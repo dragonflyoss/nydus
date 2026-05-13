@@ -1,10 +1,23 @@
+// lepton — single CLI for EROFS image creation and FUSE mounting.
+//
+// Subcommands:
+//   lepton mkfs <image> --blobdev <path> --chunksize <bytes> <source>
+//   lepton fuse mount <image> <mountpoint> [--blobdev <path>] [--threads N] [--fsname NAME]
+
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{bail, Context, Result};
-use clap::Parser;
+use anyhow::{anyhow, bail, Context, Result};
+use clap::{Args, Parser, Subcommand};
+use log::{error, info, LevelFilter};
+use signal_hook::consts::TERM_SIGNALS;
+use signal_hook::iterator::Signals;
+use simple_logger::SimpleLogger;
+
+use fuser::{Config, MountOption, Session};
 
 use mkfs_erofs::build::blobchunk::BlobWriter;
 use mkfs_erofs::build::dir::{serialize_directory, DirChild};
@@ -12,15 +25,27 @@ use mkfs_erofs::build::image::write_image;
 use mkfs_erofs::build::inode::{
     build_tree, inode_meta_size, serialize_inode, InodeData, InodeInfo,
 };
+use mkfs_erofs::fs::{ErofsFs, ErofsReader};
 use mkfs_erofs::metadata::layout::MetadataLayout;
 use mkfs_erofs::metadata::*;
 
 #[derive(Parser)]
-#[command(
-    name = "erofs-mkfs",
-    about = "Create an EROFS filesystem image (chunk-based)"
-)]
-struct Args {
+#[command(name = "lepton", about = "EROFS filesystem tools")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Create an EROFS filesystem image (chunk-based)
+    Mkfs(MkfsArgs),
+    /// FUSE-related operations
+    Fuse(FuseArgs),
+}
+
+#[derive(Args)]
+struct MkfsArgs {
     /// Output image file path
     image: PathBuf,
 
@@ -36,9 +61,50 @@ struct Args {
     source: PathBuf,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
+#[derive(Args)]
+struct FuseArgs {
+    #[command(subcommand)]
+    command: FuseCommands,
+}
 
+#[derive(Subcommand)]
+enum FuseCommands {
+    /// Mount an EROFS image via FUSE
+    Mount(MountArgs),
+}
+
+#[derive(Args)]
+struct MountArgs {
+    /// EROFS image file
+    image: String,
+
+    /// Mount point
+    mountpoint: String,
+
+    /// Optional blob device for chunk-based files
+    #[arg(long)]
+    blobdev: Option<String>,
+
+    /// Number of worker threads
+    #[arg(long, default_value_t = 4)]
+    threads: usize,
+
+    /// Filesystem name shown in /proc/mounts SOURCE column
+    #[arg(long, default_value = "lepton")]
+    fsname: String,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match cli.command {
+        Commands::Mkfs(args) => run_mkfs(args),
+        Commands::Fuse(FuseArgs {
+            command: FuseCommands::Mount(args),
+        }) => run_fuse_mount(args),
+    }
+}
+
+fn run_mkfs(args: MkfsArgs) -> Result<()> {
     // Validate chunksize
     if args.chunksize < EROFS_BLOCK_SIZE {
         bail!(
@@ -215,4 +281,71 @@ fn set_parent_nids(inodes: &mut [InodeInfo]) {
             }
         }
     }
+}
+
+fn run_fuse_mount(args: MountArgs) -> Result<()> {
+    SimpleLogger::new()
+        .with_level(LevelFilter::Info)
+        .init()
+        .map_err(|e| anyhow!("failed to init logger: {}", e))?;
+
+    let mountpoint = Path::new(&args.mountpoint);
+    if !mountpoint.is_dir() {
+        bail!("mountpoint {} is not a directory", args.mountpoint);
+    }
+
+    // ErofsReader::open() is async — use a temporary tokio runtime for initialization.
+    let reader = {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to build tokio runtime")?;
+        rt.block_on(ErofsReader::open(&args.image, args.blobdev.as_deref()))
+            .context("failed to open EROFS image")?
+    };
+    info!(
+        "opened EROFS image: root_nid={}, blocks={}, inos={}",
+        reader.sb().root_nid(),
+        reader.sb().blocks(),
+        reader.sb().inos()
+    );
+
+    let fs = ErofsFs::new(Arc::new(reader));
+
+    let mut config = Config::default();
+    config.mount_options = vec![
+        MountOption::RO,
+        MountOption::FSName(args.fsname.clone()),
+        MountOption::DefaultPermissions,
+    ];
+    config.n_threads = Some(args.threads);
+    config.clone_fd = args.threads > 1;
+
+    let mut session =
+        Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {}", e))?;
+    info!("mounted on {}", args.mountpoint);
+
+    let mut unmounter = session.unmount_callable();
+
+    // Spawn a thread to wait for termination signals and trigger unmount.
+    let mut signals = Signals::new(TERM_SIGNALS).context("failed to register signal handler")?;
+    std::thread::Builder::new()
+        .name("lepton_fuse_signal".to_string())
+        .spawn(move || {
+            if let Some(_sig) = signals.forever().next() {
+                info!("received termination signal, unmounting...");
+                if let Err(e) = unmounter.unmount() {
+                    error!("unmount error: {:?}", e);
+                }
+            }
+        })
+        .context("failed to spawn signal thread")?;
+
+    // Run the session loop in the background and wait for it to finish.
+    let bg = session
+        .spawn()
+        .map_err(|e| anyhow!("spawn failed: {}", e))?;
+    bg.join().map_err(|e| anyhow!("join failed: {}", e))?;
+
+    Ok(())
 }

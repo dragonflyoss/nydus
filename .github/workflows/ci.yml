@@ -93,12 +93,11 @@ jobs:
         with:
           go-version: '1.25.5'
 
-      - name: Build and install erofs binaries
+      - name: Build and install lepton binary
         run: |
           cd erofs-utils-rust
           cargo build --release
-          sudo install -m 700 ./target/release/erofs-mkfs /usr/sbin/
-          sudo install -m 700 ./target/release/erofs-fuse /usr/sbin/
+          sudo install -m 700 ./target/release/lepton /usr/sbin/
 
       - name: Run integration tests (verify + xfstests)
         run: |

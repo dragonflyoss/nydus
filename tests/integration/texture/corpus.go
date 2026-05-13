@@ -1,7 +1,7 @@
 // Package texture provides helpers for generating EROFS filesystem test corpus.
 //
 // The Corpus type follows a builder pattern similar to nydus smoke/tests/tool/layer.go,
-// creating real files on disk to exercise erofs-mkfs and erofs-fuse code paths.
+// creating real files on disk to exercise `lepton mkfs` and `lepton fuse mount` code paths.
 package texture
 
 import (
@@ -19,7 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Corpus represents a directory tree used as input to erofs-mkfs.
+// Corpus represents a directory tree used as input to `lepton mkfs`.
 type Corpus struct {
 	Dir string
 }

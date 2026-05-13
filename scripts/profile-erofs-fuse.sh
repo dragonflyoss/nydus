@@ -1,5 +1,5 @@
 #!/bin/bash
-# profile-erofs-fuse.sh — Automated flamegraph profiling for erofs-fuse
+# profile-erofs-fuse.sh — Automated flamegraph profiling for `lepton fuse mount`
 #
 # Usage:   sudo ./scripts/profile-erofs-fuse.sh
 # Output:  /tmp/erofs-profile/flame.svg
@@ -7,13 +7,12 @@
 # Prerequisites:
 #   - cargo build --release (with [profile.release] debug = true)
 #   - perf, fio, inferno-collapse-perf, inferno-flamegraph
-#   - erofs-mkfs built
+#   - lepton built
 
 set -euo pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-EROFS_MKFS="${PROJ_DIR}/target/release/erofs-mkfs"
-EROFS_FUSE="${PROJ_DIR}/target/release/erofs-fuse"
+LEPTON="${PROJ_DIR}/target/release/lepton"
 
 # Ensure cargo-installed binaries are in PATH (sudo often strips ~/.cargo/bin)
 for d in /home/*/.cargo/bin "${HOME}/.cargo/bin"; do
@@ -36,7 +35,7 @@ info() { echo "==> $*"; }
 cleanup() {
     info "Cleaning up..."
     fusermount -u "${MNT}" 2>/dev/null || true
-    # Kill erofs-fuse if still running
+    # Kill lepton fuse mount if still running
     if [[ -n "${FUSE_PID:-}" ]] && kill -0 "${FUSE_PID}" 2>/dev/null; then
         kill "${FUSE_PID}" 2>/dev/null || true
         wait "${FUSE_PID}" 2>/dev/null || true
@@ -50,8 +49,7 @@ command -v perf              >/dev/null || die "perf not found"
 command -v fio               >/dev/null || die "fio not found"
 command -v inferno-collapse-perf >/dev/null || die "inferno-collapse-perf not found (cargo install inferno)"
 command -v inferno-flamegraph    >/dev/null || die "inferno-flamegraph not found"
-[[ -x "${EROFS_MKFS}" ]]    || die "${EROFS_MKFS} not found — run: cargo build --release"
-[[ -x "${EROFS_FUSE}" ]]    || die "${EROFS_FUSE} not found — run: cargo build --release"
+[[ -x "${LEPTON}" ]]    || die "${LEPTON} not found — run: cargo build --release"
 
 # ── prepare workspace ───────────────────────────────────────────────
 info "Preparing workspace in ${WORK_DIR}"
@@ -66,11 +64,11 @@ info "Corpus ready (~128 MB)"
 
 # ── build EROFS image ───────────────────────────────────────────────
 info "Building EROFS image (chunksize=1M)..."
-"${EROFS_MKFS}" "${IMG}" --blobdev "${BLOB}" --chunksize 1048576 "${CORPUS_DIR}"
+"${LEPTON}" mkfs "${IMG}" --blobdev "${BLOB}" --chunksize 1048576 "${CORPUS_DIR}"
 
-# ── mount erofs-fuse ─────────────────────────────────────────────────
-info "Mounting erofs-fuse (threads=${FUSE_THREADS})..."
-"${EROFS_FUSE}" "${IMG}" "${MNT}" --blobdev "${BLOB}" --threads "${FUSE_THREADS}" &
+# ── mount lepton fuse mount ─────────────────────────────────────────
+info "Mounting lepton fuse mount (threads=${FUSE_THREADS})..."
+"${LEPTON}" fuse mount "${IMG}" "${MNT}" --blobdev "${BLOB}" --threads "${FUSE_THREADS}" &
 FUSE_PID=$!
 
 # Wait for mount
@@ -80,7 +78,7 @@ for i in $(seq 1 40); do
     fi
     sleep 0.25
 done
-mountpoint -q "${MNT}" || die "erofs-fuse failed to mount within 10s"
+mountpoint -q "${MNT}" || die "lepton fuse mount failed to mount within 10s"
 info "Mounted (PID=${FUSE_PID})"
 
 # ── warm up (prime page cache, then drop) ────────────────────────────
@@ -110,7 +108,7 @@ info "perf record done: ${PERF_DATA}"
 info "Generating flamegraph..."
 perf script -i "${PERF_DATA}" | \
     inferno-collapse-perf --all | \
-    inferno-flamegraph --title "erofs-fuse sequential read 128K (threads=${FUSE_THREADS})" \
+    inferno-flamegraph --title "lepton fuse mount sequential read 128K (threads=${FUSE_THREADS})" \
     > "${FLAME_SVG}"
 
 info "Flamegraph saved: ${FLAME_SVG}"

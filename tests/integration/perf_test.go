@@ -19,7 +19,7 @@ import (
 )
 
 // TestPerf runs fio-based I/O benchmarks and Go-based metadata benchmarks
-// against Rust erofs-fuse, optionally comparing with C erofsfuse.
+// against Rust `lepton fuse mount`, optionally comparing with C erofsfuse.
 //
 // Enable:        EROFS_RUN_PERF=1
 // C comparison:  EROFS_C_FUSE=/path/to/erofsfuse (auto-detected if omitted)
@@ -43,8 +43,8 @@ func TestPerf(t *testing.T) {
 		t.Skip("set EROFS_RUN_PERF=1 to enable")
 	}
 
-	mkfsBin := requireBinary(t, "erofs-mkfs")
-	rustFuse := requireBinary(t, "erofs-fuse")
+	mkfsBin := requireBinary(t, "lepton")
+	rustFuse := requireBinary(t, "lepton")
 	cFuse := findCFuse()
 	fioBin := requireFio(t)
 
@@ -63,12 +63,12 @@ func TestPerf(t *testing.T) {
 
 	// Build EROFS image with 1 MB chunks (realistic)
 	t.Log("Building EROFS image (chunksize=1M)...")
-	out, err := exec.Command(mkfsBin, img,
+	out, err := exec.Command(mkfsBin, "mkfs", img,
 		"--blobdev", blob, "--chunksize", "1048576", corpusDir).CombinedOutput()
-	require.NoError(t, err, "erofs-mkfs: %s", string(out))
+	require.NoError(t, err, "lepton mkfs: %s", string(out))
 
-	// --- Rust erofs-fuse ---
-	t.Log("Benchmarking Rust erofs-fuse...")
+	// --- Rust lepton fuse mount ---
+	t.Log("Benchmarking Rust lepton fuse mount...")
 	dropCaches()
 	unmount := mountEROFS(t, rustFuse, img, blob, mntDir)
 	rustResults := runBenchmarks(t, fioBin, mntDir)

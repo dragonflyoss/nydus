@@ -1,6 +1,6 @@
-# erofs-utils-rust
+# lepton
 
-A minimal Rust implementation of EROFS filesystem tools, including image creation (`erofs-mkfs`) and FUSE mounting (`erofs-fuse`).
+A minimal Rust implementation of EROFS filesystem tools, providing image creation and FUSE mounting through a single `lepton` binary with subcommands.
 
 ## Build
 
@@ -8,21 +8,20 @@ A minimal Rust implementation of EROFS filesystem tools, including image creatio
 cargo build --release
 ```
 
-Two binaries are generated:
+A single binary is produced:
 
 ```bash
-./target/release/erofs-mkfs   # Create EROFS images
-./target/release/erofs-fuse   # Mount EROFS images via FUSE
+./target/release/lepton   # EROFS tools (mkfs + fuse mount subcommands)
 ```
 
 ## Usage
 
-### erofs-mkfs
+### lepton mkfs
 
 Create an EROFS filesystem image from a source directory:
 
 ```bash
-./target/release/erofs-mkfs IMAGE --blobdev BLOB --chunksize BYTES SOURCE
+./target/release/lepton mkfs IMAGE --blobdev BLOB --chunksize BYTES SOURCE
 ```
 
 Arguments:
@@ -32,12 +31,12 @@ Arguments:
 - `--chunksize BYTES`: chunk size in bytes, must be a power of two and >= 4096
 - `SOURCE`: source directory
 
-### erofs-fuse
+### lepton fuse mount
 
 Mount an EROFS image via FUSE:
 
 ```bash
-sudo ./target/release/erofs-fuse IMAGE MOUNTPOINT [--blobdev BLOB] [--threads N]
+sudo ./target/release/lepton fuse mount IMAGE MOUNTPOINT [--blobdev BLOB] [--threads N]
 ```
 
 Arguments:
@@ -51,13 +50,13 @@ Arguments:
 
 ```bash
 # Build image
-./target/release/erofs-mkfs /tmp/erofs.meta.img \
+./target/release/lepton mkfs /tmp/erofs.meta.img \
 	--blobdev /tmp/erofs.blob.img \
 	--chunksize 1048576 \
 	~/code/linux
 
 # Mount image
-sudo ./target/release/erofs-fuse /tmp/erofs.meta.img ~/mnt \
+sudo ./target/release/lepton fuse mount /tmp/erofs.meta.img ~/mnt \
 	--blobdev /tmp/erofs.blob.img \
 	--threads 10
 ```
@@ -67,8 +66,7 @@ sudo ./target/release/erofs-fuse /tmp/erofs.meta.img ~/mnt \
 ```
 src/
 ├── bin/
-│   ├── erofs-fuse.rs           # FUSE daemon binary
-│   └── erofs-mkfs.rs           # Image creation binary
+│   └── lepton.rs               # Single CLI binary with `mkfs` and `fuse mount` subcommands
 ├── lib.rs                       # Library crate root
 ├── metadata/                    # EROFS on-disk format definitions (shared)
 │   ├── mod.rs                  # Constants, LE helpers, cast_ref/cast_mut
@@ -138,7 +136,7 @@ The integration tests live under `tests/integration/` (Go) and reuse
 Performance benchmark (requires root, fio):
 
 ```bash
-# Benchmark Rust erofs-fuse (~2min, needs fio: apt-get install fio)
+# Benchmark Rust `lepton fuse mount` (~2min, needs fio: apt-get install fio)
 make test-perf
 
 # Compare against C erofsfuse

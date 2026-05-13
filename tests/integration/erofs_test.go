@@ -1,12 +1,12 @@
-// Package integration provides end-to-end tests for erofs-mkfs and erofs-fuse.
+// Package integration provides end-to-end tests for the lepton binary.
 //
 // TestVerifyEROFS builds an EROFS image from a generated corpus, mounts it via
-// erofs-fuse, then verifies content, metadata, symlinks, hardlinks, and xattrs.
+// `lepton fuse mount`, then verifies content, metadata, symlinks, hardlinks, and xattrs.
 //
-// TestXfstests runs the xfstests read-only suite against erofs-fuse.
+// TestXfstests runs the xfstests read-only suite against `lepton fuse mount`.
 //
-// Both tests require root and the erofs-mkfs / erofs-fuse binaries on PATH or
-// built at ../../target/release/.
+// Both tests require root and the lepton binary on PATH or built at
+// ../../target/release/.
 package integration
 
 import (
@@ -58,18 +58,18 @@ func requireBinary(t *testing.T, name string) string {
 
 // ---------- FUSE mount helpers ----------
 
-func mountEROFS(t *testing.T, fuseBin, img, blobdev, mnt string) (cleanup func()) {
+func mountEROFS(t *testing.T, leptonBin, img, blobdev, mnt string) (cleanup func()) {
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	args := []string{img, mnt}
+	args := []string{"fuse", "mount", img, mnt}
 	if blobdev != "" {
 		args = append(args, "--blobdev", blobdev)
 	}
 
-	cmd := exec.Command(fuseBin, args...)
+	cmd := exec.Command(leptonBin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start(), "erofs-fuse start")
+	require.NoError(t, cmd.Start(), "lepton fuse mount start")
 
 	// Wait for mount.
 	mounted := false
@@ -80,7 +80,7 @@ func mountEROFS(t *testing.T, fuseBin, img, blobdev, mnt string) (cleanup func()
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	require.True(t, mounted, "erofs-fuse failed to mount within 10s")
+	require.True(t, mounted, "lepton fuse mount failed to mount within 10s")
 
 	return func() {
 		_ = exec.Command("fusermount", "-u", mnt).Run()
@@ -106,11 +106,11 @@ func isMountpoint(path string) bool {
 
 // ---------- mkfs helpers ----------
 
-func buildImage(t *testing.T, mkfsBin, img, blobdev, srcDir string) {
-	args := []string{img, "--blobdev", blobdev, "--chunksize", "4096", srcDir}
-	out, err := exec.Command(mkfsBin, args...).CombinedOutput()
-	require.NoError(t, err, "erofs-mkfs failed: %s", string(out))
-	t.Logf("erofs-mkfs output: %s", string(out))
+func buildImage(t *testing.T, leptonBin, img, blobdev, srcDir string) {
+	args := []string{"mkfs", img, "--blobdev", blobdev, "--chunksize", "4096", srcDir}
+	out, err := exec.Command(leptonBin, args...).CombinedOutput()
+	require.NoError(t, err, "lepton mkfs failed: %s", string(out))
+	t.Logf("lepton mkfs output: %s", string(out))
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -122,8 +122,8 @@ func TestVerifyEROFS(t *testing.T) {
 		t.Skip("requires root")
 	}
 
-	mkfsBin := requireBinary(t, "erofs-mkfs")
-	fuseBin := requireBinary(t, "erofs-fuse")
+	mkfsBin := requireBinary(t, "lepton")
+	fuseBin := requireBinary(t, "lepton")
 
 	// Temp directories
 	tmpDir := t.TempDir()
@@ -329,8 +329,8 @@ func TestXfstests(t *testing.T) {
 		t.Skip("set EROFS_RUN_XFSTESTS=1 to enable (slow)")
 	}
 
-	mkfsBin := requireBinary(t, "erofs-mkfs")
-	fuseBin := requireBinary(t, "erofs-fuse")
+	mkfsBin := requireBinary(t, "lepton")
+	fuseBin := requireBinary(t, "lepton")
 
 	// Paths
 	xfstestsDir := "/tmp/xfstests-dev"
@@ -395,24 +395,24 @@ func TestXfstests(t *testing.T) {
 
 // installMountHelper creates /usr/sbin/mount.fuse.testerofs so that xfstests
 // can mount the EROFS image via the standard FUSE mount interface.
-func installMountHelper(t *testing.T, fuseBin, img, blob string) {
+func installMountHelper(t *testing.T, leptonBin, img, blob string) {
 	script := fmt.Sprintf(`#!/bin/bash
 DEVICE="$1"
 MOUNTPOINT="$2"
 [ -z "$MOUNTPOINT" ] && MOUNTPOINT="/tmp/erofs_mount"
 [ -z "$DEVICE" ] && DEVICE="testerofs"
 ulimit -n 1048576
-pkill -f "erofs-fuse.*${MOUNTPOINT}" 2>/dev/null || true
+pkill -f "lepton fuse mount.*${MOUNTPOINT}" 2>/dev/null || true
 fusermount -u "${MOUNTPOINT}" 2>/dev/null || true
 sleep 0.5
-%s %s "${MOUNTPOINT}" --blobdev %s --fsname "${DEVICE}" 1>>/tmp/erofs_fuse.log 2>&1 &
+%s fuse mount %s "${MOUNTPOINT}" --blobdev %s --fsname "${DEVICE}" 1>>/tmp/erofs_fuse.log 2>&1 &
 for i in $(seq 1 10); do
     mountpoint -q "${MOUNTPOINT}" 2>/dev/null && exit 0
     sleep 0.5
 done
-echo "ERROR: erofs-fuse failed to mount within 5 seconds" >&2
+echo "ERROR: lepton fuse mount failed to mount within 5 seconds" >&2
 exit 1
-`, fuseBin, img, blob)
+`, leptonBin, img, blob)
 
 	helperPath := "/usr/sbin/mount.fuse.testerofs"
 	require.NoError(t, os.WriteFile(helperPath, []byte(script), 0755))

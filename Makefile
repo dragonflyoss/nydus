@@ -23,7 +23,7 @@ test-integration: release
 		$(GO) test -v -timeout 600s ./...
 
 # Run performance benchmark (requires root, fio, ~2min).
-# Compares Rust erofs-fuse vs C erofsfuse (auto-detected or EROFS_C_FUSE=path).
+# Compares Rust `lepton fuse mount` vs C erofsfuse (auto-detected or EROFS_C_FUSE=path).
 test-perf: release
 	cd tests/integration && \
 		sudo env "PATH=$(PATH)" "HOME=$(HOME)" \

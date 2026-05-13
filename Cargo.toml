@@ -4,12 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "erofs-mkfs"
-path = "src/bin/erofs-mkfs.rs"
-
-[[bin]]
-name = "erofs-fuse"
-path = "src/bin/erofs-fuse.rs"
+name = "lepton"
+path = "src/bin/lepton.rs"
 
 [dependencies]
 anyhow = "1"
