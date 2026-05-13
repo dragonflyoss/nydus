@@ -1,7 +1,4 @@
-use crate::metadata::{
-    EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_FT_DIR,
-    ErofsDirent,
-};
+use crate::metadata::{ErofsDirent, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_FT_DIR};
 
 /// A directory child entry with name, NID, and file type.
 pub struct DirChild {
@@ -16,11 +13,7 @@ pub struct DirChild {
 /// Each block is independently formatted: dirent array followed by names.
 ///
 /// Returns the serialized directory data (multiple of EROFS_BLOCK_SIZE).
-pub fn serialize_directory(
-    children: &[DirChild],
-    self_nid: u64,
-    parent_nid: u64,
-) -> Vec<u8> {
+pub fn serialize_directory(children: &[DirChild], self_nid: u64, parent_nid: u64) -> Vec<u8> {
     let block_size = EROFS_BLOCK_SIZE as usize;
 
     let mut entries: Vec<(&str, u64, u8)> = Vec::with_capacity(children.len() + 2);

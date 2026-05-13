@@ -1,6 +1,6 @@
-mod meta;
 mod data;
 pub mod fuse;
+mod meta;
 
 pub use self::fuse::ErofsFs;
 
@@ -89,15 +89,17 @@ impl ErofsReader {
     }
 
     pub(crate) fn mmap_slice(&self, offset: usize, len: usize) -> io::Result<&[u8]> {
-        let end = offset.checked_add(len).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "offset + len overflow")
-        })?;
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset + len overflow"))?;
         if end > self.mmap.len() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
                     "mmap read out of bounds: offset={}, len={}, mmap_len={}",
-                    offset, len, self.mmap.len()
+                    offset,
+                    len,
+                    self.mmap.len()
                 ),
             ));
         }
@@ -105,9 +107,10 @@ impl ErofsReader {
     }
 
     pub(crate) fn blob_mmap_slice(&self, offset: usize, len: usize) -> io::Result<&[u8]> {
-        let blob = self.blob_mmap.as_ref().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "blob device not available")
-        })?;
+        let blob = self
+            .blob_mmap
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob device not available"))?;
         let end = offset.checked_add(len).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob offset + len overflow")
         })?;
@@ -116,7 +119,9 @@ impl ErofsReader {
                 io::ErrorKind::UnexpectedEof,
                 format!(
                     "blob mmap read out of bounds: offset={}, len={}, blob_len={}",
-                    offset, len, blob.len()
+                    offset,
+                    len,
+                    blob.len()
                 ),
             ));
         }
@@ -124,7 +129,7 @@ impl ErofsReader {
     }
 
     pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {
-        (self.sb().meta_blkaddr() as u64 * EROFS_BLOCK_SIZE as u64
-            + nid * EROFS_SLOTSIZE as u64) as usize
+        (self.sb().meta_blkaddr() as u64 * EROFS_BLOCK_SIZE as u64 + nid * EROFS_SLOTSIZE as u64)
+            as usize
     }
 }

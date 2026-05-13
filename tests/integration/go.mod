@@ -1,6 +1,6 @@
 module github.com/erofs/erofs-utils-rust/tests/integration
 
-go 1.24.2
+go 1.25.5
 
 require (
 	github.com/pkg/xattr v0.4.12

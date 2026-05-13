@@ -8,15 +8,18 @@ use clap::Parser;
 
 use mkfs_erofs::build::blobchunk::BlobWriter;
 use mkfs_erofs::build::dir::{serialize_directory, DirChild};
+use mkfs_erofs::build::image::write_image;
 use mkfs_erofs::build::inode::{
     build_tree, inode_meta_size, serialize_inode, InodeData, InodeInfo,
 };
-use mkfs_erofs::build::image::write_image;
 use mkfs_erofs::metadata::layout::MetadataLayout;
 use mkfs_erofs::metadata::*;
 
 #[derive(Parser)]
-#[command(name = "erofs-mkfs", about = "Create an EROFS filesystem image (chunk-based)")]
+#[command(
+    name = "erofs-mkfs",
+    about = "Create an EROFS filesystem image (chunk-based)"
+)]
 struct Args {
     /// Output image file path
     image: PathBuf,
@@ -176,8 +179,7 @@ fn main() -> Result<()> {
 fn set_parent_nids(inodes: &mut [InodeInfo]) {
     let root_nid = inodes[0].nid;
     if let InodeData::Directory {
-        ref mut parent_nid,
-        ..
+        ref mut parent_nid, ..
     } = inodes[0].data
     {
         *parent_nid = root_nid;
@@ -206,8 +208,7 @@ fn set_parent_nids(inodes: &mut [InodeInfo]) {
     for (parent_nid_val, child_idxs) in dir_infos {
         for child_idx in child_idxs {
             if let InodeData::Directory {
-                ref mut parent_nid,
-                ..
+                ref mut parent_nid, ..
             } = inodes[child_idx].data
             {
                 *parent_nid = parent_nid_val;

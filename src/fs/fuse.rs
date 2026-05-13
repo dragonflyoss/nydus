@@ -1,15 +1,16 @@
-use std::ffi::CStr;
-use std::io;
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
-use fuse_backend_rs::abi::fuse_abi::{stat64, statvfs64, OpenOptions};
-use fuse_backend_rs::api::filesystem::{Context, DirEntry, Entry, FileSystem, ZeroCopyWriter};
-
-#[cfg(feature = "async-io")]
-use async_trait::async_trait;
+use fuser::{
+    AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
+    INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
+};
 
 use crate::metadata::*;
 
@@ -53,48 +54,42 @@ impl ErofsFs {
         }
     }
 
-    fn make_entry(&self, nid: u64, inode: &ErofsInode<'_>) -> Entry {
-        let ino = self.to_ino(nid);
-        Entry {
-            inode: ino,
-            generation: 0,
-            attr: self.make_stat(nid, inode),
-            attr_flags: 0,
-            attr_timeout: EROFS_FUSE_TIMEOUT,
-            entry_timeout: EROFS_FUSE_TIMEOUT,
-        }
-    }
-
-    fn make_stat(&self, nid: u64, inode: &ErofsInode<'_>) -> stat64 {
+    fn make_attr(&self, nid: u64, inode: &ErofsInode<'_>) -> FileAttr {
         let ino = self.to_ino(nid);
         let sb = self.reader.sb();
         let block_size = 1u64 << sb.blkszbits;
-        let mtime = inode.mtime(sb.epoch());
+        let mtime_secs = inode.mtime(sb.epoch());
         let mtime_nsec = inode.mtime_nsec();
         let size = inode.size();
-
-        let mut st: stat64 = unsafe { std::mem::zeroed() };
-        st.st_ino = ino;
-        st.st_mode = inode.mode() as u32;
-        st.st_nlink = inode.nlink() as _;
-        st.st_size = size as i64;
-        st.st_blocks = ((size + block_size - 1) / block_size * block_size / 512) as i64;
-        st.st_uid = inode.uid();
-        st.st_gid = inode.gid();
-        st.st_atime = mtime as i64;
-        st.st_mtime = mtime as i64;
-        st.st_ctime = mtime as i64;
-        st.st_atime_nsec = mtime_nsec as i64;
-        st.st_mtime_nsec = mtime_nsec as i64;
-        st.st_ctime_nsec = mtime_nsec as i64;
-        st.st_blksize = block_size as _;
+        let blocks = size.div_ceil(block_size) * block_size / 512;
+        let time = UNIX_EPOCH + Duration::new(mtime_secs, mtime_nsec);
 
         let mode = inode.mode() as u32;
-        if (mode & libc::S_IFMT) == libc::S_IFCHR || (mode & libc::S_IFMT) == libc::S_IFBLK {
-            st.st_rdev = inode.rdev() as u64;
-        }
+        let kind = mode_to_kind(mode);
+        let rdev =
+            if (mode & libc::S_IFMT) == libc::S_IFCHR || (mode & libc::S_IFMT) == libc::S_IFBLK {
+                inode.rdev()
+            } else {
+                0
+            };
 
-        st
+        FileAttr {
+            ino: INodeNo(ino),
+            size,
+            blocks,
+            atime: time,
+            mtime: time,
+            ctime: time,
+            crtime: time,
+            kind,
+            perm: (mode & 0o7777) as u16,
+            nlink: inode.nlink(),
+            uid: inode.uid(),
+            gid: inode.gid(),
+            rdev,
+            blksize: block_size as u32,
+            flags: 0,
+        }
     }
 
     fn iterate_dir<F>(&self, inode: u64, mut cb: F) -> io::Result<()>
@@ -115,10 +110,7 @@ impl ErofsFs {
         let entries = self.reader.read_dir_cached(nid, &vi)?;
         let handle = self.next_dir_handle.fetch_add(1, Ordering::Relaxed);
         let dir_handle = Arc::new(DirHandle { entries });
-        self.dir_handles
-            .lock()
-            .unwrap()
-            .insert(handle, dir_handle);
+        self.dir_handles.lock().unwrap().insert(handle, dir_handle);
         Ok(handle)
     }
 
@@ -132,254 +124,334 @@ impl ErofsFs {
     }
 }
 
-impl FileSystem for ErofsFs {
-    type Inode = u64;
-    type Handle = u64;
+fn io_errno(e: &io::Error) -> Errno {
+    Errno::from_i32(e.raw_os_error().unwrap_or(libc::EIO))
+}
 
-    fn init(
-        &self,
-        capable: fuse_backend_rs::abi::fuse_abi::FsOptions,
-    ) -> io::Result<fuse_backend_rs::abi::fuse_abi::FsOptions> {
-        use fuse_backend_rs::abi::fuse_abi::FsOptions;
-
-        // Request all capabilities that benefit a read-only filesystem.
-        let want = FsOptions::ASYNC_READ       // allow parallel reads
-            | FsOptions::BIG_WRITES            // enable large max_write (1MB)
-            | FsOptions::MAX_PAGES             // use 256 pages (1MB) for max_write/max_read
-            | FsOptions::PARALLEL_DIROPS       // parallel directory operations
-            | FsOptions::DO_READDIRPLUS        // READDIRPLUS support
-            | FsOptions::READDIRPLUS_AUTO      // auto-READDIRPLUS
-            | FsOptions::ASYNC_DIO             // async direct I/O
-            | FsOptions::CACHE_SYMLINKS; // cache symlink targets
-
-        // Negotiate: only enable what the kernel also supports.
-        Ok(capable & want)
+fn mode_to_kind(mode: u32) -> FileType {
+    match mode & libc::S_IFMT {
+        libc::S_IFREG => FileType::RegularFile,
+        libc::S_IFDIR => FileType::Directory,
+        libc::S_IFLNK => FileType::Symlink,
+        libc::S_IFBLK => FileType::BlockDevice,
+        libc::S_IFCHR => FileType::CharDevice,
+        libc::S_IFIFO => FileType::NamedPipe,
+        libc::S_IFSOCK => FileType::Socket,
+        _ => FileType::RegularFile,
     }
+}
 
-    fn destroy(&self) {}
+fn erofs_ft_to_kind(ft: u8) -> FileType {
+    match ft {
+        EROFS_FT_REG_FILE => FileType::RegularFile,
+        EROFS_FT_DIR => FileType::Directory,
+        EROFS_FT_CHRDEV => FileType::CharDevice,
+        EROFS_FT_BLKDEV => FileType::BlockDevice,
+        EROFS_FT_FIFO => FileType::NamedPipe,
+        EROFS_FT_SOCK => FileType::Socket,
+        EROFS_FT_SYMLINK => FileType::Symlink,
+        _ => FileType::RegularFile,
+    }
+}
 
-    fn lookup(&self, _ctx: &Context, parent: u64, name: &CStr) -> io::Result<Entry> {
-        let target = name.to_bytes();
+impl Filesystem for ErofsFs {
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let target = name.as_bytes();
         let mut found = None;
-        self.iterate_dir(parent, |entry_nid, _file_type, entry_name| {
+        let res = self.iterate_dir(parent.0, |entry_nid, _file_type, entry_name| {
             if entry_name == target {
                 found = Some(entry_nid);
                 return Ok(false);
             }
             Ok(true)
-        })?;
+        });
+        if let Err(e) = res {
+            reply.error(io_errno(&e));
+            return;
+        }
 
         if let Some(child_nid) = found {
-            let child_inode = self.reader.inode(child_nid)?;
-            return Ok(self.make_entry(child_nid, &child_inode));
+            match self.reader.inode(child_nid) {
+                Ok(child_inode) => {
+                    let attr = self.make_attr(child_nid, &child_inode);
+                    reply.entry(&EROFS_FUSE_TIMEOUT, &attr, Generation(0));
+                }
+                Err(e) => reply.error(io_errno(&e)),
+            }
+            return;
         }
 
-        Err(io::Error::from_raw_os_error(libc::ENOENT))
+        reply.error(Errno::ENOENT);
     }
 
-    fn forget(&self, _ctx: &Context, _inode: u64, _count: u64) {}
+    fn forget(&self, _req: &Request, _ino: INodeNo, _nlookup: u64) {}
 
-    fn getattr(
-        &self,
-        _ctx: &Context,
-        inode: u64,
-        _handle: Option<u64>,
-    ) -> io::Result<(stat64, Duration)> {
-        let nid = self.to_nid(inode);
-        let vi = self.reader.inode(nid)?;
-        Ok((self.make_stat(nid, &vi), EROFS_FUSE_TIMEOUT))
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        let nid = self.to_nid(ino.0);
+        match self.reader.inode(nid) {
+            Ok(vi) => {
+                let attr = self.make_attr(nid, &vi);
+                reply.attr(&EROFS_FUSE_TIMEOUT, &attr);
+            }
+            Err(e) => reply.error(io_errno(&e)),
+        }
     }
 
-    fn open(
-        &self,
-        _ctx: &Context,
-        inode: u64,
-        flags: u32,
-        _fuse_flags: u32,
-    ) -> io::Result<(Option<u64>, OpenOptions, Option<u32>)> {
-        if flags & (libc::O_WRONLY as u32 | libc::O_RDWR as u32) != 0 {
-            return Err(io::Error::from_raw_os_error(libc::EROFS));
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+        if flags.0 & (libc::O_WRONLY | libc::O_RDWR) != 0 {
+            reply.error(Errno::EROFS);
+            return;
         }
 
-        let nid = self.to_nid(inode);
-        let vi = self.reader.inode(nid)?;
+        let nid = self.to_nid(ino.0);
+        let vi = match self.reader.inode(nid) {
+            Ok(vi) => vi,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
         if (vi.mode() as u32 & libc::S_IFMT) != libc::S_IFREG {
-            return Err(io::Error::from_raw_os_error(libc::EISDIR));
+            reply.error(Errno::EISDIR);
+            return;
         }
 
-        Ok((Some(nid), OpenOptions::KEEP_CACHE, None))
+        reply.opened(FileHandle(nid), FopenFlags::FOPEN_KEEP_CACHE);
     }
 
     fn release(
         &self,
-        _ctx: &Context,
-        _inode: u64,
-        _flags: u32,
-        _handle: u64,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         _flush: bool,
-        _flock_release: bool,
-        _lock_owner: Option<u64>,
-    ) -> io::Result<()> {
-        Ok(())
+        reply: ReplyEmpty,
+    ) {
+        reply.ok();
     }
 
     fn read(
         &self,
-        _ctx: &Context,
-        inode: u64,
-        _handle: u64,
-        w: &mut dyn ZeroCopyWriter,
-        size: u32,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
         offset: u64,
-        _lock_owner: Option<u64>,
-        _flags: u32,
-    ) -> io::Result<usize> {
-        let nid = self.to_nid(inode);
-        let vi = self.reader.inode(nid)?;
-        self.reader.write_file_data_to(nid, &vi, offset, size, w)
+        size: u32,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
+        reply: ReplyData,
+    ) {
+        let nid = self.to_nid(ino.0);
+        let vi = match self.reader.inode(nid) {
+            Ok(vi) => vi,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
+
+        // Use write_file_data_to to fill a Vec<u8> zero-copy from mmap.
+        let mut buf: Vec<u8> = Vec::with_capacity(size as usize);
+        match self
+            .reader
+            .write_file_data_to(nid, &vi, offset, size, &mut buf)
+        {
+            Ok(_) => reply.data(&buf),
+            Err(e) => reply.error(io_errno(&e)),
+        }
     }
 
-    fn readlink(&self, _ctx: &Context, inode: u64) -> io::Result<Vec<u8>> {
-        let nid = self.to_nid(inode);
-        let vi = self.reader.inode(nid)?;
-        self.reader.read_symlink(nid, &vi)
+    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let nid = self.to_nid(ino.0);
+        let vi = match self.reader.inode(nid) {
+            Ok(vi) => vi,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
+        match self.reader.read_symlink(nid, &vi) {
+            Ok(data) => reply.data(&data),
+            Err(e) => reply.error(io_errno(&e)),
+        }
     }
 
-    fn opendir(
-        &self,
-        _ctx: &Context,
-        inode: u64,
-        _flags: u32,
-    ) -> io::Result<(Option<u64>, OpenOptions)> {
-        let nid = self.to_nid(inode);
-        let vi = self.reader.inode(nid)?;
+    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let nid = self.to_nid(ino.0);
+        let vi = match self.reader.inode(nid) {
+            Ok(vi) => vi,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
         if (vi.mode() as u32 & libc::S_IFMT) != libc::S_IFDIR {
-            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+            reply.error(Errno::ENOTDIR);
+            return;
         }
 
-        let handle = self.create_dir_handle(inode)?;
-        Ok((Some(handle), OpenOptions::CACHE_DIR | OpenOptions::KEEP_CACHE))
+        match self.create_dir_handle(ino.0) {
+            Ok(handle) => reply.opened(
+                FileHandle(handle),
+                FopenFlags::FOPEN_KEEP_CACHE | FopenFlags::FOPEN_CACHE_DIR,
+            ),
+            Err(e) => reply.error(io_errno(&e)),
+        }
     }
 
     fn readdir(
         &self,
-        _ctx: &Context,
-        _inode: u64,
-        handle: u64,
-        _size: u32,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
         offset: u64,
-        add_entry: &mut dyn FnMut(DirEntry) -> io::Result<usize>,
-    ) -> io::Result<()> {
-        let dir_handle = self.get_dir_handle(handle)?;
+        mut reply: ReplyDirectory,
+    ) {
+        let dir_handle = match self.get_dir_handle(fh.0) {
+            Ok(h) => h,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         for (idx, entry) in dir_handle.entries.iter().enumerate().skip(start) {
-            let dir_entry = DirEntry {
-                ino: self.to_ino(entry.nid),
-                offset: idx as u64 + 1,
-                type_: erofs_ft_to_dt(entry.file_type),
-                name: &entry.name,
-            };
-
-            match add_entry(dir_entry) {
-                Ok(0) => break,
-                Ok(_) => continue,
-                Err(e) => return Err(e),
+            let ino = self.to_ino(entry.nid);
+            let kind = erofs_ft_to_kind(entry.file_type);
+            let name = OsStr::from_bytes(&entry.name);
+            if reply.add(INodeNo(ino), (idx as u64) + 1, kind, name) {
+                break;
             }
         }
-        Ok(())
+        reply.ok();
     }
 
     fn readdirplus(
         &self,
-        _ctx: &Context,
-        _inode: u64,
-        handle: u64,
-        _size: u32,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
         offset: u64,
-        add_entry: &mut dyn FnMut(DirEntry, Entry) -> io::Result<usize>,
-    ) -> io::Result<()> {
-        let dir_handle = self.get_dir_handle(handle)?;
+        mut reply: ReplyDirectoryPlus,
+    ) {
+        let dir_handle = match self.get_dir_handle(fh.0) {
+            Ok(h) => h,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         for (idx, entry) in dir_handle.entries.iter().enumerate().skip(start) {
-            let child_inode = self.reader.inode(entry.nid)?;
-            let fuse_entry = self.make_entry(entry.nid, &child_inode);
-            let dir_entry = DirEntry {
-                ino: self.to_ino(entry.nid),
-                offset: idx as u64 + 1,
-                type_: erofs_ft_to_dt(entry.file_type),
-                name: &entry.name,
+            let child_inode = match self.reader.inode(entry.nid) {
+                Ok(vi) => vi,
+                Err(e) => {
+                    reply.error(io_errno(&e));
+                    return;
+                }
             };
-
-            match add_entry(dir_entry, fuse_entry) {
-                Ok(0) => break,
-                Ok(_) => continue,
-                Err(e) => return Err(e),
+            let attr = self.make_attr(entry.nid, &child_inode);
+            let ino = self.to_ino(entry.nid);
+            let name = OsStr::from_bytes(&entry.name);
+            if reply.add(
+                INodeNo(ino),
+                (idx as u64) + 1,
+                name,
+                &EROFS_FUSE_TIMEOUT,
+                &attr,
+                Generation(0),
+            ) {
+                break;
             }
         }
-        Ok(())
+        reply.ok();
     }
 
-    fn releasedir(&self, _ctx: &Context, _inode: u64, _flags: u32, handle: u64) -> io::Result<()> {
-        self.dir_handles.lock().unwrap().remove(&handle);
-        Ok(())
+    fn releasedir(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        fh: FileHandle,
+        _flags: OpenFlags,
+        reply: ReplyEmpty,
+    ) {
+        self.dir_handles.lock().unwrap().remove(&fh.0);
+        reply.ok();
     }
 
-    fn statfs(&self, _ctx: &Context, _inode: u64) -> io::Result<statvfs64> {
+    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
         let sb = self.reader.sb();
         let block_size = 1u64 << sb.blkszbits;
-        let mut st: statvfs64 = unsafe { std::mem::zeroed() };
-        st.f_bsize = block_size;
-        st.f_frsize = block_size;
-        st.f_blocks = sb.blocks();
-        st.f_files = sb.inos();
-        st.f_namemax = 255;
-        Ok(st)
+        reply.statfs(
+            sb.blocks(),
+            0,
+            0,
+            sb.inos(),
+            0,
+            block_size as u32,
+            255,
+            block_size as u32,
+        );
     }
 
-    fn access(&self, _ctx: &Context, _inode: u64, _mask: u32) -> io::Result<()> {
-        Ok(())
+    fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
+        reply.ok();
     }
 
-    fn getxattr(
-        &self,
-        _ctx: &Context,
-        inode: u64,
-        name: &CStr,
-        size: u32,
-    ) -> io::Result<fuse_backend_rs::api::filesystem::GetxattrReply> {
-        let nid = self.to_nid(inode);
-        let vi = self.reader.inode(nid)?;
-        let name_bytes = name.to_bytes();
+    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        let nid = self.to_nid(ino.0);
+        let vi = match self.reader.inode(nid) {
+            Ok(vi) => vi,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
+        let name_bytes = name.as_bytes();
 
-        let xattrs = self.reader.read_xattrs(nid, &vi)?;
+        let xattrs = match self.reader.read_xattrs(nid, &vi) {
+            Ok(x) => x,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
         for (xname, xvalue) in &xattrs {
             if xname.as_slice() == name_bytes {
                 if size == 0 {
-                    return Ok(fuse_backend_rs::api::filesystem::GetxattrReply::Count(
-                        xvalue.len() as u32,
-                    ));
+                    reply.size(xvalue.len() as u32);
+                    return;
                 }
                 if (size as usize) < xvalue.len() {
-                    return Err(io::Error::from_raw_os_error(libc::ERANGE));
+                    reply.error(Errno::ERANGE);
+                    return;
                 }
-                return Ok(fuse_backend_rs::api::filesystem::GetxattrReply::Value(
-                    xvalue.clone(),
-                ));
+                reply.data(xvalue);
+                return;
             }
         }
 
-        Err(io::Error::from_raw_os_error(libc::ENODATA))
+        reply.error(Errno::ENODATA);
     }
 
-    fn listxattr(
-        &self,
-        _ctx: &Context,
-        inode: u64,
-        size: u32,
-    ) -> io::Result<fuse_backend_rs::api::filesystem::ListxattrReply> {
-        let nid = self.to_nid(inode);
-        let vi = self.reader.inode(nid)?;
-        let xattrs = self.reader.read_xattrs(nid, &vi)?;
+    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let nid = self.to_nid(ino.0);
+        let vi = match self.reader.inode(nid) {
+            Ok(vi) => vi,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
+        let xattrs = match self.reader.read_xattrs(nid, &vi) {
+            Ok(x) => x,
+            Err(e) => {
+                reply.error(io_errno(&e));
+                return;
+            }
+        };
 
         // Build null-separated list of xattr names
         let mut names_buf: Vec<u8> = Vec::new();
@@ -389,151 +461,13 @@ impl FileSystem for ErofsFs {
         }
 
         if size == 0 {
-            return Ok(fuse_backend_rs::api::filesystem::ListxattrReply::Count(
-                names_buf.len() as u32,
-            ));
+            reply.size(names_buf.len() as u32);
+            return;
         }
         if (size as usize) < names_buf.len() {
-            return Err(io::Error::from_raw_os_error(libc::ERANGE));
+            reply.error(Errno::ERANGE);
+            return;
         }
-        Ok(fuse_backend_rs::api::filesystem::ListxattrReply::Names(
-            names_buf,
-        ))
-    }
-}
-
-#[cfg(feature = "async-io")]
-#[async_trait]
-impl fuse_backend_rs::api::filesystem::AsyncFileSystem for ErofsFs {
-    async fn async_lookup(
-        &self,
-        ctx: &Context,
-        parent: <Self as FileSystem>::Inode,
-        name: &CStr,
-    ) -> io::Result<Entry> {
-        self.lookup(ctx, parent, name)
-    }
-
-    async fn async_getattr(
-        &self,
-        ctx: &Context,
-        inode: <Self as FileSystem>::Inode,
-        handle: Option<<Self as FileSystem>::Handle>,
-    ) -> io::Result<(stat64, Duration)> {
-        self.getattr(ctx, inode, handle)
-    }
-
-    async fn async_setattr(
-        &self,
-        _ctx: &Context,
-        _inode: <Self as FileSystem>::Inode,
-        _attr: stat64,
-        _handle: Option<<Self as FileSystem>::Handle>,
-        _valid: fuse_backend_rs::abi::fuse_abi::SetattrValid,
-    ) -> io::Result<(stat64, Duration)> {
-        Err(io::Error::from_raw_os_error(libc::EROFS))
-    }
-
-    async fn async_open(
-        &self,
-        ctx: &Context,
-        inode: <Self as FileSystem>::Inode,
-        flags: u32,
-        fuse_flags: u32,
-    ) -> io::Result<(Option<<Self as FileSystem>::Handle>, OpenOptions)> {
-        self.open(ctx, inode, flags, fuse_flags)
-            .map(|(h, o, _)| (h, o))
-    }
-
-    async fn async_create(
-        &self,
-        _ctx: &Context,
-        _parent: <Self as FileSystem>::Inode,
-        _name: &CStr,
-        _args: fuse_backend_rs::abi::fuse_abi::CreateIn,
-    ) -> io::Result<(Entry, Option<<Self as FileSystem>::Handle>, OpenOptions)> {
-        Err(io::Error::from_raw_os_error(libc::EROFS))
-    }
-
-    async fn async_read(
-        &self,
-        _ctx: &Context,
-        inode: <Self as FileSystem>::Inode,
-        _handle: <Self as FileSystem>::Handle,
-        w: &mut (dyn fuse_backend_rs::api::filesystem::AsyncZeroCopyWriter + Send),
-        size: u32,
-        offset: u64,
-        _lock_owner: Option<u64>,
-        _flags: u32,
-    ) -> io::Result<usize> {
-        let nid = self.to_nid(inode);
-        let vi = self.reader.inode(nid)?;
-        // Use sync read path directly — each worker runs a single-threaded
-        // tokio runtime with only one FUSE task, so blocking is equivalent to
-        // awaiting and avoids spawn_blocking overhead (thread pool dispatch,
-        // cross-thread channel, Vec allocation per chunk).
-        let data = self.reader.read_file_data_sync(nid, &vi, offset, size)?;
-        w.write(&data)
-    }
-
-    async fn async_write(
-        &self,
-        _ctx: &Context,
-        _inode: <Self as FileSystem>::Inode,
-        _handle: <Self as FileSystem>::Handle,
-        _r: &mut (dyn fuse_backend_rs::api::filesystem::AsyncZeroCopyReader + Send),
-        _size: u32,
-        _offset: u64,
-        _lock_owner: Option<u64>,
-        _delayed_write: bool,
-        _flags: u32,
-        _fuse_flags: u32,
-    ) -> io::Result<usize> {
-        Err(io::Error::from_raw_os_error(libc::EROFS))
-    }
-
-    async fn async_fsync(
-        &self,
-        _ctx: &Context,
-        _inode: <Self as FileSystem>::Inode,
-        _datasync: bool,
-        _handle: <Self as FileSystem>::Handle,
-    ) -> io::Result<()> {
-        Ok(())
-    }
-
-    async fn async_fallocate(
-        &self,
-        _ctx: &Context,
-        _inode: <Self as FileSystem>::Inode,
-        _handle: <Self as FileSystem>::Handle,
-        _mode: u32,
-        _offset: u64,
-        _length: u64,
-    ) -> io::Result<()> {
-        Err(io::Error::from_raw_os_error(libc::EROFS))
-    }
-
-    async fn async_fsyncdir(
-        &self,
-        _ctx: &Context,
-        _inode: <Self as FileSystem>::Inode,
-        _datasync: bool,
-        _handle: <Self as FileSystem>::Handle,
-    ) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn erofs_ft_to_dt(ft: u8) -> u32 {
-    match ft {
-        EROFS_FT_REG_FILE => libc::DT_REG as u32,
-        EROFS_FT_DIR => libc::DT_DIR as u32,
-        EROFS_FT_CHRDEV => libc::DT_CHR as u32,
-        EROFS_FT_BLKDEV => libc::DT_BLK as u32,
-        EROFS_FT_FIFO => libc::DT_FIFO as u32,
-        EROFS_FT_SOCK => libc::DT_SOCK as u32,
-        EROFS_FT_SYMLINK => libc::DT_LNK as u32,
-        _ => libc::DT_UNKNOWN as u32,
+        reply.data(&names_buf);
     }
 }

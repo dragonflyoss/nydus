@@ -27,7 +27,7 @@ impl ErofsReader {
         self.mmap_slice(ci_offset, ci_total)
     }
 
-    fn chunk_index_at<'a>(ci_data: &'a [u8], i: usize) -> &'a ErofsChunkIndex {
+    fn chunk_index_at(ci_data: &[u8], i: usize) -> &ErofsChunkIndex {
         let off = i * EROFS_CHUNK_INDEX_SIZE;
         cast_ref::<ErofsChunkIndex>(&ci_data[off..])
     }
