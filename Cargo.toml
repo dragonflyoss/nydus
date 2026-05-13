@@ -13,18 +13,37 @@ path = "src/bin/erofs-fuse.rs"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
 blake3 = "1"
-uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
 crc32c = "0.6"
+fuser = "0.17"
 libc = "0.2"
 log = "0.4"
 memmap2 = "0.9"
-simple_logger = "4"
 signal-hook = "0.3"
-tokio = { version = "1", features = ["rt", "net", "io-util", "fs", "rt-multi-thread"] }
-fuser = "0.16"
+simple_logger = "4"
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "net",
+  "rt",
+  "rt-multi-thread"
+] }
+uuid = { version = "1", features = ["v4"] }
 xattr = "1"
 
-[profile.release]
+[profile.bench]
 debug = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+strip = false
+incremental = true
+
+[profile.release]
+opt-level = 3
+strip = "symbols"
+lto = "thin"
+panic = "abort"
+codegen-units = 1

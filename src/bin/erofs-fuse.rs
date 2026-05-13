@@ -30,10 +30,6 @@ struct Args {
     #[arg(long)]
     blobdev: Option<String>,
 
-    /// Number of worker threads (currently unused; fuser uses a single session loop)
-    #[arg(long, default_value_t = 4)]
-    threads: u32,
-
     /// Filesystem name shown in /proc/mounts SOURCE column
     #[arg(long, default_value = "erofs-fuse")]
     fsname: String,
@@ -46,7 +42,6 @@ fn main() -> Result<()> {
         .unwrap();
 
     let args = Args::parse();
-    let _ = args.threads; // fuser drives a single session loop; threads arg kept for CLI compat
 
     let mountpoint = Path::new(&args.mountpoint);
     if !mountpoint.is_dir() {
