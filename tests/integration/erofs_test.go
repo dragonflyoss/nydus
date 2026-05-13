@@ -1,12 +1,12 @@
-// Package integration provides end-to-end tests for the lepton binary.
+// Package integration contains end-to-end tests for the lepton binary.
 //
-// TestVerifyEROFS builds an EROFS image from a generated corpus, mounts it via
-// `lepton mount`, then verifies content, metadata, symlinks, hardlinks, and xattrs.
+// The tests in this file build an EROFS image from a generated corpus, mount
+// it through `lepton mount`, and then verify file content, metadata,
+// symlinks, hard links, and extended attributes. A separate test optionally
+// runs the xfstests read-only suite against the same mount.
 //
-// TestXfstests runs the xfstests read-only suite against `lepton mount`.
-//
-// Both tests require root and the lepton binary on PATH or built at
-// ../../target/release/.
+// Both tests require root privileges and the `lepton` binary to be available
+// either on PATH or under ../../target/{release,debug}/.
 package integration
 
 import (
@@ -29,14 +29,14 @@ import (
 	"github.com/erofs/erofs-utils-rust/tests/integration/texture"
 )
 
-// ---------- binary discovery ----------
+// Binary discovery.
 
+// findBinary locates an executable by name, preferring PATH and falling back
+// to ../../target/{release,debug}/<name> relative to this package.
 func findBinary(name string) string {
-	// Prefer PATH
 	if p, err := exec.LookPath(name); err == nil {
 		return p
 	}
-	// Try release then debug builds relative to project root
 	root, _ := filepath.Abs(filepath.Join("..", ".."))
 	for _, profile := range []string{"release", "debug"} {
 		p := filepath.Join(root, "target", profile, name)
@@ -47,18 +47,23 @@ func findBinary(name string) string {
 	return ""
 }
 
+// requireBinary returns the resolved path of an executable or fails the test
+// if it cannot be found.
 func requireBinary(t *testing.T, name string) string {
+	t.Helper()
 	p := findBinary(name)
-	fmt.Println("PATH", p)
 	if p == "" {
 		t.Fatalf("%s not found on PATH or in target/{release,debug}/", name)
 	}
 	return p
 }
 
-// ---------- FUSE mount helpers ----------
+// FUSE mount helpers.
 
-func mountEROFS(t *testing.T, leptonBin, img, blobdev, mnt string) (cleanup func()) {
+// mountLepton runs `lepton mount` in the background and returns a cleanup
+// function that unmounts the filesystem and reaps the child process.
+func mountLepton(t *testing.T, leptonBin, img, blobdev, mnt string) (cleanup func()) {
+	t.Helper()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
 	args := []string{"mount", img, mnt}
@@ -71,7 +76,7 @@ func mountEROFS(t *testing.T, leptonBin, img, blobdev, mnt string) (cleanup func
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start(), "lepton mount start")
 
-	// Wait for mount.
+	// Wait for the mountpoint to become ready (up to ~10s).
 	mounted := false
 	for range 40 {
 		if isMountpoint(mnt) {
@@ -84,7 +89,7 @@ func mountEROFS(t *testing.T, leptonBin, img, blobdev, mnt string) (cleanup func
 
 	return func() {
 		_ = exec.Command("fusermount", "-u", mnt).Run()
-		// Send SIGTERM and don't block indefinitely waiting.
+		// Send SIGTERM and don't block indefinitely while waiting.
 		if cmd.Process != nil {
 			_ = cmd.Process.Signal(syscall.SIGTERM)
 			done := make(chan struct{})
@@ -98,51 +103,46 @@ func mountEROFS(t *testing.T, leptonBin, img, blobdev, mnt string) (cleanup func
 	}
 }
 
+// isMountpoint reports whether path is currently a mountpoint.
 func isMountpoint(path string) bool {
-	out, err := exec.Command("mountpoint", "-q", path).CombinedOutput()
-	_ = out
-	return err == nil
+	return exec.Command("mountpoint", "-q", path).Run() == nil
 }
 
-// ---------- mkfs helpers ----------
+// Image build helpers.
 
-func buildImage(t *testing.T, leptonBin, img, blobdev, srcDir string) {
+// buildEROFSImage invokes `lepton build` to create an EROFS image and its
+// associated blob device file.
+func buildEROFSImage(t *testing.T, leptonBin, img, blobdev, srcDir string) {
+	t.Helper()
 	args := []string{"build", img, "--blobdev", blobdev, "--chunksize", "4096", srcDir}
 	out, err := exec.Command(leptonBin, args...).CombinedOutput()
 	require.NoError(t, err, "lepton build failed: %s", string(out))
 	t.Logf("lepton build output: %s", string(out))
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// TestVerifyEROFS — end-to-end verification
-// ═════════════════════════════════════════════════════════════════════════════
-
+// TestVerifyEROFS builds an EROFS image from a generated corpus, mounts it,
+// and verifies that all metadata and content are preserved end-to-end.
 func TestVerifyEROFS(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
 	}
 
-	mkfsBin := requireBinary(t, "lepton")
-	fuseBin := requireBinary(t, "lepton")
+	leptonBin := requireBinary(t, "lepton")
 
-	// Temp directories
 	tmpDir := t.TempDir()
 	corpusDir := filepath.Join(tmpDir, "corpus")
 	img := filepath.Join(tmpDir, "test.erofs")
 	blob := filepath.Join(tmpDir, "test.blob")
 	mnt := filepath.Join(tmpDir, "mnt")
 
-	// Generate corpus
-	corpus := texture.MakeStandardCorpus(t, corpusDir)
+	// Generate the standard test corpus and build an EROFS image from it.
+	texture.MakeStandardCorpus(t, corpusDir)
+	buildEROFSImage(t, leptonBin, img, blob, corpusDir)
 
-	// Build image
-	buildImage(t, mkfsBin, img, blob, corpus.Dir)
-
-	// Mount
-	unmount := mountEROFS(t, fuseBin, img, blob, mnt)
+	// Mount the image and run verification sub-tests against it.
+	unmount := mountLepton(t, leptonBin, img, blob, mnt)
 	defer unmount()
 
-	// Run sub-tests
 	t.Run("FileContent", func(t *testing.T) { verifyFileContent(t, corpusDir, mnt) })
 	t.Run("Symlinks", func(t *testing.T) { verifySymlinks(t, corpusDir, mnt) })
 	t.Run("Directories", func(t *testing.T) { verifyDirectories(t, corpusDir, mnt) })
@@ -151,14 +151,14 @@ func TestVerifyEROFS(t *testing.T) {
 	t.Run("Xattrs", func(t *testing.T) { verifyXattrs(t, corpusDir, mnt) })
 }
 
-// ---------- content ----------
-
+// verifyFileContent checks that every regular file in srcDir has the same
+// byte content when read from the mounted filesystem.
 func verifyFileContent(t *testing.T, srcDir, mntDir string) {
 	_ = filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		// Skip non-regular files (devices, fifos).
+		// Skip non-regular files (devices, FIFOs).
 		info, err := d.Info()
 		if err != nil || info.Mode()&fs.ModeType != 0 {
 			return nil
@@ -175,8 +175,8 @@ func verifyFileContent(t *testing.T, srcDir, mntDir string) {
 	})
 }
 
-// ---------- symlinks ----------
-
+// verifySymlinks checks that every symbolic link in srcDir resolves to the
+// same target on the mounted filesystem.
 func verifySymlinks(t *testing.T, srcDir, mntDir string) {
 	_ = filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.Type()&fs.ModeSymlink == 0 {
@@ -194,8 +194,8 @@ func verifySymlinks(t *testing.T, srcDir, mntDir string) {
 	})
 }
 
-// ---------- directories ----------
-
+// verifyDirectories checks that every directory in srcDir exists as a
+// directory on the mounted filesystem.
 func verifyDirectories(t *testing.T, srcDir, mntDir string) {
 	_ = filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || !d.IsDir() {
@@ -213,8 +213,8 @@ func verifyDirectories(t *testing.T, srcDir, mntDir string) {
 	})
 }
 
-// ---------- metadata ----------
-
+// verifyMetadata checks that permission bits, special bits, ownership, and
+// regular-file sizes match between srcDir and the mounted filesystem.
 func verifyMetadata(t *testing.T, srcDir, mntDir string) {
 	_ = filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -236,23 +236,22 @@ func verifyMetadata(t *testing.T, srcDir, mntDir string) {
 			return nil
 		}
 
-		// Permission bits
+		// Permission bits.
 		assert.Equal(t, srcInfo.Mode().Perm(), mntInfo.Mode().Perm(),
 			"mode mismatch: %s (src=%o, mnt=%o)", rel, srcInfo.Mode().Perm(), mntInfo.Mode().Perm())
 
-		// Special bits (setuid, setgid, sticky)
+		// Special bits (setuid, setgid, sticky).
 		srcSpecial := srcInfo.Mode() & (fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
 		mntSpecial := mntInfo.Mode() & (fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
-		assert.Equal(t, srcSpecial, mntSpecial,
-			"special bits mismatch: %s", rel)
+		assert.Equal(t, srcSpecial, mntSpecial, "special bits mismatch: %s", rel)
 
-		// uid/gid
+		// uid / gid.
 		srcStat := srcInfo.Sys().(*syscall.Stat_t)
 		mntStat := mntInfo.Sys().(*syscall.Stat_t)
 		assert.Equal(t, srcStat.Uid, mntStat.Uid, "uid mismatch: %s", rel)
 		assert.Equal(t, srcStat.Gid, mntStat.Gid, "gid mismatch: %s", rel)
 
-		// Size for regular files
+		// Size for regular files.
 		if srcInfo.Mode().IsRegular() {
 			assert.Equal(t, srcInfo.Size(), mntInfo.Size(), "size mismatch: %s", rel)
 		}
@@ -261,8 +260,8 @@ func verifyMetadata(t *testing.T, srcDir, mntDir string) {
 	})
 }
 
-// ---------- hardlinks ----------
-
+// verifyHardlinks checks that all hard-link entries share the same inode as
+// the original file under hardlinks/.
 func verifyHardlinks(t *testing.T, mntDir string) {
 	origPath := filepath.Join(mntDir, "hardlinks/original")
 	origInfo, err := os.Stat(origPath)
@@ -278,8 +277,8 @@ func verifyHardlinks(t *testing.T, mntDir string) {
 	}
 }
 
-// ---------- xattrs ----------
-
+// verifyXattrs checks that extended-attribute names and values under the
+// xattrs/ subtree match between srcDir and the mounted filesystem.
 func verifyXattrs(t *testing.T, srcDir, mntDir string) {
 	xattrDir := filepath.Join(srcDir, "xattrs")
 	if _, err := os.Stat(xattrDir); os.IsNotExist(err) {
@@ -317,10 +316,9 @@ func verifyXattrs(t *testing.T, srcDir, mntDir string) {
 	})
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// TestXfstests — run xfstests read-only suite
-// ═════════════════════════════════════════════════════════════════════════════
-
+// TestXfstests runs the xfstests read-only suite against a `lepton mount`.
+// The test is gated by EROFS_RUN_XFSTESTS=1 because it is slow and requires
+// xfstests to be set up on the host.
 func TestXfstests(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
@@ -329,21 +327,22 @@ func TestXfstests(t *testing.T) {
 		t.Skip("set EROFS_RUN_XFSTESTS=1 to enable (slow)")
 	}
 
-	mkfsBin := requireBinary(t, "lepton")
-	fuseBin := requireBinary(t, "lepton")
+	leptonBin := requireBinary(t, "lepton")
 
-	// Paths
-	xfstestsDir := "/tmp/xfstests-dev"
-	img := "/tmp/test_erofs.img"
-	blob := "/tmp/test_erofs.blob"
-	mntDir := "/tmp/erofs_mount"
+	const (
+		xfstestsDir = "/tmp/xfstests-dev"
+		img         = "/tmp/test_erofs.img"
+		blob        = "/tmp/test_erofs.blob"
+		mntDir      = "/tmp/erofs_mount"
+		corpusDir   = "/tmp/erofs_test_corpus"
+	)
 
-	// Locate exclude file
+	// Locate the xfstests exclude file used to skip unsupported cases.
 	excludeFile, err := filepath.Abs(filepath.Join("..", "scripts", "xfstests_erofs.exclude"))
 	require.NoError(t, err)
 	require.FileExists(t, excludeFile)
 
-	// Step 1: Ensure xfstests is built (setup_xfstests.sh handles dependencies).
+	// Step 1: ensure xfstests is built (setup_xfstests.sh handles deps).
 	if _, err := os.Stat(filepath.Join(xfstestsDir, "check")); os.IsNotExist(err) {
 		setupScript, err2 := filepath.Abs(filepath.Join("..", "scripts", "setup_xfstests.sh"))
 		require.NoError(t, err2)
@@ -352,18 +351,16 @@ func TestXfstests(t *testing.T) {
 		require.NoError(t, err2, "setup_xfstests.sh failed:\n%s", string(out))
 	}
 
-	// Step 2: Generate corpus & build image
-	corpusDir := "/tmp/erofs_test_corpus"
+	// Step 2: generate corpus and build the image.
 	corpus := texture.MakeStandardCorpus(t, corpusDir)
-
 	_ = os.Remove(img)
 	_ = os.Remove(blob)
-	buildImage(t, mkfsBin, img, blob, corpus.Dir)
+	buildEROFSImage(t, leptonBin, img, blob, corpus.Dir)
 
-	// Step 3: Install mount helper
-	installMountHelper(t, fuseBin, img, blob)
+	// Step 3: install the FUSE mount helper used by xfstests.
+	installMountHelper(t, leptonBin, img, blob)
 
-	// Step 4: Write xfstests local.config
+	// Step 4: write xfstests local.config.
 	require.NoError(t, os.MkdirAll(mntDir, 0755))
 	config := fmt.Sprintf(
 		"export TEST_DEV=testerofs\nexport TEST_DIR=%s\nexport FSTYP=fuse\nexport FUSE_SUBTYP=.testerofs\n",
@@ -371,7 +368,7 @@ func TestXfstests(t *testing.T) {
 	)
 	require.NoError(t, os.WriteFile(filepath.Join(xfstestsDir, "local.config"), []byte(config), 0644))
 
-	// Step 5: Run xfstests
+	// Step 5: run xfstests.
 	t.Log("Running xfstests (this may take several minutes)...")
 	cmd := exec.Command("./check", "-fuse", "-E", excludeFile)
 	cmd.Dir = xfstestsDir
@@ -380,11 +377,10 @@ func TestXfstests(t *testing.T) {
 	output := string(out)
 	t.Log(output)
 
-	// Parse results
+	// Parse results.
 	if strings.Contains(output, "Passed all") {
 		return // success
 	}
-	// Check for failures
 	for line := range strings.SplitSeq(output, "\n") {
 		if strings.Contains(line, "Failures:") || strings.Contains(line, "Failed") {
 			t.Fatalf("xfstests reported failures:\n%s", output)
@@ -393,9 +389,10 @@ func TestXfstests(t *testing.T) {
 	require.NoError(t, err, "xfstests exited with error")
 }
 
-// installMountHelper creates /usr/sbin/mount.fuse.testerofs so that xfstests
-// can mount the EROFS image via the standard FUSE mount interface.
+// installMountHelper writes /usr/sbin/mount.fuse.testerofs so that xfstests
+// can mount the EROFS image through the standard FUSE mount interface.
 func installMountHelper(t *testing.T, leptonBin, img, blob string) {
+	t.Helper()
 	script := fmt.Sprintf(`#!/bin/bash
 DEVICE="$1"
 MOUNTPOINT="$2"
@@ -414,6 +411,6 @@ echo "ERROR: lepton mount failed to mount within 5 seconds" >&2
 exit 1
 `, leptonBin, img, blob)
 
-	helperPath := "/usr/sbin/mount.fuse.testerofs"
+	const helperPath = "/usr/sbin/mount.fuse.testerofs"
 	require.NoError(t, os.WriteFile(helperPath, []byte(script), 0755))
 }

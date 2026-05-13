@@ -19,23 +19,28 @@ import (
 )
 
 // TestPerf runs fio-based I/O benchmarks and Go-based metadata benchmarks
-// against Rust `lepton mount`, optionally comparing with C erofsfuse.
+// against the Rust `lepton mount`, optionally comparing the results with
+// the C `erofsfuse` implementation.
 //
-// Enable:        EROFS_RUN_PERF=1
-// C comparison:  EROFS_C_FUSE=/path/to/erofsfuse (auto-detected if omitted)
-// Tuning:
+// Activation:
 //
-//	EROFS_PERF_LARGE_FILE_COUNT  number of large files for read benchmarks (default: 8)
-//	EROFS_PERF_LARGE_FILE_MB     size in MiB of each large file (default: 64)
-//	EROFS_PERF_MEDIUM_FILE_COUNT number of medium files in corpus (default: 256)
-//	EROFS_PERF_MEDIUM_FILE_MB    size in MiB of each medium file (default: 1)
-//	EROFS_PERF_SMALL_FILE_COUNT  number of small files for stat benchmark (default: 10000)
-//	EROFS_PERF_FIO_SECS          fio benchmark duration in seconds (default: 20)
-//	EROFS_PERF_SEQ_THREADS       seq-read multi-thread job count (default: 4)
-//	EROFS_PERF_READDIR_DIRS   number of directories for readdir corpus (default: 128)
-//	EROFS_PERF_READDIR_FILES  files per directory for readdir corpus (default: 256)
-//	EROFS_PERF_READDIR_PASSES repeated os.ReadDir calls per directory in one iteration (default: 8)
-//	EROFS_PERF_META_SECS      metadata benchmark duration in seconds (default: 5)
+//	EROFS_RUN_PERF=1                     enable the test (off by default).
+//	EROFS_C_FUSE=/path/to/erofsfuse      path to the C erofsfuse binary
+//	                                     (auto-detected when omitted).
+//
+// Tuning knobs (all optional):
+//
+//	EROFS_PERF_LARGE_FILE_COUNT   number of large files for read benchmarks (default 8).
+//	EROFS_PERF_LARGE_FILE_MB      size in MiB of each large file (default 64).
+//	EROFS_PERF_MEDIUM_FILE_COUNT  number of medium files in the corpus (default 256).
+//	EROFS_PERF_MEDIUM_FILE_MB     size in MiB of each medium file (default 1).
+//	EROFS_PERF_SMALL_FILE_COUNT   number of small files for the stat benchmark (default 10000).
+//	EROFS_PERF_FIO_SECS           fio benchmark duration in seconds (default 20).
+//	EROFS_PERF_SEQ_THREADS        sequential-read multi-thread job count (default 4).
+//	EROFS_PERF_READDIR_DIRS       number of directories for the readdir corpus (default 128).
+//	EROFS_PERF_READDIR_FILES      files per directory for the readdir corpus (default 256).
+//	EROFS_PERF_READDIR_PASSES     repeated os.ReadDir calls per directory per iteration (default 8).
+//	EROFS_PERF_META_SECS          metadata benchmark duration in seconds (default 5).
 func TestPerf(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
@@ -44,9 +49,8 @@ func TestPerf(t *testing.T) {
 		t.Skip("set EROFS_RUN_PERF=1 to enable")
 	}
 
-	mkfsBin := requireBinary(t, "lepton")
-	rustFuse := requireBinary(t, "lepton")
-	cFuse := findCFuse()
+	leptonBin := requireBinary(t, "lepton")
+	cErofsFuseBin := findCErofsFuse()
 	fioBin := requireFio(t)
 
 	tmpDir := "/tmp/erofs-perf"
@@ -58,29 +62,29 @@ func TestPerf(t *testing.T) {
 	blob := filepath.Join(tmpDir, "test.blob")
 	mntDir := filepath.Join(tmpDir, "mnt")
 
-	// Generate corpus (~260 MB)
+	// Generate the performance corpus (~260 MB by default).
 	t.Log("Generating performance corpus...")
 	makePerfCorpus(t, corpusDir)
 
-	// Build EROFS image with 1 MB chunks (realistic)
+	// Build the EROFS image with 1 MB chunks (a realistic chunk size).
 	t.Log("Building EROFS image (chunksize=1M)...")
-	out, err := exec.Command(mkfsBin, "build", img,
+	out, err := exec.Command(leptonBin, "build", img,
 		"--blobdev", blob, "--chunksize", "1048576", corpusDir).CombinedOutput()
 	require.NoError(t, err, "lepton build: %s", string(out))
 
-	// --- Rust lepton mount ---
+	// Benchmark the Rust lepton mount implementation.
 	t.Log("Benchmarking Rust lepton mount...")
 	dropCaches()
-	unmount := mountEROFS(t, rustFuse, img, blob, mntDir)
+	unmount := mountLepton(t, leptonBin, img, blob, mntDir)
 	rustResults := runBenchmarks(t, fioBin, mntDir)
 	unmount()
 
-	// --- C erofsfuse (optional) ---
+	// Optionally benchmark the C erofsfuse implementation for comparison.
 	var cResults map[string]*benchResult
-	if cFuse != "" {
-		t.Logf("Benchmarking C erofsfuse (%s)...", cFuse)
+	if cErofsFuseBin != "" {
+		t.Logf("Benchmarking C erofsfuse (%s)...", cErofsFuseBin)
 		dropCaches()
-		unmount = mountCErofsFuse(t, cFuse, img, blob, mntDir)
+		unmount = mountCErofsFuse(t, cErofsFuseBin, img, blob, mntDir)
 		cResults = runBenchmarks(t, fioBin, mntDir)
 		unmount()
 	} else {
@@ -90,8 +94,10 @@ func TestPerf(t *testing.T) {
 	printResultsTable(t, rustResults, cResults)
 }
 
-// ---------- perf corpus generation ----------
+// Performance corpus generation.
 
+// makePerfCorpus populates dir with a large mix of files suitable for
+// throughput, IOPS, and metadata benchmarks.
 func makePerfCorpus(t *testing.T, dir string) {
 	c := texture.NewCorpus(t, dir)
 	largeFileCount := envInt("EROFS_PERF_LARGE_FILE_COUNT", 8)
@@ -102,7 +108,7 @@ func makePerfCorpus(t *testing.T, dir string) {
 	readdirDirCount := envInt("EROFS_PERF_READDIR_DIRS", 128)
 	readdirFilesPerDir := envInt("EROFS_PERF_READDIR_FILES", 256)
 
-	// Larger corpus for read benchmarks to amplify sequential/random read cost.
+	// Large files amplify the cost of sequential and random reads.
 	for i := range largeFileCount {
 		c.CreateLargeFile(t, fmt.Sprintf("large/file_%d.bin", i), largeFileMB)
 	}
@@ -116,7 +122,8 @@ func makePerfCorpus(t *testing.T, dir string) {
 			fmt.Appendf(nil, "content of small file %d\n", i))
 	}
 
-	// Large directory fanout to amplify readdir cost and trigger repeated FUSE readdir calls.
+	// Large directory fan-out amplifies readdir cost and triggers repeated
+	// FUSE readdir calls.
 	for d := range readdirDirCount {
 		for f := range readdirFilesPerDir {
 			c.CreateFile(t, fmt.Sprintf("dirs/d%02d/f%03d.txt", d, f),
@@ -125,9 +132,11 @@ func makePerfCorpus(t *testing.T, dir string) {
 	}
 }
 
-// ---------- C fuse discovery & mount ----------
+// C erofsfuse discovery and mount helpers.
 
-func findCFuse() string {
+// findCErofsFuse returns the path to the C erofsfuse binary, or an empty
+// string if it cannot be located.
+func findCErofsFuse() string {
 	if p := os.Getenv("EROFS_C_FUSE"); p != "" {
 		return p
 	}
@@ -147,24 +156,29 @@ func findCFuse() string {
 	return ""
 }
 
+// requireFio returns the path to fio or fails the test if it is missing.
 func requireFio(t *testing.T) string {
+	t.Helper()
 	p, err := exec.LookPath("fio")
 	require.NoError(t, err, "fio not found; install with: apt-get install fio")
 	return p
 }
 
-func mountCErofsFuse(t *testing.T, cFuseBin, img, blobdev, mnt string) (cleanup func()) {
+// mountCErofsFuse mounts img through the C erofsfuse binary and returns a
+// cleanup function that unmounts and reaps the child process.
+func mountCErofsFuse(t *testing.T, cErofsFuseBin, img, blobdev, mnt string) (cleanup func()) {
+	t.Helper()
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	// C erofsfuse: erofsfuse [--device=BLOB] IMAGE MOUNTPOINT -f
+	// Invocation: erofsfuse [--device=BLOB] IMAGE MOUNTPOINT -f
 	args := []string{}
 	if blobdev != "" {
 		args = append(args, "--device="+blobdev)
 	}
 	args = append(args, img, mnt, "-f")
 
-	cmd := exec.Command(cFuseBin, args...)
+	cmd := exec.Command(cErofsFuseBin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start(), "erofsfuse start")
@@ -194,21 +208,25 @@ func mountCErofsFuse(t *testing.T, cFuseBin, img, blobdev, mnt string) (cleanup 
 	}
 }
 
+// dropCaches asks the kernel to drop page, dentry, and inode caches so that
+// the next benchmark starts from a cold state.
 func dropCaches() {
 	_ = os.WriteFile("/proc/sys/vm/drop_caches", []byte("3"), 0644)
 	time.Sleep(500 * time.Millisecond)
 }
 
-// ---------- fio execution ----------
+// fio execution.
 
+// benchResult is the per-job summary extracted from a benchmark run.
 type benchResult struct {
 	Name     string
-	ReadBW   float64 // MB/s
-	ReadIOPS float64
+	ReadBW   float64 // throughput in MB/s
+	ReadIOPS float64 // I/O operations per second
 	ReadLat  float64 // average latency in µs
 }
 
-type fioJSON struct {
+// fioJSONResult mirrors the subset of fio's JSON output we consume.
+type fioJSONResult struct {
 	Jobs []struct {
 		Jobname string `json:"jobname"`
 		Read    struct {
@@ -221,12 +239,14 @@ type fioJSON struct {
 	} `json:"jobs"`
 }
 
+// runFioJob runs a single fio job with JSON output and returns its summary.
 func runFioJob(t *testing.T, fioBin string, args []string) *benchResult {
+	t.Helper()
 	full := append([]string{"--output-format=json"}, args...)
 	out, err := exec.Command(fioBin, full...).CombinedOutput()
 	require.NoError(t, err, "fio failed: %s", string(out))
 
-	var result fioJSON
+	var result fioJSONResult
 	require.NoError(t, json.Unmarshal(out, &result), "fio JSON parse")
 	require.NotEmpty(t, result.Jobs)
 
@@ -239,16 +259,19 @@ func runFioJob(t *testing.T, fioBin string, args []string) *benchResult {
 	}
 }
 
-// ---------- benchmark suite ----------
+// Benchmark suite.
 
+// runBenchmarks executes the full I/O and metadata benchmark suite against
+// mntDir and returns the per-benchmark results keyed by name.
 func runBenchmarks(t *testing.T, fioBin, mntDir string) map[string]*benchResult {
+	t.Helper()
 	results := make(map[string]*benchResult)
 	largeFile := filepath.Join(mntDir, "large/file_0.bin")
 	fioSeconds := envInt("EROFS_PERF_FIO_SECS", 20)
 	seqThreads := envInt("EROFS_PERF_SEQ_THREADS", 4)
 	require.FileExists(t, largeFile)
 
-	// 1. Sequential read throughput (128K blocks)
+	// 1. Sequential read throughput (128K blocks).
 	dropCaches()
 	results["seq_read"] = runFioJob(t, fioBin, []string{
 		"--name=seq_read", "--filename=" + largeFile,
@@ -256,7 +279,7 @@ func runBenchmarks(t *testing.T, fioBin, mntDir string) map[string]*benchResult 
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioSeconds), "--time_based", "--readonly",
 	})
 
-	// 2. Random read IOPS (4K blocks)
+	// 2. Random read IOPS (4K blocks).
 	dropCaches()
 	results["rand_read_4k"] = runFioJob(t, fioBin, []string{
 		"--name=rand_read_4k", "--filename=" + largeFile,
@@ -264,7 +287,7 @@ func runBenchmarks(t *testing.T, fioBin, mntDir string) map[string]*benchResult 
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioSeconds), "--time_based", "--readonly",
 	})
 
-	// 3. Multi-threaded sequential read (4 threads on same file)
+	// 3. Multi-threaded sequential read on the same file.
 	dropCaches()
 	results["seq_read_4t"] = runFioJob(t, fioBin, []string{
 		"--name=seq_read_4t", "--filename=" + largeFile,
@@ -273,20 +296,23 @@ func runBenchmarks(t *testing.T, fioBin, mntDir string) map[string]*benchResult 
 		"--readonly", "--group_reporting",
 	})
 
-	// 4. Metadata: stat
+	// 4. Metadata: stat.
 	dropCaches()
 	results["stat"] = benchStat(t, filepath.Join(mntDir, "small"))
 
-	// 5. Metadata: readdir
+	// 5. Metadata: readdir.
 	dropCaches()
 	results["readdir"] = benchReaddir(t, filepath.Join(mntDir, "dirs"))
 
 	return results
 }
 
-// ---------- Go metadata benchmarks ----------
+// Go-based metadata benchmarks.
 
+// benchStat repeatedly stat()s every regular file under dir for the
+// configured metadata duration and reports the achieved ops/s and latency.
 func benchStat(t *testing.T, dir string) *benchResult {
+	t.Helper()
 	metaDuration := time.Duration(envInt("EROFS_PERF_META_SECS", 5)) * time.Second
 	var files []string
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -315,7 +341,10 @@ func benchStat(t *testing.T, dir string) *benchResult {
 	}
 }
 
+// benchReaddir repeatedly reads every subdirectory of dir for the configured
+// metadata duration and reports the achieved ops/s and latency.
 func benchReaddir(t *testing.T, dir string) *benchResult {
+	t.Helper()
 	metaDuration := time.Duration(envInt("EROFS_PERF_META_SECS", 5)) * time.Second
 	passesPerDir := envInt("EROFS_PERF_READDIR_PASSES", 8)
 	var dirs []string
@@ -348,6 +377,8 @@ func benchReaddir(t *testing.T, dir string) *benchResult {
 	}
 }
 
+// envInt returns the positive integer value of the environment variable key
+// or defaultValue if the variable is unset, empty, or not a positive int.
 func envInt(key string, defaultValue int) int {
 	value := os.Getenv(key)
 	if value == "" {
@@ -360,9 +391,12 @@ func envInt(key string, defaultValue int) int {
 	return parsed
 }
 
-// ---------- result table ----------
+// Result table.
 
+// printResultsTable logs a formatted benchmark summary, optionally including
+// a Rust-vs-C comparison column when c is non-nil.
 func printResultsTable(t *testing.T, rust, c map[string]*benchResult) {
+	t.Helper()
 	type row struct {
 		label string
 		key   string
@@ -406,7 +440,7 @@ func printResultsTable(t *testing.T, rust, c map[string]*benchResult) {
 			if cVal > 0 {
 				pct := rustVal / cVal
 				if r.unit == "µs" {
-					// For latency, lower is better
+					// For latency, lower is better.
 					pct = cVal / rustVal
 				}
 				ratio = fmt.Sprintf("%.2fx", pct)
