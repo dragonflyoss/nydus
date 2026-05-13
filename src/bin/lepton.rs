@@ -1,8 +1,8 @@
-// lepton — single CLI for EROFS image creation and FUSE mounting.
+// lepton — single CLI for EROFS image creation and mounting.
 //
 // Subcommands:
-//   lepton mkfs <image> --blobdev <path> --chunksize <bytes> <source>
-//   lepton fuse mount <image> <mountpoint> [--blobdev <path>] [--threads N] [--fsname NAME]
+//   lepton build <image> --blobdev <path> --chunksize <bytes> <source>
+//   lepton mount [--driver fuse] <image> <mountpoint> [--blobdev <path>] [--threads N] [--fsname NAME]
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use log::{error, info, LevelFilter};
 use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::iterator::Signals;
@@ -39,13 +39,13 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Create an EROFS filesystem image (chunk-based)
-    Mkfs(MkfsArgs),
-    /// FUSE-related operations
-    Fuse(FuseArgs),
+    Build(BuildArgs),
+    /// Mount an EROFS image
+    Mount(MountArgs),
 }
 
 #[derive(Args)]
-struct MkfsArgs {
+struct BuildArgs {
     /// Output image file path
     image: PathBuf,
 
@@ -61,16 +61,10 @@ struct MkfsArgs {
     source: PathBuf,
 }
 
-#[derive(Args)]
-struct FuseArgs {
-    #[command(subcommand)]
-    command: FuseCommands,
-}
-
-#[derive(Subcommand)]
-enum FuseCommands {
-    /// Mount an EROFS image via FUSE
-    Mount(MountArgs),
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum Driver {
+    /// Mount via FUSE
+    Fuse,
 }
 
 #[derive(Args)]
@@ -80,6 +74,10 @@ struct MountArgs {
 
     /// Mount point
     mountpoint: String,
+
+    /// Mount driver (default: fuse)
+    #[arg(long, value_enum, default_value_t = Driver::Fuse)]
+    driver: Driver,
 
     /// Optional blob device for chunk-based files
     #[arg(long)]
@@ -97,14 +95,14 @@ struct MountArgs {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Mkfs(args) => run_mkfs(args),
-        Commands::Fuse(FuseArgs {
-            command: FuseCommands::Mount(args),
-        }) => run_fuse_mount(args),
+        Commands::Build(args) => run_build(args),
+        Commands::Mount(args) => match args.driver {
+            Driver::Fuse => run_fuse_mount(args),
+        },
     }
 }
 
-fn run_mkfs(args: MkfsArgs) -> Result<()> {
+fn run_build(args: BuildArgs) -> Result<()> {
     // Validate chunksize
     if args.chunksize < EROFS_BLOCK_SIZE {
         bail!(

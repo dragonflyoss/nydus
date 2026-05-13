@@ -11,17 +11,17 @@ cargo build --release
 A single binary is produced:
 
 ```bash
-./target/release/lepton   # EROFS tools (mkfs + fuse mount subcommands)
+./target/release/lepton   # EROFS tools (`build` + `mount` subcommands)
 ```
 
 ## Usage
 
-### lepton mkfs
+### lepton build
 
 Create an EROFS filesystem image from a source directory:
 
 ```bash
-./target/release/lepton mkfs IMAGE --blobdev BLOB --chunksize BYTES SOURCE
+./target/release/lepton build IMAGE --blobdev BLOB --chunksize BYTES SOURCE
 ```
 
 Arguments:
@@ -31,18 +31,19 @@ Arguments:
 - `--chunksize BYTES`: chunk size in bytes, must be a power of two and >= 4096
 - `SOURCE`: source directory
 
-### lepton fuse mount
+### lepton mount
 
-Mount an EROFS image via FUSE:
+Mount an EROFS image (the default driver is `fuse`):
 
 ```bash
-sudo ./target/release/lepton fuse mount IMAGE MOUNTPOINT [--blobdev BLOB] [--threads N]
+sudo ./target/release/lepton mount IMAGE MOUNTPOINT [--driver fuse] [--blobdev BLOB] [--threads N]
 ```
 
 Arguments:
 
 - `IMAGE`: EROFS metadata image file
 - `MOUNTPOINT`: mount point directory
+- `--driver`: mount driver (default: `fuse`)
 - `--blobdev BLOB`: blob data file for chunk-based files
 - `--threads N`: number of FUSE worker threads (default: 4)
 
@@ -50,13 +51,13 @@ Arguments:
 
 ```bash
 # Build image
-./target/release/lepton mkfs /tmp/erofs.meta.img \
+./target/release/lepton build /tmp/erofs.meta.img \
 	--blobdev /tmp/erofs.blob.img \
 	--chunksize 1048576 \
 	~/code/linux
 
-# Mount image
-sudo ./target/release/lepton fuse mount /tmp/erofs.meta.img ~/mnt \
+# Mount image (driver defaults to fuse)
+sudo ./target/release/lepton mount /tmp/erofs.meta.img ~/mnt \
 	--blobdev /tmp/erofs.blob.img \
 	--threads 10
 ```
@@ -66,7 +67,7 @@ sudo ./target/release/lepton fuse mount /tmp/erofs.meta.img ~/mnt \
 ```
 src/
 ├── bin/
-│   └── lepton.rs               # Single CLI binary with `mkfs` and `fuse mount` subcommands
+│   └── lepton.rs               # Single CLI binary with `build` and `mount` subcommands
 ├── lib.rs                       # Library crate root
 ├── metadata/                    # EROFS on-disk format definitions (shared)
 │   ├── mod.rs                  # Constants, LE helpers, cast_ref/cast_mut
@@ -136,7 +137,7 @@ The integration tests live under `tests/integration/` (Go) and reuse
 Performance benchmark (requires root, fio):
 
 ```bash
-# Benchmark Rust `lepton fuse mount` (~2min, needs fio: apt-get install fio)
+# Benchmark Rust `lepton mount` (~2min, needs fio: apt-get install fio)
 make test-perf
 
 # Compare against C erofsfuse

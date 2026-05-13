@@ -1,5 +1,5 @@
 #!/bin/bash
-# profile-erofs-fuse.sh — Automated flamegraph profiling for `lepton fuse mount`
+# profile-erofs-fuse.sh — Automated flamegraph profiling for `lepton mount`
 #
 # Usage:   sudo ./scripts/profile-erofs-fuse.sh
 # Output:  /tmp/erofs-profile/flame.svg
@@ -35,7 +35,7 @@ info() { echo "==> $*"; }
 cleanup() {
     info "Cleaning up..."
     fusermount -u "${MNT}" 2>/dev/null || true
-    # Kill lepton fuse mount if still running
+    # Kill lepton mount if still running
     if [[ -n "${FUSE_PID:-}" ]] && kill -0 "${FUSE_PID}" 2>/dev/null; then
         kill "${FUSE_PID}" 2>/dev/null || true
         wait "${FUSE_PID}" 2>/dev/null || true
@@ -64,11 +64,11 @@ info "Corpus ready (~128 MB)"
 
 # ── build EROFS image ───────────────────────────────────────────────
 info "Building EROFS image (chunksize=1M)..."
-"${LEPTON}" mkfs "${IMG}" --blobdev "${BLOB}" --chunksize 1048576 "${CORPUS_DIR}"
+"${LEPTON}" build "${IMG}" --blobdev "${BLOB}" --chunksize 1048576 "${CORPUS_DIR}"
 
-# ── mount lepton fuse mount ─────────────────────────────────────────
-info "Mounting lepton fuse mount (threads=${FUSE_THREADS})..."
-"${LEPTON}" fuse mount "${IMG}" "${MNT}" --blobdev "${BLOB}" --threads "${FUSE_THREADS}" &
+# ── mount lepton ─────────────────────────────────────────────────────
+info "Mounting lepton (threads=${FUSE_THREADS})..."
+"${LEPTON}" mount "${IMG}" "${MNT}" --blobdev "${BLOB}" --threads "${FUSE_THREADS}" &
 FUSE_PID=$!
 
 # Wait for mount
@@ -78,7 +78,7 @@ for i in $(seq 1 40); do
     fi
     sleep 0.25
 done
-mountpoint -q "${MNT}" || die "lepton fuse mount failed to mount within 10s"
+mountpoint -q "${MNT}" || die "lepton mount failed to mount within 10s"
 info "Mounted (PID=${FUSE_PID})"
 
 # ── warm up (prime page cache, then drop) ────────────────────────────
@@ -108,7 +108,7 @@ info "perf record done: ${PERF_DATA}"
 info "Generating flamegraph..."
 perf script -i "${PERF_DATA}" | \
     inferno-collapse-perf --all | \
-    inferno-flamegraph --title "lepton fuse mount sequential read 128K (threads=${FUSE_THREADS})" \
+    inferno-flamegraph --title "lepton mount sequential read 128K (threads=${FUSE_THREADS})" \
     > "${FLAME_SVG}"
 
 info "Flamegraph saved: ${FLAME_SVG}"
