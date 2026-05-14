@@ -1,19 +1,4 @@
-# Exclude list for xfstests on EROFS (read-only FUSE filesystem)
-#
-# EROFS is a read-only filesystem. Most xfstests generic tests assume write
-# access and will fail with "Read-only file system". This exclude list was
-# generated from a full xfstests run against erofs-fuse and covers:
-#   - Tests that require write access to TEST_DIR
-#   - FUSE compatibility issues (open_by_handle, device nodes, etc.)
-#   - Tests requiring features not yet implemented (xattr, etc.)
-#
-# Tests that need SCRATCH_DEV are automatically skipped by xfstests (not-run).
-# Passing tests from the full run: generic/072, generic/221, generic/308
-#
-# To regenerate: run all FUSE tests and collect failures:
-#   sudo ./check -fuse 2>&1 | grep "output mismatch\|failed" | grep -oP "generic/\d+"
-#
-# --- Write-dependent tests (Read-only file system) ---
+# Exclude list for xfstests on LeptonFS (read-only FUSE filesystem)
 generic/001
 generic/004
 generic/005

@@ -19,7 +19,7 @@ test-integration: release
 	cd tests/integration && \
 		sudo env "PATH=$(PATH)" "HOME=$(HOME)" \
 		"GOMODCACHE=$$($(GO) env GOMODCACHE)" \
-		EROFS_RUN_XFSTESTS=1 \
+		LEPTONFS_RUN_XFSTESTS=1 \
 		$(GO) test -v -timeout 600s ./...
 
 # Run performance benchmark (requires root, fio, ~2min).

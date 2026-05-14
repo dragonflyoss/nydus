@@ -1,4 +1,4 @@
-// Package texture provides helpers for generating an EROFS filesystem test
+// Package texture provides helpers for generating an LeptonFS filesystem test
 // corpus.
 //
 // The Corpus type follows a builder pattern similar to nydus
@@ -38,8 +38,6 @@ func (c *Corpus) path(name string) string {
 	return filepath.Join(c.Dir, name)
 }
 
-// Regular files.
-
 // CreateFile writes data to a regular file.
 func (c *Corpus) CreateFile(t *testing.T, name string, data []byte) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
@@ -47,14 +45,15 @@ func (c *Corpus) CreateFile(t *testing.T, name string, data []byte) {
 }
 
 // CreateLargeFile fills a file with sizeMB megabytes of random data.
-func (c *Corpus) CreateLargeFile(t *testing.T, name string, sizeMB int) {
+func (c *Corpus) CreateLargeFile(t *testing.T, name string, size int) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
 	f, err := os.Create(c.path(name))
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, f.Close())
 	})
-	_, err = io.CopyN(f, rand.Reader, int64(sizeMB)<<20)
+
+	_, err = io.CopyN(f, rand.Reader, int64(size)<<20)
 	require.NoError(t, err)
 }
 
@@ -66,6 +65,7 @@ func (c *Corpus) CreateRandomFile(t *testing.T, name string, size int) {
 	t.Cleanup(func() {
 		require.NoError(t, f.Close())
 	})
+
 	_, err = io.CopyN(f, rand.Reader, int64(size))
 	require.NoError(t, err)
 }
@@ -77,10 +77,12 @@ func (c *Corpus) CreatePatternFile(t *testing.T, name string, repeatCount int) {
 	for i := range pattern {
 		pattern[i] = byte(i)
 	}
+
 	var buf []byte
 	for range repeatCount {
 		buf = append(buf, pattern...)
 	}
+
 	require.NoError(t, os.WriteFile(c.path(name), buf, 0644))
 }
 
@@ -90,30 +92,22 @@ func (c *Corpus) CreateZeroFile(t *testing.T, name string, size int) {
 	require.NoError(t, os.WriteFile(c.path(name), make([]byte, size), 0644))
 }
 
-// Directories.
-
 // CreateDir creates a directory (and parents).
 func (c *Corpus) CreateDir(t *testing.T, name string) {
 	require.NoError(t, os.MkdirAll(c.path(name), 0755))
 }
 
-// Symbolic links.
-
-// CreateSymlink creates a symbolic link name -> target (target is stored as-is).
+// CreateSymlink creates a symbolic link name -> target (relative to corpus).
 func (c *Corpus) CreateSymlink(t *testing.T, name, target string) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
 	require.NoError(t, os.Symlink(target, c.path(name)))
 }
-
-// Hard links.
 
 // CreateHardlink creates a hard link name -> existing file target (relative to corpus).
 func (c *Corpus) CreateHardlink(t *testing.T, name, target string) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
 	require.NoError(t, os.Link(c.path(target), c.path(name)))
 }
-
-// Special files.
 
 // CreateFIFO creates a named pipe.
 func (c *Corpus) CreateFIFO(t *testing.T, name string) {
@@ -135,8 +129,6 @@ func (c *Corpus) CreateBlockDev(t *testing.T, name string, major, minor uint32) 
 	require.NoError(t, syscall.Mknod(c.path(name), syscall.S_IFBLK|0666, dev))
 }
 
-// Permissions and ownership.
-
 // Chmod sets the file mode (permission bits + special bits).
 func (c *Corpus) Chmod(t *testing.T, name string, mode os.FileMode) {
 	require.NoError(t, os.Chmod(c.path(name), mode))
@@ -147,14 +139,10 @@ func (c *Corpus) Chown(t *testing.T, name string, uid, gid int) {
 	require.NoError(t, os.Lchown(c.path(name), uid, gid))
 }
 
-// Extended attributes.
-
 // SetXattr sets an extended attribute.
 func (c *Corpus) SetXattr(t *testing.T, name, key string, value []byte) {
 	require.NoError(t, xattr.Set(c.path(name), key, value))
 }
-
-// Filename helpers.
 
 // LongName returns a string of n repeated characters, useful for edge-case filenames.
 func LongName(ch byte, n int) string {
@@ -165,10 +153,8 @@ func LongName(ch byte, n int) string {
 // matching the original gen_test_corpus.sh.
 func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c := NewCorpus(t, dir)
-	isRoot := os.Getuid() == 0
 
 	// Regular files.
-
 	c.CreateFile(t, "files/empty", nil)
 	c.CreateFile(t, "files/tiny_2b", []byte("hi"))
 	c.CreateFile(t, "files/small_100b", []byte(strings.Repeat(".", 100)))
@@ -181,7 +167,6 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreatePatternFile(t, "files/byte_pattern", 16)
 
 	// Permissions.
-
 	c.CreateFile(t, "perms/r_only", []byte("readable"))
 	c.Chmod(t, "perms/r_only", 0444)
 	c.CreateFile(t, "perms/r_x", []byte("executable"))
@@ -200,7 +185,6 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.Chmod(t, "perms/suid_sgid", 06755)
 
 	// Directories.
-
 	c.CreateDir(t, "dirs/empty_dir")
 	c.CreateDir(t, "dirs/a/b/c/d/e/f")
 	c.CreateFile(t, "dirs/a/b/c/d/e/f/deep_file", []byte("deep"))
@@ -209,13 +193,13 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 		c.CreateFile(t, fmt.Sprintf("dirs/many_entries/file_%04d", i),
 			fmt.Appendf(nil, "entry_%d", i))
 	}
+
 	c.CreateDir(t, "dirs/restricted")
 	c.Chmod(t, "dirs/restricted", 0500)
 	c.CreateDir(t, "dirs/sticky_dir")
 	c.Chmod(t, "dirs/sticky_dir", 01777)
 
 	// Symbolic links.
-
 	c.CreateFile(t, "symlinks/target_file", []byte("target"))
 	c.CreateSymlink(t, "symlinks/link_to_file", "target_file")
 	c.CreateDir(t, "symlinks/target_dir")
@@ -231,7 +215,6 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreateSymlink(t, "symlinks/chain_a", "chain_b")
 
 	// Hard links.
-
 	c.CreateFile(t, "hardlinks/original", []byte("shared content"))
 	c.CreateHardlink(t, "hardlinks/link1", "hardlinks/original")
 	c.CreateHardlink(t, "hardlinks/link2", "hardlinks/original")
@@ -239,20 +222,16 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreateHardlink(t, "hardlinks/subdir/link3", "hardlinks/original")
 
 	// Special files (root only).
-
-	if isRoot {
-		c.CreateFIFO(t, "special/fifo")
-		c.CreateCharDev(t, "special/chardev", 1, 3)
-		c.CreateBlockDev(t, "special/blkdev", 1, 0)
-		c.CreateFile(t, "special/other_uid", []byte("other_owner"))
-		c.Chown(t, "special/other_uid", 1000, 1000)
-		c.CreateFile(t, "special/root_owned", []byte("root_only"))
-		c.Chown(t, "special/root_owned", 0, 0)
-		c.Chmod(t, "special/root_owned", 0600)
-	}
+	c.CreateFIFO(t, "special/fifo")
+	c.CreateCharDev(t, "special/chardev", 1, 3)
+	c.CreateBlockDev(t, "special/blkdev", 1, 0)
+	c.CreateFile(t, "special/other_uid", []byte("other_owner"))
+	c.Chown(t, "special/other_uid", 1000, 1000)
+	c.CreateFile(t, "special/root_owned", []byte("root_only"))
+	c.Chown(t, "special/root_owned", 0, 0)
+	c.Chmod(t, "special/root_owned", 0600)
 
 	// Extended attributes.
-
 	c.CreateFile(t, "xattrs/user_basic", []byte("xattr test\n"))
 	c.SetXattr(t, "xattrs/user_basic", "user.test", []byte("hello"))
 
@@ -282,16 +261,13 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreateRandomFile(t, "xattrs/large_file_xattr", 4096*4)
 	c.SetXattr(t, "xattrs/large_file_xattr", "user.on_large", []byte("large_file"))
 
-	if isRoot {
-		c.CreateFile(t, "xattrs/security_attr", []byte("security xattr\n"))
-		c.SetXattr(t, "xattrs/security_attr", "security.test", []byte("sec_value"))
+	c.CreateFile(t, "xattrs/security_attr", []byte("security xattr\n"))
+	c.SetXattr(t, "xattrs/security_attr", "security.test", []byte("sec_value"))
 
-		c.CreateFile(t, "xattrs/trusted_attr", []byte("trusted xattr\n"))
-		c.SetXattr(t, "xattrs/trusted_attr", "trusted.test", []byte("trusted_value"))
-	}
+	c.CreateFile(t, "xattrs/trusted_attr", []byte("trusted xattr\n"))
+	c.SetXattr(t, "xattrs/trusted_attr", "trusted.test", []byte("trusted_value"))
 
 	// Filenames with edge cases.
-
 	c.CreateFile(t, "names/"+LongName('a', 250), []byte("long name"))
 	c.CreateFile(t, "names/file with spaces", []byte("spaces"))
 	c.CreateFile(t, "names/file-with-dashes", []byte("special chars"))

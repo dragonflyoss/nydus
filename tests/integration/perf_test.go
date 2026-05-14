@@ -13,9 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dragonflyoss/lepton/tests/integration/texture"
 	"github.com/stretchr/testify/require"
-
-	"github.com/erofs/erofs-utils-rust/tests/integration/texture"
 )
 
 // TestPerf runs fio-based I/O benchmarks and Go-based metadata benchmarks
@@ -49,7 +48,7 @@ func TestPerf(t *testing.T) {
 		t.Skip("set EROFS_RUN_PERF=1 to enable")
 	}
 
-	leptonBin := requireBinary(t, "lepton")
+	leptonBin := mustLookupExecutable(t, "lepton")
 	cErofsFuseBin := findCErofsFuse()
 	fioBin := requireFio(t)
 
@@ -110,7 +109,7 @@ func makePerfCorpus(t *testing.T, dir string) {
 
 	// Large files amplify the cost of sequential and random reads.
 	for i := range largeFileCount {
-		c.CreateLargeFile(t, fmt.Sprintf("large/file_%d.bin", i), largeFileMB)
+		c.CreateLargeFile(t, fmt.Sprintf("large/file_%d.bin", i), largeFileMB<<20)
 	}
 
 	for i := range mediumFileCount {

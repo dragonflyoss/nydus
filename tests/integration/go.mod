@@ -1,4 +1,4 @@
-module github.com/erofs/erofs-utils-rust/tests/integration
+module github.com/dragonflyoss/lepton/tests/integration
 
 go 1.25.5
 
