@@ -18,6 +18,9 @@ pub struct BuildArgs {
     /// Output image file path.
     image: PathBuf,
 
+    /// Source directory to build the image from.
+    source: PathBuf,
+
     /// Extra blob device to store chunked data.
     #[arg(long)]
     blobdev: PathBuf,
@@ -25,9 +28,6 @@ pub struct BuildArgs {
     /// Chunk size in bytes (must be a power of two, >= 4096).
     #[arg(long)]
     chunksize: u32,
-
-    /// Source directory.
-    source: PathBuf,
 
     #[arg(
         short = 'l',
