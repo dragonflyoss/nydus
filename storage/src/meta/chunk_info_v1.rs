@@ -156,9 +156,10 @@ mod tests {
     use std::mem::ManuallyDrop;
     use std::sync::Arc;
 
+    use crate::test::TempPath;
     use nydus_utils::compress;
     use nydus_utils::metrics::BackendMetrics;
-    use vmm_sys_util::tempfile::TempFile;
+    use tempfile::NamedTempFile as TempFile;
 
     use super::*;
     use crate::backend::BlobReader;

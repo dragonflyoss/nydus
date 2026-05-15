@@ -3,7 +3,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use std::path::Path;
 use std::sync::Arc;
+use tempfile::{NamedTempFile, TempDir};
 
 use nydus_utils::digest::RafsDigest;
 use nydus_utils::metrics::BackendMetrics;
@@ -13,6 +15,22 @@ use crate::backend::{BackendResult, BlobBackend, BlobReader};
 use crate::device::v5::BlobV5ChunkInfo;
 use crate::device::{BlobChunkFlags, BlobChunkInfo};
 use std::any::Any;
+
+pub(crate) trait TempPath {
+    fn as_path(&self) -> &Path;
+}
+
+impl<F> TempPath for NamedTempFile<F> {
+    fn as_path(&self) -> &Path {
+        self.path()
+    }
+}
+
+impl TempPath for TempDir {
+    fn as_path(&self) -> &Path {
+        self.path()
+    }
+}
 
 pub(crate) struct MockBackend {
     pub metrics: Arc<BackendMetrics>,

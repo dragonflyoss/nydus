@@ -20,13 +20,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 use nydus_utils::compress::Decoder;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::metrics::{BlobcacheMetrics, Metric};
 use nydus_utils::{compress, digest, round_up_usize, DelayType, Delayer, FileRangeReader};
 use tokio::runtime::Runtime;
+
+use crate::volatile::VolatileSlice as FileVolatileSlice;
 
 use crate::backend::BlobReader;
 use crate::cache::state::ChunkMap;
@@ -2121,8 +2122,9 @@ mod tests {
     #[test]
     fn test_entries_count_metric_increment() {
         use crate::cache::state::{BlobStateMap, IndexedChunkMap};
+        use crate::test::TempPath;
         use std::sync::Arc;
-        use vmm_sys_util::tempdir::TempDir;
+        use tempfile::TempDir;
 
         // Create temporary directory and metrics
         let tmpdir = TempDir::new().unwrap();

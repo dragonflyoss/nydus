@@ -121,7 +121,8 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
-    use vmm_sys_util::tempdir::TempDir;
+    use crate::test::TempPath;
+    use tempfile::TempDir;
 
     use super::super::BlobStateMap;
     use super::*;

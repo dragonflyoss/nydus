@@ -406,9 +406,9 @@ impl FileCacheEntry {
 
 #[cfg(test)]
 pub mod blob_cache_tests {
+    use crate::test::TempPath;
     use nydus_api::FileCacheConfig;
-    use vmm_sys_util::tempdir::TempDir;
-    use vmm_sys_util::tempfile::TempFile;
+    use tempfile::{NamedTempFile as TempFile, TempDir};
 
     #[test]
     fn test_blob_cache_config() {
@@ -908,10 +908,10 @@ mod tests {
     #[test]
     fn test_filecache_config_work_dir_file_path_is_invalid() {
         use nydus_api::FileCacheConfig;
-        use vmm_sys_util::tempfile::TempFile;
+        use tempfile::NamedTempFile as TempFile;
 
         let tmp_file = TempFile::new().unwrap();
-        let file_path = tmp_file.as_path().to_path_buf();
+        let file_path = tmp_file.path().to_path_buf();
         let config = FileCacheConfig {
             work_dir: file_path.to_str().unwrap().to_owned(),
             ..Default::default()

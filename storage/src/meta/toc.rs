@@ -736,9 +736,10 @@ mod tests {
     use super::*;
     #[cfg(feature = "backend-localfs")]
     use crate::factory::BlobFactory;
+    use crate::test::TempPath;
     #[cfg(feature = "backend-localfs")]
     use nydus_api::{BackendConfigV2, LocalFsConfig};
-    use vmm_sys_util::tempfile::TempFile;
+    use tempfile::NamedTempFile as TempFile;
 
     #[test]
     #[cfg(feature = "backend-localfs")]

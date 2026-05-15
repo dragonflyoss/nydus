@@ -4,8 +4,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Utility helpers to support the storage subsystem.
-use fuse_backend_rs::abi::fuse_abi::off64_t;
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 #[cfg(target_os = "macos")]
 use libc::{fcntl, radvisory};
 use nix::sys::uio::preadv;
@@ -24,14 +22,14 @@ use std::path::PathBuf;
 use std::slice::from_raw_parts_mut;
 #[cfg(target_os = "macos")]
 use std::{ffi::CStr, mem, os::raw::c_char};
-use vm_memory::bytes::Bytes;
 
+use crate::volatile::VolatileSlice as FileVolatileSlice;
 use crate::{StorageError, StorageResult};
 
 /// Just a simple wrapper for posix `preadv`. Provide a slice of `IoVec` as input.
 pub fn readv(fd: RawFd, iovec: &mut [IoSliceMut], offset: u64) -> Result<usize> {
     loop {
-        match preadv(fd, iovec, offset as off64_t).map_err(|_| last_error!()) {
+        match preadv(fd, iovec, offset as i64).map_err(|_| last_error!()) {
             Ok(ret) => return Ok(ret),
             // Retry if the IO is interrupted by signal.
             Err(err) if err.kind() != ErrorKind::Interrupted => return Err(err),
@@ -77,9 +75,16 @@ pub fn copyv<S: AsRef<[u8]>>(
 
             let dst_slice = &dst[dst_index];
             let buffer = &s[src_offset..src_offset + buffer_len];
-            let written = dst_slice
-                .write(buffer, dst_offset)
-                .map_err(StorageError::VolatileSlice)?;
+            let written = min(buffer.len(), dst_slice.len().saturating_sub(dst_offset));
+            if written > 0 {
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        buffer.as_ptr(),
+                        dst_slice.as_ptr().add(dst_offset),
+                        written,
+                    );
+                }
+            }
 
             copied += written;
             if dst_slice.len() - dst_offset == written {
@@ -358,8 +363,9 @@ pub fn check_crc(data: &[u8], crc_digest: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test::TempPath;
     use std::io::Write;
-    use vmm_sys_util::tempfile::TempFile;
+    use tempfile::NamedTempFile as TempFile;
 
     #[test]
     fn test_copyv() {
