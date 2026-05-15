@@ -1055,9 +1055,9 @@ dependencies = [
 
 [[package]]
 name = "dragonfly-client-core"
-version = "1.3.4"
+version = "1.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b81a6dea5233ae4f37bc48d8401db627b257c35b81deba9d842187a5c3ce629f"
+checksum = "44ffc5cf12b594402f06d0e42737607c78902f6a5e63a73e082a5c341f80cbd9"
 dependencies = [
  "cgroups-rs",
  "headers",
@@ -1078,9 +1078,9 @@ dependencies = [
 
 [[package]]
 name = "dragonfly-client-util"
-version = "1.3.4"
+version = "1.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86187ec7a11bef497bfb4a4778dd9442d14c4cc8882c1927001e86d157a3b36d"
+checksum = "48346beb5075c9e630c15efef9e33a01e8d8203b1a6d27ebb357c67f2898e016"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2024,7 +2024,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.1",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2268,7 +2268,7 @@ version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d40460c0ce33d6ce4b0630ad68ff63d6661961c48b6dba35e5a4d81cfb48222"
 dependencies = [
- "socket2 0.6.1",
+ "socket2 0.6.3",
  "widestring",
  "windows-registry",
  "windows-result 0.4.1",
@@ -2460,9 +2460,9 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "libc"
-version = "0.2.184"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48f5d2a454e16a5ea0f4ced81bd44e4cfc7bd3a507b61887c99fd3538b28e4af"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libm"
@@ -2668,13 +2668,13 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.0.3"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2886843bf800fba2e3377cff24abf6379b4c4d5c6681eaf9ea5b0d15090450bd"
+checksum = "50b7e5b27aa02a74bac8c3f23f448f8d87ff11f92d3aac1a6ed369ee08cc56c1"
 dependencies = [
  "libc",
  "wasi",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3856,7 +3856,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.1",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3893,7 +3893,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.1",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -4708,12 +4708,12 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.6.1"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17129e116933cf371d018bb80ae557e889637989d8638274fb25622827b03881"
+checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5005,17 +5005,17 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.50.0"
+version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27ad5e34374e03cfffefc301becb44e9dc3c17584f414349ebe29ed26661822d"
+checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
  "bytes",
  "libc",
- "mio 1.0.3",
+ "mio 1.2.0",
  "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.1",
+ "socket2 0.6.3",
  "tokio-macros",
  "tracing",
  "windows-sys 0.61.2",
@@ -5023,9 +5023,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-macros"
-version = "2.6.1"
+version = "2.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c"
+checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5153,7 +5153,7 @@ dependencies = [
  "hyper-util",
  "percent-encoding",
  "pin-project",
- "socket2 0.6.1",
+ "socket2 0.6.3",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
