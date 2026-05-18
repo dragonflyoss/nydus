@@ -32,13 +32,15 @@ func TestVerifyLeptonFS(t *testing.T) {
 	mntDir := filepath.Join(tmpDir, "mnt")
 
 	// Generate corpus for testing.
+	t.Log("Generating corpus...")
 	texture.MakeStandardCorpus(t, corpusDir)
 	_ = os.Remove(imagePath)
 	_ = os.Remove(blobdev)
 
 	// Build LeptonFS image and mount it.
+	t.Log("Building LeptonFS image and mounting...")
 	leptonBin := mustLookupExecutable(t, "lepton")
-	buildLeptonFSImage(t, leptonBin, imagePath, blobdev, corpusDir)
+	buildLeptonFSImage(t, leptonBin, imagePath, blobdev, corpusDir, 4096)
 	unmount := mountLepton(t, leptonBin, imagePath, blobdev, mntDir)
 	defer unmount()
 
@@ -238,23 +240,18 @@ func TestXfstests(t *testing.T) {
 	mntDir := filepath.Join("/tmp", "mnt.xfstests")
 
 	// Ensure xfstests is built (setup_xfstests.sh handles deps).
-	if _, err := os.Stat(filepath.Join(xfstestsDir, "check")); os.IsNotExist(err) {
-		setupScript, err := filepath.Abs(filepath.Join("..", "scripts", "setup_xfstests.sh"))
-		require.NoError(t, err)
-		require.FileExists(t, setupScript)
-
-		out, err := exec.Command("bash", setupScript).CombinedOutput()
-		require.NoError(t, err, "setup_xfstests.sh failed:\n%s", string(out))
-	}
+	setupXfstests(t, xfstestsDir)
+	leptonBin := mustLookupExecutable(t, "lepton")
 
 	// Generate corpus for testing.
+	t.Log("Generating corpus...")
 	corpus := texture.MakeStandardCorpus(t, corpusDir)
 	_ = os.Remove(imagePath)
 	_ = os.Remove(blobdev)
 
 	// Build LeptonFS image and mount it.
-	leptonBin := mustLookupExecutable(t, "lepton")
-	buildLeptonFSImage(t, leptonBin, imagePath, blobdev, corpus.Dir)
+	t.Log("Building LeptonFS image...")
+	buildLeptonFSImage(t, leptonBin, imagePath, blobdev, corpus.Dir, 4096)
 
 	// Install the FUSE mount helper used by xfstests.
 	installMountHelper(t, leptonBin, imagePath, blobdev)

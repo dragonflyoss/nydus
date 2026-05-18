@@ -22,13 +22,13 @@ test-integration: release
 		LEPTONFS_RUN_XFSTESTS=1 \
 		$(GO) test -v -timeout 600s ./...
 
-# Run performance benchmark (requires root, fio, ~2min).
-# Compares Rust `lepton mount` vs C erofsfuse (auto-detected or EROFS_C_FUSE=path).
+# Run performance benchmark (requires root, fio, ~5min).
+# Compares Lepton vs C erofsfuse.
 test-perf: release
 	cd tests/integration && \
 		sudo env "PATH=$(PATH)" "HOME=$(HOME)" \
 		"GOMODCACHE=$$($(GO) env GOMODCACHE)" \
-		EROFS_RUN_PERF=1 \
+		LEPTONFS_RUN_PERF=1 \
 		$(GO) test -v -run TestPerf -timeout 300s ./...
 
 clean:

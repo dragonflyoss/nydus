@@ -12,6 +12,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setupXfstests checks if the xfstests "check" script is present in the given directory, and if not, runs the setup_xfstests.sh script to
+// set up the xfstests environment.
+func setupXfstests(t *testing.T, dir string) {
+	if _, err := os.Stat(filepath.Join(dir, "check")); os.IsNotExist(err) {
+		script, err := filepath.Abs(filepath.Join("..", "scripts", "setup_xfstests.sh"))
+		require.NoError(t, err)
+		require.FileExists(t, script)
+
+		out, err := exec.Command("bash", script).CombinedOutput()
+		require.NoError(t, err, "setup_xfstests.sh failed:\n%s", out)
+	}
+}
+
+// setupCErofsfuse checks if the erofsfuse executable is available on the system, and if not, runs the setup_erofsfuse.sh script to set it up.
+func setupCErofsfuse(t *testing.T) {
+	if _, err := exec.LookPath("erofsfuse"); err != nil {
+		script, err := filepath.Abs(filepath.Join("..", "scripts", "setup_erofsfuse.sh"))
+		require.NoError(t, err)
+
+		out, err := exec.Command("bash", script).CombinedOutput()
+		require.NoError(t, err, "setup_erofsfuse.sh failed:\n%s", out)
+	}
+}
+
+// mustLookupExecutable is a test helper that wraps lookupExecutable and fails the test if the executable is not found.
+func mustLookupExecutable(t *testing.T, name string) string {
+	p, err := lookupExecutable(name)
+	require.NoError(t, err)
+	return p
+}
+
 // lookupExecutable tries to find the given executable name on PATH or unorderedly under ../../target/{release,debug}/.
 // This allows the tests to run without requiring the user to have installed the binary or to have built it in
 // a specific way.
@@ -35,14 +66,55 @@ func lookupExecutable(name string) (string, error) {
 	return "", fmt.Errorf("%s not found on PATH or in target/{release,debug}/", name)
 }
 
-// mustLookupExecutable is a test helper that wraps lookupExecutable and fails the test if the executable is not found.
-func mustLookupExecutable(t *testing.T, name string) string {
-	p, err := lookupExecutable(name)
-	if err != nil {
-		require.NoError(t, err)
+// mustLookupCErofsFuse is a test helper that wraps lookupCErofsFuseExecutable and fails the test if the erofsfuse executable is not found.
+func mustLookupCErofsFuse(t *testing.T) string {
+	p, err := lookupCErofsFuseExecutable()
+	require.NoError(t, err)
+	return p
+}
+
+// lookupCErofsFuseExecutable tries to find the erofsfuse executable, which is required for comparison testing.
+// It first checks the EROFS_C_FUSE environment variable, then looks in common locations, and
+// finally checks the PATH.
+func lookupCErofsFuseExecutable() (string, error) {
+	if p := os.Getenv("EROFS_C_FUSE"); p != "" {
+		return p, nil
 	}
 
+	for _, p := range []string{
+		"/usr/bin/erofsfuse",
+		"/usr/local/bin/erofsfuse",
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+
+	if p, err := exec.LookPath("erofsfuse"); err == nil {
+		return p, nil
+	}
+
+	return "", fmt.Errorf("erofsfuse not found, set EROFS_C_FUSE=path to enable comparison")
+}
+
+// mustLookupFio is a test helper that wraps lookupExecutable for "fio" and fails the test if fio is not found.
+func mustLookupFio(t *testing.T) string {
+	p, err := exec.LookPath("fio")
+	require.NoError(t, err, "fio not found; install with: apt-get install fio")
 	return p
+}
+
+// dropCaches drops the Linux page cache, dentries, and inodes by writing to /proc/sys/vm/drop_caches.
+func dropCaches(t *testing.T) {
+	// Sync the filesystem to ensure all dirty data is flushed to disk before dropping caches.
+	syscall.Sync()
+
+	// Write "3" to /proc/sys/vm/drop_caches to drop page cache, dentries, and inodes.
+	err := os.WriteFile("/proc/sys/vm/drop_caches", []byte("3"), 0644)
+	require.NoError(t, err)
+
+	// Wait a moment to allow the system to drop caches before proceeding with the test.
+	time.Sleep(500 * time.Millisecond)
 }
 
 // isMountpoint reports whether path is currently a mountpoint.
@@ -50,10 +122,52 @@ func isMountpoint(path string) bool {
 	return exec.Command("mountpoint", "-q", path).Run() == nil
 }
 
+// mountCErofsFuse mounts the EROFS image at imagePath using the C erofsfuse implementation and
+// returns a cleanup function to unmount it.
+func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, blobdev, mnt string) (cleanup func()) {
+	_ = exec.Command("fusermount", "-u", mnt).Run()
+	require.NoError(t, os.MkdirAll(mnt, 0755))
+
+	// Invocation: erofsfuse [--device=BLOB] IMAGE MOUNTPOINT -f
+	args := []string{}
+	if blobdev != "" {
+		args = append(args, "--device="+blobdev)
+	}
+	args = append(args, imagePath, mnt, "-f")
+
+	cmd := exec.Command(cErofsFuseBin, args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start())
+
+	// Wait for the mountpoint to become ready.
+	require.Eventually(t, func() bool {
+		return isMountpoint(mnt)
+	}, 10*time.Second, 200*time.Millisecond, "erofsfuse failed to mount within 10s")
+
+	return func() {
+		_ = exec.Command("fusermount", "-u", mnt).Run()
+
+		// Send SIGTERM and don't block indefinitely while waiting.
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+			}
+		}
+	}
+}
+
 // mountLepton runs `lepton mount` in the background and returns a cleanup
 // function that unmounts the filesystem and reaps the child process.
 func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (cleanup func()) {
+	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
+
 	args := []string{"mount", imagePath, mnt}
 	if blobdev != "" {
 		args = append(args, "--blobdev", blobdev)
@@ -88,8 +202,8 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 
 // buildLeptonFSImage invokes `lepton build` to create an LeptonFS image and its
 // associated blob device file.
-func buildLeptonFSImage(t *testing.T, leptonBin, imagePath, blobdev, srcDir string) {
-	args := []string{"build", imagePath, srcDir, "--chunksize", "4096"}
+func buildLeptonFSImage(t *testing.T, leptonBin, imagePath, blobdev, srcDir string, chunkSize int) {
+	args := []string{"build", imagePath, srcDir, "--chunksize", fmt.Sprint(chunkSize)}
 	if blobdev != "" {
 		args = append(args, "--blobdev", blobdev)
 	}

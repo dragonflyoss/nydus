@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -282,4 +283,54 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreateFile(t, "names/.hidden_dir/file", []byte("in hidden dir"))
 
 	return c
+}
+
+// MakePerfCorpus creates a corpus designed to amplify performance differences between LeptonFS and erofsfuse.
+func MakePerfCorpus(t *testing.T, dir string) {
+	c := NewCorpus(t, dir)
+	largeFileCount := GetEnvAsInt("LEPTONFS_PERF_LARGE_FILE_COUNT", 8)
+	largeFileSize := GetEnvAsInt("LEPTONFS_PERF_LARGE_FILE_SIZE", 64*1024*1024)
+	mediumFileCount := GetEnvAsInt("LEPTONFS_PERF_MEDIUM_FILE_COUNT", 256)
+	mediumFileSize := GetEnvAsInt("LEPTONFS_PERF_MEDIUM_FILE", 1024*1024)
+	smallFileCount := GetEnvAsInt("LEPTONFS_PERF_SMALL_FILE_COUNT", 10000)
+	readdirDirs := GetEnvAsInt("LEPTONFS_PERF_READDIR_DIRS", 128)
+	readdirFilesPerDir := GetEnvAsInt("LEPTONFS_PERF_READDIR_FILES_PER_DIR", 256)
+
+	for i := range largeFileCount {
+		c.CreateLargeFile(t, fmt.Sprintf("large/file_%d.bin", i), largeFileSize)
+	}
+
+	for i := range mediumFileCount {
+		c.CreateRandomFile(t, fmt.Sprintf("medium/file_%04d.bin", i), mediumFileSize)
+	}
+
+	for i := range smallFileCount {
+		c.CreateFile(t, fmt.Sprintf("small/file_%04d.txt", i),
+			fmt.Appendf(nil, "content of small file %d\n", i))
+	}
+
+	// Large directory fan-out amplifies readdir cost and triggers repeated
+	// FUSE readdir calls.
+	for d := range readdirDirs {
+		for f := range readdirFilesPerDir {
+			c.CreateFile(t, fmt.Sprintf("dirs/d%02d/f%03d.txt", d, f),
+				fmt.Appendf(nil, "d%d/f%d", d, f))
+		}
+	}
+}
+
+// GetEnvAsInt reads an environment variable as an integer, returning a default value if the variable is
+// not set or cannot be parsed.
+func GetEnvAsInt(key string, defaultValue int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+
+	return parsed
 }
