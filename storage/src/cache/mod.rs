@@ -21,7 +21,6 @@ use std::io::Result;
 use std::sync::Arc;
 use std::time::Instant;
 
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_utils::compress::zlib_random::ZranDecoder;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
 use nydus_utils::{compress, digest};
@@ -33,6 +32,7 @@ use crate::device::{
 };
 use crate::meta::BlobCompressionContextInfo;
 use crate::utils::{alloc_buf, check_crc, check_hash};
+use crate::volatile::VolatileSlice as FileVolatileSlice;
 use crate::{StorageResult, RAFS_MAX_CHUNK_SIZE};
 
 mod cachedfile;

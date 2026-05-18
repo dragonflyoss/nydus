@@ -787,14 +787,14 @@ fn get_sub_iovs_offset(iov_lens: &[usize], skip_size: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::distributions::{Alphanumeric, DistString};
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vmm_sys_util::rand::rand_alphanumerics;
-    use vmm_sys_util::tempfile::TempFile;
+    use tempfile::NamedTempFile as TempFile;
 
     fn temp_path() -> PathBuf {
         PathBuf::from(format!(
             "/tmp/blob_test_{}",
-            rand_alphanumerics(8).to_str().unwrap()
+            Alphanumeric.sample_string(&mut rand::thread_rng(), 8)
         ))
     }
 

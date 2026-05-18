@@ -138,12 +138,12 @@ mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::sync::atomic::Ordering;
-    use vmm_sys_util::tempdir::TempDir;
+    use tempfile::TempDir;
 
     use super::super::persist_map::*;
     use super::*;
     use crate::device::v5::BlobV5ChunkInfo;
-    use crate::test::MockChunkInfo;
+    use crate::test::{MockChunkInfo, TempPath};
 
     #[test]
     fn test_indexed_new_invalid_file_size() {

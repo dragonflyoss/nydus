@@ -12,13 +12,13 @@ use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 use nydus_api::LocalDiskConfig;
 use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 use crate::utils::{readv, MemSliceCursor};
+use crate::volatile::VolatileSlice as FileVolatileSlice;
 
 type LocalDiskResult<T> = std::result::Result<T, LocalDiskError>;
 
