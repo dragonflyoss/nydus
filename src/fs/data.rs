@@ -1,6 +1,7 @@
 use std::io;
 use std::io::Write;
 
+use crate::build::blobchunk::ChunkIndex;
 use crate::metadata::*;
 
 use super::ErofsReader;
@@ -30,6 +31,30 @@ impl ErofsReader {
     fn chunk_index_at(ci_data: &[u8], i: usize) -> &ErofsChunkIndex {
         let off = i * EROFS_CHUNK_INDEX_SIZE;
         cast_ref::<ErofsChunkIndex>(&ci_data[off..])
+    }
+
+    pub fn read_chunk_indexes(
+        &self,
+        nid: u64,
+        inode: &ErofsInode<'_>,
+    ) -> io::Result<Vec<ChunkIndex>> {
+        if inode.size() == 0 {
+            return Ok(Vec::new());
+        }
+
+        let chunkbits = self.chunkbits(inode);
+        let chunksize = 1u64 << chunkbits;
+        let ci_data = self.chunk_indexes(nid, inode)?;
+        let nchunks = inode.size().div_ceil(chunksize) as usize;
+        let mut result = Vec::with_capacity(nchunks);
+        for index in 0..nchunks {
+            let ci = Self::chunk_index_at(ci_data, index);
+            result.push(ChunkIndex {
+                blkaddr: ci.blkaddr(),
+                device_id: ci.device_id(),
+            });
+        }
+        Ok(result)
     }
 
     // ------------------------------------------------------------------
@@ -146,7 +171,7 @@ impl ErofsReader {
                 }
             } else if ci.device_id() > 0 {
                 let blob_offset = (blkaddr * EROFS_BLOCK_SIZE as u64 + chunk_off) as usize;
-                let slice = self.blob_mmap_slice(blob_offset, to_read)?;
+                let slice = self.blob_mmap_slice(ci.device_id(), blob_offset, to_read)?;
                 w.write_all(slice)?;
             } else {
                 let data_offset = (blkaddr * EROFS_BLOCK_SIZE as u64 + chunk_off) as usize;
@@ -258,7 +283,7 @@ impl ErofsReader {
                 // Hole — zeros
             } else if ci.device_id() > 0 {
                 let blob_offset = (blkaddr * EROFS_BLOCK_SIZE as u64 + chunk_off) as usize;
-                let slice = self.blob_mmap_slice(blob_offset, to_read)?;
+                let slice = self.blob_mmap_slice(ci.device_id(), blob_offset, to_read)?;
                 result[buf_pos..buf_pos + to_read].copy_from_slice(slice);
             } else {
                 let data_offset = (blkaddr * EROFS_BLOCK_SIZE as u64 + chunk_off) as usize;
@@ -310,7 +335,7 @@ impl ErofsReader {
                 // Hole — zeros
             } else if ci.device_id() > 0 {
                 let blob_offset = (blkaddr * EROFS_BLOCK_SIZE as u64 + chunk_off) as usize;
-                let slice = self.blob_mmap_slice(blob_offset, to_read)?;
+                let slice = self.blob_mmap_slice(ci.device_id(), blob_offset, to_read)?;
                 result[buf_pos..buf_pos + to_read].copy_from_slice(slice);
             } else {
                 let data_offset = (blkaddr * EROFS_BLOCK_SIZE as u64 + chunk_off) as usize;

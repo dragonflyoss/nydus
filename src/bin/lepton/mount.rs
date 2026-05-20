@@ -5,7 +5,7 @@ use lepton::fs::{ErofsFs, ErofsReader};
 use lepton::tracing::init_tracing;
 use signal_hook::consts::TERM_SIGNALS;
 use signal_hook::iterator::Signals;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::available_parallelism;
 use tracing::{error, info, Level};
@@ -18,27 +18,33 @@ pub enum Driver {
 
 #[derive(Args)]
 pub struct MountArgs {
-    /// EROFS image file.
-    image: String,
+    /// Directory path including lepton data blob.
+    #[arg(long)]
+    pub blob_dir: Option<PathBuf>,
 
-    /// Mount point.
-    mountpoint: String,
+    /// File path to lepton bootstrap.
+    #[arg(long)]
+    pub bootstrap: Option<PathBuf>,
+
+    /// File path to lepton blob.
+    #[arg(long)]
+    pub blob: Option<PathBuf>,
 
     /// Mount driver (default: fuse).
     #[arg(long, value_enum, default_value_t = Driver::Fuse)]
     pub driver: Driver,
 
-    /// Optional blob device for chunk-based files.
+    /// Directory path to mount lepton filesystem.
     #[arg(long)]
-    blobdev: Option<String>,
+    pub mountpoint: PathBuf,
 
     /// Number of worker threads.
-    #[arg(long, default_value_t = default_threads())]
-    threads: usize,
+    #[arg(long, hide = true, default_value_t = default_threads())]
+    pub threads: usize,
 
     /// Filesystem name shown in /proc/mounts SOURCE column.
-    #[arg(long, default_value = "lepton")]
-    fsname: String,
+    #[arg(long, hide = true, default_value = "lepton")]
+    pub fsname: String,
 
     #[arg(
         short = 'l',
@@ -46,24 +52,29 @@ pub struct MountArgs {
         default_value = "info",
         help = "Specify the logging level [trace, debug, info, warn, error]"
     )]
-    log_level: Level,
+    pub log_level: Level,
 
     #[arg(
         long,
         default_value_os_t = PathBuf::from("/var/log/lepton/"),
         help = "Specify the log directory"
     )]
-    log_dir: PathBuf,
+    pub log_dir: PathBuf,
 
     #[arg(
         long,
         default_value_t = 6,
         help = "Specify the max number of log files"
     )]
-    log_max_files: usize,
+    pub log_max_files: usize,
 
-    #[arg(long, default_value_t = true, help = "Specify whether to print log")]
-    console: bool,
+    #[arg(
+        long,
+        hide = true,
+        default_value_t = true,
+        help = "Specify whether to print log"
+    )]
+    pub console: bool,
 }
 
 /// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
@@ -83,20 +94,28 @@ pub fn run_fuse_mount(args: MountArgs) -> Result<()> {
         args.console,
     );
 
-    let mountpoint = Path::new(&args.mountpoint);
+    let mountpoint = &args.mountpoint;
     if !mountpoint.is_dir() {
-        bail!("mountpoint {} is not a directory", args.mountpoint);
+        bail!("mountpoint {} is not a directory", mountpoint.display());
     }
 
-    // ErofsReader::open() is async — use a temporary tokio runtime for initialization.
-    let reader = {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to build tokio runtime")?;
-        rt.block_on(ErofsReader::open(&args.image, args.blobdev.as_deref()))
-            .context("failed to open EROFS image")?
-    };
+    match (&args.blob, &args.bootstrap, &args.blob_dir) {
+        (Some(_), None, None) => {}
+        (None, Some(_), Some(blob_dir)) if blob_dir.is_dir() => {}
+        (None, Some(_), Some(blob_dir)) => {
+            bail!("blob-dir {} is not a directory", blob_dir.display())
+        }
+        _ => {
+            bail!("mount expects either --blob <path> or --bootstrap <path> --blob-dir <dir>")
+        }
+    }
+
+    let reader = ErofsReader::open(
+        args.blob.as_deref(),
+        args.bootstrap.as_deref(),
+        args.blob_dir.as_deref(),
+    )
+    .context("failed to open EROFS image")?;
     info!(
         "opened EROFS image: root_nid={}, blocks={}, inos={}",
         reader.sb().root_nid(),
@@ -116,7 +135,7 @@ pub fn run_fuse_mount(args: MountArgs) -> Result<()> {
 
     let mut session =
         Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {}", e))?;
-    info!("mounted on {}", args.mountpoint);
+    info!("mounted on {}", mountpoint.display());
 
     let mut unmounter = session.unmount_callable();
 

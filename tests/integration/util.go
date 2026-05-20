@@ -5,12 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+var sha256FilenamePattern = regexp.MustCompile("^[0-9a-f]{64}$")
 
 // setupXfstests checks if the xfstests "check" script is present in the given directory, and if not, runs the setup_xfstests.sh script to
 // set up the xfstests environment.
@@ -168,9 +171,13 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	args := []string{"mount", imagePath, mnt}
-	if blobdev != "" {
-		args = append(args, "--blobdev", blobdev)
+	args := []string{"mount", "--mountpoint", mnt}
+	if imagePath != "" && blobdev != "" {
+		args = append(args, "--bootstrap", imagePath, "--blob-dir", filepath.Dir(blobdev))
+	} else if blobdev != "" {
+		args = append(args, "--blob", blobdev)
+	} else {
+		require.FailNow(t, "mountLepton requires either blobdev or imagePath+blobdev")
 	}
 
 	cmd := exec.Command(leptonBin, args...)
@@ -200,14 +207,96 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 	}
 }
 
+// mountLeptonBootstrap runs `lepton mount` using a bootstrap plus a blob directory.
+func mountLeptonBootstrap(t *testing.T, leptonBin, bootstrapPath, blobDir, mnt string) (cleanup func()) {
+	_ = exec.Command("fusermount", "-u", mnt).Run()
+	require.NoError(t, os.MkdirAll(mnt, 0755))
+
+	args := []string{"mount", "--bootstrap", bootstrapPath, "--blob-dir", blobDir, "--mountpoint", mnt}
+	cmd := exec.Command(leptonBin, args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start())
+
+	require.Eventually(t, func() bool {
+		return isMountpoint(mnt)
+	}, 10*time.Second, 200*time.Millisecond, "lepton bootstrap mount failed to mount within 10s")
+
+	return func() {
+		_ = exec.Command("fusermount", "-u", mnt).Run()
+
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+			}
+		}
+	}
+}
+
 // buildLeptonFSImage invokes `lepton build` to create an LeptonFS image and its
 // associated blob device file.
-func buildLeptonFSImage(t *testing.T, leptonBin, imagePath, blobdev, srcDir string, chunkSize int) {
-	args := []string{"build", imagePath, srcDir, "--chunksize", fmt.Sprint(chunkSize)}
-	if blobdev != "" {
-		args = append(args, "--blobdev", blobdev)
+func buildLeptonFSImage(t *testing.T, leptonBin, imagePath, blobdev, srcDir string, chunkSize int) string {
+	args := []string{"build", "--blob", blobdev, "--chunk-size", fmt.Sprint(chunkSize)}
+	if imagePath != "" {
+		args = append(args, "--bootstrap", imagePath)
 	}
+	args = append(args, srcDir)
 
 	out, err := exec.Command(leptonBin, args...).CombinedOutput()
 	require.NoError(t, err, "lepton build failed: %s", string(out))
+	return blobdev
+}
+
+func buildLeptonFSImageToDir(t *testing.T, leptonBin, imagePath, blobDir, srcDir string, chunkSize int) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(blobDir, 0755))
+	before := listFilesInDir(t, blobDir)
+
+	args := []string{"build", "--blob-dir", blobDir, "--chunk-size", fmt.Sprint(chunkSize)}
+	if imagePath != "" {
+		args = append(args, "--bootstrap", imagePath)
+	}
+	args = append(args, srcDir)
+
+	out, err := exec.Command(leptonBin, args...).CombinedOutput()
+	require.NoError(t, err, "lepton build --blob-dir failed: %s", string(out))
+
+	after := listFilesInDir(t, blobDir)
+	var created []string
+	for path := range after {
+		if _, existed := before[path]; existed {
+			continue
+		}
+		created = append(created, path)
+	}
+	require.Len(t, created, 1, "expected exactly one new blob in blob-dir")
+	require.True(t, sha256FilenamePattern.MatchString(filepath.Base(created[0])), "blob file name must be sha256: %s", created[0])
+	return created[0]
+}
+
+// mergeLeptonBootstrap invokes `lepton merge` and writes an overlaid bootstrap.
+func mergeLeptonBootstrap(t *testing.T, leptonBin, bootstrapPath string, sources ...string) {
+	args := []string{"merge", "--bootstrap", bootstrapPath}
+	args = append(args, sources...)
+
+	out, err := exec.Command(leptonBin, args...).CombinedOutput()
+	require.NoError(t, err, "lepton merge failed: %s", string(out))
+}
+
+func listFilesInDir(t *testing.T, dir string) map[string]struct{} {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	files := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			files[filepath.Join(dir, entry.Name())] = struct{}{}
+		}
+	}
+	return files
 }

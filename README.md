@@ -125,14 +125,28 @@ make test
 Integration tests (requires root):
 
 ```bash
-# Runs verification (~1s) + xfstests regression (~90s).
+# Runs end-to-end verification from tests/integration/e2e_test.go.
+make test-e2e
+
+# Run a single e2e test.
+make test-e2e E2E_TEST=TestMergedMountE2E
+
+# Run xfstests regression separately.
 # First run installs xfstests dependencies automatically.
-make test-integration
+make test-xfstests
 ```
 
 The integration tests live under `tests/integration/` (Go) and reuse
 `tests/scripts/setup_xfstests.sh` for environment setup and
-`tests/scripts/xfstests_erofs.exclude` for the xfstests exclusion list.
+`tests/scripts/xfstests_leptonfs.exclude` for the xfstests exclusion list.
+
+Useful knobs:
+
+- `E2E_TEST=<regex>` — passed to `go test -run` for `make test-e2e`.
+- `E2E_GO_TEST_ARGS='...'` — extra `go test` arguments for `make test-e2e`.
+- `XFSTESTS_GO_TEST_ARGS='...'` — extra `go test` arguments for `make test-xfstests`.
+- `SUDO=` — run without sudo when you only want compile-level verification.
+- `GO_BIN=/abs/path/to/go` — force a specific Go binary when `sudo` cannot find `go`.
 
 Performance benchmark (requires root, fio):
 

@@ -49,6 +49,8 @@ impl ErofsChunkIndex {
 // ErofsDeviceSlot — 128 bytes
 // =====================================================================
 
+pub const EROFS_BLOB_ID_SIZE: usize = 32;
+
 #[repr(C, packed)]
 pub struct ErofsDeviceSlot {
     pub tag: [u8; 64],
@@ -67,6 +69,27 @@ impl ErofsDeviceSlot {
         set_u32(&mut v.blocks_lo, blocks as u32);
         set_u32(&mut v.blocks_hi, (blocks >> 32) as u32);
         v
+    }
+
+    pub fn with_blob_id(blocks: u64, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> Self {
+        let mut v = Self::new(blocks);
+        v.set_blob_id(blob_id);
+        v
+    }
+
+    pub fn blocks(&self) -> u64 {
+        ((get_u32(&self.blocks_hi) as u64) << 32) | get_u32(&self.blocks_lo) as u64
+    }
+
+    pub fn set_blob_id(&mut self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) {
+        self.tag[..EROFS_BLOB_ID_SIZE].copy_from_slice(blob_id);
+        self.tag[EROFS_BLOB_ID_SIZE..].fill(0);
+    }
+
+    pub fn blob_id(&self) -> [u8; EROFS_BLOB_ID_SIZE] {
+        let mut blob_id = [0u8; EROFS_BLOB_ID_SIZE];
+        blob_id.copy_from_slice(&self.tag[..EROFS_BLOB_ID_SIZE]);
+        blob_id
     }
 
     pub fn as_bytes(&self) -> &[u8] {

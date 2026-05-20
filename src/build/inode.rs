@@ -59,7 +59,10 @@ pub struct InodeInfo {
 
 pub enum InodeData {
     /// Regular file: chunk indexes for chunk-based layout.
-    RegularFile { chunk_indexes: Vec<ChunkIndex> },
+    RegularFile {
+        chunk_indexes: Vec<ChunkIndex>,
+        chunkbits: u32,
+    },
     /// Directory: sorted children.
     Directory {
         children: Vec<DirEntry>,
@@ -232,7 +235,10 @@ fn build_tree_recursive(
             nid: 0,
             meta_offset: 0,
             is_extended,
-            data: InodeData::RegularFile { chunk_indexes },
+            data: InodeData::RegularFile {
+                chunk_indexes,
+                chunkbits: chunksize.trailing_zeros(),
+            },
             xattrs,
         });
         Ok(inode_idx)
@@ -295,7 +301,7 @@ fn target_to_bytes(target: &Path) -> Vec<u8> {
     target.as_os_str().as_bytes().to_vec()
 }
 
-fn mode_to_file_type(mode: u16) -> u8 {
+pub fn mode_to_file_type(mode: u16) -> u8 {
     match mode & 0o170000 {
         0o100000 => EROFS_FT_REG_FILE,
         0o040000 => EROFS_FT_DIR,
@@ -319,7 +325,7 @@ pub fn inode_meta_size(inode: &InodeInfo, _chunkbits: u32, _blkszbits: u32) -> u
     let xattr_size = xattr_ibody_size(&inode.xattrs);
 
     match &inode.data {
-        InodeData::RegularFile { chunk_indexes } => {
+        InodeData::RegularFile { chunk_indexes, .. } => {
             if chunk_indexes.is_empty() {
                 base + xattr_size
             } else {
@@ -374,18 +380,21 @@ fn serialize_xattrs(buf: &mut [u8], offset: usize, xattrs: &[(u8, Vec<u8>, Vec<u
 }
 
 /// Serialize an inode to bytes and write it at the given offset in a buffer.
-pub fn serialize_inode(inode: &InodeInfo, epoch: u64, chunkbits: u32) -> Vec<u8> {
+pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     let blkszbits = EROFS_BLKSZBITS as u32;
-    let meta_size = inode_meta_size(inode, chunkbits, blkszbits);
+    let meta_size = inode_meta_size(inode, blkszbits, blkszbits);
     let mut buf = vec![0u8; meta_size];
 
     let xattr_size = xattr_ibody_size(&inode.xattrs);
     let i_xattr_icount = xattr_icount(xattr_size);
 
     match &inode.data {
-        InodeData::RegularFile { chunk_indexes } => {
+        InodeData::RegularFile {
+            chunk_indexes,
+            chunkbits,
+        } => {
             let datalayout = EROFS_INODE_CHUNK_BASED;
-            let cf = chunk_format(chunkbits, blkszbits);
+            let cf = chunk_format(*chunkbits, blkszbits);
             let i_u = cf as u32;
 
             if inode.is_extended {

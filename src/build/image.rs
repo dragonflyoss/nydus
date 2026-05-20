@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::metadata::*;
 
@@ -16,7 +16,7 @@ pub fn write_image(
     root_nid: u16,
     total_inodes: u64,
     epoch: u64,
-    blob_blocks: u64,
+    device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
 ) -> Result<()> {
     let block_size = EROFS_BLOCK_SIZE as usize;
@@ -28,8 +28,11 @@ pub fn write_image(
     let feature_incompat =
         EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
 
-    let devt_slotoff: u16 =
-        (EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE) as u16 / EROFS_DEVICESLOT_SIZE as u16;
+    let devt_slotoff: u16 = if device_slots.is_empty() {
+        0
+    } else {
+        (EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE) as u16 / EROFS_DEVICESLOT_SIZE as u16
+    };
 
     // --- Block 0 ---
     let mut block0 = vec![0u8; block_size];
@@ -42,17 +45,24 @@ pub fn write_image(
         epoch,
         total_blocks,
         meta_blkaddr,
-        1, // extra_devices = 1 (blobdev)
+        device_slots.len() as u16,
         devt_slotoff,
         uuid,
     );
     let sb_offset = EROFS_SUPER_OFFSET as usize;
     block0[sb_offset..sb_offset + EROFS_SB_BASE_SIZE].copy_from_slice(sb.as_bytes());
 
-    let devslot = ErofsDeviceSlot::new(blob_blocks);
     let devslot_offset = sb_offset + EROFS_SB_BASE_SIZE;
-    block0[devslot_offset..devslot_offset + EROFS_DEVICESLOT_SIZE]
-        .copy_from_slice(devslot.as_bytes());
+    let device_table_end = devslot_offset + device_slots.len() * EROFS_DEVICESLOT_SIZE;
+    if device_table_end > block0.len() {
+        bail!("device table does not fit in block 0")
+    }
+
+    for (idx, devslot) in device_slots.iter().enumerate() {
+        let start = devslot_offset + idx * EROFS_DEVICESLOT_SIZE;
+        let end = start + EROFS_DEVICESLOT_SIZE;
+        block0[start..end].copy_from_slice(devslot.as_bytes());
+    }
 
     image.write_all(&block0)?;
 

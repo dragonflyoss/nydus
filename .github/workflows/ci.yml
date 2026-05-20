@@ -105,11 +105,10 @@ jobs:
         with:
           go-version: '1.25.5'
 
-      - name: Build and install lepton binary
+      - name: Run e2e tests
         run: |
-          cargo build --release
-          sudo install -m 700 ./target/release/lepton /usr/sbin/
+          make test-e2e
 
-      - name: Run integration tests (verify + xfstests)
+      - name: Run xfstests
         run: |
-          make test-integration
+          make test-xfstests

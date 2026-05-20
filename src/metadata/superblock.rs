@@ -63,6 +63,9 @@ impl ErofsSuperblock {
     pub fn extra_devices(&self) -> u16 {
         get_u16(&self.extra_devices)
     }
+    pub fn devt_slotoff(&self) -> u16 {
+        get_u16(&self.devt_slotoff)
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub fn new(
