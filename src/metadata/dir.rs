@@ -2,10 +2,7 @@ use std::mem;
 
 use super::*;
 
-// =====================================================================
-// ErofsDirent — 12 bytes
-// =====================================================================
-
+/// EROFS directory entry — 12 bytes, `#[repr(C, packed)]`.
 #[repr(C, packed)]
 pub struct ErofsDirent {
     pub nid: [u8; 8],
@@ -20,9 +17,11 @@ impl ErofsDirent {
     pub fn nid(&self) -> u64 {
         get_u64(&self.nid)
     }
+
     pub fn nameoff(&self) -> u16 {
         get_u16(&self.nameoff)
     }
+
     pub fn file_type(&self) -> u8 {
         self.file_type
     }

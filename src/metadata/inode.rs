@@ -2,10 +2,7 @@ use std::mem;
 
 use super::*;
 
-// =====================================================================
-// ErofsInodeCompact — 32 bytes
-// =====================================================================
-
+/// EROFS on-disk inode in compact format (32 bytes).
 #[repr(C, packed)]
 pub struct ErofsInodeCompact {
     pub i_format: [u8; 2],
@@ -27,30 +24,39 @@ impl ErofsInodeCompact {
     pub fn format(&self) -> u16 {
         get_u16(&self.i_format)
     }
+
     pub fn xattr_icount(&self) -> u16 {
         get_u16(&self.i_xattr_icount)
     }
+
     pub fn mode(&self) -> u16 {
         get_u16(&self.i_mode)
     }
+
     pub fn nb(&self) -> u16 {
         get_u16(&self.i_nb)
     }
+
     pub fn size(&self) -> u64 {
         get_u32(&self.i_size) as u64
     }
+
     pub fn mtime_delta(&self) -> u32 {
         get_u32(&self.i_mtime)
     }
+
     pub fn i_u(&self) -> u32 {
         get_u32(&self.i_u)
     }
+
     pub fn ino(&self) -> u32 {
         get_u32(&self.i_ino)
     }
+
     pub fn uid(&self) -> u32 {
         get_u16(&self.i_uid) as u32
     }
+
     pub fn gid(&self) -> u32 {
         get_u16(&self.i_gid) as u32
     }
@@ -87,10 +93,7 @@ impl ErofsInodeCompact {
     }
 }
 
-// =====================================================================
-// ErofsInodeExtended — 64 bytes
-// =====================================================================
-
+/// EROFS on-disk inode in extended format (64 bytes).
 #[repr(C, packed)]
 pub struct ErofsInodeExtended {
     pub i_format: [u8; 2],
@@ -114,36 +117,47 @@ impl ErofsInodeExtended {
     pub fn format(&self) -> u16 {
         get_u16(&self.i_format)
     }
+
     pub fn xattr_icount(&self) -> u16 {
         get_u16(&self.i_xattr_icount)
     }
+
     pub fn mode(&self) -> u16 {
         get_u16(&self.i_mode)
     }
+
     pub fn nb(&self) -> u16 {
         get_u16(&self.i_nb)
     }
+
     pub fn size(&self) -> u64 {
         get_u64(&self.i_size)
     }
+
     pub fn i_u(&self) -> u32 {
         get_u32(&self.i_u)
     }
+
     pub fn ino(&self) -> u32 {
         get_u32(&self.i_ino)
     }
+
     pub fn uid(&self) -> u32 {
         get_u32(&self.i_uid)
     }
+
     pub fn gid(&self) -> u32 {
         get_u32(&self.i_gid)
     }
+
     pub fn mtime(&self) -> u64 {
         get_u64(&self.i_mtime)
     }
+
     pub fn mtime_nsec(&self) -> u32 {
         get_u32(&self.i_mtime_nsec)
     }
+
     pub fn nlink(&self) -> u32 {
         get_u32(&self.i_nlink)
     }
@@ -184,11 +198,8 @@ impl ErofsInodeExtended {
     }
 }
 
-// =====================================================================
-// ErofsInode — unified view over compact / extended on-disk inode
-// =====================================================================
-
-/// Zero-copy view of an on-disk inode. Borrows directly from mmap.
+/// Erofs inode provides a unified interface to both compact and extended formats. Zero-copy, but
+/// requires the caller to provide the raw byte slice (e.g. from mmap) and handle the lifetime.
 pub enum ErofsInode<'a> {
     Compact(&'a ErofsInodeCompact),
     Extended(&'a ErofsInodeExtended),
@@ -203,6 +214,7 @@ impl<'a> ErofsInode<'a> {
                 "too small for inode header",
             ));
         }
+
         let i_format = u16::from_le_bytes([data[0], data[1]]);
         let is_compact = (i_format >> EROFS_I_VERSION_BIT) & 1 == EROFS_INODE_LAYOUT_COMPACT;
         if is_compact {
@@ -212,6 +224,7 @@ impl<'a> ErofsInode<'a> {
                     "too small for compact inode",
                 ));
             }
+
             Ok(ErofsInode::Compact(cast_ref::<ErofsInodeCompact>(data)))
         } else {
             if data.len() < EROFS_INODE_EXTENDED_SIZE {
@@ -220,6 +233,7 @@ impl<'a> ErofsInode<'a> {
                     "too small for extended inode",
                 ));
             }
+
             Ok(ErofsInode::Extended(cast_ref::<ErofsInodeExtended>(data)))
         }
     }
@@ -355,8 +369,7 @@ impl<'a> ErofsInode<'a> {
     }
 }
 
-// ---------- format helpers ----------
-
+/// Helper functions to construct i_format values for compact and extended inodes.
 pub fn compact_i_format(datalayout: u16, nlink_1: bool) -> u16 {
     let mut fmt = (EROFS_INODE_LAYOUT_COMPACT << EROFS_I_VERSION_BIT)
         | (datalayout << EROFS_I_DATALAYOUT_BIT);

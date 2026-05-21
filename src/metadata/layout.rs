@@ -13,8 +13,10 @@ use super::{EROFS_BLOCK_SIZE, EROFS_SLOTSIZE};
 pub struct MetadataLayout {
     /// The metadata byte buffer.
     pub buf: Vec<u8>,
+
     /// Current allocation cursor.
     cursor: usize,
+
     /// Starting block address of the metadata area in the image.
     pub meta_blkaddr: u32,
 }

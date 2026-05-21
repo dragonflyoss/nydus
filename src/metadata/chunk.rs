@@ -2,10 +2,7 @@ use std::mem;
 
 use super::*;
 
-// =====================================================================
-// ErofsChunkIndex — 8 bytes
-// =====================================================================
-
+/// EROFS chunk index entry — 8 bytes, `#[repr(C, packed)]`.
 #[repr(C, packed)]
 pub struct ErofsChunkIndex {
     pub startblk_hi: [u8; 2],
@@ -45,12 +42,9 @@ impl ErofsChunkIndex {
     }
 }
 
-// =====================================================================
-// ErofsDeviceSlot — 128 bytes
-// =====================================================================
-
 pub const EROFS_BLOB_ID_SIZE: usize = 32;
 
+/// EROFS device slot entry — 128 bytes, `#[repr(C, packed)]`.
 #[repr(C, packed)]
 pub struct ErofsDeviceSlot {
     pub tag: [u8; 64],

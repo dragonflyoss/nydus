@@ -17,8 +17,7 @@ pub use superblock::*;
 
 use std::mem;
 
-// ---------- constants ----------
-
+/// EROFS on-disk format constants.
 pub const EROFS_SUPER_MAGIC_V1: u32 = 0xE0F5_E1E2;
 pub const EROFS_SUPER_OFFSET: u64 = 1024;
 
@@ -35,7 +34,6 @@ pub const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 pub const EROFS_INODE_FLAT_PLAIN: u16 = 0;
 pub const EROFS_INODE_FLAT_INLINE: u16 = 2;
 pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
-
 pub const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;
 pub const EROFS_INODE_LAYOUT_EXTENDED: u16 = 1;
 pub const EROFS_I_VERSION_BIT: u16 = 0;
@@ -54,15 +52,13 @@ pub const EROFS_FT_SYMLINK: u8 = 7;
 
 pub const EROFS_NULL_ADDR: u64 = u64::MAX;
 
-// ---------- xattr constants ----------
-
+/// EROFS xattr name indexes.
 pub const EROFS_XATTR_INDEX_USER: u8 = 1;
 pub const EROFS_XATTR_INDEX_POSIX_ACL_ACCESS: u8 = 2;
 pub const EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
 pub const EROFS_XATTR_INDEX_TRUSTED: u8 = 4;
 pub const EROFS_XATTR_INDEX_LUSTRE: u8 = 5;
 pub const EROFS_XATTR_INDEX_SECURITY: u8 = 6;
-
 pub const EROFS_XATTR_IBODY_HEADER_SIZE: usize = 12;
 pub const EROFS_XATTR_ENTRY_HEADER_SIZE: usize = 4;
 
@@ -106,11 +102,13 @@ pub fn xattr_ibody_size(xattrs: &[(u8, Vec<u8>, Vec<u8>)]) -> usize {
     if xattrs.is_empty() {
         return 0;
     }
+
     let mut size = EROFS_XATTR_IBODY_HEADER_SIZE; // 12 bytes header
     for (_, suffix, value) in xattrs {
         let entry_size = EROFS_XATTR_ENTRY_HEADER_SIZE + suffix.len() + value.len();
         size += round_up(entry_size, 4);
     }
+
     size
 }
 
@@ -132,28 +130,32 @@ pub const EROFS_CHUNK_INDEX_SIZE: usize = 8;
 pub const EROFS_DIRENT_SIZE: usize = 12;
 pub const EROFS_DEVICESLOT_SIZE: usize = 128;
 
-// ---------- little-endian byte helpers ----------
-
+/// Read a little-endian integer from a byte array.
 #[inline(always)]
 pub(crate) fn get_u16(b: &[u8; 2]) -> u16 {
     u16::from_le_bytes(*b)
 }
+
 #[inline(always)]
 pub(crate) fn get_u32(b: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*b)
 }
+
 #[inline(always)]
 pub(crate) fn get_u64(b: &[u8; 8]) -> u64 {
     u64::from_le_bytes(*b)
 }
+
 #[inline(always)]
 pub(crate) fn set_u16(b: &mut [u8; 2], v: u16) {
     *b = v.to_le_bytes();
 }
+
 #[inline(always)]
 pub(crate) fn set_u32(b: &mut [u8; 4], v: u32) {
     *b = v.to_le_bytes();
 }
+
 #[inline(always)]
 pub(crate) fn set_u64(b: &mut [u8; 8], v: u64) {
     *b = v.to_le_bytes();

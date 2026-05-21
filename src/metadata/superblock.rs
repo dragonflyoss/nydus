@@ -39,33 +39,43 @@ impl ErofsSuperblock {
     pub fn magic(&self) -> u32 {
         get_u32(&self.magic)
     }
+
     pub fn feature_compat(&self) -> u32 {
         get_u32(&self.feature_compat)
     }
+
     pub fn feature_incompat(&self) -> u32 {
         get_u32(&self.feature_incompat)
     }
+
     pub fn root_nid(&self) -> u64 {
         get_u16(&self.rootnid_2b) as u64
     }
+
     pub fn inos(&self) -> u64 {
         get_u64(&self.inos)
     }
+
     pub fn epoch(&self) -> u64 {
         get_u64(&self.epoch)
     }
+
     pub fn fixed_nsec(&self) -> u32 {
         get_u32(&self.fixed_nsec)
     }
+
     pub fn blocks(&self) -> u64 {
         get_u32(&self.blocks_lo) as u64
     }
+
     pub fn meta_blkaddr(&self) -> u32 {
         get_u32(&self.meta_blkaddr)
     }
+
     pub fn extra_devices(&self) -> u16 {
         get_u16(&self.extra_devices)
     }
+
     pub fn devt_slotoff(&self) -> u16 {
         get_u16(&self.devt_slotoff)
     }
