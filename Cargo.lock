@@ -1258,6 +1258,9 @@ name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+dependencies = [
+ "getrandom 0.2.15",
+]
 
 [[package]]
 name = "filetime"
@@ -1309,6 +1312,18 @@ dependencies = [
  "nu-ansi-term",
  "regex",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
+ "fastrand",
+ "futures-core",
+ "futures-sink",
+ "spin 0.9.8",
 ]
 
 [[package]]
@@ -3012,6 +3027,7 @@ version = "0.4.0"
 dependencies = [
  "bytes",
  "dbs-allocator",
+ "flume",
  "fuse-backend-rs",
  "libc",
  "log",
@@ -3024,8 +3040,10 @@ dependencies = [
  "nydus-utils",
  "procfs",
  "rust-fsm",
+ "sendfd",
  "serde",
  "serde_json",
+ "serde_repr",
  "thiserror 1.0.69",
  "time",
  "tokio",
@@ -4727,6 +4745,9 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "spki"
