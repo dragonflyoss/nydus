@@ -77,7 +77,7 @@ func TestPerf(t *testing.T) {
 	// Benchmark the C erofsfuse implementation for comparison.
 	var cErofsFuseResults map[string]*benchResult
 	t.Logf("Benchmarking C erofsfuse (%s)...", cErofsFuseBin)
-	unmount = mountCErofsFuse(t, cErofsFuseBin, imagePath, blobdev, mntDir)
+	unmount = mountCErofsFuse(t, cErofsFuseBin, imagePath, mntDir, blobdev)
 	cErofsFuseResults = runBenchmarks(t, fioBin, mntDir)
 	unmount()
 

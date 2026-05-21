@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -93,6 +94,22 @@ func (c *Corpus) CreateZeroFile(t *testing.T, name string, size int) {
 	require.NoError(t, os.WriteFile(c.path(name), make([]byte, size), 0644))
 }
 
+// CreateSparseFile creates a sparse file with the provided size and writes.
+func (c *Corpus) CreateSparseFile(t *testing.T, name string, size int64, writes map[int64][]byte) {
+	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
+	f, err := os.Create(c.path(name))
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, f.Close())
+	}()
+
+	for offset, data := range writes {
+		_, err := f.WriteAt(data, offset)
+		require.NoError(t, err)
+	}
+	require.NoError(t, f.Truncate(size))
+}
+
 // CreateDir creates a directory (and parents).
 func (c *Corpus) CreateDir(t *testing.T, name string) {
 	require.NoError(t, os.MkdirAll(c.path(name), 0755))
@@ -114,6 +131,20 @@ func (c *Corpus) CreateHardlink(t *testing.T, name, target string) {
 func (c *Corpus) CreateFIFO(t *testing.T, name string) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
 	require.NoError(t, syscall.Mkfifo(c.path(name), 0666))
+}
+
+// CreateUnixSocket creates a filesystem socket node.
+func (c *Corpus) CreateUnixSocket(t *testing.T, name string) {
+	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
+	listener, err := net.Listen("unix", c.path(name))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, listener.Close())
+		err := os.Remove(c.path(name))
+		if err != nil && !os.IsNotExist(err) {
+			require.NoError(t, err)
+		}
+	})
 }
 
 // CreateCharDev creates a character device node (requires root).
@@ -161,10 +192,17 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreateFile(t, "files/small_100b", []byte(strings.Repeat(".", 100)))
 	c.CreateFile(t, "files/just_under_block", []byte(strings.Repeat("A", 4095)))
 	c.CreateRandomFile(t, "files/exact_block", 4096)
+	c.CreateRandomFile(t, "files/one_over_block", 4097)
 	c.CreateRandomFile(t, "files/two_blocks", 4096*2)
 	c.CreateRandomFile(t, "files/ten_blocks", 4096*10)
 	c.CreateRandomFile(t, "files/large_256k", 256*1024)
 	c.CreateZeroFile(t, "files/all_zeros", 4096*4)
+	c.CreateSparseFile(t, "files/sparse_hole", 4096*4+513, map[int64][]byte{
+		0:            []byte("HEAD"),
+		4096 - 2:     []byte("EDGE"),
+		4096*2 + 17:  []byte("MID"),
+		4096*4 + 512: []byte("Z"),
+	})
 	c.CreatePatternFile(t, "files/byte_pattern", 16)
 
 	// Permissions.
@@ -221,6 +259,8 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreateHardlink(t, "hardlinks/link2", "hardlinks/original")
 	c.CreateDir(t, "hardlinks/subdir")
 	c.CreateHardlink(t, "hardlinks/subdir/link3", "hardlinks/original")
+	c.CreateFile(t, "hardlinks/same_content_a", []byte("not actually linked"))
+	c.CreateFile(t, "hardlinks/same_content_b", []byte("not actually linked"))
 
 	// Special files (root only).
 	c.CreateFIFO(t, "special/fifo")
@@ -228,6 +268,8 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	c.CreateBlockDev(t, "special/blkdev", 1, 0)
 	c.CreateFile(t, "special/other_uid", []byte("other_owner"))
 	c.Chown(t, "special/other_uid", 1000, 1000)
+	c.CreateFile(t, "special/large_uid_gid", []byte("large numeric owner"))
+	c.Chown(t, "special/large_uid_gid", 70000, 70001)
 	c.CreateFile(t, "special/root_owned", []byte("root_only"))
 	c.Chown(t, "special/root_owned", 0, 0)
 	c.Chmod(t, "special/root_owned", 0600)
@@ -261,6 +303,18 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 
 	c.CreateRandomFile(t, "xattrs/large_file_xattr", 4096*4)
 	c.SetXattr(t, "xattrs/large_file_xattr", "user.on_large", []byte("large_file"))
+
+	c.CreateFile(t, "xattrs/user_huge_ibody", []byte("huge xattr body\n"))
+	for i := 0; i < 3; i++ {
+		value := strings.Repeat(string(rune('A'+i)), 900)
+		c.SetXattr(t, "xattrs/user_huge_ibody", fmt.Sprintf("user.large_%02d", i), []byte(value))
+	}
+
+	c.CreateDir(t, "xattrs/dir_huge_ibody")
+	for i := 0; i < 3; i++ {
+		value := strings.Repeat(string(rune('k'+i)), 850)
+		c.SetXattr(t, "xattrs/dir_huge_ibody", fmt.Sprintf("user.dir_large_%02d", i), []byte(value))
+	}
 
 	c.CreateFile(t, "xattrs/security_attr", []byte("security xattr\n"))
 	c.SetXattr(t, "xattrs/security_attr", "security.test", []byte("sec_value"))

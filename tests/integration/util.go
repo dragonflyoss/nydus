@@ -127,13 +127,16 @@ func isMountpoint(path string) bool {
 
 // mountCErofsFuse mounts the EROFS image at imagePath using the C erofsfuse implementation and
 // returns a cleanup function to unmount it.
-func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, blobdev, mnt string) (cleanup func()) {
+func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, mnt string, blobdevs ...string) (cleanup func()) {
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	// Invocation: erofsfuse [--device=BLOB] IMAGE MOUNTPOINT -f
+	// Invocation: erofsfuse [--device=BLOB]... IMAGE MOUNTPOINT -f
 	args := []string{}
-	if blobdev != "" {
+	for _, blobdev := range blobdevs {
+		if blobdev == "" {
+			continue
+		}
 		args = append(args, "--device="+blobdev)
 	}
 	args = append(args, imagePath, mnt, "-f")

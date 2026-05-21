@@ -59,7 +59,7 @@ impl ErofsFs {
         let sb = self.reader.sb();
         let block_size = 1u64 << sb.blkszbits;
         let mtime_secs = inode.mtime(sb.epoch());
-        let mtime_nsec = inode.mtime_nsec();
+        let mtime_nsec = inode.effective_mtime_nsec(sb.fixed_nsec());
         let size = inode.size();
         let blocks = size.div_ceil(block_size) * block_size / 512;
         let time = UNIX_EPOCH + Duration::new(mtime_secs, mtime_nsec);

@@ -3,8 +3,8 @@ use clap::Args;
 use lepton::build::inode::mode_to_file_type;
 use lepton::fs::{DeviceInfo, ErofsReader};
 use lepton::metadata::*;
+use lepton::utils::{hex_string, sha256_bytes, sha256_file, sha256_file_region};
 use memmap2::Mmap;
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -448,31 +448,6 @@ fn chunkbits(reader: &ErofsReader, inode: &ErofsInode<'_>) -> u32 {
     reader.sb().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F)
 }
 
-fn sha256_bytes(data: &[u8]) -> [u8; EROFS_BLOB_ID_SIZE] {
-    let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-    digest.copy_from_slice(&Sha256::digest(data));
-    digest
-}
-
-fn sha256_file(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("failed to map file for hashing: {}", path.display()))?;
-    Ok(sha256_bytes(&mmap))
-}
-
-fn sha256_file_region(path: &Path, offset: u64) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("failed to map file for hashing: {}", path.display()))?;
-    if offset as usize > mmap.len() {
-        bail!("hash region offset exceeds file size: {}", path.display());
-    }
-    Ok(sha256_bytes(&mmap[offset as usize..]))
-}
-
 fn print_header(
     kind: ImageKind,
     path: &Path,
@@ -690,13 +665,4 @@ fn format_u64_set(values: &BTreeSet<u64>) -> String {
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(",")
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut text, "{byte:02x}");
-    }
-    text
 }

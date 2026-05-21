@@ -329,7 +329,8 @@ pub fn inode_meta_size(inode: &InodeInfo, _chunkbits: u32, _blkszbits: u32) -> u
             if chunk_indexes.is_empty() {
                 base + xattr_size
             } else {
-                base + xattr_size + chunk_indexes.len() * EROFS_CHUNK_INDEX_SIZE
+                round_up(base + xattr_size, EROFS_CHUNK_INDEX_SIZE)
+                    + chunk_indexes.len() * EROFS_CHUNK_INDEX_SIZE
             }
         }
         InodeData::Directory { .. } => base + xattr_size,
@@ -437,7 +438,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             } else {
                 EROFS_INODE_COMPACT_SIZE
             };
-            let extent_offset = base + xattr_size;
+            let extent_offset = round_up(base + xattr_size, EROFS_CHUNK_INDEX_SIZE);
             for (i, ci) in chunk_indexes.iter().enumerate() {
                 let idx = ErofsChunkIndex::new(ci.blkaddr, ci.device_id);
                 let off = extent_offset + i * EROFS_CHUNK_INDEX_SIZE;

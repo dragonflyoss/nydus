@@ -293,6 +293,13 @@ impl<'a> ErofsInode<'a> {
         }
     }
 
+    pub fn effective_mtime_nsec(&self, fixed_nsec: u32) -> u32 {
+        match self {
+            Self::Compact(_) => fixed_nsec,
+            Self::Extended(e) => e.mtime_nsec(),
+        }
+    }
+
     pub fn nlink(&self) -> u32 {
         match self {
             Self::Compact(_) => 1,

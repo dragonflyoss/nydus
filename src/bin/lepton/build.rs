@@ -2,12 +2,12 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 use lepton::build::blobchunk::BlobWriter;
 use lepton::build::bootstrap::render_bootstrap;
-use lepton::build::inode::build_tree;
+use lepton::build::inode::{build_tree, InodeData, InodeInfo};
 use lepton::metadata::*;
 use lepton::tracing::init_command_tracing;
-use sha2::{Digest, Sha256};
+use lepton::utils::{hex_string, sha256_file};
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::{warn, Level};
@@ -108,7 +108,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         );
     }
 
-    let epoch = SystemTime::now()
+    let build_time = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .context("system time before UNIX epoch")?
         .as_secs();
@@ -120,6 +120,11 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
     eprintln!("Building filesystem tree from {}...", args.source.display());
     let mut blob_writer = BlobWriter::new(&temp_blob_data_path, args.chunk_size)?;
     let mut inodes = build_tree(&args.source, &mut blob_writer, args.chunk_size)?;
+    let epoch = inodes
+        .iter()
+        .map(|inode| inode.mtime)
+        .min()
+        .unwrap_or(build_time);
 
     let total_inodes = inodes.len() as u64;
     eprintln!(
@@ -143,12 +148,28 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
 
     let uuid = uuid::Uuid::new_v4();
     let uuid_bytes: [u8; 16] = *uuid.as_bytes();
-    let blob_id = compute_sha256_file(&temp_blob_data_path)?;
-    let device_slots = [ErofsDeviceSlot::with_blob_id(
+    let blob_id = sha256_file(&temp_blob_data_path)?;
+    let provisional_device_slots = [ErofsDeviceSlot::with_blob_id(
         blob_writer.total_blocks(),
         &blob_id,
     )];
 
+    let provisional_bootstrap = render_bootstrap(
+        &mut inodes,
+        epoch,
+        chunkbits,
+        &provisional_device_slots,
+        &uuid_bytes,
+    )?;
+    let bootstrap_blocks = provisional_bootstrap
+        .len()
+        .div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
+    rebase_external_chunk_blkaddrs(&mut inodes, bootstrap_blocks)?;
+
+    let device_slots = [ErofsDeviceSlot::with_blob_id(
+        bootstrap_blocks + blob_writer.total_blocks(),
+        &blob_id,
+    )];
     let bootstrap_bytes =
         render_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
 
@@ -196,7 +217,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         .flush()
         .with_context(|| format!("failed to flush blob: {}", temp_full_blob_path.display()))?;
 
-    let full_blob_id = compute_sha256_file(&temp_full_blob_path)?;
+    let full_blob_id = sha256_file(&temp_full_blob_path)?;
     let final_blob_path = finalize_blob_output(
         &temp_full_blob_path,
         final_blob_path,
@@ -265,32 +286,23 @@ fn finalize_blob_output(
     Ok(final_path)
 }
 
-fn compute_sha256_file(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
+fn rebase_external_chunk_blkaddrs(inodes: &mut [InodeInfo], base_blocks: u64) -> Result<()> {
+    for inode in inodes {
+        let InodeData::RegularFile { chunk_indexes, .. } = &mut inode.data else {
+            continue;
+        };
 
-    loop {
-        let read = file
-            .read(&mut buf)
-            .with_context(|| format!("failed to read file for hashing: {}", path.display()))?;
-        if read == 0 {
-            break;
+        for chunk_index in chunk_indexes {
+            if chunk_index.device_id == 0 || chunk_index.blkaddr == EROFS_NULL_ADDR {
+                continue;
+            }
+
+            chunk_index.blkaddr = chunk_index
+                .blkaddr
+                .checked_add(base_blocks)
+                .context("chunk block address overflow while rebasing full blob offsets")?;
         }
-        hasher.update(&buf[..read]);
     }
 
-    let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-    digest.copy_from_slice(&hasher.finalize());
-    Ok(digest)
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut hex, "{byte:02x}");
-    }
-    hex
+    Ok(())
 }

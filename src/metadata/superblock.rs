@@ -54,6 +54,9 @@ impl ErofsSuperblock {
     pub fn epoch(&self) -> u64 {
         get_u64(&self.epoch)
     }
+    pub fn fixed_nsec(&self) -> u32 {
+        get_u32(&self.fixed_nsec)
+    }
     pub fn blocks(&self) -> u64 {
         get_u32(&self.blocks_lo) as u64
     }

@@ -1,17 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{anyhow, bail, Context, Result};
-use sha2::{Digest, Sha256};
 
 use crate::build::blobchunk::ChunkIndex;
 use crate::build::bootstrap::render_bootstrap;
 use crate::build::inode::{mode_to_file_type, DirEntry, InodeData, InodeInfo};
 use crate::fs::ErofsReader;
 use crate::metadata::*;
+use crate::utils::{hex_string, parse_sha256_hex, sha256_file};
 
 const OCI_WHITEOUT_PREFIX: &str = ".wh.";
 const OCI_OPAQUE_MARKER: &str = ".wh..wh..opq";
@@ -100,10 +99,15 @@ pub fn merge_sources_to_bootstrap_bytes(
         &mut hardlink_indexes,
     );
 
-    let epoch = SystemTime::now()
+    let build_time = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .context("system time before UNIX epoch")?
         .as_secs();
+    let epoch = inodes
+        .iter()
+        .map(|inode| inode.mtime)
+        .min()
+        .unwrap_or(build_time);
     let uuid = uuid::Uuid::new_v4();
 
     render_bootstrap(
@@ -170,7 +174,8 @@ fn validate_source_blob_path(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow!("merge source file name must be valid UTF-8 sha256 hex"))?;
-    let expected = parse_sha256_hex(file_name)?;
+    let expected = parse_sha256_hex(file_name)
+        .context("merge source file name must be a sha256 hex string")?;
     let actual = sha256_file(path)?;
     if actual != expected {
         bail!(
@@ -195,68 +200,6 @@ fn validate_single_layer_blob_source(path: &Path, reader: &ErofsReader) -> Resul
         bail!("merge source must be a full blob file, not a metadata-only bootstrap");
     }
     Ok(())
-}
-
-fn parse_sha256_hex(value: &str) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
-    if value.len() != EROFS_BLOB_ID_SIZE * 2 {
-        bail!("merge source file name must be a 64-character sha256 hex string");
-    }
-
-    let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        let hi =
-            hex_value(chunk[0]).ok_or_else(|| anyhow!("invalid sha256 hex in source file name"))?;
-        let lo =
-            hex_value(chunk[1]).ok_or_else(|| anyhow!("invalid sha256 hex in source file name"))?;
-        digest[index] = (hi << 4) | lo;
-    }
-    Ok(digest)
-}
-
-fn hex_value(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn sha256_file(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
-    let mut file = fs::File::open(path).with_context(|| {
-        format!(
-            "failed to open merge source for hashing: {}",
-            path.display()
-        )
-    })?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-
-    loop {
-        let read = file.read(&mut buf).with_context(|| {
-            format!(
-                "failed to read merge source for hashing: {}",
-                path.display()
-            )
-        })?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buf[..read]);
-    }
-
-    let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-    digest.copy_from_slice(&hasher.finalize());
-    Ok(digest)
-}
-
-fn hex_string(bytes: &[u8]) -> String {
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(&mut hex, "{byte:02x}");
-    }
-    hex
 }
 
 fn load_node(
@@ -343,7 +286,7 @@ fn load_node(
         gid: inode.gid(),
         size: inode.size(),
         mtime: inode.mtime(epoch),
-        mtime_nsec: inode.mtime_nsec(),
+        mtime_nsec: inode.effective_mtime_nsec(reader.sb().fixed_nsec()),
         nlink: inode.nlink(),
         xattrs,
         data,

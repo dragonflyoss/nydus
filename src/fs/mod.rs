@@ -10,9 +10,9 @@ use std::io;
 use std::path::Path;
 
 use memmap2::Mmap;
-use sha2::{Digest, Sha256};
 
 use crate::metadata::*;
+use crate::utils::{hex_string, sha256_bytes};
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct DirEntry {
@@ -104,12 +104,11 @@ impl ErofsReader {
             ));
         }
         if sb.extra_devices() == 1 {
-            let blob_data_offset = Self::primary_image_size(sb)?;
             blob_devices.insert(
                 1,
                 BlobDevice {
                     mmap: Self::map_file(blob_path)?,
-                    data_offset: blob_data_offset,
+                    data_offset: 0,
                 },
             );
         }
@@ -244,9 +243,9 @@ impl ErofsReader {
                 continue;
             }
 
-            let digest = Self::sha256_bytes(&mapped[blob_data_offset..]);
+            let digest = sha256_bytes(&mapped[blob_data_offset..]);
             if &digest == expected_blob_id {
-                return Ok((mapped, blob_data_offset));
+                return Ok((mapped, 0));
             }
         }
 
@@ -260,13 +259,13 @@ impl ErofsReader {
         blob_dir: &Path,
         expected_blob_id: &[u8; EROFS_BLOB_ID_SIZE],
     ) -> io::Result<Option<(Mmap, usize)>> {
-        let path = blob_dir.join(Self::hex_string(expected_blob_id));
+        let path = blob_dir.join(hex_string(expected_blob_id));
         if !path.is_file() {
             return Ok(None);
         }
 
         let mapped = Self::map_file(&path)?;
-        if &Self::sha256_bytes(&mapped) != expected_blob_id {
+        if &sha256_bytes(&mapped) != expected_blob_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -282,7 +281,7 @@ impl ErofsReader {
                 format!("blob file {} has invalid data offset", path.display()),
             ));
         }
-        Ok(Some((mapped, blob_data_offset)))
+        Ok(Some((mapped, 0)))
     }
 
     fn data_offset_for_blob_candidate(mmap: &[u8]) -> io::Result<usize> {
@@ -294,21 +293,6 @@ impl ErofsReader {
             ));
         }
         Self::primary_image_size(sb)
-    }
-
-    fn sha256_bytes(data: &[u8]) -> [u8; EROFS_BLOB_ID_SIZE] {
-        let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-        digest.copy_from_slice(&Sha256::digest(data));
-        digest
-    }
-
-    fn hex_string(bytes: &[u8]) -> String {
-        let mut hex = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use std::fmt::Write as _;
-            let _ = write!(&mut hex, "{byte:02x}");
-        }
-        hex
     }
 
     /// Get a zero-copy reference to the on-disk superblock.

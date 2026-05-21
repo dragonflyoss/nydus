@@ -23,7 +23,7 @@ impl ErofsReader {
         let nchunks = inode.size().div_ceil(chunksize) as usize;
         let inode_offset = self.nid_to_offset(nid);
         let header_size = inode.header_size() + inode.xattr_size();
-        let ci_offset = inode_offset + header_size;
+        let ci_offset = inode_offset + round_up(header_size, EROFS_CHUNK_INDEX_SIZE);
         let ci_total = nchunks * EROFS_CHUNK_INDEX_SIZE;
         self.mmap_slice(ci_offset, ci_total)
     }
@@ -349,5 +349,121 @@ impl ErofsReader {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use tempfile::NamedTempFile;
+
+    use super::ErofsReader;
+    use crate::build::blobchunk::ChunkIndex;
+    use crate::build::bootstrap::render_bootstrap;
+    use crate::build::inode::{DirEntry as BuildDirEntry, InodeData, InodeInfo};
+    use crate::metadata::{
+        xattr_ibody_size, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE,
+        EROFS_XATTR_INDEX_USER,
+    };
+
+    #[test]
+    fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
+        let file_xattrs: Vec<(u8, Vec<u8>, Vec<u8>)> = (0..8)
+            .map(|index| {
+                (
+                    EROFS_XATTR_INDEX_USER,
+                    format!("large_{index:02}").into_bytes(),
+                    vec![b'A' + index as u8; 700],
+                )
+            })
+            .collect();
+        assert!(xattr_ibody_size(&file_xattrs) > EROFS_BLOCK_SIZE as usize);
+
+        let mut inodes = vec![
+            InodeInfo {
+                mode: 0o040755,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                mtime: 1_700_000_000,
+                mtime_nsec: 0,
+                nlink: 2,
+                ino: 1,
+                nid: 0,
+                meta_offset: 0,
+                is_extended: true,
+                data: InodeData::Directory {
+                    children: vec![BuildDirEntry {
+                        name: "huge_xattrs".into(),
+                        file_type: EROFS_FT_REG_FILE,
+                        inode_idx: 1,
+                    }],
+                    startblk: 0,
+                    dir_data_size: 0,
+                    parent_nid: 0,
+                },
+                xattrs: Vec::new(),
+            },
+            InodeInfo {
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                size: (EROFS_BLOCK_SIZE as u64) * 2,
+                mtime: 1_700_000_123,
+                mtime_nsec: 123_456_789,
+                nlink: 1,
+                ino: 2,
+                nid: 0,
+                meta_offset: 0,
+                is_extended: false,
+                data: InodeData::RegularFile {
+                    chunk_indexes: vec![
+                        ChunkIndex {
+                            blkaddr: 11,
+                            device_id: 0,
+                        },
+                        ChunkIndex {
+                            blkaddr: 22,
+                            device_id: 0,
+                        },
+                    ],
+                    chunkbits: EROFS_BLKSZBITS as u32,
+                },
+                xattrs: file_xattrs.clone(),
+            },
+        ];
+
+        let bootstrap = render_bootstrap(
+            &mut inodes,
+            1_700_000_000,
+            EROFS_BLKSZBITS as u32,
+            &[],
+            &[0u8; 16],
+        )
+        .expect("render bootstrap");
+        let mut image = NamedTempFile::new().expect("create temp image");
+        image.write_all(&bootstrap).expect("write bootstrap");
+
+        let reader = ErofsReader::open_layer(image.path()).expect("open bootstrap");
+        let file_nid = inodes[1].nid;
+        let inode = reader.inode(file_nid).expect("read inode");
+
+        let xattrs = reader.read_xattrs(file_nid, &inode).expect("read xattrs");
+        assert_eq!(xattrs.len(), file_xattrs.len());
+        for ((name, value), (_, suffix, expected_value)) in xattrs.iter().zip(file_xattrs.iter()) {
+            let expected_name = [b"user.".as_slice(), suffix.as_slice()].concat();
+            assert_eq!(name, &expected_name);
+            assert_eq!(value, expected_value);
+        }
+
+        let chunk_indexes = reader
+            .read_chunk_indexes(file_nid, &inode)
+            .expect("read chunk indexes");
+        assert_eq!(chunk_indexes.len(), 2);
+        assert_eq!(chunk_indexes[0].blkaddr, 11);
+        assert_eq!(chunk_indexes[0].device_id, 0);
+        assert_eq!(chunk_indexes[1].blkaddr, 22);
+        assert_eq!(chunk_indexes[1].device_id, 0);
     }
 }
