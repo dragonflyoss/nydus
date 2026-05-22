@@ -1,12 +1,9 @@
 name: Perftest Image (Dragonfly SDK Proxy)
 
 on:
-  push:
-    branches: ["**", "stable/**"]
-    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
-  pull_request:
-    branches: ["**", "stable/**"]
-    paths-ignore: [ '**.md', '**.png', '**.jpg', '**.svg', '**/docs/**' ]
+  schedule:
+    # Everyday at 00:40 clock UTC
+    - cron: "40 0 * * *"
   workflow_dispatch:
     inputs:
       nydus_image:
