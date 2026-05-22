@@ -13,16 +13,6 @@ pub struct ErofsChunkIndex {
 const _: () = assert!(mem::size_of::<ErofsChunkIndex>() == EROFS_CHUNK_INDEX_SIZE);
 
 impl ErofsChunkIndex {
-    pub fn blkaddr(&self) -> u64 {
-        let hi = get_u16(&self.startblk_hi) as u64;
-        let lo = get_u32(&self.startblk_lo) as u64;
-        (hi << 32) | lo
-    }
-
-    pub fn device_id(&self) -> u16 {
-        get_u16(&self.device_id)
-    }
-
     pub fn new(blkaddr: u64, device_id: u16) -> Self {
         let mut v: Self = unsafe { mem::zeroed() };
         if blkaddr == EROFS_NULL_ADDR {
@@ -39,6 +29,16 @@ impl ErofsChunkIndex {
 
     pub fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_CHUNK_INDEX_SIZE) }
+    }
+
+    pub fn blkaddr(&self) -> u64 {
+        let hi = get_u16(&self.startblk_hi) as u64;
+        let lo = get_u32(&self.startblk_lo) as u64;
+        (hi << 32) | lo
+    }
+
+    pub fn device_id(&self) -> u16 {
+        get_u16(&self.device_id)
     }
 }
 
@@ -65,6 +65,10 @@ impl ErofsDeviceSlot {
         v
     }
 
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_DEVICESLOT_SIZE) }
+    }
+
     pub fn with_blob_id(blocks: u64, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> Self {
         let mut v = Self::new(blocks);
         v.set_blob_id(blob_id);
@@ -84,9 +88,5 @@ impl ErofsDeviceSlot {
         let mut blob_id = [0u8; EROFS_BLOB_ID_SIZE];
         blob_id.copy_from_slice(&self.tag[..EROFS_BLOB_ID_SIZE]);
         blob_id
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_DEVICESLOT_SIZE) }
     }
 }

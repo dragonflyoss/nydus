@@ -21,6 +21,37 @@ pub struct ErofsInodeCompact {
 const _: () = assert!(mem::size_of::<ErofsInodeCompact>() == EROFS_INODE_COMPACT_SIZE);
 
 impl ErofsInodeCompact {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        i_format: u16,
+        i_mode: u16,
+        i_nb: u16,
+        i_size: u32,
+        i_mtime: u32,
+        i_u: u32,
+        i_ino: u32,
+        i_uid: u16,
+        i_gid: u16,
+    ) -> Self {
+        let mut v: Self = unsafe { mem::zeroed() };
+        set_u16(&mut v.i_format, i_format);
+        set_u16(&mut v.i_mode, i_mode);
+        set_u16(&mut v.i_nb, i_nb);
+        set_u32(&mut v.i_size, i_size);
+        set_u32(&mut v.i_mtime, i_mtime);
+        set_u32(&mut v.i_u, i_u);
+        set_u32(&mut v.i_ino, i_ino);
+        set_u16(&mut v.i_uid, i_uid);
+        set_u16(&mut v.i_gid, i_gid);
+        v
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_INODE_COMPACT_SIZE)
+        }
+    }
+
     pub fn format(&self) -> u16 {
         get_u16(&self.i_format)
     }
@@ -60,37 +91,6 @@ impl ErofsInodeCompact {
     pub fn gid(&self) -> u32 {
         get_u16(&self.i_gid) as u32
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        i_format: u16,
-        i_mode: u16,
-        i_nb: u16,
-        i_size: u32,
-        i_mtime: u32,
-        i_u: u32,
-        i_ino: u32,
-        i_uid: u16,
-        i_gid: u16,
-    ) -> Self {
-        let mut v: Self = unsafe { mem::zeroed() };
-        set_u16(&mut v.i_format, i_format);
-        set_u16(&mut v.i_mode, i_mode);
-        set_u16(&mut v.i_nb, i_nb);
-        set_u32(&mut v.i_size, i_size);
-        set_u32(&mut v.i_mtime, i_mtime);
-        set_u32(&mut v.i_u, i_u);
-        set_u32(&mut v.i_ino, i_ino);
-        set_u16(&mut v.i_uid, i_uid);
-        set_u16(&mut v.i_gid, i_gid);
-        v
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_INODE_COMPACT_SIZE)
-        }
-    }
 }
 
 /// EROFS on-disk inode in extended format (64 bytes).
@@ -114,6 +114,41 @@ pub struct ErofsInodeExtended {
 const _: () = assert!(mem::size_of::<ErofsInodeExtended>() == EROFS_INODE_EXTENDED_SIZE);
 
 impl ErofsInodeExtended {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        i_format: u16,
+        i_mode: u16,
+        i_nb: u16,
+        i_size: u64,
+        i_u: u32,
+        i_ino: u32,
+        i_uid: u32,
+        i_gid: u32,
+        i_mtime: u64,
+        i_mtime_nsec: u32,
+        i_nlink: u32,
+    ) -> Self {
+        let mut v: Self = unsafe { mem::zeroed() };
+        set_u16(&mut v.i_format, i_format);
+        set_u16(&mut v.i_mode, i_mode);
+        set_u16(&mut v.i_nb, i_nb);
+        set_u64(&mut v.i_size, i_size);
+        set_u32(&mut v.i_u, i_u);
+        set_u32(&mut v.i_ino, i_ino);
+        set_u32(&mut v.i_uid, i_uid);
+        set_u32(&mut v.i_gid, i_gid);
+        set_u64(&mut v.i_mtime, i_mtime);
+        set_u32(&mut v.i_mtime_nsec, i_mtime_nsec);
+        set_u32(&mut v.i_nlink, i_nlink);
+        v
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_INODE_EXTENDED_SIZE)
+        }
+    }
+
     pub fn format(&self) -> u16 {
         get_u16(&self.i_format)
     }
@@ -160,41 +195,6 @@ impl ErofsInodeExtended {
 
     pub fn nlink(&self) -> u32 {
         get_u32(&self.i_nlink)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        i_format: u16,
-        i_mode: u16,
-        i_nb: u16,
-        i_size: u64,
-        i_u: u32,
-        i_ino: u32,
-        i_uid: u32,
-        i_gid: u32,
-        i_mtime: u64,
-        i_mtime_nsec: u32,
-        i_nlink: u32,
-    ) -> Self {
-        let mut v: Self = unsafe { mem::zeroed() };
-        set_u16(&mut v.i_format, i_format);
-        set_u16(&mut v.i_mode, i_mode);
-        set_u16(&mut v.i_nb, i_nb);
-        set_u64(&mut v.i_size, i_size);
-        set_u32(&mut v.i_u, i_u);
-        set_u32(&mut v.i_ino, i_ino);
-        set_u32(&mut v.i_uid, i_uid);
-        set_u32(&mut v.i_gid, i_gid);
-        set_u64(&mut v.i_mtime, i_mtime);
-        set_u32(&mut v.i_mtime_nsec, i_mtime_nsec);
-        set_u32(&mut v.i_nlink, i_nlink);
-        v
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_INODE_EXTENDED_SIZE)
-        }
     }
 }
 

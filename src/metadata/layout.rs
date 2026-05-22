@@ -1,4 +1,4 @@
-use super::{EROFS_BLOCK_SIZE, EROFS_SLOTSIZE};
+use super::{round_up, EROFS_BLOCK_SIZE, EROFS_SLOTSIZE};
 
 /// Metadata layout allocator.
 ///
@@ -38,36 +38,39 @@ impl MetadataLayout {
 
     /// Allocate space for an inode. Returns `(offset_in_buf, nid)`.
     pub fn alloc_inode(&mut self, size: usize) -> (usize, u64) {
-        let aligned = round_up_usize(size, EROFS_SLOTSIZE as usize);
+        let aligned = round_up(size, EROFS_SLOTSIZE as usize);
         let offset = self.cursor;
         self.cursor += aligned;
         if self.buf.len() < self.cursor {
             self.buf.resize(self.cursor, 0);
         }
+
         let nid = (offset / EROFS_SLOTSIZE as usize) as u64;
         (offset, nid)
     }
 
     /// Pad the metadata buffer to the next block boundary.
     pub fn pad_to_block(&mut self) -> usize {
-        let aligned = round_up_usize(self.cursor, EROFS_BLOCK_SIZE as usize);
+        let aligned = round_up(self.cursor, EROFS_BLOCK_SIZE as usize);
         self.cursor = aligned;
         if self.buf.len() < self.cursor {
             self.buf.resize(self.cursor, 0);
         }
+
         self.cursor
     }
 
     /// Allocate block-aligned space for directory data.
     /// Returns (offset_in_buf, start_block_address).
     pub fn alloc_dir_data(&mut self, size: usize) -> (usize, u64) {
-        self.cursor = round_up_usize(self.cursor, EROFS_BLOCK_SIZE as usize);
+        self.cursor = round_up(self.cursor, EROFS_BLOCK_SIZE as usize);
         let offset = self.cursor;
-        let aligned_size = round_up_usize(size, EROFS_BLOCK_SIZE as usize);
+        let aligned_size = round_up(size, EROFS_BLOCK_SIZE as usize);
         self.cursor += aligned_size;
         if self.buf.len() < self.cursor {
             self.buf.resize(self.cursor, 0);
         }
+
         let startblk = self.meta_blkaddr as u64 + (offset / EROFS_BLOCK_SIZE as usize) as u64;
         (offset, startblk)
     }
@@ -79,10 +82,6 @@ impl MetadataLayout {
 
     /// Total number of blocks used by metadata (rounded up).
     pub fn total_blocks(&self) -> u64 {
-        round_up_usize(self.buf.len(), EROFS_BLOCK_SIZE as usize) as u64 / EROFS_BLOCK_SIZE as u64
+        round_up(self.buf.len(), EROFS_BLOCK_SIZE as usize) as u64 / EROFS_BLOCK_SIZE as u64
     }
-}
-
-fn round_up_usize(val: usize, align: usize) -> usize {
-    (val + align - 1) & !(align - 1)
 }
