@@ -92,15 +92,15 @@ else
 fi
 [ -z "$MOUNTPOINT" ] && MOUNTPOINT="/tmp/leptonfs_mount"
 ulimit -n 1048576
-pkill -f "lepton mount.*${MOUNTPOINT}" 2>/dev/null || true
+pkill -f "lepton fuse.*${MOUNTPOINT}" 2>/dev/null || true
 fusermount -u "${MOUNTPOINT}" 2>/dev/null || true
 sleep 0.5
-%s mount --bootstrap %s --blob-dir %s --mountpoint "${MOUNTPOINT}" --fsname "${DEVICE}" 1>>/tmp/leptonfs.log 2>&1 &
+%s fuse --bootstrap %s --blob-dir %s --mountpoint "${MOUNTPOINT}" --fsname "${DEVICE}" 1>>/tmp/leptonfs.log 2>&1 &
 for i in $(seq 1 20); do
     mountpoint -q "${MOUNTPOINT}" 2>/dev/null && exit 0
     sleep 0.5
 done
-echo "ERROR: lepton mount failed to mount within 10 seconds" >&2
+echo "ERROR: lepton fuse failed to mount within 10 seconds" >&2
 exit 1
 `, leptonBin, imagePath, filepath.Dir(blobdev))
 

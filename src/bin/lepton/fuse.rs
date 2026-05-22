@@ -1,0 +1,309 @@
+use anyhow::{anyhow, bail, Context, Result};
+use clap::Args;
+use fuser::{Config, MountOption, Session};
+use lepton::fs::{ErofsFs, ErofsReader};
+use lepton::tracing::init_tracing;
+use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
+use std::fs;
+use std::mem::MaybeUninit;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread::available_parallelism;
+use std::time::Duration;
+use tracing::{error, info, Level};
+
+struct TermSignalMask {
+    mask: libc::sigset_t,
+    restore_on_drop: bool,
+}
+
+impl TermSignalMask {
+    fn new() -> Result<Self> {
+        let mut mask = unsafe { MaybeUninit::<libc::sigset_t>::zeroed().assume_init() };
+        let empty_ret = unsafe { libc::sigemptyset(&mut mask) };
+        if empty_ret != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to initialize signal mask");
+        }
+        for signal in termination_signals() {
+            let add_ret = unsafe { libc::sigaddset(&mut mask, *signal) };
+            if add_ret != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("failed to add signal {} to mask", signal));
+            }
+        }
+
+        Ok(Self {
+            mask,
+            restore_on_drop: false,
+        })
+    }
+
+    fn block() -> Result<Self> {
+        let mut mask = Self::new()?;
+
+        let mask_ret =
+            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &mask.mask, std::ptr::null_mut()) };
+        if mask_ret != 0 {
+            return Err(std::io::Error::from_raw_os_error(mask_ret))
+                .context("failed to block termination signals");
+        }
+
+        mask.restore_on_drop = true;
+        Ok(mask)
+    }
+
+    fn wait(&self) -> Result<i32> {
+        let mut signal = 0;
+        let wait_ret = unsafe { libc::sigwait(&self.mask, &mut signal) };
+        if wait_ret != 0 {
+            return Err(std::io::Error::from_raw_os_error(wait_ret))
+                .context("failed to wait for termination signal");
+        }
+        Ok(signal)
+    }
+}
+
+fn termination_signals() -> impl Iterator<Item = &'static libc::c_int> {
+    TERM_SIGNALS.iter().chain(std::iter::once(&SIGHUP))
+}
+
+impl Drop for TermSignalMask {
+    fn drop(&mut self) {
+        if self.restore_on_drop {
+            let _ = unsafe {
+                libc::pthread_sigmask(libc::SIG_UNBLOCK, &self.mask, std::ptr::null_mut())
+            };
+        }
+    }
+}
+
+fn is_mountpoint_active(mountpoint: &Path) -> std::io::Result<bool> {
+    let metadata = match fs::metadata(mountpoint) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+
+    let Some(parent) = mountpoint.parent() else {
+        return Ok(true);
+    };
+    let parent_metadata = fs::metadata(parent)?;
+
+    Ok(metadata.dev() != parent_metadata.dev()
+        || (metadata.dev() == parent_metadata.dev() && metadata.ino() == parent_metadata.ino()))
+}
+
+#[derive(Args)]
+pub struct FuseArgs {
+    /// Directory path including lepton data blob.
+    #[arg(long)]
+    pub blob_dir: Option<PathBuf>,
+
+    /// Directory path for persistent chunk cache files.
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
+
+    /// File path to lepton bootstrap.
+    #[arg(long)]
+    pub bootstrap: Option<PathBuf>,
+
+    /// File path to lepton blob.
+    #[arg(long)]
+    pub blob: Option<PathBuf>,
+
+    /// Directory path to mount lepton filesystem.
+    #[arg(long)]
+    pub mountpoint: PathBuf,
+
+    /// Number of worker threads.
+    #[arg(long, hide = true, default_value_t = default_threads())]
+    pub threads: usize,
+
+    /// Filesystem name shown in /proc/mounts SOURCE column.
+    #[arg(long, hide = true, default_value = "lepton")]
+    pub fsname: String,
+
+    #[arg(
+        short = 'l',
+        long,
+        default_value = "info",
+        help = "Specify the logging level [trace, debug, info, warn, error]"
+    )]
+    pub log_level: Level,
+
+    #[arg(
+        long,
+        default_value_os_t = PathBuf::from("/var/log/lepton/"),
+        help = "Specify the log directory"
+    )]
+    pub log_dir: PathBuf,
+
+    #[arg(
+        long,
+        default_value_t = 6,
+        help = "Specify the max number of log files"
+    )]
+    pub log_max_files: usize,
+
+    #[arg(
+        long,
+        hide = true,
+        default_value_t = true,
+        help = "Specify whether to print log"
+    )]
+    pub console: bool,
+}
+
+/// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
+/// range.
+fn default_threads() -> usize {
+    let n = available_parallelism().map(|x| x.get()).unwrap_or(4);
+    n.clamp(4, 16)
+}
+
+/// Run the FUSE mount command.
+pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
+    // Block termination signals before starting any helper threads so later
+    // sigwait-based handling is the only path that consumes them.
+    let _blocked_signals = TermSignalMask::block()?;
+
+    let _guards = init_tracing(
+        "lepton",
+        args.log_dir.clone(),
+        args.log_level,
+        args.log_max_files,
+        args.console,
+    );
+
+    let mountpoint = &args.mountpoint;
+    if !mountpoint.is_dir() {
+        bail!("mountpoint {} is not a directory", mountpoint.display());
+    }
+
+    match (&args.blob, &args.bootstrap, &args.blob_dir) {
+        (Some(_), None, None) => {}
+        (None, Some(_), Some(blob_dir)) if blob_dir.is_dir() => {}
+        (None, Some(_), Some(blob_dir)) => {
+            bail!("blob-dir {} is not a directory", blob_dir.display())
+        }
+        _ => {
+            bail!("fuse expects either --blob <path> or --bootstrap <path> --blob-dir <dir>")
+        }
+    }
+    if let Some(cache_dir) = &args.cache_dir {
+        if cache_dir.exists() && !cache_dir.is_dir() {
+            bail!("cache-dir {} is not a directory", cache_dir.display());
+        }
+    }
+
+    let reader = ErofsReader::open(
+        args.blob.as_deref(),
+        args.bootstrap.as_deref(),
+        args.blob_dir.as_deref(),
+        args.cache_dir.as_deref(),
+    )
+    .context("failed to open EROFS image")?;
+
+    let fs = ErofsFs::new(Arc::new(reader));
+    let mut config = Config::default();
+    config.mount_options = vec![
+        MountOption::RO,
+        MountOption::FSName(args.fsname.clone()),
+        MountOption::DefaultPermissions,
+    ];
+    config.n_threads = Some(args.threads);
+    config.clone_fd = true;
+
+    let session =
+        Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {}", e))?;
+    let bg = session
+        .spawn()
+        .map_err(|e| anyhow!("spawn failed: {}", e))?;
+
+    let wait_signals = TermSignalMask::new()?;
+    let signal_mountpoint = mountpoint.to_path_buf();
+    let (unmount_tx, unmount_rx) = mpsc::channel::<i32>();
+    let (result_tx, result_rx) = mpsc::channel::<std::io::Result<()>>();
+
+    std::thread::Builder::new()
+        .name("lepton_fuse_controller".to_string())
+        .spawn(move || {
+            let mut bg = Some(bg);
+
+            loop {
+                if bg.as_ref().is_some_and(|bg| bg.guard.is_finished()) {
+                    let result = bg.take().expect("background session already taken").join();
+                    let _ = result_tx.send(result);
+                    return;
+                }
+
+                match unmount_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(signal) => {
+                        let result = match is_mountpoint_active(&signal_mountpoint) {
+                            Ok(true) => {
+                                info!("unmounting {}", signal_mountpoint.display());
+                                bg.take()
+                                    .expect("background session already taken")
+                                    .umount_and_join()
+                            }
+                            Ok(false) => {
+                                bg.take().expect("background session already taken").join()
+                            }
+                            Err(err) => {
+                                error!(
+                                    "failed to inspect mountpoint {} before unmount: {:?}",
+                                    signal_mountpoint.display(),
+                                    err
+                                );
+                                bg.take()
+                                    .expect("background session already taken")
+                                    .umount_and_join()
+                            }
+                        };
+                        if let Err(err) = &result {
+                            error!(
+                                "failed to unmount after receiving signal {}: {:?}",
+                                signal, err
+                            );
+                        }
+                        let _ = result_tx.send(result);
+                        return;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let result = bg.take().expect("background session already taken").join();
+                        let _ = result_tx.send(result);
+                        return;
+                    }
+                }
+            }
+        })
+        .context("failed to spawn fuse controller thread")?;
+
+    std::thread::Builder::new()
+        .name("lepton_fuse_signal".to_string())
+        .spawn(move || match wait_signals.wait() {
+            Ok(signal) => {
+                let _ = unmount_tx.send(signal);
+            }
+            Err(e) => {
+                error!("signal wait error: {:?}", e)
+            }
+        })
+        .context("failed to spawn signal thread")?;
+
+    let join_result = result_rx
+        .recv()
+        .context("failed to receive fuse controller result")?;
+    match &join_result {
+        Ok(()) => {}
+        Err(e) => error!("background fuse session join returned error: {:?}", e),
+    }
+
+    join_result.map_err(|e| anyhow!("join failed: {}", e))?;
+
+    Ok(())
+}

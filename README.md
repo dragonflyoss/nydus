@@ -1,6 +1,20 @@
 # lepton
 
-A minimal Rust implementation of EROFS filesystem tools, providing image creation and FUSE mounting through a single `lepton` binary with subcommands.
+Lepton is a minimal Rust implementation of EROFS tooling. It ships as a single
+`lepton` binary with four user-facing subcommands:
+
+- `lepton build`
+- `lepton check`
+- `lepton merge`
+- `lepton fuse`
+
+The current artifact model centers around a full blob file that contains EROFS
+metadata plus appended chunk data. Build can also emit a standalone bootstrap
+for metadata-only distribution, and always emits a companion `.blob.meta`
+sidecar for each full blob.
+
+For lower-level design and on-disk format notes, see [docs/lepton.md](docs/lepton.md)
+and [docs/erofs.md](docs/erofs.md).
 
 ## Build
 
@@ -8,111 +22,166 @@ A minimal Rust implementation of EROFS filesystem tools, providing image creatio
 cargo build --release
 ```
 
-A single binary is produced:
+The repository produces one binary:
 
 ```bash
-./target/release/lepton   # EROFS tools (`build` + `mount` subcommands)
+./target/release/lepton
 ```
 
-## Usage
+## Commands
 
 ### lepton build
 
-Create an EROFS filesystem image from a source directory:
+Build a source directory into a lepton layer.
 
 ```bash
-./target/release/lepton build IMAGE --blobdev BLOB --chunksize BYTES SOURCE
+./target/release/lepton build --blob /tmp/layer.blob --bootstrap /tmp/layer.bootstrap ./rootfs
 ```
-
-Arguments:
-
-- `IMAGE`: output EROFS metadata image
-- `--blobdev BLOB`: output blob data file (chunk-based data)
-- `--chunksize BYTES`: chunk size in bytes, must be a power of two and >= 4096
-- `SOURCE`: source directory
-
-### lepton mount
-
-Mount an EROFS image (the default driver is `fuse`):
 
 ```bash
-sudo ./target/release/lepton mount IMAGE MOUNTPOINT [--driver fuse] [--blobdev BLOB] [--threads N]
+./target/release/lepton build --blob-dir /tmp/blobs ./rootfs
 ```
 
-Arguments:
+Key points:
 
-- `IMAGE`: EROFS metadata image file
-- `MOUNTPOINT`: mount point directory
-- `--driver`: mount driver (default: `fuse`)
-- `--blobdev BLOB`: blob data file for chunk-based files
-- `--threads N`: number of FUSE worker threads (default: 4)
+- Exactly one of `--blob` or `--blob-dir` is required.
+- `--bootstrap` is optional and writes a standalone metadata-only bootstrap.
+- `--chunk-size` defaults to `1048576` (1 MiB).
+- A `.blob.meta` sidecar is always emitted for the full blob.
+- `--compressor zstd` is accepted by the CLI, but chunk data is still written
+	uncompressed in the current implementation.
 
-### Example
+Output shapes:
+
+- `--blob /tmp/layer.blob` writes `/tmp/layer.blob` and `/tmp/layer.blob.blob.meta`.
+- `--blob-dir /tmp/blobs` writes `/tmp/blobs/<full_blob_sha256>` and
+	`/tmp/blobs/<full_blob_sha256>.blob.meta`.
+
+### lepton check
+
+Statically inspect a full blob or a standalone bootstrap.
 
 ```bash
-# Build image
-./target/release/lepton build /tmp/erofs.meta.img \
-	--blobdev /tmp/erofs.blob.img \
-	--chunksize 1048576 \
-	~/code/linux
-
-# Mount image (driver defaults to fuse)
-sudo ./target/release/lepton mount /tmp/erofs.meta.img ~/mnt \
-	--blobdev /tmp/erofs.blob.img \
-	--threads 10
+./target/release/lepton check --blob /tmp/layer.blob
 ```
 
-## Architecture
-
+```bash
+./target/release/lepton check --bootstrap /tmp/layer.bootstrap --blob-dir /tmp/blobs
 ```
+
+Use `check` to inspect superblock, inode, blob, and chunk layout information
+without mounting the filesystem.
+
+### lepton merge
+
+Merge multiple previously built layer blobs into one overlaid bootstrap.
+
+```bash
+./target/release/lepton merge \
+	--bootstrap /tmp/merged.bootstrap \
+	/tmp/blobs/<layer1_sha256> \
+	/tmp/blobs/<layer2_sha256>
+```
+
+Key points:
+
+- Source paths must be full blob files.
+- Current merge behavior focuses on metadata overlay and OCI whiteout handling.
+- The output is a merged bootstrap, not a rewritten merged full blob.
+
+### lepton fuse
+
+Mount a lepton image through FUSE.
+
+Supported forms:
+
+```bash
+sudo ./target/release/lepton fuse --blob /tmp/layer.blob --mountpoint /mnt/lepton
+```
+
+```bash
+sudo ./target/release/lepton fuse \
+	--bootstrap /tmp/layer.bootstrap \
+	--blob-dir /tmp/blobs \
+	--mountpoint /mnt/lepton
+```
+
+Optional runtime knobs include:
+
+- `--cache-dir` to enable persistent local chunk cache files.
+- `--threads` to set the FUSE worker thread count.
+- `--log-dir`, `--log-level`, and `--log-max-files` for runtime logging.
+
+Lepton installs signal handlers for `SIGINT`, `SIGTERM`, `SIGQUIT`, and
+`SIGHUP`, and performs a best-effort unmount before exiting.
+
+## Artifact Model
+
+Lepton currently works with three artifact types:
+
+1. Full blob: the primary layer artifact.
+2. Standalone bootstrap: optional metadata-only artifact.
+3. Blobmeta sidecar: companion `.blob.meta` file for the full blob.
+
+The full blob layout is:
+
+```text
++------------------------------+
+| bootstrap metadata           |
++------------------------------+
+| appended chunk data region   |
++------------------------------+
+```
+
+When a standalone bootstrap is emitted, it stores the blob identifier needed to
+resolve the corresponding data blob later under `--blob-dir`.
+
+## Repository Layout
+
+```text
 src/
 ├── bin/
-│   └── lepton.rs               # Single CLI binary with `build` and `mount` subcommands
-├── lib.rs                       # Library crate root
-├── metadata/                    # EROFS on-disk format definitions (shared)
-│   ├── mod.rs                  # Constants, LE helpers, cast_ref/cast_mut
-│   ├── superblock.rs           # ErofsSuperblock (128B)
-│   ├── inode.rs                # ErofsInodeCompact/Extended, ErofsInode enum
-│   ├── dir.rs                  # ErofsDirent (12B)
-│   ├── chunk.rs                # ErofsChunkIndex (8B), ErofsDeviceSlot (128B)
-│   └── layout.rs               # MetadataLayout allocator
-├── build/                       # Build-time code (image creation)
-│   ├── mod.rs
-│   ├── image.rs                # write_image — assemble final EROFS image
-│   ├── inode.rs                # InodeInfo, build_tree, serialize_inode
-│   ├── dir.rs                  # DirChild, serialize_directory
-│   └── blobchunk.rs            # BlobWriter — chunk dedup + blob writing
-└── fs/                          # Runtime code (image reading + FUSE)
-    ├── mod.rs                  # ErofsReader — mmap + open + common helpers
-    ├── meta.rs                 # Metadata ops: inode, read_dir, read_symlink
-    ├── data.rs                 # Data ops: read_file_data, chunk read, blob pread
-    └── fuse.rs                 # ErofsFs — FileSystem + AsyncFileSystem impl
+│   └── lepton/
+│       ├── main.rs            # CLI entrypoint
+│       ├── build.rs           # `lepton build`
+│       ├── check.rs           # `lepton check`
+│       ├── merge.rs           # `lepton merge`
+│       └── fuse.rs            # `lepton fuse`
+├── build/                     # Build-time layer construction
+├── fs/                        # Runtime EROFS reader and FUSE filesystem
+├── merge.rs                   # Merge engine
+├── metadata/                  # On-disk EROFS and blobmeta structures
+├── storage/
+│   ├── backend/
+│   │   ├── mod.rs
+│   │   └── local.rs          # Local blob backend
+│   ├── cache.rs              # Persistent blob cache device
+│   └── chunkmap.rs           # Local chunk readiness bitmap
+├── tracing/                   # Runtime and command logging setup
+├── utils/                     # Hashing and helper utilities
+└── lib.rs                     # Library crate root
 ```
-
-### Design
-
-- **Zero-copy metadata**: All on-disk structs are `#[repr(C, packed)]` and cast directly from mmap (no parsing/copying)
-- **Lock-free runtime**: `Mmap` (Send+Sync) for metadata, `pread` (POSIX thread-safe) for blob data
-- **Async I/O**: Blob reads offloaded via `tokio::task::spawn_blocking`
-- **Chunk dedup**: BLAKE3-based content-addressed deduplication during image creation
 
 ## Current Scope
 
-Supported features:
+Supported today:
 
-- Chunk-based image creation with `--blobdev` and `--chunksize`
-- Directory tree as input source
-- Regular files, directories, symlinks, device nodes, FIFOs, sockets
-- Hardlink detection and dedup
-- Extended attributes (xattr) preservation
-- FUSE mount with async I/O and multi-threaded workers
+- Build chunk-based layers from a source directory.
+- Emit a full blob plus optional standalone bootstrap.
+- Emit and consume `.blob.meta` sidecars.
+- Inspect blobs and bootstraps with `lepton check`.
+- Merge multiple layers into one overlaid bootstrap with OCI whiteouts.
+- Mount either a direct blob or a bootstrap plus blob-dir with `lepton fuse`.
+- Preserve hardlinks, xattrs, symlinks, device nodes, FIFOs, and sockets.
+- Use a local persistent chunk cache via `--cache-dir`.
 
-Not yet supported:
+Not yet supported or still evolving:
 
-- tar/OCI/S3 inputs
-- Compression (LZ4, ZSTD, etc.)
-- SELinux labels
-- Incremental builds
+- tar, OCI registry, or S3 input sources.
+- Actual chunk compression output despite the `--compressor` CLI.
+- SELinux label handling.
+- Incremental builds.
+- Broader EROFS compatibility beyond the current in-tree target workflow.
 
 ## Testing
 
@@ -122,51 +191,35 @@ Unit tests:
 make test
 ```
 
-Integration tests (requires root):
+End-to-end integration tests (requires root):
 
 ```bash
-# Runs end-to-end verification from tests/integration/e2e_test.go.
 make test-e2e
-
-# Run a single e2e test.
 make test-e2e E2E_TEST=TestMergedMountE2E
+```
 
-# Run xfstests regression separately.
-# First run installs xfstests dependencies automatically.
+xfstests regression (requires root):
+
+```bash
 make test-xfstests
 ```
 
-The integration tests live under `tests/integration/` (Go) and reuse
-`tests/scripts/setup_xfstests.sh` for environment setup and
-`tests/scripts/xfstests_leptonfs.exclude` for the xfstests exclusion list.
-
-Useful knobs:
-
-- `E2E_TEST=<regex>` — passed to `go test -run` for `make test-e2e`.
-- `E2E_GO_TEST_ARGS='...'` — extra `go test` arguments for `make test-e2e`.
-- `XFSTESTS_GO_TEST_ARGS='...'` — extra `go test` arguments for `make test-xfstests`.
-- `SUDO=` — run without sudo when you only want compile-level verification.
-- `GO_BIN=/abs/path/to/go` — force a specific Go binary when `sudo` cannot find `go`.
-
-Performance benchmark (requires root, fio):
+Performance benchmark (requires root and `fio`):
 
 ```bash
-# Benchmark Rust `lepton mount` (~2min, needs fio: apt-get install fio)
 make test-perf
-
-# Compare against C erofsfuse
 EROFS_C_FUSE=/path/to/erofsfuse make test-perf
 ```
 
-```
-Benchmark                     Unit          Rust             C     Ratio
-------------------------------------------------------------------------
-Sequential Read (128K)        MB/s        3005.6        2691.3     1.12x
-Random Read (4K)              IOPS       19168.1       22605.5     0.85x
-Random Read (4K) Lat            µs          51.1          43.3     0.85x
-Seq Read 4-thread             MB/s        6575.8        5694.9     1.15x
-Stat                          IOPS     1067967.0      841824.6     1.27x
-Stat Latency                    µs           0.9           1.2     1.27x
-Readdir                       IOPS       10398.9        3907.8     2.66x
-Readdir Latency                 µs          96.2         255.9     2.66x
-```
+The Go integration tests live under `tests/integration/`. xfstests setup uses
+`tests/scripts/setup_xfstests.sh`, and the exclusion list lives at
+`tests/scripts/xfstests_leptonfs.exclude`.
+
+Useful knobs:
+
+- `E2E_TEST=<regex>` selects a single e2e test.
+- `E2E_GO_TEST_ARGS='...'` appends extra `go test` arguments for e2e runs.
+- `XFSTESTS_GO_TEST_ARGS='...'` appends extra `go test` arguments for xfstests.
+- `PERF_GO_TEST_ARGS='...'` appends extra `go test` arguments for perf runs.
+- `SUDO=` disables `sudo` when you only want compile-level verification.
+- `GO_BIN=/abs/path/to/go` forces a specific Go binary.

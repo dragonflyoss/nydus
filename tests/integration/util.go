@@ -14,6 +14,7 @@ import (
 )
 
 var sha256FilenamePattern = regexp.MustCompile("^[0-9a-f]{64}$")
+var blobMetaFilenamePattern = regexp.MustCompile(`^[0-9a-f]{64}\.blob\.meta$`)
 
 // setupXfstests checks if the xfstests "check" script is present in the given directory, and if not, runs the setup_xfstests.sh script to
 // set up the xfstests environment.
@@ -168,13 +169,13 @@ func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, mnt string, blobdev
 	}
 }
 
-// mountLepton runs `lepton mount` in the background and returns a cleanup
+// mountLepton runs `lepton fuse` in the background and returns a cleanup
 // function that unmounts the filesystem and reaps the child process.
 func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (cleanup func()) {
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	args := []string{"mount", "--mountpoint", mnt}
+	args := []string{"fuse", "--mountpoint", mnt}
 	if imagePath != "" && blobdev != "" {
 		args = append(args, "--bootstrap", imagePath, "--blob-dir", filepath.Dir(blobdev))
 	} else if blobdev != "" {
@@ -191,7 +192,7 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 	// Wait for the mountpoint to become ready.
 	require.Eventually(t, func() bool {
 		return isMountpoint(mnt)
-	}, 10*time.Second, 200*time.Millisecond, "lepton mount failed to mount within 10s")
+	}, 10*time.Second, 200*time.Millisecond, "lepton fuse failed to mount within 10s")
 
 	return func() {
 		_ = exec.Command("fusermount", "-u", mnt).Run()
@@ -210,12 +211,29 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 	}
 }
 
-// mountLeptonBootstrap runs `lepton mount` using a bootstrap plus a blob directory.
+// mountLeptonBootstrap runs `lepton fuse` using a bootstrap plus a blob directory.
 func mountLeptonBootstrap(t *testing.T, leptonBin, bootstrapPath, blobDir, mnt string) (cleanup func()) {
+    return mountLeptonBootstrapWithCache(t, leptonBin, bootstrapPath, blobDir, "", mnt)
+}
+
+// mountLeptonBootstrapWithCache runs `lepton fuse` using a bootstrap plus a blob directory,
+// optionally enabling the persistent chunk cache.
+func mountLeptonBootstrapWithCache(
+    t *testing.T,
+    leptonBin,
+    bootstrapPath,
+    blobDir,
+    cacheDir,
+    mnt string,
+) (cleanup func()) {
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
-	args := []string{"mount", "--bootstrap", bootstrapPath, "--blob-dir", blobDir, "--mountpoint", mnt}
+	args := []string{"fuse", "--bootstrap", bootstrapPath, "--blob-dir", blobDir, "--mountpoint", mnt}
+	if cacheDir != "" {
+		require.NoError(t, os.MkdirAll(cacheDir, 0755))
+		args = append(args, "--cache-dir", cacheDir)
+	}
 	cmd := exec.Command(leptonBin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -223,7 +241,7 @@ func mountLeptonBootstrap(t *testing.T, leptonBin, bootstrapPath, blobDir, mnt s
 
 	require.Eventually(t, func() bool {
 		return isMountpoint(mnt)
-	}, 10*time.Second, 200*time.Millisecond, "lepton bootstrap mount failed to mount within 10s")
+	}, 10*time.Second, 200*time.Millisecond, "lepton bootstrap fuse failed to mount within 10s")
 
 	return func() {
 		_ = exec.Command("fusermount", "-u", mnt).Run()
@@ -270,16 +288,29 @@ func buildLeptonFSImageToDir(t *testing.T, leptonBin, imagePath, blobDir, srcDir
 	require.NoError(t, err, "lepton build --blob-dir failed: %s", string(out))
 
 	after := listFilesInDir(t, blobDir)
-	var created []string
+	var blobs []string
+	var blobmetas []string
+	var unexpected []string
 	for path := range after {
 		if _, existed := before[path]; existed {
 			continue
 		}
-		created = append(created, path)
+
+		base := filepath.Base(path)
+		switch {
+		case sha256FilenamePattern.MatchString(base):
+			blobs = append(blobs, path)
+		case blobMetaFilenamePattern.MatchString(base):
+			blobmetas = append(blobmetas, path)
+		default:
+			unexpected = append(unexpected, path)
+		}
 	}
-	require.Len(t, created, 1, "expected exactly one new blob in blob-dir")
-	require.True(t, sha256FilenamePattern.MatchString(filepath.Base(created[0])), "blob file name must be sha256: %s", created[0])
-	return created[0]
+	require.Empty(t, unexpected, "unexpected files created in blob-dir: %v", unexpected)
+	require.Len(t, blobs, 1, "expected exactly one new blob in blob-dir")
+	require.Len(t, blobmetas, 1, "expected exactly one new blobmeta in blob-dir")
+	require.True(t, sha256FilenamePattern.MatchString(filepath.Base(blobs[0])), "blob file name must be sha256: %s", blobs[0])
+	return blobs[0]
 }
 
 // mergeLeptonBootstrap invokes `lepton merge` and writes an overlaid bootstrap.

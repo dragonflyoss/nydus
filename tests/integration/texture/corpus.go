@@ -3,7 +3,7 @@
 //
 // The Corpus type follows a builder pattern similar to nydus
 // smoke/tests/tool/layer.go and creates real files on disk to exercise the
-// `lepton build` and `lepton mount` code paths.
+// `lepton build` and `lepton fuse` code paths.
 package texture
 
 import (

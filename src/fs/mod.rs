@@ -6,12 +6,15 @@ pub use self::fuse::ErofsFs;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use memmap2::Mmap;
 
 use crate::metadata::*;
+use crate::storage::backend::{BlobBackend, LocalBackend};
+use crate::storage::cache::CachedBlobDevice;
 use crate::utils::{hex_string, sha256_bytes};
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
@@ -35,8 +38,12 @@ pub struct DeviceInfo {
 }
 
 struct BlobDevice {
-    mmap: Mmap,
-    data_offset: usize,
+    kind: BlobDeviceKind,
+}
+
+enum BlobDeviceKind {
+    Direct { mmap: Mmap, data_offset: usize },
+    Cached(Box<CachedBlobDevice>),
 }
 
 /// EROFS image reader — lock-free, zero-copy.
@@ -55,13 +62,16 @@ impl ErofsReader {
         blob_path: Option<&Path>,
         bootstrap_path: Option<&Path>,
         blob_dir: Option<&Path>,
+        cache_dir: Option<&Path>,
     ) -> io::Result<Self> {
-        match (blob_path, bootstrap_path, blob_dir) {
-            (Some(blob), None, None) => Self::open_blob(blob),
-            (None, Some(bootstrap), Some(blob_dir)) => Self::open_bootstrap(bootstrap, blob_dir),
+        match (blob_path, bootstrap_path, blob_dir, cache_dir) {
+            (Some(blob), None, None, None) => Self::open_blob(blob),
+            (None, Some(bootstrap), Some(blob_dir), cache_dir) => {
+                Self::open_bootstrap(bootstrap, blob_dir, cache_dir)
+            }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "expected either --blob <path> or --bootstrap <path> --blob-dir <dir>",
+                "expected either --blob <path> or --bootstrap <path> --blob-dir <dir> [--cache-dir <dir>]",
             )),
         }
     }
@@ -107,8 +117,10 @@ impl ErofsReader {
             blob_devices.insert(
                 1,
                 BlobDevice {
-                    mmap: Self::map_file(blob_path)?,
-                    data_offset: 0,
+                    kind: BlobDeviceKind::Direct {
+                        mmap: Self::map_file(blob_path)?,
+                        data_offset: 0,
+                    },
                 },
             );
         }
@@ -120,7 +132,11 @@ impl ErofsReader {
         })
     }
 
-    fn open_bootstrap(bootstrap_path: &Path, blob_dir: &Path) -> io::Result<Self> {
+    fn open_bootstrap(
+        bootstrap_path: &Path,
+        blob_dir: &Path,
+        cache_dir: Option<&Path>,
+    ) -> io::Result<Self> {
         let mmap = Self::map_file(bootstrap_path)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
         let sb = Self::superblock_from(&mmap, sb_offset)?;
@@ -131,13 +147,36 @@ impl ErofsReader {
             ));
         }
 
-        let blob_devices = Self::device_infos_from(&mmap, sb_offset)?
-            .into_iter()
-            .map(|info| {
-                let (mmap, data_offset) = Self::find_blob_in_dir(blob_dir, &info.blob_id)?;
-                Ok((info.device_id, BlobDevice { mmap, data_offset }))
-            })
-            .collect::<io::Result<HashMap<_, _>>>()?;
+        let device_infos = Self::device_infos_from(&mmap, sb_offset)?;
+
+        let blob_devices = if let Some(cache_dir) = cache_dir {
+            let backend: Arc<dyn BlobBackend> = Arc::new(LocalBackend::new(blob_dir.to_path_buf()));
+            device_infos
+                .into_iter()
+                .map(|info| {
+                    let cached = CachedBlobDevice::open(info.blob_id, cache_dir, backend.clone())?;
+                    Ok((
+                        info.device_id,
+                        BlobDevice {
+                            kind: BlobDeviceKind::Cached(Box::new(cached)),
+                        },
+                    ))
+                })
+                .collect::<io::Result<HashMap<_, _>>>()?
+        } else {
+            device_infos
+                .into_iter()
+                .map(|info| {
+                    let (mmap, data_offset) = Self::find_blob_in_dir(blob_dir, &info.blob_id)?;
+                    Ok((
+                        info.device_id,
+                        BlobDevice {
+                            kind: BlobDeviceKind::Direct { mmap, data_offset },
+                        },
+                    ))
+                })
+                .collect::<io::Result<HashMap<_, _>>>()?
+        };
 
         Ok(Self {
             mmap,
@@ -322,40 +361,94 @@ impl ErofsReader {
         Ok(&self.mmap[offset..end])
     }
 
-    pub(crate) fn blob_mmap_slice(
+    pub(crate) fn read_blob_into(
         &self,
         device_id: u16,
-        offset: usize,
-        len: usize,
-    ) -> io::Result<&[u8]> {
+        source_offset: u64,
+        chunk_off: u64,
+        dst: &mut [u8],
+    ) -> io::Result<()> {
         let blob = self.blob_devices.get(&device_id).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("blob device {device_id} not available"),
             )
         })?;
-        let start = blob.data_offset.checked_add(offset).ok_or_else(|| {
+        match &blob.kind {
+            BlobDeviceKind::Direct { mmap, data_offset } => {
+                let start = (*data_offset as u64)
+                    .checked_add(source_offset)
+                    .and_then(|offset| offset.checked_add(chunk_off))
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "blob read offset overflow")
+                    })? as usize;
+                let end = start.checked_add(dst.len()).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "blob read len overflow")
+                })?;
+                if end > mmap.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "blob mmap read out of bounds: device_id={}, offset={}, len={}, blob_len={}",
+                            device_id,
+                            start,
+                            dst.len(),
+                            mmap.len()
+                        ),
+                    ));
+                }
+                dst.copy_from_slice(&mmap[start..end]);
+                Ok(())
+            }
+            BlobDeviceKind::Cached(cached) => cached.read_into(source_offset, chunk_off, dst),
+        }
+    }
+
+    pub(crate) fn write_blob_to(
+        &self,
+        device_id: u16,
+        source_offset: u64,
+        chunk_off: u64,
+        len: usize,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        let blob = self.blob_devices.get(&device_id).ok_or_else(|| {
             io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "blob data offset + offset overflow",
+                io::ErrorKind::NotFound,
+                format!("blob device {device_id} not available"),
             )
         })?;
-        let end = start.checked_add(len).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "blob offset + len overflow")
-        })?;
-        if end > blob.mmap.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                format!(
-                    "blob mmap read out of bounds: device_id={}, offset={}, len={}, blob_len={}",
-                    device_id,
-                    start,
-                    len,
-                    blob.mmap.len()
-                ),
-            ));
+        match &blob.kind {
+            BlobDeviceKind::Direct { mmap, data_offset } => {
+                let start = (*data_offset as u64)
+                    .checked_add(source_offset)
+                    .and_then(|offset| offset.checked_add(chunk_off))
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
+                    })? as usize;
+                let end = start.checked_add(len).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "blob write len overflow")
+                })?;
+                if end > mmap.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "blob mmap read out of bounds: device_id={}, offset={}, len={}, blob_len={}",
+                            device_id,
+                            start,
+                            len,
+                            mmap.len()
+                        ),
+                    ));
+                }
+                writer.write_all(&mmap[start..end])
+            }
+            BlobDeviceKind::Cached(cached) => {
+                let mut buf = vec![0u8; len];
+                cached.read_into(source_offset, chunk_off, &mut buf)?;
+                writer.write_all(&buf)
+            }
         }
-        Ok(&blob.mmap[start..end])
     }
 
     pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {

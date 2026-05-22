@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::{warn, Level};
 
+const DEFAULT_CHUNK_SIZE: u32 = 1_048_576;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ConversionType {
     DirLepton,
@@ -32,7 +34,7 @@ pub struct BuildArgs {
     #[arg(long = "type", value_enum, default_value_t = ConversionType::DirLepton)]
     pub conversion_type: ConversionType,
 
-    /// File path to save the generated lepton blob (also include bootstrap).
+    /// File path to save the generated lepton full blob (also emits <blob>.blob.meta).
     #[arg(
         long,
         conflicts_with = "blob_dir",
@@ -40,7 +42,7 @@ pub struct BuildArgs {
     )]
     pub blob: Option<PathBuf>,
 
-    /// Directory path to save the generated lepton blob with its SHA256 file name.
+    /// Directory path to save the generated lepton full blob and blobmeta with SHA256 file names.
     #[arg(long, conflicts_with = "blob", required_unless_present = "blob")]
     pub blob_dir: Option<PathBuf>,
 
@@ -49,7 +51,7 @@ pub struct BuildArgs {
     pub bootstrap: Option<PathBuf>,
 
     /// Chunk size in bytes (must be a power of two, >= 4096).
-    #[arg(long = "chunk-size")]
+    #[arg(long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
     pub chunk_size: u32,
 
     /// Algorithm to compress data chunks.
@@ -75,7 +77,7 @@ pub struct BuildArgs {
 
 /// Run the build process to create an lepton image from the source directory.
 pub fn run_build(args: BuildArgs) -> Result<()> {
-    init_command_tracing(args.log_level, args.console);
+    let _guards = init_command_tracing(args.log_level, args.console);
 
     let requested_blob_path = args.blob.clone();
     if let (Some(bootstrap), Some(blob)) = (&args.bootstrap, requested_blob_path.as_ref()) {
@@ -146,8 +148,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         .expect("clap enforces either --blob or --blob-dir");
     eprintln!("Materializing bootstrap for {}...", blob_target_desc);
 
-    let uuid = uuid::Uuid::new_v4();
-    let uuid_bytes: [u8; 16] = *uuid.as_bytes();
+    let uuid_bytes = [0u8; 16];
     let blob_id = sha256_file(&temp_blob_data_path)?;
     let provisional_device_slots = [ErofsDeviceSlot::with_blob_id(
         blob_writer.total_blocks(),
@@ -224,16 +225,27 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         &full_blob_id,
         args.blob_dir.as_deref(),
     )?;
+    let blobmeta_path = blobmeta_output_path(
+        requested_blob_path.as_deref(),
+        args.blob_dir.as_deref(),
+        &full_blob_id,
+    );
+    blob_writer.write_blobmeta(
+        &blobmeta_path,
+        blob_id,
+        bootstrap_blocks * EROFS_BLOCK_SIZE as u64,
+    )?;
 
     let _ = fs::remove_file(&temp_blob_data_path);
 
     eprintln!(
-        "Done. Bootstrap: {} blocks, Data: {} blocks, Data blob id: {}, Blob sha256: {}, Blob path: {}",
+        "Done. Bootstrap: {} blocks, Data: {} blocks, Data blob id: {}, Blob sha256: {}, Blob path: {}, Blob meta path: {}",
         bootstrap_bytes.len().div_ceil(EROFS_BLOCK_SIZE as usize),
         blob_writer.total_blocks(),
         hex_string(&blob_id),
         hex_string(&full_blob_id),
-        final_blob_path.display()
+        final_blob_path.display(),
+        blobmeta_path.display()
     );
     Ok(())
 }
@@ -286,6 +298,25 @@ fn finalize_blob_output(
     Ok(final_path)
 }
 
+fn blobmeta_output_path(
+    blob_path: Option<&Path>,
+    blob_dir: Option<&Path>,
+    full_blob_sha256: &[u8; EROFS_BLOB_ID_SIZE],
+) -> PathBuf {
+    if let Some(dir) = blob_dir {
+        let file_name = format!("{}.blob.meta", hex_string(full_blob_sha256));
+        return dir.join(file_name);
+    }
+
+    if let Some(blob_path) = blob_path {
+        let mut path = blob_path.as_os_str().to_os_string();
+        path.push(".blob.meta");
+        return PathBuf::from(path);
+    }
+
+    Path::new(".").join(format!("{}.blob.meta", hex_string(full_blob_sha256)))
+}
+
 fn rebase_external_chunk_blkaddrs(inodes: &mut [InodeInfo], base_blocks: u64) -> Result<()> {
     for inode in inodes {
         let InodeData::RegularFile { chunk_indexes, .. } = &mut inode.data else {
@@ -305,4 +336,37 @@ fn rebase_external_chunk_blkaddrs(inodes: &mut [InodeInfo], base_blocks: u64) ->
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blobmeta_output_path_uses_blob_dir_when_present() {
+        let digest = [0x11u8; EROFS_BLOB_ID_SIZE];
+        let path = blobmeta_output_path(
+            Some(Path::new("/tmp/custom.blob")),
+            Some(Path::new("/var/lib/lepton")),
+            &digest,
+        );
+
+        assert_eq!(
+            path,
+            Path::new("/var/lib/lepton").join(format!("{}.blob.meta", hex_string(&digest)))
+        );
+    }
+
+    #[test]
+    fn blobmeta_output_path_appends_suffix_for_blob_path() {
+        let digest = [0x22u8; EROFS_BLOB_ID_SIZE];
+        let path = blobmeta_output_path(Some(Path::new("/tmp/custom.blob")), None, &digest);
+
+        assert_eq!(path, Path::new("/tmp/custom.blob.blob.meta"));
+    }
+
+    #[test]
+    fn default_chunk_size_is_one_megabyte() {
+        assert_eq!(DEFAULT_CHUNK_SIZE, 1_048_576);
+    }
 }

@@ -39,7 +39,7 @@ pub struct MergeArgs {
 }
 
 pub fn run_merge(args: MergeArgs) -> Result<()> {
-    init_command_tracing(args.log_level, args.console);
+    let _guards = init_command_tracing(args.log_level, args.console);
 
     let whiteout_spec = match args.whiteout_spec {
         WhiteoutSpec::Oci => MergeWhiteoutSpec::Oci,

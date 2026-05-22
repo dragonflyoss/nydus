@@ -71,16 +71,10 @@ pub fn merge_sources_to_bootstrap_bytes(
     let mut device_ids = HashMap::new();
 
     for (layer_id, source) in sources.iter().enumerate() {
-        let source_blob_sha256 = validate_source_blob_path(source)
+        let _source_blob_sha256 = validate_source_blob_path(source)
             .with_context(|| format!("invalid merge source: {}", source.display()))?;
-        let layer = load_layer(
-            layer_id as u32,
-            source,
-            &source_blob_sha256,
-            &mut device_slots,
-            &mut device_ids,
-        )
-        .with_context(|| format!("failed to load layer: {}", source.display()))?;
+        let layer = load_layer(layer_id as u32, source, &mut device_slots, &mut device_ids)
+            .with_context(|| format!("failed to load layer: {}", source.display()))?;
         merged_root = Some(match merged_root {
             Some(existing) => overlay_nodes(existing, layer, whiteout_spec)?,
             None => layer,
@@ -108,28 +102,27 @@ pub fn merge_sources_to_bootstrap_bytes(
         .map(|inode| inode.mtime)
         .min()
         .unwrap_or(build_time);
-    let uuid = uuid::Uuid::new_v4();
+    let uuid = [0u8; 16];
 
     render_bootstrap(
         &mut inodes,
         epoch,
         EROFS_BLKSZBITS as u32,
         &device_slots,
-        uuid.as_bytes(),
+        &uuid,
     )
 }
 
 fn load_layer(
     layer_id: u32,
     source: &Path,
-    source_blob_sha256: &[u8; EROFS_BLOB_ID_SIZE],
     device_slots: &mut Vec<ErofsDeviceSlot>,
     device_ids: &mut HashMap<[u8; EROFS_BLOB_ID_SIZE], u16>,
 ) -> Result<MergeNode> {
     let reader = ErofsReader::open_layer(source)?;
     validate_single_layer_blob_source(source, &reader)?;
     let layer_epoch = reader.sb().epoch();
-    let local_to_global = register_devices(&reader, source_blob_sha256, device_slots, device_ids)?;
+    let local_to_global = register_devices(&reader, device_slots, device_ids)?;
     load_node(
         &reader,
         layer_id,
@@ -141,7 +134,6 @@ fn load_layer(
 
 fn register_devices(
     reader: &ErofsReader,
-    source_blob_sha256: &[u8; EROFS_BLOB_ID_SIZE],
     device_slots: &mut Vec<ErofsDeviceSlot>,
     device_ids: &mut HashMap<[u8; EROFS_BLOB_ID_SIZE], u16>,
 ) -> Result<HashMap<u16, u16>> {
@@ -150,15 +142,12 @@ fn register_devices(
     let info = infos
         .first()
         .ok_or_else(|| anyhow!("merge source does not contain an external blob device"))?;
-    let global_device_id = if let Some(existing) = device_ids.get(source_blob_sha256) {
+    let global_device_id = if let Some(existing) = device_ids.get(&info.blob_id) {
         *existing
     } else {
         let next = device_slots.len() as u16 + 1;
-        device_slots.push(ErofsDeviceSlot::with_blob_id(
-            info.blocks,
-            source_blob_sha256,
-        ));
-        device_ids.insert(*source_blob_sha256, next);
+        device_slots.push(ErofsDeviceSlot::with_blob_id(info.blocks, &info.blob_id));
+        device_ids.insert(info.blob_id, next);
         next
     };
     local_to_global.insert(info.device_id, global_device_id);

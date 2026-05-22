@@ -2,16 +2,16 @@
 
 mod build;
 mod check;
+mod fuse;
 mod merge;
-mod mount;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::build::{run_build, BuildArgs};
 use crate::check::{run_check, CheckArgs};
+use crate::fuse::{run_fuse_mount, FuseArgs};
 use crate::merge::{run_merge, MergeArgs};
-use crate::mount::{run_fuse_mount, Driver, MountArgs};
 
 #[derive(Parser)]
 #[command(name = "lepton", about = "Lepton filesystem tools")]
@@ -28,8 +28,8 @@ enum Commands {
     Check(CheckArgs),
     /// Merge multiple lepton layers into an overlaid bootstrap.
     Merge(MergeArgs),
-    /// Mount an lepton image.
-    Mount(MountArgs),
+    /// Mount an lepton image through FUSE.
+    Fuse(FuseArgs),
 }
 
 fn main() -> Result<()> {
@@ -38,8 +38,6 @@ fn main() -> Result<()> {
         Commands::Build(args) => run_build(args),
         Commands::Check(args) => run_check(args),
         Commands::Merge(args) => run_merge(args),
-        Commands::Mount(args) => match args.driver {
-            Driver::Fuse => run_fuse_mount(args),
-        },
+        Commands::Fuse(args) => run_fuse_mount(args),
     }
 }

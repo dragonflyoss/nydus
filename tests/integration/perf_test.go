@@ -17,7 +17,7 @@ import (
 )
 
 // TestPerf runs fio-based I/O benchmarks and Go-based metadata benchmarks
-// against the Rust `lepton mount`, optionally comparing the results with
+// against the Rust `lepton fuse`, optionally comparing the results with
 // the C `erofsfuse` implementation.
 //
 // Activation:
@@ -68,7 +68,7 @@ func TestPerf(t *testing.T) {
 	t.Log("Building LeptonFS image (chunksize=1MiB)...")
 	buildLeptonFSImage(t, leptonBin, imagePath, blobdev, corpusDir, 1024*1024)
 
-	// Benchmark the Rust lepton mount implementation.
+	// Benchmark the Rust lepton FUSE implementation.
 	t.Log("Benchmarking lepton...")
 	unmount := mountLepton(t, leptonBin, imagePath, blobdev, mntDir)
 	leptonFSResults := runBenchmarks(t, fioBin, mntDir)

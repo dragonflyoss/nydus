@@ -4,12 +4,14 @@
 //! runtime. All on-disk structs are `#[repr(C, packed)]` and can be cast
 //! directly from mmap'd memory (zero-copy) or constructed in-place for writing.
 
+pub mod blobmeta;
 pub mod chunk;
 pub mod dir;
 pub mod inode;
 pub mod layout;
 pub mod superblock;
 
+pub use blobmeta::*;
 pub use chunk::*;
 pub use dir::*;
 pub use inode::*;

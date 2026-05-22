@@ -35,6 +35,7 @@ func TestBlobMountE2E(t *testing.T) {
 			corpusDir := filepath.Join(tmpDir, "corpus")
 			bootstrapPath := filepath.Join(tmpDir, "test.bootstrap")
 			blobDir := filepath.Join(tmpDir, "blobs")
+				cacheDir := filepath.Join(tmpDir, "cache")
 			mntDir := filepath.Join(tmpDir, "mnt")
 
 			t.Log("Generating corpus...")
@@ -57,6 +58,13 @@ func TestBlobMountE2E(t *testing.T) {
 				defer unmount()
 				verifyMountedTree(t, corpusDir, mntDir)
 			}()
+
+				func() {
+					unmount := mountLeptonBootstrapWithCache(t, leptonBin, bootstrapPath, blobDir, cacheDir, mntDir)
+					defer unmount()
+					verifyMountedTree(t, corpusDir, mntDir)
+					verifyBlobCacheArtifacts(t, cacheDir, 1)
+				}()
 		})
 	}
 }
@@ -80,6 +88,7 @@ func TestMergedMountE2E(t *testing.T) {
 	layer2Bootstrap := filepath.Join(tmpDir, "layer2.bootstrap")
 	layer3Bootstrap := filepath.Join(tmpDir, "layer3.bootstrap")
 	mergedBootstrap := filepath.Join(tmpDir, "merged.bootstrap")
+	cacheDir := filepath.Join(tmpDir, "cache")
 
 	layer1Blob := buildLeptonFSImageToDir(t, leptonBin, layer1Bootstrap, blobDir, layer1Dir, 4096)
 	layer2Blob := buildLeptonFSImageToDir(t, leptonBin, layer2Bootstrap, blobDir, layer2Dir, 4096)
@@ -96,21 +105,32 @@ func TestMergedMountE2E(t *testing.T) {
 	)
 	logLeptonCheckOutput(t, leptonBin, "--bootstrap", mergedBootstrap, "--blob-dir", blobDir)
 
-	unmount := mountLeptonBootstrap(t, leptonBin, mergedBootstrap, blobDir, mountpoint)
-	defer unmount()
-	printMergeDebugPaths(t, layer1Dir, layer2Dir, layer3Dir, mountpoint)
+	func() {
+		unmount := mountLeptonBootstrap(t, leptonBin, mergedBootstrap, blobDir, mountpoint)
+		defer unmount()
+		printMergeDebugPaths(t, layer1Dir, layer2Dir, layer3Dir, mountpoint)
 
-	verifyMountedTree(t, expectedDir, mountpoint)
-	verifyWhiteoutResults(t, mountpoint)
-	verifyMergedMountMatchesErofsFuseWhenEnabled(
-		t,
-		mergedBootstrap,
-		mountpoint,
-		layer1Blob,
-		layer2Blob,
-		layer3Blob,
-	)
-	pauseMergeDebugIfRequested(t, mountpoint)
+		verifyMountedTree(t, expectedDir, mountpoint)
+		verifyWhiteoutResults(t, mountpoint)
+		verifyMergedMountMatchesErofsFuseWhenEnabled(
+			t,
+			mergedBootstrap,
+			mountpoint,
+			layer1Blob,
+			layer2Blob,
+			layer3Blob,
+		)
+	}()
+
+	func() {
+		unmount := mountLeptonBootstrapWithCache(t, leptonBin, mergedBootstrap, blobDir, cacheDir, mountpoint)
+		defer unmount()
+
+		verifyMountedTree(t, expectedDir, mountpoint)
+		verifyWhiteoutResults(t, mountpoint)
+		verifyBlobCacheArtifacts(t, cacheDir, 3)
+		pauseMergeDebugIfRequested(t, mountpoint)
+	}()
 }
 
 func verifyMergedMountMatchesErofsFuseWhenEnabled(
@@ -900,4 +920,34 @@ func requireNotExist(t *testing.T, path string) {
 	t.Helper()
 	_, err := os.Lstat(path)
 	require.True(t, errors.Is(err, os.ErrNotExist), "expected path to be absent: %s", path)
+}
+
+func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobCount int) {
+	t.Helper()
+
+	entries, err := os.ReadDir(cacheDir)
+	require.NoError(t, err)
+
+	var dataCount int
+	var chunkmapCount int
+	var blobmetaCount int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		switch {
+		case strings.HasSuffix(name, ".blob.data"):
+			dataCount++
+		case strings.HasSuffix(name, ".chunkmap"):
+			chunkmapCount++
+		case strings.HasSuffix(name, ".blob.meta"):
+			blobmetaCount++
+		}
+	}
+
+	assert.Equal(t, blobCount, dataCount, "unexpected cached blob.data count")
+	assert.Equal(t, blobCount, chunkmapCount, "unexpected cached chunkmap count")
+	assert.Equal(t, blobCount, blobmetaCount, "unexpected cached blobmeta count")
 }
