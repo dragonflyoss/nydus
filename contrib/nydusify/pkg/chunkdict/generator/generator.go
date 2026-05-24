@@ -314,39 +314,22 @@ func pushBlobFromBackend(
 				blobDigest := digest.Digest("sha256:" + blobID)
 
 				var blobSize int64
-				var rc io.ReadCloser
 
 				if bkd != nil {
-					rc, err = bkd.Reader(blobID)
-					if err != nil {
-						return errors.Wrap(err, "get blob reader")
-					}
 					blobSize, err = bkd.Size(blobID)
 					if err != nil {
 						return errors.Wrap(err, "get blob size")
 					}
 				} else {
-					imageDesc, err := generator.sourcesParser[0].Remote.Resolve(ctx)
-					if err != nil {
-						if strings.Contains(err.Error(), "x509: certificate signed by unknown authority") {
-							logrus.Warningln("try to enable \"--source-insecure\" / \"--target-insecure\" option")
-						}
-						return errors.Wrap(err, "resolve image")
-					}
-					rc, err = generator.sourcesParser[0].Remote.Pull(ctx, *imageDesc, true)
-					if err != nil {
-						return errors.Wrap(err, "get blob reader")
-					}
 					blobInfo, err := pvd.ContentStore().Info(ctx, blobDigest)
 					if err != nil {
 						return errors.Wrap(err, "get info from content store")
 					}
 					blobSize = blobInfo.Size
 				}
-				defer rc.Close()
 
 				blobSizeStr := humanize.Bytes(uint64(blobSize))
-				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushing blob from backend")
+				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushing blob")
 
 				blobDescs[idx] = ocispec.Descriptor{
 					Digest:    blobDigest,
@@ -356,6 +339,7 @@ func pushBlobFromBackend(
 						converter.LayerAnnotationNydusBlob: "true",
 					},
 				}
+
 				writer, err := getPushWriter(ctx, pvd, blobDescs[idx], generator.Opt)
 				if err != nil {
 					if errdefs.NeedsRetryWithHTTP(err) {
@@ -366,15 +350,36 @@ func pushBlobFromBackend(
 						return errors.Wrap(err, "get push writer")
 					}
 				}
-				if writer != nil {
-					defer writer.Close()
-					return content.Copy(ctx, writer, rc, blobSize, blobDigest)
+
+				if writer == nil {
+					logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("blob already exists, skip push")
+					return nil
 				}
+				defer writer.Close()
 
-				logrus.WithField("digest", blobDigest).WithField("size", blobSizeStr).Infof("pushed blob from backend")
+				var rc io.ReadCloser
+				if bkd != nil {
+					rc, err = bkd.Reader(blobID)
+					if err != nil {
+						return errors.Wrap(err, "get blob reader")
+					}
+				} else {
+					ra, err := pvd.ContentStore().ReaderAt(ctx, blobDescs[idx])
+					if err != nil {
+						return errors.Wrap(err, "get blob reader from content store")
+					}
 
-				return nil
+					rc = struct {
+						io.Reader
+						io.Closer
+					}{
+						Reader: io.NewSectionReader(ra, 0, blobSize),
+						Closer: ra,
+					}
+				}
+				defer rc.Close()
 
+				return content.Copy(ctx, writer, rc, blobSize, blobDigest)
 			})
 		}(idx)
 	}
