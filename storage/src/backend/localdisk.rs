@@ -63,6 +63,10 @@ impl BlobReader for LocalDiskBlob {
         Ok(self.blob_length)
     }
 
+    fn expect_exact_read(&self) -> bool {
+        false
+    }
+
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
         let msg = format!(
             "localdisk: invalid offset 0x{:x}, base 0x{:x}, length 0x{:x}",

@@ -13,7 +13,6 @@ use std::{fmt, thread};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use base64::Engine;
-use reqwest::blocking::Response;
 pub use reqwest::header::HeaderMap;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH};
 use reqwest::{Method, StatusCode};
@@ -22,10 +21,10 @@ use url::{ParseError, Url};
 use nydus_api::RegistryConfig;
 use nydus_utils::metrics::BackendMetrics;
 
-use crate::backend::connection::{
-    is_success_status, respond, Connection, ConnectionConfig, ConnectionError, ReqBody,
-};
-use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
+use crate::backend::connection::{Connection, ConnectionConfig, ConnectionError, ReqBody};
+use crate::backend::request;
+use crate::backend::request::is_success_status;
+use crate::backend::{BackendContext, BackendError, BackendResult, BlobBackend, BlobReader};
 
 const REGISTRY_CLIENT_ID: &str = "nydus-registry-client";
 const HEADER_AUTHORIZATION: &str = "Authorization";
@@ -44,7 +43,9 @@ pub enum RegistryError {
     Url(String, ParseError),
     Request(ConnectionError),
     Scheme(String),
-    Transport(reqwest::Error),
+    Transport(std::io::Error),
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    Proxy(request::RequestError),
 }
 
 impl fmt::Display for RegistryError {
@@ -55,17 +56,48 @@ impl fmt::Display for RegistryError {
             RegistryError::Request(e) => write!(f, "failed to issue request, {}", e),
             RegistryError::Scheme(s) => write!(f, "invalid scheme, {}", s),
             RegistryError::Transport(e) => write!(f, "network transport error, {}", e),
+            #[cfg(feature = "backend-dragonfly-proxy")]
+            RegistryError::Proxy(e) => write!(f, "proxy error: {:?}", e),
         }
     }
 }
 
 impl From<RegistryError> for BackendError {
     fn from(error: RegistryError) -> Self {
+        // Proxy errors must surface as BackendError::Request so that
+        // retry_op's is_proxy_forbidden/is_proxy_limited checks match.
+        #[cfg(feature = "backend-dragonfly-proxy")]
+        if let RegistryError::Proxy(e) = error {
+            return BackendError::Request(e);
+        }
         BackendError::Registry(error)
     }
 }
 
 type RegistryResult<T> = std::result::Result<T, RegistryError>;
+
+/// Convert a `RequestError` into a `RegistryError`, preserving proxy error types
+/// so that retry_op's is_proxy_forbidden/is_proxy_limited checks work correctly.
+fn request_err_to_registry(e: request::RequestError) -> RegistryError {
+    match e {
+        request::RequestError::Connection(ce) => RegistryError::Request(ce),
+        #[cfg(feature = "backend-dragonfly-proxy")]
+        e @ request::RequestError::Proxy(_) => RegistryError::Proxy(e),
+        other => RegistryError::Request(ConnectionError::ErrorWithMsg(format!("{:?}", other))),
+    }
+}
+
+/// Convert a request::Response into a RegistryResult, checking status if needed.
+fn respond(resp: request::Response, catch_status: bool) -> RegistryResult<request::Response> {
+    if !catch_status || is_success_status(resp.status()) {
+        Ok(resp)
+    } else {
+        let msg = resp
+            .text()
+            .unwrap_or_else(|e| format!("failed to read response body: {}", e));
+        Err(RegistryError::Request(ConnectionError::ErrorWithMsg(msg)))
+    }
+}
 
 #[derive(Default)]
 struct Cache(RwLock<String>);
@@ -143,8 +175,9 @@ fn default_expires_in() -> u64 {
 
 impl TokenResponse {
     // Extract the bearer token from the registry auth server response
-    fn from_resp(resp: Response) -> Result<Self> {
-        let mut token: TokenResponse = resp.json().map_err(|e| {
+    fn from_resp(resp: request::Response) -> Result<Self> {
+        let body = resp.text().map_err(|e| einval!(e))?;
+        let mut token: TokenResponse = serde_json::from_str(&body).map_err(|e| {
             einval!(format!(
                 "failed to decode registry auth server response: {:?}",
                 e
@@ -328,7 +361,7 @@ impl RegistryState {
         Some(ConfigAuthUpdate::Basic(config_auth))
     }
 
-    fn refresh_cached_auth_from_config(&self, connection: &Arc<Connection>) {
+    fn refresh_cached_auth_from_config(&self, request: &request::Request) {
         match self.detect_config_auth_update() {
             None => {}
             Some(ConfigAuthUpdate::Clear) => self.clear_cached_auth(),
@@ -339,7 +372,7 @@ impl RegistryState {
                 self.token_expired_at.store(None);
                 debug!("refreshed basic registry auth after registry_auth config update");
             }
-            Some(ConfigAuthUpdate::RefreshBearer(auth)) => match self.get_token(auth, connection) {
+            Some(ConfigAuthUpdate::RefreshBearer(auth)) => match self.get_token(auth, request) {
                 Ok(token) => {
                     let last_cached_auth = self.cached_auth.get();
                     self.cached_auth
@@ -358,19 +391,19 @@ impl RegistryState {
     }
 
     // Request registry authentication server to get bearer token
-    fn get_token(&self, auth: BearerAuth, connection: &Arc<Connection>) -> Result<TokenResponse> {
+    fn get_token(&self, auth: BearerAuth, request: &request::Request) -> Result<TokenResponse> {
         let http_get = self
             .cached_auth_using_http_get
             .get(&self.host)
             .unwrap_or_default();
         let resp = if http_get {
-            self.fetch_token(&auth, connection, Method::GET)?
+            self.fetch_token(&auth, request, Method::GET)?
         } else {
-            match self.fetch_token(&auth, connection, Method::POST) {
+            match self.fetch_token(&auth, request, Method::POST) {
                 Ok(resp) => resp,
                 Err(_) => {
                     warn!("retry http GET method to get auth token");
-                    let resp = self.fetch_token(&auth, connection, Method::GET)?;
+                    let resp = self.fetch_token(&auth, request, Method::GET)?;
                     // Cache http method for next use.
                     self.cached_auth_using_http_get.set(self.host.clone(), true);
                     resp
@@ -400,9 +433,9 @@ impl RegistryState {
     fn fetch_token(
         &self,
         auth: &BearerAuth,
-        connection: &Arc<Connection>,
+        request: &request::Request,
         method: Method,
-    ) -> Result<Response> {
+    ) -> Result<request::Response> {
         let mut headers = HeaderMap::new();
 
         let config_auth = self.get_config_auth();
@@ -437,7 +470,8 @@ impl RegistryState {
             _ => return Err(einval!()),
         }
 
-        let token_resp = connection
+        let mut ctx = BackendContext::default();
+        let token_resp = request
             .call::<&[u8]>(
                 method.clone(),
                 auth.realm.as_str(),
@@ -445,6 +479,8 @@ impl RegistryState {
                 body,
                 &mut headers,
                 true,
+                &mut ctx,
+                true, // temp_disable_proxy: auth always goes direct
             )
             .map_err(move |e| {
                 warn!(
@@ -457,11 +493,11 @@ impl RegistryState {
         Ok(token_resp)
     }
 
-    fn get_auth_header(&self, auth: Auth, connection: &Arc<Connection>) -> Result<String> {
+    fn get_auth_header(&self, auth: Auth, request: &request::Request) -> Result<String> {
         match auth {
             Auth::Basic(_) => Ok(format!("Basic {}", self.get_config_auth())),
             Auth::Bearer(auth) => {
-                let token = self.get_token(auth, connection)?;
+                let token = self.get_token(auth, request)?;
                 Ok(format!("Bearer {}", token.token))
             }
         }
@@ -589,7 +625,7 @@ impl First {
 
 struct RegistryReader {
     blob_id: String,
-    connection: Arc<Connection>,
+    request: Arc<request::Request>,
     state: Arc<RegistryState>,
     metrics: Arc<BackendMetrics>,
     first: First,
@@ -629,7 +665,8 @@ impl RegistryReader {
         data: Option<ReqBody<R>>,
         mut headers: HeaderMap,
         catch_status: bool,
-    ) -> RegistryResult<Response> {
+        context: &mut BackendContext,
+    ) -> RegistryResult<request::Response> {
         // Try get authorization header from cache for this request
         let mut last_cached_auth = String::new();
         let cached_auth = self.state.cached_auth.get();
@@ -645,16 +682,34 @@ impl RegistryReader {
         // after create_upload(), so we can request registry server directly
         if let Some(data) = data {
             return self
-                .connection
-                .call(method, url, None, Some(data), &mut headers, catch_status)
-                .map_err(RegistryError::Request);
+                .request
+                .call(
+                    method,
+                    url,
+                    None,
+                    Some(data),
+                    &mut headers,
+                    catch_status,
+                    context,
+                    false,
+                )
+                .map_err(request_err_to_registry);
         }
 
         // Try to request registry server with `authorization` header
         let mut resp = self
-            .connection
-            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
-            .map_err(RegistryError::Request)?;
+            .request
+            .call::<&[u8]>(
+                method.clone(),
+                url,
+                None,
+                None,
+                &mut headers,
+                false,
+                context,
+                false,
+            )
+            .map_err(request_err_to_registry)?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             if headers.contains_key(HEADER_AUTHORIZATION) {
                 // If we request registry (harbor server) with expired authorization token,
@@ -667,9 +722,18 @@ impl RegistryReader {
                 headers.remove(HEADER_AUTHORIZATION);
 
                 resp = self
-                    .connection
-                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
-                    .map_err(RegistryError::Request)?;
+                    .request
+                    .call::<&[u8]>(
+                        method.clone(),
+                        url,
+                        None,
+                        None,
+                        &mut headers,
+                        false,
+                        context,
+                        false,
+                    )
+                    .map_err(request_err_to_registry)?;
             };
 
             if let Some(resp_auth_header) = resp.headers().get(HEADER_WWW_AUTHENTICATE) {
@@ -677,7 +741,7 @@ impl RegistryReader {
                 if let Some(auth) = RegistryState::parse_auth(resp_auth_header) {
                     let auth_header = self
                         .state
-                        .get_auth_header(auth, &self.connection)
+                        .get_auth_header(auth, &self.request)
                         .map_err(|e| RegistryError::Common(e.to_string()))?;
 
                     headers.insert(
@@ -687,21 +751,30 @@ impl RegistryReader {
 
                     // Try to request registry server with `authorization` header again
                     let resp = self
-                        .connection
-                        .call(method, url, None, data, &mut headers, catch_status)
-                        .map_err(RegistryError::Request)?;
+                        .request
+                        .call(
+                            method,
+                            url,
+                            None,
+                            data,
+                            &mut headers,
+                            catch_status,
+                            context,
+                            false,
+                        )
+                        .map_err(request_err_to_registry)?;
 
                     let status = resp.status();
                     if is_success_status(status) {
                         // Cache authorization header for next request
                         self.state.cached_auth.set(&last_cached_auth, auth_header)
                     }
-                    return respond(resp, catch_status).map_err(RegistryError::Request);
+                    return respond(resp, catch_status);
                 }
             }
         }
 
-        respond(resp, catch_status).map_err(RegistryError::Request)
+        respond(resp, catch_status)
     }
 
     /// Read data from registry server
@@ -717,9 +790,10 @@ impl RegistryReader {
     /// If responding 403, we need to repeat step one
     fn _try_read(
         &self,
-        mut buf: &mut [u8],
+        buf: &mut [u8],
         offset: u64,
         allow_retry: bool,
+        context: &mut BackendContext,
     ) -> RegistryResult<usize> {
         let url = format!("/blobs/sha256:{}", self.blob_id);
         let url = self
@@ -736,7 +810,7 @@ impl RegistryReader {
 
         if let Some(cached_redirect) = cached_redirect {
             resp = self
-                .connection
+                .request
                 .call::<&[u8]>(
                     Method::GET,
                     cached_redirect.as_str(),
@@ -744,8 +818,10 @@ impl RegistryReader {
                     None,
                     &mut headers,
                     false,
+                    context,
+                    false,
                 )
-                .map_err(RegistryError::Request)?;
+                .map_err(request_err_to_registry)?;
 
             // The request has expired or has been denied, need to re-request
             if allow_retry
@@ -757,7 +833,7 @@ impl RegistryReader {
                 );
                 self.state.cached_redirect.remove(&self.blob_id);
                 // Try read again only once
-                return self._try_read(buf, offset, false);
+                return self._try_read(buf, offset, false, context);
             }
         } else {
             resp = match self.request::<&[u8]>(
@@ -766,6 +842,7 @@ impl RegistryReader {
                 None,
                 headers.clone(),
                 false,
+                context,
             ) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
@@ -777,7 +854,14 @@ impl RegistryReader {
                         .state
                         .url(url.as_str(), &[])
                         .map_err(|e| RegistryError::Url(url, e))?;
-                    self.request::<&[u8]>(Method::GET, url.as_str(), None, headers.clone(), false)?
+                    self.request::<&[u8]>(
+                        Method::GET,
+                        url.as_str(),
+                        None,
+                        headers.clone(),
+                        false,
+                        context,
+                    )?
                 }
                 Err(RegistryError::Request(ConnectionError::Common(e))) => {
                     if e.to_string().contains("self signed certificate") {
@@ -822,7 +906,7 @@ impl RegistryReader {
                         debug!("New redirected location {:?}", location.host_str());
                     }
                     let resp_ret = self
-                        .connection
+                        .request
                         .call::<&[u8]>(
                             Method::GET,
                             location.as_str(),
@@ -830,10 +914,17 @@ impl RegistryReader {
                             None,
                             &mut headers,
                             true,
+                            context,
+                            false,
                         )
-                        .map_err(RegistryError::Request);
+                        .map_err(request_err_to_registry);
                     match resp_ret {
                         Ok(_resp) => {
+                            trace!(
+                                "redirect cache for blob={}, status={}",
+                                self.blob_id,
+                                status,
+                            );
                             resp = _resp;
                             self.state
                                 .cached_redirect
@@ -845,13 +936,58 @@ impl RegistryReader {
                     }
                 };
             } else {
-                resp = respond(resp, true).map_err(RegistryError::Request)?;
+                resp = respond(resp, true)?;
             }
         }
 
-        resp.copy_to(&mut buf)
-            .map_err(RegistryError::Transport)
+        resp.copy_to(buf)
+            .map_err(|e| RegistryError::Transport(std::io::Error::other(e)))
             .map(|size| size as usize)
+    }
+
+    /// Start a streaming read from the blob at the given offset.
+    ///
+    /// When `offset` is 0, the request is sent WITHOUT a Range header, causing
+    /// Dragonfly dfdaemon to download and cache the entire blob. When `offset > 0`,
+    /// an open-ended Range header (`bytes=offset-`) is used.
+    fn _stream_read(
+        &self,
+        offset: u64,
+        allow_retry: bool,
+        context: &mut BackendContext,
+    ) -> RegistryResult<Box<dyn Read + Send>> {
+        let url = format!("/blobs/sha256:{}", self.blob_id);
+        let url = self
+            .state
+            .url(url.as_str(), &[])
+            .map_err(|e| RegistryError::Url(url, e))?;
+        let mut headers = HeaderMap::new();
+
+        // Only add Range header if offset > 0 (open-ended range to stream from offset).
+        // When offset == 0: NO Range header — dfdaemon downloads full blob and caches it.
+        if offset > 0 {
+            let range = format!("bytes={}-", offset);
+            headers.insert("Range", range.parse().unwrap());
+        }
+
+        let resp = self.request::<&[u8]>(
+            Method::GET,
+            url.as_str(),
+            None,
+            headers,
+            allow_retry,
+            context,
+        )?;
+
+        let status = resp.status();
+        if !is_success_status(status) {
+            return Err(RegistryError::Common(format!(
+                "stream_read failed, status: {}",
+                status,
+            )));
+        }
+
+        Ok(resp.reader())
     }
 }
 
@@ -864,12 +1000,14 @@ impl BlobReader for RegistryReader {
                 .url(&url, &[])
                 .map_err(|e| RegistryError::Url(url, e))?;
 
+            let mut ctx = BackendContext::default();
             let resp = match self.request::<&[u8]>(
                 Method::HEAD,
                 url.as_str(),
                 None,
                 HeaderMap::new(),
                 true,
+                &mut ctx,
             ) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
@@ -881,10 +1019,17 @@ impl BlobReader for RegistryReader {
                         .state
                         .url(&url, &[])
                         .map_err(|e| RegistryError::Url(url, e))?;
-                    self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true)?
+                    self.request::<&[u8]>(
+                        Method::HEAD,
+                        url.as_str(),
+                        None,
+                        HeaderMap::new(),
+                        true,
+                        &mut ctx,
+                    )?
                 }
                 Err(e) => {
-                    return Err(BackendError::Registry(e));
+                    return Err(BackendError::from(e));
                 }
             };
             let content_length = resp
@@ -903,10 +1048,35 @@ impl BlobReader for RegistryReader {
     }
 
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
+        self.try_read_ctx(buf, offset, None)
+    }
+
+    fn try_read_ctx(
+        &self,
+        buf: &mut [u8],
+        offset: u64,
+        ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<usize> {
+        let mut default_ctx = BackendContext::default();
+        let ctx = ctx.unwrap_or(&mut default_ctx);
         self.first.handle_force(&mut || -> BackendResult<usize> {
-            self._try_read(buf, offset, true)
-                .map_err(BackendError::Registry)
+            self._try_read(buf, offset, true, ctx)
+                .map_err(BackendError::from)
         })
+    }
+
+    fn try_stream_read(
+        &self,
+        offset: u64,
+        ctx: Option<&mut BackendContext>,
+    ) -> BackendResult<Box<dyn Read + Send>> {
+        let mut default_ctx = BackendContext::default();
+        let ctx = ctx.unwrap_or(&mut default_ctx);
+        self.first
+            .handle_force(&mut || -> BackendResult<Box<dyn Read + Send>> {
+                self._stream_read(offset, true, ctx)
+                    .map_err(BackendError::from)
+            })
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -920,7 +1090,7 @@ impl BlobReader for RegistryReader {
 
 /// Storage backend based on image registry.
 pub struct Registry {
-    connection: Arc<Connection>,
+    request: Arc<request::Request>,
     state: Arc<RegistryState>,
     metrics: Arc<BackendMetrics>,
     first: First,
@@ -933,7 +1103,9 @@ impl Registry {
         let con_config: ConnectionConfig = config.clone().into();
 
         let retry_limit = con_config.retry_limit;
+        let proxy_config = con_config.proxy.clone();
         let connection = Connection::new(&con_config)?;
+        let request = request::Request::new(connection, proxy_config, false, id);
         let auth = trim(config.auth.clone());
         let registry_token = trim(config.registry_token.clone());
         Self::validate_authorization_info(&auth)?;
@@ -970,7 +1142,7 @@ impl Registry {
         state.set_config_auth(auth);
 
         let registry = Registry {
-            connection,
+            request,
             state,
             metrics: BackendMetrics::new(id, "registry"),
             first: First::new(),
@@ -1007,12 +1179,12 @@ impl Registry {
     }
 
     fn start_refresh_token_thread(&self) {
-        let conn = self.connection.clone();
+        let request = self.request.clone();
         let state = self.state.clone();
         thread::spawn(move || {
             loop {
                 // Check for config auth changes every tick.
-                state.refresh_cached_auth_from_config(&conn);
+                state.refresh_cached_auth_from_config(&request);
 
                 if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
                     if let Some(token_expired_at) = state.token_expired_at.load().as_deref() {
@@ -1024,7 +1196,7 @@ impl Registry {
                                 state.cached_bearer_auth.load().as_deref()
                             {
                                 if let Ok(token) =
-                                    state.get_token(cached_bearer_auth.to_owned(), &conn)
+                                    state.get_token(cached_bearer_auth.to_owned(), &request)
                                 {
                                     let new_cached_auth = format!("Bearer {}", token.token);
                                     debug!(
@@ -1043,11 +1215,11 @@ impl Registry {
                     }
                 }
 
-                if conn.shutdown.load(Ordering::Acquire) {
+                if request.is_shutdown() {
                     break;
                 }
                 thread::sleep(Duration::from_secs(REGISTRY_CONFIG_POLL_INTERVAL));
-                if conn.shutdown.load(Ordering::Acquire) {
+                if request.is_shutdown() {
                     break;
                 }
             }
@@ -1057,7 +1229,7 @@ impl Registry {
 
 impl BlobBackend for Registry {
     fn shutdown(&self) {
-        self.connection.shutdown();
+        self.request.shutdown();
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -1068,7 +1240,7 @@ impl BlobBackend for Registry {
         Ok(Arc::new(RegistryReader {
             blob_id: blob_id.to_owned(),
             state: self.state.clone(),
-            connection: self.connection.clone(),
+            request: self.request.clone(),
             metrics: self.metrics.clone(),
             first: self.first.clone(),
         }))
@@ -1474,11 +1646,11 @@ mod tests {
             "token": "test_token_value",
             "expires_in": 3600
         });
-        let response = reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_token.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_token_value");
         assert_eq!(result.expires_in, 3600);
@@ -1488,11 +1660,11 @@ mod tests {
             "access_token": "test_access_token_value",
             "expires_in": 7200
         });
-        let response = reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_access_token.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_access_token_value");
         assert_eq!(result.expires_in, 7200);
@@ -1501,11 +1673,11 @@ mod tests {
         let json_with_default_expiration = json!({
             "token": "default_expiration_token"
         });
-        let response = reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_default_expiration.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "default_expiration_token");
         assert_eq!(result.expires_in, REGISTRY_DEFAULT_TOKEN_EXPIRATION);
@@ -1515,22 +1687,533 @@ mod tests {
             "token": "test_token_value",
             "access_token": "test_access_token_value",
         });
-        let response = reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_both_tokens.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response).unwrap();
         assert_eq!(result.token, "test_token_value");
 
         // Case 5: Response contains no token
         let json_with_no_token = json!({});
-        let response = reqwest::blocking::Response::from(
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
             http::response::Builder::new()
                 .body(json_with_no_token.to_string())
                 .unwrap(),
-        );
+        ));
         let result = TokenResponse::from_resp(response);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_registry_error_display() {
+        let err = RegistryError::Common("something went wrong".to_string());
+        assert!(err
+            .to_string()
+            .contains("failed to access blob from registry"));
+        assert!(err.to_string().contains("something went wrong"));
+
+        let pe = url::Url::parse("::not-a-url").unwrap_err();
+        let err = RegistryError::Url("::not-a-url".to_string(), pe);
+        assert!(err.to_string().contains("failed to parse URL"));
+        assert!(err.to_string().contains("::not-a-url"));
+
+        let err = RegistryError::Request(ConnectionError::ErrorWithMsg(
+            "connection refused".to_string(),
+        ));
+        assert!(err.to_string().contains("failed to issue request"));
+        assert!(err.to_string().contains("connection refused"));
+
+        let err = RegistryError::Scheme("ftp".to_string());
+        assert!(err.to_string().contains("invalid scheme"));
+        assert!(err.to_string().contains("ftp"));
+
+        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "transport failure");
+        let err = RegistryError::Transport(io_err);
+        assert!(err.to_string().contains("network transport error"));
+        assert!(err.to_string().contains("transport failure"));
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_registry_error_proxy_display() {
+        let proxy_err = request::RequestError::Common("proxy unreachable".to_string());
+        let err = RegistryError::Proxy(proxy_err);
+        let s = err.to_string();
+        assert!(s.contains("proxy"), "expected 'proxy' in '{}' ", s);
+    }
+
+    #[test]
+    fn test_registry_error_into_backend_error() {
+        // RegistryError::Common → BackendError::Registry
+        let err: BackendError = RegistryError::Common("test".to_string()).into();
+        assert!(
+            matches!(err, BackendError::Registry(RegistryError::Common(_))),
+            "expected BackendError::Registry, got: {:?}",
+            err
+        );
+
+        // RegistryError::Request → BackendError::Registry
+        let err: BackendError =
+            RegistryError::Request(ConnectionError::ErrorWithMsg("msg".to_string())).into();
+        assert!(
+            matches!(err, BackendError::Registry(RegistryError::Request(_))),
+            "expected BackendError::Registry(Request), got: {:?}",
+            err
+        );
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_registry_error_proxy_into_backend_error() {
+        // RegistryError::Proxy → BackendError::Request (so retry_op checks work)
+        let proxy_req_err = request::RequestError::Common("proxy error".to_string());
+        let err: BackendError = RegistryError::Proxy(proxy_req_err).into();
+        assert!(
+            matches!(err, BackendError::Request(_)),
+            "expected BackendError::Request for proxy error, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_request_err_to_registry_connection() {
+        // RequestError::Connection → RegistryError::Request preserving inner ConnectionError
+        let ce = ConnectionError::ErrorWithMsg("conn failed".to_string());
+        let result = request_err_to_registry(request::RequestError::Connection(ce));
+        match result {
+            RegistryError::Request(ConnectionError::ErrorWithMsg(msg)) => {
+                assert_eq!(msg, "conn failed");
+            }
+            other => panic!(
+                "expected RegistryError::Request(ErrorWithMsg), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_request_err_to_registry_common() {
+        // RequestError::Common → RegistryError::Request(ErrorWithMsg) containing Debug repr
+        let result =
+            request_err_to_registry(request::RequestError::Common("unknown error".to_string()));
+        match result {
+            RegistryError::Request(ConnectionError::ErrorWithMsg(msg)) => {
+                // The Debug repr of RequestError::Common("unknown error") is embedded
+                assert!(
+                    msg.contains("unknown error"),
+                    "expected debug repr in message, got: {}",
+                    msg
+                );
+            }
+            other => panic!(
+                "expected RegistryError::Request(ErrorWithMsg), got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_respond_returns_ok_when_status_check_disabled() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::UNAUTHORIZED)
+                .body("denied".to_string())
+                .unwrap(),
+        ));
+
+        let result = respond(response, false).unwrap();
+
+        assert_eq!(result.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_respond_returns_ok_for_success_status() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::OK)
+                .body("ok".to_string())
+                .unwrap(),
+        ));
+
+        let result = respond(response, true).unwrap();
+
+        assert_eq!(result.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_respond_returns_request_error_for_failure_status() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body("rate limited".to_string())
+                .unwrap(),
+        ));
+
+        let result = respond(response, true);
+
+        assert!(matches!(
+            result,
+            Err(RegistryError::Request(ConnectionError::ErrorWithMsg(msg)))
+                if msg == "rate limited"
+        ));
+    }
+
+    #[cfg(feature = "backend-dragonfly-proxy")]
+    #[test]
+    fn test_request_err_to_registry_proxy() {
+        use crate::backend::proxy::ProxyError;
+        // RequestError::Proxy → RegistryError::Proxy preserving the original error
+        let proxy_err = request::RequestError::Proxy(ProxyError::Common("proxy down".to_string()));
+        let result = request_err_to_registry(proxy_err);
+        assert!(
+            matches!(result, RegistryError::Proxy(_)),
+            "expected RegistryError::Proxy, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_first_handle_force_success() {
+        let first = First::new();
+        let mut call_count = 0u32;
+        let result: BackendResult<u32> = first.handle_force(&mut || {
+            call_count += 1;
+            Ok(42)
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(call_count, 1);
+    }
+
+    #[test]
+    fn test_first_handle_force_failure() {
+        let first = First::new();
+        let mut call_count = 0u32;
+        let result: BackendResult<u32> = first.handle_force(&mut || {
+            call_count += 1;
+            Err(BackendError::Registry(RegistryError::Common(
+                "forced fail".to_string(),
+            )))
+        });
+        assert!(result.is_err());
+        // The Once fires the closure once; on error it renews, then handle returns
+        // Some(Err) and unwrap_or_else doesn't call the closure again.
+        assert_eq!(call_count, 1);
+    }
+
+    #[test]
+    fn test_first_handle_force_always_executes() {
+        // Fire the Once successfully so subsequent handle() calls return None.
+        let first = First::new();
+        first.once(|| {});
+
+        // handle() would return None; handle_force falls back to calling the fn directly.
+        let mut call_count = 0u32;
+        let result: BackendResult<u32> = first.handle_force(&mut || {
+            call_count += 1;
+            Ok(99)
+        });
+        assert_eq!(result.unwrap(), 99);
+        assert_eq!(
+            call_count, 1,
+            "handle_force must always execute the closure"
+        );
+    }
+
+    #[test]
+    fn test_registry_state_fallback_http() {
+        let state = create_state(true);
+        assert_eq!(state.scheme.to_string(), "https");
+        state.fallback_http();
+        assert_eq!(state.scheme.to_string(), "http");
+
+        // Calling again on already-http state is idempotent.
+        state.fallback_http();
+        assert_eq!(state.scheme.to_string(), "http");
+    }
+
+    #[test]
+    fn test_get_and_set_config_auth() {
+        let id = "/test-get-set-config-auth";
+        let state = RegistryState {
+            id: id.to_string(),
+            scheme: Scheme::new(true),
+            host: "example.com".to_string(),
+            repo: "library/test".to_string(),
+            retry_limit: 5,
+            skip_verify: false,
+            blob_url_scheme: String::new(),
+            blob_redirected_host: String::new(),
+            cached_auth_using_http_get: Default::default(),
+            cached_auth: Default::default(),
+            cached_config_auth: Default::default(),
+            cached_redirect: Default::default(),
+            token_expired_at: ArcSwapOption::new(None),
+            cached_bearer_auth: ArcSwapOption::new(None),
+        };
+
+        // Initially empty
+        assert_eq!(state.get_config_auth(), "");
+
+        // Set a value
+        state.set_config_auth(Some("dGVzdDpwYXNz".to_string()));
+        assert_eq!(state.get_config_auth(), "dGVzdDpwYXNz");
+
+        // set_config_auth(None) is a no-op
+        state.set_config_auth(None);
+        assert_eq!(state.get_config_auth(), "dGVzdDpwYXNz");
+
+        // Overwrite
+        state.set_config_auth(Some("bmV3OnZhbHVl".to_string()));
+        assert_eq!(state.get_config_auth(), "bmV3OnZhbHVl");
+
+        nydus_utils::config::remove(id, &nydus_utils::config::Keys::RegistryAuth);
+    }
+
+    #[test]
+    fn test_needs_fallback_http_connection_refused() {
+        let state = create_state_with_skip_verify(true, true);
+        assert!(state.needs_fallback_http(&nested_error("connection refused")));
+    }
+
+    #[test]
+    fn test_needs_fallback_http_non_tls_error_no_fallback() {
+        let state = create_state_with_skip_verify(true, true);
+        assert!(!state.needs_fallback_http(&nested_error("timeout")));
+        assert!(!state.needs_fallback_http(&nested_error("dns resolution failed")));
+    }
+
+    #[test]
+    fn test_needs_fallback_http_single_level_error() {
+        // Error with only one level of nesting (no source.source) returns false
+        let err = NestedErr {
+            msg: "wrong version number",
+            source: Some(Box::new(NestedErr {
+                msg: "no inner source",
+                source: None,
+            })),
+        };
+        let state = create_state_with_skip_verify(true, true);
+        assert!(!state.needs_fallback_http(&err));
+    }
+
+    #[test]
+    fn test_needs_fallback_http_no_source() {
+        let err = NestedErr {
+            msg: "no source at all",
+            source: None,
+        };
+        let state = create_state_with_skip_verify(true, true);
+        assert!(!state.needs_fallback_http(&err));
+    }
+
+    #[cfg(feature = "backend-registry")]
+    #[test]
+    fn test_respond_catch_status_disabled_passes_error_status() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body("server error".to_string())
+                .unwrap(),
+        ));
+        // catch_status=false, so even 500 is returned as Ok
+        let result = respond(response, false);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[cfg(feature = "backend-registry")]
+    #[test]
+    fn test_token_response_from_resp_invalid_json() {
+        let response = request::Response::HTTP(reqwest::blocking::Response::from(
+            http::response::Builder::new()
+                .body("not valid json {{{{".to_string())
+                .unwrap(),
+        ));
+        let result = TokenResponse::from_resp(response);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_request_err_to_registry_other_error() {
+        let other_err = request::RequestError::Common("some other error".to_string());
+        let result = request_err_to_registry(other_err);
+        assert!(matches!(
+            result,
+            RegistryError::Request(ConnectionError::ErrorWithMsg(msg))
+                if msg.contains("some other error")
+        ));
+    }
+
+    #[test]
+    fn test_hash_cache_remove_nonexistent() {
+        let cache: HashCache<String> = HashCache::new();
+        // Removing a key that doesn't exist should not panic
+        cache.remove("nonexistent");
+        assert_eq!(cache.get("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_cache_set_skips_when_last_equals_current() {
+        let cache = Cache::new("initial".to_owned());
+        // set() is a no-op when last == current (dedup guard)
+        cache.set("same_value", "same_value".to_owned());
+        assert_eq!(cache.get(), "initial");
+    }
+
+    #[test]
+    fn test_state_url_with_query() {
+        let state = create_state(true);
+        let url = state.url("/blobs/sha256:abc", &["scope=read"]).unwrap();
+        assert!(url.contains("scope=read"));
+        assert!(url.contains("/v2/library/test/blobs/sha256:abc"));
+    }
+
+    #[test]
+    fn test_state_url_with_multiple_queries() {
+        let state = create_state(true);
+        let url = state.url("/tags/list", &["n=100", "last=latest"]).unwrap();
+        assert!(url.contains("n=100"));
+        assert!(url.contains("last=latest"));
+        assert!(url.contains("&"));
+    }
+
+    #[test]
+    fn test_parse_auth_basic_with_realm() {
+        let hdr = HeaderValue::from_str(r#"Basic realm="https://registry.example.com""#).unwrap();
+        let auth = RegistryState::parse_auth(&hdr);
+        assert!(matches!(
+            auth,
+            Some(Auth::Basic(b)) if b.realm == "https://registry.example.com"
+        ));
+    }
+
+    #[test]
+    fn test_parse_auth_bearer_missing_service() {
+        let hdr =
+            HeaderValue::from_str(r#"Bearer realm="https://auth.example.com/token""#).unwrap();
+        let auth = RegistryState::parse_auth(&hdr);
+        assert!(auth.is_none(), "Bearer without service should return None");
+    }
+
+    #[test]
+    fn test_parse_auth_bearer_no_scope() {
+        let hdr = HeaderValue::from_str(
+            r#"Bearer realm="https://auth.example.com/token",service="example.com""#,
+        )
+        .unwrap();
+        let auth = RegistryState::parse_auth(&hdr);
+        assert!(matches!(
+            auth,
+            Some(Auth::Bearer(b)) if b.scope.is_empty() && b.realm == "https://auth.example.com/token"
+        ));
+    }
+
+    #[test]
+    fn test_parse_auth_unknown_scheme() {
+        let hdr = HeaderValue::from_str(r#"Digest realm="example.com""#).unwrap();
+        let auth = RegistryState::parse_auth(&hdr);
+        assert!(auth.is_none());
+    }
+
+    #[test]
+    fn test_first_renew_allows_re_execution() {
+        let first = First::new();
+        let mut count = 0u32;
+        first.once(|| count += 1);
+        assert_eq!(count, 1);
+
+        // Without renew, once is a no-op
+        first.once(|| count += 1);
+        assert_eq!(count, 1);
+
+        // After renew, once executes again
+        first.renew();
+        first.once(|| count += 1);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_first_handle_error_allows_retry() {
+        let first = First::new();
+        let mut attempts = 0u32;
+
+        // First handle() call fails — error triggers renew() inside once()
+        let result: Option<BackendResult<u32>> = first.handle(&mut || {
+            attempts += 1;
+            Err(BackendError::Registry(RegistryError::Common(
+                "fail".to_string(),
+            )))
+        });
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+        assert_eq!(attempts, 1);
+
+        // After error+renew, a second handle() call can execute again
+        let result2: Option<BackendResult<u32>> = first.handle(&mut || {
+            attempts += 1;
+            Ok(42)
+        });
+        assert_eq!(result2.unwrap().unwrap(), 42);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn test_registry_state_clear_cached_auth() {
+        let state = create_state(true);
+
+        // Set a cached auth token and a token expiry.
+        let last = state.cached_auth.get();
+        state
+            .cached_auth
+            .set(&last, "Bearer eyJhbGciOiJSUzI1NiJ9".to_string());
+        state
+            .token_expired_at
+            .store(Some(Arc::new(9_999_999_999u64)));
+
+        assert_eq!(state.cached_auth.get(), "Bearer eyJhbGciOiJSUzI1NiJ9");
+        assert!(state.token_expired_at.load().is_some());
+
+        state.clear_cached_auth();
+
+        assert_eq!(
+            state.cached_auth.get(),
+            "",
+            "cached_auth should be empty after clear"
+        );
+        assert!(
+            state.token_expired_at.load().is_none(),
+            "token_expired_at should be None after clear"
+        );
+    }
+
+    #[test]
+    fn test_stream_read_default_returns_unsupported() {
+        // Verify the default BlobReader::try_stream_read() returns Unsupported.
+        // RegistryReader overrides this — tested via integration/e2e with a real server.
+        struct DummyReader;
+        impl BlobReader for DummyReader {
+            fn blob_size(&self) -> BackendResult<u64> {
+                Ok(100)
+            }
+            fn try_read(&self, _buf: &mut [u8], _offset: u64) -> BackendResult<usize> {
+                Ok(0)
+            }
+            fn metrics(&self) -> &nydus_utils::metrics::BackendMetrics {
+                unimplemented!()
+            }
+        }
+
+        let reader = DummyReader;
+        let result = reader.try_stream_read(0, None);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match err {
+            BackendError::Unsupported(msg) => {
+                assert!(msg.contains("streaming read not supported"));
+            }
+            other => panic!("expected Unsupported, got: {:?}", other),
+        }
     }
 }

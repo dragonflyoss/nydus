@@ -21,6 +21,7 @@ use time::{format_description, OffsetDateTime};
 
 use crate::backend::connection::{Connection, ConnectionConfig};
 use crate::backend::object_storage::{ObjectStorage, ObjectStorageState};
+use crate::backend::request;
 
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 const HEADER_HOST: &str = "Host";
@@ -48,6 +49,7 @@ impl S3 {
     pub fn new(s3_config: &S3Config, id: Option<&str>) -> Result<S3> {
         let con_config: ConnectionConfig = s3_config.clone().into();
         let retry_limit = con_config.retry_limit;
+        let proxy_config = con_config.proxy.clone();
         let connection = Connection::new(&con_config)?;
         let final_endpoint = if s3_config.endpoint.is_empty() {
             S3_DEFAULT_ENDPOINT.to_string()
@@ -67,8 +69,10 @@ impl S3 {
         });
         let metrics = id.map(|i| BackendMetrics::new(i, "oss"));
 
+        let request = request::Request::new(connection, proxy_config, false, id.unwrap_or(""));
+
         Ok(ObjectStorage::new_object_storage(
-            connection,
+            request,
             state,
             metrics,
             id.map(|i| i.to_string()),

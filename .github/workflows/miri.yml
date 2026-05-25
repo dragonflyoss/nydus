@@ -36,6 +36,8 @@ jobs:
         rustup toolchain install nightly --component miri
         rustup override set nightly
         cargo miri setup
+    - name: Install protoc
+      run: bash misc/install-protoc.sh
     - name: Unit Test with Miri
       run: |
         CARGO_HOME=${HOME}/.cargo

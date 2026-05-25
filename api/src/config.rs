@@ -890,6 +890,15 @@ pub struct PrefetchConfigV2 {
     /// Prefetch all data from backend.
     #[serde(default)]
     pub prefetch_all: bool,
+    /// Enable streaming blob prefetch for Dragonfly proxy.
+    ///
+    /// When enabled, sends rangeless GET to make the proxy cache entire blobs
+    /// instead of the normal per-chunk fs prefetch. Only effective when `enable`
+    /// is also true and a Dragonfly proxy is configured. Reuses `threads_count`
+    /// and `bandwidth_limit` for concurrency and bandwidth control; retries are
+    /// fixed at 10 attempts per blob.
+    #[serde(default)]
+    pub stream_prefetch: bool,
 }
 
 /// Configuration information for network proxy.
@@ -913,6 +922,9 @@ pub struct ProxyConfig {
     /// Elapsed time to pause proxy health check when the request is inactive, in seconds.
     #[serde(default = "default_check_pause_elapsed")]
     pub check_pause_elapsed: u64,
+    /// Dragonfly scheduler endpoint URL for SDK-based proxy.
+    #[serde(default)]
+    pub dragonfly_scheduler_endpoint: String,
 }
 
 impl Default for ProxyConfig {
@@ -924,6 +936,7 @@ impl Default for ProxyConfig {
             check_interval: 5,
             use_http: false,
             check_pause_elapsed: 300,
+            dragonfly_scheduler_endpoint: String::new(),
         }
     }
 }
@@ -1432,6 +1445,13 @@ struct FsPrefetchControl {
     /// Whether to prefetch all filesystem data.
     #[serde(default = "default_prefetch_all")]
     pub prefetch_all: bool,
+
+    /// Enable streaming blob prefetch for Dragonfly proxy.
+    ///
+    /// Reuses `threads_count` and `bandwidth_limit` for concurrency and bandwidth
+    /// control. Only effective when `enable` is true.
+    #[serde(default)]
+    pub stream_prefetch: bool,
 }
 
 impl From<FsPrefetchControl> for PrefetchConfigV2 {
@@ -1442,6 +1462,7 @@ impl From<FsPrefetchControl> for PrefetchConfigV2 {
             batch_size: v.batch_size,
             bandwidth_limit: v.bandwidth_limit,
             prefetch_all: v.prefetch_all,
+            stream_prefetch: v.stream_prefetch,
         }
     }
 }
@@ -1469,6 +1490,7 @@ impl From<&BlobPrefetchConfig> for PrefetchConfigV2 {
             batch_size: v.batch_size,
             bandwidth_limit: v.bandwidth_limit,
             prefetch_all: true,
+            ..Default::default()
         }
     }
 }

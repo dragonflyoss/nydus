@@ -1,0 +1,34 @@
+# Minimal Dragonfly Manager config for E2E testing.
+# Uses local MySQL and Redis on default ports.
+server:
+  grpc:
+    port:
+      start: 65003
+      end: 65003
+  rest:
+    addr: :8080
+  logDir: /tmp/dragonfly/logs/manager
+  cacheDir: /tmp/dragonfly/cache/manager
+  logLevel: info
+
+auth:
+  jwt:
+    realm: 'Dragonfly'
+    key: 'ZHJhZ29uZmx5Cg=='
+    timeout: 48h
+    maxRefresh: 48h
+
+database:
+  type: mysql
+  mysql:
+    user: root
+    password: dragonfly
+    host: 127.0.0.1
+    port: 3306
+    dbname: manager
+    migrate: true
+  redis:
+    addrs:
+      - 127.0.0.1:6379
+
+console: true

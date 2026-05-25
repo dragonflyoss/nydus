@@ -25,9 +25,16 @@ use reqwest::{
 use nydus_api::{HttpProxyConfig, OssConfig, ProxyConfig, RegistryConfig, S3Config};
 use url::ParseError;
 
+use crate::backend::hickory::HickoryDnsResolver;
+
 const HEADER_AUTHORIZATION: &str = "Authorization";
 
 const RATE_LIMITED_LOG_TIME: u8 = 2;
+
+lazy_static::lazy_static! {
+    static ref HICKORY_DNS_RESOLVER: Arc<HickoryDnsResolver> =
+        Arc::new(HickoryDnsResolver::default());
+}
 
 thread_local! {
     pub static LAST_FALLBACK_AT: RefCell<SystemTime> = const { RefCell::new(UNIX_EPOCH) };
@@ -378,6 +385,23 @@ impl Connection {
         headers: &mut HeaderMap,
         catch_status: bool,
     ) -> ConnectionResult<Response> {
+        self.call_with_proxy_control(method, url, query, data, headers, catch_status, false)
+    }
+
+    /// Like `call()`, but when `skip_proxy` is true, bypass the HTTP proxy
+    /// entirely and go direct to the origin. Used for auth token requests
+    /// that must not have their URL scheme rewritten by `use_http`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn call_with_proxy_control<R: Read + Clone + Send + 'static>(
+        &self,
+        method: Method,
+        url: &str,
+        query: Option<&[(&str, &str)]>,
+        data: Option<ReqBody<R>>,
+        headers: &mut HeaderMap,
+        catch_status: bool,
+        skip_proxy: bool,
+    ) -> ConnectionResult<Response> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(ConnectionError::Disconnected);
         }
@@ -389,59 +413,82 @@ impl Connection {
             Ordering::Relaxed,
         );
 
-        if let Some(proxy) = &self.proxy {
-            if proxy.health.ok() {
-                let data_cloned = data.as_ref().cloned();
+        if !skip_proxy {
+            if let Some(proxy) = &self.proxy {
+                if proxy.health.ok() {
+                    let data_cloned = data.as_ref().cloned();
 
-                let http_url: Option<String>;
-                let mut replaced_url = url;
+                    let http_url: Option<String>;
+                    let mut replaced_url = url;
 
-                if proxy.use_http {
-                    http_url = proxy.try_use_http(url);
-                    if let Some(ref r) = http_url {
-                        replaced_url = r.as_str();
-                    }
-                }
-
-                let result = self.call_inner(
-                    &proxy.client,
-                    method.clone(),
-                    replaced_url,
-                    &query,
-                    data_cloned,
-                    headers,
-                    catch_status,
-                    true,
-                );
-
-                match result {
-                    Ok(resp) => {
-                        if !proxy.fallback || resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
-                            return Ok(resp);
+                    if proxy.use_http {
+                        http_url = proxy.try_use_http(url);
+                        if let Some(ref r) = http_url {
+                            replaced_url = r.as_str();
                         }
                     }
-                    Err(err) => {
-                        if !proxy.fallback {
-                            return Err(err);
+
+                    debug!(
+                        "connection: routing via PROXY (fallback={}), url={} -> {}",
+                        proxy.fallback, url, replaced_url,
+                    );
+
+                    let result = self.call_inner(
+                        &proxy.client,
+                        method.clone(),
+                        replaced_url,
+                        &query,
+                        data_cloned,
+                        headers,
+                        catch_status,
+                        true,
+                    );
+
+                    match result {
+                        Ok(resp) => {
+                            debug!(
+                                "connection: proxy returned status={}, fallback={}",
+                                resp.status(),
+                                proxy.fallback,
+                            );
+                            if !proxy.fallback || resp.status() < StatusCode::INTERNAL_SERVER_ERROR
+                            {
+                                return Ok(resp);
+                            }
+                        }
+                        Err(err) => {
+                            warn!("Request proxy server failed: {:?}", err);
+                            if !proxy.fallback {
+                                return Err(err);
+                            }
                         }
                     }
-                }
-                // If proxy server responds invalid status code or http connection failed, we need to
-                // fallback to origin server, the policy only applicable to non-upload operation
-                warn!("Request proxy server failed, fallback to original server");
-            } else {
-                LAST_FALLBACK_AT.with(|f| {
-                    let current = SystemTime::now();
-                    if current.duration_since(*f.borrow()).unwrap().as_secs()
-                        >= RATE_LIMITED_LOG_TIME as u64
-                    {
-                        warn!("Proxy server is not healthy, fallback to original server");
-                        f.replace(current);
+                    // If proxy server responds invalid status code or http connection failed, we need to
+                    // fallback to origin server, the policy only applicable to non-upload operation
+                    warn!("Request proxy server failed, fallback to original server");
+                } else {
+                    if !proxy.fallback {
+                        return Err(ConnectionError::ErrorWithMsg(
+                            "proxy is not healthy and fallback is disabled".to_string(),
+                        ));
                     }
-                })
+                    LAST_FALLBACK_AT.with(|f| {
+                        let current = SystemTime::now();
+                        if current.duration_since(*f.borrow()).unwrap().as_secs()
+                            >= RATE_LIMITED_LOG_TIME as u64
+                        {
+                            warn!("Proxy server is not healthy, fallback to original server");
+                            f.replace(current);
+                        }
+                    })
+                }
             }
-        }
+        } // end if !skip_proxy
 
+        debug!(
+            "connection: routing DIRECT (no proxy or fallback), url={}",
+            url
+        );
         self.call_inner(
             &self.client,
             method,
@@ -469,9 +516,12 @@ impl Connection {
         let mut cb = Client::builder()
             .timeout(timeout)
             .connect_timeout(connect_timeout)
-            // same number of redirects as containerd
-            // https://github.com/containerd/containerd/blob/main/core/remotes/docker/resolver.go#L596
-            .redirect(Policy::limited(10));
+            // Disable automatic redirect following so that registry.rs can
+            // cache 307 redirect URLs (cached_redirect) and skip the registry
+            // round-trip on subsequent chunk reads from the same blob.
+            .redirect(Policy::none());
+
+        cb = cb.dns_resolver(HICKORY_DNS_RESOLVER.clone());
 
         if config.skip_verify {
             cb = cb.danger_accept_invalid_certs(true);
@@ -485,6 +535,11 @@ impl Connection {
 
         if !proxy.is_empty() {
             cb = cb.proxy(reqwest::Proxy::all(proxy).map_err(|e| einval!(e))?)
+        } else {
+            // Explicitly disable system proxy (HTTP_PROXY/HTTPS_PROXY env vars)
+            // so that the direct client truly bypasses any proxy, especially when
+            // retry_op() sets disable_proxy=true for fallback to origin.
+            cb = cb.no_proxy()
         }
 
         cb.build().map_err(|e| einval!(e))
@@ -612,5 +667,134 @@ mod tests {
         assert_eq!(config.proxy.ping_url, "");
         assert_eq!(config.proxy.url, "");
         assert!(config.ca_cert_files.is_empty());
+    }
+
+    /// Helper to create a Connection with a proxy for testing fallback behavior.
+    fn make_connection_with_proxy(proxy_url: &str, fallback: bool) -> Arc<Connection> {
+        let config = ConnectionConfig {
+            proxy: ProxyConfig {
+                url: proxy_url.to_string(),
+                fallback,
+                check_interval: 5,
+                check_pause_elapsed: 300,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Connection::new(&config).unwrap()
+    }
+
+    #[test]
+    fn test_unhealthy_proxy_no_fallback_returns_error() {
+        // When proxy is unhealthy and fallback is disabled, call() must return
+        // an error immediately without attempting the origin server.
+        let conn = make_connection_with_proxy("http://127.0.0.1:1", false);
+
+        // Mark proxy as unhealthy
+        conn.proxy.as_ref().unwrap().health.set(false);
+
+        let mut headers = HeaderMap::new();
+        let result = conn.call::<Cursor<Vec<u8>>>(
+            Method::GET,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+        );
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("proxy is not healthy and fallback is disabled"),
+            "Expected 'proxy is not healthy and fallback is disabled' error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_unhealthy_proxy_with_fallback_attempts_origin() {
+        // When proxy is unhealthy but fallback IS enabled, call() should
+        // fall through to the origin server (which will fail with a connection
+        // error here since the URL is unreachable, but NOT with the
+        // "fallback is disabled" error).
+        let conn = make_connection_with_proxy("http://127.0.0.1:1", true);
+
+        // Mark proxy as unhealthy
+        conn.proxy.as_ref().unwrap().health.set(false);
+
+        let mut headers = HeaderMap::new();
+        let result = conn.call::<Cursor<Vec<u8>>>(
+            Method::GET,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+        );
+
+        // Should fail (unreachable server) but NOT with "fallback is disabled"
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("fallback is disabled"),
+            "Should not get 'fallback is disabled' error when fallback=true, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_healthy_proxy_no_fallback_returns_proxy_error() {
+        // When proxy is healthy and fallback is disabled, a failed proxy request
+        // should return the proxy error directly without falling back.
+        let conn = make_connection_with_proxy("http://127.0.0.1:1", false);
+
+        // Proxy stays healthy (default)
+        assert!(conn.proxy.as_ref().unwrap().health.ok());
+
+        let mut headers = HeaderMap::new();
+        let result = conn.call::<Cursor<Vec<u8>>>(
+            Method::GET,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+        );
+
+        // Should fail with the proxy connection error, not fallback
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            !err_msg.contains("fallback is disabled"),
+            "Should get proxy error, not fallback error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_disconnected_connection_returns_error() {
+        // Verify that a shutdown connection returns Disconnected error
+        // regardless of proxy state.
+        let conn = make_connection_with_proxy("http://127.0.0.1:1", false);
+        conn.shutdown();
+
+        let mut headers = HeaderMap::new();
+        let result = conn.call::<Cursor<Vec<u8>>>(
+            Method::GET,
+            "http://127.0.0.1:1/test",
+            None,
+            None,
+            &mut headers,
+            true,
+        );
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("disconnected"),
+            "Expected disconnected error, got: {}",
+            err_msg
+        );
     }
 }

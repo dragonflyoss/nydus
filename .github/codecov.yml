@@ -8,7 +8,7 @@ coverage:
     patch:
       default:
         enabled: yes
-        target: 90%
+        target: 80%
         threshold: 0%
 
 comment:

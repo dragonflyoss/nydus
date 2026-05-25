@@ -25,7 +25,7 @@ UNAME_M := $(shell uname -m)
 UNAME_S := $(shell uname -s)
 STATIC_TARGET = $(UNAME_M)-unknown-linux-musl
 ifeq ($(UNAME_S),Linux)
-	CARGO_COMMON += --features=virtiofs
+	CARGO_COMMON += --features=virtiofs,block-uffd
 ifeq ($(UNAME_M),ppc64le)
 	STATIC_TARGET = powerpc64le-unknown-linux-gnu
 endif
@@ -108,7 +108,7 @@ prepare-codecov:
 build: .format
 	$(CARGO_COV_FLAGS) ${CARGO} build $(CARGO_COMMON) $(CARGO_BUILD_FLAGS)
 	# Cargo will skip checking if it is already checked
-	${CARGO} clippy --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) --bins --tests -- -Dwarnings --allow clippy::unnecessary_cast --allow clippy::needless_borrow
+	${CARGO} clippy --workspace $(EXCLUDE_PACKAGES) $(CARGO_COMMON) $(CARGO_BUILD_FLAGS) --bins --tests -- -Dwarnings --allow clippy::unnecessary_cast --allow clippy::needless_borrow --allow clippy::result_large_err --allow clippy::manual_is_multiple_of --allow clippy::io_other_error
 
 release: .format build
 

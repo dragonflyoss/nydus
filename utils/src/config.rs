@@ -23,12 +23,18 @@ mod test_sync {
 pub enum Keys {
     /// Registry authentication configuration for a specific id
     RegistryAuth,
+    /// HTTP/HTTPS proxy URL for backend requests
+    ProxyURL,
+    /// Dragonfly scheduler endpoint URL for SDK-based proxy routing
+    DragonflySchedulerEndpoint,
 }
 
 impl From<&Keys> for String {
     fn from(key: &Keys) -> Self {
         match key {
             Keys::RegistryAuth => "registry_auth".to_string(),
+            Keys::ProxyURL => "proxy_url".to_string(),
+            Keys::DragonflySchedulerEndpoint => "dragonfly_scheduler_endpoint".to_string(),
         }
     }
 }
@@ -39,6 +45,8 @@ impl TryFrom<&str> for Keys {
     fn try_from(key: &str) -> Result<Self, Self::Error> {
         match key {
             "registry_auth" => Ok(Keys::RegistryAuth),
+            "proxy_url" => Ok(Keys::ProxyURL),
+            "dragonfly_scheduler_endpoint" => Ok(Keys::DragonflySchedulerEndpoint),
             _ => Err(()),
         }
     }
@@ -75,6 +83,17 @@ pub fn set(id: &str, key: &Keys, value: String) {
     let key_str: String = key.into();
     map.insert(format!("{}:{}", id, key_str), value);
     CONFIG_MAP.store(Arc::new(map));
+}
+
+/// Set the value of the key only if it is not already set (or is empty).
+///
+/// This is useful for registering initial configuration values without
+/// overwriting values that may have been set by earlier initialization.
+pub fn set_if_empty(id: &str, key: &Keys, value: String) {
+    let current = get(id, key);
+    if current.is_empty() && !value.is_empty() {
+        set(id, key, value);
+    }
 }
 
 /// Return the value of the key and whether it has changed compared to previous value.
@@ -598,6 +617,62 @@ mod tests {
     }
 
     #[test]
+    fn test_set_if_empty_sets_when_missing() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "set_if_empty_test";
+        let key = Keys::ProxyURL;
+        set_if_empty(id, &key, "http://proxy:3128".to_string());
+        assert_eq!(get(id, &key), "http://proxy:3128");
+
+        clear();
+    }
+
+    #[test]
+    fn test_set_if_empty_does_not_overwrite() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "set_if_empty_test2";
+        let key = Keys::DragonflySchedulerEndpoint;
+        set(id, &key, "http://scheduler:8002".to_string());
+        set_if_empty(id, &key, "http://other:9999".to_string());
+        assert_eq!(get(id, &key), "http://scheduler:8002");
+
+        clear();
+    }
+
+    #[test]
+    fn test_set_if_empty_ignores_empty_value() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "set_if_empty_test3";
+        let key = Keys::ProxyURL;
+        set_if_empty(id, &key, "".to_string());
+        assert_eq!(get(id, &key), "");
+        assert!(!contains_key(id, &key));
+
+        clear();
+    }
+
+    #[test]
+    fn test_set_if_empty_sets_when_existing_is_empty_string() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "set_if_empty_test4";
+        let key = Keys::ProxyURL;
+        // Set an empty string — set_if_empty should overwrite it
+        set(id, &key, "".to_string());
+        set_if_empty(id, &key, "http://proxy:3128".to_string());
+        assert_eq!(get(id, &key), "http://proxy:3128");
+
+        clear();
+    }
+
+    #[test]
     fn test_key_string_conversion() {
         let _guard = test_sync::TEST_LOCK.lock().unwrap();
         use std::convert::TryFrom;
@@ -612,5 +687,38 @@ mod tests {
         // Test invalid format
         assert_eq!(Keys::try_from("invalid_format"), Err(()));
         assert_eq!(Keys::try_from(""), Err(()));
+    }
+
+    #[test]
+    fn test_proxy_url_key() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "/mount";
+        let key = Keys::ProxyURL;
+        set(id, &key, "http://proxy:3128".to_string());
+        assert_eq!(get(id, &key), "http://proxy:3128");
+
+        let (val, changed) = get_changed(id, &key, "");
+        assert!(changed);
+        assert_eq!(val, "http://proxy:3128");
+
+        clear();
+    }
+
+    #[test]
+    fn test_dragonfly_scheduler_endpoint_key() {
+        let _guard = test_sync::TEST_LOCK.lock().unwrap();
+        clear();
+
+        let id = "/mount";
+        let key = Keys::DragonflySchedulerEndpoint;
+        set(id, &key, "http://scheduler:8002".to_string());
+        assert_eq!(get(id, &key), "http://scheduler:8002");
+
+        let (_val, changed) = get_changed(id, &key, "http://scheduler:8002");
+        assert!(!changed);
+
+        clear();
     }
 }

@@ -141,7 +141,14 @@ We are working on enabling cloud-hypervisor support for nydus.
     // Maximal read size per prefetch request, e.g. 128kb
     "merging_size": 131072,
     // Limit prefetch bandwidth to 1MB/S, it aims at reducing congestion with normal user io
-    "bandwidth_rate": 1048576
+    "bandwidth_rate": 1048576,
+    // Enable streaming blob prefetch for Dragonfly proxy optimization.
+    // When enabled, entire blobs are streamed via rangeless GET requests and
+    // cached locally, reducing per-chunk proxy round-trips. Only effective when
+    // "enable" is true. Reuses "threads_count" for concurrency and "bandwidth_rate"
+    // for bandwidth control (0 = no limit). Retries are fixed at 10 per blob.
+    // When stream_prefetch is true, normal fs prefetch is skipped.
+    "stream_prefetch": false
   }
 }
 ```
