@@ -27,11 +27,11 @@ impl LocalBackend {
         }
     }
 
-    fn legacy_blobmeta_path(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> PathBuf {
+    fn legacy_blob_meta_path(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> PathBuf {
         self.root.join(format!("{}.blob.meta", hex_string(blob_id)))
     }
 
-    fn blobmeta_path_for_source(&self, source: &Path) -> io::Result<PathBuf> {
+    fn blob_meta_path_for_source(&self, source: &Path) -> io::Result<PathBuf> {
         let file_name = source.file_name().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -39,8 +39,8 @@ impl LocalBackend {
             )
         })?;
 
-        let blobmeta_name = format!("{}.blob.meta", file_name.to_string_lossy());
-        Ok(self.root.join(blobmeta_name))
+        let blob_meta_name = format!("{}.blob.meta", file_name.to_string_lossy());
+        Ok(self.root.join(blob_meta_name))
     }
 
     fn resolve_source_path(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<PathBuf> {
@@ -87,15 +87,15 @@ impl LocalBackend {
 }
 
 impl BlobBackend for LocalBackend {
-    fn load_blobmeta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
-        let legacy_path = self.legacy_blobmeta_path(blob_id);
+    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+        let legacy_path = self.legacy_blob_meta_path(blob_id);
         if legacy_path.is_file() {
             return BlobMeta::load_with_blob_id(&legacy_path, *blob_id).map_err(io::Error::other);
         }
 
         let source_path = self.resolve_source_path(blob_id)?;
-        let blobmeta_path = self.blobmeta_path_for_source(&source_path)?;
-        BlobMeta::load_with_blob_id(&blobmeta_path, *blob_id).map_err(io::Error::other)
+        let blob_meta_path = self.blob_meta_path_for_source(&source_path)?;
+        BlobMeta::load_with_blob_id(&blob_meta_path, *blob_id).map_err(io::Error::other)
     }
 
     fn read_range(
@@ -157,29 +157,29 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn local_backend_reads_exact_blob_file_and_blobmeta() {
+    fn local_backend_reads_exact_blob_file_and_blob_meta() {
         let dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
         let blob_id = sha256_bytes(&payload);
         let blob_path = dir.path().join(hex_string(&blob_id));
-        let blobmeta_path = dir
+        let blob_meta_path = dir
             .path()
             .join(format!("{}.blob.meta", hex_string(&blob_id)));
         fs::write(&blob_path, &payload).unwrap();
         BlobMeta::from_chunks(blob_id, vec![BlobMetaChunk::new(0, 4096, 0, 4096).unwrap()])
-            .save(&blobmeta_path)
+            .save(&blob_meta_path)
             .unwrap();
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
-        let blobmeta = backend.load_blobmeta(&blob_id).unwrap();
+        let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
         let data = backend.read_range(&blob_id, 0, 4096).unwrap();
 
-        assert_eq!(blobmeta.header().chunk_count(), 1);
+        assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(data, payload);
     }
 
     #[test]
-    fn local_backend_loads_blobmeta_named_after_full_blob_sha() {
+    fn local_backend_loads_blob_meta_named_after_full_blob_sha() {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
         let blob_id = sha256_bytes(&payload);
@@ -208,10 +208,10 @@ mod tests {
         .unwrap();
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
-        let blobmeta = backend.load_blobmeta(&blob_id).unwrap();
+        let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
         let data = backend.read_range(&blob_id, 8192, 4096).unwrap();
 
-        assert_eq!(blobmeta.header().chunk_count(), 1);
+        assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(data, payload);
     }
 }

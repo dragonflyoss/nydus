@@ -1,7 +1,7 @@
 use std::io;
 use std::io::Write;
 
-use crate::build::blobchunk::ChunkIndex;
+use crate::build::blob_chunk::ChunkIndex;
 use crate::metadata::*;
 
 use super::ErofsReader;
@@ -369,7 +369,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::ErofsReader;
-    use crate::build::blobchunk::ChunkIndex;
+    use crate::build::blob_chunk::ChunkIndex;
     use crate::build::bootstrap::render_bootstrap;
     use crate::build::inode::{DirEntry as BuildDirEntry, InodeData, InodeInfo};
     use crate::metadata::{

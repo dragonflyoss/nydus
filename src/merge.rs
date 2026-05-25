@@ -5,7 +5,7 @@ use std::time::SystemTime;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::build::blobchunk::ChunkIndex;
+use crate::build::blob_chunk::ChunkIndex;
 use crate::build::bootstrap::render_bootstrap;
 use crate::build::inode::{mode_to_file_type, DirEntry, InodeData, InodeInfo};
 use crate::fs::ErofsReader;

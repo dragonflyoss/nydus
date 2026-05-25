@@ -5,7 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::build::blobchunk::{BlobWriter, ChunkIndex};
+use crate::build::blob_chunk::{BlobWriter, ChunkIndex};
 use crate::metadata::*;
 
 /// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.

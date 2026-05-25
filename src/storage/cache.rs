@@ -12,7 +12,7 @@ use crate::utils::hex_string;
 pub struct CachedBlobDevice {
     blob_id: [u8; EROFS_BLOB_ID_SIZE],
     chunkmap: ChunkMap,
-    blobmeta: BlobMeta,
+    blob_meta: BlobMeta,
     cache_file: File,
     backend: Arc<dyn BlobBackend>,
     fetch_lock: Mutex<()>,
@@ -27,13 +27,13 @@ impl CachedBlobDevice {
         fs::create_dir_all(cache_dir)?;
 
         let blob_id_hex = hex_string(&blob_id);
-        let blobmeta_path = cache_dir.join(format!("{}.blob.meta", blob_id_hex));
-        let blobmeta = if blobmeta_path.is_file() {
-            BlobMeta::load_with_blob_id(&blobmeta_path, blob_id).map_err(io::Error::other)?
+        let blob_meta_path = cache_dir.join(format!("{}.blob.meta", blob_id_hex));
+        let blob_meta = if blob_meta_path.is_file() {
+            BlobMeta::load_with_blob_id(&blob_meta_path, blob_id).map_err(io::Error::other)?
         } else {
-            let blobmeta = backend.load_blobmeta(&blob_id)?;
-            blobmeta.save(&blobmeta_path).map_err(io::Error::other)?;
-            BlobMeta::load_with_blob_id(&blobmeta_path, blob_id).map_err(io::Error::other)?
+            let blob_meta = backend.load_blob_meta(&blob_id)?;
+            blob_meta.save(&blob_meta_path).map_err(io::Error::other)?;
+            BlobMeta::load_with_blob_id(&blob_meta_path, blob_id).map_err(io::Error::other)?
         };
 
         let cache_blob_path = cache_dir.join(format!("{}.blob.data", blob_id_hex));
@@ -43,15 +43,15 @@ impl CachedBlobDevice {
             .create(true)
             .truncate(false)
             .open(&cache_blob_path)?;
-        cache_file.set_len(blobmeta.cache_size())?;
+        cache_file.set_len(blob_meta.cache_size())?;
 
         let chunkmap_path = cache_dir.join(format!("{}.chunkmap", blob_id_hex));
-        let chunkmap = ChunkMap::open(&chunkmap_path, blobmeta.chunks().len())?;
+        let chunkmap = ChunkMap::open(&chunkmap_path, blob_meta.chunks().len())?;
 
         Ok(Self {
             blob_id,
             chunkmap,
-            blobmeta,
+            blob_meta,
             cache_file,
             backend,
             fetch_lock: Mutex::new(()),
@@ -60,7 +60,7 @@ impl CachedBlobDevice {
 
     pub fn read_into(&self, source_offset: u64, chunk_off: u64, dst: &mut [u8]) -> io::Result<()> {
         let (chunk_index, chunk) = self
-            .blobmeta
+            .blob_meta
             .chunk_for_source_offset(source_offset)
             .ok_or_else(|| {
                 io::Error::new(

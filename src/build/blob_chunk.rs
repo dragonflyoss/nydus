@@ -25,7 +25,7 @@ pub struct BlobWriter {
     chunksize: u32,
     next_blkaddr: u64,
     dedup: HashMap<[u8; 32], BlobChunk>,
-    blobmeta_chunks: Vec<BlobMetaChunk>,
+    blob_meta_chunks: Vec<BlobMetaChunk>,
     pub saved_by_dedup: u64,
 }
 
@@ -38,7 +38,7 @@ impl BlobWriter {
             chunksize,
             next_blkaddr: 0,
             dedup: HashMap::new(),
-            blobmeta_chunks: Vec::new(),
+            blob_meta_chunks: Vec::new(),
             saved_by_dedup: 0,
         })
     }
@@ -47,26 +47,26 @@ impl BlobWriter {
         self.next_blkaddr
     }
 
-    pub fn blobmeta_chunks(&self) -> &[BlobMetaChunk] {
-        &self.blobmeta_chunks
+    pub fn blob_meta_chunks(&self) -> &[BlobMetaChunk] {
+        &self.blob_meta_chunks
     }
 
-    pub fn blobmeta(
+    pub fn blob_meta(
         &self,
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
         source_offset_bias: u64,
     ) -> Result<BlobMeta> {
-        BlobMeta::from_chunks(blob_id, self.blobmeta_chunks.clone())
+        BlobMeta::from_chunks(blob_id, self.blob_meta_chunks.clone())
             .with_compressed_offset_bias(source_offset_bias)
     }
 
-    pub fn write_blobmeta(
+    pub fn write_blob_meta(
         &self,
         path: &Path,
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
         source_offset_bias: u64,
     ) -> Result<()> {
-        self.blobmeta(blob_id, source_offset_bias)?.save(path)
+        self.blob_meta(blob_id, source_offset_bias)?.save(path)
     }
 
     /// Process a regular file: read it in chunk-sized pieces, dedup via BLAKE3,
@@ -116,7 +116,7 @@ impl BlobWriter {
                     addr * EROFS_BLOCK_SIZE as u64,
                     write_len as u32,
                 )?;
-                self.blobmeta_chunks.push(entry);
+                self.blob_meta_chunks.push(entry);
                 self.next_blkaddr += nblocks;
                 self.dedup.insert(hash, BlobChunk { blkaddr: addr });
                 addr
@@ -138,7 +138,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn blobmeta_chunk_round_trips_minimal_fields() {
+    fn blob_meta_chunk_round_trips_minimal_fields() {
         let entry = BlobMetaChunk::new(0x2000, 0x3000, 0x12345, 0x400).unwrap();
 
         assert_eq!(entry.uncompressed_offset(), 0x2000);
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_writer_tracks_unique_blobmeta_chunks() {
+    fn blob_writer_tracks_unique_blob_meta_chunks() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
         let file_a = dir.path().join("a.bin");
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(writer.total_blocks(), 2);
         assert_eq!(writer.saved_by_dedup, 4096);
 
-        let entries = writer.blobmeta_chunks();
+        let entries = writer.blob_meta_chunks();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].uncompressed_offset(), 0);
         assert_eq!(entries[0].uncompressed_size(), 4096);
@@ -186,10 +186,10 @@ mod tests {
     }
 
     #[test]
-    fn blob_writer_writes_blobmeta_file() {
+    fn blob_writer_writes_blob_meta_file() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
-        let blobmeta_path = dir.path().join("blob.blob.meta");
+        let blob_meta_path = dir.path().join("blob.blob.meta");
         let input_path = dir.path().join("input.bin");
         let blob_id = [7u8; EROFS_BLOB_ID_SIZE];
         fs::write(&input_path, vec![b'x'; 4096]).unwrap();
@@ -197,16 +197,16 @@ mod tests {
         let mut writer = BlobWriter::new(&blob_path, 4096).unwrap();
         writer.write_file_chunks(&input_path, 4096).unwrap();
         writer
-            .write_blobmeta(&blobmeta_path, blob_id, 8192)
+            .write_blob_meta(&blob_meta_path, blob_id, 8192)
             .unwrap();
 
-        let raw = fs::read(&blobmeta_path).unwrap();
+        let raw = fs::read(&blob_meta_path).unwrap();
         assert_eq!(raw.len(), 8192);
 
-        let blobmeta = BlobMeta::load(&blobmeta_path).unwrap();
-        assert_eq!(blobmeta.header().chunk_count(), 1);
-        assert_eq!(blobmeta.header().chunk_bytes(), 24);
-        assert_eq!(blobmeta.chunks()[0].uncompressed_offset(), 0);
-        assert_eq!(blobmeta.chunks()[0].compressed_offset(), 8192);
+        let blob_meta = BlobMeta::load(&blob_meta_path).unwrap();
+        assert_eq!(blob_meta.header().chunk_count(), 1);
+        assert_eq!(blob_meta.header().chunk_bytes(), 24);
+        assert_eq!(blob_meta.chunks()[0].uncompressed_offset(), 0);
+        assert_eq!(blob_meta.chunks()[0].compressed_offset(), 8192);
     }
 }

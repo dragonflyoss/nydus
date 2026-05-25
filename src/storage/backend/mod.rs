@@ -7,7 +7,7 @@ use crate::metadata::{BlobMeta, EROFS_BLOB_ID_SIZE};
 pub use local::LocalBackend;
 
 pub trait BlobBackend: Send + Sync {
-    fn load_blobmeta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta>;
+    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta>;
     fn read_range(
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],

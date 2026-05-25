@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
-use lepton::build::blobchunk::BlobWriter;
+use lepton::build::blob_chunk::BlobWriter;
 use lepton::build::bootstrap::render_bootstrap;
 use lepton::build::inode::{build_tree, InodeData, InodeInfo};
 use lepton::metadata::*;
@@ -42,7 +42,7 @@ pub struct BuildArgs {
     )]
     pub blob: Option<PathBuf>,
 
-    /// Directory path to save the generated lepton full blob and blobmeta with SHA256 file names.
+    /// Directory path to save the generated lepton full blob and blob meta with SHA256 file names.
     #[arg(long, conflicts_with = "blob", required_unless_present = "blob")]
     pub blob_dir: Option<PathBuf>,
 
@@ -225,13 +225,13 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         &full_blob_id,
         args.blob_dir.as_deref(),
     )?;
-    let blobmeta_path = blobmeta_output_path(
+    let blob_meta_path = blob_meta_output_path(
         requested_blob_path.as_deref(),
         args.blob_dir.as_deref(),
         &full_blob_id,
     );
-    blob_writer.write_blobmeta(
-        &blobmeta_path,
+    blob_writer.write_blob_meta(
+        &blob_meta_path,
         blob_id,
         bootstrap_blocks * EROFS_BLOCK_SIZE as u64,
     )?;
@@ -245,7 +245,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         hex_string(&blob_id),
         hex_string(&full_blob_id),
         final_blob_path.display(),
-        blobmeta_path.display()
+        blob_meta_path.display()
     );
     Ok(())
 }
@@ -298,7 +298,7 @@ fn finalize_blob_output(
     Ok(final_path)
 }
 
-fn blobmeta_output_path(
+fn blob_meta_output_path(
     blob_path: Option<&Path>,
     blob_dir: Option<&Path>,
     full_blob_sha256: &[u8; EROFS_BLOB_ID_SIZE],
@@ -343,9 +343,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blobmeta_output_path_uses_blob_dir_when_present() {
+    fn blob_meta_output_path_uses_blob_dir_when_present() {
         let digest = [0x11u8; EROFS_BLOB_ID_SIZE];
-        let path = blobmeta_output_path(
+        let path = blob_meta_output_path(
             Some(Path::new("/tmp/custom.blob")),
             Some(Path::new("/var/lib/lepton")),
             &digest,
@@ -358,9 +358,9 @@ mod tests {
     }
 
     #[test]
-    fn blobmeta_output_path_appends_suffix_for_blob_path() {
+    fn blob_meta_output_path_appends_suffix_for_blob_path() {
         let digest = [0x22u8; EROFS_BLOB_ID_SIZE];
-        let path = blobmeta_output_path(Some(Path::new("/tmp/custom.blob")), None, &digest);
+        let path = blob_meta_output_path(Some(Path::new("/tmp/custom.blob")), None, &digest);
 
         assert_eq!(path, Path::new("/tmp/custom.blob.blob.meta"));
     }

@@ -76,7 +76,7 @@ Blob file (erofs.blob.img)
 ```
 
 → source: `superblock.rs` :: `write_image()` assembles Block 0 then appends
-the metadata buffer. `blobchunk.rs` :: `BlobWriter` writes the blob file.
+the metadata buffer. `blob_chunk.rs` :: `BlobWriter` writes the blob file.
 
 ### Why this layout?
 
@@ -462,7 +462,7 @@ write_len = ceil(actual_bytes / 4096) × 4096
 This avoids inflating the blob for small files. With `--chunksize=1048576`,
 a 100-byte file writes only 4096 bytes (1 block) to the blob, not 1 MB.
 
-→ source: `blobchunk.rs` :: `BlobWriter::write_file_chunks()`
+→ source: `blob_chunk.rs` :: `BlobWriter::write_file_chunks()`
 
 ### Why BLAKE3 instead of SHA256?
 
@@ -626,7 +626,7 @@ The `main()` function orchestrates image creation in three phases:
 │                     ▼                    │                      │
 │              BlobWriter                  │                      │
 │              .write_file_chunks()        │                      │
-│              (blobchunk.rs)              │                      │
+│              (blob_chunk.rs)              │                      │
 │                     │                    │                      │
 │                     ▼                    │                      │
 │              Blob device file            │                      │

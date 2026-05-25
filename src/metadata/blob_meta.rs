@@ -284,9 +284,9 @@ impl BlobMeta {
     }
 
     pub fn load_with_blob_id(path: &Path, blob_id: [u8; EROFS_BLOB_ID_SIZE]) -> Result<Self> {
-        let mut blobmeta = Self::load(path)?;
-        blobmeta.blob_id = blob_id;
-        Ok(blobmeta)
+        let mut blob_meta = Self::load(path)?;
+        blob_meta.blob_id = blob_id;
+        Ok(blob_meta)
     }
 }
 
@@ -312,7 +312,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blob.meta");
         let blob_id = [0x5au8; EROFS_BLOB_ID_SIZE];
-        let blobmeta = BlobMeta::from_chunks(
+        let blob_meta = BlobMeta::from_chunks(
             blob_id,
             vec![
                 BlobMetaChunk::new(0, 4096, 8192, 4096).unwrap(),
@@ -320,7 +320,7 @@ mod tests {
             ],
         );
 
-        blobmeta.save(&path).unwrap();
+        blob_meta.save(&path).unwrap();
         let loaded = BlobMeta::load(&path).unwrap();
 
         assert_eq!(loaded.header().chunk_count(), 2);
