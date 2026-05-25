@@ -189,6 +189,13 @@ pub fn cast_mut<T>(data: &mut [u8]) -> &mut T {
 }
 
 /// Round `val` up to the next multiple of `align` (power of two).
+#[inline]
 pub fn round_up(val: usize, align: usize) -> usize {
+    (val + align - 1) & !(align - 1)
+}
+
+/// Round `val` up to the next multiple of `align` (power of two) for u64.
+#[inline]
+pub fn round_up_u64(val: u64, align: u64) -> u64 {
     (val + align - 1) & !(align - 1)
 }

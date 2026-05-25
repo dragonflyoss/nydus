@@ -1,4 +1,4 @@
-use super::EROFS_BLOB_ID_SIZE;
+use super::{round_up_u64, EROFS_BLOB_ID_SIZE};
 use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -7,12 +7,7 @@ use std::path::Path;
 
 pub const BLOB_META_MAGIC: u32 = 0xb10bb10b;
 pub const BLOB_META_HEADER_SIZE: u64 = 0x1000;
-
 const BLOB_META_HEADER_RESERVED_SIZE: usize = (BLOB_META_HEADER_SIZE as usize) - 12;
-
-fn round_up_4k(size: u64) -> u64 {
-    size.div_ceil(BLOB_META_HEADER_SIZE) * BLOB_META_HEADER_SIZE
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +45,7 @@ impl BlobMetaHeader {
     }
 
     pub fn aligned_chunk_bytes(&self) -> u64 {
-        round_up_4k(self.chunk_bytes())
+        round_up_u64(self.chunk_bytes(), BLOB_META_HEADER_SIZE)
     }
 
     fn set_chunk_count(&mut self, entries: u32) {
@@ -61,6 +56,7 @@ impl BlobMetaHeader {
         if self.magic != BLOB_META_MAGIC {
             bail!("invalid blob meta magic");
         }
+
         Ok(())
     }
 

@@ -369,7 +369,7 @@ impl<'a> ErofsInode<'a> {
     }
 }
 
-/// Helper functions to construct i_format values for compact and extended inodes.
+/// Helper function to construct i_format value for compact inodes.
 pub fn compact_i_format(datalayout: u16, nlink_1: bool) -> u16 {
     let mut fmt = (EROFS_INODE_LAYOUT_COMPACT << EROFS_I_VERSION_BIT)
         | (datalayout << EROFS_I_DATALAYOUT_BIT);
@@ -379,6 +379,7 @@ pub fn compact_i_format(datalayout: u16, nlink_1: bool) -> u16 {
     fmt
 }
 
+/// Helper function to construct i_format value for extended inodes.
 pub fn extended_i_format(datalayout: u16) -> u16 {
     (EROFS_INODE_LAYOUT_EXTENDED << EROFS_I_VERSION_BIT) | (datalayout << EROFS_I_DATALAYOUT_BIT)
 }
