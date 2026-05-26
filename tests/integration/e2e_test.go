@@ -2,6 +2,7 @@ package integration
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -35,7 +36,7 @@ func TestBlobMountE2E(t *testing.T) {
 			corpusDir := filepath.Join(tmpDir, "corpus")
 			bootstrapPath := filepath.Join(tmpDir, "test.bootstrap")
 			blobDir := filepath.Join(tmpDir, "blobs")
-				cacheDir := filepath.Join(tmpDir, "cache")
+			cacheDir := filepath.Join(tmpDir, "cache")
 			mntDir := filepath.Join(tmpDir, "mnt")
 
 			t.Log("Generating corpus...")
@@ -59,12 +60,12 @@ func TestBlobMountE2E(t *testing.T) {
 				verifyMountedTree(t, corpusDir, mntDir)
 			}()
 
-				func() {
-					unmount := mountLeptonBootstrapWithCache(t, leptonBin, bootstrapPath, blobDir, cacheDir, mntDir)
-					defer unmount()
-					verifyMountedTree(t, corpusDir, mntDir)
-					verifyBlobCacheArtifacts(t, cacheDir, 1)
-				}()
+			func() {
+				unmount := mountLeptonBootstrapWithCache(t, leptonBin, bootstrapPath, blobDir, cacheDir, mntDir)
+				defer unmount()
+				verifyMountedTree(t, corpusDir, mntDir)
+				verifyBlobCacheArtifacts(t, cacheDir, blobPath)
+			}()
 		})
 	}
 }
@@ -112,14 +113,6 @@ func TestMergedMountE2E(t *testing.T) {
 
 		verifyMountedTree(t, expectedDir, mountpoint)
 		verifyWhiteoutResults(t, mountpoint)
-		verifyMergedMountMatchesErofsFuseWhenEnabled(
-			t,
-			mergedBootstrap,
-			mountpoint,
-			layer1Blob,
-			layer2Blob,
-			layer3Blob,
-		)
 	}()
 
 	func() {
@@ -128,7 +121,13 @@ func TestMergedMountE2E(t *testing.T) {
 
 		verifyMountedTree(t, expectedDir, mountpoint)
 		verifyWhiteoutResults(t, mountpoint)
-		verifyBlobCacheArtifacts(t, cacheDir, 3)
+		verifyBlobCacheArtifacts(t, cacheDir, layer1Blob, layer2Blob, layer3Blob)
+		verifyMergedMountMatchesErofsFuseWhenEnabled(
+			t,
+			mergedBootstrap,
+			mountpoint,
+			cachedBlobDataDevicesForBlobs(t, cacheDir, layer1Blob, layer2Blob, layer3Blob)...,
+		)
 		pauseMergeDebugIfRequested(t, mountpoint)
 	}()
 }
@@ -152,6 +151,29 @@ func verifyMergedMountMatchesErofsFuseWhenEnabled(
 	defer unmount()
 
 	verifyMountedTreeAgainstErofsCompat(t, erofsMountpoint, leptonMountpoint)
+}
+
+func cachedBlobDataDevicesForBlobs(t *testing.T, cacheDir string, blobs ...string) []string {
+	t.Helper()
+
+	// erofsfuse consumes plain external devices. Lepton builds zstd-compressed
+	// full blobs, so compat mode must use the cache files populated by lepton fuse.
+	devices := make([]string, 0, len(blobs))
+	for _, blob := range blobs {
+		blobID := fullBlobDigest(t, blob)
+		cachedBlob := filepath.Join(cacheDir, blobID+".blob.data")
+		require.FileExists(t, cachedBlob, "cached uncompressed blob data should exist after lepton cached mount")
+		devices = append(devices, cachedBlob)
+	}
+	return devices
+}
+
+func fullBlobDigest(t *testing.T, blob string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(blob)
+	require.NoError(t, err)
+	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 func prepareMergedE2ECorpora(t *testing.T, layer1Dir, layer2Dir, layer3Dir, expectedDir string) {
@@ -922,7 +944,7 @@ func requireNotExist(t *testing.T, path string) {
 	require.True(t, errors.Is(err, os.ErrNotExist), "expected path to be absent: %s", path)
 }
 
-func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobCount int) {
+func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 	t.Helper()
 
 	entries, err := os.ReadDir(cacheDir)
@@ -947,7 +969,15 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobCount int) {
 		}
 	}
 
+	blobCount := len(blobs)
 	assert.Equal(t, blobCount, dataCount, "unexpected cached blob.data count")
 	assert.Equal(t, blobCount, chunkmapCount, "unexpected cached chunkmap count")
 	assert.Equal(t, blobCount, blobmetaCount, "unexpected cached blobmeta count")
+
+	for _, blob := range blobs {
+		prefix := fullBlobDigest(t, blob)
+		require.FileExists(t, filepath.Join(cacheDir, prefix+".blob.data"))
+		require.FileExists(t, filepath.Join(cacheDir, prefix+".blob.meta"))
+		require.FileExists(t, filepath.Join(cacheDir, prefix+".chunkmap"))
+	}
 }

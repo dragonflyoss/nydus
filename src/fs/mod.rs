@@ -14,8 +14,7 @@ use memmap2::Mmap;
 
 use crate::metadata::*;
 use crate::storage::backend::{BlobBackend, LocalBackend};
-use crate::storage::cache::CachedBlobDevice;
-use crate::utils::{hex_string, sha256_bytes};
+use crate::storage::cache::{BlobCache, DummyBlobCache, LocalBlobCache};
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct DirEntry {
@@ -38,12 +37,7 @@ pub struct DeviceInfo {
 }
 
 struct BlobDevice {
-    kind: BlobDeviceKind,
-}
-
-enum BlobDeviceKind {
-    Direct { mmap: Mmap, data_offset: usize },
-    Cached(Box<CachedBlobDevice>),
+    cache: Box<dyn BlobCache>,
 }
 
 /// EROFS image reader — lock-free, zero-copy.
@@ -106,24 +100,9 @@ impl ErofsReader {
             ));
         }
 
-        let mut blob_devices = HashMap::new();
-        if sb.extra_devices() > 1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "direct blob mounting currently supports at most one external device",
-            ));
-        }
-        if sb.extra_devices() == 1 {
-            blob_devices.insert(
-                1,
-                BlobDevice {
-                    kind: BlobDeviceKind::Direct {
-                        mmap: Self::map_file(blob_path)?,
-                        data_offset: 0,
-                    },
-                },
-            );
-        }
+        let device_infos = Self::device_infos_from(&mmap, sb_offset)?;
+        let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
+        let blob_devices = Self::open_blob_devices(device_infos, blob_dir, None)?;
 
         Ok(Self {
             mmap,
@@ -149,34 +128,7 @@ impl ErofsReader {
 
         let device_infos = Self::device_infos_from(&mmap, sb_offset)?;
 
-        let blob_devices = if let Some(cache_dir) = cache_dir {
-            let backend: Arc<dyn BlobBackend> = Arc::new(LocalBackend::new(blob_dir.to_path_buf()));
-            device_infos
-                .into_iter()
-                .map(|info| {
-                    let cached = CachedBlobDevice::open(info.blob_id, cache_dir, backend.clone())?;
-                    Ok((
-                        info.device_id,
-                        BlobDevice {
-                            kind: BlobDeviceKind::Cached(Box::new(cached)),
-                        },
-                    ))
-                })
-                .collect::<io::Result<HashMap<_, _>>>()?
-        } else {
-            device_infos
-                .into_iter()
-                .map(|info| {
-                    let (mmap, data_offset) = Self::find_blob_in_dir(blob_dir, &info.blob_id)?;
-                    Ok((
-                        info.device_id,
-                        BlobDevice {
-                            kind: BlobDeviceKind::Direct { mmap, data_offset },
-                        },
-                    ))
-                })
-                .collect::<io::Result<HashMap<_, _>>>()?
-        };
+        let blob_devices = Self::open_blob_devices(device_infos, blob_dir, cache_dir)?;
 
         Ok(Self {
             mmap,
@@ -189,6 +141,29 @@ impl ErofsReader {
         let file = fs::File::open(path)?;
         // SAFETY: file opened read-only, never modified while mapped.
         unsafe { Mmap::map(&file) }
+    }
+
+    fn open_blob_devices(
+        device_infos: Vec<DeviceInfo>,
+        blob_dir: &Path,
+        cache_dir: Option<&Path>,
+    ) -> io::Result<HashMap<u16, BlobDevice>> {
+        let backend: Arc<dyn BlobBackend> = Arc::new(LocalBackend::new(blob_dir.to_path_buf()));
+        device_infos
+            .into_iter()
+            .map(|info| {
+                let cache: Box<dyn BlobCache> = if let Some(cache_dir) = cache_dir {
+                    Box::new(LocalBlobCache::open(
+                        info.blob_id,
+                        cache_dir,
+                        backend.clone(),
+                    )?)
+                } else {
+                    Box::new(DummyBlobCache::open(info.blob_id, backend.clone())?)
+                };
+                Ok((info.device_id, BlobDevice { cache }))
+            })
+            .collect()
     }
 
     fn superblock_from(mmap: &[u8], sb_offset: usize) -> io::Result<&ErofsSuperblock> {
@@ -242,98 +217,6 @@ impl ErofsReader {
         Ok(cast_ref::<ErofsDeviceSlot>(&mmap[slot_offset..]))
     }
 
-    fn primary_image_size(sb: &ErofsSuperblock) -> io::Result<usize> {
-        let bytes = sb
-            .blocks()
-            .checked_mul(EROFS_BLOCK_SIZE as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bootstrap size overflow"))?;
-        usize::try_from(bytes).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bootstrap size does not fit usize",
-            )
-        })
-    }
-
-    fn find_blob_in_dir(
-        blob_dir: &Path,
-        expected_blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-    ) -> io::Result<(Mmap, usize)> {
-        if let Some(candidate) = Self::find_blob_by_exact_filename(blob_dir, expected_blob_id)? {
-            return Ok(candidate);
-        }
-
-        for entry in fs::read_dir(blob_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            let mapped = match Self::map_file(&path) {
-                Ok(mapped) => mapped,
-                Err(_) => continue,
-            };
-            let blob_data_offset = match Self::data_offset_for_blob_candidate(&mapped) {
-                Ok(offset) => offset,
-                Err(_) => continue,
-            };
-            if blob_data_offset > mapped.len() {
-                continue;
-            }
-
-            let digest = sha256_bytes(&mapped[blob_data_offset..]);
-            if &digest == expected_blob_id {
-                return Ok((mapped, 0));
-            }
-        }
-
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "failed to locate blob matching bootstrap blob id",
-        ))
-    }
-
-    fn find_blob_by_exact_filename(
-        blob_dir: &Path,
-        expected_blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-    ) -> io::Result<Option<(Mmap, usize)>> {
-        let path = blob_dir.join(hex_string(expected_blob_id));
-        if !path.is_file() {
-            return Ok(None);
-        }
-
-        let mapped = Self::map_file(&path)?;
-        if &sha256_bytes(&mapped) != expected_blob_id {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "blob file {} exists but its SHA256 does not match bootstrap device slot",
-                    path.display()
-                ),
-            ));
-        }
-        let blob_data_offset = Self::data_offset_for_blob_candidate(&mapped)?;
-        if blob_data_offset > mapped.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("blob file {} has invalid data offset", path.display()),
-            ));
-        }
-        Ok(Some((mapped, 0)))
-    }
-
-    fn data_offset_for_blob_candidate(mmap: &[u8]) -> io::Result<usize> {
-        let sb = Self::superblock_from(mmap, EROFS_SUPER_OFFSET as usize)?;
-        if sb.magic() != EROFS_SUPER_MAGIC_V1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "candidate is not an EROFS blob",
-            ));
-        }
-        Self::primary_image_size(sb)
-    }
-
     /// Get a zero-copy reference to the on-disk superblock.
     pub fn sb(&self) -> &ErofsSuperblock {
         cast_ref::<ErofsSuperblock>(&self.mmap[self.sb_offset..])
@@ -374,34 +257,10 @@ impl ErofsReader {
                 format!("blob device {device_id} not available"),
             )
         })?;
-        match &blob.kind {
-            BlobDeviceKind::Direct { mmap, data_offset } => {
-                let start = (*data_offset as u64)
-                    .checked_add(source_offset)
-                    .and_then(|offset| offset.checked_add(chunk_off))
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "blob read offset overflow")
-                    })? as usize;
-                let end = start.checked_add(dst.len()).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "blob read len overflow")
-                })?;
-                if end > mmap.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "blob mmap read out of bounds: device_id={}, offset={}, len={}, blob_len={}",
-                            device_id,
-                            start,
-                            dst.len(),
-                            mmap.len()
-                        ),
-                    ));
-                }
-                dst.copy_from_slice(&mmap[start..end]);
-                Ok(())
-            }
-            BlobDeviceKind::Cached(cached) => cached.read_into(source_offset, chunk_off, dst),
-        }
+        let absolute_offset = source_offset.checked_add(chunk_off).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob read offset overflow")
+        })?;
+        blob.cache.read_at(absolute_offset, dst)
     }
 
     pub(crate) fn write_blob_to(
@@ -418,37 +277,12 @@ impl ErofsReader {
                 format!("blob device {device_id} not available"),
             )
         })?;
-        match &blob.kind {
-            BlobDeviceKind::Direct { mmap, data_offset } => {
-                let start = (*data_offset as u64)
-                    .checked_add(source_offset)
-                    .and_then(|offset| offset.checked_add(chunk_off))
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
-                    })? as usize;
-                let end = start.checked_add(len).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidInput, "blob write len overflow")
-                })?;
-                if end > mmap.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "blob mmap read out of bounds: device_id={}, offset={}, len={}, blob_len={}",
-                            device_id,
-                            start,
-                            len,
-                            mmap.len()
-                        ),
-                    ));
-                }
-                writer.write_all(&mmap[start..end])
-            }
-            BlobDeviceKind::Cached(cached) => {
-                let mut buf = vec![0u8; len];
-                cached.read_into(source_offset, chunk_off, &mut buf)?;
-                writer.write_all(&buf)
-            }
-        }
+        let absolute_offset = source_offset.checked_add(chunk_off).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
+        })?;
+        let mut buf = vec![0u8; len];
+        blob.cache.read_at(absolute_offset, &mut buf)?;
+        writer.write_all(&buf)
     }
 
     pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {

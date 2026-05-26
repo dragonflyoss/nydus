@@ -55,7 +55,6 @@ struct ImageStats {
 }
 
 struct BlobSummary {
-    device_id: u16,
     slot_sha256: [u8; EROFS_BLOB_ID_SIZE],
     slot_sha256_kind: SlotSha256Kind,
     declared_data_size: u64,
@@ -64,6 +63,7 @@ struct BlobSummary {
     blob_sha256: Option<[u8; EROFS_BLOB_ID_SIZE]>,
     data_sha256: Option<[u8; EROFS_BLOB_ID_SIZE]>,
     data_size: Option<u64>,
+    blobmeta: Option<BlobMetaSummary>,
     verified: bool,
     chunk_refs: u64,
     unique_blkaddrs: HashSet<u64>,
@@ -74,7 +74,6 @@ struct BlobSummary {
 impl BlobSummary {
     fn new(device: &DeviceInfo) -> Self {
         Self {
-            device_id: device.device_id,
             slot_sha256: device.blob_id,
             slot_sha256_kind: SlotSha256Kind::Unknown,
             declared_data_size: device.blocks * EROFS_BLOCK_SIZE as u64,
@@ -83,16 +82,13 @@ impl BlobSummary {
             blob_sha256: None,
             data_sha256: None,
             data_size: None,
+            blobmeta: None,
             verified: false,
             chunk_refs: 0,
             unique_blkaddrs: HashSet::new(),
             logical_bytes: 0,
             chunk_sizes: BTreeSet::new(),
         }
-    }
-
-    fn blob_size_for_display(&self) -> Option<u64> {
-        self.blob_size
     }
 
     fn data_size_for_display(&self) -> u64 {
@@ -107,6 +103,7 @@ struct ResolvedBlob {
     blob_sha256: [u8; EROFS_BLOB_ID_SIZE],
     data_sha256: [u8; EROFS_BLOB_ID_SIZE],
     data_size: u64,
+    blobmeta: Option<BlobMetaSummary>,
     slot_sha256_kind: SlotSha256Kind,
     verified: bool,
 }
@@ -116,6 +113,17 @@ struct BlobInspection {
     data_size: u64,
     blob_sha256: [u8; EROFS_BLOB_ID_SIZE],
     blob_size: u64,
+    blobmeta: Option<BlobMetaSummary>,
+}
+
+#[derive(Clone)]
+struct BlobMetaSummary {
+    chunk_count: usize,
+    chunk_size: u32,
+    digester: BlobMetaDigester,
+    compressor: BlobMetaCompressor,
+    total_uncompressed_size: u64,
+    total_compressed_size: u64,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -123,6 +131,16 @@ enum SlotSha256Kind {
     Blob,
     Data,
     Unknown,
+}
+
+impl SlotSha256Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Blob => "full_blob",
+            Self::Data => "data_blob",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 pub fn run_check(args: CheckArgs) -> Result<()> {
@@ -167,6 +185,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
                 summary.blob_sha256 = Some(resolved.blob_sha256);
                 summary.data_sha256 = Some(resolved.data_sha256);
                 summary.data_size = Some(resolved.data_size);
+                summary.blobmeta = resolved.blobmeta.clone();
                 summary.slot_sha256_kind = resolved.slot_sha256_kind;
                 summary.verified = resolved.verified;
             }
@@ -247,7 +266,6 @@ fn walk_inode(
                         let remaining = inode.size().saturating_sub(index as u64 * chunk_size);
                         let logical_bytes = remaining.min(chunk_size);
                         let blob = blobs.entry(chunk.device_id).or_insert_with(|| BlobSummary {
-                            device_id: chunk.device_id,
                             slot_sha256: [0u8; EROFS_BLOB_ID_SIZE],
                             slot_sha256_kind: SlotSha256Kind::Unknown,
                             declared_data_size: 0,
@@ -256,6 +274,7 @@ fn walk_inode(
                             blob_sha256: None,
                             data_sha256: None,
                             data_size: None,
+                            blobmeta: None,
                             verified: false,
                             chunk_refs: 0,
                             unique_blkaddrs: HashSet::new(),
@@ -333,6 +352,7 @@ fn resolve_blobs(
                     || format!("failed to hash blob data: {}", image_path.display()),
                 )?,
                 data_size,
+                blobmeta: load_blobmeta_summary_for_source(image_path)?,
                 slot_sha256_kind: SlotSha256Kind::Data,
                 verified,
             },
@@ -367,6 +387,7 @@ fn resolve_blobs(
                 blob_sha256: inspection.blob_sha256,
                 data_sha256: inspection.data_sha256,
                 data_size: inspection.data_size,
+                blobmeta: inspection.blobmeta.clone(),
                 slot_sha256_kind: SlotSha256Kind::Blob,
                 verified: true,
             });
@@ -378,6 +399,7 @@ fn resolve_blobs(
                 blob_sha256: inspection.blob_sha256,
                 data_sha256: inspection.data_sha256,
                 data_size: inspection.data_size,
+                blobmeta: inspection.blobmeta,
                 slot_sha256_kind: SlotSha256Kind::Data,
                 verified: true,
             });
@@ -426,6 +448,31 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
         data_size: mmap.len().saturating_sub(primary_image_bytes as usize) as u64,
         blob_sha256,
         blob_size: mmap.len() as u64,
+        blobmeta: load_blobmeta_summary_for_source(path)?,
+    }))
+}
+
+fn load_blobmeta_summary_for_source(path: &Path) -> Result<Option<BlobMetaSummary>> {
+    let Some(file_name) = path.file_name() else {
+        return Ok(None);
+    };
+    let blobmeta_path = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("{}.blob.meta", file_name.to_string_lossy()));
+    if !blobmeta_path.is_file() {
+        return Ok(None);
+    }
+
+    let blobmeta = BlobMeta::load(&blobmeta_path)
+        .with_context(|| format!("failed to load blob meta: {}", blobmeta_path.display()))?;
+    Ok(Some(BlobMetaSummary {
+        chunk_count: blobmeta.chunk_count(),
+        chunk_size: blobmeta.chunk_size(),
+        digester: blobmeta.digester(),
+        compressor: blobmeta.compressor(),
+        total_uncompressed_size: blobmeta.total_uncompressed_size(),
+        total_compressed_size: blobmeta.total_compressed_size(),
     }))
 }
 
@@ -557,65 +604,102 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
     if blobs.is_empty() {
         println!("  (no external blobs recorded in device table)");
         println!();
-        println!("Notes");
-        println!("  current lepton writer does not emit compressed chunk payload; compressor is reported as none when blob devices exist.");
         return;
     }
 
-    for blob in blobs.values() {
-        let slot_sha256 = if blob.slot_sha256.iter().all(|byte| *byte == 0) {
-            "<unknown>".to_string()
-        } else {
-            hex_string(&blob.slot_sha256)
-        };
-        let blob_sha256 = blob
-            .blob_sha256
-            .map(|sha256| hex_string(&sha256))
-            .unwrap_or_else(|| "<unresolved>".to_string());
-        let data_sha256 = blob
-            .data_sha256
-            .map(|sha256| hex_string(&sha256))
-            .unwrap_or_else(|| "<unresolved>".to_string());
-        let source = blob
-            .resolved_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<metadata-only>".to_string());
-        println!(
-            "  device={} slot_sha256={} slot_sha256_kind={} blob_sha256={} blob_size={} data_sha256={} data_size={} chunk_refs={} unique_chunks={} compressor=none chunk_sizes={} logical_bytes={} declared_data_size={} verified={} source={}",
-            blob.device_id,
-            slot_sha256,
-            match blob.slot_sha256_kind {
-                SlotSha256Kind::Blob => "blob_sha256",
-                SlotSha256Kind::Data => "data_sha256",
-                SlotSha256Kind::Unknown => "unknown",
-            },
-            blob_sha256,
-            blob.blob_size_for_display()
-                .map(|size| size.to_string())
-                .unwrap_or_else(|| "<metadata-only>".to_string()),
-            data_sha256,
-            blob.data_size_for_display(),
-            blob.chunk_refs,
-            blob.unique_blkaddrs.len(),
-            format_u64_set(&blob.chunk_sizes),
-            blob.logical_bytes,
-            blob.declared_data_size,
-            blob.verified,
-            source,
-        );
+    for (index, (device_id, blob)) in blobs.iter().enumerate() {
+        print_blob_info(index, *device_id, blob);
     }
     println!();
-    println!("Notes");
-    println!("  slot_sha256 is the raw SHA256 recorded in ErofsDeviceSlot.tag.");
+}
+
+fn print_blob_info(index: usize, device_id: u16, blob: &BlobSummary) {
+    println!("  Blob {}", index);
+    println!("    blob_index: {}", index);
+    println!("    device_id: {}", device_id);
+    println!("    slot_digest_kind: {}", blob.slot_sha256_kind.as_str());
+    println!("    data_blob_digest: {}", data_blob_digest(blob));
     println!(
-        "  slot_sha256_kind reports whether ErofsDeviceSlot.tag matched the full blob SHA256 or the appended data-region SHA256 when resolving from --blob-dir."
+        "    full_blob_digest: {}",
+        optional_digest(blob.blob_sha256)
     );
     println!(
-        "  blob_sha256 is the SHA256 of the full blob artifact file when the blob can be resolved."
+        "    chunk_size: {}",
+        blobmeta_field(blob, |meta| meta.chunk_size)
     );
-    println!("  data_sha256 is the SHA256 of the appended blob data region when the blob can be resolved.");
-    println!("  current lepton writer does not emit compressed chunk payload; compressor is reported as none.");
+    println!(
+        "    chunk_count: {}",
+        blobmeta_field(blob, |meta| meta.chunk_count)
+    );
+    println!(
+        "    chunk_digester: {}",
+        blobmeta_field(blob, |meta| meta.digester)
+    );
+    println!(
+        "    chunk_compressor: {}",
+        blobmeta_field(blob, |meta| meta.compressor)
+    );
+    println!(
+        "    blob_compressed_size: {}",
+        blobmeta_field_or(blob, |meta| meta.total_compressed_size, blob.data_size)
+    );
+    println!(
+        "    blob_uncompressed_size: {}",
+        blobmeta_field_or(
+            blob,
+            |meta| meta.total_uncompressed_size,
+            Some(blob.declared_data_size),
+        )
+    );
+    println!("    chunk_refs: {}", blob.chunk_refs);
+    println!("    unique_chunks: {}", blob.unique_blkaddrs.len());
+    println!("    logical_bytes: {}", blob.logical_bytes);
+    println!("    chunk_sizes: {}", format_u64_set(&blob.chunk_sizes));
+    if let Some(source) = &blob.resolved_path {
+        println!("    source: {}", source.display());
+    }
+}
+
+fn data_blob_digest(blob: &BlobSummary) -> String {
+    blob.data_sha256
+        .map(|sha256| hex_string(&sha256))
+        .unwrap_or_else(|| digest_or_unknown(&blob.slot_sha256))
+}
+
+fn optional_digest(digest: Option<[u8; EROFS_BLOB_ID_SIZE]>) -> String {
+    digest
+        .map(|sha256| hex_string(&sha256))
+        .unwrap_or_else(|| "<unresolved>".to_string())
+}
+
+fn digest_or_unknown(digest: &[u8; EROFS_BLOB_ID_SIZE]) -> String {
+    if digest.iter().all(|byte| *byte == 0) {
+        "<unknown>".to_string()
+    } else {
+        hex_string(digest)
+    }
+}
+
+fn blobmeta_field<T: ToString>(
+    blob: &BlobSummary,
+    field: impl FnOnce(&BlobMetaSummary) -> T,
+) -> String {
+    blob.blobmeta
+        .as_ref()
+        .map(|meta| field(meta).to_string())
+        .unwrap_or_else(|| "<unresolved>".to_string())
+}
+
+fn blobmeta_field_or<T: ToString>(
+    blob: &BlobSummary,
+    field: impl FnOnce(&BlobMetaSummary) -> T,
+    fallback: Option<T>,
+) -> String {
+    blob.blobmeta
+        .as_ref()
+        .map(|meta| field(meta).to_string())
+        .or_else(|| fallback.map(|value| value.to_string()))
+        .unwrap_or_else(|| "<unresolved>".to_string())
 }
 
 fn compat_features(bits: u32) -> String {

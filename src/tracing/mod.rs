@@ -121,7 +121,6 @@ pub fn init_command_tracing(log_level: Level, console: bool) -> Vec<WorkerGuard>
     subscriber.init();
 
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
-    info!("tracing initialized level: {}", log_level);
 
     guards
 }

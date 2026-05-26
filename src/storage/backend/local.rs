@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{self};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use memmap2::Mmap;
 
@@ -17,6 +17,7 @@ use crate::utils::{hex_string, sha256_file, sha256_file_region};
 pub struct LocalBackend {
     root: PathBuf,
     resolved_sources: Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], PathBuf>>,
+    source_files: Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], Arc<File>>>,
 }
 
 impl LocalBackend {
@@ -24,11 +25,8 @@ impl LocalBackend {
         Self {
             root,
             resolved_sources: Mutex::new(HashMap::new()),
+            source_files: Mutex::new(HashMap::new()),
         }
-    }
-
-    fn legacy_blob_meta_path(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> PathBuf {
-        self.root.join(format!("{}.blob.meta", hex_string(blob_id)))
     }
 
     fn blob_meta_path_for_source(&self, source: &Path) -> io::Result<PathBuf> {
@@ -84,15 +82,32 @@ impl LocalBackend {
             ),
         ))
     }
+
+    fn source_file(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<Arc<File>> {
+        if let Some(file) = self.source_files.lock().unwrap().get(blob_id).cloned() {
+            return Ok(file);
+        }
+
+        let path = self.resolve_source_path(blob_id)?;
+        let file = Arc::new(File::open(&path)?);
+        self.source_files
+            .lock()
+            .unwrap()
+            .insert(*blob_id, file.clone());
+        Ok(file)
+    }
 }
 
 impl BlobBackend for LocalBackend {
-    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
-        let legacy_path = self.legacy_blob_meta_path(blob_id);
-        if legacy_path.is_file() {
-            return BlobMeta::load_with_blob_id(&legacy_path, *blob_id).map_err(io::Error::other);
-        }
+    fn cache_key(
+        &self,
+        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+    ) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
+        let source_path = self.resolve_source_path(blob_id)?;
+        sha256_file(&source_path).map_err(io::Error::other)
+    }
 
+    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
         let source_path = self.resolve_source_path(blob_id)?;
         let blob_meta_path = self.blob_meta_path_for_source(&source_path)?;
         BlobMeta::load_with_blob_id(&blob_meta_path, *blob_id).map_err(io::Error::other)
@@ -104,11 +119,19 @@ impl BlobBackend for LocalBackend {
         offset: u64,
         len: u32,
     ) -> io::Result<Vec<u8>> {
-        let path = self.resolve_source_path(blob_id)?;
-        let file = File::open(&path)?;
         let mut buf = vec![0u8; len as usize];
-        read_exact_at(&file, offset, &mut buf)?;
+        self.read_range_into(blob_id, offset, &mut buf)?;
         Ok(buf)
+    }
+
+    fn read_range_into(
+        &self,
+        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+        offset: u64,
+        dst: &mut [u8],
+    ) -> io::Result<()> {
+        let file = self.source_file(blob_id)?;
+        read_exact_at(&file, offset, dst)
     }
 }
 
@@ -156,6 +179,24 @@ mod tests {
     use crate::utils::sha256_bytes;
     use tempfile::tempdir;
 
+    fn blobmeta_chunk(
+        uncompressed_offset: u64,
+        uncompressed_size: u32,
+        compressed_offset: u64,
+        compressed_size: u32,
+        payload: &[u8],
+    ) -> BlobMetaChunk {
+        BlobMetaChunk::new(
+            uncompressed_offset,
+            uncompressed_size,
+            compressed_offset,
+            compressed_size,
+            *blake3::hash(payload).as_bytes(),
+            crc32c::crc32c(payload),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn local_backend_reads_exact_blob_file_and_blob_meta() {
         let dir = tempdir().unwrap();
@@ -166,7 +207,7 @@ mod tests {
             .path()
             .join(format!("{}.blob.meta", hex_string(&blob_id)));
         fs::write(&blob_path, &payload).unwrap();
-        BlobMeta::from_chunks(blob_id, vec![BlobMetaChunk::new(0, 4096, 0, 4096).unwrap()])
+        BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 4096, 0, 4096, &payload)])
             .save(&blob_meta_path)
             .unwrap();
 
@@ -197,15 +238,12 @@ mod tests {
         let full_blob_path = dir.path().join(hex_string(&full_blob_id));
         fs::rename(&temp_full_blob_path, &full_blob_path).unwrap();
 
-        BlobMeta::from_chunks(
-            blob_id,
-            vec![BlobMetaChunk::new(0, 4096, 8192, 4096).unwrap()],
-        )
-        .save(
-            &dir.path()
-                .join(format!("{}.blob.meta", hex_string(&full_blob_id))),
-        )
-        .unwrap();
+        BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 4096, 8192, 4096, &payload)])
+            .save(
+                &dir.path()
+                    .join(format!("{}.blob.meta", hex_string(&full_blob_id))),
+            )
+            .unwrap();
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.load_blob_meta(&blob_id).unwrap();

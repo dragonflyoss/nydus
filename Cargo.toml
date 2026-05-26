@@ -9,6 +9,7 @@ path = "src/bin/lepton/main.rs"
 
 [dependencies]
 anyhow = "1"
+bitflags = "2"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 crc32c = "0.6"
@@ -36,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = [
 ] }
 uuid = { version = "1", features = ["v4"] }
 xattr = "1"
+zstd = "0.13"
 
 [dev-dependencies]
 tempfile = "3.25.0"

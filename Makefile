@@ -8,6 +8,8 @@ E2E_TIMEOUT ?= 600s
 E2E_COUNT ?= 1
 E2E_GO_TEST_ARGS ?=
 LEPTONFS_MERGE_PAUSE_SECS ?= 0
+EROFS_C_FUSE ?=
+EROFS_MKFS ?=
 
 XFSTESTS_TIMEOUT ?= 600s
 XFSTESTS_COUNT ?= 1
@@ -19,7 +21,9 @@ PERF_GO_TEST_ARGS ?=
 
 GO_TEST_ENV = $(SUDO) env "PATH=$(dir $(GO_BIN)):$(PATH)" "HOME=$(HOME)" \
 	"GOCACHE=$$($(GO_BIN) env GOCACHE)" \
-	"GOMODCACHE=$$($(GO_BIN) env GOMODCACHE)"
+	"GOMODCACHE=$$($(GO_BIN) env GOMODCACHE)" \
+	"EROFS_C_FUSE=$(EROFS_C_FUSE)" \
+	"EROFS_MKFS=$(EROFS_MKFS)"
 TEST_SUPPORT_FILES = util.go
 E2E_TEST_FILES = e2e_test.go $(TEST_SUPPORT_FILES)
 XFSTESTS_TEST_FILES = xfstests_test.go $(TEST_SUPPORT_FILES)
@@ -43,6 +47,7 @@ test-e2e: release
 	cd tests/integration && \
 		$(GO_TEST_ENV) \
 		LEPTONFS_MERGE_PAUSE_SECS="$(LEPTONFS_MERGE_PAUSE_SECS)" \
+		LEPTONFS_RUN_EROFS_COMPAT="$(LEPTONFS_RUN_EROFS_COMPAT)" \
 		$(GO_BIN) test -v $(if $(strip $(E2E_TEST)),-run '^$(E2E_TEST)$$',) -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(E2E_TEST_FILES)
 
 # Run xfstests regression separately (requires root, builds release first).

@@ -16,6 +16,11 @@ import (
 var sha256FilenamePattern = regexp.MustCompile("^[0-9a-f]{64}$")
 var blobMetaFilenamePattern = regexp.MustCompile(`^[0-9a-f]{64}\.blob\.meta$`)
 
+const (
+	erofsCFuseEnv = "EROFS_C_FUSE"
+	erofsMkfsEnv  = "EROFS_MKFS"
+)
+
 // setupXfstests checks if the xfstests "check" script is present in the given directory, and if not, runs the setup_xfstests.sh script to
 // set up the xfstests environment.
 func setupXfstests(t *testing.T, dir string) {
@@ -29,15 +34,24 @@ func setupXfstests(t *testing.T, dir string) {
 	}
 }
 
-// setupCErofsfuse checks if the erofsfuse executable is available on the system, and if not, runs the setup_erofsfuse.sh script to set it up.
+// setupCErofsfuse checks if erofsfuse is available. An explicit EROFS_C_FUSE
+// path wins and skips the setup script.
 func setupCErofsfuse(t *testing.T) {
-	if _, err := exec.LookPath("erofsfuse"); err != nil {
-		script, err := filepath.Abs(filepath.Join("..", "scripts", "setup_erofsfuse.sh"))
+	if _, err := lookupCErofsFuseExecutable(); err == nil {
+		if os.Getenv(erofsMkfsEnv) != "" {
+			_, err := lookupCErofsMkfsExecutable()
+			require.NoError(t, err)
+		}
+		return
+	} else if os.Getenv(erofsCFuseEnv) != "" {
 		require.NoError(t, err)
-
-		out, err := exec.Command("bash", script).CombinedOutput()
-		require.NoError(t, err, "setup_erofsfuse.sh failed:\n%s", out)
 	}
+
+	script, err := filepath.Abs(filepath.Join("..", "scripts", "setup_erofsfuse.sh"))
+	require.NoError(t, err)
+
+	out, err := exec.Command("bash", script).CombinedOutput()
+	require.NoError(t, err, "setup_erofsfuse.sh failed:\n%s", out)
 }
 
 // mustLookupExecutable is a test helper that wraps lookupExecutable and fails the test if the executable is not found.
@@ -81,7 +95,10 @@ func mustLookupCErofsFuse(t *testing.T) string {
 // It first checks the EROFS_C_FUSE environment variable, then looks in common locations, and
 // finally checks the PATH.
 func lookupCErofsFuseExecutable() (string, error) {
-	if p := os.Getenv("EROFS_C_FUSE"); p != "" {
+	if p := os.Getenv(erofsCFuseEnv); p != "" {
+		if err := validateExecutablePath(p, erofsCFuseEnv); err != nil {
+			return "", err
+		}
 		return p, nil
 	}
 
@@ -98,7 +115,36 @@ func lookupCErofsFuseExecutable() (string, error) {
 		return p, nil
 	}
 
-	return "", fmt.Errorf("erofsfuse not found, set EROFS_C_FUSE=path to enable comparison")
+	return "", fmt.Errorf("erofsfuse not found, set %s=path to enable comparison", erofsCFuseEnv)
+}
+
+func lookupCErofsMkfsExecutable() (string, error) {
+	if p := os.Getenv(erofsMkfsEnv); p != "" {
+		if err := validateExecutablePath(p, erofsMkfsEnv); err != nil {
+			return "", err
+		}
+		return p, nil
+	}
+
+	if p, err := exec.LookPath("mkfs.erofs"); err == nil {
+		return p, nil
+	}
+
+	return "", fmt.Errorf("mkfs.erofs not found, set %s=path if a test requires it", erofsMkfsEnv)
+}
+
+func validateExecutablePath(path, envName string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s=%s is not accessible: %w", envName, path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s=%s points to a directory", envName, path)
+	}
+	if info.Mode()&0111 == 0 {
+		return fmt.Errorf("%s=%s is not executable", envName, path)
+	}
+	return nil
 }
 
 // mustLookupFio is a test helper that wraps lookupExecutable for "fio" and fails the test if fio is not found.
@@ -213,18 +259,18 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 
 // mountLeptonBootstrap runs `lepton fuse` using a bootstrap plus a blob directory.
 func mountLeptonBootstrap(t *testing.T, leptonBin, bootstrapPath, blobDir, mnt string) (cleanup func()) {
-    return mountLeptonBootstrapWithCache(t, leptonBin, bootstrapPath, blobDir, "", mnt)
+	return mountLeptonBootstrapWithCache(t, leptonBin, bootstrapPath, blobDir, "", mnt)
 }
 
 // mountLeptonBootstrapWithCache runs `lepton fuse` using a bootstrap plus a blob directory,
 // optionally enabling the persistent chunk cache.
 func mountLeptonBootstrapWithCache(
-    t *testing.T,
-    leptonBin,
-    bootstrapPath,
-    blobDir,
-    cacheDir,
-    mnt string,
+	t *testing.T,
+	leptonBin,
+	bootstrapPath,
+	blobDir,
+	cacheDir,
+	mnt string,
 ) (cleanup func()) {
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
@@ -262,7 +308,7 @@ func mountLeptonBootstrapWithCache(
 // buildLeptonFSImage invokes `lepton build` to create an LeptonFS image and its
 // associated blob device file.
 func buildLeptonFSImage(t *testing.T, leptonBin, imagePath, blobdev, srcDir string, chunkSize int) string {
-	args := []string{"build", "--blob", blobdev, "--chunk-size", fmt.Sprint(chunkSize)}
+	args := []string{"build", "--blob", blobdev, "--chunk-size", fmt.Sprint(chunkSize), "--compressor", "zstd"}
 	if imagePath != "" {
 		args = append(args, "--bootstrap", imagePath)
 	}
@@ -278,7 +324,7 @@ func buildLeptonFSImageToDir(t *testing.T, leptonBin, imagePath, blobDir, srcDir
 	require.NoError(t, os.MkdirAll(blobDir, 0755))
 	before := listFilesInDir(t, blobDir)
 
-	args := []string{"build", "--blob-dir", blobDir, "--chunk-size", fmt.Sprint(chunkSize)}
+	args := []string{"build", "--blob-dir", blobDir, "--chunk-size", fmt.Sprint(chunkSize), "--compressor", "zstd"}
 	if imagePath != "" {
 		args = append(args, "--bootstrap", imagePath)
 	}

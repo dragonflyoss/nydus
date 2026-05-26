@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 use lepton::build::blob_chunk::BlobWriter;
 use lepton::build::bootstrap::render_bootstrap;
-use lepton::build::inode::{build_tree, InodeData, InodeInfo};
+use lepton::build::inode::build_tree;
 use lepton::metadata::*;
 use lepton::tracing::init_command_tracing;
 use lepton::utils::{hex_string, sha256_file};
@@ -10,7 +10,7 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use tracing::{warn, Level};
+use tracing::Level;
 
 const DEFAULT_CHUNK_SIZE: u32 = 1_048_576;
 
@@ -23,6 +23,15 @@ pub enum ConversionType {
 pub enum Compressor {
     None,
     Zstd,
+}
+
+impl From<Compressor> for BlobMetaCompressor {
+    fn from(value: Compressor) -> Self {
+        match value {
+            Compressor::None => Self::None,
+            Compressor::Zstd => Self::Zstd,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -50,7 +59,7 @@ pub struct BuildArgs {
     #[arg(long)]
     pub bootstrap: Option<PathBuf>,
 
-    /// Chunk size in bytes (must be a power of two, >= 4096).
+    /// File chunk size in bytes (must be a power of two, >= 4KiB, and 4KiB-aligned).
     #[arg(long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
     pub chunk_size: u32,
 
@@ -86,7 +95,8 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         }
     }
 
-    // Validate chunksize.
+    // Validate EROFS file chunksize. BlobMeta groups are formed separately and
+    // are at least 1MiB even when file chunk indexes are smaller.
     if args.chunk_size < EROFS_BLOCK_SIZE {
         bail!(
             "chunksize {} must be >= block size {}",
@@ -97,17 +107,14 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
     if !args.chunk_size.is_power_of_two() {
         bail!("chunksize {} must be a power of two", args.chunk_size);
     }
+    if args.chunk_size % EROFS_BLOCK_SIZE != 0 {
+        bail!("chunksize {} must be block aligned", args.chunk_size);
+    }
     let chunkbits = args.chunk_size.trailing_zeros();
 
     // Validate source is a directory.
     if !args.source.is_dir() {
         bail!("source {} is not a directory", args.source.display());
-    }
-
-    if args.compressor == Compressor::Zstd {
-        warn!(
-            "zstd chunk compression is reserved in the new CLI but not implemented yet; writing uncompressed chunk data"
-        );
     }
 
     let build_time = SystemTime::now()
@@ -118,64 +125,30 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
     let temp_blob_data_path =
         std::env::temp_dir().join(format!("lepton-build-{}.blobdata", uuid::Uuid::new_v4()));
 
-    // Phase 1: Build inode tree and write chunk data to blobdev.
-    eprintln!("Building filesystem tree from {}...", args.source.display());
-    let mut blob_writer = BlobWriter::new(&temp_blob_data_path, args.chunk_size)?;
+    let mut blob_writer = BlobWriter::new_with_compressor(
+        &temp_blob_data_path,
+        args.chunk_size,
+        args.compressor.into(),
+    )?;
     let mut inodes = build_tree(&args.source, &mut blob_writer, args.chunk_size)?;
+    blob_writer.finish()?;
     let epoch = inodes
         .iter()
         .map(|inode| inode.mtime)
         .min()
         .unwrap_or(build_time);
 
-    let total_inodes = inodes.len() as u64;
-    eprintln!(
-        "  {} inodes, {} blob blocks, {} bytes saved by dedup",
-        total_inodes,
-        blob_writer.total_blocks(),
-        blob_writer.saved_by_dedup
-    );
-
-    // Phase 3: Materialize bootstrap bytes and final artifacts.
-    let blob_target_desc = requested_blob_path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .or_else(|| {
-            args.blob_dir
-                .as_ref()
-                .map(|dir| format!("{}/<sha256>", dir.display()))
-        })
-        .expect("clap enforces either --blob or --blob-dir");
-    eprintln!("Materializing bootstrap for {}...", blob_target_desc);
-
     let uuid_bytes = [0u8; 16];
     let blob_id = sha256_file(&temp_blob_data_path)?;
-    let provisional_device_slots = [ErofsDeviceSlot::with_blob_id(
-        blob_writer.total_blocks(),
-        &blob_id,
-    )];
-
-    let provisional_bootstrap = render_bootstrap(
-        &mut inodes,
-        epoch,
-        chunkbits,
-        &provisional_device_slots,
-        &uuid_bytes,
-    )?;
-    let bootstrap_blocks = provisional_bootstrap
-        .len()
-        .div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
-    rebase_external_chunk_blkaddrs(&mut inodes, bootstrap_blocks)?;
-
     let device_slots = [ErofsDeviceSlot::with_blob_id(
-        bootstrap_blocks + blob_writer.total_blocks(),
+        blob_writer.total_blocks(),
         &blob_id,
     )];
     let bootstrap_bytes =
         render_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
+    let bootstrap_blocks = bootstrap_bytes.len().div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
 
     if let Some(bootstrap) = &args.bootstrap {
-        eprintln!("Writing bootstrap to {}...", bootstrap.display());
         let bootstrap_file = File::create(bootstrap)
             .with_context(|| format!("failed to create bootstrap: {}", bootstrap.display()))?;
         let mut writer = BufWriter::new(bootstrap_file);
@@ -189,7 +162,6 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
 
     let (temp_full_blob_path, final_blob_path) =
         prepare_blob_output(requested_blob_path.as_deref(), args.blob_dir.as_deref())?;
-    eprintln!("Writing full blob to {}...", temp_full_blob_path.display());
     let blob_file = File::create(&temp_full_blob_path)
         .with_context(|| format!("failed to create blob: {}", temp_full_blob_path.display()))?;
     let mut blob_writer_stream = BufWriter::new(blob_file);
@@ -230,24 +202,54 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         args.blob_dir.as_deref(),
         &full_blob_id,
     );
-    blob_writer.write_blob_meta(
-        &blob_meta_path,
-        blob_id,
-        bootstrap_blocks * EROFS_BLOCK_SIZE as u64,
-    )?;
+    let blob_meta = blob_writer.blob_meta(blob_id, bootstrap_blocks * EROFS_BLOCK_SIZE as u64)?;
+    blob_meta.save(&blob_meta_path)?;
 
     let _ = fs::remove_file(&temp_blob_data_path);
 
-    eprintln!(
-        "Done. Bootstrap: {} blocks, Data: {} blocks, Data blob id: {}, Blob sha256: {}, Blob path: {}, Blob meta path: {}",
-        bootstrap_bytes.len().div_ceil(EROFS_BLOCK_SIZE as usize),
-        blob_writer.total_blocks(),
-        hex_string(&blob_id),
-        hex_string(&full_blob_id),
-        final_blob_path.display(),
-        blob_meta_path.display()
+    print_blob_summary(
+        0,
+        &blob_id,
+        &full_blob_id,
+        &blob_meta,
+        &final_blob_path,
+        &blob_meta_path,
+        args.bootstrap.as_deref(),
     );
     Ok(())
+}
+
+fn print_blob_summary(
+    index: usize,
+    data_blob_digest: &[u8; EROFS_BLOB_ID_SIZE],
+    full_blob_digest: &[u8; EROFS_BLOB_ID_SIZE],
+    blobmeta: &BlobMeta,
+    full_blob_path: &Path,
+    blobmeta_path: &Path,
+    bootstrap_path: Option<&Path>,
+) {
+    println!("Blobs");
+    println!("  Blob {}", index);
+    println!("    blob_index: {}", index);
+    println!("    data_blob_digest: {}", hex_string(data_blob_digest));
+    println!("    full_blob_digest: {}", hex_string(full_blob_digest));
+    println!("    chunk_size: {}", blobmeta.chunk_size());
+    println!("    chunk_count: {}", blobmeta.chunk_count());
+    println!("    chunk_digester: {}", blobmeta.digester());
+    println!("    chunk_compressor: {}", blobmeta.compressor());
+    println!(
+        "    blob_compressed_size: {}",
+        blobmeta.total_compressed_size()
+    );
+    println!(
+        "    blob_uncompressed_size: {}",
+        blobmeta.total_uncompressed_size()
+    );
+    println!("    full_blob_path: {}", full_blob_path.display());
+    println!("    blob_meta_path: {}", blobmeta_path.display());
+    if let Some(bootstrap_path) = bootstrap_path {
+        println!("    bootstrap_path: {}", bootstrap_path.display());
+    }
 }
 
 fn prepare_blob_output(
@@ -315,27 +317,6 @@ fn blob_meta_output_path(
     }
 
     Path::new(".").join(format!("{}.blob.meta", hex_string(full_blob_sha256)))
-}
-
-fn rebase_external_chunk_blkaddrs(inodes: &mut [InodeInfo], base_blocks: u64) -> Result<()> {
-    for inode in inodes {
-        let InodeData::RegularFile { chunk_indexes, .. } = &mut inode.data else {
-            continue;
-        };
-
-        for chunk_index in chunk_indexes {
-            if chunk_index.device_id == 0 || chunk_index.blkaddr == EROFS_NULL_ADDR {
-                continue;
-            }
-
-            chunk_index.blkaddr = chunk_index
-                .blkaddr
-                .checked_add(base_blocks)
-                .context("chunk block address overflow while rebasing full blob offsets")?;
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
