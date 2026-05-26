@@ -1,4 +1,4 @@
-version = 2
+version = 4
 root = "/var/lib/containerd"
 state = "/run/containerd"
 oom_score = 0
@@ -11,7 +11,13 @@ oom_score = 0
   disable_snapshot_annotations = false
   discard_unpacked_layers = false
 
+[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+  platform = "linux"
+  snapshotter = "nydus"
+
 [proxy_plugins]
   [proxy_plugins.nydus]
       type = "snapshot"
       address = "/run/containerd-nydus/containerd-nydus-grpc.sock"
+      [proxy_plugins.nydus.exports]
+        enable_remote_snapshot_annotations = "true"
