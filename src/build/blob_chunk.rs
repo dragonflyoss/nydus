@@ -141,8 +141,8 @@ mod tests {
     fn blob_meta_chunk_round_trips_minimal_fields() {
         let entry = BlobMetaChunk::new(0x2000, 0x3000, 0x12345, 0x400).unwrap();
 
-        assert_eq!(entry.uncompressed_offset(), 0x2000);
-        assert_eq!(entry.uncompressed_size(), 0x3000);
+        assert_eq!(entry.offset(), 0x2000);
+        assert_eq!(entry.size(), 0x3000);
         assert_eq!(entry.compressed_offset(), 0x12345);
         assert_eq!(entry.compressed_size(), 0x400);
     }
@@ -175,12 +175,12 @@ mod tests {
 
         let entries = writer.blob_meta_chunks();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].uncompressed_offset(), 0);
-        assert_eq!(entries[0].uncompressed_size(), 4096);
+        assert_eq!(entries[0].offset(), 0);
+        assert_eq!(entries[0].size(), 4096);
         assert_eq!(entries[0].compressed_offset(), 0);
         assert_eq!(entries[0].compressed_size(), 4096);
-        assert_eq!(entries[1].uncompressed_offset(), 4096);
-        assert_eq!(entries[1].uncompressed_size(), 4096);
+        assert_eq!(entries[1].offset(), 4096);
+        assert_eq!(entries[1].size(), 4096);
         assert_eq!(entries[1].compressed_offset(), 4096);
         assert_eq!(entries[1].compressed_size(), 4096);
     }
@@ -206,7 +206,7 @@ mod tests {
         let blob_meta = BlobMeta::load(&blob_meta_path).unwrap();
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(blob_meta.header().chunk_bytes(), 24);
-        assert_eq!(blob_meta.chunks()[0].uncompressed_offset(), 0);
+        assert_eq!(blob_meta.chunks()[0].offset(), 0);
         assert_eq!(blob_meta.chunks()[0].compressed_offset(), 8192);
     }
 }

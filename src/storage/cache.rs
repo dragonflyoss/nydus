@@ -87,16 +87,12 @@ impl CachedBlobDevice {
                         "backend returned unexpected range length",
                     ));
                 }
-                write_all_at(&self.cache_file, chunk.uncompressed_offset(), &data)?;
+                write_all_at(&self.cache_file, chunk.offset(), &data)?;
                 self.chunkmap.set_ready(chunk_index)?;
             }
         }
 
-        read_exact_at(
-            &self.cache_file,
-            chunk.uncompressed_offset() + chunk_off,
-            dst,
-        )
+        read_exact_at(&self.cache_file, chunk.offset() + chunk_off, dst)
     }
 }
 

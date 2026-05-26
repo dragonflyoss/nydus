@@ -365,8 +365,8 @@ Current blobmeta on-disk shape:
 | chunk records                 |
 | 24 bytes each                 |
 |                               |
-| uncompressed_offset           |
-| uncompressed_size             |
+| offset                        |
+| size                          |
 | compressed_offset             |
 | compressed_size               |
 +-------------------------------+

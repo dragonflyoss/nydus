@@ -88,8 +88,8 @@ impl BlobMetaHeader {
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BlobMetaChunk {
-    uncompressed_offset: u64,
-    uncompressed_size: u32,
+    offset: u64,
+    size: u32,
     compressed_offset: u64,
     compressed_size: u32,
 }
@@ -98,25 +98,25 @@ const _: () = assert!(size_of::<BlobMetaChunk>() == 24);
 
 impl BlobMetaChunk {
     pub fn new(
-        uncompressed_offset: u64,
-        uncompressed_size: u32,
+        offset: u64,
+        size: u32,
         compressed_offset: u64,
         compressed_size: u32,
     ) -> Result<Self> {
         let mut chunk = Self::default();
-        chunk.set_uncompressed_offset(uncompressed_offset)?;
-        chunk.set_uncompressed_size(uncompressed_size)?;
+        chunk.set_offset(offset)?;
+        chunk.set_size(size)?;
         chunk.set_compressed_offset(compressed_offset)?;
         chunk.set_compressed_size(compressed_size)?;
         Ok(chunk)
     }
 
-    pub fn uncompressed_offset(&self) -> u64 {
-        self.uncompressed_offset
+    pub fn offset(&self) -> u64 {
+        self.offset
     }
 
-    pub fn uncompressed_size(&self) -> u32 {
-        self.uncompressed_size
+    pub fn size(&self) -> u32 {
+        self.size
     }
 
     pub fn compressed_offset(&self) -> u64 {
@@ -129,8 +129,8 @@ impl BlobMetaChunk {
 
     pub fn with_compressed_offset_bias(&self, bias: u64) -> Result<Self> {
         Self::new(
-            self.uncompressed_offset(),
-            self.uncompressed_size(),
+            self.offset(),
+            self.size(),
             self.compressed_offset()
                 .checked_add(bias)
                 .context("blob meta compressed offset overflow")?,
@@ -139,12 +139,12 @@ impl BlobMetaChunk {
     }
 
     pub fn uncompressed_end(&self) -> u64 {
-        self.uncompressed_offset() + self.uncompressed_size() as u64
+        self.offset() + self.size() as u64
     }
 
     pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
-        writer.write_all(&self.uncompressed_offset.to_le_bytes())?;
-        writer.write_all(&self.uncompressed_size.to_le_bytes())?;
+        writer.write_all(&self.offset.to_le_bytes())?;
+        writer.write_all(&self.size.to_le_bytes())?;
         writer.write_all(&self.compressed_offset.to_le_bytes())?;
         writer.write_all(&self.compressed_size.to_le_bytes())?;
         Ok(())
@@ -152,23 +152,23 @@ impl BlobMetaChunk {
 
     pub fn read_from(reader: &mut dyn Read) -> Result<Self> {
         Ok(Self {
-            uncompressed_offset: read_u64(reader)?,
-            uncompressed_size: read_u32(reader)?,
+            offset: read_u64(reader)?,
+            size: read_u32(reader)?,
             compressed_offset: read_u64(reader)?,
             compressed_size: read_u32(reader)?,
         })
     }
 
-    fn set_uncompressed_offset(&mut self, offset: u64) -> Result<()> {
-        self.uncompressed_offset = offset;
+    fn set_offset(&mut self, offset: u64) -> Result<()> {
+        self.offset = offset;
         Ok(())
     }
 
-    fn set_uncompressed_size(&mut self, size: u32) -> Result<()> {
+    fn set_size(&mut self, size: u32) -> Result<()> {
         if size == 0 {
             bail!("uncompressed size must be non-zero");
         }
-        self.uncompressed_size = size;
+        self.size = size;
         Ok(())
     }
 
