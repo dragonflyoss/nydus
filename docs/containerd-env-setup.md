@@ -149,6 +149,16 @@ For version 3 containerd config format:
     discard_unpacked_layers = false
 ```
 
+For version 4 containerd config format:
+
+```toml
+[plugins]
+  [plugins.'io.containerd.cri.v1.images']
+    snapshotter = 'nydus'
+    disable_snapshot_annotations = false
+    discard_unpacked_layers = false
+```
+
 Then restart containerd, e.g.:
 
 ```bash
