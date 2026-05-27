@@ -15,9 +15,9 @@ The user-facing commands are:
 - `lepton fuse`
 
 The current merge implementation focuses on metadata overlay, blob-id
-preservation and OCI whiteout handling. The build and runtime paths use the new
-blobmeta sidecar as the canonical map from logical EROFS external-device
-addresses to encoded ranges in the stored full blob.
+preservation and OCI whiteout handling. The build and runtime paths use the
+embedded blob meta region as the canonical map from logical EROFS
+external-device addresses to encoded ranges in the stored data region.
 
 ## Goals
 
@@ -46,15 +46,13 @@ addresses to encoded ranges in the stored full blob.
 
 The `lepton build` command builds a source directory into EROFS format. It
 optionally emits a standalone metadata-only bootstrap via `--bootstrap`, while
-`--blob` remains the primary artifact and contains both the EROFS metadata and
-the appended chunk data region. Build now always emits a companion `.blob.meta`
-sidecar for the full blob: `--blob <path>` writes `<path>.blob.meta`, while
-`--blob-dir` writes `<dir>/<full_blob_sha256>.blob.meta`. `--blob-dir` is an
-alternative output mode that writes the full blob into the target directory
-through a temporary random file, computes the full artifact SHA256, and finally
-renames the file to that SHA256. The standalone bootstrap records the SHA256
-blob id for the data region in its device-table metadata so runtime can resolve
-the corresponding blob later.
+`--blob` remains the primary artifact and contains the encoded data region,
+bootstrap, blob meta, and footer in one file. `--blob-dir` is an alternative
+output mode that writes the full blob into the target directory through a
+temporary random file, computes the full artifact SHA256, and finally renames the
+file to that SHA256. The standalone bootstrap records the SHA256 blob id for the
+data region in its device-table metadata so runtime can resolve the
+corresponding full blob later.
 
 Current CLI help:
 
@@ -91,20 +89,20 @@ Current implementation notes:
 - `--chunk-size` defaults to `1048576` (1 MiB) and controls EROFS file chunk
 	indexes. Blobmeta data-block groups are at least 1 MiB, so smaller file chunks
 	do not fragment blobmeta into tiny compression units.
-- `--blob <path>` stores the full blob at `<path>` and also stores a companion
-	blobmeta sidecar at `<path>.blob.meta`.
-- `--blob-dir` stores the full blob under `<blob-dir>/<full_blob_sha256>`.
-- `--blob-dir` also stores a blobmeta sidecar as
-	`<blob-dir>/<full_blob_sha256>.blob.meta`.
+- `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
+	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
+	writes the full blob stream to that FIFO instead of creating a regular file.
+- `--blob-dir` stores the full blob under `<blob-dir>/<full_blob_sha256>` and a
+	standalone blob meta copy under `<blob-dir>/<full_blob_sha256>.blob.meta`.
 - `--compressor zstd` attempts to compress each blobmeta data-block group as one
 	unit. If the compressed bytes are larger than 70% of the uncompressed group,
 	the group is stored plain and its blobmeta chunk records
-	`compressed_size == uncompressed_size`.
+	`compressed_size == uncompressed_block_count * 4096`.
 - `--compressor none` writes every group plain.
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
 	`data_blob_digest`, `full_blob_digest`, `chunk_size`, `chunk_count`,
 	`chunk_digester`, `chunk_compressor`, compressed/uncompressed totals, and
-	output paths.
+	full blob region offsets and block counts.
 
 ### Merge
 
@@ -145,7 +143,7 @@ Current implementation notes:
 	metadata tree, applying OCI whiteout rules, and emitting a new device table.
 - Merge preserves the blob id already stored in each source device slot. For
 	single-layer outputs from `lepton build`, that blob id is currently the SHA256
-	of the appended data region.
+	of the data region.
 - Merge currently assumes source regular files use the lepton chunk-based data
 	layout and preserves each file's original chunkbits.
 
@@ -165,8 +163,8 @@ Supported forms:
 
 Current implementation notes:
 
-- `--blob` inspects the full lepton blob and verifies the appended data-region
-	SHA256 against the device-table blob id.
+- `--blob` inspects the full lepton blob, locates the bootstrap through the
+	footer, and verifies the data-region SHA256 against the device-table blob id.
 - `--bootstrap` inspects metadata only and reports blob sizes from device-table
 	block counts.
 - `--blob-dir` is optional for static inspection and is used only to resolve
@@ -175,8 +173,8 @@ Current implementation notes:
 	`chunk_size`, `chunk_count`, `chunk_digester`, `chunk_compressor`, and
 	compressed/uncompressed totals when the referenced blob can be resolved.
 - `--blob-dir` resolves by scanning full blob candidates. Device slots normally
-	store the appended-data SHA256, while blob files and blobmeta sidecars are named
-	by full blob SHA256 when produced by `--blob-dir`.
+	store the data-region SHA256, while blob files are named by full blob SHA256
+	when produced by `--blob-dir`.
 
 ### Fuse
 
@@ -233,36 +231,43 @@ validates requested blobmeta chunks without persisting decoded data.
 
 ### Build outputs
 
-`lepton build` can materialize up to three distinct artifacts:
+`lepton build` can materialize up to two distinct artifacts:
 
 1. Full blob.
 2. Optional standalone bootstrap.
-3. Companion `.blob.meta` sidecar for the full blob.
 
 Current output shapes:
 
 - `--blob <path>` writes one full blob exactly at `<path>`.
-- `--blob <path>` also writes one blobmeta sidecar at `<path>.blob.meta`.
 - `--blob-dir <dir>` writes one full blob at `<dir>/<full_blob_sha256>`.
-- `--blob-dir <dir>` also writes one blobmeta sidecar at
-	`<dir>/<full_blob_sha256>.blob.meta`.
 - `--bootstrap <path>` additionally writes a standalone metadata-only bootstrap.
 
 ### Full blob byte layout
 
 The full blob is the primary layer artifact. Its byte layout is:
 
-1. Bootstrap prefix.
-2. Appended data region.
+1. Encoded data region.
+2. Optional zero padding to the next 4 KiB boundary.
+3. Bootstrap region.
+4. Optional zero padding to the next 4 KiB boundary.
+5. Blob meta region.
+6. Footer.
 
-The order matters: the file is `bootstrap + data`, not `data + bootstrap`.
+The order matters: the file is `data + bootstrap + blob_meta + footer`, not
+`bootstrap + data`. The data region is first so build can append encoded chunk
+groups directly into the final artifact without copying them behind metadata
+later.
 
 ```text
 full blob file: <full_blob_sha256>
 
 +-------------------------------+  byte 0
-| bootstrap prefix              |
-|                               |
+| encoded data region           |
+| zstd or stored plain groups   |
++-------------------------------+  byte = footer.compressed_data_offset + footer.compressed_data_size
+| padding to 4 KiB alignment    |
++-------------------------------+  byte = footer.bootstrap_offset
+| bootstrap                     |
 |  block 0                      |
 |  +-------------------------+  |
 |  | 0x0000..0x03ff zeros    |  |
@@ -278,23 +283,57 @@ full blob file: <full_blob_sha256>
 |  | chunk index arrays      |  |
 |  | directory data blocks   |  |
 |  +-------------------------+  |
-+-------------------------------+  byte = bootstrap_blocks * 4096
-| appended data region          |
-| +---------------------------+ |
-| | encoded blobmeta groups   | |
-| | zstd or stored plain      | |
-| | deduped before grouping   | |
-| +---------------------------+ |
++-------------------------------+  byte = footer.bootstrap_offset + footer.bootstrap_blocks * 4096
+| padding to 4 KiB alignment    |
++-------------------------------+  byte = footer.blob_meta_offset
+| blob meta                     |
+| 4 KiB header + chunk records  |
+| zero padding to 4 KiB         |
++-------------------------------+  byte = footer.blob_meta_offset + footer.blob_meta_blocks * 4096
+| blob footer                   |
 +-------------------------------+  EOF
 ```
 
-The bootstrap prefix is a valid metadata-only EROFS image by itself. When
+The footer is fixed at 4096 bytes and is always located at EOF. The current
+fields occupy the first 64 bytes; the remaining bytes are reserved for future
+extension and must be zero.
+
+```text
+BlobFooter
+
+u32 magic              "LFTR" / 0x4c465452
+u32 features           currently 0
+u32 crc32              crc32c over footer bytes with this field zeroed
+u32 reserved0          must be 0
+u64 compressed_data_offset
+u64 bootstrap_offset
+u64 blob_meta_offset
+u64 compressed_data_size
+u32 bootstrap_blocks
+u32 blob_meta_blocks
+u64 reserved1          must be 0
+u8  reserved2[4032]    must be 0
+```
+
+Reader validation requires:
+
+```text
+compressed_data_offset + compressed_data_size <= bootstrap_offset
+bootstrap_offset + bootstrap_blocks * 4096 <= blob_meta_offset
+blob_meta_offset + blob_meta_blocks * 4096 == footer_offset
+```
+
+The inequalities allow alignment padding between regions. Offsets and the footer
+offset must be 4 KiB aligned. The bootstrap and blob meta region lengths are
+stored as 4 KiB block counts in the footer.
+
+The bootstrap region is a valid metadata-only EROFS image by itself. When
 `--bootstrap` is specified, the standalone bootstrap is byte-for-byte identical
-to this prefix.
+to this embedded region.
 
-### Bootstrap prefix details
+### Bootstrap region details
 
-Within the bootstrap prefix:
+Within the bootstrap region:
 
 - `superblock.blocks` counts only bootstrap blocks, not the entire full blob.
 - the device table starts in block 0 immediately after the superblock.
@@ -310,8 +349,12 @@ The superblock continues to provide:
 - `extra_devices`
 - `devt_slotoff`
 - primary image block count
+- native EROFS `sb_checksum` verification for the bootstrap image
 
 It does not carry the blob identity itself. It only points to the device table.
+Both per-layer bootstraps generated by `lepton build` and merged bootstraps
+generated by `lepton merge` pass through the same bootstrap writer, so both set
+`EROFS_FEATURE_COMPAT_SB_CHKSUM` and write the EROFS superblock crc32c.
 
 ### Device table and chunk address semantics
 
@@ -319,7 +362,7 @@ Each external blob device is represented by one `ErofsDeviceSlot` entry.
 
 For current single-layer build output:
 
-- `tag[0..32]` stores the SHA256 of the appended encoded data region only.
+- `tag[0..32]` stores the SHA256 of the encoded data region only.
 - `tag[32..64]` is zero-filled.
 - `blocks_lo/blocks_hi` store the logical uncompressed external-device size in
 	4 KiB blocks.
@@ -328,7 +371,7 @@ For current merge output:
 
 - merge preserves the blob id already stored in each source device slot;
 - for source layers produced by current `lepton build`, that preserved blob id
-	is also the appended-data SHA256.
+	is also the data-region SHA256.
 
 Regular file chunk indexes continue to use `blkaddr` and `device_id`, where:
 
@@ -344,7 +387,8 @@ first logical external data block starts at offset 0
 	logical byte offset = 0 * 4096
 
 blobmeta then maps that logical byte offset to a compressed range in the full
-blob, for example compressed_offset = bootstrap_blocks * 4096.
+blob's data region, for example compressed_offset = 0 for the first encoded
+group.
 ```
 
 Blob identity is therefore attached to the device slot, not to the chunk index
@@ -352,12 +396,12 @@ and not to the superblock directly.
 
 ### Blob ID semantics
 
-The current implementation stores the SHA256 of the appended data region in the
+The current implementation stores the SHA256 of the encoded data region in the
 device slot rather than the SHA256 of the whole full blob file.
 
 This avoids a self-reference problem:
 
-- the full blob starts with bootstrap metadata;
+- the full blob contains bootstrap metadata;
 - bootstrap metadata contains the blob identifier;
 - hashing the full file while embedding that hash into the file would be circular.
 
@@ -365,29 +409,27 @@ At the same time:
 
 - the full blob file name written by `--blob-dir` is the SHA256 of the whole
 	full blob artifact;
-- the `.blob.meta` file name follows that full blob SHA256;
-- the device slot blob id still refers to the appended data region SHA256.
+- the device slot blob id still refers to the data region SHA256.
 
-### Blobmeta sidecar layout
+### Blob meta region layout
 
-Whenever build emits a full blob, it also writes one blobmeta sidecar next to
-that blob. The sidecar file name matches the chosen full-blob path, but runtime
-still associates the sidecar with the device-slot blob id it is resolving.
-
-Blobmeta is the canonical catalog for the external data blob. A blobmeta chunk is
-a contiguous collection of logical uncompressed data blocks, not a file-local
-chunk. EROFS inode chunk indexes point into that logical uncompressed address
-space; blobmeta maps those offsets to encoded ranges in the stored full blob.
+Whenever build emits a full blob, it writes one blob meta region before the
+footer. Blob meta is the canonical catalog for the external data blob. A blob
+meta chunk is a contiguous collection of logical uncompressed data blocks, not a
+file-local chunk. EROFS inode chunk indexes point into that logical
+uncompressed address space; blob meta maps those offsets to encoded ranges in
+the full blob data region.
 
 Current blobmeta on-disk shape:
 
 ```text
-<full_blob_sha256>.blob.meta
+embedded blob meta region
 
 +-------------------------------+
 | 4 KiB header                  |
 | magic                         |
 | features                      |
+| crc32c                        |
 | chunk_entry_size              |
 | chunk_count                   |
 | chunk_size                    |
@@ -397,13 +439,15 @@ Current blobmeta on-disk shape:
 | chunk records                 |
 | 64 bytes each                 |
 |                               |
-| uncompressed_offset           |
+| uncompressed_block_offset     |
 | compressed_offset             |
-| uncompressed_size             |
+| uncompressed_block_count      |
 | compressed_size               |
 | crc32c                        |
 | reserved                      |
 | digest (BLAKE3)               |
++-------------------------------+
+| zero padding to 4 KiB         |
 +-------------------------------+
 ```
 
@@ -413,35 +457,33 @@ Header details:
 - `features` is a bitset. `COMPRESSOR_ZSTD` (`1 << 0`) means zstd is the blob's
 	default compressor; no compressor bit means stored plain. `DIGESTER_BLAKE3`
 	(`1 << 16`) is mandatory for chunk digests.
+- `crc32c` covers the full blob meta region with this field zeroed: the fixed
+	4 KiB header, all chunk records, and trailing zero padding. The cache layer
+	verifies this crc32c before mmaping a cached blob meta file for chunk lookup.
 - `chunk_entry_size` is currently 64 bytes.
 - `chunk_count` is the number of chunk records after the fixed header.
 - `chunk_size` is the target logical blobmeta group size. It is at least 1 MiB.
 - The header intentionally does not store `header_size`, total compressed size,
-	or total uncompressed size. The header size is fixed at 4 KiB, and totals are
-	computed from the chunk records.
+	or total uncompressed size. The header size is fixed at 4 KiB, totals are
+	computed from the chunk records, and the blob meta region is padded to a 4 KiB
+	block boundary.
 
 Chunk details:
 
-- `uncompressed_offset` is the logical external-device byte offset used by EROFS
-	chunk indexes. It stays block aligned and is not biased by bootstrap size.
-- `compressed_offset` is the byte offset in the source full blob. For build
-	outputs, blobmeta is biased by `bootstrap_blocks * 4096` after the full blob is
-	assembled, so this offset points directly into the appended data region.
-- `uncompressed_size` and `compressed_size` describe the logical bytes and stored
-	bytes for the group. If they are equal, runtime treats the group as stored plain
-	and skips decompression even when the header compressor is zstd.
+- `uncompressed_block_offset` is the logical external-device 4 KiB block offset
+	used by EROFS chunk indexes. It is not biased by bootstrap size.
+- `compressed_offset` is the byte offset inside the data region, not inside the
+	whole full blob file. Runtime adds `footer.compressed_data_offset` before
+	issuing backend range reads.
+- `uncompressed_block_count` describes the logical size in 4 KiB blocks.
+	`compressed_size` describes the stored bytes for the group. If `compressed_size`
+	equals `uncompressed_block_count * 4096`, runtime treats the group as stored
+	plain and skips decompression even when the header compressor is zstd.
 - `digest` and `crc32c` are computed over the uncompressed group.
 
-The writer biases `compressed_offset` by the bootstrap size when the data is
-stored as `bootstrap + data-region` in a full blob. It does not bias
-`uncompressed_offset`; that field remains the logical external-device address
-used by inode chunk indexes.
-
-Sidecar lookup follows the source full blob path. For direct `--blob <path>`,
-runtime expects `<path>.blob.meta`. For `--blob-dir`, runtime resolves the full
-blob by scanning candidates and then expects `<full_blob_sha256>.blob.meta` next
-to the resolved source. The old fallback to `<data_blob_digest>.blob.meta` is no
-longer part of the format.
+The writer does not bias `compressed_offset` by the bootstrap size. It also does
+not bias `uncompressed_block_offset`; that field remains the logical
+external-device block address used by inode chunk indexes.
 
 ### Merge output
 
@@ -457,23 +499,35 @@ The build pipeline now follows this sequence:
 	space.
 3. Group that logical data stream into blobmeta chunks, normally 1MiB each.
 4. Compute BLAKE3 digest and CRC32C over each uncompressed group.
-5. Compress each group according to the blobmeta header compressor and write the
-	encoded bytes into a temporary data-region file. For zstd, groups that do not
-	shrink to at most 70% of their uncompressed size are stored plain and marked by
-	`compressed_size == uncompressed_size`.
-6. Compute SHA256 over the temporary encoded data-region file and write it into
-	the bootstrap device slot tag.
+5. Compress each group according to the blobmeta header compressor and append
+	the encoded bytes directly to the beginning of the full blob file. For zstd,
+	groups that do not shrink to at most 70% of their uncompressed size are stored
+	plain and marked by `compressed_size == uncompressed_block_count * 4096`.
+6. Compute SHA256 over the encoded data region as those bytes are written and
+	write it into the bootstrap device slot tag.
 7. Serialize the bootstrap bytes in memory. External chunk `blkaddr` values stay
-	logical and are not rebased by the bootstrap size.
+	logical and are not rebased by the bootstrap size. The bootstrap includes the
+	native EROFS superblock checksum.
 8. Optionally persist the standalone bootstrap.
-9. Persist the full blob as `bootstrap bytes + encoded data-region bytes`.
-10. Compute SHA256 over the full blob artifact.
-11. If `--blob-dir` is used, rename the full blob to `<full_blob_sha256>` and
-	write `<full_blob_sha256>.blob.meta` next to it.
-12. If `--blob <path>` is used, write `<path>.blob.meta` next to the full blob.
+9. Append `aligned bootstrap + aligned blob_meta + footer` after the data
+	region. Blob meta carries its own header crc32c. The full blob SHA256 continues
+	from the data-region hash state while these bytes are appended, so the final
+	artifact digest is computed without re-reading the file.
+10. Move or keep the full blob at the requested output path, then write the
+	standalone `.blob.meta` copy beside that full blob.
 
-The temporary data-region file is an implementation detail and is removed after
-the final blob has been written.
+Full blob output is sequential. This allows `--blob` to target a FIFO: data
+bytes are written first, then the bootstrap bytes, then one serialized blob meta
+buffer, then the fixed footer. The build path does not seek within the full blob
+output.
+
+This layout is intentionally footer-based. A header-based variant would need to
+reserve a header at byte 0 and backpatch it after bootstrap/blobmeta offsets are
+known. That is possible with `pwrite`, but a normal SHA256 stream cannot revise
+bytes that were already fed into the hasher. A header design would therefore
+need a second pass over the completed file, a precomputed header, a digest that
+excludes mutable header bytes, or a different tree-hash construction. The footer
+keeps the artifact append-friendly and permits one-pass full-blob digesting.
 
 ## Reader and Mount Design
 
@@ -481,14 +535,13 @@ the final blob has been written.
 
 When mounting with `--blob`:
 
-1. Open the blob as the primary image.
-2. Read device slots and resolve the adjacent blobmeta sidecar for each external
-	device.
-3. Use the dummy cache path by default: fetch encoded blobmeta groups from the
-	full blob, decompress only when needed, validate digest/CRC32C, and copy
-	requested ranges.
-4. If `--cache-dir` is provided, use the persistent local cache with the same
-	blobmeta lookup rules.
+1. Read the fixed footer from EOF.
+2. Map the embedded bootstrap region as the primary EROFS image.
+3. Read device slots and resolve the full blob through the local backend.
+4. Use a temporary local cache for the mount lifetime. The cache downloads the
+	standalone blob meta into that cache, verifies its header crc32c, mmaps it for
+	chunk lookup, fetches encoded groups from the data region, and validates each
+	decoded group.
 
 ### Bootstrap plus blob-dir mount
 
@@ -497,12 +550,17 @@ When mounting with `--bootstrap + --blob-dir`:
 1. Open the bootstrap.
 2. Read every external device slot.
 3. Extract the raw 32-byte blob id from each slot tag.
-4. Resolve the full blob and matching `.blob.meta` sidecar from `blob-dir`.
-5. `--cache-dir` selects the persistent local cache; otherwise runtime uses the
-	dummy cache.
-6. Reads use logical uncompressed offsets from inode chunk indexes. The cache
-	layer maps those ranges to blobmeta chunks, fetches compressed ranges, validates
-	uncompressed data, and returns bytes to FUSE.
+4. Resolve the full blob from `blob-dir` by scanning footer-bearing candidates
+	and matching the SHA256 of each data region.
+5. `--cache-dir` selects the persistent local cache; otherwise runtime creates a
+	temporary local cache for the mount lifetime.
+6. Before chunk lookup, check the cache directory for `<full_blob_digest>.blob.meta`.
+	If it is absent, download the standalone blob meta from the local backend into
+	the cache directory. The cache verifies the blob meta header crc32c before
+	mmaping the cached file and using its chunk records.
+7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
+	layer maps those ranges to blob meta chunks, fetches compressed ranges from the
+	data region, validates uncompressed data, and returns bytes to FUSE.
 
 The runtime no longer reads external blob data by direct mmap offsets. External
 blob reads always go through the blobmeta-aware cache abstraction.
@@ -514,7 +572,8 @@ cached `pread`/`pwrite` file descriptors. Cache artifacts are named by the full
 blob digest:
 
 - `<full_blob_digest>.blob.data` stores decoded uncompressed data.
-- `<full_blob_digest>.blob.meta` stores the blobmeta sidecar copy.
+- `<full_blob_digest>.blob.meta` stores the verified blob meta copy cached from
+	the local backend.
 - `<full_blob_digest>.chunkmap` records which blobmeta chunks have been decoded.
 
 ## Merge Design

@@ -51,10 +51,7 @@ impl ErofsSuperblock {
     ) -> Self {
         let mut sb: Self = unsafe { mem::zeroed() };
         set_u32(&mut sb.magic, EROFS_SUPER_MAGIC_V1);
-        set_u32(
-            &mut sb.feature_compat,
-            feature_compat & !EROFS_FEATURE_COMPAT_SB_CHKSUM,
-        );
+        set_u32(&mut sb.feature_compat, feature_compat);
         sb.blkszbits = EROFS_BLKSZBITS;
         set_u16(&mut sb.rootnid_2b, root_nid);
         set_u64(&mut sb.inos, inos);

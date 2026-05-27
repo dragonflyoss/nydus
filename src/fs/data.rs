@@ -364,18 +364,20 @@ impl ErofsReader {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Write;
 
-    use tempfile::NamedTempFile;
+    use tempfile::{tempdir, NamedTempFile};
 
     use super::ErofsReader;
-    use crate::build::blob_chunk::ChunkIndex;
+    use crate::build::blob_chunk::{BlobWriter, ChunkIndex};
     use crate::build::bootstrap::render_bootstrap;
-    use crate::build::inode::{DirEntry as BuildDirEntry, InodeData, InodeInfo};
+    use crate::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
     use crate::metadata::{
-        xattr_ibody_size, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE,
-        EROFS_XATTR_INDEX_USER,
+        xattr_ibody_size, BlobFooter, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
+        EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER, LEPTON_BLOB_FOOTER_ALIGNMENT,
     };
+    use crate::utils::sha256_file;
 
     #[test]
     fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
@@ -475,5 +477,110 @@ mod tests {
         assert_eq!(chunk_indexes[0].device_id, 0);
         assert_eq!(chunk_indexes[1].blkaddr, 22);
         assert_eq!(chunk_indexes[1].device_id, 0);
+    }
+
+    #[test]
+    fn reads_chunk_data_from_footer_based_full_blob() {
+        let dir = tempdir().expect("create temp dir");
+        let source_dir = dir.path().join("src");
+        fs::create_dir(&source_dir).expect("create source dir");
+        fs::write(source_dir.join("hello.txt"), b"hello lepton\n").expect("write source");
+
+        let data_path = dir.path().join("data.blob");
+        let mut blob_writer = BlobWriter::new(&data_path, EROFS_BLOCK_SIZE).expect("blob writer");
+        let mut inodes =
+            build_tree(&source_dir, &mut blob_writer, EROFS_BLOCK_SIZE).expect("build tree");
+        blob_writer.finish().expect("finish blob writer");
+
+        let data_blob_id = sha256_file(&data_path).expect("hash data blob");
+        let device_slots = [ErofsDeviceSlot::with_blob_id(
+            blob_writer.total_blocks(),
+            &data_blob_id,
+        )];
+        let bootstrap = render_bootstrap(
+            &mut inodes,
+            1_700_000_000,
+            EROFS_BLKSZBITS as u32,
+            &device_slots,
+            &[0u8; 16],
+        )
+        .expect("render bootstrap");
+        let blob_meta = blob_writer.blob_meta(data_blob_id, 0).expect("blob meta");
+
+        let data_size = fs::metadata(&data_path).expect("stat data blob").len();
+        let bootstrap_offset = align_u64(data_size, LEPTON_BLOB_FOOTER_ALIGNMENT);
+        let bootstrap_blocks = bytes_to_blocks(bootstrap.len() as u64);
+        let blob_meta_offset = align_u64(
+            bootstrap_offset + bootstrap.len() as u64,
+            LEPTON_BLOB_FOOTER_ALIGNMENT,
+        );
+        let blob_meta_blocks = bytes_to_blocks(blob_meta.metadata_size());
+        let footer = BlobFooter::new(
+            0,
+            data_size,
+            bootstrap_offset,
+            bootstrap_blocks,
+            blob_meta_offset,
+            blob_meta_blocks,
+        )
+        .expect("footer");
+
+        let full_blob_path = dir.path().join("full.blob");
+        let mut full_blob = fs::File::create(&full_blob_path).expect("create full blob");
+        let data = fs::read(&data_path).expect("read data blob");
+        full_blob.write_all(&data).expect("write data blob");
+        write_zero_padding(&mut full_blob, data_size, bootstrap_offset).expect("pad data");
+        full_blob.write_all(&bootstrap).expect("write bootstrap");
+        write_zero_padding(
+            &mut full_blob,
+            bootstrap_offset + bootstrap.len() as u64,
+            blob_meta_offset,
+        )
+        .expect("pad bootstrap");
+        blob_meta.write_to(&mut full_blob).expect("write blob meta");
+        footer.write_to(&mut full_blob).expect("write footer");
+
+        let bootstrap_path = dir.path().join("bootstrap");
+        fs::write(&bootstrap_path, &bootstrap).expect("write bootstrap file");
+
+        let reader = ErofsReader::open(None, Some(&bootstrap_path), Some(dir.path()), None)
+            .expect("open reader");
+        let root = reader.inode(reader.sb().root_nid()).expect("root inode");
+        let entries = reader
+            .read_dir(reader.sb().root_nid(), &root)
+            .expect("read root dir");
+        let file_nid = entries
+            .iter()
+            .find(|entry| entry.name == "hello.txt")
+            .expect("hello entry")
+            .nid;
+        let inode = reader.inode(file_nid).expect("file inode");
+        let data = reader
+            .read_file_data_sync(file_nid, &inode, 0, inode.size() as u32)
+            .expect("read file data");
+
+        assert_eq!(data, b"hello lepton\n");
+    }
+
+    fn align_u64(value: u64, align: u64) -> u64 {
+        debug_assert!(align.is_power_of_two());
+        (value + align - 1) & !(align - 1)
+    }
+
+    fn bytes_to_blocks(size: u64) -> u32 {
+        assert_eq!(size % EROFS_BLOCK_SIZE as u64, 0);
+        (size / EROFS_BLOCK_SIZE as u64) as u32
+    }
+
+    fn write_zero_padding(
+        writer: &mut dyn Write,
+        current: u64,
+        aligned: u64,
+    ) -> std::io::Result<()> {
+        let padding = aligned - current;
+        if padding > 0 {
+            writer.write_all(&vec![0u8; padding as usize])?;
+        }
+        Ok(())
     }
 }

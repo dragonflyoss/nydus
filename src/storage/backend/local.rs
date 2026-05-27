@@ -1,22 +1,26 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{self};
+use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use memmap2::Mmap;
-
 use super::BlobBackend;
-use crate::metadata::{
-    cast_ref, BlobMeta, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_SB_BASE_SIZE,
-    EROFS_SUPER_MAGIC_V1, EROFS_SUPER_OFFSET,
-};
-use crate::utils::{hex_string, sha256_file, sha256_file_region};
+use crate::metadata::{BlobFooter, BlobMeta, EROFS_BLOB_ID_SIZE};
+use crate::utils::{hex_string, sha256_file, sha256_file_range};
+
+#[derive(Clone)]
+struct ResolvedSource {
+    path: PathBuf,
+    data_offset: u64,
+    data_size: u64,
+    blob_meta_offset: Option<u64>,
+    blob_meta_size: Option<u64>,
+}
 
 pub struct LocalBackend {
     root: PathBuf,
-    resolved_sources: Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], PathBuf>>,
+    resolved_sources: Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], ResolvedSource>>,
     source_files: Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], Arc<File>>>,
 }
 
@@ -41,18 +45,25 @@ impl LocalBackend {
         Ok(self.root.join(blob_meta_name))
     }
 
-    fn resolve_source_path(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<PathBuf> {
-        if let Some(path) = self.resolved_sources.lock().unwrap().get(blob_id).cloned() {
-            return Ok(path);
+    fn resolve_source(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<ResolvedSource> {
+        if let Some(source) = self.resolved_sources.lock().unwrap().get(blob_id).cloned() {
+            return Ok(source);
         }
 
         let exact = self.root.join(hex_string(blob_id));
         if exact.is_file() && sha256_file(&exact).map_err(io::Error::other)? == *blob_id {
+            let source = ResolvedSource {
+                path: exact.clone(),
+                data_offset: 0,
+                data_size: exact.metadata()?.len(),
+                blob_meta_offset: None,
+                blob_meta_size: None,
+            };
             self.resolved_sources
                 .lock()
                 .unwrap()
-                .insert(*blob_id, exact.clone());
-            return Ok(exact);
+                .insert(*blob_id, source.clone());
+            return Ok(source);
         }
 
         for entry in fs::read_dir(&self.root)? {
@@ -61,16 +72,19 @@ impl LocalBackend {
                 continue;
             }
 
-            let Some(offset) = data_region_offset(&path)? else {
+            let Some(source) = inspect_full_blob_source(&path)? else {
                 continue;
             };
 
-            if sha256_file_region(&path, offset).map_err(io::Error::other)? == *blob_id {
+            if sha256_file_range(&path, source.data_offset, source.data_size)
+                .map_err(io::Error::other)?
+                == *blob_id
+            {
                 self.resolved_sources
                     .lock()
                     .unwrap()
-                    .insert(*blob_id, path.clone());
-                return Ok(path);
+                    .insert(*blob_id, source.clone());
+                return Ok(source);
             }
         }
 
@@ -88,13 +102,32 @@ impl LocalBackend {
             return Ok(file);
         }
 
-        let path = self.resolve_source_path(blob_id)?;
-        let file = Arc::new(File::open(&path)?);
+        let source = self.resolve_source(blob_id)?;
+        let file = Arc::new(File::open(&source.path)?);
         self.source_files
             .lock()
             .unwrap()
             .insert(*blob_id, file.clone());
         Ok(file)
+    }
+
+    fn read_blob_meta_bytes(&self, source: &ResolvedSource) -> io::Result<Vec<u8>> {
+        let blob_meta_path = self.blob_meta_path_for_source(&source.path)?;
+        if blob_meta_path.is_file() {
+            return fs::read(&blob_meta_path);
+        }
+
+        if let (Some(offset), Some(size)) = (source.blob_meta_offset, source.blob_meta_size) {
+            let file = File::open(&source.path)?;
+            let mut data = vec![0u8; size as usize];
+            read_exact_at(&file, offset, &mut data)?;
+            return Ok(data);
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("blob meta not found: {}", blob_meta_path.display()),
+        ))
     }
 }
 
@@ -103,14 +136,22 @@ impl BlobBackend for LocalBackend {
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
     ) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
-        let source_path = self.resolve_source_path(blob_id)?;
-        sha256_file(&source_path).map_err(io::Error::other)
+        let source = self.resolve_source(blob_id)?;
+        sha256_file(&source.path).map_err(io::Error::other)
     }
 
     fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
-        let source_path = self.resolve_source_path(blob_id)?;
-        let blob_meta_path = self.blob_meta_path_for_source(&source_path)?;
-        BlobMeta::load_with_blob_id(&blob_meta_path, *blob_id).map_err(io::Error::other)
+        let source = self.resolve_source(blob_id)?;
+        let data = self.read_blob_meta_bytes(&source)?;
+        BlobMeta::from_bytes_with_blob_id(&data, *blob_id).map_err(io::Error::other)
+    }
+
+    fn download_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+        let source = self.resolve_source(blob_id)?;
+        let data = self.read_blob_meta_bytes(&source)?;
+        let mut file = File::create(dst)?;
+        file.write_all(&data)?;
+        file.flush()
     }
 
     fn read_range(
@@ -130,31 +171,33 @@ impl BlobBackend for LocalBackend {
         offset: u64,
         dst: &mut [u8],
     ) -> io::Result<()> {
+        let source = self.resolve_source(blob_id)?;
+        let end = offset.checked_add(dst.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
+        })?;
+        if end > source.data_size {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "backend range read exceeds data region",
+            ));
+        }
         let file = self.source_file(blob_id)?;
-        read_exact_at(&file, offset, dst)
+        read_exact_at(&file, source.data_offset + offset, dst)
     }
 }
 
-fn data_region_offset(path: &Path) -> io::Result<Option<u64>> {
-    let file = File::open(path)?;
-    let mapped = unsafe { Mmap::map(&file) }?;
-    if mapped.len() < EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE {
-        return Ok(None);
-    }
-
-    let sb = cast_ref::<ErofsSuperblock>(&mapped[EROFS_SUPER_OFFSET as usize..]);
-    if sb.magic() != EROFS_SUPER_MAGIC_V1 {
-        return Ok(None);
-    }
-
-    let bytes = sb
-        .blocks()
-        .checked_mul(EROFS_BLOCK_SIZE as u64)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "blob size overflow"))?;
-    if bytes as usize > mapped.len() {
-        return Ok(None);
-    }
-    Ok(Some(bytes))
+fn inspect_full_blob_source(path: &Path) -> io::Result<Option<ResolvedSource>> {
+    let footer = match BlobFooter::read_from_path(path) {
+        Ok(footer) => footer,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(ResolvedSource {
+        path: path.to_path_buf(),
+        data_offset: footer.compressed_data_offset(),
+        data_size: footer.compressed_data_size(),
+        blob_meta_offset: Some(footer.blob_meta_offset()),
+        blob_meta_size: Some(footer.blob_meta_size()),
+    }))
 }
 
 fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
@@ -175,20 +218,21 @@ fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{BlobMetaChunk, ErofsSuperblock, EROFS_SUPER_OFFSET};
+    use crate::metadata::{BlobMetaChunk, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET};
     use crate::utils::sha256_bytes;
+    use std::io::Write;
     use tempfile::tempdir;
 
     fn blobmeta_chunk(
-        uncompressed_offset: u64,
-        uncompressed_size: u32,
+        uncompressed_block_offset: u64,
+        uncompressed_block_count: u32,
         compressed_offset: u64,
         compressed_size: u32,
         payload: &[u8],
     ) -> BlobMetaChunk {
         BlobMetaChunk::new(
-            uncompressed_offset,
-            uncompressed_size,
+            uncompressed_block_offset,
+            uncompressed_block_count,
             compressed_offset,
             compressed_size,
             *blake3::hash(payload).as_bytes(),
@@ -207,7 +251,7 @@ mod tests {
             .path()
             .join(format!("{}.blob.meta", hex_string(&blob_id)));
         fs::write(&blob_path, &payload).unwrap();
-        BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 4096, 0, 4096, &payload)])
+        BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 1, 0, 4096, &payload)])
             .save(&blob_meta_path)
             .unwrap();
 
@@ -225,29 +269,36 @@ mod tests {
         let payload = vec![0xcdu8; 4096];
         let blob_id = sha256_bytes(&payload);
 
-        let mut full_blob = vec![0u8; 8192];
+        let mut bootstrap = vec![0u8; 8192];
         let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]);
         let sb_start = EROFS_SUPER_OFFSET as usize;
         let sb_end = sb_start + sb.as_bytes().len();
-        full_blob[sb_start..sb_end].copy_from_slice(sb.as_bytes());
-        full_blob.extend_from_slice(&payload);
+        bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
+        let blob_meta =
+            BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 1, 0, 4096, &payload)]);
+        let footer = BlobFooter::new(
+            0,
+            payload.len() as u64,
+            payload.len() as u64,
+            (bootstrap.len() as u64 / EROFS_BLOCK_SIZE as u64) as u32,
+            payload.len() as u64 + bootstrap.len() as u64,
+            (blob_meta.metadata_size() / EROFS_BLOCK_SIZE as u64) as u32,
+        )
+        .unwrap();
 
         let temp_full_blob_path = dir.path().join("full-blob.bin");
-        fs::write(&temp_full_blob_path, &full_blob).unwrap();
+        let mut full_blob = File::create(&temp_full_blob_path).unwrap();
+        full_blob.write_all(&payload).unwrap();
+        full_blob.write_all(&bootstrap).unwrap();
+        blob_meta.write_to(&mut full_blob).unwrap();
+        footer.write_to(&mut full_blob).unwrap();
         let full_blob_id = sha256_file(&temp_full_blob_path).unwrap();
         let full_blob_path = dir.path().join(hex_string(&full_blob_id));
         fs::rename(&temp_full_blob_path, &full_blob_path).unwrap();
 
-        BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 4096, 8192, 4096, &payload)])
-            .save(
-                &dir.path()
-                    .join(format!("{}.blob.meta", hex_string(&full_blob_id))),
-            )
-            .unwrap();
-
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
-        let data = backend.read_range(&blob_id, 8192, 4096).unwrap();
+        let data = backend.read_range(&blob_id, 0, 4096).unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(data, payload);

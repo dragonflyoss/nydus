@@ -1,6 +1,7 @@
 mod local;
 
 use std::io;
+use std::path::Path;
 
 use crate::metadata::{BlobMeta, EROFS_BLOB_ID_SIZE};
 
@@ -15,6 +16,11 @@ pub trait BlobBackend: Send + Sync {
     }
 
     fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta>;
+
+    fn download_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+        let blob_meta = self.load_blob_meta(blob_id)?;
+        blob_meta.save(dst).map_err(io::Error::other)
+    }
 
     fn read_range_into(
         &self,

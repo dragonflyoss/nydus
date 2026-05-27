@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use anyhow::{bail, Result};
+use crc32c::crc32c_append;
 
 use crate::metadata::*;
 
@@ -24,7 +25,7 @@ pub fn write_image(
     let meta_blocks = metadata_buf.len().div_ceil(block_size);
     let total_blocks = 1 + meta_blocks as u64;
 
-    let feature_compat = EROFS_FEATURE_COMPAT_MTIME;
+    let feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
     let feature_incompat =
         EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
 
@@ -64,6 +65,8 @@ pub fn write_image(
         block0[start..end].copy_from_slice(devslot.as_bytes());
     }
 
+    write_erofs_superblock_checksum(&mut block0)?;
+
     image.write_all(&block0)?;
 
     // --- Metadata blocks ---
@@ -76,4 +79,39 @@ pub fn write_image(
     }
 
     Ok(())
+}
+
+fn write_erofs_superblock_checksum(block0: &mut [u8]) -> Result<()> {
+    let sb_offset = EROFS_SUPER_OFFSET as usize;
+    if block0.len() <= sb_offset {
+        bail!("image block is too small for EROFS superblock checksum")
+    }
+
+    let checksum_offset = sb_offset + 4;
+    block0[checksum_offset..checksum_offset + 4].fill(0);
+    let crc32 = crc32c_append(!0u32, &block0[sb_offset..]);
+    block0[checksum_offset..checksum_offset + 4].copy_from_slice(&crc32.to_le_bytes());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_image_sets_erofs_superblock_checksum() {
+        let mut image = Vec::new();
+        write_image(&mut image, &[], 0, 1, 0, &[], &[0u8; 16]).unwrap();
+
+        let sb_offset = EROFS_SUPER_OFFSET as usize;
+        let feature_compat =
+            u32::from_le_bytes(image[sb_offset + 8..sb_offset + 12].try_into().unwrap());
+        let checksum = u32::from_le_bytes(image[sb_offset + 4..sb_offset + 8].try_into().unwrap());
+        let mut checksum_bytes = image[sb_offset..EROFS_BLOCK_SIZE as usize].to_vec();
+        checksum_bytes[4..8].fill(0);
+
+        assert_ne!(checksum, 0);
+        assert_ne!(feature_compat & EROFS_FEATURE_COMPAT_SB_CHKSUM, 0);
+        assert_eq!(checksum, crc32c_append(!0u32, &checksum_bytes));
+    }
 }

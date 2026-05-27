@@ -4,6 +4,7 @@ use crate::metadata::{
 };
 use anyhow::{bail, Context, Result};
 use crc32c::crc32c;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -31,8 +32,9 @@ pub struct BlobWriter {
     compressor: BlobMetaCompressor,
     next_blkaddr: u64,
     next_compressed_offset: u64,
+    data_hasher: Sha256,
     dedup: HashMap<[u8; 32], BlobChunk>,
-    group_uncompressed_offset: u64,
+    group_uncompressed_block_offset: u64,
     group_buffer: Vec<u8>,
     blob_meta_chunks: Vec<BlobMetaChunk>,
     pub saved_by_dedup: u64,
@@ -57,9 +59,24 @@ impl BlobWriter {
             bail!("blob writer file chunksize must be power-of-two and block-aligned");
         }
 
-        let blob_meta_chunk_size = file_chunk_size.max(BLOB_META_DEFAULT_CHUNK_SIZE);
         let file = File::create(path)
             .with_context(|| format!("failed to create blob device: {}", path.display()))?;
+        Self::from_file(file, file_chunk_size, compressor)
+    }
+
+    pub fn from_file(
+        file: File,
+        file_chunk_size: u32,
+        compressor: BlobMetaCompressor,
+    ) -> Result<Self> {
+        if file_chunk_size < EROFS_BLOCK_SIZE {
+            bail!("blob writer file chunksize must be at least one EROFS block");
+        }
+        if !file_chunk_size.is_power_of_two() || file_chunk_size % EROFS_BLOCK_SIZE != 0 {
+            bail!("blob writer file chunksize must be power-of-two and block-aligned");
+        }
+
+        let blob_meta_chunk_size = file_chunk_size.max(BLOB_META_DEFAULT_CHUNK_SIZE);
 
         Ok(Self {
             file,
@@ -68,8 +85,9 @@ impl BlobWriter {
             compressor,
             next_blkaddr: 0,
             next_compressed_offset: 0,
+            data_hasher: Sha256::new(),
             dedup: HashMap::new(),
-            group_uncompressed_offset: 0,
+            group_uncompressed_block_offset: 0,
             group_buffer: Vec::with_capacity(blob_meta_chunk_size as usize),
             blob_meta_chunks: Vec::new(),
             saved_by_dedup: 0,
@@ -78,6 +96,24 @@ impl BlobWriter {
 
     pub fn total_blocks(&self) -> u64 {
         self.next_blkaddr
+    }
+
+    pub fn data_size(&self) -> u64 {
+        self.next_compressed_offset
+    }
+
+    pub fn data_digest(&self) -> [u8; EROFS_BLOB_ID_SIZE] {
+        let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
+        digest.copy_from_slice(&self.data_hasher.clone().finalize());
+        digest
+    }
+
+    pub fn into_file(self) -> File {
+        self.file
+    }
+
+    pub fn into_file_and_data_hasher(self) -> (File, Sha256) {
+        (self.file, self.data_hasher)
     }
 
     pub fn blob_meta_chunks(&self) -> &[BlobMetaChunk] {
@@ -165,7 +201,8 @@ impl BlobWriter {
         let mut written = 0usize;
         while written < uncompressed.len() {
             if self.group_buffer.is_empty() {
-                self.group_uncompressed_offset = addr * EROFS_BLOCK_SIZE as u64 + written as u64;
+                self.group_uncompressed_block_offset =
+                    addr + (written / EROFS_BLOCK_SIZE as usize) as u64;
             }
 
             let remaining_group = self.blob_meta_chunk_size as usize - self.group_buffer.len();
@@ -210,11 +247,13 @@ impl BlobWriter {
         self.file
             .write_all(encoded)
             .context("failed to write to blob device")?;
+        self.data_hasher.update(encoded);
         self.next_compressed_offset += encoded.len() as u64;
 
         let entry = BlobMetaChunk::new(
-            self.group_uncompressed_offset,
-            uncompressed.len() as u32,
+            self.group_uncompressed_block_offset,
+            u32::try_from(uncompressed.len() / EROFS_BLOCK_SIZE as usize)
+                .context("blob meta uncompressed block count exceeds u32")?,
             compressed_offset,
             encoded.len() as u32,
             digest,
@@ -239,8 +278,8 @@ mod tests {
     fn blob_meta_chunk_round_trips_minimal_fields() {
         let payload = vec![0u8; 0x3000];
         let entry = BlobMetaChunk::new(
-            0x2000,
-            0x3000,
+            2,
+            3,
             0x12345,
             0x400,
             *blake3::hash(&payload).as_bytes(),
@@ -248,8 +287,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(entry.uncompressed_offset(), 0x2000);
-        assert_eq!(entry.uncompressed_size(), 0x3000);
+        assert_eq!(entry.uncompressed_block_offset(), 2);
+        assert_eq!(entry.uncompressed_block_count(), 3);
+        assert_eq!(entry.uncompressed_byte_offset(), 0x2000);
+        assert_eq!(entry.uncompressed_byte_size(), 0x3000);
         assert_eq!(entry.compressed_offset(), 0x12345);
         assert_eq!(entry.compressed_size(), 0x400);
         assert_eq!(entry.crc32(), crc32c(&payload));
@@ -286,15 +327,20 @@ mod tests {
 
         let entries = writer.blob_meta_chunks();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].uncompressed_offset(), 0);
-        assert_eq!(entries[0].uncompressed_size(), BLOB_META_DEFAULT_CHUNK_SIZE);
+        assert_eq!(entries[0].uncompressed_block_offset(), 0);
+        assert_eq!(entries[0].uncompressed_block_count(), 256);
+        assert_eq!(
+            entries[0].uncompressed_byte_size(),
+            BLOB_META_DEFAULT_CHUNK_SIZE as u64
+        );
         assert_eq!(entries[0].compressed_offset(), 0);
         assert_eq!(entries[0].compressed_size(), BLOB_META_DEFAULT_CHUNK_SIZE);
         assert_eq!(
-            entries[1].uncompressed_offset(),
-            BLOB_META_DEFAULT_CHUNK_SIZE as u64
+            entries[1].uncompressed_block_offset(),
+            BLOB_META_DEFAULT_CHUNK_SIZE as u64 / EROFS_BLOCK_SIZE as u64
         );
-        assert_eq!(entries[1].uncompressed_size(), 4096);
+        assert_eq!(entries[1].uncompressed_block_count(), 1);
+        assert_eq!(entries[1].uncompressed_byte_size(), 4096);
         assert_eq!(
             entries[1].compressed_offset(),
             BLOB_META_DEFAULT_CHUNK_SIZE as u64
@@ -326,7 +372,8 @@ mod tests {
             BLOB_META_DEFAULT_CHUNK_SIZE
         );
         assert_eq!(blob_meta.chunks().len(), 1);
-        assert_eq!(blob_meta.chunks()[0].uncompressed_size(), 8192);
+        assert_eq!(blob_meta.chunks()[0].uncompressed_block_count(), 2);
+        assert_eq!(blob_meta.chunks()[0].uncompressed_byte_size(), 8192);
     }
 
     #[test]
@@ -350,8 +397,15 @@ mod tests {
 
         let chunks = writer.blob_meta_chunks();
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].uncompressed_size(), BLOB_META_DEFAULT_CHUNK_SIZE);
-        assert_eq!(chunks[0].compressed_size(), chunks[0].uncompressed_size());
+        assert_eq!(chunks[0].uncompressed_block_count(), 256);
+        assert_eq!(
+            chunks[0].uncompressed_byte_size(),
+            BLOB_META_DEFAULT_CHUNK_SIZE as u64
+        );
+        assert_eq!(
+            u64::from(chunks[0].compressed_size()),
+            chunks[0].uncompressed_byte_size()
+        );
         assert_eq!(fs::read(&blob_path).unwrap(), content);
     }
 
@@ -371,12 +425,13 @@ mod tests {
             .unwrap();
 
         let raw = fs::read(&blob_meta_path).unwrap();
-        assert_eq!(raw.len(), 4160);
+        assert_eq!(raw.len(), 8192);
 
         let blob_meta = BlobMeta::load(&blob_meta_path).unwrap();
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(blob_meta.header().chunk_bytes(), 64);
-        assert_eq!(blob_meta.chunks()[0].uncompressed_offset(), 0);
+        assert_eq!(blob_meta.header().metadata_size(), 8192);
+        assert_eq!(blob_meta.chunks()[0].uncompressed_block_offset(), 0);
         assert_eq!(blob_meta.chunks()[0].compressed_offset(), 8192);
     }
 

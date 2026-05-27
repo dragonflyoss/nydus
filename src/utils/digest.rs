@@ -35,6 +35,26 @@ pub fn sha256_file_region(path: &Path, offset: u64) -> Result<[u8; EROFS_BLOB_ID
     sha256_reader(&mut file, path)
 }
 
+pub fn sha256_file_range(path: &Path, offset: u64, len: u64) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("failed to stat file for hashing: {}", path.display()))?
+        .len();
+    let end = offset
+        .checked_add(len)
+        .context("hash range offset overflow")?;
+    if end > file_len {
+        bail!("hash range exceeds file size: {}", path.display());
+    }
+
+    file.seek(SeekFrom::Start(offset))
+        .with_context(|| format!("failed to seek file for hashing: {}", path.display()))?;
+    let mut limited = file.take(len);
+    sha256_reader(&mut limited, path)
+}
+
 pub fn parse_sha256_hex(value: &str) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
     if value.len() != EROFS_BLOB_ID_SIZE * 2 {
         bail!(
@@ -61,7 +81,7 @@ pub fn hex_string(bytes: &[u8]) -> String {
     hex
 }
 
-fn sha256_reader(reader: &mut File, path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
+fn sha256_reader(reader: &mut dyn Read, path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
 
@@ -95,7 +115,9 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
-    use super::{hex_string, parse_sha256_hex, sha256_bytes, sha256_file_region};
+    use super::{
+        hex_string, parse_sha256_hex, sha256_bytes, sha256_file_range, sha256_file_region,
+    };
 
     #[test]
     fn parse_sha256_hex_round_trips_hex_string() {
@@ -116,6 +138,17 @@ mod tests {
 
         assert_eq!(
             sha256_file_region(file.path(), 7).unwrap(),
+            sha256_bytes(b"payload")
+        );
+    }
+
+    #[test]
+    fn sha256_file_range_hashes_bounded_region() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"prefix-payload-suffix").unwrap();
+
+        assert_eq!(
+            sha256_file_range(file.path(), 7, 7).unwrap(),
             sha256_bytes(b"payload")
         );
     }

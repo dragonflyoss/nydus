@@ -5,9 +5,11 @@ use lepton::build::bootstrap::render_bootstrap;
 use lepton::build::inode::build_tree;
 use lepton::metadata::*;
 use lepton::tracing::init_command_tracing;
-use lepton::utils::{hex_string, sha256_file};
-use std::fs::{self, File};
+use lepton::utils::hex_string;
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::Level;
@@ -43,7 +45,7 @@ pub struct BuildArgs {
     #[arg(long = "type", value_enum, default_value_t = ConversionType::DirLepton)]
     pub conversion_type: ConversionType,
 
-    /// File path to save the generated lepton full blob (also emits <blob>.blob.meta).
+    /// File path to save the generated lepton full blob.
     #[arg(
         long,
         conflicts_with = "blob_dir",
@@ -51,7 +53,7 @@ pub struct BuildArgs {
     )]
     pub blob: Option<PathBuf>,
 
-    /// Directory path to save the generated lepton full blob and blob meta with SHA256 file names.
+    /// Directory path to save the generated lepton full blob with its SHA256 file name.
     #[arg(long, conflicts_with = "blob", required_unless_present = "blob")]
     pub blob_dir: Option<PathBuf>,
 
@@ -122,14 +124,12 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         .context("system time before UNIX epoch")?
         .as_secs();
 
-    let temp_blob_data_path =
-        std::env::temp_dir().join(format!("lepton-build-{}.blobdata", uuid::Uuid::new_v4()));
+    let blob_output =
+        prepare_blob_output(requested_blob_path.as_deref(), args.blob_dir.as_deref())?;
+    let blob_file = open_blob_output(&blob_output)?;
 
-    let mut blob_writer = BlobWriter::new_with_compressor(
-        &temp_blob_data_path,
-        args.chunk_size,
-        args.compressor.into(),
-    )?;
+    let mut blob_writer =
+        BlobWriter::from_file(blob_file, args.chunk_size, args.compressor.into())?;
     let mut inodes = build_tree(&args.source, &mut blob_writer, args.chunk_size)?;
     blob_writer.finish()?;
     let epoch = inodes
@@ -139,14 +139,13 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         .unwrap_or(build_time);
 
     let uuid_bytes = [0u8; 16];
-    let blob_id = sha256_file(&temp_blob_data_path)?;
+    let blob_id = blob_writer.data_digest();
     let device_slots = [ErofsDeviceSlot::with_blob_id(
         blob_writer.total_blocks(),
         &blob_id,
     )];
     let bootstrap_bytes =
         render_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
-    let bootstrap_blocks = bootstrap_bytes.len().div_ceil(EROFS_BLOCK_SIZE as usize) as u64;
 
     if let Some(bootstrap) = &args.bootstrap {
         let bootstrap_file = File::create(bootstrap)
@@ -160,194 +159,333 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
             .with_context(|| format!("failed to flush bootstrap: {}", bootstrap.display()))?;
     }
 
-    let (temp_full_blob_path, final_blob_path) =
-        prepare_blob_output(requested_blob_path.as_deref(), args.blob_dir.as_deref())?;
-    let blob_file = File::create(&temp_full_blob_path)
-        .with_context(|| format!("failed to create blob: {}", temp_full_blob_path.display()))?;
-    let mut blob_writer_stream = BufWriter::new(blob_file);
+    let compressed_data_size = blob_writer.data_size();
+    let blob_meta = blob_writer.blob_meta(blob_id, 0)?;
+    let blob_meta_size = blob_meta.metadata_size();
+    let mut blob_meta_bytes = Vec::with_capacity(
+        usize::try_from(blob_meta_size).context("blob meta size exceeds usize")?,
+    );
+    blob_meta
+        .write_to(&mut blob_meta_bytes)
+        .context("failed to serialize blob meta")?;
+    if blob_meta_bytes.len() as u64 != blob_meta_size {
+        bail!(
+            "serialized blob meta size mismatch: expected {}, got {}",
+            blob_meta_size,
+            blob_meta_bytes.len()
+        );
+    }
+    let (blob_file, full_blob_hasher) = blob_writer.into_file_and_data_hasher();
+    let mut blob_writer_stream = HashingWriter::new(BufWriter::new(blob_file), full_blob_hasher);
+
+    let compressed_data_offset = 0u64;
+    let bootstrap_offset = align_u64(
+        compressed_data_offset + compressed_data_size,
+        LEPTON_BLOB_FOOTER_ALIGNMENT,
+    );
+    write_zero_padding(
+        &mut blob_writer_stream,
+        compressed_data_offset + compressed_data_size,
+        bootstrap_offset,
+    )?;
     blob_writer_stream
         .write_all(&bootstrap_bytes)
         .with_context(|| {
             format!(
                 "failed to write blob bootstrap: {}",
-                temp_full_blob_path.display()
+                blob_output.write_path.display()
             )
         })?;
 
-    let mut data_file = File::open(&temp_blob_data_path).with_context(|| {
-        format!(
-            "failed to reopen temp blob data: {}",
-            temp_blob_data_path.display()
-        )
-    })?;
-    io::copy(&mut data_file, &mut blob_writer_stream).with_context(|| {
-        format!(
-            "failed to append blob data: {}",
-            temp_full_blob_path.display()
-        )
-    })?;
-    blob_writer_stream
-        .flush()
-        .with_context(|| format!("failed to flush blob: {}", temp_full_blob_path.display()))?;
-
-    let full_blob_id = sha256_file(&temp_full_blob_path)?;
-    let final_blob_path = finalize_blob_output(
-        &temp_full_blob_path,
-        final_blob_path,
-        &full_blob_id,
-        args.blob_dir.as_deref(),
+    let bootstrap_size = u64::try_from(bootstrap_bytes.len()).context("bootstrap exceeds u64")?;
+    let bootstrap_blocks = bytes_to_blocks(bootstrap_size, "bootstrap")?;
+    let blob_meta_blocks = bytes_to_blocks(blob_meta_size, "blob meta")?;
+    let blob_meta_offset = align_u64(
+        bootstrap_offset + bootstrap_size,
+        LEPTON_BLOB_FOOTER_ALIGNMENT,
+    );
+    write_zero_padding(
+        &mut blob_writer_stream,
+        bootstrap_offset + bootstrap_size,
+        blob_meta_offset,
     )?;
-    let blob_meta_path = blob_meta_output_path(
-        requested_blob_path.as_deref(),
-        args.blob_dir.as_deref(),
-        &full_blob_id,
-    );
-    let blob_meta = blob_writer.blob_meta(blob_id, bootstrap_blocks * EROFS_BLOCK_SIZE as u64)?;
-    blob_meta.save(&blob_meta_path)?;
+    blob_writer_stream
+        .write_all(&blob_meta_bytes)
+        .with_context(|| {
+            format!(
+                "failed to write blob meta: {}",
+                blob_output.write_path.display()
+            )
+        })?;
 
-    let _ = fs::remove_file(&temp_blob_data_path);
+    let footer = BlobFooter::new(
+        compressed_data_offset,
+        compressed_data_size,
+        bootstrap_offset,
+        bootstrap_blocks,
+        blob_meta_offset,
+        blob_meta_blocks,
+    )?;
+    footer.write_to(&mut blob_writer_stream).with_context(|| {
+        format!(
+            "failed to write blob footer: {}",
+            blob_output.write_path.display()
+        )
+    })?;
+    let full_blob_id = blob_writer_stream
+        .finish()
+        .with_context(|| format!("failed to flush blob: {}", blob_output.write_path.display()))?;
+    let final_blob_path = finalize_blob_output(&blob_output, &full_blob_id)?;
+    let blob_meta_path = blob_meta_output_path(&final_blob_path)?;
+    blob_meta
+        .save(&blob_meta_path)
+        .with_context(|| format!("failed to save blob meta: {}", blob_meta_path.display()))?;
 
-    print_blob_summary(
-        0,
-        &blob_id,
-        &full_blob_id,
-        &blob_meta,
-        &final_blob_path,
-        &blob_meta_path,
-        args.bootstrap.as_deref(),
-    );
+    print_blob_summary(BlobSummary {
+        index: 0,
+        data_blob_digest: &blob_id,
+        full_blob_digest: &full_blob_id,
+        blob_meta: &blob_meta,
+        footer: &footer,
+        full_blob_path: &final_blob_path,
+        blob_meta_path: &blob_meta_path,
+        bootstrap_path: args.bootstrap.as_deref(),
+    });
     Ok(())
 }
 
-fn print_blob_summary(
+fn align_u64(value: u64, align: u64) -> u64 {
+    debug_assert!(align.is_power_of_two());
+    (value + align - 1) & !(align - 1)
+}
+
+fn bytes_to_blocks(size: u64, name: &str) -> Result<u32> {
+    if size % EROFS_BLOCK_SIZE as u64 != 0 {
+        bail!("{name} size is not block aligned: {size}");
+    }
+    u32::try_from(size / EROFS_BLOCK_SIZE as u64)
+        .with_context(|| format!("{name} exceeds u32 block count"))
+}
+
+fn write_zero_padding(writer: &mut dyn Write, current: u64, aligned: u64) -> Result<()> {
+    if aligned < current {
+        bail!("invalid blob region alignment");
+    }
+    let padding = (aligned - current) as usize;
+    if padding > 0 {
+        writer.write_all(&vec![0u8; padding])?;
+    }
+    Ok(())
+}
+
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+}
+
+impl<W: Write> HashingWriter<W> {
+    fn new(inner: W, hasher: Sha256) -> Self {
+        Self { inner, hasher }
+    }
+
+    fn finish(mut self) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
+        self.inner.flush()?;
+        let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
+        digest.copy_from_slice(&self.hasher.finalize());
+        Ok(digest)
+    }
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+struct BlobSummary<'a> {
     index: usize,
-    data_blob_digest: &[u8; EROFS_BLOB_ID_SIZE],
-    full_blob_digest: &[u8; EROFS_BLOB_ID_SIZE],
-    blobmeta: &BlobMeta,
-    full_blob_path: &Path,
-    blobmeta_path: &Path,
-    bootstrap_path: Option<&Path>,
-) {
+    data_blob_digest: &'a [u8; EROFS_BLOB_ID_SIZE],
+    full_blob_digest: &'a [u8; EROFS_BLOB_ID_SIZE],
+    blob_meta: &'a BlobMeta,
+    footer: &'a BlobFooter,
+    full_blob_path: &'a Path,
+    blob_meta_path: &'a Path,
+    bootstrap_path: Option<&'a Path>,
+}
+
+fn print_blob_summary(summary: BlobSummary<'_>) {
+    let BlobSummary {
+        index,
+        data_blob_digest,
+        full_blob_digest,
+        blob_meta,
+        footer,
+        full_blob_path,
+        blob_meta_path,
+        bootstrap_path,
+    } = summary;
+
     println!("Blobs");
     println!("  Blob {}", index);
     println!("    blob_index: {}", index);
     println!("    data_blob_digest: {}", hex_string(data_blob_digest));
     println!("    full_blob_digest: {}", hex_string(full_blob_digest));
-    println!("    chunk_size: {}", blobmeta.chunk_size());
-    println!("    chunk_count: {}", blobmeta.chunk_count());
-    println!("    chunk_digester: {}", blobmeta.digester());
-    println!("    chunk_compressor: {}", blobmeta.compressor());
+    println!("    chunk_size: {}", blob_meta.chunk_size());
+    println!("    chunk_count: {}", blob_meta.chunk_count());
+    println!("    chunk_digester: {}", blob_meta.digester());
+    println!("    chunk_compressor: {}", blob_meta.compressor());
     println!(
         "    blob_compressed_size: {}",
-        blobmeta.total_compressed_size()
+        blob_meta.total_compressed_size()
     );
     println!(
         "    blob_uncompressed_size: {}",
-        blobmeta.total_uncompressed_size()
+        blob_meta.total_uncompressed_size()
     );
+    println!(
+        "    compressed_data_offset: {}",
+        footer.compressed_data_offset()
+    );
+    println!(
+        "    compressed_data_size: {}",
+        footer.compressed_data_size()
+    );
+    println!("    bootstrap_offset: {}", footer.bootstrap_offset());
+    println!("    bootstrap_blocks: {}", footer.bootstrap_blocks());
+    println!("    blob_meta_offset: {}", footer.blob_meta_offset());
+    println!("    blob_meta_blocks: {}", footer.blob_meta_blocks());
     println!("    full_blob_path: {}", full_blob_path.display());
-    println!("    blob_meta_path: {}", blobmeta_path.display());
+    println!("    blob_meta_path: {}", blob_meta_path.display());
     if let Some(bootstrap_path) = bootstrap_path {
         println!("    bootstrap_path: {}", bootstrap_path.display());
     }
 }
 
-fn prepare_blob_output(
-    blob: Option<&Path>,
-    blob_dir: Option<&Path>,
-) -> Result<(PathBuf, Option<PathBuf>)> {
+fn blob_meta_output_path(blob_path: &Path) -> Result<PathBuf> {
+    let file_name = blob_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("blob path has no file name: {}", blob_path.display()))?;
+    Ok(blob_path.with_file_name(format!("{}.blob.meta", file_name.to_string_lossy())))
+}
+
+struct BlobOutput {
+    write_path: PathBuf,
+    blob_dir: Option<PathBuf>,
+    is_fifo: bool,
+}
+
+fn prepare_blob_output(blob: Option<&Path>, blob_dir: Option<&Path>) -> Result<BlobOutput> {
     match (blob, blob_dir) {
-        (Some(blob), None) => Ok((blob.to_path_buf(), None)),
+        (Some(blob), None) => Ok(BlobOutput {
+            write_path: blob.to_path_buf(),
+            blob_dir: None,
+            is_fifo: blob_is_fifo(blob)?,
+        }),
         (None, Some(dir)) => {
             fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create blob-dir: {}", dir.display()))?;
             let temp_path = dir.join(format!(".lepton-build-{}.tmp", uuid::Uuid::new_v4()));
-            Ok((temp_path, Some(dir.to_path_buf())))
+            Ok(BlobOutput {
+                write_path: temp_path,
+                blob_dir: Some(dir.to_path_buf()),
+                is_fifo: false,
+            })
         }
         _ => bail!("build expects either --blob <path> or --blob-dir <dir>"),
     }
 }
 
+fn blob_is_fifo(path: &Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.file_type().is_fifo()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("failed to stat blob: {}", path.display())),
+    }
+}
+
+fn open_blob_output(output: &BlobOutput) -> Result<File> {
+    if output.is_fifo {
+        OpenOptions::new()
+            .write(true)
+            .open(&output.write_path)
+            .with_context(|| format!("failed to open blob fifo: {}", output.write_path.display()))
+    } else {
+        File::create(&output.write_path)
+            .with_context(|| format!("failed to create blob: {}", output.write_path.display()))
+    }
+}
+
 fn finalize_blob_output(
-    temp_path: &Path,
-    blob_path: Option<PathBuf>,
+    output: &BlobOutput,
     blob_sha256: &[u8; EROFS_BLOB_ID_SIZE],
-    blob_dir: Option<&Path>,
 ) -> Result<PathBuf> {
-    if blob_dir.is_none() {
-        return Ok(blob_path.unwrap_or_else(|| temp_path.to_path_buf()));
+    if output.blob_dir.is_none() {
+        return Ok(output.write_path.clone());
     }
 
-    let dir = blob_dir.expect("blob_dir is checked above");
+    let dir = output.blob_dir.as_ref().expect("blob_dir is checked above");
     let final_path = dir.join(hex_string(blob_sha256));
     if final_path.exists() {
-        fs::remove_file(temp_path).with_context(|| {
+        fs::remove_file(&output.write_path).with_context(|| {
             format!(
                 "failed to remove temporary blob after dedup hit: {}",
-                temp_path.display()
+                output.write_path.display()
             )
         })?;
         return Ok(final_path);
     }
 
-    fs::rename(temp_path, &final_path).with_context(|| {
+    fs::rename(&output.write_path, &final_path).with_context(|| {
         format!(
             "failed to rename blob {} -> {}",
-            temp_path.display(),
+            output.write_path.display(),
             final_path.display()
         )
     })?;
     Ok(final_path)
 }
 
-fn blob_meta_output_path(
-    blob_path: Option<&Path>,
-    blob_dir: Option<&Path>,
-    full_blob_sha256: &[u8; EROFS_BLOB_ID_SIZE],
-) -> PathBuf {
-    if let Some(dir) = blob_dir {
-        let file_name = format!("{}.blob.meta", hex_string(full_blob_sha256));
-        return dir.join(file_name);
-    }
-
-    if let Some(blob_path) = blob_path {
-        let mut path = blob_path.as_os_str().to_os_string();
-        path.push(".blob.meta");
-        return PathBuf::from(path);
-    }
-
-    Path::new(".").join(format!("{}.blob.meta", hex_string(full_blob_sha256)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn blob_meta_output_path_uses_blob_dir_when_present() {
-        let digest = [0x11u8; EROFS_BLOB_ID_SIZE];
-        let path = blob_meta_output_path(
-            Some(Path::new("/tmp/custom.blob")),
-            Some(Path::new("/var/lib/lepton")),
-            &digest,
-        );
-
-        assert_eq!(
-            path,
-            Path::new("/var/lib/lepton").join(format!("{}.blob.meta", hex_string(&digest)))
-        );
-    }
-
-    #[test]
-    fn blob_meta_output_path_appends_suffix_for_blob_path() {
-        let digest = [0x22u8; EROFS_BLOB_ID_SIZE];
-        let path = blob_meta_output_path(Some(Path::new("/tmp/custom.blob")), None, &digest);
-
-        assert_eq!(path, Path::new("/tmp/custom.blob.blob.meta"));
-    }
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use tempfile::tempdir;
 
     #[test]
     fn default_chunk_size_is_one_megabyte() {
         assert_eq!(DEFAULT_CHUNK_SIZE, 1_048_576);
+    }
+
+    #[test]
+    fn align_u64_rounds_up_to_alignment() {
+        assert_eq!(align_u64(0, 8), 0);
+        assert_eq!(align_u64(1, 8), 8);
+        assert_eq!(align_u64(16, 8), 16);
+    }
+
+    #[test]
+    fn prepare_blob_output_detects_fifo_blob_path() {
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("stream.blob");
+        make_fifo(&fifo);
+
+        let output = prepare_blob_output(Some(&fifo), None).unwrap();
+
+        assert_eq!(output.write_path, fifo);
+        assert!(output.blob_dir.is_none());
+        assert!(output.is_fifo);
+    }
+
+    fn make_fifo(path: &Path) {
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let ret = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(ret, 0, "mkfifo failed: {}", io::Error::last_os_error());
     }
 }

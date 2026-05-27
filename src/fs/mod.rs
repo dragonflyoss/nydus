@@ -11,10 +11,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memmap2::Mmap;
+use tempfile::TempDir;
 
 use crate::metadata::*;
 use crate::storage::backend::{BlobBackend, LocalBackend};
-use crate::storage::cache::{BlobCache, DummyBlobCache, LocalBlobCache};
+use crate::storage::cache::{BlobCache, LocalBlobCache};
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct DirEntry {
@@ -47,7 +48,9 @@ struct BlobDevice {
 pub struct ErofsReader {
     pub(crate) mmap: Mmap,
     blob_devices: HashMap<u16, BlobDevice>,
+    image_offset: usize,
     pub(crate) sb_offset: usize,
+    _temporary_cache_dir: Option<TempDir>,
 }
 
 impl ErofsReader {
@@ -73,7 +76,12 @@ impl ErofsReader {
     /// Open a lepton blob / bootstrap file for metadata-only inspection.
     pub fn open_layer(path: &Path) -> io::Result<Self> {
         let mmap = Self::map_file(path)?;
-        let sb_offset = EROFS_SUPER_OFFSET as usize;
+        let image_offset = Self::image_offset_from_footer(&mmap)?.unwrap_or(0);
+        let sb_offset = image_offset
+            .checked_add(EROFS_SUPER_OFFSET as usize)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "superblock offset overflow")
+            })?;
         let sb = Self::superblock_from(&mmap, sb_offset)?;
         if sb.magic() != EROFS_SUPER_MAGIC_V1 {
             return Err(io::Error::new(
@@ -85,13 +93,22 @@ impl ErofsReader {
         Ok(Self {
             mmap,
             blob_devices: HashMap::new(),
+            image_offset,
             sb_offset,
+            _temporary_cache_dir: None,
         })
     }
 
     fn open_blob(blob_path: &Path) -> io::Result<Self> {
         let mmap = Self::map_file(blob_path)?;
-        let sb_offset = EROFS_SUPER_OFFSET as usize;
+        let image_offset = Self::image_offset_from_footer(&mmap)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "lepton blob footer not found")
+        })?;
+        let sb_offset = image_offset
+            .checked_add(EROFS_SUPER_OFFSET as usize)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "superblock offset overflow")
+            })?;
         let sb = Self::superblock_from(&mmap, sb_offset)?;
         if sb.magic() != EROFS_SUPER_MAGIC_V1 {
             return Err(io::Error::new(
@@ -102,12 +119,15 @@ impl ErofsReader {
 
         let device_infos = Self::device_infos_from(&mmap, sb_offset)?;
         let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
-        let blob_devices = Self::open_blob_devices(device_infos, blob_dir, None)?;
+        let (blob_devices, temporary_cache_dir) =
+            Self::open_blob_devices(device_infos, blob_dir, None)?;
 
         Ok(Self {
             mmap,
             blob_devices,
+            image_offset,
             sb_offset,
+            _temporary_cache_dir: temporary_cache_dir,
         })
     }
 
@@ -128,12 +148,15 @@ impl ErofsReader {
 
         let device_infos = Self::device_infos_from(&mmap, sb_offset)?;
 
-        let blob_devices = Self::open_blob_devices(device_infos, blob_dir, cache_dir)?;
+        let (blob_devices, temporary_cache_dir) =
+            Self::open_blob_devices(device_infos, blob_dir, cache_dir)?;
 
         Ok(Self {
             mmap,
             blob_devices,
+            image_offset: 0,
             sb_offset,
+            _temporary_cache_dir: temporary_cache_dir,
         })
     }
 
@@ -143,27 +166,46 @@ impl ErofsReader {
         unsafe { Mmap::map(&file) }
     }
 
+    fn image_offset_from_footer(mmap: &[u8]) -> io::Result<Option<usize>> {
+        if mmap.len() < LEPTON_BLOB_FOOTER_SIZE {
+            return Ok(None);
+        }
+        let footer_bytes = &mmap[mmap.len() - LEPTON_BLOB_FOOTER_SIZE..];
+        if !BlobFooter::has_magic(footer_bytes) {
+            return Ok(None);
+        }
+        let footer = BlobFooter::parse_from_tail(mmap).map_err(io::Error::other)?;
+        usize::try_from(footer.bootstrap_offset())
+            .map(Some)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bootstrap offset too large"))
+    }
+
     fn open_blob_devices(
         device_infos: Vec<DeviceInfo>,
         blob_dir: &Path,
         cache_dir: Option<&Path>,
-    ) -> io::Result<HashMap<u16, BlobDevice>> {
+    ) -> io::Result<(HashMap<u16, BlobDevice>, Option<TempDir>)> {
         let backend: Arc<dyn BlobBackend> = Arc::new(LocalBackend::new(blob_dir.to_path_buf()));
-        device_infos
+        let temporary_cache_dir = if cache_dir.is_none() {
+            Some(tempfile::Builder::new().prefix("lepton-cache-").tempdir()?)
+        } else {
+            None
+        };
+        let cache_dir = cache_dir
+            .or_else(|| temporary_cache_dir.as_ref().map(|dir| dir.path()))
+            .ok_or_else(|| io::Error::other("failed to create cache directory"))?;
+        let blob_devices = device_infos
             .into_iter()
             .map(|info| {
-                let cache: Box<dyn BlobCache> = if let Some(cache_dir) = cache_dir {
-                    Box::new(LocalBlobCache::open(
-                        info.blob_id,
-                        cache_dir,
-                        backend.clone(),
-                    )?)
-                } else {
-                    Box::new(DummyBlobCache::open(info.blob_id, backend.clone())?)
-                };
+                let cache: Box<dyn BlobCache> = Box::new(LocalBlobCache::open(
+                    info.blob_id,
+                    cache_dir,
+                    backend.clone(),
+                )?);
                 Ok((info.device_id, BlobDevice { cache }))
             })
-            .collect()
+            .collect::<io::Result<HashMap<_, _>>>()?;
+        Ok((blob_devices, temporary_cache_dir))
     }
 
     fn superblock_from(mmap: &[u8], sb_offset: usize) -> io::Result<&ErofsSuperblock> {
@@ -204,8 +246,10 @@ impl ErofsReader {
             ));
         }
 
-        let slot_offset =
-            sb.devt_slotoff() as usize * EROFS_DEVICESLOT_SIZE + index * EROFS_DEVICESLOT_SIZE;
+        let image_offset = sb_offset - EROFS_SUPER_OFFSET as usize;
+        let slot_offset = image_offset
+            + sb.devt_slotoff() as usize * EROFS_DEVICESLOT_SIZE
+            + index * EROFS_DEVICESLOT_SIZE;
         let slot_end = slot_offset + EROFS_DEVICESLOT_SIZE;
         if slot_end > mmap.len() {
             return Err(io::Error::new(
@@ -227,7 +271,11 @@ impl ErofsReader {
     }
 
     pub(crate) fn mmap_slice(&self, offset: usize, len: usize) -> io::Result<&[u8]> {
-        let end = offset
+        let mapped_offset = self
+            .image_offset
+            .checked_add(offset)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "image offset overflow"))?;
+        let end = mapped_offset
             .checked_add(len)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset + len overflow"))?;
         if end > self.mmap.len() {
@@ -235,13 +283,13 @@ impl ErofsReader {
                 io::ErrorKind::UnexpectedEof,
                 format!(
                     "mmap read out of bounds: offset={}, len={}, mmap_len={}",
-                    offset,
+                    mapped_offset,
                     len,
                     self.mmap.len()
                 ),
             ));
         }
-        Ok(&self.mmap[offset..end])
+        Ok(&self.mmap[mapped_offset..end])
     }
 
     pub(crate) fn read_blob_into(

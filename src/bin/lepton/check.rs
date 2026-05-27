@@ -3,7 +3,7 @@ use clap::Args;
 use lepton::build::inode::mode_to_file_type;
 use lepton::fs::{DeviceInfo, ErofsReader};
 use lepton::metadata::*;
-use lepton::utils::{hex_string, sha256_bytes, sha256_file, sha256_file_region};
+use lepton::utils::{hex_string, sha256_bytes};
 use memmap2::Mmap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -63,7 +63,7 @@ struct BlobSummary {
     blob_sha256: Option<[u8; EROFS_BLOB_ID_SIZE]>,
     data_sha256: Option<[u8; EROFS_BLOB_ID_SIZE]>,
     data_size: Option<u64>,
-    blobmeta: Option<BlobMetaSummary>,
+    blob_meta: Option<BlobMetaSummary>,
     verified: bool,
     chunk_refs: u64,
     unique_blkaddrs: HashSet<u64>,
@@ -82,7 +82,7 @@ impl BlobSummary {
             blob_sha256: None,
             data_sha256: None,
             data_size: None,
-            blobmeta: None,
+            blob_meta: None,
             verified: false,
             chunk_refs: 0,
             unique_blkaddrs: HashSet::new(),
@@ -103,7 +103,7 @@ struct ResolvedBlob {
     blob_sha256: [u8; EROFS_BLOB_ID_SIZE],
     data_sha256: [u8; EROFS_BLOB_ID_SIZE],
     data_size: u64,
-    blobmeta: Option<BlobMetaSummary>,
+    blob_meta: Option<BlobMetaSummary>,
     slot_sha256_kind: SlotSha256Kind,
     verified: bool,
 }
@@ -113,7 +113,7 @@ struct BlobInspection {
     data_size: u64,
     blob_sha256: [u8; EROFS_BLOB_ID_SIZE],
     blob_size: u64,
-    blobmeta: Option<BlobMetaSummary>,
+    blob_meta: Option<BlobMetaSummary>,
 }
 
 #[derive(Clone)]
@@ -168,13 +168,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     let device_infos = reader
         .device_infos()
         .context("failed to read device slots")?;
-    let resolved_blobs = resolve_blobs(
-        kind,
-        path,
-        args.blob_dir.as_deref(),
-        primary_image_bytes,
-        &device_infos,
-    )?;
+    let resolved_blobs = resolve_blobs(kind, path, args.blob_dir.as_deref(), &device_infos)?;
     let mut blobs = device_infos
         .iter()
         .map(|device| {
@@ -185,7 +179,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
                 summary.blob_sha256 = Some(resolved.blob_sha256);
                 summary.data_sha256 = Some(resolved.data_sha256);
                 summary.data_size = Some(resolved.data_size);
-                summary.blobmeta = resolved.blobmeta.clone();
+                summary.blob_meta = resolved.blob_meta.clone();
                 summary.slot_sha256_kind = resolved.slot_sha256_kind;
                 summary.verified = resolved.verified;
             }
@@ -274,7 +268,7 @@ fn walk_inode(
                             blob_sha256: None,
                             data_sha256: None,
                             data_size: None,
-                            blobmeta: None,
+                            blob_meta: None,
                             verified: false,
                             chunk_refs: 0,
                             unique_blkaddrs: HashSet::new(),
@@ -326,37 +320,26 @@ fn resolve_blobs(
     kind: ImageKind,
     image_path: &Path,
     blob_dir: Option<&Path>,
-    primary_image_bytes: u64,
     device_infos: &[DeviceInfo],
 ) -> Result<HashMap<u16, ResolvedBlob>> {
     let mut resolved = HashMap::new();
 
     if kind == ImageKind::Blob && device_infos.len() == 1 {
-        let data_size = fs::metadata(image_path)
-            .with_context(|| format!("failed to stat blob: {}", image_path.display()))?
-            .len()
-            .saturating_sub(primary_image_bytes);
-        let verified = verify_blob_tail(image_path, primary_image_bytes, &device_infos[0].blob_id)
-            .with_context(|| format!("failed to verify blob: {}", image_path.display()))?;
-        let blob_sha256 = sha256_file(image_path)
-            .with_context(|| format!("failed to hash blob: {}", image_path.display()))?;
-        resolved.insert(
-            device_infos[0].device_id,
-            ResolvedBlob {
-                path: image_path.to_path_buf(),
-                blob_size: fs::metadata(image_path)
-                    .with_context(|| format!("failed to stat blob: {}", image_path.display()))?
-                    .len(),
-                blob_sha256,
-                data_sha256: sha256_file_region(image_path, primary_image_bytes).with_context(
-                    || format!("failed to hash blob data: {}", image_path.display()),
-                )?,
-                data_size,
-                blobmeta: load_blobmeta_summary_for_source(image_path)?,
-                slot_sha256_kind: SlotSha256Kind::Data,
-                verified,
-            },
-        );
+        if let Some(inspection) = inspect_blob(image_path)? {
+            resolved.insert(
+                device_infos[0].device_id,
+                ResolvedBlob {
+                    path: image_path.to_path_buf(),
+                    blob_size: inspection.blob_size,
+                    blob_sha256: inspection.blob_sha256,
+                    data_sha256: inspection.data_sha256,
+                    data_size: inspection.data_size,
+                    blob_meta: inspection.blob_meta,
+                    slot_sha256_kind: SlotSha256Kind::Data,
+                    verified: inspection.data_sha256 == device_infos[0].blob_id,
+                },
+            );
+        }
     }
 
     let Some(blob_dir) = blob_dir else {
@@ -387,7 +370,7 @@ fn resolve_blobs(
                 blob_sha256: inspection.blob_sha256,
                 data_sha256: inspection.data_sha256,
                 data_size: inspection.data_size,
-                blobmeta: inspection.blobmeta.clone(),
+                blob_meta: inspection.blob_meta.clone(),
                 slot_sha256_kind: SlotSha256Kind::Blob,
                 verified: true,
             });
@@ -399,7 +382,7 @@ fn resolve_blobs(
                 blob_sha256: inspection.blob_sha256,
                 data_sha256: inspection.data_sha256,
                 data_size: inspection.data_size,
-                blobmeta: inspection.blobmeta,
+                blob_meta: inspection.blob_meta,
                 slot_sha256_kind: SlotSha256Kind::Data,
                 verified: true,
             });
@@ -427,68 +410,49 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
         .with_context(|| format!("failed to open blob candidate: {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }
         .with_context(|| format!("failed to map blob candidate: {}", path.display()))?;
-    if mmap.len() < EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE {
+    if mmap.len() < LEPTON_BLOB_FOOTER_SIZE {
+        return Ok(None);
+    }
+    let footer_bytes = &mmap[mmap.len() - LEPTON_BLOB_FOOTER_SIZE..];
+    if !BlobFooter::has_magic(footer_bytes) {
         return Ok(None);
     }
 
-    let sb = cast_ref::<ErofsSuperblock>(&mmap[EROFS_SUPER_OFFSET as usize..]);
-    if sb.magic() != EROFS_SUPER_MAGIC_V1 {
-        return Ok(None);
-    }
+    let footer = BlobFooter::parse_from_tail(&mmap)?;
+    let data_start = usize::try_from(footer.compressed_data_offset())
+        .context("compressed data offset too large")?;
+    let data_size =
+        usize::try_from(footer.compressed_data_size()).context("compressed data size too large")?;
+    let data_end = data_start
+        .checked_add(data_size)
+        .context("data range overflow")?;
+    let meta_start =
+        usize::try_from(footer.blob_meta_offset()).context("blob meta offset too large")?;
+    let meta_end = meta_start
+        .checked_add(footer.blob_meta_size() as usize)
+        .context("blob meta range overflow")?;
 
-    let primary_image_bytes = sb.blocks() * EROFS_BLOCK_SIZE as u64;
-    if primary_image_bytes as usize > mmap.len() {
-        return Ok(None);
-    }
-
-    let data_digest = sha256_bytes(&mmap[primary_image_bytes as usize..]);
+    let data_digest = sha256_bytes(&mmap[data_start..data_end]);
     let blob_sha256 = sha256_bytes(&mmap);
     Ok(Some(BlobInspection {
         data_sha256: data_digest,
-        data_size: mmap.len().saturating_sub(primary_image_bytes as usize) as u64,
+        data_size: footer.compressed_data_size(),
         blob_sha256,
         blob_size: mmap.len() as u64,
-        blobmeta: load_blobmeta_summary_for_source(path)?,
+        blob_meta: Some(blobmeta_summary_from_bytes(&mmap[meta_start..meta_end])?),
     }))
 }
 
-fn load_blobmeta_summary_for_source(path: &Path) -> Result<Option<BlobMetaSummary>> {
-    let Some(file_name) = path.file_name() else {
-        return Ok(None);
-    };
-    let blobmeta_path = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!("{}.blob.meta", file_name.to_string_lossy()));
-    if !blobmeta_path.is_file() {
-        return Ok(None);
-    }
-
-    let blobmeta = BlobMeta::load(&blobmeta_path)
-        .with_context(|| format!("failed to load blob meta: {}", blobmeta_path.display()))?;
-    Ok(Some(BlobMetaSummary {
+fn blobmeta_summary_from_bytes(data: &[u8]) -> Result<BlobMetaSummary> {
+    let blobmeta = BlobMeta::from_bytes_with_blob_id(data, [0u8; EROFS_BLOB_ID_SIZE])?;
+    Ok(BlobMetaSummary {
         chunk_count: blobmeta.chunk_count(),
         chunk_size: blobmeta.chunk_size(),
         digester: blobmeta.digester(),
         compressor: blobmeta.compressor(),
         total_uncompressed_size: blobmeta.total_uncompressed_size(),
         total_compressed_size: blobmeta.total_compressed_size(),
-    }))
-}
-
-fn verify_blob_tail(
-    path: &Path,
-    primary_image_bytes: u64,
-    expected: &[u8; EROFS_BLOB_ID_SIZE],
-) -> Result<bool> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open blob for verification: {}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("failed to map blob for verification: {}", path.display()))?;
-    if primary_image_bytes as usize > mmap.len() {
-        return Ok(false);
-    }
-    Ok(&sha256_bytes(&mmap[primary_image_bytes as usize..]) == expected)
+    })
 }
 
 fn chunkbits(reader: &ErofsReader, inode: &ErofsInode<'_>) -> u32 {
@@ -516,7 +480,7 @@ fn print_header(
     if kind == ImageKind::Blob && blobs.len() == 1 {
         let blob = blobs.values().next().expect("single blob summary");
         println!(
-            "  appended_blob_data_size: {}",
+            "  compressed_data_region_size: {}",
             blob.data_size_for_display()
         );
     }
@@ -684,7 +648,7 @@ fn blobmeta_field<T: ToString>(
     blob: &BlobSummary,
     field: impl FnOnce(&BlobMetaSummary) -> T,
 ) -> String {
-    blob.blobmeta
+    blob.blob_meta
         .as_ref()
         .map(|meta| field(meta).to_string())
         .unwrap_or_else(|| "<unresolved>".to_string())
@@ -695,7 +659,7 @@ fn blobmeta_field_or<T: ToString>(
     field: impl FnOnce(&BlobMetaSummary) -> T,
     fallback: Option<T>,
 ) -> String {
-    blob.blobmeta
+    blob.blob_meta
         .as_ref()
         .map(|meta| field(meta).to_string())
         .or_else(|| fallback.map(|value| value.to_string()))

@@ -20,6 +20,7 @@ memmap2 = "0.9"
 rolling-file = "0.2.0"
 sha2 = "0.10"
 signal-hook = "0.3"
+tempfile = "3.25.0"
 tokio = { version = "1", features = [
   "fs",
   "io-util",
@@ -38,9 +39,6 @@ tracing-subscriber = { version = "0.3", features = [
 uuid = { version = "1", features = ["v4"] }
 xattr = "1"
 zstd = "0.13"
-
-[dev-dependencies]
-tempfile = "3.25.0"
 
 [profile.bench]
 debug = true
