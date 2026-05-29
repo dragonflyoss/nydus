@@ -302,7 +302,7 @@ impl<'a> TarballTreeBuilder<'a> {
             let symlink_link_path = entry
                 .link_name()
                 .context("tarball: failed to get target path for tar symlink entry")?
-                .ok_or_else(|| anyhow!("tarball: failed to get symlink target tor tar entry"))?;
+                .ok_or_else(|| anyhow!("tarball: failed to get symlink target for tar entry"))?;
             let symlink_size = symlink_link_path.as_os_str().byte_size();
             if symlink_size > u16::MAX as usize {
                 bail!("tarball: symlink target from tar entry is too big");
@@ -330,8 +330,8 @@ impl<'a> TarballTreeBuilder<'a> {
         let ino = if entry_type.is_hard_link() {
             let link_path = entry
                 .link_name()
-                .context("tarball: failed to get target path for tar symlink entry")?
-                .ok_or_else(|| anyhow!("tarball: failed to get symlink target tor tar entry"))?;
+                .context("tarball: failed to get target path for tar hardlink entry")?
+                .ok_or_else(|| anyhow!("tarball: failed to get hardlink target for tar entry"))?;
             let link_path = PathBuf::from("/").join(link_path);
             let link_path = link_path.components().as_path();
             let targets = Node::generate_target_vec(link_path);

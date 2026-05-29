@@ -1398,7 +1398,7 @@ pub(crate) fn rafsv5_align(size: usize) -> usize {
     }
 }
 
-/// Validate inode metadata, include children, chunks and symblink etc.
+/// Validate inode metadata, include children, chunks and symlink etc.
 ///
 /// The default implementation is for rafs v5. The chunk data is not validated here, which will
 /// be validate on fs read.

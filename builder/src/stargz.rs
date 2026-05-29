@@ -472,7 +472,7 @@ impl StargzBuilder {
                     self.file_chunk_map
                         .insert(path.to_path_buf(), (entry.size, vec![chunk]));
                 } else {
-                    bail!("stargz: file chunk lacks of corresponding head regular file entry");
+                    bail!("stargz: file chunk lacks corresponding head regular file entry");
                 }
 
                 let aligned_chunk_size = if ctx.aligned_chunk {
@@ -539,7 +539,7 @@ impl StargzBuilder {
                     *last_reg_entry = None;
                     Ok(size)
                 } else {
-                    bail!("stargz: tailer chunk lacks of corresponding head chunk");
+                    bail!("stargz: tail chunk lacks corresponding head chunk");
                 }
             } else if entry.chunk_size != ctx.chunk_size as u64 {
                 bail!(
