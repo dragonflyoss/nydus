@@ -258,7 +258,7 @@ impl Node {
                 }
                 return Ok(0);
             } else {
-                return Err(Error::msg("inode's symblink is invalid."));
+                return Err(Error::msg("inode's symlink is invalid."));
             }
         } else if self.is_special() {
             if self.inode.is_v5() {
