@@ -222,14 +222,6 @@ impl Generator {
 
         // Update child count.
         node.inode.set_child_count(node.chunks.len() as u32);
-
-        // For RAFS v5, regular inode digest should be the hash of all chunk digests.
-        let mut inode_hasher = RafsDigest::hasher(ctx.digester);
-        for chunk in node.chunks.iter() {
-            inode_hasher.digest_update(chunk.inner.id().as_ref());
-        }
-        node.inode.set_digest(inode_hasher.digest_finalize());
-
         let child = Tree::new(node);
         child
             .borrow_mut_node()
