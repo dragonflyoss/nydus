@@ -149,7 +149,7 @@ In the future, `zstd::chunked` can work in this way as well.
 
 ### Run Nydus Service
 
-Using the key features of nydus as native in your project without preparing and invoking `nydusd` deliberately, [nydus-service](./service/README.md) helps to reuse the core services of nyuds.
+Using the key features of nydus as native in your project without preparing and invoking `nydusd` deliberately, [nydus-service](./service/README.md) helps to reuse the core services of nydus.
 
 ## Documentation
 

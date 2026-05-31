@@ -90,7 +90,7 @@ pub enum Error {
     #[error("failed to start service, {0}")]
     StartService(String),
     /// Input event to stat-machine is not expected.
-    #[error("unexpect state machine transition event `{0:?}`")]
+    #[error("unexpected state machine transition event `{0:?}`")]
     UnexpectedEvent(crate::daemon::DaemonStateMachineInput),
     #[error("failed to wait daemon, {0}")]
     WaitDaemon(#[source] io::Error),
