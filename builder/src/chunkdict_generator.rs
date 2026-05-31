@@ -25,7 +25,7 @@ use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
 use nydus_utils::compress::Algorithm;
-use nydus_utils::digest::{DigestHasher, RafsDigest};
+use nydus_utils::digest::RafsDigest;
 
 use std::mem::size_of;
 use std::path::PathBuf;
