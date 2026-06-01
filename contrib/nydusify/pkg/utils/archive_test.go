@@ -97,6 +97,77 @@ func TestUnpackFromTar(t *testing.T) {
 	assert.Equal(t, string(payload), string(content))
 }
 
+func TestUnpackFromTarRejectsPathTraversal(t *testing.T) {
+	var buffer bytes.Buffer
+	tarWriter := tar.NewWriter(&buffer)
+	payload := []byte("escaped")
+	require.NoError(t, tarWriter.WriteHeader(&tar.Header{
+		Name:     "../escaped.txt",
+		Mode:     0o644,
+		Size:     int64(len(payload)),
+		Typeflag: tar.TypeReg,
+	}))
+	_, err := tarWriter.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, tarWriter.Close())
+
+	tmpDir := t.TempDir()
+	dstDir := filepath.Join(tmpDir, "untar")
+	err = UnpackFromTar(bytes.NewReader(buffer.Bytes()), dstDir)
+	require.Error(t, err)
+	assert.NoFileExists(t, filepath.Join(tmpDir, "escaped.txt"))
+}
+
+func TestUnpackFromTarCreatesParentDirectories(t *testing.T) {
+	var buffer bytes.Buffer
+	tarWriter := tar.NewWriter(&buffer)
+	payload := []byte("nested file")
+	require.NoError(t, tarWriter.WriteHeader(&tar.Header{
+		Name:     "subdir/file.txt",
+		Mode:     0o644,
+		Size:     int64(len(payload)),
+		Typeflag: tar.TypeReg,
+	}))
+	_, err := tarWriter.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, tarWriter.Close())
+
+	dstDir := filepath.Join(t.TempDir(), "untar")
+	require.NoError(t, UnpackFromTar(bytes.NewReader(buffer.Bytes()), dstDir))
+
+	content, err := os.ReadFile(filepath.Join(dstDir, "subdir", "file.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, string(payload), string(content))
+}
+
+func TestUnpackFromTarAllowsRootDirectoryEntry(t *testing.T) {
+	var buffer bytes.Buffer
+	tarWriter := tar.NewWriter(&buffer)
+	require.NoError(t, tarWriter.WriteHeader(&tar.Header{
+		Name:     ".",
+		Mode:     0o755,
+		Typeflag: tar.TypeDir,
+	}))
+
+	payload := []byte("ok")
+	require.NoError(t, tarWriter.WriteHeader(&tar.Header{
+		Name:     "./root.txt",
+		Mode:     0o644,
+		Size:     int64(len(payload)),
+		Typeflag: tar.TypeReg,
+	}))
+	_, err := tarWriter.Write(payload)
+	require.NoError(t, err)
+	require.NoError(t, tarWriter.Close())
+
+	dstDir := filepath.Join(t.TempDir(), "untar")
+	require.NoError(t, UnpackFromTar(bytes.NewReader(buffer.Bytes()), dstDir))
+
+	content, err := os.ReadFile(filepath.Join(dstDir, "root.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, string(payload), string(content))
+}
+
 func TestUnpackTargzInvalidStream(t *testing.T) {
 	invalid := io.NopCloser(bytes.NewReader([]byte("not-a-tar-gz")))
 	defer invalid.Close()
