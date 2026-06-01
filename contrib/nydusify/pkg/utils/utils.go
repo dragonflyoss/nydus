@@ -230,6 +230,11 @@ func UnpackFromTar(reader io.Reader, targetDir string) error {
 		return err
 	}
 
+	targetDir, err := filepath.Abs(targetDir)
+	if err != nil {
+		return err
+	}
+
 	tr := tar.NewReader(reader)
 	for {
 		header, err := tr.Next()
@@ -240,7 +245,10 @@ func UnpackFromTar(reader io.Reader, targetDir string) error {
 			return err
 		}
 
-		filePath := filepath.Join(targetDir, header.Name)
+		filePath, err := unpackTarPath(targetDir, header.Name)
+		if err != nil {
+			return err
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -248,13 +256,19 @@ func UnpackFromTar(reader io.Reader, targetDir string) error {
 				return err
 			}
 		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+				return err
+			}
 			f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, header.FileInfo().Mode())
 			if err != nil {
 				return err
 			}
-			defer f.Close()
 
 			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
 				return err
 			}
 		default:
@@ -262,6 +276,24 @@ func UnpackFromTar(reader io.Reader, targetDir string) error {
 	}
 
 	return nil
+}
+
+func unpackTarPath(targetDir, name string) (string, error) {
+	cleanName := filepath.Clean(name)
+	if filepath.IsAbs(cleanName) {
+		return "", fmt.Errorf("invalid tar path %q", name)
+	}
+
+	path := filepath.Join(targetDir, cleanName)
+	rel, err := filepath.Rel(targetDir, path)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("tar path %q escapes target directory", name)
+	}
+
+	return path, nil
 }
 
 func IsEmptyString(str string) bool {
