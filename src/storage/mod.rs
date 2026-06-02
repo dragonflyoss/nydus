@@ -1,3 +1,5 @@
 pub mod backend;
 pub mod cache;
-pub mod chunkmap;
+pub mod config;
+pub mod groupmap;
+pub mod prefetch;

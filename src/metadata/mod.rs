@@ -76,6 +76,9 @@ pub const EROFS_XATTR_INDEX_LUSTRE: u8 = 5;
 pub const EROFS_XATTR_INDEX_SECURITY: u8 = 6;
 pub const EROFS_XATTR_IBODY_HEADER_SIZE: usize = 12;
 pub const EROFS_XATTR_ENTRY_HEADER_SIZE: usize = 4;
+pub const LEPTON_INTERNAL_XATTR_PREFIX: &[u8] = b"trusted.lepton.";
+pub const LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX: &[u8] = b"lepton.prefetch.blobs";
+pub const LEPTON_PREFETCH_BLOBS_XATTR_NAME: &[u8] = b"trusted.lepton.prefetch.blobs";
 
 // Misc on-disk sizes.
 pub const EROFS_DIRENT_SIZE: usize = 12;
@@ -95,6 +98,10 @@ pub fn erofs_xattr_prefix(index: u8) -> Option<&'static [u8]> {
         EROFS_XATTR_INDEX_SECURITY => Some(b"security."),
         _ => None,
     }
+}
+
+pub fn is_lepton_internal_xattr(name: &[u8]) -> bool {
+    name.starts_with(LEPTON_INTERNAL_XATTR_PREFIX)
 }
 
 /// Split a full xattr name (as bytes) into (prefix_index, suffix).
@@ -194,4 +201,17 @@ pub fn cast_mut<T>(data: &mut [u8]) -> &mut T {
 #[inline]
 pub fn round_up(val: usize, align: usize) -> usize {
     (val + align - 1) & !(align - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lepton_internal_xattr_matches_trusted_lepton_prefix_only() {
+        assert!(is_lepton_internal_xattr(b"trusted.lepton.prefetch.blobs"));
+        assert!(is_lepton_internal_xattr(b"trusted.lepton.other"));
+        assert!(!is_lepton_internal_xattr(b"trusted.other"));
+        assert!(!is_lepton_internal_xattr(b"user.lepton.prefetch.blobs"));
+    }
 }

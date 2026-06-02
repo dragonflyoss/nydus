@@ -7,7 +7,9 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::build::blob_chunk::ChunkIndex;
 use crate::build::bootstrap::render_bootstrap;
-use crate::build::inode::{mode_to_file_type, DirEntry, InodeData, InodeInfo};
+use crate::build::inode::{
+    mode_to_file_type, set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo,
+};
 use crate::fs::ErofsReader;
 use crate::metadata::*;
 use crate::utils::{hex_string, parse_sha256_hex, sha256_file};
@@ -103,6 +105,10 @@ pub fn merge_sources_to_bootstrap_bytes(
         .min()
         .unwrap_or(build_time);
     let uuid = [0u8; 16];
+    let device_count =
+        u16::try_from(device_slots.len()).context("device slot count exceeds u16")?;
+    let prefetch_device_ids = (1..=device_count).collect::<Vec<_>>();
+    set_root_prefetch_blobs_xattr(&mut inodes, &prefetch_device_ids)?;
 
     render_bootstrap(
         &mut inodes,

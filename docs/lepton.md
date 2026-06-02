@@ -87,22 +87,22 @@ Current implementation notes:
 - Either `--blob` or `--blob-dir` is required.
 - `--bootstrap` is optional and emits a standalone metadata-only artifact.
 - `--chunk-size` defaults to `1048576` (1 MiB) and controls EROFS file chunk
-	indexes. Blobmeta data-block groups are at least 1 MiB, so smaller file chunks
-	do not fragment blobmeta into tiny compression units.
+	indexes. Blobmeta compression groups are at least 1 MiB, so smaller file
+	chunks do not fragment blobmeta into tiny compression units.
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
 - `--blob-dir` stores the full blob under `<blob-dir>/<full_blob_sha256>` and a
 	standalone blob meta copy under `<blob-dir>/<full_blob_sha256>.blob.meta`.
-- `--compressor zstd` attempts to compress each blobmeta data-block group as one
+- `--compressor zstd` attempts to compress each blobmeta group as one
 	unit. If the compressed bytes are larger than 70% of the uncompressed group,
-	the group is stored plain and its blobmeta chunk records
+	the group is stored plain and its blobmeta group record has
 	`compressed_size == uncompressed_block_count * 4096`.
 - `--compressor none` writes every group plain.
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
 	`data_blob_digest`, `full_blob_digest`, `chunk_size`, `chunk_count`,
-	`chunk_digester`, `chunk_compressor`, compressed/uncompressed totals, and
-	full blob region offsets and block counts.
+	`group_count`, `chunk_digester`, `chunk_compressor`,
+	compressed/uncompressed totals, and full blob region offsets and block counts.
 
 ### Merge
 
@@ -160,6 +160,7 @@ Supported forms:
 - `lepton check --blob <blob>`
 - `lepton check --bootstrap <bootstrap>`
 - `lepton check --bootstrap <bootstrap> --blob-dir <blob-dir>`
+- `lepton check --bootstrap <bootstrap> --config <config.yaml>`
 
 Current implementation notes:
 
@@ -169,9 +170,13 @@ Current implementation notes:
 	block counts.
 - `--blob-dir` is optional for static inspection and is used only to resolve
 	referenced blob files and verify their digests.
+- `--config` supplies the blob directory through the storage config's
+	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
+	given. See [Storage config](#storage-config).
 - Blob entries report `data_blob_digest`, `full_blob_digest`, blobmeta
-	`chunk_size`, `chunk_count`, `chunk_digester`, `chunk_compressor`, and
-	compressed/uncompressed totals when the referenced blob can be resolved.
+	`chunk_size`, `chunk_count`, `group_count`, `chunk_digester`,
+	`chunk_compressor`, and compressed/uncompressed totals when the referenced
+	blob can be resolved.
 - `--blob-dir` resolves by scanning full blob candidates. Device slots normally
 	store the data-region SHA256, while blob files are named by full blob SHA256
 	when produced by `--blob-dir`.
@@ -190,6 +195,8 @@ Current implementation notes:
 
 - `SIGINT`/`SIGTERM`/`SIGQUIT` trigger a best-effort unmount before process exit,
 	so interactive `Ctrl+C` tears down the mountpoint instead of leaving it behind.
+- After mounting, runtime starts background blob prefetch unless it is disabled
+	through the storage config. See [Blob prefetch](#blob-prefetch).
 
 Current CLI help:
 
@@ -204,6 +211,8 @@ Options:
 		Directory path including lepton data blob
 	--cache-dir <cache-dir>
 		Directory path for persistent chunk cache files
+	--config <config>
+		File path to a YAML storage config providing backend/cache directories and prefetch options
 	--bootstrap <bootstrap>
 		File path to lepton bootstrap
 	--blob <blob>
@@ -222,10 +231,62 @@ Supported forms:
 
 - `lepton fuse --blob <blob> --mountpoint <mountpoint>`
 - `lepton fuse --bootstrap <bootstrap> --blob-dir <blob-dir> --mountpoint <mountpoint>`
+- `lepton fuse --bootstrap <bootstrap> --config <config.yaml> --mountpoint <mountpoint>`
 
-The fuse command rejects mixed or partial combinations outside these two forms.
-`--cache-dir` is optional in both forms; without it, runtime fetches and
-validates requested blobmeta chunks without persisting decoded data.
+The fuse command rejects mixed or partial combinations outside these forms.
+`--cache-dir` is optional; without it (and without a cache directory from
+`--config`), runtime fetches and validates requested blobmeta groups using a
+temporary cache directory that is removed on exit. When `--config` is provided,
+`backend.config.dir` supplies the blob directory and `cache.config.dir` supplies
+the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
+`--blob-dir`/`--cache-dir` flags take precedence over the config. See
+[Storage config](#storage-config).
+
+### Storage config
+
+`lepton fuse` and `lepton check` accept a shared YAML storage config through
+`--config <path>`. It centralizes the backend directory, cache directory, and
+prefetch behavior so the directory flags can be omitted.
+
+```yaml
+backend:
+  type: local
+  config:
+    dir: /var/lib/lepton/blobs
+cache:
+  type: local
+  config:
+    dir: /var/lib/lepton/cache
+prefetch:
+  enable: true
+  threads: 10
+```
+
+Fields:
+
+- `backend.type` selects the blob backend. Only `local` is supported; its
+	`config.dir` is the directory holding lepton blob files (equivalent to
+	`--blob-dir`).
+- `cache.type` selects the chunk cache. Only `local` is supported; its
+	`config.dir` is the persistent cache directory (equivalent to `--cache-dir`).
+- `prefetch.enable` (default `true`) toggles background blob prefetch after
+	mount.
+- `prefetch.threads` (default `10`) sets the number of concurrent prefetch
+	worker threads.
+
+The whole `prefetch` block is optional and falls back to the defaults above;
+individual fields may also be omitted independently. CLI directory flags
+override the corresponding config directories, and `prefetch` only applies to
+`lepton fuse`. Unknown `backend.type`/`cache.type` values are rejected at load
+time.
+
+Example invocations:
+
+```bash
+lepton fuse --bootstrap layer.bootstrap --config storage.yaml --mountpoint /mnt/lepton
+lepton check --bootstrap layer.bootstrap --config storage.yaml
+```
+
 
 ## Artifact Model
 
@@ -287,7 +348,8 @@ full blob file: <full_blob_sha256>
 | padding to 4 KiB alignment    |
 +-------------------------------+  byte = footer.blob_meta_offset
 | blob meta                     |
-| 4 KiB header + chunk records  |
+| 48-byte header + chunk table  |
+| group table                   |
 | zero padding to 4 KiB         |
 +-------------------------------+  byte = footer.blob_meta_offset + footer.blob_meta_blocks * 4096
 | blob footer                   |
@@ -387,8 +449,8 @@ first logical external data block starts at offset 0
 	logical byte offset = 0 * 4096
 
 blobmeta then maps that logical byte offset to a compressed range in the full
-blob's data region, for example compressed_offset = 0 for the first encoded
-group.
+blob's data region, for example compressed_block_offset = 0 for the first
+encoded group.
 ```
 
 Blob identity is therefore attached to the device slot, not to the chunk index
@@ -415,10 +477,11 @@ At the same time:
 
 Whenever build emits a full blob, it writes one blob meta region before the
 footer. Blob meta is the canonical catalog for the external data blob. A blob
-meta chunk is a contiguous collection of logical uncompressed data blocks, not a
-file-local chunk. EROFS inode chunk indexes point into that logical
-uncompressed address space; blob meta maps those offsets to encoded ranges in
-the full blob data region.
+meta chunk is the dense record for one EROFS external-device chunk. A blob meta
+group is the compressed unit and cache population unit. EROFS inode chunk
+indexes point into the logical uncompressed external-device address space; blob
+meta maps those chunk offsets to decoded group offsets and maps each group to an
+encoded range in the full blob data region.
 
 Current blobmeta on-disk shape:
 
@@ -426,26 +489,36 @@ Current blobmeta on-disk shape:
 embedded blob meta region
 
 +-------------------------------+
-| 4 KiB header                  |
+| 48-byte header                |
 | magic                         |
 | features                      |
 | crc32c                        |
-| chunk_entry_size              |
-| chunk_count                   |
-| chunk_size                    |
 | reserved0                     |
-| reserved                      |
+| chunks_offset                 |
+| groups_offset                 |
+| chunk_count                   |
+| group_count                   |
+| chunk_block_count             |
+| reserved1                     |
 +-------------------------------+
 | chunk records                 |
-| 64 bytes each                 |
+| 48 bytes each                 |
+|                               |
+| digest (BLAKE3)               |
+| group_index                   |
+| group_uncompressed_block_off  |
+| uncompressed_block_count      |
+| reserved                      |
++-------------------------------+
+| group records                 |
+| 32 bytes each                 |
 |                               |
 | uncompressed_block_offset     |
-| compressed_offset             |
+| compressed_block_offset       |
 | uncompressed_block_count      |
 | compressed_size               |
 | crc32c                        |
 | reserved                      |
-| digest (BLAKE3)               |
 +-------------------------------+
 | zero padding to 4 KiB         |
 +-------------------------------+
@@ -458,32 +531,47 @@ Header details:
 	default compressor; no compressor bit means stored plain. `DIGESTER_BLAKE3`
 	(`1 << 16`) is mandatory for chunk digests.
 - `crc32c` covers the full blob meta region with this field zeroed: the fixed
-	4 KiB header, all chunk records, and trailing zero padding. The cache layer
+	header, all chunk records, all group records, and trailing zero padding. The cache layer
 	verifies this crc32c before mmaping a cached blob meta file for chunk lookup.
-- `chunk_entry_size` is currently 64 bytes.
-- `chunk_count` is the number of chunk records after the fixed header.
-- `chunk_size` is the target logical blobmeta group size. It is at least 1 MiB.
+- `chunks_offset` is fixed at the header size. `groups_offset` follows the dense
+	chunk table.
+- `chunk_count` is the number of EROFS chunk records. The table is dense and a
+	runtime lookup can compute `chunk_index = block_id / chunk_block_count`.
+- `group_count` is the number of compressed group records.
+- `chunk_block_count` is the EROFS chunk size in 4 KiB blocks.
 - The header intentionally does not store `header_size`, total compressed size,
-	or total uncompressed size. The header size is fixed at 4 KiB, totals are
-	computed from the chunk records, and the blob meta region is padded to a 4 KiB
+	or total uncompressed size. The header size is fixed at 48 bytes, totals are
+	computed from the group records, and the blob meta region is padded to a 4 KiB
 	block boundary.
 
 Chunk details:
 
-- `uncompressed_block_offset` is the logical external-device 4 KiB block offset
-	used by EROFS chunk indexes. It is not biased by bootstrap size.
-- `compressed_offset` is the byte offset inside the data region, not inside the
-	whole full blob file. Runtime adds `footer.compressed_data_offset` before
-	issuing backend range reads.
-- `uncompressed_block_count` describes the logical size in 4 KiB blocks.
-	`compressed_size` describes the stored bytes for the group. If `compressed_size`
-	equals `uncompressed_block_count * 4096`, runtime treats the group as stored
-	plain and skips decompression even when the header compressor is zstd.
-- `digest` and `crc32c` are computed over the uncompressed group.
+- `digest` is computed over the uncompressed, block-padded EROFS chunk.
+- `group_index` references the compressed group that contains this chunk.
+- `group_uncompressed_block_offset` is the chunk's 4 KiB block offset within its
+	decoded group.
+- `uncompressed_block_count` is the logical chunk span in 4 KiB blocks. The
+	current builder reserves a full fixed EROFS chunk for each chunk index so the
+	dense lookup remains valid.
 
-The writer does not bias `compressed_offset` by the bootstrap size. It also does
-not bias `uncompressed_block_offset`; that field remains the logical
-external-device block address used by inode chunk indexes.
+Group details:
+
+- `uncompressed_block_offset` is the decoded cache 4 KiB block offset for the
+	group.
+- `compressed_block_offset` is the encoded data-region 4 KiB block offset, not
+	inside the whole full blob file. Runtime backends add the data-region base
+	offset before issuing range reads.
+- `uncompressed_block_count` describes the decoded group size in 4 KiB blocks.
+- `compressed_size` is the actual encoded byte length and excludes group padding.
+	The builder pads every encoded group to the next 4 KiB boundary so the next
+	group can keep a block-granular `compressed_block_offset`.
+- `crc32c` is computed over the decoded group. If `compressed_size` equals
+	`uncompressed_block_count * 4096`, runtime treats the group as stored plain and
+	skips decompression even when the header compressor is zstd.
+
+The writer does not bias `compressed_block_offset` by the bootstrap size. It
+also does not bias `uncompressed_block_offset`; that field remains the decoded
+cache address for blob data.
 
 ### Merge output
 
@@ -495,14 +583,17 @@ more previously built full blobs.
 The build pipeline now follows this sequence:
 
 1. Walk the source directory and build the in-memory inode tree.
-2. Assign file chunk indexes into a logical uncompressed external-device address
-	space.
-3. Group that logical data stream into blobmeta chunks, normally 1MiB each.
-4. Compute BLAKE3 digest and CRC32C over each uncompressed group.
+2. Assign dense file chunk indexes into a logical uncompressed external-device
+	address space. Each EROFS chunk advances by the fixed EROFS chunk size.
+3. Record one blobmeta chunk entry for each EROFS chunk and group the decoded
+	data stream into compression groups, normally 1 MiB each.
+4. Compute BLAKE3 digest over each uncompressed chunk and CRC32C over each
+	uncompressed group.
 5. Compress each group according to the blobmeta header compressor and append
-	the encoded bytes directly to the beginning of the full blob file. For zstd,
-	groups that do not shrink to at most 70% of their uncompressed size are stored
-	plain and marked by `compressed_size == uncompressed_block_count * 4096`.
+	the encoded bytes directly to the beginning of the full blob file. Encoded
+	groups are padded to 4 KiB. For zstd, groups that do not shrink to at most 70%
+	of their uncompressed size are stored plain and marked by
+	`compressed_size == uncompressed_block_count * 4096`.
 6. Compute SHA256 over the encoded data region as those bytes are written and
 	write it into the bootstrap device slot tag.
 7. Serialize the bootstrap bytes in memory. External chunk `blkaddr` values stay
@@ -559,8 +650,9 @@ When mounting with `--bootstrap + --blob-dir`:
 	the cache directory. The cache verifies the blob meta header crc32c before
 	mmaping the cached file and using its chunk records.
 7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
-	layer maps those ranges to blob meta chunks, fetches compressed ranges from the
-	data region, validates uncompressed data, and returns bytes to FUSE.
+	layer maps those ranges to blob meta chunks, ensures the referenced groups are
+	fetched and decoded from the data region, validates group CRC32C, and returns
+	the requested chunk slices to FUSE.
 
 The runtime no longer reads external blob data by direct mmap offsets. External
 blob reads always go through the blobmeta-aware cache abstraction.
@@ -574,7 +666,40 @@ blob digest:
 - `<full_blob_digest>.blob.data` stores decoded uncompressed data.
 - `<full_blob_digest>.blob.meta` stores the verified blob meta copy cached from
 	the local backend.
-- `<full_blob_digest>.chunkmap` records which blobmeta chunks have been decoded.
+- `<full_blob_digest>.groupmap` records which blobmeta groups have been decoded.
+
+### Blob prefetch
+
+After a successful mount, `lepton fuse` spawns a background prefetcher that warms
+the local cache so later on-demand reads hit decoded data instead of fetching and
+decoding groups synchronously. Prefetch is enabled by default and can be turned
+off (or resized) through the storage config `prefetch` block; see
+[Storage config](#storage-config).
+
+Per-blob prefetch streams groups into the cache:
+
+- The blob meta groups are the compression/cache unit. Prefetch reads the data
+	region in windows that accumulate consecutive groups up to the default group
+	uncompressed size (1 MiB), so each window decode covers one or more groups.
+- For each window it issues a single contiguous backend range read, then decodes
+	each contained group (plain copy or zstd), validates length and CRC32C, writes
+	the decoded bytes to the cache file at the group's uncompressed offset, and
+	marks the group ready in the groupmap.
+- Prefetch uses its own decode buffer and does not take the on-demand read
+	`fetch_lock`. The groupmap is internally locked and `set_ready` is idempotent,
+	so racing with a FUSE read at worst decodes the same group twice into identical
+	bytes at the same offset. This keeps prefetch fully decoupled from, and
+	non-blocking to, the on-demand read path.
+- Groups already marked ready (for example, fetched on demand or from a previous
+	run's persistent cache) are skipped.
+
+Prefetch scheduling across blobs has two phases:
+
+1. Priority blobs are prefetched first, sequentially, in the order listed by the
+	root inode's `trusted.lepton.prefetch.blobs` xattr (a comma-separated list of
+	device ids). The list is deduplicated and filtered to existing devices.
+2. The remaining blob devices are then prefetched concurrently by a worker pool
+	sized to `min(prefetch.threads, remaining)` (default `10` threads).
 
 ## Merge Design
 

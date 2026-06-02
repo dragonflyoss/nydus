@@ -3,7 +3,7 @@ use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::build::blob_chunk::{BlobWriter, ChunkIndex};
 use crate::metadata::*;
@@ -107,6 +107,43 @@ pub fn build_tree(
     )?;
 
     Ok(inodes)
+}
+
+pub fn set_root_prefetch_blobs_xattr(inodes: &mut [InodeInfo], device_ids: &[u16]) -> Result<()> {
+    if inodes.is_empty() {
+        bail!("cannot set root prefetch xattr for empty inode set");
+    }
+
+    let mut prefetch_device_ids = Vec::new();
+    for device_id in device_ids.iter().copied() {
+        if device_id != 0 && !prefetch_device_ids.contains(&device_id) {
+            prefetch_device_ids.push(device_id);
+        }
+    }
+    if prefetch_device_ids.is_empty() {
+        return Ok(());
+    }
+
+    let value = prefetch_device_ids
+        .iter()
+        .map(|device_id| device_id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    if value.len() > u16::MAX as usize {
+        bail!("root prefetch xattr value exceeds EROFS xattr value size limit");
+    }
+
+    inodes[0].xattrs.retain(|(index, suffix, _)| {
+        !(*index == EROFS_XATTR_INDEX_TRUSTED
+            && suffix.as_slice() == LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX)
+    });
+    inodes[0].xattrs.push((
+        EROFS_XATTR_INDEX_TRUSTED,
+        LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX.to_vec(),
+        value.into_bytes(),
+    ));
+
+    Ok(())
 }
 
 #[allow(clippy::only_used_in_recursion)]
@@ -613,4 +650,62 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     }
 
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root_inode_with_xattrs(xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>) -> InodeInfo {
+        InodeInfo {
+            mode: 0o040755,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            mtime: 0,
+            mtime_nsec: 0,
+            nlink: 2,
+            ino: 1,
+            nid: 0,
+            meta_offset: 0,
+            is_extended: false,
+            data: InodeData::Directory {
+                children: Vec::new(),
+                startblk: 0,
+                dir_data_size: 0,
+                parent_nid: 0,
+            },
+            xattrs,
+        }
+    }
+
+    #[test]
+    fn set_root_prefetch_blobs_xattr_replaces_and_deduplicates_value() {
+        let mut inodes = vec![root_inode_with_xattrs(vec![
+            (
+                EROFS_XATTR_INDEX_TRUSTED,
+                LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX.to_vec(),
+                b"old".to_vec(),
+            ),
+            (EROFS_XATTR_INDEX_USER, b"keep".to_vec(), b"value".to_vec()),
+        ])];
+
+        set_root_prefetch_blobs_xattr(&mut inodes, &[2, 5, 2, 0, 1]).unwrap();
+
+        let prefetch_xattrs = inodes[0]
+            .xattrs
+            .iter()
+            .filter(|(index, suffix, _)| {
+                *index == EROFS_XATTR_INDEX_TRUSTED
+                    && suffix.as_slice() == LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(prefetch_xattrs.len(), 1);
+        assert_eq!(prefetch_xattrs[0].2, b"2,5,1");
+        assert!(inodes[0].xattrs.iter().any(|(index, suffix, value)| {
+            *index == EROFS_XATTR_INDEX_USER
+                && suffix.as_slice() == b"keep"
+                && value.as_slice() == b"value"
+        }));
+    }
 }

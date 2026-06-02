@@ -951,7 +951,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 	require.NoError(t, err)
 
 	var dataCount int
-	var chunkmapCount int
+	var groupmapCount int
 	var blobmetaCount int
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -962,8 +962,8 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 		switch {
 		case strings.HasSuffix(name, ".blob.data"):
 			dataCount++
-		case strings.HasSuffix(name, ".chunkmap"):
-			chunkmapCount++
+		case strings.HasSuffix(name, ".groupmap"):
+			groupmapCount++
 		case strings.HasSuffix(name, ".blob.meta"):
 			blobmetaCount++
 		}
@@ -971,13 +971,13 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 
 	blobCount := len(blobs)
 	assert.Equal(t, blobCount, dataCount, "unexpected cached blob.data count")
-	assert.Equal(t, blobCount, chunkmapCount, "unexpected cached chunkmap count")
+	assert.Equal(t, blobCount, groupmapCount, "unexpected cached groupmap count")
 	assert.Equal(t, blobCount, blobmetaCount, "unexpected cached blobmeta count")
 
 	for _, blob := range blobs {
 		prefix := fullBlobDigest(t, blob)
 		require.FileExists(t, filepath.Join(cacheDir, prefix+".blob.data"))
 		require.FileExists(t, filepath.Join(cacheDir, prefix+".blob.meta"))
-		require.FileExists(t, filepath.Join(cacheDir, prefix+".chunkmap"))
+		require.FileExists(t, filepath.Join(cacheDir, prefix+".groupmap"))
 	}
 }

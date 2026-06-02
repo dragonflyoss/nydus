@@ -4,23 +4,23 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Mutex;
 
-const CHUNKMAP_MAGIC: [u8; 8] = *b"LPCM0001";
-const CHUNKMAP_VERSION: u32 = 1;
-const CHUNKMAP_HEADER_SIZE: u64 = 16;
+const GROUPMAP_MAGIC: [u8; 8] = *b"LPGM0001";
+const GROUPMAP_VERSION: u32 = 1;
+const GROUPMAP_HEADER_SIZE: u64 = 16;
 
-struct ChunkMapState {
+struct GroupMapState {
     file: File,
     bits: Vec<u8>,
-    chunk_count: usize,
+    group_count: usize,
 }
 
-pub struct ChunkMap {
-    state: Mutex<ChunkMapState>,
+pub struct GroupMap {
+    state: Mutex<GroupMapState>,
 }
 
-impl ChunkMap {
-    pub fn open(path: &Path, chunk_count: usize) -> io::Result<Self> {
-        let bytes_len = chunk_count.div_ceil(8);
+impl GroupMap {
+    pub fn open(path: &Path, group_count: usize) -> io::Result<Self> {
+        let bytes_len = group_count.div_ceil(8);
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -30,19 +30,19 @@ impl ChunkMap {
 
         let bits = if file.metadata()?.len() == 0 {
             let bits = vec![0u8; bytes_len];
-            write_header(&mut file, chunk_count)?;
+            write_header(&mut file, group_count)?;
             file.write_all(&bits)?;
             file.flush()?;
             bits
         } else {
             let existing = read_header(&mut file)?;
-            if existing != chunk_count {
+            if existing != group_count {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "chunkmap {} chunk count mismatch: expected {}, got {}",
+                        "groupmap {} group count mismatch: expected {}, got {}",
                         path.display(),
-                        chunk_count,
+                        group_count,
                         existing
                     ),
                 ));
@@ -54,23 +54,23 @@ impl ChunkMap {
         };
 
         Ok(Self {
-            state: Mutex::new(ChunkMapState {
+            state: Mutex::new(GroupMapState {
                 file,
                 bits,
-                chunk_count,
+                group_count,
             }),
         })
     }
 
     pub fn is_ready(&self, index: usize) -> io::Result<bool> {
         let state = self.state.lock().unwrap();
-        ensure_index(index, state.chunk_count)?;
+        ensure_index(index, state.group_count)?;
         Ok(state.bits[index / 8] & (1u8 << (index % 8)) != 0)
     }
 
     pub fn set_ready(&self, index: usize) -> io::Result<()> {
         let mut state = self.state.lock().unwrap();
-        ensure_index(index, state.chunk_count)?;
+        ensure_index(index, state.group_count)?;
         let byte_index = index / 8;
         let bit_mask = 1u8 << (index % 8);
         if state.bits[byte_index] & bit_mask != 0 {
@@ -80,46 +80,46 @@ impl ChunkMap {
         state.bits[byte_index] |= bit_mask;
         state.file.write_at(
             &[state.bits[byte_index]],
-            CHUNKMAP_HEADER_SIZE + byte_index as u64,
+            GROUPMAP_HEADER_SIZE + byte_index as u64,
         )?;
         state.file.flush()?;
         Ok(())
     }
 }
 
-fn ensure_index(index: usize, chunk_count: usize) -> io::Result<()> {
-    if index >= chunk_count {
+fn ensure_index(index: usize, group_count: usize) -> io::Result<()> {
+    if index >= group_count {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("chunk index {} out of range {}", index, chunk_count),
+            format!("group index {} out of range {}", index, group_count),
         ));
     }
     Ok(())
 }
 
-fn write_header(file: &mut File, chunk_count: usize) -> io::Result<()> {
-    file.write_all(&CHUNKMAP_MAGIC)?;
-    file.write_all(&CHUNKMAP_VERSION.to_le_bytes())?;
-    file.write_all(&(chunk_count as u32).to_le_bytes())?;
+fn write_header(file: &mut File, group_count: usize) -> io::Result<()> {
+    file.write_all(&GROUPMAP_MAGIC)?;
+    file.write_all(&GROUPMAP_VERSION.to_le_bytes())?;
+    file.write_all(&(group_count as u32).to_le_bytes())?;
     Ok(())
 }
 
 fn read_header(file: &mut File) -> io::Result<usize> {
     let mut magic = [0u8; 8];
     file.read_exact(&mut magic)?;
-    if magic != CHUNKMAP_MAGIC {
+    if magic != GROUPMAP_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "invalid chunkmap magic",
+            "invalid groupmap magic",
         ));
     }
 
     let mut version = [0u8; 4];
     file.read_exact(&mut version)?;
-    if u32::from_le_bytes(version) != CHUNKMAP_VERSION {
+    if u32::from_le_bytes(version) != GROUPMAP_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "unsupported chunkmap version",
+            "unsupported groupmap version",
         ));
     }
 
@@ -134,18 +134,18 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn chunkmap_persists_ready_bits() {
+    fn groupmap_persists_ready_bits() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("blob.chunkmap");
+        let path = dir.path().join("blob.groupmap");
 
-        let map = ChunkMap::open(&path, 10).unwrap();
+        let map = GroupMap::open(&path, 10).unwrap();
         assert!(!map.is_ready(3).unwrap());
         map.set_ready(3).unwrap();
         map.set_ready(9).unwrap();
         assert!(map.is_ready(3).unwrap());
         assert!(map.is_ready(9).unwrap());
 
-        let reopened = ChunkMap::open(&path, 10).unwrap();
+        let reopened = GroupMap::open(&path, 10).unwrap();
         assert!(reopened.is_ready(3).unwrap());
         assert!(reopened.is_ready(9).unwrap());
         assert!(!reopened.is_ready(2).unwrap());

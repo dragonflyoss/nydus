@@ -218,25 +218,19 @@ fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{BlobMetaChunk, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET};
+    use crate::metadata::{
+        BlobMetaChunk, BlobMetaGroup, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
+    };
     use crate::utils::sha256_bytes;
     use std::io::Write;
     use tempfile::tempdir;
 
-    fn blobmeta_chunk(
-        uncompressed_block_offset: u64,
-        uncompressed_block_count: u32,
-        compressed_offset: u64,
-        compressed_size: u32,
-        payload: &[u8],
-    ) -> BlobMetaChunk {
-        BlobMetaChunk::new(
-            uncompressed_block_offset,
-            uncompressed_block_count,
-            compressed_offset,
-            compressed_size,
-            *blake3::hash(payload).as_bytes(),
-            crc32c::crc32c(payload),
+    fn blobmeta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
+        BlobMeta::from_parts(
+            blob_id,
+            1,
+            vec![BlobMetaGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
+            vec![BlobMetaChunk::new(*blake3::hash(payload).as_bytes(), 0, 0, 1).unwrap()],
         )
         .unwrap()
     }
@@ -251,9 +245,7 @@ mod tests {
             .path()
             .join(format!("{}.blob.meta", hex_string(&blob_id)));
         fs::write(&blob_path, &payload).unwrap();
-        BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 1, 0, 4096, &payload)])
-            .save(&blob_meta_path)
-            .unwrap();
+        blobmeta(blob_id, &payload).save(&blob_meta_path).unwrap();
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
@@ -274,8 +266,7 @@ mod tests {
         let sb_start = EROFS_SUPER_OFFSET as usize;
         let sb_end = sb_start + sb.as_bytes().len();
         bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
-        let blob_meta =
-            BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 1, 0, 4096, &payload)]);
+        let blob_meta = blobmeta(blob_id, &payload);
         let footer = BlobFooter::new(
             0,
             payload.len() as u64,

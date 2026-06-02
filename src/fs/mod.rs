@@ -4,7 +4,7 @@ mod meta;
 
 pub use self::fuse::ErofsFs;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -39,6 +39,25 @@ pub struct DeviceInfo {
 
 struct BlobDevice {
     cache: Box<dyn BlobCache>,
+}
+
+/// Parse a `trusted.lepton.prefetch.blobs` xattr value such as `"2,5,1"` into an
+/// ordered list of blob device ids, skipping empty, zero, or non-numeric tokens.
+fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
+    let text = match std::str::from_utf8(value) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    text.split(',')
+        .filter_map(|token| {
+            let token = token.trim();
+            if token.is_empty() {
+                None
+            } else {
+                token.parse::<u16>().ok().filter(|id| *id != 0)
+            }
+        })
+        .collect()
 }
 
 /// EROFS image reader — lock-free, zero-copy.
@@ -270,6 +289,56 @@ impl ErofsReader {
         Self::device_infos_from(&self.mmap, self.sb_offset)
     }
 
+    /// Prefetch every group of the blob device identified by `device_id`.
+    pub fn prefetch_blob(&self, device_id: u16) -> io::Result<()> {
+        let device = self.blob_devices.get(&device_id).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("blob device {} not found", device_id),
+            )
+        })?;
+        device.cache.prefetch_all()
+    }
+
+    /// Build the blob prefetch plan: blobs listed in the root prefetch xattr (in
+    /// order, deduplicated, filtered to existing devices), followed by the
+    /// remaining blob device ids in ascending order.
+    pub fn prefetch_plan(&self) -> (Vec<u16>, Vec<u16>) {
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+        for device_id in self.read_prefetch_order() {
+            if self.blob_devices.contains_key(&device_id) && seen.insert(device_id) {
+                ordered.push(device_id);
+            }
+        }
+        let mut rest: Vec<u16> = self
+            .blob_devices
+            .keys()
+            .copied()
+            .filter(|id| !seen.contains(id))
+            .collect();
+        rest.sort_unstable();
+        (ordered, rest)
+    }
+
+    fn read_prefetch_order(&self) -> Vec<u16> {
+        let root_nid = self.sb().root_nid();
+        let inode = match self.inode(root_nid) {
+            Ok(inode) => inode,
+            Err(_) => return Vec::new(),
+        };
+        let xattrs = match self.read_xattrs(root_nid, &inode) {
+            Ok(xattrs) => xattrs,
+            Err(_) => return Vec::new(),
+        };
+        for (name, value) in xattrs {
+            if name == LEPTON_PREFETCH_BLOBS_XATTR_NAME {
+                return parse_prefetch_blobs_value(&value);
+            }
+        }
+        Vec::new()
+    }
+
     pub(crate) fn mmap_slice(&self, offset: usize, len: usize) -> io::Result<&[u8]> {
         let mapped_offset = self
             .image_offset
@@ -336,5 +405,21 @@ impl ErofsReader {
     pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {
         (self.sb().meta_blkaddr() as u64 * EROFS_BLOCK_SIZE as u64 + nid * EROFS_SLOTSIZE as u64)
             as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_prefetch_blobs_value;
+
+    #[test]
+    fn parse_prefetch_blobs_value_keeps_order_and_skips_invalid_tokens() {
+        assert_eq!(parse_prefetch_blobs_value(b"2,5,1"), vec![2, 5, 1]);
+        assert_eq!(
+            parse_prefetch_blobs_value(b" 3 , ,4, 0 ,x,7"),
+            vec![3, 4, 7]
+        );
+        assert_eq!(parse_prefetch_blobs_value(b""), Vec::<u16>::new());
+        assert_eq!(parse_prefetch_blobs_value(b"0,0"), Vec::<u16>::new());
     }
 }

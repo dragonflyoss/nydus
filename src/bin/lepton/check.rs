@@ -3,6 +3,7 @@ use clap::Args;
 use lepton::build::inode::mode_to_file_type;
 use lepton::fs::{DeviceInfo, ErofsReader};
 use lepton::metadata::*;
+use lepton::storage::config::StorageConfig;
 use lepton::utils::{hex_string, sha256_bytes};
 use memmap2::Mmap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -22,6 +23,11 @@ pub struct CheckArgs {
     /// Optional directory containing external blob files referenced by bootstrap.
     #[arg(long)]
     pub blob_dir: Option<PathBuf>,
+
+    /// File path to a YAML storage config providing the backend directory.
+    /// When set, --blob-dir can be omitted.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -119,6 +125,7 @@ struct BlobInspection {
 #[derive(Clone)]
 struct BlobMetaSummary {
     chunk_count: usize,
+    group_count: usize,
     chunk_size: u32,
     digester: BlobMetaDigester,
     compressor: BlobMetaCompressor,
@@ -144,7 +151,20 @@ impl SlotSha256Kind {
 }
 
 pub fn run_check(args: CheckArgs) -> Result<()> {
-    let (kind, path) = match (&args.blob, &args.bootstrap, &args.blob_dir) {
+    // CLI --blob-dir takes precedence over the config's backend directory.
+    let blob_dir = match &args.blob_dir {
+        Some(dir) => Some(dir.clone()),
+        None => match &args.config {
+            Some(path) => {
+                let config =
+                    StorageConfig::from_file(path).context("failed to load storage config")?;
+                Some(config.backend_dir().to_path_buf())
+            }
+            None => None,
+        },
+    };
+
+    let (kind, path) = match (&args.blob, &args.bootstrap, &blob_dir) {
         (Some(blob), None, None) => (ImageKind::Blob, blob.as_path()),
         (None, Some(bootstrap), None) => (ImageKind::Bootstrap, bootstrap.as_path()),
         (None, Some(bootstrap), Some(blob_dir)) if blob_dir.is_dir() => {
@@ -154,7 +174,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
             bail!("blob-dir {} is not a directory", blob_dir.display())
         }
         _ => {
-            bail!("check expects either --blob <path> or --bootstrap <path> [--blob-dir <dir>]")
+            bail!("check expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-dir or --config")
         }
     };
 
@@ -168,7 +188,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     let device_infos = reader
         .device_infos()
         .context("failed to read device slots")?;
-    let resolved_blobs = resolve_blobs(kind, path, args.blob_dir.as_deref(), &device_infos)?;
+    let resolved_blobs = resolve_blobs(kind, path, blob_dir.as_deref(), &device_infos)?;
     let mut blobs = device_infos
         .iter()
         .map(|device| {
@@ -447,6 +467,7 @@ fn blobmeta_summary_from_bytes(data: &[u8]) -> Result<BlobMetaSummary> {
     let blobmeta = BlobMeta::from_bytes_with_blob_id(data, [0u8; EROFS_BLOB_ID_SIZE])?;
     Ok(BlobMetaSummary {
         chunk_count: blobmeta.chunk_count(),
+        group_count: blobmeta.group_count(),
         chunk_size: blobmeta.chunk_size(),
         digester: blobmeta.digester(),
         compressor: blobmeta.compressor(),
@@ -594,6 +615,10 @@ fn print_blob_info(index: usize, device_id: u16, blob: &BlobSummary) {
     println!(
         "    chunk_count: {}",
         blobmeta_field(blob, |meta| meta.chunk_count)
+    );
+    println!(
+        "    group_count: {}",
+        blobmeta_field(blob, |meta| meta.group_count)
     );
     println!(
         "    chunk_digester: {}",

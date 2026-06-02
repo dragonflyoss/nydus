@@ -2,6 +2,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 use fuser::{Config, MountOption, Session};
 use lepton::fs::{ErofsFs, ErofsReader};
+use lepton::storage::config::StorageConfig;
+use lepton::storage::prefetch::{BlobPrefetcher, DEFAULT_PREFETCH_THREADS};
 use lepton::tracing::init_tracing;
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use std::fs;
@@ -12,7 +14,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::available_parallelism;
 use std::time::Duration;
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 
 struct TermSignalMask {
     mask: libc::sigset_t,
@@ -106,6 +108,11 @@ pub struct FuseArgs {
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
 
+    /// File path to a YAML storage config providing backend/cache directories
+    /// and prefetch options. When set, --blob-dir and --cache-dir can be omitted.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+
     /// File path to lepton bootstrap.
     #[arg(long)]
     pub bootstrap: Option<PathBuf>,
@@ -183,17 +190,41 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
         bail!("mountpoint {} is not a directory", mountpoint.display());
     }
 
-    match (&args.blob, &args.bootstrap, &args.blob_dir) {
+    // Load the optional storage config. CLI flags take precedence over config
+    // values, so --blob-dir/--cache-dir override the backend/cache directories.
+    let storage_config = match &args.config {
+        Some(path) => {
+            Some(StorageConfig::from_file(path).context("failed to load storage config")?)
+        }
+        None => None,
+    };
+
+    let blob_dir = args.blob_dir.clone().or_else(|| {
+        storage_config
+            .as_ref()
+            .map(|c| c.backend_dir().to_path_buf())
+    });
+    let cache_dir = args
+        .cache_dir
+        .clone()
+        .or_else(|| storage_config.as_ref().map(|c| c.cache_dir().to_path_buf()));
+
+    let (prefetch_enable, prefetch_threads) = match storage_config.as_ref() {
+        Some(config) => (config.prefetch.enable, config.prefetch.threads),
+        None => (true, DEFAULT_PREFETCH_THREADS),
+    };
+
+    match (&args.blob, &args.bootstrap, &blob_dir) {
         (Some(_), None, None) => {}
-        (None, Some(_), Some(blob_dir)) if blob_dir.is_dir() => {}
-        (None, Some(_), Some(blob_dir)) => {
-            bail!("blob-dir {} is not a directory", blob_dir.display())
+        (None, Some(_), Some(dir)) if dir.is_dir() => {}
+        (None, Some(_), Some(dir)) => {
+            bail!("blob-dir {} is not a directory", dir.display())
         }
         _ => {
-            bail!("fuse expects either --blob <path> or --bootstrap <path> --blob-dir <dir>")
+            bail!("fuse expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-dir or --config")
         }
     }
-    if let Some(cache_dir) = &args.cache_dir {
+    if let Some(cache_dir) = &cache_dir {
         if cache_dir.exists() && !cache_dir.is_dir() {
             bail!("cache-dir {} is not a directory", cache_dir.display());
         }
@@ -202,12 +233,13 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     let reader = ErofsReader::open(
         args.blob.as_deref(),
         args.bootstrap.as_deref(),
-        args.blob_dir.as_deref(),
-        args.cache_dir.as_deref(),
+        blob_dir.as_deref(),
+        cache_dir.as_deref(),
     )
     .context("failed to open EROFS image")?;
 
-    let fs = ErofsFs::new(Arc::new(reader));
+    let reader = Arc::new(reader);
+    let fs = ErofsFs::new(reader.clone());
     let mut config = Config::default();
     config.mount_options = vec![
         MountOption::RO,
@@ -222,6 +254,18 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     let bg = session
         .spawn()
         .map_err(|e| anyhow!("spawn failed: {}", e))?;
+
+    if prefetch_enable {
+        match BlobPrefetcher::new(reader.clone(), prefetch_threads).spawn() {
+            Ok(_handle) => info!(
+                "started blob prefetch with {} worker threads",
+                prefetch_threads
+            ),
+            Err(err) => warn!("failed to start blob prefetch: {}", err),
+        }
+    } else {
+        info!("blob prefetch disabled by config");
+    }
 
     let wait_signals = TermSignalMask::new()?;
     let signal_mountpoint = mountpoint.to_path_buf();

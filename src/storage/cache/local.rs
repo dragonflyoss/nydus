@@ -5,18 +5,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-use crate::metadata::{BlobMeta, BlobMetaChunk, EROFS_BLOB_ID_SIZE};
+use crate::metadata::{BlobMeta, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE};
 use crate::storage::backend::BlobBackend;
-use crate::storage::chunkmap::ChunkMap;
+use crate::storage::groupmap::GroupMap;
 use crate::utils::hex_string;
 
 use super::{
-    chunks_for_range, fetch_decode_validate_into, range_in_chunk, BlobCache, BlobCacheBuffers,
+    chunks_for_range, decode_group_from_window, fetch_decode_validate_group_into,
+    plan_prefetch_batches, range_in_chunk, BlobCache, BlobCacheBuffers,
 };
 
 pub struct LocalBlobCache {
     blob_id: [u8; EROFS_BLOB_ID_SIZE],
-    chunkmap: ChunkMap,
+    groupmap: GroupMap,
     blob_meta: BlobMeta,
     cache_blob_path: PathBuf,
     cache_file: Mutex<Option<Arc<File>>>,
@@ -40,12 +41,12 @@ impl LocalBlobCache {
 
         let cache_blob_path = cache_dir.join(format!("{}.blob.data", cache_key_hex));
 
-        let chunkmap_path = cache_dir.join(format!("{}.chunkmap", cache_key_hex));
-        let chunkmap = ChunkMap::open(&chunkmap_path, blob_meta.chunk_count())?;
+        let groupmap_path = cache_dir.join(format!("{}.groupmap", cache_key_hex));
+        let groupmap = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
 
         Ok(Self {
             blob_id,
-            chunkmap,
+            groupmap,
             blob_meta,
             cache_blob_path,
             cache_file: Mutex::new(None),
@@ -74,35 +75,96 @@ impl LocalBlobCache {
         Ok(file)
     }
 
-    fn ensure_chunk(
+    fn ensure_group(
         &self,
-        chunk_index: usize,
-        chunk: &BlobMetaChunk,
+        group_index: usize,
+        group: &BlobMetaGroup,
         cache_file: &File,
     ) -> io::Result<()> {
-        if self.chunkmap.is_ready(chunk_index)? {
+        if self.groupmap.is_ready(group_index)? {
             return Ok(());
         }
 
         let _guard = self.fetch_lock.lock().unwrap();
-        if self.chunkmap.is_ready(chunk_index)? {
+        if self.groupmap.is_ready(group_index)? {
             return Ok(());
         }
 
         let mut buffers = self.buffers.lock().unwrap();
-        let decoded = fetch_decode_validate_into(
+        let decoded = fetch_decode_validate_group_into(
             &self.blob_id,
             &self.blob_meta,
             &self.backend,
-            chunk,
+            group,
             &mut buffers,
         )?;
-        write_all_at(cache_file, chunk.uncompressed_byte_offset(), decoded)?;
-        self.chunkmap.set_ready(chunk_index)
+        write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
+        self.groupmap.set_ready(group_index)
     }
 }
 
 impl BlobCache for LocalBlobCache {
+    fn prefetch_all(&self) -> io::Result<()> {
+        let groups = self.blob_meta.groups();
+        if groups.is_empty() {
+            return Ok(());
+        }
+
+        let cache_file = self.cache_file()?;
+        // Prefetch owns its decode buffers and does not take `fetch_lock`, so it
+        // never blocks on-demand FUSE reads. The groupmap is internally locked
+        // and `set_ready` is idempotent, so racing with a read at worst decodes
+        // the same group twice into identical bytes at the same cache offset.
+        let mut decoded = Vec::new();
+        let mut window = Vec::new();
+
+        for batch in plan_prefetch_batches(groups, BLOB_META_DEFAULT_CHUNK_SIZE as u64) {
+            if batch
+                .clone()
+                .map(|index| self.groupmap.is_ready(index))
+                .collect::<io::Result<Vec<_>>>()?
+                .into_iter()
+                .all(|ready| ready)
+            {
+                continue;
+            }
+
+            let window_base = groups[batch.start].compressed_byte_offset();
+            let window_end = groups[batch.end - 1].compressed_byte_end();
+            let window_len = usize::try_from(window_end - window_base).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "blob prefetch window size exceeds usize",
+                )
+            })?;
+            window.resize(window_len, 0);
+            self.backend
+                .read_range_into(&self.blob_id, window_base, &mut window)?;
+
+            for index in batch {
+                if self.groupmap.is_ready(index)? {
+                    continue;
+                }
+                let group = &groups[index];
+                decode_group_from_window(
+                    &self.blob_meta,
+                    group,
+                    window_base,
+                    &window,
+                    &mut decoded,
+                )?;
+                write_all_at(
+                    cache_file.as_ref(),
+                    group.uncompressed_byte_offset(),
+                    &decoded,
+                )?;
+                self.groupmap.set_ready(index)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn read_at(&self, offset: u64, dst: &mut [u8]) -> io::Result<()> {
         if dst.is_empty() {
             return Ok(());
@@ -114,12 +176,23 @@ impl BlobCache for LocalBlobCache {
         let mut dst_offset = 0usize;
 
         for (chunk_index, chunk) in chunks {
-            self.ensure_chunk(chunk_index, &chunk, cache_file.as_ref())?;
-            let (chunk_offset, to_read) =
-                range_in_chunk(&chunk, logical_offset, dst.len() - dst_offset);
+            let group_index = chunk.group_index() as usize;
+            let group = *self.blob_meta.group_at(group_index).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
+            })?;
+            self.ensure_group(group_index, &group, cache_file.as_ref())?;
+            let (chunk_offset, to_read) = range_in_chunk(
+                &self.blob_meta,
+                chunk_index,
+                &chunk,
+                logical_offset,
+                dst.len() - dst_offset,
+            );
             read_exact_at(
                 cache_file.as_ref(),
-                chunk.uncompressed_byte_offset() + chunk_offset as u64,
+                group.uncompressed_byte_offset()
+                    + chunk.group_uncompressed_byte_offset()
+                    + chunk_offset as u64,
                 &mut dst[dst_offset..dst_offset + to_read],
             )?;
             logical_offset += to_read as u64;
@@ -183,27 +256,28 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::metadata::{
-        BlobFooter, BlobMetaChunk, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
+        BlobFooter, BlobMetaChunk, BlobMetaGroup, ErofsSuperblock, EROFS_BLOCK_SIZE,
+        EROFS_SUPER_OFFSET,
     };
     use crate::storage::backend::LocalBackend;
     use crate::utils::sha256_bytes;
     use std::io::Write;
     use tempfile::tempdir;
 
-    fn blobmeta_chunk(
-        uncompressed_block_offset: u64,
-        uncompressed_block_count: u32,
-        compressed_offset: u64,
-        compressed_size: u32,
+    fn blobmeta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
+        blobmeta_with_crc32(blob_id, payload, crc32c::crc32c(payload))
+    }
+
+    fn blobmeta_with_crc32(
+        blob_id: [u8; EROFS_BLOB_ID_SIZE],
         payload: &[u8],
-    ) -> BlobMetaChunk {
-        BlobMetaChunk::new(
-            uncompressed_block_offset,
-            uncompressed_block_count,
-            compressed_offset,
-            compressed_size,
-            *blake3::hash(payload).as_bytes(),
-            crc32c::crc32c(payload),
+        crc32: u32,
+    ) -> BlobMeta {
+        BlobMeta::from_parts(
+            blob_id,
+            1,
+            vec![BlobMetaGroup::new(0, 1, 0, 4096, crc32).unwrap()],
+            vec![BlobMetaChunk::new(*blake3::hash(payload).as_bytes(), 0, 0, 1).unwrap()],
         )
         .unwrap()
     }
@@ -216,7 +290,7 @@ mod tests {
         let blob_id = sha256_bytes(&payload);
         let blob_path = backend_dir.path().join(hex_string(&blob_id));
         fs::write(&blob_path, &payload).unwrap();
-        BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 1, 0, 4096, &payload)])
+        blobmeta(blob_id, &payload)
             .save(
                 &backend_dir
                     .path()
@@ -232,7 +306,7 @@ mod tests {
         cached.read_at(512, &mut buf).unwrap();
 
         assert_eq!(buf, payload[512..1536]);
-        assert!(cached.chunkmap.is_ready(0).unwrap());
+        assert!(cached.groupmap.is_ready(0).unwrap());
     }
 
     #[test]
@@ -246,9 +320,7 @@ mod tests {
             .path()
             .join(format!("{}.blob.meta", hex_string(&blob_id)));
         fs::write(&blob_path, &payload).unwrap();
-        BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 1, 0, 4096, &payload)])
-            .save(&blob_meta_path)
-            .unwrap();
+        blobmeta(blob_id, &payload).save(&blob_meta_path).unwrap();
         let mut raw = fs::read(&blob_meta_path).unwrap();
         raw[8] ^= 0xff;
         fs::write(&blob_meta_path, raw).unwrap();
@@ -276,16 +348,7 @@ mod tests {
         let blob_id = sha256_bytes(&payload);
         let blob_path = backend_dir.path().join(hex_string(&blob_id));
         fs::write(&blob_path, &payload).unwrap();
-        let chunk = BlobMetaChunk::new(
-            0,
-            1,
-            0,
-            4096,
-            *blake3::hash(&payload).as_bytes(),
-            crc32c::crc32c(&payload).wrapping_add(1),
-        )
-        .unwrap();
-        BlobMeta::from_chunks(blob_id, vec![chunk])
+        blobmeta_with_crc32(blob_id, &payload, crc32c::crc32c(&payload).wrapping_add(1))
             .save(
                 &backend_dir
                     .path()
@@ -302,7 +365,7 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("crc32"));
-        assert!(!cached.chunkmap.is_ready(0).unwrap());
+        assert!(!cached.groupmap.is_ready(0).unwrap());
     }
 
     #[test]
@@ -317,8 +380,7 @@ mod tests {
         let sb_end = sb_start + sb.as_bytes().len();
         bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
 
-        let blob_meta =
-            BlobMeta::from_chunks(blob_id, vec![blobmeta_chunk(0, 1, 0, 4096, &payload)]);
+        let blob_meta = blobmeta(blob_id, &payload);
         let footer = BlobFooter::new(
             0,
             payload.len() as u64,
@@ -350,7 +412,7 @@ mod tests {
         cached.read_at(256, &mut buf).unwrap();
 
         assert_eq!(buf, payload[256..768]);
-        assert!(cached.chunkmap.is_ready(0).unwrap());
+        assert!(cached.groupmap.is_ready(0).unwrap());
         assert!(cache_dir
             .path()
             .join(format!("{}.blob.data", hex_string(&full_blob_id)))
@@ -361,7 +423,7 @@ mod tests {
             .is_file());
         assert!(cache_dir
             .path()
-            .join(format!("{}.chunkmap", hex_string(&full_blob_id)))
+            .join(format!("{}.groupmap", hex_string(&full_blob_id)))
             .is_file());
         assert!(!cache_dir
             .path()

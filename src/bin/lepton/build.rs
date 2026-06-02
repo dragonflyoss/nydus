@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 use lepton::build::blob_chunk::BlobWriter;
 use lepton::build::bootstrap::render_bootstrap;
-use lepton::build::inode::build_tree;
+use lepton::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
 use lepton::metadata::*;
 use lepton::tracing::init_command_tracing;
 use lepton::utils::hex_string;
@@ -144,6 +144,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         blob_writer.total_blocks(),
         &blob_id,
     )];
+    set_root_prefetch_blobs_xattr(&mut inodes, &[1])?;
     let bootstrap_bytes =
         render_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
 
@@ -338,6 +339,7 @@ fn print_blob_summary(summary: BlobSummary<'_>) {
     println!("    full_blob_digest: {}", hex_string(full_blob_digest));
     println!("    chunk_size: {}", blob_meta.chunk_size());
     println!("    chunk_count: {}", blob_meta.chunk_count());
+    println!("    group_count: {}", blob_meta.group_count());
     println!("    chunk_digester: {}", blob_meta.digester());
     println!("    chunk_compressor: {}", blob_meta.compressor());
     println!(

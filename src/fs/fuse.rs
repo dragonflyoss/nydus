@@ -154,6 +154,10 @@ fn erofs_ft_to_kind(ft: u8) -> FileType {
     }
 }
 
+fn should_hide_xattr(ino: u64, name: &[u8]) -> bool {
+    ino == FUSE_ROOT_ID && is_lepton_internal_xattr(name)
+}
+
 impl Filesystem for ErofsFs {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let target = name.as_bytes();
@@ -410,6 +414,10 @@ impl Filesystem for ErofsFs {
             }
         };
         let name_bytes = name.as_bytes();
+        if should_hide_xattr(ino.0, name_bytes) {
+            reply.error(Errno::ENODATA);
+            return;
+        }
 
         let xattrs = match self.reader.read_xattrs(nid, &vi) {
             Ok(x) => x,
@@ -456,6 +464,9 @@ impl Filesystem for ErofsFs {
         // Build null-separated list of xattr names
         let mut names_buf: Vec<u8> = Vec::new();
         for (xname, _) in &xattrs {
+            if should_hide_xattr(ino.0, xname) {
+                continue;
+            }
             names_buf.extend_from_slice(xname);
             names_buf.push(0);
         }
