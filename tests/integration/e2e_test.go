@@ -952,7 +952,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 
 	var dataCount int
 	var groupmapCount int
-	var blobmetaCount int
+	var blobMetaCount int
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -965,14 +965,14 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 		case strings.HasSuffix(name, ".groupmap"):
 			groupmapCount++
 		case strings.HasSuffix(name, ".blob.meta"):
-			blobmetaCount++
+			blobMetaCount++
 		}
 	}
 
 	blobCount := len(blobs)
 	assert.Equal(t, blobCount, dataCount, "unexpected cached blob.data count")
 	assert.Equal(t, blobCount, groupmapCount, "unexpected cached groupmap count")
-	assert.Equal(t, blobCount, blobmetaCount, "unexpected cached blobmeta count")
+	assert.Equal(t, blobCount, blobMetaCount, "unexpected cached blob_meta count")
 
 	for _, blob := range blobs {
 		prefix := fullBlobDigest(t, blob)

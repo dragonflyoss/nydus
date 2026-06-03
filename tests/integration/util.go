@@ -335,7 +335,7 @@ func buildLeptonFSImageToDir(t *testing.T, leptonBin, imagePath, blobDir, srcDir
 
 	after := listFilesInDir(t, blobDir)
 	var blobs []string
-	var blobmetas []string
+	var blobMetas []string
 	var unexpected []string
 	for path := range after {
 		if _, existed := before[path]; existed {
@@ -347,14 +347,14 @@ func buildLeptonFSImageToDir(t *testing.T, leptonBin, imagePath, blobDir, srcDir
 		case sha256FilenamePattern.MatchString(base):
 			blobs = append(blobs, path)
 		case blobMetaFilenamePattern.MatchString(base):
-			blobmetas = append(blobmetas, path)
+			blobMetas = append(blobMetas, path)
 		default:
 			unexpected = append(unexpected, path)
 		}
 	}
 	require.Empty(t, unexpected, "unexpected files created in blob-dir: %v", unexpected)
 	require.Len(t, blobs, 1, "expected exactly one new blob in blob-dir")
-	require.Len(t, blobmetas, 1, "expected exactly one new blobmeta in blob-dir")
+	require.Len(t, blobMetas, 1, "expected exactly one new blob_meta in blob-dir")
 	require.True(t, sha256FilenamePattern.MatchString(filepath.Base(blobs[0])), "blob file name must be sha256: %s", blobs[0])
 	return blobs[0]
 }

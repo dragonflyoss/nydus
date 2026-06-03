@@ -459,20 +459,20 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
         data_size: footer.compressed_data_size(),
         blob_sha256,
         blob_size: mmap.len() as u64,
-        blob_meta: Some(blobmeta_summary_from_bytes(&mmap[meta_start..meta_end])?),
+        blob_meta: Some(blob_meta_summary_from_bytes(&mmap[meta_start..meta_end])?),
     }))
 }
 
-fn blobmeta_summary_from_bytes(data: &[u8]) -> Result<BlobMetaSummary> {
-    let blobmeta = BlobMeta::from_bytes_with_blob_id(data, [0u8; EROFS_BLOB_ID_SIZE])?;
+fn blob_meta_summary_from_bytes(data: &[u8]) -> Result<BlobMetaSummary> {
+    let blob_meta = BlobMeta::from_bytes_with_blob_id(data, [0u8; EROFS_BLOB_ID_SIZE])?;
     Ok(BlobMetaSummary {
-        chunk_count: blobmeta.chunk_count(),
-        group_count: blobmeta.group_count(),
-        chunk_size: blobmeta.chunk_size(),
-        digester: blobmeta.digester(),
-        compressor: blobmeta.compressor(),
-        total_uncompressed_size: blobmeta.total_uncompressed_size(),
-        total_compressed_size: blobmeta.total_compressed_size(),
+        chunk_count: blob_meta.chunk_count(),
+        group_count: blob_meta.group_count(),
+        chunk_size: blob_meta.chunk_size(),
+        digester: blob_meta.digester(),
+        compressor: blob_meta.compressor(),
+        total_uncompressed_size: blob_meta.total_uncompressed_size(),
+        total_compressed_size: blob_meta.total_compressed_size(),
     })
 }
 
@@ -610,31 +610,31 @@ fn print_blob_info(index: usize, device_id: u16, blob: &BlobSummary) {
     );
     println!(
         "    chunk_size: {}",
-        blobmeta_field(blob, |meta| meta.chunk_size)
+        blob_meta_field(blob, |meta| meta.chunk_size)
     );
     println!(
         "    chunk_count: {}",
-        blobmeta_field(blob, |meta| meta.chunk_count)
+        blob_meta_field(blob, |meta| meta.chunk_count)
     );
     println!(
         "    group_count: {}",
-        blobmeta_field(blob, |meta| meta.group_count)
+        blob_meta_field(blob, |meta| meta.group_count)
     );
     println!(
         "    chunk_digester: {}",
-        blobmeta_field(blob, |meta| meta.digester)
+        blob_meta_field(blob, |meta| meta.digester)
     );
     println!(
         "    chunk_compressor: {}",
-        blobmeta_field(blob, |meta| meta.compressor)
+        blob_meta_field(blob, |meta| meta.compressor)
     );
     println!(
         "    blob_compressed_size: {}",
-        blobmeta_field_or(blob, |meta| meta.total_compressed_size, blob.data_size)
+        blob_meta_field_or(blob, |meta| meta.total_compressed_size, blob.data_size)
     );
     println!(
         "    blob_uncompressed_size: {}",
-        blobmeta_field_or(
+        blob_meta_field_or(
             blob,
             |meta| meta.total_uncompressed_size,
             Some(blob.declared_data_size),
@@ -669,7 +669,7 @@ fn digest_or_unknown(digest: &[u8; EROFS_BLOB_ID_SIZE]) -> String {
     }
 }
 
-fn blobmeta_field<T: ToString>(
+fn blob_meta_field<T: ToString>(
     blob: &BlobSummary,
     field: impl FnOnce(&BlobMetaSummary) -> T,
 ) -> String {
@@ -679,7 +679,7 @@ fn blobmeta_field<T: ToString>(
         .unwrap_or_else(|| "<unresolved>".to_string())
 }
 
-fn blobmeta_field_or<T: ToString>(
+fn blob_meta_field_or<T: ToString>(
     blob: &BlobSummary,
     field: impl FnOnce(&BlobMetaSummary) -> T,
     fallback: Option<T>,

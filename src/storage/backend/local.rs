@@ -225,7 +225,7 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
-    fn blobmeta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
+    fn blob_meta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
         BlobMeta::from_parts(
             blob_id,
             1,
@@ -245,7 +245,7 @@ mod tests {
             .path()
             .join(format!("{}.blob.meta", hex_string(&blob_id)));
         fs::write(&blob_path, &payload).unwrap();
-        blobmeta(blob_id, &payload).save(&blob_meta_path).unwrap();
+        blob_meta(blob_id, &payload).save(&blob_meta_path).unwrap();
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
@@ -266,7 +266,7 @@ mod tests {
         let sb_start = EROFS_SUPER_OFFSET as usize;
         let sb_end = sb_start + sb.as_bytes().len();
         bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
-        let blob_meta = blobmeta(blob_id, &payload);
+        let blob_meta = blob_meta(blob_id, &payload);
         let footer = BlobFooter::new(
             0,
             payload.len() as u64,

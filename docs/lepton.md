@@ -4,7 +4,7 @@
 
 This document describes the current lepton artifact model, blob meta format and
 runtime read path. Lepton no longer preserves compatibility with the original
-split `image + --blobdev` prototype, the old blobmeta header layout, or the old
+split `image + --blobdev` prototype, the old blob_meta header layout, or the old
 data-digest sidecar naming convention.
 
 The user-facing commands are:
@@ -25,14 +25,14 @@ external-device addresses to encoded ranges in the stored data region.
 - Allow an optional standalone `bootstrap` artifact for remote metadata-only use.
 - Make `fuse` support either a direct blob path or a bootstrap plus blob-dir.
 - Persist a stable blob identifier inside bootstrap metadata.
-- Keep EROFS file chunk indexes logical and map them through blobmeta chunks.
+- Keep EROFS file chunk indexes logical and map them through blob_meta chunks.
 - Support compressed blob data while preserving a plain decoded cache artifact
 	for EROFS compatibility and repeated reads.
 
 ## Non-goals
 
 - Preserve backward compatibility with the old `image + --blobdev` CLI.
-- Preserve compatibility with old blobmeta headers or sidecar names.
+- Preserve compatibility with old blob_meta headers or sidecar names.
 - Implement all merge semantics in the first migration slice.
 - Introduce cross-layer global deduplication beyond the current single-build dedup.
 - Rework the full EROFS on-disk layout to match every upstream variant before the
@@ -88,15 +88,15 @@ Current implementation notes:
 - `--bootstrap` is optional and emits a standalone metadata-only artifact.
 - `--chunk-size` defaults to `1048576` (1 MiB) and controls EROFS file chunk
 	indexes. Blobmeta compression groups are at least 1 MiB, so smaller file
-	chunks do not fragment blobmeta into tiny compression units.
+	chunks do not fragment blob_meta into tiny compression units.
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
 - `--blob-dir` stores the full blob under `<blob-dir>/<full_blob_sha256>` and a
 	standalone blob meta copy under `<blob-dir>/<full_blob_sha256>.blob.meta`.
-- `--compressor zstd` attempts to compress each blobmeta group as one
+- `--compressor zstd` attempts to compress each blob_meta group as one
 	unit. If the compressed bytes are larger than 70% of the uncompressed group,
-	the group is stored plain and its blobmeta group record has
+	the group is stored plain and its blob_meta group record has
 	`compressed_size == uncompressed_block_count * 4096`.
 - `--compressor none` writes every group plain.
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
@@ -173,7 +173,7 @@ Current implementation notes:
 - `--config` supplies the blob directory through the storage config's
 	`backend.config.dir`; an explicit `--blob-dir` takes precedence when both are
 	given. See [Storage config](#storage-config).
-- Blob entries report `data_blob_digest`, `full_blob_digest`, blobmeta
+- Blob entries report `data_blob_digest`, `full_blob_digest`, blob_meta
 	`chunk_size`, `chunk_count`, `group_count`, `chunk_digester`,
 	`chunk_compressor`, and compressed/uncompressed totals when the referenced
 	blob can be resolved.
@@ -235,7 +235,7 @@ Supported forms:
 
 The fuse command rejects mixed or partial combinations outside these forms.
 `--cache-dir` is optional; without it (and without a cache directory from
-`--config`), runtime fetches and validates requested blobmeta groups using a
+`--config`), runtime fetches and validates requested blob_meta groups using a
 temporary cache directory that is removed on exit. When `--config` is provided,
 `backend.config.dir` supplies the blob directory and `cache.config.dir` supplies
 the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
@@ -448,7 +448,7 @@ first logical external data block starts at offset 0
 	blkaddr = 0
 	logical byte offset = 0 * 4096
 
-blobmeta then maps that logical byte offset to a compressed range in the full
+blob_meta then maps that logical byte offset to a compressed range in the full
 blob's data region, for example compressed_block_offset = 0 for the first
 encoded group.
 ```
@@ -483,7 +483,7 @@ indexes point into the logical uncompressed external-device address space; blob
 meta maps those chunk offsets to decoded group offsets and maps each group to an
 encoded range in the full blob data region.
 
-Current blobmeta on-disk shape:
+Current blob_meta on-disk shape:
 
 ```text
 embedded blob meta region
@@ -585,11 +585,11 @@ The build pipeline now follows this sequence:
 1. Walk the source directory and build the in-memory inode tree.
 2. Assign dense file chunk indexes into a logical uncompressed external-device
 	address space. Each EROFS chunk advances by the fixed EROFS chunk size.
-3. Record one blobmeta chunk entry for each EROFS chunk and group the decoded
+3. Record one blob_meta chunk entry for each EROFS chunk and group the decoded
 	data stream into compression groups, normally 1 MiB each.
 4. Compute BLAKE3 digest over each uncompressed chunk and CRC32C over each
 	uncompressed group.
-5. Compress each group according to the blobmeta header compressor and append
+5. Compress each group according to the blob_meta header compressor and append
 	the encoded bytes directly to the beginning of the full blob file. Encoded
 	groups are padded to 4 KiB. For zstd, groups that do not shrink to at most 70%
 	of their uncompressed size are stored plain and marked by
@@ -613,7 +613,7 @@ buffer, then the fixed footer. The build path does not seek within the full blob
 output.
 
 This layout is intentionally footer-based. A header-based variant would need to
-reserve a header at byte 0 and backpatch it after bootstrap/blobmeta offsets are
+reserve a header at byte 0 and backpatch it after bootstrap/blob_meta offsets are
 known. That is possible with `pwrite`, but a normal SHA256 stream cannot revise
 bytes that were already fed into the hasher. A header design would therefore
 need a second pass over the completed file, a precomputed header, a digest that
@@ -655,7 +655,7 @@ When mounting with `--bootstrap + --blob-dir`:
 	the requested chunk slices to FUSE.
 
 The runtime no longer reads external blob data by direct mmap offsets. External
-blob reads always go through the blobmeta-aware cache abstraction.
+blob reads always go through the blob_meta-aware cache abstraction.
 
 The local backend opens source blob files lazily when read IO is first issued and
 caches the file descriptor for later `pread` calls. The persistent local cache
@@ -666,7 +666,7 @@ blob digest:
 - `<full_blob_digest>.blob.data` stores decoded uncompressed data.
 - `<full_blob_digest>.blob.meta` stores the verified blob meta copy cached from
 	the local backend.
-- `<full_blob_digest>.groupmap` records which blobmeta groups have been decoded.
+- `<full_blob_digest>.groupmap` records which blob_meta groups have been decoded.
 
 ### Blob prefetch
 
@@ -723,7 +723,7 @@ These rules belong in the merge metadata layer, not in build and not in mount.
 ## Compatibility Notes
 
 Lepton's current format is intentionally self-consistent rather than backward
-compatible. In particular, it does not support the old CLI shape, old blobmeta
+compatible. In particular, it does not support the old CLI shape, old blob_meta
 header fields, or data-digest sidecar lookup.
 
 EROFS compatibility is handled by exposing decoded cache data when running
@@ -735,7 +735,7 @@ artifacts and are not directly consumable as plain EROFS external devices.
 The current validation surface is:
 
 1. Rust compile checks for CLI, build, metadata, storage and mount wiring.
-2. Unit coverage for blobmeta parsing, blob-id/device-slot helpers, local backend
+2. Unit coverage for blob_meta parsing, blob-id/device-slot helpers, local backend
 	lookup, cache validation, and build-time compression decisions.
 3. Integration tests for build full blob, build standalone bootstrap, direct
 	blob mount, bootstrap plus blob-dir mount, cache artifact naming, merge, OCI

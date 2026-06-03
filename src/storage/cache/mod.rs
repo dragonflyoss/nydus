@@ -46,7 +46,7 @@ pub(crate) fn plan_prefetch_batches(
 /// bytes that starts at blob offset `window_base_offset`, writing the validated
 /// uncompressed bytes into `decoded`.
 pub(crate) fn decode_group_from_window(
-    blobmeta: &BlobMeta,
+    blob_meta: &BlobMeta,
     group: &BlobMetaGroup,
     window_base_offset: u64,
     window_bytes: &[u8],
@@ -80,7 +80,7 @@ pub(crate) fn decode_group_from_window(
     })?;
 
     decoded.clear();
-    if is_stored_plain_group(blobmeta, group) {
+    if is_stored_plain_group(blob_meta, group) {
         decoded.extend_from_slice(encoded);
     } else {
         decoded.reserve(decoded_len);
@@ -98,18 +98,18 @@ pub(crate) struct BlobCacheBuffers {
 }
 
 pub(crate) fn chunks_for_range(
-    blobmeta: &BlobMeta,
+    blob_meta: &BlobMeta,
     offset: u64,
     len: usize,
 ) -> io::Result<Vec<(usize, BlobMetaChunk)>> {
-    blobmeta
+    blob_meta
         .chunks_for_uncompressed_byte_range(offset, len)
         .map_err(|err| io::Error::new(io::ErrorKind::NotFound, err))
 }
 
 pub(crate) fn fetch_decode_validate_group_into<'a>(
     blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-    blobmeta: &BlobMeta,
+    blob_meta: &BlobMeta,
     backend: &Arc<dyn BlobBackend>,
     group: &BlobMetaGroup,
     buffers: &'a mut BlobCacheBuffers,
@@ -120,7 +120,7 @@ pub(crate) fn fetch_decode_validate_group_into<'a>(
             "blob meta group uncompressed size exceeds usize",
         )
     })?;
-    if is_stored_plain_group(blobmeta, group) {
+    if is_stored_plain_group(blob_meta, group) {
         buffers.decoded.resize(decoded_len, 0);
         backend.read_range_into(
             blob_id,
@@ -147,8 +147,8 @@ pub(crate) fn fetch_decode_validate_group_into<'a>(
     Ok(&buffers.decoded)
 }
 
-fn is_stored_plain_group(blobmeta: &BlobMeta, group: &BlobMetaGroup) -> bool {
-    blobmeta.compressor() == BlobMetaCompressor::None
+fn is_stored_plain_group(blob_meta: &BlobMeta, group: &BlobMetaGroup) -> bool {
+    blob_meta.compressor() == BlobMetaCompressor::None
         || u64::from(group.compressed_size()) == group.uncompressed_byte_size()
 }
 
@@ -177,13 +177,13 @@ pub(crate) fn validate_decoded_group(group: &BlobMetaGroup, decoded: &[u8]) -> i
 }
 
 pub(crate) fn range_in_chunk(
-    blobmeta: &BlobMeta,
+    blob_meta: &BlobMeta,
     chunk_index: usize,
     chunk: &BlobMetaChunk,
     logical_offset: u64,
     dst_remaining: usize,
 ) -> (usize, usize) {
-    let chunk_offset = (logical_offset - blobmeta.chunk_logical_byte_offset(chunk_index)) as usize;
+    let chunk_offset = (logical_offset - blob_meta.chunk_logical_byte_offset(chunk_index)) as usize;
     let available = chunk.uncompressed_byte_size() as usize - chunk_offset;
     (chunk_offset, available.min(dst_remaining))
 }

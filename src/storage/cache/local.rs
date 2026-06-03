@@ -36,8 +36,8 @@ impl LocalBlobCache {
 
         let cache_key = backend.cache_key(&blob_id)?;
         let cache_key_hex = hex_string(&cache_key);
-        let blobmeta_path = cache_dir.join(format!("{}.blob.meta", cache_key_hex));
-        let blob_meta = load_cached_blob_meta(blob_id, cache_dir, &blobmeta_path, &backend)?;
+        let blob_meta_path = cache_dir.join(format!("{}.blob.meta", cache_key_hex));
+        let blob_meta = load_cached_blob_meta(blob_id, cache_dir, &blob_meta_path, &backend)?;
 
         let cache_blob_path = cache_dir.join(format!("{}.blob.data", cache_key_hex));
 
@@ -206,20 +206,20 @@ impl BlobCache for LocalBlobCache {
 fn load_cached_blob_meta(
     blob_id: [u8; EROFS_BLOB_ID_SIZE],
     cache_dir: &Path,
-    blobmeta_path: &Path,
+    blob_meta_path: &Path,
     backend: &Arc<dyn BlobBackend>,
 ) -> io::Result<BlobMeta> {
-    if !blobmeta_path.is_file() {
+    if !blob_meta_path.is_file() {
         let tmp_path = cache_dir.join(format!(".blob-meta-{}.tmp", Uuid::new_v4()));
         backend.download_blob_meta(&blob_id, &tmp_path)?;
         if let Err(err) = BlobMeta::load_checked_crc32_with_blob_id(&tmp_path, blob_id) {
             let _ = fs::remove_file(&tmp_path);
             return Err(io::Error::other(err));
         }
-        fs::rename(&tmp_path, blobmeta_path)?;
+        fs::rename(&tmp_path, blob_meta_path)?;
     }
 
-    BlobMeta::load_checked_crc32_with_blob_id(blobmeta_path, blob_id).map_err(io::Error::other)
+    BlobMeta::load_checked_crc32_with_blob_id(blob_meta_path, blob_id).map_err(io::Error::other)
 }
 
 fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
@@ -264,11 +264,11 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
-    fn blobmeta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
-        blobmeta_with_crc32(blob_id, payload, crc32c::crc32c(payload))
+    fn blob_meta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
+        blob_meta_with_crc32(blob_id, payload, crc32c::crc32c(payload))
     }
 
-    fn blobmeta_with_crc32(
+    fn blob_meta_with_crc32(
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
         payload: &[u8],
         crc32: u32,
@@ -290,7 +290,7 @@ mod tests {
         let blob_id = sha256_bytes(&payload);
         let blob_path = backend_dir.path().join(hex_string(&blob_id));
         fs::write(&blob_path, &payload).unwrap();
-        blobmeta(blob_id, &payload)
+        blob_meta(blob_id, &payload)
             .save(
                 &backend_dir
                     .path()
@@ -320,7 +320,7 @@ mod tests {
             .path()
             .join(format!("{}.blob.meta", hex_string(&blob_id)));
         fs::write(&blob_path, &payload).unwrap();
-        blobmeta(blob_id, &payload).save(&blob_meta_path).unwrap();
+        blob_meta(blob_id, &payload).save(&blob_meta_path).unwrap();
         let mut raw = fs::read(&blob_meta_path).unwrap();
         raw[8] ^= 0xff;
         fs::write(&blob_meta_path, raw).unwrap();
@@ -348,7 +348,7 @@ mod tests {
         let blob_id = sha256_bytes(&payload);
         let blob_path = backend_dir.path().join(hex_string(&blob_id));
         fs::write(&blob_path, &payload).unwrap();
-        blobmeta_with_crc32(blob_id, &payload, crc32c::crc32c(&payload).wrapping_add(1))
+        blob_meta_with_crc32(blob_id, &payload, crc32c::crc32c(&payload).wrapping_add(1))
             .save(
                 &backend_dir
                     .path()
@@ -380,7 +380,7 @@ mod tests {
         let sb_end = sb_start + sb.as_bytes().len();
         bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
 
-        let blob_meta = blobmeta(blob_id, &payload);
+        let blob_meta = blob_meta(blob_id, &payload);
         let footer = BlobFooter::new(
             0,
             payload.len() as u64,
