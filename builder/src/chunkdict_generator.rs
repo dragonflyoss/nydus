@@ -69,7 +69,6 @@ impl Generator {
     ) -> Result<BuildOutput> {
         // Validate and remove chunks whose belonged blob sizes are smaller than a block.
         let mut chunkdict_chunks = chunkdict_chunks_origin.to_vec();
-        Self::sort_chunks(&mut chunkdict_chunks);
         Self::validate_and_remove_chunks(ctx, &mut chunkdict_chunks);
         // Build root tree.
         let mut tree = Self::build_root_tree(ctx)?;
@@ -134,19 +133,6 @@ impl Generator {
 
         // Retain only chunks with chunk_blob_id that has a total uncompressed size > v6_block_size.
         chunkdict.retain(|chunk| !small_chunks.contains(&chunk.chunk_blob_id));
-    }
-
-    fn sort_chunks(chunkdict: &mut [ChunkdictChunkInfo]) {
-        chunkdict.sort_by(|a, b| {
-            a.chunk_blob_id
-                .cmp(&b.chunk_blob_id)
-                .then_with(|| a.chunk_compressed_offset.cmp(&b.chunk_compressed_offset))
-                .then_with(|| {
-                    a.chunk_uncompressed_offset
-                        .cmp(&b.chunk_uncompressed_offset)
-                })
-                .then_with(|| a.chunk_digest.cmp(&b.chunk_digest))
-        });
     }
 
     /// Build the root tree.
