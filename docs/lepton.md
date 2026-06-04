@@ -730,6 +730,182 @@ EROFS compatibility is handled by exposing decoded cache data when running
 compatibility checks against C erofsfuse. Compressed full blobs are Lepton runtime
 artifacts and are not directly consumable as plain EROFS external devices.
 
+## Image Conversion (leptonify)
+
+`lepton` operates on local directories, blobs and bootstraps. `leptonify` is the
+Go orchestrator that wraps `lepton` to operate on whole OCI images in a registry:
+it pulls an OCI image, converts every layer into a lepton image, pushes the
+result, and can validate that the converted image is faithful to its source.
+
+`leptonify` lives in `leptonify/` as its own Go module
+(`github.com/dragonflyoss/lepton/leptonify`) and shells out to the `lepton`
+binary for the actual filesystem work (`lepton build`, `lepton merge`,
+`lepton check`, `lepton fuse`).
+
+```text
+        leptonify convert                         leptonify check
+        -----------------                         ---------------
+  registry --pull--> content store          registry --pull--> content store
+              |                                          |
+   per-layer: lepton build                    manifest / bootstrap / filesystem
+              |                                          rules
+   index hook: lepton merge                              |
+              |                                      pass / fail
+  registry <--push-- lepton image
+```
+
+### Image format
+
+A converted lepton image reuses the nydus on-wire manifest layout so existing
+nydus-aware snapshotters and tooling can consume it (see
+`internal/converter/constants.go`):
+
+- Each OCI data layer becomes one lepton **blob** layer with media type
+  `application/vnd.oci.image.layer.nydus.blob.v1`, annotated with
+  `containerd.io/snapshot/nydus-blob`. A lepton full blob is uncompressed at the
+  layer level, so its diff id equals the blob digest.
+- One extra **bootstrap** layer is appended last as a gzip tarball containing
+  `image/image.boot`, annotated with `containerd.io/snapshot/nydus-bootstrap`.
+- The platform manifest is marked with the
+  `nydus.remoteimage.v1` OS feature to flag it as a lazy-loadable remote image.
+- Only `RootFS.DiffIDs` and `History` are rewritten in the image config; all
+  runtime-relevant config fields (env, cmd, entrypoint, working dir, os,
+  architecture) are preserved verbatim.
+
+### Subcommand mapping
+
+`leptonify` does not reimplement any filesystem logic; each high-level image
+operation is composed from the lower-level `lepton` subcommands plus registry
+pull/push:
+
+| `leptonify` | Underlying `lepton` subcommands | Registry |
+| --- | --- | --- |
+| `convert` | `lepton build` (per OCI layer) + `lepton merge` (index hook) | pull source, push target |
+| `check` | `lepton check` (bootstrap rule) + `lepton fuse` (filesystem rule) | pull source and/or target |
+
+The `--builder` flag selects which `lepton` binary is invoked for all of the
+above, so `leptonify` and `lepton` versions can be pinned together.
+
+### convert
+
+`leptonify convert --source <oci-ref> --target <lepton-ref> [OPTIONS]`
+
+Pulls the source OCI image into a local content store, converts it, and pushes
+the resulting lepton image to the target reference.
+
+Pipeline:
+
+1. Pull `--source` into a scratch content store
+   (`internal/remote`, backed by containerd's local content store).
+2. For each OCI layer, extract its rootfs (decompressing gzip/zstd, resolving
+   whiteouts) and run `lepton build` with the configured `--chunk-size` and
+   `--compressor`. The build output is streamed straight into the content store
+   through a FIFO, so the full blob is never staged on disk twice
+   (`internal/converter/layer.go`).
+3. A post-convert index hook runs `lepton merge` over the per-layer blobs to
+   produce the overlaid bootstrap, which is written back as the final bootstrap
+   layer (`internal/converter/hook.go`).
+4. Push the rewritten manifest and all new layers to `--target`
+   (`internal/remote`).
+
+Flags:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--source`, `-s` | required | Source OCI image reference. |
+| `--target`, `-t` | required | Target lepton image reference to push. |
+| `--builder` | `lepton` | Path to the `lepton` binary (PATH-resolvable). |
+| `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
+| `--chunk-size` | `1048576` | Lepton file chunk size in bytes (1 MiB). |
+| `--compressor` | `zstd` | Chunk data compressor: `none` or `zstd`. |
+| `--platform` | all | Convert only the given platform (e.g. `linux/amd64`). |
+| `--insecure` | `false` | Skip TLS verification for the registry. |
+| `--plain-http` | `false` | Use plain HTTP to talk to the registry. |
+| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. |
+
+Notes:
+
+- Converting an image requires **root privileges**. Layer extraction must
+  preserve original uid/gid, setuid/setgid/sticky bits, xattrs and device/fifo
+  nodes; these operations fail without root, and `leptonify` treats such
+  failures as fatal rather than silently producing a corrupted image.
+- Image references are normalized like a container runtime: a bare name such as
+  `mariadb` expands to `docker.io/library/mariadb:latest`, and a tagless
+  reference defaults to `:latest`.
+
+Example:
+
+```bash
+sudo leptonify convert \
+  --source docker.io/library/mariadb:latest \
+  --target localhost:5000/mariadb-nydus \
+  --plain-http
+```
+
+### check
+
+`leptonify check [--source <ref>] [--target <ref>] [OPTIONS]`
+
+Validates the consistency of an OCI and/or lepton image. At least one of
+`--source`/`--target` must be provided; the typical use is to pass both the
+original OCI image and its converted lepton image to prove the conversion is
+faithful.
+
+`check` pulls each provided image into a content store, parses it (detecting OCI
+vs lepton from the layer annotations), and runs the following rules in order
+(`internal/checker`):
+
+1. **manifest** — validates each manifest's structure (layer count equals diff-id
+   count; for lepton images the last layer is the bootstrap and all preceding
+   layers are blobs). When both images are present, it asserts their runtime
+   configs are equivalent (env/cmd/entrypoint/working dir/os/architecture).
+2. **bootstrap** — for each lepton image, materializes its blobs and bootstrap
+   and runs `lepton check --bootstrap <b> --blob-dir <d>` to statically validate
+   the metadata and verify blob digests.
+3. **filesystem** — materializes both images into real root filesystems and
+   compares them entry by entry. The OCI side is produced by applying its layers
+   (preserving ownership); the lepton side is mounted via `lepton fuse`. The
+   comparison covers, for every path:
+   - file type (regular, dir, symlink, device, fifo, …),
+   - permission bits **and** setuid/setgid/sticky special bits,
+   - uid and gid,
+   - symlink target,
+   - device major/minor (`rdev`) for device nodes,
+   - extended attributes (names and values, skipping the `system.*` namespace),
+   - content (size + sha256) for regular files.
+
+   Missing, extra or mismatching entries fail the check.
+
+The filesystem rule requires **root privileges** (both the FUSE mount and the
+OCI layer ownership replay need root) and is skipped automatically when only one
+of `--source`/`--target` is given. Running non-root fails fast with a clear
+message instead of silently timing out on the mount.
+
+Flags:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--source`, `-s` | empty | Source image reference (OCI or lepton). |
+| `--target`, `-t` | empty | Target image reference (OCI or lepton). |
+| `--builder` | `lepton` | Path to the `lepton` binary. |
+| `--work-dir` | temp dir | Scratch directory; created and removed when omitted. |
+| `--platform` | host | Check only the given platform; defaults to the host platform. |
+| `--insecure` | `false` | Skip TLS verification for the registry. |
+| `--plain-http` | `false` | Use plain HTTP to talk to the registry. |
+| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. |
+
+Example:
+
+```bash
+sudo leptonify check \
+  --source docker.io/library/mariadb:latest \
+  --target localhost:5000/mariadb-nydus \
+  --plain-http
+```
+
+A passing run logs `check passed`; any rule failure returns a non-zero exit code
+with the failing rule and offending path in the error.
+
 ## Validation Strategy
 
 The current validation surface is:

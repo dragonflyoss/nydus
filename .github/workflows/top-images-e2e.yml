@@ -1,0 +1,60 @@
+name: Top Images E2E
+
+# Manually-triggered end-to-end test that converts and validates the top
+# Docker Hub images with leptonify against a local registry.
+on:
+  workflow_dispatch:
+    inputs:
+      concurrency:
+        description: "Number of images converted/checked in parallel"
+        required: false
+        default: "5"
+      registry:
+        description: "Target registry for the converted images"
+        required: false
+        default: "localhost:5000"
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  top-images-e2e:
+    name: Convert and validate top images
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Docker
+        uses: docker/setup-docker-action@v4
+
+      - name: Start local registry
+        run: |
+          docker run -d -p 5000:5000 --restart always --name registry distribution/distribution
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.5'
+
+      - name: Build leptonify
+        run: |
+          make -C leptonify build
+          sudo install -m 0755 leptonify/leptonify /usr/local/bin/leptonify
+
+      - name: Run top-images e2e test
+        run: |
+          make test-top-images \
+            TOP_IMAGES_CONCURRENCY="${{ github.event.inputs.concurrency }}" \
+            TOP_IMAGES_REGISTRY="${{ github.event.inputs.registry }}"

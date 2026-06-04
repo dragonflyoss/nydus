@@ -19,6 +19,12 @@ PERF_TIMEOUT ?= 300s
 PERF_COUNT ?= 1
 PERF_GO_TEST_ARGS ?=
 
+TOP_IMAGES_TIMEOUT ?= 3600s
+TOP_IMAGES_COUNT ?= 1
+TOP_IMAGES_CONCURRENCY ?= 5
+TOP_IMAGES_REGISTRY ?= localhost:5000
+TOP_IMAGES_GO_TEST_ARGS ?=
+
 GO_TEST_ENV = $(SUDO) env "PATH=$(dir $(GO_BIN)):$(PATH)" "HOME=$(HOME)" \
 	"GOCACHE=$$($(GO_BIN) env GOCACHE)" \
 	"GOMODCACHE=$$($(GO_BIN) env GOMODCACHE)" \
@@ -28,8 +34,9 @@ TEST_SUPPORT_FILES = util.go
 E2E_TEST_FILES = e2e_test.go $(TEST_SUPPORT_FILES)
 XFSTESTS_TEST_FILES = xfstests_test.go $(TEST_SUPPORT_FILES)
 PERF_TEST_FILES = perf_test.go $(TEST_SUPPORT_FILES)
+TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 
-.PHONY: build release test test-e2e test-xfstests test-perf clean
+.PHONY: build release test test-e2e test-xfstests test-perf test-top-images clean
 
 build:
 	$(CARGO) build
@@ -67,6 +74,17 @@ test-perf: release
 		$(GO_TEST_ENV) \
 		LEPTONFS_RUN_PERF=1 \
 		$(GO_BIN) test -v -run '^TestPerf$$' -count $(PERF_COUNT) -timeout $(PERF_TIMEOUT) $(PERF_GO_TEST_ARGS) $(PERF_TEST_FILES)
+
+# Convert and validate the top Docker Hub images against a local registry
+# (requires root and a registry at $(TOP_IMAGES_REGISTRY)). Builds leptonify on demand.
+test-top-images: release
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	cd tests/integration && \
+		$(GO_TEST_ENV) \
+		LEPTONFS_RUN_TOP_IMAGES=1 \
+		LEPTONFS_TOP_IMAGES_REGISTRY=$(TOP_IMAGES_REGISTRY) \
+		LEPTONFS_TOP_IMAGES_CONCURRENCY=$(TOP_IMAGES_CONCURRENCY) \
+		$(GO_BIN) test -v -run '^TestTopImages$$' -count $(TOP_IMAGES_COUNT) -timeout $(TOP_IMAGES_TIMEOUT) $(TOP_IMAGES_GO_TEST_ARGS) $(TOP_IMAGES_TEST_FILES)
 
 clean:
 	$(CARGO) clean
