@@ -64,7 +64,7 @@ pub fn render_bootstrap(
 
         if let InodeData::Directory {
             startblk: ref mut sb,
-            dir_data_size: ref mut dds,
+            data_size: ref mut dds,
             ..
         } = inodes[idx].data
         {

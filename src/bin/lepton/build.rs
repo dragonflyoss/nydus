@@ -144,7 +144,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         blob_writer.total_blocks(),
         &blob_id,
     )];
-    set_root_prefetch_blobs_xattr(&mut inodes, &[1])?;
+    set_root_prefetch_blobs_xattr(&mut inodes[0], &[1])?;
     let bootstrap_bytes =
         render_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
 

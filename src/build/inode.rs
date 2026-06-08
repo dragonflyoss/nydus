@@ -1,50 +1,42 @@
+use crate::build::blob_chunk::{BlobWriter, ChunkIndex};
+use crate::metadata::*;
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
-
-use crate::build::blob_chunk::{BlobWriter, ChunkIndex};
-use crate::metadata::*;
-
-/// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.
-fn read_xattrs_from_path(path: &Path) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let names = match xattr::list(path) {
-        Ok(iter) => iter.collect::<Vec<_>>(),
-        Err(_) => return Vec::new(),
-    };
-
-    let mut result = Vec::new();
-    for name in &names {
-        let name_bytes = name.as_bytes();
-        let (index, suffix) = match erofs_xattr_name_split(name_bytes) {
-            Some(v) => v,
-            None => continue, // skip unsupported xattr namespaces
-        };
-        let value = match xattr::get(path, name) {
-            Ok(Some(v)) => v,
-            _ => Vec::new(),
-        };
-        result.push((index, suffix.to_vec(), value));
-    }
-    result
-}
-
 /// In-memory inode representation.
 pub struct InodeInfo {
+    /// File mode (type and permissions).
     pub mode: u16,
+
+    /// User ID.
     pub uid: u32,
+
+    /// Group ID.
     pub gid: u32,
+
+    /// File size in bytes.
     pub size: u64,
+
+    /// Modification time seconds since epoch.
     pub mtime: u64,
+
+    /// Modification time nanosecond part.
     pub mtime_nsec: u32,
+
+    /// Number of hard links.
     pub nlink: u32,
+
+    /// Inode number (for hardlink tracking).
     pub ino: u32,
 
+    /// Assigned EROFS inode number (nid) and metadata offset in the final image.
     pub nid: u64,
+
+    /// Metadata offset in the final image (set during layout).
     pub meta_offset: usize,
 
     /// True if this inode needs extended (64-byte) format.
@@ -57,87 +49,97 @@ pub struct InodeInfo {
     pub xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>,
 }
 
+/// File-type-specific data for an inode.
 pub enum InodeData {
     /// Regular file: chunk indexes for chunk-based layout.
     RegularFile {
+        /// List of chunk indexes (EROFS_CHUNK_INDEX_SIZE bytes each) for the file's data chunks.
         chunk_indexes: Vec<ChunkIndex>,
-        chunkbits: u32,
+
+        /// Number of bits for the chunk size (e.g. 12 for 4KB chunks).
+        chunk_size_bits: u32,
     },
+
     /// Directory: sorted children.
     Directory {
+        // List of child entries (name, file type, inode index in the inodes vector).
         children: Vec<DirEntry>,
+
+        /// Starting block address of the directory data (set during layout).
         startblk: u64,
-        dir_data_size: usize,
+
+        /// Size of the directory data in bytes (set during layout).
+        data_size: usize,
+
+        /// NID of the parent directory (set during layout, 0 for root).
         parent_nid: u64,
     },
+
     /// Symbolic link: target path.
     Symlink { target: Vec<u8> },
+
     /// Character/block device.
-    SpecialDev { rdev: u32 },
+    Device { rdev: u32 },
+
     /// FIFO or socket (no data).
-    SpecialNoData,
+    FifoOrSocket,
 }
 
 /// A directory entry referencing a child inode.
 pub struct DirEntry {
+    /// Entry name.
     pub name: String,
+
+    /// File type.
     pub file_type: u8,
+
+    /// Index of the child inode in the inodes vector.
     pub inode_idx: usize,
 }
 
-/// Build the in-memory inode tree from a source directory.
-///
-/// Returns a flat list of InodeInfo in DFS pre-order (root at index 0).
-pub fn build_tree(
-    source: &Path,
-    blob_writer: &mut BlobWriter,
-    chunksize: u32,
-) -> Result<Vec<InodeInfo>> {
-    let mut inodes: Vec<InodeInfo> = Vec::new();
-    let mut ino_counter: u32 = 0;
-    let mut hardlink_map: HashMap<(u64, u64), usize> = HashMap::new();
-
-    build_tree_recursive(
-        source,
-        blob_writer,
-        chunksize,
-        &mut inodes,
-        &mut ino_counter,
-        &mut hardlink_map,
-    )?;
-
-    Ok(inodes)
+/// Convert a Unix file mode to an EROFS file type value for directory entries.
+pub fn mode_to_file_type(mode: u16) -> u8 {
+    match mode & 0o170000 {
+        0o100000 => EROFS_FT_REG_FILE,
+        0o040000 => EROFS_FT_DIR,
+        0o020000 => EROFS_FT_CHRDEV,
+        0o060000 => EROFS_FT_BLKDEV,
+        0o010000 => EROFS_FT_FIFO,
+        0o140000 => EROFS_FT_SOCK,
+        0o120000 => EROFS_FT_SYMLINK,
+        _ => 0,
+    }
 }
 
-pub fn set_root_prefetch_blobs_xattr(inodes: &mut [InodeInfo], device_ids: &[u16]) -> Result<()> {
-    if inodes.is_empty() {
-        bail!("cannot set root prefetch xattr for empty inode set");
-    }
-
+/// Set the root directory's trusted.lepton.prefetch_blobs xattr to a comma-separated list of
+/// unique non-zero device IDs.
+pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, device_ids: &[u16]) -> Result<()> {
     let mut prefetch_device_ids = Vec::new();
     for device_id in device_ids.iter().copied() {
         if device_id != 0 && !prefetch_device_ids.contains(&device_id) {
             prefetch_device_ids.push(device_id);
         }
     }
+
     if prefetch_device_ids.is_empty() {
         return Ok(());
     }
 
     let value = prefetch_device_ids
         .iter()
-        .map(|device_id| device_id.to_string())
+        .map(u16::to_string)
         .collect::<Vec<_>>()
         .join(",");
     if value.len() > u16::MAX as usize {
         bail!("root prefetch xattr value exceeds EROFS xattr value size limit");
     }
 
-    inodes[0].xattrs.retain(|(index, suffix, _)| {
+    inode.xattrs.retain(|(index, suffix, _)| {
         !(*index == EROFS_XATTR_INDEX_TRUSTED
             && suffix.as_slice() == LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX)
     });
-    inodes[0].xattrs.push((
+
+    inode.xattrs.push((
         EROFS_XATTR_INDEX_TRUSTED,
         LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX.to_vec(),
         value.into_bytes(),
@@ -146,13 +148,37 @@ pub fn set_root_prefetch_blobs_xattr(inodes: &mut [InodeInfo], device_ids: &[u16
     Ok(())
 }
 
+/// Build the in-memory inode tree from a source directory.
+///
+/// Returns a flat list of InodeInfo in DFS pre-order (root at index 0).
+pub fn build_tree(
+    source: &Path,
+    blob_writer: &mut BlobWriter,
+    chunk_size: u32,
+) -> Result<Vec<InodeInfo>> {
+    let mut inodes: Vec<InodeInfo> = Vec::new();
+    let mut inode_counter: u32 = 0;
+    let mut hardlink_map: HashMap<(u64, u64), usize> = HashMap::new();
+
+    build_tree_recursive(
+        source,
+        blob_writer,
+        chunk_size,
+        &mut inodes,
+        &mut inode_counter,
+        &mut hardlink_map,
+    )?;
+
+    Ok(inodes)
+}
+
 #[allow(clippy::only_used_in_recursion)]
 fn build_tree_recursive(
     path: &Path,
     blob_writer: &mut BlobWriter,
-    chunksize: u32,
+    chunk_size: u32,
     inodes: &mut Vec<InodeInfo>,
-    ino_counter: &mut u32,
+    inode_counter: &mut u32,
     hardlink_map: &mut HashMap<(u64, u64), usize>,
 ) -> Result<usize> {
     let meta = fs::symlink_metadata(path)
@@ -171,8 +197,8 @@ fn build_tree_recursive(
         || gid > u16::MAX as u32
         || nlink > 1;
 
-    *ino_counter += 1;
-    let ino = *ino_counter;
+    *inode_counter += 1;
+    let ino = *inode_counter;
 
     if ft.is_dir() {
         let xattrs = read_xattrs_from_path(path);
@@ -192,7 +218,7 @@ fn build_tree_recursive(
             data: InodeData::Directory {
                 children: Vec::new(),
                 startblk: 0,
-                dir_data_size: 0,
+                data_size: 0,
                 parent_nid: 0,
             },
             xattrs,
@@ -226,9 +252,9 @@ fn build_tree_recursive(
             let child_idx = build_tree_recursive(
                 &child_path,
                 blob_writer,
-                chunksize,
+                chunk_size,
                 inodes,
-                ino_counter,
+                inode_counter,
                 hardlink_map,
             )?;
 
@@ -274,15 +300,17 @@ fn build_tree_recursive(
             is_extended,
             data: InodeData::RegularFile {
                 chunk_indexes,
-                chunkbits: chunksize.trailing_zeros(),
+                chunk_size_bits: chunk_size.trailing_zeros(),
             },
             xattrs,
         });
         Ok(inode_idx)
     } else if ft.is_symlink() {
         let target = fs::read_link(path)
-            .with_context(|| format!("failed to read symlink: {}", path.display()))?;
-        let target_bytes = target_to_bytes(&target);
+            .with_context(|| format!("failed to read symlink: {}", path.display()))?
+            .as_os_str()
+            .as_bytes()
+            .to_vec();
         let xattrs = read_xattrs_from_path(path);
 
         let inode_idx = inodes.len();
@@ -290,7 +318,7 @@ fn build_tree_recursive(
             mode,
             uid,
             gid,
-            size: target_bytes.len() as u64,
+            size: target.len() as u64,
             mtime,
             mtime_nsec,
             nlink,
@@ -298,9 +326,7 @@ fn build_tree_recursive(
             nid: 0,
             meta_offset: 0,
             is_extended,
-            data: InodeData::Symlink {
-                target: target_bytes,
-            },
+            data: InodeData::Symlink { target },
             xattrs,
         });
         Ok(inode_idx)
@@ -323,9 +349,9 @@ fn build_tree_recursive(
             meta_offset: 0,
             is_extended,
             data: if is_dev {
-                InodeData::SpecialDev { rdev }
+                InodeData::Device { rdev }
             } else {
-                InodeData::SpecialNoData
+                InodeData::FifoOrSocket
             },
             xattrs,
         });
@@ -333,22 +359,20 @@ fn build_tree_recursive(
     }
 }
 
-fn target_to_bytes(target: &Path) -> Vec<u8> {
+/// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.
+fn read_xattrs_from_path(path: &Path) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
     use std::os::unix::ffi::OsStrExt;
-    target.as_os_str().as_bytes().to_vec()
-}
+    let Ok(names) = xattr::list(path) else {
+        return Vec::new();
+    };
 
-pub fn mode_to_file_type(mode: u16) -> u8 {
-    match mode & 0o170000 {
-        0o100000 => EROFS_FT_REG_FILE,
-        0o040000 => EROFS_FT_DIR,
-        0o020000 => EROFS_FT_CHRDEV,
-        0o060000 => EROFS_FT_BLKDEV,
-        0o010000 => EROFS_FT_FIFO,
-        0o140000 => EROFS_FT_SOCK,
-        0o120000 => EROFS_FT_SYMLINK,
-        _ => 0,
-    }
+    names
+        .filter_map(|name| {
+            let (prefix_index, suffix) = erofs_xattr_name_split(name.as_bytes())?;
+            let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
+            Some((prefix_index, suffix.to_vec(), value))
+        })
+        .collect()
 }
 
 /// Compute the metadata size for an inode.
@@ -372,7 +396,7 @@ pub fn inode_meta_size(inode: &InodeInfo, _chunkbits: u32, _blkszbits: u32) -> u
         }
         InodeData::Directory { .. } => base + xattr_size,
         InodeData::Symlink { target } => base + xattr_size + target.len(),
-        InodeData::SpecialDev { .. } | InodeData::SpecialNoData => base + xattr_size,
+        InodeData::Device { .. } | InodeData::FifoOrSocket => base + xattr_size,
     }
 }
 
@@ -429,10 +453,10 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     match &inode.data {
         InodeData::RegularFile {
             chunk_indexes,
-            chunkbits,
+            chunk_size_bits,
         } => {
             let datalayout = EROFS_INODE_CHUNK_BASED;
-            let cf = chunk_format(*chunkbits, blkszbits);
+            let cf = chunk_format(*chunk_size_bits, blkszbits);
             let i_u = cf as u32;
 
             if inode.is_extended {
@@ -566,7 +590,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             }
             buf[inline_off..inline_off + target.len()].copy_from_slice(target);
         }
-        InodeData::SpecialDev { rdev } => {
+        InodeData::Device { rdev } => {
             let datalayout = EROFS_INODE_FLAT_PLAIN;
 
             if inode.is_extended {
@@ -604,7 +628,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 serialize_xattrs(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
             }
         }
-        InodeData::SpecialNoData => {
+        InodeData::FifoOrSocket => {
             let datalayout = EROFS_INODE_FLAT_PLAIN;
 
             if inode.is_extended {
@@ -672,7 +696,7 @@ mod tests {
             data: InodeData::Directory {
                 children: Vec::new(),
                 startblk: 0,
-                dir_data_size: 0,
+                data_size: 0,
                 parent_nid: 0,
             },
             xattrs,
@@ -681,18 +705,18 @@ mod tests {
 
     #[test]
     fn set_root_prefetch_blobs_xattr_replaces_and_deduplicates_value() {
-        let mut inodes = vec![root_inode_with_xattrs(vec![
+        let mut inode = root_inode_with_xattrs(vec![
             (
                 EROFS_XATTR_INDEX_TRUSTED,
                 LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX.to_vec(),
                 b"old".to_vec(),
             ),
             (EROFS_XATTR_INDEX_USER, b"keep".to_vec(), b"value".to_vec()),
-        ])];
+        ]);
 
-        set_root_prefetch_blobs_xattr(&mut inodes, &[2, 5, 2, 0, 1]).unwrap();
+        set_root_prefetch_blobs_xattr(&mut inode, &[2, 5, 2, 0, 1]).unwrap();
 
-        let prefetch_xattrs = inodes[0]
+        let prefetch_xattrs = inode
             .xattrs
             .iter()
             .filter(|(index, suffix, _)| {
@@ -702,7 +726,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(prefetch_xattrs.len(), 1);
         assert_eq!(prefetch_xattrs[0].2, b"2,5,1");
-        assert!(inodes[0].xattrs.iter().any(|(index, suffix, value)| {
+        assert!(inode.xattrs.iter().any(|(index, suffix, value)| {
             *index == EROFS_XATTR_INDEX_USER
                 && suffix.as_slice() == b"keep"
                 && value.as_slice() == b"value"

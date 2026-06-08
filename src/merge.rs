@@ -108,7 +108,7 @@ pub fn merge_sources_to_bootstrap_bytes(
     let device_count =
         u16::try_from(device_slots.len()).context("device slot count exceeds u16")?;
     let prefetch_device_ids = (1..=device_count).collect::<Vec<_>>();
-    set_root_prefetch_blobs_xattr(&mut inodes, &prefetch_device_ids)?;
+    set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_device_ids)?;
 
     render_bootstrap(
         &mut inodes,
@@ -402,7 +402,7 @@ fn flatten_node(
                 data: InodeData::Directory {
                     children: Vec::new(),
                     startblk: 0,
-                    dir_data_size: 0,
+                    data_size: 0,
                     parent_nid: 0,
                 },
                 xattrs: node.xattrs.clone(),
@@ -454,7 +454,7 @@ fn flatten_node(
                 is_extended: needs_extended(node.size, node.uid, node.gid, nlink),
                 data: InodeData::RegularFile {
                     chunk_indexes: chunk_indexes.clone(),
-                    chunkbits: *chunkbits,
+                    chunk_size_bits: *chunkbits,
                 },
                 xattrs: node.xattrs.clone(),
             });
@@ -497,7 +497,7 @@ fn flatten_node(
                 nid: 0,
                 meta_offset: 0,
                 is_extended: needs_extended(0, node.uid, node.gid, nlink),
-                data: InodeData::SpecialDev { rdev: *rdev },
+                data: InodeData::Device { rdev: *rdev },
                 xattrs: node.xattrs.clone(),
             });
         }
@@ -515,7 +515,7 @@ fn flatten_node(
                 nid: 0,
                 meta_offset: 0,
                 is_extended: needs_extended(0, node.uid, node.gid, nlink),
-                data: InodeData::SpecialNoData,
+                data: InodeData::FifoOrSocket,
                 xattrs: node.xattrs.clone(),
             });
         }
