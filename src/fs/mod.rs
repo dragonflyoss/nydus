@@ -327,15 +327,18 @@ impl ErofsReader {
             Ok(inode) => inode,
             Err(_) => return Vec::new(),
         };
+
         let xattrs = match self.read_xattrs(root_nid, &inode) {
             Ok(xattrs) => xattrs,
             Err(_) => return Vec::new(),
         };
+
         for (name, value) in xattrs {
-            if name == LEPTON_PREFETCH_BLOBS_XATTR_NAME {
+            if is_lepton_prefetch_blobs_xattr(&name) {
                 return parse_prefetch_blobs_value(&value);
             }
         }
+
         Vec::new()
     }
 

@@ -74,11 +74,10 @@ pub const EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
 pub const EROFS_XATTR_INDEX_TRUSTED: u8 = 4;
 pub const EROFS_XATTR_INDEX_LUSTRE: u8 = 5;
 pub const EROFS_XATTR_INDEX_SECURITY: u8 = 6;
+
+// Xattr ibody and entry header sizes.
 pub const EROFS_XATTR_IBODY_HEADER_SIZE: usize = 12;
 pub const EROFS_XATTR_ENTRY_HEADER_SIZE: usize = 4;
-pub const LEPTON_INTERNAL_XATTR_PREFIX: &[u8] = b"trusted.lepton.";
-pub const LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX: &[u8] = b"lepton.prefetch.blobs";
-pub const LEPTON_PREFETCH_BLOBS_XATTR_NAME: &[u8] = b"trusted.lepton.prefetch.blobs";
 
 // Misc on-disk sizes.
 pub const EROFS_DIRENT_SIZE: usize = 12;
@@ -86,6 +85,19 @@ pub const EROFS_DEVICESLOT_SIZE: usize = 128;
 
 // Sentinel.
 pub const EROFS_NULL_ADDR: u64 = u64::MAX;
+
+/// Lepton internal xattr suffix for prefetch blobs ("trusted.lepton.prefetch.blobs").
+pub const LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"lepton.prefetch.blobs";
+
+/// Check if an xattr name (as bytes) is a Lepton internal xattr (starts with "trusted.lepton.").
+pub fn is_lepton_xattr(name: &[u8]) -> bool {
+    name.starts_with(b"trusted.lepton.")
+}
+
+/// Check if an xattr name is the Lepton prefetch blobs xattr ("trusted.lepton.prefetch.blobs").
+pub fn is_lepton_prefetch_blobs_xattr(name: &[u8]) -> bool {
+    is_lepton_xattr(name) && name.ends_with(LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS)
+}
 
 /// Map xattr name index to its byte prefix.
 pub fn erofs_xattr_prefix(index: u8) -> Option<&'static [u8]> {
@@ -98,10 +110,6 @@ pub fn erofs_xattr_prefix(index: u8) -> Option<&'static [u8]> {
         EROFS_XATTR_INDEX_SECURITY => Some(b"security."),
         _ => None,
     }
-}
-
-pub fn is_lepton_internal_xattr(name: &[u8]) -> bool {
-    name.starts_with(LEPTON_INTERNAL_XATTR_PREFIX)
 }
 
 /// Split a full xattr name (as bytes) into (prefix_index, suffix).
@@ -132,7 +140,7 @@ pub fn xattr_ibody_size(xattrs: &[(u8, Vec<u8>, Vec<u8>)]) -> usize {
         return 0;
     }
 
-    let mut size = EROFS_XATTR_IBODY_HEADER_SIZE; // 12 bytes header
+    let mut size = EROFS_XATTR_IBODY_HEADER_SIZE;
     for (_, suffix, value) in xattrs {
         let entry_size = EROFS_XATTR_ENTRY_HEADER_SIZE + suffix.len() + value.len();
         size += round_up(entry_size, 4);
@@ -209,9 +217,9 @@ mod tests {
 
     #[test]
     fn lepton_internal_xattr_matches_trusted_lepton_prefix_only() {
-        assert!(is_lepton_internal_xattr(b"trusted.lepton.prefetch.blobs"));
-        assert!(is_lepton_internal_xattr(b"trusted.lepton.other"));
-        assert!(!is_lepton_internal_xattr(b"trusted.other"));
-        assert!(!is_lepton_internal_xattr(b"user.lepton.prefetch.blobs"));
+        assert!(is_lepton_xattr(b"trusted.lepton.prefetch.blobs"));
+        assert!(is_lepton_xattr(b"trusted.lepton.other"));
+        assert!(!is_lepton_xattr(b"trusted.other"));
+        assert!(!is_lepton_xattr(b"user.lepton.prefetch.blobs"));
     }
 }

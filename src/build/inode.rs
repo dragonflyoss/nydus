@@ -136,12 +136,12 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, device_ids: &[u16]) 
 
     inode.xattrs.retain(|(index, suffix, _)| {
         !(*index == EROFS_XATTR_INDEX_TRUSTED
-            && suffix.as_slice() == LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX)
+            && suffix.as_slice() == LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS)
     });
 
     inode.xattrs.push((
         EROFS_XATTR_INDEX_TRUSTED,
-        LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX.to_vec(),
+        LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
         value.into_bytes(),
     ));
 
@@ -384,7 +384,6 @@ pub fn inode_meta_size(inode: &InodeInfo, _chunkbits: u32, _blkszbits: u32) -> u
     };
 
     let xattr_size = xattr_ibody_size(&inode.xattrs);
-
     match &inode.data {
         InodeData::RegularFile { chunk_indexes, .. } => {
             if chunk_indexes.is_empty() {
@@ -708,7 +707,7 @@ mod tests {
         let mut inode = root_inode_with_xattrs(vec![
             (
                 EROFS_XATTR_INDEX_TRUSTED,
-                LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX.to_vec(),
+                LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
                 b"old".to_vec(),
             ),
             (EROFS_XATTR_INDEX_USER, b"keep".to_vec(), b"value".to_vec()),
@@ -721,7 +720,7 @@ mod tests {
             .iter()
             .filter(|(index, suffix, _)| {
                 *index == EROFS_XATTR_INDEX_TRUSTED
-                    && suffix.as_slice() == LEPTON_PREFETCH_BLOBS_XATTR_SUFFIX
+                    && suffix.as_slice() == LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS
             })
             .collect::<Vec<_>>();
         assert_eq!(prefetch_xattrs.len(), 1);

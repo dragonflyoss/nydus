@@ -256,6 +256,7 @@ impl ErofsReader {
         if xattr_data.len() < EROFS_XATTR_IBODY_HEADER_SIZE {
             return Ok(Vec::new());
         }
+
         let h_shared_count = xattr_data[4] as usize;
         let entries_start = EROFS_XATTR_IBODY_HEADER_SIZE + h_shared_count * 4;
         if entries_start >= xattr_data.len() {
@@ -264,7 +265,6 @@ impl ErofsReader {
 
         let mut result = Vec::new();
         let mut pos = entries_start;
-
         while pos + EROFS_XATTR_ENTRY_HEADER_SIZE <= xattr_data.len() {
             let e_name_len = xattr_data[pos] as usize;
             let e_name_index = xattr_data[pos + 1];
