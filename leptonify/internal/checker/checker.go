@@ -33,6 +33,9 @@ type Opt struct {
 	Insecure bool
 	// PlainHTTP uses plain HTTP to talk to the registry.
 	PlainHTTP bool
+	// LogLevel is the log level forwarded to the `lepton` subprocesses
+	// (trace/debug/info/warn/error). Defaults to "info" when empty.
+	LogLevel string
 	// PlatformMC selects which platform to check. Defaults to the host platform.
 	PlatformMC platforms.MatchComparer
 }
@@ -49,6 +52,9 @@ func New(opt Opt) (*Checker, error) {
 	}
 	if opt.PlatformMC == nil {
 		opt.PlatformMC = platforms.Default()
+	}
+	if opt.LogLevel == "" {
+		opt.LogLevel = "info"
 	}
 	return &Checker{opt: opt}, nil
 }
@@ -87,7 +93,7 @@ func (c *Checker) Check(ctx context.Context) error {
 	rules := []Rule{
 		&manifestRule{source: source, target: target},
 		&bootstrapRule{cs: cs, builder: c.opt.Builder, workDir: scratchDir, source: source, target: target},
-		&filesystemRule{cs: cs, builder: c.opt.Builder, workDir: scratchDir, source: source, target: target},
+		&filesystemRule{cs: cs, provider: provider, builder: c.opt.Builder, logLevel: c.opt.LogLevel, workDir: scratchDir, source: source, target: target},
 	}
 
 	for _, rule := range rules {

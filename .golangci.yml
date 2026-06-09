@@ -14,6 +14,11 @@ linters:
     - bodyclose
     - misspell
     - unconvert
+  settings:
+    misspell:
+      # "hardlinked" is a valid technical term; misspell flags it as "hardline".
+      ignore-rules:
+        - hardlinked
 
 formatters:
   enable:

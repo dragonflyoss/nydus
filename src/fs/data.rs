@@ -84,7 +84,7 @@ impl ErofsReader {
             EROFS_INODE_CHUNK_BASED => self.write_chunk_data_to(nid, inode, offset, actual_size, w),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unsupported data layout: {}", layout),
+                format!("unsupported data layout: {layout}"),
             )),
         }
     }
@@ -214,7 +214,7 @@ impl ErofsReader {
             EROFS_INODE_CHUNK_BASED => self.read_chunk_data_sync(nid, inode, offset, actual_size),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unsupported data layout: {}", layout),
+                format!("unsupported data layout: {layout}"),
             )),
         }
     }
@@ -246,7 +246,7 @@ impl ErofsReader {
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unsupported data layout: {}", layout),
+                format!("unsupported data layout: {layout}"),
             )),
         }
     }
@@ -543,7 +543,10 @@ mod tests {
         let bootstrap_path = dir.path().join("bootstrap");
         fs::write(&bootstrap_path, &bootstrap).expect("write bootstrap file");
 
-        let reader = ErofsReader::open(None, Some(&bootstrap_path), Some(dir.path()), None)
+        let backend: std::sync::Arc<dyn crate::storage::backend::BlobBackend> = std::sync::Arc::new(
+            crate::storage::backend::LocalBackend::new(dir.path().to_path_buf()),
+        );
+        let reader = ErofsReader::open(None, Some(&bootstrap_path), Some(backend), None)
             .expect("open reader");
         let root = reader.inode(reader.sb().root_nid()).expect("root inode");
         let entries = reader

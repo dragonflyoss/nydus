@@ -25,7 +25,8 @@ external-device addresses to encoded ranges in the stored data region.
 - Allow an optional standalone `bootstrap` artifact for remote metadata-only use.
 - Make `fuse` support either a direct blob path or a bootstrap plus blob-dir.
 - Persist a stable blob identifier inside bootstrap metadata.
-- Keep EROFS file chunk indexes logical and map them through blob_meta chunks.
+- Keep EROFS file chunk indexes logical and map a block to its compression group
+	in O(1) via constant-sized groups.
 - Support compressed blob data while preserving a plain decoded cache artifact
 	for EROFS compatibility and repeated reads.
 
@@ -76,6 +77,8 @@ Options:
 		File path to save the generated lepton bootstrap (optional)
 	--chunk-size <chunk-size>
 		Set the EROFS file chunk size, must be power of two, 4KiB-aligned, and at least 4KiB: [default: 1048576]
+	--compress-size <compress-size>
+		Set the blob meta group uncompressed size, must be a multiple of 1MiB and at least the chunk size: [default: 1048576]
 	--compressor <compressor>
 		Algorithm to compress data chunks: [default: zstd] [possible values: none, zstd]
 	--log-level <log-level>
@@ -87,8 +90,18 @@ Current implementation notes:
 - Either `--blob` or `--blob-dir` is required.
 - `--bootstrap` is optional and emits a standalone metadata-only artifact.
 - `--chunk-size` defaults to `1048576` (1 MiB) and controls EROFS file chunk
-	indexes. Blobmeta compression groups are at least 1 MiB, so smaller file
-	chunks do not fragment blob_meta into tiny compression units.
+	indexes (the unit of file splitting and per-chunk BLAKE3 digests). Chunks are
+	independent of compression groups and may straddle group boundaries, so a
+	smaller chunk size does not fragment blob_meta into tiny compression units.
+- `--compress-size` defaults to `1048576` (1 MiB) and sets the uncompressed size
+	of each blob_meta group (the unit of compression and of a single backend
+	read). Groups are formed by packing whole decoded blocks up to this size
+	regardless of chunk boundaries, so every group but the last is exactly this
+	many blocks. It must be a positive multiple of 1 MiB and at least
+	`--chunk-size`. Note the alignment rules differ: `--chunk-size` must be a power
+	of two and 4KiB-aligned, while `--compress-size` only needs to be a 1 MiB
+	multiple. Raising `--chunk-size` above 1 MiB requires raising `--compress-size`
+	to match or exceed it.
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
@@ -264,9 +277,12 @@ prefetch:
 
 Fields:
 
-- `backend.type` selects the blob backend. Only `local` is supported; its
-	`config.dir` is the directory holding lepton blob files (equivalent to
-	`--blob-dir`).
+- `backend.type` selects the blob backend, either `local` or `registry`.
+	- `local`: `config.dir` is the directory holding lepton blob files
+		(equivalent to `--blob-dir`).
+	- `registry`: serves blobs on demand from an OCI registry. See
+		[Registry backend](#registry-backend) for the full field list. `lepton
+		check` only supports the `local` backend.
 - `cache.type` selects the chunk cache. Only `local` is supported; its
 	`config.dir` is the persistent cache directory (equivalent to `--cache-dir`).
 - `prefetch.enable` (default `true`) toggles background blob prefetch after
@@ -286,6 +302,49 @@ Example invocations:
 lepton fuse --bootstrap layer.bootstrap --config storage.yaml --mountpoint /mnt/lepton
 lepton check --bootstrap layer.bootstrap --config storage.yaml
 ```
+
+### Registry backend
+
+The `registry` backend serves blobs on demand from an OCI registry instead of a
+local directory. A blob id is the full-blob SHA256 digest, fetched via
+`GET /v2/<repo>/blobs/sha256:<hex>` with HTTP range requests. A ready-to-edit
+example lives at [`config.yaml`](../config.yaml) in the repo root.
+
+```yaml
+backend:
+  type: registry
+  config:
+    host: 127.0.0.1:5000
+    repo: library/lepton-demo
+    insecure: true
+    skip_verify: false
+    timeout: 30
+    retry_limit: 3
+    # base64-encoded `username:password`
+    auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
+    ca_cert_files: []
+    # proxy:
+    #   url: http://127.0.0.1:65001
+    #   dragonfly_scheduler_endpoint: http://127.0.0.1:65000
+```
+
+Fields under `backend.config`:
+
+- `host` (required): registry host`[:port]`, e.g. `registry-1.docker.io` or
+	`127.0.0.1:5000`.
+- `repo` (required): image repository without tag/digest, e.g. `library/ubuntu`.
+- `insecure` (default `false`): use the `http` scheme instead of `https`.
+- `skip_verify` (default `false`): skip TLS certificate verification.
+- `timeout` (default `30`): per-request timeout in seconds.
+- `retry_limit` (default `3`): retries for on-demand reads (prefetch is tried
+	once).
+- `auth` (optional): base64-encoded `username:password` string for basic auth.
+	Omit for anonymous / token-only registries.
+- `ca_cert_files` (default `[]`): extra CA certificate PEM files to trust.
+- `proxy` (optional): with `url` (HTTP mirror base URL that blob requests are
+	rewritten to) and `dragonfly_scheduler_endpoint` (route blob requests through
+	the Dragonfly client SDK; only available when the binary is built with the
+	`backend-dragonfly-proxy` feature).
 
 
 ## Artifact Model
@@ -449,8 +508,9 @@ first logical external data block starts at offset 0
 	logical byte offset = 0 * 4096
 
 blob_meta then maps that logical byte offset to a compressed range in the full
-blob's data region, for example compressed_block_offset = 0 for the first
-encoded group.
+blob's data region. The block is mapped to its group by
+`group_index = blkaddr / group_block_count`, and the group record gives the
+encoded `compressed_byte_offset` (for example 0 for the first encoded group).
 ```
 
 Blob identity is therefore attached to the device slot, not to the chunk index
@@ -477,11 +537,12 @@ At the same time:
 
 Whenever build emits a full blob, it writes one blob meta region before the
 footer. Blob meta is the canonical catalog for the external data blob. A blob
-meta chunk is the dense record for one EROFS external-device chunk. A blob meta
-group is the compressed unit and cache population unit. EROFS inode chunk
-indexes point into the logical uncompressed external-device address space; blob
-meta maps those chunk offsets to decoded group offsets and maps each group to an
-encoded range in the full blob data region.
+meta chunk is a content-addressed record (BLAKE3 digest + absolute block range)
+used for inspection and future deduplication; chunks are independent of groups.
+A blob meta group is the compression unit and cache population unit. EROFS inode
+chunk indexes point into the logical uncompressed external-device address space;
+blob meta maps a block offset to its group by a single division and the cache
+file mirrors that decoded address space directly.
 
 Current blob_meta on-disk shape:
 
@@ -499,14 +560,13 @@ embedded blob meta region
 | chunk_count                   |
 | group_count                   |
 | chunk_block_count             |
-| reserved1                     |
+| group_block_count             |
 +-------------------------------+
 | chunk records                 |
 | 48 bytes each                 |
 |                               |
 | digest (BLAKE3)               |
-| group_index                   |
-| group_uncompressed_block_off  |
+| uncompressed_block_offset     |
 | uncompressed_block_count      |
 | reserved                      |
 +-------------------------------+
@@ -514,7 +574,7 @@ embedded blob meta region
 | 32 bytes each                 |
 |                               |
 | uncompressed_block_offset     |
-| compressed_block_offset       |
+| compressed_byte_offset        |
 | uncompressed_block_count      |
 | compressed_size               |
 | crc32c                        |
@@ -535,10 +595,12 @@ Header details:
 	verifies this crc32c before mmaping a cached blob meta file for chunk lookup.
 - `chunks_offset` is fixed at the header size. `groups_offset` follows the dense
 	chunk table.
-- `chunk_count` is the number of EROFS chunk records. The table is dense and a
-	runtime lookup can compute `chunk_index = block_id / chunk_block_count`.
+- `chunk_count` is the number of chunk records.
 - `group_count` is the number of compressed group records.
 - `chunk_block_count` is the EROFS chunk size in 4 KiB blocks.
+- `group_block_count` is the number of decoded 4 KiB blocks per group. Every
+	group except the last holds exactly this many blocks, so the read path maps a
+	block to its group with `group_index = block_id / group_block_count` in O(1).
 - The header intentionally does not store `header_size`, total compressed size,
 	or total uncompressed size. The header size is fixed at 48 bytes, totals are
 	computed from the group records, and the blob meta region is padded to a 4 KiB
@@ -546,32 +608,40 @@ Header details:
 
 Chunk details:
 
-- `digest` is computed over the uncompressed, block-padded EROFS chunk.
-- `group_index` references the compressed group that contains this chunk.
-- `group_uncompressed_block_offset` is the chunk's 4 KiB block offset within its
-	decoded group.
-- `uncompressed_block_count` is the logical chunk span in 4 KiB blocks. The
-	current builder reserves a full fixed EROFS chunk for each chunk index so the
-	dense lookup remains valid.
+- Chunks are decoupled from groups: a chunk may straddle a group boundary, and a
+	group may contain parts of several chunks. The chunk table is a digest index,
+	not a per-group map.
+- `digest` is the BLAKE3 hash of the chunk's decoded, block-aligned bytes — the
+	deduplication key.
+- `uncompressed_block_offset` is the chunk's absolute 4 KiB block offset in the
+	dense decoded address space (chunks are stored back-to-back).
+- `uncompressed_block_count` is the chunk span in 4 KiB blocks. Only the chunk's
+	final block carries zero padding; full chunks are already block-aligned, so the
+	dense layout packs real blocks instead of large zero runs.
 
 Group details:
 
+- Groups are formed by packing whole decoded blocks up to `--compress-size`
+	regardless of chunk boundaries, then compressing the batch as one unit. So
+	every group but the last is exactly `group_block_count` blocks.
 - `uncompressed_block_offset` is the decoded cache 4 KiB block offset for the
-	group.
-- `compressed_block_offset` is the encoded data-region 4 KiB block offset, not
-	inside the whole full blob file. Runtime backends add the data-region base
-	offset before issuing range reads.
+	group. Groups are dense and contiguous in the decoded address space.
+- `compressed_byte_offset` is the encoded payload's byte offset within the data
+	region (not inside the whole full blob file). Encoded groups are packed
+	back-to-back with no inter-group padding, so this is a plain byte position and
+	is not block-aligned for compressed groups. Runtime backends add the
+	data-region base offset before issuing range reads.
 - `uncompressed_block_count` describes the decoded group size in 4 KiB blocks.
-- `compressed_size` is the actual encoded byte length and excludes group padding.
-	The builder pads every encoded group to the next 4 KiB boundary so the next
-	group can keep a block-granular `compressed_block_offset`.
+- `compressed_size` is the actual encoded byte length. The next group starts at
+	exactly the previous group's `compressed_byte_offset + compressed_size`.
 - `crc32c` is computed over the decoded group. If `compressed_size` equals
 	`uncompressed_block_count * 4096`, runtime treats the group as stored plain and
 	skips decompression even when the header compressor is zstd.
 
-The writer does not bias `compressed_block_offset` by the bootstrap size. It
-also does not bias `uncompressed_block_offset`; that field remains the decoded
-cache address for blob data.
+The writer does not bias `compressed_byte_offset` by the bootstrap size, and
+does not bias `uncompressed_block_offset`. Only the data region as a whole is
+padded to a 4 KiB boundary (so the embedded bootstrap that follows starts on a
+block); groups themselves are not individually padded.
 
 ### Merge output
 
@@ -583,16 +653,20 @@ more previously built full blobs.
 The build pipeline now follows this sequence:
 
 1. Walk the source directory and build the in-memory inode tree.
-2. Assign dense file chunk indexes into a logical uncompressed external-device
-	address space. Each EROFS chunk advances by the fixed EROFS chunk size.
-3. Record one blob_meta chunk entry for each EROFS chunk and group the decoded
-	data stream into compression groups, normally 1 MiB each.
+2. Assign file chunk indexes into a logical uncompressed external-device address
+	space. Chunks are packed densely: each chunk advances by its real
+	block-aligned size, so only a chunk's final block carries zero padding (no
+	full-chunk zero runs).
+3. Record one blob_meta chunk entry per chunk (BLAKE3 digest + absolute block
+	range) and feed the decoded data stream into a block-oriented group builder
+	that flushes a compression group whenever it fills to `--compress-size`,
+	regardless of chunk boundaries. A chunk may therefore span two groups.
 4. Compute BLAKE3 digest over each uncompressed chunk and CRC32C over each
 	uncompressed group.
 5. Compress each group according to the blob_meta header compressor and append
-	the encoded bytes directly to the beginning of the full blob file. Encoded
-	groups are padded to 4 KiB. For zstd, groups that do not shrink to at most 70%
-	of their uncompressed size are stored plain and marked by
+	the encoded bytes directly to the data region. Encoded groups are packed
+	back-to-back with no inter-group padding. For zstd, groups that do not shrink
+	to at most 70% of their uncompressed size are stored plain and marked by
 	`compressed_size == uncompressed_block_count * 4096`.
 6. Compute SHA256 over the encoded data region as those bytes are written and
 	write it into the bootstrap device slot tag.
@@ -650,9 +724,13 @@ When mounting with `--bootstrap + --blob-dir`:
 	the cache directory. The cache verifies the blob meta header crc32c before
 	mmaping the cached file and using its chunk records.
 7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
-	layer maps those ranges to blob meta chunks, ensures the referenced groups are
-	fetched and decoded from the data region, validates group CRC32C, and returns
-	the requested chunk slices to FUSE.
+	layer maps an offset to its group in O(1) with `block / group_block_count`,
+	ensures every group covering the requested range is fetched and decoded from
+	the data region (validating group CRC32C), and then reads the bytes straight
+	out of the cache file. The cache file mirrors the dense decoded address space,
+	so once the covering groups are ready the absolute offset indexes directly into
+	it for a single contiguous read — no chunk-level lookup is needed on the read
+	path.
 
 The runtime no longer reads external blob data by direct mmap offsets. External
 blob reads always go through the blob_meta-aware cache abstraction.
@@ -798,10 +876,10 @@ Pipeline:
 1. Pull `--source` into a scratch content store
    (`internal/remote`, backed by containerd's local content store).
 2. For each OCI layer, extract its rootfs (decompressing gzip/zstd, resolving
-   whiteouts) and run `lepton build` with the configured `--chunk-size` and
-   `--compressor`. The build output is streamed straight into the content store
-   through a FIFO, so the full blob is never staged on disk twice
-   (`internal/converter/layer.go`).
+   whiteouts) and run `lepton build` with the configured `--chunk-size`,
+   `--compress-size` and `--compressor`. The build output is streamed straight
+   into the content store through a FIFO, so the full blob is never staged on
+   disk twice (`internal/converter/layer.go`).
 3. A post-convert index hook runs `lepton merge` over the per-layer blobs to
    produce the overlaid bootstrap, which is written back as the final bootstrap
    layer (`internal/converter/hook.go`).
@@ -817,11 +895,12 @@ Flags:
 | `--builder` | `lepton` | Path to the `lepton` binary (PATH-resolvable). |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
 | `--chunk-size` | `1048576` | Lepton file chunk size in bytes (1 MiB). |
+| `--compress-size` | `1048576` | Blob meta group uncompressed size in bytes; a multiple of 1 MiB and at least `--chunk-size`. |
 | `--compressor` | `zstd` | Chunk data compressor: `none` or `zstd`. |
 | `--platform` | all | Convert only the given platform (e.g. `linux/amd64`). |
 | `--insecure` | `false` | Skip TLS verification for the registry. |
 | `--plain-http` | `false` | Use plain HTTP to talk to the registry. |
-| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. |
+| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. Forwarded to the `lepton build`/`merge` subprocesses. |
 
 Notes:
 
@@ -892,7 +971,7 @@ Flags:
 | `--platform` | host | Check only the given platform; defaults to the host platform. |
 | `--insecure` | `false` | Skip TLS verification for the registry. |
 | `--plain-http` | `false` | Use plain HTTP to talk to the registry. |
-| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. |
+| `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. Forwarded to the `lepton fuse` subprocess (use `debug` to see per-request backend reads). |
 
 Example:
 

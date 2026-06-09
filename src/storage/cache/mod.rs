@@ -5,13 +5,10 @@ use std::io::Cursor;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::metadata::{
-    BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup, EROFS_BLOB_ID_SIZE,
-};
-use crate::storage::backend::BlobBackend;
+use crate::metadata::{BlobMeta, BlobMetaCompressor, BlobMetaGroup, EROFS_BLOB_ID_SIZE};
+use crate::storage::backend::{BlobBackend, ReadContext, RequestSource};
 
 pub use local::LocalBlobCache;
-
 pub trait BlobCache: Send + Sync {
     fn read_at(&self, offset: u64, dst: &mut [u8]) -> io::Result<()>;
 
@@ -97,23 +94,19 @@ pub(crate) struct BlobCacheBuffers {
     decoded: Vec<u8>,
 }
 
-pub(crate) fn chunks_for_range(
-    blob_meta: &BlobMeta,
-    offset: u64,
-    len: usize,
-) -> io::Result<Vec<(usize, BlobMetaChunk)>> {
-    blob_meta
-        .chunks_for_uncompressed_byte_range(offset, len)
-        .map_err(|err| io::Error::new(io::ErrorKind::NotFound, err))
-}
-
 pub(crate) fn fetch_decode_validate_group_into<'a>(
     blob_id: &[u8; EROFS_BLOB_ID_SIZE],
     blob_meta: &BlobMeta,
     backend: &Arc<dyn BlobBackend>,
     group: &BlobMetaGroup,
     buffers: &'a mut BlobCacheBuffers,
+    source: RequestSource,
 ) -> io::Result<&'a [u8]> {
+    let ctx = ReadContext::group(
+        source,
+        group.uncompressed_byte_offset(),
+        group.uncompressed_byte_size(),
+    );
     let decoded_len = usize::try_from(group.uncompressed_byte_size()).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -126,6 +119,7 @@ pub(crate) fn fetch_decode_validate_group_into<'a>(
             blob_id,
             group.compressed_byte_offset(),
             &mut buffers.decoded,
+            ctx,
         )?;
         validate_decoded_group(group, &buffers.decoded)?;
         return Ok(&buffers.decoded);
@@ -136,6 +130,7 @@ pub(crate) fn fetch_decode_validate_group_into<'a>(
         blob_id,
         group.compressed_byte_offset(),
         &mut buffers.encoded,
+        ctx,
     )?;
 
     buffers.decoded.clear();
@@ -176,18 +171,6 @@ pub(crate) fn validate_decoded_group(group: &BlobMetaGroup, decoded: &[u8]) -> i
     Ok(())
 }
 
-pub(crate) fn range_in_chunk(
-    blob_meta: &BlobMeta,
-    chunk_index: usize,
-    chunk: &BlobMetaChunk,
-    logical_offset: u64,
-    dst_remaining: usize,
-) -> (usize, usize) {
-    let chunk_offset = (logical_offset - blob_meta.chunk_logical_byte_offset(chunk_index)) as usize;
-    let available = chunk.uncompressed_byte_size() as usize - chunk_offset;
-    (chunk_offset, available.min(dst_remaining))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,7 +180,7 @@ mod tests {
         BlobMetaGroup::new(
             uncompressed_block_offset,
             uncompressed_block_count,
-            uncompressed_block_offset,
+            uncompressed_block_offset * EROFS_BLOCK_SIZE as u64,
             uncompressed_block_count * EROFS_BLOCK_SIZE,
             0,
         )

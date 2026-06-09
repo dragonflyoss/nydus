@@ -26,7 +26,7 @@ pub struct BlobWriter {
     next_blkaddr: u64,
     next_compressed_offset: u64,
     data_hasher: Sha256,
-    group_uncompressed_block_offset: u64,
+    group_block_offset: u64,
     group_buffer: Vec<u8>,
     blob_meta_groups: Vec<BlobMetaGroup>,
     blob_meta_chunks: Vec<BlobMetaChunk>,
@@ -54,12 +54,14 @@ impl BlobWriter {
 
         let file = File::create(path)
             .with_context(|| format!("failed to create blob device: {}", path.display()))?;
-        Self::from_file(file, file_chunk_size, compressor)
+        let group_size = file_chunk_size.max(BLOB_META_DEFAULT_CHUNK_SIZE);
+        Self::from_file(file, file_chunk_size, group_size, compressor)
     }
 
     pub fn from_file(
         file: File,
         file_chunk_size: u32,
+        group_size: u32,
         compressor: BlobMetaCompressor,
     ) -> Result<Self> {
         if file_chunk_size < EROFS_BLOCK_SIZE {
@@ -68,8 +70,12 @@ impl BlobWriter {
         if !file_chunk_size.is_power_of_two() || file_chunk_size % EROFS_BLOCK_SIZE != 0 {
             bail!("blob writer file chunksize must be power-of-two and block-aligned");
         }
-
-        let group_size = file_chunk_size.max(BLOB_META_DEFAULT_CHUNK_SIZE);
+        if group_size < file_chunk_size {
+            bail!("blob writer group size must be at least the file chunk size");
+        }
+        if group_size % EROFS_BLOCK_SIZE != 0 {
+            bail!("blob writer group size must be block-aligned");
+        }
 
         Ok(Self {
             file,
@@ -79,7 +85,7 @@ impl BlobWriter {
             next_blkaddr: 0,
             next_compressed_offset: 0,
             data_hasher: Sha256::new(),
-            group_uncompressed_block_offset: 0,
+            group_block_offset: 0,
             group_buffer: Vec::with_capacity(group_size as usize),
             blob_meta_groups: Vec::new(),
             blob_meta_chunks: Vec::new(),
@@ -170,8 +176,12 @@ impl BlobWriter {
             f.read_exact(&mut chunk_buf[..to_read])
                 .with_context(|| format!("failed to read file: {}", path.display()))?;
 
-            let write_len = self.file_chunk_size as usize;
-            let blkaddr = self.append_unique_chunk(&chunk_buf[..to_read], write_len)?;
+            // Pad only up to the last block of the chunk's real data, not to the
+            // full file chunk size. A full chunk is already block-aligned, while
+            // a partial (tail) chunk keeps zero padding confined to its final
+            // block so groups pack dense real blocks instead of large zero runs.
+            let write_len = align_to_block(to_read as u64) as usize;
+            let blkaddr = self.append_chunk(&chunk_buf[..to_read], write_len)?;
 
             indexes.push(ChunkIndex {
                 blkaddr,
@@ -182,50 +192,45 @@ impl BlobWriter {
         Ok(indexes)
     }
 
-    fn append_unique_chunk(&mut self, data: &[u8], write_len: usize) -> Result<u64> {
-        if write_len > self.group_size as usize {
-            bail!("blob chunk is larger than blob meta group size");
-        }
-
+    fn append_chunk(&mut self, data: &[u8], write_len: usize) -> Result<u64> {
         let addr = self.next_blkaddr;
+        let block_count = u32::try_from(write_len / EROFS_BLOCK_SIZE as usize)
+            .context("blob meta chunk block count exceeds u32")?;
+
+        // Block-aligned chunk payload: real bytes followed by zero padding only
+        // in its final block.
         let mut uncompressed = vec![0u8; write_len];
         uncompressed[..data.len()].copy_from_slice(data);
-        self.next_blkaddr += (write_len / EROFS_BLOCK_SIZE as usize) as u64;
+        self.next_blkaddr += block_count as u64;
 
-        if !self.group_buffer.is_empty()
-            && self.group_buffer.len() + uncompressed.len() > self.group_size as usize
-        {
-            self.flush_group()?;
-        }
-
-        if self.group_buffer.is_empty() {
-            self.group_uncompressed_block_offset = addr;
-        }
-
-        let group_index = u32::try_from(self.blob_meta_groups.len())
-            .context("blob meta group index exceeds u32")?;
-        let group_uncompressed_block_offset = u32::try_from(
-            addr.checked_sub(self.group_uncompressed_block_offset)
-                .context("blob meta chunk precedes its group")?,
-        )
-        .context("blob meta chunk group offset exceeds u32")?;
-        let uncompressed_block_count = u32::try_from(write_len / EROFS_BLOCK_SIZE as usize)
-            .context("blob meta chunk block count exceeds u32")?;
+        // Record the chunk by its absolute block position; chunks are tracked
+        // independently of groups as a digest index only.
         let digest = *blake3::hash(&uncompressed).as_bytes();
-        let chunk = BlobMetaChunk::new(
-            digest,
-            group_index,
-            group_uncompressed_block_offset,
-            uncompressed_block_count,
-        )?;
-        self.group_buffer.extend_from_slice(&uncompressed);
+        let chunk = BlobMetaChunk::new(digest, addr, block_count)?;
         self.blob_meta_chunks.push(chunk);
 
-        if self.group_buffer.len() == self.group_size as usize {
-            self.flush_group()?;
-        }
+        // Feed the bytes into the group stream, which packs whole blocks up to
+        // the group size regardless of chunk boundaries.
+        self.append_to_group_stream(&uncompressed)?;
 
         Ok(addr)
+    }
+
+    /// Append block-aligned data to the current group, flushing whenever it
+    /// fills to the group size. A chunk may straddle a group boundary, so groups
+    /// are pure block runs of exactly `group_size` (except the last).
+    fn append_to_group_stream(&mut self, mut data: &[u8]) -> Result<()> {
+        let group_size = self.group_size as usize;
+        while !data.is_empty() {
+            let space = group_size - self.group_buffer.len();
+            let take = space.min(data.len());
+            self.group_buffer.extend_from_slice(&data[..take]);
+            data = &data[take..];
+            if self.group_buffer.len() == group_size {
+                self.flush_group()?;
+            }
+        }
+        Ok(())
     }
 
     fn flush_group(&mut self) -> Result<()> {
@@ -250,36 +255,28 @@ impl BlobWriter {
         };
         let encoded = compressed.as_deref().unwrap_or(&uncompressed);
 
+        // Encoded group payloads are packed back-to-back in the data region.
+        // No block padding is inserted between compressed groups; they are read
+        // by byte range, and only the data region as a whole is later aligned
+        // (by the build assembler) so the embedded bootstrap starts on a block.
         let compressed_offset = self.next_compressed_offset;
-        if compressed_offset % EROFS_BLOCK_SIZE as u64 != 0 {
-            bail!("blob meta group compressed offset is not block aligned");
-        }
         self.file
             .write_all(encoded)
             .context("failed to write to blob device")?;
         self.data_hasher.update(encoded);
-        let compressed_end = compressed_offset + encoded.len() as u64;
-        let padded_end = align_to_block(compressed_end);
-        let padding_size = usize::try_from(padded_end - compressed_end)
-            .context("blob meta group padding size exceeds usize")?;
-        if padding_size > 0 {
-            let padding = vec![0u8; padding_size];
-            self.file
-                .write_all(&padding)
-                .context("failed to pad blob device group")?;
-            self.data_hasher.update(&padding);
-        }
-        self.next_compressed_offset = padded_end;
+        self.next_compressed_offset = compressed_offset + encoded.len() as u64;
 
+        let block_count = u32::try_from(uncompressed.len() / EROFS_BLOCK_SIZE as usize)
+            .context("blob meta group uncompressed block count exceeds u32")?;
         let entry = BlobMetaGroup::new(
-            self.group_uncompressed_block_offset,
-            u32::try_from(uncompressed.len() / EROFS_BLOCK_SIZE as usize)
-                .context("blob meta group uncompressed block count exceeds u32")?,
-            compressed_offset / EROFS_BLOCK_SIZE as u64,
+            self.group_block_offset,
+            block_count,
+            compressed_offset,
             encoded.len() as u32,
             crc32,
         )?;
         self.blob_meta_groups.push(entry);
+        self.group_block_offset += block_count as u64;
         Ok(())
     }
 }
@@ -297,14 +294,15 @@ mod tests {
     #[test]
     fn blob_meta_group_round_trips_minimal_fields() {
         let payload = vec![0u8; 0x3000];
-        let entry = BlobMetaGroup::new(2, 3, 0x12, 0x400, crc32c(&payload)).unwrap();
+        // Compressed byte offset is a plain byte position (not block aligned).
+        let entry = BlobMetaGroup::new(2, 3, 0x12345, 0x400, crc32c(&payload)).unwrap();
 
         assert_eq!(entry.uncompressed_block_offset(), 2);
         assert_eq!(entry.uncompressed_block_count(), 3);
         assert_eq!(entry.uncompressed_byte_offset(), 0x2000);
         assert_eq!(entry.uncompressed_byte_size(), 0x3000);
-        assert_eq!(entry.compressed_block_offset(), 0x12);
-        assert_eq!(entry.compressed_byte_offset(), 0x12000);
+        assert_eq!(entry.compressed_byte_offset(), 0x12345);
+        assert_eq!(entry.compressed_byte_end(), 0x12345 + 0x400);
         assert_eq!(entry.compressed_size(), 0x400);
         assert_eq!(entry.crc32(), crc32c(&payload));
     }
@@ -333,43 +331,46 @@ mod tests {
         assert_eq!(indexes_a.len(), 2);
         assert_eq!(indexes_b.len(), 1);
         assert_eq!(indexes_a[0].blkaddr, 0);
-        assert_eq!(indexes_b[0].blkaddr, 512);
         assert_eq!(indexes_a[1].blkaddr, 256);
-        assert_eq!(writer.total_blocks(), 768);
+        // Dense packing: file_a's 4KiB tail chunk occupies a single block, so
+        // file_b starts right after it instead of being padded to a full chunk.
+        assert_eq!(indexes_b[0].blkaddr, 257);
+        assert_eq!(writer.total_blocks(), 513);
         assert_eq!(writer.saved_by_dedup, 0);
 
         let entries = writer.blob_meta_chunks();
         let groups = writer.blob_meta_groups();
         assert_eq!(entries.len(), 3);
         assert_eq!(groups.len(), 3);
-        assert_eq!(entries[0].group_index(), 0);
-        assert_eq!(entries[0].group_uncompressed_block_offset(), 0);
+        // Chunks record absolute block offsets, independent of groups.
+        assert_eq!(entries[0].uncompressed_block_offset(), 0);
         assert_eq!(entries[0].uncompressed_block_count(), 256);
-        assert_eq!(
-            entries[0].uncompressed_byte_size(),
-            BLOB_META_DEFAULT_CHUNK_SIZE as u64
-        );
+        assert_eq!(entries[1].uncompressed_block_offset(), 256);
+        assert_eq!(entries[1].uncompressed_block_count(), 1);
+        assert_eq!(entries[2].uncompressed_block_offset(), 257);
+        assert_eq!(entries[2].uncompressed_block_count(), 256);
+        // Groups pack whole blocks up to the group size (256 blocks) regardless
+        // of chunk boundaries: file_a's tail block and file_b's leading blocks
+        // share group 1, and the remainder spills into group 2.
+        assert_eq!(groups[0].uncompressed_block_offset(), 0);
+        assert_eq!(groups[0].uncompressed_block_count(), 256);
         assert_eq!(groups[0].compressed_byte_offset(), 0);
         assert_eq!(groups[0].compressed_size(), BLOB_META_DEFAULT_CHUNK_SIZE);
-        assert_eq!(entries[1].group_index(), 1);
-        assert_eq!(entries[1].group_uncompressed_block_offset(), 0);
-        assert_eq!(entries[1].uncompressed_block_count(), 256);
-        assert_eq!(
-            entries[1].uncompressed_byte_size(),
-            BLOB_META_DEFAULT_CHUNK_SIZE as u64
-        );
+        assert_eq!(groups[1].uncompressed_block_offset(), 256);
+        assert_eq!(groups[1].uncompressed_block_count(), 256);
         assert_eq!(
             groups[1].compressed_byte_offset(),
             BLOB_META_DEFAULT_CHUNK_SIZE as u64
         );
         assert_eq!(groups[1].compressed_size(), BLOB_META_DEFAULT_CHUNK_SIZE);
-        assert_eq!(entries[2].group_index(), 2);
-        assert_eq!(entries[2].group_uncompressed_block_offset(), 0);
+        assert_eq!(groups[2].uncompressed_block_offset(), 512);
+        assert_eq!(groups[2].uncompressed_block_count(), 1);
+        // Groups pack back-to-back in the data region with no inter-group padding.
         assert_eq!(
             groups[2].compressed_byte_offset(),
-            BLOB_META_DEFAULT_CHUNK_SIZE as u64 * 2
+            2 * BLOB_META_DEFAULT_CHUNK_SIZE as u64
         );
-        assert_eq!(groups[2].compressed_size(), BLOB_META_DEFAULT_CHUNK_SIZE);
+        assert_eq!(groups[2].compressed_size(), EROFS_BLOCK_SIZE);
     }
 
     #[test]
@@ -396,7 +397,7 @@ mod tests {
         assert_eq!(blob_meta.groups().len(), 1);
         assert_eq!(blob_meta.chunks()[0].uncompressed_block_count(), 1);
         assert_eq!(blob_meta.chunks()[0].uncompressed_byte_size(), 4096);
-        assert_eq!(blob_meta.chunks()[1].group_uncompressed_block_offset(), 1);
+        assert_eq!(blob_meta.chunks()[1].uncompressed_block_offset(), 1);
         assert_eq!(blob_meta.groups()[0].uncompressed_byte_size(), 8192);
     }
 
@@ -458,7 +459,7 @@ mod tests {
         assert_eq!(blob_meta.header().chunk_bytes(), 48);
         assert_eq!(blob_meta.header().group_bytes(), 32);
         assert_eq!(blob_meta.header().metadata_size(), 4096);
-        assert_eq!(blob_meta.chunks()[0].group_uncompressed_block_offset(), 0);
+        assert_eq!(blob_meta.chunks()[0].uncompressed_block_offset(), 0);
         assert_eq!(blob_meta.groups()[0].compressed_byte_offset(), 8192);
     }
 

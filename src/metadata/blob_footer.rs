@@ -67,6 +67,23 @@ impl BlobFooter {
         Ok(footer)
     }
 
+    /// Parse a footer from exactly its `LEPTON_BLOB_FOOTER_SIZE` trailing bytes,
+    /// validating the region layout against the known total blob size. Use this
+    /// when the footer has been fetched in isolation (e.g. a registry range
+    /// read) rather than reading the whole blob.
+    pub fn parse(footer_bytes: &[u8], blob_size: u64) -> Result<Self> {
+        if footer_bytes.len() != LEPTON_BLOB_FOOTER_SIZE {
+            bail!(
+                "invalid lepton footer size: {} (expected {})",
+                footer_bytes.len(),
+                LEPTON_BLOB_FOOTER_SIZE
+            );
+        }
+        let footer = Self::from_bytes(footer_bytes)?;
+        footer.validate(blob_size)?;
+        Ok(footer)
+    }
+
     pub fn read_from_path(path: &Path) -> Result<Self> {
         let mut file = File::open(path)
             .with_context(|| format!("failed to open blob footer: {}", path.display()))?;

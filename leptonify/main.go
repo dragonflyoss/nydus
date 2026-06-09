@@ -8,10 +8,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
+	"github.com/dustin/go-humanize"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -64,6 +69,11 @@ func convertCommand() *cli.Command {
 			&cli.UintFlag{
 				Name:  "chunk-size",
 				Usage: "lepton file chunk size in bytes",
+				Value: 1 << 20,
+			},
+			&cli.UintFlag{
+				Name:  "compress-size",
+				Usage: "lepton group uncompressed size in bytes (must be a multiple of 1MiB)",
 				Value: 1 << 20,
 			},
 			&cli.StringFlag{
@@ -155,11 +165,13 @@ func runConvert(c *cli.Context) error {
 
 	logrus.Infof("converting image to lepton format")
 	newDesc, err := converter.Convert(ctx, provider.ContentStore(), srcDesc, converter.Option{
-		BuilderPath: c.String("builder"),
-		WorkDir:     scratchDir,
-		ChunkSize:   uint32(c.Uint("chunk-size")),
-		Compressor:  c.String("compressor"),
-		PlatformMC:  platformMC,
+		BuilderPath:  c.String("builder"),
+		WorkDir:      scratchDir,
+		ChunkSize:    uint32(c.Uint("chunk-size")),
+		CompressSize: uint32(c.Uint("compress-size")),
+		Compressor:   c.String("compressor"),
+		LogLevel:     c.String("log-level"),
+		PlatformMC:   platformMC,
 	})
 	if err != nil {
 		return errors.Wrap(err, "convert")
@@ -170,8 +182,73 @@ func runConvert(c *cli.Context) error {
 		return errors.Wrapf(err, "push %q", target)
 	}
 
+	// Report the total layer size of both images so the conversion's size impact
+	// is visible. Errors here are non-fatal: a missing size must not fail an
+	// otherwise successful conversion.
+	cs := provider.ContentStore()
+	if srcSize, err := totalLayerSize(ctx, cs, srcDesc, platformMC); err != nil {
+		logrus.Warnf("failed to compute source image size: %v", err)
+	} else if dstSize, err := totalLayerSize(ctx, cs, *newDesc, platformMC); err != nil {
+		logrus.Warnf("failed to compute target image size: %v", err)
+	} else {
+		logrus.Infof("image size: oci %s -> lepton %s",
+			humanize.IBytes(srcSize), humanize.IBytes(dstSize))
+	}
+
 	logrus.Infof("done: %s -> %s (%s)", source, target, newDesc.Digest)
 	return nil
+}
+
+// totalLayerSize resolves rootDesc (a manifest or a multi-platform index) for
+// the requested platform and returns the sum of its layer descriptor sizes.
+func totalLayerSize(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (uint64, error) {
+	manifestDesc, err := resolveManifest(ctx, cs, rootDesc, platformMC)
+	if err != nil {
+		return 0, err
+	}
+
+	var manifest ocispec.Manifest
+	b, err := content.ReadBlob(ctx, cs, manifestDesc)
+	if err != nil {
+		return 0, errors.Wrap(err, "read manifest blob")
+	}
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		return 0, errors.Wrap(err, "unmarshal manifest")
+	}
+
+	var total uint64
+	for _, layer := range manifest.Layers {
+		if layer.Size > 0 {
+			total += uint64(layer.Size)
+		}
+	}
+	return total, nil
+}
+
+// resolveManifest returns the platform-specific manifest descriptor, selecting
+// from an index when rootDesc is multi-platform.
+func resolveManifest(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (ocispec.Descriptor, error) {
+	if images.IsManifestType(rootDesc.MediaType) {
+		return rootDesc, nil
+	}
+	if !images.IsIndexType(rootDesc.MediaType) {
+		return ocispec.Descriptor{}, errors.Errorf("unsupported root media type %q", rootDesc.MediaType)
+	}
+
+	var index ocispec.Index
+	b, err := content.ReadBlob(ctx, cs, rootDesc)
+	if err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "read index blob")
+	}
+	if err := json.Unmarshal(b, &index); err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "unmarshal index")
+	}
+	for _, m := range index.Manifests {
+		if m.Platform == nil || platformMC.Match(*m.Platform) {
+			return m, nil
+		}
+	}
+	return ocispec.Descriptor{}, errors.New("no manifest matches the requested platform")
 }
 
 func checkCommand() *cli.Command {
@@ -266,6 +343,7 @@ func runCheck(c *cli.Context) error {
 		WorkDir:    workDir,
 		Insecure:   c.Bool("insecure"),
 		PlainHTTP:  c.Bool("plain-http"),
+		LogLevel:   c.String("log-level"),
 		PlatformMC: platformMC,
 	})
 	if err != nil {

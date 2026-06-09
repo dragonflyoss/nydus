@@ -29,7 +29,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy, llvm-tools-preview
-          toolchain: 1.85.0
+          toolchain: 1.88.0
 
       - name: Run cargo fmt
         run: |

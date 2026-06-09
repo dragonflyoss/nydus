@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 use fuser::{Config, MountOption, Session};
 use lepton::fs::{ErofsFs, ErofsReader};
+use lepton::storage::backend::{build_backend, BlobBackend, LocalBackend};
 use lepton::storage::config::StorageConfig;
 use lepton::storage::prefetch::{BlobPrefetcher, DEFAULT_PREFETCH_THREADS};
 use lepton::tracing::init_tracing;
@@ -33,7 +34,7 @@ impl TermSignalMask {
             let add_ret = unsafe { libc::sigaddset(&mut mask, *signal) };
             if add_ret != 0 {
                 return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("failed to add signal {} to mask", signal));
+                    .with_context(|| format!("failed to add signal {signal} to mask"));
             }
         }
 
@@ -199,29 +200,44 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
         None => None,
     };
 
-    let blob_dir = args.blob_dir.clone().or_else(|| {
-        storage_config
-            .as_ref()
-            .map(|c| c.backend_dir().to_path_buf())
-    });
-    let cache_dir = args
-        .cache_dir
-        .clone()
-        .or_else(|| storage_config.as_ref().map(|c| c.cache_dir().to_path_buf()));
+    let cache_dir = if let Some(dir) = args.cache_dir.clone() {
+        Some(dir)
+    } else if let Some(config) = storage_config.as_ref() {
+        Some(
+            config
+                .cache_dir()
+                .context("failed to resolve cache directory from config")?,
+        )
+    } else {
+        None
+    };
 
     let (prefetch_enable, prefetch_threads) = match storage_config.as_ref() {
         Some(config) => (config.prefetch.enable, config.prefetch.threads),
         None => (true, DEFAULT_PREFETCH_THREADS),
     };
 
-    match (&args.blob, &args.bootstrap, &blob_dir) {
-        (Some(_), None, None) => {}
-        (None, Some(_), Some(dir)) if dir.is_dir() => {}
-        (None, Some(_), Some(dir)) => {
-            bail!("blob-dir {} is not a directory", dir.display())
+    // Build the blob backend. A direct `--blob <path>` is self-contained and
+    // needs no backend. Otherwise a `--bootstrap` is served by either an
+    // explicit `--blob-dir` (local backend) or the backend from `--config`.
+    let backend: Option<Arc<dyn BlobBackend>> = if args.blob.is_some() {
+        None
+    } else if let Some(dir) = args.blob_dir.as_ref() {
+        if !dir.is_dir() {
+            bail!("blob-dir {} is not a directory", dir.display());
         }
+        Some(Arc::new(LocalBackend::new(dir.clone())))
+    } else if let Some(config) = storage_config.as_ref() {
+        Some(build_backend(&config.backend).context("failed to build blob backend")?)
+    } else {
+        None
+    };
+
+    match (&args.blob, &args.bootstrap, &backend) {
+        (Some(_), None, _) => {}
+        (None, Some(_), Some(_)) => {}
         _ => {
-            bail!("fuse expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-dir or --config")
+            bail!("fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config")
         }
     }
     if let Some(cache_dir) = &cache_dir {
@@ -233,7 +249,7 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     let reader = ErofsReader::open(
         args.blob.as_deref(),
         args.bootstrap.as_deref(),
-        blob_dir.as_deref(),
+        backend,
         cache_dir.as_deref(),
     )
     .context("failed to open EROFS image")?;
@@ -250,10 +266,8 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     config.clone_fd = true;
 
     let session =
-        Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {}", e))?;
-    let bg = session
-        .spawn()
-        .map_err(|e| anyhow!("spawn failed: {}", e))?;
+        Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {e}"))?;
+    let bg = session.spawn().map_err(|e| anyhow!("spawn failed: {e}"))?;
 
     if prefetch_enable {
         match BlobPrefetcher::new(reader.clone(), prefetch_threads).spawn() {
@@ -347,7 +361,7 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
         Err(e) => error!("background fuse session join returned error: {:?}", e),
     }
 
-    join_result.map_err(|e| anyhow!("join failed: {}", e))?;
+    join_result.map_err(|e| anyhow!("join failed: {e}"))?;
 
     Ok(())
 }

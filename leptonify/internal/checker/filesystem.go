@@ -9,6 +9,7 @@ package checker
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,19 +18,25 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/log"
+	"github.com/distribution/reference"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
+	"gopkg.in/yaml.v3"
+
+	"github.com/dragonflyoss/lepton/leptonify/internal/remote"
 )
 
 // filesystemRule mounts both the source and target images and compares their
 // root filesystems for consistency. It is skipped unless both images are
 // present.
 type filesystemRule struct {
-	cs      content.Store
-	builder string
-	workDir string
-	source  *Image
-	target  *Image
+	cs       content.Store
+	provider *remote.Provider
+	builder  string
+	logLevel string
+	workDir  string
+	source   *Image
+	target   *Image
 }
 
 func (r *filesystemRule) Name() string { return "filesystem" }
@@ -114,47 +121,61 @@ func (r *filesystemRule) mount(ctx context.Context, label string, img *Image) (s
 	}, nil
 }
 
-// fuseMount materializes the lepton bootstrap and blobs under dir, starts a
+// fuseMount materializes the lepton bootstrap under dir, generates a storage
+// config pointing the registry backend at the image's source registry, starts a
 // `lepton fuse` daemon mounting them, waits for the mount to become ready, and
-// returns the mountpoint with an unmount function.
+// returns the mountpoint with an unmount function. Blob data is fetched on
+// demand from the registry rather than materialized locally.
 func (r *filesystemRule) fuseMount(ctx context.Context, dir string, img *Image) (string, func(), error) {
 	if img.Bootstrap == nil {
 		return "", nil, errors.New("lepton image is missing its bootstrap layer")
 	}
 
-	blobDir := filepath.Join(dir, "blobs")
 	cacheDir := filepath.Join(dir, "cache")
 	mountpoint := filepath.Join(dir, "mnt")
-	for _, d := range []string{blobDir, cacheDir, mountpoint} {
+	for _, d := range []string{cacheDir, mountpoint} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return "", nil, errors.Wrapf(err, "create dir %q", d)
 		}
 	}
 
-	if err := materializeBlobs(ctx, r.cs, img.Blobs, blobDir); err != nil {
-		return "", nil, errors.Wrap(err, "materialize blobs")
-	}
-	bootstrapPath := filepath.Join(dir, "image.boot")
-	if err := extractBootstrap(ctx, r.cs, *img.Bootstrap, bootstrapPath); err != nil {
+	// Extract the bootstrap layer (image.boot plus the per-layer blob meta
+	// artifacts) and hardlink the blob metas into the cache dir so the registry
+	// backend loads metadata from disk instead of fetching each blob footer.
+	bootDir := filepath.Join(dir, "bootstrap")
+	bootstrapPath, blobMetaPaths, err := extractBootstrapLayer(ctx, r.cs, *img.Bootstrap, bootDir)
+	if err != nil {
 		return "", nil, errors.Wrap(err, "extract bootstrap")
 	}
+	if err := linkBlobMetaFiles(ctx, blobMetaPaths, cacheDir); err != nil {
+		return "", nil, errors.Wrap(err, "link blob meta to cache")
+	}
+
+	configPath := filepath.Join(dir, "config.yaml")
+	configYAML, err := r.writeRegistryConfig(img, cacheDir, configPath)
+	if err != nil {
+		return "", nil, errors.Wrap(err, "generate storage config")
+	}
+	// TODO(temporary): print the generated config so it can be verified by hand.
+	log.G(ctx).Infof("generated lepton storage config %s:\n%s", configPath, configYAML)
 
 	args := []string{
 		"fuse",
 		"--bootstrap", bootstrapPath,
-		"--blob-dir", blobDir,
-		"--cache-dir", cacheDir,
+		"--config", configPath,
 		"--mountpoint", mountpoint,
-		"--log-level", "warn",
+		"--log-level", leptonLogLevel(r.logLevel),
 		"--log-dir", filepath.Join(dir, "log"),
 		"--console",
 	}
 	// lepton fuse runs in the foreground; start it detached and wait for the
-	// mountpoint to become active.
+	// mountpoint to become active. Tee its console output to our stderr so the
+	// backend's per-request logs (link + offset/size) are visible during check,
+	// while still buffering it for error reporting.
 	cmd := exec.Command(builderBinary(r.builder), args...)
 	var fuseLog bytes.Buffer
-	cmd.Stdout = &fuseLog
-	cmd.Stderr = &fuseLog
+	cmd.Stdout = io.MultiWriter(&fuseLog, os.Stderr)
+	cmd.Stderr = io.MultiWriter(&fuseLog, os.Stderr)
 	if err := cmd.Start(); err != nil {
 		return "", nil, errors.Wrap(err, "start lepton fuse")
 	}
@@ -178,6 +199,96 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, img *Image) 
 		return "", nil, errors.Wrapf(err, "lepton fuse did not mount %q (lepton output: %s)", mountpoint, output)
 	}
 	return mountpoint, unmount, nil
+}
+
+// registryAuthConfig holds basic-auth credentials for the registry backend.
+type registryAuthConfig struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// registryBackendConfig is the `backend.config` section for the registry
+// backend understood by `lepton fuse --config`.
+type registryBackendConfig struct {
+	Host       string              `yaml:"host"`
+	Repo       string              `yaml:"repo"`
+	Insecure   bool                `yaml:"insecure"`
+	SkipVerify bool                `yaml:"skip_verify"`
+	Auth       *registryAuthConfig `yaml:"auth,omitempty"`
+}
+
+type backendSection struct {
+	Type   string                `yaml:"type"`
+	Config registryBackendConfig `yaml:"config"`
+}
+
+type localDirSection struct {
+	Dir string `yaml:"dir"`
+}
+
+type cacheSection struct {
+	Type   string          `yaml:"type"`
+	Config localDirSection `yaml:"config"`
+}
+
+type prefetchSection struct {
+	Enable  bool `yaml:"enable"`
+	Threads int  `yaml:"threads"`
+}
+
+type storageConfig struct {
+	Backend  backendSection  `yaml:"backend"`
+	Cache    cacheSection    `yaml:"cache"`
+	Prefetch prefetchSection `yaml:"prefetch"`
+}
+
+// writeRegistryConfig derives a registry-backed storage config for img, writes
+// it to configPath, and returns the rendered YAML. The registry host and
+// repository are parsed from the image reference; credentials, TLS and HTTP
+// settings come from the provider used to pull the image.
+func (r *filesystemRule) writeRegistryConfig(img *Image, cacheDir, configPath string) (string, error) {
+	named, err := reference.ParseNormalizedNamed(img.Ref)
+	if err != nil {
+		return "", errors.Wrapf(err, "parse image reference %q", img.Ref)
+	}
+	host := reference.Domain(named)
+	repo := reference.Path(named)
+	// The normalized Docker Hub domain is not the actual registry endpoint.
+	if host == "docker.io" {
+		host = "registry-1.docker.io"
+	}
+
+	var auth *registryAuthConfig
+	if username, password, err := r.provider.Credentials(host); err == nil && username != "" {
+		auth = &registryAuthConfig{Username: username, Password: password}
+	}
+
+	cfg := storageConfig{
+		Backend: backendSection{
+			Type: "registry",
+			Config: registryBackendConfig{
+				Host:       host,
+				Repo:       repo,
+				Insecure:   r.provider.PlainHTTP(),
+				SkipVerify: r.provider.Insecure(),
+				Auth:       auth,
+			},
+		},
+		Cache: cacheSection{
+			Type:   "local",
+			Config: localDirSection{Dir: cacheDir},
+		},
+		Prefetch: prefetchSection{Enable: false, Threads: 0},
+	}
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return "", errors.Wrap(err, "marshal storage config")
+	}
+	if err := os.WriteFile(configPath, out, 0o600); err != nil {
+		return "", errors.Wrapf(err, "write storage config %q", configPath)
+	}
+	return string(out), nil
 }
 
 // waitForMount polls until mountpoint is backed by a different device than its

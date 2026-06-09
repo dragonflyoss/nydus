@@ -28,8 +28,13 @@ type BuildOption struct {
 	BlobPath string
 	// ChunkSize is the file chunk size in bytes.
 	ChunkSize uint32
+	// CompressSize is the group uncompressed size in bytes (a multiple of 1MiB).
+	CompressSize uint32
 	// Compressor is the chunk data compression algorithm ("none" or "zstd").
 	Compressor string
+	// LogLevel is the log level passed to `lepton build` (trace/debug/info/warn/
+	// error). Defaults to "info" when empty.
+	LogLevel string
 }
 
 // MergeBuildOption describes a single `lepton merge` invocation that overlays a
@@ -43,6 +48,9 @@ type MergeBuildOption struct {
 	SourcePaths []string
 	// BootstrapPath is the output bootstrap path.
 	BootstrapPath string
+	// LogLevel is the log level passed to `lepton merge` (trace/debug/info/warn/
+	// error). Defaults to "info" when empty.
+	LogLevel string
 }
 
 func builderBinary(path string) string {
@@ -50,6 +58,15 @@ func builderBinary(path string) string {
 		return "lepton"
 	}
 	return path
+}
+
+// leptonLogLevel returns level, or "info" when level is empty, so a lepton
+// subprocess always receives a valid `--log-level` value.
+func leptonLogLevel(level string) string {
+	if level == "" {
+		return "info"
+	}
+	return level
 }
 
 // runLeptonBuild executes `lepton build` to produce a full blob at opt.BlobPath.
@@ -62,8 +79,9 @@ func runLeptonBuild(ctx context.Context, opt BuildOption) error {
 		opt.SourceDir,
 		"--blob", opt.BlobPath,
 		"--chunk-size", strconv.FormatUint(uint64(opt.ChunkSize), 10),
+		"--compress-size", strconv.FormatUint(uint64(opt.CompressSize), 10),
 		"--compressor", opt.Compressor,
-		"--log-level", "warn",
+		"--log-level", leptonLogLevel(opt.LogLevel),
 	}
 
 	cmd := exec.CommandContext(ctx, builderBinary(opt.BuilderPath), args...)
@@ -84,7 +102,7 @@ func runLeptonMerge(ctx context.Context, opt MergeBuildOption) error {
 	args = append(args,
 		"--bootstrap", opt.BootstrapPath,
 		"--whiteout-spec", "oci",
-		"--log-level", "warn",
+		"--log-level", leptonLogLevel(opt.LogLevel),
 	)
 
 	cmd := exec.CommandContext(ctx, builderBinary(opt.BuilderPath), args...)

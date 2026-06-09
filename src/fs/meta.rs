@@ -175,7 +175,7 @@ impl ErofsReader {
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("not a flat data layout: {}", layout),
+                format!("not a flat data layout: {layout}"),
             )),
         }
     }

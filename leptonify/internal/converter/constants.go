@@ -24,6 +24,11 @@ const (
 	// gzip-compressed bootstrap layer tarball.
 	BootstrapFileNameInLayer = "image/image.boot"
 
+	// BlobMetaDirInLayer is the directory inside the bootstrap layer tarball
+	// that holds the per-layer `<full_blob_sha256>.blob.meta` artifacts, packed
+	// alongside image.boot.
+	BlobMetaDirInLayer = "image"
+
 	// LayerAnnotationLeptonBlob marks a layer as a lepton data blob.
 	LayerAnnotationLeptonBlob = "containerd.io/snapshot/nydus-blob"
 	// LayerAnnotationLeptonBootstrap marks a layer as the lepton bootstrap.

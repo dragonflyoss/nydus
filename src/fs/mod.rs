@@ -73,21 +73,21 @@ pub struct ErofsReader {
 }
 
 impl ErofsReader {
-    /// Open an EROFS blob directly, or a bootstrap with an external blob directory.
+    /// Open an EROFS blob directly, or a bootstrap served by a blob backend.
     pub fn open(
         blob_path: Option<&Path>,
         bootstrap_path: Option<&Path>,
-        blob_dir: Option<&Path>,
+        backend: Option<Arc<dyn BlobBackend>>,
         cache_dir: Option<&Path>,
     ) -> io::Result<Self> {
-        match (blob_path, bootstrap_path, blob_dir, cache_dir) {
+        match (blob_path, bootstrap_path, backend, cache_dir) {
             (Some(blob), None, None, None) => Self::open_blob(blob),
-            (None, Some(bootstrap), Some(blob_dir), cache_dir) => {
-                Self::open_bootstrap(bootstrap, blob_dir, cache_dir)
+            (None, Some(bootstrap), Some(backend), cache_dir) => {
+                Self::open_bootstrap(bootstrap, backend, cache_dir)
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "expected either --blob <path> or --bootstrap <path> --blob-dir <dir> [--cache-dir <dir>]",
+                "expected either --blob <path> or --bootstrap <path> with a configured backend",
             )),
         }
     }
@@ -138,8 +138,9 @@ impl ErofsReader {
 
         let device_infos = Self::device_infos_from(&mmap, sb_offset)?;
         let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
+        let backend: Arc<dyn BlobBackend> = Arc::new(LocalBackend::new(blob_dir.to_path_buf()));
         let (blob_devices, temporary_cache_dir) =
-            Self::open_blob_devices(device_infos, blob_dir, None)?;
+            Self::open_blob_devices(device_infos, backend, None)?;
 
         Ok(Self {
             mmap,
@@ -152,7 +153,7 @@ impl ErofsReader {
 
     fn open_bootstrap(
         bootstrap_path: &Path,
-        blob_dir: &Path,
+        backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
     ) -> io::Result<Self> {
         let mmap = Self::map_file(bootstrap_path)?;
@@ -168,7 +169,7 @@ impl ErofsReader {
         let device_infos = Self::device_infos_from(&mmap, sb_offset)?;
 
         let (blob_devices, temporary_cache_dir) =
-            Self::open_blob_devices(device_infos, blob_dir, cache_dir)?;
+            Self::open_blob_devices(device_infos, backend, cache_dir)?;
 
         Ok(Self {
             mmap,
@@ -201,10 +202,9 @@ impl ErofsReader {
 
     fn open_blob_devices(
         device_infos: Vec<DeviceInfo>,
-        blob_dir: &Path,
+        backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
     ) -> io::Result<(HashMap<u16, BlobDevice>, Option<TempDir>)> {
-        let backend: Arc<dyn BlobBackend> = Arc::new(LocalBackend::new(blob_dir.to_path_buf()));
         let temporary_cache_dir = if cache_dir.is_none() {
             Some(tempfile::Builder::new().prefix("lepton-cache-").tempdir()?)
         } else {
@@ -294,7 +294,7 @@ impl ErofsReader {
         let device = self.blob_devices.get(&device_id).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("blob device {} not found", device_id),
+                format!("blob device {device_id} not found"),
             )
         })?;
         device.cache.prefetch_all()

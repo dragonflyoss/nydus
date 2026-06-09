@@ -1,0 +1,70 @@
+# Example storage config for `lepton fuse --config config.yaml`.
+#
+# This config serves blobs from an OCI image registry instead of a local
+# directory. Mount with:
+#
+#   lepton fuse --bootstrap layer.bootstrap --config config.yaml --mountpoint /mnt/lepton
+#
+# Note: `lepton check` only supports the `local` backend; this registry config
+# is intended for `lepton fuse`.
+
+backend:
+  type: registry
+  config:
+    # Registry host[:port]. For the official Docker registry use
+    # "registry-1.docker.io"; for a local distribution registry use
+    # "127.0.0.1:5000".
+    host: 127.0.0.1:5000
+
+    # Image repository (no tag/digest), e.g. "library/ubuntu".
+    repo: library/lepton-demo
+
+    # Use the plain `http` scheme instead of `https`. Set to true for a local
+    # distribution registry started with --plain-http. Default: false.
+    insecure: true
+
+    # Skip TLS certificate verification (also tolerates self-signed certs).
+    # Ignored when `insecure: true`. Default: false.
+    skip_verify: false
+
+    # Per-request timeout in seconds (connect + read). Default: 30.
+    timeout: 30
+
+    # Number of retries for on-demand reads. Prefetch reads are tried once.
+    # Default: 3.
+    retry_limit: 3
+
+    # Optional basic-auth credential: the base64-encoded `username:password`
+    # string. Omit `auth` entirely for anonymous / token-only registries.
+    # e.g. `printf 'testuser:testpassword' | base64` -> dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
+    auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
+
+    # Extra CA certificate PEM files to trust (in addition to the system roots).
+    # Useful for registries fronted by a private CA. Default: [].
+    ca_cert_files: []
+    # ca_cert_files:
+    #   - /etc/lepton/certs/registry-ca.pem
+
+    # Optional proxy. Blob requests are rewritten to the HTTP mirror `url`
+    # (e.g. a local P2P agent's HTTP proxy). When built with the
+    # `backend-dragonfly-proxy` feature, set `dragonfly_scheduler_endpoint` to
+    # route blob requests through the Dragonfly client SDK instead. Omit the
+    # whole `proxy` block to talk to the origin registry directly.
+    #
+    # proxy:
+    #   # Mirror base URL.
+    #   url: http://127.0.0.1:65001
+    #   # Dragonfly scheduler endpoint (requires the backend-dragonfly-proxy feature).
+    #   dragonfly_scheduler_endpoint: http://127.0.0.1:65000
+
+cache:
+  type: local
+  config:
+    # Persistent chunk cache directory (equivalent to --cache-dir).
+    dir: /var/lib/lepton/cache
+
+prefetch:
+  # Toggle background blob prefetch after mount.
+  enable: true
+  # Number of concurrent prefetch worker threads.
+  threads: 10

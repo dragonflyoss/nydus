@@ -5,7 +5,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::BlobBackend;
+use super::{BlobBackend, ReadContext};
 use crate::metadata::{BlobFooter, BlobMeta, EROFS_BLOB_ID_SIZE};
 use crate::utils::{hex_string, sha256_file, sha256_file_range};
 
@@ -31,6 +31,22 @@ impl LocalBackend {
             resolved_sources: Mutex::new(HashMap::new()),
             source_files: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Build a `LocalBackend` from its YAML configuration, which only carries
+    /// the `dir` field pointing at the blob source directory.
+    pub fn from_value(config: &serde_yaml::Value) -> io::Result<Self> {
+        #[derive(serde::Deserialize)]
+        struct LocalDirConfig {
+            dir: PathBuf,
+        }
+        let cfg: LocalDirConfig = serde_yaml::from_value(config.clone()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid local backend config: {e}"),
+            )
+        })?;
+        Ok(Self::new(cfg.dir))
     }
 
     fn blob_meta_path_for_source(&self, source: &Path) -> io::Result<PathBuf> {
@@ -159,9 +175,10 @@ impl BlobBackend for LocalBackend {
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
         offset: u64,
         len: u32,
+        ctx: ReadContext,
     ) -> io::Result<Vec<u8>> {
         let mut buf = vec![0u8; len as usize];
-        self.read_range_into(blob_id, offset, &mut buf)?;
+        self.read_range_into(blob_id, offset, &mut buf, ctx)?;
         Ok(buf)
     }
 
@@ -170,6 +187,7 @@ impl BlobBackend for LocalBackend {
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
         offset: u64,
         dst: &mut [u8],
+        _ctx: ReadContext,
     ) -> io::Result<()> {
         let source = self.resolve_source(blob_id)?;
         let end = offset.checked_add(dst.len() as u64).ok_or_else(|| {
@@ -221,6 +239,7 @@ mod tests {
     use crate::metadata::{
         BlobMetaChunk, BlobMetaGroup, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
     };
+    use crate::storage::backend::RequestSource;
     use crate::utils::sha256_bytes;
     use std::io::Write;
     use tempfile::tempdir;
@@ -230,7 +249,7 @@ mod tests {
             blob_id,
             1,
             vec![BlobMetaGroup::new(0, 1, 0, 4096, crc32c::crc32c(payload)).unwrap()],
-            vec![BlobMetaChunk::new(*blake3::hash(payload).as_bytes(), 0, 0, 1).unwrap()],
+            vec![BlobMetaChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
         )
         .unwrap()
     }
@@ -249,7 +268,9 @@ mod tests {
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
-        let data = backend.read_range(&blob_id, 0, 4096).unwrap();
+        let data = backend
+            .read_range(&blob_id, 0, 4096, ReadContext::raw(RequestSource::OnDemand))
+            .unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(data, payload);
@@ -286,10 +307,11 @@ mod tests {
         let full_blob_id = sha256_file(&temp_full_blob_path).unwrap();
         let full_blob_path = dir.path().join(hex_string(&full_blob_id));
         fs::rename(&temp_full_blob_path, &full_blob_path).unwrap();
-
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
-        let data = backend.read_range(&blob_id, 0, 4096).unwrap();
+        let data = backend
+            .read_range(&blob_id, 0, 4096, ReadContext::raw(RequestSource::OnDemand))
+            .unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(data, payload);

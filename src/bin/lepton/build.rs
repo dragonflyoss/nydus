@@ -15,6 +15,8 @@ use std::time::SystemTime;
 use tracing::Level;
 
 const DEFAULT_CHUNK_SIZE: u32 = 1_048_576;
+const DEFAULT_COMPRESS_SIZE: u32 = 1_048_576;
+const MIB: u32 = 1_048_576;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ConversionType {
@@ -65,6 +67,11 @@ pub struct BuildArgs {
     #[arg(long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
     pub chunk_size: u32,
 
+    /// Group uncompressed size in bytes (must be a multiple of 1MiB). Controls
+    /// the uncompressed size of each blob meta group used for compression.
+    #[arg(long = "compress-size", default_value_t = DEFAULT_COMPRESS_SIZE)]
+    pub compress_size: u32,
+
     /// Algorithm to compress data chunks.
     #[arg(long, value_enum, default_value_t = Compressor::Zstd)]
     pub compressor: Compressor,
@@ -114,6 +121,22 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
     }
     let chunkbits = args.chunk_size.trailing_zeros();
 
+    // Validate compress (group uncompressed) size: a positive multiple of 1MiB
+    // and at least the file chunk size so a chunk always fits in a group.
+    if args.compress_size == 0 || args.compress_size % MIB != 0 {
+        bail!(
+            "compress size {} must be a positive multiple of 1MiB",
+            args.compress_size
+        );
+    }
+    if args.compress_size < args.chunk_size {
+        bail!(
+            "compress size {} must be >= chunk size {}",
+            args.compress_size,
+            args.chunk_size
+        );
+    }
+
     // Validate source is a directory.
     if !args.source.is_dir() {
         bail!("source {} is not a directory", args.source.display());
@@ -128,8 +151,12 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         prepare_blob_output(requested_blob_path.as_deref(), args.blob_dir.as_deref())?;
     let blob_file = open_blob_output(&blob_output)?;
 
-    let mut blob_writer =
-        BlobWriter::from_file(blob_file, args.chunk_size, args.compressor.into())?;
+    let mut blob_writer = BlobWriter::from_file(
+        blob_file,
+        args.chunk_size,
+        args.compress_size,
+        args.compressor.into(),
+    )?;
     let mut inodes = build_tree(&args.source, &mut blob_writer, args.chunk_size)?;
     blob_writer.finish()?;
     let epoch = inodes
@@ -333,8 +360,8 @@ fn print_blob_summary(summary: BlobSummary<'_>) {
     } = summary;
 
     println!("Blobs");
-    println!("  Blob {}", index);
-    println!("    blob_index: {}", index);
+    println!("  Blob {index}");
+    println!("    blob_index: {index}");
     println!("    data_blob_digest: {}", hex_string(data_blob_digest));
     println!("    full_blob_digest: {}", hex_string(full_blob_digest));
     println!("    chunk_size: {}", blob_meta.chunk_size());

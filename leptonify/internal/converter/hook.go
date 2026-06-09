@@ -11,9 +11,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,6 +33,9 @@ type MergeOption struct {
 	BuilderPath string
 	// WorkDir is a scratch directory used for staging blobs and the bootstrap.
 	WorkDir string
+	// LogLevel is the log level forwarded to `lepton merge` (trace/debug/info/
+	// warn/error). Defaults to "info" when empty.
+	LogLevel string
 }
 
 // ConvertHookFunc returns a converter.ConvertHookFunc invoked after each blob
@@ -141,12 +142,22 @@ func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descript
 	defer func() { _ = os.RemoveAll(mergeDir) }()
 
 	sourcePaths := make([]string, 0, len(descs))
+	blobMetas := make([]blobMetaFile, 0, len(descs))
 	for _, desc := range descs {
 		blobPath, err := stageLeptonMetadata(ctx, cs, desc, mergeDir)
 		if err != nil {
 			return nil, errors.Wrapf(err, "stage blob %s", desc.Digest)
 		}
 		sourcePaths = append(sourcePaths, blobPath)
+
+		meta, err := extractBlobMeta(ctx, cs, desc)
+		if err != nil {
+			return nil, errors.Wrapf(err, "extract blob meta %s", desc.Digest)
+		}
+		blobMetas = append(blobMetas, blobMetaFile{
+			name: desc.Digest.Encoded() + ".blob.meta",
+			data: meta,
+		})
 	}
 
 	bootstrapPath := filepath.Join(mergeDir, "bootstrap")
@@ -154,11 +165,12 @@ func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descript
 		BuilderPath:   opt.BuilderPath,
 		SourcePaths:   sourcePaths,
 		BootstrapPath: bootstrapPath,
+		LogLevel:      opt.LogLevel,
 	}); err != nil {
 		return nil, err
 	}
 
-	return writeBootstrapLayer(ctx, cs, bootstrapPath)
+	return writeBootstrapLayer(ctx, cs, bootstrapPath, blobMetas)
 }
 
 // lepton blob footer layout (see src/metadata/blob_footer.rs). The footer is the
@@ -167,10 +179,24 @@ func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descript
 const (
 	leptonBlobFooterSize  = 4096
 	leptonBlobFooterMagic = 0x4c465452
+	leptonBlockSize       = 4096
 	// bootstrapOffsetField is the byte offset of the u64 bootstrap_offset field
 	// within the footer.
 	bootstrapOffsetField = 24
+	// blobMetaOffsetField is the byte offset of the u64 blob_meta_offset field
+	// within the footer.
+	blobMetaOffsetField = 32
+	// blobMetaBlocksField is the byte offset of the u32 blob_meta_blocks field
+	// within the footer.
+	blobMetaBlocksField = 52
 )
+
+// blobMetaFile is a per-layer blob meta artifact packed into the bootstrap layer
+// alongside image.boot, named "<full_blob_sha256>.blob.meta".
+type blobMetaFile struct {
+	name string
+	data []byte
+}
 
 // stageLeptonMetadata stages a blob from the content store for `lepton merge`
 // without materializing the (large) compressed data region.
@@ -180,8 +206,9 @@ const (
 // the footer), never the compressed data. So we read just the footer to find
 // the bootstrap offset, then write a sparse file that keeps the metadata tail at
 // its original absolute offset while leaving [0, bootstrapOffset) as a hole. The
-// file is named by the sha256 of its full content (zeros + tail), as required
-// by `lepton merge`.
+// file is named by the blob's full digest (desc.Digest), which `lepton merge`
+// records verbatim in the device slot so a registry backend can address the
+// blob by the same digest.
 func stageLeptonMetadata(ctx context.Context, cs content.Store, desc ocispec.Descriptor, dir string) (string, error) {
 	ra, err := cs.ReaderAt(ctx, desc)
 	if err != nil {
@@ -219,24 +246,22 @@ func stageLeptonMetadata(ctx context.Context, cs content.Store, desc ocispec.Des
 		}
 	}()
 
-	// The staged file content is bootstrapOffset zero bytes followed by the
-	// metadata tail; hash it as we go so we can name the file by its sha256.
-	hasher := sha256.New()
-	if err := writeZeros(hasher, bootstrapOffset); err != nil {
-		return "", errors.Wrap(err, "hash sparse prefix")
-	}
+	// The staged file content is bootstrapOffset zero bytes (a sparse hole)
+	// followed by the metadata tail at its original absolute offset.
 	if _, err := tmp.Seek(bootstrapOffset, io.SeekStart); err != nil {
 		return "", errors.Wrap(err, "seek to bootstrap offset")
 	}
 	tail := io.NewSectionReader(ra, bootstrapOffset, size-bootstrapOffset)
-	if _, err := io.Copy(io.MultiWriter(tmp, hasher), tail); err != nil {
+	if _, err := io.Copy(tmp, tail); err != nil {
 		return "", errors.Wrap(err, "stage lepton metadata")
 	}
 	if err := tmp.Close(); err != nil {
 		return "", errors.Wrap(err, "close stage temp file")
 	}
 
-	dst := filepath.Join(dir, hex.EncodeToString(hasher.Sum(nil)))
+	// Name the staged source by the blob's full digest; `lepton merge` uses the
+	// file name as the device slot blob id.
+	dst := filepath.Join(dir, desc.Digest.Encoded())
 	if err := os.Rename(tmpPath, dst); err != nil {
 		return "", errors.Wrap(err, "rename staged blob")
 	}
@@ -244,35 +269,52 @@ func stageLeptonMetadata(ctx context.Context, cs content.Store, desc ocispec.Des
 	return dst, nil
 }
 
-// writeZeros writes n zero bytes to w in bounded chunks.
-func writeZeros(w io.Writer, n int64) error {
-	if n <= 0 {
-		return nil
+// extractBlobMeta reads the blob meta region of a lepton full blob from the
+// content store, locating it via the trailing footer. The returned bytes are the
+// exact `<full_blob_sha256>.blob.meta` artifact produced by `lepton build`.
+func extractBlobMeta(ctx context.Context, cs content.Store, desc ocispec.Descriptor) ([]byte, error) {
+	ra, err := cs.ReaderAt(ctx, desc)
+	if err != nil {
+		return nil, errors.Wrap(err, "open blob reader")
 	}
-	buf := make([]byte, 64*1024)
-	for n > 0 {
-		chunk := int64(len(buf))
-		if chunk > n {
-			chunk = n
-		}
-		if _, err := w.Write(buf[:chunk]); err != nil {
-			return err
-		}
-		n -= chunk
+	defer func() { _ = ra.Close() }()
+
+	size := ra.Size()
+	if size < leptonBlobFooterSize {
+		return nil, errors.Errorf("blob is too small for a lepton footer (%d bytes)", size)
 	}
-	return nil
+
+	footer := make([]byte, leptonBlobFooterSize)
+	if _, err := ra.ReadAt(footer, size-leptonBlobFooterSize); err != nil {
+		return nil, errors.Wrap(err, "read lepton footer")
+	}
+	if magic := binary.LittleEndian.Uint32(footer[0:4]); magic != leptonBlobFooterMagic {
+		return nil, errors.Errorf("not a lepton blob: bad footer magic %#x", magic)
+	}
+	blobMetaOffset := int64(binary.LittleEndian.Uint64(footer[blobMetaOffsetField : blobMetaOffsetField+8]))
+	blobMetaSize := int64(binary.LittleEndian.Uint32(footer[blobMetaBlocksField:blobMetaBlocksField+4])) * leptonBlockSize
+	if blobMetaOffset < 0 || blobMetaSize <= 0 || blobMetaOffset+blobMetaSize > size {
+		return nil, errors.Errorf("invalid blob meta region [%d,+%d) (blob size %d)", blobMetaOffset, blobMetaSize, size)
+	}
+
+	buf := make([]byte, blobMetaSize)
+	if _, err := ra.ReadAt(buf, blobMetaOffset); err != nil {
+		return nil, errors.Wrap(err, "read blob meta region")
+	}
+	return buf, nil
 }
 
-// writeBootstrapLayer packs the bootstrap file into a gzip-compressed tar layer
-// (a single `image/image.boot` entry) and commits it to the content store.
-func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath string) (*ocispec.Descriptor, error) {
+// writeBootstrapLayer packs the bootstrap file and the per-layer blob meta
+// artifacts into a gzip-compressed tar layer (under `image/`) and commits it to
+// the content store.
+func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath string, blobMetas []blobMetaFile) (*ocispec.Descriptor, error) {
 	bootstrapData, err := os.ReadFile(bootstrapPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "read bootstrap")
 	}
 
-	// Build the gzip(tar(image/image.boot)) stream while tracking both the
-	// compressed (layer) digest and the uncompressed (diff id) digest.
+	// Build the gzip(tar(image/...)) stream while tracking both the compressed
+	// (layer) digest and the uncompressed (diff id) digest.
 	var compressedBuf bytes.Buffer
 	compressedDigester := digest.SHA256.Digester()
 	uncompressedDigester := digest.SHA256.Digester()
@@ -280,7 +322,7 @@ func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath st
 	gw := gzip.NewWriter(io.MultiWriter(&compressedBuf, compressedDigester.Hash()))
 	tw := tar.NewWriter(io.MultiWriter(gw, uncompressedDigester.Hash()))
 
-	if err := writeBootstrapTar(tw, bootstrapData); err != nil {
+	if err := writeBootstrapTar(tw, bootstrapData, blobMetas); err != nil {
 		return nil, err
 	}
 	if err := tw.Close(); err != nil {
@@ -319,9 +361,9 @@ func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath st
 	}, nil
 }
 
-// writeBootstrapTar writes the `image/` directory and `image/image.boot` file
-// entries into tw.
-func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte) error {
+// writeBootstrapTar writes the `image/` directory, the `image/image.boot` file,
+// and one `image/<full_blob_sha256>.blob.meta` entry per layer into tw.
+func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []blobMetaFile) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "image",
 		Mode:     0o755,
@@ -338,6 +380,18 @@ func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte) error {
 	}
 	if _, err := tw.Write(bootstrapData); err != nil {
 		return errors.Wrap(err, "write bootstrap file")
+	}
+	for _, meta := range blobMetas {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: BlobMetaDirInLayer + "/" + meta.name,
+			Mode: 0o444,
+			Size: int64(len(meta.data)),
+		}); err != nil {
+			return errors.Wrapf(err, "write blob meta header %s", meta.name)
+		}
+		if _, err := tw.Write(meta.data); err != nil {
+			return errors.Wrapf(err, "write blob meta %s", meta.name)
+		}
 	}
 	return nil
 }

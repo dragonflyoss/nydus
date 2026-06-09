@@ -76,6 +76,22 @@ func (p *Provider) PlatformMC() platforms.MatchComparer {
 	return p.platformMC
 }
 
+// Insecure reports whether TLS certificate verification is skipped.
+func (p *Provider) Insecure() bool {
+	return p.insecure
+}
+
+// PlainHTTP reports whether plain HTTP is used to talk to the registry.
+func (p *Provider) PlainHTTP() bool {
+	return p.plainHTTP
+}
+
+// Credentials resolves the username and password for a registry host using the
+// provider's credential function.
+func (p *Provider) Credentials(host string) (string, string, error) {
+	return p.credFunc(host)
+}
+
 func (p *Provider) resolver() remotes.Resolver {
 	return NewResolver(p.insecure, p.plainHTTP, p.credFunc)
 }

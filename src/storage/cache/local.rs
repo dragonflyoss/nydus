@@ -6,13 +6,13 @@ use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 use crate::metadata::{BlobMeta, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE};
-use crate::storage::backend::BlobBackend;
+use crate::storage::backend::{BlobBackend, ReadContext, RequestSource};
 use crate::storage::groupmap::GroupMap;
 use crate::utils::hex_string;
 
 use super::{
-    chunks_for_range, decode_group_from_window, fetch_decode_validate_group_into,
-    plan_prefetch_batches, range_in_chunk, BlobCache, BlobCacheBuffers,
+    decode_group_from_window, fetch_decode_validate_group_into, plan_prefetch_batches, BlobCache,
+    BlobCacheBuffers,
 };
 
 pub struct LocalBlobCache {
@@ -36,12 +36,12 @@ impl LocalBlobCache {
 
         let cache_key = backend.cache_key(&blob_id)?;
         let cache_key_hex = hex_string(&cache_key);
-        let blob_meta_path = cache_dir.join(format!("{}.blob.meta", cache_key_hex));
+        let blob_meta_path = cache_dir.join(format!("{cache_key_hex}.blob.meta"));
         let blob_meta = load_cached_blob_meta(blob_id, cache_dir, &blob_meta_path, &backend)?;
 
-        let cache_blob_path = cache_dir.join(format!("{}.blob.data", cache_key_hex));
+        let cache_blob_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
-        let groupmap_path = cache_dir.join(format!("{}.groupmap", cache_key_hex));
+        let groupmap_path = cache_dir.join(format!("{cache_key_hex}.groupmap"));
         let groupmap = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
 
         Ok(Self {
@@ -97,6 +97,7 @@ impl LocalBlobCache {
             &self.backend,
             group,
             &mut buffers,
+            RequestSource::OnDemand,
         )?;
         write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
         self.groupmap.set_ready(group_index)
@@ -138,8 +139,18 @@ impl BlobCache for LocalBlobCache {
                 )
             })?;
             window.resize(window_len, 0);
+            // One backend request covers the whole window (a contiguous batch of
+            // groups); report its uncompressed span for diagnostics.
+            let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
+            let uncompressed_size =
+                groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
+            let ctx = ReadContext::group(
+                RequestSource::Prefetch,
+                uncompressed_offset,
+                uncompressed_size,
+            );
             self.backend
-                .read_range_into(&self.blob_id, window_base, &mut window)?;
+                .read_range_into(&self.blob_id, window_base, &mut window, ctx)?;
 
             for index in batch {
                 if self.groupmap.is_ready(index)? {
@@ -170,36 +181,34 @@ impl BlobCache for LocalBlobCache {
             return Ok(());
         }
 
-        let chunks = chunks_for_range(&self.blob_meta, offset, dst.len())?;
+        let end = offset.checked_add(dst.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
+        })?;
         let cache_file = self.cache_file()?;
-        let mut logical_offset = offset;
-        let mut dst_offset = 0usize;
 
-        for (chunk_index, chunk) in chunks {
-            let group_index = chunk.group_index() as usize;
+        // O(1) group lookup at both ends of the range. Groups are dense and
+        // contiguous, so every group between the first and last also overlaps
+        // the range and must be decoded.
+        let first_group = self
+            .blob_meta
+            .group_index_for_byte_offset(offset)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+        let last_group = self
+            .blob_meta
+            .group_index_for_byte_offset(end - 1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+
+        for group_index in first_group..=last_group {
             let group = *self.blob_meta.group_at(group_index).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
             })?;
             self.ensure_group(group_index, &group, cache_file.as_ref())?;
-            let (chunk_offset, to_read) = range_in_chunk(
-                &self.blob_meta,
-                chunk_index,
-                &chunk,
-                logical_offset,
-                dst.len() - dst_offset,
-            );
-            read_exact_at(
-                cache_file.as_ref(),
-                group.uncompressed_byte_offset()
-                    + chunk.group_uncompressed_byte_offset()
-                    + chunk_offset as u64,
-                &mut dst[dst_offset..dst_offset + to_read],
-            )?;
-            logical_offset += to_read as u64;
-            dst_offset += to_read;
         }
 
-        Ok(())
+        // The cache file mirrors the dense uncompressed address space, so once
+        // the covering groups are decoded the absolute offset indexes straight
+        // into it for a single contiguous read.
+        read_exact_at(cache_file.as_ref(), offset, dst)
     }
 }
 
@@ -277,7 +286,7 @@ mod tests {
             blob_id,
             1,
             vec![BlobMetaGroup::new(0, 1, 0, 4096, crc32).unwrap()],
-            vec![BlobMetaChunk::new(*blake3::hash(payload).as_bytes(), 0, 0, 1).unwrap()],
+            vec![BlobMetaChunk::new(*blake3::hash(payload).as_bytes(), 0, 1).unwrap()],
         )
         .unwrap()
     }

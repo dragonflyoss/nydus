@@ -91,7 +91,7 @@ fn ensure_index(index: usize, group_count: usize) -> io::Result<()> {
     if index >= group_count {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("group index {} out of range {}", index, group_count),
+            format!("group index {index} out of range {group_count}"),
         ));
     }
     Ok(())

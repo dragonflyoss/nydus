@@ -32,8 +32,14 @@ type PackOption struct {
 	WorkDir string
 	// ChunkSize is the lepton file chunk size in bytes.
 	ChunkSize uint32
+	// CompressSize is the lepton group uncompressed size in bytes (a multiple of
+	// 1MiB).
+	CompressSize uint32
 	// Compressor is the chunk data compressor ("none" or "zstd").
 	Compressor string
+	// LogLevel is the log level forwarded to `lepton build` (trace/debug/info/
+	// warn/error). Defaults to "info" when empty.
+	LogLevel string
 }
 
 // IsLeptonBlob reports whether desc is a converted lepton data blob layer.
@@ -102,11 +108,13 @@ func convertLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor
 	}
 
 	blobDigest, blobSize, err := buildBlobToStore(ctx, cs, desc.Digest.String(), fifoPath, BuildOption{
-		BuilderPath: opt.BuilderPath,
-		SourceDir:   sourceDir,
-		BlobPath:    fifoPath,
-		ChunkSize:   opt.ChunkSize,
-		Compressor:  opt.Compressor,
+		BuilderPath:  opt.BuilderPath,
+		SourceDir:    sourceDir,
+		BlobPath:     fifoPath,
+		ChunkSize:    opt.ChunkSize,
+		CompressSize: opt.CompressSize,
+		Compressor:   opt.Compressor,
+		LogLevel:     opt.LogLevel,
 	})
 	if err != nil {
 		return nil, err
@@ -141,7 +149,7 @@ func extractOCILayer(ctx context.Context, cs content.Store, desc ocispec.Descrip
 	}
 	defer func() { _ = decompressed.Close() }()
 
-	if err := extractTar(decompressed, dir); err != nil {
+	if err := extractTar(ctx, decompressed, dir); err != nil {
 		return errors.Wrap(err, "extract layer tar")
 	}
 	return nil

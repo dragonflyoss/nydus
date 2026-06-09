@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 use lepton::build::inode::mode_to_file_type;
 use lepton::fs::{DeviceInfo, ErofsReader};
@@ -151,14 +151,29 @@ impl SlotSha256Kind {
 }
 
 pub fn run_check(args: CheckArgs) -> Result<()> {
-    // CLI --blob-dir takes precedence over the config's backend directory.
+    // `check` verifies blobs from a local directory. --blob-dir takes precedence
+    // over the config; a config is only usable here when it has a local backend.
     let blob_dir = match &args.blob_dir {
         Some(dir) => Some(dir.clone()),
         None => match &args.config {
             Some(path) => {
                 let config =
                     StorageConfig::from_file(path).context("failed to load storage config")?;
-                Some(config.backend_dir().to_path_buf())
+                if config.backend.kind == "local" {
+                    let dir = config
+                        .backend
+                        .config
+                        .get("dir")
+                        .and_then(|value| value.as_str())
+                        .map(PathBuf::from)
+                        .ok_or_else(|| anyhow!("local backend config is missing 'dir'"))?;
+                    Some(dir)
+                } else {
+                    bail!(
+                        "check only supports a local backend, but config backend is '{}'",
+                        config.backend.kind
+                    )
+                }
             }
             None => None,
         },
@@ -496,8 +511,8 @@ fn print_header(
         }
     );
     println!("  path: {}", path.display());
-    println!("  file_size: {}", image_file_bytes);
-    println!("  primary_image_size: {}", primary_image_bytes);
+    println!("  file_size: {image_file_bytes}");
+    println!("  primary_image_size: {primary_image_bytes}");
     if kind == ImageKind::Blob && blobs.len() == 1 {
         let blob = blobs.values().next().expect("single blob summary");
         println!(
@@ -578,7 +593,7 @@ fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
     println!("  hardlink_inodes: {}", stats.hardlink_inodes);
     println!("  hardlink_paths: {}", stats.hardlink_paths);
     println!("  total_chunks: {}", stats.total_chunks);
-    println!("  unique_chunks: {}", total_unique_chunks);
+    println!("  unique_chunks: {total_unique_chunks}");
     println!("  total_logical_bytes: {}", stats.total_logical_bytes);
     println!("  chunk_sizes: {}", format_u64_set(&stats.chunk_sizes));
     println!();
@@ -599,9 +614,9 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
 }
 
 fn print_blob_info(index: usize, device_id: u16, blob: &BlobSummary) {
-    println!("  Blob {}", index);
-    println!("    blob_index: {}", index);
-    println!("    device_id: {}", device_id);
+    println!("  Blob {index}");
+    println!("    blob_index: {index}");
+    println!("    device_id: {device_id}");
     println!("    slot_digest_kind: {}", blob.slot_sha256_kind.as_str());
     println!("    data_blob_digest: {}", data_blob_digest(blob));
     println!(

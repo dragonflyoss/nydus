@@ -78,7 +78,18 @@ func TestTopImages(t *testing.T) {
 				"--work-dir", filepath.Join(workDir, "convert"),
 				"--plain-http", "--insecure",
 			)
-			runLeptonify(t, convert, "convert "+image)
+			out, err := convert.CombinedOutput()
+			t.Logf("[convert %s] %s\n%s", image, strings.Join(convert.Args, " "), out)
+			if err != nil {
+				// Some entries in the popular-image list are no longer published
+				// on Docker Hub (e.g. the deprecated `java` image). Treat a pull
+				// "not found" as a skip with a warning instead of a failure so a
+				// missing upstream image does not break the suite.
+				if isImageNotFound(out) {
+					t.Skipf("WARNING: skipping %q: image not found in registry (pull 404)", image)
+				}
+				require.NoError(t, err, "convert %s failed", image)
+			}
 
 			check := exec.Command(leptonifyBin, "check",
 				"--source", image,
@@ -89,6 +100,13 @@ func TestTopImages(t *testing.T) {
 			runLeptonify(t, check, "check "+image)
 		})
 	}
+}
+
+// isImageNotFound reports whether leptonify output indicates the source image
+// could not be resolved (e.g. a deprecated Docker Hub image returning HTTP 404).
+func isImageNotFound(output []byte) bool {
+	text := string(output)
+	return strings.Contains(text, "404 Not Found") || strings.Contains(text, ": not found")
 }
 
 // runLeptonify executes a leptonify command, streaming its combined output into

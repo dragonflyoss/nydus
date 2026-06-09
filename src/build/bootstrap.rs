@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 
 use crate::build::dir::{serialize_directory, DirChild};
-use crate::build::image::write_image;
+use crate::build::image::{device_table_meta_blkaddr, write_image};
 use crate::build::inode::{inode_meta_size, serialize_inode, InodeData, InodeInfo};
 use crate::metadata::layout::MetadataLayout;
 use crate::metadata::*;
@@ -18,6 +18,11 @@ pub fn render_bootstrap(
     }
 
     let mut layout = MetadataLayout::new();
+    // The device table is laid out right after the superblock and may push the
+    // metadata region past block 0 when there are many external blobs, so the
+    // layout must use the same metadata block address as the image writer for
+    // directory data block addresses to be correct.
+    layout.meta_blkaddr = device_table_meta_blkaddr(device_slots.len())?;
     let blkszbits = EROFS_BLKSZBITS as u32;
 
     for inode in inodes.iter_mut() {

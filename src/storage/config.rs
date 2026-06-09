@@ -29,21 +29,27 @@ pub struct StorageConfig {
     pub prefetch: PrefetchConfig,
 }
 
-/// Backend configuration, tagged by `type` with the inner settings under `config`.
+/// Backend configuration. `type` selects the backend implementation and the
+/// opaque `config` map is interpreted by that backend (e.g. `local`, `registry`).
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", content = "config", rename_all = "snake_case")]
-pub enum BackendConfig {
-    Local(LocalDirConfig),
+pub struct BackendConfig {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub config: serde_yaml::Value,
 }
 
-/// Cache configuration, tagged by `type` with the inner settings under `config`.
+/// Cache configuration. `type` selects the cache implementation and the opaque
+/// `config` map is interpreted by that cache (currently only `local`).
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", content = "config", rename_all = "snake_case")]
-pub enum CacheConfig {
-    Local(LocalDirConfig),
+pub struct CacheConfig {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub config: serde_yaml::Value,
 }
 
-/// Settings shared by local backend and local cache: a single directory path.
+/// Settings for the local cache: a single directory path.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocalDirConfig {
     pub dir: PathBuf,
@@ -86,21 +92,17 @@ impl StorageConfig {
     /// Parse a storage configuration from a YAML string.
     pub fn from_yaml(contents: &str) -> anyhow::Result<Self> {
         serde_yaml::from_str(contents)
-            .map_err(|err| anyhow::anyhow!("failed to parse storage config: {}", err))
-    }
-
-    /// Directory used by the local backend to locate blobs.
-    pub fn backend_dir(&self) -> &Path {
-        match &self.backend {
-            BackendConfig::Local(config) => &config.dir,
-        }
+            .map_err(|err| anyhow::anyhow!("failed to parse storage config: {err}"))
     }
 
     /// Directory used by the local cache to store decoded chunks.
-    pub fn cache_dir(&self) -> &Path {
-        match &self.cache {
-            CacheConfig::Local(config) => &config.dir,
+    pub fn cache_dir(&self) -> anyhow::Result<PathBuf> {
+        if self.cache.kind != "local" {
+            anyhow::bail!("unsupported cache type: {}", self.cache.kind);
         }
+        let cfg: LocalDirConfig = serde_yaml::from_value(self.cache.config.clone())
+            .map_err(|err| anyhow::anyhow!("invalid local cache config: {err}"))?;
+        Ok(cfg.dir)
     }
 }
 
@@ -124,8 +126,14 @@ prefetch:
   threads: 8
 ";
         let config = StorageConfig::from_yaml(yaml).unwrap();
-        assert_eq!(config.backend_dir(), Path::new("/var/lib/lepton/blobs"));
-        assert_eq!(config.cache_dir(), Path::new("/var/lib/lepton/cache"));
+        assert_eq!(config.backend.kind, "local");
+        let backend_dir: PathBuf =
+            serde_yaml::from_value(config.backend.config["dir"].clone()).unwrap();
+        assert_eq!(backend_dir, Path::new("/var/lib/lepton/blobs"));
+        assert_eq!(
+            config.cache_dir().unwrap(),
+            Path::new("/var/lib/lepton/cache")
+        );
         assert!(config.prefetch.enable);
         assert_eq!(config.prefetch.threads, 8);
     }
@@ -167,17 +175,27 @@ prefetch:
     }
 
     #[test]
-    fn rejects_unknown_backend_type() {
+    fn parses_registry_backend_with_nested_config() {
         let yaml = "
 backend:
-  type: s3
+  type: registry
   config:
-    dir: /blobs
+    host: registry.example.com
+    repo: library/ubuntu
+    auth:
+      username: alice
+      password: secret
 cache:
   type: local
   config:
     dir: /cache
 ";
-        assert!(StorageConfig::from_yaml(yaml).is_err());
+        let config = StorageConfig::from_yaml(yaml).unwrap();
+        assert_eq!(config.backend.kind, "registry");
+        assert_eq!(
+            config.backend.config["host"].as_str(),
+            Some("registry.example.com")
+        );
+        assert_eq!(config.cache_dir().unwrap(), Path::new("/cache"));
     }
 }
