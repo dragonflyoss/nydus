@@ -22,7 +22,6 @@ use std::io::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_api::CacheConfigV2;
 use nydus_utils::crypt::{Algorithm, Cipher, CipherContext};
 use nydus_utils::{compress, digest};
@@ -34,6 +33,7 @@ use crate::device::{
     BlobChunkInfo, BlobFeatures, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest,
 };
 use crate::utils::{alloc_buf, copyv};
+use crate::volatile::VolatileSlice as FileVolatileSlice;
 use crate::{StorageError, StorageResult};
 
 struct DummyCache {
@@ -250,9 +250,10 @@ impl Drop for DummyCacheMgr {
 mod tests {
     use std::fs::OpenOptions;
 
+    use crate::test::TempPath;
     use nydus_api::ConfigV2;
     use nydus_utils::metrics::BackendMetrics;
-    use vmm_sys_util::tempdir::TempDir;
+    use tempfile::TempDir;
 
     use crate::{
         cache::state::IndexedChunkMap,

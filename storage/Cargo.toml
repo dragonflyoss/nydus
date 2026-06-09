@@ -47,8 +47,6 @@ tokio = { version = "1.19.0", features = [
     "time",
 ] }
 url = { version = "2.1.1", optional = true }
-vm-memory = { workspace = true }
-fuse-backend-rs = { workspace = true }
 gpt = { version = "3.1.0", optional = true }
 
 nydus-api = { version = "0.4.1", path = "../api" }
@@ -64,7 +62,7 @@ rand = { version = "0.8" }
 futures = "0.3"
 http = "1.4.0"
 hyper-util = { version = "0.1.19", features = ["server"] }
-vmm-sys-util = { workspace = true }
+tempfile = "3"
 tar = "0.4.40"
 regex = "1.7.0"
 toml = "0.5"

@@ -12,7 +12,6 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nix::sys::uio;
 
 use nydus_api::LocalFsConfig;
@@ -20,6 +19,7 @@ use nydus_utils::metrics::BackendMetrics;
 
 use crate::backend::{BackendError, BackendResult, BlobBackend, BlobReader};
 use crate::utils::{readv, MemSliceCursor};
+use crate::volatile::VolatileSlice as FileVolatileSlice;
 
 type LocalFsResult<T> = std::result::Result<T, LocalFsError>;
 
@@ -215,10 +215,11 @@ impl Drop for LocalFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test::TempPath;
     use std::fs;
     use std::io::Write;
     use std::os::unix::io::{FromRawFd, IntoRawFd};
-    use vmm_sys_util::{tempdir::TempDir, tempfile::TempFile};
+    use tempfile::{NamedTempFile as TempFile, TempDir};
 
     fn new_localfs(
         dir: &Path,

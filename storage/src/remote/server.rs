@@ -346,8 +346,9 @@ impl AsRawFd for Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test::TempPath;
     use std::time::{Duration, Instant};
-    use vmm_sys_util::tempdir::TempDir;
+    use tempfile::TempDir;
 
     #[test]
     #[ignore]

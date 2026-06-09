@@ -372,10 +372,10 @@ pub(crate) mod tests {
     use std::thread;
     use std::time::Instant;
 
+    use crate::test::TempPath;
     use nydus_utils::digest::Algorithm::Blake3;
     use nydus_utils::digest::{Algorithm, RafsDigest};
-    use vmm_sys_util::tempdir::TempDir;
-    use vmm_sys_util::tempfile::TempFile;
+    use tempfile::{NamedTempFile as TempFile, TempDir};
 
     use super::*;
     use crate::cache::state::DigestedChunkMap;

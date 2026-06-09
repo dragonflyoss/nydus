@@ -17,7 +17,7 @@
 use std::any::Any;
 use std::cmp;
 use std::ffi::{CStr, OsStr, OsString};
-use std::io::Result;
+use std::io::{self, Result};
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -28,10 +28,13 @@ use fuse_backend_rs::abi::fuse_abi::Attr;
 use fuse_backend_rs::abi::fuse_abi::{stat64, statvfs64};
 use fuse_backend_rs::api::filesystem::*;
 use fuse_backend_rs::api::BackendFileSystem;
+use fuse_backend_rs::file_buf::FileVolatileSlice;
+use fuse_backend_rs::file_traits::FileReadWriteVolatile;
 use nix::unistd::{getegid, geteuid};
 
 use nydus_api::ConfigV2;
 use nydus_storage::device::{BlobDevice, BlobIoVec, BlobPrefetchRequest};
+use nydus_storage::volatile::{BlobIoRead, BlobIoWrite, VolatileSlice};
 use nydus_storage::{RAFS_DEFAULT_CHUNK_SIZE, RAFS_MAX_CHUNK_SIZE};
 use nydus_utils::{
     div_round_up,
@@ -43,6 +46,71 @@ use crate::metadata::{
 };
 use crate::prefetch::BlobPrefetcher;
 use crate::{RafsError, RafsIoReader, RafsResult};
+
+struct StorageBlobWriter<'a> {
+    inner: &'a mut dyn ZeroCopyWriter,
+}
+
+struct StorageBlobReader<'a> {
+    inner: &'a mut dyn BlobIoRead,
+}
+
+impl BlobIoWrite for StorageBlobWriter<'_> {
+    fn write_from(
+        &mut self,
+        reader: &mut dyn BlobIoRead,
+        size: usize,
+        offset: u64,
+    ) -> io::Result<usize> {
+        let mut adapter = StorageBlobReader { inner: reader };
+        self.inner.write_from(&mut adapter, size, offset)
+    }
+}
+
+impl FileReadWriteVolatile for StorageBlobReader<'_> {
+    fn read_volatile(
+        &mut self,
+        _slice: FileVolatileSlice,
+    ) -> std::result::Result<usize, io::Error> {
+        unimplemented!()
+    }
+
+    fn write_volatile(
+        &mut self,
+        _slice: FileVolatileSlice,
+    ) -> std::result::Result<usize, io::Error> {
+        unimplemented!()
+    }
+
+    fn read_at_volatile(
+        &mut self,
+        slice: FileVolatileSlice,
+        offset: u64,
+    ) -> std::result::Result<usize, io::Error> {
+        let slice = unsafe { VolatileSlice::from_raw_ptr(slice.as_ptr(), slice.len()) };
+        self.inner.read_at_volatile(slice, offset)
+    }
+
+    fn read_vectored_at_volatile(
+        &mut self,
+        buffers: &[FileVolatileSlice],
+        offset: u64,
+    ) -> std::result::Result<usize, io::Error> {
+        let buffers: Vec<VolatileSlice> = buffers
+            .iter()
+            .map(|slice| unsafe { VolatileSlice::from_raw_ptr(slice.as_ptr(), slice.len()) })
+            .collect();
+        self.inner.read_vectored_at_volatile(&buffers, offset)
+    }
+
+    fn write_at_volatile(
+        &mut self,
+        _slice: FileVolatileSlice,
+        _offset: u64,
+    ) -> std::result::Result<usize, io::Error> {
+        unimplemented!()
+    }
+}
 
 /// Type of RAFS fuse handle.
 pub type Handle = u64;
@@ -741,7 +809,8 @@ impl FileSystem for Rafs {
             assert_ne!(io_vec.size(), 0);
 
             // Avoid copying `desc`
-            let r = self.device.read_to(w, io_vec)?;
+            let mut storage_writer = StorageBlobWriter { inner: w };
+            let r = self.device.read_to(&mut storage_writer, io_vec)?;
             result += r;
             recorder.mark_success(r);
             if r as u64 != io_vec.size() {
