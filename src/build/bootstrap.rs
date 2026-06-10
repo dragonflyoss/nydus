@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 
 use crate::build::dir::{serialize_directory, DirChild};
 use crate::build::image::{device_table_meta_blkaddr, write_image};
-use crate::build::inode::{inode_meta_size, serialize_inode, InodeData, InodeInfo};
+use crate::build::inode::{erofs_inode_size, serialize_inode, InodeData, InodeInfo};
 use crate::metadata::layout::MetadataLayout;
 use crate::metadata::*;
 
@@ -26,8 +26,8 @@ pub fn render_bootstrap(
     let blkszbits = EROFS_BLKSZBITS as u32;
 
     for inode in inodes.iter_mut() {
-        let meta_size = inode_meta_size(inode, chunkbits, blkszbits);
-        let (offset, nid) = layout.alloc_inode(meta_size);
+        let inode_size = erofs_inode_size(inode, chunkbits, blkszbits);
+        let (offset, nid) = layout.alloc_inode(inode_size);
         inode.meta_offset = offset;
         inode.nid = nid;
     }

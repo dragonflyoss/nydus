@@ -98,7 +98,7 @@ pub struct DirEntry {
 }
 
 /// Convert a Unix file mode to an EROFS file type value for directory entries.
-pub fn mode_to_file_type(mode: u16) -> u8 {
+pub fn mode_to_erofs_file_type(mode: u16) -> u8 {
     match mode & 0o170000 {
         0o100000 => EROFS_FT_REG_FILE,
         0o040000 => EROFS_FT_DIR,
@@ -108,6 +108,31 @@ pub fn mode_to_file_type(mode: u16) -> u8 {
         0o140000 => EROFS_FT_SOCK,
         0o120000 => EROFS_FT_SYMLINK,
         _ => 0,
+    }
+}
+
+/// Calculate the size of an inode's metadata (header + xattr ibody + chunk indexes) for the final
+/// image.
+pub fn erofs_inode_size(inode: &InodeInfo, _chunkbits: u32, _blkszbits: u32) -> usize {
+    let inode_isize = if inode.is_extended {
+        EROFS_INODE_EXTENDED_SIZE
+    } else {
+        EROFS_INODE_COMPACT_SIZE
+    };
+
+    let xattr_isize = erofs_xattr_ibody_size(&inode.xattrs);
+    match &inode.data {
+        InodeData::RegularFile { chunk_indexes, .. } => {
+            if chunk_indexes.is_empty() {
+                inode_isize + xattr_isize
+            } else {
+                round_up(inode_isize + xattr_isize, EROFS_CHUNK_INDEX_SIZE)
+                    + chunk_indexes.len() * EROFS_CHUNK_INDEX_SIZE
+            }
+        }
+        InodeData::Directory { .. } => inode_isize + xattr_isize,
+        InodeData::Symlink { target } => inode_isize + xattr_isize + target.len(),
+        InodeData::Device { .. } | InodeData::FifoOrSocket => inode_isize + xattr_isize,
     }
 }
 
@@ -192,11 +217,7 @@ fn build_tree_recursive(
     let mtime_nsec = meta.mtime_nsec() as u32;
     let nlink = meta.nlink() as u32;
 
-    let is_extended = meta.size() > u32::MAX as u64
-        || uid > u16::MAX as u32
-        || gid > u16::MAX as u32
-        || nlink > 1;
-
+    let is_extended = needs_erofs_extended_inode(&meta);
     *inode_counter += 1;
     let ino = *inode_counter;
 
@@ -239,7 +260,7 @@ fn build_tree_recursive(
             if !child_meta.file_type().is_dir() && child_meta.nlink() > 1 {
                 let key = (child_meta.dev(), child_meta.ino());
                 if let Some(&existing_idx) = hardlink_map.get(&key) {
-                    let file_type = mode_to_file_type(child_meta.mode() as u16);
+                    let file_type = mode_to_erofs_file_type(child_meta.mode() as u16);
                     children.push(DirEntry {
                         name: entry.file_name().to_string_lossy().into_owned(),
                         file_type,
@@ -263,7 +284,7 @@ fn build_tree_recursive(
                 hardlink_map.insert(key, child_idx);
             }
 
-            let file_type = mode_to_file_type(child_meta.mode() as u16);
+            let file_type = mode_to_erofs_file_type(child_meta.mode() as u16);
             children.push(DirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 file_type,
@@ -359,58 +380,13 @@ fn build_tree_recursive(
     }
 }
 
-/// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.
-fn read_xattrs_from_path(path: &Path) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(names) = xattr::list(path) else {
-        return Vec::new();
-    };
-
-    names
-        .filter_map(|name| {
-            let (prefix_index, suffix) = erofs_xattr_name_split(name.as_bytes())?;
-            let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
-            Some((prefix_index, suffix.to_vec(), value))
-        })
-        .collect()
-}
-
-/// Compute the metadata size for an inode.
-pub fn inode_meta_size(inode: &InodeInfo, _chunkbits: u32, _blkszbits: u32) -> usize {
-    let base = if inode.is_extended {
-        EROFS_INODE_EXTENDED_SIZE
-    } else {
-        EROFS_INODE_COMPACT_SIZE
-    };
-
-    let xattr_size = xattr_ibody_size(&inode.xattrs);
-    match &inode.data {
-        InodeData::RegularFile { chunk_indexes, .. } => {
-            if chunk_indexes.is_empty() {
-                base + xattr_size
-            } else {
-                round_up(base + xattr_size, EROFS_CHUNK_INDEX_SIZE)
-                    + chunk_indexes.len() * EROFS_CHUNK_INDEX_SIZE
-            }
-        }
-        InodeData::Directory { .. } => base + xattr_size,
-        InodeData::Symlink { target } => base + xattr_size + target.len(),
-        InodeData::Device { .. } | InodeData::FifoOrSocket => base + xattr_size,
-    }
-}
-
-/// Compute the chunk format value for chunk-based inodes.
-pub fn chunk_format(chunkbits: u32, blkszbits: u32) -> u16 {
-    EROFS_CHUNK_FORMAT_INDEXES | ((chunkbits - blkszbits) as u16)
-}
-
 /// Serialize xattr ibody data into the buffer at the given offset.
 /// Returns the number of bytes written.
 fn serialize_xattrs(buf: &mut [u8], offset: usize, xattrs: &[(u8, Vec<u8>, Vec<u8>)]) -> usize {
     if xattrs.is_empty() {
         return 0;
     }
-    let total_size = xattr_ibody_size(xattrs);
+    let total_size = erofs_xattr_ibody_size(xattrs);
 
     // Write ibody header (12 bytes): h_reserved(4) + h_shared_count(1) + h_reserved2(7)
     // All zeros is correct (h_shared_count = 0, no shared xattrs)
@@ -443,11 +419,11 @@ fn serialize_xattrs(buf: &mut [u8], offset: usize, xattrs: &[(u8, Vec<u8>, Vec<u
 /// Serialize an inode to bytes and write it at the given offset in a buffer.
 pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     let blkszbits = EROFS_BLKSZBITS as u32;
-    let meta_size = inode_meta_size(inode, blkszbits, blkszbits);
-    let mut buf = vec![0u8; meta_size];
+    let inode_size = erofs_inode_size(inode, blkszbits, blkszbits);
+    let mut buf = vec![0u8; inode_size];
 
-    let xattr_size = xattr_ibody_size(&inode.xattrs);
-    let i_xattr_icount = xattr_icount(xattr_size);
+    let xattr_size = erofs_xattr_ibody_size(&inode.xattrs);
+    let i_xattr_icount = erofs_xattr_icount(xattr_size);
 
     match &inode.data {
         InodeData::RegularFile {
@@ -455,11 +431,11 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             chunk_size_bits,
         } => {
             let datalayout = EROFS_INODE_CHUNK_BASED;
-            let cf = chunk_format(*chunk_size_bits, blkszbits);
+            let cf = erofs_chunk_format(*chunk_size_bits, blkszbits);
             let i_u = cf as u32;
 
             if inode.is_extended {
-                let i_format = extended_i_format(datalayout);
+                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
                     i_format,
                     inode.mode,
@@ -476,7 +452,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = compact_i_format(datalayout, true);
+                let i_format = erofs_compact_i_format(datalayout, true);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
@@ -511,7 +487,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             let startblk_hi = (*startblk >> 32) as u16;
 
             if inode.is_extended {
-                let i_format = extended_i_format(datalayout);
+                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
                     i_format,
                     inode.mode,
@@ -528,7 +504,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = compact_i_format(datalayout, false);
+                let i_format = erofs_compact_i_format(datalayout, false);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
@@ -554,7 +530,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             };
 
             if inode.is_extended {
-                let i_format = extended_i_format(datalayout);
+                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
                     i_format,
                     inode.mode,
@@ -571,7 +547,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = compact_i_format(datalayout, true);
+                let i_format = erofs_compact_i_format(datalayout, true);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
@@ -593,7 +569,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             let datalayout = EROFS_INODE_FLAT_PLAIN;
 
             if inode.is_extended {
-                let i_format = extended_i_format(datalayout);
+                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
                     i_format,
                     inode.mode,
@@ -610,7 +586,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = compact_i_format(datalayout, true);
+                let i_format = erofs_compact_i_format(datalayout, true);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
@@ -631,7 +607,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             let datalayout = EROFS_INODE_FLAT_PLAIN;
 
             if inode.is_extended {
-                let i_format = extended_i_format(datalayout);
+                let i_format = erofs_extended_i_format(datalayout);
                 let hdr = ErofsInodeExtended::new(
                     i_format,
                     inode.mode,
@@ -648,7 +624,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = compact_i_format(datalayout, true);
+                let i_format = erofs_compact_i_format(datalayout, true);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
@@ -673,6 +649,22 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     }
 
     buf
+}
+
+/// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.
+fn read_xattrs_from_path(path: &Path) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(names) = xattr::list(path) else {
+        return Vec::new();
+    };
+
+    names
+        .filter_map(|name| {
+            let (prefix_index, suffix) = erofs_xattr_name_split(name.as_bytes())?;
+            let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
+            Some((prefix_index, suffix.to_vec(), value))
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
-use lepton::build::inode::mode_to_file_type;
+use lepton::build::inode::mode_to_erofs_file_type;
 use lepton::fs::{DeviceInfo, ErofsReader};
 use lepton::metadata::*;
 use lepton::storage::config::StorageConfig;
@@ -259,7 +259,7 @@ fn walk_inode(
     let inode = reader
         .inode(nid)
         .with_context(|| format!("failed to read inode {nid}"))?;
-    let file_type = mode_to_file_type(inode.mode());
+    let file_type = mode_to_erofs_file_type(inode.mode());
 
     stats.visited_inodes += 1;
     stats.max_depth = stats.max_depth.max(depth);

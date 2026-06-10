@@ -1,4 +1,6 @@
+use std::fs;
 use std::mem;
+use std::os::unix::fs::MetadataExt;
 
 use super::*;
 
@@ -369,17 +371,109 @@ impl<'a> ErofsInode<'a> {
     }
 }
 
+/// Compute the chunk format value for chunk-based inodes.
+pub fn erofs_chunk_format(chunk_bits: u32, blksz_bits: u32) -> u16 {
+    EROFS_CHUNK_FORMAT_INDEXES | ((chunk_bits - blksz_bits) as u16)
+}
+
 /// Helper function to construct i_format value for compact inodes.
-pub fn compact_i_format(datalayout: u16, nlink_1: bool) -> u16 {
-    let mut fmt = (EROFS_INODE_LAYOUT_COMPACT << EROFS_I_VERSION_BIT)
+pub fn erofs_compact_i_format(datalayout: u16, nlink_1: bool) -> u16 {
+    let mut i_format = (EROFS_INODE_LAYOUT_COMPACT << EROFS_I_VERSION_BIT)
         | (datalayout << EROFS_I_DATALAYOUT_BIT);
+
     if nlink_1 {
-        fmt |= 1 << EROFS_I_NLINK_1_BIT;
+        i_format |= 1 << EROFS_I_NLINK_1_BIT;
     }
-    fmt
+
+    i_format
 }
 
 /// Helper function to construct i_format value for extended inodes.
-pub fn extended_i_format(datalayout: u16) -> u16 {
+pub fn erofs_extended_i_format(datalayout: u16) -> u16 {
     (EROFS_INODE_LAYOUT_EXTENDED << EROFS_I_VERSION_BIT) | (datalayout << EROFS_I_DATALAYOUT_BIT)
+}
+
+/// Map xattr name index to its byte prefix.
+pub fn erofs_xattr_prefix(index: u8) -> Option<&'static [u8]> {
+    match index {
+        EROFS_XATTR_INDEX_USER => Some(b"user."),
+        EROFS_XATTR_INDEX_POSIX_ACL_ACCESS => Some(b"system.posix_acl_access"),
+        EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT => Some(b"system.posix_acl_default"),
+        EROFS_XATTR_INDEX_TRUSTED => Some(b"trusted."),
+        EROFS_XATTR_INDEX_LUSTRE => Some(b"lustre."),
+        EROFS_XATTR_INDEX_SECURITY => Some(b"security."),
+        _ => None,
+    }
+}
+
+/// Split a full xattr name (as bytes) into (prefix_index, suffix).
+/// Returns None if the name doesn't match any known EROFS xattr prefix.
+pub fn erofs_xattr_name_split(name: &[u8]) -> Option<(u8, &[u8])> {
+    // Order matters: check longer prefixes first to avoid partial matches
+    if let Some(suffix) = name.strip_prefix(b"security." as &[u8]) {
+        Some((EROFS_XATTR_INDEX_SECURITY, suffix))
+    } else if let Some(suffix) = name.strip_prefix(b"trusted." as &[u8]) {
+        Some((EROFS_XATTR_INDEX_TRUSTED, suffix))
+    } else if let Some(suffix) = name.strip_prefix(b"user." as &[u8]) {
+        Some((EROFS_XATTR_INDEX_USER, suffix))
+    } else if let Some(suffix) = name.strip_prefix(b"system.posix_acl_access" as &[u8]) {
+        Some((EROFS_XATTR_INDEX_POSIX_ACL_ACCESS, suffix))
+    } else if let Some(suffix) = name.strip_prefix(b"system.posix_acl_default" as &[u8]) {
+        Some((EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT, suffix))
+    } else {
+        name.strip_prefix(b"lustre." as &[u8])
+            .map(|suffix| (EROFS_XATTR_INDEX_LUSTRE, suffix))
+    }
+}
+
+/// Compute the xattr ibody size for a list of xattr entries.
+/// Each entry: 4-byte header + name_suffix_len + value_len, 4-byte aligned.
+/// Plus the 12-byte ibody header.
+pub fn erofs_xattr_ibody_size(xattrs: &[(u8, Vec<u8>, Vec<u8>)]) -> usize {
+    if xattrs.is_empty() {
+        return 0;
+    }
+
+    let mut size = EROFS_XATTR_IBODY_HEADER_SIZE;
+    for (_, suffix, value) in xattrs {
+        let entry_size = EROFS_XATTR_ENTRY_HEADER_SIZE + suffix.len() + value.len();
+        size += round_up(entry_size, 4);
+    }
+
+    size
+}
+
+/// Compute i_xattr_icount from the xattr ibody size.
+/// xattr_ibody_size = 12 + 4 * (icount - 1), so icount = (size - 12) / 4 + 1 = (size - 8) / 4
+pub fn erofs_xattr_icount(xattr_ibody_size: usize) -> u16 {
+    if xattr_ibody_size == 0 {
+        0
+    } else {
+        let aligned = round_up(xattr_ibody_size, 4);
+        ((aligned - 8) / 4) as u16
+    }
+}
+
+/// Decide whether an inode must use the 64-byte extended on-disk format.
+///
+/// Compact (32-byte) inodes only support:
+/// - file size  <= u32::MAX
+/// - uid / gid  <= u16::MAX
+/// - nlink == 1 (hardlinks need a real link count)
+/// - no per-inode mtime (falls back to the global build time)
+pub fn needs_erofs_extended_inode(meta: &fs::Metadata) -> bool {
+    meta.size() > u32::MAX as u64
+        || meta.uid() > u16::MAX as u32
+        || meta.gid() > u16::MAX as u32
+        || meta.nlink() > 1
+}
+
+/// Check if an xattr name (as bytes) is a Lepton internal xattr (starts with "trusted.lepton.").
+pub fn is_lepton_xattr(name: &[u8]) -> bool {
+    name.starts_with(b"trusted.lepton.")
+}
+
+/// Check if an xattr name is the Lepton prefetch blobs xattr ("trusted.lepton.prefetch.blobs").
+pub fn is_lepton_prefetch_blobs_xattr(name: &[u8]) -> bool {
+    is_lepton_xattr(name) && name.ends_with(LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS)
 }

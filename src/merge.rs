@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use crate::build::blob_chunk::ChunkIndex;
 use crate::build::bootstrap::render_bootstrap;
 use crate::build::inode::{
-    mode_to_file_type, set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo,
+    mode_to_erofs_file_type, set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo,
 };
 use crate::fs::ErofsReader;
 use crate::metadata::*;
@@ -217,7 +217,7 @@ fn load_node(
         })
         .collect();
 
-    let data = match mode_to_file_type(mode) {
+    let data = match mode_to_erofs_file_type(mode) {
         EROFS_FT_DIR => {
             let mut children = BTreeMap::new();
             for entry in reader.read_dir(nid, &inode)? {
@@ -272,7 +272,7 @@ fn load_node(
     };
 
     Ok(MergeNode {
-        link_id: if mode_to_file_type(mode) == EROFS_FT_REG_FILE && inode.nlink() > 1 {
+        link_id: if mode_to_erofs_file_type(mode) == EROFS_FT_REG_FILE && inode.nlink() > 1 {
             Some(MergeLinkId { layer_id, nid })
         } else {
             None
@@ -413,7 +413,7 @@ fn flatten_node(
             let mut subdir_count = 0u32;
             for (name, child) in children {
                 let child_idx = flatten_node(child, inodes, ino_counter, hardlink_indexes);
-                let file_type = mode_to_file_type(child.mode);
+                let file_type = mode_to_erofs_file_type(child.mode);
                 if file_type == EROFS_FT_DIR {
                     subdir_count += 1;
                 }

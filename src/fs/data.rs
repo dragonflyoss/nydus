@@ -374,7 +374,7 @@ mod tests {
     use crate::build::bootstrap::render_bootstrap;
     use crate::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
     use crate::metadata::{
-        xattr_ibody_size, BlobFooter, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
+        erofs_xattr_ibody_size, BlobFooter, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
         EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER, LEPTON_BLOB_FOOTER_ALIGNMENT,
     };
     use crate::utils::sha256_file;
@@ -390,7 +390,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(xattr_ibody_size(&file_xattrs) > EROFS_BLOCK_SIZE as usize);
+        assert!(erofs_xattr_ibody_size(&file_xattrs) > EROFS_BLOCK_SIZE as usize);
 
         let mut inodes = vec![
             InodeInfo {
