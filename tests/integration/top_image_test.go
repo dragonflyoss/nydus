@@ -58,6 +58,7 @@ func TestTopImages(t *testing.T) {
 	require.NotEmpty(t, images, "image list %q is empty", listPath)
 
 	leptonifyBin := mustLookupLeptonify(t)
+	leptonBin := mustLookupExecutable(t, "lepton")
 
 	// Cap parallelism at `concurrency` while still running each image as an
 	// independent subtest so failures are reported per image.
@@ -75,6 +76,7 @@ func TestTopImages(t *testing.T) {
 			convert := exec.Command(leptonifyBin, "convert",
 				"--source", image,
 				"--target", target,
+				"--builder", leptonBin,
 				"--work-dir", filepath.Join(workDir, "convert"),
 				"--plain-http", "--insecure",
 			)
@@ -94,6 +96,7 @@ func TestTopImages(t *testing.T) {
 			check := exec.Command(leptonifyBin, "check",
 				"--source", image,
 				"--target", target,
+				"--builder", leptonBin,
 				"--work-dir", filepath.Join(workDir, "check"),
 				"--plain-http", "--insecure",
 			)
