@@ -33,6 +33,8 @@ func main() {
 		Commands: []*cli.Command{
 			convertCommand(),
 			checkCommand(),
+			mountCommand(),
+			optimizeCommand(),
 		},
 	}
 	if err := app.Run(os.Args); err != nil {
@@ -360,4 +362,226 @@ func runCheck(c *cli.Context) error {
 
 func joinWork(base, sub string) string {
 	return base + string(os.PathSeparator) + sub
+}
+
+func mountCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "mount",
+		Usage: "Mount an OCI or lepton image at a local mountpoint",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:     "target",
+				Aliases:  []string{"t"},
+				Usage:    "target image reference (OCI or lepton)",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:     "mountpoint",
+				Aliases:  []string{"m"},
+				Usage:    "directory to mount the image at",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:  "builder",
+				Usage: "path to the lepton binary",
+				Value: "lepton",
+			},
+			&cli.StringFlag{
+				Name:  "work-dir",
+				Usage: "scratch directory for mounting (defaults to a temp dir)",
+			},
+			&cli.StringFlag{
+				Name:  "platform",
+				Usage: "mount only the given platform (e.g. linux/amd64); defaults to the host platform",
+			},
+			&cli.BoolFlag{
+				Name:  "insecure",
+				Usage: "skip TLS certificate verification for the registry",
+			},
+			&cli.BoolFlag{
+				Name:  "plain-http",
+				Usage: "use plain HTTP to talk to the registry",
+			},
+			&cli.BoolFlag{
+				Name:  "prefetch",
+				Usage: "enable background blob prefetch after mounting (off by default)",
+			},
+			&cli.StringFlag{
+				Name:  "log-level",
+				Usage: "log level: trace, debug, info, warn, error",
+				Value: "info",
+			},
+		},
+		Action: runMount,
+	}
+}
+
+func runMount(c *cli.Context) error {
+	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
+		logrus.SetLevel(level)
+	}
+
+	ctx := log.WithLogger(context.Background(), log.L)
+
+	target := c.String("target")
+	mountpoint := c.String("mountpoint")
+
+	platformMC := platforms.Default()
+	if p := c.String("platform"); p != "" {
+		parsed, err := platforms.Parse(p)
+		if err != nil {
+			return errors.Wrapf(err, "invalid platform %q", p)
+		}
+		platformMC = platforms.Only(parsed)
+	}
+
+	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+		return errors.Wrapf(err, "create mountpoint %q", mountpoint)
+	}
+
+	// Prepare a scratch work directory.
+	workDir := c.String("work-dir")
+	cleanup := false
+	if workDir == "" {
+		tmp, err := os.MkdirTemp("", "leptonify-mount-")
+		if err != nil {
+			return errors.Wrap(err, "create work dir")
+		}
+		workDir = tmp
+		cleanup = true
+	} else if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return errors.Wrapf(err, "create work dir %q", workDir)
+	}
+	if cleanup {
+		defer func() { _ = os.RemoveAll(workDir) }()
+	}
+
+	mnt, err := checker.NewMounter(checker.MountOpt{
+		Target:     target,
+		Mountpoint: mountpoint,
+		Builder:    c.String("builder"),
+		WorkDir:    workDir,
+		Insecure:   c.Bool("insecure"),
+		PlainHTTP:  c.Bool("plain-http"),
+		Prefetch:   c.Bool("prefetch"),
+		LogLevel:   c.String("log-level"),
+		PlatformMC: platformMC,
+	})
+	if err != nil {
+		return errors.Wrap(err, "create mounter")
+	}
+
+	if err := mnt.Mount(ctx); err != nil {
+		return errors.Wrap(err, "mount")
+	}
+	return nil
+}
+
+func optimizeCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "optimize",
+		Usage: "Build an ondemand blob from a /trace access pattern and push an optimized lepton image",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:     "apiserver",
+				Usage:    "apiserver address of a running mount of the source image (e.g. unix:///path/to/apiserver.sock); access patterns are fetched from its /trace endpoint",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:     "source",
+				Aliases:  []string{"s"},
+				Usage:    "source lepton image reference",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:     "target",
+				Aliases:  []string{"t"},
+				Usage:    "optimized lepton image reference to push",
+				Required: true,
+			},
+			&cli.StringFlag{
+				Name:  "builder",
+				Usage: "path to the lepton binary",
+				Value: "lepton",
+			},
+			&cli.StringFlag{
+				Name:  "work-dir",
+				Usage: "scratch directory for optimizing (defaults to a temp dir)",
+			},
+			&cli.StringFlag{
+				Name:  "platform",
+				Usage: "optimize only the given platform (e.g. linux/amd64); defaults to the host platform",
+			},
+			&cli.BoolFlag{
+				Name:  "insecure",
+				Usage: "skip TLS certificate verification for the registry",
+			},
+			&cli.BoolFlag{
+				Name:  "plain-http",
+				Usage: "use plain HTTP to talk to the registry",
+			},
+			&cli.StringFlag{
+				Name:  "log-level",
+				Usage: "log level: trace, debug, info, warn, error",
+				Value: "info",
+			},
+		},
+		Action: runOptimize,
+	}
+}
+
+func runOptimize(c *cli.Context) error {
+	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
+		logrus.SetLevel(level)
+	}
+
+	ctx := log.WithLogger(context.Background(), log.L)
+
+	platformMC := platforms.Default()
+	if p := c.String("platform"); p != "" {
+		parsed, err := platforms.Parse(p)
+		if err != nil {
+			return errors.Wrapf(err, "invalid platform %q", p)
+		}
+		platformMC = platforms.Only(parsed)
+	}
+
+	// Prepare a scratch work directory.
+	workDir := c.String("work-dir")
+	cleanup := false
+	if workDir == "" {
+		tmp, err := os.MkdirTemp("", "leptonify-optimize-")
+		if err != nil {
+			return errors.Wrap(err, "create work dir")
+		}
+		workDir = tmp
+		cleanup = true
+	} else if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return errors.Wrapf(err, "create work dir %q", workDir)
+	}
+	if cleanup {
+		defer func() { _ = os.RemoveAll(workDir) }()
+	}
+
+	opt, err := checker.NewOptimizer(checker.OptimizeOpt{
+		Source:     c.String("source"),
+		Target:     c.String("target"),
+		Apiserver:  c.String("apiserver"),
+		Builder:    c.String("builder"),
+		WorkDir:    workDir,
+		Insecure:   c.Bool("insecure"),
+		PlainHTTP:  c.Bool("plain-http"),
+		LogLevel:   c.String("log-level"),
+		PlatformMC: platformMC,
+	})
+	if err != nil {
+		return errors.Wrap(err, "create optimizer")
+	}
+
+	if err := opt.Optimize(ctx); err != nil {
+		return errors.Wrap(err, "optimize")
+	}
+
+	logrus.Infof("optimized %s -> %s", c.String("source"), c.String("target"))
+	return nil
 }

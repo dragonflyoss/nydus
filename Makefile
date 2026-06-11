@@ -30,13 +30,13 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(dir $(GO_BIN)):$(PATH)" "HOME=$(HOME)" \
 	"GOMODCACHE=$$($(GO_BIN) env GOMODCACHE)" \
 	"EROFS_C_FUSE=$(EROFS_C_FUSE)" \
 	"EROFS_MKFS=$(EROFS_MKFS)"
-TEST_SUPPORT_FILES = util.go
+TEST_SUPPORT_FILES = util.go optimize_util.go
 E2E_TEST_FILES = e2e_test.go $(TEST_SUPPORT_FILES)
 XFSTESTS_TEST_FILES = xfstests_test.go $(TEST_SUPPORT_FILES)
 PERF_TEST_FILES = perf_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 
-.PHONY: build release test test-e2e test-xfstests test-perf test-top-images clean
+.PHONY: build release leptonify test test-e2e test-xfstests test-perf test-top-images clean
 
 build:
 	$(CARGO) build
@@ -44,12 +44,15 @@ build:
 release:
 	$(CARGO) build --release
 
+leptonify:
+	cd leptonify && $(GO_BIN) build -o leptonify .
+
 test:
 	$(CARGO) test --workspace
 
 # Run end-to-end integration tests (requires root, builds release first).
 # Only runs tests/integration/e2e_test.go.
-test-e2e: release
+test-e2e: release leptonify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/integration && \
 		$(GO_TEST_ENV) \

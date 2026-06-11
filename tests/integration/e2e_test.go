@@ -981,3 +981,156 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 		require.FileExists(t, filepath.Join(cacheDir, prefix+".groupmap"))
 	}
 }
+
+// TestLeptonifyOptimizeE2E exercises the full image-level optimize pipeline
+// against a local registry:
+//
+//  1. docker build/push a source OCI image, convert it with `leptonify
+//     convert`, and validate it with `leptonify check`.
+//  2. Mount the lepton image WITHOUT prefetch, replay a read workload, and
+//     verify the baseline metrics show on-demand backend reads. While the
+//     mount is live, run `leptonify optimize --apiserver` to build the
+//     ondemand (redirect) blob from the recorded /trace pattern and push the
+//     optimized image.
+//  3. Mount the optimized image WITH prefetch on a cold cache, wait for
+//     prefetch to quiesce, replay the same workload, and verify:
+//     - the ondemand blob was fetched (backend_redirect_read_count > 0),
+//     - every traced group was filled into its source blob's cache through
+//     the redirect path (cache_redirect_fill_group == trace size, no skips),
+//     - the workload triggered zero on-demand backend reads
+//     (backend_ondemand_read_count == 0), proving the optimization works,
+//     - file contents are byte-identical to the corpus.
+func TestLeptonifyOptimizeE2E(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires root")
+	}
+	requireDocker(t)
+	registry := requireTestRegistry(t)
+
+	leptonBin := mustLookupExecutable(t, "lepton")
+	leptonifyBin := mustLookupExecutable(t, "leptonify")
+
+	// Corpus: four ~1.2-1.5 MiB pseudo-random files so each spans more than
+	// one 1 MiB blob meta group and the trace covers multiple groups.
+	tmpDir := t.TempDir()
+	corpusDir := filepath.Join(tmpDir, "corpus")
+	require.NoError(t, os.MkdirAll(corpusDir, 0755))
+	corpusFiles := []string{"file1", "file2", "file3", "file4"}
+	for i, name := range corpusFiles {
+		size := 1<<20 + (i+1)*64*1024
+		require.NoError(t, os.WriteFile(filepath.Join(corpusDir, name), pseudoRandomTestBytes(size, uint64(i+1)), 0644))
+	}
+
+	srcRef := uniqueImageTag(registry, "lepton-e2e/optimize-src")
+	leptonRef := srcRef + "-lepton"
+	optRef := optimizedRef(leptonRef)
+
+	t.Log("Building and pushing source OCI image...")
+	dockerBuildAndPush(t, corpusDir, srcRef)
+
+	t.Log("Converting to lepton format...")
+	runLeptonifyCommand(t, leptonifyBin, leptonBin, "convert", "--source", srcRef, "--target", leptonRef,
+		"--work-dir", filepath.Join(tmpDir, "convert"))
+
+	t.Log("Checking converted image...")
+	runLeptonifyCommand(t, leptonifyBin, leptonBin, "check", "--source", srcRef, "--target", leptonRef,
+		"--work-dir", filepath.Join(tmpDir, "check"))
+
+	// The read workload replayed on both mounts: two full files plus a
+	// partial head read, in a deliberate non-sequential order.
+	workload := func(mnt string) {
+		readFilesInOrder(t, filepath.Join(mnt, "data"), "file3")
+		head := make([]byte, 100*1024)
+		f, err := os.Open(filepath.Join(mnt, "data", "file1"))
+		require.NoError(t, err)
+		_, err = io.ReadFull(f, head)
+		require.NoError(t, f.Close())
+		require.NoError(t, err)
+		readFilesInOrder(t, filepath.Join(mnt, "data"), "file4")
+	}
+
+	t.Log("Mounting baseline (no prefetch) and tracing the workload...")
+	baselineWork := filepath.Join(tmpDir, "mount-baseline")
+	baselineMnt := filepath.Join(tmpDir, "mnt-baseline")
+	var traceCount int
+	func() {
+		unmount := startLeptonifyMount(t, leptonifyBin, leptonBin, leptonRef, baselineMnt, baselineWork, false)
+		defer unmount()
+		workload(baselineMnt)
+
+		socket := filepath.Join(baselineWork, "apiserver.sock")
+		metrics := fetchMetrics(t, socket)
+		require.Greater(t, metricValue(metrics, "backend_ondemand_read_count"), 0.0,
+			"baseline workload must trigger on-demand backend reads")
+		require.Zero(t, metricValue(metrics, "backend_redirect_read_count"))
+		require.Zero(t, metricValue(metrics, "cache_redirect_fill_group"))
+		require.Zero(t, metricValue(metrics, "cache_fill_group"),
+			"baseline mount must not prefetch")
+		traceCount = fetchTraceCount(t, socket)
+		require.Greater(t, traceCount, 1, "trace must cover multiple groups")
+		t.Logf("baseline: ondemand_reads=%v trace_groups=%d",
+			metricValue(metrics, "backend_ondemand_read_count"), traceCount)
+
+		t.Log("Optimizing against the live mount apiserver...")
+		runLeptonifyCommand(t, leptonifyBin, leptonBin, "optimize",
+			"--apiserver", socket,
+			"--source", leptonRef,
+			"--target", optRef,
+			"--work-dir", filepath.Join(tmpDir, "optimize"))
+	}()
+
+	t.Log("Mounting optimized image (prefetch, cold cache) and replaying the workload...")
+	optWork := filepath.Join(tmpDir, "mount-optimized")
+	optMnt := filepath.Join(tmpDir, "mnt-optimized")
+	func() {
+		unmount := startLeptonifyMount(t, leptonifyBin, leptonBin, optRef, optMnt, optWork, true)
+		defer unmount()
+
+		socket := filepath.Join(optWork, "apiserver.sock")
+		waitPrefetchQuiesce(t, socket)
+
+		metrics := fetchMetrics(t, socket)
+		require.Greater(t, metricValue(metrics, "backend_redirect_read_count"), 0.0,
+			"prefetch must fetch the ondemand (redirect) blob from the backend")
+		require.Equal(t, float64(traceCount), metricValue(metrics, "cache_redirect_fill_group"),
+			"every traced group must be filled into its source cache via redirect")
+		require.Zero(t, metricValue(metrics, "cache_redirect_skip_group"),
+			"no redirect group may be skipped")
+		require.Zero(t, metricValue(metrics, "backend_ondemand_read_count"),
+			"prefetch warmup must not issue on-demand reads")
+		t.Logf("optimized after prefetch: redirect_reads=%v redirect_fills=%v regular_fills=%v",
+			metricValue(metrics, "backend_redirect_read_count"),
+			metricValue(metrics, "cache_redirect_fill_group"),
+			metricValue(metrics, "cache_fill_group"))
+
+		workload(optMnt)
+
+		metrics = fetchMetrics(t, socket)
+		require.Zero(t, metricValue(metrics, "backend_ondemand_read_count"),
+			"the traced workload must be served entirely from the warmed cache")
+		require.Greater(t, metricValue(metrics, "cache_hit_group"), 0.0)
+
+		// Full content verification against the corpus.
+		for _, name := range corpusFiles {
+			want, err := os.ReadFile(filepath.Join(corpusDir, name))
+			require.NoError(t, err)
+			got, err := os.ReadFile(filepath.Join(optMnt, "data", name))
+			require.NoError(t, err)
+			require.True(t, bytes.Equal(want, got), "content mismatch for %s", name)
+		}
+	}()
+}
+
+// pseudoRandomTestBytes generates deterministic pseudo-random bytes (xorshift)
+// so corpus files are incompressible and reproducible across runs.
+func pseudoRandomTestBytes(n int, seed uint64) []byte {
+	buf := make([]byte, n)
+	state := seed*0x9e3779b97f4a7c15 + 0x2545f4914f6cdd1d
+	for i := range buf {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		buf[i] = byte(state)
+	}
+	return buf
+}

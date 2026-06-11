@@ -114,6 +114,11 @@ pub struct FuseArgs {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
+    /// Enable background blob prefetch after mounting. Off by default; when
+    /// --config is provided, the config's `prefetch.enable` also turns it on.
+    #[arg(long, default_value_t = false)]
+    pub prefetch: bool,
+
     /// File path to lepton bootstrap.
     #[arg(long)]
     pub bootstrap: Option<PathBuf>,
@@ -133,6 +138,11 @@ pub struct FuseArgs {
     /// Filesystem name shown in /proc/mounts SOURCE column.
     #[arg(long, hide = true, default_value = "lepton")]
     pub fsname: String,
+
+    /// Serve Prometheus metrics over a Unix socket, e.g.
+    /// `unix:///run/lepton/api.sock`. The metrics are exposed at `/metrics`.
+    #[arg(long)]
+    pub apiserver: Option<String>,
 
     #[arg(
         short = 'l',
@@ -213,8 +223,11 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     };
 
     let (prefetch_enable, prefetch_threads) = match storage_config.as_ref() {
-        Some(config) => (config.prefetch.enable, config.prefetch.threads),
-        None => (true, DEFAULT_PREFETCH_THREADS),
+        Some(config) => (
+            config.prefetch.enable || args.prefetch,
+            config.prefetch.threads,
+        ),
+        None => (args.prefetch, DEFAULT_PREFETCH_THREADS),
     };
 
     // Build the blob backend. A direct `--blob <path>` is self-contained and
@@ -278,8 +291,21 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
             Err(err) => warn!("failed to start blob prefetch: {}", err),
         }
     } else {
-        info!("blob prefetch disabled by config");
+        info!("blob prefetch disabled (enable with --prefetch or the config's prefetch.enable)");
     }
+
+    // Optionally expose Prometheus metrics over a Unix socket. A failure here is
+    // non-fatal: the mount keeps serving without metrics.
+    let api_server = match args.apiserver.as_deref() {
+        Some(address) => match crate::apiserver::ApiServer::start(address) {
+            Ok(server) => Some(server),
+            Err(err) => {
+                warn!("failed to start metrics apiserver: {:#}", err);
+                None
+            }
+        },
+        None => None,
+    };
 
     let wait_signals = TermSignalMask::new()?;
     let signal_mountpoint = mountpoint.to_path_buf();
@@ -356,6 +382,12 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     let join_result = result_rx
         .recv()
         .context("failed to receive fuse controller result")?;
+
+    // Tear down the metrics server before reporting the mount result.
+    if let Some(server) = api_server {
+        server.stop();
+    }
+
     match &join_result {
         Ok(()) => {}
         Err(e) => error!("background fuse session join returned error: {:?}", e),

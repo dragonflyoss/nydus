@@ -2,6 +2,7 @@ pub mod build;
 pub mod fs;
 pub mod merge;
 pub mod metadata;
+pub mod metrics;
 pub mod storage;
 pub mod tracing;
 pub mod utils;

@@ -12,11 +12,13 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/lepton/leptonify/internal/converter"
+	"github.com/dragonflyoss/lepton/leptonify/internal/remote"
 )
 
 // ImageKind distinguishes a plain OCI image from a converted lepton image.
@@ -53,6 +55,22 @@ type Image struct {
 	Bootstrap *ocispec.Descriptor
 	// Blobs are the lepton data blob layers (only set for KindLepton).
 	Blobs []ocispec.Descriptor
+}
+
+// loadImage pulls ref through provider and parses it into a single-platform
+// Image. The reference must be non-empty.
+func loadImage(ctx context.Context, provider *remote.Provider, ref string, platformMC platforms.MatchComparer) (*Image, error) {
+	log.G(ctx).Infof("pulling image %s", ref)
+	desc, err := provider.Pull(ctx, ref)
+	if err != nil {
+		return nil, errors.Wrap(err, "pull")
+	}
+	img, err := parseImage(ctx, provider.ContentStore(), ref, desc, platformMC)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse")
+	}
+	log.G(ctx).Infof("parsed %s as a %s image", ref, img.Kind)
+	return img, nil
 }
 
 // parseImage resolves rootDesc (a manifest or an index) into a single-platform

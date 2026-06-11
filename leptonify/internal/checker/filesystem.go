@@ -152,7 +152,7 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, img *Image) 
 	}
 
 	configPath := filepath.Join(dir, "config.yaml")
-	configYAML, err := r.writeRegistryConfig(img, cacheDir, configPath)
+	configYAML, err := writeRegistryConfig(r.provider, img, cacheDir, configPath, false)
 	if err != nil {
 		return "", nil, errors.Wrap(err, "generate storage config")
 	}
@@ -242,11 +242,22 @@ type storageConfig struct {
 	Prefetch prefetchSection `yaml:"prefetch"`
 }
 
+// prefetchThreads returns the worker thread count for the prefetch section:
+// the lepton default when prefetch is enabled, zero otherwise.
+func prefetchThreads(enable bool) int {
+	if enable {
+		return 10
+	}
+	return 0
+}
+
 // writeRegistryConfig derives a registry-backed storage config for img, writes
 // it to configPath, and returns the rendered YAML. The registry host and
 // repository are parsed from the image reference; credentials, TLS and HTTP
-// settings come from the provider used to pull the image.
-func (r *filesystemRule) writeRegistryConfig(img *Image, cacheDir, configPath string) (string, error) {
+// settings come from the provider used to pull the image. Blob prefetch runs
+// only when prefetchEnable is set (a live mount wants production-like warmup,
+// while check and optimize want fully on-demand reads).
+func writeRegistryConfig(provider *remote.Provider, img *Image, cacheDir, configPath string, prefetchEnable bool) (string, error) {
 	named, err := reference.ParseNormalizedNamed(img.Ref)
 	if err != nil {
 		return "", errors.Wrapf(err, "parse image reference %q", img.Ref)
@@ -259,7 +270,7 @@ func (r *filesystemRule) writeRegistryConfig(img *Image, cacheDir, configPath st
 	}
 
 	var auth *registryAuthConfig
-	if username, password, err := r.provider.Credentials(host); err == nil && username != "" {
+	if username, password, err := provider.Credentials(host); err == nil && username != "" {
 		auth = &registryAuthConfig{Username: username, Password: password}
 	}
 
@@ -269,8 +280,8 @@ func (r *filesystemRule) writeRegistryConfig(img *Image, cacheDir, configPath st
 			Config: registryBackendConfig{
 				Host:       host,
 				Repo:       repo,
-				Insecure:   r.provider.PlainHTTP(),
-				SkipVerify: r.provider.Insecure(),
+				Insecure:   provider.PlainHTTP(),
+				SkipVerify: provider.Insecure(),
 				Auth:       auth,
 			},
 		},
@@ -278,7 +289,7 @@ func (r *filesystemRule) writeRegistryConfig(img *Image, cacheDir, configPath st
 			Type:   "local",
 			Config: localDirSection{Dir: cacheDir},
 		},
-		Prefetch: prefetchSection{Enable: false, Threads: 0},
+		Prefetch: prefetchSection{Enable: prefetchEnable, Threads: prefetchThreads(prefetchEnable)},
 	}
 
 	out, err := yaml.Marshal(cfg)

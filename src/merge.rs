@@ -125,6 +125,87 @@ pub fn merge_sources_to_bootstrap_bytes(
     )
 }
 
+/// Rewrite an existing merged bootstrap for the `optimize` flow: append an
+/// "ondemand" device slot for the redirect blob and put its device id first in
+/// the root prefetch xattr so it is warmed before everything else. The parent
+/// bootstrap is read-only; the rewritten bootstrap bytes are returned.
+pub fn rewrite_bootstrap_with_ondemand_device(
+    parent_bootstrap: &Path,
+    ondemand_blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+    ondemand_blocks: u64,
+) -> Result<Vec<u8>> {
+    let reader = ErofsReader::open_layer(parent_bootstrap)
+        .with_context(|| format!("failed to open bootstrap: {}", parent_bootstrap.display()))?;
+    let device_infos = reader.device_infos()?;
+    if device_infos.is_empty() {
+        bail!("parent bootstrap contains no blob devices");
+    }
+    if device_infos
+        .iter()
+        .any(|info| info.blob_id == *ondemand_blob_id)
+    {
+        bail!("parent bootstrap already contains the ondemand blob device");
+    }
+
+    // Devices keep their ids, so chunk indexes round-trip unchanged.
+    let identity: HashMap<u16, u16> = device_infos
+        .iter()
+        .map(|info| (info.device_id, info.device_id))
+        .collect();
+    let root = load_node(
+        &reader,
+        0,
+        reader.sb().root_nid(),
+        reader.sb().epoch(),
+        &identity,
+    )
+    .context("failed to load bootstrap inode tree")?;
+
+    let mut inodes = Vec::new();
+    let mut ino_counter = 0u32;
+    let mut hardlink_indexes = HashMap::new();
+    flatten_node(&root, &mut inodes, &mut ino_counter, &mut hardlink_indexes);
+    if inodes.is_empty() {
+        bail!("bootstrap produced no inodes");
+    }
+
+    let mut device_slots: Vec<ErofsDeviceSlot> = device_infos
+        .iter()
+        .map(|info| ErofsDeviceSlot::with_blob_id(info.blocks, &info.blob_id))
+        .collect();
+    let ondemand_device_id = u16::try_from(device_slots.len() + 1)
+        .context("ondemand device id exceeds u16 device table range")?;
+    device_slots.push(ErofsDeviceSlot::with_blob_id(
+        ondemand_blocks,
+        ondemand_blob_id,
+    ));
+
+    // Ondemand blob first, then the existing prefetch order (defaulting to all
+    // devices ascending when the parent has no prefetch xattr).
+    let mut prefetch_ids = vec![ondemand_device_id];
+    let existing = reader.read_prefetch_order();
+    if existing.is_empty() {
+        prefetch_ids.extend(device_infos.iter().map(|info| info.device_id));
+    } else {
+        prefetch_ids.extend(existing);
+    }
+    set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_ids)?;
+
+    let epoch = inodes
+        .iter()
+        .map(|inode| inode.mtime)
+        .min()
+        .unwrap_or_else(|| reader.sb().epoch());
+    let uuid = [0u8; 16];
+    render_bootstrap(
+        &mut inodes,
+        epoch,
+        EROFS_BLKSZBITS as u32,
+        &device_slots,
+        &uuid,
+    )
+}
+
 fn load_layer(
     layer_id: u32,
     source: &Path,

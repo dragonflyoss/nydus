@@ -19,7 +19,6 @@ backend-registry = [
   "dep:once_cell",
   "dep:futures",
   "dep:rand",
-  "dep:serde_json",
 ]
 # Dragonfly P2P SDK proxy support for the registry backend.
 backend-dragonfly-proxy = ["backend-registry", "dep:dragonfly-client-util"]
@@ -36,10 +35,14 @@ dragonfly-client-util = { version = "1.0", optional = true }
 fuser = "0.17"
 futures = { version = "0.3", optional = true }
 hickory-resolver = { version = "0.25", optional = true }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
 log = "0.4"
 memmap2 = "0.9"
 once_cell = { version = "1", optional = true }
+prometheus = { version = "0.13", default-features = false }
 rand = { version = "0.8", optional = true }
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
@@ -47,7 +50,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ], optional = true }
 rolling-file = "0.2.0"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", optional = true }
+serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
 signal-hook = "0.3"
@@ -55,6 +58,7 @@ tempfile = "3.25.0"
 tokio = { version = "1", features = [
   "fs",
   "io-util",
+  "macros",
   "net",
   "rt",
   "rt-multi-thread",

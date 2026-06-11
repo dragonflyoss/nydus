@@ -160,6 +160,52 @@ Current implementation notes:
 - Merge currently assumes source regular files use the lepton chunk-based data
 	layout and preserves each file's original chunkbits.
 
+### Optimize
+
+`lepton optimize [OPTIONS]`
+
+The `lepton optimize` command builds a compact "ondemand" blob from a recorded
+group access pattern and rewrites the bootstrap so the runtime prefetches that
+blob first. The ondemand blob carries copies of the hot groups (in first-access
+order); at mount time the phase-0 prefetch streams it and redirects each decoded
+group into the source blob's cache, so early on-demand reads hit warm cache
+instead of issuing scattered registry range reads.
+
+Supported form:
+
+```bash
+lepton optimize \
+  --apiserver unix:///path/to/api.sock \
+  --parent-bootstrap /path/to/parent-bootstrap \
+  --bootstrap /path/to/bootstrap \
+  --blob-dir /path/to/blobs \
+  --config /path/to/config.yaml
+```
+
+Current implementation notes:
+
+- `--apiserver` is the apiserver address of a **running** `lepton fuse` mount
+	(the same `unix:///path` form as `lepton fuse --apiserver`). Optimize fetches
+	the access patterns live from its `GET /trace` endpoint
+	(`{"patterns":[{"blob_index":1,"group_index":4},...]}`); entries are
+	deduplicated preserving first-access order. Run the workload against the
+	mount before invoking optimize so the trace is populated.
+- `--parent-bootstrap` is the merged bootstrap to optimize; it is read-only, so
+	optimize can be re-run against the same parent with new patterns.
+- `--bootstrap` is the rewritten bootstrap output: the parent's inode tree with
+	an appended ondemand device slot and the root `trusted.lepton.prefetch.blobs`
+	xattr updated to list the ondemand device id first.
+- `--blob-dir` receives the ondemand blob (named by its full SHA256) and its
+	`<digest>.blob.meta` sidecar; the digest is printed as `ondemand_blob_digest:`.
+- `--config` is the same storage config as `lepton fuse --config`: source group
+	bytes are pulled through the regular blob cache, so groups already decoded in
+	`cache.config.dir` are served from disk and cold groups are fetched from the
+	backend (with CRC validation on every path).
+- The ondemand artifact layout is `[group data][blob meta][footer]` with
+	`bootstrap_blocks = 0` (no embedded bootstrap) and an empty chunk table. Each
+	group record is a redirect: it stores the source device id and source group
+	index, and its `crc32c` equals the source group's decoded CRC.
+
 ### Check
 
 `lepton check [OPTIONS]`
@@ -210,6 +256,8 @@ Current implementation notes:
 	so interactive `Ctrl+C` tears down the mountpoint instead of leaving it behind.
 - After mounting, runtime starts background blob prefetch unless it is disabled
 	through the storage config. See [Blob prefetch](#blob-prefetch).
+- Pass `--apiserver unix:///path/to/api.sock` to expose Prometheus metrics over a
+	Unix socket. See [Metrics](#metrics).
 
 Current CLI help:
 
@@ -226,6 +274,8 @@ Options:
 		Directory path for persistent chunk cache files
 	--config <config>
 		File path to a YAML storage config providing backend/cache directories and prefetch options
+	--prefetch
+		Enable background blob prefetch after mounting (off by default)
 	--bootstrap <bootstrap>
 		File path to lepton bootstrap
 	--blob <blob>
@@ -238,6 +288,8 @@ Options:
 		Specify the log directory [default: /var/log/lepton/]
 	--log-max-files <log-max-files>
 		Specify the max number of log files [default: 6]
+	--apiserver <apiserver>
+		Serve Prometheus metrics over a Unix socket, e.g. unix:///run/lepton/api.sock
 ```
 
 Supported forms:
@@ -345,6 +397,77 @@ Fields under `backend.config`:
 	rewritten to) and `dragonfly_scheduler_endpoint` (route blob requests through
 	the Dragonfly client SDK; only available when the binary is built with the
 	`backend-dragonfly-proxy` feature).
+
+
+## Metrics
+
+When `lepton fuse` is started with `--apiserver unix:///path/to/api.sock`, a
+small HTTP server is bound to that Unix socket and serves the Prometheus text
+exposition at `GET /metrics` and the recorded on-demand group access order at
+`GET /trace` (any other path returns `404`). The server is torn down and the
+socket unlinked when the mount exits. Scrape it with, e.g.:
+
+```bash
+curl --unix-socket /run/lepton/api.sock http://localhost/metrics
+curl --unix-socket /run/lepton/api.sock http://localhost/trace
+```
+
+`GET /trace` returns JSON like
+`{"patterns":[{"blob_index":1,"group_index":4},...]}` listing each `(blob,
+group)` pair in first-access order, deduplicated. The blob index is the device
+id from the bootstrap device table. The trace feeds `lepton optimize` /
+`leptonify optimize`.
+
+Each completed backend request is also logged at `debug` level after it returns,
+carrying the request source, proxy type, method, URL, request headers, response
+status and headers (or an error), and the wall-clock duration.
+
+Exported metrics:
+
+Backend:
+
+- `backend_origin_read_count`, `backend_origin_read_errors`,
+	`backend_proxy_read_count`, `backend_proxy_read_errors` — read and error counts
+	split by whether the origin registry or a proxy served the read.
+- `backend_origin_read_latency`, `backend_proxy_read_latency` — read latency
+	histograms (seconds, exponential buckets from 1ms to ~8s).
+- `backend_origin_read_bytes`, `backend_proxy_read_bytes` — bytes read per side.
+- `backend_ondemand_read_count`, `backend_ondemand_read_bytes`,
+	`backend_ondemand_read_errors`, `backend_ondemand_read_high_latency_count` and
+	the `backend_prefetch_*` equivalents — reads split by on-demand vs prefetch
+	source. A read is "high latency" when it takes 250ms or more.
+- `backend_origin_crc_check_errors`, `backend_proxy_crc_check_errors` — CRC
+	validation failures on fetched data, attributed to the serving side.
+
+Filesystem:
+
+- `fs_op_count{op}`, `fs_op_errors{op}` — successful and failed FUSE operations
+	by op (`read`, `lookup`, `getattr`, ...).
+- `fs_read_latency` — FUSE read latency histogram (seconds).
+
+Cache:
+
+- `cache_opened_files` — open blob data cache files (excludes `.blob.meta` and
+	`.groupmap`).
+- `cache_hit_group` — groups served from cache without a backend read.
+- `cache_total_group` — total groups across loaded blob metas.
+- `cache_fill_group` — groups written into a blob's own cache by regular blob
+	prefetch.
+- `cache_redirect_fill_group` — groups written into a **source** blob's cache
+	from a redirect (ondemand) blob during phase-0 prefetch.
+- `cache_redirect_skip_group` — redirect groups skipped during ondemand
+	prefetch (decode/CRC failures, unknown source device, or failed fills);
+	normally zero.
+
+Redirect (ondemand blob) backend traffic:
+
+- `backend_redirect_read_count`, `backend_redirect_read_bytes` — backend reads
+	that fetched ondemand (redirect) blob data, a subset of the
+	`backend_prefetch_*` counters. Together with `cache_redirect_fill_group`
+	these attribute cache warmup to the optimize pipeline: after an optimized
+	mount's prefetch quiesces, `backend_redirect_read_count > 0` proves the
+	ondemand blob was fetched and `cache_redirect_fill_group` equals the number
+	of traced groups written into the source caches.
 
 
 ## Artifact Model
@@ -571,14 +694,16 @@ embedded blob meta region
 | reserved                      |
 +-------------------------------+
 | group records                 |
-| 32 bytes each                 |
+| 40 bytes each                 |
 |                               |
 | uncompressed_block_offset     |
 | compressed_byte_offset        |
 | uncompressed_block_count      |
 | compressed_size               |
 | crc32c                        |
-| reserved                      |
+| source_group_index            |
+| source_device_id              |
+| reserved (6 bytes)            |
 +-------------------------------+
 | zero padding to 4 KiB         |
 +-------------------------------+
@@ -637,6 +762,15 @@ Group details:
 - `crc32c` is computed over the decoded group. If `compressed_size` equals
 	`uncompressed_block_count * 4096`, runtime treats the group as stored plain and
 	skips decompression even when the header compressor is zstd.
+- `source_device_id` and `source_group_index` mark a redirect group. They are
+	zero for normal groups. A non-zero `source_device_id` means the group's data
+	belongs to that source blob device (1-based device-table id) at
+	`source_group_index`; phase-0 prefetch writes the decoded bytes into the
+	source device's cache instead of this blob's own cache. A blob containing any
+	redirect group is an "ondemand" blob: its groups may be non-uniform in size
+	(the uniformity invariant is relaxed) and `group_index_for_byte_offset` is
+	never used on it. The redirect group's `crc32c` equals the source group's
+	decoded CRC so the fill is cross-checked before touching the source cache.
 
 The writer does not bias `compressed_byte_offset` by the bootstrap size, and
 does not bias `uncompressed_block_offset`. Only the data region as a whole is
@@ -750,8 +884,9 @@ blob digest:
 
 After a successful mount, `lepton fuse` spawns a background prefetcher that warms
 the local cache so later on-demand reads hit decoded data instead of fetching and
-decoding groups synchronously. Prefetch is enabled by default and can be turned
-off (or resized) through the storage config `prefetch` block; see
+decoding groups synchronously. Prefetch is **off by default**: enable it with the
+`--prefetch` flag, or through the storage config `prefetch.enable` (either one
+turns it on); the config's `prefetch` block also sizes the worker pool. See
 [Storage config](#storage-config).
 
 Per-blob prefetch streams groups into the cache:
@@ -778,6 +913,17 @@ Prefetch scheduling across blobs has two phases:
 	device ids). The list is deduplicated and filtered to existing devices.
 2. The remaining blob devices are then prefetched concurrently by a worker pool
 	sized to `min(prefetch.threads, remaining)` (default `10` threads).
+
+When a priority blob is an "ondemand" redirect blob (produced by `lepton
+optimize`, listed first in the xattr), its prefetch is dispatched differently:
+the groups are streamed and decoded as usual, but each decoded group is written
+into its **source** device's cache (validated against the source group's length
+and CRC) and marked ready there. The ondemand blob never builds a cache file of
+its own. Per-group failures — unknown source device, CRC mismatch, source cache
+errors — are logged and skipped, so a bad redirect can only lose warmup, never
+poison a source cache or abort the mount. Blob device caches are opened lazily
+on first read or prefetch, so a device fully covered by the ondemand warmup
+pays no extra metadata fetch at mount time.
 
 ## Merge Design
 
@@ -984,6 +1130,45 @@ sudo leptonify check \
 
 A passing run logs `check passed`; any rule failure returns a non-zero exit code
 with the failing rule and offending path in the error.
+
+### leptonify optimize
+
+`leptonify optimize --apiserver <addr> --source <lepton-ref> --target <lepton-ref> [OPTIONS]`
+
+Publishes an optimized copy of a lepton image from a live access trace:
+
+1. Pull `--source` (must be a lepton image) and extract its bootstrap layer
+	(`image.boot` plus the per-layer blob metas, which seed the cache dir).
+2. Run `lepton optimize` against the bootstrap with `--apiserver`, using a
+	registry-backed storage config so source group data is range-read from the
+	source registry on demand.
+3. Assemble the optimized manifest: the original data layers are reused as-is,
+	the ondemand blob is appended as a new lepton data layer, and the bootstrap
+	layer is rebuilt with the rewritten `image.boot` plus all blob metas
+	(including the ondemand one). Config diff ids and history are updated.
+4. Push the result to `--target`.
+
+`--apiserver` points at the apiserver socket of a running `leptonify mount` of
+the source image (`<work-dir>/apiserver.sock`; a bare path or `unix://` form is
+accepted). Mount the image **without** `--prefetch` (the default) so the trace
+records the pure on-demand access pattern, exercise the workload, then run
+optimize while the mount is still up. Mount the optimized image **with**
+`--prefetch` to get the phase-0 redirect warmup. Shared flags (`--builder`,
+`--work-dir`, `--platform`, `--insecure`, `--plain-http`, `--log-level`) behave
+as in `leptonify convert`. No root is required: optimize never extracts OCI
+layers, it only rewrites metadata and appends the ondemand layer.
+
+Example:
+
+```bash
+leptonify mount -t localhost:5000/app:lepton -m /mnt/app --work-dir /tmp/mnt &
+# ... run the workload against /mnt/app ...
+leptonify optimize \
+  --apiserver /tmp/mnt/apiserver.sock \
+  --source localhost:5000/app:lepton \
+  --target localhost:5000/app:lepton-optimized \
+  --plain-http
+```
 
 ## Validation Strategy
 

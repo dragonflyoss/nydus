@@ -59,6 +59,12 @@ impl ReadContext {
 
 /// A blob backend resolves blob data and metadata by content digest.
 pub trait BlobBackend: Send + Sync {
+    /// Which side serves this backend's reads, used to attribute read and CRC
+    /// metrics. Defaults to the origin; proxied backends override it.
+    fn backend_target(&self) -> crate::metrics::BackendTarget {
+        crate::metrics::BackendTarget::Origin
+    }
+
     fn cache_key(
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],

@@ -8,8 +8,9 @@
 
 use std::io;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use reqwest::header::{HeaderMap, RANGE};
+use reqwest::header::HeaderMap;
 use reqwest::{Method, StatusCode};
 use tracing::debug;
 use url::Url;
@@ -104,6 +105,28 @@ impl Response {
     }
 }
 
+/// Which transport actually served a request, recorded in completion logs.
+#[derive(Debug, Clone, Copy)]
+enum ProxyType {
+    /// Direct request to the origin registry.
+    None,
+    /// Request rewritten to an HTTP mirror proxy.
+    Http,
+    /// Request routed through the Dragonfly SDK proxy.
+    #[cfg_attr(not(feature = "backend-dragonfly-proxy"), allow(dead_code))]
+    DragonflySdk,
+}
+
+impl ProxyType {
+    fn as_str(self) -> &'static str {
+        match self {
+            ProxyType::None => "none",
+            ProxyType::Http => "http",
+            ProxyType::DragonflySdk => "dragonfly_sdk",
+        }
+    }
+}
+
 /// Dispatches requests across direct / mirror / Dragonfly transports.
 pub(crate) struct Request {
     connection: Arc<Connection>,
@@ -152,11 +175,11 @@ impl Request {
                     ))
                 })?;
                 let mirror_url = mirror.rewrite(&origin);
-                return self.direct(method, mirror_url.as_str(), headers, ctx);
+                return self.direct(method, mirror_url.as_str(), headers, ctx, ProxyType::Http);
             }
         }
 
-        self.direct(method, url, headers, ctx)
+        self.direct(method, url, headers, ctx, ProxyType::None)
     }
 
     fn direct(
@@ -165,15 +188,51 @@ impl Request {
         url: &str,
         headers: HeaderMap,
         ctx: ReadContext,
+        proxy_type: ProxyType,
     ) -> RequestResult<Response> {
-        log_backend_request("http", &method, url, &headers, ctx);
         let client = self.connection.client();
-        let result =
-            runtime().block_on(async { client.request(method, url).headers(headers).send().await });
+        let start = Instant::now();
+        let result = runtime().block_on(async {
+            client
+                .request(method.clone(), url)
+                .headers(headers.clone())
+                .send()
+                .await
+        });
+        let duration = start.elapsed();
 
-        result
-            .map(Response::Http)
-            .map_err(|e| RequestError::Network(io::Error::other(e)))
+        match result {
+            Ok(resp) => {
+                let status = resp.status();
+                log_backend_request_done(
+                    proxy_type,
+                    &method,
+                    url,
+                    &headers,
+                    ctx,
+                    Some(status),
+                    Some(resp.headers()),
+                    None,
+                    duration,
+                );
+                Ok(Response::Http(resp))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                log_backend_request_done(
+                    proxy_type,
+                    &method,
+                    url,
+                    &headers,
+                    ctx,
+                    None,
+                    None,
+                    Some(&msg),
+                    duration,
+                );
+                Err(RequestError::Network(io::Error::other(e)))
+            }
+        }
     }
 
     #[cfg(feature = "backend-dragonfly-proxy")]
@@ -194,13 +253,48 @@ impl Request {
         );
         headers.insert(HEADER_DRAGONFLY_USE_P2P, "true".parse().unwrap());
 
-        log_backend_request("dragonfly", &Method::GET, url, &headers, ctx);
         use super::proxy::DragonflyError;
-        match dragonfly.get(url, headers, priority) {
-            Ok(resp) => Ok(Response::Dragonfly(resp)),
-            Err(DragonflyError::TooManyRequests(s)) => Err(RequestError::ProxyTooManyRequests(s)),
-            Err(DragonflyError::Forbidden(s)) => Err(RequestError::ProxyForbidden(s)),
-            Err(DragonflyError::Other(s)) => Err(RequestError::Network(io::Error::other(s))),
+        let start = Instant::now();
+        let result = dragonfly.get(url, headers.clone(), priority);
+        let duration = start.elapsed();
+        match result {
+            Ok(resp) => {
+                let status = resp.status;
+                let response_headers = resp.headers.clone();
+                log_backend_request_done(
+                    ProxyType::DragonflySdk,
+                    &Method::GET,
+                    url,
+                    &headers,
+                    ctx,
+                    Some(status),
+                    Some(&response_headers),
+                    None,
+                    duration,
+                );
+                Ok(Response::Dragonfly(resp))
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                log_backend_request_done(
+                    ProxyType::DragonflySdk,
+                    &Method::GET,
+                    url,
+                    &headers,
+                    ctx,
+                    None,
+                    None,
+                    Some(&msg),
+                    duration,
+                );
+                match err {
+                    DragonflyError::TooManyRequests(s) => {
+                        Err(RequestError::ProxyTooManyRequests(s))
+                    }
+                    DragonflyError::Forbidden(s) => Err(RequestError::ProxyForbidden(s)),
+                    DragonflyError::Other(s) => Err(RequestError::Network(io::Error::other(s))),
+                }
+            }
         }
     }
 }
@@ -210,48 +304,45 @@ pub(crate) fn is_success_status(status: StatusCode) -> bool {
     status.is_success()
 }
 
-/// Log an outgoing backend request at debug level so it can be inspected during
-/// a `check` (run with `--log-level debug`): the transport, method, final link,
-/// request type, and the read's compressed (registry byte range) and
-/// uncompressed (decoded group) geometry. Requests without a `Range` header
-/// (HEAD, auth token) and reads without a group span log the corresponding
-/// fields as `-`.
-fn log_backend_request(
-    transport: &str,
+/// Log a completed backend request at debug level so it can be inspected during
+/// a `check` (run with `--log-level debug`). The line carries the request
+/// source, the transport that served it, the method, final URL and full request
+/// headers, plus the outcome: response status and headers when the transport
+/// returned a response, an error string on transport failure, and the wall-clock
+/// duration in human-readable form.
+#[allow(clippy::too_many_arguments)]
+fn log_backend_request_done(
+    proxy_type: ProxyType,
     method: &Method,
     url: &str,
     headers: &HeaderMap,
     ctx: ReadContext,
+    status: Option<StatusCode>,
+    response_headers: Option<&HeaderMap>,
+    error: Option<&str>,
+    duration: Duration,
 ) {
-    let request_type = match ctx.source {
+    let request_source = match ctx.source {
         RequestSource::OnDemand => "ondemand",
         RequestSource::Prefetch => "prefetch",
     };
-    let (compressed_offset, compressed_size) = match headers
-        .get(RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(parse_byte_range)
-    {
-        Some((offset, size)) => (offset.to_string(), size.to_string()),
-        None => ("-".to_string(), "-".to_string()),
-    };
-    let (uncompressed_offset, uncompressed_size) = match ctx.uncompressed {
-        Some((offset, size)) => (offset.to_string(), size.to_string()),
-        None => ("-".to_string(), "-".to_string()),
-    };
     debug!(
-        "backend {transport} request: {method} {url} request_type={request_type} compressed_offset={compressed_offset} compressed_size={compressed_size} uncompressed_offset={uncompressed_offset} uncompressed_size={uncompressed_size}"
+        "backend request done: request_source={request_source} proxy_type={} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={}",
+        proxy_type.as_str(),
+        format_duration(duration),
     );
 }
 
-/// Parse a `bytes=START-END` range header value into `(offset, size)`.
-fn parse_byte_range(value: &str) -> Option<(u64, u64)> {
-    let spec = value.trim().strip_prefix("bytes=")?;
-    let (start, end) = spec.split_once('-')?;
-    let start: u64 = start.trim().parse().ok()?;
-    let end: u64 = end.trim().parse().ok()?;
-    if end < start {
-        return None;
+/// Format a duration in a compact, human-readable unit (ns/µs/ms/s).
+fn format_duration(d: Duration) -> String {
+    let nanos = d.as_nanos();
+    if nanos < 1_000 {
+        format!("{nanos}ns")
+    } else if nanos < 1_000_000 {
+        format!("{:.3}µs", nanos as f64 / 1_000.0)
+    } else if nanos < 1_000_000_000 {
+        format!("{:.3}ms", nanos as f64 / 1_000_000.0)
+    } else {
+        format!("{:.3}s", d.as_secs_f64())
     }
-    Some((start, end - start + 1))
 }

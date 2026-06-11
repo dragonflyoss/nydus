@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(blob_meta.header().group_count(), 1);
         assert_eq!(blob_meta.header().chunk_bytes(), 48);
-        assert_eq!(blob_meta.header().group_bytes(), 32);
+        assert_eq!(blob_meta.header().group_bytes(), 40);
         assert_eq!(blob_meta.header().metadata_size(), 4096);
         assert_eq!(blob_meta.chunks()[0].uncompressed_block_offset(), 0);
         assert_eq!(blob_meta.groups()[0].compressed_byte_offset(), 8192);

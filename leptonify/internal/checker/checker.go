@@ -112,15 +112,5 @@ func (c *Checker) load(ctx context.Context, provider *remote.Provider, ref strin
 	if ref == "" {
 		return nil, nil
 	}
-	log.G(ctx).Infof("pulling image %s", ref)
-	desc, err := provider.Pull(ctx, ref)
-	if err != nil {
-		return nil, errors.Wrap(err, "pull")
-	}
-	img, err := parseImage(ctx, provider.ContentStore(), ref, desc, c.opt.PlatformMC)
-	if err != nil {
-		return nil, errors.Wrap(err, "parse")
-	}
-	log.G(ctx).Infof("parsed %s as a %s image", ref, img.Kind)
-	return img, nil
+	return loadImage(ctx, provider, ref, c.opt.PlatformMC)
 }

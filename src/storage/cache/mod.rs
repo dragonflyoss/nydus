@@ -15,6 +15,38 @@ pub trait BlobCache: Send + Sync {
     /// Fetch, decode, validate, cache, and mark ready every group of this blob.
     /// Used by blob-level prefetch after a filesystem is mounted.
     fn prefetch_all(&self) -> io::Result<()>;
+
+    /// True when this blob is an "ondemand" redirect blob whose groups carry
+    /// data belonging to other source blob devices.
+    fn is_redirect_blob(&self) -> bool {
+        false
+    }
+
+    /// Stream every group of a redirect blob: fetch, decode, and validate each
+    /// group, then hand `(group, decoded_bytes)` to `cb`. This never touches
+    /// the blob's own cache file. Groups that fail decode or CRC validation
+    /// are skipped with a warning so a single bad group cannot poison the
+    /// whole redirect prefetch; `cb` errors abort the stream.
+    fn redirect_stream(
+        &self,
+        _cb: &mut dyn FnMut(&BlobMetaGroup, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "redirect stream is not supported by this blob cache",
+        ))
+    }
+
+    /// Fill one group of this blob's cache with decoded bytes provided by a
+    /// redirect blob. Validates length and CRC against this blob's own group
+    /// metadata before writing, and is a no-op when the group is already
+    /// ready.
+    fn fill_group_from_redirect(&self, _group_index: usize, _decoded: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "redirect fill is not supported by this blob cache",
+        ))
+    }
 }
 
 /// Group together consecutive groups whose accumulated uncompressed size reaches
@@ -121,7 +153,7 @@ pub(crate) fn fetch_decode_validate_group_into<'a>(
             &mut buffers.decoded,
             ctx,
         )?;
-        validate_decoded_group(group, &buffers.decoded)?;
+        validate_group_with_metrics(backend, group, &buffers.decoded)?;
         return Ok(&buffers.decoded);
     }
 
@@ -138,8 +170,24 @@ pub(crate) fn fetch_decode_validate_group_into<'a>(
     zstd::stream::copy_decode(&mut Cursor::new(&buffers.encoded), &mut buffers.decoded)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
-    validate_decoded_group(group, &buffers.decoded)?;
+    validate_group_with_metrics(backend, group, &buffers.decoded)?;
     Ok(&buffers.decoded)
+}
+
+/// Validate a decoded group and, on CRC failure, attribute a CRC error metric to
+/// the backend that served the bytes.
+pub(crate) fn validate_group_with_metrics(
+    backend: &Arc<dyn BlobBackend>,
+    group: &BlobMetaGroup,
+    decoded: &[u8],
+) -> io::Result<()> {
+    if let Err(err) = validate_decoded_group(group, decoded) {
+        if is_group_crc_mismatch(&err) {
+            crate::metrics::record_backend_crc_error(backend.backend_target());
+        }
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn is_stored_plain_group(blob_meta: &BlobMeta, group: &BlobMetaGroup) -> bool {
@@ -162,13 +210,30 @@ pub(crate) fn validate_decoded_group(group: &BlobMetaGroup, decoded: &[u8]) -> i
 
     let crc32 = crc32c::crc32c(decoded);
     if crc32 != group.crc32() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "blob meta group crc32 mismatch",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidData, GroupCrcMismatch));
     }
 
     Ok(())
+}
+
+/// Marker error wrapped in an [`io::Error`] when a decoded group fails CRC
+/// validation, so callers with backend context can attribute the failure to the
+/// origin or a proxy via [`is_group_crc_mismatch`].
+#[derive(Debug)]
+struct GroupCrcMismatch;
+
+impl std::fmt::Display for GroupCrcMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "blob meta group crc32 mismatch")
+    }
+}
+
+impl std::error::Error for GroupCrcMismatch {}
+
+/// Whether an error denotes a group CRC validation failure.
+pub(crate) fn is_group_crc_mismatch(err: &io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|inner| inner.is::<GroupCrcMismatch>())
 }
 
 #[cfg(test)]

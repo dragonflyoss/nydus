@@ -61,14 +61,11 @@ func mustLookupExecutable(t *testing.T, name string) string {
 	return p
 }
 
-// lookupExecutable tries to find the given executable name on PATH or unorderedly under ../../target/{release,debug}/.
-// This allows the tests to run without requiring the user to have installed the binary or to have built it in
-// a specific way.
+// lookupExecutable tries to find the given executable name unorderedly under
+// ../../target/{release,debug}/ (and ../../leptonify/ for the Go binary), then
+// falls back to PATH. In-tree builds win so the tests always exercise the
+// freshly built binaries even when a stale copy is installed system-wide.
 func lookupExecutable(name string) (string, error) {
-	if p, err := exec.LookPath(name); err == nil {
-		return p, nil
-	}
-
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		return "", err
@@ -81,7 +78,18 @@ func lookupExecutable(name string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("%s not found on PATH or in target/{release,debug}/", name)
+	// The leptonify Go binary is built in-tree at leptonify/leptonify.
+	if p := filepath.Join(root, "leptonify", name); name == "leptonify" {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+
+	if p, err := exec.LookPath(name); err == nil {
+		return p, nil
+	}
+
+	return "", fmt.Errorf("%s not found in target/{release,debug}/ or on PATH", name)
 }
 
 // mustLookupCErofsFuse is a test helper that wraps lookupCErofsFuseExecutable and fails the test if the erofsfuse executable is not found.

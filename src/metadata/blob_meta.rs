@@ -16,7 +16,7 @@ pub const BLOB_META_DEFAULT_CHUNK_BLOCK_COUNT: u32 =
     BLOB_META_DEFAULT_CHUNK_SIZE / EROFS_BLOCK_SIZE;
 
 const BLOB_META_HEADER_CRC32_OFFSET: usize = 8;
-const BLOB_META_GROUP_RESERVED: u32 = 0;
+const BLOB_META_GROUP_RESERVED: [u8; 6] = [0u8; 6];
 const BLOB_META_CHUNK_RESERVED: u32 = 0;
 
 bitflags! {
@@ -318,10 +318,12 @@ pub struct BlobMetaGroup {
     uncompressed_block_count: u32,
     compressed_size: u32,
     crc32: u32,
-    reserved: u32,
+    source_group_index: u32,
+    source_device_id: u16,
+    reserved: [u8; 6],
 }
 
-const _: () = assert!(size_of::<BlobMetaGroup>() == 32);
+const _: () = assert!(size_of::<BlobMetaGroup>() == 40);
 
 impl BlobMetaGroup {
     pub fn new(
@@ -337,10 +339,57 @@ impl BlobMetaGroup {
             uncompressed_block_count,
             compressed_size,
             crc32,
+            source_group_index: 0,
+            source_device_id: 0,
             reserved: BLOB_META_GROUP_RESERVED,
         };
         group.validate()?;
         Ok(group)
+    }
+
+    /// A redirect group carries data that belongs to another (source) blob
+    /// device. At prefetch time the decoded bytes are written into the source
+    /// device's cache instead of this blob's own cache. `source_device_id` is
+    /// the 1-based device id from the bootstrap device table and must be
+    /// non-zero; `crc32` must equal the source group's crc32 so the redirect
+    /// can be cross-checked before filling the source cache.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_redirect(
+        uncompressed_block_offset: u64,
+        uncompressed_block_count: u32,
+        compressed_byte_offset: u64,
+        compressed_size: u32,
+        crc32: u32,
+        source_device_id: u16,
+        source_group_index: u32,
+    ) -> Result<Self> {
+        if source_device_id == 0 {
+            bail!("blob meta redirect group source device id must be non-zero");
+        }
+        let group = Self {
+            uncompressed_block_offset,
+            compressed_byte_offset,
+            uncompressed_block_count,
+            compressed_size,
+            crc32,
+            source_group_index,
+            source_device_id,
+            reserved: BLOB_META_GROUP_RESERVED,
+        };
+        group.validate()?;
+        Ok(group)
+    }
+
+    pub fn is_redirect(&self) -> bool {
+        self.source_device_id != 0
+    }
+
+    pub fn source_device_id(&self) -> u16 {
+        self.source_device_id
+    }
+
+    pub fn source_group_index(&self) -> u32 {
+        self.source_group_index
     }
 
     pub fn uncompressed_block_offset(&self) -> u64 {
@@ -385,15 +434,15 @@ impl BlobMetaGroup {
     }
 
     pub fn with_compressed_byte_offset_bias(&self, byte_bias: u64) -> Result<Self> {
-        Self::new(
-            self.uncompressed_block_offset(),
-            self.uncompressed_block_count(),
-            self.compressed_byte_offset()
+        let group = Self {
+            compressed_byte_offset: self
+                .compressed_byte_offset()
                 .checked_add(byte_bias)
                 .context("blob meta compressed byte offset overflow")?,
-            self.compressed_size(),
-            self.crc32(),
-        )
+            ..*self
+        };
+        group.validate()?;
+        Ok(group)
     }
 
     pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
@@ -402,14 +451,16 @@ impl BlobMetaGroup {
         Ok(())
     }
 
-    fn to_bytes(self) -> [u8; 32] {
-        let mut data = [0u8; 32];
+    fn to_bytes(self) -> [u8; 40] {
+        let mut data = [0u8; 40];
         data[0..8].copy_from_slice(&self.uncompressed_block_offset.to_le_bytes());
         data[8..16].copy_from_slice(&self.compressed_byte_offset.to_le_bytes());
         data[16..20].copy_from_slice(&self.uncompressed_block_count.to_le_bytes());
         data[20..24].copy_from_slice(&self.compressed_size.to_le_bytes());
         data[24..28].copy_from_slice(&self.crc32.to_le_bytes());
-        data[28..32].copy_from_slice(&self.reserved.to_le_bytes());
+        data[28..32].copy_from_slice(&self.source_group_index.to_le_bytes());
+        data[32..34].copy_from_slice(&self.source_device_id.to_le_bytes());
+        data[34..40].copy_from_slice(&self.reserved);
         data
     }
 
@@ -420,7 +471,9 @@ impl BlobMetaGroup {
             uncompressed_block_count: read_u32(reader)?,
             compressed_size: read_u32(reader)?,
             crc32: read_u32(reader)?,
-            reserved: read_u32(reader)?,
+            source_group_index: read_u32(reader)?,
+            source_device_id: read_u16(reader)?,
+            reserved: read_group_reserved(reader)?,
         };
         group.validate()?;
         Ok(group)
@@ -442,6 +495,9 @@ impl BlobMetaGroup {
         self.compressed_byte_offset
             .checked_add(self.compressed_size as u64)
             .context("blob meta group compressed byte range overflow")?;
+        if self.source_device_id == 0 && self.source_group_index != 0 {
+            bail!("blob meta group source group index requires a source device id");
+        }
         if self.reserved != BLOB_META_GROUP_RESERVED {
             bail!("blob meta group reserved field must be zero");
         }
@@ -658,6 +714,12 @@ impl BlobMeta {
 
     pub fn group_at(&self, index: usize) -> Option<&BlobMetaGroup> {
         self.groups().get(index)
+    }
+
+    /// True when this blob is an "ondemand" redirect blob: its groups carry
+    /// data belonging to other source blob devices.
+    pub fn is_redirect_blob(&self) -> bool {
+        self.groups().iter().any(BlobMetaGroup::is_redirect)
     }
 
     /// Total number of uncompressed blocks in the dense address space.
@@ -925,6 +987,11 @@ fn validate_groups(groups: &[BlobMetaGroup], group_block_count: u32) -> Result<(
     if group_block_count == 0 {
         bail!("blob meta group block count must be non-zero");
     }
+    // Redirect blobs copy groups from arbitrary source blobs, so their group
+    // sizes are inherently non-uniform and `group_index_for_byte_offset` is
+    // never used on them. Only the dense-layout and compressed-overlap
+    // invariants apply.
+    let allow_nonuniform = groups.iter().any(BlobMetaGroup::is_redirect);
     let mut previous_uncompressed_block_end = 0u64;
     let mut previous_compressed_byte_end = 0u64;
     let last_index = groups.len().saturating_sub(1);
@@ -938,18 +1005,20 @@ fn validate_groups(groups: &[BlobMetaGroup], group_block_count: u32) -> Result<(
         // Groups pack whole blocks up to the compress size regardless of chunk
         // boundaries, so every group but the last holds exactly
         // `group_block_count` blocks and the last holds at most that many.
-        if index < last_index {
-            if group.uncompressed_block_count() != group_block_count {
+        if !allow_nonuniform {
+            if index < last_index {
+                if group.uncompressed_block_count() != group_block_count {
+                    bail!(
+                        "blob meta group {index} must be exactly {group_block_count} blocks, got {}",
+                        group.uncompressed_block_count()
+                    );
+                }
+            } else if group.uncompressed_block_count() > group_block_count {
                 bail!(
-                    "blob meta group {index} must be exactly {group_block_count} blocks, got {}",
+                    "blob meta final group {index} exceeds {group_block_count} blocks, got {}",
                     group.uncompressed_block_count()
                 );
             }
-        } else if group.uncompressed_block_count() > group_block_count {
-            bail!(
-                "blob meta final group {index} exceeds {group_block_count} blocks, got {}",
-                group.uncompressed_block_count()
-            );
         }
         // Encoded payloads are packed back-to-back in the data region, so each
         // group must start at or after the previous group's byte end. No block
@@ -1022,6 +1091,18 @@ fn read_u32(reader: &mut dyn Read) -> Result<u32> {
     let mut buf = [0u8; 4];
     reader.read_exact(&mut buf)?;
     Ok(u32::from_le_bytes(buf))
+}
+
+fn read_u16(reader: &mut dyn Read) -> Result<u16> {
+    let mut buf = [0u8; 2];
+    reader.read_exact(&mut buf)?;
+    Ok(u16::from_le_bytes(buf))
+}
+
+fn read_group_reserved(reader: &mut dyn Read) -> Result<[u8; 6]> {
+    let mut buf = [0u8; 6];
+    reader.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 fn read_u64(reader: &mut dyn Read) -> Result<u64> {
@@ -1097,8 +1178,8 @@ mod tests {
         assert_eq!(loaded.header().chunk_count(), 2);
         assert_eq!(loaded.header().group_count(), 1);
         assert_eq!(loaded.header().chunk_bytes(), 96);
-        assert_eq!(loaded.header().group_bytes(), 32);
-        assert_eq!(loaded.header().record_bytes(), 176);
+        assert_eq!(loaded.header().group_bytes(), 40);
+        assert_eq!(loaded.header().record_bytes(), 184);
         assert_eq!(loaded.header().metadata_size(), 4096);
         assert_eq!(loaded.header().chunk_size(), EROFS_BLOCK_SIZE);
         assert_eq!(loaded.header().group_block_count(), 2);
@@ -1287,5 +1368,90 @@ mod tests {
         };
 
         assert!(err.to_string().contains("overlap"));
+    }
+
+    #[test]
+    fn redirect_group_round_trips_and_reports_source() {
+        let payload = vec![0x44; 2 * EROFS_BLOCK_SIZE as usize];
+        let crc32 = crc32c::crc32c(&payload);
+        let redirect =
+            BlobMetaGroup::new_redirect(0, 2, 0, 2 * EROFS_BLOCK_SIZE, crc32, 3, 7).unwrap();
+
+        assert!(redirect.is_redirect());
+        assert_eq!(redirect.source_device_id(), 3);
+        assert_eq!(redirect.source_group_index(), 7);
+
+        let mut raw = Vec::new();
+        redirect.write_to(&mut raw).unwrap();
+        assert_eq!(raw.len(), 40);
+        let loaded = BlobMetaGroup::read_from(&mut Cursor::new(&raw)).unwrap();
+        assert_eq!(loaded, redirect);
+
+        // Normal groups stay non-redirect after a round trip.
+        let normal = group(0, 2, 0, 2 * EROFS_BLOCK_SIZE, &payload);
+        assert!(!normal.is_redirect());
+        let mut raw = Vec::new();
+        normal.write_to(&mut raw).unwrap();
+        let loaded = BlobMetaGroup::read_from(&mut Cursor::new(&raw)).unwrap();
+        assert!(!loaded.is_redirect());
+        assert_eq!(loaded.source_group_index(), 0);
+    }
+
+    #[test]
+    fn redirect_group_rejects_zero_source_device_id() {
+        let err = match BlobMetaGroup::new_redirect(0, 1, 0, EROFS_BLOCK_SIZE, 0, 0, 1) {
+            Ok(_) => panic!("zero source device id should be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("non-zero"));
+    }
+
+    #[test]
+    fn redirect_blob_meta_allows_non_uniform_groups_and_round_trips() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ondemand.blob.meta");
+        let two = vec![0x55; 2 * EROFS_BLOCK_SIZE as usize];
+        let three = vec![0x66; 3 * EROFS_BLOCK_SIZE as usize];
+        let one = vec![0x77; EROFS_BLOCK_SIZE as usize];
+        let groups = vec![
+            BlobMetaGroup::new_redirect(0, 2, 0, 2 * EROFS_BLOCK_SIZE, crc32c::crc32c(&two), 1, 4)
+                .unwrap(),
+            BlobMetaGroup::new_redirect(
+                2,
+                3,
+                2 * EROFS_BLOCK_SIZE as u64,
+                3 * EROFS_BLOCK_SIZE,
+                crc32c::crc32c(&three),
+                2,
+                0,
+            )
+            .unwrap(),
+            BlobMetaGroup::new_redirect(
+                5,
+                1,
+                5 * EROFS_BLOCK_SIZE as u64,
+                EROFS_BLOCK_SIZE,
+                crc32c::crc32c(&one),
+                1,
+                9,
+            )
+            .unwrap(),
+        ];
+
+        let blob_meta = BlobMeta::from_parts(
+            [0x9du8; EROFS_BLOB_ID_SIZE],
+            BLOB_META_DEFAULT_CHUNK_BLOCK_COUNT,
+            groups.clone(),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(blob_meta.is_redirect_blob());
+
+        blob_meta.save(&path).unwrap();
+        let loaded = BlobMeta::load(&path).unwrap();
+        assert!(loaded.is_redirect_blob());
+        assert_eq!(loaded.groups(), groups.as_slice());
+        assert_eq!(loaded.groups()[1].source_device_id(), 2);
+        assert_eq!(loaded.groups()[2].source_group_index(), 9);
     }
 }

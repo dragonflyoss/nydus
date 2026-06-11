@@ -256,6 +256,9 @@ fn default_token_expiration() -> u64 {
 pub struct Registry {
     state: Arc<RegistryState>,
     request: Arc<Request>,
+    /// Whether reads are served through a proxy (HTTP mirror or Dragonfly),
+    /// used to attribute backend read and CRC metrics.
+    target: crate::metrics::BackendTarget,
     // Ensures the first authenticated request completes before a burst of
     // concurrent reads, so they can reuse the cached token instead of each
     // performing their own auth handshake.
@@ -296,6 +299,17 @@ impl Registry {
             None => None,
         };
 
+        // Reads are proxied when an HTTP mirror or Dragonfly endpoint is set.
+        #[cfg(feature = "backend-dragonfly-proxy")]
+        let via_proxy = mirror.is_some() || dragonfly.is_some();
+        #[cfg(not(feature = "backend-dragonfly-proxy"))]
+        let via_proxy = mirror.is_some();
+        let target = if via_proxy {
+            crate::metrics::BackendTarget::Proxy
+        } else {
+            crate::metrics::BackendTarget::Origin
+        };
+
         let request = Request::new(
             connection,
             mirror,
@@ -321,6 +335,7 @@ impl Registry {
         Ok(Registry {
             state,
             request,
+            target,
             first_done: AtomicBool::new(false),
         })
     }
@@ -630,6 +645,10 @@ impl Registry {
 }
 
 impl BlobBackend for Registry {
+    fn backend_target(&self) -> crate::metrics::BackendTarget {
+        self.target
+    }
+
     fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
         self.fetch_blob_meta(blob_id).map_err(io::Error::from)
     }
@@ -644,14 +663,28 @@ impl BlobBackend for Registry {
         if dst.is_empty() {
             return Ok(());
         }
+        let source = match ctx.source {
+            RequestSource::OnDemand => crate::metrics::ReadSource::OnDemand,
+            RequestSource::Prefetch => crate::metrics::ReadSource::Prefetch,
+        };
+        let bytes = dst.len() as u64;
+        let start = std::time::Instant::now();
         // Serialize the very first read so its auth token can be reused.
-        if self.first_done.load(Ordering::Acquire) {
-            self.retry_read(blob_id, offset, dst, ctx)?;
+        let result = if self.first_done.load(Ordering::Acquire) {
+            self.retry_read(blob_id, offset, dst, ctx)
         } else {
             let result = self.retry_read(blob_id, offset, dst, ctx);
             self.first_done.store(true, Ordering::Release);
-            result?;
-        }
+            result
+        };
+        crate::metrics::record_backend_read(
+            self.target,
+            source,
+            bytes,
+            start.elapsed(),
+            result.is_err(),
+        );
+        result?;
         Ok(())
     }
 

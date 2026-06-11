@@ -7,11 +7,12 @@ pub use self::fuse::ErofsFs;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use memmap2::Mmap;
 use tempfile::TempDir;
+use tracing::warn;
 
 use crate::metadata::*;
 use crate::storage::backend::{BlobBackend, LocalBackend};
@@ -37,8 +38,32 @@ pub struct DeviceInfo {
     pub blocks: u64,
 }
 
+/// A blob device from the bootstrap device table. The blob cache is opened
+/// lazily on first read or prefetch so mounting does not pay a blob.meta
+/// download per device up front.
 struct BlobDevice {
-    cache: Box<dyn BlobCache>,
+    blob_id: [u8; EROFS_BLOB_ID_SIZE],
+    device_id: u16,
+    cache_dir: PathBuf,
+    backend: Arc<dyn BlobBackend>,
+    cache: Mutex<Option<Arc<dyn BlobCache>>>,
+}
+
+impl BlobDevice {
+    fn cache(&self) -> io::Result<Arc<dyn BlobCache>> {
+        let mut guard = self.cache.lock().unwrap();
+        if let Some(cache) = guard.as_ref() {
+            return Ok(cache.clone());
+        }
+        let cache: Arc<dyn BlobCache> = Arc::new(LocalBlobCache::open(
+            self.blob_id,
+            self.device_id as u32,
+            &self.cache_dir,
+            self.backend.clone(),
+        )?);
+        *guard = Some(cache.clone());
+        Ok(cache)
+    }
 }
 
 /// Parse a `trusted.lepton.prefetch.blobs` xattr value such as `"2,5,1"` into an
@@ -216,14 +241,18 @@ impl ErofsReader {
         let blob_devices = device_infos
             .into_iter()
             .map(|info| {
-                let cache: Box<dyn BlobCache> = Box::new(LocalBlobCache::open(
-                    info.blob_id,
-                    cache_dir,
-                    backend.clone(),
-                )?);
-                Ok((info.device_id, BlobDevice { cache }))
+                (
+                    info.device_id,
+                    BlobDevice {
+                        blob_id: info.blob_id,
+                        device_id: info.device_id,
+                        cache_dir: cache_dir.to_path_buf(),
+                        backend: backend.clone(),
+                        cache: Mutex::new(None),
+                    },
+                )
             })
-            .collect::<io::Result<HashMap<_, _>>>()?;
+            .collect();
         Ok((blob_devices, temporary_cache_dir))
     }
 
@@ -289,7 +318,9 @@ impl ErofsReader {
         Self::device_infos_from(&self.mmap, self.sb_offset)
     }
 
-    /// Prefetch every group of the blob device identified by `device_id`.
+    /// Prefetch every group of the blob device identified by `device_id`. An
+    /// "ondemand" redirect blob is dispatched group by group into the source
+    /// devices' caches instead of building its own cache file.
     pub fn prefetch_blob(&self, device_id: u16) -> io::Result<()> {
         let device = self.blob_devices.get(&device_id).ok_or_else(|| {
             io::Error::new(
@@ -297,7 +328,59 @@ impl ErofsReader {
                 format!("blob device {device_id} not found"),
             )
         })?;
-        device.cache.prefetch_all()
+        let cache = device.cache()?;
+        if cache.is_redirect_blob() {
+            self.prefetch_redirect_blob(device_id, device, cache.as_ref())
+        } else {
+            cache.prefetch_all()
+        }
+    }
+
+    /// Phase-0 prefetch for a redirect blob: stream its groups in optimized
+    /// order and fill the decoded bytes into the source blobs' caches so early
+    /// on-demand reads hit cache. Per-group failures are logged and skipped so
+    /// a bad group can never poison the source caches or abort the warmup.
+    fn prefetch_redirect_blob(
+        &self,
+        device_id: u16,
+        device: &BlobDevice,
+        cache: &dyn BlobCache,
+    ) -> io::Result<()> {
+        cache.redirect_stream(&mut |group, decoded| {
+            if !group.is_redirect() {
+                crate::metrics::inc_cache_redirect_skip_group();
+                warn!("ondemand blob {device_id} contains a non-redirect group; skipping");
+                return Ok(());
+            }
+            let source_id = group.source_device_id();
+            let source_index = group.source_group_index() as usize;
+            let source = match self.blob_devices.get(&source_id) {
+                Some(source) => source,
+                None => {
+                    crate::metrics::inc_cache_redirect_skip_group();
+                    warn!("ondemand blob {device_id} redirects to unknown device {source_id}; skipping group");
+                    return Ok(());
+                }
+            };
+            let source_cache = match source.cache() {
+                Ok(cache) => cache,
+                Err(err) => {
+                    crate::metrics::inc_cache_redirect_skip_group();
+                    warn!("failed to open source device {source_id} for redirect: {err}");
+                    return Ok(());
+                }
+            };
+            if let Err(err) = source_cache.fill_group_from_redirect(source_index, decoded) {
+                if crate::storage::cache::is_group_crc_mismatch(&err) {
+                    crate::metrics::record_backend_crc_error(device.backend.backend_target());
+                }
+                crate::metrics::inc_cache_redirect_skip_group();
+                warn!(
+                    "failed to fill device {source_id} group {source_index} from ondemand blob {device_id}: {err}"
+                );
+            }
+            Ok(())
+        })
     }
 
     /// Build the blob prefetch plan: blobs listed in the root prefetch xattr (in
@@ -321,7 +404,9 @@ impl ErofsReader {
         (ordered, rest)
     }
 
-    fn read_prefetch_order(&self) -> Vec<u16> {
+    /// Ordered device ids from the root `trusted.lepton.prefetch.blobs` xattr,
+    /// unfiltered. Empty when the xattr is missing or unreadable.
+    pub fn read_prefetch_order(&self) -> Vec<u16> {
         let root_nid = self.sb().root_nid();
         let inode = match self.inode(root_nid) {
             Ok(inode) => inode,
@@ -380,7 +465,7 @@ impl ErofsReader {
         let absolute_offset = source_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read offset overflow")
         })?;
-        blob.cache.read_at(absolute_offset, dst)
+        blob.cache()?.read_at(absolute_offset, dst)
     }
 
     pub(crate) fn write_blob_to(
@@ -401,7 +486,7 @@ impl ErofsReader {
             io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
         })?;
         let mut buf = vec![0u8; len];
-        blob.cache.read_at(absolute_offset, &mut buf)?;
+        blob.cache()?.read_at(absolute_offset, &mut buf)?;
         writer.write_all(&buf)
     }
 

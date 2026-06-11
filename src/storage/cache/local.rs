@@ -3,6 +3,7 @@ use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::metadata::{BlobMeta, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE};
@@ -17,6 +18,9 @@ use super::{
 
 pub struct LocalBlobCache {
     blob_id: [u8; EROFS_BLOB_ID_SIZE],
+    /// Device/blob index in the merged image, used to attribute on-demand group
+    /// accesses in the access trace.
+    blob_index: u32,
     groupmap: GroupMap,
     blob_meta: BlobMeta,
     cache_blob_path: PathBuf,
@@ -29,6 +33,7 @@ pub struct LocalBlobCache {
 impl LocalBlobCache {
     pub fn open(
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
+        blob_index: u32,
         cache_dir: &Path,
         backend: Arc<dyn BlobBackend>,
     ) -> io::Result<Self> {
@@ -38,6 +43,7 @@ impl LocalBlobCache {
         let cache_key_hex = hex_string(&cache_key);
         let blob_meta_path = cache_dir.join(format!("{cache_key_hex}.blob.meta"));
         let blob_meta = load_cached_blob_meta(blob_id, cache_dir, &blob_meta_path, &backend)?;
+        crate::metrics::add_cache_total_groups(blob_meta.group_count() as u64);
 
         let cache_blob_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
@@ -46,6 +52,7 @@ impl LocalBlobCache {
 
         Ok(Self {
             blob_id,
+            blob_index,
             groupmap,
             blob_meta,
             cache_blob_path,
@@ -54,6 +61,11 @@ impl LocalBlobCache {
             fetch_lock: Mutex::new(()),
             buffers: Mutex::new(BlobCacheBuffers::default()),
         })
+    }
+
+    /// The blob meta backing this cache (groups, chunks, compressor).
+    pub fn blob_meta(&self) -> &BlobMeta {
+        &self.blob_meta
     }
 
     fn cache_file(&self) -> io::Result<Arc<File>> {
@@ -71,6 +83,7 @@ impl LocalBlobCache {
                 .open(&self.cache_blob_path)?,
         );
         file.set_len(self.blob_meta.cache_size())?;
+        crate::metrics::inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
     }
@@ -82,11 +95,13 @@ impl LocalBlobCache {
         cache_file: &File,
     ) -> io::Result<()> {
         if self.groupmap.is_ready(group_index)? {
+            crate::metrics::inc_cache_hit_group();
             return Ok(());
         }
 
         let _guard = self.fetch_lock.lock().unwrap();
         if self.groupmap.is_ready(group_index)? {
+            crate::metrics::inc_cache_hit_group();
             return Ok(());
         }
 
@@ -157,19 +172,25 @@ impl BlobCache for LocalBlobCache {
                     continue;
                 }
                 let group = &groups[index];
-                decode_group_from_window(
+                if let Err(err) = decode_group_from_window(
                     &self.blob_meta,
                     group,
                     window_base,
                     &window,
                     &mut decoded,
-                )?;
+                ) {
+                    if super::is_group_crc_mismatch(&err) {
+                        crate::metrics::record_backend_crc_error(self.backend.backend_target());
+                    }
+                    return Err(err);
+                }
                 write_all_at(
                     cache_file.as_ref(),
                     group.uncompressed_byte_offset(),
                     &decoded,
                 )?;
                 self.groupmap.set_ready(index)?;
+                crate::metrics::inc_cache_fill_group();
             }
         }
 
@@ -199,6 +220,9 @@ impl BlobCache for LocalBlobCache {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
 
         for group_index in first_group..=last_group {
+            // Record the on-demand access order (first access wins) so the
+            // apiserver `/trace` endpoint can expose the group access pattern.
+            crate::metrics::trace::record_group_access(self.blob_index, group_index as u32);
             let group = *self.blob_meta.group_at(group_index).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
             })?;
@@ -209,6 +233,94 @@ impl BlobCache for LocalBlobCache {
         // the covering groups are decoded the absolute offset indexes straight
         // into it for a single contiguous read.
         read_exact_at(cache_file.as_ref(), offset, dst)
+    }
+
+    fn is_redirect_blob(&self) -> bool {
+        self.blob_meta.is_redirect_blob()
+    }
+
+    fn redirect_stream(
+        &self,
+        cb: &mut dyn FnMut(&BlobMetaGroup, &[u8]) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let groups = self.blob_meta.groups();
+        if groups.is_empty() {
+            return Ok(());
+        }
+
+        let mut decoded = Vec::new();
+        let mut window = Vec::new();
+
+        for batch in plan_prefetch_batches(groups, BLOB_META_DEFAULT_CHUNK_SIZE as u64) {
+            let window_base = groups[batch.start].compressed_byte_offset();
+            let window_end = groups[batch.end - 1].compressed_byte_end();
+            let window_len = usize::try_from(window_end - window_base).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "blob redirect window size exceeds usize",
+                )
+            })?;
+            window.resize(window_len, 0);
+            let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
+            let uncompressed_size =
+                groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
+            let ctx = ReadContext::group(
+                RequestSource::Prefetch,
+                uncompressed_offset,
+                uncompressed_size,
+            );
+            self.backend
+                .read_range_into(&self.blob_id, window_base, &mut window, ctx)?;
+            crate::metrics::record_backend_redirect_read(window_len as u64);
+
+            for index in batch {
+                let group = &groups[index];
+                if let Err(err) = decode_group_from_window(
+                    &self.blob_meta,
+                    group,
+                    window_base,
+                    &window,
+                    &mut decoded,
+                ) {
+                    if super::is_group_crc_mismatch(&err) {
+                        crate::metrics::record_backend_crc_error(self.backend.backend_target());
+                    }
+                    crate::metrics::inc_cache_redirect_skip_group();
+                    warn!("skipping redirect group {index}: {err}");
+                    continue;
+                }
+                cb(group, &decoded)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn fill_group_from_redirect(&self, group_index: usize, decoded: &[u8]) -> io::Result<()> {
+        let group = self.blob_meta.group_at(group_index).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "redirect fill group index out of range",
+            )
+        })?;
+        if self.groupmap.is_ready(group_index)? {
+            crate::metrics::inc_cache_hit_group();
+            return Ok(());
+        }
+        // Cross-check against this blob's own group metadata: the redirect
+        // group's crc32 was copied from this source group at optimize time, so
+        // any divergence (stale optimize artifact, corrupted transfer) is
+        // caught here before it can poison the cache.
+        super::validate_decoded_group(group, decoded)?;
+        let cache_file = self.cache_file()?;
+        write_all_at(
+            cache_file.as_ref(),
+            group.uncompressed_byte_offset(),
+            decoded,
+        )?;
+        self.groupmap.set_ready(group_index)?;
+        crate::metrics::inc_cache_redirect_fill_group();
+        Ok(())
     }
 }
 
@@ -309,7 +421,7 @@ mod tests {
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
-        let cached = LocalBlobCache::open(blob_id, cache_dir.path(), backend).unwrap();
+        let cached = LocalBlobCache::open(blob_id, 1, cache_dir.path(), backend).unwrap();
 
         let mut buf = vec![0u8; 1024];
         cached.read_at(512, &mut buf).unwrap();
@@ -336,7 +448,7 @@ mod tests {
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
-        let err = match LocalBlobCache::open(blob_id, cache_dir.path(), backend) {
+        let err = match LocalBlobCache::open(blob_id, 1, cache_dir.path(), backend) {
             Ok(_) => panic!("corrupted blob meta crc32 should be rejected"),
             Err(err) => err,
         };
@@ -367,7 +479,7 @@ mod tests {
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
-        let cached = LocalBlobCache::open(blob_id, cache_dir.path(), backend).unwrap();
+        let cached = LocalBlobCache::open(blob_id, 1, cache_dir.path(), backend).unwrap();
 
         let mut buf = vec![0u8; 1024];
         let err = cached.read_at(512, &mut buf).unwrap_err();
@@ -415,7 +527,7 @@ mod tests {
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
-        let cached = LocalBlobCache::open(blob_id, cache_dir.path(), backend).unwrap();
+        let cached = LocalBlobCache::open(blob_id, 1, cache_dir.path(), backend).unwrap();
 
         let mut buf = vec![0u8; 512];
         cached.read_at(256, &mut buf).unwrap();
@@ -438,5 +550,50 @@ mod tests {
             .path()
             .join(format!("{}.blob.data", hex_string(&blob_id)))
             .exists());
+    }
+
+    #[test]
+    fn fill_group_from_redirect_validates_then_caches() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let payload = vec![0x6eu8; 4096];
+        let blob_id = sha256_bytes(&payload);
+        fs::write(backend_dir.path().join(hex_string(&blob_id)), &payload).unwrap();
+        blob_meta(blob_id, &payload)
+            .save(
+                &backend_dir
+                    .path()
+                    .join(format!("{}.blob.meta", hex_string(&blob_id))),
+            )
+            .unwrap();
+
+        let backend: Arc<dyn BlobBackend> =
+            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let cached = LocalBlobCache::open(blob_id, 1, cache_dir.path(), backend).unwrap();
+        assert!(!cached.is_redirect_blob());
+
+        // Wrong length is rejected and the group stays not-ready.
+        let err = cached
+            .fill_group_from_redirect(0, &payload[..1024])
+            .unwrap_err();
+        assert!(err.to_string().contains("length mismatch"));
+        assert!(!cached.groupmap.is_ready(0).unwrap());
+
+        // Corrupted bytes fail the CRC cross-check.
+        let mut corrupted = payload.clone();
+        corrupted[0] ^= 0xff;
+        let err = cached.fill_group_from_redirect(0, &corrupted).unwrap_err();
+        assert!(super::super::is_group_crc_mismatch(&err));
+        assert!(!cached.groupmap.is_ready(0).unwrap());
+
+        // Valid bytes are cached, marked ready, and served without the backend.
+        cached.fill_group_from_redirect(0, &payload).unwrap();
+        assert!(cached.groupmap.is_ready(0).unwrap());
+        let mut buf = vec![0u8; 1024];
+        cached.read_at(512, &mut buf).unwrap();
+        assert_eq!(buf, payload[512..1536]);
+
+        // Out-of-range index is rejected.
+        assert!(cached.fill_group_from_redirect(7, &payload).is_err());
     }
 }

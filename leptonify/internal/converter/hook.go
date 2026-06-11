@@ -142,7 +142,7 @@ func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descript
 	defer func() { _ = os.RemoveAll(mergeDir) }()
 
 	sourcePaths := make([]string, 0, len(descs))
-	blobMetas := make([]blobMetaFile, 0, len(descs))
+	blobMetas := make([]BlobMetaFile, 0, len(descs))
 	for _, desc := range descs {
 		blobPath, err := stageLeptonMetadata(ctx, cs, desc, mergeDir)
 		if err != nil {
@@ -154,9 +154,9 @@ func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descript
 		if err != nil {
 			return nil, errors.Wrapf(err, "extract blob meta %s", desc.Digest)
 		}
-		blobMetas = append(blobMetas, blobMetaFile{
-			name: desc.Digest.Encoded() + ".blob.meta",
-			data: meta,
+		blobMetas = append(blobMetas, BlobMetaFile{
+			Name: desc.Digest.Encoded() + ".blob.meta",
+			Data: meta,
 		})
 	}
 
@@ -191,11 +191,11 @@ const (
 	blobMetaBlocksField = 52
 )
 
-// blobMetaFile is a per-layer blob meta artifact packed into the bootstrap layer
+// BlobMetaFile is a per-layer blob meta artifact packed into the bootstrap layer
 // alongside image.boot, named "<full_blob_sha256>.blob.meta".
-type blobMetaFile struct {
-	name string
-	data []byte
+type BlobMetaFile struct {
+	Name string
+	Data []byte
 }
 
 // stageLeptonMetadata stages a blob from the content store for `lepton merge`
@@ -307,12 +307,18 @@ func extractBlobMeta(ctx context.Context, cs content.Store, desc ocispec.Descrip
 // writeBootstrapLayer packs the bootstrap file and the per-layer blob meta
 // artifacts into a gzip-compressed tar layer (under `image/`) and commits it to
 // the content store.
-func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath string, blobMetas []blobMetaFile) (*ocispec.Descriptor, error) {
+func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath string, blobMetas []BlobMetaFile) (*ocispec.Descriptor, error) {
 	bootstrapData, err := os.ReadFile(bootstrapPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "read bootstrap")
 	}
+	return WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas)
+}
 
+// WriteBootstrapLayer packs bootstrap bytes and per-layer blob meta artifacts
+// into a gzip-compressed tar layer (under `image/`) and commits it to the
+// content store, returning the bootstrap layer descriptor.
+func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []byte, blobMetas []BlobMetaFile) (*ocispec.Descriptor, error) {
 	// Build the gzip(tar(image/...)) stream while tracking both the compressed
 	// (layer) digest and the uncompressed (diff id) digest.
 	var compressedBuf bytes.Buffer
@@ -363,7 +369,7 @@ func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath st
 
 // writeBootstrapTar writes the `image/` directory, the `image/image.boot` file,
 // and one `image/<full_blob_sha256>.blob.meta` entry per layer into tw.
-func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []blobMetaFile) error {
+func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []BlobMetaFile) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "image",
 		Mode:     0o755,
@@ -383,14 +389,14 @@ func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []blobMet
 	}
 	for _, meta := range blobMetas {
 		if err := tw.WriteHeader(&tar.Header{
-			Name: BlobMetaDirInLayer + "/" + meta.name,
+			Name: BlobMetaDirInLayer + "/" + meta.Name,
 			Mode: 0o444,
-			Size: int64(len(meta.data)),
+			Size: int64(len(meta.Data)),
 		}); err != nil {
-			return errors.Wrapf(err, "write blob meta header %s", meta.name)
+			return errors.Wrapf(err, "write blob meta header %s", meta.Name)
 		}
-		if _, err := tw.Write(meta.data); err != nil {
-			return errors.Wrapf(err, "write blob meta %s", meta.name)
+		if _, err := tw.Write(meta.Data); err != nil {
+			return errors.Wrapf(err, "write blob meta %s", meta.Name)
 		}
 	}
 	return nil
@@ -415,6 +421,12 @@ func readJSON(ctx context.Context, cs content.Store, x interface{}, desc ocispec
 		return nil, errors.Wrap(err, "unmarshal json")
 	}
 	return labels, nil
+}
+
+// WriteJSON marshals x to JSON and commits it to the content store, returning a
+// descriptor derived from oldDesc with the new digest and size.
+func WriteJSON(ctx context.Context, cs content.Store, x interface{}, oldDesc ocispec.Descriptor, labels map[string]string) (*ocispec.Descriptor, error) {
+	return writeJSON(ctx, cs, x, oldDesc, labels)
 }
 
 // writeJSON marshals x to JSON and commits it to the content store, returning a

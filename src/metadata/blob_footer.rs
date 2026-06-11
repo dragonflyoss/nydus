@@ -212,8 +212,10 @@ impl BlobFooter {
         if self.reserved0 != 0 || self.reserved1 != 0 {
             bail!("lepton footer reserved fields must be zero");
         }
-        if self.bootstrap_blocks == 0 || self.blob_meta_blocks == 0 {
-            bail!("lepton footer region block counts must be non-zero");
+        // `bootstrap_blocks` may be zero: an "ondemand" redirect blob carries
+        // only group data plus blob meta and embeds no bootstrap image.
+        if self.blob_meta_blocks == 0 {
+            bail!("lepton footer blob meta block count must be non-zero");
         }
         Ok(())
     }

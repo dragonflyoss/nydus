@@ -1983,10 +1983,14 @@ dependencies = [
  "fuser",
  "futures",
  "hickory-resolver",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "log",
  "memmap2",
  "once_cell",
+ "prometheus",
  "rand 0.8.6",
  "reqwest",
  "rolling-file",
@@ -2852,6 +2856,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "prometheus"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d33c28a30771f7f96db69893f78b857f7450d7e0237e9c8fc6427a81bae7ed1"
+dependencies = [
+ "cfg-if",
+ "fnv",
+ "lazy_static",
+ "memchr",
+ "parking_lot",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
