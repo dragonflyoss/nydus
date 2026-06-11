@@ -3,7 +3,7 @@ use crate::metadata::*;
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -217,12 +217,11 @@ fn build_tree_recursive(
     let mtime_nsec = meta.mtime_nsec() as u32;
     let nlink = meta.nlink() as u32;
 
-    let is_extended = needs_erofs_extended_inode(&meta);
     *inode_counter += 1;
     let ino = *inode_counter;
-
+    let is_extended = needs_erofs_extended_inode(&meta);
+    let xattrs = read_xattrs_from_path(path);
     if ft.is_dir() {
-        let xattrs = read_xattrs_from_path(path);
         let inode_idx = inodes.len();
         inodes.push(InodeInfo {
             mode,
@@ -247,47 +246,40 @@ fn build_tree_recursive(
 
         let mut entries: Vec<fs::DirEntry> = fs::read_dir(path)
             .with_context(|| format!("failed to read directory: {}", path.display()))?
-            .collect::<Result<Vec<_>, _>>()
-            .with_context(|| format!("failed to iterate directory: {}", path.display()))?;
-        entries.sort_by_key(|e| e.file_name());
+            .collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_cached_key(|entry| entry.file_name());
 
         let mut children = Vec::new();
         for entry in &entries {
             let child_path = entry.path();
             let child_meta = fs::symlink_metadata(&child_path)
                 .with_context(|| format!("failed to stat: {}", child_path.display()))?;
+            let hardlink_key = (!child_meta.file_type().is_dir() && child_meta.nlink() > 1)
+                .then(|| (child_meta.dev(), child_meta.ino()));
 
-            if !child_meta.file_type().is_dir() && child_meta.nlink() > 1 {
-                let key = (child_meta.dev(), child_meta.ino());
-                if let Some(&existing_idx) = hardlink_map.get(&key) {
-                    let file_type = mode_to_erofs_file_type(child_meta.mode() as u16);
-                    children.push(DirEntry {
-                        name: entry.file_name().to_string_lossy().into_owned(),
-                        file_type,
-                        inode_idx: existing_idx,
-                    });
-                    continue;
+            let child_idx = match hardlink_key.and_then(|key| hardlink_map.get(&key).copied()) {
+                Some(existing_idx) => existing_idx,
+                None => {
+                    let idx = build_tree_recursive(
+                        &child_path,
+                        blob_writer,
+                        chunk_size,
+                        inodes,
+                        inode_counter,
+                        hardlink_map,
+                    )?;
+
+                    if let Some(key) = hardlink_key {
+                        hardlink_map.insert(key, idx);
+                    }
+
+                    idx
                 }
-            }
+            };
 
-            let child_idx = build_tree_recursive(
-                &child_path,
-                blob_writer,
-                chunk_size,
-                inodes,
-                inode_counter,
-                hardlink_map,
-            )?;
-
-            if !child_meta.file_type().is_dir() && child_meta.nlink() > 1 {
-                let key = (child_meta.dev(), child_meta.ino());
-                hardlink_map.insert(key, child_idx);
-            }
-
-            let file_type = mode_to_erofs_file_type(child_meta.mode() as u16);
             children.push(DirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
-                file_type,
+                file_type: mode_to_erofs_file_type(child_meta.mode() as u16),
                 inode_idx: child_idx,
             });
         }
@@ -304,8 +296,6 @@ fn build_tree_recursive(
     } else if ft.is_file() {
         let file_size = meta.size();
         let chunk_indexes = blob_writer.write_file_chunks(path, file_size)?;
-        let xattrs = read_xattrs_from_path(path);
-
         let inode_idx = inodes.len();
         inodes.push(InodeInfo {
             mode,
@@ -325,14 +315,13 @@ fn build_tree_recursive(
             },
             xattrs,
         });
+
         Ok(inode_idx)
     } else if ft.is_symlink() {
         let target = fs::read_link(path)
             .with_context(|| format!("failed to read symlink: {}", path.display()))?
-            .as_os_str()
-            .as_bytes()
-            .to_vec();
-        let xattrs = read_xattrs_from_path(path);
+            .into_os_string()
+            .into_vec();
 
         let inode_idx = inodes.len();
         inodes.push(InodeInfo {
@@ -350,12 +339,12 @@ fn build_tree_recursive(
             data: InodeData::Symlink { target },
             xattrs,
         });
+
         Ok(inode_idx)
     } else {
         let rdev = meta.rdev() as u32;
-        let is_dev = (mode & 0o170000) == 0o020000 || (mode & 0o170000) == 0o060000;
-        let xattrs = read_xattrs_from_path(path);
-
+        let file_type = mode as u32 & libc::S_IFMT;
+        let is_dev = file_type == libc::S_IFCHR || file_type == libc::S_IFBLK;
         let inode_idx = inodes.len();
         inodes.push(InodeInfo {
             mode,
@@ -376,6 +365,7 @@ fn build_tree_recursive(
             },
             xattrs,
         });
+
         Ok(inode_idx)
     }
 }

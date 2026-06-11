@@ -1,5 +1,5 @@
 use crate::metadata::{
-    align_to_block, BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup,
+    round_up, BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup,
     BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
 };
 use anyhow::{bail, Context, Result};
@@ -164,14 +164,13 @@ impl BlobWriter {
         let mut f =
             File::open(path).with_context(|| format!("failed to open file: {}", path.display()))?;
 
-        let cs = self.file_chunk_size as u64;
-        let nchunks = file_size.div_ceil(cs);
-        let mut indexes = Vec::with_capacity(nchunks as usize);
+        let chunk_size = self.file_chunk_size as u64;
+        let chunk_count = file_size.div_ceil(chunk_size);
+        let mut indexes = Vec::with_capacity(chunk_count as usize);
         let mut chunk_buf = vec![0u8; self.file_chunk_size as usize];
-
-        for i in 0..nchunks {
-            let remaining = file_size - i * cs;
-            let to_read = remaining.min(cs) as usize;
+        for i in 0..chunk_count {
+            let remaining = file_size - i * chunk_size;
+            let to_read = remaining.min(chunk_size) as usize;
 
             f.read_exact(&mut chunk_buf[..to_read])
                 .with_context(|| format!("failed to read file: {}", path.display()))?;
@@ -180,7 +179,7 @@ impl BlobWriter {
             // full file chunk size. A full chunk is already block-aligned, while
             // a partial (tail) chunk keeps zero padding confined to its final
             // block so groups pack dense real blocks instead of large zero runs.
-            let write_len = align_to_block(to_read as u64) as usize;
+            let write_len = round_up(to_read, EROFS_BLOCK_SIZE as usize);
             let blkaddr = self.append_chunk(&chunk_buf[..to_read], write_len)?;
 
             indexes.push(ChunkIndex {
