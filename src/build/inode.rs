@@ -99,21 +99,21 @@ pub struct DirEntry {
 
 /// Convert a Unix file mode to an EROFS file type value for directory entries.
 pub fn mode_to_erofs_file_type(mode: u16) -> u8 {
-    match mode & 0o170000 {
-        0o100000 => EROFS_FT_REG_FILE,
-        0o040000 => EROFS_FT_DIR,
-        0o020000 => EROFS_FT_CHRDEV,
-        0o060000 => EROFS_FT_BLKDEV,
-        0o010000 => EROFS_FT_FIFO,
-        0o140000 => EROFS_FT_SOCK,
-        0o120000 => EROFS_FT_SYMLINK,
+    match mode as u32 & libc::S_IFMT {
+        libc::S_IFREG => EROFS_FT_REG_FILE,
+        libc::S_IFDIR => EROFS_FT_DIR,
+        libc::S_IFCHR => EROFS_FT_CHRDEV,
+        libc::S_IFBLK => EROFS_FT_BLKDEV,
+        libc::S_IFIFO => EROFS_FT_FIFO,
+        libc::S_IFSOCK => EROFS_FT_SOCK,
+        libc::S_IFLNK => EROFS_FT_SYMLINK,
         _ => 0,
     }
 }
 
 /// Calculate the size of an inode's metadata (header + xattr ibody + chunk indexes) for the final
 /// image.
-pub fn erofs_inode_size(inode: &InodeInfo, _chunkbits: u32, _blkszbits: u32) -> usize {
+pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -> usize {
     let inode_isize = if inode.is_extended {
         EROFS_INODE_EXTENDED_SIZE
     } else {
@@ -175,7 +175,14 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, device_ids: &[u16]) 
 
 /// Build the in-memory inode tree from a source directory.
 ///
-/// Returns a flat list of InodeInfo in DFS pre-order (root at index 0).
+/// Walks `source` recursively and returns one [`InodeInfo`] per filesystem
+/// object as a flat list in DFS pre-order (root at index 0); directories
+/// reference children by index into this list.
+///
+/// File contents are streamed into `blob_writer` in `chunk_size` chunks
+/// (must be a power of two). Hardlinks share a single inode entry, and
+/// children are visited in sorted name order for deterministic output.
+/// Layout fields (`nid`, `meta_offset`, etc.) are left 0 for a later pass.
 pub fn build_tree(
     source: &Path,
     blob_writer: &mut BlobWriter,
@@ -197,6 +204,14 @@ pub fn build_tree(
     Ok(inodes)
 }
 
+/// Recursively create inodes for `path` and its descendants, appending to
+/// `inodes` in DFS pre-order and returning the index of `path`'s inode.
+///
+/// Directories push their inode first, then recurse into children in sorted
+/// name order; regular files write chunks via `blob_writer`; symlinks store
+/// the target inline; devices record `rdev`. Non-directory entries with
+/// `nlink > 1` are deduplicated through `hardlink_map` (keyed by source
+/// `(dev, ino)`) so later links reuse the existing inode index.
 #[allow(clippy::only_used_in_recursion)]
 fn build_tree_recursive(
     path: &Path,
@@ -370,42 +385,6 @@ fn build_tree_recursive(
     }
 }
 
-/// Serialize xattr ibody data into the buffer at the given offset.
-/// Returns the number of bytes written.
-fn serialize_xattrs(buf: &mut [u8], offset: usize, xattrs: &[(u8, Vec<u8>, Vec<u8>)]) -> usize {
-    if xattrs.is_empty() {
-        return 0;
-    }
-    let total_size = erofs_xattr_ibody_size(xattrs);
-
-    // Write ibody header (12 bytes): h_reserved(4) + h_shared_count(1) + h_reserved2(7)
-    // All zeros is correct (h_shared_count = 0, no shared xattrs)
-    // The header is already zeroed from the vec![0u8; meta_size] initialization
-
-    // Write inline xattr entries after the header
-    let mut pos = offset + EROFS_XATTR_IBODY_HEADER_SIZE;
-    for (index, suffix, value) in xattrs {
-        // Entry header: e_name_len(1) + e_name_index(1) + e_value_size(2)
-        buf[pos] = suffix.len() as u8;
-        buf[pos + 1] = *index;
-        buf[pos + 2..pos + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
-
-        // Name suffix
-        let name_start = pos + EROFS_XATTR_ENTRY_HEADER_SIZE;
-        buf[name_start..name_start + suffix.len()].copy_from_slice(suffix);
-
-        // Value
-        let value_start = name_start + suffix.len();
-        buf[value_start..value_start + value.len()].copy_from_slice(value);
-
-        // Advance to next entry (4-byte aligned)
-        let entry_size = EROFS_XATTR_ENTRY_HEADER_SIZE + suffix.len() + value.len();
-        pos += round_up(entry_size, 4);
-    }
-
-    total_size
-}
-
 /// Serialize an inode to bytes and write it at the given offset in a buffer.
 pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     let blkszbits = EROFS_BLKSZBITS as u32;
@@ -440,7 +419,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.nlink,
                 );
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout, true);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
@@ -456,7 +435,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.gid as u16,
                 );
                 buf[..EROFS_INODE_COMPACT_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
             }
 
             let base = if inode.is_extended {
@@ -492,7 +471,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.nlink,
                 );
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout, false);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
@@ -508,7 +487,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.gid as u16,
                 );
                 buf[..EROFS_INODE_COMPACT_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
             }
         }
         InodeData::Symlink { target } => {
@@ -535,7 +514,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.nlink,
                 );
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout, true);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
@@ -551,7 +530,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.gid as u16,
                 );
                 buf[..EROFS_INODE_COMPACT_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
             }
             buf[inline_off..inline_off + target.len()].copy_from_slice(target);
         }
@@ -574,7 +553,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.nlink,
                 );
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout, true);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
@@ -590,7 +569,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.gid as u16,
                 );
                 buf[..EROFS_INODE_COMPACT_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
             }
         }
         InodeData::FifoOrSocket => {
@@ -612,7 +591,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.nlink,
                 );
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
                 let i_format = erofs_compact_i_format(datalayout, true);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
@@ -628,7 +607,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.gid as u16,
                 );
                 buf[..EROFS_INODE_COMPACT_SIZE].copy_from_slice(hdr.as_bytes());
-                serialize_xattrs(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
+                write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
             }
         }
     }
@@ -639,6 +618,50 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     }
 
     buf
+}
+
+/// Write the EROFS xattr inline body (ibody) into `buf` at `offset`.
+///
+/// Layout: an all-zero `erofs_xattr_ibody_header` (meaning no shared
+/// xattrs), followed by one 4-byte-aligned entry per element of `xattrs`
+/// (`(name_index, name_suffix, value)`).
+///
+/// Returns the ibody size in bytes, or 0 when `xattrs` is empty.
+/// Panics if the ibody does not fit in `buf` at `offset`.
+fn write_erofs_xattr_ibody(
+    buf: &mut [u8],
+    offset: usize,
+    xattrs: &[(u8, Vec<u8>, Vec<u8>)],
+) -> usize {
+    if xattrs.is_empty() {
+        return 0;
+    }
+
+    // Carve out the whole ibody region up front: bounds are checked exactly
+    // once and fail fast; every write below stays inside this region.
+    let ibody_size = erofs_xattr_ibody_size(xattrs);
+    let ibody = &mut buf[offset..offset + ibody_size];
+
+    // Entries start right after the header; `entry_start` stays 4-byte aligned.
+    let mut entry_start = EROFS_XATTR_IBODY_HEADER_SIZE;
+    for (name_index, name_suffix, value) in xattrs {
+        // EROFS XATTR Entry: e_name_len(u8) + e_name_index(u8) +
+        // e_value_size(u16 LE), followed by the name suffix and the value.
+        let name_start = entry_start + EROFS_XATTR_ENTRY_HEADER_SIZE;
+        let value_start = name_start + name_suffix.len();
+
+        // Write the entry header and body.
+        ibody[entry_start] = name_suffix.len() as u8;
+        ibody[entry_start + 1] = *name_index;
+        ibody[entry_start + 2..name_start].copy_from_slice(&(value.len() as u16).to_le_bytes());
+        ibody[name_start..value_start].copy_from_slice(name_suffix);
+        ibody[value_start..][..value.len()].copy_from_slice(value);
+
+        // Next entry begins at the next 4-byte boundary; padding is already zero.
+        entry_start = round_up(value_start + value.len(), 4);
+    }
+
+    ibody_size
 }
 
 /// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.
