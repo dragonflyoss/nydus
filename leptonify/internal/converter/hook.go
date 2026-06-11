@@ -43,8 +43,13 @@ type MergeOption struct {
 // lepton blobs into a single bootstrap layer.
 func ConvertHookFunc(opt MergeOption) converter.ConvertHookFunc {
 	return func(ctx context.Context, cs content.Store, orgDesc ocispec.Descriptor, newDesc *ocispec.Descriptor) (*ocispec.Descriptor, error) {
+		// No conversion happened for this blob: return nil so the parent does
+		// not consider it modified. Returning a non-nil descriptor here would
+		// mark unconverted blobs (e.g. in-toto attestation layers) as
+		// converted, causing their parent manifests to be rewritten and then
+		// mistakenly merged as lepton manifests.
 		if newDesc == nil {
-			return &orgDesc, nil
+			return nil, nil
 		}
 		switch {
 		case images.IsIndexType(newDesc.MediaType):
@@ -77,6 +82,14 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	manifestLabels, err := readJSON(ctx, cs, &manifest, *newDesc)
 	if err != nil {
 		return nil, errors.Wrap(err, "read manifest json")
+	}
+
+	// Only manifests whose layers were all converted to lepton blobs need a
+	// bootstrap merge. Anything else (e.g. buildkit attestation manifests with
+	// in-toto JSON layers, or already-merged lepton manifests) is passed
+	// through unchanged.
+	if !isLeptonManifest(manifest) {
+		return newDesc, nil
 	}
 
 	// Merge the lepton blob layers into a bootstrap layer.
@@ -129,6 +142,20 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	// Preserve the platform metadata from the input manifest descriptor.
 	newManifestDesc.Platform = newDesc.Platform
 	return newManifestDesc, nil
+}
+
+// isLeptonManifest reports whether every layer of the manifest is a converted
+// lepton data blob, i.e. the manifest is ready for a bootstrap merge.
+func isLeptonManifest(manifest ocispec.Manifest) bool {
+	if len(manifest.Layers) == 0 {
+		return false
+	}
+	for _, layer := range manifest.Layers {
+		if !IsLeptonBlob(layer) {
+			return false
+		}
+	}
+	return true
 }
 
 // mergeLayers stages each lepton blob to the work dir (named by its content

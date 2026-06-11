@@ -80,7 +80,9 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		return nil, errors.Wrap(err, "convert image")
 	}
 	if newDesc == nil {
-		return nil, errors.New("conversion produced no result")
+		// Nothing was modified (e.g. the source is already a lepton image);
+		// the source descriptor is the conversion result.
+		return &srcDesc, nil
 	}
 	return newDesc, nil
 }
