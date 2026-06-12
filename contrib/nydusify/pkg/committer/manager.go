@@ -113,6 +113,9 @@ func (m *Manager) Inspect(ctx context.Context, containerID string) (*InspectResu
 	if err != nil {
 		return nil, errors.Wrapf(err, "get snapshot mount")
 	}
+	if len(mount) == 0 {
+		return nil, errors.Errorf("no mounts returned for snapshot %q", containerInfo.SnapshotKey)
+	}
 	lowerDirs, upperDir, err := parseMountOptions(mount[0].Options)
 	if err != nil {
 		return nil, errors.Wrapf(err, "parse snapshot mount options")

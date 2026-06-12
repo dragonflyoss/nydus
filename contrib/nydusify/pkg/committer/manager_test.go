@@ -258,6 +258,37 @@ func TestManagerErrorPaths(t *testing.T) {
 	require.ErrorContains(t, err, "get snapshot mount")
 }
 
+func TestInspectEmptyMounts(t *testing.T) {
+	specBytes, err := json.Marshal(runtimespec.Spec{})
+	require.NoError(t, err)
+
+	client := &containerdclient.Client{}
+	patches := patchClientNewSeq([]gomonkey.OutputCell{
+		{Values: []interface{}{client, nil}},
+	})
+	defer patches.Reset()
+
+	loadPatches := patchLoadContainerSeq(client, []gomonkey.OutputCell{
+		{Values: []interface{}{&mockContainer{
+			image: &mockImage{name: "test-image"},
+			task:  &mockTask{pid: 100},
+			info: containers.Container{
+				Spec:        &anypb.Any{TypeUrl: "test", Value: specBytes},
+				SnapshotKey: "snap-key",
+			},
+		}, nil}},
+	})
+	defer loadPatches.Reset()
+
+	snapshotPatches := patchSnapshotService(client, &mockSnapshotter{
+		mounts: []mount.Mount{},
+	})
+	defer snapshotPatches.Reset()
+
+	_, err = (&Manager{address: "test"}).Inspect(context.Background(), "id")
+	require.ErrorContains(t, err, "no mounts returned for snapshot")
+}
+
 func TestInspectParseMountOptionsPaths(t *testing.T) {
 	specBytes, err := json.Marshal(runtimespec.Spec{Mounts: []runtimespec.Mount{{Destination: "/dst", Source: "/src"}}})
 	require.NoError(t, err)
