@@ -50,6 +50,7 @@ ignore = [
     { id = "RUSTSEC-2026-0118", reason = "hickory-proto v0.25.2 NSEC3 loop only affects DNSSEC validation (DnssecDnsHandle). Nydus uses TokioResolver for plain IP lookups without DNSSEC. Transitive dep via storage/hickory-resolver 0.25." },
     { id = "RUSTSEC-2026-0119", reason = "hickory-proto v0.25.2 O(n^2) label compression in BinEncoder only triggers with many-record messages. Nydus only sends simple single-record A/AAAA queries; the encoding path cannot be reached by external input. Transitive dep via storage/hickory-resolver 0.25." },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki v0.103.12 CRL parsing panic is only reachable when certificate revocation lists are configured. Nydus does not enable CRL verification. Transitive dep from reqwest/hyper-rustls." },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 v2.0.1 is unmaintained. Build-time only proc-macro helper, transitive dep via getset (used by neli and oci-spec). No safe upgrade available until upstream migrates away." },
 ]
 # Threshold for security vulnerabilities, any vulnerability with a CVSS score
 # lower than the range specified will be ignored. Note that ignored advisories
