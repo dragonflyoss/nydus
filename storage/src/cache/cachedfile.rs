@@ -1190,6 +1190,7 @@ impl FileCacheEntry {
                         RegionType::CacheFast,
                         chunk.uncompressed_offset(),
                         chunk.uncompressed_size(),
+                        chunk.uncompressed_offset(),
                         req.tags[i].clone(),
                         None,
                     )?;
@@ -1206,6 +1207,7 @@ impl FileCacheEntry {
                         RegionType::CacheSlow,
                         chunk.uncompressed_offset(),
                         chunk.uncompressed_size(),
+                        chunk.uncompressed_offset(),
                         req.tags[i].clone(),
                         Some(req.chunks[i].clone()),
                     )?;
@@ -1231,7 +1233,14 @@ impl FileCacheEntry {
                 let (start, len) = blob_cci.get_compressed_info(chunk)?;
 
                 // NOTE: Only this request region can read more chunks from backend with user io.
-                state.push(RegionType::Backend, start, len, tag, Some(chunk.clone()))?;
+                state.push(
+                    RegionType::Backend,
+                    start,
+                    len,
+                    chunk.uncompressed_offset(),
+                    tag,
+                    Some(chunk.clone()),
+                )?;
             }
         }
 
@@ -1668,6 +1677,8 @@ struct Region {
     // The range [blob_address, blob_address + blob_len) specifies data to be read from backend.
     blob_address: u64,
     blob_len: u32,
+    // Base uncompressed address for the user visible IO range.
+    user_io_address: u64,
     // The range specifying data to return to user.
     seg: BlobIoSegment,
 }
@@ -1682,6 +1693,7 @@ impl Region {
             tags: Vec::with_capacity(8),
             blob_address: 0,
             blob_len: 0,
+            user_io_address: 0,
             seg: Default::default(),
         }
     }
@@ -1717,6 +1729,7 @@ impl Region {
             tags: vec![false; len],
             blob_address,
             blob_len,
+            user_io_address: region.user_io_address,
             seg: region.seg.clone(),
         })
     }
@@ -1725,6 +1738,7 @@ impl Region {
         &mut self,
         start: u64,
         len: u32,
+        user_start: u64,
         tag: BlobIoTag,
         chunk: Option<Arc<dyn BlobChunkInfo>>,
     ) -> StorageResult<()> {
@@ -1749,6 +1763,7 @@ impl Region {
         // Maintain information for user triggered IO requests.
         if let BlobIoTag::User(ref s) = tag {
             if self.seg.is_empty() {
+                self.user_io_address = user_start;
                 self.seg = BlobIoSegment::new(s.offset, s.len);
             } else {
                 self.seg.append(s.offset, s.len);
@@ -1788,6 +1803,7 @@ impl FileIoMergeState {
         region_type: RegionType,
         start: u64,
         len: u32,
+        user_start: u64,
         tag: BlobIoTag,
         chunk: Option<Arc<dyn BlobChunkInfo>>,
     ) -> Result<()> {
@@ -1796,8 +1812,8 @@ impl FileIoMergeState {
             let region = &self.regions[self.regions.len() - 1];
             if !region.seg.is_empty() && tag.is_user_io() {
                 if let BlobIoTag::User(ref seg) = tag {
-                    if seg.offset as u64 + start
-                        != region.blob_address + region.seg.offset as u64 + region.seg.len as u64
+                    if seg.offset as u64 + user_start
+                        != region.user_io_address + region.seg.offset as u64 + region.seg.len as u64
                     {
                         self.commit();
                     }
@@ -1812,7 +1828,7 @@ impl FileIoMergeState {
 
         let idx = self.regions.len() - 1;
         self.regions[idx]
-            .append(start, len, tag, chunk)
+            .append(start, len, user_start, tag, chunk)
             .map_err(|e| einval!(e))
     }
 
@@ -1893,6 +1909,7 @@ mod tests {
         assert_eq!(region.tags.len(), 0);
         assert_eq!(region.blob_address, 0);
         assert_eq!(region.blob_len, 0);
+        assert_eq!(region.user_io_address, 0);
     }
 
     #[test]
@@ -1903,10 +1920,11 @@ mod tests {
             offset: 0x1800,
             len: 0x1800,
         });
-        region.append(0x1000, 0x2000, tag, None).unwrap();
+        region.append(0x1000, 0x2000, 0x1000, tag, None).unwrap();
         assert_eq!(region.status, RegionStatus::Open);
         assert_eq!(region.blob_address, 0x1000);
         assert_eq!(region.blob_len, 0x2000);
+        assert_eq!(region.user_io_address, 0x1000);
         assert_eq!(region.chunks.len(), 0);
         assert_eq!(region.tags.len(), 0);
         assert!(!region.seg.is_empty());
@@ -1916,10 +1934,13 @@ mod tests {
             offset: 0x0000,
             len: 0x2000,
         });
-        region.append(0x100004000, 0x2000, tag, None).unwrap_err();
+        region
+            .append(0x100004000, 0x2000, 0x100004000, tag, None)
+            .unwrap_err();
         assert_eq!(region.status, RegionStatus::Open);
         assert_eq!(region.blob_address, 0x1000);
         assert_eq!(region.blob_len, 0x2000);
+        assert_eq!(region.user_io_address, 0x1000);
         assert_eq!(region.seg.offset, 0x1800);
         assert_eq!(region.seg.len, 0x1800);
         assert_eq!(region.chunks.len(), 0);
@@ -1930,10 +1951,11 @@ mod tests {
             offset: 0x0000,
             len: 0x2000,
         });
-        region.append(0x4000, 0x2000, tag, None).unwrap();
+        region.append(0x4000, 0x2000, 0x4000, tag, None).unwrap();
         assert_eq!(region.status, RegionStatus::Open);
         assert_eq!(region.blob_address, 0x1000);
         assert_eq!(region.blob_len, 0x5000);
+        assert_eq!(region.user_io_address, 0x1000);
         assert_eq!(region.seg.offset, 0x1800);
         assert_eq!(region.seg.len, 0x3800);
         assert_eq!(region.chunks.len(), 0);
@@ -1946,7 +1968,13 @@ mod tests {
             ..Default::default()
         });
         region
-            .append(0x6000, 0x1000, BlobIoTag::Internal, Some(chunk.clone()))
+            .append(
+                0x6000,
+                0x1000,
+                0x6000,
+                BlobIoTag::Internal,
+                Some(chunk.clone()),
+            )
             .unwrap();
         assert_eq!(region.chunks.len(), 1);
         assert_eq!(region.tags, vec![false]);
@@ -1963,7 +1991,7 @@ mod tests {
             len: 0x800,
         });
         state
-            .push(RegionType::CacheFast, 0x1000, 0x2000, tag, None)
+            .push(RegionType::CacheFast, 0x1000, 0x2000, 0x1000, tag, None)
             .unwrap();
         assert_eq!(state.regions.len(), 1);
 
@@ -1972,7 +2000,7 @@ mod tests {
             len: 0x2000,
         });
         state
-            .push(RegionType::CacheFast, 0x3000, 0x2000, tag, None)
+            .push(RegionType::CacheFast, 0x3000, 0x2000, 0x3000, tag, None)
             .unwrap();
         assert_eq!(state.regions.len(), 1);
 
@@ -1981,7 +2009,7 @@ mod tests {
             len: 0x1fff,
         });
         state
-            .push(RegionType::CacheSlow, 0x5000, 0x2000, tag, None)
+            .push(RegionType::CacheSlow, 0x5000, 0x2000, 0x5000, tag, None)
             .unwrap();
         assert_eq!(state.regions.len(), 2);
 
@@ -1991,7 +2019,7 @@ mod tests {
             len: 0x1000,
         });
         state
-            .push(RegionType::CacheSlow, 0x7000, 0x1000, tag, None)
+            .push(RegionType::CacheSlow, 0x7000, 0x1000, 0x7000, tag, None)
             .unwrap();
         assert_eq!(state.regions.len(), 3);
 
@@ -2008,6 +2036,7 @@ mod tests {
                 RegionType::Backend,
                 0x1000,
                 0x1000,
+                0x1000,
                 BlobIoTag::User(BlobIoSegment {
                     offset: 0,
                     len: 0x800,
@@ -2020,6 +2049,7 @@ mod tests {
                 RegionType::Backend,
                 0x2000,
                 0x1000,
+                0x2000,
                 BlobIoTag::User(BlobIoSegment {
                     offset: 0x100,
                     len: 0x800,
