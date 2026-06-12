@@ -17,6 +17,10 @@ on:
 env:
   RUST_BACKTRACE: 1
 
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   top-images-e2e:
     name: Convert and validate top images
@@ -28,6 +32,14 @@ jobs:
 
       - name: Install Docker
         uses: docker/setup-docker-action@v4
+
+      # The image list points at GHCR mirrors (see mirror-top-images.yml);
+      # authenticate so private packages can be pulled.
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          sudo mkdir -p /root/.docker
+          sudo cp "$HOME/.docker/config.json" /root/.docker/config.json
 
       - name: Start local registry
         run: |

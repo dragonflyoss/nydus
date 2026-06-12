@@ -1,0 +1,95 @@
+name: Mirror Top Images
+
+# Manually-triggered job that mirrors the top Docker Hub images referenced by
+# tests/integration/texture/top-images.txt into this repository's GHCR
+# namespace (ghcr.io/<owner>/<repo>/<image>) so CI is not subject to Docker
+# Hub pull rate limits. Docker Hub rate limiting (HTTP 429) is handled by
+# waiting and retrying.
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: "Space-separated subset of images to mirror (default: all images in the list)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  mirror:
+    name: Mirror images to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Mirror images
+        env:
+          GHCR_NAMESPACE: ghcr.io/${{ github.repository }}
+          IMAGES_OVERRIDE: ${{ github.event.inputs.images }}
+        run: |
+          set -u
+
+          list_file=tests/integration/texture/top-images.txt
+          if [ -n "$IMAGES_OVERRIDE" ]; then
+            images="$IMAGES_OVERRIDE"
+          else
+            # Strip blank lines, comments, an optional GHCR prefix, and tags so
+            # the same list works before and after it is rewritten to GHCR refs.
+            images=$(sed -e 's/#.*$//' -e 's/[[:space:]]//g' -e '/^$/d' \
+                         -e "s|^ghcr\.io/[^/]*/[^/]*/||" -e 's/:[^:]*$//' "$list_file")
+          fi
+
+          failed=""
+          missing=""
+          for image in $images; do
+            src="docker://docker.io/library/${image}:latest"
+            dst="docker://${GHCR_NAMESPACE}/${image}:latest"
+            echo "::group::Mirroring ${image}"
+            attempt=0
+            max_attempts=10
+            ok=0
+            while [ $attempt -lt $max_attempts ]; do
+              attempt=$((attempt + 1))
+              out=$(skopeo copy --all --retry-times 3 "$src" "$dst" 2>&1)
+              status=$?
+              echo "$out"
+              if [ $status -eq 0 ]; then
+                ok=1
+                break
+              fi
+              if echo "$out" | grep -qiE 'toomanyrequests|too many requests|429'; then
+                # Docker Hub pull rate limit: wait with backoff, then retry.
+                wait=$((attempt * 120))
+                echo "Rate limited pulling ${image}; waiting ${wait}s before retry ${attempt}/${max_attempts}..."
+                sleep "$wait"
+                continue
+              fi
+              if echo "$out" | grep -qiE 'manifest unknown|name unknown|not found|404'; then
+                echo "WARNING: ${image} not found on Docker Hub; skipping."
+                missing="$missing $image"
+                ok=1
+                break
+              fi
+              echo "Transient error mirroring ${image}; retry ${attempt}/${max_attempts} in 30s..."
+              sleep 30
+            done
+            if [ $ok -ne 1 ]; then
+              failed="$failed $image"
+            fi
+            echo "::endgroup::"
+          done
+
+          echo "Missing upstream images:${missing:- none}"
+          if [ -n "$failed" ]; then
+            echo "Failed to mirror:${failed}"
+            exit 1
+          fi
+          echo "All images mirrored successfully."

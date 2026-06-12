@@ -70,7 +70,7 @@ func TestTopImages(t *testing.T) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			target := fmt.Sprintf("%s/%s-nydus", registry, image)
+			target := fmt.Sprintf("%s/%s-nydus", registry, imageBaseName(image))
 			workDir := t.TempDir()
 
 			convert := exec.Command(leptonifyBin, "convert",
@@ -105,11 +105,25 @@ func TestTopImages(t *testing.T) {
 	}
 }
 
+// imageBaseName returns the last path component of an image reference so a
+// fully-qualified mirror ref (e.g. "ghcr.io/dragonflyoss/lepton/nginx") maps
+// to a flat repository name in the local target registry.
+func imageBaseName(image string) string {
+	if i := strings.LastIndex(image, "/"); i >= 0 {
+		return image[i+1:]
+	}
+	return image
+}
+
 // isImageNotFound reports whether leptonify output indicates the source image
-// could not be resolved (e.g. a deprecated Docker Hub image returning HTTP 404).
+// could not be resolved (e.g. a deprecated Docker Hub image returning HTTP 404,
+// or a GHCR mirror that was never created because the upstream image is gone).
 func isImageNotFound(output []byte) bool {
 	text := string(output)
-	return strings.Contains(text, "404 Not Found") || strings.Contains(text, ": not found")
+	return strings.Contains(text, "404 Not Found") ||
+		strings.Contains(text, ": not found") ||
+		strings.Contains(text, "manifest unknown") ||
+		strings.Contains(text, "name unknown")
 }
 
 // runLeptonify executes a leptonify command, streaming its combined output into
