@@ -4,7 +4,7 @@ name: Mirror Top Images
 # tests/integration/texture/top-images.txt into this repository's GHCR
 # namespace (ghcr.io/<owner>/<repo>/<image>) so CI is not subject to Docker
 # Hub pull rate limits. Docker Hub rate limiting (HTTP 429) is handled by
-# waiting and retrying.
+# capped exponential backoff with jitter and per-image wait limits.
 on:
   workflow_dispatch:
     inputs:
@@ -54,37 +54,71 @@ jobs:
             dst="docker://${GHCR_NAMESPACE}/${image}:latest"
             echo "::group::Mirroring ${image}"
             attempt=0
-            max_attempts=10
+            generic_failures=0
+            max_generic_failures=10
+            rate_limit_retries=0
+            max_rate_limit_retries=20
+            rate_limit_wait=60
+            max_rate_limit_wait=900
+            total_rate_limit_wait=0
+            max_total_rate_limit_wait=3600
             ok=0
-            while [ $attempt -lt $max_attempts ]; do
+            while :; do
               attempt=$((attempt + 1))
-              out=$(skopeo copy --all --retry-times 3 "$src" "$dst" 2>&1)
-              status=$?
+              status=0
+              # GitHub Actions runs `run:` steps with `bash -e`; use `|| status=$?`
+              # so a failed command substitution does not abort the retry loop.
+              out=$(skopeo copy --all --retry-times 3 "$src" "$dst" 2>&1) || status=$?
               echo "$out"
               if [ $status -eq 0 ]; then
                 ok=1
                 break
               fi
-              if echo "$out" | grep -qiE 'toomanyrequests|too many requests|429'; then
-                # Docker Hub pull rate limit: wait with backoff, then retry.
-                wait=$((attempt * 120))
-                echo "Rate limited pulling ${image}; waiting ${wait}s before retry ${attempt}/${max_attempts}..."
-                sleep "$wait"
-                continue
-              fi
-              if echo "$out" | grep -qiE 'manifest unknown|name unknown|not found|404'; then
+              if printf '%s\n' "$out" | grep -qiE 'manifest unknown|name unknown|not found|404'; then
                 echo "WARNING: ${image} not found on Docker Hub; skipping."
                 missing="$missing $image"
                 ok=1
                 break
               fi
-              echo "Transient error mirroring ${image}; retry ${attempt}/${max_attempts} in 30s..."
+              if printf '%s\n' "$out" | grep -qiE 'toomanyrequests|too many requests|429'; then
+                # Docker Hub pull rate limit: wait with capped exponential backoff
+                # plus jitter, but stop once the per-image wait budget is spent.
+                rate_limit_retries=$((rate_limit_retries + 1))
+                if [ $rate_limit_retries -gt $max_rate_limit_retries ]; then
+                  echo "Rate limited pulling ${image}; exceeded ${max_rate_limit_retries} rate-limit retries."
+                  break
+                fi
+                jitter=$((RANDOM % 31))
+                wait=$((rate_limit_wait + jitter))
+                next_total_rate_limit_wait=$((total_rate_limit_wait + wait))
+                if [ $next_total_rate_limit_wait -gt $max_total_rate_limit_wait ]; then
+                  echo "Rate limited pulling ${image}; waiting ${wait}s would exceed the ${max_total_rate_limit_wait}s per-image wait cap (currently waited ${total_rate_limit_wait}s)."
+                  break
+                fi
+                total_rate_limit_wait=$next_total_rate_limit_wait
+                echo "Rate limited pulling ${image}; copy attempt ${attempt}, rate-limit retry ${rate_limit_retries}/${max_rate_limit_retries}, waiting ${wait}s (cumulative ${total_rate_limit_wait}s/${max_total_rate_limit_wait}s)."
+                sleep "$wait"
+                if [ $rate_limit_wait -lt $max_rate_limit_wait ]; then
+                  rate_limit_wait=$((rate_limit_wait * 2))
+                  if [ $rate_limit_wait -gt $max_rate_limit_wait ]; then
+                    rate_limit_wait=$max_rate_limit_wait
+                  fi
+                fi
+                continue
+              fi
+              generic_failures=$((generic_failures + 1))
+              if [ $generic_failures -ge $max_generic_failures ]; then
+                echo "Transient error mirroring ${image}; exhausted ${max_generic_failures} attempts."
+                break
+              fi
+              echo "Transient error mirroring ${image}; retry ${generic_failures}/${max_generic_failures} in 30s..."
               sleep 30
             done
             if [ $ok -ne 1 ]; then
               failed="$failed $image"
             fi
             echo "::endgroup::"
+            sleep 2
           done
 
           echo "Missing upstream images:${missing:- none}"
