@@ -536,11 +536,8 @@ mod tests {
 
         // Case 1: Subscriber arrives BEFORE data is ready (simulates standard waiting caller)
         let rx_early = rx.clone();
-        let early_handle = tokio::spawn(async move {
-            Group::wait_for_result::<String, String>(rx_early)
-                .await
-                .map(|boxed| boxed)
-        });
+        let early_handle =
+            tokio::spawn(async move { Group::wait_for_result::<String, String>(rx_early).await });
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -561,7 +558,6 @@ mod tests {
         {
             let late_result = Group::wait_for_result::<String, String>(rx_late2)
                 .await
-                .map(|boxed| boxed)
                 .unwrap();
             assert_eq!(
                 late_result, "success",
@@ -570,7 +566,6 @@ mod tests {
 
             let late_result2 = Group::wait_for_result::<String, String>(rx_late1)
                 .await
-                .map(|boxed| boxed)
                 .unwrap();
             assert_eq!(
                 late_result2, "success",

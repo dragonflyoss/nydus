@@ -1729,7 +1729,7 @@ mod tests {
         assert!(err.to_string().contains("invalid scheme"));
         assert!(err.to_string().contains("ftp"));
 
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "transport failure");
+        let io_err = std::io::Error::other("transport failure");
         let err = RegistryError::Transport(io_err);
         assert!(err.to_string().contains("network transport error"));
         assert!(err.to_string().contains("transport failure"));
