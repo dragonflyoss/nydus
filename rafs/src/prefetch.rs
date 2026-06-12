@@ -725,10 +725,7 @@ mod tests {
             if self.cache_succeeds {
                 Ok(true)
             } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "mock cache error",
-                ))
+                Err(std::io::Error::other("mock cache error"))
             }
         }
     }
