@@ -114,7 +114,10 @@ Prefetch Unmerged:          {unmerged_blocks}
 }
 
 fn metric_delta(old: &serde_json::Value, new: &serde_json::Value, label: &str) -> u64 {
-    new[label].as_u64().unwrap() - old[label].as_u64().unwrap()
+    new[label]
+        .as_u64()
+        .unwrap()
+        .saturating_sub(old[label].as_u64().unwrap())
 }
 
 fn metric_vec_delta(old: &serde_json::Value, new: &serde_json::Value, label: &str) -> Vec<u64> {
@@ -124,7 +127,12 @@ fn metric_vec_delta(old: &serde_json::Value, new: &serde_json::Value, label: &st
     let mut r = Vec::new();
 
     for i in 0..new_array.len() {
-        r.push(new_array[i].as_u64().unwrap() - old_array[i].as_u64().unwrap());
+        r.push(
+            new_array[i]
+                .as_u64()
+                .unwrap()
+                .saturating_sub(old_array[i].as_u64().unwrap()),
+        );
     }
 
     r
@@ -562,6 +570,13 @@ mod tests {
     }
 
     #[test]
+    fn test_metric_delta_counter_reset() {
+        let old = serde_json::json!({"read_count": 10});
+        let new = serde_json::json!({"read_count": 4});
+        assert_eq!(metric_delta(&old, &new, "read_count"), 0);
+    }
+
+    #[test]
     fn test_metric_vec_delta() {
         let old = serde_json::json!({"dist": [1, 2, 3]});
         let new = serde_json::json!({"dist": [3, 5, 9]});
@@ -579,6 +594,13 @@ mod tests {
     fn test_metric_vec_delta_zero_difference() {
         let old = serde_json::json!({"dist": [2, 4, 8]});
         let new = serde_json::json!({"dist": [2, 4, 8]});
+        assert_eq!(metric_vec_delta(&old, &new, "dist"), vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn test_metric_vec_delta_counter_reset() {
+        let old = serde_json::json!({"dist": [5, 9, 12]});
+        let new = serde_json::json!({"dist": [3, 9, 2]});
         assert_eq!(metric_vec_delta(&old, &new, "dist"), vec![0, 0, 0]);
     }
 
