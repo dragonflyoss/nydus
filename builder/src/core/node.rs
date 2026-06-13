@@ -533,6 +533,7 @@ impl Node {
         let mut chunk_info = None;
         let encrypted = blob_ctx.blob_cipher != crypt::Algorithm::None;
         let mut dumped_size = None;
+        let mut is_batched = false;
 
         if let Some(batch_gen) = ctx.blob_batch_generator.as_ref() {
             if self.inode.child_count() == 1 && d_size < ctx.batch_size / 2 {
@@ -572,8 +573,11 @@ impl Node {
                     )?);
                     batch.append_chunk_data_buf(chunk_data);
                 }
+                is_batched = true;
             }
-        } else if !ctx.blob_features.contains(BlobFeatures::SEPARATE) {
+        }
+
+        if !is_batched {
             // For other case which needs to write chunk data to data blobs. Which means,
             // `tar-ref`, `targz-ref`, `estargz-ref`, and `estargzindex-ref`, are excluded.
 
@@ -591,13 +595,15 @@ impl Node {
                 }
             }
 
-            let (pre_c_offset, c_size, is_compressed) =
-                Self::write_chunk_data(ctx, blob_ctx, blob_writer, chunk_data)
-                    .with_context(|| format!("failed to write chunk data {:?}", self.path()))?;
-            dumped_size = Some(dumped_size.unwrap_or(0) + c_size);
-            chunk.set_compressed_offset(pre_c_offset);
-            chunk.set_compressed_size(c_size);
-            chunk.set_compressed(is_compressed);
+            if !ctx.blob_features.contains(BlobFeatures::SEPARATE) {
+                let (pre_c_offset, c_size, is_compressed) =
+                    Self::write_chunk_data(ctx, blob_ctx, blob_writer, chunk_data)
+                        .with_context(|| format!("failed to write chunk data {:?}", self.path()))?;
+                dumped_size = Some(dumped_size.unwrap_or(0) + c_size);
+                chunk.set_compressed_offset(pre_c_offset);
+                chunk.set_compressed_size(c_size);
+                chunk.set_compressed(is_compressed);
+            }
         }
 
         if let Some(blob_cache) = ctx.blob_cache_generator.as_ref() {
