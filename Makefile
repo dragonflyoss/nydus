@@ -209,3 +209,11 @@ nydus-overlayfs-lint:
 docker-static:
 	docker build -t nydus-rs-static --build-arg RUST_TARGET=${RUST_TARGET_STATIC} misc/musl-static
 	docker run --rm ${CARGO_BUILD_GEARS} -e RUST_TARGET=${RUST_TARGET_STATIC} --workdir /nydus-rs -v ${current_dir}:/nydus-rs nydus-rs-static
+
+# Build the perf-test image (Dragonfly proxy SDK mode). See misc/perftest/README.md.
+PERFTEST_IMAGE ?= nydus-perftest:latest
+perftest-image:
+	docker build -f misc/perftest/Dockerfile \
+		--build-arg RUST_TARGET=${RUST_TARGET_STATIC} \
+		-t ${PERFTEST_IMAGE} ${current_dir}
+.PHONY: perftest-image

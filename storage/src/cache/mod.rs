@@ -24,6 +24,7 @@ use std::time::Instant;
 use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_utils::compress::zlib_random::ZranDecoder;
 use nydus_utils::crypt::{self, Cipher, CipherContext};
+use nydus_utils::metrics::BlobcacheMetrics;
 use nydus_utils::{compress, digest};
 
 use crate::backend::{BlobBackend, BlobReader, RequestSource};
@@ -428,6 +429,12 @@ pub trait BlobCache: Send + Sync {
 
     fn get_blob_meta_info(&self) -> Result<Option<Arc<BlobCompressionContextInfo>>> {
         Ok(None)
+    }
+
+    /// Get the [BlobcacheMetrics](../../nydus_utils/metrics/struct.BlobcacheMetrics.html) for this
+    /// cache object. Returns `None` for cache implementations that do not track metrics.
+    fn metrics(&self) -> Option<Arc<BlobcacheMetrics>> {
+        None
     }
 }
 
