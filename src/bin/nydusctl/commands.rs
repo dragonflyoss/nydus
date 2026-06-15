@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use nydus::{FsBackendDescriptor, FsBackendType};
 
 use crate::client::NydusdClient;
@@ -26,6 +26,10 @@ fn load_param_interval(params: &Option<CommandParams>) -> Result<Option<u32>> {
     } else {
         Ok(None)
     }
+}
+
+fn load_mount_config(path: &str) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("failed to read mount config {}", path))
 }
 
 pub(crate) struct CommandCache {}
@@ -463,7 +467,7 @@ impl CommandMount {
     ) -> Result<()> {
         let p = params.unwrap();
         let (source, mountpoint, fs_type) = (&p["source"], &p["mountpoint"], &p["type"]);
-        let config = std::fs::read_to_string(&p["config"]).unwrap();
+        let config = load_mount_config(&p["config"])?;
         let cmd = json!({"source": source, "fs_type": fs_type, "config": config}).to_string();
 
         client
@@ -497,6 +501,7 @@ impl CommandUmount {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vmm_sys_util::tempfile::TempFile;
 
     #[test]
     fn test_load_param_interval() {
@@ -543,6 +548,23 @@ mod tests {
 
         let err = load_param_interval(&Some(params)).unwrap_err();
         assert!(err.to_string().contains("Invalid interval input"));
+    }
+
+    #[test]
+    fn test_load_mount_config() {
+        let file = TempFile::new().unwrap();
+        std::fs::write(file.as_path(), "mode = \"direct\"").unwrap();
+
+        let config = load_mount_config(file.as_path().to_str().unwrap()).unwrap();
+        assert_eq!(config, "mode = \"direct\"");
+    }
+
+    #[test]
+    fn test_load_mount_config_missing_file() {
+        let err = load_mount_config("/definitely/missing/nydus-config.toml").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("failed to read mount config /definitely/missing/nydus-config.toml"));
     }
 
     #[test]
