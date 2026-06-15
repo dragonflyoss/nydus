@@ -26,6 +26,11 @@ import (
 //	LEPTONFS_TOP_IMAGES_REGISTRY     Target registry (default "localhost:5000").
 //	LEPTONFS_TOP_IMAGES_CONCURRENCY  Number of images processed in parallel (default 5).
 //	LEPTONFS_TOP_IMAGES_LIST         Path to the image list (default texture/top-images.txt).
+//	LEPTONFS_TOP_IMAGES_WORKDIR      Base directory for the per-image convert/check
+//	                                 scratch work directories. Point this at a mount
+//	                                 with ample free space (e.g. /mnt on GitHub
+//	                                 runners) to avoid "no space left on device".
+//	                                 Defaults to the test's temp dir.
 //
 // The test requires root because `leptonify convert` preserves file ownership
 // and `leptonify check` mounts the converted image through FUSE.
@@ -57,6 +62,15 @@ func TestTopImages(t *testing.T) {
 	images := readImageList(t, listPath)
 	require.NotEmpty(t, images, "image list %q is empty", listPath)
 
+	// Base directory for the per-image scratch work directories. Convert/check
+	// stage multi-gigabyte blobs and rootfs trees, so when LEPTONFS_TOP_IMAGES_WORKDIR
+	// is set we place the work directories on that (larger) mount instead of the
+	// default temp filesystem, which on CI runners is the small root volume.
+	workBase := os.Getenv("LEPTONFS_TOP_IMAGES_WORKDIR")
+	if workBase != "" {
+		require.NoError(t, os.MkdirAll(workBase, 0o755))
+	}
+
 	leptonifyBin := mustLookupLeptonify(t)
 	leptonBin := mustLookupExecutable(t, "lepton")
 
@@ -71,7 +85,16 @@ func TestTopImages(t *testing.T) {
 			defer func() { <-sem }()
 
 			target := fmt.Sprintf("%s/%s-nydus", registry, imageBaseName(image))
-			workDir := t.TempDir()
+
+			// Create the work directory under the (optionally larger) work base
+			// and remove it as soon as this image finishes. The explicit cleanup
+			// runs on success, failure, or skip — deferred functions execute even
+			// when require.* or t.Skip* abort the goroutine via runtime.Goexit —
+			// so scratch data never accumulates across the parallel run and fills
+			// up the disk.
+			workDir, err := os.MkdirTemp(workBase, "leptonify-top-images-")
+			require.NoError(t, err)
+			defer func() { _ = os.RemoveAll(workDir) }()
 
 			convert := exec.Command(leptonifyBin, "convert",
 				"--source", image,

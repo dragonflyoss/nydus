@@ -67,6 +67,15 @@ jobs:
 
       - name: Run top-images e2e test
         run: |
+          # Convert/check stage many multi-gigabyte images in parallel. The
+          # default temp filesystem lives on the small root volume, so place the
+          # scratch work directories on the larger /mnt ephemeral disk to avoid
+          # "no space left on device". The test removes each image's work dir as
+          # soon as it finishes, regardless of success.
+          sudo mkdir -p /mnt/leptonify-top-images
+          sudo chmod 0777 /mnt/leptonify-top-images
+          df -h / /mnt
           make test-top-images \
             TOP_IMAGES_CONCURRENCY="${{ github.event.inputs.concurrency }}" \
-            TOP_IMAGES_REGISTRY="${{ github.event.inputs.registry }}"
+            TOP_IMAGES_REGISTRY="${{ github.event.inputs.registry }}" \
+            TOP_IMAGES_WORKDIR="/mnt/leptonify-top-images"
