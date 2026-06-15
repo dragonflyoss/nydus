@@ -1,4 +1,4 @@
-version = 4
+version = 3
 root = "/var/lib/containerd"
 state = "/run/containerd"
 oom_score = 0
