@@ -25,7 +25,7 @@ use nydus_rafs::metadata::inode::InodeWrapper;
 use nydus_rafs::metadata::layout::RafsXAttrs;
 use nydus_storage::meta::BlobChunkInfoV1Ondisk;
 use nydus_utils::compress::Algorithm;
-use nydus_utils::digest::RafsDigest;
+use nydus_utils::digest::{DigestHasher, RafsDigest};
 
 use std::mem::size_of;
 use std::path::PathBuf;
@@ -222,6 +222,14 @@ impl Generator {
 
         // Update child count.
         node.inode.set_child_count(node.chunks.len() as u32);
+
+        // For RAFS v5, regular inode digest should be the hash of all chunk digests.
+        let mut inode_hasher = RafsDigest::hasher(ctx.digester);
+        for chunk in node.chunks.iter() {
+            inode_hasher.digest_update(chunk.inner.id().as_ref());
+        }
+        node.inode.set_digest(inode_hasher.digest_finalize());
+
         let child = Tree::new(node);
         child
             .borrow_mut_node()
@@ -237,9 +245,10 @@ impl Generator {
         chunkdict_chunks: &[ChunkdictChunkInfo],
         chunkdict_blobs: &[ChunkdictBlobInfo],
     ) -> Result<()> {
-        for (index, chunk_info) in chunkdict_chunks.iter().enumerate() {
-            let chunk_size: u32 = chunk_info.chunk_compressed_size;
-            let file_offset = index as u64 * chunk_size as u64;
+        let mut file_offset = 0u64;
+        for chunk_info in chunkdict_chunks.iter() {
+            let cur_file_offset = file_offset;
+            file_offset += chunk_info.chunk_uncompressed_size as u64;
             let mut chunk = ChunkWrapper::new(ctx.fs_version);
 
             // Update blob context.
@@ -279,11 +288,15 @@ impl Generator {
             let chunk_index = blob_ctx.alloc_chunk_index()?;
             chunk.set_blob_index(blob_index);
             chunk.set_index(chunk_index);
-            chunk.set_file_offset(file_offset);
+            chunk.set_file_offset(cur_file_offset);
             chunk.set_compressed_size(chunk_info.chunk_compressed_size);
             chunk.set_compressed_offset(chunk_info.chunk_compressed_offset);
             chunk.set_uncompressed_size(chunk_info.chunk_uncompressed_size);
             chunk.set_uncompressed_offset(chunk_info.chunk_uncompressed_offset);
+            chunk.set_compressed(
+                blob_ctx.blob_compressor != Algorithm::None
+                    && chunk_info.chunk_compressed_size != chunk_info.chunk_uncompressed_size,
+            );
             chunk.set_id(RafsDigest::from_string(&chunk_info.chunk_digest));
             chunk.set_crc32(chunk_info.chunk_crc32);
 
