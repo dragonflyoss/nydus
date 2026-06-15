@@ -85,10 +85,10 @@ jobs:
       shell: bash
     - name: Set up Docker Buildx
       if: matrix.arch == 'riscv64'
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
     - name: Build and push Docker image
       if: matrix.arch == 'riscv64'
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: ./.github/workflows/Dockerfile.cross
@@ -160,9 +160,8 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
-    - name: Docker Cache
-      uses: jpribyl/action-docker-layer-caching@v0.1.0
-      continue-on-error: true
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v4
     - name: Download Nydus
       uses: actions/download-artifact@v7
       with:
