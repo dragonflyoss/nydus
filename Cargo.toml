@@ -38,7 +38,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 clap = { version = "4.0.18", features = ["derive", "cargo"] }
-flexi_logger = { version = "0.25", features = ["compress"] }
+flexi_logger = { version = "0.28.0", features = ["compress"] }
 fuse-backend-rs = { workspace = true }
 hex = "0.4.3"
 hyper = { version = "1.8.1", features = ["client"] }

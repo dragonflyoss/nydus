@@ -145,6 +145,7 @@ pub fn setup_logging(
             .map_err(|_e| enosys!())?
             .log_to_file(spec)
             .append()
+            .panic_if_error_channel_is_broken(false)
             .format(opt_format);
 
         // Set log rotation
@@ -167,6 +168,7 @@ pub fn setup_logging(
         // can't change log level to a higher level than what is passed to `flexi_logger`.
         Logger::try_with_env_or_str("trace")
             .map_err(|_e| enosys!())?
+            .panic_if_error_channel_is_broken(false)
             .format(colored_opt_format)
             .start()
             .map_err(|e| eother!(e))?;
