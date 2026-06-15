@@ -35,10 +35,10 @@ jobs:
       shell: bash
     - name: Set up Docker Buildx
       if: matrix.arch == 'riscv64'
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@v4
     - name: Build and push Docker image
       if: matrix.arch == 'riscv64'
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: ./.github/workflows/Dockerfile.cross
