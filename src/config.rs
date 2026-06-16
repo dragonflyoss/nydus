@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::prefetch::DEFAULT_PREFETCH_THREADS;
+use crate::storage::prefetch::DEFAULT_PREFETCH_THREADS;
 
-/// Top-level storage configuration, typically loaded from a YAML file passed to
-/// `lepton fuse --config`.
+/// Top-level lepton configuration, typically loaded from a YAML file passed to
+/// `lepton fuse --config` or constructed by an embedding application before
+/// creating a [`LeptonAccessor`](crate::accessor::LeptonAccessor).
 ///
 /// ```yaml
 /// backend:
@@ -22,7 +23,7 @@ use super::prefetch::DEFAULT_PREFETCH_THREADS;
 ///   threads: 10
 /// ```
 #[derive(Debug, Clone, Deserialize)]
-pub struct StorageConfig {
+pub struct Config {
     pub backend: BackendConfig,
     pub cache: CacheConfig,
     #[serde(default)]
@@ -55,7 +56,7 @@ pub struct LocalDirConfig {
     pub dir: PathBuf,
 }
 
-/// Prefetch configuration controlling background blob prefetch after mount.
+/// Prefetch configuration controlling background blob prefetch.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrefetchConfig {
     #[serde(default = "default_prefetch_enable")]
@@ -81,18 +82,18 @@ impl Default for PrefetchConfig {
     }
 }
 
-impl StorageConfig {
-    /// Load and parse a storage configuration from a YAML file.
+impl Config {
+    /// Load and parse a lepton configuration from a YAML file.
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let contents = fs::read_to_string(path)
             .map_err(|err| anyhow::anyhow!("failed to read config {}: {}", path.display(), err))?;
         Self::from_yaml(&contents)
     }
 
-    /// Parse a storage configuration from a YAML string.
+    /// Parse a lepton configuration from a YAML string.
     pub fn from_yaml(contents: &str) -> anyhow::Result<Self> {
         serde_yaml::from_str(contents)
-            .map_err(|err| anyhow::anyhow!("failed to parse storage config: {err}"))
+            .map_err(|err| anyhow::anyhow!("failed to parse lepton config: {err}"))
     }
 
     /// Directory used by the local cache to store decoded chunks.
@@ -125,7 +126,7 @@ prefetch:
   enable: true
   threads: 8
 ";
-        let config = StorageConfig::from_yaml(yaml).unwrap();
+        let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(config.backend.kind, "local");
         let backend_dir: PathBuf =
             serde_yaml::from_value(config.backend.config["dir"].clone()).unwrap();
@@ -150,7 +151,7 @@ cache:
   config:
     dir: /cache
 ";
-        let config = StorageConfig::from_yaml(yaml).unwrap();
+        let config = Config::from_yaml(yaml).unwrap();
         assert!(config.prefetch.enable);
         assert_eq!(config.prefetch.threads, DEFAULT_PREFETCH_THREADS);
     }
@@ -169,7 +170,7 @@ cache:
 prefetch:
   enable: false
 ";
-        let config = StorageConfig::from_yaml(yaml).unwrap();
+        let config = Config::from_yaml(yaml).unwrap();
         assert!(!config.prefetch.enable);
         assert_eq!(config.prefetch.threads, DEFAULT_PREFETCH_THREADS);
     }
@@ -190,7 +191,7 @@ cache:
   config:
     dir: /cache
 ";
-        let config = StorageConfig::from_yaml(yaml).unwrap();
+        let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(config.backend.kind, "registry");
         assert_eq!(
             config.backend.config["host"].as_str(),

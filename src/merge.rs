@@ -70,7 +70,7 @@ pub fn merge_sources_to_bootstrap_bytes(
 
     let mut merged_root: Option<MergeNode> = None;
     let mut device_slots = Vec::new();
-    let mut device_ids = HashMap::new();
+    let mut blob_indexes = HashMap::new();
 
     for (layer_id, source) in sources.iter().enumerate() {
         let source_blob_id = parse_source_blob_id(source)
@@ -80,7 +80,7 @@ pub fn merge_sources_to_bootstrap_bytes(
             source,
             source_blob_id,
             &mut device_slots,
-            &mut device_ids,
+            &mut blob_indexes,
         )
         .with_context(|| format!("failed to load layer: {}", source.display()))?;
         merged_root = Some(match merged_root {
@@ -89,13 +89,14 @@ pub fn merge_sources_to_bootstrap_bytes(
         });
     }
 
+    let mut merged_root = merged_root.ok_or_else(|| anyhow!("merge produced no root node"))?;
+    strip_whiteout_entries(&mut merged_root, whiteout_spec);
+
     let mut inodes = Vec::new();
     let mut ino_counter = 0u32;
     let mut hardlink_indexes = HashMap::new();
     flatten_node(
-        merged_root
-            .as_ref()
-            .ok_or_else(|| anyhow!("merge produced no root node"))?,
+        &merged_root,
         &mut inodes,
         &mut ino_counter,
         &mut hardlink_indexes,
@@ -111,10 +112,9 @@ pub fn merge_sources_to_bootstrap_bytes(
         .min()
         .unwrap_or(build_time);
     let uuid = [0u8; 16];
-    let device_count =
-        u16::try_from(device_slots.len()).context("device slot count exceeds u16")?;
-    let prefetch_device_ids = (1..=device_count).collect::<Vec<_>>();
-    set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_device_ids)?;
+    let blob_count = u16::try_from(device_slots.len()).context("device slot count exceeds u16")?;
+    let prefetch_blob_indexes = (1..=blob_count).collect::<Vec<_>>();
+    set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_blob_indexes)?;
 
     render_bootstrap(
         &mut inodes,
@@ -126,31 +126,31 @@ pub fn merge_sources_to_bootstrap_bytes(
 }
 
 /// Rewrite an existing merged bootstrap for the `optimize` flow: append an
-/// "ondemand" device slot for the redirect blob and put its device id first in
-/// the root prefetch xattr so it is warmed before everything else. The parent
-/// bootstrap is read-only; the rewritten bootstrap bytes are returned.
-pub fn rewrite_bootstrap_with_ondemand_device(
+/// "ondemand" device slot for the redirect blob and put its blob index first
+/// in the root prefetch xattr so it is warmed before everything else. The
+/// parent bootstrap is read-only; the rewritten bootstrap bytes are returned.
+pub fn rewrite_bootstrap_with_ondemand_blob(
     parent_bootstrap: &Path,
     ondemand_blob_id: &[u8; EROFS_BLOB_ID_SIZE],
     ondemand_blocks: u64,
 ) -> Result<Vec<u8>> {
     let reader = ErofsReader::open_layer(parent_bootstrap)
         .with_context(|| format!("failed to open bootstrap: {}", parent_bootstrap.display()))?;
-    let device_infos = reader.device_infos()?;
-    if device_infos.is_empty() {
-        bail!("parent bootstrap contains no blob devices");
+    let blob_infos = reader.blob_infos()?;
+    if blob_infos.is_empty() {
+        bail!("parent bootstrap contains no blobs");
     }
-    if device_infos
+    if blob_infos
         .iter()
         .any(|info| info.blob_id == *ondemand_blob_id)
     {
-        bail!("parent bootstrap already contains the ondemand blob device");
+        bail!("parent bootstrap already contains the ondemand blob");
     }
 
-    // Devices keep their ids, so chunk indexes round-trip unchanged.
-    let identity: HashMap<u16, u16> = device_infos
+    // Blobs keep their indexes, so chunk indexes round-trip unchanged.
+    let identity: HashMap<u16, u16> = blob_infos
         .iter()
-        .map(|info| (info.device_id, info.device_id))
+        .map(|info| (info.blob_index, info.blob_index))
         .collect();
     let root = load_node(
         &reader,
@@ -169,27 +169,27 @@ pub fn rewrite_bootstrap_with_ondemand_device(
         bail!("bootstrap produced no inodes");
     }
 
-    let mut device_slots: Vec<ErofsDeviceSlot> = device_infos
+    let mut device_slots: Vec<ErofsDeviceSlot> = blob_infos
         .iter()
         .map(|info| ErofsDeviceSlot::with_blob_id(info.blocks, &info.blob_id))
         .collect();
-    let ondemand_device_id = u16::try_from(device_slots.len() + 1)
-        .context("ondemand device id exceeds u16 device table range")?;
+    let ondemand_blob_index = u16::try_from(device_slots.len() + 1)
+        .context("ondemand blob index exceeds u16 device table range")?;
     device_slots.push(ErofsDeviceSlot::with_blob_id(
         ondemand_blocks,
         ondemand_blob_id,
     ));
 
     // Ondemand blob first, then the existing prefetch order (defaulting to all
-    // devices ascending when the parent has no prefetch xattr).
-    let mut prefetch_ids = vec![ondemand_device_id];
+    // blobs ascending when the parent has no prefetch xattr).
+    let mut prefetch_indexes = vec![ondemand_blob_index];
     let existing = reader.read_prefetch_order();
     if existing.is_empty() {
-        prefetch_ids.extend(device_infos.iter().map(|info| info.device_id));
+        prefetch_indexes.extend(blob_infos.iter().map(|info| info.blob_index));
     } else {
-        prefetch_ids.extend(existing);
+        prefetch_indexes.extend(existing);
     }
-    set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_ids)?;
+    set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_indexes)?;
 
     let epoch = inodes
         .iter()
@@ -211,12 +211,12 @@ fn load_layer(
     source: &Path,
     source_blob_id: [u8; EROFS_BLOB_ID_SIZE],
     device_slots: &mut Vec<ErofsDeviceSlot>,
-    device_ids: &mut HashMap<[u8; EROFS_BLOB_ID_SIZE], u16>,
+    blob_indexes: &mut HashMap<[u8; EROFS_BLOB_ID_SIZE], u16>,
 ) -> Result<MergeNode> {
     let reader = ErofsReader::open_layer(source)?;
     validate_single_layer_blob_source(source, &reader)?;
     let layer_epoch = reader.sb().epoch();
-    let local_to_global = register_devices(&reader, source_blob_id, device_slots, device_ids)?;
+    let local_to_global = register_blobs(&reader, source_blob_id, device_slots, blob_indexes)?;
     load_node(
         &reader,
         layer_id,
@@ -226,32 +226,32 @@ fn load_layer(
     )
 }
 
-fn register_devices(
+fn register_blobs(
     reader: &ErofsReader,
     source_blob_id: [u8; EROFS_BLOB_ID_SIZE],
     device_slots: &mut Vec<ErofsDeviceSlot>,
-    device_ids: &mut HashMap<[u8; EROFS_BLOB_ID_SIZE], u16>,
+    blob_indexes: &mut HashMap<[u8; EROFS_BLOB_ID_SIZE], u16>,
 ) -> Result<HashMap<u16, u16>> {
     let mut local_to_global = HashMap::new();
-    let infos = reader.device_infos()?;
+    let infos = reader.blob_infos()?;
     let info = infos
         .first()
-        .ok_or_else(|| anyhow!("merge source does not contain an external blob device"))?;
+        .ok_or_else(|| anyhow!("merge source does not contain an external blob"))?;
     // The device slot stores the full-blob digest (the merge source file name),
     // not the per-layer data digest embedded in the source bootstrap, so a
     // registry backend can address the blob by the same digest.
-    let global_device_id = if let Some(existing) = device_ids.get(&source_blob_id) {
+    let global_blob_index = if let Some(existing) = blob_indexes.get(&source_blob_id) {
         *existing
     } else {
         let next = device_slots.len() as u16 + 1;
         device_slots.push(ErofsDeviceSlot::with_blob_id(info.blocks, &source_blob_id));
-        device_ids.insert(source_blob_id, next);
+        blob_indexes.insert(source_blob_id, next);
         next
     };
-    local_to_global.insert(info.device_id, global_device_id);
+    local_to_global.insert(info.blob_index, global_blob_index);
 
     if infos.len() > 1 {
-        bail!("merge source currently supports exactly one external blob device")
+        bail!("merge source currently supports exactly one external blob")
     }
     Ok(local_to_global)
 }
@@ -269,11 +269,11 @@ fn validate_single_layer_blob_source(path: &Path, reader: &ErofsReader) -> Resul
         .with_context(|| format!("failed to stat merge source: {}", path.display()))?
         .len();
     let primary_image_size = reader.sb().blocks() * EROFS_BLOCK_SIZE as u64;
-    let device_infos = reader.device_infos()?;
-    if device_infos.len() != 1 {
-        bail!("merge source must contain exactly one external blob device");
+    let blob_infos = reader.blob_infos()?;
+    if blob_infos.len() != 1 {
+        bail!("merge source must contain exactly one external blob");
     }
-    if device_infos[0].blocks > 0 && file_size == primary_image_size {
+    if blob_infos[0].blocks > 0 && file_size == primary_image_size {
         bail!("merge source must be a full blob file, not a metadata-only bootstrap");
     }
     Ok(())
@@ -284,7 +284,7 @@ fn load_node(
     layer_id: u32,
     nid: u64,
     epoch: u64,
-    device_ids: &HashMap<u16, u16>,
+    blob_indexes: &HashMap<u16, u16>,
 ) -> Result<MergeNode> {
     let inode = reader
         .inode(nid)
@@ -307,7 +307,7 @@ fn load_node(
                 }
                 children.insert(
                     entry.name.clone(),
-                    load_node(reader, layer_id, entry.nid, epoch, device_ids)
+                    load_node(reader, layer_id, entry.nid, epoch, blob_indexes)
                         .with_context(|| format!("failed to load child {}", entry.name))?,
                 );
             }
@@ -326,9 +326,9 @@ fn load_node(
                         Ok(index)
                     } else {
                         let mapped =
-                            device_ids.get(&index.device_id).copied().ok_or_else(|| {
+                            blob_indexes.get(&index.device_id).copied().ok_or_else(|| {
                                 anyhow!(
-                                    "missing global device mapping for source device {}",
+                                    "missing global blob index mapping for source blob {}",
                                     index.device_id
                                 )
                             })?;
@@ -406,12 +406,15 @@ fn overlay_directories(
         merged_children.clear();
     }
 
-    for (name, child) in upper_children {
-        if is_opaque_marker(&name, whiteout_spec) {
-            continue;
-        }
-        if let Some(target) = whiteout_target(&name, whiteout_spec) {
+    for name in upper_children.keys() {
+        if let Some(target) = whiteout_target(name, whiteout_spec) {
             merged_children.remove(target);
+        }
+    }
+
+    for (name, child) in upper_children {
+        if is_opaque_marker(&name, whiteout_spec) || whiteout_target(&name, whiteout_spec).is_some()
+        {
             continue;
         }
 
@@ -451,6 +454,19 @@ fn whiteout_target(name: &str, whiteout_spec: WhiteoutSpec) -> Option<&str> {
     }
 }
 
+fn strip_whiteout_entries(node: &mut MergeNode, whiteout_spec: WhiteoutSpec) {
+    let MergeNodeData::Directory { children } = &mut node.data else {
+        return;
+    };
+
+    children.retain(|name, _| {
+        !is_opaque_marker(name, whiteout_spec) && whiteout_target(name, whiteout_spec).is_none()
+    });
+    for child in children.values_mut() {
+        strip_whiteout_entries(child, whiteout_spec);
+    }
+}
+
 fn flatten_node(
     node: &MergeNode,
     inodes: &mut Vec<InodeInfo>,
@@ -458,14 +474,14 @@ fn flatten_node(
     hardlink_indexes: &mut HashMap<MergeLinkId, usize>,
 ) -> usize {
     if let Some(link_id) = node.link_id {
-        if let Some(inode_idx) = hardlink_indexes.get(&link_id) {
-            return *inode_idx;
+        if let Some(inode_index) = hardlink_indexes.get(&link_id) {
+            return *inode_index;
         }
     }
 
     *ino_counter += 1;
     let ino = *ino_counter;
-    let inode_idx = inodes.len();
+    let inode_index = inodes.len();
 
     match &node.data {
         MergeNodeData::Directory { children } => {
@@ -493,7 +509,7 @@ fn flatten_node(
             let mut child_entries = Vec::new();
             let mut subdir_count = 0u32;
             for (name, child) in children {
-                let child_idx = flatten_node(child, inodes, ino_counter, hardlink_indexes);
+                let child_index = flatten_node(child, inodes, ino_counter, hardlink_indexes);
                 let file_type = mode_to_erofs_file_type(child.mode);
                 if file_type == EROFS_FT_DIR {
                     subdir_count += 1;
@@ -501,18 +517,18 @@ fn flatten_node(
                 child_entries.push(DirEntry {
                     name: name.clone(),
                     file_type,
-                    inode_idx: child_idx,
+                    inode_index: child_index,
                 });
             }
 
             let nlink = 2 + subdir_count;
             let is_extended = needs_extended(0, node.uid, node.gid, nlink);
-            inodes[inode_idx].nlink = nlink;
-            inodes[inode_idx].is_extended = is_extended;
+            inodes[inode_index].nlink = nlink;
+            inodes[inode_index].is_extended = is_extended;
             if let InodeData::Directory {
                 children: ref mut dir_children,
                 ..
-            } = inodes[inode_idx].data
+            } = inodes[inode_index].data
             {
                 *dir_children = child_entries;
             }
@@ -541,7 +557,7 @@ fn flatten_node(
                 xattrs: node.xattrs.clone(),
             });
             if let Some(link_id) = node.link_id {
-                hardlink_indexes.insert(link_id, inode_idx);
+                hardlink_indexes.insert(link_id, inode_index);
             }
         }
         MergeNodeData::Symlink { target } => {
@@ -603,9 +619,171 @@ fn flatten_node(
         }
     }
 
-    inode_idx
+    inode_index
 }
 
 fn needs_extended(size: u64, uid: u32, gid: u32, nlink: u32) -> bool {
     size > u32::MAX as u64 || uid > u16::MAX as u32 || gid > u16::MAX as u32 || nlink > 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn directory(entries: Vec<(&str, MergeNode)>) -> MergeNode {
+        let children = entries
+            .into_iter()
+            .map(|(name, node)| (name.to_string(), node))
+            .collect();
+        merge_node(MergeNodeData::Directory { children })
+    }
+
+    fn regular_file() -> MergeNode {
+        merge_node(MergeNodeData::RegularFile {
+            chunk_indexes: Vec::new(),
+            chunkbits: EROFS_BLKSZBITS as u32,
+        })
+    }
+
+    fn merge_node(data: MergeNodeData) -> MergeNode {
+        let mode = match data {
+            MergeNodeData::Directory { .. } => libc::S_IFDIR as u16 | 0o755,
+            MergeNodeData::RegularFile { .. } => libc::S_IFREG as u16 | 0o644,
+            _ => libc::S_IFREG as u16 | 0o644,
+        };
+        MergeNode {
+            link_id: None,
+            mode,
+            uid: 0,
+            gid: 0,
+            size: 0,
+            mtime: 0,
+            mtime_nsec: 0,
+            nlink: 1,
+            xattrs: Vec::new(),
+            data,
+        }
+    }
+
+    fn child_names(node: &MergeNode) -> Vec<String> {
+        let MergeNodeData::Directory { children } = &node.data else {
+            panic!("not a directory")
+        };
+        children.keys().cloned().collect()
+    }
+
+    #[test]
+    fn strip_whiteout_entries_removes_opaque_marker_from_inserted_directory() {
+        let mut root = directory(vec![(
+            "opt",
+            directory(vec![(
+                "yarn-v1.22.19",
+                directory(vec![(OCI_OPAQUE_MARKER, regular_file())]),
+            )]),
+        )]);
+
+        strip_whiteout_entries(&mut root, WhiteoutSpec::Oci);
+
+        let MergeNodeData::Directory { children } = &root.data else {
+            panic!("root should be a directory")
+        };
+        let opt = children.get("opt").unwrap();
+        let MergeNodeData::Directory { children } = &opt.data else {
+            panic!("opt should be a directory")
+        };
+        let yarn = children.get("yarn-v1.22.19").unwrap();
+        assert!(child_names(yarn).is_empty());
+    }
+
+    #[test]
+    fn strip_whiteout_entries_removes_plain_whiteout_marker() {
+        let mut root = directory(vec![
+            (".wh.removed", regular_file()),
+            ("kept", regular_file()),
+        ]);
+
+        strip_whiteout_entries(&mut root, WhiteoutSpec::Oci);
+
+        assert_eq!(child_names(&root), vec!["kept"]);
+    }
+
+    #[test]
+    fn overlay_opaque_directory_keeps_upper_entries_and_drops_marker() {
+        let lower = directory(vec![(
+            "opq",
+            directory(vec![
+                ("old.txt", regular_file()),
+                ("subdir", directory(Vec::new())),
+            ]),
+        )]);
+        let upper = directory(vec![(
+            "opq",
+            directory(vec![
+                (OCI_OPAQUE_MARKER, regular_file()),
+                ("new.txt", regular_file()),
+            ]),
+        )]);
+
+        let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
+        strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
+
+        let MergeNodeData::Directory { children } = &merged.data else {
+            panic!("root should be a directory")
+        };
+        assert_eq!(child_names(children.get("opq").unwrap()), vec!["new.txt"]);
+    }
+
+    #[test]
+    fn overlay_plain_whiteout_removes_lower_entry_and_marker() {
+        let lower = directory(vec![("kept", regular_file()), ("removed", regular_file())]);
+        let upper = directory(vec![(".wh.removed", regular_file())]);
+
+        let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
+        strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
+
+        assert_eq!(child_names(&merged), vec!["kept"]);
+    }
+
+    #[test]
+    fn strip_whiteout_entries_removes_marker_inside_inserted_directory() {
+        let mut root = directory(vec![(
+            "newdir",
+            directory(vec![
+                (".wh.lower-only", regular_file()),
+                ("fresh", regular_file()),
+            ]),
+        )]);
+
+        strip_whiteout_entries(&mut root, WhiteoutSpec::Oci);
+
+        let MergeNodeData::Directory { children } = &root.data else {
+            panic!("root should be a directory")
+        };
+        assert_eq!(child_names(children.get("newdir").unwrap()), vec!["fresh"]);
+    }
+
+    #[test]
+    fn lower_whiteout_marker_does_not_delete_later_upper_entry() {
+        let lower = directory(vec![(".wh.recreated", regular_file())]);
+        let upper = directory(vec![("recreated", regular_file())]);
+
+        let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
+        strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
+
+        assert_eq!(child_names(&merged), vec!["recreated"]);
+    }
+
+    #[test]
+    fn upper_whiteout_does_not_delete_same_layer_dotfile() {
+        let lower = directory(vec![(".dotfile", regular_file())]);
+        let upper = directory(vec![
+            (".dotfile", regular_file()),
+            (".wh..dotfile", regular_file()),
+        ]);
+
+        let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
+        strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
+
+        assert_eq!(child_names(&merged), vec![".dotfile"]);
+    }
 }

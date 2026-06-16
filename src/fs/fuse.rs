@@ -8,8 +8,9 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
+    INodeNo, LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier, ReplyAttr, ReplyData,
+    ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyPoll, ReplyStatfs,
+    ReplyXattr, Request,
 };
 
 use crate::metadata::*;
@@ -283,6 +284,20 @@ impl Filesystem for ErofsFs {
         reply.ok();
     }
 
+    fn flush(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
+        // Read-only filesystem: there is no dirty state or lock bookkeeping to
+        // flush. Implement this explicitly to avoid the fuser default ENOSYS
+        // warning on every close() of duplicated file descriptors.
+        reply.ok();
+    }
+
     fn read(
         &self,
         _req: &Request,
@@ -386,11 +401,11 @@ impl Filesystem for ErofsFs {
             }
         };
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (idx, entry) in dir_handle.entries.iter().enumerate().skip(start) {
+        for (index, entry) in dir_handle.entries.iter().enumerate().skip(start) {
             let ino = self.to_ino(entry.nid);
             let kind = erofs_ft_to_kind(entry.file_type);
             let name = OsStr::from_bytes(&entry.name);
-            if reply.add(INodeNo(ino), (idx as u64) + 1, kind, name) {
+            if reply.add(INodeNo(ino), (index as u64) + 1, kind, name) {
                 break;
             }
         }
@@ -415,7 +430,7 @@ impl Filesystem for ErofsFs {
             }
         };
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        for (idx, entry) in dir_handle.entries.iter().enumerate().skip(start) {
+        for (index, entry) in dir_handle.entries.iter().enumerate().skip(start) {
             let child_inode = match self.reader.inode(entry.nid) {
                 Ok(vi) => vi,
                 Err(e) => {
@@ -429,7 +444,7 @@ impl Filesystem for ErofsFs {
             let name = OsStr::from_bytes(&entry.name);
             if reply.add(
                 INodeNo(ino),
-                (idx as u64) + 1,
+                (index as u64) + 1,
                 name,
                 &EROFS_FUSE_TIMEOUT,
                 &attr,
@@ -472,6 +487,22 @@ impl Filesystem for ErofsFs {
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
         let _m = FsOpMetric::new(metrics::FsOp::Access);
         reply.ok();
+    }
+
+    fn poll(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FileHandle,
+        _ph: PollNotifier,
+        events: PollEvents,
+        _flags: PollFlags,
+        reply: ReplyPoll,
+    ) {
+        // Regular files are always ready for the events requested by the
+        // kernel. Returning readiness avoids fuser's default ENOSYS warning
+        // while preserving normal poll/select behavior for read handles.
+        reply.poll(events);
     }
 
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {

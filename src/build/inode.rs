@@ -94,7 +94,7 @@ pub struct DirEntry {
     pub file_type: u8,
 
     /// Index of the child inode in the inodes vector.
-    pub inode_idx: usize,
+    pub inode_index: usize,
 }
 
 /// Convert a Unix file mode to an EROFS file type value for directory entries.
@@ -137,20 +137,20 @@ pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -
 }
 
 /// Set the root directory's trusted.lepton.prefetch_blobs xattr to a comma-separated list of
-/// unique non-zero device IDs.
-pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, device_ids: &[u16]) -> Result<()> {
-    let mut prefetch_device_ids = Vec::new();
-    for device_id in device_ids.iter().copied() {
-        if device_id != 0 && !prefetch_device_ids.contains(&device_id) {
-            prefetch_device_ids.push(device_id);
+/// unique non-zero blob indexes.
+pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]) -> Result<()> {
+    let mut prefetch_blob_indexes = Vec::new();
+    for blob_index in blob_indexes.iter().copied() {
+        if blob_index != 0 && !prefetch_blob_indexes.contains(&blob_index) {
+            prefetch_blob_indexes.push(blob_index);
         }
     }
 
-    if prefetch_device_ids.is_empty() {
+    if prefetch_blob_indexes.is_empty() {
         return Ok(());
     }
 
-    let value = prefetch_device_ids
+    let value = prefetch_blob_indexes
         .iter()
         .map(u16::to_string)
         .collect::<Vec<_>>()
@@ -237,7 +237,7 @@ fn build_tree_recursive(
     let is_extended = needs_erofs_extended_inode(&meta);
     let xattrs = read_xattrs_from_path(path);
     if ft.is_dir() {
-        let inode_idx = inodes.len();
+        let inode_index = inodes.len();
         inodes.push(InodeInfo {
             mode,
             uid,
@@ -272,10 +272,10 @@ fn build_tree_recursive(
             let hardlink_key = (!child_meta.file_type().is_dir() && child_meta.nlink() > 1)
                 .then(|| (child_meta.dev(), child_meta.ino()));
 
-            let child_idx = match hardlink_key.and_then(|key| hardlink_map.get(&key).copied()) {
-                Some(existing_idx) => existing_idx,
+            let child_index = match hardlink_key.and_then(|key| hardlink_map.get(&key).copied()) {
+                Some(existing_index) => existing_index,
                 None => {
-                    let idx = build_tree_recursive(
+                    let index = build_tree_recursive(
                         &child_path,
                         blob_writer,
                         chunk_size,
@@ -285,33 +285,33 @@ fn build_tree_recursive(
                     )?;
 
                     if let Some(key) = hardlink_key {
-                        hardlink_map.insert(key, idx);
+                        hardlink_map.insert(key, index);
                     }
 
-                    idx
+                    index
                 }
             };
 
             children.push(DirEntry {
                 name: entry.file_name().to_string_lossy().into_owned(),
                 file_type: mode_to_erofs_file_type(child_meta.mode() as u16),
-                inode_idx: child_idx,
+                inode_index: child_index,
             });
         }
 
         if let InodeData::Directory {
             children: ref mut dir_children,
             ..
-        } = inodes[inode_idx].data
+        } = inodes[inode_index].data
         {
             *dir_children = children;
         }
 
-        Ok(inode_idx)
+        Ok(inode_index)
     } else if ft.is_file() {
         let file_size = meta.size();
         let chunk_indexes = blob_writer.write_file_chunks(path, file_size)?;
-        let inode_idx = inodes.len();
+        let inode_index = inodes.len();
         inodes.push(InodeInfo {
             mode,
             uid,
@@ -331,14 +331,14 @@ fn build_tree_recursive(
             xattrs,
         });
 
-        Ok(inode_idx)
+        Ok(inode_index)
     } else if ft.is_symlink() {
         let target = fs::read_link(path)
             .with_context(|| format!("failed to read symlink: {}", path.display()))?
             .into_os_string()
             .into_vec();
 
-        let inode_idx = inodes.len();
+        let inode_index = inodes.len();
         inodes.push(InodeInfo {
             mode,
             uid,
@@ -355,12 +355,12 @@ fn build_tree_recursive(
             xattrs,
         });
 
-        Ok(inode_idx)
+        Ok(inode_index)
     } else {
         let rdev = meta.rdev() as u32;
         let file_type = mode as u32 & libc::S_IFMT;
         let is_dev = file_type == libc::S_IFCHR || file_type == libc::S_IFBLK;
-        let inode_idx = inodes.len();
+        let inode_index = inodes.len();
         inodes.push(InodeInfo {
             mode,
             uid,
@@ -381,7 +381,7 @@ fn build_tree_recursive(
             xattrs,
         });
 
-        Ok(inode_idx)
+        Ok(inode_index)
     }
 }
 
@@ -445,9 +445,9 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
             };
             let extent_offset = round_up(base + xattr_size, EROFS_CHUNK_INDEX_SIZE);
             for (i, ci) in chunk_indexes.iter().enumerate() {
-                let idx = ErofsChunkIndex::new(ci.blkaddr, ci.device_id);
+                let index = ErofsChunkIndex::new(ci.blkaddr, ci.device_id);
                 let off = extent_offset + i * EROFS_CHUNK_INDEX_SIZE;
-                buf[off..off + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(idx.as_bytes());
+                buf[off..off + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(index.as_bytes());
             }
         }
         InodeData::Directory { startblk, .. } => {

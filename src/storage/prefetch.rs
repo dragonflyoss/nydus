@@ -36,14 +36,17 @@ impl BlobPrefetcher {
             .spawn(move || self.run())
     }
 
-    fn run(self) {
+    /// Drive the whole prefetch workflow synchronously on the calling thread:
+    /// priority blobs sequentially in declared order, then the remaining blobs
+    /// through a worker pool. Per-blob failures are logged and skipped.
+    pub fn run(self) {
         let (priority, rest) = self.reader.prefetch_plan();
 
         // Phase 1: priority blobs, sequential, in declared order.
-        for device_id in priority {
-            match self.reader.prefetch_blob(device_id) {
-                Ok(()) => info!("prefetched priority blob {}", device_id),
-                Err(err) => warn!("failed to prefetch priority blob {}: {}", device_id, err),
+        for blob_index in priority {
+            match self.reader.prefetch_blob(blob_index) {
+                Ok(()) => info!("prefetched priority blob {}", blob_index),
+                Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
             }
         }
 
@@ -60,14 +63,14 @@ impl BlobPrefetcher {
             let handle = thread::Builder::new()
                 .name("lepton_prefetch_worker".to_string())
                 .spawn(move || loop {
-                    let device_id = {
+                    let blob_index = {
                         let mut guard = queue.lock().unwrap();
                         guard.pop()
                     };
-                    match device_id {
-                        Some(device_id) => match reader.prefetch_blob(device_id) {
-                            Ok(()) => info!("prefetched blob {}", device_id),
-                            Err(err) => warn!("failed to prefetch blob {}: {}", device_id, err),
+                    match blob_index {
+                        Some(blob_index) => match reader.prefetch_blob(blob_index) {
+                            Ok(()) => info!("prefetched blob {}", blob_index),
+                            Err(err) => warn!("failed to prefetch blob {}: {}", blob_index, err),
                         },
                         None => break,
                     }

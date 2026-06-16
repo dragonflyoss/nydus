@@ -9,7 +9,7 @@ package checker
 import (
 	"bytes"
 	"context"
-	"io"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,39 +152,45 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, img *Image) 
 	}
 
 	configPath := filepath.Join(dir, "config.yaml")
-	configYAML, err := writeRegistryConfig(r.provider, img, cacheDir, configPath, false)
+	_, err = writeRegistryConfig(r.provider, img, cacheDir, configPath, false)
 	if err != nil {
 		return "", nil, errors.Wrap(err, "generate storage config")
 	}
-	// TODO(temporary): print the generated config so it can be verified by hand.
-	log.G(ctx).Infof("generated lepton storage config %s:\n%s", configPath, configYAML)
 
 	args := []string{
 		"fuse",
 		"--bootstrap", bootstrapPath,
 		"--config", configPath,
 		"--mountpoint", mountpoint,
-		"--log-level", leptonLogLevel(r.logLevel),
+		"--log-level", "warn",
 		"--log-dir", filepath.Join(dir, "log"),
-		"--console",
 	}
 	// lepton fuse runs in the foreground; start it detached and wait for the
-	// mountpoint to become active. Tee its console output to our stderr so the
-	// backend's per-request logs (link + offset/size) are visible during check,
-	// while still buffering it for error reporting.
+	// mountpoint to become active. Keep its output buffered for startup errors;
+	// the check command itself owns the user-facing progress logs.
 	cmd := exec.Command(builderBinary(r.builder), args...)
 	var fuseLog bytes.Buffer
-	cmd.Stdout = io.MultiWriter(&fuseLog, os.Stderr)
-	cmd.Stderr = io.MultiWriter(&fuseLog, os.Stderr)
+	cmd.Stdout = &fuseLog
+	cmd.Stderr = &fuseLog
 	if err := cmd.Start(); err != nil {
 		return "", nil, errors.Wrap(err, "start lepton fuse")
 	}
 
 	unmount := func() {
-		_ = unmountFuse(mountpoint)
 		if cmd.Process != nil {
 			_ = cmd.Process.Signal(unix.SIGTERM)
-			_, _ = cmd.Process.Wait()
+			done := make(chan struct{})
+			go func() {
+				_, _ = cmd.Process.Wait()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				_ = unmountFuse(mountpoint)
+				_ = cmd.Process.Kill()
+				<-done
+			}
 		}
 	}
 
@@ -201,20 +207,14 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, img *Image) 
 	return mountpoint, unmount, nil
 }
 
-// registryAuthConfig holds basic-auth credentials for the registry backend.
-type registryAuthConfig struct {
-	Username string `yaml:"username"`
-	Password string `yaml:"password"`
-}
-
 // registryBackendConfig is the `backend.config` section for the registry
 // backend understood by `lepton fuse --config`.
 type registryBackendConfig struct {
-	Host       string              `yaml:"host"`
-	Repo       string              `yaml:"repo"`
-	Insecure   bool                `yaml:"insecure"`
-	SkipVerify bool                `yaml:"skip_verify"`
-	Auth       *registryAuthConfig `yaml:"auth,omitempty"`
+	Host       string `yaml:"host"`
+	Repo       string `yaml:"repo"`
+	Insecure   bool   `yaml:"insecure"`
+	SkipVerify bool   `yaml:"skip_verify"`
+	Auth       string `yaml:"auth,omitempty"`
 }
 
 type backendSection struct {
@@ -269,9 +269,9 @@ func writeRegistryConfig(provider *remote.Provider, img *Image, cacheDir, config
 		host = "registry-1.docker.io"
 	}
 
-	var auth *registryAuthConfig
+	var auth string
 	if username, password, err := provider.Credentials(host); err == nil && username != "" {
-		auth = &registryAuthConfig{Username: username, Password: password}
+		auth = basicAuthConfig(username, password)
 	}
 
 	cfg := storageConfig{
@@ -300,6 +300,10 @@ func writeRegistryConfig(provider *remote.Provider, img *Image, cacheDir, config
 		return "", errors.Wrapf(err, "write storage config %q", configPath)
 	}
 	return string(out), nil
+}
+
+func basicAuthConfig(username, password string) string {
+	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 }
 
 // waitForMount polls until mountpoint is backed by a different device than its

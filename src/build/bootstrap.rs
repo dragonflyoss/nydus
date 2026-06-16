@@ -38,7 +38,7 @@ pub fn render_bootstrap(
     let dir_infos: Vec<(usize, Vec<DirChild>, u64, u64)> = inodes
         .iter()
         .enumerate()
-        .filter_map(|(idx, inode)| {
+        .filter_map(|(index, inode)| {
             if let InodeData::Directory {
                 ref children,
                 parent_nid,
@@ -50,18 +50,18 @@ pub fn render_bootstrap(
                     .iter()
                     .map(|de| DirChild {
                         name: de.name.clone(),
-                        nid: inodes[de.inode_idx].nid,
+                        nid: inodes[de.inode_index].nid,
                         file_type: de.file_type,
                     })
                     .collect();
-                Some((idx, dir_children, self_nid, parent_nid))
+                Some((index, dir_children, self_nid, parent_nid))
             } else {
                 None
             }
         })
         .collect();
 
-    for (idx, dir_children, self_nid, parent_nid) in dir_infos {
+    for (index, dir_children, self_nid, parent_nid) in dir_infos {
         let dir_data = serialize_directory(&dir_children, self_nid, parent_nid);
         let dir_data_len = dir_data.len();
         let (data_offset, startblk) = layout.alloc_dir_data(dir_data_len);
@@ -71,12 +71,12 @@ pub fn render_bootstrap(
             startblk: ref mut sb,
             data_size: ref mut dds,
             ..
-        } = inodes[idx].data
+        } = inodes[index].data
         {
             *sb = startblk;
             *dds = dir_data_len;
         }
-        inodes[idx].size = dir_data_len as u64;
+        inodes[index].size = dir_data_len as u64;
     }
 
     for inode in inodes.iter() {
@@ -117,15 +117,15 @@ pub fn set_parent_nids(inodes: &mut [InodeInfo]) {
         .iter()
         .filter_map(|inode| {
             if let InodeData::Directory { ref children, .. } = inode.data {
-                let child_dir_idxs: Vec<usize> = children
+                let child_dir_indexes: Vec<usize> = children
                     .iter()
                     .filter(|de| de.file_type == EROFS_FT_DIR)
-                    .map(|de| de.inode_idx)
+                    .map(|de| de.inode_index)
                     .collect();
-                if child_dir_idxs.is_empty() {
+                if child_dir_indexes.is_empty() {
                     None
                 } else {
-                    Some((inode.nid, child_dir_idxs))
+                    Some((inode.nid, child_dir_indexes))
                 }
             } else {
                 None
@@ -133,11 +133,11 @@ pub fn set_parent_nids(inodes: &mut [InodeInfo]) {
         })
         .collect();
 
-    for (parent_nid_val, child_idxs) in dir_infos {
-        for child_idx in child_idxs {
+    for (parent_nid_val, child_indexes) in dir_infos {
+        for child_index in child_indexes {
             if let InodeData::Directory {
                 ref mut parent_nid, ..
-            } = inodes[child_idx].data
+            } = inodes[child_index].data
             {
                 *parent_nid = parent_nid_val;
             }

@@ -319,7 +319,7 @@ pub struct BlobMetaGroup {
     compressed_size: u32,
     crc32: u32,
     source_group_index: u32,
-    source_device_id: u16,
+    source_blob_index: u16,
     reserved: [u8; 6],
 }
 
@@ -340,17 +340,17 @@ impl BlobMetaGroup {
             compressed_size,
             crc32,
             source_group_index: 0,
-            source_device_id: 0,
+            source_blob_index: 0,
             reserved: BLOB_META_GROUP_RESERVED,
         };
         group.validate()?;
         Ok(group)
     }
 
-    /// A redirect group carries data that belongs to another (source) blob
-    /// device. At prefetch time the decoded bytes are written into the source
-    /// device's cache instead of this blob's own cache. `source_device_id` is
-    /// the 1-based device id from the bootstrap device table and must be
+    /// A redirect group carries data that belongs to another (source) blob.
+    /// At prefetch time the decoded bytes are written into the source blob's
+    /// cache instead of this blob's own cache. `source_blob_index` is the
+    /// 1-based blob index from the bootstrap device table and must be
     /// non-zero; `crc32` must equal the source group's crc32 so the redirect
     /// can be cross-checked before filling the source cache.
     #[allow(clippy::too_many_arguments)]
@@ -360,11 +360,11 @@ impl BlobMetaGroup {
         compressed_byte_offset: u64,
         compressed_size: u32,
         crc32: u32,
-        source_device_id: u16,
+        source_blob_index: u16,
         source_group_index: u32,
     ) -> Result<Self> {
-        if source_device_id == 0 {
-            bail!("blob meta redirect group source device id must be non-zero");
+        if source_blob_index == 0 {
+            bail!("blob meta redirect group source blob index must be non-zero");
         }
         let group = Self {
             uncompressed_block_offset,
@@ -373,7 +373,7 @@ impl BlobMetaGroup {
             compressed_size,
             crc32,
             source_group_index,
-            source_device_id,
+            source_blob_index,
             reserved: BLOB_META_GROUP_RESERVED,
         };
         group.validate()?;
@@ -381,11 +381,11 @@ impl BlobMetaGroup {
     }
 
     pub fn is_redirect(&self) -> bool {
-        self.source_device_id != 0
+        self.source_blob_index != 0
     }
 
-    pub fn source_device_id(&self) -> u16 {
-        self.source_device_id
+    pub fn source_blob_index(&self) -> u16 {
+        self.source_blob_index
     }
 
     pub fn source_group_index(&self) -> u32 {
@@ -459,7 +459,7 @@ impl BlobMetaGroup {
         data[20..24].copy_from_slice(&self.compressed_size.to_le_bytes());
         data[24..28].copy_from_slice(&self.crc32.to_le_bytes());
         data[28..32].copy_from_slice(&self.source_group_index.to_le_bytes());
-        data[32..34].copy_from_slice(&self.source_device_id.to_le_bytes());
+        data[32..34].copy_from_slice(&self.source_blob_index.to_le_bytes());
         data[34..40].copy_from_slice(&self.reserved);
         data
     }
@@ -472,7 +472,7 @@ impl BlobMetaGroup {
             compressed_size: read_u32(reader)?,
             crc32: read_u32(reader)?,
             source_group_index: read_u32(reader)?,
-            source_device_id: read_u16(reader)?,
+            source_blob_index: read_u16(reader)?,
             reserved: read_group_reserved(reader)?,
         };
         group.validate()?;
@@ -495,8 +495,8 @@ impl BlobMetaGroup {
         self.compressed_byte_offset
             .checked_add(self.compressed_size as u64)
             .context("blob meta group compressed byte range overflow")?;
-        if self.source_device_id == 0 && self.source_group_index != 0 {
-            bail!("blob meta group source group index requires a source device id");
+        if self.source_blob_index == 0 && self.source_group_index != 0 {
+            bail!("blob meta group source group index requires a source blob index");
         }
         if self.reserved != BLOB_META_GROUP_RESERVED {
             bail!("blob meta group reserved field must be zero");
@@ -1378,7 +1378,7 @@ mod tests {
             BlobMetaGroup::new_redirect(0, 2, 0, 2 * EROFS_BLOCK_SIZE, crc32, 3, 7).unwrap();
 
         assert!(redirect.is_redirect());
-        assert_eq!(redirect.source_device_id(), 3);
+        assert_eq!(redirect.source_blob_index(), 3);
         assert_eq!(redirect.source_group_index(), 7);
 
         let mut raw = Vec::new();
@@ -1398,9 +1398,9 @@ mod tests {
     }
 
     #[test]
-    fn redirect_group_rejects_zero_source_device_id() {
+    fn redirect_group_rejects_zero_source_blob_index() {
         let err = match BlobMetaGroup::new_redirect(0, 1, 0, EROFS_BLOCK_SIZE, 0, 0, 1) {
-            Ok(_) => panic!("zero source device id should be rejected"),
+            Ok(_) => panic!("zero source blob index should be rejected"),
             Err(err) => err,
         };
         assert!(err.to_string().contains("non-zero"));
@@ -1451,7 +1451,7 @@ mod tests {
         let loaded = BlobMeta::load(&path).unwrap();
         assert!(loaded.is_redirect_blob());
         assert_eq!(loaded.groups(), groups.as_slice());
-        assert_eq!(loaded.groups()[1].source_device_id(), 2);
+        assert_eq!(loaded.groups()[1].source_blob_index(), 2);
         assert_eq!(loaded.groups()[2].source_group_index(), 9);
     }
 }

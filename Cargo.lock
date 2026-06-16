@@ -1987,7 +1987,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
- "log",
  "memmap2",
  "once_cell",
  "prometheus",

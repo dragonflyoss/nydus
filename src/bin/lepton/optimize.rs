@@ -1,10 +1,10 @@
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use lepton::merge::rewrite_bootstrap_with_ondemand_device;
+use lepton::config::Config;
+use lepton::merge::rewrite_bootstrap_with_ondemand_blob;
 use lepton::metadata::*;
 use lepton::storage::backend::build_backend;
 use lepton::storage::cache::{BlobCache, LocalBlobCache};
-use lepton::storage::config::StorageConfig;
 use lepton::tracing::init_command_tracing;
 use lepton::utils::hex_string;
 use serde::Deserialize;
@@ -92,7 +92,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     }
 
     let storage_config =
-        StorageConfig::from_file(&args.config).context("failed to load storage config")?;
+        Config::from_file(&args.config).context("failed to load storage config")?;
     let backend = build_backend(&storage_config.backend).context("failed to build blob backend")?;
     let cache_dir = storage_config
         .cache_dir()
@@ -107,10 +107,10 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
                 args.parent_bootstrap.display()
             )
         })?;
-    let device_infos = reader.device_infos()?;
-    let devices_by_id: HashMap<u16, &lepton::fs::DeviceInfo> = device_infos
+    let blob_infos = reader.blob_infos()?;
+    let infos_by_index: HashMap<u16, &lepton::fs::BlobInfo> = blob_infos
         .iter()
-        .map(|info| (info.device_id, info))
+        .map(|info| (info.blob_index, info))
         .collect();
     drop(reader);
 
@@ -123,15 +123,20 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     let mut next_block_offset = 0u64;
     let mut decoded = Vec::new();
 
-    for (device_id, group_index) in &patterns {
-        let info = devices_by_id
-            .get(device_id)
-            .ok_or_else(|| anyhow::anyhow!("pattern references unknown blob device {device_id}"))?;
-        let cache = match source_caches.entry(*device_id) {
+    for (blob_index, group_index) in &patterns {
+        let info = infos_by_index
+            .get(blob_index)
+            .ok_or_else(|| anyhow::anyhow!("pattern references unknown blob {blob_index}"))?;
+        let cache = match source_caches.entry(*blob_index) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
-                LocalBlobCache::open(info.blob_id, *device_id as u32, &cache_dir, backend.clone())
-                    .with_context(|| format!("failed to open source blob device {device_id}"))?,
+                LocalBlobCache::open(
+                    info.blob_id,
+                    *blob_index as u32,
+                    &cache_dir,
+                    backend.clone(),
+                )
+                .with_context(|| format!("failed to open source blob {blob_index}"))?,
             ),
         };
 
@@ -140,11 +145,11 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
             .group_at(*group_index as usize)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "pattern references group {group_index} out of range for device {device_id}"
+                    "pattern references group {group_index} out of range for blob {blob_index}"
                 )
             })?;
         if group.is_redirect() {
-            bail!("source device {device_id} is already an ondemand blob; refusing to optimize");
+            bail!("source blob {blob_index} is already an ondemand blob; refusing to optimize");
         }
 
         let decoded_len = usize::try_from(group.uncompressed_byte_size())
@@ -153,7 +158,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
         cache
             .read_at(group.uncompressed_byte_offset(), &mut decoded)
             .with_context(|| {
-                format!("failed to read device {device_id} group {group_index} bytes")
+                format!("failed to read blob {blob_index} group {group_index} bytes")
             })?;
 
         // Recompress the decoded bytes for the ondemand artifact, storing them
@@ -174,7 +179,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
             compressed_offset,
             u32::try_from(encoded.len()).context("ondemand group compressed size exceeds u32")?,
             group.crc32(),
-            *device_id,
+            *blob_index,
             *group_index,
         )?);
         next_block_offset += group.uncompressed_block_count() as u64;
@@ -211,7 +216,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
         .save(&blob_meta_path)
         .with_context(|| format!("failed to save blob meta: {}", blob_meta_path.display()))?;
 
-    let bootstrap_bytes = rewrite_bootstrap_with_ondemand_device(
+    let bootstrap_bytes = rewrite_bootstrap_with_ondemand_blob(
         &args.parent_bootstrap,
         &full_digest,
         next_block_offset,
@@ -247,7 +252,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
 }
 
 /// Fetch the `/trace` JSON from a running mount's apiserver and return the
-/// deduplicated `(device_id, group_index)` list in first-access order.
+/// deduplicated `(blob_index, group_index)` list in first-access order.
 fn load_patterns(apiserver: &str) -> Result<Vec<(u16, u32)>> {
     let raw = fetch_trace(apiserver)
         .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
@@ -257,13 +262,13 @@ fn load_patterns(apiserver: &str) -> Result<Vec<(u16, u32)>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for pattern in trace.patterns {
-        let device_id = u16::try_from(pattern.blob_index)
+        let blob_index = u16::try_from(pattern.blob_index)
             .with_context(|| format!("pattern blob index {} exceeds u16", pattern.blob_index))?;
-        if device_id == 0 {
+        if blob_index == 0 {
             bail!("pattern blob index must be non-zero");
         }
-        if seen.insert((device_id, pattern.group_index)) {
-            ordered.push((device_id, pattern.group_index));
+        if seen.insert((blob_index, pattern.group_index)) {
+            ordered.push((blob_index, pattern.group_index));
         }
     }
     Ok(ordered)

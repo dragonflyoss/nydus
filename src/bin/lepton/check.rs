@@ -1,9 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 use lepton::build::inode::mode_to_erofs_file_type;
-use lepton::fs::{DeviceInfo, ErofsReader};
+use lepton::config::Config;
+use lepton::fs::{BlobInfo, ErofsReader};
 use lepton::metadata::*;
-use lepton::storage::config::StorageConfig;
 use lepton::utils::{hex_string, sha256_bytes};
 use memmap2::Mmap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -78,11 +78,11 @@ struct BlobSummary {
 }
 
 impl BlobSummary {
-    fn new(device: &DeviceInfo) -> Self {
+    fn new(blob: &BlobInfo) -> Self {
         Self {
-            slot_sha256: device.blob_id,
+            slot_sha256: blob.blob_id,
             slot_sha256_kind: SlotSha256Kind::Unknown,
-            declared_data_size: device.blocks * EROFS_BLOCK_SIZE as u64,
+            declared_data_size: blob.blocks * EROFS_BLOCK_SIZE as u64,
             resolved_path: None,
             blob_size: None,
             blob_sha256: None,
@@ -157,8 +157,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
         Some(dir) => Some(dir.clone()),
         None => match &args.config {
             Some(path) => {
-                let config =
-                    StorageConfig::from_file(path).context("failed to load storage config")?;
+                let config = Config::from_file(path).context("failed to load storage config")?;
                 if config.backend.kind == "local" {
                     let dir = config
                         .backend
@@ -200,15 +199,13 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
         .with_context(|| format!("failed to stat image: {}", path.display()))?
         .len();
     let primary_image_bytes = sb.blocks() * EROFS_BLOCK_SIZE as u64;
-    let device_infos = reader
-        .device_infos()
-        .context("failed to read device slots")?;
-    let resolved_blobs = resolve_blobs(kind, path, blob_dir.as_deref(), &device_infos)?;
-    let mut blobs = device_infos
+    let blob_infos = reader.blob_infos().context("failed to read device slots")?;
+    let resolved_blobs = resolve_blobs(kind, path, blob_dir.as_deref(), &blob_infos)?;
+    let mut blobs = blob_infos
         .iter()
-        .map(|device| {
-            let mut summary = BlobSummary::new(device);
-            if let Some(resolved) = resolved_blobs.get(&device.device_id) {
+        .map(|blob| {
+            let mut summary = BlobSummary::new(blob);
+            if let Some(resolved) = resolved_blobs.get(&blob.blob_index) {
                 summary.resolved_path = Some(resolved.path.clone());
                 summary.blob_size = Some(resolved.blob_size);
                 summary.blob_sha256 = Some(resolved.blob_sha256);
@@ -218,7 +215,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
                 summary.slot_sha256_kind = resolved.slot_sha256_kind;
                 summary.verified = resolved.verified;
             }
-            (device.device_id, summary)
+            (blob.blob_index, summary)
         })
         .collect::<BTreeMap<_, _>>();
 
@@ -355,14 +352,14 @@ fn resolve_blobs(
     kind: ImageKind,
     image_path: &Path,
     blob_dir: Option<&Path>,
-    device_infos: &[DeviceInfo],
+    blob_infos: &[BlobInfo],
 ) -> Result<HashMap<u16, ResolvedBlob>> {
     let mut resolved = HashMap::new();
 
-    if kind == ImageKind::Blob && device_infos.len() == 1 {
+    if kind == ImageKind::Blob && blob_infos.len() == 1 {
         if let Some(inspection) = inspect_blob(image_path)? {
             resolved.insert(
-                device_infos[0].device_id,
+                blob_infos[0].blob_index,
                 ResolvedBlob {
                     path: image_path.to_path_buf(),
                     blob_size: inspection.blob_size,
@@ -371,7 +368,7 @@ fn resolve_blobs(
                     data_size: inspection.data_size,
                     blob_meta: inspection.blob_meta,
                     slot_sha256_kind: SlotSha256Kind::Data,
-                    verified: inspection.data_sha256 == device_infos[0].blob_id,
+                    verified: inspection.data_sha256 == blob_infos[0].blob_id,
                 },
             );
         }
@@ -423,16 +420,16 @@ fn resolve_blobs(
             });
     }
 
-    for device in device_infos {
-        if let Some(match_by_blob) = blob_sha_matches.get(&device.blob_id) {
+    for blob in blob_infos {
+        if let Some(match_by_blob) = blob_sha_matches.get(&blob.blob_id) {
             resolved
-                .entry(device.device_id)
+                .entry(blob.blob_index)
                 .or_insert_with(|| match_by_blob.clone());
             continue;
         }
-        if let Some(match_by_data) = data_sha_matches.get(&device.blob_id) {
+        if let Some(match_by_data) = data_sha_matches.get(&blob.blob_id) {
             resolved
-                .entry(device.device_id)
+                .entry(blob.blob_index)
                 .or_insert_with(|| match_by_data.clone());
         }
     }
@@ -607,16 +604,16 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
         return;
     }
 
-    for (index, (device_id, blob)) in blobs.iter().enumerate() {
-        print_blob_info(index, *device_id, blob);
+    for (index, (blob_index, blob)) in blobs.iter().enumerate() {
+        print_blob_info(index, *blob_index, blob);
     }
     println!();
 }
 
-fn print_blob_info(index: usize, device_id: u16, blob: &BlobSummary) {
+fn print_blob_info(index: usize, blob_index: u16, blob: &BlobSummary) {
     println!("  Blob {index}");
     println!("    blob_index: {index}");
-    println!("    device_id: {device_id}");
+    println!("    blob_index: {blob_index}");
     println!("    slot_digest_kind: {}", blob.slot_sha256_kind.as_str());
     println!("    data_blob_digest: {}", data_blob_digest(blob));
     println!(

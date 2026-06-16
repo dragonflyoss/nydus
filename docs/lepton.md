@@ -702,7 +702,7 @@ embedded blob meta region
 | compressed_size               |
 | crc32c                        |
 | source_group_index            |
-| source_device_id              |
+| source_blob_index               |
 | reserved (6 bytes)            |
 +-------------------------------+
 | zero padding to 4 KiB         |
@@ -762,11 +762,11 @@ Group details:
 - `crc32c` is computed over the decoded group. If `compressed_size` equals
 	`uncompressed_block_count * 4096`, runtime treats the group as stored plain and
 	skips decompression even when the header compressor is zstd.
-- `source_device_id` and `source_group_index` mark a redirect group. They are
-	zero for normal groups. A non-zero `source_device_id` means the group's data
-	belongs to that source blob device (1-based device-table id) at
+- `source_blob_index` and `source_group_index` mark a redirect group. They are
+	zero for normal groups. A non-zero `source_blob_index` means the group's data
+	belongs to that source blob (1-based device-table index) at
 	`source_group_index`; phase-0 prefetch writes the decoded bytes into the
-	source device's cache instead of this blob's own cache. A blob containing any
+	source blob's cache instead of this blob's own cache. A blob containing any
 	redirect group is an "ondemand" blob: its groups may be non-uniform in size
 	(the uniformity invariant is relaxed) and `group_index_for_byte_offset` is
 	never used on it. The redirect group's `crc32c` equals the source group's
@@ -924,6 +924,101 @@ errors — are logged and skipped, so a bad redirect can only lose warmup, never
 poison a source cache or abort the mount. Blob device caches are opened lazily
 on first read or prefetch, so a device fully covered by the ondemand warmup
 pays no extra metadata fetch at mount time.
+
+## Accessor (virtio-pmem integration)
+
+`lepton::accessor::LeptonAccessor` is the library entry point for hypervisors
+(e.g. RunD) that mount the lepton image inside the guest as a plain EROFS
+filesystem over virtio-pmem, instead of using `lepton fuse` on the host:
+
+- The bootstrap is the EROFS primary device; each data blob is an external
+	device backed by its host cache data file (`{cache_dir}/{hex}.blob.data`),
+	which mirrors the dense decoded block address space — a guest read of block
+	`N` lands at byte `N * 4096` of the backing file.
+- `LeptonAccessor::new(bootstrap, Config)` parses the bootstrap and an already
+	loaded `lepton::Config` (same structure as `lepton fuse --config`) lazily;
+	per-blob work (blob meta download/validation, sparse cache file creation)
+	happens on first touch through `blob.entries()` or `blob.fetch`.
+- `BlobID` is the public blob digest type. It converts to/from 64-character
+	SHA256 hex strings and `[u8; 32]` bytes.
+- `blob.entries()` lists the device table in order as `BlobInfo` entries:
+	blob index, `BlobID`, block count, cache path, cache size, and whether the
+	blob is an ondemand redirect blob. Calling it prepares the sparse cache data
+	files, so `BlobInfo.cache_path` is immediately suitable as a virtio-pmem
+	backing file and `BlobInfo.cache_size` is `blocks * 4096`.
+- `blob.fetch(id, offset, len)` guarantees the 4 KiB-aligned range is decoded,
+	CRC-validated, and resident in the cache data file. It maps the range to
+	blob meta groups with the O(1) division lookup and reuses the regular cache
+	chain (`ensure_group`), so it is idempotent, concurrency-safe, and shares
+	trace/metrics recording with the FUSE path. Redirect blobs are rejected.
+- `fs.open(path)` resolves a path once and returns an `FsEntry`; use
+	`entry.metadata()`, `entry.read_dir()`, `entry.read()`,
+	`entry.read_at(...)`, `entry.read_link()`, and `entry.xattrs()` for
+	metadata/data access without FUSE. Holding the entry avoids repeated path
+	resolution and is the only filesystem API surface.
+
+Complete example:
+
+```rust
+use std::path::Path;
+
+use lepton::{Config, LeptonAccessor};
+
+fn wire_lepton_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> {
+	// Load the same YAML schema accepted by `lepton fuse --config`.
+	let config = Config::from_file(config_path)?;
+	let accessor = LeptonAccessor::new(bootstrap, config)?;
+
+	// Materialize every blob cache file before creating guest pmem devices.
+	// The vector is in bootstrap device-table order; `index` is the 1-based
+	// EROFS external-device index used by chunk indexes.
+	let blobs = accessor.blob.entries()?;
+	for blob in &blobs {
+		println!(
+			"blob index={} id={} blocks={} cache={} bytes={} redirect={}",
+			blob.index,
+			blob.id,
+			blob.blocks,
+			blob.cache_path.display(),
+			blob.cache_size,
+			blob.is_redirect,
+		);
+
+		// Hypervisor wiring point:
+		//   - map `bootstrap` as the EROFS primary device;
+		//   - map `blob.cache_path` as the virtio-pmem backing file for
+		//     external device `blob.index`, sized to `blob.cache_size`.
+	}
+
+	// Prepare a range before the guest touches it. The range must be 4 KiB
+	// aligned; fetch expands to whole blob-meta groups internally and is
+	// safe to call repeatedly or concurrently.
+	if let Some(blob) = blobs.iter().find(|blob| !blob.is_redirect) {
+		accessor.blob.fetch(&blob.id, 0, 4096 * 16)?;
+	}
+
+	// Static filesystem inspection without FUSE. Resolve a path once and
+	// reuse the FsEntry for hot loops.
+	let file = accessor.fs.open("path/to/file")?;
+	let meta = file.metadata()?;
+	println!("ino={} size={} mode={:o}", meta.ino, meta.size, meta.mode);
+
+	let mut buf = vec![0u8; 128 * 1024];
+	let n = file.read_at(0, &mut buf)?;
+	println!("read {n} bytes");
+
+	let root = accessor.fs.open("/")?;
+	for entry in root.read_dir()? {
+		println!("{} {:?} ino={}", entry.name, entry.file_type, entry.ino);
+	}
+
+	Ok(())
+}
+```
+
+The accessor needs neither FUSE nor the CLI stack: building with
+`--no-default-features --features backend-registry` produces a minimal
+library surface (no fuser/hyper/tokio-server/clap) suitable for embedding.
 
 ## Merge Design
 

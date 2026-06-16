@@ -1,9 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
-use fuser::{Config, MountOption, Session};
+use fuser::{Config as FuseConfig, MountOption, Session};
+use lepton::config::Config;
 use lepton::fs::{ErofsFs, ErofsReader};
 use lepton::storage::backend::{build_backend, BlobBackend, LocalBackend};
-use lepton::storage::config::StorageConfig;
 use lepton::storage::prefetch::{BlobPrefetcher, DEFAULT_PREFETCH_THREADS};
 use lepton::tracing::init_tracing;
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
@@ -204,9 +204,7 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     // Load the optional storage config. CLI flags take precedence over config
     // values, so --blob-dir/--cache-dir override the backend/cache directories.
     let storage_config = match &args.config {
-        Some(path) => {
-            Some(StorageConfig::from_file(path).context("failed to load storage config")?)
-        }
+        Some(path) => Some(Config::from_file(path).context("failed to load storage config")?),
         None => None,
     };
 
@@ -269,7 +267,7 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
 
     let reader = Arc::new(reader);
     let fs = ErofsFs::new(reader.clone());
-    let mut config = Config::default();
+    let mut config = FuseConfig::default();
     config.mount_options = vec![
         MountOption::RO,
         MountOption::FSName(args.fsname.clone()),
@@ -348,6 +346,13 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
                             }
                         };
                         if let Err(err) = &result {
+                            if err.raw_os_error() == Some(libc::EINVAL)
+                                && is_mountpoint_active(&signal_mountpoint)
+                                    .is_ok_and(|active| !active)
+                            {
+                                let _ = result_tx.send(Ok(()));
+                                return;
+                            }
                             error!(
                                 "failed to unmount after receiving signal {}: {:?}",
                                 signal, err

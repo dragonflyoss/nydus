@@ -3,6 +3,7 @@ pub mod local;
 use std::io;
 use std::io::Cursor;
 use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::metadata::{BlobMeta, BlobMetaCompressor, BlobMetaGroup, EROFS_BLOB_ID_SIZE};
@@ -15,6 +16,27 @@ pub trait BlobCache: Send + Sync {
     /// Fetch, decode, validate, cache, and mark ready every group of this blob.
     /// Used by blob-level prefetch after a filesystem is mounted.
     fn prefetch_all(&self) -> io::Result<()>;
+
+    /// Create (or open) this blob's cache data file sized to the dense
+    /// uncompressed address space and return its path. The file mirrors the
+    /// decoded block address space, so it can directly back a virtio-pmem
+    /// device whose guest reads land at `block * 4096`.
+    fn prepare(&self) -> io::Result<PathBuf> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "prepare is not supported by this blob cache",
+        ))
+    }
+
+    /// Ensure every group overlapping `[offset, offset + len)` of the dense
+    /// uncompressed address space is decoded, validated, and written to the
+    /// cache data file. Idempotent and safe to call concurrently.
+    fn ensure_range(&self, _offset: u64, _len: u64) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "ensure_range is not supported by this blob cache",
+        ))
+    }
 
     /// True when this blob is an "ondemand" redirect blob whose groups carry
     /// data belonging to other source blob devices.

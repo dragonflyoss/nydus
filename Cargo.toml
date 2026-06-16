@@ -6,9 +6,26 @@ edition = "2021"
 [[bin]]
 name = "lepton"
 path = "src/bin/lepton/main.rs"
+required-features = ["cli"]
 
 [features]
-default = ["backend-registry"]
+default = ["cli", "backend-registry"]
+# FUSE mount support (ErofsFs over fuser).
+fuse = ["dep:fuser"]
+# The `lepton` CLI binary: subcommands, apiserver, file logging, signals.
+cli = [
+  "fuse",
+  "dep:clap",
+  "dep:http-body-util",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:rolling-file",
+  "dep:signal-hook",
+  "dep:tokio",
+  "dep:tracing-appender",
+  "dep:tracing-panic",
+  "dep:tracing-subscriber",
+]
 # Container image registry backend (OCI distribution).
 backend-registry = [
   "dep:reqwest",
@@ -19,6 +36,7 @@ backend-registry = [
   "dep:once_cell",
   "dep:futures",
   "dep:rand",
+  "dep:tokio",
 ]
 # Dragonfly P2P SDK proxy support for the registry backend.
 backend-dragonfly-proxy = ["backend-registry", "dep:dragonfly-client-util"]
@@ -29,17 +47,16 @@ arc-swap = { version = "1", optional = true }
 base64 = { version = "0.22", optional = true }
 bitflags = "2"
 blake3 = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 crc32c = "0.6"
 dragonfly-client-util = { version = "1.0", optional = true }
-fuser = "0.17"
+fuser = { version = "0.17", optional = true }
 futures = { version = "0.3", optional = true }
 hickory-resolver = { version = "0.25", optional = true }
-http-body-util = "0.1"
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 libc = "0.2"
-log = "0.4"
 memmap2 = "0.9"
 once_cell = { version = "1", optional = true }
 prometheus = { version = "0.13", default-features = false }
@@ -48,12 +65,12 @@ reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "stream",
 ], optional = true }
-rolling-file = "0.2.0"
+rolling-file = { version = "0.2.0", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sha2 = "0.10"
-signal-hook = "0.3"
+signal-hook = { version = "0.3", optional = true }
 tempfile = "3.25.0"
 tokio = { version = "1", features = [
   "fs",
@@ -63,15 +80,15 @@ tokio = { version = "1", features = [
   "rt",
   "rt-multi-thread",
   "sync"
-] }
+], optional = true }
 tracing = "0.1"
-tracing-appender = "0.2.4"
-tracing-panic = "0.1.2"
+tracing-appender = { version = "0.2.4", optional = true }
+tracing-panic = { version = "0.1.2", optional = true }
 tracing-subscriber = { version = "0.3", features = [
   "chrono",
   "env-filter",
   "time"
-] }
+], optional = true }
 url = { version = "2", optional = true }
 uuid = { version = "1", features = ["v4"] }
 xattr = "1"

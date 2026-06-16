@@ -117,6 +117,47 @@ impl LocalBlobCache {
         write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
         self.groupmap.set_ready(group_index)
     }
+
+    /// Ensure every group overlapping `[offset, offset + len)` is decoded and
+    /// written to the cache file. Shared by `read_at` and `ensure_range`.
+    fn ensure_byte_range(&self, offset: u64, len: u64, cache_file: &File) -> io::Result<()> {
+        // Redirect (ondemand) blobs have a non-uniform group layout, so the
+        // O(1) division-based group lookup below does not apply; they are
+        // consumed exclusively through `redirect_stream`.
+        if self.blob_meta.is_redirect_blob() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "redirect blob has no dense readable address space",
+            ));
+        }
+
+        let end = offset.checked_add(len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
+        })?;
+
+        // O(1) group lookup at both ends of the range. Groups are dense and
+        // contiguous, so every group between the first and last also overlaps
+        // the range and must be decoded.
+        let first_group = self
+            .blob_meta
+            .group_index_for_byte_offset(offset)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+        let last_group = self
+            .blob_meta
+            .group_index_for_byte_offset(end - 1)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
+
+        for group_index in first_group..=last_group {
+            // Record the on-demand access order (first access wins) so the
+            // apiserver `/trace` endpoint can expose the group access pattern.
+            crate::metrics::trace::record_group_access(self.blob_index, group_index as u32);
+            let group = *self.blob_meta.group_at(group_index).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
+            })?;
+            self.ensure_group(group_index, &group, cache_file)?;
+        }
+        Ok(())
+    }
 }
 
 impl BlobCache for LocalBlobCache {
@@ -202,37 +243,28 @@ impl BlobCache for LocalBlobCache {
             return Ok(());
         }
 
-        let end = offset.checked_add(dst.len() as u64).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
-        })?;
         let cache_file = self.cache_file()?;
-
-        // O(1) group lookup at both ends of the range. Groups are dense and
-        // contiguous, so every group between the first and last also overlaps
-        // the range and must be decoded.
-        let first_group = self
-            .blob_meta
-            .group_index_for_byte_offset(offset)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
-        let last_group = self
-            .blob_meta
-            .group_index_for_byte_offset(end - 1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
-
-        for group_index in first_group..=last_group {
-            // Record the on-demand access order (first access wins) so the
-            // apiserver `/trace` endpoint can expose the group access pattern.
-            crate::metrics::trace::record_group_access(self.blob_index, group_index as u32);
-            let group = *self.blob_meta.group_at(group_index).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
-            })?;
-            self.ensure_group(group_index, &group, cache_file.as_ref())?;
-        }
+        self.ensure_byte_range(offset, dst.len() as u64, cache_file.as_ref())?;
 
         // The cache file mirrors the dense uncompressed address space, so once
         // the covering groups are decoded the absolute offset indexes straight
         // into it for a single contiguous read.
         read_exact_at(cache_file.as_ref(), offset, dst)
+    }
+
+    fn prepare(&self) -> io::Result<PathBuf> {
+        // Opening the cache file creates it (sparse) and sizes it to the dense
+        // uncompressed address space.
+        self.cache_file()?;
+        Ok(self.cache_blob_path.clone())
+    }
+
+    fn ensure_range(&self, offset: u64, len: u64) -> io::Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let cache_file = self.cache_file()?;
+        self.ensure_byte_range(offset, len, cache_file.as_ref())
     }
 
     fn is_redirect_blob(&self) -> bool {

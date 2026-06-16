@@ -150,15 +150,15 @@ impl ErofsReader {
         let mut file_pos = offset;
 
         while remaining > 0 {
-            let chunk_idx = (file_pos / chunksize) as usize;
+            let chunk_index = (file_pos / chunksize) as usize;
             let chunk_off = file_pos % chunksize;
             let to_read = std::cmp::min(remaining, (chunksize - chunk_off) as usize);
 
-            if chunk_idx >= nchunks {
+            if chunk_index >= nchunks {
                 break;
             }
 
-            let ci = Self::chunk_index_at(ci_data, chunk_idx);
+            let ci = Self::chunk_index_at(ci_data, chunk_index);
             let blkaddr = ci.blkaddr();
             if blkaddr == u64::MAX {
                 // Hole — write zeros (use small stack buffer to avoid large alloc)
@@ -273,15 +273,15 @@ impl ErofsReader {
         let mut buf_pos = 0;
 
         while remaining > 0 {
-            let chunk_idx = (file_pos / chunksize) as usize;
+            let chunk_index = (file_pos / chunksize) as usize;
             let chunk_off = file_pos % chunksize;
             let to_read = std::cmp::min(remaining, (chunksize - chunk_off) as usize);
 
-            if chunk_idx >= nchunks {
+            if chunk_index >= nchunks {
                 break;
             }
 
-            let ci = Self::chunk_index_at(ci_data, chunk_idx);
+            let ci = Self::chunk_index_at(ci_data, chunk_index);
             let blkaddr = ci.blkaddr();
             if blkaddr == u64::MAX {
                 // Hole — zeros
@@ -328,15 +328,15 @@ impl ErofsReader {
         let mut buf_pos = 0;
 
         while remaining > 0 {
-            let chunk_idx = (file_pos / chunksize) as usize;
+            let chunk_index = (file_pos / chunksize) as usize;
             let chunk_off = file_pos % chunksize;
             let to_read = std::cmp::min(remaining, (chunksize - chunk_off) as usize);
 
-            if chunk_idx >= nchunks {
+            if chunk_index >= nchunks {
                 break;
             }
 
-            let ci = Self::chunk_index_at(ci_data, chunk_idx);
+            let ci = Self::chunk_index_at(ci_data, chunk_index);
             let blkaddr = ci.blkaddr();
             if blkaddr == u64::MAX {
                 // Hole — zeros
@@ -409,7 +409,7 @@ mod tests {
                     children: vec![BuildDirEntry {
                         name: "huge_xattrs".into(),
                         file_type: EROFS_FT_REG_FILE,
-                        inode_idx: 1,
+                        inode_index: 1,
                     }],
                     startblk: 0,
                     data_size: 0,

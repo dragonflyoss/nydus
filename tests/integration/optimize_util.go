@@ -113,7 +113,6 @@ func startLeptonifyMount(
 	}, 30*time.Second, 200*time.Millisecond, "leptonify mount failed to mount within 30s")
 
 	return func() {
-		_ = exec.Command("fusermount", "-u", mountpoint).Run()
 		if cmd.Process != nil {
 			_ = cmd.Process.Signal(syscall.SIGTERM)
 			done := make(chan struct{})
@@ -121,7 +120,9 @@ func startLeptonifyMount(
 			select {
 			case <-done:
 			case <-time.After(10 * time.Second):
+				_ = exec.Command("fusermount", "-u", mountpoint).Run()
 				_ = cmd.Process.Kill()
+				<-done
 			}
 		}
 	}

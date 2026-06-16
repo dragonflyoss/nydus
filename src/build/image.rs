@@ -67,8 +67,8 @@ pub fn write_image(
         bail!("device table does not fit in the reserved metadata head region")
     }
 
-    for (idx, devslot) in device_slots.iter().enumerate() {
-        let start = devslot_offset + idx * EROFS_DEVICESLOT_SIZE;
+    for (index, devslot) in device_slots.iter().enumerate() {
+        let start = devslot_offset + index * EROFS_DEVICESLOT_SIZE;
         let end = start + EROFS_DEVICESLOT_SIZE;
         head[start..end].copy_from_slice(devslot.as_bytes());
     }

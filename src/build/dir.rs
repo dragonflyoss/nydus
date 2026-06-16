@@ -24,25 +24,25 @@ pub fn serialize_directory(children: &[DirChild], self_nid: u64, parent_nid: u64
     }
 
     let mut result = Vec::new();
-    let mut idx = 0;
+    let mut index = 0;
 
-    while idx < entries.len() {
-        let block_start = idx;
+    while index < entries.len() {
+        let block_start = index;
         let mut dirent_area = 0usize;
         let mut name_area = 0usize;
 
-        while idx < entries.len() {
-            let new_dirent_area = (idx - block_start + 1) * EROFS_DIRENT_SIZE;
-            let new_name_area = name_area + entries[idx].0.len();
+        while index < entries.len() {
+            let new_dirent_area = (index - block_start + 1) * EROFS_DIRENT_SIZE;
+            let new_name_area = name_area + entries[index].0.len();
             if new_dirent_area + new_name_area > block_size {
                 break;
             }
             dirent_area = new_dirent_area;
             name_area = new_name_area;
-            idx += 1;
+            index += 1;
         }
 
-        let count = idx - block_start;
+        let count = index - block_start;
         assert!(count > 0, "directory entry too large for a single block");
 
         let mut block = vec![0u8; block_size];

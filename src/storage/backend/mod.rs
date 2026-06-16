@@ -9,8 +9,8 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::config::BackendConfig;
 use crate::metadata::{BlobMeta, EROFS_BLOB_ID_SIZE};
-use crate::storage::config::BackendConfig;
 
 pub use local::LocalBackend;
 
