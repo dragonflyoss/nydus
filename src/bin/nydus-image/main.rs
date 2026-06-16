@@ -1827,7 +1827,7 @@ impl Command {
             })?;
 
         if let Some(c) = cmd {
-            let o = inspect::Executor::execute(&mut inspector, c.to_string()).unwrap();
+            let o = Self::execute_inspect_request(&mut inspector, c)?;
             serde_json::to_writer(std::io::stdout(), &o)
                 .unwrap_or_else(|e| error!("Failed to serialize result, {:?}", e));
         } else {
@@ -1835,6 +1835,28 @@ impl Command {
         }
 
         Ok(())
+    }
+
+    fn execute_inspect_request(
+        inspector: &mut inspect::RafsInspector,
+        request: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        match inspect::Executor::execute(inspector, request.to_string()) {
+            Ok(output) => Ok(output),
+            Err(inspect::ExecuteError::ExecError(e)) => {
+                Err(e).context(format!("failed to execute inspect request `{request}`"))
+            }
+            Err(inspect::ExecuteError::ArgumentParse) => {
+                bail!("invalid arguments in inspect request `{request}`")
+            }
+            Err(inspect::ExecuteError::IllegalCommand) => {
+                bail!("unsupported inspect request `{request}`")
+            }
+            Err(inspect::ExecuteError::HelpCommand) => {
+                bail!("help is not supported in inspect request mode")
+            }
+            Err(inspect::ExecuteError::Exit) => Ok(None),
+        }
     }
 
     fn stat(matches: &ArgMatches) -> Result<()> {
@@ -2315,9 +2337,37 @@ impl Command {
 
 #[cfg(test)]
 mod tests {
+    use std::{path::PathBuf, sync::Arc};
+
     use super::Command;
+    use nydus_api::ConfigV2;
+
     #[test]
     fn test_ensure_file() {
         Command::ensure_file("/dev/stdin").unwrap();
+    }
+
+    #[test]
+    fn test_execute_inspect_request_rejects_invalid_chunk_offset() {
+        let bootstrap =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/texture/bootstrap/rafs-v5.boot");
+        let mut inspector =
+            super::inspect::RafsInspector::new(&bootstrap, true, Arc::new(ConfigV2::default()))
+                .unwrap();
+
+        let err = Command::execute_inspect_request(&mut inspector, "chunk abc").unwrap_err();
+        assert!(err.to_string().contains("invalid arguments"));
+    }
+
+    #[test]
+    fn test_execute_inspect_request_rejects_invalid_inode() {
+        let bootstrap =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/texture/bootstrap/rafs-v5.boot");
+        let mut inspector =
+            super::inspect::RafsInspector::new(&bootstrap, true, Arc::new(ConfigV2::default()))
+                .unwrap();
+
+        let err = Command::execute_inspect_request(&mut inspector, "icheck abc").unwrap_err();
+        assert!(err.to_string().contains("invalid arguments"));
     }
 }
