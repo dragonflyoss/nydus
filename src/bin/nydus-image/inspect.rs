@@ -704,7 +704,10 @@ impl Executor {
             ("blobs", None) => inspector.cmd_list_blobs(),
             ("prefetch", None) => inspector.cmd_list_prefetch(),
             ("chunk", Some(argument)) => {
-                let offset: u64 = argument.parse().unwrap();
+                let offset: u64 = argument.parse().map_err(|_| {
+                    println!("Wrong OFFSET is specified. Is it a valid u64 value?");
+                    ExecuteError::ArgumentParse
+                })?;
                 inspector.cmd_show_chunk(offset)
             }
             ("icheck", Some(argument)) => {
@@ -759,6 +762,7 @@ impl Prompt {
                 Err(ExecuteError::Exit) => break,
                 Err(ExecuteError::IllegalCommand) => continue,
                 Err(ExecuteError::HelpCommand) => continue,
+                Err(ExecuteError::ArgumentParse) => continue,
                 Err(ExecuteError::ExecError(e)) => {
                     println!("Failed to execute command, {:?}", e);
                     continue;
