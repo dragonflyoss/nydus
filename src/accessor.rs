@@ -84,6 +84,10 @@ pub struct BlobInfo {
     pub index: u16,
     /// Blob digest recorded in the device slot.
     pub id: BlobID,
+    /// Start block of this blob in the flattened single-device layout.
+    pub mapped_blkaddr: u64,
+    /// Start byte offset of this blob in the flattened single-device layout.
+    pub mapped_offset: u64,
     /// Dense uncompressed size in 4 KiB blocks (the pmem device size).
     pub blocks: u64,
     /// Size in bytes of the cache data file (`blocks * 4096`).
@@ -171,6 +175,10 @@ pub struct FsEntry {
 /// Read-side handle over a lepton image, split into blob data access and
 /// static filesystem metadata/data access.
 pub struct LeptonAccessor {
+    /// Size in bytes of the standalone bootstrap image passed to [`new`].
+    ///
+    /// [`new`]: Self::new
+    pub bootstrap_size: u64,
     /// Blob table and decoded-cache preparation/fetch APIs.
     pub blob: BlobAccessor,
     /// Static path-based filesystem APIs.
@@ -202,6 +210,9 @@ impl LeptonAccessor {
     /// [`blobs`]: Self::blobs
     /// [`fetch`]: Self::fetch
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
+        let bootstrap_size = std::fs::metadata(bootstrap)
+            .with_context(|| format!("failed to stat bootstrap: {}", bootstrap.display()))?
+            .len();
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
         let cache_dir = config
             .cache_dir()
@@ -222,6 +233,7 @@ impl LeptonAccessor {
             .collect();
         let reader = Arc::new(reader);
         Ok(Self {
+            bootstrap_size,
             blob: BlobAccessor {
                 reader: reader.clone(),
                 blob_infos,
@@ -238,9 +250,14 @@ impl BlobAccessor {
     /// data file is created and sized to the dense uncompressed address
     /// space. Idempotent.
     pub fn entries(&self) -> Result<Vec<BlobInfo>> {
+        let block_size = EROFS_BLOCK_SIZE as u64;
         self.blob_infos
             .iter()
             .map(|info| {
+                let mapped_offset = info
+                    .mapped_blkaddr
+                    .checked_mul(block_size)
+                    .context("mapped blob offset overflow")?;
                 let cache = self
                     .reader
                     .blob_cache(info.blob_index)
@@ -248,11 +265,17 @@ impl BlobAccessor {
                 let cache_path = cache.prepare().with_context(|| {
                     format!("failed to prepare cache file for blob {}", info.blob_index)
                 })?;
+                let cache_size = info
+                    .blocks
+                    .checked_mul(block_size)
+                    .context("blob cache size overflow")?;
                 Ok(BlobInfo {
                     index: info.blob_index,
                     id: BlobID::from(info.blob_id),
+                    mapped_blkaddr: info.mapped_blkaddr,
+                    mapped_offset,
                     blocks: info.blocks,
-                    cache_size: info.blocks * EROFS_BLOCK_SIZE as u64,
+                    cache_size,
                     cache_path,
                     is_redirect: cache.is_redirect_blob(),
                 })
@@ -501,11 +524,14 @@ fn metadata_from_inode(reader: &ErofsReader, ino: u64, inode: &ErofsInode<'_>) -
 mod tests {
     use super::*;
     use crate::build::blob_chunk::BlobWriter;
-    use crate::build::bootstrap::render_bootstrap;
+    use crate::build::bootstrap::{
+        render_bootstrap, render_flattened_bootstrap, FLATTENED_BLOB_ALIGNMENT,
+    };
     use crate::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
     use crate::config::Config;
     use crate::metadata::{BlobMetaCompressor, ErofsDeviceSlot};
     use crate::utils::hex_string;
+    use crc32c::crc32c_append;
     use std::fs;
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
@@ -581,6 +607,7 @@ mod tests {
             &[0u8; 16],
         )
         .unwrap();
+        assert_eq!(bootstrap_bytes.len() % EROFS_BLOCK_SIZE as usize, 0);
         let bootstrap = root.join("bootstrap");
         fs::write(&bootstrap, &bootstrap_bytes).unwrap();
 
@@ -601,6 +628,11 @@ mod tests {
         let blob_id = BlobID::from(blob_id);
 
         let accessor = LeptonAccessor::new(&bootstrap, config).unwrap();
+        assert_eq!(
+            accessor.bootstrap_size,
+            fs::metadata(&bootstrap).unwrap().len()
+        );
+        assert_eq!(accessor.bootstrap_size % EROFS_BLOCK_SIZE as u64, 0);
         let blobs = accessor.blob.entries().unwrap();
         assert_eq!(blobs.len(), 1);
         let descriptor = &blobs[0];
@@ -611,6 +643,8 @@ mod tests {
             descriptor.cache_size,
             descriptor.blocks * EROFS_BLOCK_SIZE as u64
         );
+        assert_eq!(descriptor.mapped_offset, 0);
+        assert_eq!(descriptor.mapped_blkaddr, 0);
         let meta = fs::metadata(&descriptor.cache_path).unwrap();
         assert_eq!(meta.len(), descriptor.cache_size);
 
@@ -643,6 +677,81 @@ mod tests {
             .blob
             .fetch(&blob_id, descriptor.cache_size, block)
             .is_err());
+    }
+
+    #[test]
+    fn flattened_bootstrap_records_mapped_device_slots() {
+        let dir = tempdir().unwrap();
+        let (bootstrap, _config, blob_id, _corpus) = build_test_image(dir.path());
+        let reader = ErofsReader::open_layer(&bootstrap).unwrap();
+        let blob_infos = reader.blob_infos().unwrap();
+        assert_eq!(blob_infos.len(), 1);
+        assert_eq!(blob_infos[0].blob_id, blob_id);
+        assert_eq!(blob_infos[0].mapped_blkaddr, 0);
+
+        let corpus_dir = dir.path().join("corpus");
+        let blob_dir = dir.path().join("second-blobs");
+        fs::create_dir_all(&blob_dir).unwrap();
+        let staging = blob_dir.join("staging");
+        let mut writer = BlobWriter::new_with_compressor(
+            &staging,
+            crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+            BlobMetaCompressor::Zstd,
+        )
+        .unwrap();
+        let mut inodes = build_tree(
+            &corpus_dir,
+            &mut writer,
+            crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        )
+        .unwrap();
+        writer.finish().unwrap();
+
+        let second_blob_id = writer.data_digest();
+        let device_slots = [
+            ErofsDeviceSlot::with_blob_id(blob_infos[0].blocks, &blob_id),
+            ErofsDeviceSlot::with_blob_id(writer.total_blocks(), &second_blob_id),
+        ];
+        set_root_prefetch_blobs_xattr(&mut inodes[0], &[1, 2]).unwrap();
+        let flattened = render_flattened_bootstrap(
+            &mut inodes,
+            0,
+            crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
+            &device_slots,
+            &[0u8; 16],
+        )
+        .unwrap();
+        assert_eq!(flattened.len() % EROFS_BLOCK_SIZE as usize, 0);
+
+        let sb_offset = crate::metadata::EROFS_SUPER_OFFSET as usize;
+        let checksum =
+            u32::from_le_bytes(flattened[sb_offset + 4..sb_offset + 8].try_into().unwrap());
+        let mut block0 = flattened[sb_offset..EROFS_BLOCK_SIZE as usize].to_vec();
+        block0[4..8].fill(0);
+        assert_eq!(checksum, crc32c_append(!0u32, &block0));
+
+        let flattened_path = dir.path().join("flattened.bootstrap");
+        fs::write(&flattened_path, flattened).unwrap();
+        let flattened_reader = ErofsReader::open_layer(&flattened_path).unwrap();
+        let infos = flattened_reader.blob_infos().unwrap();
+        assert_eq!(infos.len(), 2);
+
+        let first_offset =
+            (fs::metadata(&flattened_path).unwrap().len() + FLATTENED_BLOB_ALIGNMENT - 1)
+                & !(FLATTENED_BLOB_ALIGNMENT - 1);
+        let second_offset =
+            (first_offset + infos[0].blocks * EROFS_BLOCK_SIZE as u64 + FLATTENED_BLOB_ALIGNMENT
+                - 1)
+                & !(FLATTENED_BLOB_ALIGNMENT - 1);
+        assert_eq!(
+            infos[0].mapped_blkaddr,
+            first_offset / EROFS_BLOCK_SIZE as u64
+        );
+        assert_eq!(
+            infos[1].mapped_blkaddr,
+            second_offset / EROFS_BLOCK_SIZE as u64
+        );
+        assert!(infos[1].mapped_blkaddr > infos[0].mapped_blkaddr);
     }
 
     #[test]

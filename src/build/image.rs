@@ -107,7 +107,7 @@ pub fn device_table_meta_blkaddr(device_count: usize) -> Result<u32> {
     u32::try_from(blocks).map_err(|_| anyhow::anyhow!("metadata block address exceeds u32"))
 }
 
-fn write_erofs_superblock_checksum(head: &mut [u8]) -> Result<()> {
+pub(crate) fn write_erofs_superblock_checksum(head: &mut [u8]) -> Result<()> {
     let sb_offset = EROFS_SUPER_OFFSET as usize;
     let block_size = EROFS_BLOCK_SIZE as usize;
     if head.len() < block_size {

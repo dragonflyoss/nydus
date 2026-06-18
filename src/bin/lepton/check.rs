@@ -63,6 +63,9 @@ struct ImageStats {
 struct BlobSummary {
     slot_sha256: [u8; EROFS_BLOB_ID_SIZE],
     slot_sha256_kind: SlotSha256Kind,
+    declared_blocks: u64,
+    mapped_blkaddr: u64,
+    mapped_offset: u64,
     declared_data_size: u64,
     resolved_path: Option<PathBuf>,
     blob_size: Option<u64>,
@@ -79,9 +82,13 @@ struct BlobSummary {
 
 impl BlobSummary {
     fn new(blob: &BlobInfo) -> Self {
+        let mapped_offset = blob.mapped_blkaddr * EROFS_BLOCK_SIZE as u64;
         Self {
             slot_sha256: blob.blob_id,
             slot_sha256_kind: SlotSha256Kind::Unknown,
+            declared_blocks: blob.blocks,
+            mapped_blkaddr: blob.mapped_blkaddr,
+            mapped_offset,
             declared_data_size: blob.blocks * EROFS_BLOCK_SIZE as u64,
             resolved_path: None,
             blob_size: None,
@@ -294,6 +301,9 @@ fn walk_inode(
                         let blob = blobs.entry(chunk.device_id).or_insert_with(|| BlobSummary {
                             slot_sha256: [0u8; EROFS_BLOB_ID_SIZE],
                             slot_sha256_kind: SlotSha256Kind::Unknown,
+                            declared_blocks: 0,
+                            mapped_blkaddr: 0,
+                            mapped_offset: 0,
                             declared_data_size: 0,
                             resolved_path: None,
                             blob_size: None,
@@ -612,8 +622,15 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
 
 fn print_blob_info(index: usize, blob_index: u16, blob: &BlobSummary) {
     println!("  Blob {index}");
-    println!("    blob_index: {index}");
+    println!("    device_table_index: {index}");
     println!("    blob_index: {blob_index}");
+    println!("    mapped_blkaddr: {}", blob.mapped_blkaddr);
+    println!("    mapped_offset: {}", blob.mapped_offset);
+    println!("    declared_blocks: {}", blob.declared_blocks);
+    println!(
+        "    declared_uncompressed_size: {}",
+        blob.declared_data_size
+    );
     println!("    slot_digest_kind: {}", blob.slot_sha256_kind.as_str());
     println!("    data_blob_digest: {}", data_blob_digest(blob));
     println!(

@@ -40,6 +40,7 @@ pub struct BlobInfo {
     pub blob_index: u16,
     pub blob_id: [u8; EROFS_BLOB_ID_SIZE],
     pub blocks: u64,
+    pub mapped_blkaddr: u64,
 }
 
 /// A blob referenced by the bootstrap device table. The blob cache is opened
@@ -278,6 +279,7 @@ impl ErofsReader {
                 blob_index: index as u16 + 1,
                 blob_id: slot.blob_id(),
                 blocks: slot.blocks(),
+                mapped_blkaddr: slot.mapped_blkaddr(),
             });
         }
         Ok(infos)

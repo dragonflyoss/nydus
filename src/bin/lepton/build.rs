@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 use lepton::build::blob_chunk::BlobWriter;
-use lepton::build::bootstrap::render_bootstrap;
+use lepton::build::bootstrap::{render_bootstrap, render_flattened_bootstrap};
 use lepton::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
 use lepton::metadata::*;
 use lepton::tracing::init_command_tracing;
@@ -176,11 +176,13 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         render_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
 
     if let Some(bootstrap) = &args.bootstrap {
+        let standalone_bootstrap_bytes =
+            render_flattened_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
         let bootstrap_file = File::create(bootstrap)
             .with_context(|| format!("failed to create bootstrap: {}", bootstrap.display()))?;
         let mut writer = BufWriter::new(bootstrap_file);
         writer
-            .write_all(&bootstrap_bytes)
+            .write_all(&standalone_bootstrap_bytes)
             .with_context(|| format!("failed to write bootstrap: {}", bootstrap.display()))?;
         writer
             .flush()

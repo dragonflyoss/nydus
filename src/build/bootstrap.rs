@@ -1,12 +1,48 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::build::dir::{serialize_directory, DirChild};
-use crate::build::image::{device_table_meta_blkaddr, write_image};
+use crate::build::image::{
+    device_table_meta_blkaddr, write_erofs_superblock_checksum, write_image,
+};
 use crate::build::inode::{erofs_inode_size, serialize_inode, InodeData, InodeInfo};
 use crate::metadata::layout::MetadataLayout;
 use crate::metadata::*;
 
+pub const FLATTENED_BLOB_ALIGNMENT: u64 = 0x8_0000;
+
 pub fn render_bootstrap(
+    inodes: &mut [InodeInfo],
+    epoch: u64,
+    chunkbits: u32,
+    device_slots: &[ErofsDeviceSlot],
+    uuid: &[u8; 16],
+) -> Result<Vec<u8>> {
+    let bootstrap = render_bootstrap_inner(inodes, epoch, chunkbits, device_slots, uuid)?;
+    debug_assert_eq!(bootstrap.len() % EROFS_BLOCK_SIZE as usize, 0);
+    Ok(bootstrap)
+}
+
+pub fn render_flattened_bootstrap(
+    inodes: &mut [InodeInfo],
+    epoch: u64,
+    chunkbits: u32,
+    device_slots: &[ErofsDeviceSlot],
+    uuid: &[u8; 16],
+) -> Result<Vec<u8>> {
+    let mut device_slots = device_slots.to_vec();
+    let mut bootstrap = render_bootstrap_inner(inodes, epoch, chunkbits, &device_slots, uuid)?;
+    debug_assert_eq!(bootstrap.len() % EROFS_BLOCK_SIZE as usize, 0);
+    set_flattened_mapped_blkaddrs(
+        &mut device_slots,
+        bootstrap.len() as u64,
+        FLATTENED_BLOB_ALIGNMENT,
+    )?;
+    patch_device_slots(&mut bootstrap, &device_slots)?;
+    debug_assert_eq!(bootstrap.len() % EROFS_BLOCK_SIZE as usize, 0);
+    Ok(bootstrap)
+}
+
+fn render_bootstrap_inner(
     inodes: &mut [InodeInfo],
     epoch: u64,
     chunkbits: u32,
@@ -102,6 +138,55 @@ pub fn render_bootstrap(
     )?;
 
     Ok(bootstrap)
+}
+
+fn set_flattened_mapped_blkaddrs(
+    device_slots: &mut [ErofsDeviceSlot],
+    bootstrap_size: u64,
+    alignment: u64,
+) -> Result<()> {
+    let block_size = EROFS_BLOCK_SIZE as u64;
+    let mut next_offset = bootstrap_size;
+    for slot in device_slots {
+        let next_offset_usize = usize::try_from(next_offset)
+            .context("flattened blob offset exceeds addressable size")?;
+        let alignment_usize = usize::try_from(alignment)
+            .context("flattened blob alignment exceeds addressable size")?;
+        let mapped_offset = round_up(next_offset_usize, alignment_usize) as u64;
+        if mapped_offset % block_size != 0 {
+            bail!("flattened blob offset must be block aligned");
+        }
+        slot.set_mapped_blkaddr(mapped_offset / block_size);
+        next_offset = mapped_offset
+            .checked_add(
+                slot.blocks()
+                    .checked_mul(block_size)
+                    .context("flattened blob size overflow")?,
+            )
+            .context("flattened blob offset overflow")?;
+    }
+    Ok(())
+}
+
+fn patch_device_slots(bootstrap: &mut [u8], device_slots: &[ErofsDeviceSlot]) -> Result<()> {
+    let devslot_offset = EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE;
+    let device_table_size = device_slots
+        .len()
+        .checked_mul(EROFS_DEVICESLOT_SIZE)
+        .context("device table size overflow")?;
+    let device_table_end = devslot_offset
+        .checked_add(device_table_size)
+        .context("device table offset overflow")?;
+    if device_table_end > bootstrap.len() {
+        bail!("device table out of bounds");
+    }
+
+    for (index, devslot) in device_slots.iter().enumerate() {
+        let start = devslot_offset + index * EROFS_DEVICESLOT_SIZE;
+        let end = start + EROFS_DEVICESLOT_SIZE;
+        bootstrap[start..end].copy_from_slice(devslot.as_bytes());
+    }
+    write_erofs_superblock_checksum(bootstrap)
 }
 
 pub fn set_parent_nids(inodes: &mut [InodeInfo]) {

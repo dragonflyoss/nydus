@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::build::blob_chunk::ChunkIndex;
-use crate::build::bootstrap::render_bootstrap;
+use crate::build::bootstrap::render_flattened_bootstrap;
 use crate::build::inode::{
     mode_to_erofs_file_type, set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo,
 };
@@ -116,7 +116,7 @@ pub fn merge_sources_to_bootstrap_bytes(
     let prefetch_blob_indexes = (1..=blob_count).collect::<Vec<_>>();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_blob_indexes)?;
 
-    render_bootstrap(
+    render_flattened_bootstrap(
         &mut inodes,
         epoch,
         EROFS_BLKSZBITS as u32,
@@ -197,7 +197,7 @@ pub fn rewrite_bootstrap_with_ondemand_blob(
         .min()
         .unwrap_or_else(|| reader.sb().epoch());
     let uuid = [0u8; 16];
-    render_bootstrap(
+    render_flattened_bootstrap(
         &mut inodes,
         epoch,
         EROFS_BLKSZBITS as u32,
