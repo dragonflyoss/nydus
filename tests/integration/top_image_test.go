@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,7 +24,25 @@ import (
 //
 // Tuning knobs (all optional):
 //
-//	LEPTONFS_TOP_IMAGES_REGISTRY     Target registry (default "localhost:5000").
+//	LEPTONFS_TOP_IMAGES_REGISTRY     Target registry/namespace for the converted
+//	                                 lepton images (default "localhost:5000"). On
+//	                                 CI this points at the GHCR namespace
+//	                                 (e.g. "ghcr.io/dragonflyoss/lepton") so the
+//	                                 converted images are pushed straight to GHCR
+//	                                 instead of a local registry, which keeps the
+//	                                 runner's root volume from filling up.
+//	LEPTONFS_TOP_IMAGES_PLAIN_HTTP   Whether convert/check talk to the target
+//	                                 registry over plain HTTP without TLS
+//	                                 verification ("1"/"true" to enable). Defaults
+//	                                 to true only for localhost registries; for a
+//	                                 real registry such as GHCR it defaults to
+//	                                 false so the pipeline uses HTTPS.
+//	LEPTONFS_TOP_IMAGES_PLATFORM     Platform to convert/check (default
+//	                                 "linux/amd64"). Multi-arch images include a
+//	                                 Windows manifest whose layers cannot be
+//	                                 extracted on Linux, so the suite pins to a
+//	                                 single Linux platform. Set to "all" (or empty)
+//	                                 to convert every platform.
 //	LEPTONFS_TOP_IMAGES_CONCURRENCY  Number of images processed in parallel (default 5).
 //	LEPTONFS_TOP_IMAGES_LIST         Path to the image list (default texture/top-images.txt).
 //	LEPTONFS_TOP_IMAGES_WORKDIR      Base directory for the per-image convert/check
@@ -45,6 +64,32 @@ func TestTopImages(t *testing.T) {
 	registry := os.Getenv("LEPTONFS_TOP_IMAGES_REGISTRY")
 	if registry == "" {
 		registry = "localhost:5000"
+	}
+
+	// Decide whether to talk to the target registry over plain HTTP without TLS
+	// verification. Local registries (localhost) are served over plain HTTP,
+	// while a real registry such as GHCR speaks HTTPS, so default accordingly
+	// and allow an explicit override.
+	plainHTTP := registryIsLocal(registry)
+	if v := os.Getenv("LEPTONFS_TOP_IMAGES_PLAIN_HTTP"); v != "" {
+		b, err := strconv.ParseBool(v)
+		require.NoError(t, err, "invalid LEPTONFS_TOP_IMAGES_PLAIN_HTTP %q", v)
+		plainHTTP = b
+	}
+
+	// Convert defaults to converting every platform in a multi-arch image, which
+	// includes the Windows manifest for images such as golang/python/openjdk.
+	// Extracting a Windows layer on Linux fails because its hardlinks (e.g.
+	// "Program Files" -> "Program Files (x86)") reference files in lower layers
+	// that the per-layer extraction never sees. Pin to a single platform so only
+	// the Linux rootfs is converted/checked. An empty value (or "all") restores
+	// the convert-all behaviour.
+	platform := "linux/amd64"
+	if v, ok := os.LookupEnv("LEPTONFS_TOP_IMAGES_PLATFORM"); ok {
+		platform = v
+	}
+	if platform == "all" {
+		platform = ""
 	}
 
 	concurrency := 5
@@ -84,7 +129,11 @@ func TestTopImages(t *testing.T) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			target := fmt.Sprintf("%s/%s-nydus", registry, imageBaseName(image))
+			// Push the converted lepton image alongside its source in the target
+			// registry/namespace, suffixing the repository with "-lepton" so it
+			// does not collide with the source image (e.g.
+			// ghcr.io/dragonflyoss/lepton/nginx -> .../nginx-lepton).
+			target := fmt.Sprintf("%s/%s-lepton", registry, imageBaseName(image))
 
 			// Create the work directory under the (optionally larger) work base
 			// and remove it as soon as this image finishes. The explicit cleanup
@@ -96,13 +145,15 @@ func TestTopImages(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { _ = os.RemoveAll(workDir) }()
 
-			convert := exec.Command(leptonifyBin, "convert",
+			convertArgs := []string{"convert",
 				"--source", image,
 				"--target", target,
 				"--builder", leptonBin,
 				"--work-dir", filepath.Join(workDir, "convert"),
-				"--plain-http", "--insecure",
-			)
+			}
+			convertArgs = append(convertArgs, platformArgs(platform)...)
+			convertArgs = append(convertArgs, registryTLSArgs(plainHTTP)...)
+			convert := exec.Command(leptonifyBin, convertArgs...)
 			out, err := convert.CombinedOutput()
 			t.Logf("[convert %s] %s\n%s", image, strings.Join(convert.Args, " "), out)
 			if err != nil {
@@ -116,13 +167,15 @@ func TestTopImages(t *testing.T) {
 				require.NoError(t, err, "convert %s failed", image)
 			}
 
-			check := exec.Command(leptonifyBin, "check",
+			checkArgs := []string{"check",
 				"--source", image,
 				"--target", target,
 				"--builder", leptonBin,
 				"--work-dir", filepath.Join(workDir, "check"),
-				"--plain-http", "--insecure",
-			)
+			}
+			checkArgs = append(checkArgs, platformArgs(platform)...)
+			checkArgs = append(checkArgs, registryTLSArgs(plainHTTP)...)
+			check := exec.Command(leptonifyBin, checkArgs...)
 			runLeptonify(t, check, "check "+image)
 		})
 	}
@@ -130,12 +183,45 @@ func TestTopImages(t *testing.T) {
 
 // imageBaseName returns the last path component of an image reference so a
 // fully-qualified mirror ref (e.g. "ghcr.io/dragonflyoss/lepton/nginx") maps
-// to a flat repository name in the local target registry.
+// to a flat repository name in the target registry.
 func imageBaseName(image string) string {
 	if i := strings.LastIndex(image, "/"); i >= 0 {
 		return image[i+1:]
 	}
 	return image
+}
+
+// registryIsLocal reports whether the registry/namespace points at a local
+// registry served over plain HTTP (e.g. "localhost:5000" or "127.0.0.1:5000")
+// rather than a real HTTPS registry such as GHCR.
+func registryIsLocal(registry string) bool {
+	host := registry
+	if i := strings.IndexAny(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+// registryTLSArgs returns the leptonify flags controlling transport security.
+// For a local registry it enables plain HTTP and skips TLS verification; for a
+// real registry such as GHCR it returns no extra flags so HTTPS is used.
+func registryTLSArgs(plainHTTP bool) []string {
+	if plainHTTP {
+		return []string{"--plain-http", "--insecure"}
+	}
+	return nil
+}
+
+// platformArgs returns the leptonify "--platform" flag pinning convert/check to
+// a single platform, or no flag when platform is empty (convert every platform).
+func platformArgs(platform string) []string {
+	if platform == "" {
+		return nil
+	}
+	return []string{"--platform", platform}
 }
 
 // isImageNotFound reports whether leptonify output indicates the source image

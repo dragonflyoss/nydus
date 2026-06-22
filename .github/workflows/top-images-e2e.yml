@@ -1,7 +1,8 @@
 name: Top Images E2E
 
 # Manually-triggered end-to-end test that converts and validates the top
-# Docker Hub images with leptonify against a local registry.
+# Docker Hub images with leptonify, pushing the converted lepton images straight
+# to this repository's GHCR namespace over HTTPS.
 on:
   workflow_dispatch:
     inputs:
@@ -10,16 +11,16 @@ on:
         required: false
         default: "5"
       registry:
-        description: "Target registry for the converted images"
+        description: "Target registry/namespace for the converted lepton images"
         required: false
-        default: "localhost:5000"
+        default: ""
 
 env:
   RUST_BACKTRACE: 1
 
 permissions:
   contents: read
-  packages: read
+  packages: write
 
 jobs:
   top-images-e2e:
@@ -32,10 +33,11 @@ jobs:
 
       # The convert/check pipeline stages many multi-gigabyte images. The
       # per-image scratch work directories are placed on the large /mnt
-      # ephemeral disk (see the test step), but the local registry, the Docker
-      # daemon data dir and the Rust/Go build all live on the smaller root
-      # volume. Reclaim the ~25GB of preinstalled toolchains we do not use so
-      # the root volume does not run out of space ("no space left on device").
+      # ephemeral disk (see the test step). The converted lepton images are
+      # pushed straight to GHCR (no local registry), but the pulled source
+      # blobs and the Rust/Go build still live on the smaller root volume.
+      # Reclaim the ~25GB of preinstalled toolchains we do not use so the root
+      # volume does not run out of space ("no space left on device").
       - name: Free up disk space
         run: |
           echo "Disk usage before cleanup:"
@@ -57,22 +59,14 @@ jobs:
       - name: Install Docker
         uses: docker/setup-docker-action@v4
 
-      # The image list points at GHCR mirrors (see mirror-top-images.yml);
-      # authenticate so private packages can be pulled.
+      # The image list points at GHCR mirrors (see mirror-top-images.yml) and
+      # the converted lepton images are pushed back to the same GHCR namespace;
+      # authenticate so packages can be pulled and pushed.
       - name: Log in to GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           sudo mkdir -p /root/.docker
           sudo cp "$HOME/.docker/config.json" /root/.docker/config.json
-
-      - name: Start local registry
-        run: |
-          # Cap the registry container's json-file log so a long run cannot fill
-          # the root volume with daemon logs (each converted image is pushed
-          # here for the check stage to pull back).
-          docker run -d -p 5000:5000 --restart always --name registry \
-            --log-opt max-size=50m --log-opt max-file=3 \
-            distribution/distribution
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -95,6 +89,12 @@ jobs:
           sudo install -m 0755 leptonify/leptonify /usr/local/bin/leptonify
 
       - name: Run top-images e2e test
+        env:
+          # Push the converted lepton images straight to this repository's GHCR
+          # namespace (over HTTPS) instead of a local registry, so the runner's
+          # root volume is not filled by the pushed-back images.
+          REGISTRY_INPUT: ${{ github.event.inputs.registry }}
+          DEFAULT_REGISTRY: ghcr.io/${{ github.repository }}
         run: |
           # Convert/check stage many multi-gigabyte images in parallel. The
           # default temp filesystem lives on the small root volume, so place the
@@ -104,7 +104,10 @@ jobs:
           sudo mkdir -p /mnt/leptonify-top-images
           sudo chmod 0777 /mnt/leptonify-top-images
           df -h / /mnt
+          registry="${REGISTRY_INPUT:-$DEFAULT_REGISTRY}"
           make test-top-images \
             TOP_IMAGES_CONCURRENCY="${{ github.event.inputs.concurrency }}" \
-            TOP_IMAGES_REGISTRY="${{ github.event.inputs.registry }}" \
+            TOP_IMAGES_REGISTRY="$registry" \
+            TOP_IMAGES_PLAIN_HTTP="false" \
+            TOP_IMAGES_PLATFORM="linux/amd64" \
             TOP_IMAGES_WORKDIR="/mnt/leptonify-top-images"

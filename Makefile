@@ -23,6 +23,8 @@ TOP_IMAGES_TIMEOUT ?= 3600s
 TOP_IMAGES_COUNT ?= 1
 TOP_IMAGES_CONCURRENCY ?= 5
 TOP_IMAGES_REGISTRY ?= localhost:5000
+TOP_IMAGES_PLAIN_HTTP ?=
+TOP_IMAGES_PLATFORM ?= linux/amd64
 TOP_IMAGES_WORKDIR ?=
 TOP_IMAGES_GO_TEST_ARGS ?=
 
@@ -79,14 +81,17 @@ test-perf: release
 		LEPTONFS_RUN_PERF=1 \
 		$(GO_BIN) test -v -run '^TestPerf$$' -count $(PERF_COUNT) -timeout $(PERF_TIMEOUT) $(PERF_GO_TEST_ARGS) $(PERF_TEST_FILES)
 
-# Convert and validate the top Docker Hub images against a local registry
-# (requires root and a registry at $(TOP_IMAGES_REGISTRY)). Builds leptonify on demand.
+# Convert and validate the top Docker Hub images, pushing the converted lepton
+# images to $(TOP_IMAGES_REGISTRY) (e.g. a GHCR namespace or a local registry).
+# Requires root and credentials for the target registry. Builds leptonify on demand.
 test-top-images: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/integration && \
 		$(GO_TEST_ENV) \
 		LEPTONFS_RUN_TOP_IMAGES=1 \
 		LEPTONFS_TOP_IMAGES_REGISTRY=$(TOP_IMAGES_REGISTRY) \
+		LEPTONFS_TOP_IMAGES_PLAIN_HTTP=$(TOP_IMAGES_PLAIN_HTTP) \
+		LEPTONFS_TOP_IMAGES_PLATFORM=$(TOP_IMAGES_PLATFORM) \
 		LEPTONFS_TOP_IMAGES_CONCURRENCY=$(TOP_IMAGES_CONCURRENCY) \
 		LEPTONFS_TOP_IMAGES_WORKDIR=$(TOP_IMAGES_WORKDIR) \
 		$(GO_BIN) test -v -run '^TestTopImages$$' -count $(TOP_IMAGES_COUNT) -timeout $(TOP_IMAGES_TIMEOUT) $(TOP_IMAGES_GO_TEST_ARGS) $(TOP_IMAGES_TEST_FILES)
