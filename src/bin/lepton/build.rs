@@ -166,28 +166,12 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         .unwrap_or(build_time);
 
     let uuid_bytes = [0u8; 16];
+    let blob_blocks = blob_writer.total_blocks();
     let blob_id = blob_writer.data_digest();
-    let device_slots = [ErofsDeviceSlot::with_blob_id(
-        blob_writer.total_blocks(),
-        &blob_id,
-    )];
+    let device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &blob_id)];
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1])?;
     let bootstrap_bytes =
         render_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
-
-    if let Some(bootstrap) = &args.bootstrap {
-        let standalone_bootstrap_bytes =
-            render_flattened_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
-        let bootstrap_file = File::create(bootstrap)
-            .with_context(|| format!("failed to create bootstrap: {}", bootstrap.display()))?;
-        let mut writer = BufWriter::new(bootstrap_file);
-        writer
-            .write_all(&standalone_bootstrap_bytes)
-            .with_context(|| format!("failed to write bootstrap: {}", bootstrap.display()))?;
-        writer
-            .flush()
-            .with_context(|| format!("failed to flush bootstrap: {}", bootstrap.display()))?;
-    }
 
     let compressed_data_size = blob_writer.data_size();
     let blob_meta = blob_writer.blob_meta(blob_id, 0)?;
@@ -270,6 +254,26 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
     blob_meta
         .save(&blob_meta_path)
         .with_context(|| format!("failed to save blob meta: {}", blob_meta_path.display()))?;
+
+    if let Some(bootstrap) = &args.bootstrap {
+        let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &full_blob_id)];
+        let standalone_bootstrap_bytes = render_flattened_bootstrap(
+            &mut inodes,
+            epoch,
+            chunkbits,
+            &standalone_device_slots,
+            &uuid_bytes,
+        )?;
+        let bootstrap_file = File::create(bootstrap)
+            .with_context(|| format!("failed to create bootstrap: {}", bootstrap.display()))?;
+        let mut writer = BufWriter::new(bootstrap_file);
+        writer
+            .write_all(&standalone_bootstrap_bytes)
+            .with_context(|| format!("failed to write bootstrap: {}", bootstrap.display()))?;
+        writer
+            .flush()
+            .with_context(|| format!("failed to flush bootstrap: {}", bootstrap.display()))?;
+    }
 
     print_blob_summary(BlobSummary {
         index: 0,
@@ -512,6 +516,44 @@ mod tests {
         assert_eq!(output.write_path, fifo);
         assert!(output.blob_dir.is_none());
         assert!(output.is_fifo);
+    }
+
+    #[test]
+    fn build_bootstrap_device_slot_uses_full_blob_digest() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let blob_dir = dir.path().join("blobs");
+        let bootstrap = dir.path().join("lepton-bootstrap.boot");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&blob_dir).unwrap();
+        fs::write(source.join("hello.txt"), b"hello lepton").unwrap();
+
+        run_build(BuildArgs {
+            source,
+            conversion_type: ConversionType::DirLepton,
+            blob: None,
+            blob_dir: Some(blob_dir.clone()),
+            bootstrap: Some(bootstrap.clone()),
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            compress_size: DEFAULT_COMPRESS_SIZE,
+            compressor: Compressor::Zstd,
+            log_level: Level::ERROR,
+            console: false,
+        })
+        .unwrap();
+
+        let full_blob_digest = fs::read_dir(&blob_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .find(|name| name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .unwrap();
+        let bootstrap_bytes = fs::read(&bootstrap).unwrap();
+        let slot_offset = EROFS_SUPER_OFFSET as usize + EROFS_SB_BASE_SIZE;
+        let slot = cast_ref::<ErofsDeviceSlot>(
+            &bootstrap_bytes[slot_offset..slot_offset + EROFS_DEVICESLOT_SIZE],
+        );
+
+        assert_eq!(hex_string(&slot.blob_id()), full_blob_digest);
     }
 
     fn make_fifo(path: &Path) {

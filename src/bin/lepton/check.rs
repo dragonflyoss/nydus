@@ -389,7 +389,6 @@ fn resolve_blobs(
     };
 
     let mut blob_sha_matches = HashMap::new();
-    let mut data_sha_matches = HashMap::new();
 
     for entry in fs::read_dir(blob_dir)
         .with_context(|| format!("failed to read blob-dir: {}", blob_dir.display()))?
@@ -416,18 +415,6 @@ fn resolve_blobs(
                 slot_sha256_kind: SlotSha256Kind::Blob,
                 verified: true,
             });
-        data_sha_matches
-            .entry(inspection.data_sha256)
-            .or_insert(ResolvedBlob {
-                path,
-                blob_size: inspection.blob_size,
-                blob_sha256: inspection.blob_sha256,
-                data_sha256: inspection.data_sha256,
-                data_size: inspection.data_size,
-                blob_meta: inspection.blob_meta,
-                slot_sha256_kind: SlotSha256Kind::Data,
-                verified: true,
-            });
     }
 
     for blob in blob_infos {
@@ -435,12 +422,6 @@ fn resolve_blobs(
             resolved
                 .entry(blob.blob_index)
                 .or_insert_with(|| match_by_blob.clone());
-            continue;
-        }
-        if let Some(match_by_data) = data_sha_matches.get(&blob.blob_id) {
-            resolved
-                .entry(blob.blob_index)
-                .or_insert_with(|| match_by_data.clone());
         }
     }
 
@@ -767,4 +748,85 @@ fn format_u64_set(values: &BTreeSet<u64>) -> String {
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn resolve_bootstrap_blob_dir_by_full_blob_digest_only() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("blob");
+        let (full_blob_digest, data_blob_digest) = write_minimal_blob(&blob_path);
+
+        let full_blob_info = BlobInfo {
+            blob_index: 1,
+            blob_id: full_blob_digest,
+            blocks: 1,
+            mapped_blkaddr: 0,
+        };
+        let resolved = resolve_blobs(
+            ImageKind::Bootstrap,
+            Path::new("bootstrap.boot"),
+            Some(dir.path()),
+            &[full_blob_info],
+        )
+        .unwrap();
+        let resolved_blob = resolved.get(&1).unwrap();
+
+        assert_eq!(resolved_blob.slot_sha256_kind, SlotSha256Kind::Blob);
+        assert_eq!(resolved_blob.blob_sha256, full_blob_digest);
+        assert!(resolved_blob.verified);
+
+        let data_blob_info = BlobInfo {
+            blob_index: 2,
+            blob_id: data_blob_digest,
+            blocks: 1,
+            mapped_blkaddr: 0,
+        };
+        let resolved = resolve_blobs(
+            ImageKind::Bootstrap,
+            Path::new("bootstrap.boot"),
+            Some(dir.path()),
+            &[data_blob_info],
+        )
+        .unwrap();
+
+        assert!(!resolved.contains_key(&2));
+    }
+
+    fn write_minimal_blob(path: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
+        let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
+        let data_digest = sha256_bytes(&data);
+        let blob_meta = BlobMeta::from_parts(
+            [0u8; EROFS_BLOB_ID_SIZE],
+            BLOB_META_DEFAULT_CHUNK_BLOCK_COUNT,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let mut blob_meta_bytes = Vec::new();
+        blob_meta.write_to(&mut blob_meta_bytes).unwrap();
+        assert_eq!(blob_meta_bytes.len(), EROFS_BLOCK_SIZE as usize);
+
+        let footer = BlobFooter::new(
+            0,
+            data.len() as u64,
+            data.len() as u64,
+            0,
+            data.len() as u64,
+            1,
+        )
+        .unwrap();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&data);
+        blob.extend_from_slice(&blob_meta_bytes);
+        footer.write_to(&mut blob).unwrap();
+        fs::write(path, &blob).unwrap();
+
+        (sha256_bytes(&blob), data_digest)
+    }
 }
