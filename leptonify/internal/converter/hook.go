@@ -109,24 +109,24 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	}
 
 	// Rewrite the image config: diff ids and history.
-	var config ocispec.Image
-	configLabels, err := readJSON(ctx, cs, &config, manifest.Config)
-	if err != nil {
-		return nil, errors.Wrap(err, "read image config")
-	}
 	diffIDs := make([]digest.Digest, 0, len(layers))
 	for _, l := range layers {
 		if uncompressed := l.Annotations[LayerAnnotationUncompressed]; uncompressed != "" {
 			diffIDs = append(diffIDs, digest.Digest(uncompressed))
 		}
 	}
-	config.RootFS.DiffIDs = diffIDs
-	config.History = append(config.History, ocispec.History{
-		CreatedBy: "Lepton Converter",
-		Comment:   "Lepton Bootstrap Layer",
-	})
 
-	newConfigDesc, err := writeJSON(ctx, cs, config, manifest.Config, configLabels)
+	var rawConfig json.RawMessage
+	configLabels, err := readJSON(ctx, cs, &rawConfig, manifest.Config)
+	if err != nil {
+		return nil, errors.Wrap(err, "read image config")
+	}
+	newConfig, err := rewriteBootstrapConfig(rawConfig, diffIDs)
+	if err != nil {
+		return nil, errors.Wrap(err, "rewrite image config")
+	}
+
+	newConfigDesc, err := writeJSON(ctx, cs, newConfig, manifest.Config, configLabels)
 	if err != nil {
 		return nil, errors.Wrap(err, "write image config")
 	}
@@ -142,6 +142,58 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	// Preserve the platform metadata from the input manifest descriptor.
 	newManifestDesc.Platform = newDesc.Platform
 	return newManifestDesc, nil
+}
+
+// rewriteBootstrapConfig updates an OCI image config for the merged bootstrap
+// layer. It patches only the `rootfs` (diff ids) and `history` fields of the
+// raw config JSON and leaves every other field — in particular the runtime
+// `config` (env/cmd/entrypoint/working dir/etc.) — byte-for-byte intact.
+//
+// Decoding the whole config into ocispec.Image and re-marshaling it would drop
+// empty-but-present fields via `omitempty` (e.g. `"Cmd": []` is re-encoded as
+// absent and then decodes back as a nil slice). The lepton config would then no
+// longer be reflect.DeepEqual to the untouched source OCI config, and
+// `leptonify check` would fail the manifest config-consistency rule.
+func rewriteBootstrapConfig(configJSON json.RawMessage, diffIDs []digest.Digest) (json.RawMessage, error) {
+	var rawConfig map[string]json.RawMessage
+	if err := json.Unmarshal(configJSON, &rawConfig); err != nil {
+		return nil, errors.Wrap(err, "unmarshal image config")
+	}
+
+	var rootFS ocispec.RootFS
+	if raw, ok := rawConfig["rootfs"]; ok {
+		if err := json.Unmarshal(raw, &rootFS); err != nil {
+			return nil, errors.Wrap(err, "unmarshal image config rootfs")
+		}
+	}
+	rootFS.DiffIDs = diffIDs
+	rootFSRaw, err := json.Marshal(rootFS)
+	if err != nil {
+		return nil, errors.Wrap(err, "marshal image config rootfs")
+	}
+	rawConfig["rootfs"] = rootFSRaw
+
+	var history []ocispec.History
+	if raw, ok := rawConfig["history"]; ok {
+		if err := json.Unmarshal(raw, &history); err != nil {
+			return nil, errors.Wrap(err, "unmarshal image config history")
+		}
+	}
+	history = append(history, ocispec.History{
+		CreatedBy: "Lepton Converter",
+		Comment:   "Lepton Bootstrap Layer",
+	})
+	historyRaw, err := json.Marshal(history)
+	if err != nil {
+		return nil, errors.Wrap(err, "marshal image config history")
+	}
+	rawConfig["history"] = historyRaw
+
+	out, err := json.Marshal(rawConfig)
+	if err != nil {
+		return nil, errors.Wrap(err, "marshal image config")
+	}
+	return out, nil
 }
 
 // isLeptonManifest reports whether every layer of the manifest is a converted

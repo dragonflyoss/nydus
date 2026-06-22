@@ -24,11 +24,35 @@ permissions:
 jobs:
   top-images-e2e:
     name: Convert and validate top images
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      # The convert/check pipeline stages many multi-gigabyte images. The
+      # per-image scratch work directories are placed on the large /mnt
+      # ephemeral disk (see the test step), but the local registry, the Docker
+      # daemon data dir and the Rust/Go build all live on the smaller root
+      # volume. Reclaim the ~25GB of preinstalled toolchains we do not use so
+      # the root volume does not run out of space ("no space left on device").
+      - name: Free up disk space
+        run: |
+          echo "Disk usage before cleanup:"
+          df -h / /mnt
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell \
+            /usr/local/share/chromium \
+            /usr/local/share/boost \
+            /usr/lib/jvm || true
+          sudo docker image prune --all --force || true
+          echo "Disk usage after cleanup:"
+          df -h / /mnt
 
       - name: Install Docker
         uses: docker/setup-docker-action@v4
@@ -43,7 +67,12 @@ jobs:
 
       - name: Start local registry
         run: |
-          docker run -d -p 5000:5000 --restart always --name registry distribution/distribution
+          # Cap the registry container's json-file log so a long run cannot fill
+          # the root volume with daemon logs (each converted image is pushed
+          # here for the check stage to pull back).
+          docker run -d -p 5000:5000 --restart always --name registry \
+            --log-opt max-size=50m --log-opt max-file=3 \
+            distribution/distribution
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
