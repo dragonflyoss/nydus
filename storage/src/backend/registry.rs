@@ -36,6 +36,12 @@ const REGISTRY_CONFIG_POLL_INTERVAL: u64 = 5; // in seconds
 // Refresh tokens this many seconds before they expire to avoid using an expired token.
 const REGISTRY_TOKEN_REFRESH_MARGIN: u64 = 20; // in seconds
 
+// Spread proactive refreshes across backends.
+const REGISTRY_TOKEN_REFRESH_JITTER_MAX: u64 = 5 * 60; // in seconds
+const REGISTRY_TOKEN_REFRESH_JITTER_DIVISOR: u64 = 10;
+const REGISTRY_TOKEN_REFRESH_BACKOFF_INITIAL: u64 = REGISTRY_CONFIG_POLL_INTERVAL; // in seconds
+const REGISTRY_TOKEN_REFRESH_BACKOFF_MAX: u64 = 10 * 60; // in seconds
+
 /// Error codes related to registry storage backend operations.
 #[derive(Debug)]
 pub enum RegistryError {
@@ -265,10 +271,35 @@ struct RegistryState {
     // Cache 30X redirect url
     // Example: RwLock<HashMap<"<blob_id>", "<redirected_url>">>
     cached_redirect: HashCache<String>,
-    // The epoch timestamp of token expiration, which is obtained from the registry server.
-    token_expired_at: ArcSwapOption<u64>,
+    // The epoch timestamp for the next background token refresh attempt,
+    // including proactive jitter and failure backoff.
+    token_refresh_at: ArcSwapOption<u64>,
     // Cache bearer auth for refreshing token.
     cached_bearer_auth: ArcSwapOption<BearerAuth>,
+}
+
+fn token_refresh_jitter_max(ttl_secs: u64) -> u64 {
+    std::cmp::min(
+        ttl_secs / REGISTRY_TOKEN_REFRESH_JITTER_DIVISOR,
+        REGISTRY_TOKEN_REFRESH_JITTER_MAX,
+    )
+}
+
+fn token_refresh_at(now: u64, ttl_secs: u64) -> u64 {
+    use rand::Rng;
+
+    let jitter_max = token_refresh_jitter_max(ttl_secs);
+    let jitter = rand::thread_rng().gen_range(0..=jitter_max);
+    let expires_at = now + ttl_secs;
+    let refresh_before_expiration = REGISTRY_TOKEN_REFRESH_MARGIN + jitter;
+
+    std::cmp::max(now, expires_at.saturating_sub(refresh_before_expiration))
+}
+
+fn next_token_refresh_backoff(backoff_secs: &mut u64) -> u64 {
+    let current = *backoff_secs;
+    *backoff_secs = (*backoff_secs * 2).min(REGISTRY_TOKEN_REFRESH_BACKOFF_MAX);
+    current
 }
 
 impl RegistryState {
@@ -331,7 +362,7 @@ impl RegistryState {
     fn clear_cached_auth(&self) {
         let last_cached_auth = self.cached_auth.get();
         self.cached_auth.set(&last_cached_auth, String::new());
-        self.token_expired_at.store(None);
+        self.token_refresh_at.store(None);
     }
 
     fn detect_config_auth_update(&self) -> Option<ConfigAuthUpdate> {
@@ -369,7 +400,7 @@ impl RegistryState {
                 let last_cached_auth = self.cached_auth.get();
                 self.cached_auth
                     .set(&last_cached_auth, format!("Basic {}", config_auth));
-                self.token_expired_at.store(None);
+                self.token_refresh_at.store(None);
                 debug!("refreshed basic registry auth after registry_auth config update");
             }
             Some(ConfigAuthUpdate::RefreshBearer(auth)) => match self.get_token(auth, request) {
@@ -415,11 +446,13 @@ impl RegistryState {
             .map_err(|e| einval!(format!("failed to get auth token from registry: {:?}", e)))?;
 
         if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            self.token_expired_at
-                .store(Some(Arc::new(now_timestamp.as_secs() + ret.expires_in)));
+            let now = now_timestamp.as_secs();
+            let expires_at = now + ret.expires_in;
+            let refresh_at = token_refresh_at(now, ret.expires_in);
+            self.token_refresh_at.store(Some(Arc::new(refresh_at)));
             debug!(
-                "cached bearer auth, next time: {}",
-                now_timestamp.as_secs() + ret.expires_in
+                "cached bearer auth, expires at: {}, refresh at: {}",
+                expires_at, refresh_at
             );
         }
 
@@ -1136,7 +1169,7 @@ impl Registry {
             blob_redirected_host: config.blob_redirected_host.clone(),
             cached_auth_using_http_get: HashCache::new(),
             cached_redirect: HashCache::new(),
-            token_expired_at: ArcSwapOption::new(None),
+            token_refresh_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),
         });
         state.set_config_auth(auth);
@@ -1182,33 +1215,40 @@ impl Registry {
         let request = self.request.clone();
         let state = self.state.clone();
         thread::spawn(move || {
+            let mut refresh_backoff_secs = REGISTRY_TOKEN_REFRESH_BACKOFF_INITIAL;
             loop {
                 // Check for config auth changes every tick.
                 state.refresh_cached_auth_from_config(&request);
 
                 if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                    if let Some(token_expired_at) = state.token_expired_at.load().as_deref() {
-                        // Refresh the token if it will expire within the margin.
-                        if now_timestamp.as_secs() + REGISTRY_TOKEN_REFRESH_MARGIN
-                            >= *token_expired_at
-                        {
+                    let now = now_timestamp.as_secs();
+                    if let Some(token_refresh_at) = state.token_refresh_at.load().as_deref() {
+                        // Refresh token at the jittered proactive refresh time.
+                        if now >= *token_refresh_at {
                             if let Some(cached_bearer_auth) =
                                 state.cached_bearer_auth.load().as_deref()
                             {
-                                if let Ok(token) =
-                                    state.get_token(cached_bearer_auth.to_owned(), &request)
-                                {
-                                    let new_cached_auth = format!("Bearer {}", token.token);
-                                    debug!(
-                                        "[refresh_token_thread] registry token has been refreshed"
-                                    );
-                                    state
-                                        .cached_auth
-                                        .set(&state.cached_auth.get(), new_cached_auth);
-                                } else {
-                                    error!(
-                                        "[refresh_token_thread] failed to refresh registry token"
-                                    );
+                                match state.get_token(cached_bearer_auth.to_owned(), &request) {
+                                    Ok(token) => {
+                                        let new_cached_auth = format!("Bearer {}", token.token);
+                                        debug!(
+                                            "[refresh_token_thread] registry token has been refreshed"
+                                        );
+                                        state
+                                            .cached_auth
+                                            .set(&state.cached_auth.get(), new_cached_auth);
+                                        refresh_backoff_secs =
+                                            REGISTRY_TOKEN_REFRESH_BACKOFF_INITIAL;
+                                    }
+                                    Err(err) => {
+                                        let backoff =
+                                            next_token_refresh_backoff(&mut refresh_backoff_secs);
+                                        state.token_refresh_at.store(Some(Arc::new(now + backoff)));
+                                        error!(
+                                            "[refresh_token_thread] failed to refresh registry token: {}, retry after {}s",
+                                            err, backoff
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1316,7 +1356,7 @@ mod tests {
             cached_auth: Default::default(),
             cached_config_auth: Default::default(),
             cached_redirect: Default::default(),
-            token_expired_at: ArcSwapOption::new(None),
+            token_refresh_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),
         }
     }
@@ -1413,7 +1453,7 @@ mod tests {
             cached_auth: Default::default(),
             cached_config_auth: Default::default(),
             cached_redirect: Default::default(),
-            token_expired_at: ArcSwapOption::new(None),
+            token_refresh_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),
         };
 
@@ -1448,7 +1488,7 @@ mod tests {
             cached_auth: Default::default(),
             cached_config_auth: Cache::new("old-auth".to_string()),
             cached_redirect: Default::default(),
-            token_expired_at: ArcSwapOption::new(None),
+            token_refresh_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(Some(Arc::new(BearerAuth {
                 realm: "https://auth.example.com/token".to_string(),
                 service: "example.com".to_string(),
@@ -1494,7 +1534,7 @@ mod tests {
             cached_auth: Default::default(),
             cached_config_auth: Default::default(),
             cached_redirect: Default::default(),
-            token_expired_at: ArcSwapOption::new(None),
+            token_refresh_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),
         };
 
@@ -1704,6 +1744,63 @@ mod tests {
         ));
         let result = TokenResponse::from_resp(response);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_token_refresh_jitter_max() {
+        assert_eq!(token_refresh_jitter_max(0), 0);
+        assert_eq!(token_refresh_jitter_max(60), 6);
+        assert_eq!(token_refresh_jitter_max(30 * 60), 3 * 60);
+        assert_eq!(
+            token_refresh_jitter_max(10 * 60 * 60),
+            REGISTRY_TOKEN_REFRESH_JITTER_MAX
+        );
+    }
+
+    #[test]
+    fn test_token_refresh_at_range() {
+        let now = 10_000;
+        let ttl_secs = 30 * 60;
+        let refresh_at = token_refresh_at(now, ttl_secs);
+        let earliest =
+            now + ttl_secs - REGISTRY_TOKEN_REFRESH_MARGIN - token_refresh_jitter_max(ttl_secs);
+        let latest = now + ttl_secs - REGISTRY_TOKEN_REFRESH_MARGIN;
+
+        assert!(refresh_at >= earliest);
+        assert!(refresh_at <= latest);
+    }
+
+    #[test]
+    fn test_token_refresh_at_short_ttl_never_before_now() {
+        let now = 10_000;
+        assert_eq!(token_refresh_at(now, REGISTRY_TOKEN_REFRESH_MARGIN), now);
+    }
+
+    #[test]
+    fn test_next_token_refresh_backoff() {
+        let mut backoff = REGISTRY_TOKEN_REFRESH_BACKOFF_INITIAL;
+
+        assert_eq!(next_token_refresh_backoff(&mut backoff), 5);
+        assert_eq!(backoff, 10);
+        assert_eq!(next_token_refresh_backoff(&mut backoff), 10);
+        assert_eq!(backoff, 20);
+        assert_eq!(next_token_refresh_backoff(&mut backoff), 20);
+        assert_eq!(backoff, 40);
+
+        while backoff < REGISTRY_TOKEN_REFRESH_BACKOFF_MAX {
+            let current = backoff;
+            assert_eq!(next_token_refresh_backoff(&mut backoff), current);
+            assert_eq!(
+                (current * 2).min(REGISTRY_TOKEN_REFRESH_BACKOFF_MAX),
+                backoff
+            );
+        }
+
+        assert_eq!(
+            next_token_refresh_backoff(&mut backoff),
+            REGISTRY_TOKEN_REFRESH_BACKOFF_MAX
+        );
+        assert_eq!(backoff, REGISTRY_TOKEN_REFRESH_BACKOFF_MAX);
     }
 
     #[test]
@@ -1949,7 +2046,7 @@ mod tests {
             cached_auth: Default::default(),
             cached_config_auth: Default::default(),
             cached_redirect: Default::default(),
-            token_expired_at: ArcSwapOption::new(None),
+            token_refresh_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),
         };
 
@@ -2163,17 +2260,17 @@ mod tests {
     fn test_registry_state_clear_cached_auth() {
         let state = create_state(true);
 
-        // Set a cached auth token and a token expiry.
+        // Set a cached auth token and token refresh time.
         let last = state.cached_auth.get();
         state
             .cached_auth
             .set(&last, "Bearer eyJhbGciOiJSUzI1NiJ9".to_string());
         state
-            .token_expired_at
-            .store(Some(Arc::new(9_999_999_999u64)));
+            .token_refresh_at
+            .store(Some(Arc::new(9_999_999_900u64)));
 
         assert_eq!(state.cached_auth.get(), "Bearer eyJhbGciOiJSUzI1NiJ9");
-        assert!(state.token_expired_at.load().is_some());
+        assert!(state.token_refresh_at.load().is_some());
 
         state.clear_cached_auth();
 
@@ -2183,8 +2280,8 @@ mod tests {
             "cached_auth should be empty after clear"
         );
         assert!(
-            state.token_expired_at.load().is_none(),
-            "token_expired_at should be None after clear"
+            state.token_refresh_at.load().is_none(),
+            "token_refresh_at should be None after clear"
         );
     }
 
