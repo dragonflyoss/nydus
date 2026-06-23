@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use lepton::config::Config;
+use lepton::fs::{BlobInfo, ErofsReader};
 use lepton::merge::rewrite_bootstrap_with_ondemand_blob;
 use lepton::metadata::*;
 use lepton::storage::backend::build_backend;
@@ -100,15 +101,14 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("failed to create cache directory: {}", cache_dir.display()))?;
 
-    let reader =
-        lepton::fs::ErofsReader::open_layer(&args.parent_bootstrap).with_context(|| {
-            format!(
-                "failed to open parent bootstrap: {}",
-                args.parent_bootstrap.display()
-            )
-        })?;
+    let reader = ErofsReader::open_layer(&args.parent_bootstrap).with_context(|| {
+        format!(
+            "failed to open parent bootstrap: {}",
+            args.parent_bootstrap.display()
+        )
+    })?;
     let blob_infos = reader.blob_infos()?;
-    let infos_by_index: HashMap<u16, &lepton::fs::BlobInfo> = blob_infos
+    let infos_by_index: HashMap<u16, &BlobInfo> = blob_infos
         .iter()
         .map(|info| (info.blob_index, info))
         .collect();

@@ -1,4 +1,4 @@
-use crate::build::blob_chunk::{BlobWriter, ChunkIndex};
+use crate::build::blob_chunk::BlobWriter;
 use crate::metadata::*;
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;

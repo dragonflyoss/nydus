@@ -44,6 +44,13 @@ impl ErofsChunkIndex {
 
 pub const EROFS_BLOB_ID_SIZE: usize = 32;
 
+/// Information about a single chunk index stored in an inode.
+#[derive(Clone)]
+pub struct ChunkIndex {
+    pub blkaddr: u64,
+    pub device_id: u16,
+}
+
 /// EROFS device slot entry — 128 bytes, `#[repr(C, packed)]`.
 #[derive(Clone, Copy)]
 #[repr(C, packed)]

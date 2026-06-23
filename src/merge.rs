@@ -5,7 +5,6 @@ use std::time::SystemTime;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::build::blob_chunk::ChunkIndex;
 use crate::build::bootstrap::render_flattened_bootstrap;
 use crate::build::inode::{
     mode_to_erofs_file_type, set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo,

@@ -2,6 +2,9 @@
 name = "lepton"
 version = "0.1.0"
 edition = "2021"
+description = "EROFS-oriented image tooling and runtime accessor APIs for Lepton images."
+repository = "https://github.com/dragonflyoss/lepton"
+readme = "README.md"
 
 [[bin]]
 name = "lepton"
@@ -9,7 +12,7 @@ path = "src/bin/lepton/main.rs"
 required-features = ["cli"]
 
 [features]
-default = ["cli", "backend-registry"]
+default = ["backend-registry"]
 # FUSE mount support (ErofsFs over fuser).
 fuse = ["dep:fuser"]
 # The `lepton` CLI binary: subcommands, apiserver, file logging, signals.
@@ -39,7 +42,10 @@ backend-registry = [
   "dep:tokio",
 ]
 # Dragonfly P2P SDK proxy support for the registry backend.
-backend-dragonfly-proxy = ["backend-registry", "dep:dragonfly-client-util"]
+backend-dragonfly-proxy = [
+  "backend-registry",
+  "dep:dragonfly-client-util",
+]
 
 [dependencies]
 anyhow = "1"

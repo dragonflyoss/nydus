@@ -1,5 +1,5 @@
 use crate::metadata::{
-    round_up, BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup,
+    round_up, BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup, ChunkIndex,
     BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
 };
 use anyhow::{bail, Context, Result};
@@ -9,13 +9,6 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::mem;
 use std::path::Path;
-
-/// Information about a single chunk index to be stored in an inode.
-#[derive(Clone)]
-pub struct ChunkIndex {
-    pub blkaddr: u64,
-    pub device_id: u16,
-}
 
 /// Manages writing chunk data to a separate blob device with SHA256 dedup.
 pub struct BlobWriter {

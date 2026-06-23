@@ -26,6 +26,7 @@ use crate::metadata::{
     EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
     EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
 };
+use crate::metrics::trace::{TraceDocument, TraceRecorder};
 use crate::storage::backend::build_backend;
 use crate::utils::{hex_string, parse_sha256_hex};
 
@@ -183,6 +184,7 @@ pub struct LeptonAccessor {
     pub blob: BlobAccessor,
     /// Static path-based filesystem APIs.
     pub fs: FsAccessor,
+    trace_recorder: Arc<TraceRecorder>,
 }
 
 /// Blob table and decoded-cache preparation/fetch APIs.
@@ -221,8 +223,15 @@ impl LeptonAccessor {
             format!("failed to create cache directory: {}", cache_dir.display())
         })?;
 
-        let reader = ErofsReader::open(None, Some(bootstrap), Some(backend), Some(&cache_dir))
-            .context("failed to open lepton bootstrap")?;
+        let trace_recorder = Arc::new(TraceRecorder::default());
+        let reader = ErofsReader::open_with_trace(
+            None,
+            Some(bootstrap),
+            Some(backend),
+            Some(&cache_dir),
+            Some(trace_recorder.clone()),
+        )
+        .context("failed to open lepton bootstrap")?;
         let blob_infos = reader.blob_infos().context("failed to read blob table")?;
         if blob_infos.is_empty() {
             bail!("bootstrap contains no blobs");
@@ -240,7 +249,23 @@ impl LeptonAccessor {
                 index_by_blob_id,
             },
             fs: FsAccessor { reader },
+            trace_recorder,
         })
+    }
+
+    /// Return a stable snapshot of this accessor's on-demand group trace.
+    pub fn trace_snapshot(&self) -> TraceDocument {
+        self.trace_recorder.snapshot()
+    }
+
+    /// Serialize this accessor's on-demand group trace as optimize-compatible JSON.
+    pub fn trace_json(&self) -> String {
+        self.trace_recorder.encode_json()
+    }
+
+    /// Clear this accessor's on-demand group trace.
+    pub fn clear_trace(&self) {
+        self.trace_recorder.clear();
     }
 }
 
@@ -529,10 +554,13 @@ mod tests {
     };
     use crate::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
     use crate::config::Config;
-    use crate::metadata::{BlobMetaCompressor, ErofsDeviceSlot};
-    use crate::utils::hex_string;
+    use crate::metadata::{
+        BlobFooter, BlobMetaCompressor, ErofsDeviceSlot, LEPTON_BLOB_FOOTER_ALIGNMENT,
+    };
+    use crate::utils::{hex_string, sha256_file};
     use crc32c::crc32c_append;
     use std::fs;
+    use std::io::Write;
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
@@ -589,16 +617,28 @@ mod tests {
         .unwrap();
         writer.finish().unwrap();
 
-        let blob_id = writer.data_digest();
-        let blob_meta = writer.blob_meta(blob_id, 0).unwrap();
+        let data_blob_id = writer.data_digest();
+        let blob_meta = writer.blob_meta(data_blob_id, 0).unwrap();
         let blocks = writer.total_blocks();
-        fs::rename(&staging, blob_dir.join(hex_string(&blob_id))).unwrap();
-        blob_meta
-            .save(&blob_dir.join(format!("{}.blob.meta", hex_string(&blob_id))))
-            .unwrap();
-
         set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
-        let device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &blob_id)];
+        let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &data_blob_id)];
+        let embedded_bootstrap_bytes = render_bootstrap(
+            &mut inodes,
+            0,
+            crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
+            &embedded_device_slots,
+            &[0u8; 16],
+        )
+        .unwrap();
+        assert_eq!(
+            embedded_bootstrap_bytes.len() % EROFS_BLOCK_SIZE as usize,
+            0
+        );
+
+        let full_blob_id =
+            write_full_blob(&staging, &blob_dir, &embedded_bootstrap_bytes, &blob_meta);
+
+        let device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &full_blob_id)];
         let bootstrap_bytes = render_bootstrap(
             &mut inodes,
             0,
@@ -607,7 +647,6 @@ mod tests {
             &[0u8; 16],
         )
         .unwrap();
-        assert_eq!(bootstrap_bytes.len() % EROFS_BLOCK_SIZE as usize, 0);
         let bootstrap = root.join("bootstrap");
         fs::write(&bootstrap, &bootstrap_bytes).unwrap();
 
@@ -618,7 +657,79 @@ mod tests {
         ))
         .unwrap();
 
-        (bootstrap, config, blob_id, corpus)
+        (bootstrap, config, full_blob_id, corpus)
+    }
+
+    fn write_full_blob(
+        data_path: &Path,
+        blob_dir: &Path,
+        bootstrap_bytes: &[u8],
+        blob_meta: &crate::metadata::BlobMeta,
+    ) -> [u8; EROFS_BLOB_ID_SIZE] {
+        let data = fs::read(data_path).unwrap();
+        let data_size = data.len() as u64;
+        let bootstrap_offset = align_u64(data_size, LEPTON_BLOB_FOOTER_ALIGNMENT);
+        let bootstrap_blocks = bytes_to_blocks(bootstrap_bytes.len() as u64);
+        let blob_meta_offset = align_u64(
+            bootstrap_offset + bootstrap_bytes.len() as u64,
+            LEPTON_BLOB_FOOTER_ALIGNMENT,
+        );
+        let blob_meta_blocks = bytes_to_blocks(blob_meta.metadata_size());
+        let footer = BlobFooter::new(
+            0,
+            data_size,
+            bootstrap_offset,
+            bootstrap_blocks,
+            blob_meta_offset,
+            blob_meta_blocks,
+        )
+        .unwrap();
+
+        let full_blob_path = blob_dir.join("full.blob");
+        let mut full_blob = fs::File::create(&full_blob_path).unwrap();
+        full_blob.write_all(&data).unwrap();
+        write_zero_padding(&mut full_blob, data_size, bootstrap_offset).unwrap();
+        full_blob.write_all(bootstrap_bytes).unwrap();
+        write_zero_padding(
+            &mut full_blob,
+            bootstrap_offset + bootstrap_bytes.len() as u64,
+            blob_meta_offset,
+        )
+        .unwrap();
+        blob_meta.write_to(&mut full_blob).unwrap();
+        footer.write_to(&mut full_blob).unwrap();
+        drop(full_blob);
+
+        let full_blob_id = sha256_file(&full_blob_path).unwrap();
+        let final_blob_path = blob_dir.join(hex_string(&full_blob_id));
+        fs::rename(&full_blob_path, &final_blob_path).unwrap();
+        blob_meta
+            .save(&blob_dir.join(format!("{}.blob.meta", hex_string(&full_blob_id))))
+            .unwrap();
+        fs::remove_file(data_path).unwrap();
+        full_blob_id
+    }
+
+    fn align_u64(value: u64, align: u64) -> u64 {
+        debug_assert!(align.is_power_of_two());
+        (value + align - 1) & !(align - 1)
+    }
+
+    fn bytes_to_blocks(size: u64) -> u32 {
+        assert_eq!(size % EROFS_BLOCK_SIZE as u64, 0);
+        (size / EROFS_BLOCK_SIZE as u64) as u32
+    }
+
+    fn write_zero_padding(
+        writer: &mut dyn Write,
+        current: u64,
+        aligned: u64,
+    ) -> std::io::Result<()> {
+        let padding = aligned - current;
+        if padding > 0 {
+            writer.write_all(&vec![0u8; padding as usize])?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -663,6 +774,15 @@ mod tests {
         // Idempotent re-fetch and zero-length fetch are fine.
         accessor.blob.fetch(&blob_id, offset, len).unwrap();
         accessor.blob.fetch(&blob_id, 0, 0).unwrap();
+
+        let trace = accessor.trace_snapshot();
+        assert_eq!(trace.patterns.len(), 1);
+        assert_eq!(trace.patterns[0].blob_index, 1);
+        assert_eq!(trace.patterns[0].group_index, 1);
+        assert_eq!(
+            accessor.trace_json(),
+            "{\"patterns\":[{\"blob_index\":1,\"group_index\":1}]}"
+        );
 
         // Unaligned ranges and unknown blobs are rejected.
         assert!(accessor.blob.fetch(&blob_id, 1, block).is_err());

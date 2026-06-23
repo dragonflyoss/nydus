@@ -1,7 +1,6 @@
 use std::io;
 use std::io::Write;
 
-use crate::build::blob_chunk::ChunkIndex;
 use crate::metadata::*;
 
 use super::ErofsReader;
@@ -370,12 +369,12 @@ mod tests {
     use tempfile::{tempdir, NamedTempFile};
 
     use super::ErofsReader;
-    use crate::build::blob_chunk::{BlobWriter, ChunkIndex};
+    use crate::build::blob_chunk::BlobWriter;
     use crate::build::bootstrap::render_bootstrap;
     use crate::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
     use crate::metadata::{
-        erofs_xattr_ibody_size, BlobFooter, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
-        EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER, LEPTON_BLOB_FOOTER_ALIGNMENT,
+        erofs_xattr_ibody_size, BlobFooter, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS,
+        EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER, LEPTON_BLOB_FOOTER_ALIGNMENT,
     };
     use crate::utils::sha256_file;
 
@@ -493,25 +492,25 @@ mod tests {
         blob_writer.finish().expect("finish blob writer");
 
         let data_blob_id = sha256_file(&data_path).expect("hash data blob");
-        let device_slots = [ErofsDeviceSlot::with_blob_id(
+        let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(
             blob_writer.total_blocks(),
             &data_blob_id,
         )];
-        let bootstrap = render_bootstrap(
+        let embedded_bootstrap = render_bootstrap(
             &mut inodes,
             1_700_000_000,
             EROFS_BLKSZBITS as u32,
-            &device_slots,
+            &embedded_device_slots,
             &[0u8; 16],
         )
-        .expect("render bootstrap");
+        .expect("render embedded bootstrap");
         let blob_meta = blob_writer.blob_meta(data_blob_id, 0).expect("blob meta");
 
         let data_size = fs::metadata(&data_path).expect("stat data blob").len();
         let bootstrap_offset = align_u64(data_size, LEPTON_BLOB_FOOTER_ALIGNMENT);
-        let bootstrap_blocks = bytes_to_blocks(bootstrap.len() as u64);
+        let bootstrap_blocks = bytes_to_blocks(embedded_bootstrap.len() as u64);
         let blob_meta_offset = align_u64(
-            bootstrap_offset + bootstrap.len() as u64,
+            bootstrap_offset + embedded_bootstrap.len() as u64,
             LEPTON_BLOB_FOOTER_ALIGNMENT,
         );
         let blob_meta_blocks = bytes_to_blocks(blob_meta.metadata_size());
@@ -530,15 +529,35 @@ mod tests {
         let data = fs::read(&data_path).expect("read data blob");
         full_blob.write_all(&data).expect("write data blob");
         write_zero_padding(&mut full_blob, data_size, bootstrap_offset).expect("pad data");
-        full_blob.write_all(&bootstrap).expect("write bootstrap");
+        full_blob
+            .write_all(&embedded_bootstrap)
+            .expect("write bootstrap");
         write_zero_padding(
             &mut full_blob,
-            bootstrap_offset + bootstrap.len() as u64,
+            bootstrap_offset + embedded_bootstrap.len() as u64,
             blob_meta_offset,
         )
         .expect("pad bootstrap");
         blob_meta.write_to(&mut full_blob).expect("write blob meta");
         footer.write_to(&mut full_blob).expect("write footer");
+        drop(full_blob);
+
+        let full_blob_id = sha256_file(&full_blob_path).expect("hash full blob");
+        let final_full_blob_path = dir.path().join(crate::utils::hex_string(&full_blob_id));
+        fs::rename(&full_blob_path, final_full_blob_path).expect("rename full blob");
+
+        let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
+            blob_writer.total_blocks(),
+            &full_blob_id,
+        )];
+        let bootstrap = render_bootstrap(
+            &mut inodes,
+            1_700_000_000,
+            EROFS_BLKSZBITS as u32,
+            &standalone_device_slots,
+            &[0u8; 16],
+        )
+        .expect("render standalone bootstrap");
 
         let bootstrap_path = dir.path().join("bootstrap");
         fs::write(&bootstrap_path, &bootstrap).expect("write bootstrap file");

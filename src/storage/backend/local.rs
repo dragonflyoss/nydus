@@ -33,6 +33,36 @@ impl LocalBackend {
         }
     }
 
+    pub(crate) fn with_full_blob_source(
+        root: PathBuf,
+        blob_id: [u8; EROFS_BLOB_ID_SIZE],
+        path: &Path,
+    ) -> io::Result<Self> {
+        let source = inspect_full_blob_source(path)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("lepton blob footer not found: {}", path.display()),
+            )
+        })?;
+        if sha256_file_range(path, source.data_offset, source.data_size)
+            .map_err(io::Error::other)?
+            != blob_id
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("full blob data digest mismatch: {}", path.display()),
+            ));
+        }
+
+        let backend = Self::new(root);
+        backend
+            .resolved_sources
+            .lock()
+            .unwrap()
+            .insert(blob_id, source);
+        Ok(backend)
+    }
+
     /// Build a `LocalBackend` from its YAML configuration, which only carries
     /// the `dir` field pointing at the blob source directory.
     pub fn from_value(config: &serde_yaml::Value) -> io::Result<Self> {
@@ -67,41 +97,24 @@ impl LocalBackend {
         }
 
         let exact = self.root.join(hex_string(blob_id));
-        if exact.is_file() && sha256_file(&exact).map_err(io::Error::other)? == *blob_id {
-            let source = ResolvedSource {
-                path: exact.clone(),
-                data_offset: 0,
-                data_size: exact.metadata()?.len(),
-                blob_meta_offset: None,
-                blob_meta_size: None,
-            };
+        if exact.is_file() {
+            if sha256_file(&exact).map_err(io::Error::other)? != *blob_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("local source blob digest mismatch: {}", exact.display()),
+                ));
+            }
+            let source = inspect_full_blob_source(&exact)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("lepton blob footer not found: {}", exact.display()),
+                )
+            })?;
             self.resolved_sources
                 .lock()
                 .unwrap()
                 .insert(*blob_id, source.clone());
             return Ok(source);
-        }
-
-        for entry in fs::read_dir(&self.root)? {
-            let path = entry?.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            let Some(source) = inspect_full_blob_source(&path)? else {
-                continue;
-            };
-
-            if sha256_file_range(&path, source.data_offset, source.data_size)
-                .map_err(io::Error::other)?
-                == *blob_id
-            {
-                self.resolved_sources
-                    .lock()
-                    .unwrap()
-                    .insert(*blob_id, source.clone());
-                return Ok(source);
-            }
         }
 
         Err(io::Error::new(
@@ -254,40 +267,18 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn local_backend_reads_exact_blob_file_and_blob_meta() {
-        let dir = tempdir().unwrap();
-        let payload = vec![0xabu8; 4096];
-        let blob_id = sha256_bytes(&payload);
-        let blob_path = dir.path().join(hex_string(&blob_id));
-        let blob_meta_path = dir
-            .path()
-            .join(format!("{}.blob.meta", hex_string(&blob_id)));
-        fs::write(&blob_path, &payload).unwrap();
-        blob_meta(blob_id, &payload).save(&blob_meta_path).unwrap();
-
-        let backend = LocalBackend::new(dir.path().to_path_buf());
-        let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
-        let data = backend
-            .read_range(&blob_id, 0, 4096, ReadContext::raw(RequestSource::OnDemand))
-            .unwrap();
-
-        assert_eq!(blob_meta.header().chunk_count(), 1);
-        assert_eq!(data, payload);
-    }
-
-    #[test]
-    fn local_backend_loads_blob_meta_named_after_full_blob_sha() {
-        let dir = tempdir().unwrap();
-        let payload = vec![0xcdu8; 4096];
-        let blob_id = sha256_bytes(&payload);
-
+    fn write_full_blob(
+        dir: &Path,
+        payload: &[u8],
+        save_sidecar: bool,
+    ) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
+        let data_blob_id = sha256_bytes(payload);
         let mut bootstrap = vec![0u8; 8192];
         let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]);
         let sb_start = EROFS_SUPER_OFFSET as usize;
         let sb_end = sb_start + sb.as_bytes().len();
         bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
-        let blob_meta = blob_meta(blob_id, &payload);
+        let blob_meta = blob_meta(data_blob_id, payload);
         let footer = BlobFooter::new(
             0,
             payload.len() as u64,
@@ -298,22 +289,65 @@ mod tests {
         )
         .unwrap();
 
-        let temp_full_blob_path = dir.path().join("full-blob.bin");
+        let temp_full_blob_path = dir.join("full-blob.bin");
         let mut full_blob = File::create(&temp_full_blob_path).unwrap();
-        full_blob.write_all(&payload).unwrap();
+        full_blob.write_all(payload).unwrap();
         full_blob.write_all(&bootstrap).unwrap();
         blob_meta.write_to(&mut full_blob).unwrap();
         footer.write_to(&mut full_blob).unwrap();
         let full_blob_id = sha256_file(&temp_full_blob_path).unwrap();
-        let full_blob_path = dir.path().join(hex_string(&full_blob_id));
+        let full_blob_path = dir.join(hex_string(&full_blob_id));
         fs::rename(&temp_full_blob_path, &full_blob_path).unwrap();
+
+        if save_sidecar {
+            blob_meta
+                .save(&dir.join(format!("{}.blob.meta", hex_string(&full_blob_id))))
+                .unwrap();
+        }
+
+        (full_blob_id, data_blob_id)
+    }
+
+    #[test]
+    fn local_backend_reads_full_blob_file_and_sidecar_meta() {
+        let dir = tempdir().unwrap();
+        let payload = vec![0xabu8; 4096];
+        let (full_blob_id, _data_blob_id) = write_full_blob(dir.path(), &payload, true);
+
         let backend = LocalBackend::new(dir.path().to_path_buf());
-        let blob_meta = backend.load_blob_meta(&blob_id).unwrap();
+        let blob_meta = backend.load_blob_meta(&full_blob_id).unwrap();
         let data = backend
-            .read_range(&blob_id, 0, 4096, ReadContext::raw(RequestSource::OnDemand))
+            .read_range(
+                &full_blob_id,
+                0,
+                4096,
+                ReadContext::raw(RequestSource::OnDemand),
+            )
             .unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(data, payload);
+    }
+
+    #[test]
+    fn local_backend_reads_embedded_blob_meta_from_full_blob() {
+        let dir = tempdir().unwrap();
+        let payload = vec![0xcdu8; 4096];
+        let (full_blob_id, data_blob_id) = write_full_blob(dir.path(), &payload, false);
+        let backend = LocalBackend::new(dir.path().to_path_buf());
+
+        let blob_meta = backend.load_blob_meta(&full_blob_id).unwrap();
+        let data = backend
+            .read_range(
+                &full_blob_id,
+                0,
+                4096,
+                ReadContext::raw(RequestSource::OnDemand),
+            )
+            .unwrap();
+
+        assert_eq!(blob_meta.header().chunk_count(), 1);
+        assert_eq!(data, payload);
+        assert!(backend.load_blob_meta(&data_blob_id).is_err());
     }
 }

@@ -17,6 +17,7 @@ use tempfile::TempDir;
 use tracing::warn;
 
 use crate::metadata::*;
+use crate::metrics::trace::TraceRecorder;
 use crate::storage::backend::{BlobBackend, LocalBackend};
 use crate::storage::cache::{BlobCache, LocalBlobCache};
 
@@ -51,6 +52,7 @@ struct Blob {
     blob_index: u16,
     cache_dir: PathBuf,
     backend: Arc<dyn BlobBackend>,
+    trace_recorder: Option<Arc<TraceRecorder>>,
     cache: Mutex<Option<Arc<dyn BlobCache>>>,
 }
 
@@ -60,11 +62,12 @@ impl Blob {
         if let Some(cache) = guard.as_ref() {
             return Ok(cache.clone());
         }
-        let cache: Arc<dyn BlobCache> = Arc::new(LocalBlobCache::open(
+        let cache: Arc<dyn BlobCache> = Arc::new(LocalBlobCache::open_with_trace(
             self.blob_id,
             self.blob_index as u32,
             &self.cache_dir,
             self.backend.clone(),
+            self.trace_recorder.clone(),
         )?);
         *guard = Some(cache.clone());
         Ok(cache)
@@ -110,10 +113,20 @@ impl ErofsReader {
         backend: Option<Arc<dyn BlobBackend>>,
         cache_dir: Option<&Path>,
     ) -> io::Result<Self> {
+        Self::open_with_trace(blob_path, bootstrap_path, backend, cache_dir, None)
+    }
+
+    pub(crate) fn open_with_trace(
+        blob_path: Option<&Path>,
+        bootstrap_path: Option<&Path>,
+        backend: Option<Arc<dyn BlobBackend>>,
+        cache_dir: Option<&Path>,
+        trace_recorder: Option<Arc<TraceRecorder>>,
+    ) -> io::Result<Self> {
         match (blob_path, bootstrap_path, backend, cache_dir) {
             (Some(blob), None, None, None) => Self::open_blob(blob),
             (None, Some(bootstrap), Some(backend), cache_dir) => {
-                Self::open_bootstrap(bootstrap, backend, cache_dir)
+                Self::open_bootstrap(bootstrap, backend, cache_dir, trace_recorder)
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -168,8 +181,15 @@ impl ErofsReader {
 
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
         let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
-        let backend: Arc<dyn BlobBackend> = Arc::new(LocalBackend::new(blob_dir.to_path_buf()));
-        let (blobs, temporary_cache_dir) = Self::open_blobs(blob_infos, backend, None)?;
+        let backend: Arc<dyn BlobBackend> = match blob_infos.as_slice() {
+            [info] => Arc::new(LocalBackend::with_full_blob_source(
+                blob_dir.to_path_buf(),
+                info.blob_id,
+                blob_path,
+            )?),
+            _ => Arc::new(LocalBackend::new(blob_dir.to_path_buf())),
+        };
+        let (blobs, temporary_cache_dir) = Self::open_blobs(blob_infos, backend, None, None)?;
 
         Ok(Self {
             mmap,
@@ -184,6 +204,7 @@ impl ErofsReader {
         bootstrap_path: &Path,
         backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
+        trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<Self> {
         let mmap = Self::map_file(bootstrap_path)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
@@ -197,7 +218,8 @@ impl ErofsReader {
 
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
 
-        let (blobs, temporary_cache_dir) = Self::open_blobs(blob_infos, backend, cache_dir)?;
+        let (blobs, temporary_cache_dir) =
+            Self::open_blobs(blob_infos, backend, cache_dir, trace_recorder)?;
 
         Ok(Self {
             mmap,
@@ -232,6 +254,7 @@ impl ErofsReader {
         blob_infos: Vec<BlobInfo>,
         backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
+        trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<(HashMap<u16, Blob>, Option<TempDir>)> {
         let temporary_cache_dir = if cache_dir.is_none() {
             Some(tempfile::Builder::new().prefix("lepton-cache-").tempdir()?)
@@ -251,6 +274,7 @@ impl ErofsReader {
                         blob_index: info.blob_index,
                         cache_dir: cache_dir.to_path_buf(),
                         backend: backend.clone(),
+                        trace_recorder: trace_recorder.clone(),
                         cache: Mutex::new(None),
                     },
                 )

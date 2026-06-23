@@ -44,10 +44,10 @@ TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 .PHONY: build release leptonify test test-e2e test-xfstests test-perf test-top-images clean
 
 build:
-	$(CARGO) build
+	$(CARGO) build --features cli
 
 release:
-	$(CARGO) build --release
+	$(CARGO) build --release --features cli
 
 leptonify:
 	cd leptonify && $(GO_BIN) build -o leptonify .

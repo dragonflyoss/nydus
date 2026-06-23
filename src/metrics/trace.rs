@@ -16,51 +16,82 @@ use std::sync::Mutex;
 use serde::Serialize;
 
 /// A single group access in the on-demand trace.
-#[derive(Debug, Clone, Copy, Serialize)]
-struct GroupAccess {
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+pub struct TracePattern {
     /// Device/blob index in the merged image (external blobs are 1-based;
     /// device 0 is the primary bootstrap image and never produces group reads).
-    blob_index: u32,
+    pub blob_index: u32,
     /// Group index within that blob's blob meta.
-    group_index: u32,
+    pub group_index: u32,
 }
 
 /// The serialized trace document. Wrapped in a struct (rather than a bare array)
 /// so future fields can be added without breaking consumers.
-#[derive(Debug, Default, Serialize)]
-struct TraceDocument {
-    patterns: Vec<GroupAccess>,
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize)]
+pub struct TraceDocument {
+    pub patterns: Vec<TracePattern>,
 }
 
 #[derive(Default)]
 struct TraceState {
-    patterns: Vec<GroupAccess>,
+    patterns: Vec<TracePattern>,
     seen: HashSet<(u32, u32)>,
 }
 
-static TRACE: LazyLock<Mutex<TraceState>> = LazyLock::new(|| Mutex::new(TraceState::default()));
+#[derive(Default)]
+pub struct TraceRecorder {
+    state: Mutex<TraceState>,
+}
+
+impl TraceRecorder {
+    /// Record an on-demand access to `(blob_index, group_index)`. The first
+    /// access to a given pair is appended in order; later accesses to the same
+    /// pair are ignored.
+    pub fn record_group_access(&self, blob_index: u32, group_index: u32) {
+        let mut state = self.state.lock().unwrap();
+        if state.seen.insert((blob_index, group_index)) {
+            state.patterns.push(TracePattern {
+                blob_index,
+                group_index,
+            });
+        }
+    }
+
+    /// Return a stable snapshot of the trace collected so far.
+    pub fn snapshot(&self) -> TraceDocument {
+        let state = self.state.lock().unwrap();
+        TraceDocument {
+            patterns: state.patterns.clone(),
+        }
+    }
+
+    /// Serialize the current on-demand group access trace as JSON, e.g.
+    /// `{"patterns":[{"blob_index":1,"group_index":4}]}`.
+    pub fn encode_json(&self) -> String {
+        serde_json::to_string(&self.snapshot()).unwrap_or_else(|_| "{\"patterns\":[]}".to_string())
+    }
+
+    /// Clear all recorded accesses.
+    pub fn clear(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.patterns.clear();
+        state.seen.clear();
+    }
+}
+
+static TRACE: LazyLock<TraceRecorder> = LazyLock::new(TraceRecorder::default);
 
 /// Record an on-demand access to `(blob_index, group_index)`. The first access
 /// to a given pair is appended in order; later accesses to the same pair are
 /// ignored so the trace captures the access pattern without unbounded growth.
 pub fn record_group_access(blob_index: u32, group_index: u32) {
-    let mut state = TRACE.lock().unwrap();
-    if state.seen.insert((blob_index, group_index)) {
-        state.patterns.push(GroupAccess {
-            blob_index,
-            group_index,
-        });
-    }
+    TRACE.record_group_access(blob_index, group_index);
 }
 
 /// Serialize the current on-demand group access trace as JSON, e.g.
 /// `{"patterns":[{"blob_index":1,"group_index":4}]}`.
 pub fn encode_json() -> String {
-    let state = TRACE.lock().unwrap();
-    let doc = TraceDocument {
-        patterns: state.patterns.clone(),
-    };
-    serde_json::to_string(&doc).unwrap_or_else(|_| "{\"patterns\":[]}".to_string())
+    TRACE.encode_json()
 }
 
 #[cfg(test)]
@@ -90,5 +121,35 @@ mod tests {
             1,
             "duplicate deduped: {json}"
         );
+    }
+
+    #[test]
+    fn recorder_snapshots_and_clears_instance_trace() {
+        let recorder = TraceRecorder::default();
+        recorder.record_group_access(1, 4);
+        recorder.record_group_access(1, 4);
+        recorder.record_group_access(2, 7);
+
+        let snapshot = recorder.snapshot();
+        assert_eq!(
+            snapshot.patterns,
+            vec![
+                TracePattern {
+                    blob_index: 1,
+                    group_index: 4,
+                },
+                TracePattern {
+                    blob_index: 2,
+                    group_index: 7,
+                },
+            ]
+        );
+        assert_eq!(
+            recorder.encode_json(),
+            "{\"patterns\":[{\"blob_index\":1,\"group_index\":4},{\"blob_index\":2,\"group_index\":7}]}"
+        );
+
+        recorder.clear();
+        assert!(recorder.snapshot().patterns.is_empty());
     }
 }

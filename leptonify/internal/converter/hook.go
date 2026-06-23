@@ -442,6 +442,7 @@ func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []
 		Annotations: map[string]string{
 			LayerAnnotationUncompressed:    uncompressedDigest.String(),
 			LayerAnnotationLeptonBootstrap: "true",
+			LayerAnnotationLeptonFsVersion: LeptonFsVersion,
 		},
 	}, nil
 }
