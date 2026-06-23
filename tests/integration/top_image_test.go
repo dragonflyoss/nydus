@@ -9,7 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -44,6 +46,14 @@ import (
 //	                                 single Linux platform. Set to "all" (or empty)
 //	                                 to convert every platform.
 //	LEPTONFS_TOP_IMAGES_CONCURRENCY  Number of images processed in parallel (default 5).
+//	LEPTONFS_TOP_IMAGES_RETRIES      Number of times convert/check are retried when
+//	                                 they hit a transient registry failure such as
+//	                                 ghcr.io returning HTTP 5xx or rate limiting
+//	                                 (default 5). Set to 0 to disable retries.
+//	LEPTONFS_TOP_IMAGES_RETRY_INTERVAL
+//	                                 Base wait between retries; the delay grows
+//	                                 linearly with each attempt to give an unstable
+//	                                 registry more room to recover (default 30s).
 //	LEPTONFS_TOP_IMAGES_LIST         Path to the image list (default texture/top-images.txt).
 //	LEPTONFS_TOP_IMAGES_WORKDIR      Base directory for the per-image convert/check
 //	                                 scratch work directories. Point this at a mount
@@ -100,6 +110,26 @@ func TestTopImages(t *testing.T) {
 		require.Greater(t, concurrency, 0, "concurrency must be positive")
 	}
 
+	// ghcr.io intermittently returns HTTP 5xx / rate-limit responses under load,
+	// which surface as convert/check failures. Retry those transient errors a few
+	// times, spacing the attempts out, so a flaky registry does not fail the whole
+	// suite. Both the retry count and the base interval are tunable.
+	retries := 5
+	if v := os.Getenv("LEPTONFS_TOP_IMAGES_RETRIES"); v != "" {
+		n, err := strconv.Atoi(v)
+		require.NoError(t, err, "invalid LEPTONFS_TOP_IMAGES_RETRIES %q", v)
+		require.GreaterOrEqual(t, n, 0, "retries must be non-negative")
+		retries = n
+	}
+
+	retryInterval := 30 * time.Second
+	if v := os.Getenv("LEPTONFS_TOP_IMAGES_RETRY_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		require.NoError(t, err, "invalid LEPTONFS_TOP_IMAGES_RETRY_INTERVAL %q", v)
+		require.Greater(t, d, time.Duration(0), "retry interval must be positive")
+		retryInterval = d
+	}
+
 	listPath := os.Getenv("LEPTONFS_TOP_IMAGES_LIST")
 	if listPath == "" {
 		listPath = filepath.Join("texture", "top-images.txt")
@@ -122,12 +152,26 @@ func TestTopImages(t *testing.T) {
 	// Cap parallelism at `concurrency` while still running each image as an
 	// independent subtest so failures are reported per image.
 	sem := make(chan struct{}, concurrency)
+	// Track success/total progress across the parallel subtests so the log shows
+	// how far along the (long-running) suite is.
+	total := len(images)
+	var processed, succeeded int64
 	for _, image := range images {
 		image := image
 		t.Run(image, func(t *testing.T) {
 			t.Parallel()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+
+			// Emit a success/total progress line once this image finishes,
+			// regardless of whether it passed, failed, or was skipped. The
+			// deferred call runs even when require.* or t.Skip* abort the
+			// goroutine via runtime.Goexit.
+			defer func() {
+				done := atomic.AddInt64(&processed, 1)
+				t.Logf("[progress] %d/%d images processed, %d succeeded",
+					done, total, atomic.LoadInt64(&succeeded))
+			}()
 
 			// Push the converted lepton image alongside its source in the target
 			// registry/namespace, suffixing the repository with "-lepton" so it
@@ -153,9 +197,8 @@ func TestTopImages(t *testing.T) {
 			}
 			convertArgs = append(convertArgs, platformArgs(platform)...)
 			convertArgs = append(convertArgs, registryTLSArgs(plainHTTP)...)
-			convert := exec.Command(leptonifyBin, convertArgs...)
-			out, err := convert.CombinedOutput()
-			t.Logf("[convert %s] %s\n%s", image, strings.Join(convert.Args, " "), out)
+			out, err := runLeptonifyWithRetry(t, "convert "+image, retries, retryInterval,
+				func() *exec.Cmd { return exec.Command(leptonifyBin, convertArgs...) })
 			if err != nil {
 				// Some entries in the popular-image list are no longer published
 				// on Docker Hub (e.g. the deprecated `java` image). Treat a pull
@@ -175,8 +218,11 @@ func TestTopImages(t *testing.T) {
 			}
 			checkArgs = append(checkArgs, platformArgs(platform)...)
 			checkArgs = append(checkArgs, registryTLSArgs(plainHTTP)...)
-			check := exec.Command(leptonifyBin, checkArgs...)
-			runLeptonify(t, check, "check "+image)
+			_, err = runLeptonifyWithRetry(t, "check "+image, retries, retryInterval,
+				func() *exec.Cmd { return exec.Command(leptonifyBin, checkArgs...) })
+			require.NoError(t, err, "check %s failed", image)
+
+			atomic.AddInt64(&succeeded, 1)
 		})
 	}
 }
@@ -235,13 +281,73 @@ func isImageNotFound(output []byte) bool {
 		strings.Contains(text, "name unknown")
 }
 
-// runLeptonify executes a leptonify command, streaming its combined output into
-// the test log and failing the test on a non-zero exit.
-func runLeptonify(t *testing.T, cmd *exec.Cmd, label string) {
+// runLeptonifyWithRetry runs a leptonify command, streaming its combined output
+// into the test log, and retries on transient registry failures (e.g. ghcr.io
+// returning HTTP 5xx or rate limiting). The command is rebuilt for each attempt
+// via build because an *exec.Cmd cannot be reused. The wait between attempts
+// grows linearly (interval, 2*interval, ...) to give an unstable registry more
+// time to recover. It returns the output and error of the final attempt.
+func runLeptonifyWithRetry(t *testing.T, label string, retries int, interval time.Duration, build func() *exec.Cmd) ([]byte, error) {
 	t.Helper()
-	out, err := cmd.CombinedOutput()
-	t.Logf("[%s] %s\n%s", label, strings.Join(cmd.Args, " "), out)
-	require.NoError(t, err, "%s failed", label)
+	attempts := retries + 1
+	var out []byte
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		cmd := build()
+		out, err = cmd.CombinedOutput()
+		t.Logf("[%s] attempt %d/%d: %s\n%s", label, attempt, attempts, strings.Join(cmd.Args, " "), out)
+		if err == nil {
+			return out, nil
+		}
+		// A missing upstream image is not transient; let the caller turn it into
+		// a skip instead of burning retries on a 404.
+		if isImageNotFound(out) {
+			return out, err
+		}
+		// Only retry failures that look like a flaky registry; a genuine
+		// conversion bug fails fast.
+		if attempt < attempts && isTransientRegistryError(out) {
+			wait := interval * time.Duration(attempt)
+			t.Logf("[%s] transient registry failure, retrying in %s (attempt %d/%d)",
+				label, wait, attempt+1, attempts)
+			time.Sleep(wait)
+			continue
+		}
+		break
+	}
+	return out, err
+}
+
+// isTransientRegistryError reports whether leptonify output indicates a transient
+// registry failure (e.g. ghcr.io returning HTTP 5xx, rate limiting, or a dropped
+// connection) that is worth retrying.
+func isTransientRegistryError(output []byte) bool {
+	text := string(output)
+	for _, marker := range []string{
+		"500 Internal Server Error",
+		"Internal Server Error",
+		"501 Not Implemented",
+		"502 Bad Gateway",
+		"503 Service Unavailable",
+		"504 Gateway Timeout",
+		"429 Too Many Requests",
+		"too many requests",
+		"toomanyrequests",
+		"TOOMANYREQUESTS",
+		"connection reset by peer",
+		"connection refused",
+		"unexpected EOF",
+		"i/o timeout",
+		"TLS handshake timeout",
+		"timeout awaiting response headers",
+		"server misbehaving",
+		"no such host",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // readImageList reads a newline-delimited image list, skipping blank lines and
