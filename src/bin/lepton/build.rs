@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::Level;
 
-const DEFAULT_CHUNK_SIZE: u32 = 1_048_576;
-const DEFAULT_COMPRESS_SIZE: u32 = 1_048_576;
 const MIB: u32 = 1_048_576;
+const DEFAULT_CHUNK_SIZE: u32 = MIB;
+const DEFAULT_COMPRESS_SIZE: u32 = 4 * MIB;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ConversionType {

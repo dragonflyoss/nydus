@@ -93,7 +93,7 @@ Current implementation notes:
 	indexes (the unit of file splitting and per-chunk BLAKE3 digests). Chunks are
 	independent of compression groups and may straddle group boundaries, so a
 	smaller chunk size does not fragment blob_meta into tiny compression units.
-- `--compress-size` defaults to `1048576` (1 MiB) and sets the uncompressed size
+- `--compress-size` defaults to `4194304` (4 MiB) and sets the uncompressed size
 	of each blob_meta group (the unit of compression and of a single backend
 	read). Groups are formed by packing whole decoded blocks up to this size
 	regardless of chunk boundaries, so every group but the last is exactly this
@@ -1136,7 +1136,7 @@ Flags:
 | `--builder` | `lepton` | Path to the `lepton` binary (PATH-resolvable). |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
 | `--chunk-size` | `1048576` | Lepton file chunk size in bytes (1 MiB). |
-| `--compress-size` | `1048576` | Blob meta group uncompressed size in bytes; a multiple of 1 MiB and at least `--chunk-size`. |
+| `--compress-size` | `4194304` | Blob meta group uncompressed size in bytes; a multiple of 1 MiB and at least `--chunk-size`. |
 | `--compressor` | `zstd` | Chunk data compressor: `none` or `zstd`. |
 | `--platform` | all | Convert only the given platform (e.g. `linux/amd64`). |
 | `--insecure` | `false` | Skip TLS verification for the registry. |

@@ -47,7 +47,7 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		opt.ChunkSize = 1 << 20
 	}
 	if opt.CompressSize == 0 {
-		opt.CompressSize = 1 << 20
+		opt.CompressSize = 4 << 20
 	}
 	platformMC := opt.PlatformMC
 	if platformMC == nil {

@@ -76,7 +76,7 @@ func convertCommand() *cli.Command {
 			&cli.UintFlag{
 				Name:  "compress-size",
 				Usage: "lepton group uncompressed size in bytes (must be a multiple of 1MiB)",
-				Value: 1 << 20,
+				Value: 4 << 20,
 			},
 			&cli.StringFlag{
 				Name:  "compressor",
