@@ -7,6 +7,7 @@ use lepton::metadata::*;
 use lepton::tracing::init_command_tracing;
 use lepton::utils::hex_string;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::FileTypeExt;
@@ -91,6 +92,12 @@ pub struct BuildArgs {
         help = "Specify whether to print log"
     )]
     pub console: bool,
+
+    /// Absolute or current-working-directory-relative paths to exclude.
+    /// May be specified multiple times. Entries inside the source tree are
+    /// omitted from the blob and the resulting filesystem tree entirely.
+    #[arg(long = "exclude")]
+    pub exclude: Vec<String>,
 }
 
 /// Run the build process to create an lepton image from the source directory.
@@ -137,9 +144,36 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         );
     }
 
-    // Validate source is a directory.
+    // Validate source is a directory and canonicalize it so that all paths
+    // produced by the recursive directory walk are absolute and match
+    // correctly against the exclude set.
     if !args.source.is_dir() {
         bail!("source {} is not a directory", args.source.display());
+    }
+    let source = args.source.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize source directory: {}",
+            args.source.display()
+        )
+    })?;
+
+    // Build the exclude set from --exclude flags. Each value is interpreted as
+    // either an absolute path or a path relative to the current working
+    // directory, canonicalized, then checked against the canonicalized source.
+    // Non-existent paths are ignored.
+    let mut exclude: HashSet<PathBuf> = HashSet::new();
+    for raw in &args.exclude {
+        let abs = match Path::new(raw).canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("--exclude {}: canonicalize failed ({})", raw, e);
+                continue;
+            }
+        };
+        // Only exclude if the path is inside the source tree.
+        if abs.starts_with(&source) {
+            exclude.insert(abs);
+        }
     }
 
     let build_time = SystemTime::now()
@@ -157,7 +191,7 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         args.compress_size,
         args.compressor.into(),
     )?;
-    let mut inodes = build_tree(&args.source, &mut blob_writer, args.chunk_size)?;
+    let mut inodes = build_tree(&source, &mut blob_writer, args.chunk_size, &exclude)?;
     blob_writer.finish()?;
     let epoch = inodes
         .iter()
@@ -539,6 +573,7 @@ mod tests {
             compressor: Compressor::Zstd,
             log_level: Level::ERROR,
             console: false,
+            exclude: Vec::new(),
         })
         .unwrap();
 

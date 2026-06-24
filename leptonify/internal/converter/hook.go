@@ -249,7 +249,7 @@ func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descript
 		return nil, err
 	}
 
-	return writeBootstrapLayer(ctx, cs, bootstrapPath, blobMetas)
+	return writeBootstrapLayer(ctx, cs, bootstrapPath, blobMetas, nil)
 }
 
 // lepton blob footer layout (see src/metadata/blob_footer.rs). The footer is the
@@ -274,6 +274,13 @@ const (
 // alongside image.boot, named "<full_blob_sha256>.blob.meta".
 type BlobMetaFile struct {
 	Name string
+	Data []byte
+}
+
+// AppendFile describes a file to bundle into the bootstrap layer tar alongside
+// image.boot and the blob meta artifacts.
+type AppendFile struct {
+	Name string // basename, placed under "image/"
 	Data []byte
 }
 
@@ -386,20 +393,19 @@ func extractBlobMeta(ctx context.Context, cs content.Store, desc ocispec.Descrip
 // writeBootstrapLayer packs the bootstrap file and the per-layer blob meta
 // artifacts into a gzip-compressed tar layer (under `image/`) and commits it to
 // the content store.
-func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath string, blobMetas []BlobMetaFile) (*ocispec.Descriptor, error) {
+func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath string, blobMetas []BlobMetaFile, appendFiles []AppendFile) (*ocispec.Descriptor, error) {
 	bootstrapData, err := os.ReadFile(bootstrapPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "read bootstrap")
 	}
-	return WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas)
+	return WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas, appendFiles)
 }
 
 // WriteBootstrapLayer packs bootstrap bytes and per-layer blob meta artifacts
 // into a gzip-compressed tar layer (under `image/`) and commits it to the
-// content store, returning the bootstrap layer descriptor.
-func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []byte, blobMetas []BlobMetaFile) (*ocispec.Descriptor, error) {
-	// Build the gzip(tar(image/...)) stream while tracking both the compressed
-	// (layer) digest and the uncompressed (diff id) digest.
+// content store, returning the bootstrap layer descriptor. If appendFiles is
+// non-empty, each file is placed under "image/" alongside image.boot.
+func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []byte, blobMetas []BlobMetaFile, appendFiles []AppendFile) (*ocispec.Descriptor, error) {
 	var compressedBuf bytes.Buffer
 	compressedDigester := digest.SHA256.Digester()
 	uncompressedDigester := digest.SHA256.Digester()
@@ -407,7 +413,7 @@ func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []
 	gw := gzip.NewWriter(io.MultiWriter(&compressedBuf, compressedDigester.Hash()))
 	tw := tar.NewWriter(io.MultiWriter(gw, uncompressedDigester.Hash()))
 
-	if err := writeBootstrapTar(tw, bootstrapData, blobMetas); err != nil {
+	if err := writeBootstrapTar(tw, bootstrapData, blobMetas, appendFiles); err != nil {
 		return nil, err
 	}
 	if err := tw.Close(); err != nil {
@@ -448,8 +454,9 @@ func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []
 }
 
 // writeBootstrapTar writes the `image/` directory, the `image/image.boot` file,
-// and one `image/<full_blob_sha256>.blob.meta` entry per layer into tw.
-func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []BlobMetaFile) error {
+// one `image/<full_blob_sha256>.blob.meta` entry per layer, and optionally
+// extra appended files into tw.
+func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []BlobMetaFile, appendFiles []AppendFile) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     "image",
 		Mode:     0o755,
@@ -477,6 +484,18 @@ func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []BlobMet
 		}
 		if _, err := tw.Write(meta.Data); err != nil {
 			return errors.Wrapf(err, "write blob meta %s", meta.Name)
+		}
+	}
+	for _, f := range appendFiles {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: "image/" + f.Name,
+			Mode: 0o444,
+			Size: int64(len(f.Data)),
+		}); err != nil {
+			return errors.Wrapf(err, "write appended file header %s", f.Name)
+		}
+		if _, err := tw.Write(f.Data); err != nil {
+			return errors.Wrapf(err, "write appended file %s", f.Name)
 		}
 	}
 	return nil

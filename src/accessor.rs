@@ -559,6 +559,7 @@ mod tests {
     };
     use crate::utils::{hex_string, sha256_file};
     use crc32c::crc32c_append;
+    use std::collections::HashSet;
     use std::fs;
     use std::io::Write;
     use std::os::unix::fs::symlink;
@@ -613,6 +614,7 @@ mod tests {
             &corpus_dir,
             &mut writer,
             crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+            &HashSet::new(),
         )
         .unwrap();
         writer.finish().unwrap();
@@ -823,6 +825,7 @@ mod tests {
             &corpus_dir,
             &mut writer,
             crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+            &HashSet::new(),
         )
         .unwrap();
         writer.finish().unwrap();

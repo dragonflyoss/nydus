@@ -363,6 +363,7 @@ impl ErofsReader {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::fs;
     use std::io::Write;
 
@@ -487,8 +488,13 @@ mod tests {
 
         let data_path = dir.path().join("data.blob");
         let mut blob_writer = BlobWriter::new(&data_path, EROFS_BLOCK_SIZE).expect("blob writer");
-        let mut inodes =
-            build_tree(&source_dir, &mut blob_writer, EROFS_BLOCK_SIZE).expect("build tree");
+        let mut inodes = build_tree(
+            &source_dir,
+            &mut blob_writer,
+            EROFS_BLOCK_SIZE,
+            &HashSet::new(),
+        )
+        .expect("build tree");
         blob_writer.finish().expect("finish blob writer");
 
         let data_blob_id = sha256_file(&data_path).expect("hash data blob");

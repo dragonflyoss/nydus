@@ -35,6 +35,9 @@ type BuildOption struct {
 	// LogLevel is the log level passed to `lepton build` (trace/debug/info/warn/
 	// error). Defaults to "info" when empty.
 	LogLevel string
+	// Excludes is the list of relative paths to exclude from the build. Each
+	// path is passed as a --exclude flag to `lepton build`.
+	Excludes []string
 }
 
 // MergeBuildOption describes a single `lepton merge` invocation that overlays a
@@ -82,6 +85,9 @@ func runLeptonBuild(ctx context.Context, opt BuildOption) error {
 		"--compress-size", strconv.FormatUint(uint64(opt.CompressSize), 10),
 		"--compressor", opt.Compressor,
 		"--log-level", leptonLogLevel(opt.LogLevel),
+	}
+	for _, excl := range opt.Excludes {
+		args = append(args, "--exclude", excl)
 	}
 
 	cmd := exec.CommandContext(ctx, builderBinary(opt.BuilderPath), args...)

@@ -188,7 +188,7 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 	}
 	blobMetas = append(blobMetas, converter.BlobMetaFile{Name: ondemandHex + ".blob.meta", Data: ondemandMeta})
 
-	bootstrapDesc, err := converter.WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas)
+	bootstrapDesc, err := converter.WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas, nil)
 	if err != nil {
 		return errors.Wrap(err, "write bootstrap layer")
 	}

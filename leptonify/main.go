@@ -50,7 +50,7 @@ func convertCommand() *cli.Command {
 			&cli.StringFlag{
 				Name:     "source",
 				Aliases:  []string{"s"},
-				Usage:    "source OCI image reference (e.g. registry/repo:tag)",
+				Usage:    "source OCI image reference (e.g. registry/repo:tag) or local directory path",
 				Required: true,
 			},
 			&cli.StringFlag{
@@ -100,6 +100,10 @@ func convertCommand() *cli.Command {
 				Usage: "log level: trace, debug, info, warn, error",
 				Value: "info",
 			},
+			&cli.StringSliceFlag{
+				Name:  "append-in-bootstrap",
+				Usage: "local file paths to bundle into the bootstrap layer alongside image.boot; files inside --source are excluded from the blob data region",
+			},
 		},
 		Action: runConvert,
 	}
@@ -114,6 +118,16 @@ func runConvert(c *cli.Context) error {
 
 	source := c.String("source")
 	target := c.String("target")
+	appendFiles := c.StringSlice("append-in-bootstrap")
+
+	// Detect whether --source is a local directory (instead of an OCI image
+	// reference). When the source is a directory, we use ConvertLocalDir
+	// which builds a single-layer lepton image directly from the directory
+	// tree, excluding any --append-in-bootstrap files that reside inside it.
+	isLocalDir := false
+	if info, err := os.Stat(source); err == nil && info.IsDir() {
+		isLocalDir = true
+	}
 
 	platformMC := platforms.All
 	if p := c.String("platform"); p != "" {
@@ -159,42 +173,60 @@ func runConvert(c *cli.Context) error {
 		return errors.Wrap(err, "create provider")
 	}
 
-	logrus.Infof("pulling source image %s", source)
-	srcDesc, err := provider.Pull(ctx, source)
-	if err != nil {
-		return errors.Wrapf(err, "pull %q", source)
-	}
+	var newDesc *ocispec.Descriptor
 
-	logrus.Infof("converting image to lepton format")
-	newDesc, err := converter.Convert(ctx, provider.ContentStore(), srcDesc, converter.Option{
-		BuilderPath:  c.String("builder"),
-		WorkDir:      scratchDir,
-		ChunkSize:    uint32(c.Uint("chunk-size")),
-		CompressSize: uint32(c.Uint("compress-size")),
-		Compressor:   c.String("compressor"),
-		LogLevel:     c.String("log-level"),
-		PlatformMC:   platformMC,
-	})
-	if err != nil {
-		return errors.Wrap(err, "convert")
+	if isLocalDir {
+		logrus.Infof("converting local directory %s to lepton format", source)
+		newDesc, err = converter.ConvertLocalDir(ctx, provider.ContentStore(), converter.LocalDirOption{
+			BuilderPath:       c.String("builder"),
+			WorkDir:           scratchDir,
+			ChunkSize:         uint32(c.Uint("chunk-size")),
+			CompressSize:      uint32(c.Uint("compress-size")),
+			Compressor:        c.String("compressor"),
+			LogLevel:          c.String("log-level"),
+			SourceDir:         source,
+			AppendInBootstrap: appendFiles,
+		})
+		if err != nil {
+			return errors.Wrap(err, "convert local directory")
+		}
+	} else {
+		logrus.Infof("pulling source image %s", source)
+		srcDesc, err := provider.Pull(ctx, source)
+		if err != nil {
+			return errors.Wrapf(err, "pull %q", source)
+		}
+
+		logrus.Infof("converting image to lepton format")
+		newDesc, err = converter.Convert(ctx, provider.ContentStore(), srcDesc, converter.Option{
+			BuilderPath:  c.String("builder"),
+			WorkDir:      scratchDir,
+			ChunkSize:    uint32(c.Uint("chunk-size")),
+			CompressSize: uint32(c.Uint("compress-size")),
+			Compressor:   c.String("compressor"),
+			LogLevel:     c.String("log-level"),
+			PlatformMC:   platformMC,
+		})
+		if err != nil {
+			return errors.Wrap(err, "convert")
+		}
+
+		// Report the total layer size of both images so the conversion's size
+		// impact is visible. Errors here are non-fatal.
+		cs := provider.ContentStore()
+		if srcSize, err := totalLayerSize(ctx, cs, srcDesc, platformMC); err != nil {
+			logrus.Warnf("failed to compute source image size: %v", err)
+		} else if dstSize, err := totalLayerSize(ctx, cs, *newDesc, platformMC); err != nil {
+			logrus.Warnf("failed to compute target image size: %v", err)
+		} else {
+			logrus.Infof("image size: oci %s -> lepton %s",
+				humanize.IBytes(srcSize), humanize.IBytes(dstSize))
+		}
 	}
 
 	logrus.Infof("pushing lepton image %s", target)
 	if err := provider.Push(ctx, *newDesc, target); err != nil {
 		return errors.Wrapf(err, "push %q", target)
-	}
-
-	// Report the total layer size of both images so the conversion's size impact
-	// is visible. Errors here are non-fatal: a missing size must not fail an
-	// otherwise successful conversion.
-	cs := provider.ContentStore()
-	if srcSize, err := totalLayerSize(ctx, cs, srcDesc, platformMC); err != nil {
-		logrus.Warnf("failed to compute source image size: %v", err)
-	} else if dstSize, err := totalLayerSize(ctx, cs, *newDesc, platformMC); err != nil {
-		logrus.Warnf("failed to compute target image size: %v", err)
-	} else {
-		logrus.Infof("image size: oci %s -> lepton %s",
-			humanize.IBytes(srcSize), humanize.IBytes(dstSize))
 	}
 
 	logrus.Infof("done: %s -> %s (%s)", source, target, newDesc.Digest)

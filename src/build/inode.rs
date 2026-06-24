@@ -1,11 +1,11 @@
 use crate::build::blob_chunk::BlobWriter;
 use crate::metadata::*;
 use anyhow::{bail, Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// In-memory inode representation.
 pub struct InodeInfo {
@@ -187,6 +187,7 @@ pub fn build_tree(
     source: &Path,
     blob_writer: &mut BlobWriter,
     chunk_size: u32,
+    exclude: &HashSet<PathBuf>,
 ) -> Result<Vec<InodeInfo>> {
     let mut inodes: Vec<InodeInfo> = Vec::new();
     let mut inode_counter: u32 = 0;
@@ -196,6 +197,7 @@ pub fn build_tree(
         source,
         blob_writer,
         chunk_size,
+        exclude,
         &mut inodes,
         &mut inode_counter,
         &mut hardlink_map,
@@ -217,6 +219,7 @@ fn build_tree_recursive(
     path: &Path,
     blob_writer: &mut BlobWriter,
     chunk_size: u32,
+    exclude: &HashSet<PathBuf>,
     inodes: &mut Vec<InodeInfo>,
     inode_counter: &mut u32,
     hardlink_map: &mut HashMap<(u64, u64), usize>,
@@ -267,6 +270,12 @@ fn build_tree_recursive(
         let mut children = Vec::new();
         for entry in &entries {
             let child_path = entry.path();
+
+            // Skip entries whose absolute path is in the exclude set.
+            if exclude.contains(&child_path) {
+                continue;
+            }
+
             let child_meta = fs::symlink_metadata(&child_path)
                 .with_context(|| format!("failed to stat: {}", child_path.display()))?;
             let hardlink_key = (!child_meta.file_type().is_dir() && child_meta.nlink() > 1)
@@ -279,6 +288,7 @@ fn build_tree_recursive(
                         &child_path,
                         blob_writer,
                         chunk_size,
+                        exclude,
                         inodes,
                         inode_counter,
                         hardlink_map,
