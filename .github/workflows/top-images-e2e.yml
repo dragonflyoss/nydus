@@ -26,7 +26,7 @@ jobs:
   top-images-e2e:
     name: Convert and validate top images
     runs-on: ${{ vars.RUNNER_OS || 'ubuntu-latest' }}
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -105,7 +105,14 @@ jobs:
           sudo chmod 0777 /mnt/leptonify-top-images
           df -h / /mnt
           registry="${REGISTRY_INPUT:-$DEFAULT_REGISTRY}"
+          # Converting/checking the full top-images list (120 images) at the
+          # default concurrency takes well over an hour, so the Go test's own
+          # -timeout must fit the job budget. Give the suite 140m — comfortably
+          # above the observed runtime — while staying 10m under the job's
+          # 150-minute timeout-minutes so a genuine hang still self-aborts with
+          # a goroutine dump before the runner hard-kills the job.
           make test-top-images \
+            TOP_IMAGES_TIMEOUT="140m" \
             TOP_IMAGES_CONCURRENCY="${{ github.event.inputs.concurrency }}" \
             TOP_IMAGES_REGISTRY="$registry" \
             TOP_IMAGES_PLAIN_HTTP="false" \
