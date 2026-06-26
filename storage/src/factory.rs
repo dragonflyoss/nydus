@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Result as IOResult;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -89,9 +89,47 @@ lazy_static::lazy_static! {
     pub static ref BLOB_FACTORY: BlobFactory = BlobFactory::new();
 }
 
+struct BlobCacheMgrEntry {
+    mgr: Arc<dyn BlobCacheMgr>,
+    active_users: AtomicUsize,
+}
+
+impl BlobCacheMgrEntry {
+    fn new(mgr: Arc<dyn BlobCacheMgr>) -> Self {
+        Self {
+            mgr,
+            active_users: AtomicUsize::new(0),
+        }
+    }
+
+    fn pin(self: &Arc<Self>) -> BlobCacheMgrGuard {
+        self.active_users.fetch_add(1, Ordering::AcqRel);
+        BlobCacheMgrGuard {
+            entry: Some(self.clone()),
+        }
+    }
+
+    fn active_users(&self) -> usize {
+        self.active_users.load(Ordering::Acquire)
+    }
+}
+
+struct BlobCacheMgrGuard {
+    entry: Option<Arc<BlobCacheMgrEntry>>,
+}
+
+impl Drop for BlobCacheMgrGuard {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            let previous = entry.active_users.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous > 0);
+        }
+    }
+}
+
 /// Factory to create blob cache for blob objects.
 pub struct BlobFactory {
-    mgrs: Mutex<HashMap<BlobCacheMgrKey, Arc<dyn BlobCacheMgr>>>,
+    mgrs: Mutex<HashMap<BlobCacheMgrKey, Arc<BlobCacheMgrEntry>>>,
     mgr_checker_active: AtomicBool,
 }
 
@@ -139,8 +177,10 @@ impl BlobFactory {
         };
         let mut guard = self.mgrs.lock().unwrap();
         // Use the existing blob cache manager if there's one with the same configuration.
-        if let Some(mgr) = guard.get(&key) {
-            return mgr.get_blob_cache(blob_info);
+        if let Some(entry) = guard.get(&key).cloned() {
+            let _active_guard = entry.pin();
+            drop(guard);
+            return entry.mgr.get_blob_cache(blob_info);
         }
         let backend = Self::new_backend(backend_cfg, id)?;
         let mgr = match cache_cfg.cache_type.as_str() {
@@ -174,41 +214,36 @@ impl BlobFactory {
             }
         };
 
-        let mgr = guard.entry(key).or_insert_with(|| mgr);
+        let entry = Arc::new(BlobCacheMgrEntry::new(mgr.clone()));
+        let _active_guard = entry.pin();
+        guard.insert(key, entry);
+        drop(guard);
 
         mgr.get_blob_cache(blob_info)
     }
 
     /// Garbage-collect unused blob cache managers and blob caches.
     pub fn gc(&self, victim: Option<(&Arc<ConfigV2>, &str)>) {
-        let mut mgrs = Vec::new();
-
+        let mut guard = self.mgrs.lock().unwrap();
         if let Some((config, id)) = victim {
             let key = BlobCacheMgrKey {
                 config: config.clone(),
             };
-            let mgr = self.mgrs.lock().unwrap().get(&key).cloned();
-            if let Some(mgr) = mgr {
-                if mgr.gc(Some(id)) {
-                    mgrs.push((key, mgr.clone()));
+            if let Some(entry) = guard.get(&key).cloned() {
+                if entry.active_users() == 0 && entry.mgr.gc(Some(id)) {
+                    guard.remove(&key);
                 }
             }
         } else {
-            for (key, mgr) in self.mgrs.lock().unwrap().iter() {
-                if mgr.gc(None) {
-                    mgrs.push((
-                        BlobCacheMgrKey {
-                            config: key.config.clone(),
-                        },
-                        mgr.clone(),
-                    ));
+            let mut reclaim = Vec::new();
+            for (key, entry) in guard.iter() {
+                if entry.active_users() == 0 && entry.mgr.gc(None) {
+                    reclaim.push(BlobCacheMgrKey {
+                        config: key.config.clone(),
+                    });
                 }
             }
-        }
-
-        for (key, mgr) in mgrs {
-            let mut guard = self.mgrs.lock().unwrap();
-            if mgr.gc(None) {
+            for key in reclaim {
                 guard.remove(&key);
             }
         }
@@ -314,9 +349,9 @@ impl BlobFactory {
     }
 
     fn check_cache_stat(&self) {
-        let mgrs = self.mgrs.lock().unwrap();
-        for (_key, mgr) in mgrs.iter() {
-            mgr.check_stat();
+        let guard = self.mgrs.lock().unwrap();
+        for (_key, entry) in guard.iter() {
+            entry.mgr.check_stat();
         }
     }
 }
@@ -331,6 +366,47 @@ impl Default for BlobFactory {
 mod tests {
     use super::*;
     use std::io::ErrorKind;
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
+
+    use nydus_api::CacheConfigV2;
+    use nydus_utils::metrics::BackendMetrics;
+
+    use crate::device::BlobFeatures;
+    use crate::test::MockBackend;
+
+    struct BlockingMgr {
+        backend: Arc<dyn BlobBackend>,
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl BlobCacheMgr for BlockingMgr {
+        fn init(&self) -> IOResult<()> {
+            Ok(())
+        }
+
+        fn destroy(&self) {}
+
+        fn gc(&self, _id: Option<&str>) -> bool {
+            false
+        }
+
+        fn backend(&self) -> &dyn BlobBackend {
+            self.backend.as_ref()
+        }
+
+        fn get_blob_cache(&self, _blob_info: &Arc<BlobInfo>) -> IOResult<Arc<dyn BlobCache>> {
+            self.entered.wait();
+            self.release.wait();
+            Err(std::io::Error::new(
+                ErrorKind::Other,
+                "blocking test manager always errors",
+            ))
+        }
+
+        fn check_stat(&self) {}
+    }
 
     fn invalid_backend_config(backend_type: &str) -> BackendConfigV2 {
         BackendConfigV2 {
@@ -342,6 +418,21 @@ mod tests {
             registry: None,
             http_proxy: None,
         }
+    }
+
+    fn test_factory_config(id: &str) -> Arc<ConfigV2> {
+        Arc::new(ConfigV2 {
+            id: id.to_string(),
+            backend: Some(BackendConfigV2 {
+                backend_type: "unused".to_string(),
+                ..Default::default()
+            }),
+            cache: Some(CacheConfigV2 {
+                cache_type: "dummycache".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -392,5 +483,65 @@ mod tests {
         };
 
         assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_new_blob_cache_releases_factory_lock_for_existing_mgr() {
+        let factory = Arc::new(BlobFactory::default());
+        let config = test_factory_config("factory-lock-test");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let backend: Arc<dyn BlobBackend> = Arc::new(MockBackend {
+            metrics: BackendMetrics::new("factory-lock-test", "mock"),
+        });
+        let mgr: Arc<dyn BlobCacheMgr> = Arc::new(BlockingMgr {
+            backend,
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        factory.mgrs.lock().unwrap().insert(
+            BlobCacheMgrKey {
+                config: config.clone(),
+            },
+            Arc::new(BlobCacheMgrEntry::new(mgr)),
+        );
+
+        let blob_info = Arc::new(BlobInfo::new(
+            0,
+            "blob-1".to_string(),
+            0,
+            0,
+            0,
+            0,
+            BlobFeatures::empty(),
+        ));
+        let worker_factory = factory.clone();
+        let worker_config = config.clone();
+        let worker_blob = blob_info.clone();
+        let worker = std::thread::spawn(move || {
+            worker_factory.new_blob_cache(&worker_config, &worker_blob, "/")
+        });
+
+        entered.wait();
+
+        let (lock_tx, lock_rx) = mpsc::channel();
+        let lock_factory = factory.clone();
+        let locker = std::thread::spawn(move || {
+            let _guard = lock_factory.mgrs.lock().unwrap();
+            let _ = lock_tx.send(());
+        });
+
+        let lock_acquired_while_getting_blob = lock_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+
+        release.wait();
+
+        let result = worker.join().unwrap();
+        locker.join().unwrap();
+
+        assert!(result.is_err());
+        assert!(
+            lock_acquired_while_getting_blob,
+            "factory lock should not be held while an existing manager resolves blob cache"
+        );
     }
 }
