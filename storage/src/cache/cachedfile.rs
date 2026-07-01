@@ -557,6 +557,10 @@ impl BlobCache for FileCacheEntry {
         &self.blob_id
     }
 
+    fn metrics(&self) -> Option<Arc<BlobcacheMetrics>> {
+        Some(self.metrics.clone())
+    }
+
     fn blob_uncompressed_size(&self) -> Result<u64> {
         Ok(self.blob_uncompressed_size)
     }
@@ -877,6 +881,11 @@ impl BlobCache for FileCacheEntry {
         })();
 
         self.update_chunk_pending_status(chunk, result.is_ok());
+        if result.is_ok() {
+            self.metrics
+                .prefetch_data_amount
+                .add(compressed_data.len() as u64);
+        }
         result.map(|_| true)
     }
 }
