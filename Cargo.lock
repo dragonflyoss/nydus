@@ -3065,7 +3065,6 @@ dependencies = [
  "base64 0.21.7",
  "bitflags 1.3.2",
  "dragonfly-client-util",
- "fuse-backend-rs",
  "futures",
  "gpt",
  "hex",
@@ -3096,12 +3095,11 @@ dependencies = [
  "sha1",
  "sha2",
  "tar",
+ "tempfile",
  "time",
  "tokio",
  "toml",
  "url",
- "vm-memory",
- "vmm-sys-util 0.15.0",
 ]
 
 [[package]]

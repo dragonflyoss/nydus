@@ -573,13 +573,13 @@ impl BlobPrefetcher {
 mod tests {
     use std::io::Read;
 
-    use fuse_backend_rs::file_buf::FileVolatileSlice;
     use nydus_storage::backend::{BackendContext, BackendResult, BlobReader};
     use nydus_storage::cache::state::ChunkMap;
     use nydus_storage::cache::BlobCache;
     use nydus_storage::device::{
         BlobChunkInfo, BlobInfo, BlobIoDesc, BlobIoVec, BlobPrefetchRequest,
     };
+    use nydus_storage::volatile::VolatileSlice as FileVolatileSlice;
     use nydus_storage::{StorageError, StorageResult};
     use nydus_utils::crypt::{Cipher, CipherContext};
     use nydus_utils::metrics::BackendMetrics;

@@ -424,7 +424,8 @@ impl AsyncWorkerMgr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vmm_sys_util::tempdir::TempDir;
+    use crate::test::TempPath;
+    use tempfile::TempDir;
 
     #[test]
     fn test_worker_mgr_new() {

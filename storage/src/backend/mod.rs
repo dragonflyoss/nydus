@@ -20,10 +20,10 @@ use std::thread::sleep;
 use std::time::SystemTime;
 use std::{sync::Arc, time::Duration};
 
-use fuse_backend_rs::file_buf::FileVolatileSlice;
 use nydus_utils::metrics::{BackendMetrics, ERROR_HOLDER};
 
 use crate::utils::{alloc_buf, copyv};
+use crate::volatile::VolatileSlice as FileVolatileSlice;
 use crate::StorageError;
 
 #[cfg(any(

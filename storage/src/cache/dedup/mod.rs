@@ -222,10 +222,10 @@ impl CasMgr {
 mod tests {
     use super::*;
     use crate::device::BlobFeatures;
-    use crate::test::MockChunkInfo;
+    use crate::test::{MockChunkInfo, TempPath};
     use crate::RAFS_DEFAULT_CHUNK_SIZE;
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vmm_sys_util::tempfile::TempFile;
+    use tempfile::NamedTempFile as TempFile;
 
     #[test]
     fn test_cas_error_display() {

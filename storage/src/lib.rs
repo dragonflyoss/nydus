@@ -55,6 +55,7 @@ pub mod meta;
 #[cfg(test)]
 pub(crate) mod test;
 pub mod utils;
+pub mod volatile;
 
 // A helper to impl RafsChunkInfo for upper layers like Rafs different metadata mode.
 #[doc(hidden)]
@@ -81,7 +82,6 @@ pub const RAFS_BATCH_SIZE_TO_GAP_SHIFT: u64 = 7;
 pub enum StorageError {
     Unsupported,
     Timeout,
-    VolatileSlice(vm_memory::VolatileMemoryError),
     MemOverflow,
     NotContinuous,
     CacheIndex(std::io::Error),
@@ -96,7 +96,6 @@ impl Display for StorageError {
             StorageError::Timeout => write!(f, "timeout when reading data from storage backend"),
             StorageError::MemOverflow => write!(f, "memory overflow when doing storage backend IO"),
             StorageError::NotContinuous => write!(f, "address ranges are not continuous"),
-            StorageError::VolatileSlice(e) => write!(f, "{}", e),
             StorageError::CacheIndex(e) => write!(f, "Wrong cache index {}", e),
             StorageError::ProxyForbidden(s) => write!(f, "proxy forbidden: {}", s),
             StorageError::ProxyLimited(s) => write!(f, "proxy rate limited: {}", s),
