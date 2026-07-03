@@ -231,37 +231,6 @@ func extractBootstrap(ctx context.Context, cs content.Store, desc ocispec.Descri
 	return errors.Errorf("bootstrap entry %q not found in layer", converter.BootstrapFileNameInLayer)
 }
 
-// materializeBlobs writes each lepton data blob from the content store into
-// blobDir. The lepton check / fuse subcommands resolve blobs by content hash, so
-// the file name is irrelevant; the descriptor digest is used for convenience.
-func materializeBlobs(ctx context.Context, cs content.Store, blobs []ocispec.Descriptor, blobDir string) error {
-	for _, blob := range blobs {
-		if err := materializeBlob(ctx, cs, blob, filepath.Join(blobDir, blob.Digest.Encoded())); err != nil {
-			return errors.Wrapf(err, "materialize blob %s", blob.Digest)
-		}
-	}
-	return nil
-}
-
-func materializeBlob(ctx context.Context, cs content.Store, desc ocispec.Descriptor, destPath string) error {
-	ra, err := cs.ReaderAt(ctx, desc)
-	if err != nil {
-		return errors.Wrap(err, "open blob reader")
-	}
-	defer func() { _ = ra.Close() }()
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return errors.Wrap(err, "create blob file")
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err := io.Copy(out, io.NewSectionReader(ra, 0, ra.Size())); err != nil {
-		return errors.Wrap(err, "copy blob")
-	}
-	return out.Close()
-}
-
 // applyOCIImage applies all OCI layers of img sequentially into rootfs,
 // resolving whiteouts so the result is the fully merged root filesystem.
 func applyOCIImage(ctx context.Context, cs content.Store, img *Image, rootfs string) error {
@@ -299,13 +268,12 @@ func applyOCILayer(ctx context.Context, cs content.Store, layer ocispec.Descript
 	return nil
 }
 
-// runLeptonCheck invokes `lepton check` to statically validate a bootstrap and
-// its referenced blobs.
-func runLeptonCheck(ctx context.Context, builder, bootstrapPath, blobDir string) error {
+// runLeptonCheck invokes `lepton check` to statically validate a bootstrap.
+// Data blobs are not verified, so no blob directory is required.
+func runLeptonCheck(ctx context.Context, builder, bootstrapPath string) error {
 	args := []string{
 		"check",
 		"--bootstrap", bootstrapPath,
-		"--blob-dir", blobDir,
 	}
 	cmd := exec.CommandContext(ctx, builderBinary(builder), args...)
 	var stdout, stderr bytes.Buffer

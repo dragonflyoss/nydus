@@ -14,17 +14,22 @@ pub const DEFAULT_PREFETCH_THREADS: usize = 10;
 /// Workflow:
 /// 1. Prefetch the blobs declared in the root `trusted.lepton.prefetch.blobs`
 ///    xattr sequentially, in the declared priority order (single thread).
-/// 2. Prefetch the remaining blobs concurrently with a worker pool.
+/// 2. When `full` is set, prefetch the remaining blobs concurrently with a
+///    worker pool. When `full` is false, stop after the priority blobs so the
+///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
+///    optimized image's "ondemand" redirect blob).
 pub struct BlobPrefetcher {
     reader: Arc<ErofsReader>,
     threads: usize,
+    full: bool,
 }
 
 impl BlobPrefetcher {
-    pub fn new(reader: Arc<ErofsReader>, threads: usize) -> Self {
+    pub fn new(reader: Arc<ErofsReader>, threads: usize, full: bool) -> Self {
         Self {
             reader,
             threads: threads.max(1),
+            full,
         }
     }
 
@@ -37,21 +42,37 @@ impl BlobPrefetcher {
     }
 
     /// Drive the whole prefetch workflow synchronously on the calling thread:
-    /// priority blobs sequentially in declared order, then the remaining blobs
-    /// through a worker pool. Per-blob failures are logged and skipped.
+    /// priority blobs sequentially in declared order, then (only when `full` is
+    /// set) the remaining blobs through a worker pool. Per-blob failures are
+    /// logged and skipped.
     pub fn run(self) {
         let (priority, rest) = self.reader.prefetch_plan();
 
-        // Phase 1: priority blobs, sequential, in declared order.
+        // Phase 1: priority blobs, sequential, in declared order. When full
+        // prefetch is disabled, only the "ondemand" redirect blob is warmed
+        // (it streams the access-ordered hot set into the source caches);
+        // non-redirect priority blobs are skipped so the backend bandwidth is
+        // not spent pulling whole source blobs.
         for blob_index in priority {
-            match self.reader.prefetch_blob(blob_index) {
+            if !self.full {
+                match self.reader.blob_is_redirect(blob_index) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(err) => {
+                        warn!("failed to inspect priority blob {}: {}", blob_index, err);
+                        continue;
+                    }
+                }
+            }
+            match self.reader.prefetch_blob(blob_index, self.threads) {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
                 Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
             }
         }
 
-        // Phase 2: remaining blobs, concurrent worker pool.
-        if rest.is_empty() {
+        // Phase 2: remaining blobs, concurrent worker pool. Skipped unless full
+        // prefetch is requested.
+        if !self.full || rest.is_empty() {
             return;
         }
         let worker_count = self.threads.min(rest.len());
@@ -68,7 +89,7 @@ impl BlobPrefetcher {
                         guard.pop()
                     };
                     match blob_index {
-                        Some(blob_index) => match reader.prefetch_blob(blob_index) {
+                        Some(blob_index) => match reader.prefetch_blob(blob_index, 1) {
                             Ok(()) => info!("prefetched blob {}", blob_index),
                             Err(err) => warn!("failed to prefetch blob {}: {}", blob_index, err),
                         },

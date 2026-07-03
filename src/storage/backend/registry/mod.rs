@@ -9,16 +9,9 @@
 //! [`load_blob_meta`](BlobBackend::load_blob_meta) recovers it from the blob's
 //! trailing footer via range reads.
 //!
-//! Module layout:
-//! * [`http`] — async client + shared runtime + sync bridge
-//! * [`dns`]  — cached, singleflight DNS resolver
-//! * [`proxy`] — HTTP mirror proxy + Dragonfly SDK proxy
-//! * [`request`] — transport routing + unified response
-
-mod dns;
-mod http;
-mod proxy;
-mod request;
+//! The HTTP transport stack (connection, DNS, HTTP proxy, request routing) lives
+//! at the [`backend`](crate::storage::backend) level so other HTTP-based
+//! backends can reuse it; this module holds only the registry-specific logic.
 
 use std::collections::HashMap;
 use std::io;
@@ -39,12 +32,12 @@ use super::{BlobBackend, ReadContext, RequestSource};
 use crate::metadata::{BlobFooter, BlobMeta, EROFS_BLOB_ID_SIZE, LEPTON_BLOB_FOOTER_SIZE};
 use crate::utils::hex_string;
 
-use http::{Connection, ConnectionConfig};
-use proxy::{HttpMirror, ProxyConfig};
-use request::{is_success_status, Request, RequestError, Response};
+use super::http::{Connection, ConnectionConfig};
+use super::proxy::{HttpProxy, ProxyConfig};
+use super::request::{is_success_status, Request, RequestError, Response};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
-use proxy::DragonflyProxy;
+use super::dragonfly_sdk::DragonflySdk;
 
 const CLIENT_ID: &str = "lepton-registry-client";
 const DEFAULT_TIMEOUT: u64 = 30;
@@ -278,14 +271,15 @@ impl Registry {
     }
 
     fn new(config: RegistryConfig) -> io::Result<Self> {
-        let connection = Connection::new(&ConnectionConfig {
+        let conn_config = ConnectionConfig {
             skip_verify: config.skip_verify,
             timeout: config.timeout,
             ca_cert_files: config.ca_cert_files.clone(),
-        })?;
+        };
+        let connection = Connection::new(&conn_config)?;
 
-        let mirror = match config.proxy.as_ref().and_then(|p| p.url.as_deref()) {
-            Some(url) => Some(HttpMirror::new(url)?),
+        let proxy = match config.proxy.as_ref().and_then(|p| p.url.as_deref()) {
+            Some(url) => Some(HttpProxy::new(&conn_config, url)?),
             None => None,
         };
 
@@ -295,15 +289,15 @@ impl Registry {
             .as_ref()
             .and_then(|p| p.dragonfly_scheduler_endpoint.as_deref())
         {
-            Some(endpoint) => Some(DragonflyProxy::new(endpoint)?),
+            Some(endpoint) => Some(DragonflySdk::new(endpoint)?),
             None => None,
         };
 
-        // Reads are proxied when an HTTP mirror or Dragonfly endpoint is set.
+        // Reads are proxied when an HTTP proxy or Dragonfly endpoint is set.
         #[cfg(feature = "backend-dragonfly-proxy")]
-        let via_proxy = mirror.is_some() || dragonfly.is_some();
+        let via_proxy = proxy.is_some() || dragonfly.is_some();
         #[cfg(not(feature = "backend-dragonfly-proxy"))]
-        let via_proxy = mirror.is_some();
+        let via_proxy = proxy.is_some();
         let target = if via_proxy {
             crate::metrics::BackendTarget::Proxy
         } else {
@@ -312,7 +306,7 @@ impl Registry {
 
         let request = Request::new(
             connection,
-            mirror,
+            proxy,
             #[cfg(feature = "backend-dragonfly-proxy")]
             dragonfly,
         );

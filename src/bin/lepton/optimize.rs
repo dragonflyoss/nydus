@@ -24,9 +24,17 @@ const MAX_COMPRESSED_SIZE_PERCENT: u128 = 70;
 pub struct OptimizeArgs {
     /// Apiserver address of a running `lepton fuse` mount, e.g.
     /// `unix:///path/to/api.sock`. The access patterns are fetched live from
-    /// its `/trace` endpoint.
-    #[arg(long)]
-    pub apiserver: String,
+    /// its `/trace` endpoint. Mutually exclusive with `--trace-file`.
+    #[arg(long, required_unless_present = "trace_file")]
+    pub apiserver: Option<String>,
+
+    /// Path to a JSON trace file containing access patterns. Accepts either the
+    /// bare `{"patterns":[{"blob_index":..,"group_index":..}]}` document or a
+    /// wrapper object exposing the same under a top-level `trace` field (as
+    /// returned by a hypervisor's stats endpoint embedding the accessor trace).
+    /// Mutually exclusive with `--apiserver`.
+    #[arg(long, conflicts_with = "apiserver")]
+    pub trace_file: Option<PathBuf>,
 
     /// Input merged bootstrap to optimize (left untouched).
     #[arg(long)]
@@ -84,11 +92,14 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
         bail!("--parent-bootstrap and --bootstrap must point to different files");
     }
 
-    let patterns = load_patterns(&args.apiserver)?;
+    let patterns = match (&args.trace_file, &args.apiserver) {
+        (Some(path), _) => load_patterns_from_file(path)?,
+        (None, Some(apiserver)) => load_patterns(apiserver)?,
+        (None, None) => bail!("either --trace-file or --apiserver must be provided"),
+    };
     if patterns.is_empty() {
         bail!(
-            "apiserver {} reported no group accesses; exercise the workload before optimizing",
-            args.apiserver
+            "no group accesses found in the access trace; exercise the workload before optimizing"
         );
     }
 
@@ -258,10 +269,35 @@ fn load_patterns(apiserver: &str) -> Result<Vec<(u16, u32)>> {
         .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
     let trace: TracePatterns = serde_json::from_slice(&raw)
         .with_context(|| format!("failed to parse /trace response from {apiserver}"))?;
+    dedup_patterns(trace.patterns)
+}
 
+/// Load access patterns from a JSON trace file. Accepts either the bare
+/// `{"patterns":[...]}` document or a wrapper object exposing the same patterns
+/// under a top-level `trace` field (as produced by a hypervisor's stats
+/// endpoint embedding the accessor trace).
+fn load_patterns_from_file(path: &std::path::Path) -> Result<Vec<(u16, u32)>> {
+    let raw =
+        fs::read(path).with_context(|| format!("failed to read trace file: {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_slice(&raw)
+        .with_context(|| format!("failed to parse trace file as JSON: {}", path.display()))?;
+    // Support both the bare document and the stats-endpoint wrapper.
+    let trace_value = value.get("trace").unwrap_or(&value);
+    let trace: TracePatterns = serde_json::from_value(trace_value.clone()).with_context(|| {
+        format!(
+            "trace file {} does not contain a `patterns` array",
+            path.display()
+        )
+    })?;
+    dedup_patterns(trace.patterns)
+}
+
+/// Deduplicate `(blob_index, group_index)` pairs while preserving first-access
+/// order, validating that every blob index fits in a non-zero `u16`.
+fn dedup_patterns(patterns: Vec<TracePattern>) -> Result<Vec<(u16, u32)>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for pattern in trace.patterns {
+    for pattern in patterns {
         let blob_index = u16::try_from(pattern.blob_index)
             .with_context(|| format!("pattern blob index {} exceeds u16", pattern.blob_index))?;
         if blob_index == 0 {

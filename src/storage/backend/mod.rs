@@ -1,5 +1,17 @@
 mod local;
 
+// Shared HTTP transport stack, reusable by any HTTP-based backend.
+#[cfg(feature = "backend-registry")]
+mod dns;
+#[cfg(feature = "backend-dragonfly-proxy")]
+mod dragonfly_sdk;
+#[cfg(feature = "backend-registry")]
+mod http;
+#[cfg(feature = "backend-registry")]
+mod proxy;
+#[cfg(feature = "backend-registry")]
+mod request;
+
 #[cfg(feature = "backend-registry")]
 mod pauser;
 #[cfg(feature = "backend-registry")]

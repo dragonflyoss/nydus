@@ -19,6 +19,7 @@ pub use metadata::{
     BlobMeta, BlobMetaChunk, BlobMetaGroup, BlobMetaHeader, BLOB_META_HEADER_SIZE, BLOB_META_MAGIC,
 };
 pub use metrics::trace::{TraceDocument, TracePattern, TraceRecorder};
+pub use metrics::MetricsSnapshot;
 #[cfg(feature = "backend-registry")]
 pub use storage::backend::Registry;
 pub use storage::backend::{build_backend, BlobBackend, LocalBackend, RequestSource};

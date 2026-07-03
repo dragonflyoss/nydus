@@ -251,12 +251,14 @@ func registryIsLocal(registry string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// registryTLSArgs returns the leptonify flags controlling transport security.
-// For a local registry it enables plain HTTP and skips TLS verification; for a
-// real registry such as GHCR it returns no extra flags so HTTPS is used.
+// registryTLSArgs returns the leptonify flags controlling transport security
+// for the target registry (where converted images are pushed). For a local
+// registry it enables plain HTTP and skips TLS verification; for a real
+// registry such as GHCR it returns no extra flags so HTTPS is used. The
+// source registry is always a public HTTPS registry and needs no flags.
 func registryTLSArgs(plainHTTP bool) []string {
 	if plainHTTP {
-		return []string{"--plain-http", "--insecure"}
+		return []string{"--target-plain-http", "--target-insecure"}
 	}
 	return nil
 }

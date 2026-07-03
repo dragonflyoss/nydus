@@ -63,6 +63,14 @@ pub struct PrefetchConfig {
     pub enable: bool,
     #[serde(default = "default_prefetch_threads")]
     pub threads: usize,
+    /// Whether to also prefetch every remaining blob in full (phase 2) after
+    /// the priority blobs. When false (the default), only the priority blobs
+    /// listed in the root prefetch xattr are prefetched — for an optimized
+    /// image that is just the "ondemand" redirect blob, which warms the hot
+    /// working set without pulling the whole image and keeps the backend
+    /// bandwidth focused on the access-ordered groups.
+    #[serde(default = "default_prefetch_full")]
+    pub full: bool,
 }
 
 fn default_prefetch_enable() -> bool {
@@ -73,11 +81,16 @@ fn default_prefetch_threads() -> usize {
     DEFAULT_PREFETCH_THREADS
 }
 
+fn default_prefetch_full() -> bool {
+    false
+}
+
 impl Default for PrefetchConfig {
     fn default() -> Self {
         Self {
             enable: default_prefetch_enable(),
             threads: default_prefetch_threads(),
+            full: default_prefetch_full(),
         }
     }
 }

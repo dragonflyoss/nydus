@@ -59,6 +59,27 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
+    /// Like [`redirect_stream`], but split the redirect blob's groups into
+    /// fixed-size segments and fetch/decode them concurrently with up to
+    /// `threads` worker threads. A blob small enough to fit in a single segment
+    /// (or `threads <= 1`) is streamed sequentially, since segmentation would
+    /// add registry connections without overlapping any work. `cb` must be
+    /// callable concurrently (it fills distinct source-blob caches, which is
+    /// safe); per-group decode/CRC failures are skipped, and the first `cb` or
+    /// backend error aborts the stream.
+    ///
+    /// [`redirect_stream`]: Self::redirect_stream
+    fn redirect_stream_parallel(
+        &self,
+        _threads: usize,
+        _cb: &(dyn Fn(&BlobMetaGroup, &[u8]) -> io::Result<()> + Sync),
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "redirect stream is not supported by this blob cache",
+        ))
+    }
+
     /// Fill one group of this blob's cache with decoded bytes provided by a
     /// redirect blob. Validates length and CRC against this blob's own group
     /// metadata before writing, and is a no-op when the group is already
@@ -70,6 +91,19 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 }
+
+/// Target uncompressed size of one redirect-prefetch segment. The ondemand
+/// (redirect) blob's groups are split into segments of about this size and
+/// fetched concurrently by [`BlobCache::redirect_stream_parallel`]; a blob that
+/// fits within a single segment is streamed sequentially instead.
+pub(crate) const REDIRECT_PREFETCH_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Number of earliest (access-ordered) groups the parallel redirect prefetch
+/// fetches one-per-segment instead of bundling into full segments. These are
+/// the most latency-critical groups — the workload faults them first — so a
+/// small, single-group read lands them within roughly one round trip in the
+/// first wave of workers, rather than waiting for a whole segment-sized read.
+pub(crate) const REDIRECT_PREFETCH_RAMP_GROUPS: usize = 16;
 
 /// Group together consecutive groups whose accumulated uncompressed size reaches
 /// `target_uncompressed`, so each batch can be fetched with a single contiguous
@@ -91,6 +125,25 @@ pub(crate) fn plan_prefetch_batches(
         start = end;
     }
     batches
+}
+
+/// Plan the segments for a parallel redirect prefetch: the first `ramp_groups`
+/// access-ordered groups are emitted one per segment (small, fast reads that
+/// land the earliest groups within a single round trip), and the remaining
+/// groups are bundled into `target_uncompressed`-sized segments for throughput.
+pub(crate) fn plan_redirect_segments(
+    groups: &[BlobMetaGroup],
+    target_uncompressed: u64,
+    ramp_groups: usize,
+) -> Vec<Range<usize>> {
+    let ramp = ramp_groups.min(groups.len());
+    let mut segments: Vec<Range<usize>> = (0..ramp).map(|i| i..i + 1).collect();
+    if ramp < groups.len() {
+        for batch in plan_prefetch_batches(&groups[ramp..], target_uncompressed) {
+            segments.push((ramp + batch.start)..(ramp + batch.end));
+        }
+    }
+    segments
 }
 
 /// Decode and validate a single group from an in-memory window of compressed

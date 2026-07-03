@@ -1,6 +1,7 @@
 use std::mem;
 
 use super::*;
+use crate::utils::digest::{hex_string, parse_sha256_hex};
 
 /// EROFS chunk index entry — 8 bytes, `#[repr(C, packed)]`.
 #[repr(C, packed)]
@@ -9,6 +10,10 @@ pub struct ErofsChunkIndex {
     pub device_id: [u8; 2],
     pub startblk_lo: [u8; 4],
 }
+
+/// On-disk null chunk address sentinel: all 48 address bits set. Decoded back
+/// to [`EROFS_NULL_ADDR`] by [`ErofsChunkIndex::blkaddr`].
+const EROFS_CHUNK_NULL_ADDR: u64 = 0xFFFF_FFFF_FFFF;
 
 const _: () = assert!(mem::size_of::<ErofsChunkIndex>() == EROFS_CHUNK_INDEX_SIZE);
 
@@ -34,7 +39,15 @@ impl ErofsChunkIndex {
     pub fn blkaddr(&self) -> u64 {
         let hi = get_u16(&self.startblk_hi) as u64;
         let lo = get_u32(&self.startblk_lo) as u64;
-        (hi << 32) | lo
+        let addr = (hi << 32) | lo;
+        // The on-disk null chunk (hole) has all 48 address bits set (written by
+        // `new(EROFS_NULL_ADDR, ..)` above); normalize it back to the in-memory
+        // EROFS_NULL_ADDR sentinel so every caller compares against one value.
+        if addr == EROFS_CHUNK_NULL_ADDR {
+            EROFS_NULL_ADDR
+        } else {
+            addr
+        }
     }
 
     pub fn device_id(&self) -> u16 {
@@ -109,11 +122,24 @@ impl ErofsDeviceSlot {
     }
 
     pub fn set_blob_id(&mut self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) {
-        self.tag[..EROFS_BLOB_ID_SIZE].copy_from_slice(blob_id);
-        self.tag[EROFS_BLOB_ID_SIZE..].fill(0);
+        // Store the blob id as a lowercase sha256 hex string, matching nydus
+        // RAFS v6 (`RafsV6Device`). A 32-byte digest encodes to 64 hex
+        // characters, which fills the entire 64-byte tag field.
+        let hex = hex_string(blob_id);
+        let bytes = hex.as_bytes();
+        self.tag[..bytes.len()].copy_from_slice(bytes);
+        self.tag[bytes.len()..].fill(0);
     }
 
     pub fn blob_id(&self) -> [u8; EROFS_BLOB_ID_SIZE] {
+        // The tag stores the blob id as a 64-character lowercase sha256 hex
+        // string (nydus RAFS v6 compatible). Fall back to the legacy raw-byte
+        // encoding when the tag is not valid hex.
+        if let Ok(text) = std::str::from_utf8(&self.tag) {
+            if let Ok(digest) = parse_sha256_hex(text) {
+                return digest;
+            }
+        }
         let mut blob_id = [0u8; EROFS_BLOB_ID_SIZE];
         blob_id.copy_from_slice(&self.tag[..EROFS_BLOB_ID_SIZE]);
         blob_id

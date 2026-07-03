@@ -63,13 +63,13 @@ func (r *filesystemRule) Validate(ctx context.Context) error {
 		return err
 	}
 
-	sourceRoot, cleanupSource, err := r.mount(ctx, "source", r.source)
+	sourceRoot, cleanupSource, err := r.mount(ctx, "source", remote.Source, r.source)
 	if err != nil {
 		return errors.Wrap(err, "mount source image")
 	}
 	defer cleanupSource()
 
-	targetRoot, cleanupTarget, err := r.mount(ctx, "target", r.target)
+	targetRoot, cleanupTarget, err := r.mount(ctx, "target", remote.Target, r.target)
 	if err != nil {
 		return errors.Wrap(err, "mount target image")
 	}
@@ -93,8 +93,9 @@ func (r *filesystemRule) Validate(ctx context.Context) error {
 
 // mount materializes img's root filesystem and returns the path together with a
 // cleanup function. OCI images are extracted to a directory; lepton images are
-// mounted through `lepton fuse`.
-func (r *filesystemRule) mount(ctx context.Context, label string, img *Image) (string, func(), error) {
+// mounted through `lepton fuse`. reg selects which registry side's TLS/HTTP
+// settings back the lepton FUSE mount.
+func (r *filesystemRule) mount(ctx context.Context, label string, reg remote.Registry, img *Image) (string, func(), error) {
 	dir, err := os.MkdirTemp(r.workDir, "fs-"+label+"-")
 	if err != nil {
 		return "", nil, errors.Wrap(err, "create scratch dir")
@@ -110,7 +111,7 @@ func (r *filesystemRule) mount(ctx context.Context, label string, img *Image) (s
 		return rootfs, cleanupDir, nil
 	}
 
-	rootfs, unmount, err := r.fuseMount(ctx, dir, img)
+	rootfs, unmount, err := r.fuseMount(ctx, dir, reg, img)
 	if err != nil {
 		cleanupDir()
 		return "", nil, err
@@ -126,7 +127,7 @@ func (r *filesystemRule) mount(ctx context.Context, label string, img *Image) (s
 // `lepton fuse` daemon mounting them, waits for the mount to become ready, and
 // returns the mountpoint with an unmount function. Blob data is fetched on
 // demand from the registry rather than materialized locally.
-func (r *filesystemRule) fuseMount(ctx context.Context, dir string, img *Image) (string, func(), error) {
+func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.Registry, img *Image) (string, func(), error) {
 	if img.Bootstrap == nil {
 		return "", nil, errors.New("lepton image is missing its bootstrap layer")
 	}
@@ -152,7 +153,7 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, img *Image) 
 	}
 
 	configPath := filepath.Join(dir, "config.yaml")
-	_, err = writeRegistryConfig(r.provider, img, cacheDir, configPath, false)
+	_, err = writeRegistryConfig(r.provider, reg, img, cacheDir, configPath, false)
 	if err != nil {
 		return "", nil, errors.Wrap(err, "generate storage config")
 	}
@@ -254,10 +255,11 @@ func prefetchThreads(enable bool) int {
 // writeRegistryConfig derives a registry-backed storage config for img, writes
 // it to configPath, and returns the rendered YAML. The registry host and
 // repository are parsed from the image reference; credentials, TLS and HTTP
-// settings come from the provider used to pull the image. Blob prefetch runs
-// only when prefetchEnable is set (a live mount wants production-like warmup,
-// while check and optimize want fully on-demand reads).
-func writeRegistryConfig(provider *remote.Provider, img *Image, cacheDir, configPath string, prefetchEnable bool) (string, error) {
+// settings come from the provider's reg side (source or target) used to pull
+// the image. Blob prefetch runs only when prefetchEnable is set (a live mount
+// wants production-like warmup, while check and optimize want fully on-demand
+// reads).
+func writeRegistryConfig(provider *remote.Provider, reg remote.Registry, img *Image, cacheDir, configPath string, prefetchEnable bool) (string, error) {
 	named, err := reference.ParseNormalizedNamed(img.Ref)
 	if err != nil {
 		return "", errors.Wrapf(err, "parse image reference %q", img.Ref)
@@ -280,8 +282,8 @@ func writeRegistryConfig(provider *remote.Provider, img *Image, cacheDir, config
 			Config: registryBackendConfig{
 				Host:       host,
 				Repo:       repo,
-				Insecure:   provider.PlainHTTP(),
-				SkipVerify: provider.Insecure(),
+				Insecure:   provider.PlainHTTP(reg),
+				SkipVerify: provider.Insecure(reg),
 				Auth:       auth,
 			},
 		},

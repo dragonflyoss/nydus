@@ -20,24 +20,43 @@ import (
 	"github.com/pkg/errors"
 )
 
+// Registry identifies which side's TLS/HTTP settings apply: the source
+// registry (images are pulled from) or the target registry (images are pushed
+// to). The two sides may live on different registries with different security
+// requirements.
+type Registry int
+
+const (
+	// Source selects the source registry settings (used by pulls).
+	Source Registry = iota
+	// Target selects the target registry settings (used by pushes).
+	Target
+)
+
 // Provider pulls and pushes images through a local content store, using a
 // docker registry resolver for remote access.
 type Provider struct {
-	store      content.Store
-	platformMC platforms.MatchComparer
-	insecure   bool
-	plainHTTP  bool
-	credFunc   CredentialFunc
+	store           content.Store
+	platformMC      platforms.MatchComparer
+	sourceInsecure  bool
+	sourcePlainHTTP bool
+	targetInsecure  bool
+	targetPlainHTTP bool
+	credFunc        CredentialFunc
 }
 
 // Options configures a Provider.
 type Options struct {
 	// WorkDir is the directory backing the local content store.
 	WorkDir string
-	// Insecure skips TLS certificate verification.
-	Insecure bool
-	// PlainHTTP uses HTTP instead of HTTPS to talk to the registry.
-	PlainHTTP bool
+	// SourceInsecure skips TLS certificate verification for the source registry.
+	SourceInsecure bool
+	// SourcePlainHTTP uses HTTP instead of HTTPS for the source registry.
+	SourcePlainHTTP bool
+	// TargetInsecure skips TLS certificate verification for the target registry.
+	TargetInsecure bool
+	// TargetPlainHTTP uses HTTP instead of HTTPS for the target registry.
+	TargetPlainHTTP bool
 	// PlatformMC selects which platforms to pull/push. Defaults to all.
 	PlatformMC platforms.MatchComparer
 }
@@ -58,11 +77,13 @@ func NewProvider(opts Options) (*Provider, error) {
 		platformMC = platforms.All
 	}
 	return &Provider{
-		store:      store,
-		platformMC: platformMC,
-		insecure:   opts.Insecure,
-		plainHTTP:  opts.PlainHTTP,
-		credFunc:   NewDockerConfigCredFunc(),
+		store:           store,
+		platformMC:      platformMC,
+		sourceInsecure:  opts.SourceInsecure,
+		sourcePlainHTTP: opts.SourcePlainHTTP,
+		targetInsecure:  opts.TargetInsecure,
+		targetPlainHTTP: opts.TargetPlainHTTP,
+		credFunc:        NewDockerConfigCredFunc(),
 	}, nil
 }
 
@@ -76,14 +97,22 @@ func (p *Provider) PlatformMC() platforms.MatchComparer {
 	return p.platformMC
 }
 
-// Insecure reports whether TLS certificate verification is skipped.
-func (p *Provider) Insecure() bool {
-	return p.insecure
+// Insecure reports whether TLS certificate verification is skipped for the
+// given registry side.
+func (p *Provider) Insecure(reg Registry) bool {
+	if reg == Target {
+		return p.targetInsecure
+	}
+	return p.sourceInsecure
 }
 
-// PlainHTTP reports whether plain HTTP is used to talk to the registry.
-func (p *Provider) PlainHTTP() bool {
-	return p.plainHTTP
+// PlainHTTP reports whether plain HTTP is used to talk to the given registry
+// side.
+func (p *Provider) PlainHTTP(reg Registry) bool {
+	if reg == Target {
+		return p.targetPlainHTTP
+	}
+	return p.sourcePlainHTTP
 }
 
 // Credentials resolves the username and password for a registry host using the
@@ -92,28 +121,45 @@ func (p *Provider) Credentials(host string) (string, string, error) {
 	return p.credFunc(host)
 }
 
-func (p *Provider) resolver() remotes.Resolver {
-	return NewResolver(p.insecure, p.plainHTTP, p.credFunc)
+func (p *Provider) resolver(reg Registry) remotes.Resolver {
+	return NewResolver(p.Insecure(reg), p.PlainHTTP(reg), p.credFunc)
 }
 
-// Pull fetches ref (and all matched-platform content) into the local content
-// store and returns the resolved root descriptor.
-func (p *Provider) Pull(ctx context.Context, ref string) (ocispec.Descriptor, error) {
+// PullOptions controls which data layers Pull downloads. Index, manifest and
+// config descriptors and the lepton bootstrap layer are always pulled.
+type PullOptions struct {
+	// PullOCILayers downloads plain OCI data layers. Disable it when no
+	// filesystem extraction/diff is needed.
+	PullOCILayers bool
+	// PullLeptonBlobs downloads lepton data blob layers. Disable it when blobs
+	// are fetched on demand (FUSE) or not needed (static bootstrap check).
+	PullLeptonBlobs bool
+}
+
+// PullAll downloads every data layer (OCI layers and lepton blobs), matching
+// the original full-pull behavior.
+var PullAll = PullOptions{PullOCILayers: true, PullLeptonBlobs: true}
+
+// Pull fetches ref into the local content store and returns the resolved root
+// descriptor. opts selects which data layers are downloaded. reg selects which
+// registry side's TLS/HTTP settings to use; pulls normally use Source, except
+// when re-reading an already-pushed target image.
+func (p *Provider) Pull(ctx context.Context, ref string, opts PullOptions, reg Registry) (ocispec.Descriptor, error) {
 	normalized, err := normalizeRef(ref)
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	return fetch(ctx, p.store, p.resolver(), normalized, p.platformMC)
+	return fetch(ctx, p.store, p.resolver(reg), normalized, p.platformMC, opts)
 }
 
 // Push uploads desc and all of its referenced content from the local store to
-// ref.
+// ref, using the target registry settings.
 func (p *Provider) Push(ctx context.Context, desc ocispec.Descriptor, ref string) error {
 	normalized, err := normalizeRef(ref)
 	if err != nil {
 		return err
 	}
-	return push(ctx, p.store, p.resolver(), desc, normalized, p.platformMC)
+	return push(ctx, p.store, p.resolver(Target), desc, normalized, p.platformMC)
 }
 
 // normalizeRef expands shorthand image references to fully-qualified names so

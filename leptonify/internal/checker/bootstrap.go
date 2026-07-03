@@ -42,7 +42,8 @@ func (r *bootstrapRule) Validate(ctx context.Context) error {
 }
 
 // validateImage runs `lepton check` for a single image. OCI images (which have
-// no bootstrap) are skipped.
+// no bootstrap) are skipped. The check is purely static: only the bootstrap is
+// materialized, so data blob layers (which are never pulled) are not required.
 func (r *bootstrapRule) validateImage(ctx context.Context, label string, img *Image) error {
 	if img == nil || img.Kind != KindLepton {
 		return nil
@@ -57,21 +58,13 @@ func (r *bootstrapRule) validateImage(ctx context.Context, label string, img *Im
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	blobDir := filepath.Join(dir, "blobs")
-	if err := os.MkdirAll(blobDir, 0o755); err != nil {
-		return errors.Wrap(err, "create blob dir")
-	}
-	if err := materializeBlobs(ctx, r.cs, img.Blobs, blobDir); err != nil {
-		return errors.Wrap(err, "materialize blobs")
-	}
-
 	bootstrapPath := filepath.Join(dir, "image.boot")
 	if err := extractBootstrap(ctx, r.cs, *img.Bootstrap, bootstrapPath); err != nil {
 		return errors.Wrap(err, "extract bootstrap")
 	}
 
-	log.G(ctx).Debugf("checking %s bootstrap with %d blobs", label, len(img.Blobs))
-	if err := runLeptonCheck(ctx, r.builder, bootstrapPath, blobDir); err != nil {
+	log.G(ctx).Debugf("statically checking %s bootstrap", label)
+	if err := runLeptonCheck(ctx, r.builder, bootstrapPath); err != nil {
 		return err
 	}
 	return nil

@@ -43,6 +43,9 @@ func (k ImageKind) String() string {
 type Image struct {
 	// Ref is the original image reference.
 	Ref string
+	// Root is the resolved root descriptor (an image index or, for a
+	// single-platform reference, the manifest itself).
+	Root ocispec.Descriptor
 	// Desc is the resolved manifest descriptor.
 	Desc ocispec.Descriptor
 	// Manifest is the image manifest.
@@ -58,10 +61,11 @@ type Image struct {
 }
 
 // loadImage pulls ref through provider and parses it into a single-platform
-// Image. The reference must be non-empty.
-func loadImage(ctx context.Context, provider *remote.Provider, ref string, platformMC platforms.MatchComparer) (*Image, error) {
+// Image. The reference must be non-empty. pullOpts selects which data layers
+// are downloaded. reg selects which registry side's TLS/HTTP settings to use.
+func loadImage(ctx context.Context, provider *remote.Provider, ref string, platformMC platforms.MatchComparer, pullOpts remote.PullOptions, reg remote.Registry) (*Image, error) {
 	log.G(ctx).Infof("pulling image %s", ref)
-	desc, err := provider.Pull(ctx, ref)
+	desc, err := provider.Pull(ctx, ref, pullOpts, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "pull")
 	}
@@ -94,6 +98,7 @@ func parseImage(ctx context.Context, cs content.Store, ref string, rootDesc ocis
 
 	img := &Image{
 		Ref:      ref,
+		Root:     rootDesc,
 		Desc:     manifestDesc,
 		Manifest: manifest,
 		Config:   config,

@@ -1,9 +1,9 @@
-//! Request routing for the registry backend.
+//! Unified request routing for HTTP-based backends.
 //!
-//! [`Request`] dispatches a logical HTTP call to one of three transports —
-//! direct origin, HTTP mirror proxy, or Dragonfly SDK proxy — and normalizes
-//! the result into a single [`Response`] type. Proxy errors are surfaced with
-//! enough structure for the retry policy to distinguish `403`/`429` from
+//! [`Request`] dispatches a logical HTTP call across one of three transports —
+//! the direct origin, an HTTP forward proxy, or the Dragonfly SDK proxy — and
+//! normalizes the outcome into a single [`Response`]. Proxy errors are surfaced
+//! with enough structure for the retry policy to tell `403` / `429` apart from
 //! transient network failures.
 
 use std::io;
@@ -11,19 +11,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reqwest::header::HeaderMap;
-use reqwest::{Method, StatusCode};
+use reqwest::{Client, Method, StatusCode};
 use tracing::debug;
-use url::Url;
 
 use super::http::{runtime, Connection};
-use super::proxy::HttpMirror;
-use crate::storage::backend::{ReadContext, RequestSource};
+use super::proxy::HttpProxy;
+use super::{ReadContext, RequestSource};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
-use super::proxy::{
-    DragonflyProxy, DragonflyResponse, DRAGONFLY_PRIORITY_ONDEMAND, DRAGONFLY_PRIORITY_PREFETCH,
-    HEADER_DRAGONFLY_PRIORITY, HEADER_DRAGONFLY_USE_P2P,
-};
+use super::dragonfly_sdk::{DragonflyError, DragonflyResponse, DragonflySdk};
 
 /// Errors produced while issuing a request.
 #[derive(Debug)]
@@ -108,9 +104,9 @@ impl Response {
 /// Which transport actually served a request, recorded in completion logs.
 #[derive(Debug, Clone, Copy)]
 enum ProxyType {
-    /// Direct request to the origin registry.
+    /// Direct request to the origin.
     None,
-    /// Request rewritten to an HTTP mirror proxy.
+    /// Request routed through an HTTP forward proxy.
     Http,
     /// Request routed through the Dragonfly SDK proxy.
     #[cfg_attr(not(feature = "backend-dragonfly-proxy"), allow(dead_code))]
@@ -127,23 +123,23 @@ impl ProxyType {
     }
 }
 
-/// Dispatches requests across direct / mirror / Dragonfly transports.
+/// Dispatches requests across direct / HTTP-proxy / Dragonfly transports.
 pub(crate) struct Request {
     connection: Arc<Connection>,
-    mirror: Option<Arc<HttpMirror>>,
+    proxy: Option<Arc<HttpProxy>>,
     #[cfg(feature = "backend-dragonfly-proxy")]
-    dragonfly: Option<Arc<DragonflyProxy>>,
+    dragonfly: Option<Arc<DragonflySdk>>,
 }
 
 impl Request {
     pub(crate) fn new(
         connection: Arc<Connection>,
-        mirror: Option<Arc<HttpMirror>>,
-        #[cfg(feature = "backend-dragonfly-proxy")] dragonfly: Option<Arc<DragonflyProxy>>,
+        proxy: Option<Arc<HttpProxy>>,
+        #[cfg(feature = "backend-dragonfly-proxy")] dragonfly: Option<Arc<DragonflySdk>>,
     ) -> Arc<Request> {
         Arc::new(Request {
             connection,
-            mirror,
+            proxy,
             #[cfg(feature = "backend-dragonfly-proxy")]
             dragonfly,
         })
@@ -167,30 +163,33 @@ impl Request {
                 }
             }
 
-            if let Some(mirror) = &self.mirror {
-                let origin = Url::parse(url).map_err(|e| {
-                    RequestError::Network(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("invalid url {url}: {e}"),
-                    ))
-                })?;
-                let mirror_url = mirror.rewrite(&origin);
-                return self.direct(method, mirror_url.as_str(), headers, ctx, ProxyType::Http);
+            if let Some(proxy) = &self.proxy {
+                let mut headers = headers;
+                HttpProxy::decorate(&mut headers, ctx.source);
+                return self.send(proxy.client(), method, url, headers, ctx, ProxyType::Http);
             }
         }
 
-        self.direct(method, url, headers, ctx, ProxyType::None)
+        self.send(
+            self.connection.client(),
+            method,
+            url,
+            headers,
+            ctx,
+            ProxyType::None,
+        )
     }
 
-    fn direct(
+    /// Send a request with the given client and log its completion.
+    fn send(
         &self,
+        client: &Client,
         method: Method,
         url: &str,
         headers: HeaderMap,
         ctx: ReadContext,
         proxy_type: ProxyType,
     ) -> RequestResult<Response> {
-        let client = self.connection.client();
         let start = Instant::now();
         let result = runtime().block_on(async {
             client
@@ -238,22 +237,14 @@ impl Request {
     #[cfg(feature = "backend-dragonfly-proxy")]
     fn call_dragonfly(
         &self,
-        dragonfly: &Arc<DragonflyProxy>,
+        dragonfly: &Arc<DragonflySdk>,
         url: &str,
         mut headers: HeaderMap,
         ctx: ReadContext,
     ) -> RequestResult<Response> {
-        let priority = match ctx.source {
-            RequestSource::Prefetch => DRAGONFLY_PRIORITY_PREFETCH,
-            RequestSource::OnDemand => DRAGONFLY_PRIORITY_ONDEMAND,
-        };
-        headers.insert(
-            HEADER_DRAGONFLY_PRIORITY,
-            priority.to_string().parse().unwrap(),
-        );
-        headers.insert(HEADER_DRAGONFLY_USE_P2P, "true".parse().unwrap());
+        HttpProxy::decorate(&mut headers, ctx.source);
+        let priority = super::proxy::dragonfly_priority(ctx.source);
 
-        use super::proxy::DragonflyError;
         let start = Instant::now();
         let result = dragonfly.get(url, headers.clone(), priority);
         let duration = start.elapsed();
@@ -308,8 +299,8 @@ pub(crate) fn is_success_status(status: StatusCode) -> bool {
 /// a `check` (run with `--log-level debug`). The line carries the request
 /// source, the transport that served it, the method, final URL and full request
 /// headers, plus the outcome: response status and headers when the transport
-/// returned a response, an error string on transport failure, and the wall-clock
-/// duration in human-readable form.
+/// returned a response, an error string on transport failure, and the
+/// wall-clock duration in human-readable form.
 #[allow(clippy::too_many_arguments)]
 fn log_backend_request_done(
     proxy_type: ProxyType,

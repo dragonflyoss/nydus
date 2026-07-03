@@ -117,9 +117,17 @@ pub(crate) fn write_erofs_superblock_checksum(head: &mut [u8]) -> Result<()> {
     // The EROFS superblock checksum covers only block 0 from the superblock
     // offset to the end of that block, regardless of how far the device table
     // (and therefore the metadata region) extends afterwards.
+    //
+    // The Linux kernel verifies it with `crc32c(~0, dsb, EROFS_BLKSIZ -
+    // EROFS_SUPER_OFFSET)`, where kernel `crc32c()` is the bare `__crc32c_le`
+    // running CRC WITHOUT the trailing one's-complement. The `crc32c` crate's
+    // `crc32c(data)` (== `crc32c_append(0, data)`) applies the standard final
+    // XOR, so the kernel value is its bitwise complement. Store `!crc32c(..)`
+    // so the guest kernel accepts the image (otherwise erofs mount fails with
+    // EBADMSG / "Bad message").
     let checksum_offset = sb_offset + 4;
     head[checksum_offset..checksum_offset + 4].fill(0);
-    let crc32 = crc32c_append(!0u32, &head[sb_offset..block_size]);
+    let crc32 = !crc32c_append(0u32, &head[sb_offset..block_size]);
     head[checksum_offset..checksum_offset + 4].copy_from_slice(&crc32.to_le_bytes());
     Ok(())
 }
@@ -142,7 +150,7 @@ mod tests {
 
         assert_ne!(checksum, 0);
         assert_ne!(feature_compat & EROFS_FEATURE_COMPAT_SB_CHKSUM, 0);
-        assert_eq!(checksum, crc32c_append(!0u32, &checksum_bytes));
+        assert_eq!(checksum, !crc32c_append(0u32, &checksum_bytes));
     }
 
     #[test]
@@ -178,7 +186,7 @@ mod tests {
         let checksum = u32::from_le_bytes(image[sb_offset + 4..sb_offset + 8].try_into().unwrap());
         let mut block0 = image[sb_offset..block_size].to_vec();
         block0[4..8].fill(0);
-        assert_eq!(checksum, crc32c_append(!0u32, &block0));
+        assert_eq!(checksum, !crc32c_append(0u32, &block0));
 
         // The last device slot lands in block 1, beyond block 0.
         let devslot_offset = sb_offset + EROFS_SB_BASE_SIZE;

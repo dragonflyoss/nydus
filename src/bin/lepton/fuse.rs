@@ -220,12 +220,13 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
         None
     };
 
-    let (prefetch_enable, prefetch_threads) = match storage_config.as_ref() {
+    let (prefetch_enable, prefetch_threads, prefetch_full) = match storage_config.as_ref() {
         Some(config) => (
             config.prefetch.enable || args.prefetch,
             config.prefetch.threads,
+            config.prefetch.full,
         ),
-        None => (args.prefetch, DEFAULT_PREFETCH_THREADS),
+        None => (args.prefetch, DEFAULT_PREFETCH_THREADS, false),
     };
 
     // Build the blob backend. A direct `--blob <path>` is self-contained and
@@ -281,10 +282,10 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     let bg = session.spawn().map_err(|e| anyhow!("spawn failed: {e}"))?;
 
     if prefetch_enable {
-        match BlobPrefetcher::new(reader.clone(), prefetch_threads).spawn() {
+        match BlobPrefetcher::new(reader.clone(), prefetch_threads, prefetch_full).spawn() {
             Ok(_handle) => info!(
-                "started blob prefetch with {} worker threads",
-                prefetch_threads
+                "started blob prefetch with {} worker threads (full={})",
+                prefetch_threads, prefetch_full
             ),
             Err(err) => warn!("failed to start blob prefetch: {}", err),
         }

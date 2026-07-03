@@ -2,6 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 use uuid::Uuid;
@@ -118,6 +119,15 @@ impl LocalBlobCache {
             return Ok(());
         }
 
+        // Record the on-demand access order (first fetch wins) only when the
+        // group is actually fetched. Warm-cache hits return above and never
+        // touch the trace lock, keeping the page-fault hot path lock-free.
+        if let Some(recorder) = self.trace_recorder.as_ref() {
+            recorder.record_group_access(self.blob_index, group_index as u32);
+        } else {
+            crate::metrics::trace::record_group_access(self.blob_index, group_index as u32);
+        }
+
         let mut buffers = self.buffers.lock().unwrap();
         let decoded = fetch_decode_validate_group_into(
             &self.blob_id,
@@ -161,17 +171,60 @@ impl LocalBlobCache {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
 
         for group_index in first_group..=last_group {
-            // Record the on-demand access order (first access wins) so the
-            // apiserver `/trace` endpoint can expose the group access pattern.
-            if let Some(recorder) = self.trace_recorder.as_ref() {
-                recorder.record_group_access(self.blob_index, group_index as u32);
-            } else {
-                crate::metrics::trace::record_group_access(self.blob_index, group_index as u32);
-            }
             let group = *self.blob_meta.group_at(group_index).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
             })?;
             self.ensure_group(group_index, &group, cache_file)?;
+        }
+        Ok(())
+    }
+
+    /// Fetch one redirect-blob segment (a contiguous range of groups) in a
+    /// single backend read, then decode and hand each group to `cb`. `window`
+    /// and `decoded` are caller-owned scratch buffers so a worker thread can
+    /// reuse them across segments. Per-group decode/CRC failures are skipped
+    /// with a warning; `cb` errors propagate to abort the stream.
+    fn stream_redirect_segment(
+        &self,
+        groups: &[BlobMetaGroup],
+        batch: std::ops::Range<usize>,
+        window: &mut Vec<u8>,
+        decoded: &mut Vec<u8>,
+        cb: &(dyn Fn(&BlobMetaGroup, &[u8]) -> io::Result<()> + Sync),
+    ) -> io::Result<()> {
+        let window_base = groups[batch.start].compressed_byte_offset();
+        let window_end = groups[batch.end - 1].compressed_byte_end();
+        let window_len = usize::try_from(window_end - window_base).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "blob redirect window size exceeds usize",
+            )
+        })?;
+        window.resize(window_len, 0);
+        let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
+        let uncompressed_size = groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
+        let ctx = ReadContext::group(
+            RequestSource::Prefetch,
+            uncompressed_offset,
+            uncompressed_size,
+        );
+        self.backend
+            .read_range_into(&self.blob_id, window_base, window, ctx)?;
+        crate::metrics::record_backend_redirect_read(window_len as u64);
+
+        for index in batch {
+            let group = &groups[index];
+            if let Err(err) =
+                decode_group_from_window(&self.blob_meta, group, window_base, window, decoded)
+            {
+                if super::is_group_crc_mismatch(&err) {
+                    crate::metrics::record_backend_crc_error(self.backend.backend_target());
+                }
+                crate::metrics::inc_cache_redirect_skip_group();
+                warn!("skipping redirect group {index}: {err}");
+                continue;
+            }
+            cb(group, decoded)?;
         }
         Ok(())
     }
@@ -343,6 +396,80 @@ impl BlobCache for LocalBlobCache {
         }
 
         Ok(())
+    }
+
+    fn redirect_stream_parallel(
+        &self,
+        threads: usize,
+        cb: &(dyn Fn(&BlobMetaGroup, &[u8]) -> io::Result<()> + Sync),
+    ) -> io::Result<()> {
+        let groups = self.blob_meta.groups();
+        if groups.is_empty() {
+            return Ok(());
+        }
+
+        // A small ondemand blob (fits in one segment) or a single worker is
+        // streamed sequentially with default-sized segments: segmentation and
+        // extra registry connections would add overhead without overlapping any
+        // work.
+        let total_uncompressed: u64 = groups
+            .iter()
+            .map(|group| group.uncompressed_byte_size())
+            .sum();
+        if threads <= 1 || total_uncompressed <= super::REDIRECT_PREFETCH_SEGMENT_SIZE {
+            let mut window = Vec::new();
+            let mut decoded = Vec::new();
+            for segment in plan_prefetch_batches(groups, super::REDIRECT_PREFETCH_SEGMENT_SIZE) {
+                self.stream_redirect_segment(groups, segment, &mut window, &mut decoded, cb)?;
+            }
+            return Ok(());
+        }
+
+        // Larger blob: fetch segments concurrently. The earliest groups are
+        // emitted one per segment (a "ramp") so they land in the first wave of
+        // workers within a single round trip, ahead of the workload's first
+        // faults; the rest are bundled into REDIRECT_PREFETCH_SEGMENT_SIZE
+        // segments for throughput.
+        let segments = super::plan_redirect_segments(
+            groups,
+            super::REDIRECT_PREFETCH_SEGMENT_SIZE,
+            super::REDIRECT_PREFETCH_RAMP_GROUPS,
+        );
+        let worker_count = threads.min(segments.len());
+        let next = AtomicUsize::new(0);
+        let first_err: Mutex<Option<io::Error>> = Mutex::new(None);
+        std::thread::scope(|scope| {
+            for _ in 0..worker_count {
+                scope.spawn(|| {
+                    let mut window = Vec::new();
+                    let mut decoded = Vec::new();
+                    loop {
+                        if first_err.lock().unwrap().is_some() {
+                            break;
+                        }
+                        let idx = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(segment) = segments.get(idx) else {
+                            break;
+                        };
+                        if let Err(err) = self.stream_redirect_segment(
+                            groups,
+                            segment.clone(),
+                            &mut window,
+                            &mut decoded,
+                            cb,
+                        ) {
+                            *first_err.lock().unwrap() = Some(err);
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        match first_err.into_inner() {
+            Ok(Some(err)) => Err(err),
+            _ => Ok(()),
+        }
     }
 
     fn fill_group_from_redirect(&self, group_index: usize, decoded: &[u8]) -> io::Result<()> {

@@ -72,7 +72,7 @@ func dockerBuildAndPush(t *testing.T, contextDir, ref string) {
 // its combined output.
 func runLeptonifyCommand(t *testing.T, leptonifyBin, leptonBin string, args ...string) string {
 	t.Helper()
-	full := append(args, "--builder", leptonBin, "--plain-http")
+	full := append(args, "--builder", leptonBin, "--source-plain-http", "--target-plain-http")
 	cmd := exec.Command(leptonifyBin, full...)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "leptonify %s failed: %s", strings.Join(args, " "), string(out))
@@ -98,7 +98,7 @@ func startLeptonifyMount(
 		"--mountpoint", mountpoint,
 		"--work-dir", workDir,
 		"--builder", leptonBin,
-		"--plain-http",
+		"--target-plain-http",
 	}
 	if prefetch {
 		args = append(args, "--prefetch")

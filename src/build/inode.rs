@@ -431,12 +431,12 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout, true);
+                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
-                    0,
+                    1,
                     inode.size as u32,
                     i_mtime,
                     i_u,
@@ -483,7 +483,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout, false);
+                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
@@ -526,12 +526,12 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout, true);
+                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
-                    0,
+                    1,
                     inode.size as u32,
                     i_mtime,
                     0,
@@ -565,12 +565,12 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout, true);
+                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
-                    0,
+                    1,
                     0,
                     i_mtime,
                     *rdev,
@@ -603,12 +603,12 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_EXTENDED_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_EXTENDED_SIZE, &inode.xattrs);
             } else {
-                let i_format = erofs_compact_i_format(datalayout, true);
+                let i_format = erofs_compact_i_format(datalayout);
                 let i_mtime = inode.mtime.wrapping_sub(epoch) as u32;
                 let hdr = ErofsInodeCompact::new(
                     i_format,
                     inode.mode,
-                    0,
+                    1,
                     0,
                     i_mtime,
                     0,

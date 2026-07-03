@@ -29,10 +29,14 @@ type Opt struct {
 	// WorkDir is the scratch directory backing the content store and rule
 	// staging. It must already exist.
 	WorkDir string
-	// Insecure skips TLS certificate verification for the registry.
-	Insecure bool
-	// PlainHTTP uses plain HTTP to talk to the registry.
-	PlainHTTP bool
+	// SourceInsecure skips TLS certificate verification for the source registry.
+	SourceInsecure bool
+	// SourcePlainHTTP uses plain HTTP to talk to the source registry.
+	SourcePlainHTTP bool
+	// TargetInsecure skips TLS certificate verification for the target registry.
+	TargetInsecure bool
+	// TargetPlainHTTP uses plain HTTP to talk to the target registry.
+	TargetPlainHTTP bool
 	// LogLevel is the log level forwarded to the `lepton` subprocesses
 	// (trace/debug/info/warn/error). Defaults to "info" when empty.
 	LogLevel string
@@ -71,23 +75,49 @@ func (c *Checker) Check(ctx context.Context) error {
 	}
 
 	provider, err := remote.NewProvider(remote.Options{
-		WorkDir:    contentDir,
-		Insecure:   c.opt.Insecure,
-		PlainHTTP:  c.opt.PlainHTTP,
-		PlatformMC: c.opt.PlatformMC,
+		WorkDir:         contentDir,
+		SourceInsecure:  c.opt.SourceInsecure,
+		SourcePlainHTTP: c.opt.SourcePlainHTTP,
+		TargetInsecure:  c.opt.TargetInsecure,
+		TargetPlainHTTP: c.opt.TargetPlainHTTP,
+		PlatformMC:      c.opt.PlatformMC,
 	})
 	if err != nil {
 		return errors.Wrap(err, "create provider")
 	}
 	cs := provider.ContentStore()
 
-	source, err := c.load(ctx, provider, c.opt.Source)
+	// A filesystem diff only runs when both a source and a target image are
+	// present. When only one is provided, OCI data layers are not needed and
+	// are therefore not pulled. Lepton data blob layers are never pulled by the
+	// checker: the bootstrap check is static and the FUSE mount fetches blobs on
+	// demand from the registry.
+	bothPresent := c.opt.Source != "" && c.opt.Target != ""
+	pullOpts := remote.PullOptions{PullOCILayers: bothPresent, PullLeptonBlobs: false}
+
+	source, err := c.load(ctx, provider, c.opt.Source, pullOpts, remote.Source)
 	if err != nil {
 		return errors.Wrapf(err, "load source %q", c.opt.Source)
 	}
-	target, err := c.load(ctx, provider, c.opt.Target)
+	target, err := c.load(ctx, provider, c.opt.Target, pullOpts, remote.Target)
 	if err != nil {
 		return errors.Wrapf(err, "load target %q", c.opt.Target)
+	}
+
+	// When only a single image is checked, export its metadata (index,
+	// manifest, config and, for lepton images, the bootstrap layer) into the
+	// work directory for inspection.
+	if !bothPresent {
+		if source != nil {
+			if err := exportImage(ctx, cs, source, filepath.Join(c.opt.WorkDir, "source")); err != nil {
+				return errors.Wrap(err, "export source")
+			}
+		}
+		if target != nil {
+			if err := exportImage(ctx, cs, target, filepath.Join(c.opt.WorkDir, "target")); err != nil {
+				return errors.Wrap(err, "export target")
+			}
+		}
 	}
 
 	rules := []Rule{
@@ -108,9 +138,9 @@ func (c *Checker) Check(ctx context.Context) error {
 }
 
 // load pulls and parses an image reference, returning nil for an empty ref.
-func (c *Checker) load(ctx context.Context, provider *remote.Provider, ref string) (*Image, error) {
+func (c *Checker) load(ctx context.Context, provider *remote.Provider, ref string, pullOpts remote.PullOptions, reg remote.Registry) (*Image, error) {
 	if ref == "" {
 		return nil, nil
 	}
-	return loadImage(ctx, provider, ref, c.opt.PlatformMC)
+	return loadImage(ctx, provider, ref, c.opt.PlatformMC, pullOpts, reg)
 }

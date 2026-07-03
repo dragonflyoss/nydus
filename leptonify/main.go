@@ -88,12 +88,20 @@ func convertCommand() *cli.Command {
 				Usage: "convert only the given platform (e.g. linux/amd64); defaults to all",
 			},
 			&cli.BoolFlag{
-				Name:  "insecure",
-				Usage: "skip TLS certificate verification for the registry",
+				Name:  "source-insecure",
+				Usage: "skip TLS certificate verification for the source registry",
 			},
 			&cli.BoolFlag{
-				Name:  "plain-http",
-				Usage: "use plain HTTP to talk to the registry",
+				Name:  "source-plain-http",
+				Usage: "use plain HTTP to talk to the source registry",
+			},
+			&cli.BoolFlag{
+				Name:  "target-insecure",
+				Usage: "skip TLS certificate verification for the target registry",
+			},
+			&cli.BoolFlag{
+				Name:  "target-plain-http",
+				Usage: "use plain HTTP to talk to the target registry",
 			},
 			&cli.StringFlag{
 				Name:  "log-level",
@@ -164,10 +172,12 @@ func runConvert(c *cli.Context) error {
 	}
 
 	provider, err := remote.NewProvider(remote.Options{
-		WorkDir:    contentDir,
-		Insecure:   c.Bool("insecure"),
-		PlainHTTP:  c.Bool("plain-http"),
-		PlatformMC: platformMC,
+		WorkDir:         contentDir,
+		SourceInsecure:  c.Bool("source-insecure"),
+		SourcePlainHTTP: c.Bool("source-plain-http"),
+		TargetInsecure:  c.Bool("target-insecure"),
+		TargetPlainHTTP: c.Bool("target-plain-http"),
+		PlatformMC:      platformMC,
 	})
 	if err != nil {
 		return errors.Wrap(err, "create provider")
@@ -192,7 +202,7 @@ func runConvert(c *cli.Context) error {
 		}
 	} else {
 		logrus.Infof("pulling source image %s", source)
-		srcDesc, err := provider.Pull(ctx, source)
+		srcDesc, err := provider.Pull(ctx, source, remote.PullAll, remote.Source)
 		if err != nil {
 			return errors.Wrapf(err, "pull %q", source)
 		}
@@ -307,19 +317,28 @@ func checkCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "work-dir",
-				Usage: "scratch directory for checking (defaults to a temp dir)",
+				Usage: "directory for checking artifacts and single-image exports",
+				Value: "./output",
 			},
 			&cli.StringFlag{
 				Name:  "platform",
 				Usage: "check only the given platform (e.g. linux/amd64); defaults to the host platform",
 			},
 			&cli.BoolFlag{
-				Name:  "insecure",
-				Usage: "skip TLS certificate verification for the registry",
+				Name:  "source-insecure",
+				Usage: "skip TLS certificate verification for the source registry",
 			},
 			&cli.BoolFlag{
-				Name:  "plain-http",
-				Usage: "use plain HTTP to talk to the registry",
+				Name:  "source-plain-http",
+				Usage: "use plain HTTP to talk to the source registry",
+			},
+			&cli.BoolFlag{
+				Name:  "target-insecure",
+				Usage: "skip TLS certificate verification for the target registry",
+			},
+			&cli.BoolFlag{
+				Name:  "target-plain-http",
+				Usage: "use plain HTTP to talk to the target registry",
 			},
 			&cli.StringFlag{
 				Name:  "log-level",
@@ -353,32 +372,27 @@ func runCheck(c *cli.Context) error {
 		platformMC = platforms.Only(parsed)
 	}
 
-	// Prepare a scratch work directory.
+	// Prepare the work directory. It holds checking scratch state and, for
+	// single-image checks, the exported metadata; it is never auto-removed.
 	workDir := c.String("work-dir")
-	cleanup := false
 	if workDir == "" {
-		tmp, err := os.MkdirTemp("", "leptonify-check-")
-		if err != nil {
-			return errors.Wrap(err, "create work dir")
-		}
-		workDir = tmp
-		cleanup = true
-	} else if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return errors.Wrapf(err, "create work dir %q", workDir)
+		workDir = "./output"
 	}
-	if cleanup {
-		defer func() { _ = os.RemoveAll(workDir) }()
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return errors.Wrapf(err, "create work dir %q", workDir)
 	}
 
 	chk, err := checker.New(checker.Opt{
-		Source:     source,
-		Target:     target,
-		Builder:    c.String("builder"),
-		WorkDir:    workDir,
-		Insecure:   c.Bool("insecure"),
-		PlainHTTP:  c.Bool("plain-http"),
-		LogLevel:   c.String("log-level"),
-		PlatformMC: platformMC,
+		Source:          source,
+		Target:          target,
+		Builder:         c.String("builder"),
+		WorkDir:         workDir,
+		SourceInsecure:  c.Bool("source-insecure"),
+		SourcePlainHTTP: c.Bool("source-plain-http"),
+		TargetInsecure:  c.Bool("target-insecure"),
+		TargetPlainHTTP: c.Bool("target-plain-http"),
+		LogLevel:        c.String("log-level"),
+		PlatformMC:      platformMC,
 	})
 	if err != nil {
 		return errors.Wrap(err, "create checker")
@@ -427,12 +441,12 @@ func mountCommand() *cli.Command {
 				Usage: "mount only the given platform (e.g. linux/amd64); defaults to the host platform",
 			},
 			&cli.BoolFlag{
-				Name:  "insecure",
-				Usage: "skip TLS certificate verification for the registry",
+				Name:  "target-insecure",
+				Usage: "skip TLS certificate verification for the target registry",
 			},
 			&cli.BoolFlag{
-				Name:  "plain-http",
-				Usage: "use plain HTTP to talk to the registry",
+				Name:  "target-plain-http",
+				Usage: "use plain HTTP to talk to the target registry",
 			},
 			&cli.BoolFlag{
 				Name:  "prefetch",
@@ -489,15 +503,15 @@ func runMount(c *cli.Context) error {
 	}
 
 	mnt, err := checker.NewMounter(checker.MountOpt{
-		Target:     target,
-		Mountpoint: mountpoint,
-		Builder:    c.String("builder"),
-		WorkDir:    workDir,
-		Insecure:   c.Bool("insecure"),
-		PlainHTTP:  c.Bool("plain-http"),
-		Prefetch:   c.Bool("prefetch"),
-		LogLevel:   c.String("log-level"),
-		PlatformMC: platformMC,
+		Target:          target,
+		Mountpoint:      mountpoint,
+		Builder:         c.String("builder"),
+		WorkDir:         workDir,
+		TargetInsecure:  c.Bool("target-insecure"),
+		TargetPlainHTTP: c.Bool("target-plain-http"),
+		Prefetch:        c.Bool("prefetch"),
+		LogLevel:        c.String("log-level"),
+		PlatformMC:      platformMC,
 	})
 	if err != nil {
 		return errors.Wrap(err, "create mounter")
@@ -545,12 +559,20 @@ func optimizeCommand() *cli.Command {
 				Usage: "optimize only the given platform (e.g. linux/amd64); defaults to the host platform",
 			},
 			&cli.BoolFlag{
-				Name:  "insecure",
-				Usage: "skip TLS certificate verification for the registry",
+				Name:  "source-insecure",
+				Usage: "skip TLS certificate verification for the source registry",
 			},
 			&cli.BoolFlag{
-				Name:  "plain-http",
-				Usage: "use plain HTTP to talk to the registry",
+				Name:  "source-plain-http",
+				Usage: "use plain HTTP to talk to the source registry",
+			},
+			&cli.BoolFlag{
+				Name:  "target-insecure",
+				Usage: "skip TLS certificate verification for the target registry",
+			},
+			&cli.BoolFlag{
+				Name:  "target-plain-http",
+				Usage: "use plain HTTP to talk to the target registry",
 			},
 			&cli.StringFlag{
 				Name:  "log-level",
@@ -596,15 +618,17 @@ func runOptimize(c *cli.Context) error {
 	}
 
 	opt, err := checker.NewOptimizer(checker.OptimizeOpt{
-		Source:     c.String("source"),
-		Target:     c.String("target"),
-		Apiserver:  c.String("apiserver"),
-		Builder:    c.String("builder"),
-		WorkDir:    workDir,
-		Insecure:   c.Bool("insecure"),
-		PlainHTTP:  c.Bool("plain-http"),
-		LogLevel:   c.String("log-level"),
-		PlatformMC: platformMC,
+		Source:          c.String("source"),
+		Target:          c.String("target"),
+		Apiserver:       c.String("apiserver"),
+		Builder:         c.String("builder"),
+		WorkDir:         workDir,
+		SourceInsecure:  c.Bool("source-insecure"),
+		SourcePlainHTTP: c.Bool("source-plain-http"),
+		TargetInsecure:  c.Bool("target-insecure"),
+		TargetPlainHTTP: c.Bool("target-plain-http"),
+		LogLevel:        c.String("log-level"),
+		PlatformMC:      platformMC,
 	})
 	if err != nil {
 		return errors.Wrap(err, "create optimizer")

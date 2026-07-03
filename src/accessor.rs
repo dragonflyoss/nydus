@@ -28,6 +28,7 @@ use crate::metadata::{
 };
 use crate::metrics::trace::{TraceDocument, TraceRecorder};
 use crate::storage::backend::build_backend;
+use crate::storage::prefetch::BlobPrefetcher;
 use crate::utils::{hex_string, parse_sha256_hex};
 
 /// Blob digest used by public accessor APIs.
@@ -209,12 +210,24 @@ impl LeptonAccessor {
     /// provide both the backend serving the blobs and a persistent local cache
     /// directory.
     ///
+    /// When `config.prefetch.enable` is set, a background prefetch worker is
+    /// spawned before returning: for an optimized image it streams the
+    /// "ondemand" redirect blob first (priority) to warm the source blobs'
+    /// caches in recorded access order, then prefetches the remaining blobs.
+    /// The worker borrows the shared reader, so callers that want network
+    /// access (e.g. the virtio-pmem backend) must construct the accessor while
+    /// the desired network namespace is active so the spawned thread inherits
+    /// it.
+    ///
     /// [`blobs`]: Self::blobs
     /// [`fetch`]: Self::fetch
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
         let bootstrap_size = std::fs::metadata(bootstrap)
             .with_context(|| format!("failed to stat bootstrap: {}", bootstrap.display()))?
             .len();
+        let prefetch_enable = config.prefetch.enable;
+        let prefetch_threads = config.prefetch.threads;
+        let prefetch_full = config.prefetch.full;
         let backend = build_backend(&config.backend).context("failed to build blob backend")?;
         let cache_dir = config
             .cache_dir()
@@ -241,6 +254,25 @@ impl LeptonAccessor {
             .map(|info| (BlobID::from(info.blob_id), info.blob_index))
             .collect();
         let reader = Arc::new(reader);
+
+        // Kick off background prefetch as soon as the accessor is built when the
+        // config opts in. The worker holds its own `Arc` clone of the reader,
+        // so it keeps running (and keeps the reader alive) independently of the
+        // returned accessor. The handle is detached: prefetch is best-effort
+        // warmup and must never block accessor construction or teardown.
+        if prefetch_enable {
+            match BlobPrefetcher::new(reader.clone(), prefetch_threads, prefetch_full).spawn() {
+                Ok(_handle) => {
+                    tracing::info!(
+                        "lepton accessor: background prefetch started (full={prefetch_full})"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!("lepton accessor: failed to start prefetch worker: {err}");
+                }
+            }
+        }
+
         Ok(Self {
             bootstrap_size,
             blob: BlobAccessor {
@@ -266,6 +298,15 @@ impl LeptonAccessor {
     /// Clear this accessor's on-demand group trace.
     pub fn clear_trace(&self) {
         self.trace_recorder.clear();
+    }
+
+    /// Return a snapshot of the process-wide lepton metrics (counters and
+    /// gauges). The metrics are global, so this reflects all blob activity in
+    /// the process, not just this accessor; callers typically inspect
+    /// `backend_ondemand_read_count` to tell whether any group was fetched
+    /// over the network rather than served from a warmed cache.
+    pub fn metrics_snapshot(&self) -> crate::metrics::MetricsSnapshot {
+        crate::metrics::snapshot()
     }
 }
 
@@ -505,22 +546,35 @@ impl FsEntry {
                 break;
             };
 
-            if chunk_index.blkaddr != u64::MAX && chunk_index.device_id > 0 {
-                let blob_offset = chunk_index
+            if chunk_index.blkaddr != u64::MAX {
+                let abs = chunk_index
                     .blkaddr
                     .checked_mul(EROFS_BLOCK_SIZE as u64)
-                    .and_then(|base| base.checked_add(chunk_off))
                     .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
-                self.reader
-                    .blob_cache(chunk_index.device_id)
-                    .with_context(|| format!("failed to open blob {}", chunk_index.device_id))?
-                    .ensure_range(blob_offset, to_fetch)
-                    .with_context(|| {
-                        format!(
-                            "failed to fetch inode {} blob {} range [{}, +{})",
-                            self.ino, chunk_index.device_id, blob_offset, to_fetch
-                        )
-                    })?;
+                // Resolve the chunk to a blob: the legacy layout names the blob
+                // by a non-zero device_id with a blob-relative address; the
+                // flattened layout uses device_id 0 with an absolute address.
+                let resolved = if chunk_index.device_id > 0 {
+                    Some((chunk_index.device_id, abs))
+                } else {
+                    self.reader.flat_blob_at(abs)?
+                };
+                if let Some((blob_index, blob_rel)) = resolved {
+                    let blob_offset = blob_rel
+                        .checked_add(chunk_off)
+                        .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
+                    self.reader
+                        .blob_cache(blob_index)
+                        .with_context(|| format!("failed to open blob {blob_index}"))?
+                        .ensure_range(blob_offset, to_fetch)
+                        .with_context(|| {
+                            format!(
+                                "failed to fetch inode {} blob {} range [{}, +{})",
+                                self.ino, blob_index, blob_offset, to_fetch
+                            )
+                        })?;
+                }
+                // Otherwise the chunk is bootstrap-local; nothing to fetch.
             }
 
             file_pos += to_fetch;
@@ -851,7 +905,7 @@ mod tests {
             u32::from_le_bytes(flattened[sb_offset + 4..sb_offset + 8].try_into().unwrap());
         let mut block0 = flattened[sb_offset..EROFS_BLOCK_SIZE as usize].to_vec();
         block0[4..8].fill(0);
-        assert_eq!(checksum, crc32c_append(!0u32, &block0));
+        assert_eq!(checksum, !crc32c_append(0u32, &block0));
 
         let flattened_path = dir.path().join("flattened.bootstrap");
         fs::write(&flattened_path, flattened).unwrap();

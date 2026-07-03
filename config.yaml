@@ -45,16 +45,18 @@ backend:
     # ca_cert_files:
     #   - /etc/lepton/certs/registry-ca.pem
 
-    # Optional proxy. Blob requests are rewritten to the HTTP mirror `url`
-    # (e.g. a local P2P agent's HTTP proxy). When built with the
+    # Optional proxy. Blob requests are routed through the HTTP forward proxy
+    # `url` (e.g. a Dragonfly dfdaemon P2P agent), keeping their original
+    # upstream URL so the proxy knows what to back-source. When built with the
     # `backend-dragonfly-proxy` feature, set `dragonfly_scheduler_endpoint` to
-    # route blob requests through the Dragonfly client SDK instead. Omit the
-    # whole `proxy` block to talk to the origin registry directly.
+    # route blob GETs through the Dragonfly client SDK instead. Omit the whole
+    # `proxy` block to talk to the origin registry directly.
     #
     # proxy:
-    #   # Mirror base URL.
+    #   # HTTP forward-proxy URL.
     #   url: http://127.0.0.1:65001
-    #   # Dragonfly scheduler endpoint (requires the backend-dragonfly-proxy feature).
+    #   # Dragonfly scheduler endpoint (requires the backend-dragonfly-proxy
+    #   # feature). Takes precedence over `url` for GET requests.
     #   dragonfly_scheduler_endpoint: http://127.0.0.1:65000
 
 cache:
@@ -68,3 +70,8 @@ prefetch:
   enable: true
   # Number of concurrent prefetch worker threads.
   threads: 10
+  # Also prefetch every remaining blob in full after the priority blobs
+  # (phase 2). Default: false. Leave false for an optimized image so only the
+  # "ondemand" redirect blob is prefetched, warming the access-ordered hot set
+  # without pulling the whole image.
+  full: false

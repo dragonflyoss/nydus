@@ -45,10 +45,14 @@ type OptimizeOpt struct {
 	// WorkDir is the scratch directory backing the content store and the
 	// optimize staging area. It must already exist.
 	WorkDir string
-	// Insecure skips TLS certificate verification for the registry.
-	Insecure bool
-	// PlainHTTP uses plain HTTP to talk to the registry.
-	PlainHTTP bool
+	// SourceInsecure skips TLS certificate verification for the source registry.
+	SourceInsecure bool
+	// SourcePlainHTTP uses plain HTTP to talk to the source registry.
+	SourcePlainHTTP bool
+	// TargetInsecure skips TLS certificate verification for the target registry.
+	TargetInsecure bool
+	// TargetPlainHTTP uses plain HTTP to talk to the target registry.
+	TargetPlainHTTP bool
 	// LogLevel is the log level forwarded to the `lepton` subprocess. Defaults
 	// to "info" when empty.
 	LogLevel string
@@ -106,17 +110,19 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 	}
 
 	provider, err := remote.NewProvider(remote.Options{
-		WorkDir:    contentDir,
-		Insecure:   o.opt.Insecure,
-		PlainHTTP:  o.opt.PlainHTTP,
-		PlatformMC: o.opt.PlatformMC,
+		WorkDir:         contentDir,
+		SourceInsecure:  o.opt.SourceInsecure,
+		SourcePlainHTTP: o.opt.SourcePlainHTTP,
+		TargetInsecure:  o.opt.TargetInsecure,
+		TargetPlainHTTP: o.opt.TargetPlainHTTP,
+		PlatformMC:      o.opt.PlatformMC,
 	})
 	if err != nil {
 		return errors.Wrap(err, "create provider")
 	}
 	cs := provider.ContentStore()
 
-	img, err := loadImage(ctx, provider, o.opt.Source, o.opt.PlatformMC)
+	img, err := loadImage(ctx, provider, o.opt.Source, o.opt.PlatformMC, remote.PullAll, remote.Source)
 	if err != nil {
 		return errors.Wrapf(err, "load source %q", o.opt.Source)
 	}
@@ -150,7 +156,7 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 	}
 
 	configPath := filepath.Join(stageDir, "config.yaml")
-	if _, err := writeRegistryConfig(provider, img, cacheDir, configPath, false); err != nil {
+	if _, err := writeRegistryConfig(provider, remote.Source, img, cacheDir, configPath, false); err != nil {
 		return errors.Wrap(err, "generate storage config")
 	}
 

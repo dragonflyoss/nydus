@@ -11,10 +11,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use memmap2::Mmap;
 use tempfile::TempDir;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::metadata::*;
 use crate::metrics::trace::TraceRecorder;
@@ -361,10 +362,24 @@ impl ErofsReader {
         blob.cache()
     }
 
+    /// Return whether the blob identified by `blob_index` is an "ondemand"
+    /// redirect blob (produced by `lepton optimize`). Opens the blob cache,
+    /// which reads the local blob meta but performs no data prefetch.
+    pub fn blob_is_redirect(&self, blob_index: u16) -> io::Result<bool> {
+        let blob = self.blobs.get(&blob_index).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("blob {blob_index} not found"),
+            )
+        })?;
+        Ok(blob.cache()?.is_redirect_blob())
+    }
+
     /// Prefetch every group of the blob identified by `blob_index`. An
     /// "ondemand" redirect blob is dispatched group by group into the source
-    /// blobs' caches instead of building its own cache file.
-    pub fn prefetch_blob(&self, blob_index: u16) -> io::Result<()> {
+    /// blobs' caches instead of building its own cache file, fetching its
+    /// segments concurrently with up to `threads` workers.
+    pub fn prefetch_blob(&self, blob_index: u16, threads: usize) -> io::Result<()> {
         let blob = self.blobs.get(&blob_index).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -373,7 +388,25 @@ impl ErofsReader {
         })?;
         let cache = blob.cache()?;
         if cache.is_redirect_blob() {
-            self.prefetch_redirect_blob(blob_index, blob, cache.as_ref())
+            // Time the ondemand (redirect) blob prefetch and report how many
+            // source groups it warmed vs skipped, so operators can tell
+            // whether the streaming warmup outran the workload.
+            let fill_before = crate::metrics::cache_redirect_fill_group_total();
+            let skip_before = crate::metrics::cache_redirect_skip_group_total();
+            let bytes_before = crate::metrics::backend_redirect_read_bytes_total();
+            let start = Instant::now();
+            let result = self.prefetch_redirect_blob(blob_index, blob, cache.as_ref(), threads);
+            let elapsed = start.elapsed();
+            info!(
+                "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} groups, skipped {} groups, fetched {} bytes",
+                blob_index,
+                elapsed,
+                threads.max(1),
+                crate::metrics::cache_redirect_fill_group_total() - fill_before,
+                crate::metrics::cache_redirect_skip_group_total() - skip_before,
+                crate::metrics::backend_redirect_read_bytes_total() - bytes_before,
+            );
+            result
         } else {
             cache.prefetch_all()
         }
@@ -381,15 +414,17 @@ impl ErofsReader {
 
     /// Phase-0 prefetch for a redirect blob: stream its groups in optimized
     /// order and fill the decoded bytes into the source blobs' caches so early
-    /// on-demand reads hit cache. Per-group failures are logged and skipped so
-    /// a bad group can never poison the source caches or abort the warmup.
+    /// on-demand reads hit cache. Segments are fetched concurrently with up to
+    /// `threads` workers. Per-group failures are logged and skipped so a bad
+    /// group can never poison the source caches or abort the warmup.
     fn prefetch_redirect_blob(
         &self,
         blob_index: u16,
         blob: &Blob,
         cache: &dyn BlobCache,
+        threads: usize,
     ) -> io::Result<()> {
-        cache.redirect_stream(&mut |group, decoded| {
+        cache.redirect_stream_parallel(threads, &|group, decoded| {
             if !group.is_redirect() {
                 crate::metrics::inc_cache_redirect_skip_group();
                 warn!("ondemand blob {blob_index} contains a non-redirect group; skipping");

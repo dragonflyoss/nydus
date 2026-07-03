@@ -15,6 +15,7 @@ use prometheus::{
     Encoder, Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
     TextEncoder,
 };
+use serde::Serialize;
 
 /// Reads slower than this are counted as "high latency" for their source.
 const HIGH_LATENCY_THRESHOLD: Duration = Duration::from_millis(250);
@@ -455,6 +456,95 @@ pub fn inc_cache_redirect_skip_group() {
     METRICS.cache_redirect_skip_group.inc();
 }
 
+/// A serializable view over the live prometheus registry.
+///
+/// Rather than mirror every counter by hand, this wraps the gathered metric
+/// families straight from [`Metrics`]'s registry, so it always stays in sync
+/// when metrics are added or removed. Serializing it yields a flat JSON object
+/// mapping each metric name to its value, which embedders (e.g. a hypervisor's
+/// stats endpoint) include to reason about runtime behavior: in particular
+/// `backend_ondemand_read_count > 0` means the prefetch did not cover the
+/// access pattern and the workload fell back to the network.
+///
+/// Encoding rules:
+/// - counters serialize as unsigned integers, gauges as signed integers;
+/// - histograms expand to `<name>_sum` (float) and `<name>_count` (integer);
+/// - labeled series are keyed as `<name>{label="value",...}` so they never
+///   collide under a single metric name.
+#[derive(Debug, Clone, Default)]
+pub struct MetricsSnapshot {
+    families: Vec<prometheus::proto::MetricFamily>,
+}
+
+impl Serialize for MetricsSnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        for family in &self.families {
+            let base = family.get_name();
+            let field_type = family.get_field_type();
+            for metric in family.get_metric() {
+                let labels = metric.get_label();
+                let key = if labels.is_empty() {
+                    base.to_string()
+                } else {
+                    let pairs: Vec<String> = labels
+                        .iter()
+                        .map(|l| format!("{}=\"{}\"", l.get_name(), l.get_value()))
+                        .collect();
+                    format!("{}{{{}}}", base, pairs.join(","))
+                };
+
+                match field_type {
+                    prometheus::proto::MetricType::COUNTER => {
+                        map.serialize_entry(&key, &(metric.get_counter().get_value() as u64))?;
+                    }
+                    prometheus::proto::MetricType::GAUGE => {
+                        map.serialize_entry(&key, &(metric.get_gauge().get_value() as i64))?;
+                    }
+                    prometheus::proto::MetricType::HISTOGRAM => {
+                        let histogram = metric.get_histogram();
+                        map.serialize_entry(&format!("{key}_sum"), &histogram.get_sample_sum())?;
+                        map.serialize_entry(
+                            &format!("{key}_count"),
+                            &histogram.get_sample_count(),
+                        )?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        map.end()
+    }
+}
+
+/// Capture a serializable snapshot of every registered metric, sourced
+/// directly from the prometheus registry inside [`Metrics`].
+pub fn snapshot() -> MetricsSnapshot {
+    MetricsSnapshot {
+        families: METRICS.registry.gather(),
+    }
+}
+
+/// Current count of groups filled into source blob caches from redirect blobs.
+pub fn cache_redirect_fill_group_total() -> u64 {
+    METRICS.cache_redirect_fill_group.get()
+}
+
+/// Current count of redirect groups skipped during ondemand prefetch.
+pub fn cache_redirect_skip_group_total() -> u64 {
+    METRICS.cache_redirect_skip_group.get()
+}
+
+/// Current total bytes of ondemand (redirect) blob data fetched from the backend.
+pub fn backend_redirect_read_bytes_total() -> u64 {
+    METRICS.backend_redirect_read_bytes.get()
+}
+
 /// Encode all metrics in the Prometheus text exposition format.
 pub fn encode_text() -> String {
     let metric_families = METRICS.registry.gather();
@@ -505,5 +595,31 @@ mod tests {
         );
         let text = encode_text();
         assert!(text.contains("backend_prefetch_read_high_latency_count"));
+    }
+
+    #[test]
+    fn snapshot_serializes_metrics_as_json_object() {
+        record_backend_read(
+            BackendTarget::Origin,
+            ReadSource::OnDemand,
+            2048,
+            Duration::from_millis(3),
+            false,
+        );
+        record_fs_op(FsOp::Read, Duration::from_millis(1), false);
+
+        let json = serde_json::to_value(snapshot()).expect("snapshot serializes");
+        let obj = json.as_object().expect("snapshot is a JSON object");
+
+        // Non-labeled counters keyed by their bare metric name.
+        assert!(obj.contains_key("backend_ondemand_read_count"));
+        assert!(json["backend_ondemand_read_count"].as_u64().unwrap() >= 1);
+        // Gauges keyed by their bare name too.
+        assert!(obj.contains_key("cache_total_group"));
+        // Labeled series are disambiguated with a brace-suffixed key.
+        assert!(obj.keys().any(|k| k.starts_with("fs_op_count{op=")));
+        // Histograms expand to _sum / _count.
+        assert!(obj.contains_key("fs_read_latency_count"));
+        assert!(obj.contains_key("fs_read_latency_sum"));
     }
 }

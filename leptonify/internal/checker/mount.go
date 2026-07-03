@@ -34,10 +34,10 @@ type MountOpt struct {
 	// WorkDir is the scratch directory backing the content store and the
 	// extracted bootstrap/cache. It must already exist.
 	WorkDir string
-	// Insecure skips TLS certificate verification for the registry.
-	Insecure bool
-	// PlainHTTP uses plain HTTP to talk to the registry.
-	PlainHTTP bool
+	// TargetInsecure skips TLS certificate verification for the target registry.
+	TargetInsecure bool
+	// TargetPlainHTTP uses plain HTTP to talk to the target registry.
+	TargetPlainHTTP bool
 	// Prefetch enables background blob prefetch after mounting. Off by
 	// default so a traced mount records the pure on-demand access pattern.
 	Prefetch bool
@@ -87,16 +87,16 @@ func (m *Mounter) Mount(ctx context.Context) error {
 	}
 
 	provider, err := remote.NewProvider(remote.Options{
-		WorkDir:    contentDir,
-		Insecure:   m.opt.Insecure,
-		PlainHTTP:  m.opt.PlainHTTP,
-		PlatformMC: m.opt.PlatformMC,
+		WorkDir:         contentDir,
+		TargetInsecure:  m.opt.TargetInsecure,
+		TargetPlainHTTP: m.opt.TargetPlainHTTP,
+		PlatformMC:      m.opt.PlatformMC,
 	})
 	if err != nil {
 		return errors.Wrap(err, "create provider")
 	}
 
-	img, err := loadImage(ctx, provider, m.opt.Target, m.opt.PlatformMC)
+	img, err := loadImage(ctx, provider, m.opt.Target, m.opt.PlatformMC, remote.PullAll, remote.Target)
 	if err != nil {
 		return errors.Wrapf(err, "load target %q", m.opt.Target)
 	}
@@ -149,7 +149,7 @@ func (m *Mounter) mountLepton(ctx context.Context, provider *remote.Provider, cs
 	}
 
 	configPath := filepath.Join(scratchDir, "config.yaml")
-	configYAML, err := writeRegistryConfig(provider, img, cacheDir, configPath, m.opt.Prefetch)
+	configYAML, err := writeRegistryConfig(provider, remote.Target, img, cacheDir, configPath, m.opt.Prefetch)
 	if err != nil {
 		return errors.Wrap(err, "generate storage config")
 	}

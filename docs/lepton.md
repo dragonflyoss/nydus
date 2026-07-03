@@ -171,11 +171,20 @@ order); at mount time the phase-0 prefetch streams it and redirects each decoded
 group into the source blob's cache, so early on-demand reads hit warm cache
 instead of issuing scattered registry range reads.
 
-Supported form:
+Supported forms:
 
 ```bash
+# Fetch the trace live from a running mount's apiserver.
 lepton optimize \
   --apiserver unix:///path/to/api.sock \
+  --parent-bootstrap /path/to/parent-bootstrap \
+  --bootstrap /path/to/bootstrap \
+  --blob-dir /path/to/blobs \
+  --config /path/to/config.yaml
+
+# Or load the trace from a previously saved JSON file.
+lepton optimize \
+  --trace-file /path/to/trace.json \
   --parent-bootstrap /path/to/parent-bootstrap \
   --bootstrap /path/to/bootstrap \
   --blob-dir /path/to/blobs \
@@ -190,6 +199,12 @@ Current implementation notes:
 	(`{"patterns":[{"blob_index":1,"group_index":4},...]}`); entries are
 	deduplicated preserving first-access order. Run the workload against the
 	mount before invoking optimize so the trace is populated.
+- `--trace-file` is the offline alternative to `--apiserver` (the two are
+	mutually exclusive; one of them is required). It accepts either the bare
+	`{"patterns":[...]}` document or a wrapper object exposing the same under a
+	top-level `trace` field (as returned by a hypervisor's stats endpoint
+	embedding the accessor trace), so a trace captured from a pmem/accessor
+	mount can be replayed without a live apiserver.
 - `--parent-bootstrap` is the merged bootstrap to optimize; it is read-only, so
 	optimize can be re-run against the same parent with new patterns.
 - `--bootstrap` is the rewritten bootstrap output: the parent's inode tree with
@@ -325,6 +340,7 @@ cache:
 prefetch:
   enable: true
   threads: 10
+  full: false
 ```
 
 Fields:
@@ -341,6 +357,11 @@ Fields:
 	mount.
 - `prefetch.threads` (default `10`) sets the number of concurrent prefetch
 	worker threads.
+- `prefetch.full` (default `false`) also prefetches every remaining blob in
+	full after the priority blobs. When `false`, only the "ondemand" redirect
+	blob (if any) is prefetched, warming the access-ordered hot set while
+	leaving backend bandwidth to on-demand reads; non-redirect priority blobs
+	and the remaining blobs are skipped. See [Blob prefetch](#blob-prefetch).
 
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
@@ -393,10 +414,25 @@ Fields under `backend.config`:
 - `auth` (optional): base64-encoded `username:password` string for basic auth.
 	Omit for anonymous / token-only registries.
 - `ca_cert_files` (default `[]`): extra CA certificate PEM files to trust.
-- `proxy` (optional): with `url` (HTTP mirror base URL that blob requests are
-	rewritten to) and `dragonfly_scheduler_endpoint` (route blob requests through
-	the Dragonfly client SDK; only available when the binary is built with the
-	`backend-dragonfly-proxy` feature).
+- `proxy` (optional): routes blob requests through a Dragonfly P2P transport
+	instead of hitting the origin registry directly. Two transports are
+	configured under the same block:
+	- `url`: an HTTP **forward proxy** URL (e.g. a Dragonfly `dfdaemon` agent).
+		Unlike a mirror — which rewrites the request host and must tell the proxy
+		the upstream out of band — a forward proxy preserves the original upstream
+		URL, so the proxy already knows which registry to back-source from.
+		Requests carry Dragonfly hint headers: `X-Dragonfly-Priority` (`6` for
+		on-demand reads, `3` for prefetch) and `X-Dragonfly-Use-P2P`.
+	- `dragonfly_scheduler_endpoint`: routes blob `GET`s through the Dragonfly
+		client SDK (crate `dragonfly-client-request`) talking directly to a
+		scheduler, bypassing plain HTTP. Only available when the binary is built
+		with the `backend-dragonfly-proxy` feature; takes precedence over `url`
+		for `GET`s when both are set. The same priority hint is passed through
+		the SDK request.
+
+	Omit the whole `proxy` block to talk to the origin registry directly.
+	Metrics attribute each read to the origin or proxy side (see
+	[Metrics](#metrics)).
 
 
 ## Metrics
@@ -421,6 +457,16 @@ id from the bootstrap device table. The trace feeds `lepton optimize` /
 Each completed backend request is also logged at `debug` level after it returns,
 carrying the request source, proxy type, method, URL, request headers, response
 status and headers (or an error), and the wall-clock duration.
+
+For library embedders (no apiserver socket), `lepton::metrics::snapshot()`
+returns a serializable `MetricsSnapshot` (re-exported as
+`lepton::MetricsSnapshot`) capturing every registered metric from the same
+registry. It serializes to a flat JSON map: counters as unsigned integers,
+gauges as signed integers, histograms expanded to `<name>_sum` / `<name>_count`,
+and labeled series keyed as `<name>{label="value",...}`. Embedders (e.g. a
+hypervisor's stats endpoint) include it to reason about runtime behavior — in
+particular `backend_ondemand_read_count > 0` means the prefetch did not cover
+the access pattern and the workload fell back to the network.
 
 Exported metrics:
 
@@ -910,9 +956,13 @@ Prefetch scheduling across blobs has two phases:
 
 1. Priority blobs are prefetched first, sequentially, in the order listed by the
 	root inode's `trusted.lepton.prefetch.blobs` xattr (a comma-separated list of
-	device ids). The list is deduplicated and filtered to existing devices.
-2. The remaining blob devices are then prefetched concurrently by a worker pool
-	sized to `min(prefetch.threads, remaining)` (default `10` threads).
+	device ids). The list is deduplicated and filtered to existing devices. When
+	`prefetch.full` is `false` (the default), only redirect ("ondemand") priority
+	blobs are warmed; non-redirect priority blobs are skipped so backend
+	bandwidth is not spent pulling whole source blobs.
+2. Only when `prefetch.full` is set, the remaining blob devices are then
+	prefetched concurrently by a worker pool sized to
+	`min(prefetch.threads, remaining)` (default `10` threads).
 
 When a priority blob is an "ondemand" redirect blob (produced by `lepton
 optimize`, listed first in the xattr), its prefetch is dispatched differently:
@@ -925,10 +975,22 @@ poison a source cache or abort the mount. Blob device caches are opened lazily
 on first read or prefetch, so a device fully covered by the ondemand warmup
 pays no extra metadata fetch at mount time.
 
+Redirect prefetch is itself parallelized when the ondemand blob is larger than
+one segment and more than one worker thread is configured. The group list is
+split into segments of up to 16 MiB uncompressed each and fetched concurrently
+by the prefetch worker pool, with one twist: the earliest groups are emitted as
+single-group segments (a "ramp") so they land in the first wave of workers
+within a single round trip — ahead of the workload's first page faults — while
+the rest are bundled into full-size segments for throughput. A small ondemand
+blob (fitting in one segment) or a single-thread pool streams sequentially,
+since segmentation and extra registry connections would add overhead without
+overlapping any work. In a cold-registry container start benchmark this
+parallel ramped prefetch cut end-to-end start time from 32.6s to 25.0s.
+
 ## Accessor (virtio-pmem integration)
 
 `lepton::accessor::LeptonAccessor` is the library entry point for hypervisors
-(e.g. RunD) that mount the lepton image inside the guest as a plain EROFS
+that mount the lepton image inside the guest as a plain EROFS
 filesystem over virtio-pmem, instead of using `lepton fuse` on the host:
 
 - The bootstrap is the EROFS primary device; each data blob is an external
@@ -939,6 +1001,16 @@ filesystem over virtio-pmem, instead of using `lepton fuse` on the host:
 	loaded `lepton::Config` (same structure as `lepton fuse --config`) lazily;
 	per-blob work (blob meta download/validation, sparse cache file creation)
 	happens on first touch through `blob.entries()` or `blob.fetch`.
+- When `config.prefetch.enable` is set, `new` spawns a background prefetch
+	worker before returning — the same two-phase workflow as `lepton fuse`
+	(redirect blob first, then the rest only under `prefetch.full`). The worker
+	thread inherits the network namespace active at construction time, so
+	callers that construct the accessor for a guest-facing backend must do so
+	while the desired netns is active.
+- Access traces are recorded on actual backend fetches (not cache hits), and
+	`lepton::metrics::snapshot()` exposes runtime counters for embedding into
+	hypervisor stats endpoints; a saved trace JSON can be replayed offline via
+	`lepton optimize --trace-file`. See [Metrics](#metrics).
 - `BlobID` is the public blob digest type. It converts to/from 64-character
 	SHA256 hex strings and `[u8; 32]` bytes.
 - `blob.entries()` lists the device table in order as `BlobInfo` entries:

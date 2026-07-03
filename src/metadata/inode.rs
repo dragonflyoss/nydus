@@ -377,15 +377,15 @@ pub fn erofs_chunk_format(chunk_bits: u32, blksz_bits: u32) -> u16 {
 }
 
 /// Helper function to construct i_format value for compact inodes.
-pub fn erofs_compact_i_format(datalayout: u16, nlink_1: bool) -> u16 {
-    let mut i_format = (EROFS_INODE_LAYOUT_COMPACT << EROFS_I_VERSION_BIT)
-        | (datalayout << EROFS_I_DATALAYOUT_BIT);
-
-    if nlink_1 {
-        i_format |= 1 << EROFS_I_NLINK_1_BIT;
-    }
-
-    i_format
+///
+/// Produces a standard EROFS compact i_format (only the version and datalayout
+/// fields). The `EROFS_I_NLINK_1` optimization (i_format bit 4) is intentionally
+/// not used: older kernels (e.g. 5.10) reject any inode whose i_format has bits
+/// outside `EROFS_I_ALL` (0xF). Since `needs_extended` forces every inode with
+/// nlink > 1 to the extended layout, all compact inodes have nlink == 1, which
+/// is written directly into the standard compact i_nlink field by the callers.
+pub fn erofs_compact_i_format(datalayout: u16) -> u16 {
+    (EROFS_INODE_LAYOUT_COMPACT << EROFS_I_VERSION_BIT) | (datalayout << EROFS_I_DATALAYOUT_BIT)
 }
 
 /// Helper function to construct i_format value for extended inodes.
