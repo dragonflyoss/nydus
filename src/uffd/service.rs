@@ -218,6 +218,24 @@ impl UffdConn {
                         .await?,
                 );
             }
+            Request::Stat => {
+                self.proto
+                    .send_stat(self.core.total_size(), self.core.block_size(), 0)
+                    .await?;
+            }
+            Request::Fetch(request) => {
+                let core = self.core.clone();
+                let ranges = tokio::task::spawn_blocking(move || {
+                    core.fetch_ranges(request.offset, request.len)
+                })
+                .await
+                .context("UFFD FETCH blocking task failed")??;
+                self.send_ranges(None, &ranges).await?;
+            }
+            Request::Probe => {
+                let ranges = self.core.probe_ranges()?;
+                self.send_ranges(None, &ranges).await?;
+            }
         }
         Ok(())
     }

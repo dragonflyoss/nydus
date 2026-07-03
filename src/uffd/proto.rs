@@ -19,8 +19,14 @@ pub const UFFD_MAGIC: u32 = 0x5546_4644;
 pub const UFFD_PROTOCOL_VERSION: u16 = 1;
 
 pub const MSG_HANDSHAKE: u16 = 0x01;
+pub const MSG_STAT_REQUEST: u16 = 0x02;
+pub const MSG_FETCH_REQUEST: u16 = 0x03;
+pub const MSG_PROBE_REQUEST: u16 = 0x04;
 
 pub const MSG_RANGE_RESPONSE: u16 = 0x81;
+pub const MSG_STAT_RESPONSE: u16 = 0x82;
+
+pub const RANGE_RESPONSE_FLAG_NEXT: u16 = 1 << 0;
 
 pub const HANDSHAKE_FLAG_COPY: u8 = 0x01;
 pub const HANDSHAKE_FLAG_PREFAULT: u8 = 0x02;
@@ -28,6 +34,8 @@ pub const HANDSHAKE_FLAG_PREFAULT: u8 = 0x02;
 pub const HEADER_SIZE: usize = 20;
 pub const REGION_SIZE: usize = 40;
 pub const RANGE_SIZE: usize = 24;
+pub const FETCH_REQUEST_SIZE: usize = 16;
+pub const STAT_RESPONSE_SIZE: usize = size_of::<u64>() + 2 * size_of::<u32>();
 
 const HANDSHAKE_PREFIX_SIZE: usize = size_of::<u16>() + 2 * size_of::<u8>();
 const RANGE_COUNT_SIZE: usize = size_of::<u32>();
@@ -108,6 +116,13 @@ pub struct DeviceRange {
     pub len: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatResponse {
+    pub size: u64,
+    pub block_size: u32,
+    pub flags: u32,
+}
+
 #[derive(Debug)]
 pub enum Request {
     Handshake {
@@ -116,6 +131,9 @@ pub enum Request {
         regions: Vec<VmaRegion>,
         uffd: OwnedFd,
     },
+    Stat,
+    Fetch(DeviceRange),
+    Probe,
 }
 
 pub type ResolvedRange = FdRange;
@@ -160,6 +178,23 @@ impl ProtoConn {
                         uffd: fds.pop().expect("validated HANDSHAKE fd count"),
                     }
                 }
+                MSG_STAT_REQUEST => {
+                    validate_empty_request(&payload, &fds, "STAT")?;
+                    Request::Stat
+                }
+                MSG_FETCH_REQUEST => {
+                    validate_no_fds(&fds, "FETCH")?;
+                    let request = decode_fetch_request(&payload)
+                        .ok_or_else(|| anyhow!("invalid FETCH payload"))?;
+                    Request::Fetch(DeviceRange {
+                        offset: request.offset,
+                        len: request.len,
+                    })
+                }
+                MSG_PROBE_REQUEST => {
+                    validate_empty_request(&payload, &fds, "PROBE")?;
+                    Request::Probe
+                }
                 other => {
                     warn!("nydus uffd ignored message type 0x{other:04x}");
                     continue;
@@ -200,15 +235,34 @@ impl ProtoConn {
     }
 
     pub async fn send_ranges(&self, ranges: &[ResolvedRange]) -> Result<()> {
-        for chunk in ranges.chunks(MAX_RANGES_PER_MSG) {
+        if ranges.is_empty() {
+            return send_with_fd(&self.stream, &encode_range_response(&[], false), &[]).await;
+        }
+
+        let mut chunks = ranges.chunks(MAX_RANGES_PER_MSG).peekable();
+        while let Some(chunk) = chunks.next() {
             let wire_ranges = chunk
                 .iter()
                 .map(|range| (range.source_offset, range.offset, range.len))
                 .collect::<Vec<_>>();
             let fds = chunk.iter().map(|range| range.fd).collect::<Vec<_>>();
-            send_with_fd(&self.stream, &encode_range_response(&wire_ranges), &fds).await?;
+            send_with_fd(
+                &self.stream,
+                &encode_range_response(&wire_ranges, chunks.peek().is_some()),
+                &fds,
+            )
+            .await?;
         }
         Ok(())
+    }
+
+    pub async fn send_stat(&self, size: u64, block_size: u32, flags: u32) -> Result<()> {
+        send_with_fd(
+            &self.stream,
+            &encode_stat_response(size, block_size, flags),
+            &[],
+        )
+        .await
     }
 }
 
@@ -277,9 +331,12 @@ pub fn decode_handshake(payload: &[u8]) -> Option<(u16, FaultPolicy, bool, Vec<V
     Some((ver, policy, enable_prefault, regions))
 }
 
-pub fn encode_range_response(ranges: &[(u64, u64, u64)]) -> Vec<u8> {
+pub fn encode_range_response(ranges: &[(u64, u64, u64)], next: bool) -> Vec<u8> {
     let payload_len = RANGE_COUNT_SIZE + ranges.len() * RANGE_SIZE;
-    let header = Header::new(MSG_RANGE_RESPONSE, payload_len as u32);
+    let mut header = Header::new(MSG_RANGE_RESPONSE, payload_len as u32);
+    if next {
+        header.flags |= RANGE_RESPONSE_FLAG_NEXT;
+    }
     let mut buf = Vec::with_capacity(HEADER_SIZE + payload_len);
     buf.extend_from_slice(&header.to_bytes());
     buf.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
@@ -311,6 +368,69 @@ pub fn decode_range_response(payload: &[u8]) -> Option<Vec<BlobRange>> {
         off += RANGE_SIZE;
     }
     Some(ranges)
+}
+
+pub fn encode_stat_request() -> Vec<u8> {
+    Header::new(MSG_STAT_REQUEST, 0).to_bytes().to_vec()
+}
+
+pub fn encode_stat_response(size: u64, block_size: u32, flags: u32) -> Vec<u8> {
+    let header = Header::new(MSG_STAT_RESPONSE, STAT_RESPONSE_SIZE as u32);
+    let mut buf = Vec::with_capacity(HEADER_SIZE + STAT_RESPONSE_SIZE);
+    buf.extend_from_slice(&header.to_bytes());
+    buf.extend_from_slice(&size.to_le_bytes());
+    buf.extend_from_slice(&block_size.to_le_bytes());
+    buf.extend_from_slice(&flags.to_le_bytes());
+    buf
+}
+
+pub fn decode_stat_response(payload: &[u8]) -> Option<StatResponse> {
+    if payload.len() != STAT_RESPONSE_SIZE {
+        return None;
+    }
+    Some(StatResponse {
+        size: u64::from_le_bytes(payload[0..8].try_into().unwrap()),
+        block_size: u32::from_le_bytes(payload[8..12].try_into().unwrap()),
+        flags: u32::from_le_bytes(payload[12..16].try_into().unwrap()),
+    })
+}
+
+pub fn encode_fetch_request(offset: u64, len: u64) -> Vec<u8> {
+    let header = Header::new(MSG_FETCH_REQUEST, FETCH_REQUEST_SIZE as u32);
+    let mut buf = Vec::with_capacity(HEADER_SIZE + FETCH_REQUEST_SIZE);
+    buf.extend_from_slice(&header.to_bytes());
+    buf.extend_from_slice(&offset.to_le_bytes());
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf
+}
+
+pub fn decode_fetch_request(payload: &[u8]) -> Option<DeviceRange> {
+    if payload.len() != FETCH_REQUEST_SIZE {
+        return None;
+    }
+    Some(DeviceRange {
+        offset: u64::from_le_bytes(payload[0..8].try_into().unwrap()),
+        len: u64::from_le_bytes(payload[8..16].try_into().unwrap()),
+    })
+}
+
+pub fn encode_probe_request() -> Vec<u8> {
+    Header::new(MSG_PROBE_REQUEST, 0).to_bytes().to_vec()
+}
+
+fn validate_no_fds(fds: &[OwnedFd], name: &str) -> Result<()> {
+    if !fds.is_empty() {
+        bail!("{name} request must not carry file descriptors");
+    }
+    Ok(())
+}
+
+fn validate_empty_request(payload: &[u8], fds: &[OwnedFd], name: &str) -> Result<()> {
+    validate_no_fds(fds, name)?;
+    if !payload.is_empty() {
+        bail!("{name} request must have an empty payload");
+    }
+    Ok(())
 }
 
 async fn recv_with_fd(
@@ -399,15 +519,73 @@ mod tests {
     }
 
     #[test]
+    fn stat_response_roundtrip() {
+        let buf = encode_stat_response(0x20_0000, 4096, 1);
+        let hdr = Header::from_bytes(&buf[..HEADER_SIZE].try_into().unwrap());
+        assert_eq!(hdr.msg_type, MSG_STAT_RESPONSE);
+        assert_eq!(MSG_STAT_RESPONSE, 0x82);
+        assert_eq!(hdr.len as usize, STAT_RESPONSE_SIZE);
+        assert_eq!(
+            decode_stat_response(&buf[HEADER_SIZE..]),
+            Some(StatResponse {
+                size: 0x20_0000,
+                block_size: 4096,
+                flags: 1,
+            })
+        );
+    }
+
+    #[test]
     fn range_response_roundtrip() {
-        let buf = encode_range_response(&[(0, 4096, 8192)]);
+        let buf = encode_range_response(&[(0, 4096, 8192)], false);
         let hdr = Header::from_bytes(&buf[..HEADER_SIZE].try_into().unwrap());
         assert_eq!(hdr.magic, UFFD_MAGIC);
         assert_eq!(hdr.msg_type, MSG_RANGE_RESPONSE);
+        assert_eq!(hdr.flags, 0);
         let ranges = decode_range_response(&buf[HEADER_SIZE..]).unwrap();
         assert_eq!(ranges[0].device_offset, 0);
         assert_eq!(ranges[0].blob_offset, 4096);
         assert_eq!(ranges[0].len, 8192);
+    }
+
+    #[test]
+    fn fetch_request_roundtrip() {
+        let buf = encode_fetch_request(0x1234_0000, 0x20_0000);
+        let hdr = Header::from_bytes(&buf[..HEADER_SIZE].try_into().unwrap());
+        assert_eq!(hdr.msg_type, MSG_FETCH_REQUEST);
+        assert_eq!(hdr.len as usize, FETCH_REQUEST_SIZE);
+        assert_eq!(
+            decode_fetch_request(&buf[HEADER_SIZE..]),
+            Some(DeviceRange {
+                offset: 0x1234_0000,
+                len: 0x20_0000,
+            })
+        );
+        assert_eq!(decode_fetch_request(&buf[HEADER_SIZE..buf.len() - 1]), None);
+    }
+
+    #[tokio::test]
+    async fn proto_conn_decodes_typed_requests() {
+        let (proto, client) = proto_pair();
+        let mut stat = Header::from_bytes(&encode_stat_request().try_into().unwrap());
+        stat.flags = 1;
+        stat.cookie = 2;
+        client.send_with_fd(&stat.to_bytes(), &[]).unwrap();
+        assert!(matches!(proto.recv().await.unwrap(), Some(Request::Stat)));
+
+        client
+            .send_with_fd(&encode_fetch_request(0x4000, 0x8000), &[])
+            .unwrap();
+        assert!(matches!(
+            proto.recv().await.unwrap(),
+            Some(Request::Fetch(DeviceRange {
+                offset: 0x4000,
+                len: 0x8000
+            }))
+        ));
+
+        client.send_with_fd(&encode_probe_request(), &[]).unwrap();
+        assert!(matches!(proto.recv().await.unwrap(), Some(Request::Probe)));
     }
 
     #[tokio::test]
@@ -470,12 +648,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proto_conn_supports_concurrent_receive_and_send() {
+        let (proto, mut client) = proto_pair();
+        let receiver = proto.clone();
+        let receive_task = tokio::spawn(async move { receiver.recv().await });
+        tokio::task::yield_now().await;
+
+        proto.send_stat(0x20_0000, 4096, 0).await.unwrap();
+        let mut header_buf = [0u8; HEADER_SIZE];
+        let mut raw_fds = [0i32; MAX_RECV_FDS];
+        let (read, fd_count) = client.recv_with_fd(&mut header_buf, &mut raw_fds).unwrap();
+        assert_eq!(read, HEADER_SIZE);
+        assert_eq!(fd_count, 0);
+        let header = Header::from_bytes(&header_buf);
+        assert_eq!(header.msg_type, MSG_STAT_RESPONSE);
+        let mut payload = vec![0u8; header.len as usize];
+        client.read_exact(&mut payload).unwrap();
+        assert_eq!(decode_stat_response(&payload).unwrap().size, 0x20_0000);
+
+        client.send_with_fd(&encode_stat_request(), &[]).unwrap();
+        assert!(matches!(
+            receive_task.await.unwrap().unwrap(),
+            Some(Request::Stat)
+        ));
+    }
+
+    #[tokio::test]
     async fn proto_conn_rejects_oversized_payload() {
         let (proto, client) = proto_pair();
-        let header = Header::new(MSG_HANDSHAKE, (MAX_PAYLOAD_SIZE + 1) as u32);
+        let header = Header::new(MSG_FETCH_REQUEST, (MAX_PAYLOAD_SIZE + 1) as u32);
         client.send_with_fd(&header.to_bytes(), &[]).unwrap();
         let err = proto.recv().await.unwrap_err();
         assert!(format!("{err:#}").contains("exceeds limit"));
+    }
+
+    #[tokio::test]
+    async fn proto_conn_rejects_unexpected_fds() {
+        let (proto, client) = proto_pair();
+        let file = File::open("/dev/null").unwrap();
+        client
+            .send_with_fd(&encode_stat_request(), &[file.as_raw_fd()])
+            .unwrap();
+        let err = proto.recv().await.unwrap_err();
+        assert!(format!("{err:#}").contains("must not carry file descriptors"));
     }
 
     #[tokio::test]
@@ -492,7 +707,7 @@ mod tests {
             .collect::<Vec<_>>();
         proto.send_ranges(&ranges).await.unwrap();
 
-        for expected_count in [16, 1] {
+        for (expected_count, expected_flags) in [(16, RANGE_RESPONSE_FLAG_NEXT), (1, 0)] {
             let mut header_buf = [0u8; HEADER_SIZE];
             let mut raw_fds = [0i32; MAX_RECV_FDS];
             let (read, fd_count) = client.recv_with_fd(&mut header_buf, &mut raw_fds).unwrap();
@@ -504,6 +719,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let header = Header::from_bytes(&header_buf);
             assert_eq!(header.msg_type, MSG_RANGE_RESPONSE);
+            assert_eq!(header.flags, expected_flags);
             let mut payload = vec![0u8; header.len as usize];
             client.read_exact(&mut payload).unwrap();
             assert_eq!(
@@ -512,5 +728,23 @@ mod tests {
             );
             assert_eq!(received_fds.len(), expected_count);
         }
+    }
+
+    #[tokio::test]
+    async fn proto_conn_sends_final_empty_range_batch() {
+        let (proto, mut client) = proto_pair();
+        proto.send_ranges(&[]).await.unwrap();
+
+        let mut header_buf = [0u8; HEADER_SIZE];
+        let mut raw_fds = [0i32; MAX_RECV_FDS];
+        let (read, fd_count) = client.recv_with_fd(&mut header_buf, &mut raw_fds).unwrap();
+        assert_eq!(read, HEADER_SIZE);
+        assert_eq!(fd_count, 0);
+        let header = Header::from_bytes(&header_buf);
+        assert_eq!(header.msg_type, MSG_RANGE_RESPONSE);
+        assert_eq!(header.flags, 0);
+        let mut payload = vec![0u8; header.len as usize];
+        client.read_exact(&mut payload).unwrap();
+        assert!(decode_range_response(&payload).unwrap().is_empty());
     }
 }
