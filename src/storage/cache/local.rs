@@ -1,10 +1,12 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::warn;
+use std::time::Duration;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::metadata::{BlobMeta, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE};
@@ -26,6 +28,7 @@ pub struct LocalBlobCache {
     groupmap: GroupMap,
     blob_meta: BlobMeta,
     cache_blob_path: PathBuf,
+    prefetch_lock_path: PathBuf,
     cache_file: Mutex<Option<Arc<File>>>,
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
@@ -63,12 +66,15 @@ impl LocalBlobCache {
         let groupmap_path = cache_dir.join(format!("{cache_key_hex}.groupmap"));
         let groupmap = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
 
+        let prefetch_lock_path = cache_dir.join(format!("{cache_key_hex}.prefetch.lock"));
+
         Ok(Self {
             blob_id,
             blob_index,
             groupmap,
             blob_meta,
             cache_blob_path,
+            prefetch_lock_path,
             cache_file: Mutex::new(None),
             backend,
             trace_recorder,
@@ -341,6 +347,70 @@ impl BlobCache for LocalBlobCache {
         self.blob_meta.is_redirect_blob()
     }
 
+    /// Acquire the per-blob cross-process prefetch lock, blocking (in 1s
+    /// polls) while another process holds it. Modeled after the nydus blob
+    /// prefetcher: locking failures degrade to prefetching without the lock
+    /// rather than failing the prefetch, and the guard is released when the
+    /// returned file is dropped — including on process death, so a crashed
+    /// owner's lock is taken over and the groupmap-driven skip logic resumes
+    /// where it left off.
+    fn prefetch_lock(&self) -> Option<File> {
+        let file = match OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.prefetch_lock_path)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                warn!(
+                    "failed to open prefetch lock {}: {err}; prefetching without cross-process lock",
+                    self.prefetch_lock_path.display()
+                );
+                return None;
+            }
+        };
+
+        let mut contention_logged = false;
+        loop {
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                if contention_logged {
+                    info!("acquired prefetch lock for blob {}", self.blob_index);
+                }
+                return Some(file);
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                warn!(
+                    "failed to acquire prefetch lock for blob {}: {err}; prefetching without cross-process lock",
+                    self.blob_index
+                );
+                return None;
+            }
+            // Another process is prefetching this blob. For a regular blob the
+            // shared groupmap tells us when the owner has finished everything,
+            // so we can stop waiting; the caller's prefetch then reduces to a
+            // cheap all-ready scan. A redirect blob never marks its own map,
+            // so keep waiting for the lock and rely on segment skipping.
+            if !self.blob_meta.is_redirect_blob() && self.groupmap.all_ready() {
+                return None;
+            }
+            if !contention_logged {
+                info!(
+                    "prefetch lock for blob {} is held by another process; waiting",
+                    self.blob_index
+                );
+                contention_logged = true;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    fn group_ready(&self, group_index: usize) -> bool {
+        self.groupmap.is_ready(group_index).unwrap_or(false)
+    }
+
     fn redirect_stream(
         &self,
         cb: &mut dyn FnMut(&BlobMetaGroup, &[u8]) -> io::Result<()>,
@@ -401,12 +471,22 @@ impl BlobCache for LocalBlobCache {
     fn redirect_stream_parallel(
         &self,
         threads: usize,
+        skip: &(dyn Fn(&BlobMetaGroup) -> bool + Sync),
         cb: &(dyn Fn(&BlobMetaGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         let groups = self.blob_meta.groups();
         if groups.is_empty() {
             return Ok(());
         }
+
+        // Segments whose groups are all already done (per `skip`, typically
+        // backed by the shared source groupmaps) are not fetched at all, so a
+        // process re-running the warmup behind another one does close to zero
+        // backend work. Partially-done segments are still fetched whole to
+        // keep the backend reads contiguous.
+        let segment_done = |segment: &std::ops::Range<usize>| -> bool {
+            segment.clone().all(|index| skip(&groups[index]))
+        };
 
         // A small ondemand blob (fits in one segment) or a single worker is
         // streamed sequentially with default-sized segments: segmentation and
@@ -420,6 +500,9 @@ impl BlobCache for LocalBlobCache {
             let mut window = Vec::new();
             let mut decoded = Vec::new();
             for segment in plan_prefetch_batches(groups, super::REDIRECT_PREFETCH_SEGMENT_SIZE) {
+                if segment_done(&segment) {
+                    continue;
+                }
                 self.stream_redirect_segment(groups, segment, &mut window, &mut decoded, cb)?;
             }
             return Ok(());
@@ -451,6 +534,9 @@ impl BlobCache for LocalBlobCache {
                         let Some(segment) = segments.get(idx) else {
                             break;
                         };
+                        if segment_done(segment) {
+                            continue;
+                        }
                         if let Err(err) = self.stream_redirect_segment(
                             groups,
                             segment.clone(),
@@ -619,6 +705,44 @@ mod tests {
         full_blob_id
     }
 
+    /// Wraps a real backend and counts data-range reads, so tests can assert
+    /// that cross-process sharing (groupmap + prefetch lock + segment skip)
+    /// actually eliminates duplicate backend traffic.
+    struct CountingBackend {
+        inner: LocalBackend,
+        reads: AtomicUsize,
+    }
+
+    impl CountingBackend {
+        fn new(dir: &Path) -> Arc<Self> {
+            Arc::new(Self {
+                inner: LocalBackend::new(dir.to_path_buf()),
+                reads: AtomicUsize::new(0),
+            })
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    impl BlobBackend for CountingBackend {
+        fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+            self.inner.load_blob_meta(blob_id)
+        }
+
+        fn read_range(
+            &self,
+            blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+            offset: u64,
+            len: u32,
+            ctx: ReadContext,
+        ) -> io::Result<Vec<u8>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.read_range(blob_id, offset, len, ctx)
+        }
+    }
+
     #[test]
     fn local_blob_cache_fetches_from_local_backend() {
         let backend_dir = tempdir().unwrap();
@@ -637,6 +761,187 @@ mod tests {
 
         assert_eq!(buf, payload[512..1536]);
         assert!(cached.groupmap.is_ready(0).unwrap());
+    }
+
+    #[test]
+    fn prefetch_lock_dedups_across_handles() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let payload = vec![0x5au8; 4096];
+        let data_blob_id = sha256_bytes(&payload);
+        let meta = blob_meta(data_blob_id, &payload);
+        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+
+        let backend: Arc<dyn BlobBackend> =
+            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        // Two handles on the same cache directory model two concurrent
+        // processes (flock contention applies across file descriptors even
+        // within one process).
+        let owner =
+            LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
+        let waiter = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+
+        let guard = owner.prefetch_lock().expect("first handle takes the lock");
+
+        // The owner finished all groups: the contender must give up on the
+        // lock (returning None) instead of waiting, since the shared groupmap
+        // already reports everything ready.
+        owner.groupmap.set_ready(0).unwrap();
+        assert!(waiter.prefetch_lock().is_none());
+        assert!(waiter.group_ready(0));
+
+        // Once the owner releases the lock, it is acquirable again.
+        drop(guard);
+        assert!(waiter.prefetch_lock().is_some());
+    }
+
+    #[test]
+    fn prefetch_lock_degrades_when_lock_file_unusable() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let payload = vec![0x21u8; 4096];
+        let data_blob_id = sha256_bytes(&payload);
+        let meta = blob_meta(data_blob_id, &payload);
+        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+
+        let backend: Arc<dyn BlobBackend> =
+            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let cached = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+
+        // Make the lock path unopenable for writing (it is a directory):
+        // locking must degrade to None instead of failing or hanging, and the
+        // blob must still be readable.
+        fs::create_dir(&cached.prefetch_lock_path).unwrap();
+        assert!(cached.prefetch_lock().is_none());
+        let mut buf = vec![0u8; 512];
+        cached.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, payload[..512]);
+    }
+
+    #[test]
+    fn on_demand_reads_ignore_a_held_prefetch_lock() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let payload = vec![0x77u8; 4096];
+        let data_blob_id = sha256_bytes(&payload);
+        let meta = blob_meta(data_blob_id, &payload);
+        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+
+        let backend: Arc<dyn BlobBackend> =
+            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+        let owner =
+            LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
+        let reader = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+
+        // Another instance holds the prefetch lock; the on-demand read path
+        // must proceed immediately (fetch the cold group itself) rather than
+        // queueing behind the lock.
+        let _guard = owner.prefetch_lock().expect("owner takes the lock");
+        let mut buf = vec![0u8; 1024];
+        reader.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, payload[..1024]);
+    }
+
+    #[test]
+    fn prefetch_behind_another_instance_does_no_backend_work() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let payload = vec![0x42u8; 4096];
+        let data_blob_id = sha256_bytes(&payload);
+        let meta = blob_meta(data_blob_id, &payload);
+        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+
+        let backend = CountingBackend::new(backend_dir.path());
+        let first = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone() as Arc<dyn BlobBackend>,
+        )
+        .unwrap();
+        let second = LocalBlobCache::open(
+            full_blob_id,
+            1,
+            cache_dir.path(),
+            backend.clone() as Arc<dyn BlobBackend>,
+        )
+        .unwrap();
+
+        // The "owner" instance prefetches everything from the backend.
+        let guard = first.prefetch_lock();
+        first.prefetch_all().unwrap();
+        let after_owner = backend.reads();
+        assert!(after_owner > 0, "owner must stream from the backend");
+
+        // While the owner still holds the lock, a contending instance sees
+        // every group ready through the shared groupmap and gives up on the
+        // lock (None) instead of waiting.
+        assert!(second.prefetch_lock().is_none());
+        drop(guard);
+
+        // Repeating the prefetch afterwards issues zero backend reads: every
+        // group is already ready in the shared cache.
+        second.prefetch_all().unwrap();
+        assert_eq!(backend.reads(), after_owner, "waiter must not re-download");
+
+        // Cross-handle on-demand reads are also served from the shared cache.
+        let mut buf = vec![0u8; 4096];
+        second.read_at(0, &mut buf).unwrap();
+        assert_eq!(buf, payload);
+        assert_eq!(backend.reads(), after_owner);
+    }
+
+    #[test]
+    fn redirect_stream_skips_fully_done_segments() {
+        let backend_dir = tempdir().unwrap();
+        let payload = vec![0x9cu8; 4096];
+        let crc32 = crc32c::crc32c(&payload);
+
+        // An ondemand (redirect) blob whose single group redirects to source
+        // blob 1 group 0; its data region carries a copy of the source bytes.
+        let redirect_meta = BlobMeta::from_parts(
+            sha256_bytes(&payload),
+            1,
+            vec![BlobMetaGroup::new_redirect(0, 1, 0, 4096, crc32, 1, 0).unwrap()],
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(redirect_meta.is_redirect_blob());
+        let redirect_blob_id = write_full_blob(backend_dir.path(), &payload, &redirect_meta, true);
+
+        let run = |skip_all: bool| -> (usize, usize) {
+            let cache_dir = tempdir().unwrap();
+            let backend = CountingBackend::new(backend_dir.path());
+            let cache = LocalBlobCache::open(
+                redirect_blob_id,
+                2,
+                cache_dir.path(),
+                backend.clone() as Arc<dyn BlobBackend>,
+            )
+            .unwrap();
+            let baseline = backend.reads();
+            let delivered = AtomicUsize::new(0);
+            cache
+                .redirect_stream_parallel(1, &|_group| skip_all, &|group, decoded| {
+                    assert!(group.is_redirect());
+                    assert_eq!(decoded, payload);
+                    delivered.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap();
+            (backend.reads() - baseline, delivered.load(Ordering::SeqCst))
+        };
+
+        // Nothing done yet: the segment is fetched and the group delivered.
+        let (reads, delivered) = run(false);
+        assert!(reads > 0);
+        assert_eq!(delivered, 1);
+
+        // Every group reported done (e.g. resident in the source caches of a
+        // faster sibling instance): no backend fetch, no callback at all.
+        let (reads, delivered) = run(true);
+        assert_eq!(reads, 0, "fully-done segment must not be fetched");
+        assert_eq!(delivered, 0);
     }
 
     #[test]

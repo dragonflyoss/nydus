@@ -924,7 +924,11 @@ blob digest:
 - `<full_blob_digest>.blob.data` stores decoded uncompressed data.
 - `<full_blob_digest>.blob.meta` stores the verified blob meta copy cached from
 	the local backend.
-- `<full_blob_digest>.groupmap` records which blob_meta groups have been decoded.
+- `<full_blob_digest>.groupmap` records which blob_meta groups have been decoded
+	(a shared readiness bitmap, see
+	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
+- `<full_blob_digest>.prefetch.lock` is the cross-process prefetch lock file
+	(empty; only its `flock` state matters).
 
 ### Blob prefetch
 
@@ -945,10 +949,10 @@ Per-blob prefetch streams groups into the cache:
 	the decoded bytes to the cache file at the group's uncompressed offset, and
 	marks the group ready in the groupmap.
 - Prefetch uses its own decode buffer and does not take the on-demand read
-	`fetch_lock`. The groupmap is internally locked and `set_ready` is idempotent,
-	so racing with a FUSE read at worst decodes the same group twice into identical
-	bytes at the same offset. This keeps prefetch fully decoupled from, and
-	non-blocking to, the on-demand read path.
+	`fetch_lock`. The groupmap bits are updated atomically and `set_ready` is
+	idempotent, so racing with a FUSE read at worst decodes the same group twice
+	into identical bytes at the same offset. This keeps prefetch fully decoupled
+	from, and non-blocking to, the on-demand read path.
 - Groups already marked ready (for example, fetched on demand or from a previous
 	run's persistent cache) are skipped.
 
@@ -986,6 +990,76 @@ blob (fitting in one segment) or a single-thread pool streams sequentially,
 since segmentation and extra registry connections would add overhead without
 overlapping any work. In a cold-registry container start benchmark this
 parallel ramped prefetch cut end-to-end start time from 32.6s to 25.0s.
+
+### Cross-process cache sharing and prefetch dedup
+
+Many identical instances cold-starting on one node (for example, dozens of
+hypervisor-embedded accessors mounting the same optimized image) all target the
+same cache directory, the same blobs, and the same access-ordered hot set.
+Without coordination each instance would stream the whole ondemand blob and
+decode every group independently — N× the backend traffic, decode CPU, and
+cache writes for identical bytes. Two mechanisms make the warmup effectively
+single-instance while leaving the on-demand read path untouched.
+
+**Shared groupmap bitmap.** The `<digest>.groupmap` file is a 16-byte header
+(magic `LPGM0001`, version, group count — both little-endian `u32`) followed by
+one readiness bit per blob_meta group. The whole file is mapped `MAP_SHARED`
+and every bit access goes through atomic operations (`Acquire` loads,
+`fetch_or` with `AcqRel` to set), so `set_ready` updates made by one process
+are immediately observed by every other process sharing the cache directory
+through the shared page cache — no reopen, no polling, no IPC. Modeled on the
+nydus chunk-state `PersistMap`. Two details matter for concurrent creation and
+crash safety:
+
+- Racing creators run the same idempotent sequence (`set_len` to the expected
+	size, then write the identical header bytes). The window where one process
+	maps a fully sized but still all-zero header is detected at open and healed
+	by rewriting the header; a non-zero header with a wrong magic is rejected as
+	corrupt instead of silently reinitialized.
+- Bits are set only after the decoded, CRC-validated group bytes have been
+	written to the cache data file, and persistence rides on regular kernel
+	writeback of the dirty mapping — there is no per-bit write syscall on the hot
+	path.
+
+`all_ready()` scans the shared bitmap (masking the partial final byte), so any
+instance can cheaply tell when another instance has finished warming a blob.
+
+**Per-blob prefetch flock.** Blob-level prefetch — and only prefetch — is
+serialized across processes with an exclusive `flock` on
+`<digest>.prefetch.lock`, taken at the top of the per-blob prefetch entry point
+(modeled on the nydus blob prefetcher):
+
+- The lock is polled non-blocking with a 1s sleep between attempts, so a waiter
+	can observe progress while it waits: a waiter on a regular blob gives up on
+	the lock as soon as the shared groupmap reports every group ready (its own
+	prefetch then reduces to a cheap all-ready scan).
+- Locking failures (unopenable lock file, unexpected errno) degrade to
+	prefetching without the lock — correctness never depends on it, only the
+	cross-process dedup guarantee does.
+- The guard is the open file descriptor: dropping it — including by process
+	death — releases the lock, so a crashed owner is taken over by a waiter, and
+	the ready-skip logic resumes the warmup exactly where the crashed owner left
+	off.
+- **On-demand reads never touch the lock.** A cold group hit by a page fault is
+	fetched immediately by whichever instance needs it; the worst case is one
+	duplicated group fetch racing the owner's warmup, which the idempotent cache
+	write absorbs.
+
+**Redirect segment skipping.** A waiter that eventually acquires the lock (or a
+restart replaying the warmup) must not re-download the ondemand blob just to
+discover every fill is a no-op: the parallel redirect stream accepts a `skip`
+predicate that consults the **source** blobs' shared groupmaps, and any segment
+whose groups are all already resident is not fetched at all. Partially-done
+segments are still fetched whole to keep backend reads contiguous.
+
+Measured on one node with the shared cache directory (cold registry, optimized
+image): with 10 concurrent cold starts exactly one instance acquired the lock
+and streamed the ondemand blob (≈230 MB, 222 groups filled) while the other
+nine did zero prefetch backend reads (only 0–5 MB of early on-demand faults
+each, thousands of shared-cache hits); with 50 concurrent cold starts the
+cache grew to the same ≈900 MB a single instance produces and end-to-end
+application readiness stayed at the single-instance baseline (24–27s across
+all 50, vs ≈25s for one).
 
 ## Accessor (virtio-pmem integration)
 

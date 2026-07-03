@@ -387,6 +387,14 @@ impl ErofsReader {
             )
         })?;
         let cache = blob.cache()?;
+        // Serialize prefetch of the same blob across processes sharing the
+        // cache directory: with many identical instances cold-starting on one
+        // node, only the lock owner streams from the backend while the others
+        // wait and then find the work already done through the shared
+        // groupmap. On-demand reads never pass through here, so they are
+        // never delayed by the lock. Held (via the guard's file descriptor)
+        // until this function returns.
+        let _prefetch_lock = cache.prefetch_lock();
         if cache.is_redirect_blob() {
             // Time the ondemand (redirect) blob prefetch and report how many
             // source groups it warmed vs skipped, so operators can tell
@@ -424,7 +432,24 @@ impl ErofsReader {
         cache: &dyn BlobCache,
         threads: usize,
     ) -> io::Result<()> {
-        cache.redirect_stream_parallel(threads, &|group, decoded| {
+        // A redirect group is already done when its bytes are resident in the
+        // source blob's cache (readiness is shared across processes through
+        // the source groupmap). Segments made entirely of done groups are not
+        // fetched, so re-running the warmup behind another process's progress
+        // does close to zero backend work.
+        let skip = |group: &BlobMetaGroup| -> bool {
+            if !group.is_redirect() {
+                return false;
+            }
+            let Some(source) = self.blobs.get(&group.source_blob_index()) else {
+                return false;
+            };
+            match source.cache() {
+                Ok(source_cache) => source_cache.group_ready(group.source_group_index() as usize),
+                Err(_) => false,
+            }
+        };
+        cache.redirect_stream_parallel(threads, &skip, &|group, decoded| {
             if !group.is_redirect() {
                 crate::metrics::inc_cache_redirect_skip_group();
                 warn!("ondemand blob {blob_index} contains a non-redirect group; skipping");

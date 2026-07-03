@@ -44,6 +44,23 @@ pub trait BlobCache: Send + Sync {
         false
     }
 
+    /// Acquire the cross-process prefetch lock for this blob, blocking until
+    /// the lock is held. Returns the lock guard (released on drop / process
+    /// exit), or `None` when locking is unavailable or unnecessary — in both
+    /// cases the caller proceeds with the prefetch, merely without the
+    /// cross-process dedup guarantee. Only the blob-level prefetch path takes
+    /// this lock; on-demand reads never wait on it.
+    fn prefetch_lock(&self) -> Option<std::fs::File> {
+        None
+    }
+
+    /// True when the group at `group_index` is already decoded and resident in
+    /// this blob's cache. Reflects updates from other processes sharing the
+    /// same cache directory.
+    fn group_ready(&self, _group_index: usize) -> bool {
+        false
+    }
+
     /// Stream every group of a redirect blob: fetch, decode, and validate each
     /// group, then hand `(group, decoded_bytes)` to `cb`. This never touches
     /// the blob's own cache file. Groups that fail decode or CRC validation
@@ -63,15 +80,19 @@ pub trait BlobCache: Send + Sync {
     /// fixed-size segments and fetch/decode them concurrently with up to
     /// `threads` worker threads. A blob small enough to fit in a single segment
     /// (or `threads <= 1`) is streamed sequentially, since segmentation would
-    /// add registry connections without overlapping any work. `cb` must be
-    /// callable concurrently (it fills distinct source-blob caches, which is
-    /// safe); per-group decode/CRC failures are skipped, and the first `cb` or
-    /// backend error aborts the stream.
+    /// add registry connections without overlapping any work. Segments whose
+    /// groups are all reported done by `skip` are not fetched at all, so a
+    /// process re-running the warmup behind another one's progress does close
+    /// to zero backend work. `cb` must be callable concurrently (it fills
+    /// distinct source-blob caches, which is safe); per-group decode/CRC
+    /// failures are skipped, and the first `cb` or backend error aborts the
+    /// stream.
     ///
     /// [`redirect_stream`]: Self::redirect_stream
     fn redirect_stream_parallel(
         &self,
         _threads: usize,
+        _skip: &(dyn Fn(&BlobMetaGroup) -> bool + Sync),
         _cb: &(dyn Fn(&BlobMetaGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
         Err(io::Error::new(
