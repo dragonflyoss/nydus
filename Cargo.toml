@@ -153,3 +153,6 @@ vhost-user-backend = "0.21.0"
 
 # fuse-backend-rs which depends on rust-vmm
 fuse-backend-rs = "0.14.0"
+
+[patch.crates-io]
+fuse-backend-rs = { git = "https://github.com/Zephyrcf/fuse-backend-rs.git", tag = "v0.0.1" }
