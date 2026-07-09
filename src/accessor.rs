@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -24,7 +26,7 @@ use crate::fs::{BlobInfo as ReaderBlobInfo, ErofsReader};
 use crate::metadata::{
     ErofsInode, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
     EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
-    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN,
+    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
 };
 use crate::metrics::trace::{TraceDocument, TraceRecorder};
 use crate::storage::backend::build_backend;
@@ -103,6 +105,37 @@ pub struct BlobInfo {
     pub is_redirect: bool,
 }
 
+/// Resolved mmap-ready byte range.
+///
+/// `fd` is always a real file descriptor. Zero-filled ranges use the
+/// accessor-owned `/dev/zero` fd with `offset == 0`; callers can compare
+/// against [`NydusAccessor::zero_fd`] to recognize those ranges for optimized
+/// copy-mode handling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FdRange {
+    /// Raw fd backing this range. The fd is owned by the accessor/cache and
+    /// must not be closed by the caller.
+    pub fd: RawFd,
+    /// Byte offset within `fd`. For zero-filled ranges this is always `0`.
+    pub offset: u64,
+    /// Length in bytes.
+    pub len: u64,
+    /// Offset in the source view: flattened-device offset for
+    /// [`NydusAccessor`] ranges, file-relative offset for [`FsEntry`] ranges.
+    pub source_offset: u64,
+}
+
+impl FdRange {
+    fn new(fd: RawFd, offset: u64, len: u64, source_offset: u64) -> Self {
+        Self {
+            fd,
+            offset,
+            len,
+            source_offset,
+        }
+    }
+}
+
 /// File type exposed by the static accessor API, independent of FUSE types.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileType {
@@ -171,6 +204,7 @@ pub struct DirEntry {
 #[derive(Clone)]
 pub struct FsEntry {
     reader: Arc<ErofsReader>,
+    zero_file: Arc<File>,
     ino: u64,
 }
 
@@ -185,6 +219,9 @@ pub struct NydusAccessor {
     pub blob: BlobAccessor,
     /// Static path-based filesystem APIs.
     pub fs: FsAccessor,
+    bootstrap: Arc<File>,
+    zero_file: Arc<File>,
+    flat_size: u64,
     trace_recorder: Arc<TraceRecorder>,
 }
 
@@ -198,6 +235,7 @@ pub struct BlobAccessor {
 /// Static path-based filesystem APIs.
 pub struct FsAccessor {
     reader: Arc<ErofsReader>,
+    zero_file: Arc<File>,
 }
 
 impl NydusAccessor {
@@ -222,7 +260,20 @@ impl NydusAccessor {
     /// [`blobs`]: Self::blobs
     /// [`fetch`]: Self::fetch
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let bootstrap_size = std::fs::metadata(bootstrap)
+        let bootstrap_file = Arc::new(
+            OpenOptions::new()
+                .read(true)
+                .open(bootstrap)
+                .with_context(|| format!("failed to open bootstrap: {}", bootstrap.display()))?,
+        );
+        let zero_file = Arc::new(
+            OpenOptions::new()
+                .read(true)
+                .open("/dev/zero")
+                .context("failed to open /dev/zero")?,
+        );
+        let bootstrap_size = bootstrap_file
+            .metadata()
             .with_context(|| format!("failed to stat bootstrap: {}", bootstrap.display()))?
             .len();
         let prefetch_enable = config.prefetch.enable;
@@ -249,6 +300,23 @@ impl NydusAccessor {
         if blob_infos.is_empty() {
             bail!("bootstrap contains no blobs");
         }
+        let flat_size = blob_infos.iter().try_fold(bootstrap_size, |size, info| {
+            let offset = info
+                .mapped_blkaddr
+                .checked_mul(EROFS_BLOCK_SIZE as u64)
+                .context("mapped blob offset overflow")?;
+            let len = info
+                .blocks
+                .checked_mul(EROFS_BLOCK_SIZE as u64)
+                .context("blob size overflow")?;
+            Ok::<u64, anyhow::Error>(
+                size.max(
+                    offset
+                        .checked_add(len)
+                        .context("flat blob range overflow")?,
+                ),
+            )
+        })?;
         let index_by_blob_id = blob_infos
             .iter()
             .map(|info| (BlobID::from(info.blob_id), info.blob_index))
@@ -280,9 +348,45 @@ impl NydusAccessor {
                 blob_infos,
                 index_by_blob_id,
             },
-            fs: FsAccessor { reader },
+            fs: FsAccessor {
+                reader,
+                zero_file: zero_file.clone(),
+            },
+            bootstrap: bootstrap_file,
+            zero_file,
+            flat_size,
             trace_recorder,
         })
+    }
+
+    /// Return the bootstrap file backing this accessor.
+    pub fn bootstrap(&self) -> &File {
+        &self.bootstrap
+    }
+
+    /// Return the size of the flattened device view.
+    pub fn flat_size(&self) -> u64 {
+        self.flat_size
+    }
+
+    /// Return the accessor-owned `/dev/zero` fd used for zero-filled ranges.
+    pub fn zero_fd(&self) -> RawFd {
+        self.zero_file.as_raw_fd()
+    }
+
+    /// Fetch `[offset, offset + len)` in the flattened device view and return
+    /// mmap-ready ranges. The bootstrap is exposed at the beginning of the
+    /// view, and gaps between blob files are returned as `/dev/zero` ranges.
+    pub fn fetch_flat_ranges(&self, offset: u64, len: u64) -> Result<Vec<FdRange>> {
+        self.resolve_flat_ranges(offset, len, ResolveMode::Fetch)
+    }
+
+    /// Probe `[offset, offset + len)` in the flattened device view without
+    /// downloading missing blob data. Bootstrap and gaps are returned when
+    /// ready; cold blob cache ranges are omitted, so the result may be
+    /// discontinuous.
+    pub fn probe_flat_ranges(&self, offset: u64, len: u64) -> Result<Vec<FdRange>> {
+        self.resolve_flat_ranges(offset, len, ResolveMode::Probe)
     }
 
     /// Return a stable snapshot of this accessor's on-demand group trace.
@@ -307,6 +411,91 @@ impl NydusAccessor {
     /// over the network rather than served from a warmed cache.
     pub fn metrics_snapshot(&self) -> crate::metrics::MetricsSnapshot {
         crate::metrics::snapshot()
+    }
+
+    fn resolve_flat_ranges(
+        &self,
+        offset: u64,
+        len: u64,
+        mode: ResolveMode,
+    ) -> Result<Vec<FdRange>> {
+        let end = match checked_range_end(offset, len)? {
+            Some(end) => end.min(self.flat_size),
+            None => return Ok(Vec::new()),
+        };
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+
+        let mut ranges = Vec::new();
+        let mut pos = offset;
+        let bootstrap_end = end.min(self.bootstrap_size);
+        if pos < bootstrap_end {
+            push_fd_range(
+                &mut ranges,
+                FdRange::new(self.bootstrap.as_raw_fd(), pos, bootstrap_end - pos, pos),
+                self.zero_file.as_raw_fd(),
+            );
+            pos = bootstrap_end;
+        }
+        if pos >= end {
+            return Ok(ranges);
+        }
+
+        let mut blobs = self
+            .blob
+            .entries()
+            .context("failed to describe blob device layout")?;
+        blobs.retain(|blob| !blob.is_redirect);
+        blobs.sort_by_key(|blob| blob.mapped_offset);
+
+        while pos < end {
+            let blob_index = blobs.iter().position(|blob| {
+                mapped_range_offset(blob.mapped_offset, blob.cache_size, pos).is_some()
+            });
+
+            if let Some(blob_index) = blob_index {
+                let blob = &blobs[blob_index];
+                let blob_end = blob
+                    .mapped_offset
+                    .checked_add(blob.cache_size)
+                    .context("blob device range overflow")?;
+                let seg_end = end.min(blob_end);
+                let blob_offset = pos - blob.mapped_offset;
+                push_blob_fd_ranges(
+                    &self.blob.reader,
+                    self.zero_file.as_raw_fd(),
+                    &mut ranges,
+                    BlobRangeSpec {
+                        index: blob.index,
+                        offset: blob_offset,
+                        len: seg_end - pos,
+                        source_offset: pos,
+                    },
+                    mode,
+                )?;
+                pos = seg_end;
+            } else {
+                let next_blob = blobs
+                    .iter()
+                    .filter(|blob| blob.mapped_offset > pos)
+                    .map(|blob| blob.mapped_offset)
+                    .min()
+                    .unwrap_or(end);
+                let hole_end = end.min(next_blob);
+                if hole_end <= pos {
+                    break;
+                }
+                push_fd_range(
+                    &mut ranges,
+                    FdRange::new(self.zero_file.as_raw_fd(), 0, hole_end - pos, pos),
+                    self.zero_file.as_raw_fd(),
+                );
+                pos = hole_end;
+            }
+        }
+
+        Ok(ranges)
     }
 }
 
@@ -383,6 +572,7 @@ impl FsAccessor {
         let ino = self.resolve_path(path.as_ref())?;
         Ok(FsEntry {
             reader: self.reader.clone(),
+            zero_file: self.zero_file.clone(),
             ino,
         })
     }
@@ -494,6 +684,22 @@ impl FsEntry {
         }
     }
 
+    /// Fetch this regular file's byte range and return mmap-ready ranges.
+    ///
+    /// Offsets in returned ranges are relative to this file in
+    /// [`FdRange::source_offset`]. Sparse file holes are returned as
+    /// `/dev/zero` ranges.
+    pub fn fetch_ranges(&self, offset: u64, len: u64) -> Result<Vec<FdRange>> {
+        self.resolve_file_ranges(offset, len, ResolveMode::Fetch)
+    }
+
+    /// Probe this regular file's byte range without downloading missing blob
+    /// data. Sparse holes are returned as ready `/dev/zero` ranges; cold blob
+    /// ranges are omitted.
+    pub fn probe_ranges(&self, offset: u64, len: u64) -> Result<Vec<FdRange>> {
+        self.resolve_file_ranges(offset, len, ResolveMode::Probe)
+    }
+
     /// Read this symlink target as raw bytes.
     pub fn read_link(&self) -> Result<Vec<u8>> {
         let inode = self.inode()?;
@@ -547,7 +753,7 @@ impl FsEntry {
             };
 
             if chunk_index.blkaddr != u64::MAX {
-                let abs = chunk_index
+                let chunk_addr = chunk_index
                     .blkaddr
                     .checked_mul(EROFS_BLOCK_SIZE as u64)
                     .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
@@ -555,9 +761,9 @@ impl FsEntry {
                 // by a non-zero device_id with a blob-relative address; the
                 // flattened layout uses device_id 0 with an absolute address.
                 let resolved = if chunk_index.device_id > 0 {
-                    Some((chunk_index.device_id, abs))
+                    Some((chunk_index.device_id, chunk_addr))
                 } else {
-                    self.reader.flat_blob_at(abs)?
+                    self.reader.flat_blob_at(chunk_addr)?
                 };
                 if let Some((blob_index, blob_rel)) = resolved {
                     let blob_offset = blob_rel
@@ -582,6 +788,112 @@ impl FsEntry {
         }
         Ok(())
     }
+
+    fn resolve_file_ranges(
+        &self,
+        offset: u64,
+        len: u64,
+        mode: ResolveMode,
+    ) -> Result<Vec<FdRange>> {
+        let inode = self.inode()?;
+        if FileType::from_mode(inode.mode())? != FileType::RegularFile {
+            bail!("not a regular file");
+        }
+        let end = match checked_range_end(offset, len)? {
+            Some(end) => end.min(inode.size()),
+            None => return Ok(Vec::new()),
+        };
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+
+        match inode.data_layout() {
+            EROFS_INODE_FLAT_PLAIN | EROFS_INODE_FLAT_INLINE => {
+                bail!("flat file data is not supported by FsEntry range API")
+            }
+            EROFS_INODE_CHUNK_BASED => {
+                self.resolve_chunk_file_ranges(&inode, offset, end - offset, mode)
+            }
+            other => bail!("unsupported data layout: {other}"),
+        }
+    }
+
+    fn resolve_chunk_file_ranges(
+        &self,
+        inode: &ErofsInode<'_>,
+        offset: u64,
+        len: u64,
+        mode: ResolveMode,
+    ) -> Result<Vec<FdRange>> {
+        let chunkbits = self.reader.sb().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F);
+        let chunksize = 1u64 << chunkbits;
+        let chunk_indexes = self
+            .reader
+            .read_chunk_indexes(self.ino, inode)
+            .with_context(|| format!("failed to read chunk indexes for inode {}", self.ino))?;
+        let blob_layout = self.reader.blob_infos()?;
+
+        let mut ranges = Vec::new();
+        let mut remaining = len;
+        let mut file_pos = offset;
+        while remaining > 0 {
+            let file_chunk_index = (file_pos / chunksize) as usize;
+            let chunk_off = file_pos % chunksize;
+            let to_resolve = remaining.min(chunksize - chunk_off);
+            let Some(chunk_index) = chunk_indexes.get(file_chunk_index) else {
+                break;
+            };
+
+            if chunk_index.blkaddr == EROFS_NULL_ADDR {
+                push_fd_range(
+                    &mut ranges,
+                    FdRange::new(self.zero_file.as_raw_fd(), 0, to_resolve, file_pos),
+                    self.zero_file.as_raw_fd(),
+                );
+            } else {
+                let chunk_addr = chunk_index
+                    .blkaddr
+                    .checked_mul(EROFS_BLOCK_SIZE as u64)
+                    .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
+                let resolved = if chunk_index.device_id > 0 {
+                    // Legacy layout: device_id directly names the blob.
+                    Some((chunk_index.device_id, chunk_addr))
+                } else {
+                    // Flattened layout: device_id 0 stores a flat device address.
+                    blob_layout.iter().find_map(|blob| {
+                        let start = blob.mapped_blkaddr.checked_mul(EROFS_BLOCK_SIZE as u64)?;
+                        let size = blob.blocks.checked_mul(EROFS_BLOCK_SIZE as u64)?;
+                        mapped_range_offset(start, size, chunk_addr)
+                            .map(|offset| (blob.blob_index, offset))
+                    })
+                };
+                if let Some((blob_index, blob_rel)) = resolved {
+                    let blob_offset = blob_rel
+                        .checked_add(chunk_off)
+                        .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
+                    push_blob_fd_ranges(
+                        &self.reader,
+                        self.zero_file.as_raw_fd(),
+                        &mut ranges,
+                        BlobRangeSpec {
+                            index: blob_index,
+                            offset: blob_offset,
+                            len: to_resolve,
+                            source_offset: file_pos,
+                        },
+                        mode,
+                    )?;
+                } else {
+                    bail!("bootstrap-local file data is not supported by FsEntry range API");
+                }
+            }
+
+            file_pos += to_resolve;
+            remaining -= to_resolve;
+        }
+
+        Ok(ranges)
+    }
 }
 
 fn metadata_from_inode(reader: &ErofsReader, ino: u64, inode: &ErofsInode<'_>) -> Result<Metadata> {
@@ -597,6 +909,102 @@ fn metadata_from_inode(reader: &ErofsReader, ino: u64, inode: &ErofsInode<'_>) -
         mtime_nsec: inode.effective_mtime_nsec(reader.sb().fixed_nsec()),
         rdev: inode.rdev(),
     })
+}
+
+#[derive(Clone, Copy)]
+enum ResolveMode {
+    Fetch,
+    Probe,
+}
+
+#[derive(Clone, Copy)]
+struct BlobRangeSpec {
+    index: u16,
+    offset: u64,
+    len: u64,
+    source_offset: u64,
+}
+
+fn checked_range_end(offset: u64, len: u64) -> Result<Option<u64>> {
+    if len == 0 {
+        return Ok(None);
+    }
+    Ok(Some(offset.checked_add(len).ok_or_else(|| {
+        anyhow::anyhow!("range offset + length overflow")
+    })?))
+}
+
+fn mapped_range_offset(mapped_offset: u64, size: u64, offset: u64) -> Option<u64> {
+    let end = mapped_offset.checked_add(size)?;
+    if offset >= mapped_offset && offset < end {
+        Some(offset - mapped_offset)
+    } else {
+        None
+    }
+}
+
+fn push_blob_fd_ranges(
+    reader: &ErofsReader,
+    zero_fd: RawFd,
+    ranges: &mut Vec<FdRange>,
+    spec: BlobRangeSpec,
+    mode: ResolveMode,
+) -> Result<()> {
+    let cache = reader
+        .blob_cache(spec.index)
+        .with_context(|| format!("failed to open blob {}", spec.index))?;
+    let fd = cache
+        .cache_fd()
+        .with_context(|| format!("failed to get cache fd for blob {}", spec.index))?;
+
+    match mode {
+        ResolveMode::Fetch => {
+            cache.ensure_range(spec.offset, spec.len).with_context(|| {
+                format!(
+                    "failed to fetch blob {} range [{}, +{})",
+                    spec.index, spec.offset, spec.len
+                )
+            })?;
+            push_fd_range(
+                ranges,
+                FdRange::new(fd, spec.offset, spec.len, spec.source_offset),
+                zero_fd,
+            );
+        }
+        ResolveMode::Probe => {
+            for ready in cache.ready_ranges(spec.offset, spec.len)? {
+                push_fd_range(
+                    ranges,
+                    FdRange::new(
+                        fd,
+                        ready.start,
+                        ready.end - ready.start,
+                        spec.source_offset + (ready.start - spec.offset),
+                    ),
+                    zero_fd,
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn push_fd_range(ranges: &mut Vec<FdRange>, range: FdRange, zero_fd: RawFd) {
+    if range.len == 0 {
+        return;
+    }
+    if let Some(last) = ranges.last_mut() {
+        let source_contiguous = last.source_offset + last.len == range.source_offset;
+        let file_contiguous = last.offset + last.len == range.offset;
+        let both_zero =
+            last.fd == zero_fd && range.fd == zero_fd && last.offset == 0 && range.offset == 0;
+        if last.fd == range.fd && source_contiguous && (file_contiguous || both_zero) {
+            last.len += range.len;
+            return;
+        }
+    }
+    ranges.push(range);
 }
 
 #[cfg(test)]
@@ -623,6 +1031,29 @@ mod tests {
     /// config) and return (bootstrap, config, data blob id, expected file bytes).
     fn build_test_image(
         root: &Path,
+    ) -> (
+        PathBuf,
+        Config,
+        [u8; EROFS_BLOB_ID_SIZE],
+        HashMap<String, Vec<u8>>,
+    ) {
+        build_test_image_with_layout(root, false)
+    }
+
+    fn build_flattened_test_image(
+        root: &Path,
+    ) -> (
+        PathBuf,
+        Config,
+        [u8; EROFS_BLOB_ID_SIZE],
+        HashMap<String, Vec<u8>>,
+    ) {
+        build_test_image_with_layout(root, true)
+    }
+
+    fn build_test_image_with_layout(
+        root: &Path,
+        flattened: bool,
     ) -> (
         PathBuf,
         Config,
@@ -695,14 +1126,25 @@ mod tests {
             write_full_blob(&staging, &blob_dir, &embedded_bootstrap_bytes, &blob_meta);
 
         let device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &full_blob_id)];
-        let bootstrap_bytes = render_bootstrap(
-            &mut inodes,
-            0,
-            crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
-            &device_slots,
-            &[0u8; 16],
-        )
-        .unwrap();
+        let bootstrap_bytes = if flattened {
+            render_flattened_bootstrap(
+                &mut inodes,
+                0,
+                crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
+                &device_slots,
+                &[0u8; 16],
+            )
+            .unwrap()
+        } else {
+            render_bootstrap(
+                &mut inodes,
+                0,
+                crate::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
+                &device_slots,
+                &[0u8; 16],
+            )
+            .unwrap()
+        };
         let bootstrap = root.join("bootstrap");
         fs::write(&bootstrap, &bootstrap_bytes).unwrap();
 
@@ -791,7 +1233,7 @@ mod tests {
     #[test]
     fn accessor_describes_devices_and_fetches_aligned_ranges() {
         let dir = tempdir().unwrap();
-        let (bootstrap, config, blob_id, _corpus) = build_test_image(dir.path());
+        let (bootstrap, config, blob_id, _corpus) = build_flattened_test_image(dir.path());
         let blob_id = BlobID::from(blob_id);
 
         let accessor = NydusAccessor::new(&bootstrap, config).unwrap();
@@ -810,22 +1252,51 @@ mod tests {
             descriptor.cache_size,
             descriptor.blocks * EROFS_BLOCK_SIZE as u64
         );
-        assert_eq!(descriptor.mapped_offset, 0);
-        assert_eq!(descriptor.mapped_blkaddr, 0);
+        assert!(descriptor.mapped_offset >= accessor.bootstrap_size);
+        assert_eq!(
+            descriptor.mapped_offset,
+            descriptor.mapped_blkaddr * EROFS_BLOCK_SIZE as u64
+        );
         let meta = fs::metadata(&descriptor.cache_path).unwrap();
         assert_eq!(meta.len(), descriptor.cache_size);
+        assert_eq!(
+            accessor.flat_size(),
+            descriptor.mapped_offset + descriptor.cache_size
+        );
+        assert_eq!(
+            accessor.bootstrap().metadata().unwrap().len(),
+            accessor.bootstrap_size
+        );
+        assert!(accessor.zero_fd() >= 0);
+        let bootstrap_ranges = accessor
+            .fetch_flat_ranges(0, EROFS_BLOCK_SIZE as u64)
+            .unwrap();
+        assert_eq!(bootstrap_ranges.len(), 1);
+        assert_eq!(bootstrap_ranges[0].fd, accessor.bootstrap().as_raw_fd());
+        assert_eq!(bootstrap_ranges[0].offset, 0);
+        assert_eq!(bootstrap_ranges[0].source_offset, 0);
+        assert_eq!(bootstrap_ranges[0].len, EROFS_BLOCK_SIZE as u64);
 
         // Fetch a block-aligned range in the middle; the cache file should be
         // populated for that range and a second fetch is idempotent. The dense
         // blob address space is independent of path order, so exact file
         // content is covered by the static read API test below.
         let block = EROFS_BLOCK_SIZE as u64;
-        let (offset, len) = (256 * block, 16 * block);
-        accessor.blob.fetch(&blob_id, offset, len).unwrap();
+        let (blob_offset, len) = (256 * block, 16 * block);
+        let offset = descriptor.mapped_offset + blob_offset;
+        assert!(accessor.probe_flat_ranges(offset, len).unwrap().is_empty());
+        let fd_ranges = accessor.fetch_flat_ranges(offset, len).unwrap();
+        assert_eq!(fd_ranges.len(), 1);
+        assert_eq!(fd_ranges[0].offset, blob_offset);
+        assert_eq!(fd_ranges[0].len, len);
+        assert_eq!(fd_ranges[0].source_offset, offset);
+        assert_ne!(fd_ranges[0].fd, accessor.zero_fd());
+        accessor.blob.fetch(&blob_id, blob_offset, len).unwrap();
         let cached = fs::read(&descriptor.cache_path).unwrap();
-        assert!(cached[offset as usize..(offset + len) as usize]
+        assert!(cached[blob_offset as usize..(blob_offset + len) as usize]
             .iter()
             .any(|byte| *byte != 0));
+        assert_eq!(accessor.probe_flat_ranges(offset, len).unwrap(), fd_ranges);
 
         // Idempotent re-fetch and zero-length fetch are fine.
         accessor.blob.fetch(&blob_id, offset, len).unwrap();
@@ -1023,7 +1494,13 @@ mod tests {
         assert!(before.iter().all(|byte| *byte == 0));
 
         let file1_entry = accessor.fs.open("file1").unwrap();
+        assert!(file1_entry.probe_ranges(12345, 4097).unwrap().is_empty());
+        let ranges = file1_entry.fetch_ranges(12345, 4097).unwrap();
+        assert!(!ranges.is_empty());
+        assert_eq!(ranges[0].source_offset, 12345);
+        assert_ne!(ranges[0].fd, accessor.zero_fd());
         file1_entry.fetch(12345, 4097).unwrap();
+        assert_eq!(file1_entry.probe_ranges(12345, 4097).unwrap(), ranges);
 
         let after = fs::read(&blobs[0].cache_path).unwrap();
         assert!(after.iter().any(|byte| *byte != 0));

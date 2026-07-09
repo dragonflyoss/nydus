@@ -11,7 +11,7 @@ pub mod tracing;
 pub mod utils;
 
 pub use accessor::{
-    BlobAccessor, BlobID, BlobInfo, DirEntry, FileType, FsAccessor, FsEntry, Metadata,
+    BlobAccessor, BlobID, BlobInfo, DirEntry, FdRange, FileType, FsAccessor, FsEntry, Metadata,
     NydusAccessor,
 };
 pub use config::Config;

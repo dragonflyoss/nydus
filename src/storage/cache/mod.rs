@@ -3,6 +3,7 @@ pub mod local;
 use std::io;
 use std::io::Cursor;
 use std::ops::Range;
+use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,6 +13,16 @@ use crate::storage::backend::{BlobBackend, ReadContext, RequestSource};
 pub use local::LocalBlobCache;
 pub trait BlobCache: Send + Sync {
     fn read_at(&self, offset: u64, dst: &mut [u8]) -> io::Result<()>;
+
+    /// Return the raw fd of the cache data file for mmap use.
+    ///
+    /// The caller must not close the fd; it remains owned by this cache.
+    fn cache_fd(&self) -> io::Result<RawFd> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "cache_fd is not supported by this blob cache",
+        ))
+    }
 
     /// Fetch, decode, validate, cache, and mark ready every group of this blob.
     /// Used by blob-level prefetch after a filesystem is mounted.
@@ -35,6 +46,15 @@ pub trait BlobCache: Send + Sync {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "ensure_range is not supported by this blob cache",
+        ))
+    }
+
+    /// Return ready byte intervals overlapping `[offset, offset + len)`.
+    /// This must not trigger backend fetch.
+    fn ready_ranges(&self, _offset: u64, _len: u64) -> io::Result<Vec<Range<u64>>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "ready_ranges is not supported by this blob cache",
         ))
     }
 

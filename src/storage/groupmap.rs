@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -122,6 +123,27 @@ impl GroupMap {
         Ok(self.bit_byte(index).load(Ordering::Acquire) & mask != 0)
     }
 
+    pub fn ready_ranges(&self, first: usize, last: usize) -> io::Result<Vec<Range<usize>>> {
+        ensure_range(first, last, self.group_count)?;
+
+        let mut ranges = Vec::new();
+        let mut start = None;
+        for index in first..=last {
+            match (start, self.is_ready(index)?) {
+                (None, true) => start = Some(index),
+                (Some(range_start), false) => {
+                    ranges.push(range_start..index);
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(range_start) = start {
+            ranges.push(range_start..last + 1);
+        }
+        Ok(ranges)
+    }
+
     pub fn set_ready(&self, index: usize) -> io::Result<()> {
         ensure_index(index, self.group_count)?;
         let mask = 1u8 << (index % 8);
@@ -161,6 +183,18 @@ fn ensure_index(index: usize, group_count: usize) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("group index {index} out of range {group_count}"),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_range(first: usize, last: usize, group_count: usize) -> io::Result<()> {
+    ensure_index(first, group_count)?;
+    ensure_index(last, group_count)?;
+    if first > last {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid group range",
         ));
     }
     Ok(())
@@ -207,6 +241,21 @@ mod tests {
             writer.set_ready(index).unwrap();
         }
         assert!(observer.all_ready());
+    }
+
+    #[test]
+    fn groupmap_reports_merged_ready_ranges() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blob.groupmap");
+        let map = GroupMap::open(&path, 10).unwrap();
+        for index in [1, 2, 4, 7, 8, 9] {
+            map.set_ready(index).unwrap();
+        }
+
+        assert_eq!(map.ready_ranges(0, 9).unwrap(), vec![1..3, 4..5, 7..10]);
+        assert_eq!(map.ready_ranges(7, 9).unwrap(), vec![7..10]);
+        assert_eq!(map.ready_ranges(0, 8).unwrap(), vec![1..3, 4..5, 7..9]);
+        assert_eq!(map.ready_ranges(8, 9).unwrap(), vec![8..10]);
     }
 
     #[test]
