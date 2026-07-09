@@ -51,6 +51,8 @@ ignore = [
     { id = "RUSTSEC-2026-0119", reason = "hickory-proto v0.25.2 O(n^2) label compression in BinEncoder only triggers with many-record messages. Nydus only sends simple single-record A/AAAA queries; the encoding path cannot be reached by external input. Transitive dep via storage/hickory-resolver 0.25." },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki v0.103.12 CRL parsing panic is only reachable when certificate revocation lists are configured. Nydus does not enable CRL verification. Transitive dep from reqwest/hyper-rustls." },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 v2.0.1 is unmaintained. Build-time only proc-macro helper, transitive dep via getset (used by neli and oci-spec). No safe upgrade available until upstream migrates away." },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml <0.41 O(N^2) duplicate attribute check. Transitive dep via dragonfly-client-util -> opendal/reqsign. Only parses cloud storage API responses (S3 etc.), not untrusted XML. Upstream opendal 0.55 / reqsign 0.16 pin quick-xml 0.37/0.38, no upgrade available." },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml <0.41 NsReader unbounded namespace allocation. Transitive dep via dragonfly-client-util -> opendal/reqsign. Only parses cloud storage API responses (S3 etc.), not untrusted XML. Upstream opendal 0.55 / reqsign 0.16 pin quick-xml 0.37/0.38, no upgrade available." },
 ]
 # Threshold for security vulnerabilities, any vulnerability with a CVSS score
 # lower than the range specified will be ignored. Note that ignored advisories
