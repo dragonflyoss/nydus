@@ -2285,7 +2285,6 @@ dependencies = [
  "rand 0.8.6",
  "reqwest 0.12.28",
  "rolling-file",
- "sendfd",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -4036,15 +4035,6 @@ name = "semver"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
-
-[[package]]
-name = "sendfd"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b183bfd5b1bc64ab0c1ef3ee06b008a9ef1b68a7d3a99ba566fbfe7a7c6d745b"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "serde"

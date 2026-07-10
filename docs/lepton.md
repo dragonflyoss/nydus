@@ -13,7 +13,6 @@ The user-facing commands are:
 - `lepton check`
 - `lepton merge`
 - `lepton fuse`
-- `lepton uffd` (with the optional `uffd` feature)
 
 The current merge implementation focuses on metadata overlay, blob-id
 preservation and OCI whiteout handling. The build and runtime paths use the
@@ -261,10 +260,10 @@ Current implementation notes:
 `lepton fuse [OPTIONS]`
 
 The `lepton fuse` command mounts lepton metadata as a filesystem at the target
-mountpoint. It is the host filesystem mount entrypoint; microVM integrations
-can instead use [`lepton uffd`](#uffd). During read path resolution, runtime
-uses the blob id recorded in bootstrap metadata to locate the corresponding
-blob under `--blob-dir` and then serves chunk data from that blob.
+mountpoint. It is the only runtime mount entrypoint. During read path
+resolution, runtime uses the blob id recorded in bootstrap metadata to locate
+the corresponding blob under `--blob-dir` and then serves chunk data from that
+blob.
 
 Current implementation notes:
 
@@ -323,56 +322,11 @@ the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
 `--blob-dir`/`--cache-dir` flags take precedence over the config. See
 [Storage config](#storage-config).
 
-### UFFD
-
-`lepton uffd [OPTIONS]`
-
-The `lepton uffd` command serves a flattened Lepton image to microVM processes
-over a Unix stream socket. A microVM can expose an anonymous virtio-pmem VMA to
-its guest, register the VMA with userfaultfd, and let Lepton resolve faults from
-the bootstrap and decoded blob cache files. The guest mounts the resulting
-device as EROFS.
-
-The UFFD command is available only when Lepton is built with both the `cli` and
-`uffd` features. The `uffd` feature gates the service and its FD-passing
-dependency, so other Lepton library and builtin-accessor users do not include
-the UFFD service path.
-
-```bash
-cargo build --release --features cli,uffd --bin lepton
-
-lepton uffd \
-  --bootstrap /var/lib/lepton/image/image.boot \
-  --config /etc/lepton/config.yaml \
-  --socket /run/lepton/uffd.sock
-```
-
-Options:
-
-- `--bootstrap` selects the EROFS bootstrap used as device metadata.
-- `--config` selects the regular Lepton backend, cache, and prefetch
-  configuration.
-- `--socket` is the Unix socket used by microVM clients.
-- `--threads` optionally sets the Tokio runtime worker count; when omitted,
-  Tokio chooses its default from available host CPUs.
-- `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
-
-The service supports multiple connections, Zerocopy and Copy page-fault
-policies, optional prefaulting of locally ready ranges, and stateless
-`STAT`/`FETCH`/`PROBE` requests for clients that monitor userfaultfd themselves.
-Termination signals stop the listener, drain connection tasks, remove the Unix
-socket, and then exit the runtime.
-
-See [Lepton UFFD Service and Wire Protocol](uffd.md) for the flattened device
-layout, binary framing, SCM_RIGHTS FD rules, request/response formats, and
-fault-handling responsibilities.
-
 ### Storage config
 
-`lepton fuse`, `lepton uffd`, and `lepton check` accept a shared YAML storage
-config through `--config <path>`. It centralizes the backend directory, cache
-directory, and prefetch behavior so command-specific directory flags can be
-omitted.
+`lepton fuse` and `lepton check` accept a shared YAML storage config through
+`--config <path>`. It centralizes the backend directory, cache directory, and
+prefetch behavior so the directory flags can be omitted.
 
 ```yaml
 backend:
@@ -411,15 +365,14 @@ Fields:
 
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
-override the corresponding config directories. Runtime prefetch applies to
-`lepton fuse` and `lepton uffd`; static `lepton check` does not start it.
-Unknown `backend.type`/`cache.type` values are rejected at load time.
+override the corresponding config directories, and `prefetch` only applies to
+`lepton fuse`. Unknown `backend.type`/`cache.type` values are rejected at load
+time.
 
 Example invocations:
 
 ```bash
 lepton fuse --bootstrap layer.bootstrap --config storage.yaml --mountpoint /mnt/lepton
-lepton uffd --bootstrap layer.bootstrap --config storage.yaml --socket /run/lepton/uffd.sock
 lepton check --bootstrap layer.bootstrap --config storage.yaml
 ```
 
@@ -1112,9 +1065,7 @@ all 50, vs ≈25s for one).
 
 `lepton::accessor::LeptonAccessor` is the library entry point for hypervisors
 that mount the lepton image inside the guest as a plain EROFS
-filesystem over virtio-pmem, instead of using `lepton fuse` on the host. The
-`lepton uffd` service builds its flattened device and on-demand fetch path on
-the same accessor; see [Lepton UFFD Service and Wire Protocol](uffd.md).
+filesystem over virtio-pmem, instead of using `lepton fuse` on the host:
 
 - The bootstrap is the EROFS primary device; each data blob is an external
 	device backed by its host cache data file (`{cache_dir}/{hex}.blob.data`),

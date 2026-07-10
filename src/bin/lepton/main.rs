@@ -6,8 +6,6 @@ mod check;
 mod fuse;
 mod merge;
 mod optimize;
-#[cfg(feature = "uffd")]
-mod uffd;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -17,8 +15,6 @@ use crate::check::{run_check, CheckArgs};
 use crate::fuse::{run_fuse_mount, FuseArgs};
 use crate::merge::{run_merge, MergeArgs};
 use crate::optimize::{run_optimize, OptimizeArgs};
-#[cfg(feature = "uffd")]
-use crate::uffd::{run_uffd_service, UffdArgs};
 
 #[derive(Parser)]
 #[command(name = "lepton", about = "Lepton filesystem tools")]
@@ -39,9 +35,6 @@ enum Commands {
     Optimize(OptimizeArgs),
     /// Mount an lepton image through FUSE.
     Fuse(FuseArgs),
-    /// Serve a flattened lepton image through userfaultfd.
-    #[cfg(feature = "uffd")]
-    Uffd(UffdArgs),
 }
 
 fn main() -> Result<()> {
@@ -52,7 +45,5 @@ fn main() -> Result<()> {
         Commands::Merge(args) => run_merge(args),
         Commands::Optimize(args) => run_optimize(args),
         Commands::Fuse(args) => run_fuse_mount(args),
-        #[cfg(feature = "uffd")]
-        Commands::Uffd(args) => run_uffd_service(args),
     }
 }

@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -375,45 +374,6 @@ impl BlobAccessor {
         cache
             .ensure_range(offset, len)
             .with_context(|| format!("failed to fetch blob {blob_index} range [{offset}, +{len})"))
-    }
-
-    /// Check whether `[offset, offset + len)` of the blob's dense
-    /// uncompressed address space is already decoded and resident in the cache
-    /// file. This never triggers backend fetch.
-    pub fn is_range_ready(&self, id: &BlobID, offset: u64, len: u64) -> Result<bool> {
-        if len == 0 {
-            return Ok(true);
-        }
-        let blob_index = *self
-            .index_by_blob_id
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
-        let cache = self
-            .reader
-            .blob_cache(blob_index)
-            .with_context(|| format!("failed to open blob {blob_index}"))?;
-        cache
-            .is_range_ready(offset, len)
-            .with_context(|| format!("failed to probe blob {blob_index} range [{offset}, +{len})"))
-    }
-
-    /// Return ready byte intervals overlapping `[offset, offset + len)` in a
-    /// blob's dense uncompressed address space without fetching cold groups.
-    pub fn ready_ranges(&self, id: &BlobID, offset: u64, len: u64) -> Result<Vec<Range<u64>>> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let blob_index = *self
-            .index_by_blob_id
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
-        let cache = self
-            .reader
-            .blob_cache(blob_index)
-            .with_context(|| format!("failed to open blob {blob_index}"))?;
-        cache.ready_ranges(offset, len).with_context(|| {
-            format!("failed to enumerate ready blob {blob_index} ranges [{offset}, +{len})")
-        })
     }
 }
 

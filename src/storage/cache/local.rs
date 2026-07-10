@@ -1,8 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::ops::Range;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -342,56 +341,6 @@ impl BlobCache for LocalBlobCache {
         }
         let cache_file = self.cache_file()?;
         self.ensure_byte_range(offset, len, cache_file.as_ref())
-    }
-
-    fn is_range_ready(&self, offset: u64, len: u64) -> io::Result<bool> {
-        if len == 0 {
-            return Ok(true);
-        }
-        if self.blob_meta.is_redirect_blob() {
-            return Ok(false);
-        }
-        let first = match self.blob_meta.group_index_for_byte_offset(offset) {
-            Some(i) => i,
-            None => return Ok(false),
-        };
-        let last = match self.blob_meta.group_index_for_byte_offset(offset + len - 1) {
-            Some(i) => i,
-            None => return Ok(false),
-        };
-        self.groupmap.is_range_ready(first, last)
-    }
-
-    fn ready_ranges(&self, offset: u64, len: u64) -> io::Result<Vec<Range<u64>>> {
-        if len == 0 || self.blob_meta.is_redirect_blob() {
-            return Ok(Vec::new());
-        }
-        let end = offset.checked_add(len).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "blob probe range overflow")
-        })?;
-        let first = self
-            .blob_meta
-            .group_index_for_byte_offset(offset)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
-        let last = self
-            .blob_meta
-            .group_index_for_byte_offset(end - 1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
-
-        self.groupmap
-            .ready_ranges(first, last)?
-            .into_iter()
-            .map(|groups| {
-                let first_group = self.blob_meta.group_at(groups.start).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
-                })?;
-                let last_group = self.blob_meta.group_at(groups.end - 1).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "blob meta group not found")
-                })?;
-                Ok(first_group.uncompressed_byte_offset().max(offset)
-                    ..last_group.uncompressed_byte_end().min(end))
-            })
-            .collect()
     }
 
     fn is_redirect_blob(&self) -> bool {

@@ -29,12 +29,6 @@ cli = [
   "dep:tracing-panic",
   "dep:tracing-subscriber",
 ]
-# Device-level userfaultfd service for microVM virtio-pmem use cases.
-# This is intentionally not part of the default or builtin accessor path.
-uffd = [
-  "dep:sendfd",
-  "dep:tokio",
-]
 # Container image registry backend (OCI distribution).
 backend-registry = [
   "dep:reqwest",
@@ -81,7 +75,6 @@ rolling-file = { version = "0.2.0", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-sendfd = { version = "0.4", optional = true }
 sha2 = "0.10"
 signal-hook = { version = "0.3", optional = true }
 tempfile = "3.1.0"
