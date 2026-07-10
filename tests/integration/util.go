@@ -62,7 +62,7 @@ func mustLookupExecutable(t *testing.T, name string) string {
 }
 
 // lookupExecutable tries to find the given executable name unorderedly under
-// ../../target/{release,debug}/ (and ../../leptonify/ for the Go binary), then
+// ../../target/{release,debug}/ (and ../../nydusify/ for the Go binary), then
 // falls back to PATH. In-tree builds win so the tests always exercise the
 // freshly built binaries even when a stale copy is installed system-wide.
 func lookupExecutable(name string) (string, error) {
@@ -78,8 +78,8 @@ func lookupExecutable(name string) (string, error) {
 		}
 	}
 
-	// The leptonify Go binary is built in-tree at leptonify/leptonify.
-	if p := filepath.Join(root, "leptonify", name); name == "leptonify" {
+	// The nydusify Go binary is built in-tree at nydusify/nydusify.
+	if p := filepath.Join(root, "nydusify", name); name == "nydusify" {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
@@ -223,9 +223,9 @@ func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, mnt string, blobdev
 	}
 }
 
-// mountLepton runs `lepton fuse` in the background and returns a cleanup
+// mountNydus runs `nydus fuse` in the background and returns a cleanup
 // function that unmounts the filesystem and reaps the child process.
-func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (cleanup func()) {
+func mountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup func()) {
 	_ = exec.Command("fusermount", "-u", mnt).Run()
 	require.NoError(t, os.MkdirAll(mnt, 0755))
 
@@ -235,10 +235,10 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 	} else if blobdev != "" {
 		args = append(args, "--blob", blobdev)
 	} else {
-		require.FailNow(t, "mountLepton requires either blobdev or imagePath+blobdev")
+		require.FailNow(t, "mountNydus requires either blobdev or imagePath+blobdev")
 	}
 
-	cmd := exec.Command(leptonBin, args...)
+	cmd := exec.Command(nydusBin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
@@ -246,7 +246,7 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 	// Wait for the mountpoint to become ready.
 	require.Eventually(t, func() bool {
 		return isMountpoint(mnt)
-	}, 10*time.Second, 200*time.Millisecond, "lepton fuse failed to mount within 10s")
+	}, 10*time.Second, 200*time.Millisecond, "nydus fuse failed to mount within 10s")
 
 	return func() {
 		_ = exec.Command("fusermount", "-u", mnt).Run()
@@ -265,16 +265,16 @@ func mountLepton(t *testing.T, leptonBin, imagePath, blobdev, mnt string) (clean
 	}
 }
 
-// mountLeptonBootstrap runs `lepton fuse` using a bootstrap plus a blob directory.
-func mountLeptonBootstrap(t *testing.T, leptonBin, bootstrapPath, blobDir, mnt string) (cleanup func()) {
-	return mountLeptonBootstrapWithCache(t, leptonBin, bootstrapPath, blobDir, "", mnt)
+// mountNydusBootstrap runs `nydus fuse` using a bootstrap plus a blob directory.
+func mountNydusBootstrap(t *testing.T, nydusBin, bootstrapPath, blobDir, mnt string) (cleanup func()) {
+	return mountNydusBootstrapWithCache(t, nydusBin, bootstrapPath, blobDir, "", mnt)
 }
 
-// mountLeptonBootstrapWithCache runs `lepton fuse` using a bootstrap plus a blob directory,
+// mountNydusBootstrapWithCache runs `nydus fuse` using a bootstrap plus a blob directory,
 // optionally enabling the persistent chunk cache.
-func mountLeptonBootstrapWithCache(
+func mountNydusBootstrapWithCache(
 	t *testing.T,
-	leptonBin,
+	nydusBin,
 	bootstrapPath,
 	blobDir,
 	cacheDir,
@@ -288,14 +288,14 @@ func mountLeptonBootstrapWithCache(
 		require.NoError(t, os.MkdirAll(cacheDir, 0755))
 		args = append(args, "--cache-dir", cacheDir)
 	}
-	cmd := exec.Command(leptonBin, args...)
+	cmd := exec.Command(nydusBin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
 
 	require.Eventually(t, func() bool {
 		return isMountpoint(mnt)
-	}, 10*time.Second, 200*time.Millisecond, "lepton bootstrap fuse failed to mount within 10s")
+	}, 10*time.Second, 200*time.Millisecond, "nydus bootstrap fuse failed to mount within 10s")
 
 	return func() {
 		_ = exec.Command("fusermount", "-u", mnt).Run()
@@ -313,21 +313,21 @@ func mountLeptonBootstrapWithCache(
 	}
 }
 
-// buildLeptonFSImage invokes `lepton build` to create an LeptonFS image and its
+// buildNydusFSImage invokes `nydus build` to create an NydusFS image and its
 // associated blob device file.
-func buildLeptonFSImage(t *testing.T, leptonBin, imagePath, blobdev, srcDir string, chunkSize int) string {
+func buildNydusFSImage(t *testing.T, nydusBin, imagePath, blobdev, srcDir string, chunkSize int) string {
 	args := []string{"build", "--blob", blobdev, "--chunk-size", fmt.Sprint(chunkSize), "--compressor", "zstd"}
 	if imagePath != "" {
 		args = append(args, "--bootstrap", imagePath)
 	}
 	args = append(args, srcDir)
 
-	out, err := exec.Command(leptonBin, args...).CombinedOutput()
-	require.NoError(t, err, "lepton build failed: %s", string(out))
+	out, err := exec.Command(nydusBin, args...).CombinedOutput()
+	require.NoError(t, err, "nydus build failed: %s", string(out))
 	return blobdev
 }
 
-func buildLeptonFSImageToDir(t *testing.T, leptonBin, imagePath, blobDir, srcDir string, chunkSize int) string {
+func buildNydusFSImageToDir(t *testing.T, nydusBin, imagePath, blobDir, srcDir string, chunkSize int) string {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(blobDir, 0755))
 	before := listFilesInDir(t, blobDir)
@@ -338,8 +338,8 @@ func buildLeptonFSImageToDir(t *testing.T, leptonBin, imagePath, blobDir, srcDir
 	}
 	args = append(args, srcDir)
 
-	out, err := exec.Command(leptonBin, args...).CombinedOutput()
-	require.NoError(t, err, "lepton build --blob-dir failed: %s", string(out))
+	out, err := exec.Command(nydusBin, args...).CombinedOutput()
+	require.NoError(t, err, "nydus build --blob-dir failed: %s", string(out))
 
 	after := listFilesInDir(t, blobDir)
 	var blobs []string
@@ -367,13 +367,13 @@ func buildLeptonFSImageToDir(t *testing.T, leptonBin, imagePath, blobDir, srcDir
 	return blobs[0]
 }
 
-// mergeLeptonBootstrap invokes `lepton merge` and writes an overlaid bootstrap.
-func mergeLeptonBootstrap(t *testing.T, leptonBin, bootstrapPath string, sources ...string) {
+// mergeNydusBootstrap invokes `nydus merge` and writes an overlaid bootstrap.
+func mergeNydusBootstrap(t *testing.T, nydusBin, bootstrapPath string, sources ...string) {
 	args := []string{"merge", "--bootstrap", bootstrapPath}
 	args = append(args, sources...)
 
-	out, err := exec.Command(leptonBin, args...).CombinedOutput()
-	require.NoError(t, err, "lepton merge failed: %s", string(out))
+	out, err := exec.Command(nydusBin, args...).CombinedOutput()
+	require.NoError(t, err, "nydus merge failed: %s", string(out))
 }
 
 func listFilesInDir(t *testing.T, dir string) map[string]struct{} {

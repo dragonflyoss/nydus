@@ -17,61 +17,61 @@ import (
 )
 
 // TestTopImages converts and validates the most popular Docker Hub images with
-// leptonify, exercising the full convert + check pipeline against a local
+// nydusify, exercising the full convert + check pipeline against a local
 // registry.
 //
 // Activation:
 //
-//	LEPTONFS_RUN_TOP_IMAGES=1   enable the test (off by default).
+//	NYDUSFS_RUN_TOP_IMAGES=1   enable the test (off by default).
 //
 // Tuning knobs (all optional):
 //
-//	LEPTONFS_TOP_IMAGES_REGISTRY     Target registry/namespace for the converted
-//	                                 lepton images (default "localhost:5000"). On
+//	NYDUSFS_TOP_IMAGES_REGISTRY     Target registry/namespace for the converted
+//	                                 nydus images (default "localhost:5000"). On
 //	                                 CI this points at the GHCR namespace
-//	                                 (e.g. "ghcr.io/dragonflyoss/lepton") so the
+//	                                 (e.g. "ghcr.io/dragonflyoss/nydus") so the
 //	                                 converted images are pushed straight to GHCR
 //	                                 instead of a local registry, which keeps the
 //	                                 runner's root volume from filling up.
-//	LEPTONFS_TOP_IMAGES_PLAIN_HTTP   Whether convert/check talk to the target
+//	NYDUSFS_TOP_IMAGES_PLAIN_HTTP   Whether convert/check talk to the target
 //	                                 registry over plain HTTP without TLS
 //	                                 verification ("1"/"true" to enable). Defaults
 //	                                 to true only for localhost registries; for a
 //	                                 real registry such as GHCR it defaults to
 //	                                 false so the pipeline uses HTTPS.
-//	LEPTONFS_TOP_IMAGES_PLATFORM     Platform to convert/check (default
+//	NYDUSFS_TOP_IMAGES_PLATFORM     Platform to convert/check (default
 //	                                 "linux/amd64"). Multi-arch images include a
 //	                                 Windows manifest whose layers cannot be
 //	                                 extracted on Linux, so the suite pins to a
 //	                                 single Linux platform. Set to "all" (or empty)
 //	                                 to convert every platform.
-//	LEPTONFS_TOP_IMAGES_CONCURRENCY  Number of images processed in parallel (default 5).
-//	LEPTONFS_TOP_IMAGES_RETRIES      Number of times convert/check are retried when
+//	NYDUSFS_TOP_IMAGES_CONCURRENCY  Number of images processed in parallel (default 5).
+//	NYDUSFS_TOP_IMAGES_RETRIES      Number of times convert/check are retried when
 //	                                 they hit a transient registry failure such as
 //	                                 ghcr.io returning HTTP 5xx or rate limiting
 //	                                 (default 5). Set to 0 to disable retries.
-//	LEPTONFS_TOP_IMAGES_RETRY_INTERVAL
+//	NYDUSFS_TOP_IMAGES_RETRY_INTERVAL
 //	                                 Base wait between retries; the delay grows
 //	                                 linearly with each attempt to give an unstable
 //	                                 registry more room to recover (default 30s).
-//	LEPTONFS_TOP_IMAGES_LIST         Path to the image list (default texture/top-images.txt).
-//	LEPTONFS_TOP_IMAGES_WORKDIR      Base directory for the per-image convert/check
+//	NYDUSFS_TOP_IMAGES_LIST         Path to the image list (default texture/top-images.txt).
+//	NYDUSFS_TOP_IMAGES_WORKDIR      Base directory for the per-image convert/check
 //	                                 scratch work directories. Point this at a mount
 //	                                 with ample free space (e.g. /mnt on GitHub
 //	                                 runners) to avoid "no space left on device".
 //	                                 Defaults to the test's temp dir.
 //
-// The test requires root because `leptonify convert` preserves file ownership
-// and `leptonify check` mounts the converted image through FUSE.
+// The test requires root because `nydusify convert` preserves file ownership
+// and `nydusify check` mounts the converted image through FUSE.
 func TestTopImages(t *testing.T) {
-	if os.Getenv("LEPTONFS_RUN_TOP_IMAGES") == "" {
-		t.Skip("set LEPTONFS_RUN_TOP_IMAGES=1 to run the top-images e2e test")
+	if os.Getenv("NYDUSFS_RUN_TOP_IMAGES") == "" {
+		t.Skip("set NYDUSFS_RUN_TOP_IMAGES=1 to run the top-images e2e test")
 	}
 	if os.Getuid() != 0 {
 		t.Skip("requires root (convert preserves ownership, check mounts via FUSE)")
 	}
 
-	registry := os.Getenv("LEPTONFS_TOP_IMAGES_REGISTRY")
+	registry := os.Getenv("NYDUSFS_TOP_IMAGES_REGISTRY")
 	if registry == "" {
 		registry = "localhost:5000"
 	}
@@ -81,9 +81,9 @@ func TestTopImages(t *testing.T) {
 	// while a real registry such as GHCR speaks HTTPS, so default accordingly
 	// and allow an explicit override.
 	plainHTTP := registryIsLocal(registry)
-	if v := os.Getenv("LEPTONFS_TOP_IMAGES_PLAIN_HTTP"); v != "" {
+	if v := os.Getenv("NYDUSFS_TOP_IMAGES_PLAIN_HTTP"); v != "" {
 		b, err := strconv.ParseBool(v)
-		require.NoError(t, err, "invalid LEPTONFS_TOP_IMAGES_PLAIN_HTTP %q", v)
+		require.NoError(t, err, "invalid NYDUSFS_TOP_IMAGES_PLAIN_HTTP %q", v)
 		plainHTTP = b
 	}
 
@@ -95,7 +95,7 @@ func TestTopImages(t *testing.T) {
 	// the Linux rootfs is converted/checked. An empty value (or "all") restores
 	// the convert-all behaviour.
 	platform := "linux/amd64"
-	if v, ok := os.LookupEnv("LEPTONFS_TOP_IMAGES_PLATFORM"); ok {
+	if v, ok := os.LookupEnv("NYDUSFS_TOP_IMAGES_PLATFORM"); ok {
 		platform = v
 	}
 	if platform == "all" {
@@ -103,7 +103,7 @@ func TestTopImages(t *testing.T) {
 	}
 
 	concurrency := 5
-	if v := os.Getenv("LEPTONFS_TOP_IMAGES_CONCURRENCY"); v != "" {
+	if v := os.Getenv("NYDUSFS_TOP_IMAGES_CONCURRENCY"); v != "" {
 		n, err := fmt.Sscanf(v, "%d", &concurrency)
 		require.NoError(t, err)
 		require.Equal(t, 1, n)
@@ -115,22 +115,22 @@ func TestTopImages(t *testing.T) {
 	// times, spacing the attempts out, so a flaky registry does not fail the whole
 	// suite. Both the retry count and the base interval are tunable.
 	retries := 5
-	if v := os.Getenv("LEPTONFS_TOP_IMAGES_RETRIES"); v != "" {
+	if v := os.Getenv("NYDUSFS_TOP_IMAGES_RETRIES"); v != "" {
 		n, err := strconv.Atoi(v)
-		require.NoError(t, err, "invalid LEPTONFS_TOP_IMAGES_RETRIES %q", v)
+		require.NoError(t, err, "invalid NYDUSFS_TOP_IMAGES_RETRIES %q", v)
 		require.GreaterOrEqual(t, n, 0, "retries must be non-negative")
 		retries = n
 	}
 
 	retryInterval := 30 * time.Second
-	if v := os.Getenv("LEPTONFS_TOP_IMAGES_RETRY_INTERVAL"); v != "" {
+	if v := os.Getenv("NYDUSFS_TOP_IMAGES_RETRY_INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
-		require.NoError(t, err, "invalid LEPTONFS_TOP_IMAGES_RETRY_INTERVAL %q", v)
+		require.NoError(t, err, "invalid NYDUSFS_TOP_IMAGES_RETRY_INTERVAL %q", v)
 		require.Greater(t, d, time.Duration(0), "retry interval must be positive")
 		retryInterval = d
 	}
 
-	listPath := os.Getenv("LEPTONFS_TOP_IMAGES_LIST")
+	listPath := os.Getenv("NYDUSFS_TOP_IMAGES_LIST")
 	if listPath == "" {
 		listPath = filepath.Join("texture", "top-images.txt")
 	}
@@ -138,16 +138,16 @@ func TestTopImages(t *testing.T) {
 	require.NotEmpty(t, images, "image list %q is empty", listPath)
 
 	// Base directory for the per-image scratch work directories. Convert/check
-	// stage multi-gigabyte blobs and rootfs trees, so when LEPTONFS_TOP_IMAGES_WORKDIR
+	// stage multi-gigabyte blobs and rootfs trees, so when NYDUSFS_TOP_IMAGES_WORKDIR
 	// is set we place the work directories on that (larger) mount instead of the
 	// default temp filesystem, which on CI runners is the small root volume.
-	workBase := os.Getenv("LEPTONFS_TOP_IMAGES_WORKDIR")
+	workBase := os.Getenv("NYDUSFS_TOP_IMAGES_WORKDIR")
 	if workBase != "" {
 		require.NoError(t, os.MkdirAll(workBase, 0o755))
 	}
 
-	leptonifyBin := mustLookupLeptonify(t)
-	leptonBin := mustLookupExecutable(t, "lepton")
+	nydusifyBin := mustLookupNydusify(t)
+	nydusBin := mustLookupExecutable(t, "nydus")
 
 	// Cap parallelism at `concurrency` while still running each image as an
 	// independent subtest so failures are reported per image.
@@ -173,11 +173,11 @@ func TestTopImages(t *testing.T) {
 					done, total, atomic.LoadInt64(&succeeded))
 			}()
 
-			// Push the converted lepton image alongside its source in the target
-			// registry/namespace, suffixing the repository with "-lepton" so it
+			// Push the converted nydus image alongside its source in the target
+			// registry/namespace, suffixing the repository with "-nydus" so it
 			// does not collide with the source image (e.g.
-			// ghcr.io/dragonflyoss/lepton/nginx -> .../nginx-lepton).
-			target := fmt.Sprintf("%s/%s-lepton", registry, imageBaseName(image))
+			// ghcr.io/dragonflyoss/nydus/nginx -> .../nginx-nydus).
+			target := fmt.Sprintf("%s/%s-nydus", registry, imageBaseName(image))
 
 			// Create the work directory under the (optionally larger) work base
 			// and remove it as soon as this image finishes. The explicit cleanup
@@ -185,20 +185,20 @@ func TestTopImages(t *testing.T) {
 			// when require.* or t.Skip* abort the goroutine via runtime.Goexit —
 			// so scratch data never accumulates across the parallel run and fills
 			// up the disk.
-			workDir, err := os.MkdirTemp(workBase, "leptonify-top-images-")
+			workDir, err := os.MkdirTemp(workBase, "nydusify-top-images-")
 			require.NoError(t, err)
 			defer func() { _ = os.RemoveAll(workDir) }()
 
 			convertArgs := []string{"convert",
 				"--source", image,
 				"--target", target,
-				"--builder", leptonBin,
+				"--builder", nydusBin,
 				"--work-dir", filepath.Join(workDir, "convert"),
 			}
 			convertArgs = append(convertArgs, platformArgs(platform)...)
 			convertArgs = append(convertArgs, registryTLSArgs(plainHTTP)...)
-			out, err := runLeptonifyWithRetry(t, "convert "+image, retries, retryInterval,
-				func() *exec.Cmd { return exec.Command(leptonifyBin, convertArgs...) })
+			out, err := runNydusifyWithRetry(t, "convert "+image, retries, retryInterval,
+				func() *exec.Cmd { return exec.Command(nydusifyBin, convertArgs...) })
 			if err != nil {
 				// Some entries in the popular-image list are no longer published
 				// on Docker Hub (e.g. the deprecated `java` image). Treat a pull
@@ -213,13 +213,13 @@ func TestTopImages(t *testing.T) {
 			checkArgs := []string{"check",
 				"--source", image,
 				"--target", target,
-				"--builder", leptonBin,
+				"--builder", nydusBin,
 				"--work-dir", filepath.Join(workDir, "check"),
 			}
 			checkArgs = append(checkArgs, platformArgs(platform)...)
 			checkArgs = append(checkArgs, registryTLSArgs(plainHTTP)...)
-			_, err = runLeptonifyWithRetry(t, "check "+image, retries, retryInterval,
-				func() *exec.Cmd { return exec.Command(leptonifyBin, checkArgs...) })
+			_, err = runNydusifyWithRetry(t, "check "+image, retries, retryInterval,
+				func() *exec.Cmd { return exec.Command(nydusifyBin, checkArgs...) })
 			require.NoError(t, err, "check %s failed", image)
 
 			atomic.AddInt64(&succeeded, 1)
@@ -228,7 +228,7 @@ func TestTopImages(t *testing.T) {
 }
 
 // imageBaseName returns the last path component of an image reference so a
-// fully-qualified mirror ref (e.g. "ghcr.io/dragonflyoss/lepton/nginx") maps
+// fully-qualified mirror ref (e.g. "ghcr.io/dragonflyoss/nydus/nginx") maps
 // to a flat repository name in the target registry.
 func imageBaseName(image string) string {
 	if i := strings.LastIndex(image, "/"); i >= 0 {
@@ -251,7 +251,7 @@ func registryIsLocal(registry string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// registryTLSArgs returns the leptonify flags controlling transport security
+// registryTLSArgs returns the nydusify flags controlling transport security
 // for the target registry (where converted images are pushed). For a local
 // registry it enables plain HTTP and skips TLS verification; for a real
 // registry such as GHCR it returns no extra flags so HTTPS is used. The
@@ -263,7 +263,7 @@ func registryTLSArgs(plainHTTP bool) []string {
 	return nil
 }
 
-// platformArgs returns the leptonify "--platform" flag pinning convert/check to
+// platformArgs returns the nydusify "--platform" flag pinning convert/check to
 // a single platform, or no flag when platform is empty (convert every platform).
 func platformArgs(platform string) []string {
 	if platform == "" {
@@ -272,7 +272,7 @@ func platformArgs(platform string) []string {
 	return []string{"--platform", platform}
 }
 
-// isImageNotFound reports whether leptonify output indicates the source image
+// isImageNotFound reports whether nydusify output indicates the source image
 // could not be resolved (e.g. a deprecated Docker Hub image returning HTTP 404,
 // or a GHCR mirror that was never created because the upstream image is gone).
 func isImageNotFound(output []byte) bool {
@@ -283,13 +283,13 @@ func isImageNotFound(output []byte) bool {
 		strings.Contains(text, "name unknown")
 }
 
-// runLeptonifyWithRetry runs a leptonify command, streaming its combined output
+// runNydusifyWithRetry runs a nydusify command, streaming its combined output
 // into the test log, and retries on transient registry failures (e.g. ghcr.io
 // returning HTTP 5xx or rate limiting). The command is rebuilt for each attempt
 // via build because an *exec.Cmd cannot be reused. The wait between attempts
 // grows linearly (interval, 2*interval, ...) to give an unstable registry more
 // time to recover. It returns the output and error of the final attempt.
-func runLeptonifyWithRetry(t *testing.T, label string, retries int, interval time.Duration, build func() *exec.Cmd) ([]byte, error) {
+func runNydusifyWithRetry(t *testing.T, label string, retries int, interval time.Duration, build func() *exec.Cmd) ([]byte, error) {
 	t.Helper()
 	attempts := retries + 1
 	var out []byte
@@ -320,7 +320,7 @@ func runLeptonifyWithRetry(t *testing.T, label string, retries int, interval tim
 	return out, err
 }
 
-// isTransientRegistryError reports whether leptonify output indicates a transient
+// isTransientRegistryError reports whether nydusify output indicates a transient
 // registry failure (e.g. ghcr.io returning HTTP 5xx, rate limiting, or a dropped
 // connection) that is worth retrying.
 func isTransientRegistryError(output []byte) bool {
@@ -373,39 +373,39 @@ func readImageList(t *testing.T, path string) []string {
 	return images
 }
 
-// mustLookupLeptonify locates the leptonify binary on PATH or under the
-// leptonify module directory, building it on demand if necessary.
-func mustLookupLeptonify(t *testing.T) string {
+// mustLookupNydusify locates the nydusify binary on PATH or under the
+// nydusify module directory, building it on demand if necessary.
+func mustLookupNydusify(t *testing.T) string {
 	t.Helper()
-	if p, err := exec.LookPath("leptonify"); err == nil {
+	if p, err := exec.LookPath("nydusify"); err == nil {
 		return p
 	}
 
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
-	moduleDir := filepath.Join(root, "leptonify")
+	moduleDir := filepath.Join(root, "nydusify")
 
 	// Already-built binary inside the module directory.
-	built := filepath.Join(moduleDir, "leptonify")
+	built := filepath.Join(moduleDir, "nydusify")
 	if info, err := os.Stat(built); err == nil && !info.IsDir() {
 		return built
 	}
 
 	// Build it once for the whole test run.
-	buildLeptonifyOnce.Do(func() {
+	buildNydusifyOnce.Do(func() {
 		cmd := exec.Command("go", "build", "-o", built, ".")
 		cmd.Dir = moduleDir
 		out, berr := cmd.CombinedOutput()
-		buildLeptonifyErr = berr
+		buildNydusifyErr = berr
 		if berr != nil {
-			buildLeptonifyErr = fmt.Errorf("build leptonify: %w\n%s", berr, out)
+			buildNydusifyErr = fmt.Errorf("build nydusify: %w\n%s", berr, out)
 		}
 	})
-	require.NoError(t, buildLeptonifyErr)
+	require.NoError(t, buildNydusifyErr)
 	return built
 }
 
 var (
-	buildLeptonifyOnce sync.Once
-	buildLeptonifyErr  error
+	buildNydusifyOnce sync.Once
+	buildNydusifyErr  error
 )

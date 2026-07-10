@@ -136,7 +136,7 @@ pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -
     }
 }
 
-/// Set the root directory's trusted.lepton.prefetch_blobs xattr to a comma-separated list of
+/// Set the root directory's trusted.nydus.prefetch_blobs xattr to a comma-separated list of
 /// unique non-zero blob indexes.
 pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]) -> Result<()> {
     let mut prefetch_blob_indexes = Vec::new();
@@ -161,12 +161,12 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]
 
     inode.xattrs.retain(|(index, suffix, _)| {
         !(*index == EROFS_XATTR_INDEX_TRUSTED
-            && suffix.as_slice() == LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS)
+            && suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
     });
 
     inode.xattrs.push((
         EROFS_XATTR_INDEX_TRUSTED,
-        LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
+        NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
         value.into_bytes(),
     ));
 
@@ -722,7 +722,7 @@ mod tests {
         let mut inode = root_inode_with_xattrs(vec![
             (
                 EROFS_XATTR_INDEX_TRUSTED,
-                LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
+                NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
                 b"old".to_vec(),
             ),
             (EROFS_XATTR_INDEX_USER, b"keep".to_vec(), b"value".to_vec()),
@@ -735,7 +735,7 @@ mod tests {
             .iter()
             .filter(|(index, suffix, _)| {
                 *index == EROFS_XATTR_INDEX_TRUSTED
-                    && suffix.as_slice() == LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS
+                    && suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS
             })
             .collect::<Vec<_>>();
         assert_eq!(prefetch_xattrs.len(), 1);

@@ -8,14 +8,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dragonflyoss/lepton/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/integration/texture"
 	"github.com/stretchr/testify/require"
 )
 
-// TestXfstests runs the xfstests read-only suite against a `lepton mount`.
+// TestXfstests runs the xfstests read-only suite against a `nydus mount`.
 func TestXfstests(t *testing.T) {
-	if os.Getenv("LEPTONFS_RUN_XFSTESTS") != "1" {
-		t.Skip("set LEPTONFS_RUN_XFSTESTS=1 to enable")
+	if os.Getenv("NYDUSFS_RUN_XFSTESTS") != "1" {
+		t.Skip("set NYDUSFS_RUN_XFSTESTS=1 to enable")
 	}
 
 	if os.Getuid() != 0 {
@@ -29,26 +29,26 @@ func TestXfstests(t *testing.T) {
 	mntDir := filepath.Join("/tmp", "mnt.xfstests")
 
 	setupXfstests(t, xfstestsDir)
-	leptonBin := mustLookupExecutable(t, "lepton")
+	nydusBin := mustLookupExecutable(t, "nydus")
 
 	t.Log("Generating corpus...")
 	texture.MakeStandardCorpus(t, corpusDir)
 	_ = os.Remove(imagePath)
 	_ = os.Remove(blobdev)
 
-	t.Log("Building LeptonFS image...")
-	buildLeptonFSImage(t, leptonBin, imagePath, blobdev, corpusDir, 4096)
+	t.Log("Building NydusFS image...")
+	buildNydusFSImage(t, nydusBin, imagePath, blobdev, corpusDir, 4096)
 
-	installMountHelper(t, leptonBin, imagePath, blobdev)
+	installMountHelper(t, nydusBin, imagePath, blobdev)
 
 	require.NoError(t, os.MkdirAll(mntDir, 0755))
 	config := fmt.Sprintf(
-		"export TEST_DEV=testleptonfs\nexport TEST_DIR=%s\nexport FSTYP=fuse\nexport FUSE_SUBTYP=.testleptonfs\n",
+		"export TEST_DEV=testnydusfs\nexport TEST_DIR=%s\nexport FSTYP=fuse\nexport FUSE_SUBTYP=.testnydusfs\n",
 		mntDir,
 	)
 	require.NoError(t, os.WriteFile(filepath.Join(xfstestsDir, "local.config"), []byte(config), 0644))
 
-	excludeFile, err := filepath.Abs(filepath.Join("..", "scripts", "xfstests_leptonfs.exclude"))
+	excludeFile, err := filepath.Abs(filepath.Join("..", "scripts", "xfstests_nydusfs.exclude"))
 	require.NoError(t, err)
 	require.FileExists(t, excludeFile)
 
@@ -72,38 +72,38 @@ func TestXfstests(t *testing.T) {
 	}
 }
 
-// installMountHelper writes a helper script to /usr/local/bin/testleptonfs that xfstests will invoke to
-// mount the LeptonFS image. The script ensures that the mount is ready before returning, and logs
+// installMountHelper writes a helper script to /usr/local/bin/testnydusfs that xfstests will invoke to
+// mount the NydusFS image. The script ensures that the mount is ready before returning, and logs
 // output for debugging.
-func installMountHelper(t *testing.T, leptonBin, imagePath, blobdev string) {
+func installMountHelper(t *testing.T, nydusBin, imagePath, blobdev string) {
 	t.Helper()
 
 	script := fmt.Sprintf(`#!/bin/bash
 # xfstests may invoke this as either:
-#   testleptonfs <mountpoint>
+#   testnydusfs <mountpoint>
 # or:
-#   testleptonfs <device> <mountpoint>
+#   testnydusfs <device> <mountpoint>
 if [ "$#" -ge 2 ]; then
     DEVICE="$1"
     MOUNTPOINT="$2"
 else
-    DEVICE="testleptonfs"
+    DEVICE="testnydusfs"
     MOUNTPOINT="$1"
 fi
-[ -z "$MOUNTPOINT" ] && MOUNTPOINT="/tmp/leptonfs_mount"
+[ -z "$MOUNTPOINT" ] && MOUNTPOINT="/tmp/nydusfs_mount"
 ulimit -n 1048576
-pkill -f "lepton fuse.*${MOUNTPOINT}" 2>/dev/null || true
+pkill -f "nydus fuse.*${MOUNTPOINT}" 2>/dev/null || true
 fusermount -u "${MOUNTPOINT}" 2>/dev/null || true
 sleep 0.5
-%s fuse --bootstrap %s --blob-dir %s --mountpoint "${MOUNTPOINT}" --fsname "${DEVICE}" 1>>/tmp/leptonfs.log 2>&1 &
+%s fuse --bootstrap %s --blob-dir %s --mountpoint "${MOUNTPOINT}" --fsname "${DEVICE}" 1>>/tmp/nydusfs.log 2>&1 &
 for i in $(seq 1 20); do
     mountpoint -q "${MOUNTPOINT}" 2>/dev/null && exit 0
     sleep 0.5
 done
-echo "ERROR: lepton fuse failed to mount within 10 seconds" >&2
+echo "ERROR: nydus fuse failed to mount within 10 seconds" >&2
 exit 1
-`, leptonBin, imagePath, filepath.Dir(blobdev))
+`, nydusBin, imagePath, filepath.Dir(blobdev))
 
-	const helperPath = "/usr/local/bin/testleptonfs"
+	const helperPath = "/usr/local/bin/testnydusfs"
 	require.NoError(t, os.WriteFile(helperPath, []byte(script), 0755))
 }

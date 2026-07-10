@@ -1,4 +1,4 @@
-//! Self-contained Prometheus metrics for lepton.
+//! Self-contained Prometheus metrics for nydus.
 //!
 //! This module owns a private [`prometheus::Registry`] and every metric the
 //! daemon exports. Other modules never touch Prometheus types directly; they

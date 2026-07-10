@@ -1,21 +1,21 @@
 [package]
-name = "lepton"
+name = "nydus"
 version = "0.1.0"
 edition = "2021"
-description = "EROFS-oriented image tooling and runtime accessor APIs for Lepton images."
-repository = "https://github.com/dragonflyoss/lepton"
+description = "EROFS-oriented image tooling and runtime accessor APIs for Nydus images."
+repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 
 [[bin]]
-name = "lepton"
-path = "src/bin/lepton/main.rs"
+name = "nydus"
+path = "src/bin/nydus/main.rs"
 required-features = ["cli"]
 
 [features]
 default = ["backend-registry"]
 # FUSE mount support (ErofsFs over fuser).
 fuse = ["dep:fuser"]
-# The `lepton` CLI binary: subcommands, apiserver, file logging, signals.
+# The `nydus` CLI binary: subcommands, apiserver, file logging, signals.
 cli = [
   "fuse",
   "dep:clap",

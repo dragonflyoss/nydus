@@ -2261,48 +2261,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
-name = "lepton"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arc-swap",
- "base64",
- "bitflags 2.11.0",
- "blake3",
- "clap",
- "crc32c",
- "dragonfly-client-request",
- "fuser",
- "futures",
- "hickory-resolver",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
- "memmap2",
- "once_cell",
- "prometheus",
- "rand 0.8.6",
- "reqwest 0.12.28",
- "rolling-file",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.10.9",
- "signal-hook",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-panic",
- "tracing-subscriber",
- "url",
- "uuid",
- "xattr",
- "zstd",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2659,6 +2617,48 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "nydus"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "base64",
+ "bitflags 2.11.0",
+ "blake3",
+ "clap",
+ "crc32c",
+ "dragonfly-client-request",
+ "fuser",
+ "futures",
+ "hickory-resolver",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "memmap2",
+ "once_cell",
+ "prometheus",
+ "rand 0.8.6",
+ "reqwest 0.12.28",
+ "rolling-file",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "signal-hook",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-panic",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "xattr",
+ "zstd",
 ]
 
 [[package]]

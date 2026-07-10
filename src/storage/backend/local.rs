@@ -41,7 +41,7 @@ impl LocalBackend {
         let source = inspect_full_blob_source(path)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("lepton blob footer not found: {}", path.display()),
+                format!("nydus blob footer not found: {}", path.display()),
             )
         })?;
         if sha256_file_range(path, source.data_offset, source.data_size)
@@ -107,7 +107,7 @@ impl LocalBackend {
             let source = inspect_full_blob_source(&exact)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("lepton blob footer not found: {}", exact.display()),
+                    format!("nydus blob footer not found: {}", exact.display()),
                 )
             })?;
             self.resolved_sources

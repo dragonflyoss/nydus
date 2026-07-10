@@ -1,9 +1,9 @@
-// Package texture provides helpers for generating an LeptonFS filesystem test
+// Package texture provides helpers for generating an NydusFS filesystem test
 // corpus.
 //
 // The Corpus type follows a builder pattern similar to nydus
 // smoke/tests/tool/layer.go and creates real files on disk to exercise the
-// `lepton build` and `lepton fuse` code paths.
+// `nydus build` and `nydus fuse` code paths.
 package texture
 
 import (
@@ -23,7 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Corpus represents a directory tree used as input to `lepton build`.
+// Corpus represents a directory tree used as input to `nydus build`.
 type Corpus struct {
 	Dir string
 }
@@ -339,16 +339,16 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 	return c
 }
 
-// MakePerfCorpus creates a corpus designed to amplify performance differences between LeptonFS and erofsfuse.
+// MakePerfCorpus creates a corpus designed to amplify performance differences between NydusFS and erofsfuse.
 func MakePerfCorpus(t *testing.T, dir string) {
 	c := NewCorpus(t, dir)
-	largeFileCount := GetEnvAsInt("LEPTONFS_PERF_LARGE_FILE_COUNT", 8)
-	largeFileSize := GetEnvAsInt("LEPTONFS_PERF_LARGE_FILE_SIZE", 64*1024*1024)
-	mediumFileCount := GetEnvAsInt("LEPTONFS_PERF_MEDIUM_FILE_COUNT", 256)
-	mediumFileSize := GetEnvAsInt("LEPTONFS_PERF_MEDIUM_FILE", 1024*1024)
-	smallFileCount := GetEnvAsInt("LEPTONFS_PERF_SMALL_FILE_COUNT", 10000)
-	readdirDirs := GetEnvAsInt("LEPTONFS_PERF_READDIR_DIRS", 128)
-	readdirFilesPerDir := GetEnvAsInt("LEPTONFS_PERF_READDIR_FILES_PER_DIR", 256)
+	largeFileCount := GetEnvAsInt("NYDUSFS_PERF_LARGE_FILE_COUNT", 8)
+	largeFileSize := GetEnvAsInt("NYDUSFS_PERF_LARGE_FILE_SIZE", 64*1024*1024)
+	mediumFileCount := GetEnvAsInt("NYDUSFS_PERF_MEDIUM_FILE_COUNT", 256)
+	mediumFileSize := GetEnvAsInt("NYDUSFS_PERF_MEDIUM_FILE", 1024*1024)
+	smallFileCount := GetEnvAsInt("NYDUSFS_PERF_SMALL_FILE_COUNT", 10000)
+	readdirDirs := GetEnvAsInt("NYDUSFS_PERF_READDIR_DIRS", 128)
+	readdirFilesPerDir := GetEnvAsInt("NYDUSFS_PERF_READDIR_FILES_PER_DIR", 256)
 
 	for i := range largeFileCount {
 		c.CreateLargeFile(t, fmt.Sprintf("large/file_%d.bin", i), largeFileSize)

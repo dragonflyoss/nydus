@@ -19,12 +19,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// leptonTestRegistryEnv overrides the registry endpoint used by the optimize
+// nydusTestRegistryEnv overrides the registry endpoint used by the optimize
 // e2e test. Defaults to localhost:5000 (e.g. a `docker run registry:2`).
-const leptonTestRegistryEnv = "LEPTON_TEST_REGISTRY"
+const nydusTestRegistryEnv = "NYDUS_TEST_REGISTRY"
 
 func testRegistryEndpoint() string {
-	if endpoint := os.Getenv(leptonTestRegistryEnv); endpoint != "" {
+	if endpoint := os.Getenv(nydusTestRegistryEnv); endpoint != "" {
 		return endpoint
 	}
 	return "localhost:5000"
@@ -39,7 +39,7 @@ func requireTestRegistry(t *testing.T) string {
 	resp, err := client.Get("http://" + endpoint + "/v2/")
 	if err != nil {
 		t.Skipf("no registry at %s (set %s or run `docker run -d -p 5000:5000 registry:2`): %v",
-			endpoint, leptonTestRegistryEnv, err)
+			endpoint, nydusTestRegistryEnv, err)
 	}
 	_ = resp.Body.Close()
 	return endpoint
@@ -68,23 +68,23 @@ func dockerBuildAndPush(t *testing.T, contextDir, ref string) {
 	require.NoError(t, err, "docker push failed: %s", string(out))
 }
 
-// runLeptonifyCommand runs a leptonify subcommand to completion and returns
+// runNydusifyCommand runs a nydusify subcommand to completion and returns
 // its combined output.
-func runLeptonifyCommand(t *testing.T, leptonifyBin, leptonBin string, args ...string) string {
+func runNydusifyCommand(t *testing.T, nydusifyBin, nydusBin string, args ...string) string {
 	t.Helper()
-	full := append(args, "--builder", leptonBin, "--source-plain-http", "--target-plain-http")
-	cmd := exec.Command(leptonifyBin, full...)
+	full := append(args, "--builder", nydusBin, "--source-plain-http", "--target-plain-http")
+	cmd := exec.Command(nydusifyBin, full...)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "leptonify %s failed: %s", strings.Join(args, " "), string(out))
+	require.NoError(t, err, "nydusify %s failed: %s", strings.Join(args, " "), string(out))
 	return string(out)
 }
 
-// startLeptonifyMount runs `leptonify mount` in the background, waits for the
+// startNydusifyMount runs `nydusify mount` in the background, waits for the
 // mountpoint, and returns a cleanup function. The apiserver socket is exposed
 // at workDir/apiserver.sock.
-func startLeptonifyMount(
+func startNydusifyMount(
 	t *testing.T,
-	leptonifyBin, leptonBin, ref, mountpoint, workDir string,
+	nydusifyBin, nydusBin, ref, mountpoint, workDir string,
 	prefetch bool,
 ) (cleanup func()) {
 	t.Helper()
@@ -97,20 +97,20 @@ func startLeptonifyMount(
 		"--target", ref,
 		"--mountpoint", mountpoint,
 		"--work-dir", workDir,
-		"--builder", leptonBin,
+		"--builder", nydusBin,
 		"--target-plain-http",
 	}
 	if prefetch {
 		args = append(args, "--prefetch")
 	}
-	cmd := exec.Command(leptonifyBin, args...)
+	cmd := exec.Command(nydusifyBin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
 
 	require.Eventually(t, func() bool {
 		return isMountpoint(mountpoint)
-	}, 30*time.Second, 200*time.Millisecond, "leptonify mount failed to mount within 30s")
+	}, 30*time.Second, 200*time.Millisecond, "nydusify mount failed to mount within 30s")
 
 	return func() {
 		if cmd.Process != nil {

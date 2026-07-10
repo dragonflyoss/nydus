@@ -1,10 +1,10 @@
-//! Host-side accessor for lepton images backing guest virtio-pmem devices.
+//! Host-side accessor for nydus images backing guest virtio-pmem devices.
 //!
-//! A guest kernel mounts the lepton bootstrap as an EROFS image whose external
+//! A guest kernel mounts the nydus bootstrap as an EROFS image whose external
 //! devices are virtio-pmem devices backed by the host-side cache data files
 //! (`{cache_dir}/{hex}.blob.data`). Each cache file mirrors the blob's dense
 //! decoded block address space, so a guest read of block `N` lands at byte
-//! `N * 4096` of the backing file. [`LeptonAccessor`] exposes the device
+//! `N * 4096` of the backing file. [`NydusAccessor`] exposes the device
 //! table needed to wire up those pmem devices and a [`blob.fetch`] entry point
 //! that guarantees a block-aligned range is decoded and resident before the
 //! guest touches it.
@@ -97,7 +97,7 @@ pub struct BlobInfo {
     /// Host path of the sparse cache data file backing the pmem device.
     pub cache_path: PathBuf,
     /// True when this is an "ondemand" redirect blob produced by
-    /// `lepton optimize`. Its data file is never read by the guest (no chunk
+    /// `nydus optimize`. Its data file is never read by the guest (no chunk
     /// index points at it); it only feeds the phase-0 prefetch that warms the
     /// source blobs' caches.
     pub is_redirect: bool,
@@ -174,9 +174,9 @@ pub struct FsEntry {
     ino: u64,
 }
 
-/// Read-side handle over a lepton image, split into blob data access and
+/// Read-side handle over a nydus image, split into blob data access and
 /// static filesystem metadata/data access.
-pub struct LeptonAccessor {
+pub struct NydusAccessor {
     /// Size in bytes of the standalone bootstrap image passed to [`new`].
     ///
     /// [`new`]: Self::new
@@ -200,13 +200,13 @@ pub struct FsAccessor {
     reader: Arc<ErofsReader>,
 }
 
-impl LeptonAccessor {
+impl NydusAccessor {
     /// Parse the bootstrap and config and build the blob table,
     /// deferring all per-blob work: no blob meta is downloaded and no cache
     /// file is created until [`blobs`], [`fetch`], or [`prefetch`] first
     /// touches a blob.
     ///
-    /// `config` uses the same structure as `lepton fuse --config` and must
+    /// `config` uses the same structure as `nydus fuse --config` and must
     /// provide both the backend serving the blobs and a persistent local cache
     /// directory.
     ///
@@ -244,7 +244,7 @@ impl LeptonAccessor {
             Some(&cache_dir),
             Some(trace_recorder.clone()),
         )
-        .context("failed to open lepton bootstrap")?;
+        .context("failed to open nydus bootstrap")?;
         let blob_infos = reader.blob_infos().context("failed to read blob table")?;
         if blob_infos.is_empty() {
             bail!("bootstrap contains no blobs");
@@ -264,11 +264,11 @@ impl LeptonAccessor {
             match BlobPrefetcher::new(reader.clone(), prefetch_threads, prefetch_full).spawn() {
                 Ok(_handle) => {
                     tracing::info!(
-                        "lepton accessor: background prefetch started (full={prefetch_full})"
+                        "nydus accessor: background prefetch started (full={prefetch_full})"
                     );
                 }
                 Err(err) => {
-                    tracing::warn!("lepton accessor: failed to start prefetch worker: {err}");
+                    tracing::warn!("nydus accessor: failed to start prefetch worker: {err}");
                 }
             }
         }
@@ -300,7 +300,7 @@ impl LeptonAccessor {
         self.trace_recorder.clear();
     }
 
-    /// Return a snapshot of the process-wide lepton metrics (counters and
+    /// Return a snapshot of the process-wide nydus metrics (counters and
     /// gauges). The metrics are global, so this reflects all blob activity in
     /// the process, not just this accessor; callers typically inspect
     /// `backend_ondemand_read_count` to tell whether any group was fetched
@@ -609,7 +609,7 @@ mod tests {
     use crate::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
     use crate::config::Config;
     use crate::metadata::{
-        BlobFooter, BlobMetaCompressor, ErofsDeviceSlot, LEPTON_BLOB_FOOTER_ALIGNMENT,
+        BlobFooter, BlobMetaCompressor, ErofsDeviceSlot, NYDUS_BLOB_FOOTER_ALIGNMENT,
     };
     use crate::utils::{hex_string, sha256_file};
     use crc32c::crc32c_append;
@@ -619,7 +619,7 @@ mod tests {
     use std::os::unix::fs::symlink;
     use tempfile::tempdir;
 
-    /// Build a minimal single-blob lepton image (blob dir + bootstrap +
+    /// Build a minimal single-blob nydus image (blob dir + bootstrap +
     /// config) and return (bootstrap, config, data blob id, expected file bytes).
     fn build_test_image(
         root: &Path,
@@ -724,11 +724,11 @@ mod tests {
     ) -> [u8; EROFS_BLOB_ID_SIZE] {
         let data = fs::read(data_path).unwrap();
         let data_size = data.len() as u64;
-        let bootstrap_offset = align_u64(data_size, LEPTON_BLOB_FOOTER_ALIGNMENT);
+        let bootstrap_offset = align_u64(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
         let bootstrap_blocks = bytes_to_blocks(bootstrap_bytes.len() as u64);
         let blob_meta_offset = align_u64(
             bootstrap_offset + bootstrap_bytes.len() as u64,
-            LEPTON_BLOB_FOOTER_ALIGNMENT,
+            NYDUS_BLOB_FOOTER_ALIGNMENT,
         );
         let blob_meta_blocks = bytes_to_blocks(blob_meta.metadata_size());
         let footer = BlobFooter::new(
@@ -794,7 +794,7 @@ mod tests {
         let (bootstrap, config, blob_id, _corpus) = build_test_image(dir.path());
         let blob_id = BlobID::from(blob_id);
 
-        let accessor = LeptonAccessor::new(&bootstrap, config).unwrap();
+        let accessor = NydusAccessor::new(&bootstrap, config).unwrap();
         assert_eq!(
             accessor.bootstrap_size,
             fs::metadata(&bootstrap).unwrap().len()
@@ -937,7 +937,7 @@ mod tests {
         let (bootstrap, config, blob_id, corpus) = build_test_image(dir.path());
         let blob_id = BlobID::from(blob_id);
 
-        let accessor = LeptonAccessor::new(&bootstrap, config).unwrap();
+        let accessor = NydusAccessor::new(&bootstrap, config).unwrap();
 
         let root_entry = accessor.fs.open("/").unwrap();
         let root = root_entry.metadata().unwrap();
@@ -1003,7 +1003,7 @@ mod tests {
 
         let xattrs = root_entry.xattrs().unwrap();
         assert!(xattrs.iter().any(|(name, value)| {
-            name.as_slice() == b"trusted.lepton.prefetch.blobs" && value.as_slice() == b"1"
+            name.as_slice() == b"trusted.nydus.prefetch.blobs" && value.as_slice() == b"1"
         }));
 
         let blobs = accessor.blob.entries().unwrap();
@@ -1017,7 +1017,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let (bootstrap, config, _blob_id, _corpus) = build_test_image(dir.path());
 
-        let accessor = LeptonAccessor::new(&bootstrap, config).unwrap();
+        let accessor = NydusAccessor::new(&bootstrap, config).unwrap();
         let blobs = accessor.blob.entries().unwrap();
         let before = fs::read(&blobs[0].cache_path).unwrap();
         assert!(before.iter().all(|byte| *byte == 0));

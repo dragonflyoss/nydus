@@ -468,12 +468,12 @@ pub fn needs_erofs_extended_inode(meta: &fs::Metadata) -> bool {
         || meta.nlink() > 1
 }
 
-/// Check if an xattr name (as bytes) is a Lepton internal xattr (starts with "trusted.lepton.").
-pub fn is_lepton_xattr(name: &[u8]) -> bool {
-    name.starts_with(b"trusted.lepton.")
+/// Check if an xattr name (as bytes) is a Nydus internal xattr (starts with "trusted.nydus.").
+pub fn is_nydus_xattr(name: &[u8]) -> bool {
+    name.starts_with(b"trusted.nydus.")
 }
 
-/// Check if an xattr name is the Lepton prefetch blobs xattr ("trusted.lepton.prefetch.blobs").
-pub fn is_lepton_prefetch_blobs_xattr(name: &[u8]) -> bool {
-    is_lepton_xattr(name) && name.ends_with(LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS)
+/// Check if an xattr name is the Nydus prefetch blobs xattr ("trusted.nydus.prefetch.blobs").
+pub fn is_nydus_prefetch_blobs_xattr(name: &[u8]) -> bool {
+    is_nydus_xattr(name) && name.ends_with(NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
 }

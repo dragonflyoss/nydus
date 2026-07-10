@@ -1,4 +1,4 @@
-module github.com/dragonflyoss/lepton/tests/integration
+module github.com/dragonflyoss/nydus/tests/integration
 
 go 1.25.5
 

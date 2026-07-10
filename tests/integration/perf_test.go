@@ -10,42 +10,42 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/lepton/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/integration/texture"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/stretchr/testify/require"
 )
 
 // TestPerf runs fio-based I/O benchmarks and Go-based metadata benchmarks
-// against the Rust `lepton fuse`, optionally comparing the results with
+// against the Rust `nydus fuse`, optionally comparing the results with
 // the C `erofsfuse` implementation.
 //
 // Activation:
 //
-//	LEPTONFS_RUN_PERF=1                     enable the test (off by default).
+//	NYDUSFS_RUN_PERF=1                     enable the test (off by default).
 //	                                     (auto-detected when omitted).
 //
 // Tuning knobs (all optional):
 //
-//	LEPTONFS_PERF_LARGE_FILE_COUNT        Number of large files for read benchmarks (default 8).
-//	LEPTONFS_PERF_LARGE_FILE_SIZE         Size of each large file (default 64MiB).
-//	LEPTONFS_PERF_MEDIUM_FILE_COUNT       Number of medium files in the corpus (default 256).
-//	LEPTONFS_PERF_MEDIUM_FILE             Size of each medium file (default 1Mib).
-//	LEPTONFS_PERF_SMALL_FILE_COUNT        Number of small files for the stat benchmark (default 10000).
-//	LEPTONFS_PERF_FIO_RUNTIME             Fio benchmark duration in seconds (default 20).
-//	LEPTONFS_PERF_FIO_SEQ_NUMJOBS         Sequential-read multi-thread job count (default 4).
-//	LEPTONFS_PERF_FIO_RAND_NUMJOBS        Random-read multi-thread job count (default 4).
-//	LEPTONFS_PERF_READDIR_DIRS            Number of directories for the readdir corpus (default 128).
-//	LEPTONFS_PERF_READDIR_FILES_PER_DIR   Files per directory for the readdir corpus (default 256).
-//	LEPTONFS_PERF_READDIR_META_SECS       Metadata benchmark duration in seconds (default 5).
-//	LEPTONFS_PERF_READDIR_PASSES_PER_DIR  Repeated os.ReadDir calls per directory per iteration (default 8).
+//	NYDUSFS_PERF_LARGE_FILE_COUNT        Number of large files for read benchmarks (default 8).
+//	NYDUSFS_PERF_LARGE_FILE_SIZE         Size of each large file (default 64MiB).
+//	NYDUSFS_PERF_MEDIUM_FILE_COUNT       Number of medium files in the corpus (default 256).
+//	NYDUSFS_PERF_MEDIUM_FILE             Size of each medium file (default 1Mib).
+//	NYDUSFS_PERF_SMALL_FILE_COUNT        Number of small files for the stat benchmark (default 10000).
+//	NYDUSFS_PERF_FIO_RUNTIME             Fio benchmark duration in seconds (default 20).
+//	NYDUSFS_PERF_FIO_SEQ_NUMJOBS         Sequential-read multi-thread job count (default 4).
+//	NYDUSFS_PERF_FIO_RAND_NUMJOBS        Random-read multi-thread job count (default 4).
+//	NYDUSFS_PERF_READDIR_DIRS            Number of directories for the readdir corpus (default 128).
+//	NYDUSFS_PERF_READDIR_FILES_PER_DIR   Files per directory for the readdir corpus (default 256).
+//	NYDUSFS_PERF_READDIR_META_SECS       Metadata benchmark duration in seconds (default 5).
+//	NYDUSFS_PERF_READDIR_PASSES_PER_DIR  Repeated os.ReadDir calls per directory per iteration (default 8).
 func TestPerf(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Fatal("requires root")
 	}
 
-	if os.Getenv("LEPTONFS_RUN_PERF") == "" {
-		t.Skip("set LEPTONFS_RUN_PERF=1 to enable")
+	if os.Getenv("NYDUSFS_RUN_PERF") == "" {
+		t.Skip("set NYDUSFS_RUN_PERF=1 to enable")
 	}
 
 	tmpDir := t.TempDir()
@@ -57,21 +57,21 @@ func TestPerf(t *testing.T) {
 	// Ensure erofsfuse is built and available if we're going to benchmark it.
 	setupCErofsfuse(t)
 	fioBin := mustLookupFio(t)
-	leptonBin := mustLookupExecutable(t, "lepton")
+	nydusBin := mustLookupExecutable(t, "nydus")
 	cErofsFuseBin := mustLookupCErofsFuse(t)
 
 	// Generate the performance corpus (~260 MiB by default).
 	t.Log("Generating performance corpus...")
 	texture.MakePerfCorpus(t, corpusDir)
 
-	// Build the LeptonFS image with 1 MiB chunks (a realistic chunk size).
-	t.Log("Building LeptonFS image (chunksize=1MiB)...")
-	buildLeptonFSImage(t, leptonBin, imagePath, blobdev, corpusDir, 1024*1024)
+	// Build the NydusFS image with 1 MiB chunks (a realistic chunk size).
+	t.Log("Building NydusFS image (chunksize=1MiB)...")
+	buildNydusFSImage(t, nydusBin, imagePath, blobdev, corpusDir, 1024*1024)
 
-	// Benchmark the Rust lepton FUSE implementation.
-	t.Log("Benchmarking lepton...")
-	unmount := mountLepton(t, leptonBin, imagePath, blobdev, mntDir)
-	leptonFSResults := runBenchmarks(t, fioBin, mntDir)
+	// Benchmark the Rust nydus FUSE implementation.
+	t.Log("Benchmarking nydus...")
+	unmount := mountNydus(t, nydusBin, imagePath, blobdev, mntDir)
+	nydusFSResults := runBenchmarks(t, fioBin, mntDir)
 	unmount()
 
 	// Benchmark the C erofsfuse implementation for comparison.
@@ -81,7 +81,7 @@ func TestPerf(t *testing.T) {
 	cErofsFuseResults = runBenchmarks(t, fioBin, mntDir)
 	unmount()
 
-	printResultTable(t, leptonFSResults, cErofsFuseResults)
+	printResultTable(t, nydusFSResults, cErofsFuseResults)
 }
 
 // runBenchmarks executes the full I/O and metadata benchmark suite against
@@ -90,9 +90,9 @@ func runBenchmarks(t *testing.T, fioBin, mntDir string) map[string]*benchResult 
 	largeFile := filepath.Join(mntDir, "large/file_0.bin")
 	require.FileExists(t, largeFile)
 
-	fioRuntime := texture.GetEnvAsInt("LEPTONFS_PERF_FIO_RUNTIME", 20)
-	fioSeqNumjobs := texture.GetEnvAsInt("LEPTONFS_PERF_FIO_SEQ_NUMJOBS", 4)
-	fioRandNumjobs := texture.GetEnvAsInt("LEPTONFS_PERF_FIO_RAND_NUMJOBS", 1)
+	fioRuntime := texture.GetEnvAsInt("NYDUSFS_PERF_FIO_RUNTIME", 20)
+	fioSeqNumjobs := texture.GetEnvAsInt("NYDUSFS_PERF_FIO_SEQ_NUMJOBS", 4)
+	fioRandNumjobs := texture.GetEnvAsInt("NYDUSFS_PERF_FIO_RAND_NUMJOBS", 1)
 	results := make(map[string]*benchResult)
 
 	dropCaches(t)
@@ -166,7 +166,7 @@ func runBenchmarks(t *testing.T, fioBin, mntDir string) map[string]*benchResult 
 // benchStat repeatedly stats every file in dir for the configured metadata duration and
 // reports the achieved ops/s and latency.
 func benchStat(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(texture.GetEnvAsInt("LEPTONFS_PERF_META_SECS", 5)) * time.Second
+	metaDuration := time.Duration(texture.GetEnvAsInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
 
 	var files []string
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -201,8 +201,8 @@ func benchStat(t *testing.T, dir string) *benchResult {
 // benchReaddir repeatedly reads every subdirectory of dir for the configured
 // metadata duration and reports the achieved ops/s and latency.
 func benchReaddir(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(texture.GetEnvAsInt("LEPTONFS_PERF_READDIR_META_SECS", 5)) * time.Second
-	passesPerDir := texture.GetEnvAsInt("LEPTONFS_PERF_READDIR_PASSES_PER_DIR", 8)
+	metaDuration := time.Duration(texture.GetEnvAsInt("NYDUSFS_PERF_READDIR_META_SECS", 5)) * time.Second
+	passesPerDir := texture.GetEnvAsInt("NYDUSFS_PERF_READDIR_PASSES_PER_DIR", 8)
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -283,7 +283,7 @@ func runFio(t *testing.T, fioBin string, args []string) *benchResult {
 	}
 }
 
-func printResultTable(t *testing.T, lepton, erofsfuse map[string]*benchResult) {
+func printResultTable(t *testing.T, nydus, erofsfuse map[string]*benchResult) {
 	type row struct {
 		label         string
 		key           string
@@ -314,7 +314,7 @@ func printResultTable(t *testing.T, lepton, erofsfuse map[string]*benchResult) {
 	tw := table.NewWriter()
 	tw.SetStyle(table.StyleLight)
 	tw.Style().Options.SeparateRows = false
-	tw.AppendHeader(table.Row{"Name", "Lepton", "erofsfuse"})
+	tw.AppendHeader(table.Row{"Name", "Nydus", "erofsfuse"})
 	tw.SetColumnConfigs([]table.ColumnConfig{
 		{Number: 1, Align: text.AlignLeft},
 		{Number: 2, Align: text.AlignRight},
@@ -322,7 +322,7 @@ func printResultTable(t *testing.T, lepton, erofsfuse map[string]*benchResult) {
 	})
 
 	for _, r := range rows {
-		lr := lepton[r.key]
+		lr := nydus[r.key]
 		er := erofsfuse[r.key]
 		if lr == nil || er == nil {
 			continue

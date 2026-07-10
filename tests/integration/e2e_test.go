@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/lepton/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/integration/texture"
 	"github.com/pkg/xattr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-const leptonRunErofsCompatEnv = "LEPTONFS_RUN_EROFS_COMPAT"
+const nydusRunErofsCompatEnv = "NYDUSFS_RUN_EROFS_COMPAT"
 
 func TestBlobMountE2E(t *testing.T) {
 	if os.Getuid() != 0 {
@@ -44,24 +44,24 @@ func TestBlobMountE2E(t *testing.T) {
 			corpus.CreateUnixSocket(t, "special/socket")
 
 			t.Log("Building blob and mounting it directly...")
-			leptonBin := mustLookupExecutable(t, "lepton")
-			blobPath := buildLeptonFSImageToDir(t, leptonBin, bootstrapPath, blobDir, corpusDir, chunkSize)
-			logLeptonCheckOutput(t, leptonBin, "--blob", blobPath)
-			logLeptonCheckOutput(t, leptonBin, "--bootstrap", bootstrapPath, "--blob-dir", blobDir)
+			nydusBin := mustLookupExecutable(t, "nydus")
+			blobPath := buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, chunkSize)
+			logNydusCheckOutput(t, nydusBin, "--blob", blobPath)
+			logNydusCheckOutput(t, nydusBin, "--bootstrap", bootstrapPath, "--blob-dir", blobDir)
 			func() {
-				unmount := mountLepton(t, leptonBin, "", blobPath, mntDir)
+				unmount := mountNydus(t, nydusBin, "", blobPath, mntDir)
 				defer unmount()
 				verifyMountedTree(t, corpusDir, mntDir)
 			}()
 
 			func() {
-				unmount := mountLeptonBootstrap(t, leptonBin, bootstrapPath, blobDir, mntDir)
+				unmount := mountNydusBootstrap(t, nydusBin, bootstrapPath, blobDir, mntDir)
 				defer unmount()
 				verifyMountedTree(t, corpusDir, mntDir)
 			}()
 
 			func() {
-				unmount := mountLeptonBootstrapWithCache(t, leptonBin, bootstrapPath, blobDir, cacheDir, mntDir)
+				unmount := mountNydusBootstrapWithCache(t, nydusBin, bootstrapPath, blobDir, cacheDir, mntDir)
 				defer unmount()
 				verifyMountedTree(t, corpusDir, mntDir)
 				verifyBlobCacheArtifacts(t, cacheDir, blobPath)
@@ -83,7 +83,7 @@ func TestMergedMountE2E(t *testing.T) {
 	mountpoint := filepath.Join(tmpDir, "mnt")
 	prepareMergedE2ECorpora(t, layer1Dir, layer2Dir, layer3Dir, expectedDir)
 
-	leptonBin := mustLookupExecutable(t, "lepton")
+	nydusBin := mustLookupExecutable(t, "nydus")
 	blobDir := filepath.Join(tmpDir, "blobs")
 	layer1Bootstrap := filepath.Join(tmpDir, "layer1.bootstrap")
 	layer2Bootstrap := filepath.Join(tmpDir, "layer2.bootstrap")
@@ -91,23 +91,23 @@ func TestMergedMountE2E(t *testing.T) {
 	mergedBootstrap := filepath.Join(tmpDir, "merged.bootstrap")
 	cacheDir := filepath.Join(tmpDir, "cache")
 
-	layer1Blob := buildLeptonFSImageToDir(t, leptonBin, layer1Bootstrap, blobDir, layer1Dir, 4096)
-	layer2Blob := buildLeptonFSImageToDir(t, leptonBin, layer2Bootstrap, blobDir, layer2Dir, 4096)
-	layer3Blob := buildLeptonFSImageToDir(t, leptonBin, layer3Bootstrap, blobDir, layer3Dir, 4096)
-	logLeptonCheckOutput(t, leptonBin, "--bootstrap", layer1Bootstrap, "--blob-dir", blobDir)
+	layer1Blob := buildNydusFSImageToDir(t, nydusBin, layer1Bootstrap, blobDir, layer1Dir, 4096)
+	layer2Blob := buildNydusFSImageToDir(t, nydusBin, layer2Bootstrap, blobDir, layer2Dir, 4096)
+	layer3Blob := buildNydusFSImageToDir(t, nydusBin, layer3Bootstrap, blobDir, layer3Dir, 4096)
+	logNydusCheckOutput(t, nydusBin, "--bootstrap", layer1Bootstrap, "--blob-dir", blobDir)
 
-	mergeLeptonBootstrap(
+	mergeNydusBootstrap(
 		t,
-		leptonBin,
+		nydusBin,
 		mergedBootstrap,
 		layer1Blob,
 		layer2Blob,
 		layer3Blob,
 	)
-	logLeptonCheckOutput(t, leptonBin, "--bootstrap", mergedBootstrap, "--blob-dir", blobDir)
+	logNydusCheckOutput(t, nydusBin, "--bootstrap", mergedBootstrap, "--blob-dir", blobDir)
 
 	func() {
-		unmount := mountLeptonBootstrap(t, leptonBin, mergedBootstrap, blobDir, mountpoint)
+		unmount := mountNydusBootstrap(t, nydusBin, mergedBootstrap, blobDir, mountpoint)
 		defer unmount()
 		printMergeDebugPaths(t, layer1Dir, layer2Dir, layer3Dir, mountpoint)
 
@@ -116,7 +116,7 @@ func TestMergedMountE2E(t *testing.T) {
 	}()
 
 	func() {
-		unmount := mountLeptonBootstrapWithCache(t, leptonBin, mergedBootstrap, blobDir, cacheDir, mountpoint)
+		unmount := mountNydusBootstrapWithCache(t, nydusBin, mergedBootstrap, blobDir, cacheDir, mountpoint)
 		defer unmount()
 
 		verifyMountedTree(t, expectedDir, mountpoint)
@@ -135,12 +135,12 @@ func TestMergedMountE2E(t *testing.T) {
 func verifyMergedMountMatchesErofsFuseWhenEnabled(
 	t *testing.T,
 	mergedBootstrap string,
-	leptonMountpoint string,
+	nydusMountpoint string,
 	blobs ...string,
 ) {
 	t.Helper()
-	if os.Getenv(leptonRunErofsCompatEnv) != "1" {
-		t.Logf("Skipping erofsfuse compatibility step; set %s=1 to enable", leptonRunErofsCompatEnv)
+	if os.Getenv(nydusRunErofsCompatEnv) != "1" {
+		t.Logf("Skipping erofsfuse compatibility step; set %s=1 to enable", nydusRunErofsCompatEnv)
 		return
 	}
 
@@ -150,19 +150,19 @@ func verifyMergedMountMatchesErofsFuseWhenEnabled(
 	unmount := mountCErofsFuse(t, cErofsFuseBin, mergedBootstrap, erofsMountpoint, blobs...)
 	defer unmount()
 
-	verifyMountedTreeAgainstErofsCompat(t, erofsMountpoint, leptonMountpoint)
+	verifyMountedTreeAgainstErofsCompat(t, erofsMountpoint, nydusMountpoint)
 }
 
 func cachedBlobDataDevicesForBlobs(t *testing.T, cacheDir string, blobs ...string) []string {
 	t.Helper()
 
-	// erofsfuse consumes plain external devices. Lepton builds zstd-compressed
-	// full blobs, so compat mode must use the cache files populated by lepton fuse.
+	// erofsfuse consumes plain external devices. Nydus builds zstd-compressed
+	// full blobs, so compat mode must use the cache files populated by nydus fuse.
 	devices := make([]string, 0, len(blobs))
 	for _, blob := range blobs {
 		blobID := fullBlobDigest(t, blob)
 		cachedBlob := filepath.Join(cacheDir, blobID+".blob.data")
-		require.FileExists(t, cachedBlob, "cached uncompressed blob data should exist after lepton cached mount")
+		require.FileExists(t, cachedBlob, "cached uncompressed blob data should exist after nydus cached mount")
 		devices = append(devices, cachedBlob)
 	}
 	return devices
@@ -912,18 +912,18 @@ func printMergeDebugPaths(t *testing.T, layer1Dir, layer2Dir, layer3Dir, mountpo
 	_, _ = fmt.Fprint(os.Stderr, message)
 }
 
-func logLeptonCheckOutput(t *testing.T, leptonBin string, args ...string) {
+func logNydusCheckOutput(t *testing.T, nydusBin string, args ...string) {
 	t.Helper()
 
 	cmdArgs := append([]string{"check"}, args...)
-	out, err := exec.Command(leptonBin, cmdArgs...).CombinedOutput()
-	require.NoError(t, err, "lepton check failed: %s", string(out))
-	t.Logf("lepton %s output:\n%s", strings.Join(cmdArgs, " "), string(out))
+	out, err := exec.Command(nydusBin, cmdArgs...).CombinedOutput()
+	require.NoError(t, err, "nydus check failed: %s", string(out))
+	t.Logf("nydus %s output:\n%s", strings.Join(cmdArgs, " "), string(out))
 }
 
 func pauseMergeDebugIfRequested(t *testing.T, mountpoint string) {
 	t.Helper()
-	pauseSecs := texture.GetEnvAsInt("LEPTONFS_MERGE_PAUSE_SECS", 0)
+	pauseSecs := texture.GetEnvAsInt("NYDUSFS_MERGE_PAUSE_SECS", 0)
 	if pauseSecs <= 0 {
 		return
 	}
@@ -982,14 +982,14 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 	}
 }
 
-// TestLeptonifyOptimizeE2E exercises the full image-level optimize pipeline
+// TestNydusifyOptimizeE2E exercises the full image-level optimize pipeline
 // against a local registry:
 //
-//  1. docker build/push a source OCI image, convert it with `leptonify
-//     convert`, and validate it with `leptonify check`.
-//  2. Mount the lepton image WITHOUT prefetch, replay a read workload, and
+//  1. docker build/push a source OCI image, convert it with `nydusify
+//     convert`, and validate it with `nydusify check`.
+//  2. Mount the nydus image WITHOUT prefetch, replay a read workload, and
 //     verify the baseline metrics show on-demand backend reads. While the
-//     mount is live, run `leptonify optimize --apiserver` to build the
+//     mount is live, run `nydusify optimize --apiserver` to build the
 //     ondemand (redirect) blob from the recorded /trace pattern and push the
 //     optimized image.
 //  3. Mount the optimized image WITH prefetch on a cold cache, wait for
@@ -1000,15 +1000,15 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 //     - the workload triggered zero on-demand backend reads
 //     (backend_ondemand_read_count == 0), proving the optimization works,
 //     - file contents are byte-identical to the corpus.
-func TestLeptonifyOptimizeE2E(t *testing.T) {
+func TestNydusifyOptimizeE2E(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
 	}
 	requireDocker(t)
 	registry := requireTestRegistry(t)
 
-	leptonBin := mustLookupExecutable(t, "lepton")
-	leptonifyBin := mustLookupExecutable(t, "leptonify")
+	nydusBin := mustLookupExecutable(t, "nydus")
+	nydusifyBin := mustLookupExecutable(t, "nydusify")
 
 	// Corpus: four ~1.2-1.5 MiB pseudo-random files so each spans more than
 	// one 1 MiB blob meta group and the trace covers multiple groups.
@@ -1021,19 +1021,19 @@ func TestLeptonifyOptimizeE2E(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(corpusDir, name), pseudoRandomTestBytes(size, uint64(i+1)), 0644))
 	}
 
-	srcRef := uniqueImageTag(registry, "lepton-e2e/optimize-src")
-	leptonRef := srcRef + "-lepton"
-	optRef := optimizedRef(leptonRef)
+	srcRef := uniqueImageTag(registry, "nydus-e2e/optimize-src")
+	nydusRef := srcRef + "-nydus"
+	optRef := optimizedRef(nydusRef)
 
 	t.Log("Building and pushing source OCI image...")
 	dockerBuildAndPush(t, corpusDir, srcRef)
 
-	t.Log("Converting to lepton format...")
-	runLeptonifyCommand(t, leptonifyBin, leptonBin, "convert", "--source", srcRef, "--target", leptonRef,
+	t.Log("Converting to nydus format...")
+	runNydusifyCommand(t, nydusifyBin, nydusBin, "convert", "--source", srcRef, "--target", nydusRef,
 		"--work-dir", filepath.Join(tmpDir, "convert"))
 
 	t.Log("Checking converted image...")
-	runLeptonifyCommand(t, leptonifyBin, leptonBin, "check", "--source", srcRef, "--target", leptonRef,
+	runNydusifyCommand(t, nydusifyBin, nydusBin, "check", "--source", srcRef, "--target", nydusRef,
 		"--work-dir", filepath.Join(tmpDir, "check"))
 
 	// The read workload replayed on both mounts: two full files plus a
@@ -1054,7 +1054,7 @@ func TestLeptonifyOptimizeE2E(t *testing.T) {
 	baselineMnt := filepath.Join(tmpDir, "mnt-baseline")
 	var traceCount int
 	func() {
-		unmount := startLeptonifyMount(t, leptonifyBin, leptonBin, leptonRef, baselineMnt, baselineWork, false)
+		unmount := startNydusifyMount(t, nydusifyBin, nydusBin, nydusRef, baselineMnt, baselineWork, false)
 		defer unmount()
 		workload(baselineMnt)
 
@@ -1072,9 +1072,9 @@ func TestLeptonifyOptimizeE2E(t *testing.T) {
 			metricValue(metrics, "backend_ondemand_read_count"), traceCount)
 
 		t.Log("Optimizing against the live mount apiserver...")
-		runLeptonifyCommand(t, leptonifyBin, leptonBin, "optimize",
+		runNydusifyCommand(t, nydusifyBin, nydusBin, "optimize",
 			"--apiserver", socket,
-			"--source", leptonRef,
+			"--source", nydusRef,
 			"--target", optRef,
 			"--work-dir", filepath.Join(tmpDir, "optimize"))
 	}()
@@ -1083,7 +1083,7 @@ func TestLeptonifyOptimizeE2E(t *testing.T) {
 	optWork := filepath.Join(tmpDir, "mount-optimized")
 	optMnt := filepath.Join(tmpDir, "mnt-optimized")
 	func() {
-		unmount := startLeptonifyMount(t, leptonifyBin, leptonBin, optRef, optMnt, optWork, true)
+		unmount := startNydusifyMount(t, nydusifyBin, nydusBin, optRef, optMnt, optWork, true)
 		defer unmount()
 
 		socket := filepath.Join(optWork, "apiserver.sock")

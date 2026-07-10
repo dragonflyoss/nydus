@@ -86,8 +86,8 @@ pub const EROFS_DEVICESLOT_SIZE: usize = 128;
 // Sentinel.
 pub const EROFS_NULL_ADDR: u64 = u64::MAX;
 
-/// Lepton internal xattr suffix for prefetch blobs ("trusted.lepton.prefetch.blobs").
-pub const LEPTON_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"lepton.prefetch.blobs";
+/// Nydus internal xattr suffix for prefetch blobs ("trusted.nydus.prefetch.blobs").
+pub const NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"nydus.prefetch.blobs";
 
 /// Read a little-endian integer from a byte array.
 #[inline(always)]
@@ -145,10 +145,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lepton_internal_xattr_matches_trusted_lepton_prefix_only() {
-        assert!(is_lepton_xattr(b"trusted.lepton.prefetch.blobs"));
-        assert!(is_lepton_xattr(b"trusted.lepton.other"));
-        assert!(!is_lepton_xattr(b"trusted.other"));
-        assert!(!is_lepton_xattr(b"user.lepton.prefetch.blobs"));
+    fn nydus_internal_xattr_matches_trusted_nydus_prefix_only() {
+        assert!(is_nydus_xattr(b"trusted.nydus.prefetch.blobs"));
+        assert!(is_nydus_xattr(b"trusted.nydus.other"));
+        assert!(!is_nydus_xattr(b"trusted.other"));
+        assert!(!is_nydus_xattr(b"user.nydus.prefetch.blobs"));
     }
 }

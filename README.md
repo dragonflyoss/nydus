@@ -1,10 +1,10 @@
-# lepton
+# nydus
 
-Lepton is a Rust implementation of EROFS-oriented image tooling. This README is
+Nydus is a Rust implementation of EROFS-oriented image tooling. This README is
 kept as a development entrypoint for building and testing the repository.
 
 For CLI behavior, artifact layout, blob meta format and runtime read-path
-details, see [docs/lepton.md](docs/lepton.md). For EROFS structure notes, see
+details, see [docs/nydus.md](docs/nydus.md). For EROFS structure notes, see
 [docs/erofs.md](docs/erofs.md).
 
 ## Prerequisites
@@ -40,7 +40,7 @@ cargo build --release
 The release binary is written to:
 
 ```bash
-./target/release/lepton
+./target/release/nydus
 ```
 
 ## Rust Validation
@@ -86,7 +86,7 @@ Run e2e with erofs-utils compatibility enabled:
 ```bash
 EROFS_C_FUSE=/path/to/erofsfuse \
 EROFS_MKFS=/path/to/mkfs.erofs \
-LEPTONFS_RUN_EROFS_COMPAT=1 \
+NYDUSFS_RUN_EROFS_COMPAT=1 \
 make test-e2e
 ```
 
@@ -110,7 +110,7 @@ EROFS_C_FUSE=/path/to/erofsfuse make test-perf
 
 The Go integration tests live under `tests/integration/`. xfstests setup uses
 `tests/scripts/setup_xfstests.sh`, and the exclusion list lives at
-`tests/scripts/xfstests_leptonfs.exclude`.
+`tests/scripts/xfstests_nydusfs.exclude`.
 
 ## Test Knobs
 
@@ -118,7 +118,7 @@ The Go integration tests live under `tests/integration/`. xfstests setup uses
 - `E2E_TIMEOUT=<duration>` changes the e2e timeout, defaulting to `600s`.
 - `E2E_COUNT=<n>` changes the e2e repeat count.
 - `E2E_GO_TEST_ARGS='...'` appends extra `go test` arguments for e2e runs.
-- `LEPTONFS_RUN_EROFS_COMPAT=1` enables erofs-utils compatibility checks.
+- `NYDUSFS_RUN_EROFS_COMPAT=1` enables erofs-utils compatibility checks.
 - `EROFS_C_FUSE=/abs/path/to/erofsfuse` selects the C erofsfuse binary.
 - `EROFS_MKFS=/abs/path/to/mkfs.erofs` selects the mkfs.erofs binary.
 - `XFSTESTS_GO_TEST_ARGS='...'` appends extra `go test` arguments for xfstests.

@@ -29,7 +29,7 @@ use url::Url;
 
 use super::pauser::BACKEND_PAUSER;
 use super::{BlobBackend, ReadContext, RequestSource};
-use crate::metadata::{BlobFooter, BlobMeta, EROFS_BLOB_ID_SIZE, LEPTON_BLOB_FOOTER_SIZE};
+use crate::metadata::{BlobFooter, BlobMeta, EROFS_BLOB_ID_SIZE, NYDUS_BLOB_FOOTER_SIZE};
 use crate::utils::hex_string;
 
 use super::http::{Connection, ConnectionConfig};
@@ -39,7 +39,7 @@ use super::request::{is_success_status, Request, RequestError, Response};
 #[cfg(feature = "backend-dragonfly-proxy")]
 use super::dragonfly_sdk::DragonflySdk;
 
-const CLIENT_ID: &str = "lepton-registry-client";
+const CLIENT_ID: &str = "nydus-registry-client";
 const DEFAULT_TIMEOUT: u64 = 30;
 const DEFAULT_RETRY_LIMIT: u8 = 3;
 const DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60;
@@ -490,17 +490,17 @@ impl Registry {
     /// `<full-blob>.blob.meta` for this blob.
     fn fetch_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> RegistryResult<BlobMeta> {
         let size = self.blob_size(blob_id)?;
-        if size < LEPTON_BLOB_FOOTER_SIZE as u64 {
+        if size < NYDUS_BLOB_FOOTER_SIZE as u64 {
             return Err(RegistryError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "registry blob is too small for a lepton footer",
+                "registry blob is too small for a nydus footer",
             )));
         }
 
-        let mut footer_bytes = vec![0u8; LEPTON_BLOB_FOOTER_SIZE];
+        let mut footer_bytes = vec![0u8; NYDUS_BLOB_FOOTER_SIZE];
         self.retry_read(
             blob_id,
-            size - LEPTON_BLOB_FOOTER_SIZE as u64,
+            size - NYDUS_BLOB_FOOTER_SIZE as u64,
             &mut footer_bytes,
             ReadContext::raw(RequestSource::OnDemand),
         )?;

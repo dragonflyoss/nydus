@@ -427,7 +427,7 @@ mod tests {
     use crate::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
     use crate::metadata::{
         erofs_xattr_ibody_size, BlobFooter, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS,
-        EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER, LEPTON_BLOB_FOOTER_ALIGNMENT,
+        EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER, NYDUS_BLOB_FOOTER_ALIGNMENT,
     };
     use crate::utils::sha256_file;
 
@@ -536,7 +536,7 @@ mod tests {
         let dir = tempdir().expect("create temp dir");
         let source_dir = dir.path().join("src");
         fs::create_dir(&source_dir).expect("create source dir");
-        fs::write(source_dir.join("hello.txt"), b"hello lepton\n").expect("write source");
+        fs::write(source_dir.join("hello.txt"), b"hello nydus\n").expect("write source");
 
         let data_path = dir.path().join("data.blob");
         let mut blob_writer = BlobWriter::new(&data_path, EROFS_BLOCK_SIZE).expect("blob writer");
@@ -565,11 +565,11 @@ mod tests {
         let blob_meta = blob_writer.blob_meta(data_blob_id, 0).expect("blob meta");
 
         let data_size = fs::metadata(&data_path).expect("stat data blob").len();
-        let bootstrap_offset = align_u64(data_size, LEPTON_BLOB_FOOTER_ALIGNMENT);
+        let bootstrap_offset = align_u64(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
         let bootstrap_blocks = bytes_to_blocks(embedded_bootstrap.len() as u64);
         let blob_meta_offset = align_u64(
             bootstrap_offset + embedded_bootstrap.len() as u64,
-            LEPTON_BLOB_FOOTER_ALIGNMENT,
+            NYDUS_BLOB_FOOTER_ALIGNMENT,
         );
         let blob_meta_blocks = bytes_to_blocks(blob_meta.metadata_size());
         let footer = BlobFooter::new(
@@ -639,7 +639,7 @@ mod tests {
             .read_file_data_sync(file_nid, &inode, 0, inode.size() as u32)
             .expect("read file data");
 
-        assert_eq!(data, b"hello lepton\n");
+        assert_eq!(data, b"hello nydus\n");
     }
 
     fn align_u64(value: u64, align: u64) -> u64 {

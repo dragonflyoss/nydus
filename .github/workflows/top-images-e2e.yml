@@ -1,7 +1,7 @@
 name: Top Images E2E
 
 # Manually-triggered end-to-end test that converts and validates the top
-# Docker Hub images with leptonify, pushing the converted lepton images straight
+# Docker Hub images with nydusify, pushing the converted nydus images straight
 # to this repository's GHCR namespace over HTTPS.
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         required: false
         default: "5"
       registry:
-        description: "Target registry/namespace for the converted lepton images"
+        description: "Target registry/namespace for the converted nydus images"
         required: false
         default: ""
 
@@ -33,7 +33,7 @@ jobs:
 
       # The convert/check pipeline stages many multi-gigabyte images. The
       # per-image scratch work directories are placed on the large /mnt
-      # ephemeral disk (see the test step). The converted lepton images are
+      # ephemeral disk (see the test step). The converted nydus images are
       # pushed straight to GHCR (no local registry), but the pulled source
       # blobs and the Rust/Go build still live on the smaller root volume.
       # Reclaim the ~25GB of preinstalled toolchains we do not use so the root
@@ -60,7 +60,7 @@ jobs:
         uses: docker/setup-docker-action@v4
 
       # The image list points at GHCR mirrors (see mirror-top-images.yml) and
-      # the converted lepton images are pushed back to the same GHCR namespace;
+      # the converted nydus images are pushed back to the same GHCR namespace;
       # authenticate so packages can be pulled and pushed.
       - name: Log in to GHCR
         run: |
@@ -83,14 +83,14 @@ jobs:
         with:
           go-version: '1.25.5'
 
-      - name: Build leptonify
+      - name: Build nydusify
         run: |
-          make -C leptonify build
-          sudo install -m 0755 leptonify/leptonify /usr/local/bin/leptonify
+          make -C nydusify build
+          sudo install -m 0755 nydusify/nydusify /usr/local/bin/nydusify
 
       - name: Run top-images e2e test
         env:
-          # Push the converted lepton images straight to this repository's GHCR
+          # Push the converted nydus images straight to this repository's GHCR
           # namespace (over HTTPS) instead of a local registry, so the runner's
           # root volume is not filled by the pushed-back images.
           REGISTRY_INPUT: ${{ github.event.inputs.registry }}
@@ -101,8 +101,8 @@ jobs:
           # scratch work directories on the larger /mnt ephemeral disk to avoid
           # "no space left on device". The test removes each image's work dir as
           # soon as it finishes, regardless of success.
-          sudo mkdir -p /mnt/leptonify-top-images
-          sudo chmod 0777 /mnt/leptonify-top-images
+          sudo mkdir -p /mnt/nydusify-top-images
+          sudo chmod 0777 /mnt/nydusify-top-images
           df -h / /mnt
           registry="${REGISTRY_INPUT:-$DEFAULT_REGISTRY}"
           # Converting/checking the full top-images list (120 images) at the
@@ -117,4 +117,4 @@ jobs:
             TOP_IMAGES_REGISTRY="$registry" \
             TOP_IMAGES_PLAIN_HTTP="false" \
             TOP_IMAGES_PLATFORM="linux/amd64" \
-            TOP_IMAGES_WORKDIR="/mnt/leptonify-top-images"
+            TOP_IMAGES_WORKDIR="/mnt/nydusify-top-images"

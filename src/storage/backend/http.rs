@@ -22,7 +22,7 @@ use super::dns::HickoryResolver;
 /// when enabled, the Dragonfly SDK proxy).
 static HTTP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
-        .thread_name("lepton-backend")
+        .thread_name("nydus-backend")
         .enable_all()
         .build()
         .expect("failed to build backend tokio runtime")

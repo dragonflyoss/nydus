@@ -75,7 +75,7 @@ impl Blob {
     }
 }
 
-/// Parse a `trusted.lepton.prefetch.blobs` xattr value such as `"2,5,1"` into an
+/// Parse a `trusted.nydus.prefetch.blobs` xattr value such as `"2,5,1"` into an
 /// ordered list of blob indexes, skipping empty, zero, or non-numeric tokens.
 fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
     let text = match std::str::from_utf8(value) {
@@ -136,7 +136,7 @@ impl ErofsReader {
         }
     }
 
-    /// Open a lepton blob / bootstrap file for metadata-only inspection.
+    /// Open a nydus blob / bootstrap file for metadata-only inspection.
     pub fn open_layer(path: &Path) -> io::Result<Self> {
         let mmap = Self::map_file(path)?;
         let image_offset = Self::image_offset_from_footer(&mmap)?.unwrap_or(0);
@@ -165,7 +165,7 @@ impl ErofsReader {
     fn open_blob(blob_path: &Path) -> io::Result<Self> {
         let mmap = Self::map_file(blob_path)?;
         let image_offset = Self::image_offset_from_footer(&mmap)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "lepton blob footer not found")
+            io::Error::new(io::ErrorKind::InvalidData, "nydus blob footer not found")
         })?;
         let sb_offset = image_offset
             .checked_add(EROFS_SUPER_OFFSET as usize)
@@ -238,10 +238,10 @@ impl ErofsReader {
     }
 
     fn image_offset_from_footer(mmap: &[u8]) -> io::Result<Option<usize>> {
-        if mmap.len() < LEPTON_BLOB_FOOTER_SIZE {
+        if mmap.len() < NYDUS_BLOB_FOOTER_SIZE {
             return Ok(None);
         }
-        let footer_bytes = &mmap[mmap.len() - LEPTON_BLOB_FOOTER_SIZE..];
+        let footer_bytes = &mmap[mmap.len() - NYDUS_BLOB_FOOTER_SIZE..];
         if !BlobFooter::has_magic(footer_bytes) {
             return Ok(None);
         }
@@ -258,7 +258,7 @@ impl ErofsReader {
         trace_recorder: Option<Arc<TraceRecorder>>,
     ) -> io::Result<(HashMap<u16, Blob>, Option<TempDir>)> {
         let temporary_cache_dir = if cache_dir.is_none() {
-            Some(tempfile::Builder::new().prefix("lepton-cache-").tempdir()?)
+            Some(tempfile::Builder::new().prefix("nydus-cache-").tempdir()?)
         } else {
             None
         };
@@ -363,7 +363,7 @@ impl ErofsReader {
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
-    /// redirect blob (produced by `lepton optimize`). Opens the blob cache,
+    /// redirect blob (produced by `nydus optimize`). Opens the blob cache,
     /// which reads the local blob meta but performs no data prefetch.
     pub fn blob_is_redirect(&self, blob_index: u16) -> io::Result<bool> {
         let blob = self.blobs.get(&blob_index).ok_or_else(|| {
@@ -507,7 +507,7 @@ impl ErofsReader {
         (ordered, rest)
     }
 
-    /// Ordered blob indexes from the root `trusted.lepton.prefetch.blobs` xattr,
+    /// Ordered blob indexes from the root `trusted.nydus.prefetch.blobs` xattr,
     /// unfiltered. Empty when the xattr is missing or unreadable.
     pub fn read_prefetch_order(&self) -> Vec<u16> {
         let root_nid = self.sb().root_nid();
@@ -522,7 +522,7 @@ impl ErofsReader {
         };
 
         for (name, value) in xattrs {
-            if is_lepton_prefetch_blobs_xattr(&name) {
+            if is_nydus_prefetch_blobs_xattr(&name) {
                 return parse_prefetch_blobs_value(&value);
             }
         }

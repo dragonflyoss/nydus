@@ -186,7 +186,7 @@ fn erofs_ft_to_kind(ft: u8) -> FileType {
 }
 
 fn should_hide_xattr(ino: u64, name: &[u8]) -> bool {
-    ino == FUSE_ROOT_ID && is_lepton_xattr(name)
+    ino == FUSE_ROOT_ID && is_nydus_xattr(name)
 }
 
 impl Filesystem for ErofsFs {

@@ -17,7 +17,7 @@ const GROUPMAP_HEADER_SIZE: usize = 16;
 /// the bits are accessed with atomic operations, so every process (or thread)
 /// that opens the same groupmap file observes `set_ready` updates from all
 /// the others through the shared page cache — this is what lets concurrent
-/// lepton instances on one node share a single warmed cache. Persistence
+/// nydus instances on one node share a single warmed cache. Persistence
 /// across reboots is provided by regular kernel writeback of the dirty pages.
 pub struct GroupMap {
     map: MmapRaw,

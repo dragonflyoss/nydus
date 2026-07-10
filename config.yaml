@@ -1,12 +1,12 @@
-# Example storage config for `lepton fuse --config config.yaml`.
+# Example storage config for `nydus fuse --config config.yaml`.
 #
 # This config serves blobs from an OCI image registry instead of a local
 # directory. Mount with:
 #
-#   lepton fuse --bootstrap layer.bootstrap --config config.yaml --mountpoint /mnt/lepton
+#   nydus fuse --bootstrap layer.bootstrap --config config.yaml --mountpoint /mnt/nydus
 #
-# Note: `lepton check` only supports the `local` backend; this registry config
-# is intended for `lepton fuse`.
+# Note: `nydus check` only supports the `local` backend; this registry config
+# is intended for `nydus fuse`.
 
 backend:
   type: registry
@@ -17,7 +17,7 @@ backend:
     host: 127.0.0.1:5000
 
     # Image repository (no tag/digest), e.g. "library/ubuntu".
-    repo: library/lepton-demo
+    repo: library/nydus-demo
 
     # Use the plain `http` scheme instead of `https`. Set to true for a local
     # distribution registry started with --plain-http. Default: false.
@@ -43,7 +43,7 @@ backend:
     # Useful for registries fronted by a private CA. Default: [].
     ca_cert_files: []
     # ca_cert_files:
-    #   - /etc/lepton/certs/registry-ca.pem
+    #   - /etc/nydus/certs/registry-ca.pem
 
     # Optional proxy. Blob requests are routed through the HTTP forward proxy
     # `url` (e.g. a Dragonfly dfdaemon P2P agent), keeping their original
@@ -63,7 +63,7 @@ cache:
   type: local
   config:
     # Persistent chunk cache directory (equivalent to --cache-dir).
-    dir: /var/lib/lepton/cache
+    dir: /var/lib/nydus/cache
 
 prefetch:
   # Toggle background blob prefetch after mount.

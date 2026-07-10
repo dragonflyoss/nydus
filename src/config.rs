@@ -5,9 +5,9 @@ use serde::Deserialize;
 
 use crate::storage::prefetch::DEFAULT_PREFETCH_THREADS;
 
-/// Top-level lepton configuration, typically loaded from a YAML file passed to
-/// `lepton fuse --config` or constructed by an embedding application before
-/// creating a [`LeptonAccessor`](crate::accessor::LeptonAccessor).
+/// Top-level nydus configuration, typically loaded from a YAML file passed to
+/// `nydus fuse --config` or constructed by an embedding application before
+/// creating a [`NydusAccessor`](crate::accessor::NydusAccessor).
 ///
 /// ```yaml
 /// backend:
@@ -96,17 +96,17 @@ impl Default for PrefetchConfig {
 }
 
 impl Config {
-    /// Load and parse a lepton configuration from a YAML file.
+    /// Load and parse a nydus configuration from a YAML file.
     pub fn from_file(path: &Path) -> anyhow::Result<Self> {
         let contents = fs::read_to_string(path)
             .map_err(|err| anyhow::anyhow!("failed to read config {}: {}", path.display(), err))?;
         Self::from_yaml(&contents)
     }
 
-    /// Parse a lepton configuration from a YAML string.
+    /// Parse a nydus configuration from a YAML string.
     pub fn from_yaml(contents: &str) -> anyhow::Result<Self> {
         serde_yaml::from_str(contents)
-            .map_err(|err| anyhow::anyhow!("failed to parse lepton config: {err}"))
+            .map_err(|err| anyhow::anyhow!("failed to parse nydus config: {err}"))
     }
 
     /// Directory used by the local cache to store decoded chunks.
@@ -130,11 +130,11 @@ mod tests {
 backend:
   type: local
   config:
-    dir: /var/lib/lepton/blobs
+    dir: /var/lib/nydus/blobs
 cache:
   type: local
   config:
-    dir: /var/lib/lepton/cache
+    dir: /var/lib/nydus/cache
 prefetch:
   enable: true
   threads: 8
@@ -143,10 +143,10 @@ prefetch:
         assert_eq!(config.backend.kind, "local");
         let backend_dir: PathBuf =
             serde_yaml::from_value(config.backend.config["dir"].clone()).unwrap();
-        assert_eq!(backend_dir, Path::new("/var/lib/lepton/blobs"));
+        assert_eq!(backend_dir, Path::new("/var/lib/nydus/blobs"));
         assert_eq!(
             config.cache_dir().unwrap(),
-            Path::new("/var/lib/lepton/cache")
+            Path::new("/var/lib/nydus/cache")
         );
         assert!(config.prefetch.enable);
         assert_eq!(config.prefetch.threads, 8);

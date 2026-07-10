@@ -9,10 +9,10 @@ use crate::fs::ErofsReader;
 /// Default number of worker threads used for concurrent blob prefetch.
 pub const DEFAULT_PREFETCH_THREADS: usize = 10;
 
-/// Drives blob-level prefetch after a lepton filesystem is mounted.
+/// Drives blob-level prefetch after a nydus filesystem is mounted.
 ///
 /// Workflow:
-/// 1. Prefetch the blobs declared in the root `trusted.lepton.prefetch.blobs`
+/// 1. Prefetch the blobs declared in the root `trusted.nydus.prefetch.blobs`
 ///    xattr sequentially, in the declared priority order (single thread).
 /// 2. When `full` is set, prefetch the remaining blobs concurrently with a
 ///    worker pool. When `full` is false, stop after the priority blobs so the
@@ -37,7 +37,7 @@ impl BlobPrefetcher {
     /// returned handle may be detached by the caller.
     pub fn spawn(self) -> io::Result<JoinHandle<()>> {
         thread::Builder::new()
-            .name("lepton_prefetch".to_string())
+            .name("nydus_prefetch".to_string())
             .spawn(move || self.run())
     }
 
@@ -82,7 +82,7 @@ impl BlobPrefetcher {
             let reader = self.reader.clone();
             let queue = queue.clone();
             let handle = thread::Builder::new()
-                .name("lepton_prefetch_worker".to_string())
+                .name("nydus_prefetch_worker".to_string())
                 .spawn(move || loop {
                     let blob_index = {
                         let mut guard = queue.lock().unwrap();
