@@ -8,6 +8,8 @@ pub mod metrics;
 pub mod storage;
 #[cfg(feature = "cli")]
 pub mod tracing;
+#[cfg(feature = "uffd")]
+pub mod uffd;
 pub mod utils;
 
 pub use accessor::{

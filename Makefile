@@ -2,6 +2,7 @@ CARGO ?= cargo
 GO    ?= go
 GO_BIN ?= $(or $(shell command -v $(GO) 2>/dev/null),$(shell command -v go 2>/dev/null))
 SUDO ?= sudo
+FEATURES ?= cli
 
 E2E_TEST ?=
 E2E_TIMEOUT ?= 600s
@@ -44,10 +45,10 @@ TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 .PHONY: build release leptonify test test-e2e test-xfstests test-perf test-top-images clean
 
 build:
-	$(CARGO) build --features cli
+	$(CARGO) build --features "$(FEATURES)"
 
 release:
-	$(CARGO) build --release --features cli
+	$(CARGO) build --release --features "$(FEATURES)"
 
 leptonify:
 	cd leptonify && $(GO_BIN) build -o leptonify .

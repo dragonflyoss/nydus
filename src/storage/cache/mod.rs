@@ -38,6 +38,18 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
+    /// Check whether every group overlapping `[offset, offset + len)` is
+    /// already decoded and resident in the cache data file.
+    fn is_range_ready(&self, _offset: u64, _len: u64) -> io::Result<bool> {
+        Ok(false)
+    }
+
+    /// Return the ready byte intervals overlapping `[offset, offset + len)`.
+    /// This never triggers backend fetches.
+    fn ready_ranges(&self, _offset: u64, _len: u64) -> io::Result<Vec<Range<u64>>> {
+        Ok(Vec::new())
+    }
+
     /// True when this blob is an "ondemand" redirect blob whose groups carry
     /// data belonging to other source blob devices.
     fn is_redirect_blob(&self) -> bool {
