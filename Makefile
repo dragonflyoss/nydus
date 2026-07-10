@@ -12,6 +12,10 @@ NYDUSFS_MERGE_PAUSE_SECS ?= 0
 EROFS_C_FUSE ?=
 EROFS_MKFS ?=
 
+UFFD_TIMEOUT ?= 300s
+UFFD_COUNT ?= 1
+UFFD_GO_TEST_ARGS ?=
+
 XFSTESTS_TIMEOUT ?= 600s
 XFSTESTS_COUNT ?= 1
 XFSTESTS_GO_TEST_ARGS ?=
@@ -38,11 +42,12 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(dir $(GO_BIN)):$(PATH)" "HOME=$(HOME)" \
 	"EROFS_MKFS=$(EROFS_MKFS)"
 TEST_SUPPORT_FILES = util.go optimize_util.go
 E2E_TEST_FILES = e2e_test.go $(TEST_SUPPORT_FILES)
+UFFD_TEST_FILES = uffd_test.go $(TEST_SUPPORT_FILES)
 XFSTESTS_TEST_FILES = xfstests_test.go $(TEST_SUPPORT_FILES)
 PERF_TEST_FILES = perf_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 
-.PHONY: build release nydusify test test-e2e test-xfstests test-perf test-top-images clean
+.PHONY: build release nydusify test test-e2e test-uffd test-xfstests test-perf test-top-images clean
 
 build:
 	$(CARGO) build --features "$(FEATURES)"
@@ -65,6 +70,16 @@ test-e2e: release nydusify
 		NYDUSFS_MERGE_PAUSE_SECS="$(NYDUSFS_MERGE_PAUSE_SECS)" \
 		NYDUSFS_RUN_EROFS_COMPAT="$(NYDUSFS_RUN_EROFS_COMPAT)" \
 		$(GO_BIN) test -v $(if $(strip $(E2E_TEST)),-run '^$(E2E_TEST)$$',) -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(E2E_TEST_FILES)
+
+# Run the UFFD service smoke test. This builds nydus with the optional uffd
+# feature and does not require root because it exercises stateless socket
+# requests rather than real userfaultfd faults.
+test-uffd: FEATURES=cli,uffd
+test-uffd: release
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	cd tests/integration && \
+		$(GO_TEST_ENV) \
+		$(GO_BIN) test -v -run '^TestUffdServiceSmoke$$' -count $(UFFD_COUNT) -timeout $(UFFD_TIMEOUT) $(UFFD_GO_TEST_ARGS) $(UFFD_TEST_FILES)
 
 # Run xfstests regression separately (requires root, builds release first).
 # First run will install xfstests dependencies via tests/scripts/setup_xfstests.sh.
