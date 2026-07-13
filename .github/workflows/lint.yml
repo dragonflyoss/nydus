@@ -2,13 +2,13 @@ name: Lint
 
 on:
   push:
-    branches: [main, release-*]
+    branches: [main, release-*, v3]
     paths-ignore:
       - "**.md"
       - "docs/**"
       - "LICENSE*"
   pull_request:
-    branches: [main, release-*]
+    branches: [main, release-*, v3]
     paths-ignore:
       - "**.md"
       - "docs/**"
