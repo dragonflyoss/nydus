@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main, release-*]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
   pull_request:
     branches: [main, release-*]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE*"
 
 env:
   RUST_BACKTRACE: 1
