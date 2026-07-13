@@ -47,13 +47,19 @@ XFSTESTS_TEST_FILES = xfstests_test.go $(TEST_SUPPORT_FILES)
 PERF_TEST_FILES = perf_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 
-.PHONY: build release nydusify test test-e2e test-uffd test-xfstests test-perf test-top-images clean
+.PHONY: build release nydusify test test-e2e test-uffd test-xfstests test-perf test-top-images crate clean
 
 build:
-	$(CARGO) build --features "$(FEATURES)"
+	$(CARGO) build -p nydus --features "$(FEATURES)"
 
 release:
-	$(CARGO) build --release --features "$(FEATURES)"
+	$(CARGO) build -p nydus --release --features "$(FEATURES)"
+
+# Validate that the nydus-accessor crate can be packaged and published
+# to crates.io. Run `cargo publish -p nydus-accessor --registry crates-io`
+# manually to publish.
+crate:
+	$(CARGO) publish -p nydus-accessor --registry crates-io --dry-run
 
 nydusify:
 	cd nydusify && $(GO_BIN) build -o nydusify .

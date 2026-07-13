@@ -86,11 +86,11 @@ is loaded on demand at runtime (that cost shows up inside Ready).
 
 ## Components
 
-| Component       | Path              | Description                                                                                     |
-| --------------- | ----------------- | ----------------------------------------------------------------------------------------------- |
-| `nydus`         | `src/bin/nydus/`  | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `uffd`                         |
-| `nydusify`      | `nydusify/`       | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry        |
-| `NydusAccessor` | `src/accessor.rs` | Library API for embedding the image read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
+| Component        | Path                     | Description                                                                                              |
+| ---------------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `nydus`          | `nydus/src/bin/nydus/`         | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `uffd`                                  |
+| `nydusify`       | `nydusify/`              | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry                 |
+| `nydus-accessor` | `nydus-accessor/` | Library crate (`NydusAccessor`) for embedding the image read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
 
 ## Quick Start
 
@@ -154,11 +154,15 @@ cargo build --release --features cli,uffd
 make nydusify
 ```
 
-Library embedders can build a minimal surface without FUSE, CLI, or server
-dependencies:
+Library embedders should depend on the `nydus-accessor` crate
+(`nydus-accessor/`, re-exported by the root `nydus` crate), which
+carries the accessor read path without FUSE, CLI, or server dependencies:
 
 ```bash
-cargo build --no-default-features --features backend-registry
+cargo build -p nydus-accessor --features backend-registry
+
+# Validate crates.io packaging (cargo publish dry run).
+make crate
 ```
 
 ## Testing

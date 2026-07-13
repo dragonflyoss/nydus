@@ -1,0 +1,87 @@
+[package]
+name = "nydus"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "EROFS-oriented image tooling and runtime accessor APIs for Nydus images."
+repository = "https://github.com/dragonflyoss/nydus"
+readme = "../README.md"
+
+[[bin]]
+name = "nydus"
+path = "src/bin/nydus/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["backend-registry"]
+# FUSE mount support (ErofsFs over fuser).
+fuse = ["dep:fuser"]
+# The `nydus` CLI binary: subcommands, apiserver, file logging, signals.
+cli = [
+  "fuse",
+  "dep:clap",
+  "dep:http-body-util",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:rolling-file",
+  "dep:signal-hook",
+  "dep:tokio",
+  "dep:tracing-appender",
+  "dep:tracing-panic",
+  "dep:tracing-subscriber",
+]
+# Device-level userfaultfd service for microVM virtio-pmem use cases.
+# This is intentionally not part of the default or builtin accessor path.
+uffd = [
+  "dep:sendfd",
+  "dep:tokio",
+]
+# Container image registry backend (OCI distribution).
+backend-registry = ["nydus-accessor/backend-registry"]
+# Dragonfly P2P SDK proxy support for the registry backend.
+backend-dragonfly-proxy = [
+  "backend-registry",
+  "nydus-accessor/backend-dragonfly-proxy",
+]
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+crc32c = "0.6"
+fuser = { version = "0.17", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+libc = "0.2"
+memmap2 = "0.9"
+nydus-accessor = { version = "0.1.0", path = "../nydus-accessor" }
+rolling-file = { version = "0.2.0", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sendfd = { version = "0.4", optional = true }
+sha2 = "0.10"
+signal-hook = { version = "0.3", optional = true }
+tokio = { version = "1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "sync"
+], optional = true }
+tracing = "0.1"
+tracing-appender = { version = "0.2.4", optional = true }
+tracing-panic = { version = "0.1.2", optional = true }
+tracing-subscriber = { version = "0.3", features = [
+  "chrono",
+  "env-filter",
+  "time"
+], optional = true }
+uuid = { version = "1", features = ["v4"] }
+xattr = "1"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3.1.0"

@@ -16,7 +16,7 @@ use fuser::{
 use crate::metadata::*;
 use crate::metrics;
 
-use super::{CachedDirEntry, ErofsReader};
+use crate::fs::{CachedDirEntry, ErofsReader};
 
 const FUSE_ROOT_ID: u64 = 1;
 const EROFS_FUSE_TIMEOUT: Duration = Duration::from_secs(86400 * 365 * 10);
