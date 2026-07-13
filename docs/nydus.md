@@ -872,6 +872,153 @@ does not bias `uncompressed_block_offset`. Only the data region as a whole is
 padded to a 4 KiB boundary (so the embedded bootstrap that follows starts on a
 block); groups themselves are not individually padded.
 
+### Blocks, chunks and groups
+
+The three units live in two address spaces: blocks, chunks and groups are
+defined on the **decoded** (uncompressed) external-device address space that
+EROFS chunk indexes point into, while only groups exist in the **encoded**
+data region stored in the full blob. The figures below use the defaults
+(`--chunk-size` 1 MiB = 256 blocks, `--compress-size` 4 MiB = 1024 blocks),
+so one group spans four chunks.
+
+Chunks are the deduplication unit and are split **per file**: every regular
+file is cut independently into `--chunk-size` pieces, and a file's final chunk
+keeps only its real block-aligned size instead of being padded to a full
+chunk:
+
+```text
+           file A (448 blocks)     file B (512 blocks)      file C ..
+           +--------+------+    +--------+--------+    +--------
+           | A ch 0 |A ch 1|    | B ch 0 | B ch 1 |    | C ch 0
+           |256 blk |192blk|    |256 blk |256 blk |    | 256 blk
+           | BLAKE3 |BLAKE3|    | BLAKE3 | BLAKE3 |    | BLAKE3
+           +--------+------+    +--------+--------+    +--------
+```
+
+The per-file chunks are then packed densely, back-to-back, into the decoded
+external-device address space that EROFS chunk indexes point into; each
+chunk's BLAKE3 digest and absolute block range are recorded in the blob meta
+chunk table:
+
+```text
+blkaddr    0        256    448      704      960
+           |        |      |        |        |
+           +--------+------+--------+--------+--------+--
+           | A ch 0 |A ch 1| B ch 0 | B ch 1 | C ch 0 | ..
+           +--------+------+--------+--------+--------+--
+```
+
+Groups aggregate **blocks**, not files or chunks: the group builder packs
+whole decoded blocks up to `--compress-size` and flushes, regardless of where
+files or chunks start and end — here the group 0 boundary at block 1024 falls
+in the middle of `C ch 0`, so that chunk straddles two groups:
+
+```text
+blkaddr    0                                   1024
+           |                                   |
+           +--------+------+--------+--------+--------+--
+same space | A ch 0 |A ch 1| B ch 0 | B ch 1 | C ch 0 | ..
+           +--------+------+--------+--------+--------+--
+           |<------------ group 0 ------------>|<- group 1 ..
+           |       CRC32C(decoded bytes)       |   CRC32C ..
+           +-----------------------------------+-----------
+```
+
+Each group is the compression, backend-read and cache-fill unit, with a
+CRC32C computed over its decoded bytes.
+
+Groups are then compressed independently and packed back-to-back into the
+encoded data region of the full blob:
+
+```text
+           group 0                      group 1
+              | zstd                       | zstd (stored plain when
+              v                            v  saving is less than 30%)
++---------------------------+------------------+---
+| group 0 compressed bytes  | group 1 bytes    | ...
++---------------------------+------------------+---
+^ compressed_byte_offset(g0) = 0
+                            ^ compressed_byte_offset(g1)
+                              = offset(g0) + compressed_size(g0)
+```
+
+Hash and validation summary:
+
+- **BLAKE3 per chunk** (blob meta chunk table) — the deduplication key over
+	the chunk's decoded, block-aligned bytes.
+- **CRC32C per group** (blob meta group record) — validated after every fetch
+	and decode, on both the on-demand and prefetch paths.
+- **SHA256 over the data region** — written into the bootstrap device slot as
+	the blob id.
+- **SHA256 over the whole full blob** — the artifact file name (`--blob-dir`)
+	and the OCI layer digest.
+- **CRC32C in the blob meta header and blob footer** — checked before either
+	structure is trusted; the bootstrap has its own EROFS superblock checksum.
+
+### Ondemand (redirect) blob layout
+
+`nydus optimize` emits one extra "ondemand" blob and appends it to the image
+as a new layer. It reuses the full blob container format, but degenerates two
+regions: there is no embedded bootstrap (`bootstrap_blocks = 0`) and the blob
+meta chunk table is empty — the ondemand blob introduces no new filesystem
+data, it only re-hosts copies of hot groups from the source blobs:
+
+```text
+ondemand blob — named by SHA256(full blob), one new nydus layer
+
++--------------------------------+  byte 0
+| group data                     |
+|  encoded copies of the traced  |
+|  source groups, packed in      |
+|  first-access order            |
++--------------------------------+
+| blob meta                      |
+|  header (crc32c)               |
+|  chunk table: empty            |
+|  group table: redirect records |
++--------------------------------+
+| footer (bootstrap_blocks = 0)  |
++--------------------------------+
+```
+
+Every group record in the ondemand blob is a **redirect**: instead of
+describing this blob's own decoded address space, it names the source group
+it is a copy of. Group sizes follow the source groups, so the uniform-size
+invariant is relaxed and the O(1) `block / group_block_count` lookup is never
+used on an ondemand blob:
+
+```text
+redirect group record (in the ondemand group table)
+
+  source_blob_index  = 2 --+
+  source_group_index = 7   +--> names source blob 2, group 7;
+  crc32c ------------------+    crc32c equals that group's decoded CRC
+
+  compressed_byte_offset --+
+  compressed_size ---------+--> locates the encoded copy inside
+                                the ondemand data region
+```
+
+At mount time the rewritten bootstrap lists the ondemand device first in the
+root inode's `trusted.nydus.prefetch.blobs` xattr, so phase-0 prefetch streams
+it and fans the decoded groups out into the **source** blobs' caches:
+
+```text
+phase-0 prefetch of the ondemand blob
+
+fetch group copy -> zstd decode -> CRC32C check (must equal the
+        |                          source group's decoded CRC)
+        v
+<source digest>.blob.data  at the source group's uncompressed offset
++ source groupmap bit set
+```
+
+The ondemand blob never builds a cache file of its own; a failed redirect
+(unknown source device, CRC mismatch, cache write error) is logged and
+skipped, so a bad group can only lose warmup, never poison a source cache.
+See [Optimize](#optimize) for the CLI and [Blob prefetch](#blob-prefetch) for
+the scheduling details.
+
 ### Merge output
 
 The merge command emits an overlaid standalone bootstrap that references one or
@@ -978,6 +1125,36 @@ blob digest:
 	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
 - `<full_blob_digest>.prefetch.lock` is the cross-process prefetch lock file
 	(empty; only its `flock` state matters).
+
+The cache data file mirrors the decoded address space one-to-one, so a group's
+bytes land at `uncompressed_block_offset * 4096` and EROFS chunk `blkaddr`
+offsets index into it directly:
+
+```text
+cache directory, artifacts named by SHA256(full blob) = <hex>
+
+<hex>.blob.data — decoded data, sparse; filled group by group
++-----------+-----------+-----------+-----------+---
+|  group 0  |  (hole)   |  group 2  |  (hole)   | ...
+|  decoded  |           |  decoded  |           |
++-----------+-----------+-----------+-----------+---
+^ byte offset = uncompressed_block_offset * 4096; a group is written
+  only after zstd decode + CRC32C validation succeeds
+
+<hex>.blob.meta — verified blob meta copy (mmap'd for chunk/group lookup)
++--------+-------------------+-------------------+
+| header | chunk table       | group table       |
+| crc32c | BLAKE3 digests    | offsets + CRC32C  |
++--------+-------------------+-------------------+
+
+<hex>.groupmap — shared readiness bitmap, MAP_SHARED + atomic bit ops
++------------------------+----------------------+
+| 16 B header (LPGM0001) | 1 bit per group ...  |
++------------------------+----------------------+
+  bit set only after the group's bytes are resident in .blob.data
+
+<hex>.prefetch.lock — empty; exclusive flock serializes prefetch owners
+```
 
 ### Blob prefetch
 
@@ -1287,6 +1464,35 @@ nydus-aware snapshotters and tooling can consume it (see
 - Only `RootFS.DiffIDs` and `History` are rewritten in the image config; all
   runtime-relevant config fields (env, cmd, entrypoint, working dir, os,
   architecture) are preserved verbatim.
+
+Putting the pieces together, a converted nydus image looks like:
+
+```text
+nydus image (OCI manifest, os.features: ["nydus.remoteimage.v1"])
++--------------------------------------------------------------------+
+| config      diff_ids / history rewritten; runtime fields verbatim  |
+|--------------------------------------------------------------------|
+| layer 0     nydus blob layer   ...nydus.blob.v1   <- OCI layer 0   |
+| layer 1     nydus blob layer   ...nydus.blob.v1   <- OCI layer 1   |
+|  ...        (one full blob per source OCI layer)                   |
+| layer N     bootstrap layer    gzip tar { image/image.boot }       |
+|             = merged overlaid bootstrap referencing layers 0..N-1  |
++--------------------------------------------------------------------+
+           |
+           |  each blob layer is one full blob; layer digest =
+           |  SHA256(full blob) (uncompressed layer, diff id = digest)
+           v
++--------------------+-------------+-----------+--------+
+| encoded data       | bootstrap   | blob meta | footer |  full blob
+| (zstd groups,      | (embedded   | (chunk +  | 4 KiB  |
+|  CRC32C each)      |  EROFS)     |  group)   |        |
++--------------------+-------------+-----------+--------+
+  SHA256(data region) -> device slot blob id in the bootstrap
+```
+
+The merged `image.boot` in the bootstrap layer carries one device slot per
+blob layer, so mounting needs only that bootstrap plus on-demand range reads
+into the blob layers.
 
 ### Subcommand mapping
 
