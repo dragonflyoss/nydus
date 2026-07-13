@@ -1,0 +1,70 @@
+[package]
+name = "nydus-accessor"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Runtime accessor APIs for EROFS-based Nydus images: metadata parsing, on-demand blob caching and storage backends."
+repository = "https://github.com/dragonflyoss/nydus"
+readme = "README.md"
+# Integration tests need the `nydus` builder (a path-only cyclic
+# dev-dependency stripped on publish), so keep them out of the package.
+exclude = ["/tests"]
+
+[features]
+default = []
+# Container image registry backend (OCI distribution).
+backend-registry = [
+  "dep:reqwest",
+  "dep:hickory-resolver",
+  "dep:url",
+  "dep:arc-swap",
+  "dep:once_cell",
+  "dep:futures",
+  "dep:rand",
+  "dep:tokio",
+]
+# Dragonfly P2P SDK proxy support for the registry backend.
+backend-dragonfly-proxy = [
+  "backend-registry",
+  "dep:dragonfly-client-request",
+]
+
+[dependencies]
+anyhow = "1"
+arc-swap = { version = "1", optional = true }
+bitflags = "2"
+crc32c = "0.6"
+dragonfly-client-request = { version = "=1.4.0", optional = true }
+futures = { version = "0.3", optional = true }
+hickory-resolver = { version = "0.25", optional = true }
+libc = "0.2"
+memmap2 = "0.9"
+once_cell = { version = "1", optional = true }
+prometheus = { version = "0.13", default-features = false }
+rand = { version = "0.8", optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "stream",
+], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tempfile = "3.1.0"
+tokio = { version = "1", features = [
+  "io-util",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "sync"
+], optional = true }
+tracing = "0.1"
+url = { version = "2", optional = true }
+uuid = { version = "1", features = ["v4"] }
+zstd = "0.13"
+
+[dev-dependencies]
+blake3 = "1"
+# Path-only cyclic dev-dependency: tests build fixture images with the
+# `nydus` builder. Stripped automatically by `cargo publish`.
+nydus = { path = "../nydus", default-features = false }

@@ -1,15 +1,21 @@
+//! Runtime accessor APIs for EROFS-based Nydus images.
+//!
+//! This crate provides the host-side building blocks used to serve Nydus
+//! images at runtime: EROFS metadata parsing ([`metadata`]), an on-demand
+//! blob cache and storage backends ([`storage`]), an image reader ([`fs`]),
+//! and the high-level [`NydusAccessor`] entry point ([`accessor`]).
+//!
+//! Optional cargo features:
+//! - `backend-registry`: container image registry backend (OCI distribution).
+//! - `backend-dragonfly-proxy`: Dragonfly P2P SDK proxy for the registry
+//!   backend.
+
 pub mod accessor;
-pub mod build;
 pub mod config;
 pub mod fs;
-pub mod merge;
 pub mod metadata;
 pub mod metrics;
 pub mod storage;
-#[cfg(feature = "cli")]
-pub mod tracing;
-#[cfg(feature = "uffd")]
-pub mod uffd;
 pub mod utils;
 
 pub use accessor::{

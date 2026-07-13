@@ -1,10 +1,5 @@
 mod data;
-#[cfg(feature = "fuse")]
-pub mod fuse;
 mod meta;
-
-#[cfg(feature = "fuse")]
-pub use self::fuse::ErofsFs;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -29,8 +24,9 @@ pub struct DirEntry {
     pub name: String,
 }
 
-#[cfg(feature = "fuse")]
-pub(crate) struct CachedDirEntry {
+/// Directory entry with an owned raw name, cached by directory handles in
+/// FUSE frontends (see the `fuse` module in the `nydus` crate).
+pub struct CachedDirEntry {
     pub nid: u64,
     pub file_type: u8,
     pub name: Vec<u8>,

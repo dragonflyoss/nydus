@@ -2,9 +2,7 @@ use std::io;
 
 use crate::metadata::*;
 
-#[cfg(feature = "fuse")]
-use super::CachedDirEntry;
-use super::{DirEntry, ErofsReader};
+use super::{CachedDirEntry, DirEntry, ErofsReader};
 
 impl ErofsReader {
     /// Get a zero-copy inode view from the mmap.
@@ -52,8 +50,9 @@ impl ErofsReader {
         Ok(entries)
     }
 
-    #[cfg(feature = "fuse")]
-    pub(crate) fn read_dir_cached(
+    /// Read directory entries with owned raw names, for FUSE directory
+    /// handle caching.
+    pub fn read_dir_cached(
         &self,
         nid: u64,
         inode: &ErofsInode<'_>,
