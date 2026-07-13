@@ -3,22 +3,21 @@
 ## Status
 
 This document describes the current nydus artifact model, blob meta format and
-runtime read path. Nydus no longer preserves compatibility with the original
-split `image + --blobdev` prototype, the old blob_meta header layout, or the old
-data-digest sidecar naming convention.
+runtime read path.
 
 The user-facing commands are:
 
 - `nydus build`
 - `nydus check`
 - `nydus merge`
+- `nydus optimize`
 - `nydus fuse`
 - `nydus uffd` (with the optional `uffd` feature)
 
-The current merge implementation focuses on metadata overlay, blob-id
-preservation and OCI whiteout handling. The build and runtime paths use the
-embedded blob meta region as the canonical map from logical EROFS
-external-device addresses to encoded ranges in the stored data region.
+The merge implementation focuses on metadata overlay, blob-id preservation and
+OCI whiteout handling. The build and runtime paths use the embedded blob meta
+region as the canonical map from logical EROFS external-device addresses to
+encoded ranges in the stored data region.
 
 ## Goals
 
@@ -33,12 +32,9 @@ external-device addresses to encoded ranges in the stored data region.
 
 ## Non-goals
 
-- Preserve backward compatibility with the old `image + --blobdev` CLI.
-- Preserve compatibility with old blob_meta headers or sidecar names.
-- Implement all merge semantics in the first migration slice.
+- Preserve on-disk compatibility with earlier Nydus image formats (RAFS v5/v6).
 - Introduce cross-layer global deduplication beyond the current single-build dedup.
-- Rework the full EROFS on-disk layout to match every upstream variant before the
-  new artifact workflow is proven in-tree.
+- Rework the full EROFS on-disk layout to match every upstream variant.
 
 ## CLI Contract
 
@@ -60,30 +56,32 @@ Current CLI help:
 
 ```bash
 nydus build -h
-Create an nydus filesystem layer (chunk-based)
+Create an nydus filesystem image (chunk-based)
 
 Usage: nydus build [OPTIONS] <SOURCE>
 
 Arguments:
-	<SOURCE>  source from which to build the filesystem
+	<SOURCE>  Source directory to build the image from
 
 Options:
-	--type <type>
-		Conversion type: [default: dir-nydus] [possible values: dir-nydus]
-	--blob <blob>
-		File path to save the generated nydus blob (also include bootstrap)
-	--blob-dir <blob-dir>
-		Directory path to save the generated nydus blob with sha256 file name (conflict with `--blob`)
-	--bootstrap <bootstrap>
-		File path to save the generated nydus bootstrap (optional)
-	--chunk-size <chunk-size>
-		Set the EROFS file chunk size, must be power of two, 4KiB-aligned, and at least 4KiB: [default: 1048576]
-	--compress-size <compress-size>
-		Set the blob meta group uncompressed size, must be a multiple of 1MiB and at least the chunk size: [default: 1048576]
-	--compressor <compressor>
-		Algorithm to compress data chunks: [default: zstd] [possible values: none, zstd]
-	--log-level <log-level>
-		Log level: [default: info] [possible values: trace, debug, info, warn, error]
+	--type <CONVERSION_TYPE>
+		Conversion type [default: dir-nydus] [possible values: dir-nydus]
+	--blob <BLOB>
+		File path to save the generated nydus full blob
+	--blob-dir <BLOB_DIR>
+		Directory path to save the generated nydus full blob with its SHA256 file name
+	--bootstrap <BOOTSTRAP>
+		File path to save the generated nydus bootstrap
+	--chunk-size <CHUNK_SIZE>
+		File chunk size in bytes (must be a power of two, >= 4KiB, and 4KiB-aligned) [default: 1048576]
+	--compress-size <COMPRESS_SIZE>
+		Group uncompressed size in bytes (must be a multiple of 1MiB). Controls the uncompressed size of each blob meta group used for compression [default: 4194304]
+	--compressor <COMPRESSOR>
+		Algorithm to compress data chunks [default: zstd] [possible values: none, zstd]
+	-l, --log-level <LOG_LEVEL>
+		Specify the logging level [trace, debug, info, warn, error] [default: info]
+	--exclude <EXCLUDE>
+		Absolute or current-working-directory-relative paths to exclude. May be specified multiple times. Entries inside the source tree are omitted from the blob and the resulting filesystem tree entirely
 ```
 
 Current implementation notes:
@@ -113,6 +111,9 @@ Current implementation notes:
 	the group is stored plain and its blob_meta group record has
 	`compressed_size == uncompressed_block_count * 4096`.
 - `--compressor none` writes every group plain.
+- `--exclude <path>` omits paths inside the source tree from the blob and the
+	resulting filesystem tree entirely. It accepts absolute or
+	current-working-directory-relative paths and may be repeated.
 - Build prints one `Blobs` section grouped by `Blob N` with `blob_index`,
 	`data_blob_digest`, `full_blob_digest`, `chunk_size`, `chunk_count`,
 	`group_count`, `chunk_digester`, `chunk_compressor`,
@@ -134,19 +135,20 @@ Current CLI help:
 
 ```bash
 nydus merge -h
-Merge multiple nydus bootstrap into a overlaid bootstrap
+Merge multiple nydus layers into an overlaid bootstrap
 
-Usage: nydus merge [OPTIONS] <SOURCE>...
+Usage: nydus merge [OPTIONS] --bootstrap <BOOTSTRAP> <SOURCES>...
 
 Arguments:
-	<SOURCE>...  nydus blob paths with sha256 file name (allow one or more)
+	<SOURCES>...  Nydus layer blob paths named by their SHA256
 
 Options:
-	--bootstrap <bootstrap>
+	--bootstrap <BOOTSTRAP>
 		File path to save the generated overlaid nydus bootstrap
-	--whiteout-spec [default: oci] [possible values: oci]
-	--log-level <log-level>
-		Log level: [default: info] [possible values: trace, debug, info, warn, error]
+	--whiteout-spec <WHITEOUT_SPEC>
+		Whiteout specification to apply while merging layers [default: oci] [possible values: oci]
+	-l, --log-level <LOG_LEVEL>
+		Specify the logging level [trace, debug, info, warn, error] [default: info]
 ```
 
 Current implementation notes:
@@ -279,33 +281,33 @@ Current CLI help:
 
 ```bash
 nydus fuse -h
-Mount nydus filesystem into a directory
+Mount an nydus image through FUSE
 
-Usage: nydus fuse [OPTIONS]
+Usage: nydus fuse [OPTIONS] --mountpoint <MOUNTPOINT>
 
 Options:
-	--blob-dir <blob-dir>
+	--blob-dir <BLOB_DIR>
 		Directory path including nydus data blob
-	--cache-dir <cache-dir>
+	--cache-dir <CACHE_DIR>
 		Directory path for persistent chunk cache files
-	--config <config>
-		File path to a YAML storage config providing backend/cache directories and prefetch options
+	--config <CONFIG>
+		File path to a YAML storage config providing backend/cache directories and prefetch options. When set, --blob-dir and --cache-dir can be omitted
 	--prefetch
-		Enable background blob prefetch after mounting (off by default)
-	--bootstrap <bootstrap>
+		Enable background blob prefetch after mounting. Off by default; when --config is provided, the config's `prefetch.enable` also turns it on
+	--bootstrap <BOOTSTRAP>
 		File path to nydus bootstrap
-	--blob <blob>
+	--blob <BLOB>
 		File path to nydus blob
-	--mountpoint <mountpoint>
+	--mountpoint <MOUNTPOINT>
 		Directory path to mount nydus filesystem
-	--log-level <log-level>
-		Log level: [default: info] [possible values: trace, debug, info, warn, error]
-	--log-dir <log-dir>
+	--apiserver <APISERVER>
+		Serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics`
+	-l, --log-level <LOG_LEVEL>
+		Specify the logging level [trace, debug, info, warn, error] [default: info]
+	--log-dir <LOG_DIR>
 		Specify the log directory [default: /var/log/nydus/]
-	--log-max-files <log-max-files>
+	--log-max-files <LOG_MAX_FILES>
 		Specify the max number of log files [default: 6]
-	--apiserver <apiserver>
-		Serve Prometheus metrics over a Unix socket, e.g. unix:///run/nydus/api.sock
 ```
 
 Supported forms:
@@ -1236,9 +1238,9 @@ These rules belong in the merge metadata layer, not in build and not in mount.
 
 ## Compatibility Notes
 
-Nydus's current format is intentionally self-consistent rather than backward
-compatible. In particular, it does not support the old CLI shape, old blob_meta
-header fields, or data-digest sidecar lookup.
+The nydus v3 format described here is self-consistent and does not preserve
+on-disk compatibility with earlier Nydus image formats (RAFS v5/v6): bootstraps
+are native EROFS images rather than RAFS metadata.
 
 EROFS compatibility is handled by exposing decoded cache data when running
 compatibility checks against C erofsfuse. Compressed full blobs are Nydus runtime

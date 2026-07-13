@@ -1,8 +1,10 @@
 # EROFS Technical Internals
 
-A deep dive into the EROFS on-disk format and how `erofs-utils-rust` builds
-chunk-based images. Read this alongside the source files in `src/` for full
-understanding.
+A deep dive into the EROFS on-disk format and how Nydus builds chunk-based
+EROFS metadata. Read this alongside the source files in `src/metadata/` and
+`src/build/` for full understanding. For the full-blob artifact layout, blob
+meta format and runtime read path built on top of this, see
+[nydus.md](nydus.md).
 
 ---
 
@@ -33,21 +35,24 @@ images. Three core design choices drive everything:
 | **Deduplication** | Content-addressed chunks (BLAKE3 hash); identical data stored once |
 | **Minimal metadata overhead** | Compact 32-byte inodes; slot-aligned addressing; no indirection tables |
 
-The chunk-based layout that `erofs-utils-rust` produces separates **metadata**
+The chunk-based layout that Nydus produces separates **metadata**
 (inodes, directories) from **data** (file contents). Metadata lives in the
-primary image; data lives in a separate **blob device**. This split allows a
-container runtime to lazily pull data chunks on first access while the
-metadata image remains small enough to fetch entirely at startup.
+primary image (the **bootstrap**); data lives on a separate logical **blob
+device**. This split allows a container runtime to lazily pull data chunks on
+first access while the metadata image remains small enough to fetch entirely
+at startup. In the full nydus artifact the bootstrap and the encoded data
+region are packed into one blob file; this document describes the EROFS-level
+view (see [nydus.md](nydus.md#artifact-model) for the artifact packing).
 
 ---
 
 ## 2. Image Layout
 
-An EROFS image produced by `erofs-utils-rust` has the following block-level
+An EROFS image produced by Nydus has the following block-level
 structure (`BLOCK_SIZE = 4096`):
 
 ```
-Image file (erofs.meta.img)
+Bootstrap (metadata-only EROFS image)
 ┌──────────────────────────────────────────────────────────────┐
 │ Block 0                                                      │
 │ ┌──────────────┬───────────────┬───────────────┬───────────┐ │
@@ -68,15 +73,16 @@ Image file (erofs.meta.img)
 │ └──────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
 
-Blob file (erofs.blob.img)
+External blob device (logical decoded address space)
 ┌──────────────────────────────────────────────────────────────┐
 │ [chunk_0] [chunk_1] [chunk_2] ...                            │
 │  Each chunk: up to chunksize bytes, block-aligned            │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-→ source: `superblock.rs` :: `write_image()` assembles Block 0 then appends
-the metadata buffer. `blob_chunk.rs` :: `BlobWriter` writes the blob file.
+→ source: `src/build/image.rs` :: `write_image()` assembles Block 0 then
+appends the metadata buffer. `src/build/blob_chunk.rs` :: `BlobWriter` writes
+the chunk data.
 
 ### Why this layout?
 
@@ -85,8 +91,9 @@ the metadata buffer. `blob_chunk.rs` :: `BlobWriter` writes the blob file.
 - **Metadata** is in a contiguous region so the kernel can read it with
   sequential I/O. Inodes are packed tightly — no bitmap, no inode table
   indirection — because the filesystem is read-only and never needs allocation.
-- **Blob** is a separate file so it can be stored on a remote registry and
-  pulled lazily.
+- **Blob data** is addressed as a separate logical device so it can be stored
+  on a remote registry and pulled lazily; the runtime cache file mirrors this
+  decoded address space (see [nydus.md](nydus.md#blob-meta-region-layout)).
 
 ---
 
@@ -117,21 +124,21 @@ Offset  Size  Field              Description
   64    16    volume_name        Volume label (zero-padded)
   80     4    feature_incompat   Incompatible feature flags
   84     2    compr_algs         Available compression algorithms (0 = none)
-  86     2    extra_devices      Number of extra devices (1 for blobdev)
+  86     2    extra_devices      Number of extra devices (external blob devices)
   88     2    devt_slotoff       Byte offset / 128 of the device table
   90     1    dirblkbits         Directory block size bits (0 = same as blkszbits)
  108     4    build_time         Seconds added to epoch for build timestamp
 ```
 
-→ source: `ondisk.rs` :: `serialize_superblock()`
+→ source: `src/metadata/superblock.rs` :: `Superblock`
 
-### Feature flags used by erofs-utils-rust
+### Feature flags used by Nydus
 
 | Flag | Value | Meaning |
 |------|-------|---------|
 | `FEATURE_COMPAT_MTIME` | 0x02 | Compact inodes store mtime as delta from epoch |
 | `FEATURE_INCOMPAT_CHUNKED_FILE` | 0x04 | Files may use chunk-based data layout |
-| `FEATURE_INCOMPAT_DEVICE_TABLE` | 0x08 | Image has a device table (enables blobdev) |
+| `FEATURE_INCOMPAT_DEVICE_TABLE` | 0x08 | Image has a device table (enables external blob devices) |
 
 ### Why `epoch` + per-inode delta?
 
@@ -175,11 +182,12 @@ Offset  Size  Field        Description
   78    50    reserved     Must be zero
 ```
 
-→ source: `ondisk.rs` :: `serialize_device_slot()`
+→ source: `src/metadata/chunk.rs` :: `DeviceSlot`
 
-In `erofs-utils-rust`, we always have exactly **one** extra device
-(`extra_devices = 1`). The `blocks` field records the total number of
-4096-byte blocks in the blob device file.
+A single-layer `nydus build` output has exactly **one** extra device
+(`extra_devices = 1`); a merged bootstrap produced by `nydus merge` carries
+one device slot per source layer. The `blocks` field records the logical
+uncompressed device size in 4096-byte blocks.
 
 ### Why device_id starts at 1?
 
@@ -221,8 +229,8 @@ This design eliminates any inode table or bitmap — the NID **is** the address.
 The kernel computes the inode location with a single shift and add, making
 inode lookup O(1).
 
-→ source: `layout.rs` :: `MetadataLayout::alloc_inode()` assigns offsets and
-computes NIDs as `offset / 32`.
+→ source: `src/metadata/layout.rs` :: `MetadataLayout::alloc_inode()` assigns
+offsets and computes NIDs as `offset / 32`.
 
 ### Compact vs Extended format
 
@@ -233,8 +241,8 @@ EROFS has two inode formats:
 | **Compact** | 32 bytes | Default: file ≤ 4 GB, UID/GID ≤ 65535, nlink = 1 |
 | **Extended** | 64 bytes | file > 4 GB, UID/GID > 65535, or nlink > 1 |
 
-→ source: `inode.rs` :: `build_tree_recursive()` sets `is_extended` based on
-these thresholds.
+→ source: `src/build/inode.rs` :: `build_tree_recursive()` sets `is_extended`
+based on these thresholds.
 
 ### Compact inode (32 bytes)
 
@@ -254,7 +262,7 @@ Offset  Size  Field           Description
   28     4    i_reserved      Must be zero
 ```
 
-→ source: `ondisk.rs` :: `serialize_inode_compact()`
+→ source: `src/metadata/inode.rs` :: `CompactInode`
 
 ### Extended inode (64 bytes)
 
@@ -276,7 +284,7 @@ Offset  Size  Field           Description
   48    16    i_reserved2     Must be zero
 ```
 
-→ source: `ondisk.rs` :: `serialize_inode_extended()`
+→ source: `src/metadata/inode.rs` :: `ExtendedInode`
 
 ### i_format bit encoding
 
@@ -296,7 +304,7 @@ L₀-L₂ (bits 1-3) : Data layout:
 N  (bit 4)    : nlink_1 flag (compact non-dir only; indicates nlink == 1)
 ```
 
-→ source: `ondisk.rs` :: `compact_i_format()`, `extended_i_format()`
+→ source: `src/metadata/inode.rs` :: `compact_i_format()`, `extended_i_format()`
 
 ### The i_u union
 
@@ -310,7 +318,7 @@ depends on the data layout:
 | FLAT_INLINE (symlink) | 0 (target data is inline after inode header) |
 | CHUNK_BASED | `chunk_info.format` — chunk format bits (see §6) |
 
-### Data layouts used in erofs-utils-rust
+### Data layouts used by Nydus
 
 ```
 Regular files → CHUNK_BASED
@@ -354,7 +362,7 @@ NID span (number of 32B slots consumed):
   e.g. compact inode with 4 chunks = ceil((32 + 32) / 32) = 2 slots
 ```
 
-→ source: `inode.rs` :: `inode_meta_size()`, `serialize_inode()`
+→ source: `src/build/inode.rs` :: `inode_meta_size()`, `serialize_inode()`
 
 ### Symlink inode memory layout
 
@@ -380,13 +388,13 @@ Each chunk of a regular file is described by an 8-byte index:
 Offset  Size  Field         Description
 ──────  ────  ─────         ───────────
    0     2    startblk_hi   Block address bits 47-32
-   2     2    device_id     Which device holds this chunk (1 = blobdev)
+   2     2    device_id     Which device holds this chunk (1 = first blob device)
    4     4    startblk_lo   Block address bits 31-0
 ```
 
 A hole (sparse region) is represented by all-`0xFF` bytes.
 
-→ source: `ondisk.rs` :: `serialize_chunk_index()`
+→ source: `src/metadata/chunk.rs` :: `ChunkIndex`
 
 ### Chunk format (stored in i_u)
 
@@ -405,7 +413,7 @@ Bit 5    : INDEXES (0x0020) — use 8-byte chunk index entries
 Bit 6    : 48BIT (0x0040) — addresses may exceed 32 bits
 ```
 
-→ source: `inode.rs` :: `chunk_format()`
+→ source: `src/metadata/inode.rs` :: `chunk_format()`
 
 ### How the kernel reads a chunk
 
@@ -427,7 +435,7 @@ physical_pos = blkaddr × block_size + chunk_offset
 
 ### Deduplication via content hashing
 
-`erofs-utils-rust` deduplicates at build time using a hash map:
+Nydus deduplicates at build time using a hash map:
 
 ```
                         ┌─────────────┐
@@ -459,17 +467,18 @@ to the blob is block-aligned:
 write_len = ceil(actual_bytes / 4096) × 4096
 ```
 
-This avoids inflating the blob for small files. With `--chunksize=1048576`,
+This avoids inflating the blob for small files. With `--chunk-size=1048576`,
 a 100-byte file writes only 4096 bytes (1 block) to the blob, not 1 MB.
 
-→ source: `blob_chunk.rs` :: `BlobWriter::write_file_chunks()`
+→ source: `src/build/blob_chunk.rs` :: `BlobWriter::write_file_chunks()`
 
 ### Why BLAKE3 instead of SHA256?
 
 BLAKE3 is ~4× faster than SHA256 on modern CPUs while providing equivalent
-collision resistance (256-bit output). Since the hash is only used internally
-for dedup and never stored on disk, switching algorithms is transparent to the
-EROFS format.
+collision resistance (256-bit output). The digest is used for build-time dedup
+and also recorded per chunk in the blob meta region (see
+[nydus.md](nydus.md#blob-meta-region-layout)); the EROFS metadata itself never
+stores it, so the choice is invisible to the EROFS kernel driver.
 
 ---
 
@@ -489,7 +498,7 @@ Offset  Size  Field       Description
   11     1    reserved    Must be zero
 ```
 
-→ source: `ondisk.rs` :: `serialize_dirent()`
+→ source: `src/metadata/dir.rs` :: `Dirent`
 
 ### Block-level layout
 
@@ -512,7 +521,7 @@ One directory block (4096 bytes):
 The name of entry `i` spans from `nameoff[i]` to `nameoff[i+1]` (or to the
 end of the used area for the last entry). The rest of the block is zero-padded.
 
-→ source: `dir.rs` :: `serialize_directory()`
+→ source: `src/build/dir.rs` :: `serialize_directory()`
 
 ### Filling algorithm
 
@@ -591,7 +600,7 @@ fn alloc_inode(&mut self, size: usize) -> (usize, u64) {
 }
 ```
 
-→ source: `layout.rs` :: `MetadataLayout`
+→ source: `src/metadata/layout.rs` :: `MetadataLayout`
 
 ### Directory data block address
 
@@ -620,13 +629,13 @@ The `main()` function orchestrates image creation in three phases:
 │       │                                                         │
 │       ▼                                                         │
 │  build_tree()  ──── DFS walk ────►  Vec<InodeInfo>              │
-│  (inode.rs)         │                    │                      │
+│  (src/build/inode.rs) │                  │                      │
 │                     │ for each           │                      │
 │                     │ regular file:      │                      │
 │                     ▼                    │                      │
 │              BlobWriter                  │                      │
 │              .write_file_chunks()        │                      │
-│              (blob_chunk.rs)              │                      │
+│              (src/build/blob_chunk.rs)    │                      │
 │                     │                    │                      │
 │                     ▼                    │                      │
 │              Blob device file            │                      │
@@ -636,32 +645,33 @@ The `main()` function orchestrates image creation in three phases:
 │ Phase 2: Metadata Layout                 │                      │
 │                                          ▼                      │
 │  ┌─ alloc_inode() ───────  assign NID to each inode             │
-│  │  (layout.rs)                                                 │
+│  │  (src/metadata/layout.rs)                                    │
 │  │                                                              │
 │  ├─ set_parent_nids() ───  wire up ".." references              │
-│  │  (main.rs)                                                   │
+│  │  (src/build/bootstrap.rs)                                    │
 │  │                                                              │
 │  ├─ pad_to_block() ──────  align for directory data             │
-│  │  (layout.rs)                                                 │
+│  │  (src/metadata/layout.rs)                                    │
 │  │                                                              │
 │  ├─ serialize_directory()  serialize dir entries into blocks     │
-│  │  (dir.rs)               alloc_dir_data() for each dir        │
+│  │  (src/build/dir.rs)     alloc_dir_data() for each dir        │
 │  │                                                              │
 │  └─ serialize_inode() ───  write inode bytes into metadata buf  │
-│     (inode.rs)                                                  │
+│     (src/build/inode.rs)                                        │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │ Phase 3: Image Writing                                          │
 │                                                                 │
 │  write_image()  ──►  Block 0: superblock + device table         │
-│  (superblock.rs)     Block 1..N: metadata buffer                │
+│  (src/build/image.rs) Block 1..N: metadata buffer               │
 │                      Padding to block boundary                  │
 │                                                                 │
 │                 ──►  Final .img file                             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-→ source: `main.rs` :: `main()`
+→ source: `src/bin/nydus/build.rs` (build subcommand) orchestrating
+`src/build/`
 
 ### Phase 1 detail: Tree building
 
@@ -682,7 +692,8 @@ root directory.
 
 ### Phase 2 detail: Parent NID wiring
 
-After NID assignment, `set_parent_nids()` traverses the inode list:
+After NID assignment, `set_parent_nids()` (`src/build/bootstrap.rs`) traverses
+the inode list:
 
 - Root directory's `parent_nid` = its own NID (root's `".."` points to itself)
 - For every other directory: `parent_nid` = its parent directory's NID
@@ -737,9 +748,10 @@ device ID, which is insufficient for multi-device setups.
 | Speed (single core) | ~500 MB/s | ~2 GB/s |
 | Collision resistance | 128 bits | 128 bits |
 
-BLAKE3 is 3–4× faster with identical security properties. Since the hash is
-used only at build time (never stored on disk), the choice is invisible to the
-EROFS format and kernel driver.
+BLAKE3 is 3–4× faster with identical security properties. The digest is used
+for build-time dedup and recorded in the blob meta chunk table — outside the
+EROFS metadata proper — so the choice is invisible to the EROFS format and
+kernel driver.
 
 ### Why sort directory entries?
 
@@ -776,13 +788,13 @@ on-demand loading for container use cases.
 
 | Name | Value | Defined in |
 |------|-------|-----------|
-| `EROFS_SUPER_MAGIC_V1` | `0xE0F5E1E2` | `ondisk.rs` |
-| `EROFS_SUPER_OFFSET` | 1024 | `ondisk.rs` |
-| `EROFS_BLOCK_SIZE` | 4096 | `ondisk.rs` |
-| `EROFS_BLKSZBITS` | 12 | `ondisk.rs` |
-| `EROFS_ISLOTBITS` | 5 | `ondisk.rs` |
-| `EROFS_SLOTSIZE` | 32 | `ondisk.rs` |
-| `EROFS_NULL_ADDR` | `0xFFFFFFFFFFFFFFFF` | `ondisk.rs` |
+| `EROFS_SUPER_MAGIC_V1` | `0xE0F5E1E2` | `src/metadata/mod.rs` |
+| `EROFS_SUPER_OFFSET` | 1024 | `src/metadata/mod.rs` |
+| `EROFS_BLOCK_SIZE` | 4096 | `src/metadata/mod.rs` |
+| `EROFS_BLKSZBITS` | 12 | `src/metadata/mod.rs` |
+| `EROFS_ISLOTBITS` | 5 | `src/metadata/mod.rs` |
+| `EROFS_SLOTSIZE` | 32 | `src/metadata/mod.rs` |
+| `EROFS_NULL_ADDR` | `0xFFFFFFFFFFFFFFFF` | `src/metadata/mod.rs` |
 
 ### File type constants
 

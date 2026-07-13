@@ -1,133 +1,133 @@
-# nydus
+# Nydus
 
-Nydus is a Rust implementation of EROFS-oriented image tooling. This README is
-kept as a development entrypoint for building and testing the repository.
+Nydus is an EROFS-native container image format and runtime, implemented in
+Rust. It converts container image layers into chunk-based EROFS filesystems
+that support on-demand loading: a container can start after fetching only a
+small metadata bootstrap, while file data is pulled from the registry lazily,
+in compressed groups, exactly when it is read.
 
-For CLI behavior, artifact layout, blob meta format and runtime read-path
-details, see [docs/nydus.md](docs/nydus.md). For EROFS structure notes, see
-[docs/erofs.md](docs/erofs.md).
+This repository is the Nydus image format v3 implementation. Compared with
+earlier Nydus versions it uses native EROFS metadata end to end — the same
+bootstrap mounts through FUSE on the host, or directly as EROFS inside a
+microVM guest via virtio-pmem.
 
-## Prerequisites
+## Features
 
-- Rust toolchain with `cargo`.
-- Go for integration tests under `tests/integration/`.
-- `sudo` and FUSE support for e2e, xfstests and perf runs.
-- `fio` for `make test-perf`.
-- Optional erofs-utils binaries for compatibility checks:
-	`EROFS_C_FUSE=/path/to/erofsfuse` and `EROFS_MKFS=/path/to/mkfs.erofs`.
+- **Single-artifact layers** — each layer is one full blob file
+  (`data + bootstrap + blob meta + footer`) named by its SHA256, with an
+  optional standalone metadata-only bootstrap.
+- **On-demand loading** — file reads map to compressed groups through an O(1)
+  logical-address lookup; only the touched groups are fetched, CRC-validated,
+  decoded, and cached.
+- **Compression and dedup** — zstd-compressed groups independent of chunk
+  boundaries; chunk-level BLAKE3 digests deduplicate data within a build.
+- **Multiple mount paths** — host FUSE mount (`nydus fuse`), a device-level
+  userfaultfd service for microVM virtio-pmem (`nydus uffd`), and an embeddable
+  accessor library (`NydusAccessor`) for hypervisors.
+- **Registry backend with P2P** — blobs are range-read directly from any OCI
+  registry, optionally through a Dragonfly forward proxy or client SDK.
+- **Access-trace optimization** — `nydus optimize` records the group access
+  order of a real workload and builds an "ondemand" blob that prefetch streams
+  first, so cold starts hit warm cache instead of scattered registry reads.
+- **Cross-process cache sharing** — concurrent instances on one node share a
+  decoded cache directory; a shared readiness bitmap and per-blob prefetch lock
+  make N cold starts cost one warmup.
+- **Observability** — Prometheus metrics and the on-demand access trace are
+  exposed over a Unix-socket apiserver (`/metrics`, `/trace`).
 
-## Build
+## Components
 
-Debug build:
+| Component | Path | Description |
+| --- | --- | --- |
+| `nydus` | `src/bin/nydus/` | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `uffd` |
+| `nydusify` | `nydusify/` | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry |
+| `NydusAccessor` | `src/accessor.rs` | Library API for embedding the image read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
+
+## Quick Start
+
+Build a directory into a nydus layer and mount it:
 
 ```bash
+# Build: emits ./layer.blob (data + bootstrap + blob meta + footer).
+nydus build --blob ./layer.blob /path/to/source-dir
+
+# Mount the blob directly.
+nydus fuse --blob ./layer.blob --mountpoint /mnt/nydus
+
+# Inspect it without mounting.
+nydus check --blob ./layer.blob
+```
+
+Convert a whole OCI image and validate the result (requires root):
+
+```bash
+sudo nydusify convert \
+  --source docker.io/library/mariadb:latest \
+  --target localhost:5000/mariadb-nydus \
+  --plain-http
+
+sudo nydusify check \
+  --source docker.io/library/mariadb:latest \
+  --target localhost:5000/mariadb-nydus \
+  --plain-http
+```
+
+Mount a converted image lazily from the registry with a YAML storage config
+(see [docs/nydus.md](docs/nydus.md#storage-config) and the example
+[`config.yaml`](config.yaml)):
+
+```bash
+nydus fuse --bootstrap image.boot --config config.yaml --mountpoint /mnt/nydus
+```
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [docs/nydus.md](docs/nydus.md) | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, accessor API, and `nydusify` |
+| [docs/uffd.md](docs/uffd.md) | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem |
+| [docs/erofs.md](docs/erofs.md) | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline |
+
+## Building from Source
+
+Prerequisites: a Rust toolchain with `cargo`; Go for `nydusify` and the
+integration tests.
+
+```bash
+# Debug / release CLI binary (written to target/{debug,release}/nydus).
 make build
-```
-
-Release build:
-
-```bash
 make release
+
+# With the optional UFFD service.
+cargo build --release --features cli,uffd
+
+# The nydusify binary.
+make nydusify
 ```
 
-Equivalent direct Cargo commands:
+Library embedders can build a minimal surface without FUSE, CLI, or server
+dependencies:
 
 ```bash
-cargo build
-cargo build --release
+cargo build --no-default-features --features backend-registry
 ```
 
-The release binary is written to:
+## Testing
 
 ```bash
-./target/release/nydus
-```
-
-## Rust Validation
-
-Run the full Rust test suite:
-
-```bash
+# Rust unit tests.
 make test
-```
 
-Useful focused checks while developing:
-
-```bash
-cargo check --workspace
-cargo test blob_meta --workspace
-cargo test cache --workspace
-cargo test local_backend --workspace
-```
-
-Format and diff hygiene:
-
-```bash
-cargo fmt
-git diff --check
-```
-
-## Integration Tests
-
-End-to-end tests require root because they mount FUSE filesystems:
-
-```bash
+# End-to-end integration tests (requires root and FUSE).
 make test-e2e
-```
 
-Run one e2e test by name:
+# UFFD service smoke test.
+make test-uffd
 
-```bash
-make test-e2e E2E_TEST=TestMergedMountE2E
-```
-
-Run e2e with erofs-utils compatibility enabled:
-
-```bash
-EROFS_C_FUSE=/path/to/erofsfuse \
-EROFS_MKFS=/path/to/mkfs.erofs \
-NYDUSFS_RUN_EROFS_COMPAT=1 \
-make test-e2e
-```
-
-xfstests regression, also requiring root:
-
-```bash
+# xfstests regression (requires root); fio performance benchmark (requires root and fio).
 make test-xfstests
-```
-
-Performance benchmark, requiring root and `fio`:
-
-```bash
 make test-perf
 ```
 
-With C erofsfuse comparison:
-
-```bash
-EROFS_C_FUSE=/path/to/erofsfuse make test-perf
-```
-
-The Go integration tests live under `tests/integration/`. xfstests setup uses
-`tests/scripts/setup_xfstests.sh`, and the exclusion list lives at
-`tests/scripts/xfstests_nydusfs.exclude`.
-
-## Test Knobs
-
-- `E2E_TEST=<regex>` selects a single e2e test.
-- `E2E_TIMEOUT=<duration>` changes the e2e timeout, defaulting to `600s`.
-- `E2E_COUNT=<n>` changes the e2e repeat count.
-- `E2E_GO_TEST_ARGS='...'` appends extra `go test` arguments for e2e runs.
-- `NYDUSFS_RUN_EROFS_COMPAT=1` enables erofs-utils compatibility checks.
-- `EROFS_C_FUSE=/abs/path/to/erofsfuse` selects the C erofsfuse binary.
-- `EROFS_MKFS=/abs/path/to/mkfs.erofs` selects the mkfs.erofs binary.
-- `XFSTESTS_GO_TEST_ARGS='...'` appends extra `go test` arguments for xfstests.
-- `PERF_GO_TEST_ARGS='...'` appends extra `go test` arguments for perf runs.
-- `SUDO=` disables `sudo` when you only want compile-level verification.
-- `GO_BIN=/abs/path/to/go` forces a specific Go binary.
-
-## Clean
-
-```bash
-make clean
-```
+Integration tests live under `tests/integration/`. See the `Makefile` for
+per-target knobs such as `E2E_TEST=<regex>` to select a single e2e test.
