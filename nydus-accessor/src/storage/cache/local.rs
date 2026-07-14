@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::ops::Range;
@@ -5,7 +6,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -21,6 +22,57 @@ use super::{
     BlobCacheBuffers,
 };
 
+#[derive(Clone)]
+enum GroupFlightResult {
+    Success,
+    Failure { kind: io::ErrorKind, message: Arc<str> },
+}
+
+struct GroupFlight {
+    result: Mutex<Option<GroupFlightResult>>,
+    done: Condvar,
+}
+
+impl GroupFlight {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            done: Condvar::new(),
+        }
+    }
+
+    /// Notify every waiter of the final result. Idempotent: if a previous call
+    /// (or the Drop guard) already set the result, this is a no-op.
+    fn complete(&self, result: &io::Result<()>) {
+        let mut guard = self.result.lock().unwrap();
+        if guard.is_some() {
+            return;
+        }
+        let result = match result {
+            Ok(()) => GroupFlightResult::Success,
+            Err(err) => GroupFlightResult::Failure {
+                kind: err.kind(),
+                message: Arc::from(err.to_string()),
+            },
+        };
+        *guard = Some(result);
+        self.done.notify_all();
+    }
+
+    fn wait(&self) -> io::Result<()> {
+        let mut result = self.result.lock().unwrap();
+        while result.is_none() {
+            result = self.done.wait(result).unwrap();
+        }
+        match result.as_ref().unwrap() {
+            GroupFlightResult::Success => Ok(()),
+            GroupFlightResult::Failure { kind, message } => {
+                Err(io::Error::new(*kind, message.to_string()))
+            }
+        }
+    }
+}
+
 pub struct LocalBlobCache {
     blob_id: [u8; EROFS_BLOB_ID_SIZE],
     /// Device/blob index in the merged image, used to attribute on-demand group
@@ -33,8 +85,7 @@ pub struct LocalBlobCache {
     cache_file: Mutex<Option<Arc<File>>>,
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
-    fetch_lock: Mutex<()>,
-    buffers: Mutex<BlobCacheBuffers>,
+    inflight_groups: Mutex<HashMap<usize, Arc<GroupFlight>>>,
 }
 
 impl LocalBlobCache {
@@ -79,8 +130,7 @@ impl LocalBlobCache {
             cache_file: Mutex::new(None),
             backend,
             trace_recorder,
-            fetch_lock: Mutex::new(()),
-            buffers: Mutex::new(BlobCacheBuffers::default()),
+            inflight_groups: Mutex::new(HashMap::new()),
         })
     }
 
@@ -120,32 +170,64 @@ impl LocalBlobCache {
             return Ok(());
         }
 
-        let _guard = self.fetch_lock.lock().unwrap();
-        if self.groupmap.is_ready(group_index)? {
-            crate::metrics::inc_cache_hit_group();
-            return Ok(());
+        let (flight, leader) = {
+            let mut inflight = self.inflight_groups.lock().unwrap();
+            match inflight.get(&group_index) {
+                Some(flight) => (flight.clone(), false),
+                None => {
+                    let flight = Arc::new(GroupFlight::new());
+                    inflight.insert(group_index, flight.clone());
+                    (flight, true)
+                }
+            }
+        };
+        if !leader {
+            return flight.wait();
         }
 
-        // Record the on-demand access order (first fetch wins) only when the
-        // group is actually fetched. Warm-cache hits return above and never
-        // touch the trace lock, keeping the page-fault hot path lock-free.
-        if let Some(recorder) = self.trace_recorder.as_ref() {
-            recorder.record_group_access(self.blob_index, group_index as u32);
-        } else {
-            crate::metrics::trace::record_group_access(self.blob_index, group_index as u32);
-        }
+        // The leader owns job-local decode buffers. Different cold groups can be
+        // fetched concurrently while callers of this group join the same flight.
+        //
+        // LeaderGuard ensures that even when the closure panics, every follower
+        // waiting on this group is unblocked with an error and the inflight slot
+        // is freed. Without this, a panic in fetch_decode_validate_group_into
+        // (or any helper it calls) would leave followers permanently stuck in
+        // flight.wait().
+        let _guard = LeaderGuard {
+            flight: flight.clone(),
+            group_index,
+            inflight: &self.inflight_groups,
+        };
 
-        let mut buffers = self.buffers.lock().unwrap();
-        let decoded = fetch_decode_validate_group_into(
-            &self.blob_id,
-            &self.blob_meta,
-            &self.backend,
-            group,
-            &mut buffers,
-            RequestSource::OnDemand,
-        )?;
-        write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
-        self.groupmap.set_ready(group_index)
+        let result = (|| {
+            if self.groupmap.is_ready(group_index)? {
+                crate::metrics::inc_cache_hit_group();
+                return Ok(());
+            }
+            if let Some(recorder) = self.trace_recorder.as_ref() {
+                recorder.record_group_access(self.blob_index, group_index as u32);
+            } else {
+                crate::metrics::trace::record_group_access(self.blob_index, group_index as u32);
+            }
+
+            let mut buffers = BlobCacheBuffers::default();
+            let decoded = fetch_decode_validate_group_into(
+                &self.blob_id,
+                &self.blob_meta,
+                &self.backend,
+                group,
+                &mut buffers,
+                RequestSource::OnDemand,
+            )?;
+            write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
+            self.groupmap.set_ready(group_index)
+        })();
+
+        // Notify followers with the actual result.
+        // complete() is idempotent: the guard's Drop then no-ops.
+        flight.complete(&result);
+        // guard is dropped here: inflight entry removed, complete(Err) no-ops
+        result
     }
 
     /// Ensure every group overlapping `[offset, offset + len)` is decoded and
@@ -655,6 +737,27 @@ fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         read_total += read;
     }
     Ok(())
+}
+
+/// Drop guard that ensures a leader always signals its flight and cleans up
+/// the inflight map, even when the fetch body panics. Without this, a panic in
+/// `fetch_decode_validate_group_into` (or any helper it calls) would leave
+/// follower threads permanently blocked in `flight.wait()`.
+struct LeaderGuard<'a> {
+    flight: Arc<GroupFlight>,
+    group_index: usize,
+    inflight: &'a Mutex<HashMap<usize, Arc<GroupFlight>>>,
+}
+
+impl<'a> Drop for LeaderGuard<'a> {
+    fn drop(&mut self) {
+        // complete is idempotent: if the leader called `flight.complete(...)`
+        // normally before Drop runs, this is a no-op.
+        self.flight.complete(&Err(io::Error::other(
+            "group leader panicked or was abandoned",
+        )));
+        self.inflight.lock().unwrap().remove(&self.group_index);
+    }
 }
 
 fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
