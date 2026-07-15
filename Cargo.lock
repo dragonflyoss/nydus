@@ -1398,7 +1398,7 @@ dependencies = [
  "versionize_derive",
  "vhost",
  "virtio-queue",
- "vm-memory",
+ "vm-memory 0.17.1",
  "vmm-sys-util 0.15.0",
 ]
 
@@ -2974,7 +2974,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "vm-memory",
+ "vm-memory 0.18.0",
  "vmm-sys-util 0.15.0",
 ]
 
@@ -3015,7 +3015,7 @@ dependencies = [
  "vhost-user-backend",
  "virtio-bindings",
  "virtio-queue",
- "vm-memory",
+ "vm-memory 0.18.0",
  "vmm-sys-util 0.15.0",
  "xattr",
 ]
@@ -3053,7 +3053,7 @@ dependencies = [
  "vhost-user-backend",
  "virtio-bindings",
  "virtio-queue",
- "vm-memory",
+ "vm-memory 0.18.0",
  "vmm-sys-util 0.15.0",
 ]
 
@@ -3100,7 +3100,7 @@ dependencies = [
  "tokio",
  "toml",
  "url",
- "vm-memory",
+ "vm-memory 0.18.0",
  "vmm-sys-util 0.15.0",
 ]
 
@@ -5520,7 +5520,7 @@ dependencies = [
  "bitflags 2.8.0",
  "libc",
  "uuid",
- "vm-memory",
+ "vm-memory 0.17.1",
  "vmm-sys-util 0.15.0",
 ]
 
@@ -5535,7 +5535,7 @@ dependencies = [
  "vhost",
  "virtio-bindings",
  "virtio-queue",
- "vm-memory",
+ "vm-memory 0.17.1",
  "vmm-sys-util 0.15.0",
 ]
 
@@ -5554,7 +5554,7 @@ dependencies = [
  "libc",
  "log",
  "virtio-bindings",
- "vm-memory",
+ "vm-memory 0.17.1",
  "vmm-sys-util 0.15.0",
 ]
 
@@ -5563,6 +5563,18 @@ name = "vm-memory"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f39348a049689cabd3377cdd9182bf526ec76a6f823b79903896452e9d7a7380"
+dependencies = [
+ "arc-swap",
+ "libc",
+ "thiserror 2.0.18",
+ "winapi",
+]
+
+[[package]]
+name = "vm-memory"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b55e753c7725603745cb32b2287ef7ef3da05c03c7702cda3fa8abe25ae0465"
 dependencies = [
  "arc-swap",
  "libc",
