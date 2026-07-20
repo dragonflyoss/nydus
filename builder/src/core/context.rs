@@ -1220,8 +1220,11 @@ impl BlobManager {
 pub struct BootstrapContext {
     /// This build has a parent bootstrap.
     pub layered: bool,
-    /// Cache node index for hardlinks, HashMap<(layer_index, real_inode, dev), Vec<TreeNode>>.
+    /// Cache node indexes for regular-file hardlinks,
+    /// HashMap<(layer_index, real_inode, dev), Vec<TreeNode>>.
     pub(crate) inode_map: HashMap<(u16, Inode, u64), Vec<TreeNode>>,
+    /// Number of unique inodes in the generated filesystem.
+    pub(crate) inode_count: u64,
     /// Current position to write in f_bootstrap
     pub(crate) offset: u64,
     pub(crate) writer: Box<dyn RafsIoWrite>,
@@ -1243,6 +1246,7 @@ impl BootstrapContext {
         Ok(Self {
             layered,
             inode_map: HashMap::new(),
+            inode_count: 0,
             next_ino: 1,
             offset: EROFS_BLOCK_SIZE_4096,
             writer,
