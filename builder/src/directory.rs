@@ -268,7 +268,61 @@ impl Builder for DirectoryBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+
+    use nydus_rafs::metadata::RafsVersion;
+    use vmm_sys_util::tempdir::TempDir;
+
     use super::*;
+    use crate::{Bootstrap, BootstrapContext};
+
+    fn inode_fields(tree: &Tree, path: &str) -> (u64, u64, u32) {
+        let node = tree.get_node(Path::new(path)).unwrap().borrow_mut_node();
+        (node.inode.ino(), node.inode.parent(), node.inode.nlink())
+    }
+
+    #[test]
+    fn test_v5_hardlinked_symlink_is_not_coalesced() {
+        let source = TempDir::new().unwrap();
+        let nested = source.as_path().join("b");
+        fs::create_dir(&nested).unwrap();
+
+        let symlink_path = source.as_path().join("a");
+        symlink("target", &symlink_path).unwrap();
+        fs::hard_link(&symlink_path, nested.join("a")).unwrap();
+
+        let regular_path = source.as_path().join("c");
+        fs::write(&regular_path, b"data").unwrap();
+        fs::hard_link(&regular_path, nested.join("c")).unwrap();
+
+        let mut ctx = BuildContext {
+            fs_version: RafsVersion::V5,
+            source_path: source.as_path().to_path_buf(),
+            ..Default::default()
+        };
+        let (tree, _) = DirectoryBuilder::new().build_tree(&mut ctx, 0).unwrap();
+        let mut bootstrap_ctx = BootstrapContext::new(None, false).unwrap();
+        let mut bootstrap = Bootstrap::new(tree).unwrap();
+        bootstrap.build(&mut ctx, &mut bootstrap_ctx).unwrap();
+
+        let (symlink_ino, _, symlink_nlink) = inode_fields(&bootstrap.tree, "/a");
+        let (nested_symlink_ino, nested_symlink_parent, nested_symlink_nlink) =
+            inode_fields(&bootstrap.tree, "/b/a");
+        assert_ne!(symlink_ino, nested_symlink_ino);
+        assert_eq!(symlink_nlink, 1);
+        assert_eq!(nested_symlink_nlink, 1);
+        assert!(nested_symlink_parent < nested_symlink_ino);
+
+        let (regular_ino, _, regular_nlink) = inode_fields(&bootstrap.tree, "/c");
+        let (nested_regular_ino, _, nested_regular_nlink) = inode_fields(&bootstrap.tree, "/b/c");
+        assert_eq!(regular_ino, nested_regular_ino);
+        assert_eq!(regular_nlink, 2);
+        assert_eq!(nested_regular_nlink, 2);
+        assert_eq!(bootstrap_ctx.inode_map.len(), 1);
+        assert_eq!(bootstrap_ctx.inode_count, 5);
+    }
 
     #[test]
     fn test_directory_builder_new() {

@@ -174,7 +174,7 @@ impl Bootstrap {
 
         // Set super block
         let mut super_block = RafsV5SuperBlock::new();
-        let inodes_count = bootstrap_ctx.inode_map.len() as u64;
+        let inodes_count = bootstrap_ctx.inode_count;
         super_block.set_inodes_count(inodes_count);
         super_block.set_inode_table_offset(super_block_size as u64);
         super_block.set_inode_table_entries(inode_table_entries);

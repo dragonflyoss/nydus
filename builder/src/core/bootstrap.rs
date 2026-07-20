@@ -38,14 +38,7 @@ impl Bootstrap {
         root_node.index = index;
         root_node.inode.set_ino(index);
         ctx.prefetch.insert(&self.tree.node, root_node.deref());
-        bootstrap_ctx.inode_map.insert(
-            (
-                root_node.layer_idx,
-                root_node.info.src_ino,
-                root_node.info.src_dev,
-            ),
-            vec![self.tree.node.clone()],
-        );
+        bootstrap_ctx.inode_count += 1;
         drop(root_node);
 
         Self::build_rafs(ctx, bootstrap_ctx, &mut self.tree)?;
@@ -122,39 +115,45 @@ impl Bootstrap {
                 child_node.inode.set_parent(parent_ino);
             }
 
-            // Handle hardlink.
-            // All hardlink nodes' ino and nlink should be the same.
-            // We need to find hardlink node index list in the layer where the node is located
-            // because the real_ino may be different among different layers,
             let mut v6_hardlink_offset: Option<u64> = None;
-            let key = (
-                child_node.layer_idx,
-                child_node.info.src_ino,
-                child_node.info.src_dev,
-            );
-            if let Some(indexes) = bootstrap_ctx.inode_map.get_mut(&key) {
-                let nlink = indexes.len() as u32 + 1;
-                // Update nlink for previous hardlink inodes
-                for n in indexes.iter() {
-                    n.borrow_mut().inode.set_nlink(nlink);
-                }
+            if child_node.is_reg() {
+                // Only regular files are represented as hardlinks in RAFS. The source inode may
+                // be different among layers, so layer index is part of the hardlink cache key.
+                let key = (
+                    child_node.layer_idx,
+                    child_node.info.src_ino,
+                    child_node.info.src_dev,
+                );
+                if let Some(indexes) = bootstrap_ctx.inode_map.get_mut(&key) {
+                    let nlink = indexes.len() as u32 + 1;
+                    // Update nlink for previous hardlink inodes.
+                    for n in indexes.iter() {
+                        n.borrow_mut().inode.set_nlink(nlink);
+                    }
 
-                let (first_ino, first_offset) = {
-                    let first_node = indexes[0].borrow_mut();
-                    (first_node.inode.ino(), first_node.v6_offset)
-                };
-                // set offset for rafs v6 hardlinks
-                v6_hardlink_offset = Some(first_offset);
-                child_node.inode.set_nlink(nlink);
-                child_node.inode.set_ino(first_ino);
-                indexes.push(child.node.clone());
+                    let (first_ino, first_offset) = {
+                        let first_node = indexes[0].borrow_mut();
+                        (first_node.inode.ino(), first_node.v6_offset)
+                    };
+                    // Set offset for RAFS v6 hardlinks.
+                    v6_hardlink_offset = Some(first_offset);
+                    child_node.inode.set_nlink(nlink);
+                    child_node.inode.set_ino(first_ino);
+                    indexes.push(child.node.clone());
+                } else {
+                    child_node.inode.set_ino(index);
+                    child_node.inode.set_nlink(1);
+                    bootstrap_ctx
+                        .inode_map
+                        .insert(key, vec![child.node.clone()]);
+                    bootstrap_ctx.inode_count += 1;
+                }
             } else {
+                // RAFS doesn't model hardlinks for non-regular files. Assign a distinct inode
+                // even when two source entries (for example symlinks) share an inode.
                 child_node.inode.set_ino(index);
                 child_node.inode.set_nlink(1);
-                // Store inode real ino
-                bootstrap_ctx
-                    .inode_map
-                    .insert(key, vec![child.node.clone()]);
+                bootstrap_ctx.inode_count += 1;
             }
 
             // update bootstrap_ctx.offset for rafs v6 non-dir nodes.
