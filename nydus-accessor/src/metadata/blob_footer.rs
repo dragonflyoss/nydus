@@ -5,16 +5,29 @@ use std::path::Path;
 
 use super::EROFS_BLOCK_SIZE;
 
-pub const NYDUS_BLOB_FOOTER_MAGIC: u32 = 0x4c46_5452;
+/// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the
+/// footer starts with the readable string. Same style and `magic + version +
+/// flags` header prefix as the blob meta (`LPBLMETA`) and groupmap
+/// (`LPGRPMAP`) sidecars.
+pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"LPFOOTER";
+/// On-disk format generation, informational only: readers do not gate on it.
+/// Compatibility is governed EROFS-style by the magic and the incompat half
+/// of `flags` (unknown incompat bits reject the footer).
+pub const NYDUS_BLOB_FOOTER_VERSION: u32 = 1;
 pub const NYDUS_BLOB_FOOTER_SIZE: usize = 4096;
 pub const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
 
-const NYDUS_BLOB_FOOTER_SUPPORTED_FEATURES: u32 = 0;
+/// `flags` is split EROFS-style: the low 16 bits are incompatible features
+/// (unknown bits reject), the high 16 bits are compatible features (unknown
+/// bits are ignored). No bits are defined yet.
+const NYDUS_BLOB_FOOTER_INCOMPAT_MASK: u32 = 0x0000_FFFF;
+const NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT: u32 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobFooter {
-    magic: u32,
-    features: u32,
+    magic: [u8; 8],
+    version: u32,
+    flags: u32,
     crc32: u32,
     reserved0: u32,
     compressed_data_offset: u64,
@@ -23,7 +36,6 @@ pub struct BlobFooter {
     compressed_data_size: u64,
     bootstrap_blocks: u32,
     blob_meta_blocks: u32,
-    reserved1: u64,
 }
 
 impl BlobFooter {
@@ -37,7 +49,8 @@ impl BlobFooter {
     ) -> Result<Self> {
         let mut footer = Self {
             magic: NYDUS_BLOB_FOOTER_MAGIC,
-            features: 0,
+            version: NYDUS_BLOB_FOOTER_VERSION,
+            flags: 0,
             crc32: 0,
             reserved0: 0,
             compressed_data_offset,
@@ -46,7 +59,6 @@ impl BlobFooter {
             compressed_data_size,
             bootstrap_blocks,
             blob_meta_blocks,
-            reserved1: 0,
         };
         footer.validate_layout(
             blob_meta_offset
@@ -105,9 +117,8 @@ impl BlobFooter {
     }
 
     pub fn has_magic(data: &[u8]) -> bool {
-        data.len() >= 4
-            && u32::from_le_bytes(data[..4].try_into().expect("slice length checked"))
-                == NYDUS_BLOB_FOOTER_MAGIC
+        data.len() >= NYDUS_BLOB_FOOTER_MAGIC.len()
+            && data[..NYDUS_BLOB_FOOTER_MAGIC.len()] == NYDUS_BLOB_FOOTER_MAGIC
     }
 
     pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
@@ -157,21 +168,22 @@ impl BlobFooter {
         if data.len() != NYDUS_BLOB_FOOTER_SIZE {
             bail!("invalid nydus footer size: {}", data.len());
         }
-        if data[64..].iter().any(|byte| *byte != 0) {
-            bail!("nydus footer reserved extension area must be zero");
-        }
+        // Bytes past the fixed fields are reserved for future compat fields.
+        // Writers zero them, but readers deliberately do not enforce that
+        // (EROFS-style): a newer writer may have placed compat fields there
+        // that this reader ignores. Corruption is caught by the footer crc32c.
         let footer = Self {
-            magic: read_u32(data, 0),
-            features: read_u32(data, 4),
-            crc32: read_u32(data, 8),
-            reserved0: read_u32(data, 12),
-            compressed_data_offset: read_u64(data, 16),
-            bootstrap_offset: read_u64(data, 24),
-            blob_meta_offset: read_u64(data, 32),
-            compressed_data_size: read_u64(data, 40),
-            bootstrap_blocks: read_u32(data, 48),
-            blob_meta_blocks: read_u32(data, 52),
-            reserved1: read_u64(data, 56),
+            magic: data[0..8].try_into().expect("slice checked"),
+            version: read_u32(data, 8),
+            flags: read_u32(data, 12),
+            crc32: read_u32(data, 16),
+            reserved0: read_u32(data, 20),
+            compressed_data_offset: read_u64(data, 24),
+            bootstrap_offset: read_u64(data, 32),
+            blob_meta_offset: read_u64(data, 40),
+            compressed_data_size: read_u64(data, 48),
+            bootstrap_blocks: read_u32(data, 56),
+            blob_meta_blocks: read_u32(data, 60),
         };
         footer.validate_common()?;
         let actual = footer.compute_crc32();
@@ -183,17 +195,17 @@ impl BlobFooter {
 
     fn to_bytes(self) -> [u8; NYDUS_BLOB_FOOTER_SIZE] {
         let mut data = [0u8; NYDUS_BLOB_FOOTER_SIZE];
-        write_u32(&mut data, 0, self.magic);
-        write_u32(&mut data, 4, self.features);
-        write_u32(&mut data, 8, self.crc32);
-        write_u32(&mut data, 12, self.reserved0);
-        write_u64(&mut data, 16, self.compressed_data_offset);
-        write_u64(&mut data, 24, self.bootstrap_offset);
-        write_u64(&mut data, 32, self.blob_meta_offset);
-        write_u64(&mut data, 40, self.compressed_data_size);
-        write_u32(&mut data, 48, self.bootstrap_blocks);
-        write_u32(&mut data, 52, self.blob_meta_blocks);
-        write_u64(&mut data, 56, self.reserved1);
+        data[0..8].copy_from_slice(&self.magic);
+        write_u32(&mut data, 8, self.version);
+        write_u32(&mut data, 12, self.flags);
+        write_u32(&mut data, 16, self.crc32);
+        write_u32(&mut data, 20, self.reserved0);
+        write_u64(&mut data, 24, self.compressed_data_offset);
+        write_u64(&mut data, 32, self.bootstrap_offset);
+        write_u64(&mut data, 40, self.blob_meta_offset);
+        write_u64(&mut data, 48, self.compressed_data_size);
+        write_u32(&mut data, 56, self.bootstrap_blocks);
+        write_u32(&mut data, 60, self.blob_meta_blocks);
         data
     }
 
@@ -206,12 +218,15 @@ impl BlobFooter {
         if self.magic != NYDUS_BLOB_FOOTER_MAGIC {
             bail!("invalid nydus footer magic");
         }
-        if self.features & !NYDUS_BLOB_FOOTER_SUPPORTED_FEATURES != 0 {
-            bail!("unsupported nydus footer features: {:#x}", self.features);
+        // `version` is informational and deliberately not gated on:
+        // compatibility is carried by the magic and the incompat flag bits.
+        let unknown_incompat =
+            self.flags & NYDUS_BLOB_FOOTER_INCOMPAT_MASK & !NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT;
+        if unknown_incompat != 0 {
+            bail!("unsupported nydus footer incompat flags: {unknown_incompat:#x}");
         }
-        if self.reserved0 != 0 || self.reserved1 != 0 {
-            bail!("nydus footer reserved fields must be zero");
-        }
+        // `reserved0` is a future compat-field slot and deliberately not
+        // enforced to zero; corruption is caught by the footer crc32c.
         // `bootstrap_blocks` may be zero: an "ondemand" redirect blob carries
         // only group data plus blob meta and embeds no bootstrap image.
         if self.blob_meta_blocks == 0 {
@@ -257,7 +272,7 @@ impl BlobFooter {
 
     fn compute_crc32(&self) -> u32 {
         let mut data = self.to_bytes();
-        data[8..12].fill(0);
+        data[16..20].fill(0);
         crc32c::crc32c(&data)
     }
 }
@@ -293,6 +308,41 @@ mod tests {
 
         assert_eq!(parsed, footer);
         assert_eq!(NYDUS_BLOB_FOOTER_SIZE, 4096);
+    }
+
+    #[test]
+    fn footer_version_is_informational_and_incompat_flags_reject() {
+        let footer = BlobFooter::new(0, 17, 4096, 1, 8192, 1).unwrap();
+
+        // Re-seal the footer bytes after poking a field: crc32 covers
+        // everything but itself.
+        let reseal = |mut data: [u8; NYDUS_BLOB_FOOTER_SIZE]| {
+            data[16..20].fill(0);
+            let crc32 = crc32c::crc32c(&data);
+            data[16..20].copy_from_slice(&crc32.to_le_bytes());
+            data
+        };
+
+        // A future format generation is readable: version is informational.
+        let mut future = footer.to_bytes();
+        future[8..12].copy_from_slice(&(NYDUS_BLOB_FOOTER_VERSION + 1).to_le_bytes());
+        BlobFooter::from_bytes(&reseal(future)).expect("future version must be readable");
+
+        // An unknown compat (high-half) flag bit is ignored.
+        let mut compat = footer.to_bytes();
+        compat[12..16].copy_from_slice(&(1u32 << 31).to_le_bytes());
+        BlobFooter::from_bytes(&reseal(compat)).expect("unknown compat flag must be ignored");
+
+        // An unknown incompat (low-half) flag bit rejects the footer.
+        let mut incompat = footer.to_bytes();
+        incompat[12..16].copy_from_slice(&(1u32 << 3).to_le_bytes());
+        let err = BlobFooter::from_bytes(&reseal(incompat)).unwrap_err();
+        assert!(err.to_string().contains("incompat"), "{err}");
+
+        // A resealed nonzero reserved tail (a future compat field) is readable.
+        let mut tail = footer.to_bytes();
+        tail[NYDUS_BLOB_FOOTER_SIZE - 1] = 0xff;
+        BlobFooter::from_bytes(&reseal(tail)).expect("reserved tail must be ignored");
     }
 
     #[test]

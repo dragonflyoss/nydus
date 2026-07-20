@@ -81,6 +81,17 @@ pub trait BlobCache: Send + Sync {
         false
     }
 
+    /// True when every group of this blob is already decoded into the local
+    /// cache. Implementations must answer in O(1) (a single shared-flag load,
+    /// no bitmap scan), so per-event handlers — uffd page faults, fanotify
+    /// pre-content events, FUSE reads — can consult it on every request and
+    /// skip readiness bookkeeping entirely once the blob is fully warmed.
+    /// Sticky: once true it stays true, since ready groups are never evicted
+    /// within a cache generation.
+    fn fully_ready(&self) -> bool {
+        false
+    }
+
     /// Stream every group of a redirect blob: fetch, decode, and validate each
     /// group, then hand `(group, decoded_bytes)` to `cb`. This never touches
     /// the blob's own cache file. Groups that fail decode or CRC validation

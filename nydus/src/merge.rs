@@ -321,7 +321,11 @@ fn load_node(
                 .read_chunk_indexes(nid, &inode)?
                 .into_iter()
                 .map(|index| {
-                    if index.device_id == 0 {
+                    // A hole chunk carries no blob reference at all (its
+                    // on-disk device_id bits are part of the null sentinel),
+                    // so it passes through unchanged instead of being device
+                    // remapped.
+                    if index.blkaddr == EROFS_NULL_ADDR || index.device_id == 0 {
                         Ok(index)
                     } else {
                         let mapped =

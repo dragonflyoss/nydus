@@ -298,7 +298,7 @@ impl Metrics {
             cache_opened_files: gauge(
                 &registry,
                 "cache_opened_files",
-                "Open blob data cache files (excluding .blob.meta and .groupmap)",
+                "Open blob data cache files (excluding .blob.meta and .group.map)",
             ),
             cache_hit_group: counter(
                 &registry,

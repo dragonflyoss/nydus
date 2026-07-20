@@ -278,12 +278,12 @@ prefetch:
 // ----------------------------------------------------------------- daemon ----
 
 // wipeCache removes every per-blob artifact so the next daemon starts COLD.
-// Leaving a stale .groupmap behind makes the daemon believe groups are ready
+// Leaving a stale .group.map behind makes the daemon believe groups are ready
 // while the re-created .blob.data is all zeros — range_ready would ALLOW
 // without fetching and the reader gets a sparse hole. Wipe data+meta+map+lock.
 func (e *fanotifyEnv) wipeCache(t *testing.T) {
 	t.Helper()
-	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.groupmap", "*.prefetch.lock"} {
+	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.group.map", "*.prefetch.lock"} {
 		matches, _ := filepath.Glob(filepath.Join(e.cacheDir, pattern))
 		for _, m := range matches {
 			_ = os.Remove(m)

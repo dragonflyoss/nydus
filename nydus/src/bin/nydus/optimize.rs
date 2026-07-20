@@ -28,10 +28,9 @@ pub struct OptimizeArgs {
     #[arg(long, required_unless_present = "trace_file")]
     pub apiserver: Option<String>,
 
-    /// Path to a JSON trace file containing access patterns. Accepts either the
-    /// bare `{"patterns":[{"blob_index":..,"group_index":..}]}` document or a
-    /// wrapper object exposing the same under a top-level `trace` field (as
-    /// returned by a hypervisor's stats endpoint embedding the accessor trace).
+    /// Path to a JSON trace file containing access patterns: the versioned
+    /// `{"version":1,"patterns":[{"blob_index":..,"group_index":..}]}`
+    /// document, exactly as produced by the apiserver `/trace` endpoint.
     /// Mutually exclusive with `--apiserver`.
     #[arg(long, conflicts_with = "apiserver")]
     pub trace_file: Option<PathBuf>,
@@ -72,7 +71,8 @@ pub struct OptimizeArgs {
 }
 
 #[derive(Deserialize)]
-struct TracePatterns {
+struct TraceEnvelope {
+    version: u32,
     patterns: Vec<TracePattern>,
 }
 
@@ -80,6 +80,19 @@ struct TracePatterns {
 struct TracePattern {
     blob_index: u32,
     group_index: u32,
+}
+
+/// Supported trace document version (see `metrics::trace::TRACE_DOCUMENT_VERSION`).
+const TRACE_DOCUMENT_VERSION: u32 = 1;
+
+/// Parse the versioned trace document `{"version":1,"patterns":[...]}`.
+fn parse_trace_document(raw: &[u8]) -> Result<Vec<(u16, u32)>> {
+    let envelope: TraceEnvelope =
+        serde_json::from_slice(raw).context("failed to parse trace document")?;
+    if envelope.version != TRACE_DOCUMENT_VERSION {
+        bail!("unsupported trace document version: {}", envelope.version);
+    }
+    dedup_patterns(envelope.patterns)
 }
 
 /// Build an "ondemand" redirect blob from a `/trace` access pattern and rewrite
@@ -267,29 +280,18 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
 fn load_patterns(apiserver: &str) -> Result<Vec<(u16, u32)>> {
     let raw = fetch_trace(apiserver)
         .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
-    let trace: TracePatterns = serde_json::from_slice(&raw)
-        .with_context(|| format!("failed to parse /trace response from {apiserver}"))?;
-    dedup_patterns(trace.patterns)
+    parse_trace_document(&raw)
+        .with_context(|| format!("failed to parse /trace response from {apiserver}"))
 }
 
-/// Load access patterns from a JSON trace file. Accepts either the bare
-/// `{"patterns":[...]}` document or a wrapper object exposing the same patterns
-/// under a top-level `trace` field (as produced by a hypervisor's stats
-/// endpoint embedding the accessor trace).
+/// Load access patterns from a versioned JSON trace document
+/// (`{"version":1,"trace":{"patterns":[...]}}`), exactly as produced by the
+/// apiserver `/trace` endpoint.
 fn load_patterns_from_file(path: &std::path::Path) -> Result<Vec<(u16, u32)>> {
     let raw =
         fs::read(path).with_context(|| format!("failed to read trace file: {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_slice(&raw)
-        .with_context(|| format!("failed to parse trace file as JSON: {}", path.display()))?;
-    // Support both the bare document and the stats-endpoint wrapper.
-    let trace_value = value.get("trace").unwrap_or(&value);
-    let trace: TracePatterns = serde_json::from_value(trace_value.clone()).with_context(|| {
-        format!(
-            "trace file {} does not contain a `patterns` array",
-            path.display()
-        )
-    })?;
-    dedup_patterns(trace.patterns)
+    parse_trace_document(&raw)
+        .with_context(|| format!("failed to parse trace file: {}", path.display()))
 }
 
 /// Deduplicate `(blob_index, group_index)` pairs while preserving first-access
@@ -394,4 +396,26 @@ fn align_u64(value: u64, align: u64) -> u64 {
 
 fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
     (compressed_len as u128) * 100 <= (uncompressed_len as u128) * MAX_COMPRESSED_SIZE_PERCENT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_trace_document_accepts_versioned_envelope_only() {
+        let doc = br#"{"version":1,"patterns":[
+            {"blob_index":1,"group_index":4},
+            {"blob_index":1,"group_index":4},
+            {"blob_index":2,"group_index":7}]}"#;
+        let patterns = parse_trace_document(doc).unwrap();
+        assert_eq!(patterns, vec![(1, 4), (2, 7)]);
+
+        // Wrong version is rejected.
+        let err = parse_trace_document(br#"{"version":2,"patterns":[]}"#).unwrap_err();
+        assert!(err.to_string().contains("version"), "{err}");
+
+        // The legacy unversioned document is no longer accepted.
+        assert!(parse_trace_document(br#"{"patterns":[]}"#).is_err());
+    }
 }

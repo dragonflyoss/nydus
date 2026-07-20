@@ -1,6 +1,6 @@
 use crate::metadata::{
     round_up, BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup, ChunkIndex,
-    BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
+    BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR,
 };
 use anyhow::{bail, Context, Result};
 use crc32c::crc32c;
@@ -66,8 +66,12 @@ impl BlobWriter {
         if group_size < file_chunk_size {
             bail!("blob writer group size must be at least the file chunk size");
         }
-        if group_size % EROFS_BLOCK_SIZE != 0 {
-            bail!("blob writer group size must be block-aligned");
+        // The blob meta header stores the group size as a log2 exponent
+        // (`group_block_bits`), so it must be a power of two; being a power
+        // of two >= the (block-aligned) chunk size also makes it block
+        // aligned by construction.
+        if !group_size.is_power_of_two() {
+            bail!("blob writer group size must be a power of two");
         }
 
         Ok(Self {
@@ -167,6 +171,21 @@ impl BlobWriter {
 
             f.read_exact(&mut chunk_buf[..to_read])
                 .with_context(|| format!("failed to read file: {}", path.display()))?;
+
+            // A fully-zero chunk (a real filesystem hole reads back as zeros,
+            // and so does zero-filled data) is not stored at all: it gets a
+            // null chunk index (all 48 address bits set on disk), which every
+            // read path already decodes as a hole and satisfies with zeros.
+            // No blob data, no blob-meta chunk entry, and no blob cache
+            // traffic is ever spent on it — native EROFS mounts handle the
+            // null address the same way in-kernel.
+            if chunk_buf[..to_read].iter().all(|&byte| byte == 0) {
+                indexes.push(ChunkIndex {
+                    blkaddr: EROFS_NULL_ADDR,
+                    device_id: 0,
+                });
+                continue;
+            }
 
             // Pad only up to the last block of the chunk's real data, not to the
             // full file chunk size. A full chunk is already block-aligned, while
@@ -394,6 +413,65 @@ mod tests {
     }
 
     #[test]
+    fn blob_writer_turns_zero_chunks_into_holes() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("blob.data");
+        let input_path = dir.path().join("input.bin");
+        // chunk 0: data, chunk 1: all zeros, chunk 2: data (partial tail).
+        let mut content = vec![b'a'; EROFS_BLOCK_SIZE as usize];
+        content.extend(vec![0u8; EROFS_BLOCK_SIZE as usize]);
+        content.extend(vec![b'c'; 100]);
+        fs::write(&input_path, &content).unwrap();
+
+        let mut writer = BlobWriter::new(&blob_path, EROFS_BLOCK_SIZE).unwrap();
+        let indexes = writer
+            .write_file_chunks(&input_path, content.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+        let blob_meta = writer.blob_meta([0u8; EROFS_BLOB_ID_SIZE], 0).unwrap();
+
+        // The all-zero chunk becomes a hole: a null chunk index with no blob
+        // reference, no blob-meta chunk entry, and no bytes in the data region.
+        assert_eq!(indexes.len(), 3);
+        assert_eq!(indexes[0].blkaddr, 0);
+        assert_eq!(indexes[1].blkaddr, EROFS_NULL_ADDR);
+        assert_eq!(indexes[2].blkaddr, 1);
+        assert_eq!(blob_meta.chunks().len(), 2);
+        assert_eq!(blob_meta.chunks()[1].uncompressed_block_offset(), 1);
+        assert_eq!(writer.total_blocks(), 2);
+        let data = fs::read(&blob_path).unwrap();
+        assert_eq!(data.len(), 2 * EROFS_BLOCK_SIZE as usize);
+        assert!(!data[..EROFS_BLOCK_SIZE as usize].iter().any(|&b| b != b'a'));
+
+        // The on-disk null index encodes the all-ones sentinel.
+        let raw = crate::metadata::ErofsChunkIndex::new(indexes[1].blkaddr, indexes[1].device_id);
+        assert_eq!(raw.blkaddr(), EROFS_NULL_ADDR);
+    }
+
+    #[test]
+    fn blob_writer_handles_fully_zero_file() {
+        let dir = tempdir().unwrap();
+        let blob_path = dir.path().join("blob.data");
+        let input_path = dir.path().join("input.bin");
+        let content = vec![0u8; 2 * EROFS_BLOCK_SIZE as usize];
+        fs::write(&input_path, &content).unwrap();
+
+        let mut writer = BlobWriter::new(&blob_path, EROFS_BLOCK_SIZE).unwrap();
+        let indexes = writer
+            .write_file_chunks(&input_path, content.len() as u64)
+            .unwrap();
+        writer.finish().unwrap();
+
+        // Every chunk is a hole: nothing lands in the blob at all.
+        assert_eq!(indexes.len(), 2);
+        assert!(indexes.iter().all(|ci| ci.blkaddr == EROFS_NULL_ADDR));
+        assert!(writer.blob_meta_chunks().is_empty());
+        assert!(writer.blob_meta_groups().is_empty());
+        assert_eq!(writer.total_blocks(), 0);
+        assert_eq!(fs::read(&blob_path).unwrap().len(), 0);
+    }
+
+    #[test]
     fn blob_writer_stores_uncompressed_when_zstd_saves_too_little() {
         let dir = tempdir().unwrap();
         let blob_path = dir.path().join("blob.data");
@@ -443,14 +521,15 @@ mod tests {
             .unwrap();
 
         let raw = fs::read(&blob_meta_path).unwrap();
-        assert_eq!(raw.len(), 4096);
+        // 4 KiB header block + one chunk + one group, padded to a block.
+        assert_eq!(raw.len(), 8192);
 
         let blob_meta = BlobMeta::load(&blob_meta_path).unwrap();
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(blob_meta.header().group_count(), 1);
         assert_eq!(blob_meta.header().chunk_bytes(), 48);
         assert_eq!(blob_meta.header().group_bytes(), 40);
-        assert_eq!(blob_meta.header().metadata_size(), 4096);
+        assert_eq!(blob_meta.header().metadata_size(), 8192);
         assert_eq!(blob_meta.chunks()[0].uncompressed_block_offset(), 0);
         assert_eq!(blob_meta.groups()[0].compressed_byte_offset(), 8192);
     }

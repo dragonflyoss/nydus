@@ -15,6 +15,9 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
+/// Version of the serialized trace document, bumped on incompatible changes.
+pub const TRACE_DOCUMENT_VERSION: u32 = 1;
+
 /// A single group access in the on-demand trace.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 pub struct TracePattern {
@@ -25,11 +28,23 @@ pub struct TracePattern {
     pub group_index: u32,
 }
 
-/// The serialized trace document. Wrapped in a struct (rather than a bare array)
-/// so future fields can be added without breaking consumers.
-#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize)]
+/// The serialized trace document: `{"version":1,"patterns":[...]}`. The
+/// explicit format version lets future fields be added (or the pattern shape
+/// change) without breaking consumers, and keeps the document self-describing
+/// wherever it travels (files, HTTP bodies, embedding hosts).
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct TraceDocument {
+    pub version: u32,
     pub patterns: Vec<TracePattern>,
+}
+
+impl Default for TraceDocument {
+    fn default() -> Self {
+        Self {
+            version: TRACE_DOCUMENT_VERSION,
+            patterns: Vec::new(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -61,14 +76,16 @@ impl TraceRecorder {
     pub fn snapshot(&self) -> TraceDocument {
         let state = self.state.lock().unwrap();
         TraceDocument {
+            version: TRACE_DOCUMENT_VERSION,
             patterns: state.patterns.clone(),
         }
     }
 
     /// Serialize the current on-demand group access trace as JSON, e.g.
-    /// `{"patterns":[{"blob_index":1,"group_index":4}]}`.
+    /// `{"version":1,"patterns":[{"blob_index":1,"group_index":4}]}`.
     pub fn encode_json(&self) -> String {
-        serde_json::to_string(&self.snapshot()).unwrap_or_else(|_| "{\"patterns\":[]}".to_string())
+        serde_json::to_string(&self.snapshot())
+            .unwrap_or_else(|_| "{\"version\":1,\"patterns\":[]}".to_string())
     }
 
     /// Clear all recorded accesses.
@@ -89,7 +106,7 @@ pub fn record_group_access(blob_index: u32, group_index: u32) {
 }
 
 /// Serialize the current on-demand group access trace as JSON, e.g.
-/// `{"patterns":[{"blob_index":1,"group_index":4}]}`.
+/// `{"version":1,"patterns":[{"blob_index":1,"group_index":4}]}`.
 pub fn encode_json() -> String {
     TRACE.encode_json()
 }
@@ -131,6 +148,7 @@ mod tests {
         recorder.record_group_access(2, 7);
 
         let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.version, TRACE_DOCUMENT_VERSION);
         assert_eq!(
             snapshot.patterns,
             vec![
@@ -146,7 +164,7 @@ mod tests {
         );
         assert_eq!(
             recorder.encode_json(),
-            "{\"patterns\":[{\"blob_index\":1,\"group_index\":4},{\"blob_index\":2,\"group_index\":7}]}"
+            "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"group_index\":4},{\"blob_index\":2,\"group_index\":7}]}"
         );
 
         recorder.clear();

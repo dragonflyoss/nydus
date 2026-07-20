@@ -284,7 +284,7 @@ accessor builds unless explicitly enabled.
   EPERM.
 - Fills persist in the on-disk cache file and its groupmap. A daemon restart
   re-serves already-fetched groups with no backend traffic. A cold restart must
-  remove all per-blob artifacts (`*.blob.data`, `*.blob.meta`, `*.groupmap`,
+  remove all per-blob artifacts (`*.blob.data`, `*.blob.meta`, `*.group.map`,
   `*.prefetch.lock`) together; a stale groupmap against a wiped data file makes
   the fast path allow reads of unfilled holes.
 

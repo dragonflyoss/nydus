@@ -56,6 +56,7 @@ struct ImageStats {
     hardlink_inodes: u64,
     hardlink_paths: u64,
     total_chunks: u64,
+    hole_chunks: u64,
     total_logical_bytes: u64,
     chunk_sizes: BTreeSet<u64>,
 }
@@ -298,6 +299,13 @@ fn walk_inode(
                     for (index, chunk) in chunk_indexes.iter().enumerate() {
                         let remaining = inode.size().saturating_sub(index as u64 * chunk_size);
                         let logical_bytes = remaining.min(chunk_size);
+                        // Hole chunks reference no blob at all (their on-disk
+                        // device_id bits are part of the null sentinel), so
+                        // they must not fabricate a blob summary entry.
+                        if chunk.blkaddr == EROFS_NULL_ADDR {
+                            stats.hole_chunks += 1;
+                            continue;
+                        }
                         let blob = blobs.entry(chunk.device_id).or_insert_with(|| BlobSummary {
                             slot_sha256: [0u8; EROFS_BLOB_ID_SIZE],
                             slot_sha256_kind: SlotSha256Kind::Unknown,
@@ -320,9 +328,7 @@ fn walk_inode(
                         blob.chunk_refs += 1;
                         blob.logical_bytes += logical_bytes;
                         blob.chunk_sizes.insert(chunk_size);
-                        if chunk.blkaddr != EROFS_NULL_ADDR {
-                            blob.unique_blkaddrs.insert(chunk.blkaddr);
-                        }
+                        blob.unique_blkaddrs.insert(chunk.blkaddr);
                     }
                 }
                 EROFS_INODE_FLAT_PLAIN => {
@@ -581,6 +587,7 @@ fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
     println!("  hardlink_inodes: {}", stats.hardlink_inodes);
     println!("  hardlink_paths: {}", stats.hardlink_paths);
     println!("  total_chunks: {}", stats.total_chunks);
+    println!("  hole_chunks: {}", stats.hole_chunks);
     println!("  unique_chunks: {total_unique_chunks}");
     println!("  total_logical_bytes: {}", stats.total_logical_bytes);
     println!("  chunk_sizes: {}", format_u64_set(&stats.chunk_sizes));

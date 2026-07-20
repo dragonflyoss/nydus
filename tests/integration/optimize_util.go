@@ -212,14 +212,16 @@ func fetchTraceCount(t *testing.T, socketPath string) int {
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var trace struct {
+	var doc struct {
+		Version  uint32 `json:"version"`
 		Patterns []struct {
 			BlobIndex  uint32 `json:"blob_index"`
 			GroupIndex uint32 `json:"group_index"`
 		} `json:"patterns"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&trace))
-	return len(trace.Patterns)
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&doc))
+	require.EqualValues(t, 1, doc.Version, "unexpected trace document version")
+	return len(doc.Patterns)
 }
 
 // readFilesInOrder reads the given files (relative to root) sequentially,

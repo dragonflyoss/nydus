@@ -25,8 +25,10 @@ const (
 	NydusBlobFooterSize = 4096
 	// NydusBlockSize is the nydus/EROFS block size in bytes.
 	NydusBlockSize = 4096
-	// footerVersion is the supported u32 footer format version at offset 8.
-	footerVersion = 1
+	// footerIncompatMask selects the incompatible half of the u32 flags field
+	// at offset 12: unknown incompat bits mean the footer cannot be parsed.
+	// The version at offset 8 is informational and not gated on.
+	footerIncompatMask = 0x0000FFFF
 	// bootstrapOffsetField is the byte offset of the u64 bootstrap_offset field
 	// within the footer.
 	bootstrapOffsetField = 32
@@ -69,8 +71,8 @@ func readFooter(ra io.ReaderAt, size int64) ([]byte, error) {
 	if !bytes.Equal(footer[0:8], NydusBlobFooterMagic) {
 		return nil, errors.Errorf("not a nydus blob: bad footer magic %q", footer[0:8])
 	}
-	if version := binary.LittleEndian.Uint32(footer[8:12]); version != footerVersion {
-		return nil, errors.Errorf("unsupported nydus footer version %d", version)
+	if incompat := binary.LittleEndian.Uint32(footer[12:16]) & footerIncompatMask; incompat != 0 {
+		return nil, errors.Errorf("unsupported nydus footer incompat flags %#x", incompat)
 	}
 	return footer, nil
 }

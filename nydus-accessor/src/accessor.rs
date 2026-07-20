@@ -588,6 +588,23 @@ impl BlobAccessor {
             format!("failed to inspect blob {blob_index} ready range [{offset}, +{len})")
         })
     }
+
+    /// O(1) fast-path probe: true when every group of the blob is already
+    /// decoded into its local cache (a single shared-flag load, no bitmap
+    /// scan). On-demand services (uffd, fanotify, FUSE) can consult this per
+    /// event — or once per blob, since the answer is sticky — to bypass range
+    /// readiness checks and fetch plumbing entirely for fully warmed blobs.
+    pub fn fully_ready(&self, id: &BlobID) -> Result<bool> {
+        let blob_index = *self
+            .index_by_blob_id
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
+        let cache = self
+            .reader
+            .blob_cache(blob_index)
+            .with_context(|| format!("failed to open blob {blob_index}"))?;
+        Ok(cache.fully_ready())
+    }
 }
 
 impl FsAccessor {

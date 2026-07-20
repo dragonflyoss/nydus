@@ -68,8 +68,9 @@ pub struct BuildArgs {
     #[arg(long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
     pub chunk_size: u32,
 
-    /// Group uncompressed size in bytes (must be a multiple of 1MiB). Controls
-    /// the uncompressed size of each blob meta group used for compression.
+    /// Group uncompressed size in bytes (must be a power of two, >= 1MiB, and
+    /// >= the chunk size). Controls the uncompressed size of each blob meta
+    /// group used for compression.
     #[arg(long = "compress-size", default_value_t = DEFAULT_COMPRESS_SIZE)]
     pub compress_size: u32,
 
@@ -128,11 +129,13 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
     }
     let chunkbits = args.chunk_size.trailing_zeros();
 
-    // Validate compress (group uncompressed) size: a positive multiple of 1MiB
-    // and at least the file chunk size so a chunk always fits in a group.
-    if args.compress_size == 0 || args.compress_size % MIB != 0 {
+    // Validate compress (group uncompressed) size: a power of two (the blob
+    // meta header stores it as the log2 exponent `group_block_bits`), at
+    // least 1MiB, and at least the file chunk size so a chunk always fits in
+    // a group.
+    if !args.compress_size.is_power_of_two() || args.compress_size < MIB {
         bail!(
-            "compress size {} must be a positive multiple of 1MiB",
+            "compress size {} must be a power of two and at least 1MiB",
             args.compress_size
         );
     }
@@ -588,7 +591,7 @@ mod tests {
             &bootstrap_bytes[slot_offset..slot_offset + EROFS_DEVICESLOT_SIZE],
         );
 
-        assert_eq!(hex_string(&slot.blob_id()), full_blob_digest);
+        assert_eq!(hex_string(&slot.blob_id().unwrap()), full_blob_digest);
     }
 
     fn make_fifo(path: &Path) {

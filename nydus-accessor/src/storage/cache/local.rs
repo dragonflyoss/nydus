@@ -118,7 +118,22 @@ impl LocalBlobCache {
 
         let cache_blob_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
-        let groupmap_path = cache_dir.join(format!("{cache_key_hex}.groupmap"));
+        let groupmap_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
+        // The groupmap is only meaningful together with the cache data file it
+        // describes: a leftover groupmap whose data file has been removed
+        // would claim groups are ready while reads hit sparse zeros. Reset it
+        // so the blob starts cold instead of serving holes. (Removing the map
+        // while keeping the data is the safe direction and needs no handling.)
+        if groupmap_path.exists() && !cache_blob_path.exists() {
+            match fs::remove_file(&groupmap_path) {
+                Ok(()) => warn!(
+                    "stale groupmap without cache data file, resetting: {}",
+                    groupmap_path.display()
+                ),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
         let groupmap = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
 
         let prefetch_lock_path = cache_dir.join(format!("{cache_key_hex}.prefetch.lock"));
@@ -250,6 +265,13 @@ impl LocalBlobCache {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read range overflow")
         })?;
 
+        // Fast path: the sticky all-ready flag says every group is already
+        // decoded into the cache file, so skip the per-group walk entirely.
+        if self.groupmap.is_all_ready() {
+            crate::metrics::inc_cache_hit_group();
+            return Ok(());
+        }
+
         // O(1) group lookup at both ends of the range. Groups are dense and
         // contiguous, so every group between the first and last also overlaps
         // the range and must be decoded.
@@ -328,6 +350,11 @@ impl BlobCache for LocalBlobCache {
         if groups.is_empty() {
             return Ok(());
         }
+        // Fast path: another process (or an earlier run) already decoded every
+        // group; skip the batch planning and per-group readiness scan.
+        if !self.blob_meta.is_redirect_blob() && self.groupmap.is_all_ready() {
+            return Ok(());
+        }
 
         let cache_file = self.cache_file()?;
         // Prefetch owns its decode buffers and does not take `fetch_lock`, so it
@@ -395,6 +422,17 @@ impl BlobCache for LocalBlobCache {
                 self.groupmap.set_ready(index)?;
                 crate::metrics::inc_cache_fill_group();
             }
+        }
+
+        // A successful full prefetch means every group is now ready (decoded
+        // here or observed ready from another process), so guarantee the
+        // sticky ALL_READY flag is latched before returning. set_ready
+        // normally latches it through the shared ready counter, but a
+        // historical writer crash between its bit and counter updates leaves
+        // the counter short forever; the authoritative bitmap scan inside
+        // all_ready() latches the flag regardless.
+        if !self.blob_meta.is_redirect_blob() {
+            self.groupmap.all_ready();
         }
 
         Ok(())
@@ -531,6 +569,12 @@ impl BlobCache for LocalBlobCache {
 
     fn group_ready(&self, group_index: usize) -> bool {
         self.groupmap.is_ready(group_index).unwrap_or(false)
+    }
+
+    fn fully_ready(&self) -> bool {
+        // A redirect blob never marks its own groupmap (its groups fill other
+        // blobs' caches), so the flag is meaningless there.
+        !self.blob_meta.is_redirect_blob() && self.groupmap.is_all_ready()
     }
 
     fn redirect_stream(
@@ -907,6 +951,44 @@ mod tests {
     }
 
     #[test]
+    fn stale_groupmap_without_data_file_is_reset() {
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let payload = vec![0x3du8; 4096];
+        let data_blob_id = sha256_bytes(&payload);
+        let meta = blob_meta(data_blob_id, &payload);
+        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let backend: Arc<dyn BlobBackend> =
+            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+
+        // Warm the cache: data file created, group marked ready, sticky
+        // all-ready flag latched.
+        {
+            let cached =
+                LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
+            let mut buf = vec![0u8; 1024];
+            cached.read_at(0, &mut buf).unwrap();
+            assert!(cached.groupmap.is_all_ready());
+        }
+
+        // Model the operational accident: the data file is removed while the
+        // groupmap survives. Reopening must reset the groupmap instead of
+        // trusting ready bits that now point at sparse holes.
+        let cache_key = backend.cache_key(&full_blob_id).unwrap();
+        let prefix = hex_string(&cache_key);
+        fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
+
+        let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        assert!(!reopened.groupmap.is_ready(0).unwrap());
+        assert!(!reopened.groupmap.is_all_ready());
+
+        // The blob still reads correctly end-to-end after the reset.
+        let mut buf = vec![0u8; 1024];
+        reopened.read_at(512, &mut buf).unwrap();
+        assert_eq!(buf, payload[512..1536]);
+    }
+
+    #[test]
     fn prefetch_lock_dedups_across_handles() {
         let backend_dir = tempdir().unwrap();
         let cache_dir = tempdir().unwrap();
@@ -1099,7 +1181,8 @@ mod tests {
             .path()
             .join(format!("{}.blob.meta", hex_string(&full_blob_id)));
         let mut raw = fs::read(&blob_meta_path).unwrap();
-        raw[8] ^= 0xff;
+        // Flip a byte of the header crc32 field (offset 16 in the v1 header).
+        raw[16] ^= 0xff;
         fs::write(&blob_meta_path, raw).unwrap();
 
         let backend: Arc<dyn BlobBackend> =
@@ -1170,7 +1253,7 @@ mod tests {
             .is_file());
         assert!(cache_dir
             .path()
-            .join(format!("{}.groupmap", hex_string(&full_blob_id)))
+            .join(format!("{}.group.map", hex_string(&full_blob_id)))
             .is_file());
         assert!(!cache_dir
             .path()
