@@ -6,40 +6,75 @@
 
 package converter
 
-// Media types and annotations used by nydus images.
-//
-// The on-wire manifest format intentionally mirrors the nydus image format so
-// that existing snapshotters and tooling that already understand the nydus
-// layout can consume nydus images with minimal changes.
+import (
+	"context"
+	"io"
+
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
+)
+
+// Media types, annotations and conversion primitives are re-exported from the
+// public pkg/converter package so internal packages (checker, remote, main)
+// keep their existing import surface.
 const (
 	// ManifestOSFeatureNydus marks a platform manifest in an image index as a
 	// remote (lazy-loadable) nydus image.
-	ManifestOSFeatureNydus = "nydus.remoteimage.v1"
+	ManifestOSFeatureNydus = pkgconv.ManifestOSFeatureNydus
 
 	// MediaTypeNydusBlob is the media type of a single converted data layer
 	// (a nydus full blob: data + bootstrap + blob meta + footer).
-	MediaTypeNydusBlob = "application/vnd.oci.image.layer.nydus.blob.v1"
+	MediaTypeNydusBlob = pkgconv.MediaTypeNydusBlob
 
 	// BootstrapFileNameInLayer is the path of the bootstrap entry inside the
 	// gzip-compressed bootstrap layer tarball.
-	BootstrapFileNameInLayer = "image/image.boot"
+	BootstrapFileNameInLayer = pkgconv.BootstrapFileNameInLayer
 
 	// BlobMetaDirInLayer is the directory inside the bootstrap layer tarball
 	// that holds the per-layer `<full_blob_sha256>.blob.meta` artifacts, packed
 	// alongside image.boot.
-	BlobMetaDirInLayer = "image"
+	BlobMetaDirInLayer = pkgconv.BlobMetaDirInLayer
 
 	// LayerAnnotationNydusBlob marks a layer as a nydus data blob.
-	LayerAnnotationNydusBlob = "containerd.io/snapshot/nydus-blob"
+	LayerAnnotationNydusBlob = pkgconv.LayerAnnotationNydusBlob
 	// LayerAnnotationNydusBootstrap marks a layer as the nydus bootstrap.
-	LayerAnnotationNydusBootstrap = "containerd.io/snapshot/nydus-bootstrap"
+	LayerAnnotationNydusBootstrap = pkgconv.LayerAnnotationNydusBootstrap
 	// LayerAnnotationNydusFsVersion marks a bootstrap layer as a nydus pmem
 	// image for snapshotters that dispatch by nydus fs-version annotations.
-	LayerAnnotationNydusFsVersion = "containerd.io/snapshot/nydus-fs-version"
+	LayerAnnotationNydusFsVersion = pkgconv.LayerAnnotationNydusFsVersion
 	// NydusFsVersion is the pseudo nydus fs-version used for nydus pmem images.
-	NydusFsVersion = "7"
+	NydusFsVersion = pkgconv.NydusFsVersion
 
 	// LayerAnnotationUncompressed holds the uncompressed digest (diff id) of a
 	// layer, following the containerd convention.
-	LayerAnnotationUncompressed = "containerd.io/uncompressed"
+	LayerAnnotationUncompressed = pkgconv.LayerAnnotationUncompressed
 )
+
+// Types re-exported from pkg/converter.
+type (
+	// BuildOption describes a single `nydus build` invocation.
+	BuildOption = pkgconv.BuildOption
+	// MergeBuildOption describes a single `nydus merge` invocation.
+	MergeBuildOption = pkgconv.MergeBuildOption
+	// BlobMetaFile is a per-layer blob meta artifact packed into the bootstrap
+	// layer alongside image.boot, named "<full_blob_sha256>.blob.meta".
+	BlobMetaFile = pkgconv.BlobMetaFile
+	// AppendFile describes a file to bundle into the bootstrap layer tar
+	// alongside image.boot and the blob meta artifacts.
+	AppendFile = pkgconv.AppendFile
+	// PackOption configures per-layer conversion.
+	PackOption = pkgconv.PackOption
+	// MergeOption configures the bootstrap merge / manifest rewrite step.
+	MergeOption = pkgconv.MergeOption
+)
+
+func runNydusBuild(ctx context.Context, opt BuildOption) error {
+	return pkgconv.RunNydusBuild(ctx, opt)
+}
+
+func runNydusMerge(ctx context.Context, opt MergeBuildOption) error {
+	return pkgconv.RunNydusMerge(ctx, opt)
+}
+
+func extractTar(ctx context.Context, r io.Reader, dir string) error {
+	return pkgconv.ExtractTar(ctx, r, dir)
+}
