@@ -8,7 +8,6 @@ package converter
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +17,7 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -288,54 +288,8 @@ func stageNydusMetadataFromFile(blobPath string, blobDigest digest.Digest, dir s
 	if err != nil {
 		return "", errors.Wrap(err, "stat blob file")
 	}
-	size := info.Size()
 
-	if size < nydusBlobFooterSize {
-		return "", errors.Errorf("blob is too small for a nydus footer (%d bytes)", size)
-	}
-
-	footer := make([]byte, nydusBlobFooterSize)
-	if _, err := f.ReadAt(footer, size-nydusBlobFooterSize); err != nil {
-		return "", errors.Wrap(err, "read nydus footer")
-	}
-	if magic := binary.LittleEndian.Uint32(footer[0:4]); magic != nydusBlobFooterMagic {
-		return "", errors.Errorf("not a nydus blob: bad footer magic %#x", magic)
-	}
-	bootstrapOffset := int64(binary.LittleEndian.Uint64(footer[bootstrapOffsetField : bootstrapOffsetField+8]))
-	if bootstrapOffset < 0 || bootstrapOffset > size {
-		return "", errors.Errorf("invalid bootstrap offset %d (blob size %d)", bootstrapOffset, size)
-	}
-
-	tmp, err := os.CreateTemp(dir, "stage-*")
-	if err != nil {
-		return "", errors.Wrap(err, "create stage temp file")
-	}
-	tmpPath := tmp.Name()
-	committed := false
-	defer func() {
-		_ = tmp.Close()
-		if !committed {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmp.Seek(bootstrapOffset, io.SeekStart); err != nil {
-		return "", errors.Wrap(err, "seek to bootstrap offset")
-	}
-	tail := io.NewSectionReader(f, bootstrapOffset, size-bootstrapOffset)
-	if _, err := io.Copy(tmp, tail); err != nil {
-		return "", errors.Wrap(err, "stage nydus metadata")
-	}
-	if err := tmp.Close(); err != nil {
-		return "", errors.Wrap(err, "close stage temp file")
-	}
-
-	dst := filepath.Join(dir, blobDigest.Encoded())
-	if err := os.Rename(tmpPath, dst); err != nil {
-		return "", errors.Wrap(err, "rename staged blob")
-	}
-	committed = true
-	return dst, nil
+	return pkgconv.StageNydusMetadata(f, info.Size(), blobDigest.Encoded(), dir)
 }
 
 // extractBlobMetaFromFile reads the blob meta region from a local blob file.
@@ -350,28 +304,6 @@ func extractBlobMetaFromFile(blobPath string) ([]byte, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "stat blob file")
 	}
-	size := info.Size()
 
-	if size < nydusBlobFooterSize {
-		return nil, errors.Errorf("blob is too small for a nydus footer (%d bytes)", size)
-	}
-
-	footer := make([]byte, nydusBlobFooterSize)
-	if _, err := f.ReadAt(footer, size-nydusBlobFooterSize); err != nil {
-		return nil, errors.Wrap(err, "read nydus footer")
-	}
-	if magic := binary.LittleEndian.Uint32(footer[0:4]); magic != nydusBlobFooterMagic {
-		return nil, errors.Errorf("not a nydus blob: bad footer magic %#x", magic)
-	}
-	blobMetaOffset := int64(binary.LittleEndian.Uint64(footer[blobMetaOffsetField : blobMetaOffsetField+8]))
-	blobMetaSize := int64(binary.LittleEndian.Uint32(footer[blobMetaBlocksField:blobMetaBlocksField+4])) * nydusBlockSize
-	if blobMetaOffset < 0 || blobMetaSize <= 0 || blobMetaOffset+blobMetaSize > size {
-		return nil, errors.Errorf("invalid blob meta region [%d,+%d) (blob size %d)", blobMetaOffset, blobMetaSize, size)
-	}
-
-	buf := make([]byte, blobMetaSize)
-	if _, err := f.ReadAt(buf, blobMetaOffset); err != nil {
-		return nil, errors.Wrap(err, "read blob meta region")
-	}
-	return buf, nil
+	return pkgconv.ExtractBlobMeta(f, info.Size())
 }

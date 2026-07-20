@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Package converter converts OCI image layers into nydus blobs and bootstraps.
 package converter
 
 import (
@@ -72,11 +71,11 @@ func nydusLogLevel(level string) string {
 	return level
 }
 
-// runNydusBuild executes `nydus build` to produce a full blob at opt.BlobPath.
+// RunNydusBuild executes `nydus build` to produce a full blob at opt.BlobPath.
 //
 // The blob is written strictly sequentially (data -> bootstrap -> blob meta ->
 // footer) which makes opt.BlobPath safe to point at a FIFO for streaming.
-func runNydusBuild(ctx context.Context, opt BuildOption) error {
+func RunNydusBuild(ctx context.Context, opt BuildOption) error {
 	args := []string{
 		"build",
 		opt.SourceDir,
@@ -99,9 +98,9 @@ func runNydusBuild(ctx context.Context, opt BuildOption) error {
 	return nil
 }
 
-// runNydusMerge executes `nydus merge` to overlay opt.SourcePaths into a
+// RunNydusMerge executes `nydus merge` to overlay opt.SourcePaths into a
 // single bootstrap at opt.BootstrapPath.
-func runNydusMerge(ctx context.Context, opt MergeBuildOption) error {
+func RunNydusMerge(ctx context.Context, opt MergeBuildOption) error {
 	args := make([]string, 0, len(opt.SourcePaths)+5)
 	args = append(args, "merge")
 	args = append(args, opt.SourcePaths...)

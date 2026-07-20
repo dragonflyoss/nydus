@@ -16,7 +16,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-// extractTar extracts a raw (already decompressed) OCI layer tar stream into
+// ExtractTar extracts a raw (already decompressed) OCI layer tar stream into
 // dir using containerd's archive applier.
 //
 // This performs a verbatim extraction rather than a layered overlay apply: OCI
@@ -30,9 +30,9 @@ import (
 //
 // Faithfully reproducing the layer requires root: ownership (uid/gid), device
 // nodes and privileged xattrs cannot otherwise be restored. Rather than
-// silently producing an image with the wrong ownership, extractTar refuses to
+// silently producing an image with the wrong ownership, ExtractTar refuses to
 // run unprivileged.
-func extractTar(ctx context.Context, r io.Reader, dir string) error {
+func ExtractTar(ctx context.Context, r io.Reader, dir string) error {
 	if os.Geteuid() != 0 {
 		return errors.New("converting an image requires root privileges to preserve file ownership and device nodes; re-run with sudo")
 	}

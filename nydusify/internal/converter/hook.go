@@ -11,7 +11,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,21 +21,13 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/converter"
 	"github.com/containerd/errdefs"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
-// MergeOption configures the bootstrap merge / manifest rewrite step.
-type MergeOption struct {
-	// BuilderPath is the nydus binary path (PATH-resolvable). Defaults to "nydus".
-	BuilderPath string
-	// WorkDir is a scratch directory used for staging blobs and the bootstrap.
-	WorkDir string
-	// LogLevel is the log level forwarded to `nydus merge` (trace/debug/info/
-	// warn/error). Defaults to "info" when empty.
-	LogLevel string
-}
+// MergeOption is aliased from pkg/converter (see constants.go).
 
 // ConvertHookFunc returns a converter.ConvertHookFunc invoked after each blob
 // is converted. It hooks index and manifest conversion to merge the per-layer
@@ -249,52 +240,12 @@ func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descript
 		return nil, err
 	}
 
-	return writeBootstrapLayer(ctx, cs, bootstrapPath, blobMetas, nil)
-}
-
-// nydus blob footer layout (see src/metadata/blob_footer.rs). The footer is the
-// last nydusBlobFooterSize bytes of a full blob and records the absolute
-// offsets of the data / bootstrap / blob-meta regions.
-const (
-	nydusBlobFooterSize  = 4096
-	nydusBlobFooterMagic = 0x4c465452
-	nydusBlockSize       = 4096
-	// bootstrapOffsetField is the byte offset of the u64 bootstrap_offset field
-	// within the footer.
-	bootstrapOffsetField = 24
-	// blobMetaOffsetField is the byte offset of the u64 blob_meta_offset field
-	// within the footer.
-	blobMetaOffsetField = 32
-	// blobMetaBlocksField is the byte offset of the u32 blob_meta_blocks field
-	// within the footer.
-	blobMetaBlocksField = 52
-)
-
-// BlobMetaFile is a per-layer blob meta artifact packed into the bootstrap layer
-// alongside image.boot, named "<full_blob_sha256>.blob.meta".
-type BlobMetaFile struct {
-	Name string
-	Data []byte
-}
-
-// AppendFile describes a file to bundle into the bootstrap layer tar alongside
-// image.boot and the blob meta artifacts.
-type AppendFile struct {
-	Name string // basename, placed under "image/"
-	Data []byte
+	return writeBootstrapLayer(ctx, cs, bootstrapPath, blobMetas, opt.AppendFiles)
 }
 
 // stageNydusMetadata stages a blob from the content store for `nydus merge`
-// without materializing the (large) compressed data region.
-//
-// A nydus full blob is laid out as [compressed data][bootstrap][blob meta]
-// [footer]. `nydus merge` only reads the bootstrap and blob meta (located via
-// the footer), never the compressed data. So we read just the footer to find
-// the bootstrap offset, then write a sparse file that keeps the metadata tail at
-// its original absolute offset while leaving [0, bootstrapOffset) as a hole. The
-// file is named by the blob's full digest (desc.Digest), which `nydus merge`
-// records verbatim in the device slot so a registry backend can address the
-// blob by the same digest.
+// without materializing the (large) compressed data region. See
+// pkg/converter.StageNydusMetadata for the layout details.
 func stageNydusMetadata(ctx context.Context, cs content.Store, desc ocispec.Descriptor, dir string) (string, error) {
 	ra, err := cs.ReaderAt(ctx, desc)
 	if err != nil {
@@ -302,57 +253,7 @@ func stageNydusMetadata(ctx context.Context, cs content.Store, desc ocispec.Desc
 	}
 	defer func() { _ = ra.Close() }()
 
-	size := ra.Size()
-	if size < nydusBlobFooterSize {
-		return "", errors.Errorf("blob is too small for a nydus footer (%d bytes)", size)
-	}
-
-	footer := make([]byte, nydusBlobFooterSize)
-	if _, err := ra.ReadAt(footer, size-nydusBlobFooterSize); err != nil {
-		return "", errors.Wrap(err, "read nydus footer")
-	}
-	if magic := binary.LittleEndian.Uint32(footer[0:4]); magic != nydusBlobFooterMagic {
-		return "", errors.Errorf("not a nydus blob: bad footer magic %#x", magic)
-	}
-	bootstrapOffset := int64(binary.LittleEndian.Uint64(footer[bootstrapOffsetField : bootstrapOffsetField+8]))
-	if bootstrapOffset < 0 || bootstrapOffset > size {
-		return "", errors.Errorf("invalid bootstrap offset %d (blob size %d)", bootstrapOffset, size)
-	}
-
-	tmp, err := os.CreateTemp(dir, "stage-*")
-	if err != nil {
-		return "", errors.Wrap(err, "create stage temp file")
-	}
-	tmpPath := tmp.Name()
-	committed := false
-	defer func() {
-		_ = tmp.Close()
-		if !committed {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	// The staged file content is bootstrapOffset zero bytes (a sparse hole)
-	// followed by the metadata tail at its original absolute offset.
-	if _, err := tmp.Seek(bootstrapOffset, io.SeekStart); err != nil {
-		return "", errors.Wrap(err, "seek to bootstrap offset")
-	}
-	tail := io.NewSectionReader(ra, bootstrapOffset, size-bootstrapOffset)
-	if _, err := io.Copy(tmp, tail); err != nil {
-		return "", errors.Wrap(err, "stage nydus metadata")
-	}
-	if err := tmp.Close(); err != nil {
-		return "", errors.Wrap(err, "close stage temp file")
-	}
-
-	// Name the staged source by the blob's full digest; `nydus merge` uses the
-	// file name as the device slot blob id.
-	dst := filepath.Join(dir, desc.Digest.Encoded())
-	if err := os.Rename(tmpPath, dst); err != nil {
-		return "", errors.Wrap(err, "rename staged blob")
-	}
-	committed = true
-	return dst, nil
+	return pkgconv.StageNydusMetadata(ra, ra.Size(), desc.Digest.Encoded(), dir)
 }
 
 // extractBlobMeta reads the blob meta region of a nydus full blob from the
@@ -365,29 +266,7 @@ func extractBlobMeta(ctx context.Context, cs content.Store, desc ocispec.Descrip
 	}
 	defer func() { _ = ra.Close() }()
 
-	size := ra.Size()
-	if size < nydusBlobFooterSize {
-		return nil, errors.Errorf("blob is too small for a nydus footer (%d bytes)", size)
-	}
-
-	footer := make([]byte, nydusBlobFooterSize)
-	if _, err := ra.ReadAt(footer, size-nydusBlobFooterSize); err != nil {
-		return nil, errors.Wrap(err, "read nydus footer")
-	}
-	if magic := binary.LittleEndian.Uint32(footer[0:4]); magic != nydusBlobFooterMagic {
-		return nil, errors.Errorf("not a nydus blob: bad footer magic %#x", magic)
-	}
-	blobMetaOffset := int64(binary.LittleEndian.Uint64(footer[blobMetaOffsetField : blobMetaOffsetField+8]))
-	blobMetaSize := int64(binary.LittleEndian.Uint32(footer[blobMetaBlocksField:blobMetaBlocksField+4])) * nydusBlockSize
-	if blobMetaOffset < 0 || blobMetaSize <= 0 || blobMetaOffset+blobMetaSize > size {
-		return nil, errors.Errorf("invalid blob meta region [%d,+%d) (blob size %d)", blobMetaOffset, blobMetaSize, size)
-	}
-
-	buf := make([]byte, blobMetaSize)
-	if _, err := ra.ReadAt(buf, blobMetaOffset); err != nil {
-		return nil, errors.Wrap(err, "read blob meta region")
-	}
-	return buf, nil
+	return pkgconv.ExtractBlobMeta(ra, ra.Size())
 }
 
 // writeBootstrapLayer packs the bootstrap file and the per-layer blob meta
@@ -413,7 +292,7 @@ func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []
 	gw := gzip.NewWriter(io.MultiWriter(&compressedBuf, compressedDigester.Hash()))
 	tw := tar.NewWriter(io.MultiWriter(gw, uncompressedDigester.Hash()))
 
-	if err := writeBootstrapTar(tw, bootstrapData, blobMetas, appendFiles); err != nil {
+	if err := pkgconv.WriteBootstrapTar(tw, bootstrapData, blobMetas, appendFiles); err != nil {
 		return nil, err
 	}
 	if err := tw.Close(); err != nil {
@@ -451,54 +330,6 @@ func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []
 			LayerAnnotationNydusFsVersion: NydusFsVersion,
 		},
 	}, nil
-}
-
-// writeBootstrapTar writes the `image/` directory, the `image/image.boot` file,
-// one `image/<full_blob_sha256>.blob.meta` entry per layer, and optionally
-// extra appended files into tw.
-func writeBootstrapTar(tw *tar.Writer, bootstrapData []byte, blobMetas []BlobMetaFile, appendFiles []AppendFile) error {
-	if err := tw.WriteHeader(&tar.Header{
-		Name:     "image",
-		Mode:     0o755,
-		Typeflag: tar.TypeDir,
-	}); err != nil {
-		return errors.Wrap(err, "write bootstrap dir header")
-	}
-	if err := tw.WriteHeader(&tar.Header{
-		Name: BootstrapFileNameInLayer,
-		Mode: 0o444,
-		Size: int64(len(bootstrapData)),
-	}); err != nil {
-		return errors.Wrap(err, "write bootstrap file header")
-	}
-	if _, err := tw.Write(bootstrapData); err != nil {
-		return errors.Wrap(err, "write bootstrap file")
-	}
-	for _, meta := range blobMetas {
-		if err := tw.WriteHeader(&tar.Header{
-			Name: BlobMetaDirInLayer + "/" + meta.Name,
-			Mode: 0o444,
-			Size: int64(len(meta.Data)),
-		}); err != nil {
-			return errors.Wrapf(err, "write blob meta header %s", meta.Name)
-		}
-		if _, err := tw.Write(meta.Data); err != nil {
-			return errors.Wrapf(err, "write blob meta %s", meta.Name)
-		}
-	}
-	for _, f := range appendFiles {
-		if err := tw.WriteHeader(&tar.Header{
-			Name: "image/" + f.Name,
-			Mode: 0o444,
-			Size: int64(len(f.Data)),
-		}); err != nil {
-			return errors.Wrapf(err, "write appended file header %s", f.Name)
-		}
-		if _, err := tw.Write(f.Data); err != nil {
-			return errors.Wrapf(err, "write appended file %s", f.Name)
-		}
-	}
-	return nil
 }
 
 // readJSON reads and unmarshals a JSON blob (manifest/index/config) from the
