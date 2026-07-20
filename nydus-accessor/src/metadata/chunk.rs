@@ -2,6 +2,7 @@ use std::mem;
 
 use super::*;
 use crate::utils::digest::{hex_string, parse_sha256_hex};
+use anyhow::{anyhow, Context, Result};
 
 /// EROFS chunk index entry — 8 bytes, `#[repr(C, packed)]`.
 #[repr(C, packed)]
@@ -131,18 +132,14 @@ impl ErofsDeviceSlot {
         self.tag[bytes.len()..].fill(0);
     }
 
-    pub fn blob_id(&self) -> [u8; EROFS_BLOB_ID_SIZE] {
+    pub fn blob_id(&self) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
         // The tag stores the blob id as a 64-character lowercase sha256 hex
-        // string (nydus RAFS v6 compatible). Fall back to the legacy raw-byte
-        // encoding when the tag is not valid hex.
-        if let Ok(text) = std::str::from_utf8(&self.tag) {
-            if let Ok(digest) = parse_sha256_hex(text) {
-                return digest;
-            }
-        }
-        let mut blob_id = [0u8; EROFS_BLOB_ID_SIZE];
-        blob_id.copy_from_slice(&self.tag[..EROFS_BLOB_ID_SIZE]);
-        blob_id
+        // string (nydus RAFS v6 compatible). Anything else is a corrupt or
+        // foreign device slot and must be rejected rather than silently
+        // reinterpreted as raw digest bytes.
+        let text = std::str::from_utf8(&self.tag)
+            .map_err(|_| anyhow!("device slot tag is not a sha256 hex blob id"))?;
+        parse_sha256_hex(text).context("device slot tag is not a sha256 hex blob id")
     }
 }
 
@@ -158,7 +155,7 @@ mod tests {
         let slot =
             ErofsDeviceSlot::with_blob_id_and_mapped_blkaddr(blocks, &blob_id, mapped_blkaddr);
 
-        assert_eq!(slot.blob_id(), blob_id);
+        assert_eq!(slot.blob_id().unwrap(), blob_id);
         assert_eq!(slot.blocks(), blocks);
         assert_eq!(slot.mapped_blkaddr(), mapped_blkaddr);
 

@@ -37,6 +37,9 @@ pub const EROFS_FEATURE_COMPAT_SB_CHKSUM: u32 = 0x0000_0001;
 pub const EROFS_FEATURE_COMPAT_MTIME: u32 = 0x0000_0002;
 pub const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 pub const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
+/// 48-bit block addressing: the kernel interprets the `*_hi` halves of chunk
+/// index and device slot addresses only when this bit is set.
+pub const EROFS_FEATURE_INCOMPAT_48BIT: u32 = 0x0000_0080;
 
 // Inode layout.
 pub const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;

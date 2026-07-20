@@ -76,7 +76,7 @@ Options:
 	--chunk-size <CHUNK_SIZE>
 		File chunk size in bytes (must be a power of two, >= 4KiB, and 4KiB-aligned) [default: 1048576]
 	--compress-size <COMPRESS_SIZE>
-		Group uncompressed size in bytes (must be a multiple of 1MiB). Controls the uncompressed size of each blob meta group used for compression [default: 4194304]
+		Group uncompressed size in bytes (must be a power of two, >= 1MiB, and >= the chunk size). Controls the uncompressed size of each blob meta group used for compression [default: 4194304]
 	--compressor <COMPRESSOR>
 		Algorithm to compress data chunks [default: zstd] [possible values: none, zstd]
 	-l, --log-level <LOG_LEVEL>
@@ -97,11 +97,10 @@ Current implementation notes:
 	of each blob_meta group (the unit of compression and of a single backend
 	read). Groups are formed by packing whole decoded blocks up to this size
 	regardless of chunk boundaries, so every group but the last is exactly this
-	many blocks. It must be a positive multiple of 1 MiB and at least
-	`--chunk-size`. Note the alignment rules differ: `--chunk-size` must be a power
-	of two and 4KiB-aligned, while `--compress-size` only needs to be a 1 MiB
-	multiple. Raising `--chunk-size` above 1 MiB requires raising `--compress-size`
-	to match or exceed it.
+	many blocks. Like `--chunk-size` it must be a power of two (the blob meta
+	header stores both sizes as log2 exponents); it must also be at least 1 MiB
+	and at least `--chunk-size`. Raising `--chunk-size` above 1 MiB requires
+	raising `--compress-size` to match or exceed it.
 - `--blob <path>` stores the full blob at `<path>` and a standalone blob meta
 	copy at `<path>.blob.meta`. If `<path>` already exists and is a FIFO, build
 	writes the full blob stream to that FIFO instead of creating a regular file.
@@ -200,15 +199,13 @@ Current implementation notes:
 - `--apiserver` is the apiserver address of a **running** `nydus fuse` mount
 	(the same `unix:///path` form as `nydus fuse --apiserver`). Optimize fetches
 	the access patterns live from its `GET /trace` endpoint
-	(`{"patterns":[{"blob_index":1,"group_index":4},...]}`); entries are
-	deduplicated preserving first-access order. Run the workload against the
-	mount before invoking optimize so the trace is populated.
+	(`{"version":1,"patterns":[{"blob_index":1,"group_index":4},...]}`);
+	entries are deduplicated preserving first-access order. Run the workload
+	against the mount before invoking optimize so the trace is populated.
 - `--trace-file` is the offline alternative to `--apiserver` (the two are
-	mutually exclusive; one of them is required). It accepts either the bare
-	`{"patterns":[...]}` document or a wrapper object exposing the same under a
-	top-level `trace` field (as returned by a hypervisor's stats endpoint
-	embedding the accessor trace), so a trace captured from a pmem/accessor
-	mount can be replayed without a live apiserver.
+	mutually exclusive; one of them is required). It accepts the same versioned
+	trace document as produced by the `/trace` endpoint, so a trace captured
+	from a pmem/accessor mount can be replayed without a live apiserver.
 - `--parent-bootstrap` is the merged bootstrap to optimize; it is read-only, so
 	optimize can be re-run against the same parent with new patterns.
 - `--bootstrap` is the rewritten bootstrap output: the parent's inode tree with
@@ -595,7 +592,7 @@ Filesystem:
 Cache:
 
 - `cache_opened_files` — open blob data cache files (excludes `.blob.meta` and
-	`.groupmap`).
+	`.group.map`).
 - `cache_hit_group` — groups served from cache without a backend read.
 - `cache_total_group` — total groups across loaded blob metas.
 - `cache_fill_group` — groups written into a blob's own cache by regular blob
@@ -677,7 +674,7 @@ full blob file: <full_blob_sha256>
 | padding to 4 KiB alignment    |
 +-------------------------------+  byte = footer.blob_meta_offset
 | blob meta                     |
-| 48-byte header + chunk table  |
+| 4 KiB header + chunk table    |
 | group table                   |
 | zero padding to 4 KiB         |
 +-------------------------------+  byte = footer.blob_meta_offset + footer.blob_meta_blocks * 4096
@@ -687,24 +684,30 @@ full blob file: <full_blob_sha256>
 
 The footer is fixed at 4096 bytes and is always located at EOF. The current
 fields occupy the first 64 bytes; the remaining bytes are reserved for future
-extension and must be zero.
+compat fields — writers zero them, readers ignore them (EROFS-style, so a
+compat extension does not break old readers), and corruption is caught by the
+footer crc32c.
 
 ```text
 BlobFooter
 
-u32 magic              "LFTR" / 0x4c465452
-u32 features           currently 0
+u8  magic[8]           "LPFOOTER", raw ASCII bytes written as-is
+u32 version            informational format generation (currently 1)
+u32 flags              low 16 bits incompat (unknown bits reject),
+                       high 16 bits compat (unknown bits ignored)
 u32 crc32              crc32c over footer bytes with this field zeroed
-u32 reserved0          must be 0
+u32 reserved0          future compat-field slot; writers zero, readers ignore
 u64 compressed_data_offset
 u64 bootstrap_offset
 u64 blob_meta_offset
 u64 compressed_data_size
 u32 bootstrap_blocks
 u32 blob_meta_blocks
-u64 reserved1          must be 0
-u8  reserved2[4032]    must be 0
+u8  reserved1[4032]    compat area: writers zero, readers ignore
 ```
+
+The `magic + version + flags` header prefix matches the blob meta
+(`LPBLMETA`) and groupmap (`LPGRPMAP`) sidecars.
 
 Reader validation requires:
 
@@ -779,7 +782,7 @@ first logical external data block starts at offset 0
 
 blob_meta then maps that logical byte offset to a compressed range in the full
 blob's data region. The block is mapped to its group by
-`group_index = blkaddr / group_block_count`, and the group record gives the
+`group_index = blkaddr >> group_block_bits`, and the group record gives the
 encoded `compressed_byte_offset` (for example 0 for the first encoded group).
 ```
 
@@ -820,17 +823,19 @@ Current blob_meta on-disk shape:
 embedded blob meta region
 
 +-------------------------------+
-| 48-byte header                |
-| magic                         |
-| features                      |
+| 4096-byte header (one block)  |
+| magic (8 bytes, "LPBLMETA")   |
+| version                       |
+| flags                         |
 | crc32c                        |
 | reserved0                     |
 | chunks_offset                 |
 | groups_offset                 |
 | chunk_count                   |
 | group_count                   |
-| chunk_block_count             |
-| group_block_count             |
+| chunk_block_bits (u8)         |
+| group_block_bits (u8 + pad)   |
+| reserved tail (compat area)   |
 +-------------------------------+
 | chunk records                 |
 | 48 bytes each                 |
@@ -858,10 +863,23 @@ embedded blob meta region
 
 Header details:
 
-- `magic` is `0x4c50424d`.
-- `features` is a bitset. `COMPRESSOR_ZSTD` (`1 << 0`) means zstd is the blob's
-	default compressor; no compressor bit means stored plain. `DIGESTER_BLAKE3`
-	(`1 << 16`) is mandatory for chunk digests.
+- `magic` is the 8 raw ASCII bytes `LPBLMETA`, written as-is (a hexdump of the
+	file starts with the readable string). Same magic style as the groupmap
+	sidecar (`LPGRPMAP`).
+- `version` is an informational format generation (currently 1). Readers do
+	not gate on it: compatibility is governed EROFS-style by the magic (a new
+	format family gets a new magic) and by the flag bits below.
+- `flags` is split EROFS-style: the low 16 bits are incompatible features — a
+	reader that does not know a set bit must reject the file (like
+	`feature_incompat`); the high 16 bits are compatible features — unknown
+	bits are ignored (like `feature_compat`). `COMPRESSOR_ZSTD` (`1 << 0`)
+	means zstd is the blob's default compressor; no compressor bit means
+	stored plain. `DIGESTER_BLAKE3` (`1 << 1`) is mandatory for chunk digests.
+	Record-layout evolution (wider chunk/group records, new record kinds) is
+	expressed as a new incompat bit — the same way EROFS gates compact vs
+	extended inodes — while header growth uses the reserved tail plus a compat
+	bit. The `magic + version + flags` header prefix is shared with the
+	groupmap sidecar.
 - `crc32c` covers the full blob meta region with this field zeroed: the fixed
 	header, all chunk records, all group records, and trailing zero padding. The cache layer
 	verifies this crc32c before mmaping a cached blob meta file for chunk lookup.
@@ -869,14 +887,27 @@ Header details:
 	chunk table.
 - `chunk_count` is the number of chunk records.
 - `group_count` is the number of compressed group records.
-- `chunk_block_count` is the EROFS chunk size in 4 KiB blocks.
-- `group_block_count` is the number of decoded 4 KiB blocks per group. Every
-	group except the last holds exactly this many blocks, so the read path maps a
-	block to its group with `group_index = block_id / group_block_count` in O(1).
-- The header intentionally does not store `header_size`, total compressed size,
-	or total uncompressed size. The header size is fixed at 48 bytes, totals are
-	computed from the group records, and the blob meta region is padded to a 4 KiB
-	block boundary.
+- `chunk_block_bits` is log2 of the EROFS chunk size in 4 KiB blocks:
+	`chunk_size = 4096 << chunk_block_bits`, so the default 1 MiB chunk stores
+	8. Storing the exponent EROFS-style (the same quantity as `chunk_format &
+	EROFS_CHUNK_FORMAT_BLKBITS_MASK`) makes non-power-of-two chunk sizes
+	unrepresentable and feeds the shift-based offset math directly.
+- `group_block_bits` is log2 of the per-group block count, same
+	representation as `chunk_block_bits` (the default 4 MiB group stores 10).
+	Every group except the last is exactly `1 << group_block_bits` blocks, so
+	the read path maps a block to its group with
+	`group_index = block_id >> group_block_bits` in O(1). The two exponents
+	are adjacent `u8`s at offset 48; the six bytes after them are reserved.
+- The header is one EROFS block (4096 bytes): the chunk table starts block
+	aligned by construction, and everything between the last field and the end
+	of the header block is reserved for future compat fields — writers zero it,
+	readers ignore it (so a compat extension does not break old readers), and
+	corruption is caught by the region crc32c. Layout changes that old readers
+	cannot safely ignore (wider records, new tables, moved offsets) must use an
+	incompat flag bit instead. The header intentionally does not
+	store total compressed size or total uncompressed size — totals are computed
+	from the group records — and the blob meta region is padded to a 4 KiB block
+	boundary.
 
 Chunk details:
 
@@ -895,7 +926,7 @@ Group details:
 
 - Groups are formed by packing whole decoded blocks up to `--compress-size`
 	regardless of chunk boundaries, then compressing the batch as one unit. So
-	every group but the last is exactly `group_block_count` blocks.
+	every group but the last is exactly `1 << group_block_bits` blocks.
 - `uncompressed_block_offset` is the decoded cache 4 KiB block offset for the
 	group. Groups are dense and contiguous in the decoded address space.
 - `compressed_byte_offset` is the encoded payload's byte offset within the data
@@ -946,6 +977,14 @@ chunk:
            | BLAKE3 |BLAKE3|    | BLAKE3 | BLAKE3 |    | BLAKE3
            +--------+------+    +--------+--------+    +--------
 ```
+
+A fully-zero chunk — a real filesystem hole reads back as zeros, and so does
+zero-filled data — is never stored: the builder emits the standard EROFS null
+chunk index (all 48 address bits set on disk) instead. Hole chunks occupy no
+bytes in the data region, get no blob meta chunk record, and never touch the
+blob cache at runtime: the accessor read paths satisfy them with zeros
+directly, and native EROFS mounts decode the null address in-kernel the same
+way.
 
 The per-file chunks are then packed densely, back-to-back, into the decoded
 external-device address space that EROFS chunk indexes point into; each
@@ -1036,7 +1075,7 @@ ondemand blob — named by SHA256(full blob), one new nydus layer
 Every group record in the ondemand blob is a **redirect**: instead of
 describing this blob's own decoded address space, it names the source group
 it is a copy of. Group sizes follow the source groups, so the uniform-size
-invariant is relaxed and the O(1) `block / group_block_count` lookup is never
+invariant is relaxed and the O(1) `block >> group_block_bits` lookup is never
 used on an ondemand blob:
 
 ```text
@@ -1152,7 +1191,7 @@ When mounting with `--bootstrap + --blob-dir`:
 	the cache directory. The cache verifies the blob meta header crc32c before
 	mmaping the cached file and using its chunk records.
 7. Reads use logical uncompressed offsets from inode chunk indexes. The cache
-	layer maps an offset to its group in O(1) with `block / group_block_count`,
+	layer maps an offset to its group in O(1) with `block >> group_block_bits`,
 	ensures every group covering the requested range is fetched and decoded from
 	the data region (validating group CRC32C), and then reads the bytes straight
 	out of the cache file. The cache file mirrors the dense decoded address space,
@@ -1172,7 +1211,7 @@ blob digest:
 - `<full_blob_digest>.blob.data` stores decoded uncompressed data.
 - `<full_blob_digest>.blob.meta` stores the verified blob meta copy cached from
 	the local backend.
-- `<full_blob_digest>.groupmap` records which blob_meta groups have been decoded
+- `<full_blob_digest>.group.map` records which blob_meta groups have been decoded
 	(a shared readiness bitmap, see
 	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
 - `<full_blob_digest>.prefetch.lock` is the cross-process prefetch lock file
@@ -1199,11 +1238,13 @@ cache directory, artifacts named by SHA256(full blob) = <hex>
 | crc32c | BLAKE3 digests    | offsets + CRC32C  |
 +--------+-------------------+-------------------+
 
-<hex>.groupmap — shared readiness bitmap, MAP_SHARED + atomic bit ops
-+------------------------+----------------------+
-| 16 B header (LPGM0001) | 1 bit per group ...  |
-+------------------------+----------------------+
-  bit set only after the group's bytes are resident in .blob.data
+<hex>.group.map — shared readiness bitmap, MAP_SHARED + atomic bit ops
++---------------------------------+----------------------+
+| 4 KiB header (LPGRPMAP, version,| 1 bit per group ...  |
+| flags, count, ready count)      |                      |
++---------------------------------+----------------------+
+  bit set only after the group's bytes are resident in .blob.data;
+  the ALL_READY header flag latches once every bit is set
 
 <hex>.prefetch.lock — empty; exclusive flock serializes prefetch owners
 ```
@@ -1279,9 +1320,15 @@ decode every group independently — N× the backend traffic, decode CPU, and
 cache writes for identical bytes. Two mechanisms make the warmup effectively
 single-instance while leaving the on-demand read path untouched.
 
-**Shared groupmap bitmap.** The `<digest>.groupmap` file is a 16-byte header
-(magic `LPGM0001`, version, group count — both little-endian `u32`) followed by
-one readiness bit per blob_meta group. The whole file is mapped `MAP_SHARED`
+**Shared groupmap bitmap.** The `<digest>.group.map` file is a 4096-byte header
+followed by one readiness bit per blob_meta group. The header carries the
+8-byte ASCII magic `LPGRPMAP` (same raw-bytes style as the blob meta's
+`LPBLMETA`), an informational little-endian `u32` format generation (not gated
+on, like the other formats), a mutable `flags` word (the same
+`magic + version + flags` prefix as the blob meta header — but here the flags
+are runtime state bits, not format features, and unknown bits are ignored),
+the group count, and a mutable ready-group counter; the rest of the header
+page is reserved and zero. The whole file is mapped `MAP_SHARED`
 and every bit access goes through atomic operations (`Acquire` loads,
 `fetch_or` with `AcqRel` to set), so `set_ready` updates made by one process
 are immediately observed by every other process sharing the cache directory
@@ -1299,8 +1346,21 @@ crash safety:
 	writeback of the dirty mapping — there is no per-bit write syscall on the hot
 	path.
 
-`all_ready()` scans the shared bitmap (masking the partial final byte), so any
-instance can cheaply tell when another instance has finished warming a blob.
+`is_all_ready()` is the O(1) fast path: the process that flips the last
+missing bit (tracked by the shared ready counter) latches the sticky
+`ALL_READY` flag in the header, and from then on a single atomic load answers
+"is this blob fully cached?" for every process. Per-event handlers — uffd page
+faults, FUSE reads — consult it before any
+per-group bookkeeping (`ensure_range` and `ready_ranges` short-circuit on it),
+so a fully warmed blob costs one load per request instead of a bitmap walk.
+`all_ready()` falls back to scanning the shared bitmap (masking the partial
+final byte) when the flag is not yet set, and latches the flag when the scan
+proves completion — this also heals the rare counter skew left by a process
+that died between setting the last bit and bumping the counter, as does the
+same reconciliation at every `open`. A successful `prefetch_all` additionally
+runs this authoritative scan before returning, so once a full prefetch
+completes, `fully_ready` is guaranteed to answer true even in the presence of
+historical counter skew.
 
 **Per-blob prefetch flock.** Blob-level prefetch — and only prefetch — is
 serialized across processes with an exclusive `flock` on
@@ -1594,7 +1654,7 @@ Flags:
 | `--builder` | `nydus` | Path to the `nydus` binary (PATH-resolvable). |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
 | `--chunk-size` | `1048576` | Nydus file chunk size in bytes (1 MiB). |
-| `--compress-size` | `4194304` | Blob meta group uncompressed size in bytes; a multiple of 1 MiB and at least `--chunk-size`. |
+| `--compress-size` | `4194304` | Blob meta group uncompressed size in bytes; a power of two, at least 1 MiB and at least `--chunk-size`. |
 | `--compressor` | `zstd` | Chunk data compressor: `none` or `zstd`. |
 | `--platform` | all | Convert only the given platform (e.g. `linux/amd64`). |
 | `--insecure` | `false` | Skip TLS verification for the registry. |

@@ -142,12 +142,7 @@ impl ErofsReader {
                 io::Error::new(io::ErrorKind::InvalidData, "superblock offset overflow")
             })?;
         let sb = Self::superblock_from(&mmap, sb_offset)?;
-        if sb.magic() != EROFS_SUPER_MAGIC_V1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("bad EROFS magic: 0x{:08X}", sb.magic()),
-            ));
-        }
+        Self::validate_superblock(sb)?;
 
         Ok(Self {
             mmap,
@@ -169,12 +164,7 @@ impl ErofsReader {
                 io::Error::new(io::ErrorKind::InvalidData, "superblock offset overflow")
             })?;
         let sb = Self::superblock_from(&mmap, sb_offset)?;
-        if sb.magic() != EROFS_SUPER_MAGIC_V1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("bad EROFS magic: 0x{:08X}", sb.magic()),
-            ));
-        }
+        Self::validate_superblock(sb)?;
 
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
         let blob_dir = blob_path.parent().unwrap_or_else(|| Path::new("."));
@@ -206,12 +196,7 @@ impl ErofsReader {
         let mmap = Self::map_file(bootstrap_path)?;
         let sb_offset = EROFS_SUPER_OFFSET as usize;
         let sb = Self::superblock_from(&mmap, sb_offset)?;
-        if sb.magic() != EROFS_SUPER_MAGIC_V1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("bad EROFS magic: 0x{:08X}", sb.magic()),
-            ));
-        }
+        Self::validate_superblock(sb)?;
 
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
 
@@ -291,6 +276,29 @@ impl ErofsReader {
         Ok(cast_ref::<ErofsSuperblock>(&mmap[sb_offset..]))
     }
 
+    /// Validate the superblock magic and reject images declaring incompat
+    /// features this reader does not implement (the standard EROFS incompat
+    /// contract: unknown bits mean the image cannot be read correctly).
+    fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
+        if sb.magic() != EROFS_SUPER_MAGIC_V1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("bad EROFS magic: 0x{:08X}", sb.magic()),
+            ));
+        }
+        const SUPPORTED_INCOMPAT: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
+            | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
+            | EROFS_FEATURE_INCOMPAT_48BIT;
+        let unknown = sb.feature_incompat() & !SUPPORTED_INCOMPAT;
+        if unknown != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported EROFS incompat features: {unknown:#x}"),
+            ));
+        }
+        Ok(())
+    }
+
     fn blob_infos_from(mmap: &[u8], sb_offset: usize) -> io::Result<Vec<BlobInfo>> {
         let sb = Self::superblock_from(mmap, sb_offset)?;
         let mut infos = Vec::with_capacity(sb.extra_devices() as usize);
@@ -298,7 +306,7 @@ impl ErofsReader {
             let slot = Self::device_slot_from(mmap, sb_offset, index)?;
             infos.push(BlobInfo {
                 blob_index: index as u16 + 1,
-                blob_id: slot.blob_id(),
+                blob_id: slot.blob_id().map_err(io::Error::other)?,
                 blocks: slot.blocks(),
                 mapped_blkaddr: slot.mapped_blkaddr(),
             });

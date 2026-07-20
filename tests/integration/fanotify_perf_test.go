@@ -631,7 +631,7 @@ func (e *fanotifyPerfEnv) countFanLogs(pattern string) int {
 }
 
 func wipeCacheDir(cacheDir string) {
-	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.groupmap", "*.prefetch.lock"} {
+	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.group.map", "*.prefetch.lock"} {
 		matches, _ := filepath.Glob(filepath.Join(cacheDir, pattern))
 		for _, m := range matches {
 			_ = os.Remove(m)

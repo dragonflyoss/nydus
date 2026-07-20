@@ -34,8 +34,24 @@ pub fn write_image(
     let total_blocks = meta_blkaddr as u64 + meta_blocks as u64;
 
     let feature_compat = EROFS_FEATURE_COMPAT_MTIME | EROFS_FEATURE_COMPAT_SB_CHKSUM;
-    let feature_incompat =
+    let mut feature_incompat =
         EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE;
+    // The `*_hi` halves of chunk index and device slot addresses are only
+    // interpreted by the kernel when the 48BIT incompat feature is declared.
+    // Declare it exactly when some block address actually exceeds 32 bits, so
+    // small images stay mountable on older kernels while large ones cannot be
+    // silently misread. The largest chunk block address is bounded by the end
+    // of the last mapped device (flattened layout) or the device's own block
+    // count (legacy blob-relative layout), both covered by `mapped + blocks`.
+    let max_block_end = device_slots
+        .iter()
+        .map(|slot| slot.mapped_blkaddr() + slot.blocks())
+        .max()
+        .unwrap_or(0)
+        .max(total_blocks);
+    if max_block_end > (1u64 << 32) {
+        feature_incompat |= EROFS_FEATURE_INCOMPAT_48BIT;
+    }
 
     let devt_slotoff: u16 = if device_slots.is_empty() {
         0

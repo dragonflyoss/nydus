@@ -288,7 +288,7 @@ fn accessor_describes_devices_and_fetches_aligned_ranges() {
     assert_eq!(trace.patterns[0].group_index, 1);
     assert_eq!(
         accessor.trace_json(),
-        "{\"patterns\":[{\"blob_index\":1,\"group_index\":1}]}"
+        "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"group_index\":1}]}"
     );
 
     // Unaligned ranges and unknown blobs are rejected.

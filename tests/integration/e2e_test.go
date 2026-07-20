@@ -962,7 +962,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 		switch {
 		case strings.HasSuffix(name, ".blob.data"):
 			dataCount++
-		case strings.HasSuffix(name, ".groupmap"):
+		case strings.HasSuffix(name, ".group.map"):
 			groupmapCount++
 		case strings.HasSuffix(name, ".blob.meta"):
 			blobMetaCount++
@@ -978,7 +978,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 		prefix := fullBlobDigest(t, blob)
 		require.FileExists(t, filepath.Join(cacheDir, prefix+".blob.data"))
 		require.FileExists(t, filepath.Join(cacheDir, prefix+".blob.meta"))
-		require.FileExists(t, filepath.Join(cacheDir, prefix+".groupmap"))
+		require.FileExists(t, filepath.Join(cacheDir, prefix+".group.map"))
 	}
 }
 
