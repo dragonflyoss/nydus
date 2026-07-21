@@ -13,6 +13,7 @@ The user-facing commands are:
 - `nydus optimize`
 - `nydus fuse`
 - `nydus uffd` (with the optional `uffd` feature)
+- `nydus fanotify` (with the optional `fanotify` feature)
 
 The merge implementation focuses on metadata overlay, blob-id preservation and
 OCI whiteout handling. The build and runtime paths use the embedded blob meta
@@ -369,11 +370,62 @@ See [Nydus UFFD Service and Wire Protocol](uffd.md) for the flattened device
 layout, binary framing, SCM_RIGHTS FD rules, request/response formats, and
 fault-handling responsibilities.
 
+### Fanotify
+
+`nydus fanotify [OPTIONS]`
+
+The `nydus fanotify` command serves a Nydus image to the kernel EROFS driver as
+an on-demand, **multi-device** mount. The bootstrap is a real local EROFS image
+mounted directly, so mount and metadata reads (`ls`, `stat`) work off the local
+bootstrap; each blob is a separate EROFS device backed by the accessor's sparse
+cache file, marked for fanotify `FAN_PRE_ACCESS`. A cold blob-data read faults;
+the daemon identifies the blob, fetches the range into its cache file, and
+answers the event. This is the native-EROFS counterpart to `nydus uffd` (which
+serves microVMs) and the successor to the deprecated EROFS-over-fscache path.
+
+The fanotify command is available only when Nydus is built with both the `cli`
+and `fanotify` features.
+
+```bash
+cargo build --release --features cli,fanotify --bin nydus
+
+sudo nydus fanotify \
+  --bootstrap /var/lib/nydus/image/image.boot \
+  --config /etc/nydus/config.yaml \
+  --mountpoint /mnt/erofs
+```
+
+Options:
+
+- `--bootstrap` is the local mount source and metadata device.
+- `--config` selects the regular Nydus backend, cache, and prefetch
+  configuration; the blob cache files under the cache directory are the blob
+  devices.
+- `--mountpoint` is the EROFS mount target. When provided, the daemon mounts
+  after the fanotify group is ready and unmounts on shutdown.
+- `--fetch-concurrency` bounds how many blob fetches run concurrently
+  (default `max(ncpu, 64)`). A busy pool queues tasks — backpressure —
+  rather than denying reads. Admission is unbounded; there is no per-event
+  byte cap or timeout (bounded fetch time comes from the backend's HTTP
+  timeout + retries; a registry `timeout: 0` is rejected for this mode).
+- `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
+
+The service marks every blob device and runs an event coordinator whose fetch
+concurrency is bounded by the fetch pool; there is no per-event deadline
+(bounded fetch time comes from the backend's HTTP timeout + retries). On
+shutdown it denies outstanding events and unmounts **before** dropping the
+fanotify group fd, whose release would fail-open residual events. Requires
+`CAP_SYS_ADMIN` and Linux 6.15+.
+
+See [Nydus Fanotify Pre-Content Service](fanotify.md) for the multi-device layout,
+event ABI, event processing, service lifecycle, and constraints.
+
 ### Storage config
 
-`nydus fuse`, `nydus uffd`, and `nydus check` accept a shared YAML storage
-config through `--config <path>`. It centralizes the backend directory, cache
-directory, and prefetch behavior so command-specific directory flags can be
+`nydus fuse`, `nydus uffd`, `nydus fanotify`, and `nydus check` accept a shared
+YAML storage config through `--config <path>`. It centralizes the backend
+directory, cache directory, and prefetch behavior so command-specific directory
+flags can be
 omitted.
 
 ```yaml
