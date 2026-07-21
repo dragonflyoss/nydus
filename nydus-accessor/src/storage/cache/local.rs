@@ -25,7 +25,10 @@ use super::{
 #[derive(Clone)]
 enum GroupFlightResult {
     Success,
-    Failure { kind: io::ErrorKind, message: Arc<str> },
+    Failure {
+        kind: io::ErrorKind,
+        message: Arc<str>,
+    },
 }
 
 struct GroupFlight {

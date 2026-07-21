@@ -36,6 +36,9 @@ uffd = [
   "dep:sendfd",
   "dep:tokio",
 ]
+# Serve an EROFS multi-device image on demand through fanotify pre-content
+# hooks (FAN_CLASS_PRE_CONTENT + FAN_PRE_ACCESS). Requires Linux >= 6.15.
+fanotify = []
 # Container image registry backend (OCI distribution).
 backend-registry = ["nydus-accessor/backend-registry"]
 # Dragonfly P2P SDK proxy support for the registry backend.

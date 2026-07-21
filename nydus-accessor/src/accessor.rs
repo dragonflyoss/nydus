@@ -564,6 +564,30 @@ impl BlobAccessor {
             .ensure_range(offset, len)
             .with_context(|| format!("failed to fetch blob {blob_index} range [{offset}, +{len})"))
     }
+
+    /// Return cache-ready byte intervals overlapping `[offset, offset + len)`
+    /// without triggering a backend fetch. The groupmap remains authoritative.
+    pub fn ready_ranges(
+        &self,
+        id: &BlobID,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<std::ops::Range<u64>>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let blob_index = *self
+            .index_by_blob_id
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
+        let cache = self
+            .reader
+            .blob_cache(blob_index)
+            .with_context(|| format!("failed to open blob {blob_index}"))?;
+        cache.ready_ranges(offset, len).with_context(|| {
+            format!("failed to inspect blob {blob_index} ready range [{offset}, +{len})")
+        })
+    }
 }
 
 impl FsAccessor {

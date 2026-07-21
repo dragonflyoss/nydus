@@ -4,6 +4,8 @@
 pub use nydus_accessor::{accessor, config, fs, metadata, metrics, storage, utils};
 
 pub mod build;
+#[cfg(feature = "fanotify")]
+pub mod fanotify;
 #[cfg(feature = "fuse")]
 pub mod fuse;
 pub mod merge;
