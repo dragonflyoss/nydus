@@ -85,7 +85,7 @@ is loaded on demand at runtime (that cost shows up inside Ready).
   cuts cold-start E2E from 22.62s to 8.94s (~2.5×), and against Nydus v2
   (row 4 vs 6) from 17.75s to 8.94s (~2×).
 
-### fanotify vs FUSE
+### Fanotify vs FUSE
 
 `nydus fanotify` (Linux ≥ 6.15) serves the same registry-backed image through
 a kernel EROFS mount instead of a userspace FUSE daemon. Same image, backend,
@@ -93,14 +93,14 @@ and cache for both modes; **warm** = page cache hot, **cold-page** = page
 cache dropped before every job. All metrics represent the statistically 
 aggregated median derived from the standard test-fanotify-perf benchmark suite.
 
-**Conclusion:** fanotify wins everywhere the kernel read path matters —
+**Conclusion:** Fanotify wins everywhere the kernel read path matters —
 metadata ops (stat +23%, readdir 3.4×, xattr ~6×) run on pure kernel EROFS
 with no userspace round trip, and sequential reads are 1.9–3.5× faster because
 data never copies through userspace. 4K random reads are a wash; the one loss
-is concurrent 128K random reads (~18% behind FUSE), where the fanotify
+is concurrent 128K random reads (~18% behind FUSE), where the Fanotify
 pre-content mark disables kernel readahead.
 
-| Benchmark | Unit | fanotify warm | FUSE warm | fanotify cold-page | FUSE cold-page |
+| Benchmark | Unit | Fanotify warm | FUSE warm | Fanotify cold-page | FUSE cold-page |
 | --- | --- | ---: | ---: | ---: | ---: |
 | Sequential read 128K | MiB/s | 6,285 | 1,818 | 5,856 | 1,728 |
 | Sequential read 4-job 128K | MiB/s | 10,155 | 5,386 | 9,046 | 5,305 |
@@ -172,6 +172,7 @@ nydus fuse --bootstrap image.boot --config config.yaml --mountpoint /mnt/nydus
 | [docs/nydus.md](docs/nydus.md) | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, accessor API, and `nydusify`    |
 | [docs/uffd.md](docs/uffd.md)   | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem |
 | [docs/erofs.md](docs/erofs.md) | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                   |
+| [docs/fanotify.md](docs/fanotify.md) | Fanotify pre-content service: multi-device EROFS model, event ABI, event processing, response protocol, service lifecycle, and fail-open behavior on crash |
 
 ## Building from Source
 
