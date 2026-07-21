@@ -3,6 +3,8 @@
 mod apiserver;
 mod build;
 mod check;
+#[cfg(feature = "fanotify")]
+mod fanotify;
 mod fuse;
 mod merge;
 mod optimize;
@@ -14,6 +16,8 @@ use clap::{Parser, Subcommand};
 
 use crate::build::{run_build, BuildArgs};
 use crate::check::{run_check, CheckArgs};
+#[cfg(feature = "fanotify")]
+use crate::fanotify::{run_fanotify_service, FanotifyArgs};
 use crate::fuse::{run_fuse_mount, FuseArgs};
 use crate::merge::{run_merge, MergeArgs};
 use crate::optimize::{run_optimize, OptimizeArgs};
@@ -42,6 +46,9 @@ enum Commands {
     /// Serve a flattened nydus image through userfaultfd.
     #[cfg(feature = "uffd")]
     Uffd(UffdArgs),
+    /// Serve an EROFS image on demand through fanotify pre-content hooks.
+    #[cfg(feature = "fanotify")]
+    Fanotify(FanotifyArgs),
 }
 
 fn main() -> Result<()> {
@@ -54,5 +61,7 @@ fn main() -> Result<()> {
         Commands::Fuse(args) => run_fuse_mount(args),
         #[cfg(feature = "uffd")]
         Commands::Uffd(args) => run_uffd_service(args),
+        #[cfg(feature = "fanotify")]
+        Commands::Fanotify(args) => run_fanotify_service(args),
     }
 }
