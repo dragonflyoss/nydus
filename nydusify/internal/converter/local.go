@@ -8,7 +8,6 @@ package converter
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,7 +18,6 @@ import (
 	"github.com/containerd/platforms"
 	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	digest "github.com/opencontainers/go-digest"
-	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
@@ -46,142 +44,21 @@ type LocalDirOption struct {
 // (as entries under "image/"). If any of those files reside inside SourceDir,
 // they are passed as --exclude flags to `nydus build` so their data does not
 // also end up in the blob data region.
+//
+// It is a thin wrapper around ConvertMultiSource with a single directory
+// source.
 func ConvertLocalDir(ctx context.Context, cs content.Store, opt LocalDirOption) (*ocispec.Descriptor, error) {
-	if opt.Compressor == "" {
-		opt.Compressor = "zstd"
-	}
-	if opt.ChunkSize == 0 {
-		opt.ChunkSize = 1 << 20
-	}
-	if opt.CompressSize == 0 {
-		opt.CompressSize = 1 << 20
-	}
-
-	appendFiles, err := validateAndReadAppendFiles(opt.AppendInBootstrap)
-	if err != nil {
-		return nil, err
-	}
-
-	buildDir, err := os.MkdirTemp(opt.WorkDir, "local-build-")
-	if err != nil {
-		return nil, errors.Wrap(err, "create build scratch dir")
-	}
-	defer func() { _ = os.RemoveAll(buildDir) }()
-
-	// Pass the append file paths as --exclude flags to `nydus build`.
-	// The Rust side resolves each path against the source directory and
-	// canonicalizes it, so files outside the source are simply ignored.
-	excludes := opt.AppendInBootstrap
-
-	// Step 1: Run nydus build to produce the full blob.
-	blobPath := filepath.Join(buildDir, "blob.nydus")
-	if err := runNydusBuild(ctx, BuildOption{
-		BuilderPath:  opt.BuilderPath,
-		SourceDir:    opt.SourceDir,
-		BlobPath:     blobPath,
-		ChunkSize:    opt.ChunkSize,
-		CompressSize: opt.CompressSize,
-		Compressor:   opt.Compressor,
-		LogLevel:     opt.LogLevel,
-		Excludes:     excludes,
-	}); err != nil {
-		return nil, err
-	}
-
-	// Step 2: Ingest the blob into the content store.
-	blobDesc, err := ingestBlobFile(ctx, cs, blobPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "ingest blob")
-	}
-
-	// Step 3: Stage blob metadata for merge and extract blob.meta.
-	mergeDir, err := os.MkdirTemp(opt.WorkDir, "local-merge-")
-	if err != nil {
-		return nil, errors.Wrap(err, "create merge scratch dir")
-	}
-	defer func() { _ = os.RemoveAll(mergeDir) }()
-
-	stagedPath, err := stageNydusMetadataFromFile(blobPath, blobDesc.Digest, mergeDir)
-	if err != nil {
-		return nil, errors.Wrap(err, "stage blob for merge")
-	}
-
-	blobMetaData, err := extractBlobMetaFromFile(blobPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "extract blob meta")
-	}
-	blobMetas := []BlobMetaFile{{
-		Name: blobDesc.Digest.Encoded() + ".blob.meta",
-		Data: blobMetaData,
-	}}
-
-	// Step 4: Run nydus merge (single layer) to produce the bootstrap.
-	bootstrapPath := filepath.Join(mergeDir, "bootstrap")
-	if err := runNydusMerge(ctx, MergeBuildOption{
-		BuilderPath:   opt.BuilderPath,
-		SourcePaths:   []string{stagedPath},
-		BootstrapPath: bootstrapPath,
-		LogLevel:      opt.LogLevel,
-	}); err != nil {
-		return nil, err
-	}
-
-	// Step 5: Pack bootstrap layer with blob.meta and appended files.
-	bootstrapData, err := os.ReadFile(bootstrapPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "read bootstrap")
-	}
-
-	bootstrapDesc, err := WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas, appendFiles)
-	if err != nil {
-		return nil, errors.Wrap(err, "write bootstrap layer")
-	}
-
-	// Step 6: Build OCI image config.
-	config := ocispec.Image{
-		Platform: platforms.DefaultSpec(),
-		RootFS: ocispec.RootFS{
-			Type: "layers",
-			DiffIDs: []digest.Digest{
-				blobDesc.Digest,
-				digest.Digest(bootstrapDesc.Annotations[LayerAnnotationUncompressed]),
-			},
-		},
-		History: []ocispec.History{
-			{CreatedBy: "Nydus Build", Comment: "Nydus Data Layer"},
-			{CreatedBy: "Nydus Converter", Comment: "Nydus Bootstrap Layer"},
-		},
-	}
-
-	configDesc, err := writeJSON(ctx, cs, config, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "write image config")
-	}
-	configDesc.MediaType = ocispec.MediaTypeImageConfig
-
-	// Step 7: Build OCI manifest.
-	layers := []ocispec.Descriptor{blobDesc, *bootstrapDesc}
-
-	labels := map[string]string{
-		"containerd.io/gc.ref.content.config": configDesc.Digest.String(),
-	}
-	for idx, l := range layers {
-		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", idx)] = l.Digest.String()
-	}
-
-	manifest := ocispec.Manifest{
-		Versioned: specs.Versioned{SchemaVersion: 2},
-		MediaType: ocispec.MediaTypeImageManifest,
-		Config:    *configDesc,
-		Layers:    layers,
-	}
-
-	manifestDesc, err := writeJSON(ctx, cs, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, labels)
-	if err != nil {
-		return nil, errors.Wrap(err, "write manifest")
-	}
-
-	return manifestDesc, nil
+	return ConvertMultiSource(ctx, cs, MultiSourceOption{
+		BuilderPath:       opt.BuilderPath,
+		WorkDir:           opt.WorkDir,
+		ChunkSize:         opt.ChunkSize,
+		CompressSize:      opt.CompressSize,
+		Compressor:        opt.Compressor,
+		LogLevel:          opt.LogLevel,
+		Platform:          platforms.DefaultSpec(),
+		Sources:           []Source{{Dir: opt.SourceDir}},
+		AppendInBootstrap: opt.AppendInBootstrap,
+	})
 }
 
 // validateAndReadAppendFiles validates the list of file paths and reads their

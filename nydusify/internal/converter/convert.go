@@ -75,6 +75,13 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		converter.ConvertHooks{PostConvertHook: hookFn},
 	)
 
+	// A source that is already (partly) a nydus image carries blob layers
+	// whose diff ids cannot be computed by decompression; label them upfront
+	// so images.GetDiffID takes the fast path.
+	if err := labelNydusBlobDiffIDs(ctx, cs, srcDesc, platformMC); err != nil {
+		return nil, errors.Wrap(err, "label nydus blob diff ids")
+	}
+
 	newDesc, err := indexConvertFn(ctx, cs, srcDesc)
 	if err != nil {
 		return nil, errors.Wrap(err, "convert image")
