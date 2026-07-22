@@ -186,8 +186,14 @@ impl BlobFooter {
             blob_meta_blocks: read_u32(data, 60),
         };
         footer.validate_common()?;
-        let actual = footer.compute_crc32();
-        if footer.crc32 != actual {
+        // Verify the crc32 over the raw incoming bytes (with the crc32 field
+        // zeroed), not over a re-serialization of the parsed struct: the
+        // reserved tail may carry nonzero compat fields from a newer writer,
+        // which `to_bytes` would drop and thereby corrupt the checksum.
+        let mut raw = [0u8; NYDUS_BLOB_FOOTER_SIZE];
+        raw.copy_from_slice(data);
+        raw[16..20].fill(0);
+        if footer.crc32 != crc32c::crc32c(&raw) {
             bail!("nydus footer crc32 mismatch");
         }
         Ok(footer)
