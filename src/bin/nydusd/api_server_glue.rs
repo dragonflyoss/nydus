@@ -15,7 +15,7 @@ use mio::Waker;
 use nix::sys::signal::{kill, SIGTERM};
 use nix::unistd::Pid;
 
-use nydus::daemon::NydusDaemon;
+use nydus::daemon::{BlobCullResult, NydusDaemon};
 use nydus::{FsBackendMountCmd, FsBackendType, FsBackendUmountCmd, FsService};
 use nydus_api::{
     start_http_thread, ApiError, ApiMountCmd, ApiRequest, ApiResponse, ApiResponsePayload,
@@ -68,6 +68,10 @@ impl ApiServer {
             ApiRequest::CreateBlobObject(entry) => self.create_blob_cache_entry(&entry),
             ApiRequest::DeleteBlobObject(param) => self.remove_blob_cache_entry(&param),
             ApiRequest::DeleteBlobFile(blob_id) => self.blob_cache_gc(blob_id),
+            ApiRequest::CullBlobFile(blob_id, background) => {
+                self.blob_cache_cull(blob_id, background)
+            }
+            ApiRequest::GetPendingBlobCulls => self.pending_blob_culls(),
         };
 
         self.respond(resp);
@@ -319,6 +323,26 @@ impl ApiServer {
             .delete_blob(blob_id)
             .map_err(|e| ApiError::DaemonAbnormal(e.into()))
             .map(|_| ApiResponsePayload::Empty)
+    }
+
+    fn blob_cache_cull(&self, blob_id: String, background: bool) -> ApiResponse {
+        self.get_daemon_object()?
+            .cull_blob(blob_id, background)
+            .map_err(|e| ApiError::DaemonAbnormal(e.into()))
+            .map(|result| match result {
+                BlobCullResult::Done => ApiResponsePayload::Empty,
+                BlobCullResult::Pending(reason) => ApiResponsePayload::Pending(reason),
+            })
+    }
+
+    fn pending_blob_culls(&self) -> ApiResponse {
+        let pending = self
+            .get_daemon_object()?
+            .pending_culls()
+            .map_err(|e| ApiError::DaemonAbnormal(e.into()))?;
+        let body = serde_json::to_string(&pending)
+            .map_err(|e| ApiError::DaemonAbnormal(DaemonErrorKind::Serde(e)))?;
+        Ok(ApiResponsePayload::PendingCulls(body))
     }
 
     fn do_start(&self) -> ApiResponse {
