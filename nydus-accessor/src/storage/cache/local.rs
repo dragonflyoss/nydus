@@ -134,6 +134,23 @@ impl LocalBlobCache {
                 Err(err) => return Err(err),
             }
         }
+        // Create the cache data file eagerly, before the groupmap. This keeps
+        // the invariant "groupmap file exists => data file exists" so the
+        // stale-reset above can only fire for a genuinely orphaned groupmap.
+        // With lazy creation a second handle opening the same cache dir before
+        // any read would unlink the groupmap a live handle already has mapped,
+        // splitting the two onto different inodes: ready bits set by one side
+        // become invisible to the other, and its prefetch_lock() then waits
+        // forever for groups that never turn ready.
+        let data_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&cache_blob_path)?;
+        data_file.set_len(blob_meta.cache_size())?;
+        drop(data_file);
+
         let groupmap = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
 
         let prefetch_lock_path = cache_dir.join(format!("{cache_key_hex}.prefetch.lock"));
