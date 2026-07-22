@@ -656,17 +656,27 @@ impl FsCacheHandler {
     }
 
     fn handle_close_request(&self, hdr: &FsCacheMsgHeader) {
-        let mut state = self.get_state();
+        let data_blob = {
+            let mut state = self.get_state();
+            match state.id_to_object_map.get(&hdr.object_id).cloned() {
+                Some((FsCacheObject::DataBlob(fsblob), _)) => {
+                    // Safe to unwrap() because `id_to_config_map` and data blob entries in
+                    // `id_to_object_map` are kept in consistence.
+                    let config = state.id_to_config_map.get(&hdr.object_id).unwrap().clone();
+                    Some((fsblob, config))
+                }
+                Some((FsCacheObject::Bootstrap(_), _)) => {
+                    state.id_to_object_map.remove(&hdr.object_id);
+                    None
+                }
+                None => None,
+            }
+        };
 
-        if let Some((FsCacheObject::DataBlob(fsblob), _)) =
-            state.id_to_object_map.remove(&hdr.object_id)
-        {
-            // Safe to unwrap() because `id_to_config_map` and `id_to_object_map` is kept
-            // in consistence.
-            let config = state.id_to_config_map.remove(&hdr.object_id).unwrap();
+        if let Some((fsblob, config)) = data_blob {
             let factory_config = config.config_v2();
-            let guard = fsblob.read().unwrap();
-            match guard.get_blob_cache() {
+            let blob = fsblob.read().unwrap().get_blob_cache();
+            match blob {
                 Some(blob) => {
                     if let Ok(cache_cfg) = factory_config.get_cache_config() {
                         if cache_cfg.prefetch.enable {
@@ -678,6 +688,16 @@ impl FsCacheHandler {
                     BLOB_FACTORY.gc(Some((factory_config, &id)));
                 }
                 _ => warn!("fscache: blob object not ready {}", hdr.object_id),
+            }
+
+            let mut state = self.get_state();
+            let same_object = matches!(
+                state.id_to_object_map.get(&hdr.object_id),
+                Some((FsCacheObject::DataBlob(current), _)) if Arc::ptr_eq(current, &fsblob)
+            );
+            if same_object {
+                state.id_to_object_map.remove(&hdr.object_id);
+                state.id_to_config_map.remove(&hdr.object_id);
             }
         }
     }
@@ -964,7 +984,9 @@ impl AsRawFd for FsCacheHandler {
 mod tests {
     use super::*;
     use crate::blob_cache::BlobCacheMgr;
+    use nydus_api::BlobCacheEntry;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use vmm_sys_util::tempdir::TempDir;
 
     fn create_test_handler() -> FsCacheHandler {
@@ -989,12 +1011,110 @@ mod tests {
         }
     }
 
+    fn create_test_data_blob_config() -> (Arc<DataBlobConfig>, TempDir) {
+        let tmp_dir = TempDir::new().unwrap();
+        let mut bootstrap_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        bootstrap_path.push("../tests/texture/bootstrap/rafs-v6-2.2.boot");
+        let config = r#"
+        {
+            "type": "bootstrap",
+            "id": "rafs-v6",
+            "domain_id": "domain-test",
+            "config_v2": {
+                "version": 2,
+                "id": "factory1",
+                "backend": {
+                    "type": "localfs",
+                    "localfs": { "dir": "WORK_DIR" }
+                },
+                "cache": {
+                    "type": "filecache",
+                    "filecache": { "work_dir": "WORK_DIR" }
+                },
+                "metadata_path": "BOOTSTRAP_PATH"
+            }
+        }"#;
+        let content = config
+            .replace("WORK_DIR", tmp_dir.as_path().to_str().unwrap())
+            .replace("BOOTSTRAP_PATH", bootstrap_path.to_str().unwrap());
+        let mut entry: BlobCacheEntry = serde_json::from_str(&content).unwrap();
+        assert!(entry.prepare_configuration_info());
+
+        let mgr = BlobCacheMgr::new();
+        mgr.add_blob_entry(&entry).unwrap();
+        let key = generate_blob_key(
+            "domain-test",
+            "be7d77eeb719f70884758d1aa800ed0fb09d701aaec469964e9d54325f0d5fef",
+        );
+        match mgr.get_config(&key).unwrap() {
+            BlobConfig::DataBlob(config) => (config, tmp_dir),
+            BlobConfig::MetaBlob(_) => panic!("expected data blob config"),
+        }
+    }
+
     #[test]
     fn test_op_code() {
         assert_eq!(FsCacheOpCode::try_from(0).unwrap(), FsCacheOpCode::Open);
         assert_eq!(FsCacheOpCode::try_from(1).unwrap(), FsCacheOpCode::Close);
         assert_eq!(FsCacheOpCode::try_from(2).unwrap(), FsCacheOpCode::Read);
         FsCacheOpCode::try_from(3).unwrap_err();
+    }
+
+    #[test]
+    fn test_close_releases_state_lock_before_blob_cleanup() {
+        let handler = Arc::new(create_test_handler());
+        let (config, tmp_dir) = create_test_data_blob_config();
+        let file = Arc::new(File::create(tmp_dir.as_path().join("data-blob")).unwrap());
+        let fd = file.as_raw_fd() as u32;
+        let fsblob = Arc::new(RwLock::new(FsCacheBlobCache {
+            cache: None,
+            config: config.clone(),
+            file,
+        }));
+        let object_id = 1;
+        {
+            let mut state = handler.get_state();
+            state
+                .id_to_object_map
+                .insert(object_id, (FsCacheObject::DataBlob(fsblob.clone()), fd));
+            state.id_to_config_map.insert(object_id, config);
+        }
+
+        let blob_guard = fsblob.write().unwrap();
+        let close_handler = handler.clone();
+        let close_thread = thread::spawn(move || {
+            close_handler.handle_close_request(&FsCacheMsgHeader {
+                msg_id: 1,
+                opcode: FsCacheOpCode::Close,
+                len: MSG_HEADER_SIZE as u32,
+                object_id,
+            });
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Arc::strong_count(&fsblob) < 3 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(
+            Arc::strong_count(&fsblob),
+            3,
+            "close request did not reach data blob cleanup"
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if handler.state.try_lock().is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "close request held the global state lock during data blob cleanup"
+            );
+            thread::yield_now();
+        }
+
+        drop(blob_guard);
+        close_thread.join().unwrap();
+        assert!(handler.get_object(object_id).is_none());
     }
 
     #[test]
