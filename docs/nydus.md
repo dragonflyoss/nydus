@@ -1542,8 +1542,9 @@ artifacts and are not directly consumable as plain EROFS external devices.
 
 `nydus` operates on local directories, blobs and bootstraps. `nydusify` is the
 Go orchestrator that wraps `nydus` to operate on whole OCI images in a registry:
-it pulls an OCI image, converts every layer into a nydus image, pushes the
-result, and can validate that the converted image is faithful to its source.
+it pulls one or more sources (OCI images and/or local directories), converts
+them into a nydus image, pushes the result, and can validate that the converted
+image is faithful to its source.
 
 `nydusify` lives in `nydusify/` as its own Go module
 (`github.com/dragonflyoss/nydus/nydusify`) and shells out to the `nydus`
@@ -1554,11 +1555,12 @@ binary for the actual filesystem work (`nydus build`, `nydus merge`,
         nydusify convert                         nydusify check
         -----------------                         ---------------
   registry --pull--> content store          registry --pull--> content store
+  and/or local directory sources                         |
+              |                              manifest / bootstrap / filesystem
+   per layer / per dir: nydus build                      rules
               |                                          |
-   per-layer: nydus build                    manifest / bootstrap / filesystem
-              |                                          rules
-   index hook: nydus merge                              |
-              |                                      pass / fail
+   all blobs: nydus merge                            pass / fail
+              |
   registry <--push-- nydus image
 ```
 
@@ -1589,7 +1591,8 @@ nydus image (OCI manifest, os.features: ["nydus.remoteimage.v1"])
 |--------------------------------------------------------------------|
 | layer 0     nydus blob layer   ...nydus.blob.v1   <- OCI layer 0   |
 | layer 1     nydus blob layer   ...nydus.blob.v1   <- OCI layer 1   |
-|  ...        (one full blob per source OCI layer)                   |
+|  ...        (one full blob per source OCI layer                    |
+|             or per local directory source)                         |
 | layer N     bootstrap layer    gzip tar { image/image.boot }       |
 |             = merged overlaid bootstrap referencing layers 0..N-1  |
 +--------------------------------------------------------------------+
@@ -1617,7 +1620,7 @@ pull/push:
 
 | `nydusify` | Underlying `nydus` subcommands | Registry |
 | --- | --- | --- |
-| `convert` | `nydus build` (per OCI layer) + `nydus merge` (index hook) | pull source, push target |
+| `convert` | `nydus build` (per OCI layer / per directory source) + `nydus merge` (all blobs) | pull sources, push target |
 | `check` | `nydus check` (bootstrap rule) + `nydus fuse` (filesystem rule) | pull source and/or target |
 
 The `--builder` flag selects which `nydus` binary is invoked for all of the
@@ -1625,12 +1628,22 @@ above, so `nydusify` and `nydus` versions can be pinned together.
 
 ### convert
 
-`nydusify convert --source <oci-ref> --target <nydus-ref> [OPTIONS]`
+`nydusify convert --source <oci-ref|dir> [--source <oci-ref|dir> ...] --target <nydus-ref> [OPTIONS]`
 
-Pulls the source OCI image into a local content store, converts it, and pushes
-the resulting nydus image to the target reference.
+Converts one or more sources into a nydus image and pushes it to the target
+reference. A source is either an OCI image reference (pulled into a local
+content store) or a local directory path (built directly with `nydus build`).
 
-Pipeline:
+With a single image source, the classic whole-image conversion runs (all
+platforms by default). With a single directory source, a one-layer nydus image
+is built from the directory tree. When `--source` is repeated, the sources are
+stacked in order (first is lowest) into **one** nydus image: every directory
+contributes one blob layer, every image contributes its layers as blob layers
+(existing nydus blob layers are reused as-is and a pre-merged bootstrap is
+dropped), and a single `nydus merge` over all blobs produces the one bootstrap
+layer covering the whole stack.
+
+Pipeline (single image source):
 
 1. Pull `--source` into a scratch content store
    (`internal/remote`, backed by containerd's local content store).
@@ -1645,11 +1658,24 @@ Pipeline:
 4. Push the rewritten manifest and all new layers to `--target`
    (`internal/remote`).
 
+Pipeline (multiple and/or directory sources, `internal/converter/multi.go`):
+
+1. Pull each image source; directory sources are used in place.
+2. Per source, produce nydus blob layers: `nydus build` on each directory,
+   per-layer conversion for OCI image layers, pass-through for layers that are
+   already nydus blobs.
+3. Stage all blobs (in stacking order) and run a single `nydus merge` to
+   produce one bootstrap layer for the whole stack.
+4. Assemble the manifest (`[blobs..., bootstrap]`) and config. The runtime
+   config (env, cmd, entrypoint, ...) is inherited from the uppermost image
+   source when present; otherwise a minimal config is synthesized. Push to
+   `--target`.
+
 Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--source`, `-s` | required | Source OCI image reference. |
+| `--source`, `-s` | required | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. |
 | `--target`, `-t` | required | Target nydus image reference to push. |
 | `--builder` | `nydus` | Path to the `nydus` binary (PATH-resolvable). |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
@@ -1657,26 +1683,47 @@ Flags:
 | `--compress-size` | `4194304` | Blob meta group uncompressed size in bytes; a power of two, at least 1 MiB and at least `--chunk-size`. |
 | `--compressor` | `zstd` | Chunk data compressor: `none` or `zstd`. |
 | `--platform` | all | Convert only the given platform (e.g. `linux/amd64`). |
+| `--append-in-bootstrap` | empty | Local file paths to bundle into the bootstrap layer tar alongside `image.boot`; files inside a directory source are excluded from that source's blob data region. |
 | `--insecure` | `false` | Skip TLS verification for the registry. |
 | `--plain-http` | `false` | Use plain HTTP to talk to the registry. |
 | `--log-level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. Forwarded to the `nydus build`/`merge` subprocesses. |
 
 Notes:
 
-- Converting an image requires **root privileges**. Layer extraction must
-  preserve original uid/gid, setuid/setgid/sticky bits, xattrs and device/fifo
-  nodes; these operations fail without root, and `nydusify` treats such
-  failures as fatal rather than silently producing a corrupted image.
+- Converting an **OCI image** source requires **root privileges**. Layer
+  extraction must preserve original uid/gid, setuid/setgid/sticky bits, xattrs
+  and device/fifo nodes; these operations fail without root, and `nydusify`
+  treats such failures as fatal rather than silently producing a corrupted
+  image. Directory sources and already-nydus image sources do not need root.
+- Multiple sources are merged into one single-platform manifest, so image
+  sources are resolved against exactly one platform: `--platform`, or the host
+  platform when omitted.
 - Image references are normalized like a container runtime: a bare name such as
   `mariadb` expands to `docker.io/library/mariadb:latest`, and a tagless
   reference defaults to `:latest`.
 
-Example:
+Examples:
 
 ```bash
+# Whole-image conversion (requires root).
 sudo nydusify convert \
   --source docker.io/library/mariadb:latest \
   --target localhost:5000/mariadb-nydus \
+  --plain-http
+
+# One-layer image from a local directory.
+nydusify convert \
+  --source ./models/llama \
+  --target localhost:5000/llama-nydus \
+  --plain-http
+
+# Stack a nydus base image and two directories into one image:
+# three blob layers plus one merged bootstrap layer.
+nydusify convert \
+  --source localhost:5000/base-nydus \
+  --source ./layer-data \
+  --source ./layer-config \
+  --target localhost:5000/app-nydus \
   --plain-http
 ```
 
