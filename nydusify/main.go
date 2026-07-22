@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -47,10 +48,10 @@ func convertCommand() *cli.Command {
 		Name:  "convert",
 		Usage: "Pull an OCI image, convert it to a nydus image, and push the result",
 		Flags: []cli.Flag{
-			&cli.StringFlag{
+			&cli.StringSliceFlag{
 				Name:     "source",
 				Aliases:  []string{"s"},
-				Usage:    "source OCI image reference (e.g. registry/repo:tag) or local directory path",
+				Usage:    "source OCI image reference (e.g. registry/repo:tag) or local directory path; can be repeated to stack multiple sources (lower to upper) into one nydus image with a single merged bootstrap",
 				Required: true,
 			},
 			&cli.StringFlag{
@@ -124,26 +125,33 @@ func runConvert(c *cli.Context) error {
 
 	ctx := log.WithLogger(context.Background(), log.L)
 
-	source := c.String("source")
+	sources := c.StringSlice("source")
+	source := sources[0]
 	target := c.String("target")
 	appendFiles := c.StringSlice("append-in-bootstrap")
+	multiSource := len(sources) > 1
 
 	// Detect whether --source is a local directory (instead of an OCI image
 	// reference). When the source is a directory, we use ConvertLocalDir
 	// which builds a single-layer nydus image directly from the directory
 	// tree, excluding any --append-in-bootstrap files that reside inside it.
-	isLocalDir := false
-	if info, err := os.Stat(source); err == nil && info.IsDir() {
-		isLocalDir = true
-	}
+	isLocalDir := isDir(source)
 
+	platform := platforms.DefaultSpec()
 	platformMC := platforms.All
 	if p := c.String("platform"); p != "" {
 		parsed, err := platforms.Parse(p)
 		if err != nil {
 			return errors.Wrapf(err, "invalid platform %q", p)
 		}
+		platform = parsed
 		platformMC = platforms.Only(parsed)
+	} else if multiSource {
+		// Multiple sources are merged into one single-platform manifest, so
+		// image sources must be resolved to exactly one platform. Default to
+		// the host platform when --platform is not given.
+		logrus.Infof("multiple sources: defaulting to platform %s", platforms.Format(platform))
+		platformMC = platforms.Only(platform)
 	}
 
 	// Prepare a scratch work directory.
@@ -185,7 +193,37 @@ func runConvert(c *cli.Context) error {
 
 	var newDesc *ocispec.Descriptor
 
-	if isLocalDir {
+	if multiSource {
+		srcs := make([]converter.Source, 0, len(sources))
+		for _, s := range sources {
+			if isDir(s) {
+				srcs = append(srcs, converter.Source{Dir: s})
+				continue
+			}
+			logrus.Infof("pulling source image %s", s)
+			desc, err := provider.Pull(ctx, s, remote.PullAll, remote.Source)
+			if err != nil {
+				return errors.Wrapf(err, "pull %q", s)
+			}
+			srcs = append(srcs, converter.Source{Image: &desc})
+		}
+
+		logrus.Infof("converting %d sources to nydus format", len(srcs))
+		newDesc, err = converter.ConvertMultiSource(ctx, provider.ContentStore(), converter.MultiSourceOption{
+			BuilderPath:       c.String("builder"),
+			WorkDir:           scratchDir,
+			ChunkSize:         uint32(c.Uint("chunk-size")),
+			CompressSize:      uint32(c.Uint("compress-size")),
+			Compressor:        c.String("compressor"),
+			LogLevel:          c.String("log-level"),
+			Platform:          platform,
+			Sources:           srcs,
+			AppendInBootstrap: appendFiles,
+		})
+		if err != nil {
+			return errors.Wrap(err, "convert multiple sources")
+		}
+	} else if isLocalDir {
 		logrus.Infof("converting local directory %s to nydus format", source)
 		newDesc, err = converter.ConvertLocalDir(ctx, provider.ContentStore(), converter.LocalDirOption{
 			BuilderPath:       c.String("builder"),
@@ -239,8 +277,15 @@ func runConvert(c *cli.Context) error {
 		return errors.Wrapf(err, "push %q", target)
 	}
 
-	logrus.Infof("done: %s -> %s (%s)", source, target, newDesc.Digest)
+	logrus.Infof("done: %s -> %s (%s)", strings.Join(sources, ", "), target, newDesc.Digest)
 	return nil
+}
+
+// isDir reports whether path exists and is a local directory (as opposed to
+// an OCI image reference).
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // totalLayerSize resolves rootDesc (a manifest or a multi-platform index) for
