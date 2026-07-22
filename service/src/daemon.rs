@@ -26,6 +26,15 @@ use crate::fs_service::{FsBackendCollection, FsService};
 use crate::upgrade::UpgradeManager;
 use crate::{BlobCacheMgr, Error, Result};
 
+/// Result of trying to reclaim a blob from the kernel fscache.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlobCullResult {
+    /// The cache cookie was reclaimed or is stably absent.
+    Done,
+    /// Reclamation cannot complete yet and should be retried later.
+    Pending,
+}
+
 /// Nydus daemon working states.
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Hash, PartialEq, Eq, Serialize)]
@@ -189,6 +198,11 @@ pub trait NydusDaemon: DaemonStateMachineSubscriber + Send + Sync {
     /// Delete a blob object managed by the daemon.
     fn delete_blob(&self, _blob_id: String) -> Result<()> {
         Ok(())
+    }
+
+    /// Try to reclaim a blob and report whether it completed synchronously.
+    fn cull_blob(&self, _blob_id: String) -> Result<BlobCullResult> {
+        Err(Error::Unsupported)
     }
 }
 

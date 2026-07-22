@@ -13,7 +13,7 @@
 //! - [FsCacheHandler] reads blob data from the [BlobCacheMgr] and sends back reply messages.
 
 use std::collections::hash_map::Entry::Vacant;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fs::{self, File, OpenOptions};
 use std::io::{copy, Error, ErrorKind, Result, Write};
@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::read_unaligned;
 use std::string::String;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Barrier, Condvar, Mutex, MutexGuard, RwLock};
 use std::{cmp, env, thread, time};
 
@@ -35,6 +36,7 @@ use nydus_storage::factory::{ASYNC_RUNTIME, BLOB_FACTORY};
 use crate::blob_cache::{
     generate_blob_key, BlobCacheMgr, BlobConfig, DataBlobConfig, MetaBlobConfig,
 };
+use crate::daemon::BlobCullResult;
 
 nix::ioctl_write_int!(fscache_cread, 0x98, 1);
 
@@ -49,6 +51,7 @@ const TOKEN_EVENT_FSCACHE: usize = 2;
 
 const BLOB_CACHE_INIT_RETRY: u8 = 5;
 const BLOB_CACHE_INIT_INTERVAL_MS: u64 = 300;
+const FSCACHE_CULL_RETRY_INTERVAL_MS: u64 = 1000;
 
 /// Command code in requests from fscache driver.
 #[repr(u32)]
@@ -209,6 +212,8 @@ impl TryFrom<&[u8]> for FsCacheMsgRead {
 }
 
 struct FsCacheBootstrap {
+    blob_id: String,
+    volume_key: String,
     bootstrap_file: File,
     cache_file: File,
 }
@@ -217,6 +222,7 @@ struct FsCacheBlobCache {
     cache: Option<Arc<dyn BlobCache>>,
     config: Arc<DataBlobConfig>,
     file: Arc<File>,
+    volume_key: String,
 }
 
 impl FsCacheBlobCache {
@@ -243,6 +249,575 @@ struct FsCacheState {
     blob_cache_mgr: Arc<BlobCacheMgr>,
 }
 
+#[derive(Default)]
+struct FsCacheCullInner {
+    pending: HashSet<String>,
+    queued: HashSet<String>,
+    processing: HashSet<String>,
+    queue: VecDeque<String>,
+    waiters: HashMap<String, Vec<Sender<FsCacheCullStatus>>>,
+    unsettled_closes: HashMap<String, HashSet<String>>,
+    stopped: bool,
+}
+
+#[derive(Default)]
+struct FsCacheCullState {
+    inner: Mutex<FsCacheCullInner>,
+    condvar: Condvar,
+    cwd_lock: Mutex<()>,
+}
+
+#[derive(Clone, Debug)]
+enum FsCacheCullStatus {
+    Done,
+    Pending(String),
+    Failed(String),
+}
+
+struct FsCacheCullOps<'a> {
+    file: &'a File,
+    state: &'a Arc<Mutex<FsCacheState>>,
+    cull_state: &'a Arc<FsCacheCullState>,
+    cache_dir: &'a Path,
+}
+
+struct FsCacheCullWorker {
+    file: File,
+    state: Arc<Mutex<FsCacheState>>,
+    cull_state: Arc<FsCacheCullState>,
+    cache_dir: PathBuf,
+}
+
+struct CurrentDirGuard {
+    old: PathBuf,
+}
+
+impl FsCacheCullState {
+    fn enqueue(&self, blob_id: String) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.stopped {
+            return;
+        }
+
+        inner.pending.insert(blob_id.clone());
+        let queued = !inner.processing.contains(&blob_id) && inner.queued.insert(blob_id.clone());
+        if queued {
+            inner.queue.push_back(blob_id);
+            self.condvar.notify_one();
+        }
+    }
+
+    fn request(&self, blob_id: String) -> Result<FsCacheCullStatus> {
+        let (tx, rx) = channel();
+        let mut inner = self.inner.lock().unwrap();
+        if inner.stopped {
+            return Err(Error::new(
+                ErrorKind::BrokenPipe,
+                "fscache cull worker stopped",
+            ));
+        }
+
+        inner.pending.insert(blob_id.clone());
+        inner.waiters.entry(blob_id.clone()).or_default().push(tx);
+        if !inner.processing.contains(&blob_id) {
+            // Synchronous API callers should not wait behind a large legacy GC queue.
+            if inner.queued.contains(&blob_id) {
+                if let Some(index) = inner.queue.iter().position(|queued| queued == &blob_id) {
+                    inner.queue.remove(index);
+                }
+            } else {
+                inner.queued.insert(blob_id.clone());
+            }
+            inner.queue.push_front(blob_id);
+            self.condvar.notify_one();
+        }
+        drop(inner);
+
+        rx.recv()
+            .map_err(|_| Error::new(ErrorKind::BrokenPipe, "fscache cull worker exited"))
+    }
+
+    /// Publish one attempt's result and report whether an asynchronous request still owns
+    /// the pending cull. Synchronous callers take responsibility for retrying a Pending result,
+    /// so no worker retry may outlive the response they receive.
+    fn finish_attempt(&self, blob_id: &str, status: FsCacheCullStatus) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        inner.processing.remove(blob_id);
+        let waiters = inner.waiters.remove(blob_id).unwrap_or_default();
+        let synchronous_attempt = !waiters.is_empty();
+        let terminal = matches!(
+            status,
+            FsCacheCullStatus::Done | FsCacheCullStatus::Failed(_)
+        );
+        if terminal || synchronous_attempt {
+            inner.pending.remove(blob_id);
+            inner.queued.remove(blob_id);
+        }
+        let retry_pending = !terminal && !synchronous_attempt && inner.pending.contains(blob_id);
+        self.condvar.notify_all();
+        drop(inner);
+
+        for waiter in waiters {
+            let _ = waiter.send(status.clone());
+        }
+        retry_pending
+    }
+
+    fn record_close(&self, blob_id: &str, volume_key: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .unsettled_closes
+            .entry(blob_id.to_string())
+            .or_default()
+            .insert(volume_key.to_string());
+
+        if !inner.stopped
+            && inner.pending.contains(blob_id)
+            && inner.queued.insert(blob_id.to_string())
+        {
+            inner.queue.push_back(blob_id.to_string());
+            self.condvar.notify_one();
+        }
+    }
+
+    fn unsettled_close_volumes(&self, blob_id: &str) -> HashSet<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .unsettled_closes
+            .get(blob_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn resolve_close(&self, blob_id: &str, volume_key: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        let remove_blob = match inner.unsettled_closes.get_mut(blob_id) {
+            Some(volumes) => {
+                volumes.remove(volume_key);
+                volumes.is_empty()
+            }
+            None => false,
+        };
+        if remove_blob {
+            inner.unsettled_closes.remove(blob_id);
+        }
+    }
+
+    fn stop(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.stopped = true;
+        inner.queue.clear();
+        inner.queued.clear();
+        let waiters = std::mem::take(&mut inner.waiters);
+        self.condvar.notify_all();
+        drop(inner);
+
+        for (_, blob_waiters) in waiters {
+            for waiter in blob_waiters {
+                let _ = waiter.send(FsCacheCullStatus::Failed(
+                    "fscache cull worker stopped".to_string(),
+                ));
+            }
+        }
+    }
+
+    fn next(&self) -> Option<String> {
+        let mut inner = self.inner.lock().unwrap();
+        loop {
+            while inner.queue.is_empty() && !inner.stopped {
+                inner = self.condvar.wait(inner).unwrap();
+            }
+            if inner.stopped {
+                return None;
+            }
+            if let Some(blob_id) = inner.queue.pop_front() {
+                inner.queued.remove(&blob_id);
+                if inner.pending.contains(&blob_id) {
+                    inner.processing.insert(blob_id.clone());
+                    return Some(blob_id);
+                }
+            }
+        }
+    }
+
+    fn wait_before_retry(&self, blob_id: &str, timeout: time::Duration) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.stopped || !inner.pending.contains(blob_id) {
+            return false;
+        }
+
+        if !inner.queued.contains(blob_id) {
+            let (guard, _) = self.condvar.wait_timeout(inner, timeout).unwrap();
+            inner = guard;
+        }
+
+        if inner.stopped || !inner.pending.contains(blob_id) {
+            return false;
+        }
+
+        if !inner.queued.contains(blob_id) {
+            inner.queued.insert(blob_id.to_string());
+            inner.queue.push_back(blob_id.to_string());
+            self.condvar.notify_one();
+        }
+        true
+    }
+}
+
+impl CurrentDirGuard {
+    fn new(dir: &Path) -> Result<Self> {
+        let old = env::current_dir()?;
+        env::set_current_dir(dir)?;
+        Ok(Self { old })
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = env::set_current_dir(&self.old);
+    }
+}
+
+impl<'a> FsCacheCullOps<'a> {
+    fn try_cull_cache_once(&self, blob_id: &str) -> Result<FsCacheCullStatus> {
+        let open = self.blob_is_open(blob_id);
+        if open {
+            // Do not touch cachefiles while nydusd still has the object open. It can only be
+            // rejected as busy and the kernel lookup may be slow; close handling will wake this
+            // pending cull immediately.
+            return Ok(FsCacheCullStatus::Pending("open".to_string()));
+        }
+        if self.blob_is_configured(blob_id) {
+            // Bind publishes blob configuration before cachefiles sends OPEN. Treat that
+            // interval as referenced; otherwise cull can report a stably absent cookie just
+            // before the legitimate OPEN creates it.
+            return Ok(FsCacheCullStatus::Pending("configured".to_string()));
+        }
+        let mut unsettled_volumes = self.cull_state.unsettled_close_volumes(blob_id);
+
+        let children = match fs::read_dir(self.cache_dir) {
+            Ok(children) => children,
+            Err(e) if Self::is_not_found(&e) && unsettled_volumes.is_empty() => {
+                return Ok(FsCacheCullStatus::Done)
+            }
+            Err(e) if Self::is_not_found(&e) => {
+                return Ok(FsCacheCullStatus::Pending(
+                    "awaiting cachefiles commit".to_string(),
+                ))
+            }
+            Err(e) => {
+                return Ok(FsCacheCullStatus::Failed(format!(
+                    "read cache dir {} failed: {}",
+                    self.cache_dir.display(),
+                    e
+                )));
+            }
+        };
+        let mut pending_reason: Option<String> = None;
+
+        // Calculate the blob path in all volumes and try to cull the matching cookies.
+        for child in children {
+            let child = match child {
+                Ok(child) => child,
+                Err(e) => {
+                    return Ok(FsCacheCullStatus::Failed(format!(
+                        "read cache dir entry failed: {}",
+                        e
+                    )));
+                }
+            };
+            let path = child.path();
+            let file_name = match child.file_name().to_str() {
+                Some(n) => n.to_string(),
+                None => {
+                    warn!("failed to get file name of {}", child.path().display());
+                    continue;
+                }
+            };
+            if !path.is_dir() || !file_name.starts_with("Ierofs,") {
+                continue;
+            }
+
+            // Get volume_key from volume dir name, e.g. Ierofs,SharedDomain -> erofs,SharedDomain.
+            let volume_key = &file_name[1..];
+            let (cookie_dir, cookie_name) = Self::generate_cookie_path(&path, volume_key, blob_id);
+            let cookie_path = cookie_dir.join(&cookie_name);
+            if !cookie_path.is_file() {
+                continue;
+            }
+            let cookie_path = cookie_path.display();
+
+            match self.inuse(&cookie_dir, &cookie_name) {
+                Err(e) => {
+                    if Self::is_not_found(&e) {
+                        continue;
+                    }
+                    return Ok(FsCacheCullStatus::Failed(format!(
+                        "inuse {} failed: {}",
+                        cookie_path, e
+                    )));
+                }
+                Ok(true) => {
+                    warn!("blob {} in use, cull pending", cookie_path);
+                    pending_reason.get_or_insert_with(|| "inuse".to_string());
+                }
+                Ok(false) => {
+                    if let Err(e) = self.cull(&cookie_dir, &cookie_name) {
+                        if Self::is_not_found(&e) {
+                            if unsettled_volumes.remove(volume_key) {
+                                self.cull_state.resolve_close(blob_id, volume_key);
+                            }
+                            continue;
+                        }
+                        if e.raw_os_error() == Some(libc::EBUSY) {
+                            pending_reason.get_or_insert_with(|| "cull busy".to_string());
+                            continue;
+                        }
+                        return Ok(FsCacheCullStatus::Failed(format!(
+                            "cull {} failed: {}",
+                            cookie_path, e
+                        )));
+                    } else if unsettled_volumes.remove(volume_key) {
+                        self.cull_state.resolve_close(blob_id, volume_key);
+                    }
+                }
+            }
+        }
+
+        if let Some(reason) = pending_reason {
+            return Ok(FsCacheCullStatus::Pending(reason));
+        }
+
+        if !unsettled_volumes.is_empty() {
+            return Ok(FsCacheCullStatus::Pending(
+                "awaiting cachefiles commit".to_string(),
+            ));
+        }
+
+        Ok(FsCacheCullStatus::Done)
+    }
+
+    fn is_not_found(err: &Error) -> bool {
+        matches!(
+            err.raw_os_error(),
+            Some(e) if e == libc::ENOENT || e == libc::ESTALE
+        )
+    }
+
+    fn blob_is_open(&self, blob_id: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .id_to_config_map
+            .values()
+            .any(|config| config.blob_info().blob_id() == blob_id)
+            || state
+                .id_to_object_map
+                .values()
+                .any(|(object, _fd)| match object {
+                    FsCacheObject::Bootstrap(bootstrap) => bootstrap.blob_id.as_str() == blob_id,
+                    FsCacheObject::DataBlob(_blob) => false,
+                })
+    }
+
+    fn blob_is_configured(&self, blob_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .blob_cache_mgr
+            .contains_blob_id(blob_id)
+    }
+
+    #[inline]
+    fn hash_32(val: u32) -> u32 {
+        val.wrapping_mul(0x61C88647)
+    }
+
+    #[inline]
+    fn rol32(word: u32, shift: i32) -> u32 {
+        word << (shift & 31) | (word >> ((-shift) & 31))
+    }
+
+    #[inline]
+    fn round_up_u32(size: usize) -> usize {
+        size.div_ceil(4) * 4
+    }
+
+    fn fscache_hash(salt: u32, data: &[u8]) -> u32 {
+        assert_eq!(data.len() % 4, 0);
+
+        let mut x = 0;
+        let mut y = salt;
+        let mut buf_le32: [u8; 4] = [0; 4];
+        let n = data.len() / 4;
+
+        for i in 0..n {
+            buf_le32.clone_from_slice(&data[i * 4..i * 4 + 4]);
+            let a = u32::from_ne_bytes(buf_le32).to_le();
+            x ^= a;
+            y ^= x;
+            x = Self::rol32(x, 7);
+            x = x.wrapping_add(y);
+            y = Self::rol32(y, 20);
+            y = y.wrapping_mul(9);
+        }
+        Self::hash_32(y ^ Self::hash_32(x))
+    }
+
+    fn generate_cookie_path(
+        volume_path: &Path,
+        volume_key: &str,
+        cookie_key: &str,
+    ) -> (PathBuf, String) {
+        // Calculate volume hash.
+        let mut volume_hash_key: Vec<u8> =
+            Vec::with_capacity(Self::round_up_u32(volume_key.len() + 2));
+        volume_hash_key.push(volume_key.len() as u8);
+        volume_hash_key.append(&mut volume_key.as_bytes().to_vec());
+        volume_hash_key.resize(volume_hash_key.capacity(), 0);
+        let volume_hash = Self::fscache_hash(0, volume_hash_key.as_slice());
+
+        // Calculate cookie hash.
+        let mut cookie_hash_key: Vec<u8> = Vec::with_capacity(Self::round_up_u32(cookie_key.len()));
+        cookie_hash_key.append(&mut cookie_key.as_bytes().to_vec());
+        cookie_hash_key.resize(cookie_hash_key.capacity(), 0);
+        let dir_hash = Self::fscache_hash(volume_hash, cookie_hash_key.as_slice());
+
+        let dir = format!("@{:02x}", dir_hash as u8);
+        let cookie = format!("D{}", cookie_key);
+        (volume_path.join(dir), cookie)
+    }
+
+    fn write_cachefiles_cmd(&self, cookie_dir: &Path, msg: &str) -> Result<usize> {
+        let _cwd_lock = self.cull_state.cwd_lock.lock().unwrap();
+        let _cwd = CurrentDirGuard::new(cookie_dir)?;
+        let ret = unsafe {
+            libc::write(
+                self.file.as_raw_fd(),
+                msg.as_bytes().as_ptr() as *const libc::c_void,
+                msg.len(),
+            )
+        };
+        if ret < 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(ret as usize)
+        }
+    }
+
+    fn inuse(&self, cookie_dir: &Path, cookie_name: &str) -> Result<bool> {
+        let msg = format!("inuse {}", cookie_name);
+        match self.write_cachefiles_cmd(cookie_dir, &msg) {
+            Err(err) => {
+                if err.raw_os_error() == Some(libc::EBUSY) {
+                    Ok(true)
+                } else {
+                    Err(err)
+                }
+            }
+            Ok(n) if n == msg.len() => Ok(false),
+            Ok(_) => Err(Error::new(
+                ErrorKind::WriteZero,
+                "short write to cachefiles device",
+            )),
+        }
+    }
+
+    fn cull(&self, cookie_dir: &Path, cookie_name: &str) -> Result<()> {
+        let msg = format!("cull {}", cookie_name);
+        match self.write_cachefiles_cmd(cookie_dir, &msg) {
+            Ok(n) if n == msg.len() => Ok(()),
+            Ok(_) => Err(Error::new(
+                ErrorKind::WriteZero,
+                "short write to cachefiles device",
+            )),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+impl FsCacheCullWorker {
+    fn start(
+        file: File,
+        state: Arc<Mutex<FsCacheState>>,
+        cull_state: Arc<FsCacheCullState>,
+        cache_dir: PathBuf,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            Self {
+                file,
+                state,
+                cull_state,
+                cache_dir,
+            }
+            .run()
+        })
+    }
+
+    fn run(self) {
+        if let Err(e) = Self::unshare_fs_struct() {
+            error!("fscache: failed to isolate cull worker: {}", e);
+            self.cull_state.stop();
+            return;
+        }
+
+        while let Some(blob_id) = self.cull_state.next() {
+            let ops = FsCacheCullOps {
+                file: &self.file,
+                state: &self.state,
+                cull_state: &self.cull_state,
+                cache_dir: &self.cache_dir,
+            };
+
+            match ops.try_cull_cache_once(&blob_id) {
+                Ok(status @ FsCacheCullStatus::Done) => {
+                    self.cull_state.finish_attempt(&blob_id, status);
+                }
+                Ok(FsCacheCullStatus::Pending(reason)) => {
+                    let wait_for_lifecycle_event = reason == "open" || reason == "configured";
+                    let retry_pending = self
+                        .cull_state
+                        .finish_attempt(&blob_id, FsCacheCullStatus::Pending(reason));
+                    if !retry_pending {
+                        // A synchronous caller owns retry after Pending and uses its durable
+                        // metadata marker for the next GC request.
+                        continue;
+                    }
+                    if wait_for_lifecycle_event {
+                        // The blob is still referenced by an active config or fscache object.
+                        // Retrying on a timer can only observe the same in-memory state. CLOSE
+                        // wakes this legacy asynchronous cull after the reference is removed.
+                        continue;
+                    }
+                    self.cull_state.wait_before_retry(
+                        &blob_id,
+                        time::Duration::from_millis(FSCACHE_CULL_RETRY_INTERVAL_MS),
+                    );
+                }
+                Ok(FsCacheCullStatus::Failed(reason)) => {
+                    warn!("fscache: failed to cull blob {}: {}", blob_id, reason);
+                    self.cull_state
+                        .finish_attempt(&blob_id, FsCacheCullStatus::Failed(reason));
+                }
+                Err(e) => {
+                    self.cull_state
+                        .finish_attempt(&blob_id, FsCacheCullStatus::Failed(e.to_string()));
+                    warn!("fscache: failed to cull blob {}: {}", blob_id, e);
+                }
+            }
+        }
+    }
+
+    fn unshare_fs_struct() -> Result<()> {
+        let ret = unsafe { libc::unshare(libc::CLONE_FS) };
+        if ret != 0 {
+            Err(Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Handler to cooperate with Linux fscache driver to manage cached blob objects.
 ///
 /// The `FsCacheHandler` create a communication channel with the Linux fscache driver, configure
@@ -255,7 +830,10 @@ pub struct FsCacheHandler {
     state: Arc<Mutex<FsCacheState>>,
     poller: Mutex<Poll>,
     waker: Arc<Waker>,
+    #[allow(dead_code)]
     cache_dir: PathBuf,
+    cull_state: Arc<FsCacheCullState>,
+    cull_worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl FsCacheHandler {
@@ -321,17 +899,28 @@ impl FsCacheHandler {
             id_to_config_map: Default::default(),
             blob_cache_mgr,
         };
+        let state = Arc::new(Mutex::new(state));
         let cache_dir = PathBuf::new().join(dir).join("cache");
+        let cull_state = Arc::new(FsCacheCullState::default());
+        let cull_worker_file = file.try_clone()?;
+        let cull_worker = FsCacheCullWorker::start(
+            cull_worker_file,
+            state.clone(),
+            cull_state.clone(),
+            cache_dir.clone(),
+        );
 
         Ok(FsCacheHandler {
             active: AtomicBool::new(true),
             barrier: Barrier::new(threads + 1),
             threads,
             file,
-            state: Arc::new(Mutex::new(state)),
+            state,
             poller: Mutex::new(poller),
             waker: Arc::new(waker),
             cache_dir,
+            cull_state,
+            cull_worker: Mutex::new(Some(cull_worker)),
         })
     }
 
@@ -347,6 +936,12 @@ impl FsCacheHandler {
             error!("fscache: failed to signal worker thread to exit, {}", e);
         }
         self.barrier.wait();
+        self.cull_state.stop();
+        if let Some(worker) = self.cull_worker.lock().unwrap().take() {
+            if worker.join().is_err() {
+                warn!("fscache: cull worker panicked");
+            }
+        }
     }
 
     /// Run the event loop to handle all requests from kernel fscache driver.
@@ -478,6 +1073,7 @@ impl FsCacheHandler {
                 cache: None,
                 config: config.clone(),
                 file: Arc::new(unsafe { File::from_raw_fd(msg.fd as RawFd) }),
+                volume_key: msg.volume_key.clone(),
             }));
             e.insert((FsCacheObject::DataBlob(fsblob.clone()), msg.fd));
             state.id_to_config_map.insert(hdr.object_id, config.clone());
@@ -614,6 +1210,8 @@ impl FsCacheHandler {
                     Ok(md) => {
                         let cache_file = unsafe { File::from_raw_fd(msg.fd as RawFd) };
                         let bootstrap = Arc::new(FsCacheBootstrap {
+                            blob_id: config.blob_id().to_string(),
+                            volume_key: msg.volume_key.clone(),
                             bootstrap_file: f,
                             cache_file,
                         });
@@ -657,28 +1255,38 @@ impl FsCacheHandler {
 
     fn handle_close_request(&self, hdr: &FsCacheMsgHeader) {
         let mut state = self.get_state();
-
-        if let Some((FsCacheObject::DataBlob(fsblob), _)) =
-            state.id_to_object_map.remove(&hdr.object_id)
-        {
-            // Safe to unwrap() because `id_to_config_map` and `id_to_object_map` is kept
-            // in consistence.
-            let config = state.id_to_config_map.remove(&hdr.object_id).unwrap();
-            let factory_config = config.config_v2();
-            let guard = fsblob.read().unwrap();
-            match guard.get_blob_cache() {
-                Some(blob) => {
-                    if let Ok(cache_cfg) = factory_config.get_cache_config() {
-                        if cache_cfg.prefetch.enable {
-                            let _ = blob.stop_prefetch();
+        let closed_blob = match state.id_to_object_map.remove(&hdr.object_id) {
+            Some((FsCacheObject::DataBlob(fsblob), _)) => {
+                // Safe to unwrap because the config and object maps are kept consistent.
+                let config = state.id_to_config_map.remove(&hdr.object_id).unwrap();
+                let blob_id = config.blob_info().blob_id().to_string();
+                let factory_config = config.config_v2();
+                let guard = fsblob.read().unwrap();
+                match guard.get_blob_cache() {
+                    Some(blob) => {
+                        if let Ok(cache_cfg) = factory_config.get_cache_config() {
+                            if cache_cfg.prefetch.enable {
+                                let _ = blob.stop_prefetch();
+                            }
                         }
+                        let id = blob.blob_id().to_string();
+                        drop(blob);
+                        BLOB_FACTORY.gc(Some((factory_config, &id)));
                     }
-                    let id = blob.blob_id().to_string();
-                    drop(blob);
-                    BLOB_FACTORY.gc(Some((factory_config, &id)));
+                    _ => warn!("fscache: blob object not ready {}", hdr.object_id),
                 }
-                _ => warn!("fscache: blob object not ready {}", hdr.object_id),
+                Some((blob_id, fsblob.read().unwrap().volume_key.clone()))
             }
+            Some((FsCacheObject::Bootstrap(bootstrap), _)) => {
+                Some((bootstrap.blob_id.clone(), bootstrap.volume_key.clone()))
+            }
+            None => None,
+        };
+
+        // Publish the close settle window before releasing the object-state lock. A cull
+        // attempt cannot observe the object as closed without also seeing this marker.
+        if let Some((blob_id, volume_key)) = closed_blob.as_ref() {
+            self.cull_state.record_close(blob_id, volume_key);
         }
     }
 
@@ -756,166 +1364,52 @@ impl FsCacheHandler {
         }
     }
 
-    /// Reclaim unused facache objects.
+    /// Queue an unused fscache object for reclamation.
     pub fn cull_cache(&self, blob_id: String) -> Result<()> {
-        let children = fs::read_dir(self.cache_dir.clone())?;
-        let mut res = true;
-        // This is safe, because only api server which is a single thread server will call this func,
-        // and no other func will change cwd.
-        let cwd_old = env::current_dir()?;
+        self.cull_state.enqueue(blob_id);
+        Ok(())
+    }
 
-        info!("try to cull blob {}", blob_id);
-
-        // calc blob path in all volumes then try to cull them
-        for child in children {
-            let child = child?;
-            let path = child.path();
-            let file_name = match child.file_name().to_str() {
-                Some(n) => n.to_string(),
-                None => {
-                    warn!("failed to get file name of {}", child.path().display());
-                    continue;
-                }
-            };
-            if !path.is_dir() || !file_name.starts_with("Ierofs,") {
-                continue;
-            }
-
-            // get volume_key form volume dir name e.g. Ierofs,SharedDomain
-            let volume_key = &file_name[1..];
-            let (cookie_dir, cookie_name) = self.generate_cookie_path(&path, volume_key, &blob_id);
-            let cookie_path = cookie_dir.join(&cookie_name);
-            if !cookie_path.is_file() {
-                continue;
-            }
-            let cookie_path = cookie_path.display();
-
-            match self.inuse(&cookie_dir, &cookie_name) {
-                Err(e) => {
-                    warn!("blob {} call inuse err {}, cull failed!", cookie_path, e);
-                    res = false;
-                }
-                Ok(true) => {
-                    warn!("blob {} in use, skip!", cookie_path);
-                    res = false;
-                }
-                Ok(false) => {
-                    if let Err(e) = self.cull(&cookie_dir, &cookie_name) {
-                        warn!("blob {} call cull err {}, cull failed!", cookie_path, e);
-                        res = false;
-                    }
-                }
-            }
-        }
-
-        env::set_current_dir(cwd_old)?;
-        if res {
-            Ok(())
-        } else {
-            Err(eother!("failed to cull blob objects from fscache"))
+    /// Try one cull attempt and wait until the dedicated cull worker reports its result.
+    pub fn cull_cache_status(&self, blob_id: String) -> Result<BlobCullResult> {
+        match self.cull_state.request(blob_id)? {
+            FsCacheCullStatus::Done => Ok(BlobCullResult::Done),
+            FsCacheCullStatus::Pending(_) => Ok(BlobCullResult::Pending),
+            FsCacheCullStatus::Failed(reason) => Err(Error::other(reason)),
         }
     }
 
+    #[cfg(test)]
     #[inline]
     fn hash_32(&self, val: u32) -> u32 {
-        val * 0x61C88647
+        FsCacheCullOps::hash_32(val)
     }
 
+    #[cfg(test)]
     #[inline]
     fn rol32(&self, word: u32, shift: i32) -> u32 {
-        word << (shift & 31) | (word >> ((-shift) & 31))
+        FsCacheCullOps::rol32(word, shift)
     }
 
+    #[cfg(test)]
     #[inline]
     fn round_up_u32(&self, size: usize) -> usize {
-        size.div_ceil(4) * 4
+        FsCacheCullOps::round_up_u32(size)
     }
 
-    //address from kernel fscache_hash()
+    #[cfg(test)]
     fn fscache_hash(&self, salt: u32, data: &[u8]) -> u32 {
-        assert_eq!(data.len() % 4, 0);
-
-        let mut x = 0;
-        let mut y = salt;
-        let mut buf_le32: [u8; 4] = [0; 4];
-        let n = data.len() / 4;
-
-        for i in 0..n {
-            buf_le32.clone_from_slice(&data[i * 4..i * 4 + 4]);
-            let a = u32::from_ne_bytes(buf_le32).to_le();
-            x ^= a;
-            y ^= x;
-            x = self.rol32(x, 7);
-            x += y;
-            y = self.rol32(y, 20);
-            y *= 9;
-        }
-        self.hash_32(y ^ self.hash_32(x))
+        FsCacheCullOps::fscache_hash(salt, data)
     }
 
+    #[cfg(test)]
     fn generate_cookie_path(
         &self,
         volume_path: &Path,
         volume_key: &str,
         cookie_key: &str,
     ) -> (PathBuf, String) {
-        //calc volume hash
-        let mut volume_hash_key: Vec<u8> =
-            Vec::with_capacity(self.round_up_u32(volume_key.len() + 2));
-        volume_hash_key.push(volume_key.len() as u8);
-        volume_hash_key.append(&mut volume_key.as_bytes().to_vec());
-        volume_hash_key.resize(volume_hash_key.capacity(), 0);
-        let volume_hash = self.fscache_hash(0, volume_hash_key.as_slice());
-
-        //calc cookie hash
-        let mut cookie_hash_key: Vec<u8> = Vec::with_capacity(self.round_up_u32(cookie_key.len()));
-        cookie_hash_key.append(&mut cookie_key.as_bytes().to_vec());
-        cookie_hash_key.resize(cookie_hash_key.capacity(), 0);
-        let dir_hash = self.fscache_hash(volume_hash, cookie_hash_key.as_slice());
-
-        let dir = format!("@{:02x}", dir_hash as u8);
-        let cookie = format!("D{}", cookie_key);
-        (volume_path.join(dir), cookie)
-    }
-
-    fn inuse(&self, cookie_dir: &Path, cookie_name: &str) -> Result<bool> {
-        env::set_current_dir(cookie_dir)?;
-        let msg = format!("inuse {}", cookie_name);
-        let ret = unsafe {
-            libc::write(
-                self.file.as_raw_fd(),
-                msg.as_bytes().as_ptr() as *const libc::c_void,
-                msg.len(),
-            )
-        };
-        if ret < 0 {
-            let err = Error::last_os_error();
-            if let Some(e) = err.raw_os_error() {
-                if e == libc::EBUSY {
-                    return Ok(true);
-                }
-            }
-            Err(err)
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn cull(&self, cookie_dir: &Path, cookie_name: &str) -> Result<()> {
-        env::set_current_dir(cookie_dir)?;
-        let msg = format!("cull {}", cookie_name);
-        let ret = unsafe {
-            libc::write(
-                self.file.as_raw_fd(),
-                msg.as_bytes().as_ptr() as *const libc::c_void,
-                msg.len(),
-            )
-        };
-        if ret as usize != msg.len() {
-            Err(Error::last_os_error())
-        } else {
-            Ok(())
-        }
+        FsCacheCullOps::generate_cookie_path(volume_path, volume_key, cookie_key)
     }
 
     #[inline]
@@ -973,6 +1467,7 @@ mod tests {
         let poller = Poll::new().unwrap();
         let waker = Arc::new(Waker::new(poller.registry(), Token(TOKEN_EVENT_WAKER)).unwrap());
         let file = File::create(cache_dir.join("cachefiles")).unwrap();
+        let cull_state = Arc::new(FsCacheCullState::default());
 
         FsCacheHandler {
             active: AtomicBool::new(true),
@@ -986,6 +1481,8 @@ mod tests {
             poller: Mutex::new(poller),
             waker,
             cache_dir,
+            cull_state,
+            cull_worker: Mutex::new(None),
         }
     }
 
@@ -995,6 +1492,164 @@ mod tests {
         assert_eq!(FsCacheOpCode::try_from(1).unwrap(), FsCacheOpCode::Close);
         assert_eq!(FsCacheOpCode::try_from(2).unwrap(), FsCacheOpCode::Read);
         FsCacheOpCode::try_from(3).unwrap_err();
+    }
+
+    #[test]
+    fn test_cull_close_remains_unsettled_until_resolved() {
+        let state = FsCacheCullState::default();
+        state.record_close("blob", "erofs,domain");
+
+        assert_eq!(
+            state.unsettled_close_volumes("blob"),
+            HashSet::from(["erofs,domain".to_string()])
+        );
+        state.resolve_close("blob", "erofs,domain");
+        assert!(state.unsettled_close_volumes("blob").is_empty());
+    }
+
+    #[test]
+    fn test_cull_request_receives_attempt_status() {
+        let state = Arc::new(FsCacheCullState::default());
+        let worker_state = state.clone();
+        let worker = thread::spawn(move || {
+            let blob_id = worker_state.next().unwrap();
+            assert_eq!(blob_id, "blob");
+            worker_state.finish_attempt(&blob_id, FsCacheCullStatus::Done);
+        });
+
+        assert!(matches!(
+            state.request("blob".to_string()),
+            Ok(FsCacheCullStatus::Done)
+        ));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn test_synchronous_pending_cull_does_not_retry_in_background() {
+        let state = Arc::new(FsCacheCullState::default());
+        let request_state = state.clone();
+        let requester = thread::spawn(move || request_state.request("blob".to_string()));
+
+        let blob_id = state.next().unwrap();
+        assert_eq!(blob_id, "blob");
+        // CLOSE may queue another attempt while the synchronous attempt is still processing.
+        state.record_close(&blob_id, "volume");
+        assert!(!state.finish_attempt(
+            &blob_id,
+            FsCacheCullStatus::Pending("awaiting cachefiles commit".to_string())
+        ));
+        assert!(matches!(
+            requester.join().unwrap(),
+            Ok(FsCacheCullStatus::Pending(_))
+        ));
+
+        // A later CLOSE must not resurrect work after the synchronous caller was told to retry.
+        state.record_close(&blob_id, "volume");
+        state.enqueue("other".to_string());
+        assert_eq!(state.next().as_deref(), Some("other"));
+        state.finish_attempt("other", FsCacheCullStatus::Done);
+
+        let inner = state.inner.lock().unwrap();
+        assert!(!inner.pending.contains(&blob_id));
+        assert!(!inner.queued.contains(&blob_id));
+        assert!(!inner.processing.contains(&blob_id));
+        assert!(inner.queue.is_empty());
+    }
+
+    #[test]
+    fn test_cull_stably_absent_cookie_is_done() {
+        let cache_dir = TempDir::new().unwrap();
+        let mut handler = create_test_handler();
+        handler.cache_dir = cache_dir.as_path().to_path_buf();
+        let ops = FsCacheCullOps {
+            file: &handler.file,
+            state: &handler.state,
+            cull_state: &handler.cull_state,
+            cache_dir: &handler.cache_dir,
+        };
+
+        assert!(matches!(
+            ops.try_cull_cache_once("absent-blob"),
+            Ok(FsCacheCullStatus::Done)
+        ));
+    }
+
+    #[test]
+    fn test_cull_post_close_absence_is_pending() {
+        let cache_dir = TempDir::new().unwrap();
+        let volume_key = "erofs,domain";
+        fs::create_dir(cache_dir.as_path().join(format!("I{}", volume_key))).unwrap();
+        let mut handler = create_test_handler();
+        handler.cache_dir = cache_dir.as_path().to_path_buf();
+        handler.cull_state.record_close("blob", volume_key);
+        let ops = FsCacheCullOps {
+            file: &handler.file,
+            state: &handler.state,
+            cull_state: &handler.cull_state,
+            cache_dir: &handler.cache_dir,
+        };
+
+        assert!(matches!(
+            ops.try_cull_cache_once("blob"),
+            Ok(FsCacheCullStatus::Pending(reason))
+                if reason == "awaiting cachefiles commit"
+        ));
+        assert_eq!(
+            handler.cull_state.unsettled_close_volumes("blob"),
+            HashSet::from([volume_key.to_string()])
+        );
+    }
+
+    #[test]
+    fn test_cull_success_resolves_post_close_volume() {
+        let cache_dir = TempDir::new().unwrap();
+        let volume_key = "erofs,domain";
+        let volume_path = cache_dir.as_path().join(format!("I{}", volume_key));
+        fs::create_dir(&volume_path).unwrap();
+        let (cookie_dir, cookie_name) =
+            FsCacheCullOps::generate_cookie_path(&volume_path, volume_key, "blob");
+        fs::create_dir(&cookie_dir).unwrap();
+
+        let mut handler = create_test_handler();
+        handler.cache_dir = cache_dir.as_path().to_path_buf();
+        handler.cull_state.record_close("blob", volume_key);
+        let ops = FsCacheCullOps {
+            file: &handler.file,
+            state: &handler.state,
+            cull_state: &handler.cull_state,
+            cache_dir: &handler.cache_dir,
+        };
+
+        assert!(matches!(
+            ops.try_cull_cache_once("blob"),
+            Ok(FsCacheCullStatus::Pending(reason))
+                if reason == "awaiting cachefiles commit"
+        ));
+        File::create(cookie_dir.join(cookie_name)).unwrap();
+        assert!(matches!(
+            ops.try_cull_cache_once("blob"),
+            Ok(FsCacheCullStatus::Done)
+        ));
+        assert!(handler
+            .cull_state
+            .unsettled_close_volumes("blob")
+            .is_empty());
+    }
+
+    #[test]
+    fn test_close_requeues_open_cull_after_unsettled_close_is_recorded() {
+        let state = FsCacheCullState::default();
+        state.enqueue("blob".to_string());
+        assert_eq!(state.next().as_deref(), Some("blob"));
+
+        // CLOSE may race after an attempt observed open=true but before it publishes Pending.
+        state.record_close("blob", "volume");
+        state.finish_attempt("blob", FsCacheCullStatus::Pending("open".to_string()));
+        assert_eq!(state.next().as_deref(), Some("blob"));
+        assert_eq!(
+            state.unsettled_close_volumes("blob"),
+            HashSet::from(["volume".to_string()])
+        );
     }
 
     #[test]
