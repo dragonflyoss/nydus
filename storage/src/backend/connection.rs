@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{Read, Result};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fmt, thread};
 
@@ -223,6 +223,32 @@ struct Proxy {
     replace_scheme: AtomicI16,
 }
 
+#[derive(Debug, Default)]
+struct HealthCheckerStop {
+    stopped: Mutex<bool>,
+    wakeup: Condvar,
+}
+
+impl HealthCheckerStop {
+    fn stop(&self) {
+        *self.stopped.lock().unwrap() = true;
+        self.wakeup.notify_all();
+    }
+
+    fn wait(&self, timeout: Duration) -> bool {
+        let stopped = self.stopped.lock().unwrap();
+        let (stopped, _result) = self
+            .wakeup
+            .wait_timeout_while(stopped, timeout, |s| !*s)
+            .unwrap();
+        *stopped
+    }
+
+    fn is_stopped(&self) -> bool {
+        *self.stopped.lock().unwrap()
+    }
+}
+
 impl Proxy {
     fn try_use_http(&self, url: &str) -> Option<String> {
         if self.replace_scheme.load(Ordering::Relaxed) == SCHEME_REVERSION_CACHE_REPLACE {
@@ -270,6 +296,7 @@ pub(crate) struct Connection {
     pub shutdown: AtomicBool,
     /// Timestamp of connection's last active request, represents as duration since UNIX_EPOCH in seconds.
     last_active: Arc<AtomicU64>,
+    health_checker_stop: Arc<HealthCheckerStop>,
 }
 
 impl Connection {
@@ -309,6 +336,7 @@ impl Connection {
                     .unwrap()
                     .as_secs(),
             )),
+            health_checker_stop: Arc::new(HealthCheckerStop::default()),
         });
 
         // Start proxy's health checking thread.
@@ -322,6 +350,7 @@ impl Connection {
             if proxy.health.ping_url.is_some() {
                 let proxy = proxy.clone();
                 let last_active = Arc::clone(&self.last_active);
+                let stop = Arc::clone(&self.health_checker_stop);
 
                 // Spawn thread to update the health status of proxy server.
                 thread::spawn(move || {
@@ -329,6 +358,10 @@ impl Connection {
                     let mut last_success = true;
 
                     loop {
+                        if stop.is_stopped() {
+                            break;
+                        }
+
                         let elapsed = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -363,7 +396,9 @@ impl Connection {
                                 });
                         }
 
-                        thread::sleep(proxy.health.check_interval);
+                        if stop.wait(proxy.health.check_interval) {
+                            break;
+                        }
                     }
                 });
             }
@@ -373,6 +408,7 @@ impl Connection {
     /// Shutdown the connection.
     pub fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
+        self.health_checker_stop.stop();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -609,6 +645,13 @@ impl Connection {
     }
 }
 
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.health_checker_stop.stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,5 +839,50 @@ mod tests {
             "Expected disconnected error, got: {}",
             err_msg
         );
+    }
+
+    fn health_check_connection() -> Arc<Connection> {
+        let config = ConnectionConfig {
+            connect_timeout: 1,
+            proxy: ProxyConfig {
+                url: "http://127.0.0.1:1".to_string(),
+                ping_url: "http://127.0.0.1:1/healthy".to_string(),
+                check_interval: 3600,
+                check_pause_elapsed: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        Connection::new(&config).unwrap()
+    }
+
+    fn wait_for_proxy_owners(proxy: &std::sync::Weak<Proxy>, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while proxy.strong_count() != expected && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(proxy.strong_count(), expected);
+    }
+
+    #[test]
+    fn test_shutdown_stops_proxy_health_checker() {
+        let conn = health_check_connection();
+        let proxy = Arc::downgrade(conn.proxy.as_ref().unwrap());
+
+        conn.shutdown();
+
+        // The connection still owns one reference; the worker must release its copy.
+        wait_for_proxy_owners(&proxy, 1);
+    }
+
+    #[test]
+    fn test_drop_stops_proxy_health_checker() {
+        let conn = health_check_connection();
+        let proxy = Arc::downgrade(conn.proxy.as_ref().unwrap());
+
+        drop(conn);
+
+        wait_for_proxy_owners(&proxy, 0);
     }
 }
