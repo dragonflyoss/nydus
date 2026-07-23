@@ -1184,20 +1184,40 @@ func main() {
 					Name:    "source-backend-type",
 					Value:   "",
 					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
-					EnvVars: []string{"BACKEND_TYPE"},
+					EnvVars: []string{"SOURCE_BACKEND_TYPE"},
 				},
 				&cli.StringFlag{
 					Name:    "source-backend-config",
 					Value:   "",
 					Usage:   "Json configuration string for storage backend",
-					EnvVars: []string{"BACKEND_CONFIG"},
+					EnvVars: []string{"SOURCE_BACKEND_CONFIG"},
 				},
 				&cli.PathFlag{
 					Name:      "source-backend-config-file",
 					Value:     "",
 					TakesFile: true,
 					Usage:     "Json configuration file for storage backend",
-					EnvVars:   []string{"BACKEND_CONFIG_FILE"},
+					EnvVars:   []string{"SOURCE_BACKEND_CONFIG_FILE"},
+				},
+
+				&cli.StringFlag{
+					Name:    "target-backend-type",
+					Value:   "",
+					Usage:   "Type of storage backend, possible values: 'oss', 's3'",
+					EnvVars: []string{"TARGET_BACKEND_TYPE"},
+				},
+				&cli.StringFlag{
+					Name:    "target-backend-config",
+					Value:   "",
+					Usage:   "Json configuration string for storage backend",
+					EnvVars: []string{"TARGET_BACKEND_CONFIG"},
+				},
+				&cli.PathFlag{
+					Name:      "target-backend-config-file",
+					Value:     "",
+					TakesFile: true,
+					Usage:     "Json configuration file for storage backend",
+					EnvVars:   []string{"TARGET_BACKEND_CONFIG_FILE"},
 				},
 
 				&cli.BoolFlag{
@@ -1238,6 +1258,11 @@ func main() {
 					return err
 				}
 
+				targetBackendType, targetBackendConfig, err := getBackendConfig(c, "target-", false)
+				if err != nil {
+					return err
+				}
+
 				pushChunkSize, err := humanize.ParseBytes(c.String("push-chunk-size"))
 				if err != nil {
 					return errors.Wrap(err, "invalid --push-chunk-size option")
@@ -1257,6 +1282,8 @@ func main() {
 
 					SourceBackendType:   sourceBackendType,
 					SourceBackendConfig: sourceBackendConfig,
+					TargetBackendType:   targetBackendType,
+					TargetBackendConfig: targetBackendConfig,
 
 					AllPlatforms: c.Bool("all-platforms"),
 					Platforms:    c.String("platform"),
