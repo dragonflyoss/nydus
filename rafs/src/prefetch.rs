@@ -14,13 +14,14 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Once};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use nydus_storage::backend::RequestSource;
 use nydus_storage::cache::BlobCache;
 use nydus_storage::device::{BlobChunkInfo, BlobInfo};
+use nydus_utils::metrics::Metric;
 
 use crate::metadata::{RafsInodeExt, RafsSuper};
 
@@ -110,6 +111,7 @@ struct State {
     threads_count: usize,
     rate_limiter: Option<Arc<Mutex<RateLimiter>>>,
     max_retry_per_blob: u64,
+    begin_timing_once: Once,
 }
 
 /// Streaming blob prefetcher that downloads entire blobs via rangeless GET
@@ -149,6 +151,7 @@ impl BlobPrefetcher {
                 threads_count,
                 rate_limiter,
                 max_retry_per_blob: DEFAULT_MAX_RETRY,
+                begin_timing_once: Once::new(),
             }),
         })
     }
@@ -445,6 +448,20 @@ impl BlobPrefetcher {
         chunk_status: &mut [bool],
     ) -> anyhow::Result<()> {
         let blob_id = blob.info.blob_id();
+        let stream_start = SystemTime::now();
+
+        // Record the wall-clock start of prefetch on the first blob streamed.
+        if let Some(metrics) = cache.metrics() {
+            state.begin_timing_once.call_once(|| {
+                if let Ok(t) = stream_start.duration_since(SystemTime::UNIX_EPOCH) {
+                    metrics.prefetch_begin_time_secs.set(t.as_secs());
+                    metrics
+                        .prefetch_begin_time_millis
+                        .set(t.subsec_millis() as u64);
+                }
+            });
+        }
+
         let last_chunk_end = blob
             .chunks
             .iter()
@@ -565,6 +582,18 @@ impl BlobPrefetcher {
             "BlobPrefetcher: streamed blob {}, cached {} chunks",
             blob_id, chunks_cached
         );
+
+        // Update BlobcacheMetrics to include this blob in the prefetch statistics.
+        // One blob stream = one backend request (rangeless GET), regardless of how
+        // many chunks were extracted from it. prefetch_data_amount is accumulated
+        // per chunk in cache_chunk_data; here we count the request and update timing.
+        if chunks_cached > 0 {
+            if let Some(metrics) = cache.metrics() {
+                metrics.prefetch_requests_count.inc();
+                metrics.calculate_prefetch_metrics(stream_start);
+            }
+        }
+
         Ok(())
     }
 }
@@ -582,7 +611,7 @@ mod tests {
     };
     use nydus_storage::{StorageError, StorageResult};
     use nydus_utils::crypt::{Cipher, CipherContext};
-    use nydus_utils::metrics::BackendMetrics;
+    use nydus_utils::metrics::{BackendMetrics, BlobcacheMetrics, Metric};
     use nydus_utils::{compress, crypt, digest};
 
     use crate::mock::MockChunkInfo;
@@ -650,6 +679,7 @@ mod tests {
         /// Whether `cache_chunk_data` returns `Ok(true)` (true) or `Err` (false).
         cache_succeeds: bool,
         cache_calls: Arc<AtomicUsize>,
+        blobcache_metrics: Arc<BlobcacheMetrics>,
     }
 
     impl BlobCache for MockBlobCache {
@@ -719,14 +749,21 @@ mod tests {
         fn cache_chunk_data(
             &self,
             _chunk: &dyn BlobChunkInfo,
-            _data: &[u8],
+            data: &[u8],
         ) -> std::io::Result<bool> {
             self.cache_calls.fetch_add(1, Ordering::Relaxed);
             if self.cache_succeeds {
+                self.blobcache_metrics
+                    .prefetch_data_amount
+                    .add(data.len() as u64);
                 Ok(true)
             } else {
                 Err(std::io::Error::other("mock cache error"))
             }
+        }
+
+        fn metrics(&self) -> Option<Arc<BlobcacheMetrics>> {
+            Some(self.blobcache_metrics.clone())
         }
     }
 
@@ -759,6 +796,7 @@ mod tests {
             threads_count: 2,
             rate_limiter: None,
             max_retry_per_blob: 3,
+            begin_timing_once: Once::new(),
         })
     }
 
@@ -782,11 +820,13 @@ mod tests {
         let stream_calls = Arc::new(AtomicUsize::new(0));
         let cache_calls = Arc::new(AtomicUsize::new(0));
         let reader = Arc::new(MockBlobReader::new(stream_data, Arc::clone(&stream_calls)));
+        let blobcache_metrics = BlobcacheMetrics::new("mock", "/tmp");
         let cache = Arc::new(MockBlobCache {
             chunk_map: Arc::new(MockChunkMap { ready }),
             reader,
             cache_succeeds,
             cache_calls: Arc::clone(&cache_calls),
+            blobcache_metrics,
         });
         (cache, stream_calls, cache_calls)
     }
@@ -1081,6 +1121,250 @@ mod tests {
         assert!(status[1]);
         assert_eq!(state.progress.prefetched_chunks.load(Ordering::Relaxed), 2);
         assert_eq!(state.progress.prefetched_bytes.load(Ordering::Relaxed), 16);
+    }
+
+    // ── prefetch_one_blob ────────────────────────────────────────────────────
+
+    // ── BlobcacheMetrics instrumentation ─────────────────────────────────────
+
+    #[test]
+    fn test_metrics_prefetch_data_amount_updated_per_cached_chunk() {
+        // Each newly cached chunk must add its compressed size to prefetch_data_amount.
+        let state = make_state(false);
+        let chunk_size = 20usize;
+        let chunk = Arc::new(MockChunkInfo::mock(
+            0,
+            0,
+            chunk_size as u32,
+            0,
+            chunk_size as u32,
+        ));
+        let blob = make_blob_work(vec![chunk]);
+        let (cache, _, _) = make_cache(false, vec![], true);
+        let metrics = cache.blobcache_metrics.clone();
+        let cache_arc: Arc<dyn BlobCache> = cache;
+        let mut status = vec![false; 1];
+        let data: Vec<u8> = vec![0u8; chunk_size];
+        let reader: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(data));
+
+        BlobPrefetcher::stream_and_cache(&state, reader, &blob, &cache_arc, 0, &mut status)
+            .unwrap();
+
+        assert_eq!(
+            metrics.prefetch_data_amount.count(),
+            chunk_size as u64,
+            "prefetch_data_amount must equal the compressed chunk size"
+        );
+    }
+
+    #[test]
+    fn test_metrics_prefetch_data_amount_accumulates_across_chunks() {
+        // With two chunks cached, prefetch_data_amount must be the sum of both sizes.
+        let state = make_state(false);
+        let sz0 = 8usize;
+        let sz1 = 12usize;
+        let chunk0 = Arc::new(MockChunkInfo::mock(0, 0, sz0 as u32, 0, sz0 as u32));
+        let chunk1 = Arc::new(MockChunkInfo::mock(0, 8, sz1 as u32, 0, sz1 as u32));
+        let blob = make_blob_work(vec![chunk0, chunk1]);
+        let (cache, _, _) = make_cache(false, vec![], true);
+        let metrics = cache.blobcache_metrics.clone();
+        let cache_arc: Arc<dyn BlobCache> = cache;
+        let mut status = vec![false; 2];
+        let data: Vec<u8> = vec![0u8; sz0 + sz1];
+        let reader: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(data));
+
+        BlobPrefetcher::stream_and_cache(&state, reader, &blob, &cache_arc, 0, &mut status)
+            .unwrap();
+
+        assert_eq!(
+            metrics.prefetch_data_amount.count(),
+            (sz0 + sz1) as u64,
+            "prefetch_data_amount must be the sum of all cached chunk sizes"
+        );
+    }
+
+    #[test]
+    fn test_metrics_prefetch_data_amount_not_updated_on_cache_error() {
+        // When cache_chunk_data returns Err, prefetch_data_amount must stay zero.
+        let state = make_state(false);
+        let chunk_size = 10usize;
+        let chunk = Arc::new(MockChunkInfo::mock(
+            0,
+            0,
+            chunk_size as u32,
+            0,
+            chunk_size as u32,
+        ));
+        let blob = make_blob_work(vec![chunk]);
+        let (cache, _, _) = make_cache(false, vec![], false); // cache_succeeds = false
+        let metrics = cache.blobcache_metrics.clone();
+        let cache_arc: Arc<dyn BlobCache> = cache;
+        let mut status = vec![false; 1];
+        let data = vec![0u8; chunk_size];
+        let reader: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(data));
+
+        BlobPrefetcher::stream_and_cache(&state, reader, &blob, &cache_arc, 0, &mut status)
+            .unwrap();
+
+        assert_eq!(
+            metrics.prefetch_data_amount.count(),
+            0,
+            "prefetch_data_amount must not be updated when caching fails"
+        );
+    }
+
+    #[test]
+    fn test_metrics_prefetch_requests_count_incremented_per_blob() {
+        // After streaming one blob with at least one newly cached chunk,
+        // prefetch_requests_count must be exactly 1.
+        let state = make_state(false);
+        let chunk_size = 10usize;
+        let chunk = Arc::new(MockChunkInfo::mock(
+            0,
+            0,
+            chunk_size as u32,
+            0,
+            chunk_size as u32,
+        ));
+        let blob = make_blob_work(vec![chunk]);
+        let (cache, _, _) = make_cache(false, vec![], true);
+        let metrics = cache.blobcache_metrics.clone();
+        let cache_arc: Arc<dyn BlobCache> = cache;
+        let mut status = vec![false; 1];
+        let data = vec![0u8; chunk_size];
+        let reader: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(data));
+
+        BlobPrefetcher::stream_and_cache(&state, reader, &blob, &cache_arc, 0, &mut status)
+            .unwrap();
+
+        assert_eq!(
+            metrics.prefetch_requests_count.count(),
+            1,
+            "exactly one blob stream = one prefetch request"
+        );
+    }
+
+    #[test]
+    fn test_metrics_prefetch_requests_count_zero_when_no_chunks_cached() {
+        // If nothing gets cached (empty stream), prefetch_requests_count must stay 0.
+        let state = make_state(false);
+        let chunk = Arc::new(MockChunkInfo::mock(0, 0, 10, 0, 10));
+        let blob = make_blob_work(vec![chunk]);
+        let (cache, _, _) = make_cache(false, vec![], true); // empty stream data
+        let metrics = cache.blobcache_metrics.clone();
+        let cache_arc: Arc<dyn BlobCache> = cache;
+        let mut status = vec![false; 1];
+        let reader: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(vec![]));
+
+        BlobPrefetcher::stream_and_cache(&state, reader, &blob, &cache_arc, 0, &mut status)
+            .unwrap();
+
+        assert_eq!(
+            metrics.prefetch_requests_count.count(),
+            0,
+            "no chunks cached → no prefetch request counted"
+        );
+    }
+
+    #[test]
+    fn test_metrics_prefetch_begin_time_set_on_first_blob() {
+        // The prefetch_begin_time_secs must be non-zero after streaming the first blob.
+        let state = make_state(false);
+        let chunk_size = 10usize;
+        let chunk = Arc::new(MockChunkInfo::mock(
+            0,
+            0,
+            chunk_size as u32,
+            0,
+            chunk_size as u32,
+        ));
+        let blob = make_blob_work(vec![chunk]);
+        let (cache, _, _) = make_cache(false, vec![], true);
+        let metrics = cache.blobcache_metrics.clone();
+        let cache_arc: Arc<dyn BlobCache> = cache;
+        let mut status = vec![false; 1];
+        let data = vec![0u8; chunk_size];
+        let reader: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(data));
+
+        BlobPrefetcher::stream_and_cache(&state, reader, &blob, &cache_arc, 0, &mut status)
+            .unwrap();
+
+        assert!(
+            metrics.prefetch_begin_time_secs.count() > 0,
+            "prefetch_begin_time_secs must be set after the first blob stream"
+        );
+    }
+
+    #[test]
+    fn test_metrics_prefetch_begin_time_set_only_once() {
+        // Calling stream_and_cache twice on the same state must set begin_time only
+        // on the first call (the Once cell prevents overwriting).
+        let state = make_state(false);
+        let chunk_size = 10usize;
+        let make_chunk = || {
+            Arc::new(MockChunkInfo::mock(
+                0,
+                0,
+                chunk_size as u32,
+                0,
+                chunk_size as u32,
+            ))
+        };
+        let blob1 = make_blob_work(vec![make_chunk()]);
+        let blob2 = make_blob_work(vec![make_chunk()]);
+        let (cache, _, _) = make_cache(false, vec![], true);
+        let metrics = cache.blobcache_metrics.clone();
+        let cache_arc: Arc<dyn BlobCache> = cache;
+
+        let reader1: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(vec![0u8; chunk_size]));
+        let mut status1 = vec![false; 1];
+        BlobPrefetcher::stream_and_cache(&state, reader1, &blob1, &cache_arc, 0, &mut status1)
+            .unwrap();
+
+        let first_begin = metrics.prefetch_begin_time_secs.count();
+
+        // Small delay to ensure a different timestamp would be written if Once didn't guard it.
+        std::thread::sleep(Duration::from_millis(10));
+
+        let reader2: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(vec![0u8; chunk_size]));
+        let mut status2 = vec![false; 1];
+        BlobPrefetcher::stream_and_cache(&state, reader2, &blob2, &cache_arc, 0, &mut status2)
+            .unwrap();
+
+        assert_eq!(
+            metrics.prefetch_begin_time_secs.count(),
+            first_begin,
+            "begin time must not be overwritten on subsequent blob streams"
+        );
+    }
+
+    #[test]
+    fn test_metrics_prefetch_end_time_set_after_streaming() {
+        // prefetch_end_time_secs must be non-zero after a blob is streamed.
+        let state = make_state(false);
+        let chunk_size = 10usize;
+        let chunk = Arc::new(MockChunkInfo::mock(
+            0,
+            0,
+            chunk_size as u32,
+            0,
+            chunk_size as u32,
+        ));
+        let blob = make_blob_work(vec![chunk]);
+        let (cache, _, _) = make_cache(false, vec![], true);
+        let metrics = cache.blobcache_metrics.clone();
+        let cache_arc: Arc<dyn BlobCache> = cache;
+        let mut status = vec![false; 1];
+        let data = vec![0u8; chunk_size];
+        let reader: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(data));
+
+        BlobPrefetcher::stream_and_cache(&state, reader, &blob, &cache_arc, 0, &mut status)
+            .unwrap();
+
+        assert!(
+            metrics.prefetch_end_time_secs.count() > 0,
+            "prefetch_end_time_secs must be set after streaming"
+        );
     }
 
     // ── prefetch_one_blob ────────────────────────────────────────────────────
