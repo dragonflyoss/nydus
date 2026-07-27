@@ -15,7 +15,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::sync::mpsc::{self, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
 use anyhow::{anyhow, Context, Result};
@@ -25,16 +25,10 @@ use crate::BlobID;
 
 use super::core::{
     align_fetch_range, decide, fd_identity, Decision, DenyReason, FanotifyCore, FetchError,
-    Response,
+    Response, FAN_CLASS_PRE_CONTENT, FAN_CLOEXEC, FAN_MARK_ADD, FAN_NONBLOCK,
 };
-use super::event::{EventIter, PreContentEvent};
+use super::event::{EventIter, PreContentEvent, FAN_PRE_ACCESS};
 use super::response::{FdResponseWriter, PendingPermission, ResponseWriter};
-
-const FAN_CLOEXEC: u32 = 0x0000_0001;
-const FAN_NONBLOCK: u32 = 0x0000_0002;
-const FAN_CLASS_PRE_CONTENT: u32 = 0x0000_0008;
-const FAN_MARK_ADD: u32 = 0x0000_0001;
-const FAN_PRE_ACCESS: u64 = 0x0010_0000;
 
 // 256 KiB holds ~5400 minimum-size events per read(2)
 // (24-byte fanotify_event_metadata + 24-byte RANGE record).
@@ -261,11 +255,14 @@ impl FanotifyService {
         }
         let fan = unsafe { OwnedFd::from_raw_fd(fan_fd) };
 
-        for device in core.devices() {
+        for (slot, device) in core.devices().iter().enumerate() {
             if core
                 .range_ready(&device.id, 0, device.cache_size)
                 .unwrap_or(false)
             {
+                // Record that this slot's mark was never added, so runtime
+                // `try_unmark` probes skip it entirely.
+                core.mark_unmarked(slot);
                 debug!(
                     "fanotify: skip marking fully-ready blob {} (slot {})",
                     device.id, device.index
@@ -333,6 +330,7 @@ fn serve(
     pool: Arc<FetchPool>,
 ) -> Result<()> {
     let fan_raw = fan_fd.as_raw_fd();
+    let fan_weak = Arc::downgrade(fan_fd);
     let epfd = epoll_create().context("epoll_create1")?;
 
     let writer: Arc<dyn ResponseWriter> = Arc::new(FdResponseWriter::new(fan_fd.clone()));
@@ -364,6 +362,7 @@ fn serve(
     coordinate(
         epfd.as_raw_fd(),
         fan_raw,
+        &fan_weak,
         core,
         &writer,
         &pool,
@@ -382,6 +381,7 @@ fn serve(
 fn coordinate(
     epfd: RawFd,
     fan_fd: RawFd,
+    fan_weak: &Weak<OwnedFd>,
     core: &Arc<FanotifyCore>,
     writer: &Arc<dyn ResponseWriter>,
     pool: &FetchPool,
@@ -398,6 +398,7 @@ fn coordinate(
     let outcome = event_loop(
         epfd,
         fan_fd,
+        fan_weak,
         core,
         writer,
         pool,
@@ -432,6 +433,7 @@ fn coordinate(
 fn event_loop(
     epfd: RawFd,
     fan_fd: RawFd,
+    fan_weak: &Weak<OwnedFd>,
     core: &Arc<FanotifyCore>,
     writer: &Arc<dyn ResponseWriter>,
     pool: &FetchPool,
@@ -483,6 +485,7 @@ fn event_loop(
                 match read_events(fan_fd, &mut buffer) {
                     Ok(0) => {} // EAGAIN: no events
                     Ok(n) => admit_batch(
+                        fan_weak,
                         core,
                         writer,
                         pool,
@@ -550,6 +553,7 @@ fn drain_completions(
 
 #[allow(clippy::too_many_arguments)]
 fn admit_batch(
+    fan_weak: &Weak<OwnedFd>,
     core: &Arc<FanotifyCore>,
     writer: &Arc<dyn ResponseWriter>,
     pool: &FetchPool,
@@ -600,6 +604,7 @@ fn admit_batch(
         };
 
         admit_event(
+            fan_weak,
             core,
             writer,
             pool,
@@ -617,6 +622,7 @@ fn admit_batch(
 
 #[allow(clippy::too_many_arguments)]
 fn admit_event(
+    fan_weak: &Weak<OwnedFd>,
     core: &Arc<FanotifyCore>,
     writer: &Arc<dyn ResponseWriter>,
     pool: &FetchPool,
@@ -677,6 +683,9 @@ fn admit_event(
                 offset, count, device.id
             );
             respond(&mut permission, Response::Allow)?;
+            if let Some(fd_arc) = fan_weak.upgrade() {
+                core.try_unmark(fd_arc.as_raw_fd(), &device.id);
+            }
             return Ok(());
         }
         Ok(false) => {}
@@ -712,10 +721,22 @@ fn admit_event(
     let cache_size = device.cache_size;
     let core = Arc::clone(core);
     let sink = Arc::clone(sink);
+
+    let fan_weak = fan_weak.clone();
     pool.execute(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             core.fetch(&id, cache_size, offset, count)
         }));
+        // After a successful fetch, check whether this was the last group of
+        // the blob. If the groupmap's sticky ALL_READY flag is now set, remove
+        // the fanotify mark so the kernel stops generating events for this
+        // file entirely — subsequent reads hit the page cache without any
+        // daemon involvement.
+        if matches!(&result, Ok(Ok(()))) {
+            if let Some(fd_arc) = fan_weak.upgrade() {
+                core.try_unmark(fd_arc.as_raw_fd(), &id);
+            }
+        }
         let result = match result {
             Ok(fetch_result) => CompletionResult::Fetch(fetch_result),
             Err(_) => CompletionResult::Panicked,
