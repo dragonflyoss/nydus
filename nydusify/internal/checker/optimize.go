@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/errdefs"
@@ -35,11 +34,9 @@ type OptimizeOpt struct {
 	Source string
 	// Target is the optimized nydus image reference to push. Required.
 	Target string
-	// Apiserver is the apiserver address of a running mount of the source
-	// image (e.g. `unix:///path/to/apiserver.sock`, as exposed by `nydusify
-	// mount`); the access patterns are fetched live from its `/trace`
-	// endpoint. Required.
-	Apiserver string
+	// Pattern is the path to a JSON access-pattern file (the same document
+	// served by the `/trace` endpoint). Required.
+	Pattern string
 	// Builder is the nydus binary path (PATH-resolvable). Defaults to "nydus".
 	Builder string
 	// WorkDir is the scratch directory backing the content store and the
@@ -77,12 +74,8 @@ func NewOptimizer(opt OptimizeOpt) (*Optimizer, error) {
 	if opt.Target == "" {
 		return nil, errors.New("target must be provided")
 	}
-	if opt.Apiserver == "" {
-		return nil, errors.New("apiserver must be provided")
-	}
-	// Accept a bare socket path for convenience; nydus expects unix://.
-	if !strings.HasPrefix(opt.Apiserver, "unix://") {
-		opt.Apiserver = "unix://" + opt.Apiserver
+	if opt.Pattern == "" {
+		return nil, errors.New("pattern must be provided")
 	}
 	if opt.PlatformMC == nil {
 		opt.PlatformMC = platforms.Default()
@@ -217,12 +210,12 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, bootstrap, blobDir, configPath string) (string, error) {
 	args := []string{
 		"optimize",
-		"--apiserver", o.opt.Apiserver,
 		"--parent-bootstrap", parentBootstrap,
 		"--bootstrap", bootstrap,
 		"--blob-dir", blobDir,
 		"--config", configPath,
 		"--log-level", nydusLogLevel(o.opt.LogLevel),
+		"--trace-file", o.opt.Pattern,
 	}
 	cmd := exec.CommandContext(ctx, builderBinary(o.opt.Builder), args...)
 	var output bytes.Buffer
@@ -282,21 +275,33 @@ func commitBlobFile(ctx context.Context, cs content.Store, path string) (*ocispe
 // The image config diff ids and history are updated accordingly.
 func (o *Optimizer) writeOptimizedImage(ctx context.Context, cs content.Store, img *Image, ondemandDesc, bootstrapDesc ocispec.Descriptor) (*ocispec.Descriptor, error) {
 	layers := make([]ocispec.Descriptor, 0, len(img.Manifest.Layers)+1)
-	for _, layer := range img.Manifest.Layers {
+	diffIDs := make([]digest.Digest, 0, len(img.Manifest.Layers)+2)
+	for i, layer := range img.Manifest.Layers {
 		if converter.IsNydusBootstrap(layer) {
 			continue
 		}
 		layers = append(layers, layer)
+		if uncompressed := layer.Annotations[converter.LayerAnnotationUncompressed]; uncompressed != "" {
+			diffIDs = append(diffIDs, digest.Digest(uncompressed))
+		} else if i < len(img.Config.RootFS.DiffIDs) {
+			// Data layers from other builders may lack the uncompressed
+			// annotation; keep the original diff id from the source config
+			// (manifest layers and config diff ids are index-aligned).
+			diffIDs = append(diffIDs, img.Config.RootFS.DiffIDs[i])
+		} else {
+			return nil, errors.Errorf("cannot determine diff id for layer %s", layer.Digest)
+		}
+	}
+	for _, l := range []ocispec.Descriptor{ondemandDesc, bootstrapDesc} {
+		uncompressed := l.Annotations[converter.LayerAnnotationUncompressed]
+		if uncompressed == "" {
+			return nil, errors.Errorf("missing uncompressed annotation on appended layer %s", l.Digest)
+		}
+		diffIDs = append(diffIDs, digest.Digest(uncompressed))
 	}
 	layers = append(layers, ondemandDesc, bootstrapDesc)
 
 	config := img.Config
-	diffIDs := make([]digest.Digest, 0, len(layers))
-	for _, l := range layers {
-		if uncompressed := l.Annotations[converter.LayerAnnotationUncompressed]; uncompressed != "" {
-			diffIDs = append(diffIDs, digest.Digest(uncompressed))
-		}
-	}
 	config.RootFS.DiffIDs = diffIDs
 	config.History = append(config.History, ocispec.History{
 		CreatedBy: "Nydus Optimizer",

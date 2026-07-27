@@ -1793,13 +1793,13 @@ with the failing rule and offending path in the error.
 
 ### nydusify optimize
 
-`nydusify optimize --apiserver <addr> --source <nydus-ref> --target <nydus-ref> [OPTIONS]`
+`nydusify optimize --pattern <path> --source <nydus-ref> --target <nydus-ref> [OPTIONS]`
 
-Publishes an optimized copy of a nydus image from a live access trace:
+Publishes an optimized copy of a nydus image from a recorded access pattern:
 
 1. Pull `--source` (must be a nydus image) and extract its bootstrap layer
 	(`image.boot` plus the per-layer blob metas, which seed the cache dir).
-2. Run `nydus optimize` against the bootstrap with `--apiserver`, using a
+2. Run `nydus optimize` against the bootstrap with `--trace-file`, using a
 	registry-backed storage config so source group data is range-read from the
 	source registry on demand.
 3. Assemble the optimized manifest: the original data layers are reused as-is,
@@ -1808,23 +1808,27 @@ Publishes an optimized copy of a nydus image from a live access trace:
 	(including the ondemand one). Config diff ids and history are updated.
 4. Push the result to `--target`.
 
-`--apiserver` points at the apiserver socket of a running `nydusify mount` of
-the source image (`<work-dir>/apiserver.sock`; a bare path or `unix://` form is
-accepted). Mount the image **without** `--prefetch` (the default) so the trace
-records the pure on-demand access pattern, exercise the workload, then run
-optimize while the mount is still up. Mount the optimized image **with**
-`--prefetch` to get the phase-0 redirect warmup. Shared flags (`--builder`,
-`--work-dir`, `--platform`, `--insecure`, `--plain-http`, `--log-level`) behave
-as in `nydusify convert`. No root is required: optimize never extracts OCI
-layers, it only rewrites metadata and appends the ondemand layer.
+`--pattern` is a JSON access-pattern file in the same format served by a
+mount's `GET /trace` endpoint
+(`{"version":1,"patterns":[{"blob_index":1,"group_index":4},...]}`). It can be
+saved from the `/trace` endpoint of a `nydusify mount` apiserver, or exported
+offline from a pmem/accessor mount trace (e.g. a rund sandbox extendedstats
+snapshot). Record the pattern from a mount **without** prefetch so it captures
+the pure on-demand access pattern, exercise the workload, then save the trace.
+Mount the optimized image **with** `--prefetch` to get the phase-0 redirect
+warmup. Shared flags (`--builder`, `--work-dir`, `--platform`, `--insecure`,
+`--plain-http`, `--log-level`) behave as in `nydusify convert`. No root is
+required: optimize never extracts OCI layers, it only rewrites metadata and
+appends the ondemand layer.
 
 Example:
 
 ```bash
 nydusify mount -t localhost:5000/app:nydus -m /mnt/app --work-dir /tmp/mnt &
 # ... run the workload against /mnt/app ...
+curl --unix-socket /tmp/mnt/apiserver.sock http://localhost/trace > /tmp/pattern.json
 nydusify optimize \
-  --apiserver /tmp/mnt/apiserver.sock \
+  --pattern /tmp/pattern.json \
   --source localhost:5000/app:nydus \
   --target localhost:5000/app:nydus-optimized \
   --plain-http

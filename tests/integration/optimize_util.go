@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -193,9 +194,10 @@ func waitPrefetchQuiesce(t *testing.T, socketPath string) {
 	}, 60*time.Second, 300*time.Millisecond, "prefetch did not quiesce within 60s")
 }
 
-// fetchTraceCount GETs the /trace endpoint from the mount's apiserver socket
-// and returns the number of recorded (blob, group) access patterns.
-func fetchTraceCount(t *testing.T, socketPath string) int {
+// saveTrace GETs the /trace endpoint from the mount's apiserver socket, saves
+// the raw JSON access-pattern document to path, and returns the number of
+// recorded (blob, group) access patterns.
+func saveTrace(t *testing.T, socketPath, path string) int {
 	t.Helper()
 
 	client := &http.Client{
@@ -212,6 +214,10 @@ func fetchTraceCount(t *testing.T, socketPath string) int {
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0644))
+
 	var doc struct {
 		Version  uint32 `json:"version"`
 		Patterns []struct {
@@ -219,7 +225,7 @@ func fetchTraceCount(t *testing.T, socketPath string) int {
 			GroupIndex uint32 `json:"group_index"`
 		} `json:"patterns"`
 	}
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&doc))
+	require.NoError(t, json.Unmarshal(raw, &doc))
 	require.EqualValues(t, 1, doc.Version, "unexpected trace document version")
 	return len(doc.Patterns)
 }
