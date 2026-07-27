@@ -20,18 +20,33 @@
 //! (they need a real image / kernel).
 
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use tracing::{debug, warn};
 
 use crate::{BlobID, Config, NydusAccessor};
 
-use super::event::{PreContentEvent, Range};
+use super::event::{PreContentEvent, Range, FAN_PRE_ACCESS};
 
 /// EROFS block size as u64 — reuses the canonical constant from the accessor.
 const BLOCK_SIZE: u64 = crate::metadata::EROFS_BLOCK_SIZE as u64;
+
+/// `fanotify_init(2)` flag: close-on-exec on the group descriptor.
+pub(crate) const FAN_CLOEXEC: u32 = 0x0000_0001;
+/// `fanotify_init(2)` flag: non-blocking reads on the group descriptor.
+pub(crate) const FAN_NONBLOCK: u32 = 0x0000_0002;
+/// `fanotify_init(2)` class: pre-content permission events (Linux 6.15+).
+pub(crate) const FAN_CLASS_PRE_CONTENT: u32 = 0x0000_0008;
+/// `fanotify_mark(2)` flag: add a mark.
+pub(crate) const FAN_MARK_ADD: u32 = 0x0000_0001;
+/// `fanotify_mark(2)` flag: remove a mark instead of adding one.
+pub(crate) const FAN_MARK_REMOVE: u32 = 0x0000_0002;
 
 /// What to answer the kernel with for one event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +128,13 @@ pub struct FanotifyCore {
     devices: Vec<BlobDevice>,
     /// `(dev, ino)` → index into `devices` for O(1) event-fd lookup.
     device_index: HashMap<(u64, u64), usize>,
+    /// `BlobID` → index into `devices` for O(1) slot lookup by blob identity.
+    blob_slot: HashMap<BlobID, usize>,
+    /// Per-device-slot sticky flag: true once the fanotify mark has been removed
+    /// (or was never added because the blob was already fully ready at startup).
+    /// Prevents redundant `fully_ready` probes and duplicate `FAN_MARK_REMOVE`
+    /// syscalls across concurrent fetch workers.
+    unmarked: Vec<AtomicBool>,
 }
 
 impl FanotifyCore {
@@ -138,6 +160,7 @@ impl FanotifyCore {
 
         let mut devices = Vec::with_capacity(entries.len());
         let mut device_index = HashMap::with_capacity(entries.len());
+        let mut blob_slot = HashMap::with_capacity(entries.len());
         for (slot, b) in entries.into_iter().enumerate() {
             let expected_index = u16::try_from(slot + 1)
                 .context("blob device table has more slots than the EROFS index space")?;
@@ -161,6 +184,7 @@ impl FanotifyCore {
             let (dev, ino) = cache_identity(&b.cache_path, b.cache_size).with_context(|| {
                 format!("failed to validate blob device {}", b.cache_path.display())
             })?;
+            blob_slot.insert(b.id, slot);
             devices.push(BlobDevice {
                 index: b.index,
                 id: b.id,
@@ -170,10 +194,14 @@ impl FanotifyCore {
             });
             device_index.insert((dev, ino), slot);
         }
+
+        let unmarked: Vec<AtomicBool> = devices.iter().map(|_| AtomicBool::new(false)).collect();
         Ok(Self {
             accessor,
             devices,
             device_index,
+            blob_slot,
+            unmarked,
         })
     }
 
@@ -223,6 +251,90 @@ impl FanotifyCore {
                 e.context(format!("failed to fetch blob range [{offset}, +{count})")),
             )
         })
+    }
+
+    /// Record that the mark for device `slot` was never added (the blob was
+    /// already fully ready at startup), so `try_unmark` skips it at runtime.
+    pub fn mark_unmarked(&self, slot: usize) {
+        if let Some(flag) = self.unmarked.get(slot) {
+            flag.store(true, Ordering::Release);
+        }
+    }
+
+    /// Remove the fanotify mark on a blob whose groupmap is fully ready.
+    ///
+    /// Called from fetch worker threads after a successful fetch. The per-slot
+    /// [`AtomicBool`] ensures the readiness probe and the `FAN_MARK_REMOVE`
+    /// syscall execute at most once per blob across all concurrent workers.
+    /// Returns `true` if this call won the per-slot CAS and attempted
+    /// `FAN_MARK_REMOVE`; the syscall itself may still fail (logged), in
+    /// which case the latched flag prevents any retry.
+    ///
+    /// # Safety (syscall)
+    ///
+    /// `fan_fd` must be a live fanotify group descriptor. `fanotify_mark` is
+    /// thread-safe; concurrent calls with `FAN_MARK_REMOVE` on the same path
+    /// are harmless (the loser gets `ENOENT`).
+    pub fn try_unmark(&self, fan_fd: RawFd, id: &BlobID) -> bool {
+        let Some(&slot) = self.blob_slot.get(id) else {
+            return false;
+        };
+        // Fast path: the mark was already removed by an earlier successful
+        // unmark, or was never added because the blob was fully ready at
+        // startup.
+        if self.unmarked[slot].load(Ordering::Acquire) {
+            return false;
+        }
+        // O(1) probe: single atomic load on the groupmap's shared ALL_READY flag.
+        if !self.accessor.blob.fully_ready(id).unwrap_or(false) {
+            return false;
+        }
+        // Claim the unmark: exactly one thread wins the CAS.
+        if self.unmarked[slot]
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        let path = match CString::new(self.devices[slot].cache_path.as_os_str().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return false, // interior NUL: cannot happen for real paths
+        };
+        let ret = unsafe {
+            libc::fanotify_mark(
+                fan_fd,
+                FAN_MARK_REMOVE,
+                FAN_PRE_ACCESS,
+                libc::AT_FDCWD,
+                path.as_ptr(),
+            )
+        };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::ENOENT) {
+                // Benign: the mark was already removed (e.g. by another path).
+                debug!(
+                    "fanotify: FAN_MARK_REMOVE for slot {} ({}): already gone (ENOENT)",
+                    self.devices[slot].index,
+                    self.devices[slot].cache_path.display()
+                );
+            } else {
+                // Unexpected, but not fatal.
+                warn!(
+                    "fanotify: FAN_MARK_REMOVE for slot {} ({}) failed: {err}",
+                    self.devices[slot].index,
+                    self.devices[slot].cache_path.display()
+                );
+            }
+        } else {
+            debug!(
+                "fanotify: unmarked fully-ready blob {} (slot {}) at {}",
+                id,
+                self.devices[slot].index,
+                self.devices[slot].cache_path.display()
+            );
+        }
+        true
     }
 }
 
