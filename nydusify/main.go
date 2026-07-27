@@ -574,8 +574,8 @@ func optimizeCommand() *cli.Command {
 		Usage: "Build an ondemand blob from a /trace access pattern and push an optimized nydus image",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
-				Name:     "apiserver",
-				Usage:    "apiserver address of a running mount of the source image (e.g. unix:///path/to/apiserver.sock); access patterns are fetched from its /trace endpoint",
+				Name:     "pattern",
+				Usage:    "path to a JSON access-pattern file (same format as the /trace endpoint)",
 				Required: true,
 			},
 			&cli.StringFlag{
@@ -665,7 +665,7 @@ func runOptimize(c *cli.Context) error {
 	opt, err := checker.NewOptimizer(checker.OptimizeOpt{
 		Source:          c.String("source"),
 		Target:          c.String("target"),
-		Apiserver:       c.String("apiserver"),
+		Pattern:         c.String("pattern"),
 		Builder:         c.String("builder"),
 		WorkDir:         workDir,
 		SourceInsecure:  c.Bool("source-insecure"),

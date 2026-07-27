@@ -988,9 +988,9 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 //  1. docker build/push a source OCI image, convert it with `nydusify
 //     convert`, and validate it with `nydusify check`.
 //  2. Mount the nydus image WITHOUT prefetch, replay a read workload, and
-//     verify the baseline metrics show on-demand backend reads. While the
-//     mount is live, run `nydusify optimize --apiserver` to build the
-//     ondemand (redirect) blob from the recorded /trace pattern and push the
+//     verify the baseline metrics show on-demand backend reads. Save the
+//     recorded /trace pattern to a file and run `nydusify optimize
+//     --pattern` to build the ondemand (redirect) blob from it and push the
 //     optimized image.
 //  3. Mount the optimized image WITH prefetch on a cold cache, wait for
 //     prefetch to quiesce, replay the same workload, and verify:
@@ -1066,14 +1066,14 @@ func TestNydusifyOptimizeE2E(t *testing.T) {
 		require.Zero(t, metricValue(metrics, "cache_redirect_fill_group"))
 		require.Zero(t, metricValue(metrics, "cache_fill_group"),
 			"baseline mount must not prefetch")
-		traceCount = fetchTraceCount(t, socket)
+		traceCount = saveTrace(t, socket, filepath.Join(tmpDir, "pattern.json"))
 		require.Greater(t, traceCount, 1, "trace must cover multiple groups")
 		t.Logf("baseline: ondemand_reads=%v trace_groups=%d",
 			metricValue(metrics, "backend_ondemand_read_count"), traceCount)
 
-		t.Log("Optimizing against the live mount apiserver...")
+		t.Log("Optimizing with the saved trace pattern...")
 		runNydusifyCommand(t, nydusifyBin, nydusBin, "optimize",
-			"--apiserver", socket,
+			"--pattern", filepath.Join(tmpDir, "pattern.json"),
 			"--source", nydusRef,
 			"--target", optRef,
 			"--work-dir", filepath.Join(tmpDir, "optimize"))
