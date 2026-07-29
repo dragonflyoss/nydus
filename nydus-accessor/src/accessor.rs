@@ -17,7 +17,7 @@ use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{bail, Context, Result};
 
@@ -230,6 +230,8 @@ pub struct BlobAccessor {
     reader: Arc<ErofsReader>,
     blob_infos: Vec<ReaderBlobInfo>,
     index_by_blob_id: HashMap<BlobID, u16>,
+    /// Memoised result of [`BlobAccessor::flat_layout`].
+    flat_layout: OnceLock<Vec<BlobInfo>>,
 }
 
 /// Static path-based filesystem APIs.
@@ -347,6 +349,7 @@ impl NydusAccessor {
                 reader: reader.clone(),
                 blob_infos,
                 index_by_blob_id,
+                flat_layout: OnceLock::new(),
             },
             fs: FsAccessor {
                 reader,
@@ -442,12 +445,10 @@ impl NydusAccessor {
             return Ok(ranges);
         }
 
-        let mut blobs = self
+        let blobs = self
             .blob
-            .entries()
+            .flat_layout()
             .context("failed to describe blob device layout")?;
-        blobs.retain(|blob| !blob.is_redirect);
-        blobs.sort_by_key(|blob| blob.mapped_offset);
 
         while pos < end {
             let blob_index = blobs.iter().position(|blob| {
@@ -536,6 +537,30 @@ impl BlobAccessor {
                 })
             })
             .collect()
+    }
+
+    /// Describe the blobs that back the flattened single-device address
+    /// space, sorted by `mapped_offset` and with redirect blobs removed.
+    ///
+    /// The layout is fixed for the lifetime of the accessor, so it is computed
+    /// once and memoised: block-device style workloads resolve ranges on every
+    /// I/O and must not pay for re-enumerating (and re-sorting) the blob table
+    /// each time. The first call prepares every blob, exactly as
+    /// [`BlobAccessor::entries`] does.
+    pub fn flat_layout(&self) -> Result<&[BlobInfo]> {
+        if let Some(layout) = self.flat_layout.get() {
+            return Ok(layout);
+        }
+        let mut blobs = self.entries()?;
+        blobs.retain(|blob| !blob.is_redirect);
+        blobs.sort_by_key(|blob| blob.mapped_offset);
+        // A racing caller may have won the initialisation; either value is
+        // equally valid because the layout is deterministic.
+        let _ = self.flat_layout.set(blobs);
+        Ok(self
+            .flat_layout
+            .get()
+            .expect("flat layout is initialised above"))
     }
 
     /// Ensure `[offset, offset + len)` of the blob's dense uncompressed
