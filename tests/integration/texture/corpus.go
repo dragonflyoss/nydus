@@ -46,19 +46,6 @@ func (c *Corpus) CreateFile(t *testing.T, name string, data []byte) {
 	require.NoError(t, os.WriteFile(c.path(name), data, 0644))
 }
 
-// CreateLargeFile fills a file with sizeMB megabytes of random data.
-func (c *Corpus) CreateLargeFile(t *testing.T, name string, size int) {
-	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
-	f, err := os.Create(c.path(name))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		require.NoError(t, f.Close())
-	})
-
-	_, err = io.CopyN(f, rand.Reader, int64(size)<<20)
-	require.NoError(t, err)
-}
-
 // CreateRandomFile creates a file with exactly size bytes of random data.
 func (c *Corpus) CreateRandomFile(t *testing.T, name string, size int) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(c.path(name)), 0755))
@@ -351,7 +338,10 @@ func MakePerfCorpus(t *testing.T, dir string) {
 	readdirFilesPerDir := GetEnvAsInt("NYDUSFS_PERF_READDIR_FILES_PER_DIR", 256)
 
 	for i := range largeFileCount {
-		c.CreateLargeFile(t, fmt.Sprintf("large/file_%d.bin", i), largeFileSize)
+		// largeFileSize is in bytes (NYDUSFS_PERF_LARGE_FILE_SIZE, default
+		// 64 MiB). An earlier revision passed it to a helper that treated it
+		// as MiB, asking for 64 TiB per file and filling the disk.
+		c.CreateRandomFile(t, fmt.Sprintf("large/file_%d.bin", i), largeFileSize)
 	}
 
 	for i := range mediumFileCount {

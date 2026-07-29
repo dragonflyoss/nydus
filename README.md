@@ -122,45 +122,60 @@ pre-content mark disables kernel readahead.
 | Readdir + stat (`ls -l`) latency | ms/op | 10.0 | 11.9 | 10.1 | 12.0 |
 | First 1 MiB cold read | s | — | — | 0.02 | 0.08 |
 
-### ublk vs FUSE
+### NBD vs FUSE
 
-`nydus ublk` (Linux ≥ 6.0) serves the same image as a read-only block device
-that the kernel EROFS driver mounts directly. Same image, backend, and cache
-for both modes; the page cache is dropped before every phase and the working
-set is bounded to 128 MiB so results are not dominated by host free memory.
-Numbers are the median of 3 runs of `tests/scripts/bench_ublk_vs_fuse.sh` on a
-6-CPU host.
+`nydus nbd` serves the same image as a single read-only block device through
+the kernel NBD driver, mounted as native EROFS — it needs only the `nbd`
+module and EROFS support. Numbers from`make test-nbd-perf` (local backend, 
+same image and prefetch-off config for both modes, separate caches): 
+**warm** = page cache hot, **cold-page** = page cache dropped before every job, 
+**O_DIRECT** = page cache bypassed on every request in both modes (the pure per-request round trip).
 
-**Conclusion:** ublk wins wherever the kernel read path matters. A metadata
-walk is 7.5× faster because it runs entirely in the kernel EROFS driver with
-no per-file userspace round trip, sequential reads are 3.3× faster, and
-single-job 4K random reads are 4.7× faster. Concurrent 4K random reads are a
-wash: at that point both modes are served from the page cache and the
-bottleneck is neither mount path.
+**Conclusion:** NBD wins steady state and metadata — warm large-block reads
+run 1.9–2.3× FUSE (native EROFS page-cache path vs FUSE's heavier cached-read
+path) with the daemon fully out of the data path (0.0 s CPU over the warm
+suite vs 2.3 s for FUSE); readdir is ~1.5× faster and stat ~15% faster. FUSE
+has the thinner cold per-request round trip: with O_DIRECT, 4K random costs
+13.3 µs vs 23.9 µs per op and sequential 128K also favors FUSE — NBD pays the
+block layer + NBD socket on every page-cache miss. The fill path is identical
+by construction — both modes share the same accessor and cache format.
 
-| Benchmark | Unit | ublk | FUSE | Ratio |
-| --- | --- | ---: | ---: | ---: |
-| Metadata walk (10,004 files) | s | 0.17 | 1.28 | 7.5× |
-| Sequential read 1M | MiB/s | 4,356 | 1,317 | 3.3× |
-| Random read 4K | IOPS | 13,590 | 2,865 | 4.7× |
-| Random read 4-job 4K | IOPS | 52,503 | 53,156 | 0.99× |
+| Benchmark | Unit | NBD warm | FUSE warm | NBD cold-page | FUSE cold-page |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Sequential read 128K | MiB/s | 32,494 | 13,855 | 33,561 | 15,595 |
+| Sequential read 4-job 128K | MiB/s | 43,578 | 23,239 | 34,950 | 24,876 |
+| Sequential read 4K | MiB/s | 5,797 | 4,802 | 5,719 | 4,971 |
+| Sequential read 4-job 4K | MiB/s | 8,244 | 8,198 | 8,324 | 8,193 |
+| Random read 128K | MiB/s | 30,234 | 13,743 | 16,922 | 16,861 |
+| Random read 4-job 128K | MiB/s | 42,263 | 20,948 | 24,525 | 25,026 |
+| Random read 4K | IOPS | 1,077,819 | 1,143,747 | 906,122 | 954,870 |
+| Random read 4K latency | µs | 0.8 | 0.8 | 1.0 | 0.9 |
+| Random read 4-job 4K | MiB/s | 6,619 | 6,826 | 5,447 | 5,612 |
+| Stat | IOPS | 508,934 | 442,512 | 509,355 | 449,899 |
+| Stat latency | µs | 2.0 | 2.3 | 2.0 | 2.2 |
+| Readdir | IOPS | 27,072 | 17,605 | 26,451 | 17,663 |
+| Readdir latency | µs | 36.9 | 56.8 | 37.8 | 56.6 |
+| Sequential read 128K O_DIRECT | MiB/s | — | — | 2,274 | 3,399 |
+| Random read 4K O_DIRECT | IOPS | — | — | 41,391 | 73,577 |
+| Random read 4K O_DIRECT latency | µs | — | — | 23.9 | 13.3 |
+| Daemon CPU over the suite | s | 0.0 | 2.3 | 0.7 | 2.9 |
+| Mount ready | s | — | — | 0.21 | 0.05 |
+| First 1 MiB cold read | s | — | — | 6.17 | 6.55 |
+| Prewarm (full-file cold fetch) | MiB/s | — | — | 958 | 1,006 |
 
-Serving a block device costs one userspace round trip per request, so the
-daemon's own efficiency sets the ceiling. Measured with
-`fio --iodepth=32 --numjobs=1` against a single queue thread on a warm cache,
-where that thread is CPU bound:
-
-| | IOPS | Latency (µs) | Daemon CPU per I/O (µs) |
-| --- | ---: | ---: | ---: |
-| Rebuild the blob layout per I/O, serve with `pread` | 369k | 86.4 | 2.57 |
-| Memoise the blob layout | 397k | 80.3 | 2.38 |
-| Serve from `mmap`ed backing files | **481k** | **66.4** | **1.88** |
+- The First 1 MiB cold read (~6.2–6.6 s in both modes) is the shared
+  accessor's one-time first-touch blob preparation against this local-backend
+  image (a full-blob digest verification), not a transport cost — the two
+  modes are within 6% of each other.
+- Cold-page `direct=0` rows largely re-warm during each 20 s job (the target
+  file is 64 MiB), so they mostly reflect the same page-cache path difference
+  as the warm columns; the O_DIRECT rows are the clean cold-path comparison.
 
 ## Components
 
 | Component        | Path                     | Description                                                                                              |
 | ---------------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `nydus`          | `nydus/src/bin/nydus/`         | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `ublk` / `uffd` / `fanotify`      |
+| `nydus`          | `nydus/src/bin/nydus/`         | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `uffd` / `fanotify` / `nbd`              |
 | `nydusify`       | `nydusify/`              | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry                 |
 | `nydus-accessor` | `nydus-accessor/` | Library crate (`NydusAccessor`) for embedding the image read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
 
@@ -210,6 +225,7 @@ nydus fuse --bootstrap image.boot --config config.yaml --mountpoint /mnt/nydus
 | [docs/ublk.md](docs/ublk.md)   | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths |
 | [docs/erofs.md](docs/erofs.md) | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                   |
 | [docs/fanotify.md](docs/fanotify.md) | Fanotify pre-content service: multi-device EROFS model, event ABI, event processing, response protocol, service lifecycle, and fail-open behavior on crash |
+| [docs/nbd.md](docs/nbd.md)     | NBD service: flattened block device, kernel socket protocol framing, ioctl session setup, request validation, and mount lifecycle                 |
 
 ## Building from Source
 
@@ -259,6 +275,10 @@ make test-ublk
 
 # Fanotify service smoke test.
 make test-fanotify
+
+# NBD service E2E (requires root and the nbd module); NBD vs FUSE benchmark.
+make test-nbd
+make test-nbd-perf
 
 # xfstests regression (requires root); fio performance benchmark (requires root and fio).
 make test-xfstests

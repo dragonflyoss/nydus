@@ -23,7 +23,10 @@ import (
 // runBenchmarks executes the full I/O and metadata benchmark suite and returns
 // the per-benchmark results keyed by name. When cold is true, dropCaches is
 // called before each fio job to force cache-miss reads; when false, the page
-// cache is left intact for warm-cache measurements.
+// cache is left intact for warm-cache measurements. Every job passes
+// --invalidate=0: fio's default invalidate=1 fadvises the target file out of
+// the page cache at job start, which would silently turn the warm runs into
+// cold ones — cache state must be controlled by dropCaches alone.
 func runBenchmarks(t *testing.T, fioBin, targetFile, statDir, readdirDir string, cold bool) map[string]*benchResult {
 	require.FileExists(t, targetFile)
 
@@ -41,35 +44,35 @@ func runBenchmarks(t *testing.T, fioBin, targetFile, statDir, readdirDir string,
 	maybeDrop()
 	results["seq_read_128k"] = runFio(t, fioBin, []string{
 		"--name=seq_read", "--filename=" + targetFile,
-		"--rw=read", "--bs=128k", "--direct=0",
+		"--rw=read", "--bs=128k", "--direct=0", "--invalidate=0",
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioRuntime), "--time_based", "--readonly",
 	})
 
 	maybeDrop()
 	results["rand_read_128k"] = runFio(t, fioBin, []string{
 		"--name=rand_read", "--filename=" + targetFile,
-		"--rw=randread", "--bs=128k", "--direct=0",
+		"--rw=randread", "--bs=128k", "--direct=0", "--invalidate=0",
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioRuntime), "--time_based", "--readonly",
 	})
 
 	maybeDrop()
 	results["seq_read_4k"] = runFio(t, fioBin, []string{
 		"--name=seq_read_4k", "--filename=" + targetFile,
-		"--rw=read", "--bs=4k", "--direct=0",
+		"--rw=read", "--bs=4k", "--direct=0", "--invalidate=0",
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioRuntime), "--time_based", "--readonly",
 	})
 
 	maybeDrop()
 	results["rand_read_4k"] = runFio(t, fioBin, []string{
 		"--name=rand_read_4k", "--filename=" + targetFile,
-		"--rw=randread", "--bs=4k", "--direct=0",
+		"--rw=randread", "--bs=4k", "--direct=0", "--invalidate=0",
 		"--numjobs=1", fmt.Sprintf("--runtime=%d", fioRuntime), "--time_based", "--readonly",
 	})
 
 	maybeDrop()
 	results["seq_read_4t_128k"] = runFio(t, fioBin, []string{
 		"--name=seq_read_4t", "--filename=" + targetFile,
-		"--rw=read", "--bs=128k", "--direct=0",
+		"--rw=read", "--bs=128k", "--direct=0", "--invalidate=0",
 		fmt.Sprintf("--numjobs=%d", fioSeqNumjobs), fmt.Sprintf("--runtime=%d", fioRuntime), "--time_based",
 		"--readonly", "--group_reporting",
 	})
@@ -77,7 +80,7 @@ func runBenchmarks(t *testing.T, fioBin, targetFile, statDir, readdirDir string,
 	maybeDrop()
 	results["rand_read_4t_128k"] = runFio(t, fioBin, []string{
 		"--name=rand_read_4t", "--filename=" + targetFile,
-		"--rw=randread", "--bs=128k", "--direct=0",
+		"--rw=randread", "--bs=128k", "--direct=0", "--invalidate=0",
 		fmt.Sprintf("--numjobs=%d", fioRandNumjobs), fmt.Sprintf("--runtime=%d", fioRuntime), "--time_based",
 		"--readonly", "--group_reporting",
 	})
@@ -85,7 +88,7 @@ func runBenchmarks(t *testing.T, fioBin, targetFile, statDir, readdirDir string,
 	maybeDrop()
 	results["seq_read_4t_4k"] = runFio(t, fioBin, []string{
 		"--name=seq_read_4t", "--filename=" + targetFile,
-		"--rw=read", "--bs=4k", "--direct=0",
+		"--rw=read", "--bs=4k", "--direct=0", "--invalidate=0",
 		fmt.Sprintf("--numjobs=%d", fioSeqNumjobs), fmt.Sprintf("--runtime=%d", fioRuntime), "--time_based",
 		"--readonly", "--group_reporting",
 	})
@@ -93,7 +96,7 @@ func runBenchmarks(t *testing.T, fioBin, targetFile, statDir, readdirDir string,
 	maybeDrop()
 	results["rand_read_4t_4k"] = runFio(t, fioBin, []string{
 		"--name=rand_read_4t", "--filename=" + targetFile,
-		"--rw=randread", "--bs=4k", "--direct=0",
+		"--rw=randread", "--bs=4k", "--direct=0", "--invalidate=0",
 		fmt.Sprintf("--numjobs=%d", fioRandNumjobs), fmt.Sprintf("--runtime=%d", fioRuntime), "--time_based",
 		"--readonly", "--group_reporting",
 	})
