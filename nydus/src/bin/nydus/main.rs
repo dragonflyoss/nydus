@@ -8,6 +8,8 @@ mod fanotify;
 mod fuse;
 mod merge;
 mod optimize;
+#[cfg(feature = "ublk")]
+mod ublk;
 #[cfg(feature = "uffd")]
 mod uffd;
 
@@ -21,6 +23,8 @@ use crate::fanotify::{run_fanotify_service, FanotifyArgs};
 use crate::fuse::{run_fuse_mount, FuseArgs};
 use crate::merge::{run_merge, MergeArgs};
 use crate::optimize::{run_optimize, OptimizeArgs};
+#[cfg(feature = "ublk")]
+use crate::ublk::{run_ublk_target, UblkArgs};
 #[cfg(feature = "uffd")]
 use crate::uffd::{run_uffd_service, UffdArgs};
 
@@ -43,6 +47,9 @@ enum Commands {
     Optimize(OptimizeArgs),
     /// Mount an nydus image through FUSE.
     Fuse(FuseArgs),
+    /// Serve a flattened nydus image as a ublk block device.
+    #[cfg(feature = "ublk")]
+    Ublk(UblkArgs),
     /// Serve a flattened nydus image through userfaultfd.
     #[cfg(feature = "uffd")]
     Uffd(UffdArgs),
@@ -59,6 +66,8 @@ fn main() -> Result<()> {
         Commands::Merge(args) => run_merge(args),
         Commands::Optimize(args) => run_optimize(args),
         Commands::Fuse(args) => run_fuse_mount(args),
+        #[cfg(feature = "ublk")]
+        Commands::Ublk(args) => run_ublk_target(args),
         #[cfg(feature = "uffd")]
         Commands::Uffd(args) => run_uffd_service(args),
         #[cfg(feature = "fanotify")]

@@ -11,6 +11,8 @@ pub mod fuse;
 pub mod merge;
 #[cfg(feature = "cli")]
 pub mod tracing;
+#[cfg(feature = "ublk")]
+pub mod ublk;
 #[cfg(feature = "uffd")]
 pub mod uffd;
 
