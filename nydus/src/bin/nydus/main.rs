@@ -7,6 +7,8 @@ mod check;
 mod fanotify;
 mod fuse;
 mod merge;
+#[cfg(feature = "nbd")]
+mod nbd;
 mod optimize;
 #[cfg(feature = "ublk")]
 mod ublk;
@@ -22,6 +24,8 @@ use crate::check::{run_check, CheckArgs};
 use crate::fanotify::{run_fanotify_service, FanotifyArgs};
 use crate::fuse::{run_fuse_mount, FuseArgs};
 use crate::merge::{run_merge, MergeArgs};
+#[cfg(feature = "nbd")]
+use crate::nbd::{run_nbd_service, NbdArgs};
 use crate::optimize::{run_optimize, OptimizeArgs};
 #[cfg(feature = "ublk")]
 use crate::ublk::{run_ublk_target, UblkArgs};
@@ -56,6 +60,9 @@ enum Commands {
     /// Serve an EROFS image on demand through fanotify pre-content hooks.
     #[cfg(feature = "fanotify")]
     Fanotify(FanotifyArgs),
+    /// Export a nydus image as a block device through the NBD protocol.
+    #[cfg(feature = "nbd")]
+    Nbd(NbdArgs),
 }
 
 fn main() -> Result<()> {
@@ -72,5 +79,7 @@ fn main() -> Result<()> {
         Commands::Uffd(args) => run_uffd_service(args),
         #[cfg(feature = "fanotify")]
         Commands::Fanotify(args) => run_fanotify_service(args),
+        #[cfg(feature = "nbd")]
+        Commands::Nbd(args) => run_nbd_service(args),
     }
 }

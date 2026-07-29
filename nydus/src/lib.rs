@@ -9,6 +9,8 @@ pub mod fanotify;
 #[cfg(feature = "fuse")]
 pub mod fuse;
 pub mod merge;
+#[cfg(feature = "nbd")]
+pub mod nbd;
 #[cfg(feature = "cli")]
 pub mod tracing;
 #[cfg(feature = "ublk")]

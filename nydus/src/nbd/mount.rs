@@ -1,0 +1,79 @@
+//! NBD block-device mount lifecycle.
+//!
+//! Unlike fanotify's file-backed multi-device EROFS mount (a bootstrap file as
+//! the source plus repeated `device=` options), the NBD daemon exposes a
+//! single block device `/dev/nbdX` carrying the whole flattened image, so
+//! mounting is a plain `mount(2)` of that device at the target with the image's
+//! filesystem type (ERofs for a nydus image). No loop device, no `device=`
+//! options, no option-length budget.
+
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+
+/// Mount the NBD block device `device` at `mountpoint` as `fstype`, read-only.
+///
+/// Read-only because the daemon only ever writes to the accessor's cache files
+/// through `fetch`, never through the NBD device; `MS_NODEV`/`MS_NOSUID` match
+/// the fanotify EROFS mount policy for a content-addressed image.
+pub fn mount_nbd(device: &str, mountpoint: &Path, fstype: &str) -> Result<()> {
+    let source = CString::new(device).context("device path contains an interior NUL byte")?;
+    let target = path_cstring(mountpoint, "mountpoint")?;
+    let fs_type = CString::new(fstype)
+        .with_context(|| format!("fs type {fstype} contains an interior NUL byte"))?;
+
+    let ret = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            fs_type.as_ptr(),
+            libc::MS_RDONLY | libc::MS_NODEV | libc::MS_NOSUID,
+            std::ptr::null(),
+        )
+    };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| {
+            format!(
+                "failed to mount {device} at {} (type {fstype})",
+                mountpoint.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+/// Unmount whatever is mounted at `mountpoint`. A plain `umount2(., 0)`; the
+/// EBUSY retry loop lives in the CLI, mirroring fanotify's shutdown ordering.
+pub fn unmount_nbd(mountpoint: &Path) -> Result<()> {
+    let target = path_cstring(mountpoint, "mountpoint")?;
+    let ret = unsafe { libc::umount2(target.as_ptr(), 0) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to unmount {}", mountpoint.display()));
+    }
+    Ok(())
+}
+
+fn path_cstring(path: &Path, kind: &str) -> Result<CString> {
+    CString::new(path.as_os_str().as_bytes())
+        .with_context(|| format!("{kind} path contains an interior NUL byte"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mount_nbd_rejects_interior_nul_in_device_or_fstype() {
+        let mp = Path::new("/mnt/x");
+        assert!(mount_nbd("/dev/nbd\0bad", mp, "erofs").is_err());
+        assert!(mount_nbd("/dev/nbd0", mp, "ero\0fs").is_err());
+    }
+
+    #[test]
+    fn unmount_nbd_rejects_interior_nul_in_mountpoint() {
+        assert!(unmount_nbd(Path::new("/mnt/\0bad")).is_err());
+    }
+}
