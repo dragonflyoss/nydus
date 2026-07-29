@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+*
+  # Manual dry run: builds and uploads workflow artifacts, but never
+  # publishes a GitHub release.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  NYDUS_FEATURES: cli,uffd,fanotify,backend-dragonfly-proxy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }} static binaries
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          # Tags are needed for the dry-run tarball name fallback.
+          fetch-depth: 0
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: release-${{ matrix.arch }}
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GH_TOKEN }}
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          # perl/make are needed by openssl-src, which builds OpenSSL from
+          # source for the musl target (dragonfly-client-util vendors it).
+          sudo apt-get install -y --no-install-recommends \
+            musl-tools musl-dev pkg-config perl make file
+
+      - name: Add Rust musl target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build nydus
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: |
+          cargo build -p nydus --release \
+            --target ${{ matrix.target }} \
+            --features "${NYDUS_FEATURES}"
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          # docker/cli guards `cli/config/configfile` with `//go:build go1.25`,
+          # so the go.mod directive (1.24.2) is not enough to build nydusify.
+          go-version: "1.25.5"
+          cache-dependency-path: nydusify/go.sum
+
+      - name: Build nydusify
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          cd nydusify
+          go build -ldflags "-s -w" -o nydusify .
+
+      - name: Assemble release directory
+        run: |
+          mkdir -p nydus-static
+          cp target/${{ matrix.target }}/release/nydus nydus-static/
+          cp nydusify/nydusify nydus-static/
+          cp config.yaml nydus-static/
+          chmod +x nydus-static/nydus nydus-static/nydusify
+
+      - name: Verify binaries are static
+        run: |
+          for bin in nydus-static/nydus nydus-static/nydusify; do
+            echo "== ${bin}"
+            file "${bin}"
+            # musl release builds come out as `static-pie linked`, while the
+            # CGO-free Go binary is plain `statically linked`.
+            file "${bin}" | grep -Eq 'statically linked|static-pie linked'
+          done
+          ./nydus-static/nydus --help > /dev/null
+          ./nydus-static/nydusify --help > /dev/null
+
+      - name: Create release tarball
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag=$(git describe --match 'v[0-9]*' --always --tags)
+          fi
+          tarball="nydus-static-${tag}-linux-${{ matrix.arch }}.tgz"
+          tar cf - nydus-static | gzip > "${tarball}"
+          sha256sum "${tarball}" > "${tarball}.sha256sum"
+          echo "tarball=${tarball}" >> "${GITHUB_ENV}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: nydus-release-tarball-linux-${{ matrix.arch }}
+          path: |
+            ${{ env.tarball }}
+            ${{ env.tarball }}.sha256sum
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: nydus-release-tarball-*
+          merge-multiple: true
+          path: nydus-tarball
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Nydus ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
+          files: nydus-tarball/*
+          fail_on_unmatched_files: true
