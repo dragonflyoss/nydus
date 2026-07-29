@@ -12,6 +12,7 @@ The user-facing commands are:
 - `nydus merge`
 - `nydus optimize`
 - `nydus fuse`
+- `nydus ublk` (with the optional `ublk` feature)
 - `nydus uffd` (with the optional `uffd` feature)
 - `nydus fanotify` (with the optional `fanotify` feature)
 
@@ -322,6 +323,65 @@ temporary cache directory that is removed on exit. When `--config` is provided,
 the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
 `--blob-dir`/`--cache-dir` flags take precedence over the config. See
 [Storage config](#storage-config).
+
+### Ublk
+
+`nydus ublk [OPTIONS]`
+
+The `nydus ublk` command serves a flattened nydus image as a read-only
+`/dev/ublkbN` block device through the kernel's userspace block driver
+(`ublk_drv`). The bootstrap sits at device offset `0` and every blob at the
+`mapped_offset` recorded in its EROFS device slot, which is exactly the layout
+the kernel EROFS driver expects from a single device — so the device can be
+mounted with `mount -t erofs` and every filesystem operation above it runs in
+the kernel, with no userspace round trip per file.
+
+The ublk command is available only when Nydus is built with both the `cli` and
+`ublk` features. It requires Linux 6.0 or newer with the `ublk_drv` module
+loaded.
+
+```bash
+cargo build --release --features cli,ublk --bin nydus
+
+sudo modprobe ublk_drv
+
+sudo nydus ublk \
+  --bootstrap /var/lib/nydus/image/image.boot \
+  --config /etc/nydus/config.yaml
+# prints e.g. /dev/ublkb0
+
+sudo mount -t erofs -o ro /dev/ublkb0 /mnt/nydus
+```
+
+Options:
+
+- `--bootstrap` selects the EROFS bootstrap used as device metadata. Its blob
+  table drives the flattened layout, so multi-blob images need no extra flags.
+- `--config` selects the regular Nydus backend, cache, and prefetch
+  configuration. See [Storage config](#storage-config).
+- `--dev-id` requests a specific device id; `-1` (the default) lets the driver
+  allocate one.
+- `--queues` sets the queue count. Each queue is one thread serving its I/O
+  synchronously, so a single queue serializes the whole device. The default is
+  one queue per host CPU, capped at 4.
+- `--depth` sets the per-queue depth (default 128).
+- `--io-buf-bytes` sets the per-request buffer size (default 512 KiB).
+- `--unprivileged` creates the device with `UBLK_F_UNPRIVILEGED_DEV`.
+- `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
+
+Blobs are prepared before the device path is printed, so a backend that cannot
+serve a blob meta fails the daemon at startup rather than surfacing later as an
+opaque `mount` failure. The device path is printed to stdout as its own line;
+callers should match the `/dev/ublkb` prefix rather than assume it is the first
+line, because structured logs may also go to stdout.
+
+Unmount before stopping the daemon: the kernel cannot delete a mounted device,
+so killing the daemon first leaks it. The daemon must also not share a mount
+namespace with the mounter, or shutdown and unmount deadlock on each other.
+
+See [Nydus ublk Block Device Target](ublk.md) for the flattened device layout,
+device parameters, read path, queue model, and a comparison with the other
+mount paths.
 
 ### UFFD
 
