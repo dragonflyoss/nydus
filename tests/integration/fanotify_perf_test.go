@@ -342,7 +342,7 @@ func (e *fanotifyPerfEnv) warmupPageCache(t *testing.T, fioBin, target string) {
 	t.Helper()
 	t.Log("  warming page cache (seq read 10s)")
 	out, err := exec.Command(fioBin, "--name=warmup", "--filename="+target,
-		"--rw=read", "--bs=128k", "--direct=0", "--numjobs=1",
+		"--rw=read", "--bs=128k", "--direct=0", "--invalidate=0", "--numjobs=1",
 		"--runtime=10", "--time_based", "--readonly").CombinedOutput()
 	require.NoError(t, err, "warmup fio failed: %s", out)
 	t.Log("  page cache warm")

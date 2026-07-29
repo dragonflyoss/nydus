@@ -15,6 +15,7 @@ The user-facing commands are:
 - `nydus ublk` (with the optional `ublk` feature)
 - `nydus uffd` (with the optional `uffd` feature)
 - `nydus fanotify` (with the optional `fanotify` feature)
+- `nydus nbd` (with the optional `nbd` feature)
 
 The merge implementation focuses on metadata overlay, blob-id preservation and
 OCI whiteout handling. The build and runtime paths use the embedded blob meta
@@ -263,7 +264,8 @@ Current implementation notes:
 
 The `nydus fuse` command mounts nydus metadata as a filesystem at the target
 mountpoint. It is the host filesystem mount entrypoint; microVM integrations
-can instead use [`nydus uffd`](#uffd). During read path resolution, runtime
+can instead use [`nydus uffd`](#uffd), and block-device consumers
+[`nydus nbd`](#nbd). During read path resolution, runtime
 uses the blob id recorded in bootstrap metadata to locate the corresponding
 blob under `--blob-dir` and then serves chunk data from that blob.
 
@@ -477,10 +479,63 @@ fanotify group fd, whose release would fail-open residual events. Requires
 See [Nydus Fanotify Pre-Content Service](fanotify.md) for the multi-device layout,
 event ABI, event processing, service lifecycle, and constraints.
 
+### NBD
+
+`nydus nbd [OPTIONS]`
+
+The `nydus nbd` command exposes the flattened nydus image (bootstrap plus all
+data blobs) as a single read-only block device through the Linux NBD driver.
+The kernel reads `/dev/nbdX`; each cold read fetches the covering blob ranges
+into the local cache files on demand. The bootstrap keeps its device table, so
+mounting the device as EROFS without `device=` options enables the kernel's
+flatdev mode and every chunk resolves on the one device. This is the
+block-device counterpart to `nydus fanotify`: it works on kernels without
+`FAN_PRE_ACCESS` (Linux < 6.15) and needs only the `nbd` module and EROFS
+support.
+
+The NBD command is available only when Nydus is built with both the `cli` and
+`nbd` features.
+
+```bash
+cargo build --release --features cli,nbd --bin nydus
+
+sudo nydus nbd \
+  --bootstrap /var/lib/nydus/image/image.boot \
+  --config /etc/nydus/config.yaml \
+  --device /dev/nbd0 \
+  --mountpoint /mnt/erofs
+```
+
+Options:
+
+- `--bootstrap` is the EROFS bootstrap served at the head of the device.
+- `--config` selects the regular Nydus backend, cache, and prefetch
+  configuration.
+- `--device` is the NBD device node to attach. A device already serving
+  another client (nonzero capacity) is refused.
+- `--mountpoint` optionally mounts the device as EROFS once the session is
+  live and unmounts it on shutdown; when omitted, only the device is attached
+  and the caller mounts it.
+- `--threads` sets the worker count (default: available CPU count, capped at
+  16). Each worker is an independent kernel NBD connection, so backend
+  fetches for concurrent reads overlap.
+- `--timeout` (seconds, default 60, nonzero) is how long the kernel waits for
+  one reply before failing the request; size it above the worst-case cold
+  fetch from the backend.
+- `--log-level`, `--log-dir`, and `--log-max-files` control service logging.
+
+On shutdown, the first termination signal unmounts **before** tearing down
+the NBD session — the unmount's own reads still need a live device — and a
+second signal forces immediate exit. Requires root (NBD ioctls plus mount)
+and the `nbd` kernel module.
+
+See [Nydus NBD Service](nbd.md) for the wire framing, ioctl session setup,
+request validation, and lifecycle details.
+
 ### Storage config
 
-`nydus fuse`, `nydus uffd`, `nydus fanotify`, and `nydus check` accept a shared
-YAML storage config through `--config <path>`. It centralizes the backend
+`nydus fuse`, `nydus uffd`, `nydus fanotify`, `nydus nbd`, and `nydus check`
+accept a shared YAML storage config through `--config <path>`. It centralizes the backend
 directory, cache directory, and prefetch behavior so command-specific directory
 flags can be
 omitted.
@@ -523,7 +578,8 @@ Fields:
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
 override the corresponding config directories. Runtime prefetch applies to
-`nydus fuse` and `nydus uffd`; static `nydus check` does not start it.
+`nydus fuse`, `nydus uffd`, and `nydus nbd`; static `nydus check` does not
+start it.
 Unknown `backend.type`/`cache.type` values are rejected at load time.
 
 Example invocations:
@@ -1466,7 +1522,9 @@ the library entry point for hypervisors
 that mount the nydus image inside the guest as a plain EROFS
 filesystem over virtio-pmem, instead of using `nydus fuse` on the host. The
 `nydus uffd` service builds its flattened device and on-demand fetch path on
-the same accessor; see [Nydus UFFD Service and Wire Protocol](uffd.md).
+the same accessor; see [Nydus UFFD Service and Wire Protocol](uffd.md). The
+`nydus nbd` service serves the same flattened view through the kernel NBD
+driver; see [Nydus NBD Service](nbd.md).
 
 - The bootstrap is the EROFS primary device; each data blob is an external
 	device backed by its host cache data file (`{cache_dir}/{hex}.blob.data`),
