@@ -18,7 +18,7 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
 
 - **CLI-friendly** — non-core capabilities are removed and binary components
   reduced: one `nydus` binary (`build` / `merge` / `check` / `optimize` /
-  `fuse` / `uffd` / `fanotify`) plus the `nydusify` image orchestrator. Each layer is one
+  `fuse` / `ublk` / `uffd` / `fanotify`) plus the `nydusify` image orchestrator. Each layer is one
   self-contained blob artifact (`data + bootstrap + blob meta + footer`)
   named by its SHA256, with an optional standalone metadata-only bootstrap.
 - **Native EROFS format** — a fully standard EROFS layout compatible with
@@ -42,11 +42,13 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
   client SDK mode talking straight to a scheduler, improving large-scale
   distribution performance.
 - **Multiple mount paths, Kata pmem UFFD support** — host FUSE mount
-  (`nydus fuse`), a device-level userfaultfd service (`nydus uffd`), a
-  fanotify pre-content service (`nydus fanotify`, Linux >= 6.15), and an
-  embeddable accessor library (`NydusAccessor`) that serve the image to
-  microVM guests as EROFS over virtio-pmem — the target end-state for Kata
-  image acceleration in agent sandbox image and snapshot scenarios.
+  (`nydus fuse`), a read-only ublk block device (`nydus ublk`, Linux >= 6.0)
+  that the kernel EROFS driver mounts directly, a device-level userfaultfd
+  service (`nydus uffd`), a fanotify pre-content service (`nydus fanotify`,
+  Linux >= 6.15), and an embeddable accessor library (`NydusAccessor`) that
+  serve the image to microVM guests as EROFS over virtio-pmem — the target
+  end-state for Kata image acceleration in agent sandbox image and snapshot
+  scenarios.
 - **Build and FUSE performance** — targets over 3× overall improvement in
   layer build time, memory efficiency, and FUSE performance compared with v2.
 - **Observability** — Prometheus metrics and the on-demand access trace are
@@ -120,11 +122,45 @@ pre-content mark disables kernel readahead.
 | Readdir + stat (`ls -l`) latency | ms/op | 10.0 | 11.9 | 10.1 | 12.0 |
 | First 1 MiB cold read | s | — | — | 0.02 | 0.08 |
 
+### ublk vs FUSE
+
+`nydus ublk` (Linux ≥ 6.0) serves the same image as a read-only block device
+that the kernel EROFS driver mounts directly. Same image, backend, and cache
+for both modes; the page cache is dropped before every phase and the working
+set is bounded to 128 MiB so results are not dominated by host free memory.
+Numbers are the median of 3 runs of `tests/scripts/bench_ublk_vs_fuse.sh` on a
+6-CPU host.
+
+**Conclusion:** ublk wins wherever the kernel read path matters. A metadata
+walk is 7.5× faster because it runs entirely in the kernel EROFS driver with
+no per-file userspace round trip, sequential reads are 3.3× faster, and
+single-job 4K random reads are 4.7× faster. Concurrent 4K random reads are a
+wash: at that point both modes are served from the page cache and the
+bottleneck is neither mount path.
+
+| Benchmark | Unit | ublk | FUSE | Ratio |
+| --- | --- | ---: | ---: | ---: |
+| Metadata walk (10,004 files) | s | 0.17 | 1.28 | 7.5× |
+| Sequential read 1M | MiB/s | 4,356 | 1,317 | 3.3× |
+| Random read 4K | IOPS | 13,590 | 2,865 | 4.7× |
+| Random read 4-job 4K | IOPS | 52,503 | 53,156 | 0.99× |
+
+Serving a block device costs one userspace round trip per request, so the
+daemon's own efficiency sets the ceiling. Measured with
+`fio --iodepth=32 --numjobs=1` against a single queue thread on a warm cache,
+where that thread is CPU bound:
+
+| | IOPS | Latency (µs) | Daemon CPU per I/O (µs) |
+| --- | ---: | ---: | ---: |
+| Rebuild the blob layout per I/O, serve with `pread` | 369k | 86.4 | 2.57 |
+| Memoise the blob layout | 397k | 80.3 | 2.38 |
+| Serve from `mmap`ed backing files | **481k** | **66.4** | **1.88** |
+
 ## Components
 
 | Component        | Path                     | Description                                                                                              |
 | ---------------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `nydus`          | `nydus/src/bin/nydus/`         | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `uffd` / `fanotify`                      |
+| `nydus`          | `nydus/src/bin/nydus/`         | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `ublk` / `uffd` / `fanotify`      |
 | `nydusify`       | `nydusify/`              | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry                 |
 | `nydus-accessor` | `nydus-accessor/` | Library crate (`NydusAccessor`) for embedding the image read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
 
@@ -171,6 +207,7 @@ nydus fuse --bootstrap image.boot --config config.yaml --mountpoint /mnt/nydus
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [docs/nydus.md](docs/nydus.md) | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, accessor API, and `nydusify`    |
 | [docs/uffd.md](docs/uffd.md)   | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem |
+| [docs/ublk.md](docs/ublk.md)   | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths |
 | [docs/erofs.md](docs/erofs.md) | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                   |
 | [docs/fanotify.md](docs/fanotify.md) | Fanotify pre-content service: multi-device EROFS model, event ABI, event processing, response protocol, service lifecycle, and fail-open behavior on crash |
 
@@ -186,6 +223,9 @@ make release
 
 # With the optional UFFD service.
 cargo build --release --features cli,uffd
+
+# With the optional ublk block device target (needs Linux 6.0+ to run).
+cargo build --release --features cli,ublk
 
 # The nydusify binary.
 make nydusify
@@ -213,6 +253,9 @@ make test-e2e
 
 # UFFD service smoke test.
 make test-uffd
+
+# ublk block device test (requires root and Linux 6.0+ with ublk_drv).
+make test-ublk
 
 # Fanotify service smoke test.
 make test-fanotify
