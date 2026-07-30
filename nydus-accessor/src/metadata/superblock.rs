@@ -1,5 +1,8 @@
 use super::*;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::mem;
+use std::path::Path;
 
 /// EROFS superblock — 128 bytes, `#[repr(C, packed)]`.
 #[repr(C, packed)]
@@ -111,5 +114,108 @@ impl ErofsSuperblock {
 
     pub fn devt_slotoff(&self) -> u16 {
         get_u16(&self.devt_slotoff)
+    }
+}
+
+/// Check whether `path` is a rafs v7 (pure EROFS) bootstrap.
+///
+/// Reads the EROFS superblock at [`EROFS_SUPER_OFFSET`] and requires:
+/// - the EROFS magic,
+/// - only incompat features this crate implements (standard EROFS contract),
+/// - the [`EROFS_FEATURE_COMPAT_RAFS_V6`] marker bit to be absent.
+///
+/// Returns `Ok(false)` for RAFS v6 bootstraps (which always carry the marker
+/// bit) and an error for files that are not readable EROFS images at all, so
+/// callers can route `nydus://` paths to the right backend by content instead
+/// of by URI scheme.
+pub fn is_rafs_v7_bootstrap(path: &Path) -> io::Result<bool> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(EROFS_SUPER_OFFSET))?;
+    let mut buf = [0u8; EROFS_SB_BASE_SIZE];
+    file.read_exact(&mut buf)?;
+    // Safety: ErofsSuperblock is #[repr(C, packed)], exactly
+    // EROFS_SB_BASE_SIZE bytes, and valid for any bit pattern.
+    let sb: &ErofsSuperblock = unsafe { &*(buf.as_ptr() as *const ErofsSuperblock) };
+
+    if sb.magic() != EROFS_SUPER_MAGIC_V1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad EROFS magic: 0x{:08X}", sb.magic()),
+        ));
+    }
+    const SUPPORTED_INCOMPAT: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
+        | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
+        | EROFS_FEATURE_INCOMPAT_48BIT;
+    let unknown = sb.feature_incompat() & !SUPPORTED_INCOMPAT;
+    if unknown != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported EROFS incompat features: {unknown:#x}"),
+        ));
+    }
+    Ok(sb.feature_compat() & EROFS_FEATURE_COMPAT_RAFS_V6 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_bootstrap(
+        feature_compat: u32,
+        feature_incompat: u32,
+        magic: Option<u32>,
+    ) -> tempfile::NamedTempFile {
+        let mut sb = ErofsSuperblock::new(
+            feature_compat,
+            feature_incompat,
+            0,
+            0,
+            0,
+            1,
+            1,
+            0,
+            0,
+            &[0u8; 16],
+        );
+        if let Some(m) = magic {
+            set_u32(&mut sb.magic, m);
+        }
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&[0u8; EROFS_SUPER_OFFSET as usize]).unwrap();
+        file.write_all(sb.as_bytes()).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn test_is_rafs_v7_bootstrap() {
+        // Pure EROFS with standard bits only: rafs v7.
+        let v7 = write_bootstrap(
+            EROFS_FEATURE_COMPAT_SB_CHKSUM,
+            EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
+            None,
+        );
+        assert!(is_rafs_v7_bootstrap(v7.path()).unwrap());
+
+        // RAFS v6 marker bit present: not v7.
+        let v6 = write_bootstrap(
+            EROFS_FEATURE_COMPAT_RAFS_V6,
+            EROFS_FEATURE_INCOMPAT_CHUNKED_FILE | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
+            None,
+        );
+        assert!(!is_rafs_v7_bootstrap(v6.path()).unwrap());
+
+        // Bad magic: error.
+        let bad = write_bootstrap(0, 0, Some(0xDEAD_BEEF));
+        assert!(is_rafs_v7_bootstrap(bad.path()).is_err());
+
+        // Unknown incompat bit: error.
+        let unknown = write_bootstrap(0, 0x8000_0000, None);
+        assert!(is_rafs_v7_bootstrap(unknown.path()).is_err());
+
+        // Truncated file (no superblock): error.
+        let empty = tempfile::NamedTempFile::new().unwrap();
+        assert!(is_rafs_v7_bootstrap(empty.path()).is_err());
     }
 }
