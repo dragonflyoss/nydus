@@ -122,51 +122,66 @@ pre-content mark disables kernel readahead.
 | Readdir + stat (`ls -l`) latency | ms/op | 10.0 | 11.9 | 10.1 | 12.0 |
 | First 1 MiB cold read | s | — | — | 0.02 | 0.08 |
 
-### NBD vs FUSE
+### Block device vs FUSE
 
-`nydus nbd` serves the same image as a single read-only block device through
-the kernel NBD driver, mounted as native EROFS — it needs only the `nbd`
-module and EROFS support. Numbers from`make test-nbd-perf` (local backend, 
-same image and prefetch-off config for both modes, separate caches): 
-**warm** = page cache hot, **cold-page** = page cache dropped before every job, 
-**O_DIRECT** = page cache bypassed on every request in both modes (the pure per-request round trip).
+`nydus nbd` and `nydus ublk` each serve the same image as a single
+read-only block device — NBD through the kernel NBD driver, ublk through
+`ublk_drv` (Linux 6.0+) — both mounted as native EROFS. `make test-block-perf`
+runs all three modes (FUSE, NBD, ublk) against the same local-backend image
+with prefetch off and separate caches: **warm** = page cache hot,
+**cold-page** = page cache dropped before every job, **O_DIRECT** = page
+cache bypassed on every request (the pure per-request round trip).
 
-**Conclusion:** NBD wins steady state and metadata — warm large-block reads
-run 1.9–2.3× FUSE (native EROFS page-cache path vs FUSE's heavier cached-read
-path) with the daemon fully out of the data path (0.0 s CPU over the warm
-suite vs 2.3 s for FUSE); readdir is ~1.5× faster and stat ~15% faster. FUSE
-has the thinner cold per-request round trip: with O_DIRECT, 4K random costs
-13.3 µs vs 23.9 µs per op and sequential 128K also favors FUSE — NBD pays the
-block layer + NBD socket on every page-cache miss. The fill path is identical
-by construction — both modes share the same accessor and cache format.
+**Conclusion:** both block-device modes beat FUSE on warm steady state and
+metadata — warm large-block reads run ~2× FUSE (Seq 128K: NBD 26,715 / ublk
+26,361 vs FUSE 13,466 MiB/s) with the daemons fully out of the data path
+(0.0 s CPU over the warm suite vs 2.2 s for FUSE); readdir is ~1.5× faster
+and stat ~15% faster, served by the kernel EROFS driver. NBD and ublk are
+within ~2% of each other whenever the page cache is hot — the transport
+difference only shows up on cold requests. There ublk is the thinnest: with
+O_DIRECT, 4K random costs 11.7 µs (ublk) vs 13.4 µs (FUSE) vs 24.0 µs (NBD),
+and sequential 128K direct goes 4,320 / 3,330 / 2,235 MiB/s — io_uring
+shared-memory SQE/CQE undercuts both the NBD kernel socket and FUSE's
+request/reply, so ublk now wins the cold per-request round trip too. The fill
+path is identical by construction (shared accessor and cache format): prewarm
+972 / 1,060 / 1,069 MiB/s, 71.1 MiB fetched for the block modes vs 64.0 for
+FUSE (readahead policy). FUSE's only remaining win is mount-ready latency:
+0.21 s vs ublk 6.42 s, because `nydus ublk` eagerly prepares every blob in
+`UblkDevice::new` so the EROFS `mount` never stalls — that same ~6 s of blob
+prep shows up in FUSE/NBD's first 1 MiB read (6.18–6.36 s) instead of
+mount-ready, so the total cold-start cost is roughly constant across modes.
 
-| Benchmark | Unit | NBD warm | FUSE warm | NBD cold-page | FUSE cold-page |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Sequential read 128K | MiB/s | 32,494 | 13,855 | 33,561 | 15,595 |
-| Sequential read 4-job 128K | MiB/s | 43,578 | 23,239 | 34,950 | 24,876 |
-| Sequential read 4K | MiB/s | 5,797 | 4,802 | 5,719 | 4,971 |
-| Sequential read 4-job 4K | MiB/s | 8,244 | 8,198 | 8,324 | 8,193 |
-| Random read 128K | MiB/s | 30,234 | 13,743 | 16,922 | 16,861 |
-| Random read 4-job 128K | MiB/s | 42,263 | 20,948 | 24,525 | 25,026 |
-| Random read 4K | IOPS | 1,077,819 | 1,143,747 | 906,122 | 954,870 |
-| Random read 4K latency | µs | 0.8 | 0.8 | 1.0 | 0.9 |
-| Random read 4-job 4K | MiB/s | 6,619 | 6,826 | 5,447 | 5,612 |
-| Stat | IOPS | 508,934 | 442,512 | 509,355 | 449,899 |
-| Stat latency | µs | 2.0 | 2.3 | 2.0 | 2.2 |
-| Readdir | IOPS | 27,072 | 17,605 | 26,451 | 17,663 |
-| Readdir latency | µs | 36.9 | 56.8 | 37.8 | 56.6 |
-| Sequential read 128K O_DIRECT | MiB/s | — | — | 2,274 | 3,399 |
-| Random read 4K O_DIRECT | IOPS | — | — | 41,391 | 73,577 |
-| Random read 4K O_DIRECT latency | µs | — | — | 23.9 | 13.3 |
-| Daemon CPU over the suite | s | 0.0 | 2.3 | 0.7 | 2.9 |
-| Mount ready | s | — | — | 0.21 | 0.05 |
-| First 1 MiB cold read | s | — | — | 6.17 | 6.55 |
-| Prewarm (full-file cold fetch) | MiB/s | — | — | 958 | 1,006 |
+| Benchmark | Unit | FUSE warm | FUSE cold-page | NBD warm | NBD cold-page | ublk warm | ublk cold-page |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Sequential read 128K | MiB/s | 13,466 | 14,947 | 26,715 | 27,791 | 26,361 | 28,140 |
+| Sequential read 4-job 128K | MiB/s | 19,967 | 21,722 | 34,167 | 22,189 | 33,695 | 27,233 |
+| Sequential read 4K | MiB/s | 4,980 | 5,158 | 5,831 | 5,702 | 5,757 | 5,943 |
+| Sequential read 4-job 4K | MiB/s | 7,771 | 7,783 | 7,410 | 7,573 | 7,380 | 7,548 |
+| Random read 128K | MiB/s | 12,841 | 15,368 | 25,752 | 14,748 | 24,982 | 14,222 |
+| Random read 4-job 128K | MiB/s | 18,371 | 21,210 | 32,056 | 19,742 | 31,667 | 20,598 |
+| Random read 4K | IOPS | 1,059,692 | 862,411 | 1,073,705 | 843,477 | 1,057,331 | 1,022,064 |
+| Random read 4K latency | µs | 0.8 | 1.0 | 0.8 | 1.1 | 0.8 | 0.9 |
+| Random read 4-job 4K | MiB/s | 6,210 | 5,081 | 6,353 | 4,792 | 6,367 | 5,871 |
+| Stat | IOPS | 379,835 | 380,165 | 441,985 | 441,879 | 442,925 | 438,224 |
+| Stat latency | µs | 2.6 | 2.6 | 2.3 | 2.3 | 2.3 | 2.3 |
+| Readdir | IOPS | 16,850 | 16,826 | 26,125 | 25,187 | 25,051 | 24,718 |
+| Readdir latency | µs | 59.3 | 59.4 | 38.3 | 39.7 | 39.9 | 40.5 |
+| Sequential read 128K O_DIRECT | MiB/s | — | 3,330 | — | 2,235 | — | 4,320 |
+| Random read 4K O_DIRECT | IOPS | — | 72,906 | — | 41,363 | — | 84,229 |
+| Random read 4K O_DIRECT latency | µs | — | 13.4 | — | 24.0 | — | 11.7 |
+| Daemon CPU over the suite | s | 2.2 | 2.9 | 0.0 | 0.7 | 0.0 | 0.3 |
+| Mount ready | s | — | 0.21 | — | 0.21 | — | 6.42 |
+| First 1 MiB cold read | s | — | 6.36 | — | 6.18 | — | 0.007 |
+| Prewarm (full-file cold fetch) | MiB/s | — | 972 | — | 1,060 | — | 1,069 |
+| Data fetched (prewarm) | MiB | — | 64.0 | — | 71.1 | — | 71.1 |
 
-- The First 1 MiB cold read (~6.2–6.6 s in both modes) is the shared
-  accessor's one-time first-touch blob preparation against this local-backend
-  image (a full-blob digest verification), not a transport cost — the two
-  modes are within 6% of each other.
+- The First 1 MiB cold read is not a transport cost. FUSE and NBD pay
+  ~6.2–6.4 s here because both prepare the blob lazily on first touch (meta
+  download + cache-file sizing + digest verification); ublk pays 6.42 s in
+  *mount-ready* instead, because `nydus ublk` calls
+  `accessor.blob.flat_layout()` in `UblkDevice::new` so EROFS `mount` never
+  stalls. The total cold-start cost (mount-ready + first read) is roughly
+  constant across modes.
 - Cold-page `direct=0` rows largely re-warm during each 20 s job (the target
   file is 64 MiB), so they mostly reflect the same page-cache path difference
   as the warm columns; the O_DIRECT rows are the clean cold-path comparison.
@@ -276,9 +291,11 @@ make test-ublk
 # Fanotify service smoke test.
 make test-fanotify
 
-# NBD service E2E (requires root and the nbd module); NBD vs FUSE benchmark.
+# NBD service E2E (requires root and the nbd module);
 make test-nbd
-make test-nbd-perf
+
+# FUSE vs NBD vs ublk benchmark.
+make test-block-perf
 
 # xfstests regression (requires root); fio performance benchmark (requires root and fio).
 make test-xfstests

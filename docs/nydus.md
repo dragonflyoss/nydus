@@ -265,7 +265,7 @@ Current implementation notes:
 The `nydus fuse` command mounts nydus metadata as a filesystem at the target
 mountpoint. It is the host filesystem mount entrypoint; microVM integrations
 can instead use [`nydus uffd`](#uffd), and block-device consumers
-[`nydus nbd`](#nbd). During read path resolution, runtime
+[`nydus nbd`](#nbd) or [`nydus ublk`](#ublk). During read path resolution, runtime
 uses the blob id recorded in bootstrap metadata to locate the corresponding
 blob under `--blob-dir` and then serves chunk data from that blob.
 
@@ -534,8 +534,8 @@ request validation, and lifecycle details.
 
 ### Storage config
 
-`nydus fuse`, `nydus uffd`, `nydus fanotify`, `nydus nbd`, and `nydus check`
-accept a shared YAML storage config through `--config <path>`. It centralizes the backend
+`nydus fuse`, `nydus uffd`, `nydus fanotify`, `nydus nbd`, `nydus ublk`, and
+`nydus check` accept a shared YAML storage config through `--config <path>`. It centralizes the backend
 directory, cache directory, and prefetch behavior so command-specific directory
 flags can be
 omitted.
@@ -578,8 +578,8 @@ Fields:
 The whole `prefetch` block is optional and falls back to the defaults above;
 individual fields may also be omitted independently. CLI directory flags
 override the corresponding config directories. Runtime prefetch applies to
-`nydus fuse`, `nydus uffd`, and `nydus nbd`; static `nydus check` does not
-start it.
+`nydus fuse`, `nydus uffd`, `nydus nbd`, and `nydus ublk`; static `nydus check`
+does not start it.
 Unknown `backend.type`/`cache.type` values are rejected at load time.
 
 Example invocations:
@@ -1524,7 +1524,9 @@ filesystem over virtio-pmem, instead of using `nydus fuse` on the host. The
 `nydus uffd` service builds its flattened device and on-demand fetch path on
 the same accessor; see [Nydus UFFD Service and Wire Protocol](uffd.md). The
 `nydus nbd` service serves the same flattened view through the kernel NBD
-driver; see [Nydus NBD Service](nbd.md).
+driver; see [Nydus NBD Service](nbd.md). The `nydus ublk` service serves it
+through `ublk_drv` over `io_uring`; see
+[Nydus ublk Block Device Target](ublk.md).
 
 - The bootstrap is the EROFS primary device; each data blob is an external
 	device backed by its host cache data file (`{cache_dir}/{hex}.blob.data`),

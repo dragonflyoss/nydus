@@ -39,9 +39,9 @@ NBD_TIMEOUT ?= 600s
 NBD_COUNT ?= 1
 NBD_GO_TEST_ARGS ?=
 
-NBD_PERF_TIMEOUT ?= 1800s
-NBD_PERF_COUNT ?= 1
-NBD_PERF_GO_TEST_ARGS ?=
+BLOCK_PERF_TIMEOUT ?= 1800s
+BLOCK_PERF_COUNT ?= 1
+BLOCK_PERF_GO_TEST_ARGS ?=
 
 XFSTESTS_TIMEOUT ?= 600s
 XFSTESTS_COUNT ?= 1
@@ -84,7 +84,7 @@ FANOTIFY_PERF_TEST_PKG = .
 # fanotify_test.go, so the entire package must be compiled together.
 NBD_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-uffd test-fanotify test-nbd test-nbd-perf test-xfstests test-perf test-top-images crate clean
+.PHONY: build release nydusify test test-e2e test-uffd test-fanotify test-nbd test-block-perf test-xfstests test-perf test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -162,23 +162,25 @@ test-nbd: release
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
 		$(GO_BIN) test -v -run '^TestNbdE2E$$' -count $(NBD_COUNT) -timeout $(NBD_TIMEOUT) $(NBD_GO_TEST_ARGS) $(NBD_TEST_PKG)
 
-# NBD vs FUSE performance comparison (requires root, the nbd module, EROFS
-# support, fio). Both modes serve the same local-backend image with prefetch
-# disabled; after prewarming the nydus cache the comparison isolates the read
-# transport: NBD (EROFS -> block layer -> NBD socket -> daemon pread) vs FUSE
-# (request -> daemon pread -> reply). Columns per mode: warm (page cache hot,
-# NBD daemon should be idle) and cold-page (dropCaches per job, warm nydus
-# cache — the headline transport number); direct=1 rows bypass the page cache
-# for the purest per-request round-trip comparison. Needs both subcommands in
-# one binary, hence FEATURES=cli,fuse,nbd.
-test-nbd-perf: FEATURES=cli,fuse,nbd
-test-nbd-perf: release
+# FUSE vs NBD vs ublk block-device performance comparison (requires root,
+# the nbd and ublk_drv modules, EROFS support, fio). All three modes serve
+# the same local-backend image with prefetch disabled; after prewarming the
+# nydus cache the comparison isolates the read transport: FUSE (request ->
+# daemon pread -> reply), NBD (EROFS -> block layer -> NBD socket -> daemon
+# pread), ublk (EROFS -> ublk_drv -> io_uring -> daemon pread). Columns per
+# mode: warm (page cache hot, NBD/ublk daemons should be idle) and cold-page
+# (dropCaches per job, warm nydus cache — the headline transport number);
+# direct=1 rows bypass the page cache for the purest per-request round-trip
+# comparison. Needs all three subcommands in one binary, hence
+# FEATURES=cli,fuse,nbd,ublk.
+test-block-perf: FEATURES=cli,fuse,nbd,ublk
+test-block-perf: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
 	cd tests/integration && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
-		NBD_RUN_PERF=1 \
-		$(GO_BIN) test -v -run '^TestNbdPerf$$' -count $(NBD_PERF_COUNT) -timeout $(NBD_PERF_TIMEOUT) $(NBD_PERF_GO_TEST_ARGS) $(NBD_TEST_PKG)
+		BLOCK_RUN_PERF=1 \
+		$(GO_BIN) test -v -run '^TestBlockPerf$$' -count $(BLOCK_PERF_COUNT) -timeout $(BLOCK_PERF_TIMEOUT) $(BLOCK_PERF_GO_TEST_ARGS) $(NBD_TEST_PKG)
 
 # Run xfstests regression separately (requires root, builds release first).
 # First run will install xfstests dependencies via tests/scripts/setup_xfstests.sh.

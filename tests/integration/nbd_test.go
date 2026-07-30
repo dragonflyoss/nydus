@@ -269,7 +269,7 @@ func (e *nbdEnv) waitForDeviceRelease(t *testing.T) {
 }
 
 // waitNbdDeviceRelease waits until the kernel reports the NBD device as
-// detached (sysfs size back to 0). Shared with TestNbdPerf.
+// detached (sysfs size back to 0). Shared with TestBlockPerf.
 func waitNbdDeviceRelease(t *testing.T, device string) {
 	t.Helper()
 	sysfs := filepath.Join("/sys/block", filepath.Base(device), "size")

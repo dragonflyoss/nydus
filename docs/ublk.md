@@ -240,19 +240,6 @@ cargo test --features cli,ublk -p nydus ublk
 make test-ublk
 ```
 
-`tests/scripts/bench_ublk_vs_fuse.sh` compares the ublk and FUSE mounts of the
-same image on metadata walk, sequential read, and random read. It drops the
-page cache before every phase and bounds the working set so results are not
-dominated by the host's free memory.
-
-```bash
-sudo ./tests/scripts/bench_ublk_vs_fuse.sh \
-  --nydus ./target/release/nydus \
-  --bootstrap /path/to/image.boot \
-  --config /path/to/config.yaml \
-  --output /tmp/bench.csv --runs 3
-```
-
 ## Constraints
 
 - Read-only. A writable container rootfs needs `overlayfs` on top.
