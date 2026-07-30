@@ -35,6 +35,11 @@ pub const EROFS_SLOTSIZE: u32 = 1 << EROFS_ISLOTBITS;
 // Feature flags.
 pub const EROFS_FEATURE_COMPAT_SB_CHKSUM: u32 = 0x0000_0001;
 pub const EROFS_FEATURE_COMPAT_MTIME: u32 = 0x0000_0002;
+/// RAFS v6 marker: RAFS v6 bootstraps embed a private extension superblock
+/// and always set this compat bit; pure-EROFS nydus (rafs v7) bootstraps
+/// never do. This crate does not read RAFS v6 images — the bit exists only
+/// so the two formats can be told apart (see [`is_rafs_v7_bootstrap`]).
+pub const EROFS_FEATURE_COMPAT_RAFS_V6: u32 = 0x4000_0000;
 pub const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 pub const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 /// 48-bit block addressing: the kernel interprets the `*_hi` halves of chunk

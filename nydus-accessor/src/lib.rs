@@ -24,7 +24,8 @@ pub use accessor::{
 };
 pub use config::Config;
 pub use metadata::{
-    BlobMeta, BlobMetaChunk, BlobMetaGroup, BlobMetaHeader, BLOB_META_HEADER_SIZE, BLOB_META_MAGIC,
+    is_rafs_v7_bootstrap, BlobMeta, BlobMetaChunk, BlobMetaGroup, BlobMetaHeader,
+    BLOB_META_HEADER_SIZE, BLOB_META_MAGIC, EROFS_FEATURE_COMPAT_RAFS_V6,
 };
 pub use metrics::trace::{TraceDocument, TracePattern, TraceRecorder, TRACE_DOCUMENT_VERSION};
 pub use metrics::MetricsSnapshot;
