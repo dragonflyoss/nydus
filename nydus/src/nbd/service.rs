@@ -98,7 +98,7 @@ fn device_size(fd: RawFd) -> std::io::Result<u64> {
 /// Hand-rolled because `Write::write_all_vectored` is still unstable (#70436).
 fn writev_all<W: Write>(w: &mut W, a: &mut &[u8], b: &mut &[u8]) -> std::io::Result<()> {
     while !a.is_empty() || !b.is_empty() {
-        let iovs = [IoSlice::new(*a), IoSlice::new(*b)];
+        let iovs = [IoSlice::new(a), IoSlice::new(b)];
         let n = w.write_vectored(&iovs)?;
         if n == 0 {
             return Err(std::io::Error::new(
@@ -112,7 +112,7 @@ fn writev_all<W: Write>(w: &mut W, a: &mut &[u8], b: &mut &[u8]) -> std::io::Res
                 left -= a.len();
                 *a = &[];
             } else {
-                let cur: &[u8] = *a;
+                let cur: &[u8] = a;
                 *a = &cur[left..];
                 left = 0;
             }
@@ -121,7 +121,7 @@ fn writev_all<W: Write>(w: &mut W, a: &mut &[u8], b: &mut &[u8]) -> std::io::Res
             if left >= b.len() {
                 *b = &[];
             } else {
-                let cur: &[u8] = *b;
+                let cur: &[u8] = b;
                 *b = &cur[left..];
             }
         }
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn ioctl_codes_match_linux_nbd_header() {
         // _IO(0xab, nr) = (0xab << 8) | nr — verify the constants we hardcoded.
-        assert_eq!(NBD_SET_SOCK, (0xab << 8) | 0);
+        assert_eq!(NBD_SET_SOCK, 0xab << 8);
         assert_eq!(NBD_SET_BLOCK_SIZE, (0xab << 8) | 1);
         assert_eq!(NBD_DO_IT, (0xab << 8) | 3);
         assert_eq!(NBD_CLEAR_SOCK, (0xab << 8) | 4);
