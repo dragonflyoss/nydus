@@ -33,23 +33,24 @@ anonymous virtio-pmem mapping
                                                           v
                                                    local cache files
 
-Zerocopy: nydus uffd -- FD ranges --> microVM process
-                                         |
-                                  mmap(MAP_FIXED) + UFFD wake
-                                         |
-                                         v
-                                  guest thread resumes
+Customized (zero-copy): nydus uffd -- FD ranges --> microVM process
+                                                    |
+                                             mmap(MAP_FIXED) + UFFD wake
+                                                    |
+                                                    v
+                                             guest thread resumes
 
-Copy:     nydus uffd -- UFFDIO_COPY / UFFDIO_ZEROPAGE --> guest thread resumes
+Managed (copy): nydus uffd -- UFFDIO_COPY / UFFDIO_ZEROPAGE --> guest thread resumes
 ```
 
 Two fault policies are supported:
 
-- **Zerocopy**: Nydus returns file descriptors and byte ranges. The microVM
-  maps those ranges over the anonymous virtio-pmem VMA and wakes the faulting
-  thread.
-- **Copy**: Nydus reads the resolved bytes and completes the fault itself with
-  `UFFDIO_COPY` or `UFFDIO_ZEROPAGE`. No range response is sent.
+- **Customized**: Nydus returns file descriptors and byte ranges for the
+  zero-copy path. The microVM maps those ranges over the anonymous
+  virtio-pmem VMA and wakes the faulting thread.
+- **Managed**: Nydus reads the resolved bytes and completes the fault itself
+  through the copy path with `UFFDIO_COPY` or `UFFDIO_ZEROPAGE`. No range
+  response is sent.
 
 The service also supports stateless `STAT`, `FETCH`, and `PROBE` requests for a
 client that monitors its own userfaultfd.
@@ -88,7 +89,7 @@ fetched, decoded, and validated before its file descriptor is returned.
 ## Transport and Framing
 
 The server listens on an `AF_UNIX`, `SOCK_STREAM` socket. Every frame consists
-of a fixed 20-byte header followed by `len` payload bytes. All integer fields
+of a fixed 16-byte header followed by `len` payload bytes. All integer fields
 are little-endian.
 
 Because the transport is a stream, clients must not assume that one `sendmsg`
@@ -99,65 +100,93 @@ File descriptors are attached to the frame header with `SCM_RIGHTS`. They are
 not included in `header.len`. A receiver owns every received descriptor and
 must close it after use.
 
-### Common header
+### Request header
 
 | Offset | Size | Type | Field | Meaning |
 |---:|---:|---|---|---|
-| 0 | 4 | `u32` | `magic` | Always `0x55464644` (`UFFD`) |
-| 4 | 2 | `u16` | `flags` | Message-specific flags |
-| 6 | 2 | `u16` | `msg_type` | Request or response type |
-| 8 | 8 | `u64` | `cookie` | Reserved for correlation/extension |
-| 16 | 4 | `u32` | `len` | Payload length, excluding header and FDs |
+| 0 | 2 | `u16` | `command` | Request command |
+| 2 | 6 | `u8[6]` | `command_headers` | Command-specific fields |
+| 8 | 8 | `u64` | `len` | Payload length, excluding header and FDs |
 
-`RANGE_RESPONSE` defines a `NEXT` bit in `flags`; other messages currently set
-`flags` to zero. The receiver accepts unknown flag bits for future extension.
-`cookie` is not currently interpreted and should be zero.
+Commands that do not currently define command-specific fields send these
+bytes as zero. The server ignores unused bytes so future extensions remain
+backward compatible.
 
-The implementation bounds accepted payload lengths. An invalid magic value,
-malformed payload, invalid FD count, or payload exceeding that bound terminates
-the connection. Unknown message types are logged and ignored.
+### Response header
 
-## Message Types
+| Offset | Size | Type | Field | Meaning |
+|---:|---:|---|---|---|
+| 0 | 2 | `u16` | `status` | `OK=1`, `ERROR=2` |
+| 2 | 2 | `u16` | `reply_type` | Response payload type |
+| 4 | 4 | `u8[4]` | `reply_headers` | Reply-specific fields |
+| 8 | 8 | `u64` | `len` | Payload length, excluding header and FDs |
 
-| Value | Name | Direction | Connection state |
-|---:|---|---|---|
-| `0x01` | `HANDSHAKE` | client to server | Establishes UFFD state |
-| `0x02` | `STAT_REQUEST` | client to server | Stateless |
-| `0x03` | `FETCH_REQUEST` | client to server | Stateless |
-| `0x04` | `PROBE_REQUEST` | client to server | Stateless |
-| `0x81` | `RANGE_RESPONSE` | server to client | Backing file ranges |
-| `0x82` | `STAT_RESPONSE` | server to client | Stat response |
+The implementation bounds accepted payload lengths. A malformed payload,
+invalid FD count, or payload exceeding that bound terminates the connection.
+Unknown commands are logged and ignored.
 
-There are no dynamic add-region or remove-region messages. A connection sends
-its complete region list in `HANDSHAKE`, which may occur at most once.
+## Commands and Reply Types
+
+| Value | Command | Connection state |
+|---:|---|---|
+| `0x0a` | `HANDSHAKE` | Establishes UFFD state |
+| `0x0b` | `ADD_REGION` | Not implemented by this service |
+| `0x0c` | `REMOVE_REGION` | Not implemented by this service |
+| `0x20` | `STAT` | Stateless |
+| `0x21` | `FETCH` | Stateless |
+| `0x22` | `PROBE` | Stateless |
+
+| Value | Reply type | Meaning |
+|---:|---|---|
+| `0` | `LEGACY` | Legacy inline or empty response |
+| `1` | `FD_RANGES` | Backing file ranges |
+| `0x20` | `STAT` | Device metadata |
+
+Nydus does not currently implement dynamic add-region or remove-region
+requests. A connection sends its complete region list in `HANDSHAKE`, which may
+occur at most once.
 
 ## HANDSHAKE
 
 `HANDSHAKE` registers one userfaultfd and the VMAs backed by the flattened
 device.
 
-Exactly one userfaultfd must be attached with `SCM_RIGHTS`.
+The first FD attached with `SCM_RIGHTS` is the userfaultfd. Optional backing
+FDs are accepted and closed without use, as described below.
 
-### Payload prefix
+### Command header
 
 | Offset | Size | Type | Field | Meaning |
 |---:|---:|---|---|---|
 | 0 | 2 | `u16` | `version` | Must be `1` |
-| 2 | 1 | `u8` | `flags` | Fault policy and prefault flags |
-| 3 | 1 | `u8` | `region_count` | Number of following regions |
+| 2 | 1 | `u8` | `flags` | Handshake behavior flags |
+| 3 | 1 | `u8` | `uffd_modes` | Effective client UFFD registration modes |
+| 4 | 2 | `u16` | `region_count` | Number of payload regions |
 
 Handshake flags:
 
 | Bit | Name | Meaning |
 |---:|---|---|
-| 0 | `COPY` | Use Copy policy; clear means Zerocopy |
+| 0 | `MANAGED` | Nydus handles faults using the copy path; clear selects the Customized zero-copy path |
 | 1 | `PREFAULT` | Send locally ready ranges during handshake |
+| 2 | `ACK_REQUIRED` | Return an empty Legacy response after acceptance |
+| 3 | `BACKING_FDS` | One backing FD follows the userfaultfd per region |
 
 Other flag bits are currently ignored.
 
+UFFD modes:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| 0 | `MISSING` | Regions use UFFD missing mode |
+| 1 | `WP` | Regions use UFFD write-protect mode |
+| 2 | `WP_ASYNC` | UFFD write protection is asynchronous |
+
+Nydus currently ignores `uffd_modes`, including unknown mode bits.
+
 ### Region entry
 
-Each region is 40 bytes.
+Each region is 48 bytes.
 
 | Offset | Size | Type | Field | Meaning |
 |---:|---:|---|---|---|
@@ -167,33 +196,49 @@ Each region is 40 bytes.
 | 24 | 8 | `u64` | `fault_size` | Fault resolution window |
 | 32 | 4 | `i32` | `prot` | Mapping protection flags |
 | 36 | 4 | `i32` | `flags` | Mapping flags |
+| 40 | 8 | `u64` | `backing_offset` | Region offset in its backing FD |
 
-Region entries immediately follow the 4-byte prefix. Payload length is:
+Region entries start at the beginning of the payload. Payload length is:
 
 ```text
-4 + region_count * 40
+region_count * 48
 ```
+
+Without `BACKING_FDS`, the request carries only the userfaultfd. With
+`BACKING_FDS`, it carries the userfaultfd followed by one backing FD per region.
+Nydus validates this ordering and count, retains the userfaultfd, and
+immediately closes the backing FDs because its current fault paths do not use
+them. `backing_offset` is parsed but otherwise ignored.
 
 The service makes the received userfaultfd nonblocking and monitors it for
 page-fault events. A duplicate handshake is rejected.
 
-When Zerocopy prefault is enabled, Nydus probes the registered regions and
-sends their currently ready ranges as `RANGE_RESPONSE` frames. Prefault does
-not download missing blob data. It is processed synchronously so range-response
-frames are not written concurrently on the stream. Copy policy ignores the
-prefault flag.
+When `ACK_REQUIRED` is set, Nydus sends an empty Legacy `OK` response after
+accepting the session and before sending any prefault `FD_RANGES`. Without the
+flag, a successful handshake has no response. Handshake failure may close the
+connection without an error response.
 
-## RANGE_RESPONSE
+When Customized prefault is enabled, Nydus probes the registered regions and
+sends their currently ready ranges as `FD_RANGES` responses. Prefault does not
+download missing blob data. It is processed synchronously so range frames are
+not written concurrently on the stream. Managed policy ignores the prefault
+flag.
 
-`RANGE_RESPONSE` returns backing file ranges for Zerocopy faults, prefault,
+## FD_RANGES
+
+`FD_RANGES` returns backing file ranges for Customized faults, prefault,
 `FETCH`, and `PROBE`.
 
-### Payload
+### Reply header
 
 | Offset | Size | Type | Field | Meaning |
 |---:|---:|---|---|---|
-| 0 | 4 | `u32` | `range_count` | Number of range entries and attached FDs |
-| 4 | variable | `Range[]` | `ranges` | `range_count` 24-byte entries |
+| 0 | 2 | `u16` | `flags` | Bit zero is `MORE` |
+| 2 | 2 | `u16` | `fd_count` | Number of payload entries and attached FDs |
+
+### Payload
+
+The payload contains exactly `fd_count` consecutive 24-byte range entries.
 
 Each range entry is:
 
@@ -205,27 +250,27 @@ Each range entry is:
 
 One FD is attached for every range, in the same order as the entries. The
 implementation limits the number of ranges and FDs in one frame. Larger
-results are split across multiple `RANGE_RESPONSE` frames, so clients must not
+results are split across multiple `FD_RANGES` frames, so clients must not
 assume a fixed batch size.
 
-Bit zero of the RANGE_RESPONSE header `flags` field is `NEXT`:
+Bit zero of the reply-specific `flags` field is `MORE`:
 
-- `NEXT=1` means another RANGE_RESPONSE for the same logical result follows.
-- `NEXT=0` means the current frame is the final batch.
-- A single-batch result has `NEXT=0`.
-- An empty result is one RANGE_RESPONSE with `range_count=0`, no FDs, and
-  `NEXT=0`.
+- `MORE=1` means another `FD_RANGES` batch for the same logical result follows.
+- `MORE=0` means the current frame is the final batch.
+- A single-batch result has `MORE=0`.
+- An empty result is one `FD_RANGES` response with `fd_count=0`, no FDs, and
+  `MORE=0`.
 
-These rules apply to Zerocopy faults, handshake prefault, `FETCH`, and `PROBE`.
-All batches for one result are sent contiguously and are not interleaved with
-another result on the same connection.
+These rules apply to Customized faults, handshake prefault, `FETCH`, and
+`PROBE`. All batches for one result are sent contiguously and are not
+interleaved with another result on the same connection.
 
 Data ranges reference either the bootstrap or a decoded blob cache file. Hole
 ranges reference `/dev/zero` with `file_offset == 0`. Adjacent ranges are
 merged when they use the same FD and contiguous device/file offsets; adjacent
 hole ranges may also be merged.
 
-For a Zerocopy fault, the client maps each range at:
+For a Customized fault, the client maps each range at:
 
 ```text
 host_address = region.virt_addr
@@ -238,10 +283,11 @@ range and closes the received FDs.
 
 ## STAT
 
-`STAT_REQUEST` has an empty payload and carries no FDs. It may be sent on a
-connection without a handshake.
+`STAT` currently sends zeroed command-specific headers, an empty payload, and
+no FDs. It may be sent on a connection without a handshake.
 
-The server replies with one `STAT_RESPONSE` and no FDs:
+The server replies with one `STAT` response and no FDs. Its reply-specific
+headers are zero and its payload is:
 
 | Offset | Size | Type | Field | Meaning |
 |---:|---:|---|---|---|
@@ -251,8 +297,9 @@ The server replies with one `STAT_RESPONSE` and no FDs:
 
 ## FETCH
 
-`FETCH_REQUEST` asks Nydus to make one device range locally available and
-return its complete FD mapping. It has no connection state and carries no FDs.
+`FETCH` asks Nydus to make one device range locally available and return its
+complete FD mapping. Its command-specific headers are currently zero, it has
+no connection state, and it carries no FDs.
 
 | Offset | Size | Type | Field | Meaning |
 |---:|---:|---|---|---|
@@ -260,25 +307,26 @@ return its complete FD mapping. It has no connection state and carries no FDs.
 | 8 | 8 | `u64` | `len` | Nonzero, block-aligned byte length |
 
 Nydus downloads and decodes missing blob groups, then returns one or more
-`RANGE_RESPONSE` frames. The returned ranges cover the complete requested
+`FD_RANGES` frames. The returned ranges cover the complete requested
 interval without gaps; holes are represented by `/dev/zero` ranges. The client
-receives through the RANGE_RESPONSE with `NEXT=0`, then verifies that the
+receives through the `FD_RANGES` response with `MORE=0`, then verifies that the
 accumulated ranges cover `[offset, offset + len)`.
 
 ## PROBE
 
-`PROBE_REQUEST` has an empty payload, carries no FDs, and requires no
-handshake. It checks the entire flattened device without downloading missing
-blob data.
+`PROBE` currently sends zeroed command-specific headers and an empty payload,
+carries no FDs, and requires no handshake. It checks the entire flattened
+device without downloading missing blob data.
 
-The server emits one or more `RANGE_RESPONSE` frames containing:
+The server emits one or more `FD_RANGES` frames containing:
 
 - the bootstrap range;
 - hole ranges backed by `/dev/zero`;
 - blob subranges already present in the local cache.
 
-Missing blob ranges are omitted. The RANGE_RESPONSE with `NEXT=0` completes the
-probe. If no ranges are ready, that final response has zero ranges and no FDs.
+Missing blob ranges are omitted. The `FD_RANGES` response with `MORE=0`
+completes the probe. If no ranges are ready, that final response has zero
+ranges and no FDs.
 
 ## Fault Handling
 
@@ -287,19 +335,19 @@ fault address. It aligns the fault offset down to the region's `fault_size`
 (with a minimum of the service block size) and clips the resolution window to
 the region end.
 
-### Zerocopy policy
+### Customized policy (zero-copy)
 
 1. Fetch and validate every blob range in the fault window.
 2. Resolve the window into bootstrap/blob/zero FD ranges.
-3. Send one or more `RANGE_RESPONSE` frames.
+3. Send one or more `FD_RANGES` frames.
 4. The client installs fixed mappings and wakes the faulting thread.
 
-### Copy policy
+### Managed policy (copy)
 
 1. Fetch and validate every blob range in the fault window.
 2. Read data ranges from their backing FDs.
 3. Resolve data with `UFFDIO_COPY` and holes with `UFFDIO_ZEROPAGE`.
-4. Return to the connection loop without sending `RANGE_RESPONSE`.
+4. Return to the connection loop without sending `FD_RANGES`.
 
 Faults are processed serially within one connection. Separate connections run
 in independent Tokio tasks and may process faults concurrently. Potentially
@@ -373,9 +421,10 @@ accessor builds unless explicitly enabled.
 - The transport is local Unix stream plus `SCM_RIGHTS`; TCP is not supported.
 - Wire integers are little-endian.
 - Device and file offsets are byte offsets, not block numbers.
-- `RANGE_RESPONSE` FD count must equal `range_count`.
+- An `FD_RANGES` response's `fd_count`, payload entry count, and attached FD
+  count must match.
 - The client must keep its registered VMAs and userfaultfd alive for the
   connection lifetime.
 - Concurrent writers on one protocol connection are not currently supported;
   responses are serialized by the connection task.
-- RANGE_RESPONSE batches belonging to one logical result are contiguous.
+- `FD_RANGES` batches belonging to one logical result are contiguous.

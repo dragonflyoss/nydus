@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::{Config, FdRange, NydusAccessor};
 
-use super::proto::{DeviceRange, FaultPolicy, VmaRegion};
+use super::proto::{DeviceRange, VmaRegion};
 
 pub const UFFD_BLOCK_SIZE: u64 = 4096;
 pub const UFFD_TOTAL_SIZE_ALIGNMENT: u64 = 2 * 1024 * 1024;
@@ -97,7 +97,7 @@ impl UffdCore {
         &self,
         uffd_fd: RawFd,
         regions: &[VmaRegion],
-        policy: FaultPolicy,
+        managed: bool,
         msg: &UffdMsg,
     ) -> Result<Vec<FdRange>> {
         let Some((region, range)) = resolve_fault_range(regions, msg)? else {
@@ -105,20 +105,19 @@ impl UffdCore {
         };
         let ranges = self.fetch_ranges(range.offset, range.len)?;
 
-        match policy {
-            FaultPolicy::Zerocopy => Ok(ranges),
-            FaultPolicy::Copy => {
-                for range in ranges {
-                    let addr = region.virt_addr + (range.source_offset - region.offset);
-                    if range.fd == self.accessor.zero_fd() {
-                        uffdio_zeropage(uffd_fd, addr, range.len)?;
-                    } else {
-                        uffdio_copy_from_fd(uffd_fd, addr, range.fd, range.offset, range.len)?;
-                    }
-                }
-                Ok(Vec::new())
+        if !managed {
+            return Ok(ranges);
+        }
+
+        for range in ranges {
+            let addr = region.virt_addr + (range.source_offset - region.offset);
+            if range.fd == self.accessor.zero_fd() {
+                uffdio_zeropage(uffd_fd, addr, range.len)?;
+            } else {
+                uffdio_copy_from_fd(uffd_fd, addr, range.fd, range.offset, range.len)?;
             }
         }
+        Ok(Vec::new())
     }
 
     pub fn prefault_ranges(&self, regions: &[VmaRegion]) -> Result<Vec<FdRange>> {
