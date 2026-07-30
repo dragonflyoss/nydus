@@ -913,8 +913,11 @@ impl RegistryReader {
             // Handle redirect request and cache redirect url
             if need_redirect {
                 if let Some(location) = resp.headers().get("location") {
-                    let location = location.to_str().unwrap();
-                    let mut location = Url::parse(location)
+                    let location = location.to_str().map_err(|e| {
+                        RegistryError::Common(format!("invalid Location header: {}", e))
+                    })?;
+                    let mut location = Url::parse(&url)
+                        .and_then(|base| base.join(location))
                         .map_err(|e| RegistryError::Url(location.to_string(), e))?;
                     // Note: Some P2P proxy server supports only scheme specified origin blob server,
                     // so we need change scheme to `blob_url_scheme` here
