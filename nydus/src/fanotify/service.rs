@@ -217,7 +217,7 @@ impl FetchPool {
                     };
                     work();
                 })
-                .with_context(|| format!("failed to spawn fetch worker"))?;
+                .with_context(|| "failed to spawn fetch worker".to_string())?;
         }
         Ok(FetchPool { tx })
     }

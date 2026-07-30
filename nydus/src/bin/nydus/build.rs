@@ -70,7 +70,7 @@ pub struct BuildArgs {
 
     /// Group uncompressed size in bytes (must be a power of two, >= 1MiB, and
     /// >= the chunk size). Controls the uncompressed size of each blob meta
-    /// group used for compression.
+    /// > group used for compression.
     #[arg(long = "compress-size", default_value_t = DEFAULT_COMPRESS_SIZE)]
     pub compress_size: u32,
 
