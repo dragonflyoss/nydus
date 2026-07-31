@@ -271,16 +271,16 @@ impl<'a> TarballTreeBuilder<'a> {
 
         let mut file_size = entry.size();
         let name = Self::get_file_name(path)?;
-        let mode = Self::get_mode(header)?;
-        let (uid, gid) = Self::get_uid_gid(self.ctx, header)?;
-        let mtime = header.mtime().unwrap_or_default();
+        let mut mode = Self::get_mode(header)?;
+        let (mut uid, mut gid) = Self::get_uid_gid(self.ctx, header)?;
+        let mut mtime = header.mtime().unwrap_or_default();
         let mut flags = match self.ctx.fs_version {
             RafsVersion::V5 => RafsInodeFlags::default(),
             RafsVersion::V6 => RafsInodeFlags::default(),
         };
 
         // Parse special files
-        let rdev = if entry_type.is_block_special()
+        let mut rdev = if entry_type.is_block_special()
             || entry_type.is_character_special()
             || entry_type.is_fifo()
         {
@@ -298,7 +298,7 @@ impl<'a> TarballTreeBuilder<'a> {
         };
 
         // Parse symlink
-        let (symlink, symlink_size) = if entry_type.is_symlink() {
+        let (mut symlink, mut symlink_size) = if entry_type.is_symlink() {
             let symlink_link_path = entry
                 .link_name()
                 .context("tarball: failed to get target path for tar symlink entry")?
@@ -322,6 +322,29 @@ impl<'a> TarballTreeBuilder<'a> {
             child_count = div_round_up(file_size, self.ctx.chunk_size as u64);
             if child_count > RAFS_MAX_CHUNKS_PER_BLOB as u64 {
                 bail!("tarball: file size 0x{:x} is too big", file_size);
+            }
+        }
+
+        // Parse xattrs
+        let mut xattrs = RafsXAttrs::new();
+        if let Some(exts) = entry.pax_extensions()? {
+            for p in exts {
+                match p {
+                    Ok(pax) => {
+                        let prefix = b"SCHILY.xattr.";
+                        let key = pax.key_bytes();
+                        if key.starts_with(prefix) {
+                            let x_key = OsStr::from_bytes(&key[prefix.len()..]);
+                            xattrs.add(x_key.to_os_string(), pax.value_bytes().to_vec())?;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(anyhow!(
+                            "tarball: failed to parse PaxExtension from tar header, {}",
+                            e
+                        ))
+                    }
+                }
             }
         }
 
@@ -350,43 +373,44 @@ impl<'a> TarballTreeBuilder<'a> {
                 }
             }
             let mut tmp_node = tmp_tree.borrow_mut_node();
-            if !tmp_node.is_reg() {
+            if tmp_node.is_reg() {
+                hardlink_target = Some(tmp_tree);
+                flags |= RafsInodeFlags::HARDLINK;
+                tmp_node.inode.set_has_hardlink(true);
+                tmp_node.inode.ino()
+            } else if tmp_node.is_dir() {
                 bail!(
-                    "tarball: target {} for hardlink {} is not a regular file",
+                    "tarball: target {} for hardlink {} is a directory",
                     link_path.display(),
                     path.display()
                 );
+            } else {
+                // RAFS only represents hardlinks for regular files, so a hardlink to a symlink
+                // or to a special file becomes an independent node cloned from the target. Such
+                // nodes carry all their information in the inode, so nothing gets duplicated in
+                // the data blob.
+                //
+                // Extracting a hardlink entry doesn't apply the metadata from its header: the
+                // name is created with link(2) and resolves to the inode of the target. So all
+                // metadata comes from the target node, and the generated filesystem matches what
+                // extracting the tarball produces even if the two headers disagree.
+                mode = tmp_node.inode.mode();
+                uid = tmp_node.inode.uid();
+                gid = tmp_node.inode.gid();
+                mtime = tmp_node.inode.mtime();
+                rdev = tmp_node.inode.rdev();
+                file_size = tmp_node.inode.size();
+                symlink = tmp_node.info.symlink.clone();
+                symlink_size = tmp_node.inode.symlink_size();
+                xattrs = tmp_node.info.xattrs.clone();
+                if tmp_node.is_symlink() {
+                    flags |= RafsInodeFlags::SYMLINK;
+                }
+                self.builder.next_ino()
             }
-            hardlink_target = Some(tmp_tree);
-            flags |= RafsInodeFlags::HARDLINK;
-            tmp_node.inode.set_has_hardlink(true);
-            tmp_node.inode.ino()
         } else {
             self.builder.next_ino()
         };
-
-        // Parse xattrs
-        let mut xattrs = RafsXAttrs::new();
-        if let Some(exts) = entry.pax_extensions()? {
-            for p in exts {
-                match p {
-                    Ok(pax) => {
-                        let prefix = b"SCHILY.xattr.";
-                        let key = pax.key_bytes();
-                        if key.starts_with(prefix) {
-                            let x_key = OsStr::from_bytes(&key[prefix.len()..]);
-                            xattrs.add(x_key.to_os_string(), pax.value_bytes().to_vec())?;
-                        }
-                    }
-                    Err(e) => {
-                        return Err(anyhow!(
-                            "tarball: failed to parse PaxExtension from tar header, {}",
-                            e
-                        ))
-                    }
-                }
-            }
-        }
 
         let mut inode = match self.ctx.fs_version {
             RafsVersion::V5 => InodeWrapper::V5(RafsV5Inode {
@@ -564,6 +588,11 @@ impl<'a> TarballTreeBuilder<'a> {
 }
 
 /// Builder to create RAFS filesystems from tarballs.
+///
+/// Note that hardlinks are only preserved for regular files, since RAFS represents hardlinks by
+/// sharing an inode between regular files. A tar hardlink entry whose target is a symlink or a
+/// special file becomes an independent node with the metadata of its target, so the generated
+/// filesystem reports `nlink` of 1 for both names instead of 2.
 pub struct TarballBuilder {
     ty: ConversionType,
 }
@@ -673,8 +702,283 @@ mod tests {
 
     use super::*;
     use crate::attributes::Attributes;
-    use crate::{ArtifactStorage, Features, Prefetch, WhiteoutSpec};
+    use crate::{ArtifactStorage, Bootstrap, BootstrapContext, Features, Prefetch, WhiteoutSpec};
     use nydus_utils::{compress, digest};
+
+    // Metadata of the hardlink targets in `create_hardlink_tar`, chosen to differ from the
+    // metadata of the hardlink entries pointing at them.
+    const TARGET_MODE: u32 = 0o755;
+    const TARGET_UID: u64 = 7;
+    const TARGET_GID: u64 = 8;
+    const TARGET_MTIME: u64 = 111;
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_entry_with_meta(
+        tar: &mut tar::Builder<File>,
+        path: &str,
+        entry_type: EntryType,
+        link_name: Option<&str>,
+        data: &[u8],
+        mode: u32,
+        uid: u64,
+        gid: u64,
+        mtime: u64,
+    ) {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(entry_type);
+        header.set_mode(mode);
+        header.set_uid(uid);
+        header.set_gid(gid);
+        header.set_mtime(mtime);
+        header.set_size(data.len() as u64);
+        if let Some(link_name) = link_name {
+            header.set_link_name(link_name).unwrap();
+        }
+        if entry_type == EntryType::Fifo {
+            header.set_device_major(0).unwrap();
+            header.set_device_minor(0).unwrap();
+        }
+        tar.append_data(&mut header, path, data).unwrap();
+    }
+
+    fn append_entry(
+        tar: &mut tar::Builder<File>,
+        path: &str,
+        entry_type: EntryType,
+        link_name: Option<&str>,
+        data: &[u8],
+    ) {
+        append_entry_with_meta(tar, path, entry_type, link_name, data, 0o644, 0, 0, 0);
+    }
+
+    // Generate a tar stream containing hardlinks to a symlink, to a fifo and to a regular file.
+    // The hardlinks to the symlink live in a subdirectory, so that the node created for them gets
+    // an inode number greater than the inode number of its parent directory. The targets carry
+    // metadata which differs from their hardlink entries, so that a node built from the target is
+    // distinguishable from one built from the hardlink header.
+    fn create_hardlink_tar(path: &Path) {
+        let mut tar = tar::Builder::new(File::create(path).unwrap());
+        append_entry(&mut tar, "foo", EntryType::Regular, None, b"hello");
+        for (name, entry_type) in [("sym", EntryType::Symlink), ("fifo", EntryType::Fifo)] {
+            let link_name = (entry_type == EntryType::Symlink).then_some("foo");
+            append_entry_with_meta(
+                &mut tar,
+                name,
+                entry_type,
+                link_name,
+                b"",
+                TARGET_MODE,
+                TARGET_UID,
+                TARGET_GID,
+                TARGET_MTIME,
+            );
+        }
+        append_entry(&mut tar, "dir/", EntryType::Directory, None, b"");
+        append_entry(
+            &mut tar,
+            "dir/sym-link",
+            EntryType::Link,
+            Some("./sym"),
+            b"",
+        );
+        append_entry(
+            &mut tar,
+            "dir/fifo-link",
+            EntryType::Link,
+            Some("fifo"),
+            b"",
+        );
+        append_entry(&mut tar, "dir/foo-link", EntryType::Link, Some("foo"), b"");
+        tar.finish().unwrap();
+    }
+
+    fn create_context(source_path: PathBuf, version: RafsVersion) -> BuildContext {
+        let mut ctx = BuildContext::new(
+            "test".to_string(),
+            true,
+            0,
+            compress::Algorithm::None,
+            digest::Algorithm::Sha256,
+            true,
+            WhiteoutSpec::Oci,
+            ConversionType::TarToRafs,
+            source_path,
+            Prefetch::default(),
+            None,
+            None,
+            false,
+            Features::new(),
+            false,
+            Attributes::default(),
+        );
+        ctx.fs_version = version;
+        ctx
+    }
+
+    fn build_tree(ctx: &mut BuildContext) -> Result<Tree> {
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
+        let mut blob_writer: Box<dyn Artifact> = Box::<NoopArtifactWriter>::default();
+        let mut tree_builder = TarballTreeBuilder::new(
+            ConversionType::TarToRafs,
+            ctx,
+            &mut blob_mgr,
+            blob_writer.as_mut(),
+            0,
+        );
+        tree_builder.build_tree()
+    }
+
+    fn build_rafs(ctx: &mut BuildContext) -> Bootstrap {
+        let tree = build_tree(ctx).unwrap();
+        let mut bootstrap_ctx = BootstrapContext::new(None, false).unwrap();
+        let mut bootstrap = Bootstrap::new(tree).unwrap();
+        bootstrap.build(ctx, &mut bootstrap_ctx).unwrap();
+        bootstrap
+    }
+
+    fn get_node(bootstrap: &Bootstrap, path: &str) -> Node {
+        bootstrap
+            .tree
+            .get_node(Path::new(path))
+            .unwrap()
+            .borrow_mut_node()
+            .clone()
+    }
+
+    // The metadata of an independent node created for a hardlink entry must come from the target
+    // node, since extracting the entry would create a name resolving to the inode of the target.
+    fn assert_metadata_from_target(node: &Node, target: &Node, file_type: libc::mode_t) {
+        assert_eq!(node.inode.mode(), target.inode.mode());
+        assert_eq!(node.inode.mode(), crate::mode_bits(file_type) | TARGET_MODE);
+        assert_eq!(node.inode.uid(), TARGET_UID as u32);
+        assert_eq!(node.inode.gid(), TARGET_GID as u32);
+        assert_eq!(node.inode.mtime(), TARGET_MTIME);
+        assert_eq!(node.info.xattrs.is_empty(), target.info.xattrs.is_empty());
+    }
+
+    fn test_hardlink_to_non_regular_file(version: RafsVersion) {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let tmp_dir = tmp_dir.as_path().to_path_buf();
+        let source_path = tmp_dir.join("hardlink.tar");
+        create_hardlink_tar(&source_path);
+        let mut ctx = create_context(source_path.clone(), version);
+        let bootstrap = build_rafs(&mut ctx);
+
+        // A hardlink to a symlink becomes an independent symlink node with the same target,
+        // instead of sharing the inode of the target as a hardlink to a regular file does. Its
+        // metadata comes from the target, not from the header of the hardlink entry.
+        let sym = get_node(&bootstrap, "/sym");
+        let sym_link = get_node(&bootstrap, "/dir/sym-link");
+        assert!(sym_link.is_symlink());
+        assert_eq!(sym_link.info.symlink, Some(OsString::from("foo")));
+        assert_eq!(sym_link.inode.symlink_size(), 3);
+        assert_eq!(sym_link.inode.size(), 3);
+        assert_ne!(sym_link.inode.ino(), sym.inode.ino());
+        assert_eq!(sym_link.inode.nlink(), 1);
+        // A hardlink entry has no file data, so it never gets chunks.
+        assert_eq!(sym_link.inode.child_count(), 0);
+        assert_metadata_from_target(&sym_link, &sym, libc::S_IFLNK);
+        if version.is_v5() {
+            // The digest of a v5 symlink is computed from its target, so an independent node
+            // must have gone through the regular symlink dump path.
+            assert_eq!(sym_link.inode.digest(), sym.inode.digest());
+        }
+
+        // Same for a hardlink to a special file, which also keeps the device number.
+        let fifo = get_node(&bootstrap, "/fifo");
+        let fifo_link = get_node(&bootstrap, "/dir/fifo-link");
+        assert!(fifo_link.is_special());
+        assert_eq!(fifo_link.inode.rdev(), fifo.inode.rdev());
+        assert_ne!(fifo_link.inode.ino(), fifo.inode.ino());
+        assert_eq!(fifo_link.inode.nlink(), 1);
+        assert_eq!(fifo_link.inode.child_count(), 0);
+        assert_metadata_from_target(&fifo_link, &fifo, libc::S_IFIFO);
+
+        // A hardlink to a regular file is still coalesced into a single inode.
+        let foo = get_node(&bootstrap, "/foo");
+        let foo_link = get_node(&bootstrap, "/dir/foo-link");
+        assert!(foo_link.is_hardlink());
+        assert_eq!(foo_link.inode.ino(), foo.inode.ino());
+        assert_eq!(foo_link.inode.nlink(), 2);
+        assert_eq!(foo.inode.nlink(), 2);
+        assert_eq!(foo_link.inode.size(), 5);
+        assert_eq!(foo_link.inode.child_count(), 1);
+        assert_eq!(foo_link.chunks.len(), 1);
+
+        // The same tarball must also convert end to end, including blob and bootstrap dump.
+        let mut ctx = create_context(source_path, version);
+        ctx.blob_storage = Some(ArtifactStorage::FileDir((tmp_dir.clone(), String::new())));
+        let mut bootstrap_mgr = BootstrapManager::new(
+            Some(ArtifactStorage::FileDir((tmp_dir, String::new()))),
+            None,
+        );
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
+        TarballBuilder::new(ConversionType::TarToRafs)
+            .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_v5_hardlink_to_non_regular_file() {
+        test_hardlink_to_non_regular_file(RafsVersion::V5);
+    }
+
+    #[test]
+    fn test_v6_hardlink_to_non_regular_file() {
+        test_hardlink_to_non_regular_file(RafsVersion::V6);
+    }
+
+    #[test]
+    fn test_hardlink_to_directory_is_rejected() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("hardlink-dir.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        append_entry(&mut tar, "dir/", EntryType::Directory, None, b"");
+        append_entry(&mut tar, "dir-link", EntryType::Link, Some("dir"), b"");
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let err = build_tree(&mut ctx).err().unwrap();
+        assert!(err.to_string().contains("is a directory"), "{}", err);
+    }
+
+    #[test]
+    fn test_hardlink_to_unknown_target_is_rejected() {
+        // A tar entry may only be hardlinked to an entry which appeared earlier in the stream,
+        // because the tarball is parsed in a single pass.
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("hardlink-unknown.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        append_entry(&mut tar, "sym-link", EntryType::Link, Some("sym"), b"");
+        append_entry(&mut tar, "sym", EntryType::Symlink, Some("foo"), b"");
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let err = build_tree(&mut ctx).err().unwrap();
+        assert!(err.to_string().contains("unknown target"), "{}", err);
+    }
+
+    #[test]
+    fn test_malformed_pax_extension_is_rejected() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("bad-pax.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        // A PAX record starts with its own length in decimal, here reported too long.
+        let pax = "99 SCHILY.xattr.user.key=value\n";
+        let mut header = Header::new_ustar();
+        header.set_entry_type(EntryType::XHeader);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_size(pax.len() as u64);
+        tar.append_data(&mut header, "PaxHeaders/foo", pax.as_bytes())
+            .unwrap();
+        append_entry(&mut tar, "foo", EntryType::Regular, None, b"hello");
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let err = build_tree(&mut ctx).err().unwrap();
+        assert!(err.to_string().contains("PaxExtension"), "{}", err);
+    }
 
     #[test]
     fn test_build_tarfs() {
