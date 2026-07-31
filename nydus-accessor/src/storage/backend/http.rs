@@ -16,7 +16,7 @@ use reqwest::redirect::Policy;
 use reqwest::Client;
 use tokio::runtime::Runtime;
 
-use super::dns::HickoryResolver;
+use super::dns::SystemResolver;
 
 /// Shared runtime used for every backend network operation (direct HTTP and,
 /// when enabled, the Dragonfly SDK proxy).
@@ -68,7 +68,7 @@ pub(crate) fn build_client(
         // Backends handle 3xx redirects manually so they can cache the
         // redirected blob-storage URL.
         .redirect(Policy::none())
-        .dns_resolver(Arc::new(HickoryResolver::default()));
+        .dns_resolver(Arc::new(SystemResolver::default()));
 
     builder = match proxy_url {
         Some(url) => {

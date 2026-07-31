@@ -2865,7 +2865,6 @@ dependencies = [
  "crc32c",
  "dragonfly-client-request",
  "futures",
- "hickory-resolver",
  "libc",
  "memmap2",
  "nydus",
