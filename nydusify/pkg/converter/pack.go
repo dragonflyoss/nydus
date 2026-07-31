@@ -91,6 +91,14 @@ func Pack(ctx context.Context, dest io.Writer, opt PackOption) (io.WriteCloser, 
 			// Unblock the writer side on extraction failure.
 			pr.CloseWithError(err)
 		} else {
+			// The tar reader stops at the end-of-archive marker and does not
+			// consume what follows. Streams written with the traditional
+			// blocking factor (GNU tar pads the archive to a multiple of
+			// 10240 bytes) therefore still hold trailing zero blocks. Drain
+			// them, otherwise closing the pipe here makes the writer side
+			// fail with "io: read/write on closed pipe" even though the
+			// extraction succeeded.
+			_, _ = io.Copy(io.Discard, pr)
 			_ = pr.Close()
 		}
 		pack.extractErr <- err
