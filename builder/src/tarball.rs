@@ -459,6 +459,10 @@ impl<'a> TarballTreeBuilder<'a> {
             node.inode.set_size(n.inode.size());
             node.inode.set_child_count(n.inode.child_count());
             node.chunks = n.chunks.clone();
+            // All names of a hardlink share a single inode, and for RAFS v6 they literally share
+            // its on-disk region, whose size was reserved from the target. The xattrs must
+            // therefore stay identical to the target's, even if the hardlink entry recorded
+            // xattrs of its own.
             node.set_xattr(n.info.xattrs.clone());
         } else {
             node.dump_node_data_with_reader(
@@ -665,6 +669,8 @@ impl Builder for TarballBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::attributes::Attributes;
     use crate::{ArtifactStorage, Features, Prefetch, WhiteoutSpec};
@@ -740,5 +746,131 @@ mod tests {
         builder
             .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
             .unwrap();
+    }
+
+    // Build a tar holding a regular file, a hardlink to it and two more entries stored after the
+    // hardlink, so that an inode written at a wrong offset is observable. `xattr_on` selects
+    // which of the two names records an xattr in its own PAX header.
+    fn create_xattr_hardlink_tar(path: &Path, xattr_on: &str) {
+        let mut tar = tar::Builder::new(File::create(path).unwrap());
+        let mut append = |name: &str, entry_type: EntryType, data: &[u8]| {
+            if name == xattr_on {
+                // A PAX extended header record is "<len> <key>=<value>\n", where <len> counts
+                // the whole record including itself.
+                let body = format!(" SCHILY.xattr.user.key={}\n", "v".repeat(600));
+                let mut len = body.len() + 1;
+                let pax = loop {
+                    let pax = format!("{}{}", len, body);
+                    if pax.len() == len {
+                        break pax;
+                    }
+                    len = pax.len();
+                };
+                let mut header = Header::new_ustar();
+                header.set_entry_type(EntryType::XHeader);
+                header.set_mode(0o644);
+                header.set_mtime(0);
+                header.set_size(pax.len() as u64);
+                tar.append_data(&mut header, "PaxHeaders/entry", pax.as_bytes())
+                    .unwrap();
+            }
+            let mut header = Header::new_gnu();
+            header.set_entry_type(entry_type);
+            header.set_mode(0o644);
+            header.set_mtime(0);
+            header.set_size(data.len() as u64);
+            if entry_type == EntryType::Link {
+                header.set_link_name("foo").unwrap();
+            }
+            tar.append_data(&mut header, name, data).unwrap();
+        };
+        append("foo", EntryType::Regular, b"hello");
+        append("foo-link", EntryType::Link, b"");
+        append("zzz1", EntryType::Regular, b"world");
+        append("zzz2", EntryType::Regular, b"world");
+        tar.finish().unwrap();
+    }
+
+    fn build_and_load_xattr_hardlink_tar(
+        version: RafsVersion,
+        xattr_on: &str,
+    ) -> nydus_rafs::metadata::RafsSuper {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let tmp_dir = tmp_dir.as_path().to_path_buf();
+        let source_path = tmp_dir.join("xattr-hardlink.tar");
+        let bootstrap_path = tmp_dir.join("bootstrap");
+        create_xattr_hardlink_tar(&source_path, xattr_on);
+
+        let mut ctx = BuildContext::new(
+            "test".to_string(),
+            true,
+            0,
+            compress::Algorithm::None,
+            digest::Algorithm::Sha256,
+            true,
+            WhiteoutSpec::Oci,
+            ConversionType::TarToRafs,
+            source_path,
+            Prefetch::default(),
+            Some(ArtifactStorage::FileDir((tmp_dir, String::new()))),
+            None,
+            false,
+            Features::new(),
+            false,
+            Attributes::default(),
+        );
+        ctx.fs_version = version;
+        let mut bootstrap_mgr = BootstrapManager::new(
+            Some(ArtifactStorage::SingleFile(bootstrap_path.clone())),
+            None,
+        );
+        let mut blob_mgr = BlobManager::new(digest::Algorithm::Sha256, false);
+        TarballBuilder::new(ConversionType::TarToRafs)
+            .build(&mut ctx, &mut bootstrap_mgr, &mut blob_mgr)
+            .unwrap();
+
+        // Loading the bootstrap back is what detects an inode written at a wrong offset.
+        nydus_rafs::metadata::RafsSuper::load_from_file(
+            &bootstrap_path,
+            Arc::new(nydus_api::ConfigV2::default()),
+            false,
+        )
+        .unwrap()
+        .0
+    }
+
+    fn xattr_count(sb: &nydus_rafs::metadata::RafsSuper, name: &str) -> usize {
+        let root = sb.get_inode(sb.superblock.root_ino(), false).unwrap();
+        let child = root.get_child_by_name(OsStr::new(name)).unwrap();
+        let inode = sb.get_inode(child.ino(), false).unwrap();
+        inode.get_xattrs().unwrap().len()
+    }
+
+    // A hardlink entry inherits the xattrs of its target, which must be reflected in the inode
+    // flags: the RAFS v5 inode table reserves room for the xattr table based on the flag, while
+    // the xattr table itself is written whenever the node has xattrs. If the two disagree, every
+    // inode after the hardlink is written at the wrong offset and the bootstrap can't be loaded.
+    #[test]
+    fn test_v5_hardlink_inherits_xattr_flag_from_target() {
+        let sb = build_and_load_xattr_hardlink_tar(RafsVersion::V5, "foo");
+        // Both names of the hardlink resolve to the inode of the target, which carries the xattr.
+        assert_eq!(xattr_count(&sb, "foo"), 1);
+        assert_eq!(xattr_count(&sb, "foo-link"), 1);
+        // The entries stored after the hardlink must still be readable.
+        assert_eq!(xattr_count(&sb, "zzz1"), 0);
+        assert_eq!(xattr_count(&sb, "zzz2"), 0);
+    }
+
+    // All names of a hardlink share one inode, and for RAFS v6 they share its on-disk region,
+    // whose size is reserved from the target. A hardlink entry keeping xattrs of its own would
+    // write past that region, leaking them onto the target and corrupting the inodes stored after
+    // it, so the xattrs of the target win even when only the hardlink entry recorded any.
+    #[test]
+    fn test_v6_hardlink_xattrs_stay_identical_to_target() {
+        let sb = build_and_load_xattr_hardlink_tar(RafsVersion::V6, "foo-link");
+        assert_eq!(xattr_count(&sb, "foo"), 0);
+        assert_eq!(xattr_count(&sb, "foo-link"), 0);
+        assert_eq!(xattr_count(&sb, "zzz1"), 0);
+        assert_eq!(xattr_count(&sb, "zzz2"), 0);
     }
 }
