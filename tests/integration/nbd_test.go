@@ -57,6 +57,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var nbdReadFailurePattern = regexp.MustCompile(`nbd: read .* failed:`)
+
 // nbdEnv holds the paths, binaries and process handles for one E2E run.
 type nbdEnv struct {
 	nydusBin string
@@ -361,7 +363,7 @@ func (e *nbdEnv) caseDaemonHealth(t *testing.T) { // C6 — daemon health under 
 	// negative checks — none should fire for legitimate reads.
 	assert.Equal(t, 0, e.countLogs(`nbd: invalid request magic`), "no bad-magic errors for legit reads")
 	assert.Equal(t, 0, e.countLogs(`nbd: short read`), "no short-read errors for legit reads")
-	assert.Equal(t, 0, e.countLogs(`nbd:.* failed`), "no read/backend failures against the local backend")
+	assert.Equal(t, 0, countMatchingLines(e.logCorpus(), nbdReadFailurePattern), "no read/backend failures against the local backend")
 	assert.Equal(t, 0, e.countLogs(`nbd: unsupported request type`), "no unsupported-type errors for legit reads")
 }
 
@@ -531,14 +533,28 @@ func (e *nbdEnv) logCorpus() string {
 
 // countLogs counts lines across every log sink matching the pattern.
 func (e *nbdEnv) countLogs(pattern string) int {
-	re := regexp.MustCompile(pattern)
+	return countMatchingLines(e.logCorpus(), regexp.MustCompile(pattern))
+}
+
+func countMatchingLines(corpus string, re *regexp.Regexp) int {
 	count := 0
-	for _, line := range strings.Split(e.logCorpus(), "\n") {
+	for _, line := range strings.Split(corpus, "\n") {
 		if re.MatchString(line) {
 			count++
 		}
 	}
 	return count
+}
+
+func TestCountMatchingLinesCountsOnlyNbdReadFailures(t *testing.T) {
+	corpus := strings.Join([]string{
+		"INFO nbd service attached to /dev/nbd0",
+		"WARN nbd: failed to read request header: unexpected EOF",
+		"WARN nbd: failed to handle request: broken pipe",
+		"WARN nbd: read [0x0, +4096) failed: input/output error",
+	}, "\n")
+
+	assert.Equal(t, 1, countMatchingLines(corpus, nbdReadFailurePattern))
 }
 
 // erofsSupported reports whether the running kernel has EROFS filesystem
