@@ -808,6 +808,9 @@ impl StargzBuilder {
                     node.inode.set_size(target.inode.size());
                     node.inode.set_child_count(target.inode.child_count());
                     node.chunks = target.chunks.clone();
+                    // All names of a hardlink share the on-disk inode of the target for RAFS v6,
+                    // including the region reserved for its xattrs, so they must stay identical
+                    // to the target's.
                     node.set_xattr(target.info.xattrs.clone());
                 }
                 None => bail!(
