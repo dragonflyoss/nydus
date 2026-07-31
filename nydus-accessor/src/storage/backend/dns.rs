@@ -1,11 +1,10 @@
-//! DNS resolution for the registry backend, backed by
-//! [hickory-resolver](https://github.com/hickory-dns/hickory-dns).
+//! DNS resolution for the registry backend, backed by the system resolver
+//! (`getaddrinfo`, through [`tokio::net::lookup_host`]).
 //!
-//! Results are cached with their record TTL (failures use a short negative
-//! TTL), and concurrent lookups for the same host are de-duplicated with a
-//! small singleflight built on [`futures::future::Shared`]. This avoids a
-//! thundering herd of identical DNS queries when many blob requests start at
-//! once after mount.
+//! Results are cached and concurrent lookups for the same host are
+//! de-duplicated with a small singleflight built on
+//! [`futures::future::Shared`]. This avoids a thundering herd of identical DNS
+//! queries when many blob requests start at once after mount.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -13,11 +12,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::future::{BoxFuture, FutureExt, Shared};
-use hickory_resolver::config::LookupIpStrategy;
-use hickory_resolver::TokioResolver;
-use once_cell::sync::OnceCell;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use tokio::sync::RwLock;
+
+/// TTL applied to successful lookups; the system resolver reports no record TTL.
+const POSITIVE_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// TTL applied to failed lookups, to avoid hammering the DNS server.
 const NEGATIVE_CACHE_TTL: Duration = Duration::from_secs(60);
@@ -31,42 +30,22 @@ struct CachedLookup {
 
 type SharedLookup = Shared<BoxFuture<'static, Arc<CachedLookup>>>;
 
+#[derive(Default)]
 struct ResolverState {
-    resolver: TokioResolver,
     cache: RwLock<HashMap<String, Arc<CachedLookup>>>,
     inflight: Mutex<HashMap<String, SharedLookup>>,
 }
 
 /// A `reqwest`-compatible resolver that caches and de-duplicates lookups.
 #[derive(Clone, Default)]
-pub(crate) struct HickoryResolver {
-    // Construction is delayed because there may be no Tokio runtime when the
-    // resolver is created; it is initialized lazily on first use.
-    state: Arc<OnceCell<Arc<ResolverState>>>,
+pub(crate) struct SystemResolver {
+    state: Arc<ResolverState>,
 }
 
-impl HickoryResolver {
-    fn state(&self) -> Result<Arc<ResolverState>, String> {
-        self.state
-            .get_or_try_init(|| {
-                let mut builder =
-                    TokioResolver::builder_tokio().map_err(|e| format!("dns init failed: {e}"))?;
-                builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
-                Ok::<_, String>(Arc::new(ResolverState {
-                    resolver: builder.build(),
-                    cache: RwLock::new(HashMap::new()),
-                    inflight: Mutex::new(HashMap::new()),
-                }))
-            })
-            .cloned()
-    }
-}
-
-impl Resolve for HickoryResolver {
+impl Resolve for SystemResolver {
     fn resolve(&self, name: Name) -> Resolving {
-        let this = self.clone();
+        let state = self.state.clone();
         Box::pin(async move {
-            let state = this.state().map_err(|e| -> BoxError { e.into() })?;
             let host = name.as_str().to_string();
             let cached = resolve_cached(state, host).await;
             match &cached.result {
@@ -81,8 +60,6 @@ impl Resolve for HickoryResolver {
         })
     }
 }
-
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 async fn resolve_cached(state: Arc<ResolverState>, host: String) -> Arc<CachedLookup> {
     // Fast path: a still-valid cache entry.
@@ -113,10 +90,10 @@ async fn resolve_cached(state: Arc<ResolverState>, host: String) -> Arc<CachedLo
 }
 
 async fn lookup_and_cache(state: Arc<ResolverState>, host: String) -> Arc<CachedLookup> {
-    let cached = match state.resolver.lookup_ip(host.as_str()).await {
-        Ok(lookup) => Arc::new(CachedLookup {
-            valid_until: lookup.valid_until(),
-            result: Ok(Arc::new(lookup.iter().collect())),
+    let cached = match tokio::net::lookup_host((host.as_str(), 0u16)).await {
+        Ok(addrs) => Arc::new(CachedLookup {
+            valid_until: Instant::now() + POSITIVE_CACHE_TTL,
+            result: Ok(Arc::new(addrs.map(|addr| addr.ip()).collect())),
         }),
         Err(err) => Arc::new(CachedLookup {
             valid_until: Instant::now() + NEGATIVE_CACHE_TTL,
@@ -156,7 +133,7 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let resolver = HickoryResolver::default();
+            let resolver = SystemResolver::default();
             let name: Name = "localhost".parse().unwrap();
             let addrs = resolver.resolve(name).await.unwrap();
             assert!(addrs.count() > 0);
@@ -171,8 +148,8 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let resolver = HickoryResolver::default();
-            let state = resolver.state().unwrap();
+            let resolver = SystemResolver::default();
+            let state = resolver.state.clone();
             let _ = resolve_cached(state.clone(), "localhost".to_string()).await;
             assert!(state.cache.read().await.contains_key("localhost"));
             // Second resolution should hit the cache and dedup cleanly.
