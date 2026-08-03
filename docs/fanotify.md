@@ -285,8 +285,10 @@ accessor builds unless explicitly enabled.
 - Fills persist in the on-disk cache file and its groupmap. A daemon restart
   re-serves already-fetched groups with no backend traffic. A cold restart must
   remove all per-blob artifacts (`*.blob.data`, `*.blob.meta`, `*.group.map`,
-  `*.prefetch.lock`) together; a stale groupmap against a wiped data file makes
-  the fast path allow reads of unfilled holes.
+  `*.prefetch.lock`, `*.flight.lock`) together. Removing the data file alone is
+  detected — the groupmap is reset in place so every process sharing it agrees
+  the blob is cold — but leaving a lock file behind while its blob is replaced
+  drops the cross-process fetch coordination for that blob.
 
 ## Known Limitations
 

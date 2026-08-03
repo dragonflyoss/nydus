@@ -239,7 +239,9 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
         if !dir.is_dir() {
             bail!("blob-dir {} is not a directory", dir.display());
         }
-        Some(Arc::new(LocalBackend::new(dir.clone())))
+        Some(nydus::storage::backend::metered(Arc::new(
+            LocalBackend::new(dir.clone()),
+        )))
     } else if let Some(config) = storage_config.as_ref() {
         Some(build_backend(&config.backend).context("failed to build blob backend")?)
     } else {

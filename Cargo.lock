@@ -2868,7 +2868,6 @@ dependencies = [
  "libc",
  "memmap2",
  "nydus",
- "once_cell",
  "prometheus",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -2880,7 +2879,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "uuid",
  "zstd",
 ]
 

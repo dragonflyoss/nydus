@@ -9,9 +9,9 @@
 
 use std::io;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
-use once_cell::sync::Lazy;
 use reqwest::redirect::Policy;
 use reqwest::Client;
 use tokio::runtime::Runtime;
@@ -20,7 +20,7 @@ use super::dns::SystemResolver;
 
 /// Shared runtime used for every backend network operation (direct HTTP and,
 /// when enabled, the Dragonfly SDK proxy).
-static HTTP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+static HTTP_RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .thread_name("nydus-backend")
         .enable_all()

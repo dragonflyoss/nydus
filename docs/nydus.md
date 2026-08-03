@@ -605,7 +605,7 @@ backend:
     repo: library/nydus-demo
     insecure: true
     skip_verify: false
-    timeout: 30
+    timeout: 5
     retry_limit: 3
     # base64-encoded `username:password`
     auth: dGVzdHVzZXI6dGVzdHBhc3N3b3Jk
@@ -622,7 +622,10 @@ Fields under `backend.config`:
 - `repo` (required): image repository without tag/digest, e.g. `library/ubuntu`.
 - `insecure` (default `false`): use the `http` scheme instead of `https`.
 - `skip_verify` (default `false`): skip TLS certificate verification.
-- `timeout` (default `30`): per-request timeout in seconds.
+- `timeout` (default `5`): per-request timeout in seconds. Kept short because a
+	read holds the group's cross-process fetch claim for its whole duration, and
+	what queues up behind that claim are reader threads in the other instances
+	sharing the cache directory.
 - `retry_limit` (default `3`): retries for on-demand reads (prefetch is tried
 	once).
 - `auth` (optional): base64-encoded `username:password` string for basic auth.
@@ -707,12 +710,16 @@ Filesystem:
 
 Cache:
 
-- `cache_opened_files` — open blob data cache files (excludes `.blob.meta` and
-	`.group.map`).
+- `cache_opened_files` — open blob data cache files (excludes the `.blob.meta`,
+	`.group.map` and `.lock` sidecars).
 - `cache_hit_group` — groups served from cache without a backend read.
-- `cache_total_group` — total groups across loaded blob metas.
+- `cache_total_group` — total groups across loaded blob metas, counted once per
+	blob however many caches are open on it.
 - `cache_fill_group` — groups written into a blob's own cache by regular blob
 	prefetch.
+- `cache_ondemand_fill_group` — groups written into a blob's own cache to
+	satisfy an on-demand read. Summing it across the instances sharing a cache
+	directory shows how much duplicate fetching they do.
 - `cache_redirect_fill_group` — groups written into a **source** blob's cache
 	from a redirect (ondemand) blob during phase-0 prefetch.
 - `cache_redirect_skip_group` — redirect groups skipped during ondemand
@@ -1332,6 +1339,9 @@ blob digest:
 	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
 - `<full_blob_digest>.prefetch.lock` is the cross-process prefetch lock file
 	(empty; only its `flock` state matters).
+- `<full_blob_digest>.flight.lock` is the cross-process fetch lock file for
+	single groups (empty; only its byte-range lock state matters, see
+	[Cross-process cache sharing](#cross-process-cache-sharing-and-prefetch-dedup)).
 
 The cache data file mirrors the decoded address space one-to-one, so a group's
 bytes land at `uncompressed_block_offset * 4096` and EROFS chunk `blkaddr`
@@ -1363,6 +1373,9 @@ cache directory, artifacts named by SHA256(full blob) = <hex>
   the ALL_READY header flag latches once every bit is set
 
 <hex>.prefetch.lock — empty; exclusive flock serializes prefetch owners
+
+<hex>.flight.lock — empty; byte N carries an OFD lock claiming group N,
+  so exactly one process fetches a cold group and the rest wait for it
 ```
 
 ### Blob prefetch
@@ -1494,10 +1507,35 @@ serialized across processes with an exclusive `flock` on
 	death — releases the lock, so a crashed owner is taken over by a waiter, and
 	the ready-skip logic resumes the warmup exactly where the crashed owner left
 	off.
-- **On-demand reads never touch the lock.** A cold group hit by a page fault is
-	fetched immediately by whichever instance needs it; the worst case is one
-	duplicated group fetch racing the owner's warmup, which the idempotent cache
-	write absorbs.
+- **On-demand reads never touch the prefetch lock.** A cold group hit by a page
+	fault is never queued behind a whole-blob warmup; it coordinates at group
+	granularity instead, on its own lock file (below).
+
+**Per-group fetch claim.** On-demand reads coordinate at group granularity on
+`<digest>.flight.lock`, where byte `N` stands for group `N` — one descriptor per
+blob however many groups it has. A reader that finds a group cold claims its
+byte, and readers in the other instances block until the claim is released,
+which the fetcher does immediately after publishing the group in the shared
+groupmap. Waiters therefore re-check readiness and almost always find the group
+already there, so a cold group costs one backend fetch per node rather than one
+per instance.
+
+- The claims are **open file description locks**, so the kernel releases them
+	when the descriptor closes, including on process death. A fetcher that crashes
+	mid-flight hands the group to a waiter instead of wedging it.
+- Waiting blocks in the kernel rather than polling, so the handover follows the
+	release immediately. What bounds the wait is the fetcher, not the waiter:
+	every backend read carries a timeout (hence the short registry `timeout`
+	default), so a claim is always released. **A claim must never be held across
+	an operation that cannot time out** — what queues up behind it are reader
+	threads. The wait is interruptible, so shutdown still works.
+- The in-process fetch flight elects a single fetcher per group before any of
+	this, which is what makes a descriptor-owned lock meaningful: two threads
+	locking the same byte through one descriptor would both succeed and neither
+	would wait.
+- A filesystem that cannot provide the lock degrades to fetching without
+	coordination, exactly as before this existed — a missing optimisation must
+	never fail a read.
 
 **Redirect segment skipping.** A waiter that eventually acquires the lock (or a
 restart replaying the warmup) must not re-download the ondemand blob just to

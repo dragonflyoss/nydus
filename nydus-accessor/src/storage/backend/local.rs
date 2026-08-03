@@ -12,6 +12,9 @@ use crate::utils::{hex_string, sha256_file, sha256_file_range};
 #[derive(Clone)]
 struct ResolvedSource {
     path: PathBuf,
+    /// Digest naming this blob's cache files. Resolved once, because deriving
+    /// it means hashing the whole source file.
+    cache_key: [u8; EROFS_BLOB_ID_SIZE],
     data_offset: u64,
     data_size: u64,
     blob_meta_offset: Option<u64>,
@@ -38,7 +41,10 @@ impl LocalBackend {
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
         path: &Path,
     ) -> io::Result<Self> {
-        let source = inspect_full_blob_source(path)?.ok_or_else(|| {
+        // `blob_id` only covers the data region here, so the cache key is the
+        // digest of the whole file and has to be computed.
+        let cache_key = sha256_file(path).map_err(io::Error::other)?;
+        let source = inspect_full_blob_source(path, cache_key)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("nydus blob footer not found: {}", path.display()),
@@ -104,7 +110,9 @@ impl LocalBackend {
                     format!("local source blob digest mismatch: {}", exact.display()),
                 ));
             }
-            let source = inspect_full_blob_source(&exact)?.ok_or_else(|| {
+            // The check above proves the whole file hashes to `blob_id`, so it
+            // doubles as the cache key.
+            let source = inspect_full_blob_source(&exact, *blob_id)?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("nydus blob footer not found: {}", exact.display()),
@@ -165,8 +173,7 @@ impl BlobBackend for LocalBackend {
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
     ) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
-        let source = self.resolve_source(blob_id)?;
-        sha256_file(&source.path).map_err(io::Error::other)
+        Ok(self.resolve_source(blob_id)?.cache_key)
     }
 
     fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
@@ -217,13 +224,17 @@ impl BlobBackend for LocalBackend {
     }
 }
 
-fn inspect_full_blob_source(path: &Path) -> io::Result<Option<ResolvedSource>> {
+fn inspect_full_blob_source(
+    path: &Path,
+    cache_key: [u8; EROFS_BLOB_ID_SIZE],
+) -> io::Result<Option<ResolvedSource>> {
     let footer = match BlobFooter::read_from_path(path) {
         Ok(footer) => footer,
         Err(_) => return Ok(None),
     };
     Ok(Some(ResolvedSource {
         path: path.to_path_buf(),
+        cache_key,
         data_offset: footer.compressed_data_offset(),
         data_size: footer.compressed_data_size(),
         blob_meta_offset: Some(footer.blob_meta_offset()),

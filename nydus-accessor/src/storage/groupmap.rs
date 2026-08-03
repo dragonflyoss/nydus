@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::ops::Range;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -33,6 +34,26 @@ const GROUPMAP_READY_COUNT_OFFSET: usize = 20;
 /// `flags` bit: every group of this blob is ready. Sticky — ready bits are
 /// never cleared, so once set it stays set for the lifetime of the file.
 const GROUPMAP_FLAG_ALL_READY: u32 = 1;
+
+/// Holds `flock(LOCK_EX)` on a file for the guard's lifetime.
+struct FileLock<'a> {
+    file: &'a File,
+}
+
+impl<'a> FileLock<'a> {
+    fn exclusive(file: &'a File) -> io::Result<Self> {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for FileLock<'_> {
+    fn drop(&mut self) {
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
 
 /// Persistent per-blob group readiness bitmap, shared across processes.
 ///
@@ -164,6 +185,32 @@ impl GroupMap {
         // long, and `offset` is a 4-byte-aligned position inside the header,
         // satisfying AtomicU32's alignment and size requirements.
         unsafe { &*(self.map.as_ptr().add(offset) as *const AtomicU32) }
+    }
+
+    /// Clear every ready bit and its derived counters, in place.
+    ///
+    /// Used when the cache data file these bits describe has gone away: each
+    /// set bit would otherwise claim bytes that are no longer there, and reads
+    /// would silently return the holes of a fresh sparse file.
+    ///
+    /// Resetting in place rather than unlinking the map and building a new one
+    /// is what keeps concurrent processes together: they have this file
+    /// mapped, so they observe the reset. Unlinking would leave the newcomer
+    /// on a different inode, and from then on neither side could see the
+    /// other's readiness — the survivor would keep waiting for groups that,
+    /// from its map's point of view, never turn ready.
+    pub fn reset(&self) -> io::Result<()> {
+        // Serialize with other processes resetting the same map.
+        let _guard = FileLock::exclusive(&self._file)?;
+        // Stepping by 8 visits each bitmap byte exactly once.
+        for index in (0..self.group_count).step_by(8) {
+            self.bit_byte(index).store(0, Ordering::Release);
+        }
+        self.header_u32(GROUPMAP_READY_COUNT_OFFSET)
+            .store(0, Ordering::Release);
+        self.header_u32(GROUPMAP_FLAGS_OFFSET)
+            .fetch_and(!GROUPMAP_FLAG_ALL_READY, Ordering::AcqRel);
+        Ok(())
     }
 
     pub fn is_ready(&self, index: usize) -> io::Result<bool> {
