@@ -59,6 +59,17 @@ struct ImageStats {
     hole_chunks: u64,
     total_logical_bytes: u64,
     chunk_sizes: BTreeSet<u64>,
+    inline_across_blocks: Vec<InlineOverflow>,
+}
+
+/// An inode whose tail-packed inline data crosses its metadata block, which
+/// the kernel rejects with `-EFSCORRUPTED` when the inode is read.
+struct InlineOverflow {
+    nid: u64,
+    block_offset: u64,
+    header_size: u64,
+    xattr_size: u64,
+    inline_size: u64,
 }
 
 struct BlobSummary {
@@ -244,8 +255,56 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     print_superblock(sb);
     print_summary(&stats, &blobs);
     print_blobs(&blobs);
+    print_inline_across_blocks(&stats);
+
+    if !stats.inline_across_blocks.is_empty() {
+        bail!(
+            "{} inode(s) have inline data crossing a metadata block; \
+             the kernel cannot read them",
+            stats.inline_across_blocks.len()
+        );
+    }
 
     Ok(())
+}
+
+/// Report an inode whose tail-packed inline data would cross its metadata
+/// block. EROFS requires that tail to stay inside the inode's own block; the
+/// kernel fails `erofs_map_blocks()` with `-EFSCORRUPTED` otherwise, making the
+/// inode unreadable.
+fn inline_overflow(nid: u64, inode: &ErofsInode<'_>) -> Option<InlineOverflow> {
+    if inode.data_layout() != EROFS_INODE_FLAT_INLINE {
+        return None;
+    }
+    check_inline_fit(
+        nid,
+        inode.header_size() as u64,
+        inode.xattr_size() as u64,
+        inode.size(),
+    )
+}
+
+fn check_inline_fit(
+    nid: u64,
+    header_size: u64,
+    xattr_size: u64,
+    file_size: u64,
+) -> Option<InlineOverflow> {
+    let block = EROFS_BLOCK_SIZE as u64;
+    let block_offset = (nid * EROFS_SLOTSIZE as u64) % block;
+    // Full blocks live in the data area; only the remainder is packed inline.
+    let inline_size = file_size % block;
+    if block_offset + header_size + xattr_size + inline_size > block {
+        Some(InlineOverflow {
+            nid,
+            block_offset,
+            header_size,
+            xattr_size,
+            inline_size,
+        })
+    } else {
+        None
+    }
 }
 
 fn walk_inode(
@@ -272,6 +331,9 @@ fn walk_inode(
     if file_type != EROFS_FT_DIR && inode.nlink() > 1 {
         stats.hardlink_inodes += 1;
         stats.hardlink_paths += inode.nlink() as u64;
+    }
+    if let Some(overflow) = inline_overflow(nid, &inode) {
+        stats.inline_across_blocks.push(overflow);
     }
 
     match file_type {
@@ -563,6 +625,41 @@ fn print_superblock(sb: &ErofsSuperblock) {
     println!();
 }
 
+/// Print inodes whose inline tail crosses a metadata block. Only the first
+/// entries are listed because a builder bug tends to hit many inodes at once.
+fn print_inline_across_blocks(stats: &ImageStats) {
+    if stats.inline_across_blocks.is_empty() {
+        return;
+    }
+
+    const MAX_LISTED: usize = 20;
+    println!(
+        "Inline data across blocks ({} inode(s), block size {})",
+        stats.inline_across_blocks.len(),
+        EROFS_BLOCK_SIZE
+    );
+    for entry in stats.inline_across_blocks.iter().take(MAX_LISTED) {
+        let end = entry.block_offset + entry.header_size + entry.xattr_size + entry.inline_size;
+        println!(
+            "  nid {}: block_offset {} + header {} + xattr {} + inline {} = {} (> {})",
+            entry.nid,
+            entry.block_offset,
+            entry.header_size,
+            entry.xattr_size,
+            entry.inline_size,
+            end,
+            EROFS_BLOCK_SIZE
+        );
+    }
+    if stats.inline_across_blocks.len() > MAX_LISTED {
+        println!(
+            "  ... {} more",
+            stats.inline_across_blocks.len() - MAX_LISTED
+        );
+    }
+    println!();
+}
+
 fn print_summary(stats: &ImageStats, blobs: &BTreeMap<u16, BlobSummary>) {
     let total_unique_chunks = blobs
         .values()
@@ -762,6 +859,30 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn inline_fit_flags_only_block_crossing_inodes() {
+        // nid 2557 sits 4000 bytes into its block; a 65-byte symlink target
+        // behind a 32-byte header ends one byte past the block.
+        let overflow = check_inline_fit(2557, 32, 0, 65).expect("should overflow");
+        assert_eq!(overflow.block_offset, 4000);
+        assert_eq!(overflow.inline_size, 65);
+
+        // 64 bytes exactly fills the block tail.
+        assert!(check_inline_fit(2557, 32, 0, 64).is_none());
+        // An inode at the start of a block has room to spare.
+        assert!(check_inline_fit(128, 32, 0, 4000).is_none());
+    }
+
+    #[test]
+    fn inline_fit_accounts_for_xattrs_and_full_blocks() {
+        // xattrs push the tail past the block end.
+        assert!(check_inline_fit(2557, 32, 0, 60).is_none());
+        assert!(check_inline_fit(2557, 32, 12, 60).is_some());
+
+        // Only the remainder is inline: a whole-block file packs nothing.
+        assert!(check_inline_fit(2557, 32, 0, EROFS_BLOCK_SIZE as u64).is_none());
+    }
 
     #[test]
     fn resolve_bootstrap_blob_dir_by_full_blob_digest_only() {
