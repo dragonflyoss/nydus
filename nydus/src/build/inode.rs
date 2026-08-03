@@ -136,6 +136,13 @@ pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -
     }
 }
 
+/// Whether the inode stores tail-packed data inline behind its header
+/// (`EROFS_INODE_FLAT_INLINE`), which the kernel requires to stay within the
+/// inode's own metadata block.
+pub fn erofs_inode_has_inline(inode: &InodeInfo) -> bool {
+    matches!(inode.data, InodeData::Symlink { .. })
+}
+
 /// Set the root directory's trusted.nydus.prefetch_blobs xattr to a comma-separated list of
 /// unique non-zero blob indexes.
 pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]) -> Result<()> {

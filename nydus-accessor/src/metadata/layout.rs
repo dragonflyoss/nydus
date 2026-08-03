@@ -37,7 +37,17 @@ impl MetadataLayout {
     }
 
     /// Allocate space for an inode. Returns `(offset_in_buf, nid)`.
-    pub fn alloc_inode(&mut self, size: usize) -> (usize, u64) {
+    ///
+    /// `has_inline` marks inodes whose tail-packed data is stored right behind
+    /// the inode header (`EROFS_INODE_FLAT_INLINE`). The kernel requires that
+    /// tail to stay inside the inode's own metadata block, so such an inode is
+    /// pushed to the next block instead of straddling the boundary.
+    pub fn alloc_inode(&mut self, size: usize, has_inline: bool) -> (usize, u64) {
+        let block = EROFS_BLOCK_SIZE as usize;
+        if has_inline && self.cursor % block + size > block {
+            self.cursor = round_up(self.cursor, block);
+        }
+
         let aligned = round_up(size, EROFS_SLOTSIZE as usize);
         let offset = self.cursor;
         self.cursor += aligned;
@@ -83,5 +93,72 @@ impl MetadataLayout {
     /// Total number of blocks used by metadata (rounded up).
     pub fn total_blocks(&self) -> u64 {
         round_up(self.buf.len(), EROFS_BLOCK_SIZE as usize) as u64 / EROFS_BLOCK_SIZE as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BLOCK: usize = EROFS_BLOCK_SIZE as usize;
+    const SLOT: usize = EROFS_SLOTSIZE as usize;
+
+    /// Fill the metadata area up to `remaining` bytes before the block end.
+    fn fill_to_block_tail(layout: &mut MetadataLayout, remaining: usize) {
+        while (BLOCK - layout.cursor % BLOCK) > remaining {
+            layout.alloc_inode(SLOT, false);
+        }
+        assert_eq!(BLOCK - layout.cursor % BLOCK, remaining);
+    }
+
+    #[test]
+    fn inline_inode_skips_block_boundary() {
+        let mut layout = MetadataLayout::new();
+        fill_to_block_tail(&mut layout, 64);
+
+        // 32B header + 96B target would run 64 bytes past the block end.
+        let (offset, nid) = layout.alloc_inode(SLOT + 96, true);
+
+        assert_eq!(offset % BLOCK, 0, "inline inode must start a new block");
+        assert_eq!(nid, (offset / SLOT) as u64);
+        assert!(
+            offset % BLOCK + SLOT + 96 <= BLOCK,
+            "inline data must stay inside one block"
+        );
+    }
+
+    #[test]
+    fn inline_inode_that_fits_is_not_moved() {
+        let mut layout = MetadataLayout::new();
+        fill_to_block_tail(&mut layout, 128);
+        let expected = layout.cursor;
+
+        let (offset, _) = layout.alloc_inode(SLOT + 96, true);
+
+        assert_eq!(offset, expected, "must not waste a block when it fits");
+    }
+
+    #[test]
+    fn non_inline_inode_may_straddle_blocks() {
+        let mut layout = MetadataLayout::new();
+        fill_to_block_tail(&mut layout, 64);
+        let expected = layout.cursor;
+
+        // Chunk indexes are read one at a time, so they may cross blocks.
+        let (offset, _) = layout.alloc_inode(SLOT + 96, false);
+
+        assert_eq!(offset, expected);
+    }
+
+    #[test]
+    fn inline_inode_exactly_filling_block_tail_stays() {
+        let mut layout = MetadataLayout::new();
+        fill_to_block_tail(&mut layout, 128);
+        let expected = layout.cursor;
+
+        let (offset, _) = layout.alloc_inode(128, true);
+
+        assert_eq!(offset, expected);
+        assert_eq!(layout.cursor % BLOCK, 0);
     }
 }

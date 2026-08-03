@@ -4,7 +4,9 @@ use crate::build::dir::{serialize_directory, DirChild};
 use crate::build::image::{
     device_table_meta_blkaddr, write_erofs_superblock_checksum, write_image,
 };
-use crate::build::inode::{erofs_inode_size, serialize_inode, InodeData, InodeInfo};
+use crate::build::inode::{
+    erofs_inode_has_inline, erofs_inode_size, serialize_inode, InodeData, InodeInfo,
+};
 use crate::metadata::layout::MetadataLayout;
 use crate::metadata::*;
 
@@ -112,7 +114,16 @@ fn render_bootstrap_inner(
 
     for inode in inodes.iter_mut() {
         let inode_size = erofs_inode_size(inode, chunkbits, blkszbits);
-        let (offset, nid) = layout.alloc_inode(inode_size);
+        let has_inline = erofs_inode_has_inline(inode);
+        if has_inline && inode_size > EROFS_BLOCK_SIZE as usize {
+            bail!(
+                "inode {} inline data ({} bytes) does not fit in one {}-byte block",
+                inode.ino,
+                inode_size,
+                EROFS_BLOCK_SIZE
+            );
+        }
+        let (offset, nid) = layout.alloc_inode(inode_size, has_inline);
         inode.meta_offset = offset;
         inode.nid = nid;
     }
