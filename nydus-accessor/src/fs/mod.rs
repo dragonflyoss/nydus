@@ -176,7 +176,12 @@ impl ErofsReader {
             )?),
             _ => Arc::new(LocalBackend::new(blob_dir.to_path_buf())),
         };
-        let (blobs, temporary_cache_dir) = Self::open_blobs(blob_infos, backend, None, None)?;
+        let (blobs, temporary_cache_dir) = Self::open_blobs(
+            blob_infos,
+            crate::storage::backend::metered(backend),
+            None,
+            None,
+        )?;
 
         Ok(Self {
             mmap,

@@ -27,7 +27,7 @@ use crate::metadata::{BlobMeta, EROFS_BLOB_ID_SIZE};
 pub use local::LocalBackend;
 
 #[cfg(feature = "backend-registry")]
-pub use pauser::BACKEND_PAUSER;
+pub use pauser::Pauser;
 #[cfg(feature = "backend-registry")]
 pub use registry::Registry;
 
@@ -118,15 +118,108 @@ pub trait BlobBackend: Send + Sync {
     ) -> io::Result<Vec<u8>>;
 }
 
+/// Wrap `backend` so every read it serves reports to [`crate::metrics`].
+///
+/// Metering lives here rather than in each backend so all of them report the
+/// same counters; an individual backend must not report reads on its own or
+/// they would be counted twice. Apply this exactly once, where the backend is
+/// constructed.
+pub fn metered(backend: Arc<dyn BlobBackend>) -> Arc<dyn BlobBackend> {
+    Arc::new(MeteredBackend { inner: backend })
+}
+
+struct MeteredBackend {
+    inner: Arc<dyn BlobBackend>,
+}
+
+impl MeteredBackend {
+    fn record<T>(
+        &self,
+        ctx: ReadContext,
+        bytes: u64,
+        read: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        let start = std::time::Instant::now();
+        let result = read();
+        let source = match ctx.source {
+            RequestSource::OnDemand => crate::metrics::ReadSource::OnDemand,
+            RequestSource::Prefetch => crate::metrics::ReadSource::Prefetch,
+        };
+        crate::metrics::record_backend_read(
+            self.inner.backend_target(),
+            source,
+            bytes,
+            start.elapsed(),
+            result.is_err(),
+        );
+        result
+    }
+}
+
+impl BlobBackend for MeteredBackend {
+    fn backend_target(&self) -> crate::metrics::BackendTarget {
+        self.inner.backend_target()
+    }
+
+    fn cache_key(
+        &self,
+        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+    ) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
+        self.inner.cache_key(blob_id)
+    }
+
+    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+        self.inner.load_blob_meta(blob_id)
+    }
+
+    fn download_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+        self.inner.download_blob_meta(blob_id, dst)
+    }
+
+    fn read_range_into(
+        &self,
+        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+        offset: u64,
+        dst: &mut [u8],
+        ctx: ReadContext,
+    ) -> io::Result<()> {
+        if dst.is_empty() {
+            return Ok(());
+        }
+        let bytes = dst.len() as u64;
+        self.record(ctx, bytes, || {
+            self.inner.read_range_into(blob_id, offset, dst, ctx)
+        })
+    }
+
+    fn read_range(
+        &self,
+        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+        offset: u64,
+        len: u32,
+        ctx: ReadContext,
+    ) -> io::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        self.record(ctx, len as u64, || {
+            self.inner.read_range(blob_id, offset, len, ctx)
+        })
+    }
+}
+
 /// Construct a blob backend from its configuration.
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
-    match config.kind.as_str() {
-        "local" => Ok(Arc::new(LocalBackend::from_value(&config.config)?)),
+    let backend: Arc<dyn BlobBackend> = match config.kind.as_str() {
+        "local" => Arc::new(LocalBackend::from_value(&config.config)?),
         #[cfg(feature = "backend-registry")]
-        "registry" => Ok(Arc::new(Registry::from_value(&config.config)?)),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("unsupported backend type: {other}"),
-        )),
-    }
+        "registry" => Arc::new(Registry::from_value(&config.config)?),
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported backend type: {other}"),
+            ))
+        }
+    };
+    Ok(metered(backend))
 }

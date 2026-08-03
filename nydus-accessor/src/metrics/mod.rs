@@ -8,7 +8,8 @@
 
 pub mod trace;
 
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use prometheus::{
@@ -16,6 +17,8 @@ use prometheus::{
     TextEncoder,
 };
 use serde::Serialize;
+
+use crate::metadata::EROFS_BLOB_ID_SIZE;
 
 /// Reads slower than this are counted as "high latency" for their source.
 const HIGH_LATENCY_THRESHOLD: Duration = Duration::from_millis(250);
@@ -136,6 +139,7 @@ struct Metrics {
     cache_hit_group: IntCounter,
     cache_total_group: IntGauge,
     cache_fill_group: IntCounter,
+    cache_ondemand_fill_group: IntCounter,
     cache_redirect_fill_group: IntCounter,
     cache_redirect_skip_group: IntCounter,
 }
@@ -308,12 +312,17 @@ impl Metrics {
             cache_total_group: gauge(
                 &registry,
                 "cache_total_group",
-                "Total groups across loaded blob metas",
+                "Total groups across loaded blob metas, counted once per blob",
             ),
             cache_fill_group: counter(
                 &registry,
                 "cache_fill_group",
                 "Groups written into a blob's own cache by regular blob prefetch",
+            ),
+            cache_ondemand_fill_group: counter(
+                &registry,
+                "cache_ondemand_fill_group",
+                "Groups written into a blob's own cache by an on-demand read",
             ),
             cache_redirect_fill_group: counter(
                 &registry,
@@ -420,9 +429,54 @@ pub fn inc_cache_opened_files() {
     METRICS.cache_opened_files.inc();
 }
 
-/// Add `count` groups to the total-groups gauge when a blob meta is loaded.
-pub fn add_cache_total_groups(count: u64) {
-    METRICS.cache_total_group.add(count as i64);
+/// Decrement the count of open blob data cache files.
+pub fn dec_cache_opened_files() {
+    METRICS.cache_opened_files.dec();
+}
+
+/// Blobs currently contributing to `cache_total_group`, with how many caches
+/// hold each one. Blobs are keyed by cache key, so several caches over the
+/// same blob — including ones reached through different images — only count
+/// its groups once.
+static TRACKED_BLOBS: LazyLock<Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], TrackedBlob>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct TrackedBlob {
+    groups: u64,
+    caches: usize,
+}
+
+/// Count `groups` towards the total-groups gauge for the blob `cache_key`,
+/// unless another cache already counted it.
+pub fn track_blob_groups(cache_key: [u8; EROFS_BLOB_ID_SIZE], groups: u64) {
+    let mut tracked = match TRACKED_BLOBS.lock() {
+        Ok(tracked) => tracked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let entry = tracked
+        .entry(cache_key)
+        .or_insert(TrackedBlob { groups, caches: 0 });
+    entry.caches += 1;
+    if entry.caches == 1 {
+        METRICS.cache_total_group.add(entry.groups as i64);
+    }
+}
+
+/// Drop one cache's claim on the blob `cache_key`, uncounting its groups once
+/// the last cache over that blob is gone.
+pub fn untrack_blob_groups(cache_key: &[u8; EROFS_BLOB_ID_SIZE]) {
+    let mut tracked = match TRACKED_BLOBS.lock() {
+        Ok(tracked) => tracked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(entry) = tracked.get_mut(cache_key) else {
+        return;
+    };
+    entry.caches -= 1;
+    if entry.caches == 0 {
+        METRICS.cache_total_group.sub(entry.groups as i64);
+        tracked.remove(cache_key);
+    }
 }
 
 /// Record a group served from cache without a backend read.
@@ -439,9 +493,16 @@ pub fn record_backend_redirect_read(bytes: u64) {
     m.backend_redirect_read_bytes.inc_by(bytes);
 }
 
-/// Record a group written into a blob's own cache by regular blob prefetch.
+/// Record a group decoded into a blob's own cache by regular blob prefetch.
 pub fn inc_cache_fill_group() {
     METRICS.cache_fill_group.inc();
+}
+
+/// Record a group decoded into a blob's own cache to satisfy an on-demand
+/// read. Summing this across the processes sharing a cache directory shows how
+/// much duplicate fetching they do.
+pub fn inc_cache_ondemand_fill_group() {
+    METRICS.cache_ondemand_fill_group.inc();
 }
 
 /// Record a group decoded from a redirect (ondemand) blob and written into its
@@ -454,6 +515,18 @@ pub fn inc_cache_redirect_fill_group() {
 /// failure, unknown source device, or a failed source-cache fill).
 pub fn inc_cache_redirect_skip_group() {
     METRICS.cache_redirect_skip_group.inc();
+}
+
+/// How many caches currently claim the blob `cache_key`, for tests. The gauge
+/// itself is process-global and other tests move it concurrently, so the
+/// refcount is what can be asserted deterministically.
+#[cfg(test)]
+fn tracked_blob_refs(cache_key: &[u8; EROFS_BLOB_ID_SIZE]) -> Option<usize> {
+    let tracked = match TRACKED_BLOBS.lock() {
+        Ok(tracked) => tracked,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    tracked.get(cache_key).map(|entry| entry.caches)
 }
 
 /// A serializable view over the live prometheus registry.
@@ -571,7 +644,7 @@ mod tests {
         );
         record_fs_op(FsOp::Read, Duration::from_millis(2), false);
         inc_cache_hit_group();
-        add_cache_total_groups(3);
+        track_blob_groups([7u8; EROFS_BLOB_ID_SIZE], 3);
         inc_cache_opened_files();
 
         let text = encode_text();
@@ -621,5 +694,26 @@ mod tests {
         // Histograms expand to _sum / _count.
         assert!(obj.contains_key("fs_read_latency_count"));
         assert!(obj.contains_key("fs_read_latency_sum"));
+    }
+
+    #[test]
+    fn blob_groups_are_counted_once_per_blob_and_released() {
+        // The gauge moves with the refcount transitions asserted here, and is
+        // itself process-global, so this pins the transitions instead.
+        let key = [42u8; EROFS_BLOB_ID_SIZE];
+        assert_eq!(tracked_blob_refs(&key), None);
+
+        // A second cache over the same blob joins the existing entry rather
+        // than counting the blob's groups again.
+        track_blob_groups(key, 10);
+        assert_eq!(tracked_blob_refs(&key), Some(1));
+        track_blob_groups(key, 10);
+        assert_eq!(tracked_blob_refs(&key), Some(2));
+
+        // The groups stay counted until the last cache is gone.
+        untrack_blob_groups(&key);
+        assert_eq!(tracked_blob_refs(&key), Some(1));
+        untrack_blob_groups(&key);
+        assert_eq!(tracked_blob_refs(&key), None);
     }
 }

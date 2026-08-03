@@ -27,8 +27,10 @@ backend:
     # Ignored when `insecure: true`. Default: false.
     skip_verify: false
 
-    # Per-request timeout in seconds (connect + read). Default: 30.
-    timeout: 30
+    # Per-request timeout in seconds (connect + read). Default: 5. Kept short
+    # because a read holds the group's fetch claim for its whole duration, and
+    # the readers waiting behind that claim are FUSE worker threads.
+    timeout: 5
 
     # Number of retries for on-demand reads. Prefetch reads are tried once.
     # Default: 3.

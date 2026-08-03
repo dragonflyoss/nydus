@@ -20,6 +20,10 @@ UBLK_TIMEOUT ?= 300s
 UBLK_COUNT ?= 1
 UBLK_GO_TEST_ARGS ?=
 
+ACCESSOR_TIMEOUT ?= 900s
+ACCESSOR_COUNT ?= 1
+ACCESSOR_GO_TEST_ARGS ?=
+
 FANOTIFY_TIMEOUT ?= 600s
 FANOTIFY_COUNT ?= 1
 FANOTIFY_GO_TEST_ARGS ?=
@@ -71,6 +75,7 @@ TEST_SUPPORT_FILES = util.go optimize_util.go
 E2E_TEST_FILES = e2e_test.go $(TEST_SUPPORT_FILES)
 UFFD_TEST_FILES = uffd_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
+ACCESSOR_TEST_FILES = accessor_test.go $(TEST_SUPPORT_FILES)
 XFSTESTS_TEST_FILES = xfstests_test.go $(TEST_SUPPORT_FILES)
 PERF_TEST_FILES = perf_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
@@ -84,7 +89,7 @@ FANOTIFY_PERF_TEST_PKG = .
 # fanotify_test.go, so the entire package must be compiled together.
 NBD_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-uffd test-fanotify test-nbd test-block-perf test-xfstests test-perf test-top-images crate clean
+.PHONY: build release nydusify test test-e2e test-uffd test-accessor test-fanotify test-nbd test-block-perf test-xfstests test-perf test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -132,6 +137,15 @@ test-ublk: release
 	cd tests/integration && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestUblkTarget$$' -count $(UBLK_COUNT) -timeout $(UBLK_TIMEOUT) $(UBLK_GO_TEST_ARGS) $(UBLK_TEST_FILES)
+
+# Run the cross-process blob cache tests. Requires root because they mount
+# several nydus FUSE instances against one shared --cache-dir and assert on the
+# cache directory plus each instance's /metrics endpoint.
+test-accessor: release
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	cd tests/integration && \
+		$(GO_TEST_ENV) \
+		$(GO_BIN) test -v -run '^TestAccessor' -count $(ACCESSOR_COUNT) -timeout $(ACCESSOR_TIMEOUT) $(ACCESSOR_GO_TEST_ARGS) $(ACCESSOR_TEST_FILES)
 
 # Run the fanotify pre-content E2E test (requires root, Linux >= 6.15, docker
 # for the throwaway local registry). Builds nydus with the fanotify feature.

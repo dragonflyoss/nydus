@@ -3,13 +3,12 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::ops::Range;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::metadata::{BlobMeta, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE};
 use crate::metrics::trace::TraceRecorder;
@@ -17,6 +16,7 @@ use crate::storage::backend::{BlobBackend, ReadContext, RequestSource};
 use crate::storage::groupmap::GroupMap;
 use crate::utils::hex_string;
 
+use super::grouplock::GroupLocks;
 use super::{
     decode_group_from_window, fetch_decode_validate_group_into, plan_prefetch_batches, BlobCache,
     BlobCacheBuffers,
@@ -78,6 +78,9 @@ impl GroupFlight {
 
 pub struct LocalBlobCache {
     blob_id: [u8; EROFS_BLOB_ID_SIZE],
+    /// Digest naming this blob's cache files, shared by every image that
+    /// references the same blob.
+    cache_key: [u8; EROFS_BLOB_ID_SIZE],
     /// Device/blob index in the merged image, used to attribute on-demand group
     /// accesses in the access trace.
     blob_index: u32,
@@ -89,6 +92,9 @@ pub struct LocalBlobCache {
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     inflight_groups: Mutex<HashMap<usize, Arc<GroupFlight>>>,
+    /// Keeps the processes sharing this cache from each fetching the same
+    /// cold group.
+    group_locks: GroupLocks,
 }
 
 impl LocalBlobCache {
@@ -114,34 +120,22 @@ impl LocalBlobCache {
         let cache_key_hex = hex_string(&cache_key);
         let blob_meta_path = cache_dir.join(format!("{cache_key_hex}.blob.meta"));
         let blob_meta = load_cached_blob_meta(blob_id, cache_dir, &blob_meta_path, &backend)?;
-        crate::metrics::add_cache_total_groups(blob_meta.group_count() as u64);
+        crate::metrics::track_blob_groups(cache_key, blob_meta.group_count() as u64);
 
         let cache_blob_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
         let groupmap_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
         // The groupmap is only meaningful together with the cache data file it
         // describes: a leftover groupmap whose data file has been removed
-        // would claim groups are ready while reads hit sparse zeros. Reset it
-        // so the blob starts cold instead of serving holes. (Removing the map
-        // while keeping the data is the safe direction and needs no handling.)
-        if groupmap_path.exists() && !cache_blob_path.exists() {
-            match fs::remove_file(&groupmap_path) {
-                Ok(()) => warn!(
-                    "stale groupmap without cache data file, resetting: {}",
-                    groupmap_path.display()
-                ),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err),
-            }
-        }
-        // Create the cache data file eagerly, before the groupmap. This keeps
-        // the invariant "groupmap file exists => data file exists" so the
-        // stale-reset above can only fire for a genuinely orphaned groupmap.
-        // With lazy creation a second handle opening the same cache dir before
-        // any read would unlink the groupmap a live handle already has mapped,
-        // splitting the two onto different inodes: ready bits set by one side
-        // become invisible to the other, and its prefetch_lock() then waits
-        // forever for groups that never turn ready.
+        // would claim groups are ready while reads hit sparse zeros. Note this
+        // before creating the data file below, which would otherwise mask it.
+        // (Removing the map while keeping the data is the safe direction and
+        // needs no handling.)
+        let stale_groupmap = groupmap_path.exists() && !cache_blob_path.exists();
+
+        // Create the cache data file eagerly, before the groupmap, so that
+        // "groupmap file exists => data file exists" holds and the check above
+        // can only fire for a genuinely orphaned groupmap.
         let data_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -152,11 +146,23 @@ impl LocalBlobCache {
         drop(data_file);
 
         let groupmap = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
+        if stale_groupmap {
+            // Reset in place rather than unlinking: handles already mapping
+            // this file observe the reset, whereas a replacement inode would
+            // split them off with their readiness invisible to each other.
+            groupmap.reset()?;
+            warn!(
+                "stale groupmap without cache data file, reset: {}",
+                groupmap_path.display()
+            );
+        }
 
         let prefetch_lock_path = cache_dir.join(format!("{cache_key_hex}.prefetch.lock"));
+        let group_locks = GroupLocks::new(cache_dir.join(format!("{cache_key_hex}.flight.lock")));
 
         Ok(Self {
             blob_id,
+            cache_key,
             blob_index,
             groupmap,
             blob_meta,
@@ -166,6 +172,7 @@ impl LocalBlobCache {
             backend,
             trace_recorder,
             inflight_groups: Mutex::new(HashMap::new()),
+            group_locks,
         })
     }
 
@@ -192,6 +199,25 @@ impl LocalBlobCache {
         crate::metrics::inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
+    }
+
+    /// Reject work against a cache data file that has been unlinked.
+    ///
+    /// The descriptor keeps an unlinked inode alive, so writes through it
+    /// still succeed — but they land somewhere nobody else can reach, while
+    /// the shared groupmap goes on advertising those groups as ready. Better
+    /// to stop than to publish readiness for bytes other processes cannot see.
+    fn ensure_data_file_linked(&self, cache_file: &File) -> io::Result<()> {
+        if cache_file.metadata()?.nlink() == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "cache data file was removed while in use: {}",
+                    self.cache_blob_path.display()
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn ensure_group(
@@ -245,6 +271,18 @@ impl LocalBlobCache {
                 crate::metrics::trace::record_group_access(self.blob_index, group_index as u32);
             }
 
+            // Claim the group across the processes sharing this cache. The
+            // in-process flight above already left a single leader per group,
+            // which is what makes the descriptor-owned lock meaningful here.
+            // Whoever waited usually finds the group published on the way out,
+            // so the re-check below is what actually removes the duplicate
+            // backend traffic.
+            let _claim = self.group_locks.acquire(group_index);
+            if self.groupmap.is_ready(group_index)? {
+                crate::metrics::inc_cache_hit_group();
+                return Ok(());
+            }
+
             let mut buffers = BlobCacheBuffers::default();
             let decoded = fetch_decode_validate_group_into(
                 &self.blob_id,
@@ -255,7 +293,9 @@ impl LocalBlobCache {
                 RequestSource::OnDemand,
             )?;
             write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
-            self.groupmap.set_ready(group_index)
+            self.groupmap.set_ready(group_index)?;
+            crate::metrics::inc_cache_ondemand_fill_group();
+            Ok(())
         })();
 
         // Notify followers with the actual result.
@@ -361,6 +401,22 @@ impl LocalBlobCache {
     }
 }
 
+impl Drop for LocalBlobCache {
+    fn drop(&mut self) {
+        // Mirror the gauge updates from `open_with_trace` and `cache_file` so
+        // repeatedly opening and dropping caches does not inflate them.
+        let opened = self
+            .cache_file
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some();
+        if opened {
+            crate::metrics::dec_cache_opened_files();
+        }
+        crate::metrics::untrack_blob_groups(&self.cache_key);
+    }
+}
+
 impl BlobCache for LocalBlobCache {
     fn prefetch_all(&self) -> io::Result<()> {
         let groups = self.blob_meta.groups();
@@ -374,6 +430,9 @@ impl BlobCache for LocalBlobCache {
         }
 
         let cache_file = self.cache_file()?;
+        // Prefetch writes the bulk of the cache, so it is worth one stat to
+        // make sure the file it fills is still the one other processes read.
+        self.ensure_data_file_linked(&cache_file)?;
         // Prefetch owns its decode buffers and does not take `fetch_lock`, so it
         // never blocks on-demand FUSE reads. The groupmap is internally locked
         // and `set_ready` is idempotent, so racing with a read at worst decodes
@@ -776,13 +835,17 @@ fn load_cached_blob_meta(
     backend: &Arc<dyn BlobBackend>,
 ) -> io::Result<BlobMeta> {
     if !blob_meta_path.is_file() {
-        let tmp_path = cache_dir.join(format!(".blob-meta-{}.tmp", Uuid::new_v4()));
-        backend.download_blob_meta(&blob_id, &tmp_path)?;
-        if let Err(err) = BlobMeta::load_checked_crc32_with_blob_id(&tmp_path, blob_id) {
-            let _ = fs::remove_file(&tmp_path);
+        // `O_EXCL` creation keeps the name unique against other processes
+        // sharing this cache dir, and drops the file if we bail out early.
+        let tmp = tempfile::Builder::new()
+            .prefix(".blob-meta-")
+            .suffix(".tmp")
+            .tempfile_in(cache_dir)?;
+        backend.download_blob_meta(&blob_id, tmp.path())?;
+        if let Err(err) = BlobMeta::load_checked_crc32_with_blob_id(tmp.path(), blob_id) {
             return Err(io::Error::other(err));
         }
-        fs::rename(&tmp_path, blob_meta_path)?;
+        tmp.persist(blob_meta_path).map_err(|err| err.error)?;
     }
 
     BlobMeta::load_checked_crc32_with_blob_id(blob_meta_path, blob_id).map_err(io::Error::other)
@@ -1003,6 +1066,47 @@ mod tests {
         let mut buf = vec![0u8; 1024];
         reopened.read_at(512, &mut buf).unwrap();
         assert_eq!(buf, payload[512..1536]);
+    }
+
+    #[test]
+    fn stale_groupmap_reset_keeps_the_same_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let backend_dir = tempdir().unwrap();
+        let cache_dir = tempdir().unwrap();
+        let payload = vec![0x2eu8; 4096];
+        let data_blob_id = sha256_bytes(&payload);
+        let meta = blob_meta(data_blob_id, &payload);
+        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let backend: Arc<dyn BlobBackend> =
+            Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
+
+        // A live handle keeps the groupmap mapped throughout, standing in for
+        // a process that is already running when the accident happens.
+        let live =
+            LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
+        let mut buf = vec![0u8; 1024];
+        live.read_at(0, &mut buf).unwrap();
+        assert!(live.groupmap.is_ready(0).unwrap());
+
+        let cache_key = backend.cache_key(&full_blob_id).unwrap();
+        let prefix = hex_string(&cache_key);
+        let groupmap_path = cache_dir.path().join(format!("{prefix}.group.map"));
+        let before = fs::metadata(&groupmap_path).unwrap().ino();
+        fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
+
+        let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
+        assert_eq!(
+            fs::metadata(&groupmap_path).unwrap().ino(),
+            before,
+            "the reset must not replace the groupmap file"
+        );
+
+        // Because the inode is unchanged, the reset is visible through the
+        // mapping the live handle already holds; a replacement inode would
+        // have left it advertising readiness nobody else can see.
+        assert!(!live.groupmap.is_ready(0).unwrap());
+        assert!(!reopened.groupmap.is_ready(0).unwrap());
     }
 
     #[test]
