@@ -1541,7 +1541,7 @@ proves completion — this also heals the rare counter skew left by a process
 that died between setting the last bit and bumping the counter, as does the
 same reconciliation at every `open`. A successful `prefetch_all` additionally
 runs this authoritative scan before returning, so once a full prefetch
-completes, `is_fully_ready` is guaranteed to answer true even in the presence of
+completes, `is_all_ready` is guaranteed to answer true even in the presence of
 historical counter skew.
 
 **Per-blob prefetch flock.** Blob-level prefetch — and only prefetch — is
@@ -1626,7 +1626,7 @@ through `ublk_drv` over `io_uring`; see
 - `NydusCore::new(bootstrap, Config)` parses the bootstrap and an already
 	loaded `nydus::Config` (same structure as `nydus fuse --config`) lazily;
 	per-blob work (blob meta download/validation, sparse cache file creation)
-	happens on first touch through `blob.entries()` or `blob.fetch`.
+	happens on first touch through `blob.prepare_entries()` or `blob.fetch`.
 - When `config.prefetch.enable` is set, `new` spawns a background prefetch
 	worker before returning — the same two-phase workflow as `nydus fuse`
 	(redirect blob first, then the rest only under `prefetch.full`). The worker
@@ -1639,7 +1639,7 @@ through `ublk_drv` over `io_uring`; see
 	`nydus optimize --trace-file`. See [Metrics](#metrics).
 - `BlobId` is the public blob digest type. It converts to/from 64-character
 	SHA256 hex strings and `[u8; 32]` bytes.
-- `blob.entries()` lists the device table in order as `BlobInfo` entries:
+- `blob.prepare_entries()` lists the device table in order as `BlobInfo` entries:
 	blob index, `BlobId`, block count, cache path, cache size, and whether the
 	blob is an ondemand redirect blob. Calling it prepares the sparse cache data
 	files, so `BlobInfo.cache_path` is immediately suitable as a virtio-pmem
@@ -1670,7 +1670,7 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> 
 	// Materialize every blob cache file before creating guest pmem devices.
 	// The vector is in bootstrap device-table order; `index` is the 1-based
 	// EROFS external-device index used by chunk indexes.
-	let blobs = core.blobs.entries()?;
+	let blobs = core.blobs.prepare_entries()?;
 	for blob in &blobs {
 		println!(
 			"blob index={} id={} blocks={} cache={} bytes={} redirect={}",

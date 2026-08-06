@@ -36,11 +36,15 @@ pub enum BackendTarget {
     Proxy,
 }
 
-/// Whether a backend read was triggered by a blocking FUSE request or by
-/// background prefetch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadSource {
+/// What kind of backend read this is — a user-triggered on-demand read or a
+/// background prefetch — used to apply different retry, throttling,
+/// proxy-priority and metering policies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadKind {
+    /// User-triggered read that blocks a FUSE request.
+    #[default]
     OnDemand,
+    /// Background prefetch read after mount.
     Prefetch,
 }
 
@@ -341,12 +345,12 @@ impl Metrics {
 
 static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
 
-/// Record a single logical backend read: its target, source, transferred byte
+/// Record a single logical backend read: its target, kind, transferred byte
 /// count (on success), duration and outcome. One call updates every relevant
 /// origin/proxy and on-demand/prefetch counter, byte total and latency series.
 pub fn record_backend_read(
     target: BackendTarget,
-    source: ReadSource,
+    kind: ReadKind,
     bytes: u64,
     duration: Duration,
     is_err: bool,
@@ -376,8 +380,8 @@ pub fn record_backend_read(
         }
     }
 
-    match source {
-        ReadSource::OnDemand => {
+    match kind {
+        ReadKind::OnDemand => {
             m.backend_ondemand_read_count.inc();
             if is_err {
                 m.backend_ondemand_read_errors.inc();
@@ -388,7 +392,7 @@ pub fn record_backend_read(
                 m.backend_ondemand_read_high_latency_count.inc();
             }
         }
-        ReadSource::Prefetch => {
+        ReadKind::Prefetch => {
             m.backend_prefetch_read_count.inc();
             if is_err {
                 m.backend_prefetch_read_errors.inc();
@@ -637,7 +641,7 @@ mod tests {
     fn encode_text_contains_registered_metrics() {
         record_backend_read(
             BackendTarget::Origin,
-            ReadSource::OnDemand,
+            ReadKind::OnDemand,
             1024,
             Duration::from_millis(5),
             false,
@@ -661,7 +665,7 @@ mod tests {
     fn high_latency_counts_when_over_threshold() {
         record_backend_read(
             BackendTarget::Proxy,
-            ReadSource::Prefetch,
+            ReadKind::Prefetch,
             0,
             Duration::from_millis(500),
             true,
@@ -674,7 +678,7 @@ mod tests {
     fn snapshot_serializes_metrics_as_json_object() {
         record_backend_read(
             BackendTarget::Origin,
-            ReadSource::OnDemand,
+            ReadKind::OnDemand,
             2048,
             Duration::from_millis(3),
             false,

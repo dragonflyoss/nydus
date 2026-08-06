@@ -61,6 +61,8 @@ pub enum Response {
 pub enum DenyReason {
     /// The event carried no fillable range (missing/zero/out-of-device/overflow).
     InvalidRange,
+    /// The event is not a pre-access (FAN_PRE_ACCESS) permission event.
+    NotPreAccess,
     /// The event fd did not resolve to a known source blob device.
     UnknownDevice,
     /// A read targeted a redirect slot, which the guest must never read.
@@ -132,7 +134,7 @@ pub struct FanotifyCore {
     blob_slot: HashMap<BlobId, usize>,
     /// Per-device-slot sticky flag: true once the fanotify mark has been removed
     /// (or was never added because the blob was already fully ready at startup).
-    /// Prevents redundant `is_fully_ready` probes and duplicate `FAN_MARK_REMOVE`
+    /// Prevents redundant `is_all_ready` probes and duplicate `FAN_MARK_REMOVE`
     /// syscalls across concurrent fetch workers.
     unmarked: Vec<AtomicBool>,
 }
@@ -154,7 +156,7 @@ impl FanotifyCore {
             Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
         let entries = core
             .blobs
-            .entries()
+            .prepare_entries()
             .context("failed to enumerate blob devices")?;
 
         let mut devices = Vec::with_capacity(entries.len());
@@ -254,7 +256,7 @@ impl FanotifyCore {
 
     /// Record that the mark for device `slot` was never added (the blob was
     /// already fully ready at startup), so `try_unmark` skips it at runtime.
-    pub fn mark_unmarked(&self, slot: usize) {
+    pub fn set_unmarked(&self, slot: usize) {
         if let Some(flag) = self.unmarked.get(slot) {
             flag.store(true, Ordering::Release);
         }
@@ -285,7 +287,7 @@ impl FanotifyCore {
             return false;
         }
         // O(1) probe: single atomic load on the groupmap's shared ALL_READY flag.
-        if !self.core.blobs.is_fully_ready(id).unwrap_or(false) {
+        if !self.core.blobs.is_all_ready(id).unwrap_or(false) {
             return false;
         }
         // Claim the unmark: exactly one thread wins the CAS.
@@ -349,7 +351,7 @@ pub enum FetchError {
 /// are denied too.
 pub fn decide(event: &PreContentEvent) -> Decision {
     if !event.is_pre_access() {
-        return Decision::Deny(DenyReason::InvalidRange);
+        return Decision::Deny(DenyReason::NotPreAccess);
     }
     match event.range {
         Some(range) => Decision::Fill(range),
@@ -507,7 +509,7 @@ mod tests {
         };
         assert_eq!(
             decide(&ev(0, Some(r))),
-            Decision::Deny(DenyReason::InvalidRange)
+            Decision::Deny(DenyReason::NotPreAccess)
         );
     }
 

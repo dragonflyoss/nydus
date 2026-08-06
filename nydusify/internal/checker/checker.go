@@ -18,8 +18,8 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 )
 
-// Opt configures a Checker.
-type Opt struct {
+// Option configures a Checker.
+type Option struct {
 	// Source is the source image reference (OCI or nydus). May be empty.
 	Source string
 	// Target is the target image reference (OCI or nydus). May be empty.
@@ -46,11 +46,11 @@ type Opt struct {
 
 // Checker validates the consistency of a source/target image pair.
 type Checker struct {
-	opt Opt
+	opt Option
 }
 
 // New creates a Checker.
-func New(opt Opt) (*Checker, error) {
+func New(opt Option) (*Checker, error) {
 	if opt.Source == "" && opt.Target == "" {
 		return nil, errors.New("at least one of source or target must be provided")
 	}
@@ -74,7 +74,7 @@ func (c *Checker) Check(ctx context.Context) error {
 		}
 	}
 
-	provider, err := remote.NewProvider(remote.Options{
+	provider, err := remote.NewProvider(remote.Option{
 		WorkDir:         contentDir,
 		SourceInsecure:  c.opt.SourceInsecure,
 		SourcePlainHTTP: c.opt.SourcePlainHTTP,
@@ -93,13 +93,13 @@ func (c *Checker) Check(ctx context.Context) error {
 	// checker: the bootstrap check is static and the FUSE mount fetches blobs on
 	// demand from the registry.
 	bothPresent := c.opt.Source != "" && c.opt.Target != ""
-	pullOpts := remote.PullOptions{PullOCILayers: bothPresent, PullNydusBlobs: false}
+	pullOpt := remote.PullOption{PullOCILayers: bothPresent, PullNydusBlobs: false}
 
-	source, err := c.load(ctx, provider, c.opt.Source, pullOpts, remote.Source)
+	source, err := c.load(ctx, provider, c.opt.Source, pullOpt, remote.Source)
 	if err != nil {
 		return errors.Wrapf(err, "load source %q", c.opt.Source)
 	}
-	target, err := c.load(ctx, provider, c.opt.Target, pullOpts, remote.Target)
+	target, err := c.load(ctx, provider, c.opt.Target, pullOpt, remote.Target)
 	if err != nil {
 		return errors.Wrapf(err, "load target %q", c.opt.Target)
 	}
@@ -138,9 +138,9 @@ func (c *Checker) Check(ctx context.Context) error {
 }
 
 // load pulls and parses an image reference, returning nil for an empty ref.
-func (c *Checker) load(ctx context.Context, provider *remote.Provider, ref string, pullOpts remote.PullOptions, reg remote.Registry) (*Image, error) {
+func (c *Checker) load(ctx context.Context, provider *remote.Provider, ref string, pullOpt remote.PullOption, reg remote.Side) (*Image, error) {
 	if ref == "" {
 		return nil, nil
 	}
-	return loadImage(ctx, provider, ref, c.opt.PlatformMC, pullOpts, reg)
+	return loadImage(ctx, provider, ref, c.opt.PlatformMC, pullOpt, reg)
 }

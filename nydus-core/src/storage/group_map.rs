@@ -214,13 +214,13 @@ impl GroupMap {
     }
 
     pub fn is_ready(&self, index: usize) -> io::Result<bool> {
-        ensure_index(index, self.group_count)?;
+        validate_index(index, self.group_count)?;
         let mask = 1u8 << (index % 8);
         Ok(self.bit_byte(index).load(Ordering::Acquire) & mask != 0)
     }
 
     pub fn ready_ranges(&self, first: usize, last: usize) -> io::Result<Vec<Range<usize>>> {
-        ensure_range(first, last, self.group_count)?;
+        validate_range(first, last, self.group_count)?;
 
         // Fast path: a fully-ready blob needs no bit scanning at all.
         if self.is_all_ready() {
@@ -248,7 +248,7 @@ impl GroupMap {
     }
 
     pub fn set_ready(&self, index: usize) -> io::Result<()> {
-        ensure_index(index, self.group_count)?;
+        validate_index(index, self.group_count)?;
         let mask = 1u8 << (index % 8);
         let previous = self.bit_byte(index).fetch_or(mask, Ordering::AcqRel);
         if previous & mask == 0 {
@@ -340,7 +340,7 @@ fn header_bytes(group_count: usize) -> [u8; GROUPMAP_HEADER_SIZE] {
     header
 }
 
-fn ensure_index(index: usize, group_count: usize) -> io::Result<()> {
+fn validate_index(index: usize, group_count: usize) -> io::Result<()> {
     if index >= group_count {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -350,9 +350,9 @@ fn ensure_index(index: usize, group_count: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_range(first: usize, last: usize, group_count: usize) -> io::Result<()> {
-    ensure_index(first, group_count)?;
-    ensure_index(last, group_count)?;
+fn validate_range(first: usize, last: usize, group_count: usize) -> io::Result<()> {
+    validate_index(first, group_count)?;
+    validate_index(last, group_count)?;
     if first > last {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

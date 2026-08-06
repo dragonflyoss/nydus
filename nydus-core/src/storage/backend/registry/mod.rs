@@ -28,13 +28,13 @@ use serde::Deserialize;
 use url::Url;
 
 use super::pauser::Pauser;
-use super::{BlobBackend, ReadContext, RequestSource};
+use super::{BlobBackend, ReadContext, ReadKind};
 use crate::metadata::{BlobFooter, BlobMeta, EROFS_BLOB_ID_SIZE, NYDUS_BLOB_FOOTER_SIZE};
 use crate::utils::hex_string;
 
-use super::http::{Connection, ConnectionConfig};
+use super::http::{ConnectionConfig, HttpClient};
 use super::proxy::{HttpProxy, ProxyConfig};
-use super::request::{is_success_status, Request, RequestError, Response};
+use super::request::{is_success_status, RequestDispatcher, RequestError, Response};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
 use super::dragonfly_sdk::DragonflySdk;
@@ -251,7 +251,7 @@ fn default_token_expiration() -> u64 {
 /// Storage backend backed by an OCI image registry.
 pub struct Registry {
     state: Arc<RegistryState>,
-    request: Arc<Request>,
+    request: Arc<RequestDispatcher>,
     /// Whether reads are served through a proxy (HTTP mirror or Dragonfly),
     /// used to attribute backend read and CRC metrics.
     target: crate::metrics::BackendTarget,
@@ -282,7 +282,7 @@ impl Registry {
             timeout: config.timeout,
             ca_cert_files: config.ca_cert_files.clone(),
         };
-        let connection = Connection::new(&conn_config)?;
+        let connection = HttpClient::new(&conn_config)?;
 
         let proxy = match config.proxy.as_ref().and_then(|p| p.url.as_deref()) {
             Some(url) => Some(HttpProxy::new(&conn_config, url)?),
@@ -310,7 +310,7 @@ impl Registry {
             crate::metrics::BackendTarget::Origin
         };
 
-        let request = Request::new(
+        let request = RequestDispatcher::new(
             connection,
             proxy,
             #[cfg(feature = "backend-dragonfly-proxy")]
@@ -341,7 +341,7 @@ impl Registry {
         })
     }
 
-    /// Fill `dst` with the blob byte range, retrying per the source policy.
+    /// Fill `dst` with the blob byte range, retrying per the read-kind policy.
     fn retry_read(
         &self,
         blob_id: &[u8; EROFS_BLOB_ID_SIZE],
@@ -351,9 +351,9 @@ impl Registry {
     ) -> RegistryResult<()> {
         self.pauser.wait_if_paused();
 
-        let max_attempts = match ctx.source {
-            RequestSource::Prefetch => 1,
-            RequestSource::OnDemand => self.state.retry_limit.max(1),
+        let max_attempts = match ctx.kind {
+            ReadKind::Prefetch => 1,
+            ReadKind::OnDemand => self.state.retry_limit.max(1),
         };
 
         let mut attempt = 0u8;
@@ -365,7 +365,7 @@ impl Registry {
                 Err(e @ RegistryError::ProxyForbidden(_)) => return Err(e),
                 // Prefetch should never hammer a rate-limited proxy.
                 Err(e @ RegistryError::ProxyTooManyRequests(_))
-                    if ctx.source == RequestSource::Prefetch =>
+                    if ctx.kind == ReadKind::Prefetch =>
                 {
                     return Err(e);
                 }
@@ -451,7 +451,7 @@ impl Registry {
             Method::HEAD,
             &url,
             HeaderMap::new(),
-            ReadContext::raw(RequestSource::OnDemand),
+            ReadContext::raw(ReadKind::OnDemand),
         )?;
         let status = resp.status();
 
@@ -466,7 +466,7 @@ impl Registry {
                 Method::HEAD,
                 &location,
                 HeaderMap::new(),
-                ReadContext::raw(RequestSource::OnDemand),
+                ReadContext::raw(ReadKind::OnDemand),
                 true,
             )?;
             if !is_success_status(redirected.status()) {
@@ -509,7 +509,7 @@ impl Registry {
             blob_id,
             size - NYDUS_BLOB_FOOTER_SIZE as u64,
             &mut footer_bytes,
-            ReadContext::raw(RequestSource::OnDemand),
+            ReadContext::raw(ReadKind::OnDemand),
         )?;
         let footer = BlobFooter::parse(&footer_bytes, size)
             .map_err(|e| RegistryError::Io(io::Error::other(e.to_string())))?;
@@ -525,7 +525,7 @@ impl Registry {
             blob_id,
             footer.blob_meta_offset(),
             &mut blob_meta_bytes,
-            ReadContext::raw(RequestSource::OnDemand),
+            ReadContext::raw(ReadKind::OnDemand),
         )?;
 
         BlobMeta::from_bytes_with_blob_id(&blob_meta_bytes, *blob_id)
@@ -621,7 +621,7 @@ impl Registry {
             Method::GET,
             url.as_str(),
             headers,
-            ReadContext::raw(RequestSource::OnDemand),
+            ReadContext::raw(ReadKind::OnDemand),
             false,
         )?;
         if !is_success_status(resp.status()) {

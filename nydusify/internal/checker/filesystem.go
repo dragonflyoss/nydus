@@ -95,7 +95,7 @@ func (r *filesystemRule) Validate(ctx context.Context) error {
 // cleanup function. OCI images are extracted to a directory; nydus images are
 // mounted through `nydus fuse`. reg selects which registry side's TLS/HTTP
 // settings back the nydus FUSE mount.
-func (r *filesystemRule) mount(ctx context.Context, label string, reg remote.Registry, img *Image) (string, func(), error) {
+func (r *filesystemRule) mount(ctx context.Context, label string, reg remote.Side, img *Image) (string, func(), error) {
 	dir, err := os.MkdirTemp(r.workDir, "fs-"+label+"-")
 	if err != nil {
 		return "", nil, errors.Wrap(err, "create scratch dir")
@@ -127,7 +127,7 @@ func (r *filesystemRule) mount(ctx context.Context, label string, reg remote.Reg
 // `nydus fuse` daemon mounting them, waits for the mount to become ready, and
 // returns the mountpoint with an unmount function. Blob data is fetched on
 // demand from the registry rather than materialized locally.
-func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.Registry, img *Image) (string, func(), error) {
+func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.Side, img *Image) (string, func(), error) {
 	if img.Bootstrap == nil {
 		return "", nil, errors.New("nydus image is missing its bootstrap layer")
 	}
@@ -211,9 +211,12 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.R
 // registryBackendConfig is the `backend.config` section for the registry
 // backend understood by `nydus fuse --config`.
 type registryBackendConfig struct {
-	Host       string `yaml:"host"`
-	Repo       string `yaml:"repo"`
-	Insecure   bool   `yaml:"insecure"`
+	Host string `yaml:"host"`
+	Repo string `yaml:"repo"`
+	// PlainHTTP uses the http scheme to talk to the registry. The nydus-core
+	// config calls this key "insecure", unlike the rest of nydusify where
+	// Insecure means skip-TLS-verify.
+	PlainHTTP  bool   `yaml:"insecure"`
 	SkipVerify bool   `yaml:"skip_verify"`
 	Auth       string `yaml:"auth,omitempty"`
 }
@@ -259,7 +262,7 @@ func prefetchThreads(enable bool) int {
 // the image. Blob prefetch runs only when prefetchEnable is set (a live mount
 // wants production-like warmup, while check and optimize want fully on-demand
 // reads).
-func writeRegistryConfig(provider *remote.Provider, reg remote.Registry, img *Image, cacheDir, configPath string, prefetchEnable bool) (string, error) {
+func writeRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image, cacheDir, configPath string, prefetchEnable bool) (string, error) {
 	named, err := reference.ParseNormalizedNamed(img.Ref)
 	if err != nil {
 		return "", errors.Wrapf(err, "parse image reference %q", img.Ref)
@@ -282,7 +285,7 @@ func writeRegistryConfig(provider *remote.Provider, reg remote.Registry, img *Im
 			Config: registryBackendConfig{
 				Host:       host,
 				Repo:       repo,
-				Insecure:   provider.PlainHTTP(reg),
+				PlainHTTP:  provider.PlainHTTP(reg),
 				SkipVerify: provider.Insecure(reg),
 				Auth:       auth,
 			},

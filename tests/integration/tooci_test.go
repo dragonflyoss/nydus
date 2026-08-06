@@ -33,8 +33,8 @@ func TestNydusifyToOCIE2E(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
 	}
-	requireDocker(t)
-	registry := requireTestRegistry(t)
+	skipUnlessDocker(t)
+	registry := skipUnlessTestRegistry(t)
 
 	nydusBin := mustLookupExecutable(t, "nydus")
 	nydusifyBin := mustLookupExecutable(t, "nydusify")
@@ -43,7 +43,7 @@ func TestNydusifyToOCIE2E(t *testing.T) {
 	contextDir := filepath.Join(tmpDir, "context")
 	makeToOCICorpus(t, contextDir)
 
-	srcRef := uniqueImageTag(registry, "nydus-e2e/tooci-src")
+	srcRef := uniqueImageRef(registry, "nydus-e2e/tooci-src")
 	nydusRef := srcRef + "-nydus"
 
 	t.Log("Building and pushing the multi-layer source OCI image...")

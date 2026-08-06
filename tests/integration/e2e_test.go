@@ -144,7 +144,7 @@ func verifyMergedMountMatchesErofsFuseWhenEnabled(
 		return
 	}
 
-	setupCErofsfuse(t)
+	setupCErofsFuse(t)
 	cErofsFuseBin := mustLookupCErofsFuse(t)
 	erofsMountpoint := filepath.Join(t.TempDir(), "erofsfuse-mnt")
 	unmount := mountCErofsFuse(t, cErofsFuseBin, mergedBootstrap, erofsMountpoint, blobs...)
@@ -923,7 +923,7 @@ func logNydusCheckOutput(t *testing.T, nydusBin string, args ...string) {
 
 func pauseMergeDebugIfRequested(t *testing.T, mountpoint string) {
 	t.Helper()
-	pauseSecs := texture.GetEnvAsInt("NYDUSFS_MERGE_PAUSE_SECS", 0)
+	pauseSecs := texture.EnvInt("NYDUSFS_MERGE_PAUSE_SECS", 0)
 	if pauseSecs <= 0 {
 		return
 	}
@@ -1004,8 +1004,8 @@ func TestNydusifyOptimizeE2E(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
 	}
-	requireDocker(t)
-	registry := requireTestRegistry(t)
+	skipUnlessDocker(t)
+	registry := skipUnlessTestRegistry(t)
 
 	nydusBin := mustLookupExecutable(t, "nydus")
 	nydusifyBin := mustLookupExecutable(t, "nydusify")
@@ -1021,7 +1021,7 @@ func TestNydusifyOptimizeE2E(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(corpusDir, name), pseudoRandomTestBytes(size, uint64(i+1)), 0644))
 	}
 
-	srcRef := uniqueImageTag(registry, "nydus-e2e/optimize-src")
+	srcRef := uniqueImageRef(registry, "nydus-e2e/optimize-src")
 	nydusRef := srcRef + "-nydus"
 	optRef := optimizedRef(nydusRef)
 

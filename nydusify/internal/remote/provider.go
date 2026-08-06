@@ -20,15 +20,15 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Registry identifies which side's TLS/HTTP settings apply: the source
+// Side identifies which registry side's TLS/HTTP settings apply: the source
 // registry (images are pulled from) or the target registry (images are pushed
 // to). The two sides may live on different registries with different security
 // requirements.
-type Registry int
+type Side int
 
 const (
 	// Source selects the source registry settings (used by pulls).
-	Source Registry = iota
+	Source Side = iota
 	// Target selects the target registry settings (used by pushes).
 	Target
 )
@@ -45,8 +45,8 @@ type Provider struct {
 	credFunc        CredentialFunc
 }
 
-// Options configures a Provider.
-type Options struct {
+// Option configures a Provider.
+type Option struct {
 	// WorkDir is the directory backing the local content store.
 	WorkDir string
 	// SourceInsecure skips TLS certificate verification for the source registry.
@@ -62,27 +62,27 @@ type Options struct {
 }
 
 // NewProvider creates a Provider backed by a local content store at
-// opts.WorkDir.
-func NewProvider(opts Options) (*Provider, error) {
+// opt.WorkDir.
+func NewProvider(opt Option) (*Provider, error) {
 	// Back the store with an in-memory label store so that content labels
 	// (distribution source labels, gc references written during conversion)
 	// can be set. local.NewStore alone returns an immutable store that rejects
 	// label updates.
-	store, err := local.NewLabeledStore(opts.WorkDir, newMemoryLabelStore())
+	store, err := local.NewLabeledStore(opt.WorkDir, newMemoryLabelStore())
 	if err != nil {
-		return nil, errors.Wrapf(err, "create local content store at %q", opts.WorkDir)
+		return nil, errors.Wrapf(err, "create local content store at %q", opt.WorkDir)
 	}
-	platformMC := opts.PlatformMC
+	platformMC := opt.PlatformMC
 	if platformMC == nil {
 		platformMC = platforms.All
 	}
 	return &Provider{
 		store:           store,
 		platformMC:      platformMC,
-		sourceInsecure:  opts.SourceInsecure,
-		sourcePlainHTTP: opts.SourcePlainHTTP,
-		targetInsecure:  opts.TargetInsecure,
-		targetPlainHTTP: opts.TargetPlainHTTP,
+		sourceInsecure:  opt.SourceInsecure,
+		sourcePlainHTTP: opt.SourcePlainHTTP,
+		targetInsecure:  opt.TargetInsecure,
+		targetPlainHTTP: opt.TargetPlainHTTP,
 		credFunc:        NewDockerConfigCredFunc(),
 	}, nil
 }
@@ -99,7 +99,7 @@ func (p *Provider) PlatformMC() platforms.MatchComparer {
 
 // Insecure reports whether TLS certificate verification is skipped for the
 // given registry side.
-func (p *Provider) Insecure(reg Registry) bool {
+func (p *Provider) Insecure(reg Side) bool {
 	if reg == Target {
 		return p.targetInsecure
 	}
@@ -108,7 +108,7 @@ func (p *Provider) Insecure(reg Registry) bool {
 
 // PlainHTTP reports whether plain HTTP is used to talk to the given registry
 // side.
-func (p *Provider) PlainHTTP(reg Registry) bool {
+func (p *Provider) PlainHTTP(reg Side) bool {
 	if reg == Target {
 		return p.targetPlainHTTP
 	}
@@ -121,13 +121,13 @@ func (p *Provider) Credentials(host string) (string, string, error) {
 	return p.credFunc(host)
 }
 
-func (p *Provider) resolver(reg Registry) remotes.Resolver {
+func (p *Provider) resolver(reg Side) remotes.Resolver {
 	return NewResolver(p.Insecure(reg), p.PlainHTTP(reg), p.credFunc)
 }
 
-// PullOptions controls which data layers Pull downloads. Index, manifest and
+// PullOption controls which data layers Pull downloads. Index, manifest and
 // config descriptors and the nydus bootstrap layer are always pulled.
-type PullOptions struct {
+type PullOption struct {
 	// PullOCILayers downloads plain OCI data layers. Disable it when no
 	// filesystem extraction/diff is needed.
 	PullOCILayers bool
@@ -138,18 +138,18 @@ type PullOptions struct {
 
 // PullAll downloads every data layer (OCI layers and nydus blobs), matching
 // the original full-pull behavior.
-var PullAll = PullOptions{PullOCILayers: true, PullNydusBlobs: true}
+var PullAll = PullOption{PullOCILayers: true, PullNydusBlobs: true}
 
 // Pull fetches ref into the local content store and returns the resolved root
-// descriptor. opts selects which data layers are downloaded. reg selects which
+// descriptor. opt selects which data layers are downloaded. reg selects which
 // registry side's TLS/HTTP settings to use; pulls normally use Source, except
 // when re-reading an already-pushed target image.
-func (p *Provider) Pull(ctx context.Context, ref string, opts PullOptions, reg Registry) (ocispec.Descriptor, error) {
+func (p *Provider) Pull(ctx context.Context, ref string, opt PullOption, reg Side) (ocispec.Descriptor, error) {
 	normalized, err := normalizeRef(ref)
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	return fetch(ctx, p.store, p.resolver(reg), normalized, p.platformMC, opts)
+	return fetch(ctx, p.store, p.resolver(reg), normalized, p.platformMC, opt)
 }
 
 // Push uploads desc and all of its referenced content from the local store to

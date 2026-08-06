@@ -16,7 +16,7 @@ use fuser::{
 use crate::metadata::*;
 use crate::metrics;
 
-use crate::fs::{CachedDirEntry, ErofsReader};
+use crate::fs::{ErofsReader, RawNameDirEntry};
 
 const FUSE_ROOT_ID: u64 = 1;
 const EROFS_FUSE_TIMEOUT: Duration = Duration::from_secs(86400 * 365 * 10);
@@ -28,7 +28,7 @@ pub struct ErofsFs {
 }
 
 struct DirHandle {
-    entries: Vec<CachedDirEntry>,
+    entries: Vec<RawNameDirEntry>,
 }
 
 impl ErofsFs {
@@ -40,7 +40,7 @@ impl ErofsFs {
         }
     }
 
-    fn to_nid(&self, ino: u64) -> u64 {
+    fn ino_to_nid(&self, ino: u64) -> u64 {
         if ino == FUSE_ROOT_ID {
             self.reader.sb().root_nid()
         } else {
@@ -48,7 +48,7 @@ impl ErofsFs {
         }
     }
 
-    fn to_ino(&self, nid: u64) -> u64 {
+    fn nid_to_ino(&self, nid: u64) -> u64 {
         if nid == self.reader.sb().root_nid() {
             FUSE_ROOT_ID
         } else {
@@ -57,7 +57,7 @@ impl ErofsFs {
     }
 
     fn make_attr(&self, nid: u64, inode: &ErofsInode<'_>) -> FileAttr {
-        let ino = self.to_ino(nid);
+        let ino = self.nid_to_ino(nid);
         let sb = self.reader.sb();
         let block_size = 1u64 << sb.blkszbits;
         let mtime_secs = inode.mtime(sb.epoch());
@@ -98,7 +98,7 @@ impl ErofsFs {
     where
         F: FnMut(u64, u8, &[u8]) -> io::Result<bool>,
     {
-        let nid = self.to_nid(inode);
+        let nid = self.ino_to_nid(inode);
         let vi = self.reader.inode(nid)?;
         self.reader
             .for_each_dir_entry(nid, &vi, |entry_nid, file_type, name| {
@@ -107,9 +107,9 @@ impl ErofsFs {
     }
 
     fn create_dir_handle(&self, inode: u64) -> io::Result<u64> {
-        let nid = self.to_nid(inode);
+        let nid = self.ino_to_nid(inode);
         let vi = self.reader.inode(nid)?;
-        let entries = self.reader.read_dir_cached(nid, &vi)?;
+        let entries = self.reader.read_dir_raw(nid, &vi)?;
         let handle = self.next_dir_handle.fetch_add(1, Ordering::Relaxed);
         let dir_handle = Arc::new(DirHandle { entries });
         self.dir_handles.lock().unwrap().insert(handle, dir_handle);
@@ -231,7 +231,7 @@ impl Filesystem for ErofsFs {
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         let mut m = FsOpMetric::new(metrics::FsOp::Getattr);
-        let nid = self.to_nid(ino.0);
+        let nid = self.ino_to_nid(ino.0);
         match self.reader.inode(nid) {
             Ok(vi) => {
                 let attr = self.make_attr(nid, &vi);
@@ -252,7 +252,7 @@ impl Filesystem for ErofsFs {
             return;
         }
 
-        let nid = self.to_nid(ino.0);
+        let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -310,7 +310,7 @@ impl Filesystem for ErofsFs {
         reply: ReplyData,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Read);
-        let nid = self.to_nid(ino.0);
+        let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -336,7 +336,7 @@ impl Filesystem for ErofsFs {
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readlink);
-        let nid = self.to_nid(ino.0);
+        let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -356,7 +356,7 @@ impl Filesystem for ErofsFs {
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let mut m = FsOpMetric::new(metrics::FsOp::Opendir);
-        let nid = self.to_nid(ino.0);
+        let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -402,7 +402,7 @@ impl Filesystem for ErofsFs {
         };
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
         for (index, entry) in dir_handle.entries.iter().enumerate().skip(start) {
-            let ino = self.to_ino(entry.nid);
+            let ino = self.nid_to_ino(entry.nid);
             let kind = erofs_ft_to_kind(entry.file_type);
             let name = OsStr::from_bytes(&entry.name);
             if reply.add(INodeNo(ino), (index as u64) + 1, kind, name) {
@@ -440,7 +440,7 @@ impl Filesystem for ErofsFs {
                 }
             };
             let attr = self.make_attr(entry.nid, &child_inode);
-            let ino = self.to_ino(entry.nid);
+            let ino = self.nid_to_ino(entry.nid);
             let name = OsStr::from_bytes(&entry.name);
             if reply.add(
                 INodeNo(ino),
@@ -507,7 +507,7 @@ impl Filesystem for ErofsFs {
 
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
         let mut m = FsOpMetric::new(metrics::FsOp::Getxattr);
-        let nid = self.to_nid(ino.0);
+        let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {
@@ -553,7 +553,7 @@ impl Filesystem for ErofsFs {
 
     fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
         let mut m = FsOpMetric::new(metrics::FsOp::Listxattr);
-        let nid = self.to_nid(ino.0);
+        let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
             Err(e) => {

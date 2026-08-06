@@ -27,12 +27,12 @@ import (
 // selected subset of layers) for the platforms matched by platformMC into
 // store. It returns the resolved root descriptor.
 //
-// Which data layers are downloaded is controlled by opts: see PullOptions.
+// Which data layers are downloaded is controlled by opt: see PullOption.
 // Index/manifest/config descriptors and (for nydus images) the bootstrap
 // layer are always fetched.
 //
 // Adapted from containerd's client pull flow.
-func fetch(ctx context.Context, store content.Store, resolver remotes.Resolver, ref string, platformMC platforms.MatchComparer, opts PullOptions) (ocispec.Descriptor, error) {
+func fetch(ctx context.Context, store content.Store, resolver remotes.Resolver, ref string, platformMC platforms.MatchComparer, opt PullOption) (ocispec.Descriptor, error) {
 	name, desc, err := resolver.Resolve(ctx, ref)
 	if err != nil {
 		return ocispec.Descriptor{}, errors.Wrapf(err, "resolve %q", ref)
@@ -49,7 +49,7 @@ func fetch(ctx context.Context, store content.Store, resolver remotes.Resolver, 
 
 	childrenHandler := images.ChildrenHandler(store)
 	childrenHandler = images.FilterPlatforms(childrenHandler, platformMC)
-	childrenHandler = selectLayersHandler(childrenHandler, opts)
+	childrenHandler = selectLayersHandler(childrenHandler, opt)
 
 	appendDistSrc, err := docker.AppendDistributionSourceLabel(store, ref)
 	if err != nil {
@@ -76,9 +76,9 @@ func fetch(ctx context.Context, store content.Store, resolver remotes.Resolver, 
 // Filtering rules per layer:
 //   - nydus bootstrap layer: always kept (needed for the static check and the
 //     metadata export);
-//   - nydus data blob layer: kept only when opts.PullNydusBlobs is true;
-//   - OCI data layer: kept only when opts.PullOCILayers is true.
-func selectLayersHandler(h images.HandlerFunc, opts PullOptions) images.HandlerFunc {
+//   - nydus data blob layer: kept only when opt.PullNydusBlobs is true;
+//   - OCI data layer: kept only when opt.PullOCILayers is true.
+func selectLayersHandler(h images.HandlerFunc, opt PullOption) images.HandlerFunc {
 	return func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		children, err := h(ctx, desc)
 		if err != nil {
@@ -90,11 +90,11 @@ func selectLayersHandler(h images.HandlerFunc, opts PullOptions) images.HandlerF
 			case converter.IsNydusBootstrap(child):
 				filtered = append(filtered, child)
 			case converter.IsNydusBlob(child):
-				if opts.PullNydusBlobs {
+				if opt.PullNydusBlobs {
 					filtered = append(filtered, child)
 				}
 			case images.IsLayerType(child.MediaType):
-				if opts.PullOCILayers {
+				if opt.PullOCILayers {
 					filtered = append(filtered, child)
 				}
 			default:

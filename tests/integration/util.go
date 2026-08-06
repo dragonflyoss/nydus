@@ -34,9 +34,9 @@ func setupXfstests(t *testing.T, dir string) {
 	}
 }
 
-// setupCErofsfuse checks if erofsfuse is available. An explicit EROFS_C_FUSE
+// setupCErofsFuse checks if erofsfuse is available. An explicit EROFS_C_FUSE
 // path wins and skips the setup script.
-func setupCErofsfuse(t *testing.T) {
+func setupCErofsFuse(t *testing.T) {
 	if _, err := lookupCErofsFuseExecutable(); err == nil {
 		if os.Getenv(erofsMkfsEnv) != "" {
 			_, err := lookupCErofsMkfsExecutable()

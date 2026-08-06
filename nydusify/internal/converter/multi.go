@@ -186,7 +186,7 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	if err != nil {
 		return nil, errors.Wrap(err, "build image config")
 	}
-	configDesc, err := writeJSON(ctx, cs, configJSON, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
+	configDesc, err := WriteJSON(ctx, cs, configJSON, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageConfig}, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "write image config")
 	}
@@ -205,7 +205,7 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 		Config:    *configDesc,
 		Layers:    layers,
 	}
-	manifestDesc, err := writeJSON(ctx, cs, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, labels)
+	manifestDesc, err := WriteJSON(ctx, cs, manifest, ocispec.Descriptor{MediaType: ocispec.MediaTypeImageManifest}, labels)
 	if err != nil {
 		return nil, errors.Wrap(err, "write manifest")
 	}
@@ -292,7 +292,7 @@ func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 		newDesc = &srcDesc
 	}
 
-	manifestDesc, err := resolveManifestDesc(ctx, cs, *newDesc, platformMC)
+	manifestDesc, err := resolveManifest(ctx, cs, *newDesc, platformMC)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -415,9 +415,9 @@ func labelNydusBlobDiffIDs(ctx context.Context, cs content.Store, rootDesc ocisp
 	return nil
 }
 
-// resolveManifestDesc returns the platform-specific manifest descriptor,
+// resolveManifest returns the platform-specific manifest descriptor,
 // selecting from an index when rootDesc is multi-platform.
-func resolveManifestDesc(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (ocispec.Descriptor, error) {
+func resolveManifest(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (ocispec.Descriptor, error) {
 	if images.IsManifestType(rootDesc.MediaType) {
 		return rootDesc, nil
 	}

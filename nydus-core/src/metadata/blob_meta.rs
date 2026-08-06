@@ -243,12 +243,14 @@ impl BlobMetaHeader {
         self.group_count as u64 * size_of::<BlobMetaGroup>() as u64
     }
 
-    pub fn record_bytes(&self) -> u64 {
+    /// End offset of the record region (header plus chunk and group tables),
+    /// before padding to the block-aligned `metadata_size`.
+    pub fn records_end(&self) -> u64 {
         self.groups_offset + self.group_bytes()
     }
 
     pub fn metadata_size(&self) -> u64 {
-        align_to_block(self.record_bytes())
+        align_to_block(self.records_end())
     }
 
     fn set_counts_and_offsets(&mut self, chunk_count: u32, group_count: u32) -> Result<()> {
@@ -818,10 +820,6 @@ impl BlobMeta {
         usize::try_from(block >> self.header.group_block_bits()).ok()
     }
 
-    pub fn cache_size(&self) -> u64 {
-        self.total_uncompressed_size()
-    }
-
     pub fn total_uncompressed_size(&self) -> u64 {
         groups_total_uncompressed_size(self.groups())
     }
@@ -846,7 +844,7 @@ impl BlobMeta {
     }
 
     fn padding_size(&self) -> usize {
-        (self.metadata_size() - self.header.record_bytes()) as usize
+        (self.metadata_size() - self.header.records_end()) as usize
     }
 
     pub fn write_to(&self, writer: &mut dyn Write) -> Result<()> {
@@ -878,7 +876,7 @@ impl BlobMeta {
         Self::from_bytes_with_blob_id_inner(data, blob_id, false)
     }
 
-    pub fn from_bytes_with_blob_id_checked_crc32(
+    pub fn from_bytes_checked_crc32_with_blob_id(
         data: &[u8],
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
     ) -> Result<Self> {
@@ -1011,7 +1009,7 @@ pub fn align_to_block(value: u64) -> u64 {
 }
 
 fn validate_padding(data: &[u8], header: &BlobMetaHeader) -> Result<()> {
-    let padding_start = header.record_bytes() as usize;
+    let padding_start = header.records_end() as usize;
     if data[padding_start..].iter().any(|byte| *byte != 0) {
         bail!("blob meta padding must be zero");
     }
@@ -1275,7 +1273,7 @@ mod tests {
         assert_eq!(loaded.header().version(), BLOB_META_VERSION);
         assert_eq!(loaded.header().chunk_bytes(), 96);
         assert_eq!(loaded.header().group_bytes(), 40);
-        assert_eq!(loaded.header().record_bytes(), 4096 + 96 + 40);
+        assert_eq!(loaded.header().records_end(), 4096 + 96 + 40);
         assert_eq!(loaded.header().metadata_size(), 8192);
         assert_eq!(loaded.header().chunk_size(), EROFS_BLOCK_SIZE);
         assert_eq!(loaded.header().group_block_count(), 2);
@@ -1286,7 +1284,7 @@ mod tests {
         assert_eq!(loaded.chunks()[1].digest(), &digest(&payload_b));
         assert_eq!(loaded.chunks()[1].uncompressed_block_offset(), 1);
         assert_eq!(loaded.group_index_for_byte_offset(4096), Some(0));
-        assert_eq!(loaded.cache_size(), 8192);
+        assert_eq!(loaded.total_uncompressed_size(), 8192);
     }
 
     #[test]
@@ -1334,7 +1332,7 @@ mod tests {
         let loaded = BlobMeta::from_bytes_with_blob_id(&raw, [0u8; EROFS_BLOB_ID_SIZE]).unwrap();
 
         assert_eq!(loaded.header().crc32(), corrupted_crc32);
-        let err = match BlobMeta::from_bytes_with_blob_id_checked_crc32(
+        let err = match BlobMeta::from_bytes_checked_crc32_with_blob_id(
             &raw,
             [0u8; EROFS_BLOB_ID_SIZE],
         ) {
@@ -1427,7 +1425,7 @@ mod tests {
 
         BlobMeta::from_bytes_with_blob_id(&raw, [0u8; EROFS_BLOB_ID_SIZE])
             .expect("nonzero reserved tail must be ignored");
-        let err = match BlobMeta::from_bytes_with_blob_id_checked_crc32(
+        let err = match BlobMeta::from_bytes_checked_crc32_with_blob_id(
             &raw,
             [0u8; EROFS_BLOB_ID_SIZE],
         ) {

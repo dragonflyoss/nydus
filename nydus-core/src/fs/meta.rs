@@ -2,14 +2,14 @@ use std::io;
 
 use crate::metadata::*;
 
-use super::{CachedDirEntry, DirEntry, ErofsReader};
+use super::{ErofsReader, RawDirEntry, RawNameDirEntry};
 
 impl ErofsReader {
     /// Get a zero-copy inode view from the mmap.
     pub fn inode(&self, nid: u64) -> io::Result<ErofsInode<'_>> {
         let offset = self.nid_to_offset(nid);
         let data = self.mmap_slice(offset, EROFS_INODE_EXTENDED_SIZE)?;
-        ErofsInode::cast(data)
+        ErofsInode::parse(data)
     }
 
     /// Iterate directory entries without materializing the whole directory in memory.
@@ -37,10 +37,10 @@ impl ErofsReader {
     }
 
     /// Read directory entries from a directory inode.
-    pub fn read_dir(&self, nid: u64, inode: &ErofsInode<'_>) -> io::Result<Vec<DirEntry>> {
+    pub fn read_dir(&self, nid: u64, inode: &ErofsInode<'_>) -> io::Result<Vec<RawDirEntry>> {
         let mut entries = Vec::new();
         self.for_each_dir_entry(nid, inode, |entry_nid, file_type, name| {
-            entries.push(DirEntry {
+            entries.push(RawDirEntry {
                 nid: entry_nid,
                 file_type,
                 name: String::from_utf8_lossy(name).into_owned(),
@@ -52,14 +52,14 @@ impl ErofsReader {
 
     /// Read directory entries with owned raw names, for FUSE directory
     /// handle caching.
-    pub fn read_dir_cached(
+    pub fn read_dir_raw(
         &self,
         nid: u64,
         inode: &ErofsInode<'_>,
-    ) -> io::Result<Vec<CachedDirEntry>> {
+    ) -> io::Result<Vec<RawNameDirEntry>> {
         let mut entries = Vec::new();
         self.for_each_dir_entry(nid, inode, |entry_nid, file_type, name| {
-            entries.push(CachedDirEntry {
+            entries.push(RawNameDirEntry {
                 nid: entry_nid,
                 file_type,
                 name: name.to_vec(),

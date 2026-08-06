@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{align_u64, bytes_to_blocks, write_zero_padding};
+use common::{align_up, bytes_to_blocks, write_zero_padding};
 
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
@@ -168,9 +168,9 @@ fn write_full_blob(
 ) -> [u8; EROFS_BLOB_ID_SIZE] {
     let data = fs::read(data_path).unwrap();
     let data_size = data.len() as u64;
-    let bootstrap_offset = align_u64(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
+    let bootstrap_offset = align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
     let bootstrap_blocks = bytes_to_blocks(bootstrap_bytes.len() as u64);
-    let blob_meta_offset = align_u64(
+    let blob_meta_offset = align_up(
         bootstrap_offset + bootstrap_bytes.len() as u64,
         NYDUS_BLOB_FOOTER_ALIGNMENT,
     );
@@ -219,7 +219,7 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
     let core = NydusCore::new(&bootstrap, config).unwrap();
     assert_eq!(core.bootstrap_size, fs::metadata(&bootstrap).unwrap().len());
     assert_eq!(core.bootstrap_size % EROFS_BLOCK_SIZE as u64, 0);
-    let blobs = core.blobs.entries().unwrap();
+    let blobs = core.blobs.prepare_entries().unwrap();
     assert_eq!(blobs.len(), 1);
     let descriptor = &blobs[0];
     assert_eq!(descriptor.index, 1);
@@ -305,7 +305,7 @@ fn core_describes_devices_and_fetches_aligned_ranges() {
 fn flattened_bootstrap_records_mapped_device_slots() {
     let dir = tempdir().unwrap();
     let (bootstrap, _config, blob_id, _corpus) = build_test_image(dir.path());
-    let reader = ErofsReader::open_layer(&bootstrap).unwrap();
+    let reader = ErofsReader::open_metadata_only(&bootstrap).unwrap();
     let blob_infos = reader.blob_infos().unwrap();
     assert_eq!(blob_infos.len(), 1);
     assert_eq!(blob_infos[0].blob_id, blob_id);
@@ -354,7 +354,7 @@ fn flattened_bootstrap_records_mapped_device_slots() {
 
     let flattened_path = dir.path().join("flattened.bootstrap");
     fs::write(&flattened_path, flattened).unwrap();
-    let flattened_reader = ErofsReader::open_layer(&flattened_path).unwrap();
+    let flattened_reader = ErofsReader::open_metadata_only(&flattened_path).unwrap();
     let infos = flattened_reader.blob_infos().unwrap();
     assert_eq!(infos.len(), 2);
 
@@ -450,7 +450,7 @@ fn core_static_filesystem_api_reads_metadata_and_data() {
         name.as_slice() == b"trusted.nydus.prefetch.blobs" && value.as_slice() == b"1"
     }));
 
-    let blobs = core.blobs.entries().unwrap();
+    let blobs = core.blobs.prepare_entries().unwrap();
     let cached = fs::read(&blobs[0].cache_path).unwrap();
     assert!(cached.iter().any(|byte| *byte != 0));
     assert_eq!(blobs[0].id, blob_id);
@@ -462,7 +462,7 @@ fn fs_entry_fetch_populates_blob_cache_without_reading_data() {
     let (bootstrap, config, _blob_id, _corpus) = build_test_image(dir.path());
 
     let core = NydusCore::new(&bootstrap, config).unwrap();
-    let blobs = core.blobs.entries().unwrap();
+    let blobs = core.blobs.prepare_entries().unwrap();
     let before = fs::read(&blobs[0].cache_path).unwrap();
     assert!(before.iter().all(|byte| *byte == 0));
 

@@ -31,9 +31,9 @@ func testRegistryEndpoint() string {
 	return "localhost:5000"
 }
 
-// requireTestRegistry skips the test when no registry responds on the
+// skipUnlessTestRegistry skips the test when no registry responds on the
 // configured endpoint.
-func requireTestRegistry(t *testing.T) string {
+func skipUnlessTestRegistry(t *testing.T) string {
 	t.Helper()
 	endpoint := testRegistryEndpoint()
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -46,8 +46,8 @@ func requireTestRegistry(t *testing.T) string {
 	return endpoint
 }
 
-// requireDocker skips the test when the docker CLI or daemon is unavailable.
-func requireDocker(t *testing.T) {
+// skipUnlessDocker skips the test when the docker CLI or daemon is unavailable.
+func skipUnlessDocker(t *testing.T) {
 	t.Helper()
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		t.Skipf("docker is not available: %v", err)
@@ -249,8 +249,8 @@ func optimizedRef(ref string) string {
 	return ref + "-optimized"
 }
 
-// uniqueImageTag builds a per-run image tag so repeated test runs do not
+// uniqueImageRef builds a per-run image reference so repeated test runs do not
 // collide in the registry.
-func uniqueImageTag(endpoint, repo string) string {
+func uniqueImageRef(endpoint, repo string) string {
 	return fmt.Sprintf("%s/%s:%d", endpoint, repo, time.Now().UnixNano())
 }

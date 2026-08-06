@@ -402,8 +402,8 @@ func (e *fanotifyEnv) casePartialRangeBounded(t *testing.T) { // C3 — decisive
 	mntLarge := filepath.Join(e.mntDir, "large.bin")
 	srcLarge := filepath.Join(e.sourceDir, "large.bin")
 	for _, skip := range []int64{1, 17, 40, 63} {
-		g := sliceSha(t, mntLarge, skip, 1)
-		w := sliceSha(t, srcLarge, skip, 1)
+		g := sliceSHA(t, mntLarge, skip, 1)
+		w := sliceSHA(t, srcLarge, skip, 1)
 		assert.Equal(t, w, g, "large.bin[+%dMiB,1MiB] byte-exact", skip)
 	}
 	after := usedBytes(blob)
@@ -684,11 +684,11 @@ func (e *fanotifyEnv) cacheBlob(t *testing.T) string {
 // logCorpus concatenates the daemon console log and every file under logDir.
 func (e *fanotifyEnv) logCorpus() string {
 	var b strings.Builder
-	b.Write(mustReadFile(e.daemonLog))
+	b.Write(readFileOrEmpty(e.daemonLog))
 	entries, _ := os.ReadDir(e.logDir)
 	for _, entry := range entries {
 		if entry.Type().IsRegular() {
-			b.Write(mustReadFile(filepath.Join(e.logDir, entry.Name())))
+			b.Write(readFileOrEmpty(filepath.Join(e.logDir, entry.Name())))
 		}
 	}
 	return b.String()
@@ -727,9 +727,9 @@ func shaFile(t *testing.T, path string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// sliceSha reads countMiB starting at skipMiB (bs=1M semantics) and returns the
+// sliceSHA reads countMiB starting at skipMiB (bs=1M semantics) and returns the
 // sha256 of that slice.
-func sliceSha(t *testing.T, path string, skipMiB, countMiB int64) string {
+func sliceSHA(t *testing.T, path string, skipMiB, countMiB int64) string {
 	t.Helper()
 	data, err := readSlice(path, skipMiB, countMiB)
 	require.NoError(t, err)
@@ -857,7 +857,9 @@ func envOr(key, def string) string {
 	return def
 }
 
-func mustReadFile(path string) []byte {
+// readFileOrEmpty reads path for log dumps, treating missing or unreadable
+// files as empty.
+func readFileOrEmpty(path string) []byte {
 	data, _ := os.ReadFile(path)
 	return data
 }

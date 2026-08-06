@@ -18,7 +18,7 @@ use crate::storage::backend::{BlobBackend, LocalBackend};
 use crate::storage::cache::{BlobCache, LocalBlobCache};
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
-pub struct DirEntry {
+pub struct RawDirEntry {
     pub nid: u64,
     pub file_type: u8,
     pub name: String,
@@ -26,14 +26,14 @@ pub struct DirEntry {
 
 /// Directory entry with an owned raw name, cached by directory handles in
 /// FUSE frontends (see the `fuse` module in the `nydus` crate).
-pub struct CachedDirEntry {
+pub struct RawNameDirEntry {
     pub nid: u64,
     pub file_type: u8,
     pub name: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BlobInfo {
+pub struct RawBlobInfo {
     /// 1-based index of the blob in the bootstrap device table.
     pub blob_index: u16,
     pub blob_id: [u8; EROFS_BLOB_ID_SIZE],
@@ -133,7 +133,7 @@ impl ErofsReader {
     }
 
     /// Open a nydus blob / bootstrap file for metadata-only inspection.
-    pub fn open_layer(path: &Path) -> io::Result<Self> {
+    pub fn open_metadata_only(path: &Path) -> io::Result<Self> {
         let mmap = Self::map_file(path)?;
         let image_offset = Self::image_offset_from_footer(&mmap)?.unwrap_or(0);
         let sb_offset = image_offset
@@ -238,7 +238,7 @@ impl ErofsReader {
     }
 
     fn open_blobs(
-        blob_infos: Vec<BlobInfo>,
+        blob_infos: Vec<RawBlobInfo>,
         backend: Arc<dyn BlobBackend>,
         cache_dir: Option<&Path>,
         trace_recorder: Option<Arc<TraceRecorder>>,
@@ -304,12 +304,12 @@ impl ErofsReader {
         Ok(())
     }
 
-    fn blob_infos_from(mmap: &[u8], sb_offset: usize) -> io::Result<Vec<BlobInfo>> {
+    fn blob_infos_from(mmap: &[u8], sb_offset: usize) -> io::Result<Vec<RawBlobInfo>> {
         let sb = Self::superblock_from(mmap, sb_offset)?;
         let mut infos = Vec::with_capacity(sb.extra_devices() as usize);
         for index in 0..sb.extra_devices() as usize {
             let slot = Self::device_slot_from(mmap, sb_offset, index)?;
-            infos.push(BlobInfo {
+            infos.push(RawBlobInfo {
                 blob_index: index as u16 + 1,
                 blob_id: slot.blob_id().map_err(io::Error::other)?,
                 blocks: slot.blocks(),
@@ -352,7 +352,7 @@ impl ErofsReader {
         cast_ref::<ErofsSuperblock>(&self.mmap[self.sb_offset..])
     }
 
-    pub fn blob_infos(&self) -> io::Result<Vec<BlobInfo>> {
+    pub fn blob_infos(&self) -> io::Result<Vec<RawBlobInfo>> {
         Self::blob_infos_from(&self.mmap, self.sb_offset)
     }
 
@@ -458,7 +458,7 @@ impl ErofsReader {
                 Err(_) => false,
             }
         };
-        cache.redirect_stream_parallel(threads, &skip, &|group, decoded| {
+        cache.stream_redirect_parallel(threads, &skip, &|group, decoded| {
             if !group.is_redirect() {
                 crate::metrics::inc_cache_redirect_skip_group();
                 warn!("ondemand blob {blob_index} contains a non-redirect group; skipping");

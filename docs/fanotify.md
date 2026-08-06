@@ -50,7 +50,7 @@ answers them immediately with no backend I/O.
 ## Multi-Device Model
 
 The daemon enumerates blob devices from the bootstrap via
-`Blobs::entries()`, which also creates and sizes each blob's sparse cache
+`Blobs::prepare_entries()`, which also creates and sizes each blob's sparse cache
 file so the device files exist before mount.
 
 Layout rules:

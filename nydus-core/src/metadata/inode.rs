@@ -208,8 +208,8 @@ pub enum ErofsInode<'a> {
 }
 
 impl<'a> ErofsInode<'a> {
-    /// Cast from a byte slice (first 2 bytes determine format).
-    pub fn cast(data: &'a [u8]) -> std::io::Result<Self> {
+    /// Parse from a byte slice (first 2 bytes determine format).
+    pub fn parse(data: &'a [u8]) -> std::io::Result<Self> {
         if data.len() < 2 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,

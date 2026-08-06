@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use nydus::config::Config;
-use nydus::fs::{BlobInfo, ErofsReader};
+use nydus::fs::{ErofsReader, RawBlobInfo};
 use nydus::merge::rewrite_bootstrap_with_ondemand_blob;
 use nydus::metadata::*;
 use nydus::storage::backend::build_backend;
@@ -73,11 +73,11 @@ pub struct OptimizeArgs {
 #[derive(Deserialize)]
 struct TraceEnvelope {
     version: u32,
-    patterns: Vec<TracePattern>,
+    patterns: Vec<TraceEntry>,
 }
 
 #[derive(Deserialize)]
-struct TracePattern {
+struct TraceEntry {
     blob_index: u32,
     group_index: u32,
 }
@@ -125,14 +125,14 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("failed to create cache directory: {}", cache_dir.display()))?;
 
-    let reader = ErofsReader::open_layer(&args.parent_bootstrap).with_context(|| {
+    let reader = ErofsReader::open_metadata_only(&args.parent_bootstrap).with_context(|| {
         format!(
             "failed to open parent bootstrap: {}",
             args.parent_bootstrap.display()
         )
     })?;
     let blob_infos = reader.blob_infos()?;
-    let infos_by_index: HashMap<u16, &BlobInfo> = blob_infos
+    let infos_by_index: HashMap<u16, &RawBlobInfo> = blob_infos
         .iter()
         .map(|info| (info.blob_index, info))
         .collect();
@@ -296,7 +296,7 @@ fn load_patterns_from_file(path: &std::path::Path) -> Result<Vec<(u16, u32)>> {
 
 /// Deduplicate `(blob_index, group_index)` pairs while preserving first-access
 /// order, validating that every blob index fits in a non-zero `u16`.
-fn dedup_patterns(patterns: Vec<TracePattern>) -> Result<Vec<(u16, u32)>> {
+fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<(u16, u32)>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for pattern in patterns {
@@ -317,7 +317,7 @@ fn dedup_patterns(patterns: Vec<TracePattern>) -> Result<Vec<(u16, u32)>> {
 /// replies with a complete body and closes the connection, so the body is
 /// everything after the header terminator.
 fn fetch_trace(apiserver: &str) -> Result<Vec<u8>> {
-    let socket_path = crate::apiserver::parse_unix_address(apiserver)?;
+    let socket_path = crate::api_server::parse_unix_address(apiserver)?;
     let mut stream = UnixStream::connect(&socket_path).with_context(|| {
         format!(
             "failed to connect to apiserver socket: {}",
@@ -351,7 +351,7 @@ fn fetch_trace(apiserver: &str) -> Result<Vec<u8>> {
 /// embedded bootstrap) and return its bytes, full SHA256 digest, and footer.
 fn assemble_artifact(data: &[u8], blob_meta: &BlobMeta) -> Result<(Vec<u8>, [u8; 32], BlobFooter)> {
     let compressed_data_size = data.len() as u64;
-    let bootstrap_offset = align_u64(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
+    let bootstrap_offset = align_up(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
     let blob_meta_offset = bootstrap_offset;
     let blob_meta_size = blob_meta.metadata_size();
     let blob_meta_blocks = u32::try_from(blob_meta_size / EROFS_BLOCK_SIZE as u64)
@@ -389,7 +389,7 @@ fn assemble_artifact(data: &[u8], blob_meta: &BlobMeta) -> Result<(Vec<u8>, [u8;
     Ok((artifact, digest, footer))
 }
 
-fn align_u64(value: u64, align: u64) -> u64 {
+fn align_up(value: u64, align: u64) -> u64 {
     debug_assert!(align.is_power_of_two());
     (value + align - 1) & !(align - 1)
 }

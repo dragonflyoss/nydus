@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{align_u64, bytes_to_blocks, write_zero_padding};
+use common::{align_up, bytes_to_blocks, write_zero_padding};
 
 use std::collections::HashSet;
 use std::fs;
@@ -100,7 +100,7 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
     let mut image = NamedTempFile::new().expect("create temp image");
     image.write_all(&bootstrap).expect("write bootstrap");
 
-    let reader = ErofsReader::open_layer(image.path()).expect("open bootstrap");
+    let reader = ErofsReader::open_metadata_only(image.path()).expect("open bootstrap");
     let file_nid = inodes[1].nid;
     let inode = reader.inode(file_nid).expect("read inode");
 
@@ -156,9 +156,9 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let blob_meta = blob_writer.blob_meta(data_blob_id, 0).expect("blob meta");
 
     let data_size = fs::metadata(&data_path).expect("stat data blob").len();
-    let bootstrap_offset = align_u64(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
+    let bootstrap_offset = align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
     let bootstrap_blocks = bytes_to_blocks(embedded_bootstrap.len() as u64);
-    let blob_meta_offset = align_u64(
+    let blob_meta_offset = align_up(
         bootstrap_offset + embedded_bootstrap.len() as u64,
         NYDUS_BLOB_FOOTER_ALIGNMENT,
     );

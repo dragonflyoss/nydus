@@ -1,6 +1,6 @@
 //! Flattened block-device view of a nydus image.
 //!
-//! [`UblkDevice`] turns [`NydusCore`]'s flattened device view into a plain
+//! [`UblkCore`] turns [`NydusCore`]'s flattened device view into a plain
 //! `read_at(offset, buf)` interface: the bootstrap is exposed at the beginning
 //! of the address space, each blob at the `mapped_blkaddr` recorded in the
 //! bootstrap device table, and the gaps in between as zeroes. That is exactly
@@ -24,14 +24,14 @@ use crate::metadata::EROFS_BLOCK_SIZE;
 pub const UBLK_LOGICAL_BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 
 /// Read-only block device backed by a nydus image.
-pub struct UblkDevice {
+pub struct UblkCore {
     core: NydusCore,
     zero_fd: RawFd,
-    size: u64,
+    device_size: u64,
     maps: FileMaps,
 }
 
-impl UblkDevice {
+impl UblkCore {
     /// Open `bootstrap` with the storage `config` and expose it as a flattened
     /// read-only block device. All blobs referenced by the bootstrap device
     /// table are prepared up front, and background prefetch follows
@@ -42,7 +42,7 @@ impl UblkDevice {
         let zero_fd = core.zero_fd();
         // Round the device size up to a whole block: the kernel always reads in
         // block units, and the tail block of the last blob may be partial.
-        let size = round_up(core.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
+        let device_size = align_up(core.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
             .context("flattened device size overflow")?;
         // Preparing a blob downloads and validates its meta and sizes its cache
         // file, which takes seconds for a large image. Left to the first block
@@ -55,15 +55,15 @@ impl UblkDevice {
         Ok(Self {
             core,
             zero_fd,
-            size,
+            device_size,
             maps: FileMaps::default(),
         })
     }
 
     /// Size of the block device in bytes, always a multiple of
     /// [`UBLK_LOGICAL_BLOCK_SIZE`].
-    pub fn size(&self) -> u64 {
-        self.size
+    pub fn device_size(&self) -> u64 {
+        self.device_size
     }
 
     /// Borrow the underlying core, e.g. to snapshot metrics.
@@ -81,12 +81,12 @@ impl UblkDevice {
         if buf.is_empty() {
             return Ok(());
         }
-        if offset >= self.size {
+        if offset >= self.device_size {
             buf.fill(0);
             return Ok(());
         }
 
-        let len = (buf.len() as u64).min(self.size - offset);
+        let len = (buf.len() as u64).min(self.device_size - offset);
         let ranges = self
             .core
             .fetch_flat_ranges(offset, len)
@@ -291,7 +291,7 @@ fn pread_exact(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<()> {
     Ok(())
 }
 
-fn round_up(value: u64, align: u64) -> Option<u64> {
+fn align_up(value: u64, align: u64) -> Option<u64> {
     value.checked_add(align - 1).map(|v| v & !(align - 1))
 }
 
@@ -321,11 +321,11 @@ mod tests {
 
     #[test]
     fn rounds_size_up_to_block() {
-        assert_eq!(round_up(0, 4096), Some(0));
-        assert_eq!(round_up(1, 4096), Some(4096));
-        assert_eq!(round_up(4096, 4096), Some(4096));
-        assert_eq!(round_up(4097, 4096), Some(8192));
-        assert_eq!(round_up(u64::MAX, 4096), None);
+        assert_eq!(align_up(0, 4096), Some(0));
+        assert_eq!(align_up(1, 4096), Some(4096));
+        assert_eq!(align_up(4096, 4096), Some(4096));
+        assert_eq!(align_up(4097, 4096), Some(8192));
+        assert_eq!(align_up(u64::MAX, 4096), None);
     }
 
     #[test]

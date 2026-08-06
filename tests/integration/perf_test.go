@@ -50,7 +50,7 @@ func TestPerf(t *testing.T) {
 	mntDir := filepath.Join(tmpDir, "mnt")
 
 	// Ensure erofsfuse is built and available if we're going to benchmark it.
-	setupCErofsfuse(t)
+	setupCErofsFuse(t)
 	fioBin := mustLookupFio(t)
 	nydusBin := mustLookupExecutable(t, "nydus")
 	cErofsFuseBin := mustLookupCErofsFuse(t)

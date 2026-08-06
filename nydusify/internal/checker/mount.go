@@ -22,8 +22,8 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 )
 
-// MountOpt configures a Mounter.
-type MountOpt struct {
+// MountOption configures a Mounter.
+type MountOption struct {
 	// Target is the image reference to mount (OCI or nydus). Required.
 	Target string
 	// Mountpoint is the directory the image is mounted at. Required, and must
@@ -52,11 +52,11 @@ type MountOpt struct {
 // mounted live through `nydus fuse` (blobs fetched on demand from the source
 // registry); OCI images are extracted to the mountpoint.
 type Mounter struct {
-	opt MountOpt
+	opt MountOption
 }
 
 // NewMounter creates a Mounter.
-func NewMounter(opt MountOpt) (*Mounter, error) {
+func NewMounter(opt MountOption) (*Mounter, error) {
 	if opt.Target == "" {
 		return nil, errors.New("target must be provided")
 	}
@@ -86,7 +86,7 @@ func (m *Mounter) Mount(ctx context.Context) error {
 		}
 	}
 
-	provider, err := remote.NewProvider(remote.Options{
+	provider, err := remote.NewProvider(remote.Option{
 		WorkDir:         contentDir,
 		TargetInsecure:  m.opt.TargetInsecure,
 		TargetPlainHTTP: m.opt.TargetPlainHTTP,
@@ -102,14 +102,14 @@ func (m *Mounter) Mount(ctx context.Context) error {
 	}
 
 	if img.Kind == KindOCI {
-		return m.mountOCI(ctx, provider.ContentStore(), img)
+		return m.extractOCI(ctx, provider.ContentStore(), img)
 	}
 	return m.mountNydus(ctx, provider, provider.ContentStore(), img, scratchDir)
 }
 
-// mountOCI extracts img's merged root filesystem into the mountpoint. Layer
+// extractOCI extracts img's merged root filesystem into the mountpoint. Layer
 // ownership is preserved, which requires root.
-func (m *Mounter) mountOCI(ctx context.Context, cs content.Store, img *Image) error {
+func (m *Mounter) extractOCI(ctx context.Context, cs content.Store, img *Image) error {
 	log.G(ctx).Infof("extracting OCI image %s to %s", img.Ref, m.opt.Mountpoint)
 	if err := applyOCIImage(ctx, cs, img, m.opt.Mountpoint); err != nil {
 		return errors.Wrap(err, "apply oci image")

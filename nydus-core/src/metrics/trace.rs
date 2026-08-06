@@ -20,7 +20,7 @@ pub const TRACE_DOCUMENT_VERSION: u32 = 1;
 
 /// A single group access in the on-demand trace.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
-pub struct TracePattern {
+pub struct TraceEntry {
     /// Device/blob index in the merged image (external blobs are 1-based;
     /// device 0 is the primary bootstrap image and never produces group reads).
     pub blob_index: u32,
@@ -35,7 +35,7 @@ pub struct TracePattern {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct TraceDocument {
     pub version: u32,
-    pub patterns: Vec<TracePattern>,
+    pub patterns: Vec<TraceEntry>,
 }
 
 impl Default for TraceDocument {
@@ -49,7 +49,7 @@ impl Default for TraceDocument {
 
 #[derive(Default)]
 struct TraceState {
-    patterns: Vec<TracePattern>,
+    patterns: Vec<TraceEntry>,
     seen: HashSet<(u32, u32)>,
 }
 
@@ -65,7 +65,7 @@ impl TraceRecorder {
     pub fn record_group_access(&self, blob_index: u32, group_index: u32) {
         let mut state = self.state.lock().unwrap();
         if state.seen.insert((blob_index, group_index)) {
-            state.patterns.push(TracePattern {
+            state.patterns.push(TraceEntry {
                 blob_index,
                 group_index,
             });
@@ -152,11 +152,11 @@ mod tests {
         assert_eq!(
             snapshot.patterns,
             vec![
-                TracePattern {
+                TraceEntry {
                     blob_index: 1,
                     group_index: 4,
                 },
-                TracePattern {
+                TraceEntry {
                     blob_index: 2,
                     group_index: 7,
                 },

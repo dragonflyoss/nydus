@@ -6,7 +6,7 @@ use clap::Args;
 use nydus::config::Config;
 use nydus::tracing::init_tracing;
 use nydus::ublk::{
-    default_queues, UblkDevice, UblkOptions, UblkTarget, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
+    default_queues, UblkCore, UblkOptions, UblkTarget, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use signal_hook::iterator::Signals;
@@ -79,7 +79,7 @@ pub struct UblkArgs {
 /// Note: the daemon must not share a mount namespace with whoever mounts the
 /// device. Otherwise the unmount triggered while the daemon exits flushes I/O
 /// to a device that is no longer being served, and both sides deadlock.
-pub fn run_ublk_target(args: UblkArgs) -> Result<()> {
+pub fn run_ublk(args: UblkArgs) -> Result<()> {
     let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
         .context("failed to register termination signals")?;
     let signal_handle = signals.handle();
@@ -93,11 +93,11 @@ pub fn run_ublk_target(args: UblkArgs) -> Result<()> {
     );
 
     let config = Config::from_file(&args.config).context("failed to load storage config")?;
-    let device = Arc::new(UblkDevice::new(&args.bootstrap, config)?);
+    let core = Arc::new(UblkCore::new(&args.bootstrap, config)?);
     info!(
         "serving {} as a {} byte block device",
         args.bootstrap.display(),
-        device.size()
+        core.device_size()
     );
 
     let options = UblkOptions {
@@ -107,7 +107,7 @@ pub fn run_ublk_target(args: UblkArgs) -> Result<()> {
         io_buf_bytes: args.io_buf_bytes,
         unprivileged: args.unprivileged,
     };
-    let target = UblkTarget::new(device, &options)?;
+    let target = UblkTarget::new(core, &options)?;
     println!("{}", target.dev_path());
 
     let handle = target.handle();

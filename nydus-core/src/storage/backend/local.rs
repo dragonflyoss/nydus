@@ -263,7 +263,7 @@ mod tests {
     use crate::metadata::{
         BlobMetaChunk, BlobMetaGroup, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
     };
-    use crate::storage::backend::RequestSource;
+    use crate::storage::backend::ReadKind;
     use crate::utils::sha256_bytes;
     use std::io::Write;
     use tempfile::tempdir;
@@ -328,12 +328,7 @@ mod tests {
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.load_blob_meta(&full_blob_id).unwrap();
         let data = backend
-            .read_range(
-                &full_blob_id,
-                0,
-                4096,
-                ReadContext::raw(RequestSource::OnDemand),
-            )
+            .read_range(&full_blob_id, 0, 4096, ReadContext::raw(ReadKind::OnDemand))
             .unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);
@@ -349,12 +344,7 @@ mod tests {
 
         let blob_meta = backend.load_blob_meta(&full_blob_id).unwrap();
         let data = backend
-            .read_range(
-                &full_blob_id,
-                0,
-                4096,
-                ReadContext::raw(RequestSource::OnDemand),
-            )
+            .read_range(&full_blob_id, 0, 4096, ReadContext::raw(ReadKind::OnDemand))
             .unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);
