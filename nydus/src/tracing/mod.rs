@@ -88,20 +88,33 @@ pub fn init_tracing(
 /// logs to stdout and does not log to files.
 #[allow(clippy::too_many_arguments)]
 pub fn init_command_tracing(log_level: Level, console: bool) -> Vec<WorkerGuard> {
+    init_command_tracing_to(std::io::stdout(), log_level, console)
+}
+
+/// Same as [`init_command_tracing`] but logs to stderr, for commands that
+/// write their payload to stdout.
+pub fn init_command_tracing_stderr(log_level: Level, console: bool) -> Vec<WorkerGuard> {
+    init_command_tracing_to(std::io::stderr(), log_level, console)
+}
+
+fn init_command_tracing_to<W>(writer: W, log_level: Level, console: bool) -> Vec<WorkerGuard>
+where
+    W: std::io::Write + Send + 'static,
+{
     let mut guards = vec![];
 
-    // Setup stdout layer.
-    let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
-    guards.push(stdout_guard);
+    // Setup console layer.
+    let (console_writer, console_guard) = tracing_appender::non_blocking(writer);
+    guards.push(console_guard);
 
-    // Initialize stdout layer.
-    let stdout_filter = if console {
+    // Initialize console layer.
+    let console_filter = if console {
         LevelFilter::DEBUG
     } else {
         LevelFilter::OFF
     };
-    let stdout_logging_layer = Layer::new()
-        .with_writer(stdout_writer)
+    let console_logging_layer = Layer::new()
+        .with_writer(console_writer)
         .with_file(true)
         .with_line_number(true)
         .with_target(false)
@@ -109,7 +122,7 @@ pub fn init_command_tracing(log_level: Level, console: bool) -> Vec<WorkerGuard>
         .with_thread_ids(false)
         .with_timer(ChronoLocal::rfc_3339())
         .pretty()
-        .with_filter(stdout_filter);
+        .with_filter(console_filter);
 
     // Setup env filter for log level.
     let env_filter = EnvFilter::try_from_default_env()
@@ -117,7 +130,7 @@ pub fn init_command_tracing(log_level: Level, console: bool) -> Vec<WorkerGuard>
 
     let subscriber = Registry::default()
         .with(env_filter)
-        .with(stdout_logging_layer);
+        .with(console_logging_layer);
     subscriber.init();
 
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));

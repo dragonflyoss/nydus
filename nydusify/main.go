@@ -113,6 +113,15 @@ func convertCommand() *cli.Command {
 				Name:  "append-in-bootstrap",
 				Usage: "local file paths to bundle into the bootstrap layer alongside image.boot; files inside --source are excluded from the blob data region",
 			},
+			&cli.BoolFlag{
+				Name:  "to-oci",
+				Usage: "reverse the conversion: unpack a nydus image back to a plain OCI image",
+			},
+			&cli.StringFlag{
+				Name:  "oci-compressor",
+				Usage: "--to-oci only: layer compression of the produced OCI image: gzip, zstd or none",
+				Value: "gzip",
+			},
 		},
 		Action: runConvert,
 	}
@@ -192,6 +201,36 @@ func runConvert(c *cli.Context) error {
 	}
 
 	var newDesc *ocispec.Descriptor
+
+	if c.Bool("to-oci") {
+		if multiSource || isLocalDir {
+			return errors.New("--to-oci expects exactly one nydus image as --source")
+		}
+
+		logrus.Infof("pulling nydus image %s", source)
+		srcDesc, err := provider.Pull(ctx, source, remote.PullAll, remote.Source)
+		if err != nil {
+			return errors.Wrapf(err, "pull %q", source)
+		}
+
+		logrus.Infof("converting image back to OCI format")
+		newDesc, err = converter.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, converter.ToOCIOption{
+			BuilderPath: c.String("builder"),
+			WorkDir:     scratchDir,
+			Compressor:  c.String("oci-compressor"),
+			LogLevel:    c.String("log-level"),
+		})
+		if err != nil {
+			return errors.Wrap(err, "convert to oci")
+		}
+
+		logrus.Infof("pushing oci image %s", target)
+		if err := provider.Push(ctx, *newDesc, target); err != nil {
+			return errors.Wrapf(err, "push %q", target)
+		}
+		logrus.Infof("done: %s -> %s (%s)", source, target, newDesc.Digest)
+		return nil
+	}
 
 	if multiSource {
 		srcs := make([]converter.Source, 0, len(sources))
