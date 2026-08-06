@@ -3,8 +3,10 @@ use clap::{Args, ValueEnum};
 use nydus::build::blob_chunk::BlobWriter;
 use nydus::build::bootstrap::{render_bootstrap, render_flattened_bootstrap};
 use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
+use nydus::fs::ErofsReader;
 use nydus::metadata::*;
 use nydus::tracing::init_command_tracing;
+use nydus::unpack::unpack_to_tar;
 use nydus::utils::hex_string;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -22,6 +24,7 @@ const DEFAULT_COMPRESS_SIZE: u32 = 4 * MIB;
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ConversionType {
     DirNydus,
+    NydusTar,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -41,7 +44,8 @@ impl From<Compressor> for BlobMetaCompressor {
 
 #[derive(Args)]
 pub struct BuildArgs {
-    /// Source directory to build the image from.
+    /// Source to build from: a directory for `dir-nydus`, a nydus full blob
+    /// for `nydus-tar`.
     pub source: PathBuf,
 
     /// Conversion type.
@@ -49,20 +53,21 @@ pub struct BuildArgs {
     pub conversion_type: ConversionType,
 
     /// File path to save the generated nydus full blob.
-    #[arg(
-        long,
-        conflicts_with = "blob_dir",
-        required_unless_present = "blob_dir"
-    )]
+    #[arg(long, conflicts_with = "blob_dir")]
     pub blob: Option<PathBuf>,
 
     /// Directory path to save the generated nydus full blob with its SHA256 file name.
-    #[arg(long, conflicts_with = "blob", required_unless_present = "blob")]
+    #[arg(long, conflicts_with = "blob")]
     pub blob_dir: Option<PathBuf>,
 
     /// File path to save the generated nydus bootstrap.
     #[arg(long)]
     pub bootstrap: Option<PathBuf>,
+
+    /// `nydus-tar` only: file path to save the generated tar stream, or `-`
+    /// for stdout.
+    #[arg(long, default_value = "-")]
+    pub output: PathBuf,
 
     /// File chunk size in bytes (must be a power of two, >= 4KiB, and 4KiB-aligned).
     #[arg(long = "chunk-size", default_value_t = DEFAULT_CHUNK_SIZE)]
@@ -101,10 +106,48 @@ pub struct BuildArgs {
     pub exclude: Vec<String>,
 }
 
-/// Run the build process to create an nydus image from the source directory.
+/// Run the requested conversion.
 pub fn run_build(args: BuildArgs) -> Result<()> {
     let _guards = init_command_tracing(args.log_level, args.console);
 
+    match args.conversion_type {
+        ConversionType::DirNydus => run_dir_to_nydus(args),
+        ConversionType::NydusTar => run_nydus_to_tar(args),
+    }
+}
+
+/// Unpack a nydus full blob back into an uncompressed OCI layer tar stream.
+fn run_nydus_to_tar(args: BuildArgs) -> Result<()> {
+    for (name, set) in [
+        ("--blob", args.blob.is_some()),
+        ("--blob-dir", args.blob_dir.is_some()),
+        ("--bootstrap", args.bootstrap.is_some()),
+        ("--exclude", !args.exclude.is_empty()),
+    ] {
+        if set {
+            bail!("{name} is not supported with --type nydus-tar");
+        }
+    }
+    if !args.source.is_file() {
+        bail!("source {} is not a nydus blob file", args.source.display());
+    }
+
+    let reader = ErofsReader::open(Some(&args.source), None, None, None)
+        .with_context(|| format!("failed to open nydus blob: {}", args.source.display()))?;
+
+    if args.output == Path::new("-") {
+        let stdout = io::stdout();
+        unpack_to_tar(&reader, BufWriter::new(stdout.lock()))?;
+    } else {
+        let file = File::create(&args.output)
+            .with_context(|| format!("failed to create output: {}", args.output.display()))?;
+        unpack_to_tar(&reader, BufWriter::new(file))?;
+    }
+    Ok(())
+}
+
+/// Create an nydus image from the source directory.
+fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     let requested_blob_path = args.blob.clone();
     if let (Some(bootstrap), Some(blob)) = (&args.bootstrap, requested_blob_path.as_ref()) {
         if *bootstrap == *blob {
@@ -526,7 +569,9 @@ fn finalize_blob_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::ffi::CString;
+    use std::io::Read;
     use std::os::unix::ffi::OsStrExt;
     use tempfile::tempdir;
 
@@ -571,6 +616,7 @@ mod tests {
             blob: None,
             blob_dir: Some(blob_dir.clone()),
             bootstrap: Some(bootstrap.clone()),
+            output: PathBuf::from("-"),
             chunk_size: DEFAULT_CHUNK_SIZE,
             compress_size: DEFAULT_COMPRESS_SIZE,
             compressor: Compressor::Zstd,
@@ -592,6 +638,175 @@ mod tests {
         );
 
         assert_eq!(hex_string(&slot.blob_id().unwrap()), full_blob_digest);
+    }
+
+    #[test]
+    fn nydus_tar_round_trips_the_source_tree() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let blob = dir.path().join("layer.blob");
+        let tar_path = dir.path().join("layer.tar");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(source.join("nested")).unwrap();
+        fs::write(source.join("nested/hello.txt"), b"hello nydus").unwrap();
+        fs::write(source.join("empty.txt"), b"").unwrap();
+        // Spans several 4KiB chunks so the chunk-based read path is exercised.
+        let big = vec![b'x'; 10 * 1024];
+        fs::write(source.join("big.bin"), &big).unwrap();
+        fs::write(source.join("linked.txt"), b"link me").unwrap();
+        fs::hard_link(source.join("linked.txt"), source.join("alias.txt")).unwrap();
+        std::os::unix::fs::symlink("nested/hello.txt", source.join("link")).unwrap();
+        // Whiteout markers are ordinary files on both sides of the conversion.
+        fs::write(source.join(".wh.deleted"), b"").unwrap();
+        let xattr_set = xattr::set(source.join("nested/hello.txt"), "user.demo", b"v1").is_ok();
+
+        build_and_unpack(&source, &blob, &tar_path);
+
+        let mut entries = BTreeMap::new();
+        let mut archive = tar::Archive::new(File::open(&tar_path).unwrap());
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let header = entry.header().clone();
+            let link = header
+                .link_name()
+                .unwrap()
+                .map(|p| p.to_string_lossy().into_owned());
+            let xattrs: Vec<_> = entry
+                .pax_extensions()
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .map(|ext| {
+                    let ext = ext.unwrap();
+                    (ext.key().unwrap().to_string(), ext.value_bytes().to_vec())
+                })
+                .collect();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            entries.insert(path, (header.entry_type(), link, data, xattrs));
+        }
+
+        let names: Vec<_> = entries.keys().cloned().collect();
+        assert_eq!(
+            names,
+            vec![
+                ".wh.deleted",
+                "alias.txt",
+                "big.bin",
+                "empty.txt",
+                "link",
+                "linked.txt",
+                "nested/",
+                "nested/hello.txt",
+            ]
+        );
+
+        assert_eq!(entries["nested/hello.txt"].2, b"hello nydus");
+        assert_eq!(entries["big.bin"].2, big);
+        assert!(entries["empty.txt"].2.is_empty());
+        assert_eq!(entries["nested/"].0, tar::EntryType::Directory);
+        assert_eq!(entries["link"].0, tar::EntryType::Symlink);
+        assert_eq!(entries["link"].1.as_deref(), Some("nested/hello.txt"));
+
+        // The first path wins; the second becomes a hardlink pointing at it.
+        assert_eq!(entries["alias.txt"].0, tar::EntryType::Regular);
+        assert_eq!(entries["linked.txt"].0, tar::EntryType::Link);
+        assert_eq!(entries["linked.txt"].1.as_deref(), Some("alias.txt"));
+
+        if xattr_set {
+            assert_eq!(
+                entries["nested/hello.txt"].3,
+                vec![("SCHILY.xattr.user.demo".to_string(), b"v1".to_vec())]
+            );
+        }
+    }
+
+    #[test]
+    fn nydus_tar_drops_internal_nydus_xattrs() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source");
+        let blob = dir.path().join("layer.blob");
+        let tar_path = dir.path().join("layer.tar");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(source.join("sub")).unwrap();
+
+        build_and_unpack(&source, &blob, &tar_path);
+
+        let mut archive = tar::Archive::new(File::open(&tar_path).unwrap());
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let keys: Vec<String> = entry
+                .pax_extensions()
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .map(|ext| ext.unwrap().key().unwrap().to_string())
+                .collect();
+            assert!(
+                !keys.iter().any(|key| key.contains("nydus")),
+                "leaked internal xattr: {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nydus_tar_rejects_blob_output_flags() {
+        let dir = tempdir().unwrap();
+        let blob = dir.path().join("layer.blob");
+        fs::write(&blob, b"").unwrap();
+
+        let err = run_nydus_to_tar(BuildArgs {
+            source: blob.clone(),
+            conversion_type: ConversionType::NydusTar,
+            blob: Some(blob),
+            blob_dir: None,
+            bootstrap: None,
+            output: dir.path().join("out.tar"),
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            compress_size: DEFAULT_COMPRESS_SIZE,
+            compressor: Compressor::Zstd,
+            log_level: Level::ERROR,
+            console: false,
+            exclude: Vec::new(),
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("--blob is not supported"));
+    }
+
+    fn build_and_unpack(source: &Path, blob: &Path, tar_path: &Path) {
+        run_dir_to_nydus(BuildArgs {
+            source: source.to_path_buf(),
+            conversion_type: ConversionType::DirNydus,
+            blob: Some(blob.to_path_buf()),
+            blob_dir: None,
+            bootstrap: None,
+            output: PathBuf::from("-"),
+            chunk_size: EROFS_BLOCK_SIZE,
+            compress_size: MIB,
+            compressor: Compressor::Zstd,
+            log_level: Level::ERROR,
+            console: false,
+            exclude: Vec::new(),
+        })
+        .unwrap();
+
+        run_nydus_to_tar(BuildArgs {
+            source: blob.to_path_buf(),
+            conversion_type: ConversionType::NydusTar,
+            blob: None,
+            blob_dir: None,
+            bootstrap: None,
+            output: tar_path.to_path_buf(),
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            compress_size: DEFAULT_COMPRESS_SIZE,
+            compressor: Compressor::Zstd,
+            log_level: Level::ERROR,
+            console: false,
+            exclude: Vec::new(),
+        })
+        .unwrap();
     }
 
     fn make_fifo(path: &Path) {
