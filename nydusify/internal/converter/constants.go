@@ -36,6 +36,9 @@ const (
 
 	// LayerAnnotationNydusBlob marks a layer as a nydus data blob.
 	LayerAnnotationNydusBlob = pkgconv.LayerAnnotationNydusBlob
+	// LayerAnnotationNydusBlobOptimized marks a nydus data blob as the ondemand
+	// blob appended by `nydusify optimize`.
+	LayerAnnotationNydusBlobOptimized = pkgconv.LayerAnnotationNydusBlobOptimized
 	// LayerAnnotationNydusBootstrap marks a layer as the nydus bootstrap.
 	LayerAnnotationNydusBootstrap = pkgconv.LayerAnnotationNydusBootstrap
 	// LayerAnnotationNydusFsVersion marks a bootstrap layer as a nydus pmem

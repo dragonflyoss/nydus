@@ -37,6 +37,16 @@ func IsNydusBootstrap(desc ocispec.Descriptor) bool {
 	return ok
 }
 
+// IsNydusOptimizedBlob reports whether desc is the ondemand blob appended by
+// `nydusify optimize`, which carries no filesystem tree of its own.
+func IsNydusOptimizedBlob(desc ocispec.Descriptor) bool {
+	if desc.Annotations == nil {
+		return false
+	}
+	_, ok := desc.Annotations[LayerAnnotationNydusBlobOptimized]
+	return ok
+}
+
 // LayerConvertFunc returns a converter.ConvertFunc that converts a single OCI
 // image layer into a nydus data blob layer.
 //

@@ -36,6 +36,11 @@ const (
 
 	// LayerAnnotationNydusBlob marks a layer as a nydus data blob.
 	LayerAnnotationNydusBlob = "containerd.io/snapshot/nydus-blob"
+	// LayerAnnotationNydusBlobOptimized marks a nydus data blob as the ondemand
+	// blob appended by `nydusify optimize`. It holds a rearranged copy of data
+	// already present in the other blobs and describes no filesystem tree of
+	// its own.
+	LayerAnnotationNydusBlobOptimized = "containerd.io/snapshot/nydus-blob-optimized"
 	// LayerAnnotationNydusBootstrap marks a layer as the nydus bootstrap.
 	LayerAnnotationNydusBootstrap = "containerd.io/snapshot/nydus-bootstrap"
 	// LayerAnnotationNydusFsVersion marks a bootstrap layer as a nydus pmem
