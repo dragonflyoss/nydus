@@ -32,8 +32,8 @@ type ToOCIOption struct {
 	BuilderPath string
 	// WorkDir is a scratch directory used to materialize blobs for unpacking.
 	WorkDir string
-	// Compressor is the OCI layer compression to apply: "gzip", "zstd" or
-	// "none".
+	// Compressor is the layer compression of the produced OCI image, given as
+	// one of the `oci-` prefixed `--compressor` values.
 	Compressor string
 	// LogLevel is the log level passed to the nydus binary.
 	LogLevel string
@@ -336,17 +336,27 @@ func trimHistory(history []ocispec.History, droppedLayers int) []ocispec.History
 	return history
 }
 
+// ociCompressors maps the `--compressor` values that select a reverse
+// conversion to the OCI layer compression they produce.
+var ociCompressors = map[string]compression.Compression{
+	"oci-gzip": compression.Gzip,
+	"oci-zstd": compression.Zstd,
+	"oci-tar":  compression.Uncompressed,
+}
+
+// IsOCICompressor reports whether a `--compressor` value asks for a nydus
+// image to be converted back to OCI rather than the other way round.
+func IsOCICompressor(name string) bool {
+	_, ok := ociCompressors[name]
+	return ok
+}
+
 func parseCompressor(name string) (compression.Compression, error) {
-	switch name {
-	case "", "gzip":
-		return compression.Gzip, nil
-	case "zstd":
-		return compression.Zstd, nil
-	case "none":
-		return compression.Uncompressed, nil
-	default:
-		return 0, errors.Errorf("unsupported compressor %q, expected gzip, zstd or none", name)
+	algo, ok := ociCompressors[name]
+	if !ok {
+		return 0, errors.Errorf("unsupported OCI compressor %q, expected oci-gzip, oci-zstd or oci-tar", name)
 	}
+	return algo, nil
 }
 
 func layerMediaType(algo compression.Compression) string {

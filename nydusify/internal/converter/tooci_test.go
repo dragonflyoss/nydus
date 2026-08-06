@@ -139,12 +139,14 @@ func TestParseCompressorAndLayerMediaType(t *testing.T) {
 		algo      compression.Compression
 		mediaType string
 	}{
-		"":     {compression.Gzip, ocispec.MediaTypeImageLayerGzip},
-		"gzip": {compression.Gzip, ocispec.MediaTypeImageLayerGzip},
-		"zstd": {compression.Zstd, ocispec.MediaTypeImageLayerZstd},
-		"none": {compression.Uncompressed, ocispec.MediaTypeImageLayer},
+		"oci-gzip": {compression.Gzip, ocispec.MediaTypeImageLayerGzip},
+		"oci-zstd": {compression.Zstd, ocispec.MediaTypeImageLayerZstd},
+		"oci-tar":  {compression.Uncompressed, ocispec.MediaTypeImageLayer},
 	}
 	for name, want := range cases {
+		if !IsOCICompressor(name) {
+			t.Errorf("IsOCICompressor(%q) = false, want true", name)
+		}
 		algo, err := parseCompressor(name)
 		if err != nil {
 			t.Fatalf("parseCompressor(%q): %v", name, err)
@@ -156,8 +158,14 @@ func TestParseCompressorAndLayerMediaType(t *testing.T) {
 			t.Errorf("layerMediaType(%q) = %q, want %q", name, got, want.mediaType)
 		}
 	}
-	if _, err := parseCompressor("lz4"); err == nil {
-		t.Error("expected an error for an unsupported compressor")
+	// The forward compressors must not be mistaken for a reverse conversion.
+	for _, name := range []string{"", "zstd", "none", "gzip"} {
+		if IsOCICompressor(name) {
+			t.Errorf("IsOCICompressor(%q) = true, want false", name)
+		}
+		if _, err := parseCompressor(name); err == nil {
+			t.Errorf("parseCompressor(%q) succeeded, want an error", name)
+		}
 	}
 }
 

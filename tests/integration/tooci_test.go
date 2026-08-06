@@ -59,13 +59,13 @@ func TestNydusifyToOCIE2E(t *testing.T) {
 		"--source", srcRef, "--target", nydusRef,
 		"--work-dir", filepath.Join(tmpDir, "check-nydus"))
 
-	for _, compressor := range []string{"gzip", "zstd", "none"} {
+	for _, compressor := range []string{"oci-gzip", "oci-zstd", "oci-tar"} {
 		t.Run(compressor, func(t *testing.T) {
-			ociRef := fmt.Sprintf("%s-oci-%s", srcRef, compressor)
+			ociRef := fmt.Sprintf("%s-%s", srcRef, compressor)
 
 			t.Logf("Converting nydus back to OCI (%s)...", compressor)
-			runNydusifyCommand(t, nydusifyBin, nydusBin, "convert", "--to-oci",
-				"--oci-compressor", compressor,
+			runNydusifyCommand(t, nydusifyBin, nydusBin, "convert",
+				"--compressor", compressor,
 				"--source", nydusRef, "--target", ociRef,
 				"--work-dir", filepath.Join(tmpDir, "tooci-"+compressor))
 
@@ -114,9 +114,9 @@ func verifyPlainOCIImage(t *testing.T, nydusifyBin, nydusBin, ref, workDir, medi
 
 func expectedLayerMediaType(compressor string) string {
 	switch compressor {
-	case "zstd":
+	case "oci-zstd":
 		return ocispec.MediaTypeImageLayerZstd
-	case "none":
+	case "oci-tar":
 		return ocispec.MediaTypeImageLayer
 	default:
 		return ocispec.MediaTypeImageLayerGzip
