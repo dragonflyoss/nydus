@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -23,6 +24,7 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
 )
 
 // ToOCIOption configures the reverse conversion from a nydus image back to a
@@ -93,18 +95,19 @@ func convertManifestToOCI(ctx context.Context, cs content.Store, desc ocispec.De
 		return nil, err
 	}
 
-	layers := make([]ocispec.Descriptor, 0, len(blobs))
-	diffIDs := make([]digest.Digest, 0, len(blobs))
-	for _, blob := range blobs {
-		layer, diffID, err := unpackLayer(ctx, cs, blob, opt)
-		if err != nil {
-			return nil, errors.Wrapf(err, "unpack nydus layer %s", blob.Digest)
-		}
-		if layer == nil {
+	unpacked, err := unpackLayers(ctx, cs, blobs, opt)
+	if err != nil {
+		return nil, err
+	}
+
+	layers := make([]ocispec.Descriptor, 0, len(unpacked))
+	diffIDs := make([]digest.Digest, 0, len(unpacked))
+	for _, layer := range unpacked {
+		if layer.desc == nil {
 			continue
 		}
-		layers = append(layers, *layer)
-		diffIDs = append(diffIDs, diffID)
+		layers = append(layers, *layer.desc)
+		diffIDs = append(diffIDs, layer.diffID)
 	}
 	if len(layers) == 0 {
 		return nil, errors.New("no nydus data layer could be unpacked")
@@ -163,16 +166,49 @@ func nydusDataLayers(layers []ocispec.Descriptor) ([]ocispec.Descriptor, error) 
 	return blobs, nil
 }
 
+// unpackedLayer is the OCI layer rebuilt from one nydus data blob. A nil desc
+// marks a blob that carries no filesystem tree and was skipped.
+type unpackedLayer struct {
+	desc   *ocispec.Descriptor
+	diffID digest.Digest
+}
+
+// unpackLayers rebuilds every data blob into an OCI layer, preserving the
+// input order. Layers are independent, so they are unpacked concurrently —
+// each one spawns a nydus process and compresses its output, and the forward
+// conversion parallelizes the same way.
+func unpackLayers(ctx context.Context, cs content.Store, blobs []ocispec.Descriptor, opt ToOCIOption) ([]unpackedLayer, error) {
+	algo, err := parseCompressor(opt.Compressor)
+	if err != nil {
+		return nil, err
+	}
+
+	unpacked := make([]unpackedLayer, len(blobs))
+	eg, egCtx := errgroup.WithContext(ctx)
+	// Concurrent layers each stage a full blob copy on disk, so the limit
+	// bounds scratch usage as well as CPU.
+	eg.SetLimit(min(runtime.GOMAXPROCS(0), len(blobs)))
+	for i, blob := range blobs {
+		eg.Go(func() error {
+			desc, diffID, err := unpackLayer(egCtx, cs, blob, opt, algo)
+			if err != nil {
+				return errors.Wrapf(err, "unpack nydus layer %s", blob.Digest)
+			}
+			unpacked[i] = unpackedLayer{desc: desc, diffID: diffID}
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	return unpacked, nil
+}
+
 // unpackLayer turns one nydus data blob back into a compressed OCI layer,
 // returning the new descriptor and its diff id. Data-only blobs (the ondemand
 // blob of an optimized image) carry no filesystem tree and are skipped, which
 // is reported as a nil descriptor.
-func unpackLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt ToOCIOption) (*ocispec.Descriptor, digest.Digest, error) {
-	algo, err := parseCompressor(opt.Compressor)
-	if err != nil {
-		return nil, "", err
-	}
-
+func unpackLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt ToOCIOption, algo compression.Compression) (*ocispec.Descriptor, digest.Digest, error) {
 	// The unpacker memory-maps the blob, so it has to exist as a regular file.
 	blobPath, err := materializeBlob(ctx, cs, desc, opt.WorkDir)
 	if err != nil {
@@ -301,7 +337,7 @@ func rewriteOCIConfig(configJSON json.RawMessage, diffIDs []digest.Digest) (json
 		}
 		kept := history[:0]
 		for _, entry := range history {
-			if entry.CreatedBy == nydusHistoryCreatedBy {
+			if droppedLayerComments[entry.Comment] {
 				continue
 			}
 			kept = append(kept, entry)
@@ -320,9 +356,12 @@ func rewriteOCIConfig(configJSON json.RawMessage, diffIDs []digest.Digest) (json
 	return out, nil
 }
 
-// nydusHistoryCreatedBy is the `created_by` value the nydus conversion stamps
-// on the history entries it appends.
-const nydusHistoryCreatedBy = "Nydus Converter"
+// droppedLayerComments marks the history entries that describe layers the
+// reverse conversion removes, so they must not survive into the OCI config.
+var droppedLayerComments = map[string]bool{
+	"Nydus Bootstrap Layer":     true,
+	"Nydus Ondemand Blob Layer": true,
+}
 
 func parseCompressor(name string) (compression.Compression, error) {
 	switch name {

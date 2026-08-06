@@ -35,7 +35,9 @@ func TestRewriteOCIConfigResetsDiffIDsAndDropsNydusHistory(t *testing.T) {
 		},
 		"history": [
 			{"created_by": "RUN apt-get update"},
-			{"created_by": "Nydus Converter", "comment": "Nydus Bootstrap Layer"}
+			{"created_by": "Nydus Build", "comment": "Nydus Data Layer"},
+			{"created_by": "Nydus Converter", "comment": "Nydus Bootstrap Layer"},
+			{"created_by": "Nydus Optimizer", "comment": "Nydus Ondemand Blob Layer"}
 		]
 	}`)
 	diffIDs := []digest.Digest{
@@ -79,8 +81,16 @@ func TestRewriteOCIConfigResetsDiffIDsAndDropsNydusHistory(t *testing.T) {
 	if err := json.Unmarshal(got["history"], &history); err != nil {
 		t.Fatalf("unmarshal history: %v", err)
 	}
-	if len(history) != 1 || history[0].CreatedBy != "RUN apt-get update" {
-		t.Errorf("history = %+v, want only the original entry", history)
+	// Only the entries describing removed layers are dropped; the data layer
+	// entry still matches a layer of the rebuilt image.
+	wantHistory := []string{"RUN apt-get update", "Nydus Build"}
+	if len(history) != len(wantHistory) {
+		t.Fatalf("history = %+v, want %v", history, wantHistory)
+	}
+	for i, createdBy := range wantHistory {
+		if history[i].CreatedBy != createdBy {
+			t.Errorf("history[%d].created_by = %q, want %q", i, history[i].CreatedBy, createdBy)
+		}
 	}
 }
 
