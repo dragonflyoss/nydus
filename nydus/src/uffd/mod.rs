@@ -8,5 +8,5 @@ pub mod proto;
 pub mod service;
 
 pub use core::{UffdCore, UffdOptions};
-pub use proto::{FaultPolicy, VmaRegion};
+pub use proto::VmaRegion;
 pub use service::UffdService;

@@ -15,7 +15,10 @@ use tracing::{debug, info, warn};
 use crate::FdRange;
 
 use super::core::{read_uffd_msg, UffdCore, UffdMsg};
-use super::proto::{FaultPolicy, ProtoConn, Request, VmaRegion};
+use super::proto::{
+    ProtoConn, Request, VmaRegion, HANDSHAKE_FLAG_ACK_REQUIRED, HANDSHAKE_FLAG_MANAGED,
+    HANDSHAKE_FLAG_PREFAULT,
+};
 
 pub struct UffdService {
     core: Arc<UffdCore>,
@@ -25,7 +28,7 @@ pub struct UffdService {
 
 struct HandshakeState {
     regions: Vec<VmaRegion>,
-    policy: FaultPolicy,
+    managed: bool,
     uffd: AsyncFd<OwnedFd>,
 }
 
@@ -205,18 +208,14 @@ impl UffdConn {
         };
         match request {
             Request::Handshake {
-                policy,
-                prefault,
+                flags,
                 regions,
                 uffd,
             } => {
                 if self.state.is_some() {
                     bail!("duplicate UFFD handshake");
                 }
-                self.state = Some(
-                    self.handle_handshake(policy, prefault, regions, uffd)
-                        .await?,
-                );
+                self.state = Some(self.handle_handshake(flags, regions, uffd).await?);
             }
             Request::Stat => {
                 self.proto
@@ -242,18 +241,20 @@ impl UffdConn {
 
     async fn handle_handshake(
         &self,
-        policy: FaultPolicy,
-        prefault: bool,
+        flags: u8,
         regions: Vec<VmaRegion>,
         uffd: OwnedFd,
     ) -> Result<HandshakeState> {
+        let managed = flags & HANDSHAKE_FLAG_MANAGED != 0;
+        let prefault = flags & HANDSHAKE_FLAG_PREFAULT != 0;
+        let ack_required = flags & HANDSHAKE_FLAG_ACK_REQUIRED != 0;
         set_nonblocking(uffd.as_raw_fd())?;
         let async_uffd = AsyncFd::new(uffd).context("failed to register userfaultfd with tokio")?;
 
         info!(
-            "nydus uffd handshake: regions={} policy={:?} prefault={}",
+            "nydus uffd handshake: regions={} managed={} prefault={}",
             regions.len(),
-            policy,
+            managed,
             prefault
         );
         for (idx, region) in regions.iter().enumerate() {
@@ -268,15 +269,19 @@ impl UffdConn {
             );
         }
 
+        if ack_required {
+            self.proto.send_ack().await?;
+        }
+
         // Keep prefault synchronous until ProtoConn guarantees serialized concurrent writes.
-        if prefault && policy == FaultPolicy::Zerocopy {
+        if prefault && !managed {
             let ranges = self.core.prefault_ranges(&regions)?;
             self.send_ranges(Some(&regions), &ranges).await?;
         }
 
         Ok(HandshakeState {
             regions,
-            policy,
+            managed,
             uffd: async_uffd,
         })
     }
@@ -287,7 +292,7 @@ impl UffdConn {
             .as_ref()
             .ok_or_else(|| anyhow!("received UFFD event before handshake"))?;
         let uffd_fd = state.uffd.get_ref().as_raw_fd();
-        let policy = state.policy;
+        let managed = state.managed;
         let regions = state.regions.clone();
         debug!(
             "nydus uffd event: event=0x{:02x} addr={:#x} flags={:#x}",
@@ -295,17 +300,17 @@ impl UffdConn {
         );
         let core = self.core.clone();
         let ranges = tokio::task::spawn_blocking(move || {
-            core.resolve_page_fault(uffd_fd, &regions, policy, &msg)
+            core.resolve_page_fault(uffd_fd, &regions, managed, &msg)
         })
         .await
         .context("UFFD page-fault blocking task failed")??;
         debug!(
-            "nydus uffd resolved fault: policy={:?} ranges={}",
-            policy,
+            "nydus uffd resolved fault: managed={} ranges={}",
+            managed,
             ranges.len()
         );
 
-        if policy == FaultPolicy::Zerocopy {
+        if !managed {
             self.send_ranges(Some(&state.regions), &ranges).await?;
         }
         Ok(())
