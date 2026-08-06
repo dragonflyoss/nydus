@@ -1119,6 +1119,18 @@ func TestNydusifyOptimizeE2E(t *testing.T) {
 			require.True(t, bytes.Equal(want, got), "content mismatch for %s", name)
 		}
 	}()
+
+	// The ondemand blob holds a rearranged copy of the other blobs and no
+	// filesystem tree, so the reverse conversion must skip it and still
+	// reproduce the original layers.
+	t.Log("Converting the optimized image back to OCI...")
+	backRef := optRef + "-oci"
+	runNydusifyCommand(t, nydusifyBin, nydusBin, "convert", "--to-oci",
+		"--source", optRef, "--target", backRef,
+		"--work-dir", filepath.Join(tmpDir, "tooci"))
+	runNydusifyCommand(t, nydusifyBin, nydusBin, "check",
+		"--source", optRef, "--target", backRef,
+		"--work-dir", filepath.Join(tmpDir, "check-tooci"))
 }
 
 // pseudoRandomTestBytes generates deterministic pseudo-random bytes (xorshift)

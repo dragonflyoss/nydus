@@ -264,8 +264,9 @@ func commitBlobFile(ctx context.Context, cs content.Store, path string) (*ocispe
 		Annotations: map[string]string{
 			// A nydus full blob is self-describing and uncompressed at the
 			// layer level, so the diff id equals the blob digest.
-			converter.LayerAnnotationUncompressed: dgst.String(),
-			converter.LayerAnnotationNydusBlob:    "true",
+			converter.LayerAnnotationUncompressed:       dgst.String(),
+			converter.LayerAnnotationNydusBlob:          "true",
+			converter.LayerAnnotationNydusBlobOptimized: "true",
 		},
 	}, nil
 }
