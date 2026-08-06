@@ -53,3 +53,6 @@ scripts/certs
 
 # Ignore .vscode folder
 .vscode
+
+# Graphify
+graphify-out
