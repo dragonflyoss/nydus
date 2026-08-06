@@ -96,7 +96,7 @@ jobs:
           mkdir -p nydus-static
           cp target/${{ matrix.target }}/release/nydus nydus-static/
           cp nydusify/nydusify nydus-static/
-          cp config.yaml nydus-static/
+          cp config/registry.example.yaml nydus-static/
           chmod +x nydus-static/nydus nydus-static/nydusify
 
       - name: Verify binaries are static
