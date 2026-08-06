@@ -13,7 +13,7 @@
 //! - Filling is `BlobAccessor::fetch(id, off, len)`, which decodes + validates +
 //!   writes the blob's cache file *in place* (the same file the kernel reads) and
 //!   is idempotent — so no hand-rolled pwrite/dedup/fsync is needed here; that
-//!   I/O lives in (and is tested by) `nydus-accessor`.
+//!   I/O lives in (and is tested by) `nydus-core`.
 //!
 //! Kernel-independent logic here (device lookup, RANGE decision, fetch-range
 //! alignment) is unit-tested; the accessor fetch and the event loop are not

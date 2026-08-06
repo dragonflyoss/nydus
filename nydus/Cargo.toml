@@ -42,11 +42,11 @@ fanotify = []
 # Export a nydus image as a block device through the NBD protocol.
 nbd = []
 # Container image registry backend (OCI distribution).
-backend-registry = ["nydus-accessor/backend-registry"]
+backend-registry = ["nydus-core/backend-registry"]
 # Dragonfly P2P SDK proxy support for the registry backend.
 backend-dragonfly-proxy = [
   "backend-registry",
-  "nydus-accessor/backend-dragonfly-proxy",
+  "nydus-core/backend-dragonfly-proxy",
 ]
 # ublk block device target: expose the flattened image as /dev/ublkbN so the
 # kernel EROFS driver can mount it directly. Requires Linux >= 6.0 (ublk_drv).
@@ -64,7 +64,7 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 libc = "0.2"
 libublk = { version = "0.4", default-features = false, optional = true }
 memmap2 = "0.9"
-nydus-accessor = { version = "0.1.0", path = "../nydus-accessor" }
+nydus-core = { version = "0.1.0", path = "../nydus-core" }
 rolling-file = { version = "0.2.0", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

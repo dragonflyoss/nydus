@@ -2,7 +2,7 @@
 
 A deep dive into the EROFS on-disk format and how Nydus builds chunk-based
 EROFS metadata. Read this alongside the source files in
-`nydus-accessor/src/metadata/` and `nydus/src/build/` for full
+`nydus-core/src/metadata/` and `nydus/src/build/` for full
 understanding. For the full-blob artifact layout, blob
 meta format and runtime read path built on top of this, see
 [nydus.md](nydus.md).
@@ -131,7 +131,7 @@ Offset  Size  Field              Description
  108     4    build_time         Seconds added to epoch for build timestamp
 ```
 
-→ source: `nydus-accessor/src/metadata/superblock.rs` :: `Superblock`
+→ source: `nydus-core/src/metadata/superblock.rs` :: `Superblock`
 
 ### Feature flags used by Nydus
 
@@ -183,7 +183,7 @@ Offset  Size  Field        Description
   78    50    reserved     Must be zero
 ```
 
-→ source: `nydus-accessor/src/metadata/chunk.rs` :: `DeviceSlot`
+→ source: `nydus-core/src/metadata/chunk.rs` :: `DeviceSlot`
 
 A single-layer `nydus build` output has exactly **one** extra device
 (`extra_devices = 1`); a merged bootstrap produced by `nydus merge` carries
@@ -230,7 +230,7 @@ This design eliminates any inode table or bitmap — the NID **is** the address.
 The kernel computes the inode location with a single shift and add, making
 inode lookup O(1).
 
-→ source: `nydus-accessor/src/metadata/layout.rs` :: `MetadataLayout::alloc_inode()` assigns
+→ source: `nydus-core/src/metadata/layout.rs` :: `MetadataLayout::alloc_inode()` assigns
 offsets and computes NIDs as `offset / 32`.
 
 ### Compact vs Extended format
@@ -263,7 +263,7 @@ Offset  Size  Field           Description
   28     4    i_reserved      Must be zero
 ```
 
-→ source: `nydus-accessor/src/metadata/inode.rs` :: `CompactInode`
+→ source: `nydus-core/src/metadata/inode.rs` :: `CompactInode`
 
 ### Extended inode (64 bytes)
 
@@ -285,7 +285,7 @@ Offset  Size  Field           Description
   48    16    i_reserved2     Must be zero
 ```
 
-→ source: `nydus-accessor/src/metadata/inode.rs` :: `ExtendedInode`
+→ source: `nydus-core/src/metadata/inode.rs` :: `ExtendedInode`
 
 ### i_format bit encoding
 
@@ -305,7 +305,7 @@ L₀-L₂ (bits 1-3) : Data layout:
 N  (bit 4)    : nlink_1 flag (compact non-dir only; indicates nlink == 1)
 ```
 
-→ source: `nydus-accessor/src/metadata/inode.rs` :: `compact_i_format()`, `extended_i_format()`
+→ source: `nydus-core/src/metadata/inode.rs` :: `compact_i_format()`, `extended_i_format()`
 
 ### The i_u union
 
@@ -395,7 +395,7 @@ Offset  Size  Field         Description
 
 A hole (sparse region) is represented by all-`0xFF` bytes.
 
-→ source: `nydus-accessor/src/metadata/chunk.rs` :: `ChunkIndex`
+→ source: `nydus-core/src/metadata/chunk.rs` :: `ChunkIndex`
 
 ### Chunk format (stored in i_u)
 
@@ -414,7 +414,7 @@ Bit 5    : INDEXES (0x0020) — use 8-byte chunk index entries
 Bit 6    : 48BIT (0x0040) — addresses may exceed 32 bits
 ```
 
-→ source: `nydus-accessor/src/metadata/inode.rs` :: `chunk_format()`
+→ source: `nydus-core/src/metadata/inode.rs` :: `chunk_format()`
 
 ### How the kernel reads a chunk
 
@@ -499,7 +499,7 @@ Offset  Size  Field       Description
   11     1    reserved    Must be zero
 ```
 
-→ source: `nydus-accessor/src/metadata/dir.rs` :: `Dirent`
+→ source: `nydus-core/src/metadata/dir.rs` :: `Dirent`
 
 ### Block-level layout
 
@@ -601,7 +601,7 @@ fn alloc_inode(&mut self, size: usize) -> (usize, u64) {
 }
 ```
 
-→ source: `nydus-accessor/src/metadata/layout.rs` :: `MetadataLayout`
+→ source: `nydus-core/src/metadata/layout.rs` :: `MetadataLayout`
 
 ### Directory data block address
 
@@ -646,13 +646,13 @@ The `main()` function orchestrates image creation in three phases:
 │ Phase 2: Metadata Layout                 │                      │
 │                                          ▼                      │
 │  ┌─ alloc_inode() ───────  assign NID to each inode             │
-│  │  (nydus-accessor/src/metadata/layout.rs)                                    │
+│  │  (nydus-core/src/metadata/layout.rs)                                    │
 │  │                                                              │
 │  ├─ set_parent_nids() ───  wire up ".." references              │
 │  │  (nydus/src/build/bootstrap.rs)                                    │
 │  │                                                              │
 │  ├─ pad_to_block() ──────  align for directory data             │
-│  │  (nydus-accessor/src/metadata/layout.rs)                                    │
+│  │  (nydus-core/src/metadata/layout.rs)                                    │
 │  │                                                              │
 │  ├─ serialize_directory()  serialize dir entries into blocks     │
 │  │  (nydus/src/build/dir.rs)     alloc_dir_data() for each dir        │
@@ -789,13 +789,13 @@ on-demand loading for container use cases.
 
 | Name | Value | Defined in |
 |------|-------|-----------|
-| `EROFS_SUPER_MAGIC_V1` | `0xE0F5E1E2` | `nydus-accessor/src/metadata/mod.rs` |
-| `EROFS_SUPER_OFFSET` | 1024 | `nydus-accessor/src/metadata/mod.rs` |
-| `EROFS_BLOCK_SIZE` | 4096 | `nydus-accessor/src/metadata/mod.rs` |
-| `EROFS_BLKSZBITS` | 12 | `nydus-accessor/src/metadata/mod.rs` |
-| `EROFS_ISLOTBITS` | 5 | `nydus-accessor/src/metadata/mod.rs` |
-| `EROFS_SLOTSIZE` | 32 | `nydus-accessor/src/metadata/mod.rs` |
-| `EROFS_NULL_ADDR` | `0xFFFFFFFFFFFFFFFF` | `nydus-accessor/src/metadata/mod.rs` |
+| `EROFS_SUPER_MAGIC_V1` | `0xE0F5E1E2` | `nydus-core/src/metadata/mod.rs` |
+| `EROFS_SUPER_OFFSET` | 1024 | `nydus-core/src/metadata/mod.rs` |
+| `EROFS_BLOCK_SIZE` | 4096 | `nydus-core/src/metadata/mod.rs` |
+| `EROFS_BLKSZBITS` | 12 | `nydus-core/src/metadata/mod.rs` |
+| `EROFS_ISLOTBITS` | 5 | `nydus-core/src/metadata/mod.rs` |
+| `EROFS_SLOTSIZE` | 32 | `nydus-core/src/metadata/mod.rs` |
+| `EROFS_NULL_ADDR` | `0xFFFFFFFFFFFFFFFF` | `nydus-core/src/metadata/mod.rs` |
 
 ### File type constants
 

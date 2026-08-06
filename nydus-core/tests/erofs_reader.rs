@@ -15,12 +15,12 @@ use tempfile::{tempdir, NamedTempFile};
 use nydus::build::blob_chunk::BlobWriter;
 use nydus::build::bootstrap::render_bootstrap;
 use nydus::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
-use nydus_accessor::fs::ErofsReader;
-use nydus_accessor::metadata::{
+use nydus_core::fs::ErofsReader;
+use nydus_core::metadata::{
     erofs_xattr_ibody_size, BlobFooter, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS,
     EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER, NYDUS_BLOB_FOOTER_ALIGNMENT,
 };
-use nydus_accessor::utils::sha256_file;
+use nydus_core::utils::sha256_file;
 
 #[test]
 fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
@@ -194,7 +194,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let full_blob_id = sha256_file(&full_blob_path).expect("hash full blob");
     let final_full_blob_path = dir
         .path()
-        .join(nydus_accessor::utils::hex_string(&full_blob_id));
+        .join(nydus_core::utils::hex_string(&full_blob_id));
     fs::rename(&full_blob_path, final_full_blob_path).expect("rename full blob");
 
     let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
@@ -213,8 +213,8 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let bootstrap_path = dir.path().join("bootstrap");
     fs::write(&bootstrap_path, &bootstrap).expect("write bootstrap file");
 
-    let backend: std::sync::Arc<dyn nydus_accessor::storage::backend::BlobBackend> =
-        std::sync::Arc::new(nydus_accessor::storage::backend::LocalBackend::new(
+    let backend: std::sync::Arc<dyn nydus_core::storage::backend::BlobBackend> =
+        std::sync::Arc::new(nydus_core::storage::backend::LocalBackend::new(
             dir.path().to_path_buf(),
         ));
     let reader =
