@@ -1,9 +1,10 @@
-# Example storage config for `nydus fuse --config config.yaml`.
+# Example storage config for `nydus fuse --config <config>`. Copy and edit
+# before use.
 #
 # This config serves blobs from an OCI image registry instead of a local
 # directory. Mount with:
 #
-#   nydus fuse --bootstrap layer.bootstrap --config config.yaml --mountpoint /mnt/nydus
+#   nydus fuse --bootstrap layer.bootstrap --config config/registry.example.yaml --mountpoint /mnt/nydus
 #
 # Note: `nydus check` only supports the `local` backend; this registry config
 # is intended for `nydus fuse`.

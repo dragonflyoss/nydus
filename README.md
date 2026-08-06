@@ -225,10 +225,10 @@ sudo nydusify check \
 
 Mount a converted image lazily from the registry with a YAML storage config
 (see [docs/nydus.md](docs/nydus.md#storage-config) and the example
-[`config.yaml`](config.yaml)):
+[`config/registry.example.yaml`](config/registry.example.yaml)):
 
 ```bash
-nydus fuse --bootstrap image.boot --config config.yaml --mountpoint /mnt/nydus
+nydus fuse --bootstrap image.boot --config config/registry.example.yaml --mountpoint /mnt/nydus
 ```
 
 ## Documentation

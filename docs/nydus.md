@@ -595,7 +595,7 @@ nydus check --bootstrap layer.bootstrap --config storage.yaml
 The `registry` backend serves blobs on demand from an OCI registry instead of a
 local directory. A blob id is the full-blob SHA256 digest, fetched via
 `GET /v2/<repo>/blobs/sha256:<hex>` with HTTP range requests. A ready-to-edit
-example lives at [`config.yaml`](../config.yaml) in the repo root.
+example lives at [`config/registry.example.yaml`](../config/registry.example.yaml).
 
 ```yaml
 backend:
