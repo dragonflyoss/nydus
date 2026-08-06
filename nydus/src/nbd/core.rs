@@ -5,7 +5,7 @@
 //! (and any redirect blob) reported as `/dev/zero`. [`NbdCore`] wraps that
 //! view with a synchronous `read` that fetches the covering ranges and copies
 //! bytes out of the resolved fds; the pwrite/dedup/fsync I/O lives in (and is
-//! tested by) `nydus-accessor`.
+//! tested by) `nydus-core`.
 //!
 //! # Flattened superblock — kernel flatdev auto-detection
 //!

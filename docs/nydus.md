@@ -1555,7 +1555,7 @@ all 50, vs ≈25s for one).
 
 ## Accessor (virtio-pmem integration)
 
-`nydus_accessor::NydusAccessor` (re-exported as `nydus::NydusAccessor`) is
+`nydus_core::NydusAccessor` (re-exported as `nydus::NydusAccessor`) is
 the library entry point for hypervisors
 that mount the nydus image inside the guest as a plain EROFS
 filesystem over virtio-pmem, instead of using `nydus fuse` on the host. The
@@ -1607,7 +1607,7 @@ Complete example:
 ```rust
 use std::path::Path;
 
-use nydus_accessor::{Config, NydusAccessor};
+use nydus_core::{Config, NydusAccessor};
 
 fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> {
 	// Load the same YAML schema accepted by `nydus fuse --config`.
@@ -1662,8 +1662,8 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> 
 ```
 
 The accessor needs neither FUSE nor the CLI stack: it lives in the
-standalone `nydus-accessor` crate (`nydus-accessor/`), which the root
-`nydus` crate re-exports. Depending on `nydus-accessor` with the
+standalone `nydus-core` crate (`nydus-core/`), which the root
+`nydus` crate re-exports. Depending on `nydus-core` with the
 `backend-registry` feature produces a minimal library surface (no
 fuser/hyper/tokio-server/clap) suitable for embedding.
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["nydus", "nydus-accessor"]
+members = ["nydus", "nydus-core"]
 
 [profile.bench]
 debug = true

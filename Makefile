@@ -97,11 +97,11 @@ build:
 release:
 	$(CARGO) build -p nydus --release --features "$(FEATURES)"
 
-# Validate that the nydus-accessor crate can be packaged and published
-# to crates.io. Run `cargo publish -p nydus-accessor --registry crates-io`
+# Validate that the nydus-core crate can be packaged and published
+# to crates.io. Run `cargo publish -p nydus-core --registry crates-io`
 # manually to publish.
 crate:
-	$(CARGO) publish -p nydus-accessor --registry crates-io --dry-run
+	$(CARGO) publish -p nydus-core --registry crates-io --dry-run
 
 nydusify:
 	cd nydusify && $(GO_BIN) build -o nydusify .

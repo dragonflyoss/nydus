@@ -16,14 +16,14 @@ use nydus::build::bootstrap::{
     render_bootstrap, render_flattened_bootstrap, FLATTENED_BLOB_ALIGNMENT,
 };
 use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
-use nydus_accessor::config::Config;
-use nydus_accessor::fs::ErofsReader;
-use nydus_accessor::metadata::{
+use nydus_core::config::Config;
+use nydus_core::fs::ErofsReader;
+use nydus_core::metadata::{
     BlobFooter, BlobMetaCompressor, ErofsDeviceSlot, NYDUS_BLOB_FOOTER_ALIGNMENT,
 };
-use nydus_accessor::metadata::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
-use nydus_accessor::utils::{hex_string, sha256_file};
-use nydus_accessor::{BlobID, FileType, NydusAccessor};
+use nydus_core::metadata::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
+use nydus_core::utils::{hex_string, sha256_file};
+use nydus_core::{BlobID, FileType, NydusAccessor};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
@@ -94,14 +94,14 @@ fn build_test_image_with_layout(
     let staging = blob_dir.join("staging");
     let mut writer = BlobWriter::new_with_compressor(
         &staging,
-        nydus_accessor::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
         BlobMetaCompressor::Zstd,
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_accessor::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();
@@ -115,7 +115,7 @@ fn build_test_image_with_layout(
     let embedded_bootstrap_bytes = render_bootstrap(
         &mut inodes,
         0,
-        nydus_accessor::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
+        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
         &embedded_device_slots,
         &[0u8; 16],
     )
@@ -132,7 +132,7 @@ fn build_test_image_with_layout(
         render_flattened_bootstrap(
             &mut inodes,
             0,
-            nydus_accessor::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
+            nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
             &device_slots,
             &[0u8; 16],
         )
@@ -141,7 +141,7 @@ fn build_test_image_with_layout(
         render_bootstrap(
             &mut inodes,
             0,
-            nydus_accessor::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
+            nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
             &device_slots,
             &[0u8; 16],
         )
@@ -164,7 +164,7 @@ fn write_full_blob(
     data_path: &Path,
     blob_dir: &Path,
     bootstrap_bytes: &[u8],
-    blob_meta: &nydus_accessor::metadata::BlobMeta,
+    blob_meta: &nydus_core::metadata::BlobMeta,
 ) -> [u8; EROFS_BLOB_ID_SIZE] {
     let data = fs::read(data_path).unwrap();
     let data_size = data.len() as u64;
@@ -322,14 +322,14 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     let staging = blob_dir.join("staging");
     let mut writer = BlobWriter::new_with_compressor(
         &staging,
-        nydus_accessor::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
         BlobMetaCompressor::Zstd,
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_accessor::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();
@@ -344,14 +344,14 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     let flattened = render_flattened_bootstrap(
         &mut inodes,
         0,
-        nydus_accessor::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
+        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
         &device_slots,
         &[0u8; 16],
     )
     .unwrap();
     assert_eq!(flattened.len() % EROFS_BLOCK_SIZE as usize, 0);
 
-    let sb_offset = nydus_accessor::metadata::EROFS_SUPER_OFFSET as usize;
+    let sb_offset = nydus_core::metadata::EROFS_SUPER_OFFSET as usize;
     let checksum = u32::from_le_bytes(flattened[sb_offset + 4..sb_offset + 8].try_into().unwrap());
     let mut block0 = flattened[sb_offset..EROFS_BLOCK_SIZE as usize].to_vec();
     block0[4..8].fill(0);

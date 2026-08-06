@@ -1,4 +1,4 @@
-# nydus-accessor
+# nydus-core
 
 Runtime accessor APIs for EROFS-based Nydus images.
 
