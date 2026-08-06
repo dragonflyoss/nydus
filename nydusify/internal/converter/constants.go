@@ -55,6 +55,8 @@ type (
 	BuildOption = pkgconv.BuildOption
 	// MergeBuildOption describes a single `nydus merge` invocation.
 	MergeBuildOption = pkgconv.MergeBuildOption
+	// UnpackOption describes a single `nydus build --type nydus-tar` invocation.
+	UnpackOption = pkgconv.UnpackOption
 	// BlobMetaFile is a per-layer blob meta artifact packed into the bootstrap
 	// layer alongside image.boot, named "<full_blob_sha256>.blob.meta".
 	BlobMetaFile = pkgconv.BlobMetaFile
@@ -73,6 +75,10 @@ func runNydusBuild(ctx context.Context, opt BuildOption) error {
 
 func runNydusMerge(ctx context.Context, opt MergeBuildOption) error {
 	return pkgconv.RunNydusMerge(ctx, opt)
+}
+
+func runNydusToTar(ctx context.Context, opt UnpackOption, dest io.Writer) error {
+	return pkgconv.RunNydusToTar(ctx, opt, dest)
 }
 
 func extractTar(ctx context.Context, r io.Reader, dir string) error {

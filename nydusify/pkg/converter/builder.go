@@ -9,6 +9,7 @@ package converter
 import (
 	"bytes"
 	"context"
+	"io"
 	"os/exec"
 	"strconv"
 
@@ -52,6 +53,19 @@ type MergeBuildOption struct {
 	BootstrapPath string
 	// LogLevel is the log level passed to `nydus merge` (trace/debug/info/warn/
 	// error). Defaults to "info" when empty.
+	LogLevel string
+}
+
+// UnpackOption describes a single `nydus build --type nydus-tar` invocation
+// that turns a nydus full blob back into an OCI layer tar stream.
+type UnpackOption struct {
+	// BuilderPath is the path (or PATH-resolvable name) of the nydus binary.
+	BuilderPath string
+	// BlobPath is the nydus full blob to unpack. Unlike the build direction it
+	// must be a regular file, because the unpacker memory-maps it.
+	BlobPath string
+	// LogLevel is the log level passed to the nydus binary (trace/debug/info/
+	// warn/error). Defaults to "info" when empty.
 	LogLevel string
 }
 
@@ -115,6 +129,29 @@ func RunNydusMerge(ctx context.Context, opt MergeBuildOption) error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return errors.Wrapf(err, "nydus merge failed: %s", stderr.String())
+	}
+	return nil
+}
+
+// RunNydusToTar executes `nydus build --type nydus-tar` to unpack a nydus full
+// blob, streaming the uncompressed OCI layer tar into dest.
+//
+// A full blob carries the filesystem tree and the chunk data of exactly one
+// layer, so no bootstrap, lower layer or storage backend is involved.
+func RunNydusToTar(ctx context.Context, opt UnpackOption, dest io.Writer) error {
+	args := []string{
+		"build", opt.BlobPath,
+		"--type", "nydus-tar",
+		"--output", "-",
+		"--log-level", nydusLogLevel(opt.LogLevel),
+	}
+
+	cmd := exec.CommandContext(ctx, builderBinary(opt.BuilderPath), args...)
+	cmd.Stdout = dest
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return errors.Wrapf(err, "nydus build --type nydus-tar failed: %s", stderr.String())
 	}
 	return nil
 }

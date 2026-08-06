@@ -5,7 +5,7 @@ use nydus::build::bootstrap::{render_bootstrap, render_flattened_bootstrap};
 use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
 use nydus::fs::ErofsReader;
 use nydus::metadata::*;
-use nydus::tracing::init_command_tracing;
+use nydus::tracing::{init_command_tracing, init_command_tracing_stderr};
 use nydus::unpack::unpack_to_tar;
 use nydus::utils::hex_string;
 use sha2::{Digest, Sha256};
@@ -108,7 +108,14 @@ pub struct BuildArgs {
 
 /// Run the requested conversion.
 pub fn run_build(args: BuildArgs) -> Result<()> {
-    let _guards = init_command_tracing(args.log_level, args.console);
+    let tar_to_stdout =
+        args.conversion_type == ConversionType::NydusTar && args.output == Path::new("-");
+    // Logging to stdout would corrupt a tar stream written to stdout.
+    let _guards = if tar_to_stdout {
+        init_command_tracing_stderr(args.log_level, args.console)
+    } else {
+        init_command_tracing(args.log_level, args.console)
+    };
 
     match args.conversion_type {
         ConversionType::DirNydus => run_dir_to_nydus(args),

@@ -35,6 +35,9 @@ const (
 	// blobMetaOffsetField is the byte offset of the u64 blob_meta_offset field
 	// within the footer.
 	blobMetaOffsetField = 40
+	// bootstrapBlocksField is the byte offset of the u32 bootstrap_blocks field
+	// within the footer.
+	bootstrapBlocksField = 56
 	// blobMetaBlocksField is the byte offset of the u32 blob_meta_blocks field
 	// within the footer.
 	blobMetaBlocksField = 60
@@ -153,4 +156,16 @@ func ExtractBlobMeta(ra io.ReaderAt, size int64) ([]byte, error) {
 		return nil, errors.Wrap(err, "read blob meta region")
 	}
 	return buf, nil
+}
+
+// HasBootstrap reports whether a nydus full blob embeds a bootstrap, i.e.
+// whether it describes a filesystem tree of its own. Data-only artifacts such
+// as the ondemand blob produced by `nydus optimize` record zero bootstrap
+// blocks and cannot be unpacked back to an OCI layer.
+func HasBootstrap(ra io.ReaderAt, size int64) (bool, error) {
+	footer, err := readFooter(ra, size)
+	if err != nil {
+		return false, err
+	}
+	return binary.LittleEndian.Uint32(footer[bootstrapBlocksField:bootstrapBlocksField+4]) > 0, nil
 }
