@@ -114,14 +114,14 @@ pub(crate) fn build_client(
         .map_err(|e| io::Error::other(format!("failed to build http client: {e}")))
 }
 
-/// A direct HTTP connection, wrapping a configured async client.
-pub(crate) struct Connection {
+/// An HTTP client for direct origin requests, wrapping a configured async client.
+pub(crate) struct HttpClient {
     client: Client,
 }
 
-impl Connection {
-    pub(crate) fn new(config: &ConnectionConfig) -> io::Result<Arc<Connection>> {
-        Ok(Arc::new(Connection {
+impl HttpClient {
+    pub(crate) fn new(config: &ConnectionConfig) -> io::Result<Arc<HttpClient>> {
+        Ok(Arc::new(HttpClient {
             client: build_client(config, None)?,
         }))
     }

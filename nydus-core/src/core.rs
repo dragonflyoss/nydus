@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{bail, Context, Result};
 
 use crate::config::Config;
-use crate::fs::{BlobInfo as ReaderBlobInfo, ErofsReader};
+use crate::fs::{ErofsReader, RawBlobInfo};
 use crate::metadata::{
     ErofsInode, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
     EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
@@ -228,7 +228,7 @@ pub struct NydusCore {
 /// Blob table and decoded-cache preparation/fetch APIs.
 pub struct Blobs {
     reader: Arc<ErofsReader>,
-    blob_infos: Vec<ReaderBlobInfo>,
+    raw_blob_infos: Vec<RawBlobInfo>,
     index_by_blob_id: HashMap<BlobId, u16>,
     /// Memoised result of [`Blobs::flat_layout`].
     flat_layout: OnceLock<Vec<BlobInfo>>,
@@ -298,28 +298,30 @@ impl NydusCore {
             Some(trace_recorder.clone()),
         )
         .context("failed to open nydus bootstrap")?;
-        let blob_infos = reader.blob_infos().context("failed to read blob table")?;
-        if blob_infos.is_empty() {
+        let raw_blob_infos = reader.blob_infos().context("failed to read blob table")?;
+        if raw_blob_infos.is_empty() {
             bail!("bootstrap contains no blobs");
         }
-        let flat_size = blob_infos.iter().try_fold(bootstrap_size, |size, info| {
-            let offset = info
-                .mapped_blkaddr
-                .checked_mul(EROFS_BLOCK_SIZE as u64)
-                .context("mapped blob offset overflow")?;
-            let len = info
-                .blocks
-                .checked_mul(EROFS_BLOCK_SIZE as u64)
-                .context("blob size overflow")?;
-            Ok::<u64, anyhow::Error>(
-                size.max(
-                    offset
-                        .checked_add(len)
-                        .context("flat blob range overflow")?,
-                ),
-            )
-        })?;
-        let index_by_blob_id = blob_infos
+        let flat_size = raw_blob_infos
+            .iter()
+            .try_fold(bootstrap_size, |size, info| {
+                let offset = info
+                    .mapped_blkaddr
+                    .checked_mul(EROFS_BLOCK_SIZE as u64)
+                    .context("mapped blob offset overflow")?;
+                let len = info
+                    .blocks
+                    .checked_mul(EROFS_BLOCK_SIZE as u64)
+                    .context("blob size overflow")?;
+                Ok::<u64, anyhow::Error>(
+                    size.max(
+                        offset
+                            .checked_add(len)
+                            .context("flat blob range overflow")?,
+                    ),
+                )
+            })?;
+        let index_by_blob_id = raw_blob_infos
             .iter()
             .map(|info| (BlobId::from(info.blob_id), info.blob_index))
             .collect();
@@ -347,7 +349,7 @@ impl NydusCore {
             bootstrap_size,
             blobs: Blobs {
                 reader: reader.clone(),
-                blob_infos,
+                raw_blob_infos,
                 index_by_blob_id,
                 flat_layout: OnceLock::new(),
             },
@@ -505,9 +507,9 @@ impl Blobs {
     /// use: the blob meta is downloaded and validated, and the sparse cache
     /// data file is created and sized to the dense uncompressed address
     /// space. Idempotent.
-    pub fn entries(&self) -> Result<Vec<BlobInfo>> {
+    pub fn prepare_entries(&self) -> Result<Vec<BlobInfo>> {
         let block_size = EROFS_BLOCK_SIZE as u64;
-        self.blob_infos
+        self.raw_blob_infos
             .iter()
             .map(|info| {
                 let mapped_offset = info
@@ -546,12 +548,12 @@ impl Blobs {
     /// once and memoised: block-device style workloads resolve ranges on every
     /// I/O and must not pay for re-enumerating (and re-sorting) the blob table
     /// each time. The first call prepares every blob, exactly as
-    /// [`Blobs::entries`] does.
+    /// [`Blobs::prepare_entries`] does.
     pub fn flat_layout(&self) -> Result<&[BlobInfo]> {
         if let Some(layout) = self.flat_layout.get() {
             return Ok(layout);
         }
-        let mut blobs = self.entries()?;
+        let mut blobs = self.prepare_entries()?;
         blobs.retain(|blob| !blob.is_redirect);
         blobs.sort_by_key(|blob| blob.mapped_offset);
         // A racing caller may have won the initialisation; either value is
@@ -619,7 +621,7 @@ impl Blobs {
     /// scan). On-demand services (uffd, fanotify, FUSE) can consult this per
     /// event — or once per blob, since the answer is sticky — to bypass range
     /// readiness checks and fetch plumbing entirely for fully warmed blobs.
-    pub fn is_fully_ready(&self, id: &BlobId) -> Result<bool> {
+    pub fn is_all_ready(&self, id: &BlobId) -> Result<bool> {
         let blob_index = *self
             .index_by_blob_id
             .get(id)
@@ -628,7 +630,7 @@ impl Blobs {
             .reader
             .blob_cache(blob_index)
             .with_context(|| format!("failed to open blob {blob_index}"))?;
-        Ok(cache.is_fully_ready())
+        Ok(cache.is_all_ready())
     }
 }
 

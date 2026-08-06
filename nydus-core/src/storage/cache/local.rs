@@ -12,11 +12,11 @@ use tracing::{info, warn};
 
 use crate::metadata::{BlobMeta, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE};
 use crate::metrics::trace::TraceRecorder;
-use crate::storage::backend::{BlobBackend, ReadContext, RequestSource};
-use crate::storage::groupmap::GroupMap;
+use crate::storage::backend::{BlobBackend, ReadContext, ReadKind};
+use crate::storage::group_map::GroupMap;
 use crate::utils::hex_string;
 
-use super::grouplock::GroupLocks;
+use super::group_lock::GroupLocks;
 use super::{
     decode_group_from_window, fetch_decode_validate_group_into, plan_prefetch_batches, BlobCache,
     BlobCacheBuffers,
@@ -142,7 +142,7 @@ impl LocalBlobCache {
             .create(true)
             .truncate(false)
             .open(&cache_blob_path)?;
-        data_file.set_len(blob_meta.cache_size())?;
+        data_file.set_len(blob_meta.total_uncompressed_size())?;
         drop(data_file);
 
         let groupmap = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
@@ -195,7 +195,7 @@ impl LocalBlobCache {
                 .truncate(false)
                 .open(&self.cache_blob_path)?,
         );
-        file.set_len(self.blob_meta.cache_size())?;
+        file.set_len(self.blob_meta.total_uncompressed_size())?;
         crate::metrics::inc_cache_opened_files();
         *cache_file = Some(file.clone());
         Ok(file)
@@ -290,7 +290,7 @@ impl LocalBlobCache {
                 &self.backend,
                 group,
                 &mut buffers,
-                RequestSource::OnDemand,
+                ReadKind::OnDemand,
             )?;
             write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
             self.groupmap.set_ready(group_index)?;
@@ -310,7 +310,7 @@ impl LocalBlobCache {
     fn ensure_byte_range(&self, offset: u64, len: u64, cache_file: &File) -> io::Result<()> {
         // Redirect (ondemand) blobs have a non-uniform group layout, so the
         // O(1) division-based group lookup below does not apply; they are
-        // consumed exclusively through `redirect_stream`.
+        // consumed exclusively through `stream_redirect`.
         if self.blob_meta.is_redirect_blob() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -358,13 +358,13 @@ impl LocalBlobCache {
     fn stream_redirect_segment(
         &self,
         groups: &[BlobMetaGroup],
-        batch: std::ops::Range<usize>,
+        segment: std::ops::Range<usize>,
         window: &mut Vec<u8>,
         decoded: &mut Vec<u8>,
         cb: &(dyn Fn(&BlobMetaGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
-        let window_base = groups[batch.start].compressed_byte_offset();
-        let window_end = groups[batch.end - 1].compressed_byte_end();
+        let window_base = groups[segment.start].compressed_byte_offset();
+        let window_end = groups[segment.end - 1].compressed_byte_end();
         let window_len = usize::try_from(window_end - window_base).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -372,18 +372,15 @@ impl LocalBlobCache {
             )
         })?;
         window.resize(window_len, 0);
-        let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
-        let uncompressed_size = groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
-        let ctx = ReadContext::group(
-            RequestSource::Prefetch,
-            uncompressed_offset,
-            uncompressed_size,
-        );
+        let uncompressed_offset = groups[segment.start].uncompressed_byte_offset();
+        let uncompressed_size =
+            groups[segment.end - 1].uncompressed_byte_end() - uncompressed_offset;
+        let ctx = ReadContext::group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
         self.backend
             .read_range_into(&self.blob_id, window_base, window, ctx)?;
         crate::metrics::record_backend_redirect_read(window_len as u64);
 
-        for index in batch {
+        for index in segment {
             let group = &groups[index];
             if let Err(err) =
                 decode_group_from_window(&self.blob_meta, group, window_base, window, decoded)
@@ -465,11 +462,8 @@ impl BlobCache for LocalBlobCache {
             let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
             let uncompressed_size =
                 groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
-            let ctx = ReadContext::group(
-                RequestSource::Prefetch,
-                uncompressed_offset,
-                uncompressed_size,
-            );
+            let ctx =
+                ReadContext::group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
             self.backend
                 .read_range_into(&self.blob_id, window_base, &mut window, ctx)?;
 
@@ -647,13 +641,13 @@ impl BlobCache for LocalBlobCache {
         self.groupmap.is_ready(group_index).unwrap_or(false)
     }
 
-    fn is_fully_ready(&self) -> bool {
+    fn is_all_ready(&self) -> bool {
         // A redirect blob never marks its own groupmap (its groups fill other
         // blobs' caches), so the flag is meaningless there.
         !self.blob_meta.is_redirect_blob() && self.groupmap.is_all_ready()
     }
 
-    fn redirect_stream(
+    fn stream_redirect(
         &self,
         cb: &mut dyn FnMut(&BlobMetaGroup, &[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
@@ -678,11 +672,8 @@ impl BlobCache for LocalBlobCache {
             let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
             let uncompressed_size =
                 groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
-            let ctx = ReadContext::group(
-                RequestSource::Prefetch,
-                uncompressed_offset,
-                uncompressed_size,
-            );
+            let ctx =
+                ReadContext::group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
             self.backend
                 .read_range_into(&self.blob_id, window_base, &mut window, ctx)?;
             crate::metrics::record_backend_redirect_read(window_len as u64);
@@ -710,7 +701,7 @@ impl BlobCache for LocalBlobCache {
         Ok(())
     }
 
-    fn redirect_stream_parallel(
+    fn stream_redirect_parallel(
         &self,
         threads: usize,
         skip: &(dyn Fn(&BlobMetaGroup) -> bool + Sync),
@@ -1268,7 +1259,7 @@ mod tests {
             let baseline = backend.reads();
             let delivered = AtomicUsize::new(0);
             cache
-                .redirect_stream_parallel(1, &|_group| skip_all, &|group, decoded| {
+                .stream_redirect_parallel(1, &|_group| skip_all, &|group, decoded| {
                     assert!(group.is_redirect());
                     assert_eq!(decoded, payload);
                     delivered.fetch_add(1, Ordering::SeqCst);

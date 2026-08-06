@@ -187,7 +187,7 @@ func runConvert(c *cli.Context) error {
 		}
 	}
 
-	provider, err := remote.NewProvider(remote.Options{
+	provider, err := remote.NewProvider(remote.Option{
 		WorkDir:         contentDir,
 		SourceInsecure:  c.Bool("source-insecure"),
 		SourcePlainHTTP: c.Bool("source-plain-http"),
@@ -465,7 +465,7 @@ func runCheck(c *cli.Context) error {
 		return errors.Wrapf(err, "create work dir %q", workDir)
 	}
 
-	chk, err := checker.New(checker.Opt{
+	chk, err := checker.New(checker.Option{
 		Source:          source,
 		Target:          target,
 		Builder:         c.String("builder"),
@@ -585,7 +585,7 @@ func runMount(c *cli.Context) error {
 		defer func() { _ = os.RemoveAll(workDir) }()
 	}
 
-	mnt, err := checker.NewMounter(checker.MountOpt{
+	mnt, err := checker.NewMounter(checker.MountOption{
 		Target:          target,
 		Mountpoint:      mountpoint,
 		Builder:         c.String("builder"),
@@ -700,7 +700,7 @@ func runOptimize(c *cli.Context) error {
 		defer func() { _ = os.RemoveAll(workDir) }()
 	}
 
-	opt, err := checker.NewOptimizer(checker.OptimizeOpt{
+	opt, err := checker.NewOptimizer(checker.OptimizeOption{
 		Source:          c.String("source"),
 		Target:          c.String("target"),
 		Pattern:         c.String("pattern"),

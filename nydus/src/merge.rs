@@ -133,7 +133,7 @@ pub fn rewrite_bootstrap_with_ondemand_blob(
     ondemand_blob_id: &[u8; EROFS_BLOB_ID_SIZE],
     ondemand_blocks: u64,
 ) -> Result<Vec<u8>> {
-    let reader = ErofsReader::open_layer(parent_bootstrap)
+    let reader = ErofsReader::open_metadata_only(parent_bootstrap)
         .with_context(|| format!("failed to open bootstrap: {}", parent_bootstrap.display()))?;
     let blob_infos = reader.blob_infos()?;
     if blob_infos.is_empty() {
@@ -212,7 +212,7 @@ fn load_layer(
     device_slots: &mut Vec<ErofsDeviceSlot>,
     blob_indexes: &mut HashMap<[u8; EROFS_BLOB_ID_SIZE], u16>,
 ) -> Result<MergeNode> {
-    let reader = ErofsReader::open_layer(source)?;
+    let reader = ErofsReader::open_metadata_only(source)?;
     validate_single_layer_blob_source(source, &reader)?;
     let layer_epoch = reader.sb().epoch();
     let local_to_global = register_blobs(&reader, source_blob_id, device_slots, blob_indexes)?;

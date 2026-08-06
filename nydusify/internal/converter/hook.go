@@ -79,7 +79,7 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	// bootstrap merge. Anything else (e.g. buildkit attestation manifests with
 	// in-toto JSON layers, or already-merged nydus manifests) is passed
 	// through unchanged.
-	if !isNydusManifest(manifest) {
+	if !isMergeableBlobManifest(manifest) {
 		return newDesc, nil
 	}
 
@@ -117,7 +117,7 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 		return nil, errors.Wrap(err, "rewrite image config")
 	}
 
-	newConfigDesc, err := writeJSON(ctx, cs, newConfig, manifest.Config, configLabels)
+	newConfigDesc, err := WriteJSON(ctx, cs, newConfig, manifest.Config, configLabels)
 	if err != nil {
 		return nil, errors.Wrap(err, "write image config")
 	}
@@ -126,7 +126,7 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	manifest.Layers = layers
 	manifestLabels["containerd.io/gc.ref.content.config"] = newConfigDesc.Digest.String()
 
-	newManifestDesc, err := writeJSON(ctx, cs, manifest, *newDesc, manifestLabels)
+	newManifestDesc, err := WriteJSON(ctx, cs, manifest, *newDesc, manifestLabels)
 	if err != nil {
 		return nil, errors.Wrap(err, "write manifest")
 	}
@@ -187,9 +187,11 @@ func rewriteBootstrapConfig(configJSON json.RawMessage, diffIDs []digest.Digest)
 	return out, nil
 }
 
-// isNydusManifest reports whether every layer of the manifest is a converted
-// nydus data blob, i.e. the manifest is ready for a bootstrap merge.
-func isNydusManifest(manifest ocispec.Manifest) bool {
+// isMergeableBlobManifest reports whether the manifest is in the mergeable
+// pre-merge state: every layer is a converted nydus data blob and no bootstrap
+// layer has been appended yet. A finished nydus manifest (blobs followed by a
+// bootstrap layer) returns false.
+func isMergeableBlobManifest(manifest ocispec.Manifest) bool {
 	if len(manifest.Layers) == 0 {
 		return false
 	}
@@ -240,7 +242,7 @@ func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descript
 		return nil, err
 	}
 
-	return writeBootstrapLayer(ctx, cs, bootstrapPath, blobMetas, opt.AppendFiles)
+	return writeBootstrapLayerFromFile(ctx, cs, bootstrapPath, blobMetas, opt.AppendFiles)
 }
 
 // stageNydusMetadata stages a blob from the content store for `nydus merge`
@@ -269,10 +271,10 @@ func extractBlobMeta(ctx context.Context, cs content.Store, desc ocispec.Descrip
 	return pkgconv.ExtractBlobMeta(ra, ra.Size())
 }
 
-// writeBootstrapLayer packs the bootstrap file and the per-layer blob meta
+// writeBootstrapLayerFromFile packs the bootstrap file and the per-layer blob meta
 // artifacts into a gzip-compressed tar layer (under `image/`) and commits it to
 // the content store.
-func writeBootstrapLayer(ctx context.Context, cs content.Store, bootstrapPath string, blobMetas []BlobMetaFile, appendFiles []AppendFile) (*ocispec.Descriptor, error) {
+func writeBootstrapLayerFromFile(ctx context.Context, cs content.Store, bootstrapPath string, blobMetas []BlobMetaFile, appendFiles []AppendFile) (*ocispec.Descriptor, error) {
 	bootstrapData, err := os.ReadFile(bootstrapPath)
 	if err != nil {
 		return nil, errors.Wrap(err, "read bootstrap")
@@ -356,12 +358,6 @@ func readJSON(ctx context.Context, cs content.Store, x interface{}, desc ocispec
 // WriteJSON marshals x to JSON and commits it to the content store, returning a
 // descriptor derived from oldDesc with the new digest and size.
 func WriteJSON(ctx context.Context, cs content.Store, x interface{}, oldDesc ocispec.Descriptor, labels map[string]string) (*ocispec.Descriptor, error) {
-	return writeJSON(ctx, cs, x, oldDesc, labels)
-}
-
-// writeJSON marshals x to JSON and commits it to the content store, returning a
-// descriptor derived from oldDesc with the new digest and size.
-func writeJSON(ctx context.Context, cs content.Store, x interface{}, oldDesc ocispec.Descriptor, labels map[string]string) (*ocispec.Descriptor, error) {
 	b, err := json.Marshal(x)
 	if err != nil {
 		return nil, errors.Wrap(err, "marshal json")

@@ -6,7 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Args;
 use nydus::config::Config;
 use nydus::tracing::init_tracing;
-use nydus::uffd::{UffdCore, UffdOptions, UffdService};
+use nydus::uffd::{UffdCore, UffdService};
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use signal_hook::iterator::Signals;
 use tracing::Level;
@@ -55,7 +55,7 @@ pub struct UffdArgs {
     pub console: bool,
 }
 
-pub fn run_uffd_service(args: UffdArgs) -> Result<()> {
+pub fn run_uffd(args: UffdArgs) -> Result<()> {
     let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
         .context("failed to register termination signals")?;
     let signal_handle = signals.handle();
@@ -69,10 +69,7 @@ pub fn run_uffd_service(args: UffdArgs) -> Result<()> {
     );
 
     let config = Config::from_file(&args.config).context("failed to load storage config")?;
-    let core = Arc::new(UffdCore::new(UffdOptions {
-        bootstrap: args.bootstrap,
-        config,
-    })?);
+    let core = Arc::new(UffdCore::new(&args.bootstrap, config)?);
     let service = Arc::new(UffdService::new(core, args.socket));
     let signal_service = service.clone();
     let signal_thread = std::thread::Builder::new()

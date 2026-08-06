@@ -336,8 +336,8 @@ func (e *nbdEnv) casePartialRangeBounded(t *testing.T) { // C3 — decisive dema
 	mntLarge := filepath.Join(e.mntDir, "large.bin")
 	srcLarge := filepath.Join(e.sourceDir, "large.bin")
 	for _, skip := range []int64{1, 17, 40, 63} {
-		g := sliceSha(t, mntLarge, skip, 1)
-		w := sliceSha(t, srcLarge, skip, 1)
+		g := sliceSHA(t, mntLarge, skip, 1)
+		w := sliceSHA(t, srcLarge, skip, 1)
 		assert.Equal(t, w, g, "large.bin[+%dMiB,1MiB] byte-exact", skip)
 	}
 	after := e.cacheUsed()
@@ -521,11 +521,11 @@ func (e *nbdEnv) cacheUsed() int64 {
 // logCorpus concatenates the daemon console log and every file under logDir.
 func (e *nbdEnv) logCorpus() string {
 	var b strings.Builder
-	b.Write(mustReadFile(e.daemonLog))
+	b.Write(readFileOrEmpty(e.daemonLog))
 	entries, _ := os.ReadDir(e.logDir)
 	for _, entry := range entries {
 		if entry.Type().IsRegular() {
-			b.Write(mustReadFile(filepath.Join(e.logDir, entry.Name())))
+			b.Write(readFileOrEmpty(filepath.Join(e.logDir, entry.Name())))
 		}
 	}
 	return b.String()

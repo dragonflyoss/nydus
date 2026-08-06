@@ -78,7 +78,7 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 		labels[fmt.Sprintf("containerd.io/gc.ref.content.m.%d", i)] = newDesc.Digest.String()
 	}
 
-	return writeJSON(ctx, cs, index, desc, labels)
+	return WriteJSON(ctx, cs, index, desc, labels)
 }
 
 func convertManifestToOCI(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt ToOCIOption) (*ocispec.Descriptor, error) {
@@ -119,7 +119,7 @@ func convertManifestToOCI(ctx context.Context, cs content.Store, desc ocispec.De
 	if err != nil {
 		return nil, errors.Wrap(err, "rewrite image config")
 	}
-	newConfigDesc, err := writeJSON(ctx, cs, newConfig, manifest.Config, configLabels)
+	newConfigDesc, err := WriteJSON(ctx, cs, newConfig, manifest.Config, configLabels)
 	if err != nil {
 		return nil, errors.Wrap(err, "write image config")
 	}
@@ -129,7 +129,7 @@ func convertManifestToOCI(ctx context.Context, cs content.Store, desc ocispec.De
 	manifest.Layers = layers
 	manifestLabels["containerd.io/gc.ref.content.config"] = newConfigDesc.Digest.String()
 
-	newDesc, err := writeJSON(ctx, cs, manifest, desc, manifestLabels)
+	newDesc, err := WriteJSON(ctx, cs, manifest, desc, manifestLabels)
 	if err != nil {
 		return nil, errors.Wrap(err, "write manifest")
 	}

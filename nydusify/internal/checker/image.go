@@ -61,11 +61,11 @@ type Image struct {
 }
 
 // loadImage pulls ref through provider and parses it into a single-platform
-// Image. The reference must be non-empty. pullOpts selects which data layers
+// Image. The reference must be non-empty. pullOpt selects which data layers
 // are downloaded. reg selects which registry side's TLS/HTTP settings to use.
-func loadImage(ctx context.Context, provider *remote.Provider, ref string, platformMC platforms.MatchComparer, pullOpts remote.PullOptions, reg remote.Registry) (*Image, error) {
+func loadImage(ctx context.Context, provider *remote.Provider, ref string, platformMC platforms.MatchComparer, pullOpt remote.PullOption, reg remote.Side) (*Image, error) {
 	log.G(ctx).Infof("pulling image %s", ref)
-	desc, err := provider.Pull(ctx, ref, pullOpts, reg)
+	desc, err := provider.Pull(ctx, ref, pullOpt, reg)
 	if err != nil {
 		return nil, errors.Wrap(err, "pull")
 	}
@@ -81,7 +81,7 @@ func loadImage(ctx context.Context, provider *remote.Provider, ref string, platf
 // Image, reading the manifest and config from cs and classifying the image as
 // OCI or nydus.
 func parseImage(ctx context.Context, cs content.Store, ref string, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (*Image, error) {
-	manifestDesc, err := selectManifest(ctx, cs, rootDesc, platformMC)
+	manifestDesc, err := resolveManifest(ctx, cs, rootDesc, platformMC)
 	if err != nil {
 		return nil, errors.Wrap(err, "select platform manifest")
 	}
@@ -123,9 +123,9 @@ func parseImage(ctx context.Context, cs content.Store, ref string, rootDesc ocis
 	return img, nil
 }
 
-// selectManifest returns the manifest descriptor for the requested platform. If
+// resolveManifest returns the manifest descriptor for the requested platform. If
 // rootDesc is already a manifest it is returned as-is.
-func selectManifest(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (ocispec.Descriptor, error) {
+func resolveManifest(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (ocispec.Descriptor, error) {
 	if images.IsManifestType(rootDesc.MediaType) {
 		return rootDesc, nil
 	}

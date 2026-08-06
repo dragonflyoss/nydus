@@ -40,7 +40,7 @@ const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 /// precondition.
 pub struct NbdCore {
     core: Arc<NydusCore>,
-    flat_size: u64,
+    device_size: u64,
 }
 
 impl NbdCore {
@@ -60,17 +60,20 @@ impl NbdCore {
                 "flattened image size {flat_size} is not a multiple of the {BLOCK_SIZE} B EROFS block size"
             );
         }
-        Ok(Self { core, flat_size })
+        Ok(Self {
+            core,
+            device_size: flat_size,
+        })
     }
 
     /// Total size in bytes of the flattened block device exposed to the kernel.
-    pub fn flat_size(&self) -> u64 {
-        self.flat_size
+    pub fn device_size(&self) -> u64 {
+        self.device_size
     }
 
     /// Total block count (4 KiB units) reported to the NBD driver.
     pub fn blocks(&self) -> u64 {
-        self.flat_size / BLOCK_SIZE
+        self.device_size / BLOCK_SIZE
     }
 
     /// Fetch `[offset, offset + buf.len())` of the flattened device view and
@@ -78,7 +81,7 @@ impl NbdCore {
     /// gaps as zeros. Both `offset` and `buf.len()` must be block-aligned (the
     /// NBD protocol guarantees this for valid requests). On success every byte
     /// of `buf` has been written.
-    pub fn read(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
         if buf.is_empty() {
             return Ok(());
         }
@@ -88,10 +91,10 @@ impl NbdCore {
         let end = offset
             .checked_add(len)
             .ok_or_else(|| anyhow::anyhow!("nbd read range overflow"))?;
-        if end > self.flat_size {
+        if end > self.device_size {
             anyhow::bail!(
                 "nbd read [{offset}, +{len}) past flattened device size {}",
-                self.flat_size
+                self.device_size
             );
         }
 

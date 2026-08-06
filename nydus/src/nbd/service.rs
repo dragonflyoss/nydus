@@ -350,7 +350,7 @@ impl NbdWorker {
                 // Split the borrows so `self.core` and `self.buf` stay disjoint.
                 let core = &self.core;
                 let buf = &mut self.buf[..len];
-                match core.read(req.offset, buf) {
+                match core.read_at(req.offset, buf) {
                     Ok(()) => wrote_data = true,
                     Err(err) => {
                         warn!(

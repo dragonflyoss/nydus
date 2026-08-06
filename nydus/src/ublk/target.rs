@@ -13,7 +13,7 @@ use libublk::io::{BufDescList, UblkDev, UblkIOCtx, UblkQueue};
 use libublk::{BufDesc, UblkError, UblkFlags, UblkIORes};
 use tracing::{error, info};
 
-use super::device::{UblkDevice, UBLK_LOGICAL_BLOCK_SIZE};
+use super::core::{UblkCore, UBLK_LOGICAL_BLOCK_SIZE};
 
 /// Default per-queue depth, i.e. the number of in-flight block requests.
 pub const DEFAULT_QUEUE_DEPTH: u16 = 128;
@@ -65,13 +65,13 @@ impl Default for UblkOptions {
 /// A running ublk device serving a nydus image.
 pub struct UblkTarget {
     ctrl: Arc<UblkCtrl>,
-    device: Arc<UblkDevice>,
+    core: Arc<UblkCore>,
 }
 
 impl UblkTarget {
     /// Create the ublk device. The device is added to the driver here but does
     /// not serve I/O until [`UblkTarget::run`] is called.
-    pub fn new(device: Arc<UblkDevice>, options: &UblkOptions) -> Result<Self> {
+    pub fn new(core: Arc<UblkCore>, options: &UblkOptions) -> Result<Self> {
         let ctrl_flags = if options.unprivileged {
             libublk::sys::UBLK_F_UNPRIVILEGED_DEV as u64
         } else {
@@ -90,7 +90,7 @@ impl UblkTarget {
 
         Ok(Self {
             ctrl: Arc::new(ctrl),
-            device,
+            core,
         })
     }
 
@@ -108,14 +108,14 @@ impl UblkTarget {
 
     /// Serve I/O until the device is stopped or removed. Blocks the caller.
     pub fn run(&self) -> Result<()> {
-        let size = self.device.size();
-        let device = self.device.clone();
+        let device_size = self.core.device_size();
+        let core = self.core.clone();
         let dev_path = self.dev_path();
 
         self.ctrl
             .run_target(
-                |dev| init_target(dev, size),
-                move |qid, dev| serve_queue(qid, dev, device.clone()),
+                |dev| init_target(dev, device_size),
+                move |qid, dev| serve_queue(qid, dev, core.clone()),
                 move |_ctrl| info!("nydus ublk device ready at {dev_path}"),
             )
             .map_err(|err| anyhow!("ublk device failed: {err}"))?;
@@ -146,10 +146,10 @@ impl UblkHandle {
 }
 
 /// Describe the device to the driver: read-only, EROFS-block-sized.
-fn init_target(dev: &mut UblkDev, size: u64) -> Result<(), UblkError> {
+fn init_target(dev: &mut UblkDev, device_size: u64) -> Result<(), UblkError> {
     let block_shift = UBLK_LOGICAL_BLOCK_SIZE.trailing_zeros() as u8;
     let tgt = &mut dev.tgt;
-    tgt.dev_size = size;
+    tgt.dev_size = device_size;
     tgt.params = libublk::sys::ublk_params {
         types: libublk::sys::UBLK_PARAM_TYPE_BASIC,
         basic: libublk::sys::ublk_param_basic {
@@ -159,7 +159,7 @@ fn init_target(dev: &mut UblkDev, size: u64) -> Result<(), UblkError> {
             io_opt_shift: block_shift,
             io_min_shift: block_shift,
             max_sectors: dev.dev_info.max_io_buf_bytes >> 9,
-            dev_sectors: size >> 9,
+            dev_sectors: device_size >> 9,
             ..Default::default()
         },
         ..Default::default()
@@ -169,13 +169,13 @@ fn init_target(dev: &mut UblkDev, size: u64) -> Result<(), UblkError> {
 }
 
 /// Serve one hardware queue. Runs on its own thread until the queue is down.
-fn serve_queue(qid: u16, dev: &UblkDev, device: Arc<UblkDevice>) {
+fn serve_queue(qid: u16, dev: &UblkDev, core: Arc<UblkCore>) {
     let bufs_rc = Rc::new(dev.alloc_queue_io_bufs());
     let bufs = bufs_rc.clone();
 
     let handler = move |q: &UblkQueue, tag: u16, _io: &UblkIOCtx| {
         let slice = bufs_rc[tag as usize].as_slice();
-        let res = handle_io(q, tag, slice, &device);
+        let res = handle_io(q, tag, slice, &core);
         if let Err(err) =
             q.complete_io_cmd_unified(tag, BufDesc::Slice(slice), Ok(UblkIORes::Result(res)))
         {
@@ -198,7 +198,7 @@ fn serve_queue(qid: u16, dev: &UblkDev, device: Arc<UblkDevice>) {
 
 /// Handle a single block request, returning the ublk result: transferred bytes
 /// on success, a negative errno on failure.
-fn handle_io(q: &UblkQueue, tag: u16, buf: &[u8], device: &UblkDevice) -> i32 {
+fn handle_io(q: &UblkQueue, tag: u16, buf: &[u8], core: &UblkCore) -> i32 {
     let iod = q.get_iod(tag);
     let op = iod.op_flags & 0xff;
     let offset = iod.start_sector << 9;
@@ -213,7 +213,7 @@ fn handle_io(q: &UblkQueue, tag: u16, buf: &[u8], device: &UblkDevice) -> i32 {
             // owned by the queue and only ever touched by the handler serving
             // that tag, so no other reference to it is live here.
             let dst = unsafe { std::slice::from_raw_parts_mut(buf.as_ptr() as *mut u8, bytes) };
-            match device.read_at(offset, dst) {
+            match core.read_at(offset, dst) {
                 Ok(()) => bytes as i32,
                 Err(err) => {
                     error!("ublk read at {offset} ({bytes} bytes) failed: {err}");

@@ -1,4 +1,4 @@
 pub mod backend;
 pub mod cache;
-pub mod groupmap;
+pub mod group_map;
 pub mod prefetch;

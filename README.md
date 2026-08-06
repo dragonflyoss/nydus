@@ -147,7 +147,7 @@ path is identical by construction (shared core and cache format): prewarm
 972 / 1,060 / 1,069 MiB/s, 71.1 MiB fetched for the block modes vs 64.0 for
 FUSE (readahead policy). FUSE's only remaining win is mount-ready latency:
 0.21 s vs ublk 6.42 s, because `nydus ublk` eagerly prepares every blob in
-`UblkDevice::new` so the EROFS `mount` never stalls — that same ~6 s of blob
+`UblkCore::new` so the EROFS `mount` never stalls — that same ~6 s of blob
 prep shows up in FUSE/NBD's first 1 MiB read (6.18–6.36 s) instead of
 mount-ready, so the total cold-start cost is roughly constant across modes.
 
@@ -179,7 +179,7 @@ mount-ready, so the total cold-start cost is roughly constant across modes.
   ~6.2–6.4 s here because both prepare the blob lazily on first touch (meta
   download + cache-file sizing + digest verification); ublk pays 6.42 s in
   *mount-ready* instead, because `nydus ublk` calls
-  `core.blobs.flat_layout()` in `UblkDevice::new` so EROFS `mount` never
+  `core.blobs.flat_layout()` in `UblkCore::new` so EROFS `mount` never
   stalls. The total cold-start cost (mount-ready + first read) is roughly
   constant across modes.
 - Cold-page `direct=0` rows largely re-warm during each 20 s job (the target

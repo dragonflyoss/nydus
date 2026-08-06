@@ -26,10 +26,10 @@ pub use metadata::{
     is_rafs_v7_bootstrap, BlobMeta, BlobMetaChunk, BlobMetaGroup, BlobMetaHeader,
     BLOB_META_HEADER_SIZE, BLOB_META_MAGIC, EROFS_FEATURE_COMPAT_RAFS_V6,
 };
-pub use metrics::trace::{TraceDocument, TracePattern, TraceRecorder, TRACE_DOCUMENT_VERSION};
+pub use metrics::trace::{TraceDocument, TraceEntry, TraceRecorder, TRACE_DOCUMENT_VERSION};
 pub use metrics::MetricsSnapshot;
 #[cfg(feature = "backend-registry")]
 pub use storage::backend::Registry;
-pub use storage::backend::{build_backend, BlobBackend, LocalBackend, RequestSource};
-pub use storage::groupmap::GroupMap;
+pub use storage::backend::{build_backend, BlobBackend, LocalBackend, ReadKind};
+pub use storage::group_map::GroupMap;
 pub use storage::prefetch::{BlobPrefetcher, DEFAULT_PREFETCH_THREADS};

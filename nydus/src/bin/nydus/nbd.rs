@@ -94,7 +94,7 @@ fn default_nbd_threads() -> NonZeroUsize {
 
 /// True when an unmount error means "nothing is mounted there" (EINVAL: not a
 /// mount point; ENOENT: the path is gone), so retrying is pointless.
-fn not_mounted(err: &anyhow::Error) -> bool {
+fn is_not_mounted(err: &anyhow::Error) -> bool {
     matches!(
         err.downcast_ref::<std::io::Error>()
             .and_then(|io| io.raw_os_error()),
@@ -102,7 +102,7 @@ fn not_mounted(err: &anyhow::Error) -> bool {
     )
 }
 
-pub fn run_nbd_service(args: NbdArgs) -> Result<()> {
+pub fn run_nbd(args: NbdArgs) -> Result<()> {
     let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
         .context("failed to register termination signals")?;
     let signal_handle = signals.handle();
@@ -128,7 +128,7 @@ pub fn run_nbd_service(args: NbdArgs) -> Result<()> {
         "nydus nbd service attached to {} ({} blocks, {} bytes, {} worker thread(s))",
         args.device,
         core.blocks(),
-        core.flat_size(),
+        core.device_size(),
         threads
     );
 
@@ -173,7 +173,7 @@ pub fn run_nbd_service(args: NbdArgs) -> Result<()> {
                                 // Nothing mounted (signal arrived before the
                                 // mount happened): retrying would only stall
                                 // the shutdown for the whole retry window.
-                                Err(err) if not_mounted(&err) => {
+                                Err(err) if is_not_mounted(&err) => {
                                     debug!("nothing mounted at {}: {err:#}", mp.display());
                                     break;
                                 }
@@ -213,7 +213,7 @@ pub fn run_nbd_service(args: NbdArgs) -> Result<()> {
             .context("failed to spawn nbd event loop thread")?;
 
         let mounted = service
-            .wait_for_capacity(core.flat_size(), CAPACITY_WAIT_TIMEOUT)
+            .wait_for_capacity(core.device_size(), CAPACITY_WAIT_TIMEOUT)
             .context("nbd device did not reach the expected capacity")
             .and_then(|()| mount_nbd(&device, &mp, "erofs"));
 

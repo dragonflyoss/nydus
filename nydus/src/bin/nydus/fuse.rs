@@ -184,7 +184,7 @@ fn default_threads() -> usize {
 }
 
 /// Run the FUSE mount command.
-pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
+pub fn run_fuse(args: FuseArgs) -> Result<()> {
     // Block termination signals before starting any helper threads so later
     // sigwait-based handling is the only path that consumes them.
     let _blocked_signals = TermSignalMask::block()?;
@@ -299,7 +299,7 @@ pub fn run_fuse_mount(args: FuseArgs) -> Result<()> {
     // Optionally expose Prometheus metrics over a Unix socket. A failure here is
     // non-fatal: the mount keeps serving without metrics.
     let api_server = match args.apiserver.as_deref() {
-        Some(address) => match crate::apiserver::ApiServer::start(address) {
+        Some(address) => match crate::api_server::ApiServer::start(address) {
             Ok(server) => Some(server),
             Err(err) => {
                 warn!("failed to start metrics apiserver: {:#}", err);

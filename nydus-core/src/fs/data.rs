@@ -3,12 +3,12 @@ use std::io::Write;
 
 use crate::metadata::*;
 
-use super::{BlobInfo, ErofsReader};
+use super::{ErofsReader, RawBlobInfo};
 
 /// Resolve an absolute byte offset in the flattened device to the blob that
 /// backs it, returning `(blob_index, offset_within_blob)`. Returns `None` when
 /// the address is bootstrap-local (not in any blob's mapped range).
-fn locate_flat_blob(blob_layout: &[BlobInfo], abs_byte: u64) -> Option<(u16, u64)> {
+fn locate_flat_blob(blob_layout: &[RawBlobInfo], abs_byte: u64) -> Option<(u16, u64)> {
     let block_size = EROFS_BLOCK_SIZE as u64;
     for info in blob_layout {
         let start = info.mapped_blkaddr * block_size;
@@ -373,7 +373,7 @@ impl ErofsReader {
     /// blob or to bootstrap-local data).
     fn read_chunk_slice(
         &self,
-        blob_layout: &[BlobInfo],
+        blob_layout: &[RawBlobInfo],
         ci: &ErofsChunkIndex,
         chunk_off: u64,
         dst: &mut [u8],

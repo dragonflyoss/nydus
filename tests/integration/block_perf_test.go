@@ -298,7 +298,7 @@ func (e *blockPerfEnv) startFuse(t *testing.T, targetRel string) *coldStart {
 
 	require.Eventually(t, func() bool {
 		return isMountpoint(e.fuseMnt)
-	}, 60*time.Second, 200*time.Millisecond, "fuse daemon did not mount:\n%s", mustReadFile(e.fuseLog))
+	}, 60*time.Second, 200*time.Millisecond, "fuse daemon did not mount:\n%s", readFileOrEmpty(e.fuseLog))
 	cs := &coldStart{mountSec: time.Since(start).Seconds()}
 	t.Logf("  fuse daemon ready (pid=%d, %.2fs)", cmd.Process.Pid, cs.mountSec)
 
@@ -361,11 +361,11 @@ func (e *blockPerfEnv) startNbd(t *testing.T, targetRel string) *coldStart {
 	require.Eventually(t, func() bool {
 		select {
 		case <-e.nbdExited:
-			require.FailNowf(t, "nbd daemon exited during startup", "%s", mustReadFile(e.nbdLog))
+			require.FailNowf(t, "nbd daemon exited during startup", "%s", readFileOrEmpty(e.nbdLog))
 		default:
 		}
 		return isMountpoint(e.nbdMnt)
-	}, 60*time.Second, 200*time.Millisecond, "nbd daemon did not mount:\n%s", mustReadFile(e.nbdLog))
+	}, 60*time.Second, 200*time.Millisecond, "nbd daemon did not mount:\n%s", readFileOrEmpty(e.nbdLog))
 	cs := &coldStart{mountSec: time.Since(start).Seconds()}
 	t.Logf("  nbd daemon ready (pid=%d, device=%s, %.2fs)", cmd.Process.Pid, e.nbdDev, cs.mountSec)
 
@@ -451,11 +451,11 @@ func (e *blockPerfEnv) startUblk(t *testing.T, targetRel string) *coldStart {
 	require.Eventually(t, func() bool {
 		select {
 		case <-e.ublkExited:
-			require.FailNowf(t, "ublk daemon exited during startup", "%s", mustReadFile(e.ublkLog))
+			require.FailNowf(t, "ublk daemon exited during startup", "%s", readFileOrEmpty(e.ublkLog))
 		default:
 		}
 		return e.ublkDevPath != ""
-	}, 60*time.Second, 200*time.Millisecond, "ublk daemon did not report a device path:\n%s", mustReadFile(e.ublkLog))
+	}, 60*time.Second, 200*time.Millisecond, "ublk daemon did not report a device path:\n%s", readFileOrEmpty(e.ublkLog))
 	require.NotEmpty(t, e.ublkDevPath, "ublk dev path not captured")
 	require.Eventually(t, func() bool {
 		_, err := os.Stat(e.ublkDevPath)
@@ -544,7 +544,7 @@ func (e *blockPerfEnv) warmupPageCache(t *testing.T, target string) {
 // a failed job is logged and its row omitted rather than failing the run.
 func (e *blockPerfEnv) runDirectJobs(t *testing.T, target string) map[string]*benchResult {
 	t.Helper()
-	fioRuntime := texture.GetEnvAsInt("NYDUSFS_PERF_FIO_RUNTIME", 20)
+	fioRuntime := texture.EnvInt("NYDUSFS_PERF_FIO_RUNTIME", 20)
 	results := make(map[string]*benchResult)
 	jobs := []struct {
 		key  string

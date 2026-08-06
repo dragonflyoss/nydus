@@ -146,7 +146,7 @@ func TestTopImages(t *testing.T) {
 		require.NoError(t, os.MkdirAll(workBase, 0o755))
 	}
 
-	nydusifyBin := mustLookupNydusify(t)
+	nydusifyBin := lookupOrBuildNydusify(t)
 	nydusBin := mustLookupExecutable(t, "nydus")
 
 	// Cap parallelism at `concurrency` while still running each image as an
@@ -373,9 +373,9 @@ func readImageList(t *testing.T, path string) []string {
 	return images
 }
 
-// mustLookupNydusify locates the nydusify binary on PATH or under the
+// lookupOrBuildNydusify locates the nydusify binary on PATH or under the
 // nydusify module directory, building it on demand if necessary.
-func mustLookupNydusify(t *testing.T) string {
+func lookupOrBuildNydusify(t *testing.T) string {
 	t.Helper()
 	if p, err := exec.LookPath("nydusify"); err == nil {
 		return p

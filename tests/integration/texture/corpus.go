@@ -329,13 +329,13 @@ func MakeStandardCorpus(t *testing.T, dir string) *Corpus {
 // MakePerfCorpus creates a corpus designed to amplify performance differences between NydusFS and erofsfuse.
 func MakePerfCorpus(t *testing.T, dir string) {
 	c := NewCorpus(t, dir)
-	largeFileCount := GetEnvAsInt("NYDUSFS_PERF_LARGE_FILE_COUNT", 8)
-	largeFileSize := GetEnvAsInt("NYDUSFS_PERF_LARGE_FILE_SIZE", 64*1024*1024)
-	mediumFileCount := GetEnvAsInt("NYDUSFS_PERF_MEDIUM_FILE_COUNT", 256)
-	mediumFileSize := GetEnvAsInt("NYDUSFS_PERF_MEDIUM_FILE", 1024*1024)
-	smallFileCount := GetEnvAsInt("NYDUSFS_PERF_SMALL_FILE_COUNT", 10000)
-	readdirDirs := GetEnvAsInt("NYDUSFS_PERF_READDIR_DIRS", 128)
-	readdirFilesPerDir := GetEnvAsInt("NYDUSFS_PERF_READDIR_FILES_PER_DIR", 256)
+	largeFileCount := EnvInt("NYDUSFS_PERF_LARGE_FILE_COUNT", 8)
+	largeFileSize := EnvInt("NYDUSFS_PERF_LARGE_FILE_SIZE", 64*1024*1024)
+	mediumFileCount := EnvInt("NYDUSFS_PERF_MEDIUM_FILE_COUNT", 256)
+	mediumFileSize := EnvInt("NYDUSFS_PERF_MEDIUM_FILE", 1024*1024)
+	smallFileCount := EnvInt("NYDUSFS_PERF_SMALL_FILE_COUNT", 10000)
+	readdirDirs := EnvInt("NYDUSFS_PERF_READDIR_DIRS", 128)
+	readdirFilesPerDir := EnvInt("NYDUSFS_PERF_READDIR_FILES_PER_DIR", 256)
 
 	for i := range largeFileCount {
 		// largeFileSize is in bytes (NYDUSFS_PERF_LARGE_FILE_SIZE, default
@@ -363,9 +363,9 @@ func MakePerfCorpus(t *testing.T, dir string) {
 	}
 }
 
-// GetEnvAsInt reads an environment variable as an integer, returning a default value if the variable is
+// EnvInt reads an environment variable as an integer, returning a default value if the variable is
 // not set or cannot be parsed.
-func GetEnvAsInt(key string, defaultValue int) int {
+func EnvInt(key string, defaultValue int) int {
 	value := os.Getenv(key)
 	if value == "" {
 		return defaultValue

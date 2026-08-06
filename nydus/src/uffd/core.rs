@@ -1,6 +1,6 @@
 use std::io;
 use std::os::fd::RawFd;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -54,12 +54,6 @@ struct UffdioZeropage {
     zeropage: i64,
 }
 
-#[derive(Clone, Debug)]
-pub struct UffdOptions {
-    pub bootstrap: PathBuf,
-    pub config: Config,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResolveMode {
     Fetch,
@@ -68,22 +62,20 @@ enum ResolveMode {
 
 pub struct UffdCore {
     core: Arc<NydusCore>,
-    total_size: u64,
+    device_size: u64,
 }
 
 impl UffdCore {
-    pub fn new(options: UffdOptions) -> Result<Self> {
-        let core = Arc::new(
-            NydusCore::new(&options.bootstrap, options.config)
-                .context("failed to create nydus core")?,
-        );
-        let total_size = align_up(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)?;
+    pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
+        let core =
+            Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
+        let device_size = align_up(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)?;
 
-        Ok(Self { core, total_size })
+        Ok(Self { core, device_size })
     }
 
-    pub fn total_size(&self) -> u64 {
-        self.total_size
+    pub fn device_size(&self) -> u64 {
+        self.device_size
     }
 
     pub fn block_size(&self) -> u32 {
@@ -125,7 +117,7 @@ impl UffdCore {
             let end = region
                 .offset
                 .saturating_add(region.size)
-                .min(self.total_size);
+                .min(self.device_size);
             if end <= start {
                 continue;
             }
@@ -139,7 +131,7 @@ impl UffdCore {
     }
 
     pub fn probe_ranges(&self) -> Result<Vec<FdRange>> {
-        self.resolve_ranges(0, self.total_size, ResolveMode::Probe)
+        self.resolve_ranges(0, self.device_size, ResolveMode::Probe)
     }
 
     fn resolve_ranges(
@@ -148,7 +140,7 @@ impl UffdCore {
         len: u64,
         mode: ResolveMode,
     ) -> Result<Vec<FdRange>> {
-        ensure_device_range(self.total_size, device_offset, len)?;
+        ensure_device_range(self.device_size, device_offset, len)?;
         let end = device_offset
             .checked_add(len)
             .ok_or_else(|| anyhow!("device range overflow"))?;
@@ -248,7 +240,7 @@ fn resolve_fault_range<'a>(
     )))
 }
 
-fn ensure_device_range(total_size: u64, offset: u64, len: u64) -> Result<()> {
+fn ensure_device_range(device_size: u64, offset: u64, len: u64) -> Result<()> {
     if len == 0 {
         bail!("device range length must be non-zero");
     }
@@ -258,8 +250,8 @@ fn ensure_device_range(total_size: u64, offset: u64, len: u64) -> Result<()> {
     let end = offset
         .checked_add(len)
         .ok_or_else(|| anyhow!("device range overflow"))?;
-    if end > total_size {
-        bail!("device range [{offset}, {end}) exceeds device size {total_size}");
+    if end > device_size {
+        bail!("device range [{offset}, {end}) exceeds device size {device_size}");
     }
     Ok(())
 }

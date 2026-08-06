@@ -46,7 +46,7 @@ type coreMount struct {
 	cmd  *exec.Cmd
 }
 
-type coreMountOpts struct {
+type coreMountOption struct {
 	bootstrap string
 	blobDir   string
 	cacheDir  string
@@ -80,12 +80,12 @@ prefetch:
 
 // startCoreMount mounts an image and waits until both the mountpoint and
 // the metrics endpoint answer.
-func startCoreMount(t *testing.T, nydusBin string, opts coreMountOpts) *coreMount {
+func startCoreMount(t *testing.T, nydusBin string, opt coreMountOption) *coreMount {
 	t.Helper()
 
-	_ = exec.Command("fusermount", "-u", opts.mnt).Run()
-	require.NoError(t, os.MkdirAll(opts.mnt, 0755))
-	require.NoError(t, os.MkdirAll(opts.cacheDir, 0755))
+	_ = exec.Command("fusermount", "-u", opt.mnt).Run()
+	require.NoError(t, os.MkdirAll(opt.mnt, 0755))
+	require.NoError(t, os.MkdirAll(opt.cacheDir, 0755))
 
 	// Keep the socket out of the test's temp dir: Unix socket paths are capped
 	// near 108 bytes and TMPDIR is redirected into the repo for some targets.
@@ -96,18 +96,18 @@ func startCoreMount(t *testing.T, nydusBin string, opts coreMountOpts) *coreMoun
 
 	args := []string{
 		"fuse",
-		"--bootstrap", opts.bootstrap,
-		"--blob-dir", opts.blobDir,
-		"--cache-dir", opts.cacheDir,
-		"--mountpoint", opts.mnt,
+		"--bootstrap", opt.bootstrap,
+		"--blob-dir", opt.blobDir,
+		"--cache-dir", opt.cacheDir,
+		"--mountpoint", opt.mnt,
 		"--apiserver", "unix://" + sock,
 	}
-	if opts.prefetch {
+	if opt.prefetch {
 		args = append(args, "--prefetch")
 	}
-	if opts.fullPrefetch {
+	if opt.fullPrefetch {
 		configPath := filepath.Join(sockDir, "storage.yaml")
-		writePrefetchConfig(t, configPath, opts.blobDir, opts.cacheDir)
+		writePrefetchConfig(t, configPath, opt.blobDir, opt.cacheDir)
 		args = append(args, "--config", configPath)
 	}
 
@@ -116,12 +116,12 @@ func startCoreMount(t *testing.T, nydusBin string, opts coreMountOpts) *coreMoun
 	cmd.Stderr = os.Stderr
 	require.NoError(t, cmd.Start())
 
-	m := &coreMount{mnt: opts.mnt, sock: sock, cmd: cmd}
+	m := &coreMount{mnt: opt.mnt, sock: sock, cmd: cmd}
 	t.Cleanup(m.stop)
 
 	require.Eventually(t, func() bool {
-		return isMountpoint(opts.mnt)
-	}, 30*time.Second, 100*time.Millisecond, "nydus fuse failed to mount %s", opts.mnt)
+		return isMountpoint(opt.mnt)
+	}, 30*time.Second, 100*time.Millisecond, "nydus fuse failed to mount %s", opt.mnt)
 	require.Eventually(t, func() bool {
 		_, err := m.tryMetrics()
 		return err == nil
@@ -356,7 +356,7 @@ func readConcurrently(t *testing.T, mounts []*coreMount, rel string) []string {
 	return digests
 }
 
-func requireRoot(t *testing.T) {
+func skipUnlessRoot(t *testing.T) {
 	t.Helper()
 	if os.Getuid() != 0 {
 		t.Skip("requires root to mount FUSE")
@@ -378,7 +378,7 @@ func sumMetric(t *testing.T, mounts []*coreMount, name string) float64 {
 // however much duplicate work the processes do, they all observe the same
 // bytes and the cache never serves a torn group.
 func TestCoreConcurrentColdReadIsConsistent(t *testing.T) {
-	requireRoot(t)
+	skipUnlessRoot(t)
 
 	root := t.TempDir()
 	nydusBin := mustLookupExecutable(t, "nydus")
@@ -387,7 +387,7 @@ func TestCoreConcurrentColdReadIsConsistent(t *testing.T) {
 
 	mounts := make([]*coreMount, coreProcs)
 	for i := range mounts {
-		mounts[i] = startCoreMount(t, nydusBin, coreMountOpts{
+		mounts[i] = startCoreMount(t, nydusBin, coreMountOption{
 			bootstrap: fixture.bootstrap1,
 			blobDir:   fixture.blobDir,
 			cacheDir:  cacheDir,
@@ -406,7 +406,7 @@ func TestCoreConcurrentColdReadIsConsistent(t *testing.T) {
 // fetching the processes do, calibrated against a single process doing the
 // same read so the assertion does not depend on the blob's group count.
 func TestCoreConcurrentColdReadAmplification(t *testing.T) {
-	requireRoot(t)
+	skipUnlessRoot(t)
 
 	root := t.TempDir()
 	nydusBin := mustLookupExecutable(t, "nydus")
@@ -414,7 +414,7 @@ func TestCoreConcurrentColdReadAmplification(t *testing.T) {
 
 	// Baseline: one process filling a cold cache on its own.
 	soloCache := filepath.Join(root, "cache-solo")
-	solo := startCoreMount(t, nydusBin, coreMountOpts{
+	solo := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap: fixture.bootstrap1,
 		blobDir:   fixture.blobDir,
 		cacheDir:  soloCache,
@@ -429,7 +429,7 @@ func TestCoreConcurrentColdReadAmplification(t *testing.T) {
 	sharedCache := filepath.Join(root, "cache-shared")
 	mounts := make([]*coreMount, coreProcs)
 	for i := range mounts {
-		mounts[i] = startCoreMount(t, nydusBin, coreMountOpts{
+		mounts[i] = startCoreMount(t, nydusBin, coreMountOption{
 			bootstrap: fixture.bootstrap1,
 			blobDir:   fixture.blobDir,
 			cacheDir:  sharedCache,
@@ -454,14 +454,14 @@ func TestCoreConcurrentColdReadAmplification(t *testing.T) {
 // cross-process exclusion: the per-blob prefetch lock should keep all but one
 // process from streaming the blob.
 func TestCoreConcurrentPrefetchDeduplicates(t *testing.T) {
-	requireRoot(t)
+	skipUnlessRoot(t)
 
 	root := t.TempDir()
 	nydusBin := mustLookupExecutable(t, "nydus")
 	fixture := buildCoreFixture(t, nydusBin, root)
 
 	soloCache := filepath.Join(root, "cache-solo")
-	solo := startCoreMount(t, nydusBin, coreMountOpts{
+	solo := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap:    fixture.bootstrap1,
 		blobDir:      fixture.blobDir,
 		cacheDir:     soloCache,
@@ -478,7 +478,7 @@ func TestCoreConcurrentPrefetchDeduplicates(t *testing.T) {
 	sharedCache := filepath.Join(root, "cache-shared")
 	mounts := make([]*coreMount, coreProcs)
 	for i := range mounts {
-		mounts[i] = startCoreMount(t, nydusBin, coreMountOpts{
+		mounts[i] = startCoreMount(t, nydusBin, coreMountOption{
 			bootstrap:    fixture.bootstrap1,
 			blobDir:      fixture.blobDir,
 			cacheDir:     sharedCache,
@@ -508,20 +508,20 @@ func TestCoreConcurrentPrefetchDeduplicates(t *testing.T) {
 // the same blob converge on one set of cache files, which is what makes a node
 // running many images cheap.
 func TestCoreSharedBlobUsesOneCacheEntry(t *testing.T) {
-	requireRoot(t)
+	skipUnlessRoot(t)
 
 	root := t.TempDir()
 	nydusBin := mustLookupExecutable(t, "nydus")
 	fixture := buildCoreFixture(t, nydusBin, root)
 	cacheDir := filepath.Join(root, "cache")
 
-	image1 := startCoreMount(t, nydusBin, coreMountOpts{
+	image1 := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap: fixture.bootstrap1,
 		blobDir:   fixture.blobDir,
 		cacheDir:  cacheDir,
 		mnt:       filepath.Join(root, "mnt1"),
 	})
-	image2 := startCoreMount(t, nydusBin, coreMountOpts{
+	image2 := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap: fixture.bootstrap2,
 		blobDir:   fixture.blobDir,
 		cacheDir:  cacheDir,
@@ -551,14 +551,14 @@ func TestCoreSharedBlobUsesOneCacheEntry(t *testing.T) {
 // an on-demand one on the same cache. Neither may deadlock and both must see
 // correct data.
 func TestCorePrefetchAndOnDemandConcurrent(t *testing.T) {
-	requireRoot(t)
+	skipUnlessRoot(t)
 
 	root := t.TempDir()
 	nydusBin := mustLookupExecutable(t, "nydus")
 	fixture := buildCoreFixture(t, nydusBin, root)
 	cacheDir := filepath.Join(root, "cache")
 
-	prefetcher := startCoreMount(t, nydusBin, coreMountOpts{
+	prefetcher := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap:    fixture.bootstrap1,
 		blobDir:      fixture.blobDir,
 		cacheDir:     cacheDir,
@@ -566,7 +566,7 @@ func TestCorePrefetchAndOnDemandConcurrent(t *testing.T) {
 		prefetch:     true,
 		fullPrefetch: true,
 	})
-	reader := startCoreMount(t, nydusBin, coreMountOpts{
+	reader := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap: fixture.bootstrap1,
 		blobDir:   fixture.blobDir,
 		cacheDir:  cacheDir,
@@ -589,14 +589,14 @@ func TestCorePrefetchAndOnDemandConcurrent(t *testing.T) {
 // must still complete their reads. Once per-group locks land this also covers
 // a dead lock holder being taken over.
 func TestCoreSurvivesPeerCrash(t *testing.T) {
-	requireRoot(t)
+	skipUnlessRoot(t)
 
 	root := t.TempDir()
 	nydusBin := mustLookupExecutable(t, "nydus")
 	fixture := buildCoreFixture(t, nydusBin, root)
 	cacheDir := filepath.Join(root, "cache")
 
-	victim := startCoreMount(t, nydusBin, coreMountOpts{
+	victim := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap:    fixture.bootstrap1,
 		blobDir:      fixture.blobDir,
 		cacheDir:     cacheDir,
@@ -604,7 +604,7 @@ func TestCoreSurvivesPeerCrash(t *testing.T) {
 		prefetch:     true,
 		fullPrefetch: true,
 	})
-	survivor := startCoreMount(t, nydusBin, coreMountOpts{
+	survivor := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap: fixture.bootstrap1,
 		blobDir:   fixture.blobDir,
 		cacheDir:  cacheDir,
@@ -636,14 +636,14 @@ func TestCoreSurvivesPeerCrash(t *testing.T) {
 // up on the same bitmap file: if the reset swaps the inode, a live process
 // keeps publishing readiness that newcomers can never see.
 func TestCoreStaleGroupmapKeepsInode(t *testing.T) {
-	requireRoot(t)
+	skipUnlessRoot(t)
 
 	root := t.TempDir()
 	nydusBin := mustLookupExecutable(t, "nydus")
 	fixture := buildCoreFixture(t, nydusBin, root)
 	cacheDir := filepath.Join(root, "cache")
 
-	first := startCoreMount(t, nydusBin, coreMountOpts{
+	first := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap: fixture.bootstrap1,
 		blobDir:   fixture.blobDir,
 		cacheDir:  cacheDir,
@@ -663,7 +663,7 @@ func TestCoreStaleGroupmapKeepsInode(t *testing.T) {
 	// first mount is still running.
 	require.NoError(t, os.Remove(blobData))
 
-	second := startCoreMount(t, nydusBin, coreMountOpts{
+	second := startCoreMount(t, nydusBin, coreMountOption{
 		bootstrap: fixture.bootstrap1,
 		blobDir:   fixture.blobDir,
 		cacheDir:  cacheDir,

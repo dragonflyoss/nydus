@@ -5,7 +5,7 @@ use std::io::Write;
 
 use nydus_core::metadata::EROFS_BLOCK_SIZE;
 
-pub fn align_u64(value: u64, align: u64) -> u64 {
+pub fn align_up(value: u64, align: u64) -> u64 {
     debug_assert!(align.is_power_of_two());
     (value + align - 1) & !(align - 1)
 }

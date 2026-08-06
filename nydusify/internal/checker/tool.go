@@ -27,11 +27,11 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
 )
 
-func builderBinary(path string) string {
-	if path == "" {
+func builderBinary(bin string) string {
+	if bin == "" {
 		return "nydus"
 	}
-	return path
+	return bin
 }
 
 // nydusLogLevel returns level, or "info" when level is empty, so a nydus

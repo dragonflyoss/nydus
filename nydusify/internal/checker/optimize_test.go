@@ -12,7 +12,7 @@ import (
 )
 
 func TestNewOptimizerPatternValidation(t *testing.T) {
-	base := OptimizeOpt{Source: "localhost:5000/src:v3", Target: "localhost:5000/dst:v3"}
+	base := OptimizeOption{Source: "localhost:5000/src:v3", Target: "localhost:5000/dst:v3"}
 
 	// Pattern missing.
 	if _, err := NewOptimizer(base); err == nil ||

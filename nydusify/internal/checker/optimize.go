@@ -28,8 +28,8 @@ import (
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 )
 
-// OptimizeOpt configures an Optimizer.
-type OptimizeOpt struct {
+// OptimizeOption configures an Optimizer.
+type OptimizeOption struct {
 	// Source is the nydus image reference to optimize. Required.
 	Source string
 	// Target is the optimized nydus image reference to push. Required.
@@ -63,11 +63,11 @@ type OptimizeOpt struct {
 // reused as-is, an ondemand blob layer is appended, and the bootstrap layer is
 // rewritten so the runtime prefetches the ondemand blob first.
 type Optimizer struct {
-	opt OptimizeOpt
+	opt OptimizeOption
 }
 
 // NewOptimizer creates an Optimizer.
-func NewOptimizer(opt OptimizeOpt) (*Optimizer, error) {
+func NewOptimizer(opt OptimizeOption) (*Optimizer, error) {
 	if opt.Source == "" {
 		return nil, errors.New("source must be provided")
 	}
@@ -102,7 +102,7 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 		}
 	}
 
-	provider, err := remote.NewProvider(remote.Options{
+	provider, err := remote.NewProvider(remote.Option{
 		WorkDir:         contentDir,
 		SourceInsecure:  o.opt.SourceInsecure,
 		SourcePlainHTTP: o.opt.SourcePlainHTTP,
@@ -162,7 +162,7 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 	log.G(ctx).Infof("built ondemand blob %s", ondemandHex)
 
 	// Commit the ondemand blob as a nydus data layer.
-	ondemandDesc, err := commitBlobFile(ctx, cs, filepath.Join(blobDir, ondemandHex))
+	ondemandDesc, err := ingestBlobFile(ctx, cs, filepath.Join(blobDir, ondemandHex))
 	if err != nil {
 		return errors.Wrap(err, "commit ondemand blob")
 	}
@@ -231,9 +231,9 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 	return string(match[1]), nil
 }
 
-// commitBlobFile commits a digest-named nydus blob file from disk into the
+// ingestBlobFile commits a digest-named nydus blob file from disk into the
 // content store as a nydus data layer descriptor.
-func commitBlobFile(ctx context.Context, cs content.Store, path string) (*ocispec.Descriptor, error) {
+func ingestBlobFile(ctx context.Context, cs content.Store, path string) (*ocispec.Descriptor, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, errors.Wrapf(err, "open blob %q", path)

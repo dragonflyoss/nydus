@@ -59,7 +59,7 @@ type FetchKey = (BlobId, u64, u64);
 /// One in-flight fetch job and every permission event waiting on it. Concurrent
 /// reads of the same range (common at container start: many tasks page in the
 /// same library) coalesce into a single backend fetch instead of one per reader.
-struct PendingEvent {
+struct PendingJob {
     key: FetchKey,
     waiters: Vec<PendingPermission>,
 }
@@ -140,7 +140,9 @@ impl PendingTable {
         }
     }
 
-    fn take_undecided(&mut self) -> Vec<u64> {
+    /// Marks every undecided entry decided and returns their job ids. Entries
+    /// stay in the map; only the `decided` flag flips.
+    fn mark_all_decided(&mut self) -> Vec<u64> {
         let undecided: Vec<u64> = self
             .entries
             .iter()
@@ -237,7 +239,7 @@ impl FetchPool {
 
 impl FanotifyService {
     /// Create the group and marks while retaining an unregistered `OwnedFd`.
-    pub fn setup(core: Arc<FanotifyCore>) -> Result<Self> {
+    pub fn new(core: Arc<FanotifyCore>) -> Result<Self> {
         if core.devices().is_empty() {
             anyhow::bail!("image has no blob devices to serve");
         }
@@ -262,7 +264,7 @@ impl FanotifyService {
             {
                 // Record that this slot's mark was never added, so runtime
                 // `try_unmark` probes skip it entirely.
-                core.mark_unmarked(slot);
+                core.set_unmarked(slot);
                 debug!(
                     "fanotify: skip marking fully-ready blob {} (slot {})",
                     device.id, device.index
@@ -357,7 +359,7 @@ fn serve(
         .send(())
         .map_err(|_| anyhow!("fanotify readiness receiver was dropped"))?;
 
-    let mut pending_events = HashMap::new();
+    let mut pending_jobs = HashMap::new();
     let mut pending_table = PendingTable::new();
     coordinate(
         epfd.as_raw_fd(),
@@ -370,7 +372,7 @@ fn serve(
         &completion_rx,
         stop_raw,
         wake_raw,
-        &mut pending_events,
+        &mut pending_jobs,
         &mut pending_table,
     )
 }
@@ -389,7 +391,7 @@ fn coordinate(
     completion_rx: &mpsc::Receiver<Completion>,
     stop_fd: RawFd,
     wake_fd: RawFd,
-    pending_events: &mut HashMap<u64, PendingEvent>,
+    pending_jobs: &mut HashMap<u64, PendingJob>,
     pending_table: &mut PendingTable,
 ) -> Result<()> {
     // Reverse index (FetchKey -> job_id) for coalescing concurrent identical reads.
@@ -406,7 +408,7 @@ fn coordinate(
         completion_rx,
         stop_fd,
         wake_fd,
-        pending_events,
+        pending_jobs,
         pending_table,
         &mut in_flight,
     );
@@ -419,7 +421,7 @@ fn coordinate(
         fan_fd,
         writer,
         completion_rx,
-        pending_events,
+        pending_jobs,
         pending_table,
         &mut in_flight,
     );
@@ -441,7 +443,7 @@ fn event_loop(
     completion_rx: &mpsc::Receiver<Completion>,
     stop_fd: RawFd,
     wake_fd: RawFd,
-    pending_events: &mut HashMap<u64, PendingEvent>,
+    pending_jobs: &mut HashMap<u64, PendingJob>,
     pending_table: &mut PendingTable,
     in_flight: &mut HashMap<FetchKey, u64>,
 ) -> Result<()> {
@@ -491,7 +493,7 @@ fn event_loop(
                         pool,
                         sink,
                         &buffer[..n],
-                        pending_events,
+                        pending_jobs,
                         pending_table,
                         in_flight,
                     )?,
@@ -501,7 +503,7 @@ fn event_loop(
         }
 
         // Drain completions (non-blocking).
-        drain_completions(completion_rx, pending_events, pending_table, in_flight)?;
+        drain_completions(completion_rx, pending_jobs, pending_table, in_flight)?;
     }
 }
 
@@ -513,16 +515,16 @@ fn shutdown_cleanup(
     fan_fd: RawFd,
     writer: &Arc<dyn ResponseWriter>,
     completion_rx: &mpsc::Receiver<Completion>,
-    pending_events: &mut HashMap<u64, PendingEvent>,
+    pending_jobs: &mut HashMap<u64, PendingJob>,
     pending_table: &mut PendingTable,
     in_flight: &mut HashMap<FetchKey, u64>,
 ) {
-    if let Err(err) = deny_undecided(pending_events, pending_table, in_flight) {
+    if let Err(err) = deny_undecided(pending_jobs, pending_table, in_flight) {
         warn!("fanotify: denying outstanding events during shutdown failed: {err:#}");
     }
     // In-flight fetches may still be completing; answer them so their readers
     // unblock too.
-    if let Err(err) = drain_completions(completion_rx, pending_events, pending_table, in_flight) {
+    if let Err(err) = drain_completions(completion_rx, pending_jobs, pending_table, in_flight) {
         warn!("fanotify: draining completions during shutdown failed: {err:#}");
     }
     if let Err(err) = drain_kernel_queue(fan_fd, writer) {
@@ -532,14 +534,14 @@ fn shutdown_cleanup(
 
 fn drain_completions(
     rx: &mpsc::Receiver<Completion>,
-    pending_events: &mut HashMap<u64, PendingEvent>,
+    pending_jobs: &mut HashMap<u64, PendingJob>,
     pending_table: &mut PendingTable,
     in_flight: &mut HashMap<FetchKey, u64>,
 ) -> Result<()> {
     loop {
         match rx.try_recv() {
             Ok(completion) => {
-                handle_completion(completion, pending_events, pending_table, in_flight)?
+                handle_completion(completion, pending_jobs, pending_table, in_flight)?
             }
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => {
@@ -559,7 +561,7 @@ fn admit_batch(
     pool: &FetchPool,
     sink: &Arc<CompletionSink>,
     bytes: &[u8],
-    pending_events: &mut HashMap<u64, PendingEvent>,
+    pending_jobs: &mut HashMap<u64, PendingJob>,
     pending_table: &mut PendingTable,
     in_flight: &mut HashMap<FetchKey, u64>,
 ) -> Result<()> {
@@ -610,7 +612,7 @@ fn admit_batch(
             pool,
             sink,
             event,
-            pending_events,
+            pending_jobs,
             pending_table,
             in_flight,
         )?;
@@ -628,7 +630,7 @@ fn admit_event(
     pool: &FetchPool,
     sink: &Arc<CompletionSink>,
     event: PreContentEvent,
-    pending_events: &mut HashMap<u64, PendingEvent>,
+    pending_jobs: &mut HashMap<u64, PendingJob>,
     pending_table: &mut PendingTable,
     in_flight: &mut HashMap<FetchKey, u64>,
 ) -> Result<()> {
@@ -702,7 +704,7 @@ fn admit_event(
     // so any job found in `in_flight` here is still pending.
     let key: FetchKey = (device.id, offset, count);
     if let Some(&job_id) = in_flight.get(&key) {
-        match pending_events.get_mut(&job_id) {
+        match pending_jobs.get_mut(&job_id) {
             Some(entry) => {
                 entry.waiters.push(permission);
                 debug!(
@@ -744,9 +746,9 @@ fn admit_event(
         sink.complete(job_id, result);
     });
 
-    let previous = pending_events.insert(
+    let previous = pending_jobs.insert(
         job_id,
-        PendingEvent {
+        PendingJob {
             key,
             waiters: vec![permission],
         },
@@ -766,13 +768,13 @@ fn admit_event(
 
 fn handle_completion(
     completion: Completion,
-    pending_events: &mut HashMap<u64, PendingEvent>,
+    pending_jobs: &mut HashMap<u64, PendingJob>,
     pending_table: &mut PendingTable,
     in_flight: &mut HashMap<FetchKey, u64>,
 ) -> Result<()> {
     match pending_table.on_completion(completion.job_id) {
         CompletionAction::Decide => {
-            let mut event = pending_events.remove(&completion.job_id).ok_or_else(|| {
+            let mut event = pending_jobs.remove(&completion.job_id).ok_or_else(|| {
                 anyhow!("completion has no permission event: {}", completion.job_id)
             })?;
             in_flight.remove(&event.key);
@@ -816,12 +818,12 @@ fn handle_completion(
 // ---- shutdown ----
 
 fn deny_undecided(
-    pending_events: &mut HashMap<u64, PendingEvent>,
+    pending_jobs: &mut HashMap<u64, PendingJob>,
     pending_table: &mut PendingTable,
     in_flight: &mut HashMap<FetchKey, u64>,
 ) -> Result<()> {
-    for job_id in pending_table.take_undecided() {
-        if let Some(mut event) = pending_events.remove(&job_id) {
+    for job_id in pending_table.mark_all_decided() {
+        if let Some(mut event) = pending_jobs.remove(&job_id) {
             in_flight.remove(&event.key);
             // Deny every reader coalesced onto this job. The kernel's fail-open
             // on group close covers any residue past a fatal respond error.
@@ -969,14 +971,14 @@ mod tests {
     fn completion_answers_all_coalesced_waiters() {
         let rec: Arc<RecordWriter> = Arc::new(RecordWriter::default());
         let w: Arc<dyn ResponseWriter> = rec.clone();
-        let mut pending_events = HashMap::new();
+        let mut pending_jobs = HashMap::new();
         let mut table = PendingTable::new();
         let mut in_flight = HashMap::new();
 
         let job = table.admit();
-        pending_events.insert(
+        pending_jobs.insert(
             job,
-            PendingEvent {
+            PendingJob {
                 key: key(),
                 waiters: vec![perm(&w), perm(&w)],
             },
@@ -988,7 +990,7 @@ mod tests {
                 job_id: job,
                 result: CompletionResult::Fetch(Ok(())),
             },
-            &mut pending_events,
+            &mut pending_jobs,
             &mut table,
             &mut in_flight,
         )
@@ -997,7 +999,7 @@ mod tests {
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 2, "both waiters answered");
         assert!(calls.iter().all(|(_, d)| *d == Response::Allow));
-        assert!(pending_events.is_empty());
+        assert!(pending_jobs.is_empty());
         assert!(in_flight.is_empty(), "coalescing index cleared");
     }
 
@@ -1006,14 +1008,14 @@ mod tests {
     fn completion_backend_failure_denies_all_waiters() {
         let rec: Arc<RecordWriter> = Arc::new(RecordWriter::default());
         let w: Arc<dyn ResponseWriter> = rec.clone();
-        let mut pending_events = HashMap::new();
+        let mut pending_jobs = HashMap::new();
         let mut table = PendingTable::new();
         let mut in_flight = HashMap::new();
 
         let job = table.admit();
-        pending_events.insert(
+        pending_jobs.insert(
             job,
-            PendingEvent {
+            PendingJob {
                 key: key(),
                 waiters: vec![perm(&w), perm(&w), perm(&w)],
             },
@@ -1025,7 +1027,7 @@ mod tests {
                 job_id: job,
                 result: CompletionResult::Fetch(Err(FetchError::Backend(anyhow!("boom")))),
             },
-            &mut pending_events,
+            &mut pending_jobs,
             &mut table,
             &mut in_flight,
         )
@@ -1041,26 +1043,26 @@ mod tests {
     fn shutdown_denies_all_coalesced_waiters() {
         let rec: Arc<RecordWriter> = Arc::new(RecordWriter::default());
         let w: Arc<dyn ResponseWriter> = rec.clone();
-        let mut pending_events = HashMap::new();
+        let mut pending_jobs = HashMap::new();
         let mut table = PendingTable::new();
         let mut in_flight = HashMap::new();
 
         let job = table.admit();
-        pending_events.insert(
+        pending_jobs.insert(
             job,
-            PendingEvent {
+            PendingJob {
                 key: key(),
                 waiters: vec![perm(&w), perm(&w)],
             },
         );
         in_flight.insert(key(), job);
 
-        deny_undecided(&mut pending_events, &mut table, &mut in_flight).unwrap();
+        deny_undecided(&mut pending_jobs, &mut table, &mut in_flight).unwrap();
 
         let calls = rec.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
         assert!(calls.iter().all(|(_, d)| *d == Response::Deny));
-        assert!(pending_events.is_empty());
+        assert!(pending_jobs.is_empty());
         assert!(in_flight.is_empty());
     }
 
@@ -1070,28 +1072,28 @@ mod tests {
     fn late_completion_after_shutdown_is_noop() {
         let rec: Arc<RecordWriter> = Arc::new(RecordWriter::default());
         let w: Arc<dyn ResponseWriter> = rec.clone();
-        let mut pending_events = HashMap::new();
+        let mut pending_jobs = HashMap::new();
         let mut table = PendingTable::new();
         let mut in_flight = HashMap::new();
 
         let job = table.admit();
-        pending_events.insert(
+        pending_jobs.insert(
             job,
-            PendingEvent {
+            PendingJob {
                 key: key(),
                 waiters: vec![perm(&w)],
             },
         );
         in_flight.insert(key(), job);
 
-        deny_undecided(&mut pending_events, &mut table, &mut in_flight).unwrap();
+        deny_undecided(&mut pending_jobs, &mut table, &mut in_flight).unwrap();
         // Fetch finishes late; the pending table still holds the job as decided.
         handle_completion(
             Completion {
                 job_id: job,
                 result: CompletionResult::Fetch(Ok(())),
             },
-            &mut pending_events,
+            &mut pending_jobs,
             &mut table,
             &mut in_flight,
         )

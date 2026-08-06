@@ -3,7 +3,7 @@ use clap::Args;
 use memmap2::Mmap;
 use nydus::build::inode::mode_to_erofs_file_type;
 use nydus::config::Config;
-use nydus::fs::{BlobInfo, ErofsReader};
+use nydus::fs::{ErofsReader, RawBlobInfo};
 use nydus::metadata::*;
 use nydus::utils::{hex_string, sha256_bytes};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -59,7 +59,7 @@ struct ImageStats {
     hole_chunks: u64,
     total_logical_bytes: u64,
     chunk_sizes: BTreeSet<u64>,
-    inline_across_blocks: Vec<InlineOverflow>,
+    inline_overflows: Vec<InlineOverflow>,
 }
 
 /// An inode whose tail-packed inline data crosses its metadata block, which
@@ -93,7 +93,7 @@ struct BlobSummary {
 }
 
 impl BlobSummary {
-    fn new(blob: &BlobInfo) -> Self {
+    fn new(blob: &RawBlobInfo) -> Self {
         let mapped_offset = blob.mapped_blkaddr * EROFS_BLOCK_SIZE as u64;
         Self {
             slot_sha256: blob.blob_id,
@@ -211,7 +211,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
         }
     };
 
-    let reader = ErofsReader::open_layer(path)
+    let reader = ErofsReader::open_metadata_only(path)
         .with_context(|| format!("failed to open image for inspection: {}", path.display()))?;
     let sb = reader.sb();
     let image_file_bytes = fs::metadata(path)
@@ -257,11 +257,11 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     print_blobs(&blobs);
     print_inline_across_blocks(&stats);
 
-    if !stats.inline_across_blocks.is_empty() {
+    if !stats.inline_overflows.is_empty() {
         bail!(
             "{} inode(s) have inline data crossing a metadata block; \
              the kernel cannot read them",
-            stats.inline_across_blocks.len()
+            stats.inline_overflows.len()
         );
     }
 
@@ -333,7 +333,7 @@ fn walk_inode(
         stats.hardlink_paths += inode.nlink() as u64;
     }
     if let Some(overflow) = inline_overflow(nid, &inode) {
-        stats.inline_across_blocks.push(overflow);
+        stats.inline_overflows.push(overflow);
     }
 
     match file_type {
@@ -430,7 +430,7 @@ fn resolve_blobs(
     kind: ImageKind,
     image_path: &Path,
     blob_dir: Option<&Path>,
-    blob_infos: &[BlobInfo],
+    blob_infos: &[RawBlobInfo],
 ) -> Result<HashMap<u16, ResolvedBlob>> {
     let mut resolved = HashMap::new();
 
@@ -628,17 +628,17 @@ fn print_superblock(sb: &ErofsSuperblock) {
 /// Print inodes whose inline tail crosses a metadata block. Only the first
 /// entries are listed because a builder bug tends to hit many inodes at once.
 fn print_inline_across_blocks(stats: &ImageStats) {
-    if stats.inline_across_blocks.is_empty() {
+    if stats.inline_overflows.is_empty() {
         return;
     }
 
     const MAX_LISTED: usize = 20;
     println!(
         "Inline data across blocks ({} inode(s), block size {})",
-        stats.inline_across_blocks.len(),
+        stats.inline_overflows.len(),
         EROFS_BLOCK_SIZE
     );
-    for entry in stats.inline_across_blocks.iter().take(MAX_LISTED) {
+    for entry in stats.inline_overflows.iter().take(MAX_LISTED) {
         let end = entry.block_offset + entry.header_size + entry.xattr_size + entry.inline_size;
         println!(
             "  nid {}: block_offset {} + header {} + xattr {} + inline {} = {} (> {})",
@@ -651,11 +651,8 @@ fn print_inline_across_blocks(stats: &ImageStats) {
             EROFS_BLOCK_SIZE
         );
     }
-    if stats.inline_across_blocks.len() > MAX_LISTED {
-        println!(
-            "  ... {} more",
-            stats.inline_across_blocks.len() - MAX_LISTED
-        );
+    if stats.inline_overflows.len() > MAX_LISTED {
+        println!("  ... {} more", stats.inline_overflows.len() - MAX_LISTED);
     }
     println!();
 }
@@ -707,7 +704,7 @@ fn print_blobs(blobs: &BTreeMap<u16, BlobSummary>) {
 
 fn print_blob_info(index: usize, blob_index: u16, blob: &BlobSummary) {
     println!("  Blob {index}");
-    println!("    device_table_index: {index}");
+    println!("    entry: {index}");
     println!("    blob_index: {blob_index}");
     println!("    mapped_blkaddr: {}", blob.mapped_blkaddr);
     println!("    mapped_offset: {}", blob.mapped_offset);
@@ -890,7 +887,7 @@ mod tests {
         let blob_path = dir.path().join("blob");
         let (full_blob_digest, data_blob_digest) = write_minimal_blob(&blob_path);
 
-        let full_blob_info = BlobInfo {
+        let full_blob_info = RawBlobInfo {
             blob_index: 1,
             blob_id: full_blob_digest,
             blocks: 1,
@@ -909,7 +906,7 @@ mod tests {
         assert_eq!(resolved_blob.blob_sha256, full_blob_digest);
         assert!(resolved_blob.verified);
 
-        let data_blob_info = BlobInfo {
+        let data_blob_info = RawBlobInfo {
             blob_index: 2,
             blob_id: data_blob_digest,
             blocks: 1,

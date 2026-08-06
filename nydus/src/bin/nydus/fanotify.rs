@@ -108,7 +108,7 @@ fn raise_nofile_limit() {
     }
 }
 
-pub fn run_fanotify_service(args: FanotifyArgs) -> Result<()> {
+pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
         .context("failed to register termination signals")?;
     let signal_handle = signals.handle();
@@ -128,7 +128,7 @@ pub fn run_fanotify_service(args: FanotifyArgs) -> Result<()> {
         FanotifyCore::new(&args.bootstrap, config).context("failed to build fanotify core")?,
     );
 
-    let service = FanotifyService::setup(core.clone())?;
+    let service = FanotifyService::new(core.clone())?;
     let device_count = core.devices().len();
 
     // Thread pool for fetch jobs, bounded by --fetch-concurrency.

@@ -1,4 +1,4 @@
-mod grouplock;
+mod group_lock;
 pub mod local;
 
 use std::io;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::metadata::{BlobMeta, BlobMetaCompressor, BlobMetaGroup, EROFS_BLOB_ID_SIZE};
-use crate::storage::backend::{BlobBackend, ReadContext, RequestSource};
+use crate::storage::backend::{BlobBackend, ReadContext, ReadKind};
 
 pub use local::LocalBlobCache;
 pub trait BlobCache: Send + Sync {
@@ -89,7 +89,7 @@ pub trait BlobCache: Send + Sync {
     /// skip readiness bookkeeping entirely once the blob is fully warmed.
     /// Sticky: once true it stays true, since ready groups are never evicted
     /// within a cache generation.
-    fn is_fully_ready(&self) -> bool {
+    fn is_all_ready(&self) -> bool {
         false
     }
 
@@ -98,7 +98,7 @@ pub trait BlobCache: Send + Sync {
     /// the blob's own cache file. Groups that fail decode or CRC validation
     /// are skipped with a warning so a single bad group cannot poison the
     /// whole redirect prefetch; `cb` errors abort the stream.
-    fn redirect_stream(
+    fn stream_redirect(
         &self,
         _cb: &mut dyn FnMut(&BlobMetaGroup, &[u8]) -> io::Result<()>,
     ) -> io::Result<()> {
@@ -108,7 +108,7 @@ pub trait BlobCache: Send + Sync {
         ))
     }
 
-    /// Like [`redirect_stream`], but split the redirect blob's groups into
+    /// Like [`stream_redirect`], but split the redirect blob's groups into
     /// fixed-size segments and fetch/decode them concurrently with up to
     /// `threads` worker threads. A blob small enough to fit in a single segment
     /// (or `threads <= 1`) is streamed sequentially, since segmentation would
@@ -120,8 +120,8 @@ pub trait BlobCache: Send + Sync {
     /// failures are skipped, and the first `cb` or backend error aborts the
     /// stream.
     ///
-    /// [`redirect_stream`]: Self::redirect_stream
-    fn redirect_stream_parallel(
+    /// [`stream_redirect`]: Self::stream_redirect
+    fn stream_redirect_parallel(
         &self,
         _threads: usize,
         _skip: &(dyn Fn(&BlobMetaGroup) -> bool + Sync),
@@ -147,7 +147,7 @@ pub trait BlobCache: Send + Sync {
 
 /// Target uncompressed size of one redirect-prefetch segment. The ondemand
 /// (redirect) blob's groups are split into segments of about this size and
-/// fetched concurrently by [`BlobCache::redirect_stream_parallel`]; a blob that
+/// fetched concurrently by [`BlobCache::stream_redirect_parallel`]; a blob that
 /// fits within a single segment is streamed sequentially instead.
 pub(crate) const REDIRECT_PREFETCH_SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
 
@@ -260,10 +260,10 @@ pub(crate) fn fetch_decode_validate_group_into<'a>(
     backend: &Arc<dyn BlobBackend>,
     group: &BlobMetaGroup,
     buffers: &'a mut BlobCacheBuffers,
-    source: RequestSource,
+    kind: ReadKind,
 ) -> io::Result<&'a [u8]> {
     let ctx = ReadContext::group(
-        source,
+        kind,
         group.uncompressed_byte_offset(),
         group.uncompressed_byte_size(),
     );

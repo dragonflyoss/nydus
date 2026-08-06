@@ -1,6 +1,6 @@
 //! Unified request routing for HTTP-based backends.
 //!
-//! [`Request`] dispatches a logical HTTP call across one of three transports —
+//! [`RequestDispatcher`] dispatches a logical HTTP call across one of three transports —
 //! the direct origin, an HTTP forward proxy, or the Dragonfly SDK proxy — and
 //! normalizes the outcome into a single [`Response`]. Proxy errors are surfaced
 //! with enough structure for the retry policy to tell `403` / `429` apart from
@@ -14,9 +14,9 @@ use reqwest::header::HeaderMap;
 use reqwest::{Client, Method, StatusCode};
 use tracing::debug;
 
-use super::http::{runtime, Connection};
+use super::http::{runtime, HttpClient};
 use super::proxy::HttpProxy;
-use super::{ReadContext, RequestSource};
+use super::{ReadContext, ReadKind};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
 use super::dragonfly_sdk::{DragonflyError, DragonflyResponse, DragonflySdk};
@@ -106,9 +106,9 @@ impl Response {
 enum ProxyType {
     /// Direct request to the origin.
     None,
-    /// Request routed through an HTTP forward proxy.
+    /// RequestDispatcher routed through an HTTP forward proxy.
     Http,
-    /// Request routed through the Dragonfly SDK proxy.
+    /// RequestDispatcher routed through the Dragonfly SDK proxy.
     #[cfg_attr(not(feature = "backend-dragonfly-proxy"), allow(dead_code))]
     DragonflySdk,
 }
@@ -124,20 +124,20 @@ impl ProxyType {
 }
 
 /// Dispatches requests across direct / HTTP-proxy / Dragonfly transports.
-pub(crate) struct Request {
-    connection: Arc<Connection>,
+pub(crate) struct RequestDispatcher {
+    connection: Arc<HttpClient>,
     proxy: Option<Arc<HttpProxy>>,
     #[cfg(feature = "backend-dragonfly-proxy")]
     dragonfly: Option<Arc<DragonflySdk>>,
 }
 
-impl Request {
+impl RequestDispatcher {
     pub(crate) fn new(
-        connection: Arc<Connection>,
+        connection: Arc<HttpClient>,
         proxy: Option<Arc<HttpProxy>>,
         #[cfg(feature = "backend-dragonfly-proxy")] dragonfly: Option<Arc<DragonflySdk>>,
-    ) -> Arc<Request> {
-        Arc::new(Request {
+    ) -> Arc<RequestDispatcher> {
+        Arc::new(RequestDispatcher {
             connection,
             proxy,
             #[cfg(feature = "backend-dragonfly-proxy")]
@@ -165,7 +165,7 @@ impl Request {
 
             if let Some(proxy) = &self.proxy {
                 let mut headers = headers;
-                HttpProxy::decorate(&mut headers, ctx.source);
+                HttpProxy::decorate(&mut headers, ctx.kind);
                 return self.send(proxy.client(), method, url, headers, ctx, ProxyType::Http);
             }
         }
@@ -242,8 +242,8 @@ impl Request {
         mut headers: HeaderMap,
         ctx: ReadContext,
     ) -> RequestResult<Response> {
-        HttpProxy::decorate(&mut headers, ctx.source);
-        let priority = super::proxy::dragonfly_priority(ctx.source);
+        HttpProxy::decorate(&mut headers, ctx.kind);
+        let priority = super::proxy::dragonfly_priority(ctx.kind);
 
         let start = Instant::now();
         let result = dragonfly.get(url, headers.clone(), priority);
@@ -313,12 +313,12 @@ fn log_backend_request_done(
     error: Option<&str>,
     duration: Duration,
 ) {
-    let request_source = match ctx.source {
-        RequestSource::OnDemand => "ondemand",
-        RequestSource::Prefetch => "prefetch",
+    let read_kind = match ctx.kind {
+        ReadKind::OnDemand => "ondemand",
+        ReadKind::Prefetch => "prefetch",
     };
     debug!(
-        "backend request done: request_source={request_source} proxy_type={} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={}",
+        "backend request done: read_kind={read_kind} proxy_type={} method={method} url={url} headers={headers:?} status={status:?} response_headers={response_headers:?} error={error:?} duration={}",
         proxy_type.as_str(),
         format_duration(duration),
     );

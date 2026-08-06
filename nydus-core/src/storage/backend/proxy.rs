@@ -20,7 +20,7 @@ use reqwest::Client;
 use serde::Deserialize;
 
 use super::http::{build_client, ConnectionConfig};
-use super::RequestSource;
+use super::ReadKind;
 
 /// Dragonfly priority hint for background prefetch requests.
 pub(crate) const DRAGONFLY_PRIORITY_PREFETCH: i32 = 3;
@@ -32,11 +32,11 @@ pub(crate) const HEADER_DRAGONFLY_PRIORITY: &str = "X-Dragonfly-Priority";
 /// Header opting a request into Dragonfly P2P distribution.
 pub(crate) const HEADER_DRAGONFLY_USE_P2P: &str = "X-Dragonfly-Use-P2P";
 
-/// Map a request source to its Dragonfly priority value.
-pub(crate) fn dragonfly_priority(source: RequestSource) -> i32 {
-    match source {
-        RequestSource::Prefetch => DRAGONFLY_PRIORITY_PREFETCH,
-        RequestSource::OnDemand => DRAGONFLY_PRIORITY_ONDEMAND,
+/// Map a read kind to its Dragonfly priority value.
+pub(crate) fn dragonfly_priority(kind: ReadKind) -> i32 {
+    match kind {
+        ReadKind::Prefetch => DRAGONFLY_PRIORITY_PREFETCH,
+        ReadKind::OnDemand => DRAGONFLY_PRIORITY_ONDEMAND,
     }
 }
 
@@ -75,8 +75,8 @@ impl HttpProxy {
 
     /// Attach Dragonfly hint headers (priority + P2P opt-in) to a request the
     /// HTTP proxy will serve.
-    pub(crate) fn decorate(headers: &mut HeaderMap, source: RequestSource) {
-        if let Ok(priority) = dragonfly_priority(source).to_string().parse() {
+    pub(crate) fn decorate(headers: &mut HeaderMap, kind: ReadKind) {
+        if let Ok(priority) = dragonfly_priority(kind).to_string().parse() {
             headers.insert(HEADER_DRAGONFLY_PRIORITY, priority);
         }
         headers.insert(HEADER_DRAGONFLY_USE_P2P, HeaderValue::from_static("true"));

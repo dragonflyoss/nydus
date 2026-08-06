@@ -1,6 +1,6 @@
 // nydus — single CLI for nydus image creation, merge and mounting.
 
-mod apiserver;
+mod api_server;
 mod build;
 mod check;
 #[cfg(feature = "fanotify")]
@@ -21,16 +21,16 @@ use clap::{Parser, Subcommand};
 use crate::build::{run_build, BuildArgs};
 use crate::check::{run_check, CheckArgs};
 #[cfg(feature = "fanotify")]
-use crate::fanotify::{run_fanotify_service, FanotifyArgs};
-use crate::fuse::{run_fuse_mount, FuseArgs};
+use crate::fanotify::{run_fanotify, FanotifyArgs};
+use crate::fuse::{run_fuse, FuseArgs};
 use crate::merge::{run_merge, MergeArgs};
 #[cfg(feature = "nbd")]
-use crate::nbd::{run_nbd_service, NbdArgs};
+use crate::nbd::{run_nbd, NbdArgs};
 use crate::optimize::{run_optimize, OptimizeArgs};
 #[cfg(feature = "ublk")]
-use crate::ublk::{run_ublk_target, UblkArgs};
+use crate::ublk::{run_ublk, UblkArgs};
 #[cfg(feature = "uffd")]
-use crate::uffd::{run_uffd_service, UffdArgs};
+use crate::uffd::{run_uffd, UffdArgs};
 
 #[derive(Parser)]
 #[command(name = "nydus", about = "Nydus filesystem tools")]
@@ -72,14 +72,14 @@ fn main() -> Result<()> {
         Commands::Check(args) => run_check(args),
         Commands::Merge(args) => run_merge(args),
         Commands::Optimize(args) => run_optimize(args),
-        Commands::Fuse(args) => run_fuse_mount(args),
+        Commands::Fuse(args) => run_fuse(args),
         #[cfg(feature = "ublk")]
-        Commands::Ublk(args) => run_ublk_target(args),
+        Commands::Ublk(args) => run_ublk(args),
         #[cfg(feature = "uffd")]
-        Commands::Uffd(args) => run_uffd_service(args),
+        Commands::Uffd(args) => run_uffd(args),
         #[cfg(feature = "fanotify")]
-        Commands::Fanotify(args) => run_fanotify_service(args),
+        Commands::Fanotify(args) => run_fanotify(args),
         #[cfg(feature = "nbd")]
-        Commands::Nbd(args) => run_nbd_service(args),
+        Commands::Nbd(args) => run_nbd(args),
     }
 }

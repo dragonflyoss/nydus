@@ -31,39 +31,33 @@ pub use pauser::Pauser;
 #[cfg(feature = "backend-registry")]
 pub use registry::Registry;
 
-/// Origin of a backend read, used to apply different retry, throttling and
-/// proxy-priority policies to user-triggered versus background reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RequestSource {
-    /// User-triggered read that blocks a FUSE request.
-    #[default]
-    OnDemand,
-    /// Background prefetch read after mount.
-    Prefetch,
-}
+/// Kind of a backend read (on-demand vs prefetch), used to apply different
+/// retry, throttling and proxy-priority policies to user-triggered versus
+/// background reads.
+pub use crate::metrics::ReadKind;
 
-/// Diagnostic context for a backend read: its origin plus the uncompressed
+/// Diagnostic context for a backend read: its kind plus the uncompressed
 /// `(offset, size)` span it decodes to, when the read maps to blob-meta groups.
 /// Raw reads (e.g. the blob footer or blob meta region) carry `None`.
 #[derive(Debug, Clone, Copy)]
 pub struct ReadContext {
-    pub source: RequestSource,
+    pub kind: ReadKind,
     pub uncompressed: Option<(u64, u64)>,
 }
 
 impl ReadContext {
     /// Context for a read that decodes to a known uncompressed group span.
-    pub fn group(source: RequestSource, uncompressed_offset: u64, uncompressed_size: u64) -> Self {
+    pub fn group(kind: ReadKind, uncompressed_offset: u64, uncompressed_size: u64) -> Self {
         Self {
-            source,
+            kind,
             uncompressed: Some((uncompressed_offset, uncompressed_size)),
         }
     }
 
     /// Context for a raw read with no associated uncompressed group span.
-    pub fn raw(source: RequestSource) -> Self {
+    pub fn raw(kind: ReadKind) -> Self {
         Self {
-            source,
+            kind,
             uncompressed: None,
         }
     }
@@ -141,13 +135,9 @@ impl MeteredBackend {
     ) -> io::Result<T> {
         let start = std::time::Instant::now();
         let result = read();
-        let source = match ctx.source {
-            RequestSource::OnDemand => crate::metrics::ReadSource::OnDemand,
-            RequestSource::Prefetch => crate::metrics::ReadSource::Prefetch,
-        };
         crate::metrics::record_backend_read(
             self.inner.backend_target(),
-            source,
+            ctx.kind,
             bytes,
             start.elapsed(),
             result.is_err(),

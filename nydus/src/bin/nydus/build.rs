@@ -280,7 +280,7 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     let mut blob_writer_stream = HashingWriter::new(BufWriter::new(blob_file), full_blob_hasher);
 
     let compressed_data_offset = 0u64;
-    let bootstrap_offset = align_u64(
+    let bootstrap_offset = align_up(
         compressed_data_offset + compressed_data_size,
         NYDUS_BLOB_FOOTER_ALIGNMENT,
     );
@@ -301,7 +301,7 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     let bootstrap_size = u64::try_from(bootstrap_bytes.len()).context("bootstrap exceeds u64")?;
     let bootstrap_blocks = bytes_to_blocks(bootstrap_size, "bootstrap")?;
     let blob_meta_blocks = bytes_to_blocks(blob_meta_size, "blob meta")?;
-    let blob_meta_offset = align_u64(
+    let blob_meta_offset = align_up(
         bootstrap_offset + bootstrap_size,
         NYDUS_BLOB_FOOTER_ALIGNMENT,
     );
@@ -375,7 +375,7 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
-fn align_u64(value: u64, align: u64) -> u64 {
+fn align_up(value: u64, align: u64) -> u64 {
     debug_assert!(align.is_power_of_two());
     (value + align - 1) & !(align - 1)
 }
@@ -588,10 +588,10 @@ mod tests {
     }
 
     #[test]
-    fn align_u64_rounds_up_to_alignment() {
-        assert_eq!(align_u64(0, 8), 0);
-        assert_eq!(align_u64(1, 8), 8);
-        assert_eq!(align_u64(16, 8), 16);
+    fn align_up_rounds_up_to_alignment() {
+        assert_eq!(align_up(0, 8), 0);
+        assert_eq!(align_up(1, 8), 8);
+        assert_eq!(align_up(16, 8), 16);
     }
 
     #[test]
