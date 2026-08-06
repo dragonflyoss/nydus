@@ -17,6 +17,7 @@ pub mod tracing;
 pub mod ublk;
 #[cfg(feature = "uffd")]
 pub mod uffd;
+pub mod unpack;
 
 #[cfg(feature = "fuse")]
 pub use fuse::ErofsFs;
