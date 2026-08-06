@@ -16,8 +16,8 @@ const _: () = assert!(mem::size_of::<ErofsDirent>() == EROFS_DIRENT_SIZE);
 impl ErofsDirent {
     pub fn new(nid: u64, nameoff: u16, file_type: u8) -> Self {
         let mut v: Self = unsafe { mem::zeroed() };
-        set_u64(&mut v.nid, nid);
-        set_u16(&mut v.nameoff, nameoff);
+        write_u64(&mut v.nid, nid);
+        write_u16(&mut v.nameoff, nameoff);
         v.file_type = file_type;
         v
     }
@@ -27,11 +27,11 @@ impl ErofsDirent {
     }
 
     pub fn nid(&self) -> u64 {
-        get_u64(&self.nid)
+        read_u64(&self.nid)
     }
 
     pub fn nameoff(&self) -> u16 {
-        get_u16(&self.nameoff)
+        read_u16(&self.nameoff)
     }
 
     pub fn file_type(&self) -> u8 {

@@ -26,9 +26,9 @@ impl ErofsChunkIndex {
             v.device_id = [0xFF; 2];
             v.startblk_lo = [0xFF; 4];
         } else {
-            set_u16(&mut v.startblk_hi, (blkaddr >> 32) as u16);
-            set_u16(&mut v.device_id, device_id);
-            set_u32(&mut v.startblk_lo, blkaddr as u32);
+            write_u16(&mut v.startblk_hi, (blkaddr >> 32) as u16);
+            write_u16(&mut v.device_id, device_id);
+            write_u32(&mut v.startblk_lo, blkaddr as u32);
         }
         v
     }
@@ -38,8 +38,8 @@ impl ErofsChunkIndex {
     }
 
     pub fn blkaddr(&self) -> u64 {
-        let hi = get_u16(&self.startblk_hi) as u64;
-        let lo = get_u32(&self.startblk_lo) as u64;
+        let hi = read_u16(&self.startblk_hi) as u64;
+        let lo = read_u32(&self.startblk_lo) as u64;
         let addr = (hi << 32) | lo;
         // The on-disk null chunk (hole) has all 48 address bits set (written by
         // `new(EROFS_NULL_ADDR, ..)` above); normalize it back to the in-memory
@@ -52,7 +52,7 @@ impl ErofsChunkIndex {
     }
 
     pub fn device_id(&self) -> u16 {
-        get_u16(&self.device_id)
+        read_u16(&self.device_id)
     }
 }
 
@@ -83,8 +83,8 @@ impl ErofsDeviceSlot {
     pub fn new(blocks: u64) -> Self {
         let mut v: Self = unsafe { mem::zeroed() };
         debug_assert!(blocks < (1u64 << 48));
-        set_u32(&mut v.blocks_lo, blocks as u32);
-        set_u16(&mut v.blocks_hi, (blocks >> 32) as u16);
+        write_u32(&mut v.blocks_lo, blocks as u32);
+        write_u16(&mut v.blocks_hi, (blocks >> 32) as u16);
         v
     }
 
@@ -109,17 +109,17 @@ impl ErofsDeviceSlot {
     }
 
     pub fn blocks(&self) -> u64 {
-        ((get_u16(&self.blocks_hi) as u64) << 32) | get_u32(&self.blocks_lo) as u64
+        ((read_u16(&self.blocks_hi) as u64) << 32) | read_u32(&self.blocks_lo) as u64
     }
 
     pub fn mapped_blkaddr(&self) -> u64 {
-        ((get_u16(&self.uniaddr_hi) as u64) << 32) | get_u32(&self.uniaddr_lo) as u64
+        ((read_u16(&self.uniaddr_hi) as u64) << 32) | read_u32(&self.uniaddr_lo) as u64
     }
 
     pub fn set_mapped_blkaddr(&mut self, mapped_blkaddr: u64) {
         debug_assert!(mapped_blkaddr < (1u64 << 48));
-        set_u32(&mut self.uniaddr_lo, mapped_blkaddr as u32);
-        set_u16(&mut self.uniaddr_hi, (mapped_blkaddr >> 32) as u16);
+        write_u32(&mut self.uniaddr_lo, mapped_blkaddr as u32);
+        write_u16(&mut self.uniaddr_hi, (mapped_blkaddr >> 32) as u16);
     }
 
     pub fn set_blob_id(&mut self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) {

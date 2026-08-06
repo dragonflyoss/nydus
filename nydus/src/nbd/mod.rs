@@ -3,7 +3,7 @@
 //! Exposes the flattened EROFS image (bootstrap + all data blobs) as a single
 //! read-only block device through the Linux NBD driver. The kernel reads
 //! `/dev/nbdX`; each cold read fetches the covering blob ranges through
-//! [`NydusAccessor`]'s on-demand backend into the per-blob sparse cache file.
+//! [`NydusCore`]'s on-demand backend into the per-blob sparse cache file.
 //! Repeat reads are served by the page cache above the device; reads that do
 //! reach the daemon again (after eviction) pread cache-resident ranges
 //! locally without touching the backend.
@@ -13,7 +13,7 @@
 //! through the NBD socket protocol instead of fanotify pre-content hooks, so
 //! it works on kernels without `FAN_CLASS_PRE_CONTENT` (Linux < 6.15).
 //!
-//! [`NydusAccessor`]: crate::NydusAccessor
+//! [`NydusCore`]: crate::NydusCore
 
 pub mod core;
 pub mod mount;

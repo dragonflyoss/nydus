@@ -53,18 +53,18 @@ impl ErofsSuperblock {
         uuid: &[u8; 16],
     ) -> Self {
         let mut sb: Self = unsafe { mem::zeroed() };
-        set_u32(&mut sb.magic, EROFS_SUPER_MAGIC_V1);
-        set_u32(&mut sb.feature_compat, feature_compat);
+        write_u32(&mut sb.magic, EROFS_SUPER_MAGIC_V1);
+        write_u32(&mut sb.feature_compat, feature_compat);
         sb.blkszbits = EROFS_BLKSZBITS;
-        set_u16(&mut sb.rootnid_2b, root_nid);
-        set_u64(&mut sb.inos, inos);
-        set_u64(&mut sb.epoch, epoch);
-        set_u32(&mut sb.blocks_lo, blocks as u32);
-        set_u32(&mut sb.meta_blkaddr, meta_blkaddr);
+        write_u16(&mut sb.rootnid_2b, root_nid);
+        write_u64(&mut sb.inos, inos);
+        write_u64(&mut sb.epoch, epoch);
+        write_u32(&mut sb.blocks_lo, blocks as u32);
+        write_u32(&mut sb.meta_blkaddr, meta_blkaddr);
         sb.uuid = *uuid;
-        set_u32(&mut sb.feature_incompat, feature_incompat);
-        set_u16(&mut sb.extra_devices, extra_devices);
-        set_u16(&mut sb.devt_slotoff, devt_slotoff);
+        write_u32(&mut sb.feature_incompat, feature_incompat);
+        write_u16(&mut sb.extra_devices, extra_devices);
+        write_u16(&mut sb.devt_slotoff, devt_slotoff);
         sb
     }
 
@@ -73,47 +73,47 @@ impl ErofsSuperblock {
     }
 
     pub fn magic(&self) -> u32 {
-        get_u32(&self.magic)
+        read_u32(&self.magic)
     }
 
     pub fn feature_compat(&self) -> u32 {
-        get_u32(&self.feature_compat)
+        read_u32(&self.feature_compat)
     }
 
     pub fn feature_incompat(&self) -> u32 {
-        get_u32(&self.feature_incompat)
+        read_u32(&self.feature_incompat)
     }
 
     pub fn root_nid(&self) -> u64 {
-        get_u16(&self.rootnid_2b) as u64
+        read_u16(&self.rootnid_2b) as u64
     }
 
     pub fn inos(&self) -> u64 {
-        get_u64(&self.inos)
+        read_u64(&self.inos)
     }
 
     pub fn epoch(&self) -> u64 {
-        get_u64(&self.epoch)
+        read_u64(&self.epoch)
     }
 
     pub fn fixed_nsec(&self) -> u32 {
-        get_u32(&self.fixed_nsec)
+        read_u32(&self.fixed_nsec)
     }
 
     pub fn blocks(&self) -> u64 {
-        get_u32(&self.blocks_lo) as u64
+        read_u32(&self.blocks_lo) as u64
     }
 
     pub fn meta_blkaddr(&self) -> u32 {
-        get_u32(&self.meta_blkaddr)
+        read_u32(&self.meta_blkaddr)
     }
 
     pub fn extra_devices(&self) -> u16 {
-        get_u16(&self.extra_devices)
+        read_u16(&self.extra_devices)
     }
 
     pub fn devt_slotoff(&self) -> u16 {
-        get_u16(&self.devt_slotoff)
+        read_u16(&self.devt_slotoff)
     }
 }
 
@@ -179,7 +179,7 @@ mod tests {
             &[0u8; 16],
         );
         if let Some(m) = magic {
-            set_u32(&mut sb.magic, m);
+            write_u32(&mut sb.magic, m);
         }
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&[0u8; EROFS_SUPER_OFFSET as usize]).unwrap();

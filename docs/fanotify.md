@@ -10,7 +10,7 @@ Requires Linux 6.15+.
 
 The daemon serves a **multi-device** EROFS image. The bootstrap is a real local
 EROFS file that is mounted directly; each data blob is a separate EROFS
-`device=` backed by the accessor's per-blob sparse cache file. The daemon marks
+`device=` backed by the core's per-blob sparse cache file. The daemon marks
 each blob cache file `FAN_PRE_ACCESS`. Mount, `ls`, and `stat` read the local
 bootstrap and never involve fanotify; only cold blob-**data** reads fault.
 
@@ -31,7 +31,7 @@ backing cache file (sparse hole; pages not present)
 nydus fanotify
       |
       | fstat(fd) -> (dev, ino) -> blob device
-      | BlobAccessor::fetch(id, offset, count):
+      | Blobs::fetch(id, offset, count):
       |   backend fetch + decode + CRC validate
       |   write decoded data to the blob's cache file
       v
@@ -50,7 +50,7 @@ answers them immediately with no backend I/O.
 ## Multi-Device Model
 
 The daemon enumerates blob devices from the bootstrap via
-`BlobAccessor::entries()`, which also creates and sizes each blob's sparse cache
+`Blobs::entries()`, which also creates and sizes each blob's sparse cache
 file so the device files exist before mount.
 
 Layout rules:
@@ -58,7 +58,7 @@ Layout rules:
 - The **bootstrap** is a local EROFS file, mounted directly as the mount source.
   It is never marked and never served through fanotify.
 - Each **blob** is one EROFS `device=` slot, in device-table order. Its backing
-  file is the accessor's decoded cache file (`BlobInfo::cache_path`), sized to
+  file is the core's decoded cache file (`BlobInfo::cache_path`), sized to
   the blob's decoded length.
 - Device slots keep their original 1-based index, including **redirect** slots,
   so the EROFS `device=` index is never renumbered. A read routed to a redirect
@@ -99,7 +99,7 @@ decides a response purely from the parsed event, then admits the fetch:
 2. **Resolve device.** `fstat` the event fd for `(dev, ino)` and look up the
    blob device. An unknown device, or a redirect slot, is denied.
 3. **Align.** The RANGE is aligned outward to 4 KiB EROFS blocks and clamped to
-   the device size (the accessor requires block-aligned arguments). The device
+   the device size (the core requires block-aligned arguments). The device
    size is the fetch bound; there is no per-event byte cap.
 4. **Fast path.** If the authoritative groupmap already covers the aligned range,
    the event is allowed immediately with no backend I/O.
@@ -109,7 +109,7 @@ decides a response purely from the parsed event, then admits the fetch:
    unbounded pending table. Admission never fails; concurrency is bounded by the
    fetch thread pool (`--fetch-concurrency`), which queues tasks (backpressure)
    rather than denying.
-6. **Fetch.** `BlobAccessor::fetch(id, offset, count)` runs on a fetch worker
+6. **Fetch.** `Blobs::fetch(id, offset, count)` runs on a fetch worker
    thread; it decodes, CRC-validates, dedups (idempotent, group-granular) and
    writes the blob's cache file in place. The work is wrapped in `catch_unwind`.
 7. **Respond.** On completion the event is answered `FAN_ALLOW` on success, or
@@ -122,7 +122,7 @@ decides a response purely from the parsed event, then admits the fetch:
 
 Duplicate work is removed at two layers. The event loop coalesces events sharing
 an identical `(blob, aligned range)` key, so a burst of readers faulting the same
-range dispatches a single fetch. Below that, the accessor de-duplicates at
+range dispatches a single fetch. Below that, the core de-duplicates at
 blob-meta-group granularity (single-flight), so faults for different ranges in
 the same group also join one fetch. Distinct groups fetch concurrently up to the
 fetch thread pool size (`max(ncpu, 64)`); a saturated pool queues tasks rather
@@ -177,7 +177,7 @@ backpressures readers rather than denying them.
 
 1. **Setup.** Raise the `RLIMIT_NOFILE` soft limit to the hard limit (each
    in-flight cold read pins a dup'd event fd and admission is unbounded). Build
-   the accessor, enumerate and prepare blob devices, create the
+   the core, enumerate and prepare blob devices, create the
    `FAN_CLASS_PRE_CONTENT` group, and `FAN_MARK_ADD` `FAN_PRE_ACCESS` on each
    blob cache file — skipping any blob already fully cached. The group fd is
    held unregistered.
@@ -255,7 +255,7 @@ prefetch:
 ```
 
 The fanotify feature is optional and does not affect default library or builtin
-accessor builds unless explicitly enabled.
+core builds unless explicitly enabled.
 
 ## Requirements
 

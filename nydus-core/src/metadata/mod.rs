@@ -99,32 +99,32 @@ pub const NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"nydus.prefetch.blobs";
 
 /// Read a little-endian integer from a byte array.
 #[inline(always)]
-pub(crate) fn get_u16(b: &[u8; 2]) -> u16 {
+pub(crate) fn read_u16(b: &[u8; 2]) -> u16 {
     u16::from_le_bytes(*b)
 }
 
 #[inline(always)]
-pub(crate) fn set_u16(b: &mut [u8; 2], v: u16) {
+pub(crate) fn write_u16(b: &mut [u8; 2], v: u16) {
     *b = v.to_le_bytes();
 }
 
 #[inline(always)]
-pub(crate) fn get_u32(b: &[u8; 4]) -> u32 {
+pub(crate) fn read_u32(b: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*b)
 }
 
 #[inline(always)]
-pub(crate) fn set_u32(b: &mut [u8; 4], v: u32) {
+pub(crate) fn write_u32(b: &mut [u8; 4], v: u32) {
     *b = v.to_le_bytes();
 }
 
 #[inline(always)]
-pub(crate) fn get_u64(b: &[u8; 8]) -> u64 {
+pub(crate) fn read_u64(b: &[u8; 8]) -> u64 {
     u64::from_le_bytes(*b)
 }
 
 #[inline(always)]
-pub(crate) fn set_u64(b: &mut [u8; 8], v: u64) {
+pub(crate) fn write_u64(b: &mut [u8; 8], v: u64) {
     *b = v.to_le_bytes();
 }
 

@@ -1,6 +1,6 @@
 //! Fill engine for the NBD service, flat single-device model.
 //!
-//! The accessor exposes the whole image as one flattened device view: the
+//! The core exposes the whole image as one flattened device view: the
 //! bootstrap at the head, then each blob at its `mapped_offset`, with gaps
 //! (and any redirect blob) reported as `/dev/zero`. [`NbdCore`] wraps that
 //! view with a synchronous `read` that fetches the covering ranges and copies
@@ -27,19 +27,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 
 use crate::metadata::EROFS_BLOCK_SIZE;
-use crate::{Config, NydusAccessor};
+use crate::{Config, NydusCore};
 
-/// EROFS block size as u64 — reuses the canonical constant from the accessor.
+/// EROFS block size as u64 — reuses the canonical constant from the core.
 const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 
 /// Read-side handle for the NBD on-demand service.
 ///
-/// Holds a shared accessor (so background prefetch keeps running) and the
+/// Holds a shared core (so background prefetch keeps running) and the
 /// flattened device size computed at construction. All read paths are
-/// block-aligned by the NBD protocol, which matches the accessor's fetch
+/// block-aligned by the NBD protocol, which matches the core's fetch
 /// precondition.
 pub struct NbdCore {
-    accessor: Arc<NydusAccessor>,
+    core: Arc<NydusCore>,
     flat_size: u64,
 }
 
@@ -48,11 +48,10 @@ impl NbdCore {
     /// No blob meta is downloaded and no cache file is created until a read
     /// first touches a blob, so this returns quickly even for large images.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let accessor = Arc::new(
-            NydusAccessor::new(bootstrap, config).context("failed to create nydus accessor")?,
-        );
+        let core =
+            Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
 
-        let flat_size = accessor.flat_size();
+        let flat_size = core.flat_size();
         if flat_size == 0 {
             anyhow::bail!("flattened image size is zero");
         }
@@ -61,10 +60,7 @@ impl NbdCore {
                 "flattened image size {flat_size} is not a multiple of the {BLOCK_SIZE} B EROFS block size"
             );
         }
-        Ok(Self {
-            accessor,
-            flat_size,
-        })
+        Ok(Self { core, flat_size })
     }
 
     /// Total size in bytes of the flattened block device exposed to the kernel.
@@ -100,10 +96,10 @@ impl NbdCore {
         }
 
         let ranges = self
-            .accessor
+            .core
             .fetch_flat_ranges(offset, len)
             .context("failed to fetch flat ranges for nbd read")?;
-        let zero_fd = self.accessor.zero_fd();
+        let zero_fd = self.core.zero_fd();
         let mut written = 0usize;
         for range in ranges {
             // The fetch contract is a gapless cover of the request window;
@@ -137,7 +133,7 @@ impl NbdCore {
             }
             written += seg_len;
         }
-        // The accessor resolves the whole requested window, so every byte is
+        // The core resolves the whole requested window, so every byte is
         // accounted for; pad the tail with zeros defensively if it ever is not.
         if written < buf.len() {
             buf[written..].fill(0);

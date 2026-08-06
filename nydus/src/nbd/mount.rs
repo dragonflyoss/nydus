@@ -4,7 +4,7 @@
 //! the source plus repeated `device=` options), the NBD daemon exposes a
 //! single block device `/dev/nbdX` carrying the whole flattened image, so
 //! mounting is a plain `mount(2)` of that device at the target with the image's
-//! filesystem type (ERofs for a nydus image). No loop device, no `device=`
+//! filesystem type (EROFS for a nydus image). No loop device, no `device=`
 //! options, no option-length budget.
 
 use std::ffi::CString;
@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 
 /// Mount the NBD block device `device` at `mountpoint` as `fstype`, read-only.
 ///
-/// Read-only because the daemon only ever writes to the accessor's cache files
+/// Read-only because the daemon only ever writes to the core's cache files
 /// through `fetch`, never through the NBD device; `MS_NODEV`/`MS_NOSUID` match
 /// the fanotify EROFS mount policy for a content-addressed image.
 pub fn mount_nbd(device: &str, mountpoint: &Path, fstype: &str) -> Result<()> {

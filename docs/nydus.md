@@ -207,7 +207,7 @@ Current implementation notes:
 - `--trace-file` is the offline alternative to `--apiserver` (the two are
 	mutually exclusive; one of them is required). It accepts the same versioned
 	trace document as produced by the `/trace` endpoint, so a trace captured
-	from a pmem/accessor mount can be replayed without a live apiserver.
+	from a pmem/core mount can be replayed without a live apiserver.
 - `--parent-bootstrap` is the merged bootstrap to optimize; it is read-only, so
 	optimize can be re-run against the same parent with new patterns.
 - `--bootstrap` is the rewritten bootstrap output: the parent's inode tree with
@@ -397,7 +397,7 @@ device as EROFS.
 
 The UFFD command is available only when Nydus is built with both the `cli` and
 `uffd` features. The `uffd` feature gates the service and its FD-passing
-dependency, so other Nydus library and builtin-accessor users do not include
+dependency, so other Nydus library and builtin-core users do not include
 the UFFD service path.
 
 ```bash
@@ -436,7 +436,7 @@ fault-handling responsibilities.
 The `nydus fanotify` command serves a Nydus image to the kernel EROFS driver as
 an on-demand, **multi-device** mount. The bootstrap is a real local EROFS image
 mounted directly, so mount and metadata reads (`ls`, `stat`) work off the local
-bootstrap; each blob is a separate EROFS device backed by the accessor's sparse
+bootstrap; each blob is a separate EROFS device backed by the core's sparse
 cache file, marked for fanotify `FAN_PRE_ACCESS`. A cold blob-data read faults;
 the daemon identifies the blob, fetches the range into its cache file, and
 answers the event. This is the native-EROFS counterpart to `nydus uffd` (which
@@ -1105,7 +1105,7 @@ A fully-zero chunk — a real filesystem hole reads back as zeros, and so does
 zero-filled data — is never stored: the builder emits the standard EROFS null
 chunk index (all 48 address bits set on disk) instead. Hole chunks occupy no
 bytes in the data region, get no blob meta chunk record, and never touch the
-blob cache at runtime: the accessor read paths satisfy them with zeros
+blob cache at runtime: the core read paths satisfy them with zeros
 directly, and native EROFS mounts decode the null address in-kernel the same
 way.
 
@@ -1442,7 +1442,7 @@ parallel ramped prefetch cut end-to-end start time from 32.6s to 25.0s.
 ### Cross-process cache sharing and prefetch dedup
 
 Many identical instances cold-starting on one node (for example, dozens of
-hypervisor-embedded accessors mounting the same optimized image) all target the
+hypervisor-embedded cores mounting the same optimized image) all target the
 same cache directory, the same blobs, and the same access-ordered hot set.
 Without coordination each instance would stream the whole ondemand blob and
 decode every group independently — N× the backend traffic, decode CPU, and
@@ -1482,13 +1482,13 @@ missing bit (tracked by the shared ready counter) latches the sticky
 faults, FUSE reads — consult it before any
 per-group bookkeeping (`ensure_range` and `ready_ranges` short-circuit on it),
 so a fully warmed blob costs one load per request instead of a bitmap walk.
-`all_ready()` falls back to scanning the shared bitmap (masking the partial
+`check_all_ready()` falls back to scanning the shared bitmap (masking the partial
 final byte) when the flag is not yet set, and latches the flag when the scan
 proves completion — this also heals the rare counter skew left by a process
 that died between setting the last bit and bumping the counter, as does the
 same reconciliation at every `open`. A successful `prefetch_all` additionally
 runs this authoritative scan before returning, so once a full prefetch
-completes, `fully_ready` is guaranteed to answer true even in the presence of
+completes, `is_fully_ready` is guaranteed to answer true even in the presence of
 historical counter skew.
 
 **Per-blob prefetch flock.** Blob-level prefetch — and only prefetch — is
@@ -1553,14 +1553,14 @@ cache grew to the same ≈900 MB a single instance produces and end-to-end
 application readiness stayed at the single-instance baseline (24–27s across
 all 50, vs ≈25s for one).
 
-## Accessor (virtio-pmem integration)
+## Core (virtio-pmem integration)
 
-`nydus_core::NydusAccessor` (re-exported as `nydus::NydusAccessor`) is
+`nydus_core::NydusCore` (re-exported as `nydus::NydusCore`) is
 the library entry point for hypervisors
 that mount the nydus image inside the guest as a plain EROFS
 filesystem over virtio-pmem, instead of using `nydus fuse` on the host. The
 `nydus uffd` service builds its flattened device and on-demand fetch path on
-the same accessor; see [Nydus UFFD Service and Wire Protocol](uffd.md). The
+the same core; see [Nydus UFFD Service and Wire Protocol](uffd.md). The
 `nydus nbd` service serves the same flattened view through the kernel NBD
 driver; see [Nydus NBD Service](nbd.md). The `nydus ublk` service serves it
 through `ublk_drv` over `io_uring`; see
@@ -1570,7 +1570,7 @@ through `ublk_drv` over `io_uring`; see
 	device backed by its host cache data file (`{cache_dir}/{hex}.blob.data`),
 	which mirrors the dense decoded block address space — a guest read of block
 	`N` lands at byte `N * 4096` of the backing file.
-- `NydusAccessor::new(bootstrap, Config)` parses the bootstrap and an already
+- `NydusCore::new(bootstrap, Config)` parses the bootstrap and an already
 	loaded `nydus::Config` (same structure as `nydus fuse --config`) lazily;
 	per-blob work (blob meta download/validation, sparse cache file creation)
 	happens on first touch through `blob.entries()` or `blob.fetch`.
@@ -1578,16 +1578,16 @@ through `ublk_drv` over `io_uring`; see
 	worker before returning — the same two-phase workflow as `nydus fuse`
 	(redirect blob first, then the rest only under `prefetch.full`). The worker
 	thread inherits the network namespace active at construction time, so
-	callers that construct the accessor for a guest-facing backend must do so
+	callers that construct the core for a guest-facing backend must do so
 	while the desired netns is active.
 - Access traces are recorded on actual backend fetches (not cache hits), and
 	`nydus::metrics::snapshot()` exposes runtime counters for embedding into
 	hypervisor stats endpoints; a saved trace JSON can be replayed offline via
 	`nydus optimize --trace-file`. See [Metrics](#metrics).
-- `BlobID` is the public blob digest type. It converts to/from 64-character
+- `BlobId` is the public blob digest type. It converts to/from 64-character
 	SHA256 hex strings and `[u8; 32]` bytes.
 - `blob.entries()` lists the device table in order as `BlobInfo` entries:
-	blob index, `BlobID`, block count, cache path, cache size, and whether the
+	blob index, `BlobId`, block count, cache path, cache size, and whether the
 	blob is an ondemand redirect blob. Calling it prepares the sparse cache data
 	files, so `BlobInfo.cache_path` is immediately suitable as a virtio-pmem
 	backing file and `BlobInfo.cache_size` is `blocks * 4096`.
@@ -1607,17 +1607,17 @@ Complete example:
 ```rust
 use std::path::Path;
 
-use nydus_core::{Config, NydusAccessor};
+use nydus_core::{Config, NydusCore};
 
 fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> {
 	// Load the same YAML schema accepted by `nydus fuse --config`.
 	let config = Config::from_file(config_path)?;
-	let accessor = NydusAccessor::new(bootstrap, config)?;
+	let core = NydusCore::new(bootstrap, config)?;
 
 	// Materialize every blob cache file before creating guest pmem devices.
 	// The vector is in bootstrap device-table order; `index` is the 1-based
 	// EROFS external-device index used by chunk indexes.
-	let blobs = accessor.blob.entries()?;
+	let blobs = core.blobs.entries()?;
 	for blob in &blobs {
 		println!(
 			"blob index={} id={} blocks={} cache={} bytes={} redirect={}",
@@ -1639,12 +1639,12 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> 
 	// aligned; fetch expands to whole blob-meta groups internally and is
 	// safe to call repeatedly or concurrently.
 	if let Some(blob) = blobs.iter().find(|blob| !blob.is_redirect) {
-		accessor.blob.fetch(&blob.id, 0, 4096 * 16)?;
+		core.blobs.fetch(&blob.id, 0, 4096 * 16)?;
 	}
 
 	// Static filesystem inspection without FUSE. Resolve a path once and
 	// reuse the FsEntry for hot loops.
-	let file = accessor.fs.open("path/to/file")?;
+	let file = core.fs.open("path/to/file")?;
 	let meta = file.metadata()?;
 	println!("ino={} size={} mode={:o}", meta.ino, meta.size, meta.mode);
 
@@ -1652,7 +1652,7 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> 
 	let n = file.read_at(0, &mut buf)?;
 	println!("read {n} bytes");
 
-	let root = accessor.fs.open("/")?;
+	let root = core.fs.open("/")?;
 	for entry in root.read_dir()? {
 		println!("{} {:?} ino={}", entry.name, entry.file_type, entry.ino);
 	}
@@ -1661,7 +1661,7 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> 
 }
 ```
 
-The accessor needs neither FUSE nor the CLI stack: it lives in the
+The core needs neither FUSE nor the CLI stack: it lives in the
 standalone `nydus-core` crate (`nydus-core/`), which the root
 `nydus` crate re-exports. Depending on `nydus-core` with the
 `backend-registry` feature produces a minimal library surface (no
@@ -1970,7 +1970,7 @@ Publishes an optimized copy of a nydus image from a recorded access pattern:
 mount's `GET /trace` endpoint
 (`{"version":1,"patterns":[{"blob_index":1,"group_index":4},...]}`). It can be
 saved from the `/trace` endpoint of a `nydusify mount` apiserver, or exported
-offline from a pmem/accessor mount trace (e.g. a rund sandbox extendedstats
+offline from a pmem/core mount trace (e.g. a rund sandbox extendedstats
 snapshot). Record the pattern from a mount **without** prefetch so it captures
 the pure on-demand access pattern, exercise the workload, then save the trace.
 Mount the optimized image **with** `--prefetch` to get the phase-0 redirect

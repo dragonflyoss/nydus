@@ -3,8 +3,8 @@
 //! nydus's native shape is multi-device EROFS: the **bootstrap is a real local
 //! EROFS image** (superblock + all inode/dirent metadata + a device table) that
 //! the operator mounts directly, and each data **blob is a separate EROFS device**
-//! backed by the accessor's per-blob sparse cache file. This daemon marks the
-//! blob devices and fills them on demand via [`NydusAccessor`]'s blob fetch.
+//! backed by the core's per-blob sparse cache file. This daemon marks the
+//! blob devices and fills them on demand via [`NydusCore`]'s blob fetch.
 //!
 //! Consequences of the multi-device split: mount and metadata reads (`ls`,
 //! `stat`) hit the real local bootstrap and never involve fanotify; only cold
@@ -20,7 +20,7 @@
 //! and response ownership — is unit-tested; the full on-demand data path has
 //! been verified end-to-end with a registry backend on a 6.15 kernel.
 //!
-//! [`NydusAccessor`]: crate::NydusAccessor
+//! [`NydusCore`]: crate::NydusCore
 
 pub mod core;
 pub mod event;

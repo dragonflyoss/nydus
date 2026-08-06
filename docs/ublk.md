@@ -73,7 +73,7 @@ Layout rules:
   size.
 
 This is the same layout `nydus uffd` serves, so the two targets share the
-`NydusAccessor` range-resolution path.
+`NydusCore` range-resolution path.
 
 ## Device Parameters
 
@@ -110,7 +110,7 @@ readers, not from splitting one reader's stream.
 
 A block read is served in three steps:
 
-1. **Resolve.** `NydusAccessor::fetch_flat_ranges` maps the requested device
+1. **Resolve.** `NydusCore::fetch_flat_ranges` maps the requested device
    range onto a list of `(fd, offset, length)` ranges over the bootstrap file,
    the blob cache files, and `/dev/zero`. Ranges backed by a blob are fetched,
    decoded and CRC-validated before the descriptor is handed back, so a cache

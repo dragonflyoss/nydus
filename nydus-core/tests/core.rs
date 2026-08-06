@@ -1,4 +1,4 @@
-//! Integration tests for the `NydusAccessor` public API. They live in
+//! Integration tests for the `NydusCore` public API. They live in
 //! `tests/` (not as unit tests) because building fixture images requires the
 //! `nydus` builder, which itself depends on this crate.
 
@@ -23,7 +23,7 @@ use nydus_core::metadata::{
 };
 use nydus_core::metadata::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use nydus_core::utils::{hex_string, sha256_file};
-use nydus_core::{BlobID, FileType, NydusAccessor};
+use nydus_core::{BlobId, FileType, NydusCore};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
@@ -211,18 +211,15 @@ fn write_full_blob(
 }
 
 #[test]
-fn accessor_describes_devices_and_fetches_aligned_ranges() {
+fn core_describes_devices_and_fetches_aligned_ranges() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, blob_id, _corpus) = build_flattened_test_image(dir.path());
-    let blob_id = BlobID::from(blob_id);
+    let blob_id = BlobId::from(blob_id);
 
-    let accessor = NydusAccessor::new(&bootstrap, config).unwrap();
-    assert_eq!(
-        accessor.bootstrap_size,
-        fs::metadata(&bootstrap).unwrap().len()
-    );
-    assert_eq!(accessor.bootstrap_size % EROFS_BLOCK_SIZE as u64, 0);
-    let blobs = accessor.blob.entries().unwrap();
+    let core = NydusCore::new(&bootstrap, config).unwrap();
+    assert_eq!(core.bootstrap_size, fs::metadata(&bootstrap).unwrap().len());
+    assert_eq!(core.bootstrap_size % EROFS_BLOCK_SIZE as u64, 0);
+    let blobs = core.blobs.entries().unwrap();
     assert_eq!(blobs.len(), 1);
     let descriptor = &blobs[0];
     assert_eq!(descriptor.index, 1);
@@ -232,7 +229,7 @@ fn accessor_describes_devices_and_fetches_aligned_ranges() {
         descriptor.cache_size,
         descriptor.blocks * EROFS_BLOCK_SIZE as u64
     );
-    assert!(descriptor.mapped_offset >= accessor.bootstrap_size);
+    assert!(descriptor.mapped_offset >= core.bootstrap_size);
     assert_eq!(
         descriptor.mapped_offset,
         descriptor.mapped_blkaddr * EROFS_BLOCK_SIZE as u64
@@ -240,19 +237,17 @@ fn accessor_describes_devices_and_fetches_aligned_ranges() {
     let meta = fs::metadata(&descriptor.cache_path).unwrap();
     assert_eq!(meta.len(), descriptor.cache_size);
     assert_eq!(
-        accessor.flat_size(),
+        core.flat_size(),
         descriptor.mapped_offset + descriptor.cache_size
     );
     assert_eq!(
-        accessor.bootstrap().metadata().unwrap().len(),
-        accessor.bootstrap_size
+        core.bootstrap().metadata().unwrap().len(),
+        core.bootstrap_size
     );
-    assert!(accessor.zero_fd() >= 0);
-    let bootstrap_ranges = accessor
-        .fetch_flat_ranges(0, EROFS_BLOCK_SIZE as u64)
-        .unwrap();
+    assert!(core.zero_fd() >= 0);
+    let bootstrap_ranges = core.fetch_flat_ranges(0, EROFS_BLOCK_SIZE as u64).unwrap();
     assert_eq!(bootstrap_ranges.len(), 1);
-    assert_eq!(bootstrap_ranges[0].fd, accessor.bootstrap().as_raw_fd());
+    assert_eq!(bootstrap_ranges[0].fd, core.bootstrap().as_raw_fd());
     assert_eq!(bootstrap_ranges[0].offset, 0);
     assert_eq!(bootstrap_ranges[0].source_offset, 0);
     assert_eq!(bootstrap_ranges[0].len, EROFS_BLOCK_SIZE as u64);
@@ -264,44 +259,44 @@ fn accessor_describes_devices_and_fetches_aligned_ranges() {
     let block = EROFS_BLOCK_SIZE as u64;
     let (blob_offset, len) = (256 * block, 16 * block);
     let offset = descriptor.mapped_offset + blob_offset;
-    assert!(accessor.probe_flat_ranges(offset, len).unwrap().is_empty());
-    let fd_ranges = accessor.fetch_flat_ranges(offset, len).unwrap();
+    assert!(core.probe_flat_ranges(offset, len).unwrap().is_empty());
+    let fd_ranges = core.fetch_flat_ranges(offset, len).unwrap();
     assert_eq!(fd_ranges.len(), 1);
     assert_eq!(fd_ranges[0].offset, blob_offset);
     assert_eq!(fd_ranges[0].len, len);
     assert_eq!(fd_ranges[0].source_offset, offset);
-    assert_ne!(fd_ranges[0].fd, accessor.zero_fd());
-    accessor.blob.fetch(&blob_id, blob_offset, len).unwrap();
+    assert_ne!(fd_ranges[0].fd, core.zero_fd());
+    core.blobs.fetch(&blob_id, blob_offset, len).unwrap();
     let cached = fs::read(&descriptor.cache_path).unwrap();
     assert!(cached[blob_offset as usize..(blob_offset + len) as usize]
         .iter()
         .any(|byte| *byte != 0));
-    assert_eq!(accessor.probe_flat_ranges(offset, len).unwrap(), fd_ranges);
+    assert_eq!(core.probe_flat_ranges(offset, len).unwrap(), fd_ranges);
 
     // Idempotent re-fetch and zero-length fetch are fine.
-    accessor.blob.fetch(&blob_id, offset, len).unwrap();
-    accessor.blob.fetch(&blob_id, 0, 0).unwrap();
+    core.blobs.fetch(&blob_id, offset, len).unwrap();
+    core.blobs.fetch(&blob_id, 0, 0).unwrap();
 
-    let trace = accessor.trace_snapshot();
+    let trace = core.trace_snapshot();
     assert_eq!(trace.patterns.len(), 1);
     assert_eq!(trace.patterns[0].blob_index, 1);
     assert_eq!(trace.patterns[0].group_index, 1);
     assert_eq!(
-        accessor.trace_json(),
+        core.trace_json(),
         "{\"version\":1,\"patterns\":[{\"blob_index\":1,\"group_index\":1}]}"
     );
 
     // Unaligned ranges and unknown blobs are rejected.
-    assert!(accessor.blob.fetch(&blob_id, 1, block).is_err());
-    assert!(accessor.blob.fetch(&blob_id, 0, block + 1).is_err());
-    assert!(accessor
-        .blob
-        .fetch(&BlobID::from([0u8; 32]), 0, block)
+    assert!(core.blobs.fetch(&blob_id, 1, block).is_err());
+    assert!(core.blobs.fetch(&blob_id, 0, block + 1).is_err());
+    assert!(core
+        .blobs
+        .fetch(&BlobId::from([0u8; 32]), 0, block)
         .is_err());
 
     // Out-of-range fetch fails rather than fabricating data.
-    assert!(accessor
-        .blob
+    assert!(core
+        .blobs
         .fetch(&blob_id, descriptor.cache_size, block)
         .is_err());
 }
@@ -381,14 +376,14 @@ fn flattened_bootstrap_records_mapped_device_slots() {
 }
 
 #[test]
-fn accessor_static_filesystem_api_reads_metadata_and_data() {
+fn core_static_filesystem_api_reads_metadata_and_data() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, blob_id, corpus) = build_test_image(dir.path());
-    let blob_id = BlobID::from(blob_id);
+    let blob_id = BlobId::from(blob_id);
 
-    let accessor = NydusAccessor::new(&bootstrap, config).unwrap();
+    let core = NydusCore::new(&bootstrap, config).unwrap();
 
-    let root_entry = accessor.fs.open("/").unwrap();
+    let root_entry = core.fs.open("/").unwrap();
     let root = root_entry.metadata().unwrap();
     assert_eq!(root.file_type, FileType::Directory);
 
@@ -401,7 +396,7 @@ fn accessor_static_filesystem_api_reads_metadata_and_data() {
     assert!(names.contains(&"dir"));
     assert!(names.contains(&"link_to_file1"));
 
-    let file1_entry = accessor.fs.open("file1").unwrap();
+    let file1_entry = core.fs.open("file1").unwrap();
     let file1 = file1_entry.metadata().unwrap();
     assert_eq!(file1.file_type, FileType::RegularFile);
     assert!(file1.size >= corpus["file1"].len() as u64);
@@ -419,7 +414,7 @@ fn accessor_static_filesystem_api_reads_metadata_and_data() {
     assert_eq!(read, second.len());
     assert_eq!(&second, &corpus["file1"][777..777 + read]);
 
-    let tiny = accessor.fs.open("tiny.txt").unwrap().read().unwrap();
+    let tiny = core.fs.open("tiny.txt").unwrap().read().unwrap();
     assert_eq!(
         &tiny[..corpus["tiny.txt"].len()],
         corpus["tiny.txt"].as_slice()
@@ -427,14 +422,14 @@ fn accessor_static_filesystem_api_reads_metadata_and_data() {
     assert!(tiny[corpus["tiny.txt"].len()..]
         .iter()
         .all(|byte| *byte == 0));
-    assert!(accessor
+    assert!(core
         .fs
         .open("empty.txt")
         .unwrap()
         .read()
         .unwrap()
         .is_empty());
-    let small = accessor.fs.open("dir/small.txt").unwrap().read().unwrap();
+    let small = core.fs.open("dir/small.txt").unwrap().read().unwrap();
     assert_eq!(
         &small[..corpus["dir/small.txt"].len()],
         corpus["dir/small.txt"].as_slice()
@@ -443,7 +438,7 @@ fn accessor_static_filesystem_api_reads_metadata_and_data() {
         .iter()
         .all(|byte| *byte == 0));
 
-    let link_entry = accessor.fs.open("link_to_file1").unwrap();
+    let link_entry = core.fs.open("link_to_file1").unwrap();
     let link = link_entry.read_link().unwrap();
     assert_eq!(link, b"file1");
     assert_eq!(link_entry.read_link().unwrap(), b"file1");
@@ -455,7 +450,7 @@ fn accessor_static_filesystem_api_reads_metadata_and_data() {
         name.as_slice() == b"trusted.nydus.prefetch.blobs" && value.as_slice() == b"1"
     }));
 
-    let blobs = accessor.blob.entries().unwrap();
+    let blobs = core.blobs.entries().unwrap();
     let cached = fs::read(&blobs[0].cache_path).unwrap();
     assert!(cached.iter().any(|byte| *byte != 0));
     assert_eq!(blobs[0].id, blob_id);
@@ -466,22 +461,22 @@ fn fs_entry_fetch_populates_blob_cache_without_reading_data() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, _blob_id, _corpus) = build_test_image(dir.path());
 
-    let accessor = NydusAccessor::new(&bootstrap, config).unwrap();
-    let blobs = accessor.blob.entries().unwrap();
+    let core = NydusCore::new(&bootstrap, config).unwrap();
+    let blobs = core.blobs.entries().unwrap();
     let before = fs::read(&blobs[0].cache_path).unwrap();
     assert!(before.iter().all(|byte| *byte == 0));
 
-    let file1_entry = accessor.fs.open("file1").unwrap();
+    let file1_entry = core.fs.open("file1").unwrap();
     assert!(file1_entry.probe_ranges(12345, 4097).unwrap().is_empty());
     let ranges = file1_entry.fetch_ranges(12345, 4097).unwrap();
     assert!(!ranges.is_empty());
     assert_eq!(ranges[0].source_offset, 12345);
-    assert_ne!(ranges[0].fd, accessor.zero_fd());
+    assert_ne!(ranges[0].fd, core.zero_fd());
     file1_entry.fetch(12345, 4097).unwrap();
     assert_eq!(file1_entry.probe_ranges(12345, 4097).unwrap(), ranges);
 
     let after = fs::read(&blobs[0].cache_path).unwrap();
     assert!(after.iter().any(|byte| *byte != 0));
     file1_entry.fetch(0, 0).unwrap();
-    accessor.fs.open("/").unwrap().fetch(0, 4096).unwrap_err();
+    core.fs.open("/").unwrap().fetch(0, 4096).unwrap_err();
 }

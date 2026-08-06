@@ -366,7 +366,7 @@ prefetch:
 ```
 
 The UFFD feature is optional and does not affect default library or builtin
-accessor builds unless explicitly enabled.
+core builds unless explicitly enabled.
 
 ## Protocol Constraints
 

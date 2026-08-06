@@ -282,7 +282,7 @@ impl GroupMap {
     /// first; otherwise scans the shared bitmap and latches the flag when the
     /// scan proves completion (also healing any ready-count skew left by a
     /// crashed writer). The answer reflects updates from other processes.
-    pub fn all_ready(&self) -> bool {
+    pub fn check_all_ready(&self) -> bool {
         if self.is_all_ready() {
             return true;
         }
@@ -397,12 +397,12 @@ mod tests {
         assert!(!observer.is_ready(7).unwrap());
         writer.set_ready(7).unwrap();
         assert!(observer.is_ready(7).unwrap());
-        assert!(!observer.all_ready());
+        assert!(!observer.check_all_ready());
 
         for index in 0..20 {
             writer.set_ready(index).unwrap();
         }
-        assert!(observer.all_ready());
+        assert!(observer.check_all_ready());
     }
 
     #[test]
@@ -493,7 +493,7 @@ mod tests {
         // a concurrent observer see it without any bitmap scan or reopen.
         assert!(writer.is_all_ready());
         assert!(observer.is_all_ready());
-        assert!(observer.all_ready());
+        assert!(observer.check_all_ready());
 
         // ready_ranges collapses to the whole span on the fast path.
         assert_eq!(observer.ready_ranges(0, 8).unwrap(), vec![0..9]);
@@ -524,7 +524,7 @@ mod tests {
         // Open reconciles the flag from the authoritative bitmap.
         let map = GroupMap::open(&path, group_count).unwrap();
         assert!(map.is_all_ready());
-        assert!(map.all_ready());
+        assert!(map.check_all_ready());
         // The heal path also corrects the advisory ready counter.
         assert_eq!(map.ready_count(), group_count);
     }
@@ -536,7 +536,7 @@ mod tests {
 
         let map = GroupMap::open(&path, 0).unwrap();
         assert!(map.is_all_ready());
-        assert!(map.all_ready());
+        assert!(map.check_all_ready());
     }
 
     #[test]
@@ -545,7 +545,7 @@ mod tests {
         let path = dir.path().join("blob.group.map");
 
         // 9 groups spill into a second bitmap byte; exercise both byte
-        // boundaries and the partial final byte in all_ready().
+        // boundaries and the partial final byte in check_all_ready().
         let map = GroupMap::open(&path, 9).unwrap();
         for index in [0usize, 7, 8] {
             assert!(!map.is_ready(index).unwrap());
@@ -555,11 +555,11 @@ mod tests {
         for index in [1usize, 6] {
             assert!(!map.is_ready(index).unwrap(), "neighbor bit {index} leaked");
         }
-        assert!(!map.all_ready());
+        assert!(!map.check_all_ready());
         for index in 0..9 {
             map.set_ready(index).unwrap();
         }
-        assert!(map.all_ready());
+        assert!(map.check_all_ready());
 
         // Out-of-range indexes are rejected, not silently wrapped.
         assert_eq!(
@@ -600,7 +600,7 @@ mod tests {
         for index in 0..group_count {
             assert!(verify.is_ready(index).unwrap(), "lost update at {index}");
         }
-        assert!(verify.all_ready());
+        assert!(verify.check_all_ready());
     }
 
     #[test]
@@ -620,7 +620,7 @@ mod tests {
         for index in 0..group_count {
             assert!(map.is_ready(index).unwrap());
         }
-        assert!(map.all_ready());
+        assert!(map.check_all_ready());
         let elapsed = start.elapsed();
         // Generous bound (debug builds included): catches only pathological
         // regressions such as reintroducing per-bit file I/O.

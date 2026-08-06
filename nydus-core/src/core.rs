@@ -1,15 +1,15 @@
-//! Host-side accessor for nydus images backing guest virtio-pmem devices.
+//! Host-side core for nydus images backing guest virtio-pmem devices.
 //!
 //! A guest kernel mounts the nydus bootstrap as an EROFS image whose external
 //! devices are virtio-pmem devices backed by the host-side cache data files
 //! (`{cache_dir}/{hex}.blob.data`). Each cache file mirrors the blob's dense
 //! decoded block address space, so a guest read of block `N` lands at byte
-//! `N * 4096` of the backing file. [`NydusAccessor`] exposes the device
-//! table needed to wire up those pmem devices and a [`blob.fetch`] entry point
+//! `N * 4096` of the backing file. [`NydusCore`] exposes the device
+//! table needed to wire up those pmem devices and a [`blobs.fetch`] entry point
 //! that guarantees a block-aligned range is decoded and resident before the
 //! guest touches it.
 //!
-//! [`blob.fetch`]: BlobAccessor::fetch
+//! [`blobs.fetch`]: Blobs::fetch
 
 use std::collections::HashMap;
 use std::fmt;
@@ -33,11 +33,11 @@ use crate::storage::backend::build_backend;
 use crate::storage::prefetch::BlobPrefetcher;
 use crate::utils::{hex_string, parse_sha256_hex};
 
-/// Blob digest used by public accessor APIs.
+/// Blob digest used by public core APIs.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct BlobID([u8; EROFS_BLOB_ID_SIZE]);
+pub struct BlobId([u8; EROFS_BLOB_ID_SIZE]);
 
-impl BlobID {
+impl BlobId {
     pub fn new(bytes: [u8; EROFS_BLOB_ID_SIZE]) -> Self {
         Self(bytes)
     }
@@ -55,19 +55,19 @@ impl BlobID {
     }
 }
 
-impl From<[u8; EROFS_BLOB_ID_SIZE]> for BlobID {
+impl From<[u8; EROFS_BLOB_ID_SIZE]> for BlobId {
     fn from(value: [u8; EROFS_BLOB_ID_SIZE]) -> Self {
         Self::new(value)
     }
 }
 
-impl From<BlobID> for [u8; EROFS_BLOB_ID_SIZE] {
-    fn from(value: BlobID) -> Self {
+impl From<BlobId> for [u8; EROFS_BLOB_ID_SIZE] {
+    fn from(value: BlobId) -> Self {
         value.into_bytes()
     }
 }
 
-impl FromStr for BlobID {
+impl FromStr for BlobId {
     type Err = anyhow::Error;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
@@ -75,7 +75,7 @@ impl FromStr for BlobID {
     }
 }
 
-impl fmt::Display for BlobID {
+impl fmt::Display for BlobId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&hex_string(&self.0))
     }
@@ -87,7 +87,7 @@ pub struct BlobInfo {
     /// 1-based blob index, matching the EROFS device table order.
     pub index: u16,
     /// Blob digest recorded in the device slot.
-    pub id: BlobID,
+    pub id: BlobId,
     /// Start block of this blob in the flattened single-device layout.
     pub mapped_blkaddr: u64,
     /// Start byte offset of this blob in the flattened single-device layout.
@@ -108,12 +108,12 @@ pub struct BlobInfo {
 /// Resolved mmap-ready byte range.
 ///
 /// `fd` is always a real file descriptor. Zero-filled ranges use the
-/// accessor-owned `/dev/zero` fd with `offset == 0`; callers can compare
-/// against [`NydusAccessor::zero_fd`] to recognize those ranges for optimized
+/// core-owned `/dev/zero` fd with `offset == 0`; callers can compare
+/// against [`NydusCore::zero_fd`] to recognize those ranges for optimized
 /// copy-mode handling.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FdRange {
-    /// Raw fd backing this range. The fd is owned by the accessor/cache and
+    /// Raw fd backing this range. The fd is owned by the core/cache and
     /// must not be closed by the caller.
     pub fd: RawFd,
     /// Byte offset within `fd`. For zero-filled ranges this is always `0`.
@@ -121,7 +121,7 @@ pub struct FdRange {
     /// Length in bytes.
     pub len: u64,
     /// Offset in the source view: flattened-device offset for
-    /// [`NydusAccessor`] ranges, file-relative offset for [`FsEntry`] ranges.
+    /// [`NydusCore`] ranges, file-relative offset for [`FsEntry`] ranges.
     pub source_offset: u64,
 }
 
@@ -136,7 +136,7 @@ impl FdRange {
     }
 }
 
-/// File type exposed by the static accessor API, independent of FUSE types.
+/// File type exposed by the static core API, independent of FUSE types.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileType {
     RegularFile,
@@ -210,15 +210,15 @@ pub struct FsEntry {
 
 /// Read-side handle over a nydus image, split into blob data access and
 /// static filesystem metadata/data access.
-pub struct NydusAccessor {
+pub struct NydusCore {
     /// Size in bytes of the standalone bootstrap image passed to [`new`].
     ///
     /// [`new`]: Self::new
     pub bootstrap_size: u64,
     /// Blob table and decoded-cache preparation/fetch APIs.
-    pub blob: BlobAccessor,
+    pub blobs: Blobs,
     /// Static path-based filesystem APIs.
-    pub fs: FsAccessor,
+    pub fs: Fs,
     bootstrap: Arc<File>,
     zero_file: Arc<File>,
     flat_size: u64,
@@ -226,21 +226,21 @@ pub struct NydusAccessor {
 }
 
 /// Blob table and decoded-cache preparation/fetch APIs.
-pub struct BlobAccessor {
+pub struct Blobs {
     reader: Arc<ErofsReader>,
     blob_infos: Vec<ReaderBlobInfo>,
-    index_by_blob_id: HashMap<BlobID, u16>,
-    /// Memoised result of [`BlobAccessor::flat_layout`].
+    index_by_blob_id: HashMap<BlobId, u16>,
+    /// Memoised result of [`Blobs::flat_layout`].
     flat_layout: OnceLock<Vec<BlobInfo>>,
 }
 
 /// Static path-based filesystem APIs.
-pub struct FsAccessor {
+pub struct Fs {
     reader: Arc<ErofsReader>,
     zero_file: Arc<File>,
 }
 
-impl NydusAccessor {
+impl NydusCore {
     /// Parse the bootstrap and config and build the blob table,
     /// deferring all per-blob work: no blob meta is downloaded and no cache
     /// file is created until [`blobs`], [`fetch`], or [`prefetch`] first
@@ -255,7 +255,7 @@ impl NydusAccessor {
     /// "ondemand" redirect blob first (priority) to warm the source blobs'
     /// caches in recorded access order, then prefetches the remaining blobs.
     /// The worker borrows the shared reader, so callers that want network
-    /// access (e.g. the virtio-pmem backend) must construct the accessor while
+    /// access (e.g. the virtio-pmem backend) must construct the core while
     /// the desired network namespace is active so the spawned thread inherits
     /// it.
     ///
@@ -321,37 +321,37 @@ impl NydusAccessor {
         })?;
         let index_by_blob_id = blob_infos
             .iter()
-            .map(|info| (BlobID::from(info.blob_id), info.blob_index))
+            .map(|info| (BlobId::from(info.blob_id), info.blob_index))
             .collect();
         let reader = Arc::new(reader);
 
-        // Kick off background prefetch as soon as the accessor is built when the
+        // Kick off background prefetch as soon as the core is built when the
         // config opts in. The worker holds its own `Arc` clone of the reader,
         // so it keeps running (and keeps the reader alive) independently of the
-        // returned accessor. The handle is detached: prefetch is best-effort
-        // warmup and must never block accessor construction or teardown.
+        // returned core. The handle is detached: prefetch is best-effort
+        // warmup and must never block core construction or teardown.
         if prefetch_enable {
             match BlobPrefetcher::new(reader.clone(), prefetch_threads, prefetch_full).spawn() {
                 Ok(_handle) => {
                     tracing::info!(
-                        "nydus accessor: background prefetch started (full={prefetch_full})"
+                        "nydus core: background prefetch started (full={prefetch_full})"
                     );
                 }
                 Err(err) => {
-                    tracing::warn!("nydus accessor: failed to start prefetch worker: {err}");
+                    tracing::warn!("nydus core: failed to start prefetch worker: {err}");
                 }
             }
         }
 
         Ok(Self {
             bootstrap_size,
-            blob: BlobAccessor {
+            blobs: Blobs {
                 reader: reader.clone(),
                 blob_infos,
                 index_by_blob_id,
                 flat_layout: OnceLock::new(),
             },
-            fs: FsAccessor {
+            fs: Fs {
                 reader,
                 zero_file: zero_file.clone(),
             },
@@ -362,7 +362,7 @@ impl NydusAccessor {
         })
     }
 
-    /// Return the bootstrap file backing this accessor.
+    /// Return the bootstrap file backing this core.
     pub fn bootstrap(&self) -> &File {
         &self.bootstrap
     }
@@ -372,7 +372,7 @@ impl NydusAccessor {
         self.flat_size
     }
 
-    /// Return the accessor-owned `/dev/zero` fd used for zero-filled ranges.
+    /// Return the core-owned `/dev/zero` fd used for zero-filled ranges.
     pub fn zero_fd(&self) -> RawFd {
         self.zero_file.as_raw_fd()
     }
@@ -392,24 +392,24 @@ impl NydusAccessor {
         self.resolve_flat_ranges(offset, len, ResolveMode::Probe)
     }
 
-    /// Return a stable snapshot of this accessor's on-demand group trace.
+    /// Return a stable snapshot of this core's on-demand group trace.
     pub fn trace_snapshot(&self) -> TraceDocument {
         self.trace_recorder.snapshot()
     }
 
-    /// Serialize this accessor's on-demand group trace as optimize-compatible JSON.
+    /// Serialize this core's on-demand group trace as optimize-compatible JSON.
     pub fn trace_json(&self) -> String {
         self.trace_recorder.encode_json()
     }
 
-    /// Clear this accessor's on-demand group trace.
+    /// Clear this core's on-demand group trace.
     pub fn clear_trace(&self) {
         self.trace_recorder.clear();
     }
 
     /// Return a snapshot of the process-wide nydus metrics (counters and
     /// gauges). The metrics are global, so this reflects all blob activity in
-    /// the process, not just this accessor; callers typically inspect
+    /// the process, not just this core; callers typically inspect
     /// `backend_ondemand_read_count` to tell whether any group was fetched
     /// over the network rather than served from a warmed cache.
     pub fn metrics_snapshot(&self) -> crate::metrics::MetricsSnapshot {
@@ -446,7 +446,7 @@ impl NydusAccessor {
         }
 
         let blobs = self
-            .blob
+            .blobs
             .flat_layout()
             .context("failed to describe blob device layout")?;
 
@@ -464,7 +464,7 @@ impl NydusAccessor {
                 let seg_end = end.min(blob_end);
                 let blob_offset = pos - blob.mapped_offset;
                 push_blob_fd_ranges(
-                    &self.blob.reader,
+                    &self.blobs.reader,
                     self.zero_file.as_raw_fd(),
                     &mut ranges,
                     BlobRangeSpec {
@@ -500,7 +500,7 @@ impl NydusAccessor {
     }
 }
 
-impl BlobAccessor {
+impl Blobs {
     /// Describe every blob in device-table order, preparing each on first
     /// use: the blob meta is downloaded and validated, and the sparse cache
     /// data file is created and sized to the dense uncompressed address
@@ -527,7 +527,7 @@ impl BlobAccessor {
                     .context("blob cache size overflow")?;
                 Ok(BlobInfo {
                     index: info.blob_index,
-                    id: BlobID::from(info.blob_id),
+                    id: BlobId::from(info.blob_id),
                     mapped_blkaddr: info.mapped_blkaddr,
                     mapped_offset,
                     blocks: info.blocks,
@@ -542,11 +542,11 @@ impl BlobAccessor {
     /// Describe the blobs that back the flattened single-device address
     /// space, sorted by `mapped_offset` and with redirect blobs removed.
     ///
-    /// The layout is fixed for the lifetime of the accessor, so it is computed
+    /// The layout is fixed for the lifetime of the core, so it is computed
     /// once and memoised: block-device style workloads resolve ranges on every
     /// I/O and must not pay for re-enumerating (and re-sorting) the blob table
     /// each time. The first call prepares every blob, exactly as
-    /// [`BlobAccessor::entries`] does.
+    /// [`Blobs::entries`] does.
     pub fn flat_layout(&self) -> Result<&[BlobInfo]> {
         if let Some(layout) = self.flat_layout.get() {
             return Ok(layout);
@@ -568,7 +568,7 @@ impl BlobAccessor {
     /// file, fetching missing groups through the backend. Both `offset` and
     /// `len` must be 4 KiB block aligned; the fetch rounds outward to whole
     /// blob meta groups. Idempotent and safe to call concurrently.
-    pub fn fetch(&self, id: &BlobID, offset: u64, len: u64) -> Result<()> {
+    pub fn fetch(&self, id: &BlobId, offset: u64, len: u64) -> Result<()> {
         let block_size = EROFS_BLOCK_SIZE as u64;
         if offset % block_size != 0 || len % block_size != 0 {
             bail!("fetch range must be 4 KiB block aligned: offset={offset} len={len}");
@@ -594,7 +594,7 @@ impl BlobAccessor {
     /// without triggering a backend fetch. The groupmap remains authoritative.
     pub fn ready_ranges(
         &self,
-        id: &BlobID,
+        id: &BlobId,
         offset: u64,
         len: u64,
     ) -> Result<Vec<std::ops::Range<u64>>> {
@@ -619,7 +619,7 @@ impl BlobAccessor {
     /// scan). On-demand services (uffd, fanotify, FUSE) can consult this per
     /// event — or once per blob, since the answer is sticky — to bypass range
     /// readiness checks and fetch plumbing entirely for fully warmed blobs.
-    pub fn fully_ready(&self, id: &BlobID) -> Result<bool> {
+    pub fn is_fully_ready(&self, id: &BlobId) -> Result<bool> {
         let blob_index = *self
             .index_by_blob_id
             .get(id)
@@ -628,11 +628,11 @@ impl BlobAccessor {
             .reader
             .blob_cache(blob_index)
             .with_context(|| format!("failed to open blob {blob_index}"))?;
-        Ok(cache.fully_ready())
+        Ok(cache.is_fully_ready())
     }
 }
 
-impl FsAccessor {
+impl Fs {
     /// Resolve `path` once and return a reusable entry handle.
     pub fn open(&self, path: impl AsRef<Path>) -> Result<FsEntry> {
         let ino = self.resolve_path(path.as_ref())?;

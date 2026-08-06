@@ -49,7 +49,7 @@ kernels without `FAN_CLASS_PRE_CONTENT` (Linux < 6.15); it only needs the
 
 ## Flattened Device Layout
 
-The device content is the accessor's flattened view, identical to the UFFD
+The device content is the core's flattened view, identical to the UFFD
 service's layout (see [Nydus UFFD Service and Wire Protocol](uffd.md)):
 
 ```text

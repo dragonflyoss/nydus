@@ -3,7 +3,7 @@ name = "nydus"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "EROFS-oriented image tooling and runtime accessor APIs for Nydus images."
+description = "EROFS-oriented image tooling and runtime core APIs for Nydus images."
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "../README.md"
 
@@ -31,7 +31,7 @@ cli = [
   "dep:tracing-subscriber",
 ]
 # Device-level userfaultfd service for microVM virtio-pmem use cases.
-# This is intentionally not part of the default or builtin accessor path.
+# This is intentionally not part of the default or builtin core path.
 uffd = [
   "dep:sendfd",
   "dep:tokio",

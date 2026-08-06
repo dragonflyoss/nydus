@@ -55,7 +55,7 @@ impl BlobPrefetcher {
         // not spent pulling whole source blobs.
         for blob_index in priority {
             if !self.full {
-                match self.reader.blob_is_redirect(blob_index) {
+                match self.reader.is_redirect_blob(blob_index) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(err) => {

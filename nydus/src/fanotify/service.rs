@@ -1,6 +1,6 @@
 //! Fanotify pre-content group setup and an event coordinator (epoll + thread pool).
 //!
-//! The coordinator runs one event loop and never runs the synchronous accessor
+//! The coordinator runs one event loop and never runs the synchronous core
 //! fetch inline. Each event dispatches its fetch to a thread pool; the task
 //! reports every result back through a completion channel. Concurrency is
 //! bounded by the pool size (--fetch-concurrency).
@@ -21,7 +21,7 @@ use std::thread;
 use anyhow::{anyhow, Context, Result};
 use tracing::{debug, warn};
 
-use crate::BlobID;
+use crate::BlobId;
 
 use super::core::{
     align_fetch_range, decide, fd_identity, Decision, DenyReason, FanotifyCore, FetchError,
@@ -54,7 +54,7 @@ struct Completion {
 
 /// Coalescing key: identical (blob, aligned offset, aligned length) reads share
 /// one fetch job and are all answered by its single completion.
-type FetchKey = (BlobID, u64, u64);
+type FetchKey = (BlobId, u64, u64);
 
 /// One in-flight fetch job and every permission event waiting on it. Concurrent
 /// reads of the same range (common at container start: many tasks page in the
@@ -257,7 +257,7 @@ impl FanotifyService {
 
         for (slot, device) in core.devices().iter().enumerate() {
             if core
-                .range_ready(&device.id, 0, device.cache_size)
+                .is_range_ready(&device.id, 0, device.cache_size)
                 .unwrap_or(false)
             {
                 // Record that this slot's mark was never added, so runtime
@@ -676,7 +676,7 @@ fn admit_event(
             return Ok(());
         }
     };
-    match core.range_ready(&device.id, offset, count) {
+    match core.is_range_ready(&device.id, offset, count) {
         Ok(true) => {
             debug!(
                 "fanotify: range [{}, +{}) already ready for blob {}; allowing immediately",
@@ -961,7 +961,7 @@ mod tests {
     }
 
     fn key() -> FetchKey {
-        (BlobID::from_str(&format!("{:064x}", 7)).unwrap(), 0, 4096)
+        (BlobId::from_str(&format!("{:064x}", 7)).unwrap(), 0, 4096)
     }
 
     /// Two readers coalesced onto one job both receive the fetch's decision.
