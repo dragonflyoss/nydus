@@ -45,15 +45,21 @@ encoded ranges in the stored data region.
 
 `nydus build [OPTIONS] <SOURCE>`
 
-The `nydus build` command builds a source directory into EROFS format. It
-optionally emits a standalone metadata-only bootstrap via `--bootstrap`, while
-`--blob` remains the primary artifact and contains the encoded data region,
-bootstrap, blob meta, and footer in one file. `--blob-dir` is an alternative
-output mode that writes the full blob into the target directory through a
-temporary random file, computes the full artifact SHA256, and finally renames the
-file to that SHA256. The standalone bootstrap records the SHA256 blob id for the
-data region in its device-table metadata so runtime can resolve the
-corresponding full blob later.
+The `nydus build` command converts between a directory tree and the nydus
+format. The direction is selected by `--type`:
+
+- `dir-nydus` (default) builds a source directory into EROFS format.
+- `nydus-tar` unpacks a nydus full blob back into an uncompressed OCI layer tar
+  stream.
+
+In the `dir-nydus` direction it optionally emits a standalone metadata-only
+bootstrap via `--bootstrap`, while `--blob` remains the primary artifact and
+contains the encoded data region, bootstrap, blob meta, and footer in one file.
+`--blob-dir` is an alternative output mode that writes the full blob into the
+target directory through a temporary random file, computes the full artifact
+SHA256, and finally renames the file to that SHA256. The standalone bootstrap
+records the SHA256 blob id for the data region in its device-table metadata so
+runtime can resolve the corresponding full blob later.
 
 Current CLI help:
 
@@ -64,17 +70,19 @@ Create an nydus filesystem image (chunk-based)
 Usage: nydus build [OPTIONS] <SOURCE>
 
 Arguments:
-	<SOURCE>  Source directory to build the image from
+	<SOURCE>  Source to build from: a directory for `dir-nydus`, a nydus full blob for `nydus-tar`
 
 Options:
 	--type <CONVERSION_TYPE>
-		Conversion type [default: dir-nydus] [possible values: dir-nydus]
+		Conversion type [default: dir-nydus] [possible values: dir-nydus, nydus-tar]
 	--blob <BLOB>
 		File path to save the generated nydus full blob
 	--blob-dir <BLOB_DIR>
 		Directory path to save the generated nydus full blob with its SHA256 file name
 	--bootstrap <BOOTSTRAP>
 		File path to save the generated nydus bootstrap
+	--output <OUTPUT>
+		`nydus-tar` only: file path to save the generated tar stream, or `-` for stdout [default: -]
 	--chunk-size <CHUNK_SIZE>
 		File chunk size in bytes (must be a power of two, >= 4KiB, and 4KiB-aligned) [default: 1048576]
 	--compress-size <COMPRESS_SIZE>
@@ -89,7 +97,7 @@ Options:
 
 Current implementation notes:
 
-- Either `--blob` or `--blob-dir` is required.
+- Either `--blob` or `--blob-dir` is required for `--type dir-nydus`.
 - `--bootstrap` is optional and emits a standalone metadata-only artifact.
 - `--chunk-size` defaults to `1048576` (1 MiB) and controls EROFS file chunk
 	indexes (the unit of file splitting and per-chunk BLAKE3 digests). Chunks are
@@ -120,6 +128,51 @@ Current implementation notes:
 	`data_blob_digest`, `full_blob_digest`, `chunk_size`, `chunk_count`,
 	`group_count`, `chunk_digester`, `chunk_compressor`,
 	compressed/uncompressed totals, and full blob region offsets and block counts.
+
+#### Unpacking back to a tar stream
+
+`nydus build --type nydus-tar <BLOB> [--output <path>|-]`
+
+A nydus full blob is self-describing: it carries the filesystem tree, the chunk
+data and the footer of exactly one layer. Unpacking therefore needs nothing but
+that one file — no merged bootstrap, no lower layer, no storage backend,
+and no on-demand fetching.
+
+The unpacker walks the embedded EROFS tree from the root inode and emits one
+tar entry per inode, streaming file data straight out of the blob:
+
+- Mode, uid, gid, size, rdev and mtime come from the inode. A non-zero
+	sub-second mtime is emitted as a PAX `mtime` record.
+- Extended attributes become PAX `SCHILY.xattr.*` records. The internal
+	`trusted.nydus.*` attributes are dropped: they only drive the nydus runtime.
+- Hard links reuse the first path visited. That entry is a regular file and
+	every later path for the same inode becomes a tar hard link pointing at it.
+- Sockets cannot be represented in tar and are skipped with a warning.
+- OCI whiteouts need no special handling. `nydusify` extracts `.wh.*` markers
+	verbatim when it builds a layer, so they are ordinary inodes in the blob and
+	round-trip as ordinary tar entries.
+
+Current implementation notes:
+
+- `<SOURCE>` must be a regular file, because the blob is memory-mapped.
+- `--blob`, `--blob-dir`, `--bootstrap` and `--exclude` are rejected in this
+	direction.
+- With `--output -` the tar goes to stdout and logging is redirected to stderr,
+	so the stream stays clean for piping.
+- Entries follow EROFS directory order, which is sorted by name, so the output
+	is deterministic for a given blob.
+- The rebuilt tar is not a byte-for-byte copy of the layer the blob was built
+	from: framing details such as the tar flavor and entry ordering are not
+	recorded in the image. Content and metadata round-trip, the layer digest does
+	not.
+
+```bash
+# Inspect a layer without mounting it.
+nydus build --type nydus-tar layer.blob --output - | tar -tvf -
+
+# Materialize the layer as an OCI layer tar.
+nydus build --type nydus-tar layer.blob --output layer.tar
+```
 
 ### Merge
 
@@ -1702,7 +1755,8 @@ artifacts and are not directly consumable as plain EROFS external devices.
 Go orchestrator that wraps `nydus` to operate on whole OCI images in a registry:
 it pulls one or more sources (OCI images and/or local directories), converts
 them into a nydus image, pushes the result, and can validate that the converted
-image is faithful to its source.
+image is faithful to its source. It also runs the conversion in reverse,
+turning a nydus image back into a plain OCI image.
 
 `nydusify` lives in `nydusify/` as its own Go module
 (`github.com/dragonflyoss/nydus/nydusify`) and shells out to the `nydus`
@@ -1720,6 +1774,14 @@ binary for the actual filesystem work (`nydus build`, `nydus merge`,
    all blobs: nydus merge                            pass / fail
               |
   registry <--push-- nydus image
+
+        nydusify convert --compressor oci-gzip|oci-zstd|oci-tar
+        --------------------------------------------------------
+  registry --pull--> content store
+              |
+   per blob layer: nydus build --type nydus-tar, then recompress
+              |
+  registry <--push-- OCI image
 ```
 
 ### Image format
@@ -1734,6 +1796,11 @@ nydus-aware snapshotters and tooling can consume it (see
   layer level, so its diff id equals the blob digest.
 - One extra **bootstrap** layer is appended last as a gzip tarball containing
   `image/image.boot`, annotated with `containerd.io/snapshot/nydus-bootstrap`.
+- The ondemand blob appended by `nydusify optimize` is a nydus blob layer that
+  additionally carries `containerd.io/snapshot/nydus-blob-optimized`. It holds a
+  rearranged copy of data already present in the other blobs and describes no
+  filesystem tree of its own, so consumers that walk the layers (such as the
+  reverse conversion) can tell it apart without parsing the blob.
 - The platform manifest is marked with the
   `nydus.remoteimage.v1` OS feature to flag it as a lazy-loadable remote image.
 - Only `RootFS.DiffIDs` and `History` are rewritten in the image config; all
@@ -1779,6 +1846,7 @@ pull/push:
 | `nydusify` | Underlying `nydus` subcommands | Registry |
 | --- | --- | --- |
 | `convert` | `nydus build` (per OCI layer / per directory source) + `nydus merge` (all blobs) | pull sources, push target |
+| `convert --compressor oci-*` | `nydus build --type nydus-tar` (per blob layer) | pull source, push target |
 | `check` | `nydus check` (bootstrap rule) + `nydus fuse` (filesystem rule) | pull source and/or target |
 
 The `--builder` flag selects which `nydus` binary is invoked for all of the
@@ -1786,11 +1854,19 @@ above, so `nydusify` and `nydus` versions can be pinned together.
 
 ### convert
 
-`nydusify convert --source <oci-ref|dir> [--source <oci-ref|dir> ...] --target <nydus-ref> [OPTIONS]`
+`nydusify convert --source <oci-ref|dir> [--source <oci-ref|dir> ...] --target <ref> [OPTIONS]`
 
-Converts one or more sources into a nydus image and pushes it to the target
-reference. A source is either an OCI image reference (pulled into a local
-content store) or a local directory path (built directly with `nydus build`).
+Converts an image between OCI and nydus format and pushes it to the target
+reference. `--compressor` picks the direction: `none` and `zstd` are nydus chunk
+compressors and run the OCI to nydus conversion, while the `oci-` prefixed
+values run the reverse and select the layer compression of the rebuilt OCI
+image. An unknown value is rejected up front rather than silently running the
+wrong direction.
+
+#### OCI to nydus
+
+A source is either an OCI image reference (pulled into a local content store) or
+a local directory path (built directly with `nydus build`).
 
 With a single image source, the classic whole-image conversion runs (all
 platforms by default). With a single directory source, a one-layer nydus image
@@ -1829,17 +1905,56 @@ Pipeline (multiple and/or directory sources, `internal/converter/multi.go`):
    source when present; otherwise a minimal config is synthesized. Push to
    `--target`.
 
+#### nydus to OCI
+
+`nydusify convert --compressor oci-gzip|oci-zstd|oci-tar --source <nydus-ref> --target <oci-ref>`
+
+Rebuilds a plain OCI image from a nydus image. Exactly one image source is
+expected; directory sources and stacking do not apply.
+
+Every nydus data layer is a self-contained full blob covering exactly one OCI
+layer, so each one is unpacked on its own and the merged bootstrap is simply
+dropped (`internal/converter/tooci.go`):
+
+1. Pull `--source` and classify its layers by annotation. Layers carrying
+   `nydus-bootstrap` or `nydus-blob-optimized` describe no filesystem tree and
+   are dropped; the remaining nydus blob layers are the data layers. A manifest
+   that is not a nydus image is rejected.
+2. For each data layer, materialize the blob (the unpacker memory-maps it), run
+   `nydus build --type nydus-tar` and pipe the tar into the configured
+   compressor and into the content store, hashing the uncompressed stream on the
+   way through to get the diff id. Layers are independent, so they are unpacked
+   concurrently up to `GOMAXPROCS`; each concurrent layer stages a full blob
+   copy in `--work-dir`.
+3. Rebuild the config and manifest: fresh diff ids, the `nydus.remoteimage.v1`
+   OS feature cleared, the bootstrap layer removed, and the history entries of
+   the removed layers trimmed. Runtime config fields are preserved verbatim.
+4. Push to `--target`.
+
+Layer media types follow the compressor: `oci-gzip` produces
+`application/vnd.oci.image.layer.v1.tar+gzip`, `oci-zstd` produces
+`...tar+zstd`, and `oci-tar` produces the uncompressed `...tar`.
+
+Two properties do not survive the round trip:
+
+- **Layer digests change.** The rebuilt tar is not a byte-for-byte copy of the
+  original layer, so its diff id (and therefore the config and manifest digest)
+  differs from the image the nydus one was converted from. Content and file
+  metadata do round-trip.
+- **Files bundled with `--append-in-bootstrap` are lost.** They only ever
+  existed in the bootstrap layer, which the reverse conversion drops.
+
 Flags:
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `--source`, `-s` | required | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. |
-| `--target`, `-t` | required | Target nydus image reference to push. |
+| `--source`, `-s` | required | Source OCI image reference or local directory path. Repeatable; multiple sources are stacked in order (lower to upper) into one image. Converting back to OCI takes exactly one image source. |
+| `--target`, `-t` | required | Target image reference to push. |
 | `--builder` | `nydus` | Path to the `nydus` binary (PATH-resolvable). |
 | `--work-dir` | temp dir | Scratch directory; a temp dir is created and removed when omitted. |
-| `--chunk-size` | `1048576` | Nydus file chunk size in bytes (1 MiB). |
-| `--compress-size` | `4194304` | Blob meta group uncompressed size in bytes; a power of two, at least 1 MiB and at least `--chunk-size`. |
-| `--compressor` | `zstd` | Chunk data compressor: `none` or `zstd`. |
+| `--chunk-size` | `1048576` | Nydus file chunk size in bytes (1 MiB). Ignored when converting back to OCI. |
+| `--compress-size` | `4194304` | Blob meta group uncompressed size in bytes; a power of two, at least 1 MiB and at least `--chunk-size`. Ignored when converting back to OCI. |
+| `--compressor` | `zstd` | Direction and compression. `none`/`zstd`: chunk data compressor for OCI to nydus. `oci-gzip`/`oci-zstd`/`oci-tar`: layer compression of the rebuilt OCI image for nydus to OCI. |
 | `--platform` | all | Convert only the given platform (e.g. `linux/amd64`). |
 | `--append-in-bootstrap` | empty | Local file paths to bundle into the bootstrap layer tar alongside `image.boot`; files inside a directory source are excluded from that source's blob data region. |
 | `--insecure` | `false` | Skip TLS verification for the registry. |
@@ -1856,6 +1971,8 @@ Notes:
 - Multiple sources are merged into one single-platform manifest, so image
   sources are resolved against exactly one platform: `--platform`, or the host
   platform when omitted.
+- Converting back to OCI needs no root: it only reads blobs and writes tar
+  streams, it never materializes a rootfs.
 - Image references are normalized like a container runtime: a bare name such as
   `mariadb` expands to `docker.io/library/mariadb:latest`, and a tagless
   reference defaults to `:latest`.
@@ -1882,6 +1999,13 @@ nydusify convert \
   --source ./layer-data \
   --source ./layer-config \
   --target localhost:5000/app-nydus \
+  --plain-http
+
+# Convert a nydus image back to a plain OCI image with gzip layers.
+nydusify convert \
+  --compressor oci-gzip \
+  --source localhost:5000/mariadb-nydus \
+  --target localhost:5000/mariadb-oci \
   --plain-http
 ```
 
@@ -1961,9 +2085,11 @@ Publishes an optimized copy of a nydus image from a recorded access pattern:
 	registry-backed storage config so source group data is range-read from the
 	source registry on demand.
 3. Assemble the optimized manifest: the original data layers are reused as-is,
-	the ondemand blob is appended as a new nydus data layer, and the bootstrap
-	layer is rebuilt with the rewritten `image.boot` plus all blob metas
-	(including the ondemand one). Config diff ids and history are updated.
+	the ondemand blob is appended as a new nydus data layer (annotated with
+	`containerd.io/snapshot/nydus-blob-optimized` so it is recognizable without
+	parsing it), and the bootstrap layer is rebuilt with the rewritten
+	`image.boot` plus all blob metas (including the ondemand one). Config diff
+	ids and history are updated.
 4. Push the result to `--target`.
 
 `--pattern` is a JSON access-pattern file in the same format served by a
@@ -2002,4 +2128,9 @@ The current validation surface is:
 3. Integration tests for build full blob, build standalone bootstrap, direct
 	blob mount, bootstrap plus blob-dir mount, cache artifact naming, merge, OCI
 	whiteouts, and optional erofs-utils compatibility.
-4. xfstests and fio-backed performance checks for mount behavior.
+4. Round-trip coverage for the reverse conversion: `nydus build --type
+	nydus-tar` against a freshly built blob at the unit level, and an image-level
+	test that pushes a multi-layer OCI image, converts it to nydus and back for
+	every `oci-` compressor, and diffs the nydus mount against the rebuilt OCI
+	rootfs with `nydusify check`.
+5. xfstests and fio-backed performance checks for mount behavior.

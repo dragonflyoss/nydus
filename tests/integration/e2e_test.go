@@ -1125,7 +1125,8 @@ func TestNydusifyOptimizeE2E(t *testing.T) {
 	// reproduce the original layers.
 	t.Log("Converting the optimized image back to OCI...")
 	backRef := optRef + "-oci"
-	runNydusifyCommand(t, nydusifyBin, nydusBin, "convert", "--to-oci",
+	runNydusifyCommand(t, nydusifyBin, nydusBin, "convert",
+		"--compressor", "oci-gzip",
 		"--source", optRef, "--target", backRef,
 		"--work-dir", filepath.Join(tmpDir, "tooci"))
 	runNydusifyCommand(t, nydusifyBin, nydusBin, "check",

@@ -46,18 +46,18 @@ func main() {
 func convertCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "convert",
-		Usage: "Pull an OCI image, convert it to a nydus image, and push the result",
+		Usage: "Convert an image between OCI and nydus format and push the result",
 		Flags: []cli.Flag{
 			&cli.StringSliceFlag{
 				Name:     "source",
 				Aliases:  []string{"s"},
-				Usage:    "source OCI image reference (e.g. registry/repo:tag) or local directory path; can be repeated to stack multiple sources (lower to upper) into one nydus image with a single merged bootstrap",
+				Usage:    "source image reference (e.g. registry/repo:tag) or local directory path; can be repeated to stack multiple sources (lower to upper) into one nydus image with a single merged bootstrap",
 				Required: true,
 			},
 			&cli.StringFlag{
 				Name:     "target",
 				Aliases:  []string{"t"},
-				Usage:    "target nydus image reference to push",
+				Usage:    "target image reference to push",
 				Required: true,
 			},
 			&cli.StringFlag{
@@ -81,7 +81,7 @@ func convertCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "compressor",
-				Usage: "chunk data compressor: none or zstd",
+				Usage: "OCI to nydus: chunk data compressor, none or zstd. nydus to OCI: oci-gzip, oci-zstd or oci-tar, selecting the layer compression of the rebuilt OCI image",
 				Value: "zstd",
 			},
 			&cli.StringFlag{
@@ -113,15 +113,6 @@ func convertCommand() *cli.Command {
 				Name:  "append-in-bootstrap",
 				Usage: "local file paths to bundle into the bootstrap layer alongside image.boot; files inside --source are excluded from the blob data region",
 			},
-			&cli.BoolFlag{
-				Name:  "to-oci",
-				Usage: "reverse the conversion: unpack a nydus image back to a plain OCI image",
-			},
-			&cli.StringFlag{
-				Name:  "oci-compressor",
-				Usage: "--to-oci only: layer compression of the produced OCI image: gzip, zstd or none",
-				Value: "gzip",
-			},
 		},
 		Action: runConvert,
 	}
@@ -139,6 +130,14 @@ func runConvert(c *cli.Context) error {
 	target := c.String("target")
 	appendFiles := c.StringSlice("append-in-bootstrap")
 	multiSource := len(sources) > 1
+
+	// The compressor picks the conversion direction, so reject unknown values
+	// instead of silently running the wrong one.
+	compressor := c.String("compressor")
+	toOCI := converter.IsOCICompressor(compressor)
+	if !toOCI && compressor != "none" && compressor != "zstd" {
+		return errors.Errorf("unsupported --compressor %q, expected none, zstd, oci-gzip, oci-zstd or oci-tar", compressor)
+	}
 
 	// Detect whether --source is a local directory (instead of an OCI image
 	// reference). When the source is a directory, we use ConvertLocalDir
@@ -202,9 +201,9 @@ func runConvert(c *cli.Context) error {
 
 	var newDesc *ocispec.Descriptor
 
-	if c.Bool("to-oci") {
+	if toOCI {
 		if multiSource || isLocalDir {
-			return errors.New("--to-oci expects exactly one nydus image as --source")
+			return errors.New("converting back to OCI expects exactly one nydus image as --source")
 		}
 
 		logrus.Infof("pulling nydus image %s", source)
@@ -217,7 +216,7 @@ func runConvert(c *cli.Context) error {
 		newDesc, err = converter.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, converter.ToOCIOption{
 			BuilderPath: c.String("builder"),
 			WorkDir:     scratchDir,
-			Compressor:  c.String("oci-compressor"),
+			Compressor:  compressor,
 			LogLevel:    c.String("log-level"),
 		})
 		if err != nil {
@@ -253,7 +252,7 @@ func runConvert(c *cli.Context) error {
 			WorkDir:           scratchDir,
 			ChunkSize:         uint32(c.Uint("chunk-size")),
 			CompressSize:      uint32(c.Uint("compress-size")),
-			Compressor:        c.String("compressor"),
+			Compressor:        compressor,
 			LogLevel:          c.String("log-level"),
 			Platform:          platform,
 			Sources:           srcs,
@@ -269,7 +268,7 @@ func runConvert(c *cli.Context) error {
 			WorkDir:           scratchDir,
 			ChunkSize:         uint32(c.Uint("chunk-size")),
 			CompressSize:      uint32(c.Uint("compress-size")),
-			Compressor:        c.String("compressor"),
+			Compressor:        compressor,
 			LogLevel:          c.String("log-level"),
 			SourceDir:         source,
 			AppendInBootstrap: appendFiles,
