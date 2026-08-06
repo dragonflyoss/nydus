@@ -1,6 +1,6 @@
 # nydus-core
 
-Runtime accessor APIs for EROFS-based Nydus images.
+Runtime core APIs for EROFS-based Nydus images.
 
 This crate provides the host-side building blocks used to serve Nydus images
 at runtime:
@@ -10,7 +10,7 @@ at runtime:
 - `storage`: on-demand blob cache, storage backends (`local`, and `registry`
   behind the `backend-registry` feature) and background prefetching.
 - `fs`: an EROFS image reader (`ErofsReader`).
-- `accessor`: the high-level `NydusAccessor` entry point exposing the device
+- `core`: the high-level `NydusCore` entry point exposing the device
   table and block-aligned `fetch` APIs for microVM virtio-pmem use cases.
 
 ## Features

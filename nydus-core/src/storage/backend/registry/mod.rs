@@ -188,7 +188,7 @@ impl RegistryState {
         self.token_expires_at.store(None);
     }
 
-    fn get_redirect(&self, hex: &str) -> Option<String> {
+    fn redirect(&self, hex: &str) -> Option<String> {
         self.cached_redirect.read().unwrap().get(hex).cloned()
     }
 
@@ -394,7 +394,7 @@ impl Registry {
         let range = format!("bytes={offset}-{end}");
 
         // Fast path: a previously cached redirect URL.
-        if let Some(redirect) = self.state.get_redirect(&hex) {
+        if let Some(redirect) = self.state.redirect(&hex) {
             let mut headers = HeaderMap::new();
             headers.insert(RANGE, range.parse().unwrap());
             let resp = self

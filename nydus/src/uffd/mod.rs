@@ -1,6 +1,6 @@
 //! Device-level userfaultfd service for flattened Nydus virtio-pmem images.
 //!
-//! This module is feature-gated by `uffd` so builtin accessor users do not pull
+//! This module is feature-gated by `uffd` so builtin core users do not pull
 //! in the tokio-based server stack.
 
 pub mod core;

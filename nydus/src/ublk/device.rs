@@ -1,6 +1,6 @@
 //! Flattened block-device view of a nydus image.
 //!
-//! [`UblkDevice`] turns [`NydusAccessor`]'s flattened device view into a plain
+//! [`UblkDevice`] turns [`NydusCore`]'s flattened device view into a plain
 //! `read_at(offset, buf)` interface: the bootstrap is exposed at the beginning
 //! of the address space, each blob at the `mapped_blkaddr` recorded in the
 //! bootstrap device table, and the gaps in between as zeroes. That is exactly
@@ -15,8 +15,8 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 
-use crate::accessor::{FdRange, NydusAccessor};
 use crate::config::Config;
+use crate::core::{FdRange, NydusCore};
 use crate::metadata::EROFS_BLOCK_SIZE;
 
 /// Logical block size exposed by the ublk device. Matching the EROFS block size
@@ -25,7 +25,7 @@ pub const UBLK_LOGICAL_BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 
 /// Read-only block device backed by a nydus image.
 pub struct UblkDevice {
-    accessor: NydusAccessor,
+    core: NydusCore,
     zero_fd: RawFd,
     size: u64,
     maps: FileMaps,
@@ -37,24 +37,23 @@ impl UblkDevice {
     /// table are prepared up front, and background prefetch follows
     /// `config.prefetch`.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
-        let accessor = NydusAccessor::new(bootstrap, config)
+        let core = NydusCore::new(bootstrap, config)
             .context("failed to open nydus image for the ublk device")?;
-        let zero_fd = accessor.zero_fd();
+        let zero_fd = core.zero_fd();
         // Round the device size up to a whole block: the kernel always reads in
         // block units, and the tail block of the last blob may be partial.
-        let size = round_up(accessor.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
+        let size = round_up(core.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
             .context("flattened device size overflow")?;
         // Preparing a blob downloads and validates its meta and sizes its cache
         // file, which takes seconds for a large image. Left to the first block
         // read it stalls whoever gets there first — typically `mount`, which
         // then appears to hang long after the device was announced as ready.
-        accessor
-            .blob
+        core.blobs
             .flat_layout()
             .context("failed to prepare the blobs backing the device")?;
 
         Ok(Self {
-            accessor,
+            core,
             zero_fd,
             size,
             maps: FileMaps::default(),
@@ -67,9 +66,9 @@ impl UblkDevice {
         self.size
     }
 
-    /// Borrow the underlying accessor, e.g. to snapshot metrics.
-    pub fn accessor(&self) -> &NydusAccessor {
-        &self.accessor
+    /// Borrow the underlying core, e.g. to snapshot metrics.
+    pub fn core(&self) -> &NydusCore {
+        &self.core
     }
 
     /// Read `buf.len()` bytes at `offset` of the flattened device.
@@ -89,7 +88,7 @@ impl UblkDevice {
 
         let len = (buf.len() as u64).min(self.size - offset);
         let ranges = self
-            .accessor
+            .core
             .fetch_flat_ranges(offset, len)
             .map_err(|err| io::Error::other(format!("{err:#}")))?;
 
@@ -205,7 +204,7 @@ impl Mapping {
             return None;
         }
         let len = usize::try_from(stat.st_size).ok().filter(|len| *len > 0)?;
-        // SAFETY: `fd` is a readable regular file owned by the accessor and
+        // SAFETY: `fd` is a readable regular file owned by the core and
         // kept open for the whole life of the device.
         let addr = unsafe {
             libc::mmap(
@@ -260,7 +259,7 @@ impl Drop for Mapping {
 /// Read `buf.len()` bytes at `offset` from `fd`, zero-filling the tail on EOF.
 ///
 /// Blob cache files are sparse and sized to the blob's dense block address
-/// space, but a short read can still happen when the accessor resolved a range
+/// space, but a short read can still happen when the core resolved a range
 /// that extends past the current file size; treat it the same way a block
 /// device treats an unwritten sector.
 fn pread_exact(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<()> {

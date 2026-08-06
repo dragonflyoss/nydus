@@ -36,15 +36,15 @@ impl ErofsInodeCompact {
         i_gid: u16,
     ) -> Self {
         let mut v: Self = unsafe { mem::zeroed() };
-        set_u16(&mut v.i_format, i_format);
-        set_u16(&mut v.i_mode, i_mode);
-        set_u16(&mut v.i_nb, i_nb);
-        set_u32(&mut v.i_size, i_size);
-        set_u32(&mut v.i_mtime, i_mtime);
-        set_u32(&mut v.i_u, i_u);
-        set_u32(&mut v.i_ino, i_ino);
-        set_u16(&mut v.i_uid, i_uid);
-        set_u16(&mut v.i_gid, i_gid);
+        write_u16(&mut v.i_format, i_format);
+        write_u16(&mut v.i_mode, i_mode);
+        write_u16(&mut v.i_nb, i_nb);
+        write_u32(&mut v.i_size, i_size);
+        write_u32(&mut v.i_mtime, i_mtime);
+        write_u32(&mut v.i_u, i_u);
+        write_u32(&mut v.i_ino, i_ino);
+        write_u16(&mut v.i_uid, i_uid);
+        write_u16(&mut v.i_gid, i_gid);
         v
     }
 
@@ -55,43 +55,43 @@ impl ErofsInodeCompact {
     }
 
     pub fn format(&self) -> u16 {
-        get_u16(&self.i_format)
+        read_u16(&self.i_format)
     }
 
     pub fn xattr_icount(&self) -> u16 {
-        get_u16(&self.i_xattr_icount)
+        read_u16(&self.i_xattr_icount)
     }
 
     pub fn mode(&self) -> u16 {
-        get_u16(&self.i_mode)
+        read_u16(&self.i_mode)
     }
 
     pub fn nb(&self) -> u16 {
-        get_u16(&self.i_nb)
+        read_u16(&self.i_nb)
     }
 
     pub fn size(&self) -> u64 {
-        get_u32(&self.i_size) as u64
+        read_u32(&self.i_size) as u64
     }
 
     pub fn mtime_delta(&self) -> u32 {
-        get_u32(&self.i_mtime)
+        read_u32(&self.i_mtime)
     }
 
     pub fn i_u(&self) -> u32 {
-        get_u32(&self.i_u)
+        read_u32(&self.i_u)
     }
 
     pub fn ino(&self) -> u32 {
-        get_u32(&self.i_ino)
+        read_u32(&self.i_ino)
     }
 
     pub fn uid(&self) -> u32 {
-        get_u16(&self.i_uid) as u32
+        read_u16(&self.i_uid) as u32
     }
 
     pub fn gid(&self) -> u32 {
-        get_u16(&self.i_gid) as u32
+        read_u16(&self.i_gid) as u32
     }
 }
 
@@ -131,17 +131,17 @@ impl ErofsInodeExtended {
         i_nlink: u32,
     ) -> Self {
         let mut v: Self = unsafe { mem::zeroed() };
-        set_u16(&mut v.i_format, i_format);
-        set_u16(&mut v.i_mode, i_mode);
-        set_u16(&mut v.i_nb, i_nb);
-        set_u64(&mut v.i_size, i_size);
-        set_u32(&mut v.i_u, i_u);
-        set_u32(&mut v.i_ino, i_ino);
-        set_u32(&mut v.i_uid, i_uid);
-        set_u32(&mut v.i_gid, i_gid);
-        set_u64(&mut v.i_mtime, i_mtime);
-        set_u32(&mut v.i_mtime_nsec, i_mtime_nsec);
-        set_u32(&mut v.i_nlink, i_nlink);
+        write_u16(&mut v.i_format, i_format);
+        write_u16(&mut v.i_mode, i_mode);
+        write_u16(&mut v.i_nb, i_nb);
+        write_u64(&mut v.i_size, i_size);
+        write_u32(&mut v.i_u, i_u);
+        write_u32(&mut v.i_ino, i_ino);
+        write_u32(&mut v.i_uid, i_uid);
+        write_u32(&mut v.i_gid, i_gid);
+        write_u64(&mut v.i_mtime, i_mtime);
+        write_u32(&mut v.i_mtime_nsec, i_mtime_nsec);
+        write_u32(&mut v.i_nlink, i_nlink);
         v
     }
 
@@ -152,51 +152,51 @@ impl ErofsInodeExtended {
     }
 
     pub fn format(&self) -> u16 {
-        get_u16(&self.i_format)
+        read_u16(&self.i_format)
     }
 
     pub fn xattr_icount(&self) -> u16 {
-        get_u16(&self.i_xattr_icount)
+        read_u16(&self.i_xattr_icount)
     }
 
     pub fn mode(&self) -> u16 {
-        get_u16(&self.i_mode)
+        read_u16(&self.i_mode)
     }
 
     pub fn nb(&self) -> u16 {
-        get_u16(&self.i_nb)
+        read_u16(&self.i_nb)
     }
 
     pub fn size(&self) -> u64 {
-        get_u64(&self.i_size)
+        read_u64(&self.i_size)
     }
 
     pub fn i_u(&self) -> u32 {
-        get_u32(&self.i_u)
+        read_u32(&self.i_u)
     }
 
     pub fn ino(&self) -> u32 {
-        get_u32(&self.i_ino)
+        read_u32(&self.i_ino)
     }
 
     pub fn uid(&self) -> u32 {
-        get_u32(&self.i_uid)
+        read_u32(&self.i_uid)
     }
 
     pub fn gid(&self) -> u32 {
-        get_u32(&self.i_gid)
+        read_u32(&self.i_gid)
     }
 
     pub fn mtime(&self) -> u64 {
-        get_u64(&self.i_mtime)
+        read_u64(&self.i_mtime)
     }
 
     pub fn mtime_nsec(&self) -> u32 {
-        get_u32(&self.i_mtime_nsec)
+        read_u32(&self.i_mtime_nsec)
     }
 
     pub fn nlink(&self) -> u32 {
-        get_u32(&self.i_nlink)
+        read_u32(&self.i_nlink)
     }
 }
 

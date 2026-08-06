@@ -116,12 +116,12 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-    use crate::BlobID;
+    use crate::BlobId;
 
     fn device(index: u16, path: &str) -> BlobDevice {
         BlobDevice::for_test(
             index,
-            BlobID::from_str(&format!("{index:064x}")).unwrap(),
+            BlobId::from_str(&format!("{index:064x}")).unwrap(),
             false,
             PathBuf::from(path),
             4096,

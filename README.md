@@ -45,7 +45,7 @@ redesign in Rust. Compared with Nydus v2 (RAFS), v3 brings:
   (`nydus fuse`), a read-only ublk block device (`nydus ublk`, Linux >= 6.0)
   that the kernel EROFS driver mounts directly, a device-level userfaultfd
   service (`nydus uffd`), a fanotify pre-content service (`nydus fanotify`,
-  Linux >= 6.15), and an embeddable accessor library (`NydusAccessor`) that
+  Linux >= 6.15), and an embeddable core library (`NydusCore`) that
   serve the image to microVM guests as EROFS over virtio-pmem — the target
   end-state for Kata image acceleration in agent sandbox image and snapshot
   scenarios.
@@ -143,7 +143,7 @@ O_DIRECT, 4K random costs 11.7 µs (ublk) vs 13.4 µs (FUSE) vs 24.0 µs (NBD),
 and sequential 128K direct goes 4,320 / 3,330 / 2,235 MiB/s — io_uring
 shared-memory SQE/CQE undercuts both the NBD kernel socket and FUSE's
 request/reply, so ublk now wins the cold per-request round trip too. The fill
-path is identical by construction (shared accessor and cache format): prewarm
+path is identical by construction (shared core and cache format): prewarm
 972 / 1,060 / 1,069 MiB/s, 71.1 MiB fetched for the block modes vs 64.0 for
 FUSE (readahead policy). FUSE's only remaining win is mount-ready latency:
 0.21 s vs ublk 6.42 s, because `nydus ublk` eagerly prepares every blob in
@@ -179,7 +179,7 @@ mount-ready, so the total cold-start cost is roughly constant across modes.
   ~6.2–6.4 s here because both prepare the blob lazily on first touch (meta
   download + cache-file sizing + digest verification); ublk pays 6.42 s in
   *mount-ready* instead, because `nydus ublk` calls
-  `accessor.blob.flat_layout()` in `UblkDevice::new` so EROFS `mount` never
+  `core.blobs.flat_layout()` in `UblkDevice::new` so EROFS `mount` never
   stalls. The total cold-start cost (mount-ready + first read) is roughly
   constant across modes.
 - Cold-page `direct=0` rows largely re-warm during each 20 s job (the target
@@ -192,7 +192,7 @@ mount-ready, so the total cold-start cost is roughly constant across modes.
 | ---------------- | ------------------------ | -------------------------------------------------------------------------------------------------------- |
 | `nydus`          | `nydus/src/bin/nydus/`         | CLI: `build`, `merge`, `check`, `optimize`, `fuse`, and optional `uffd` / `fanotify` / `nbd`              |
 | `nydusify`       | `nydusify/`              | Go orchestrator that converts, checks, and optimizes whole OCI images against a registry                 |
-| `nydus-core` | `nydus-core/` | Library crate (`NydusAccessor`) for embedding the image read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
+| `nydus-core` | `nydus-core/` | Library crate (`NydusCore`) for embedding the image read path (e.g. hypervisor virtio-pmem wiring) without FUSE |
 
 ## Quick Start
 
@@ -235,7 +235,7 @@ nydus fuse --bootstrap image.boot --config config/registry.example.yaml --mountp
 
 | Document                       | Contents                                                                                                                                          |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [docs/nydus.md](docs/nydus.md) | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, accessor API, and `nydusify`    |
+| [docs/nydus.md](docs/nydus.md) | Design document: CLI contract, artifact model, blob meta format, read path, prefetch, optimize pipeline, metrics, core API, and `nydusify`    |
 | [docs/uffd.md](docs/uffd.md)   | UFFD service design: flattened device layout, Unix-socket wire protocol, SCM_RIGHTS FD rules, and fault-handling policies for microVM virtio-pmem |
 | [docs/ublk.md](docs/ublk.md)   | ublk block device target: flattened device layout, device parameters, queue model, mmap-based read path, and comparison with the other mount paths |
 | [docs/erofs.md](docs/erofs.md) | EROFS internals: on-disk format, superblock, inode/NID system, chunk indexes, directory format, and the metadata build pipeline                   |
@@ -264,7 +264,7 @@ make nydusify
 
 Library embedders should depend on the `nydus-core` crate
 (`nydus-core/`, re-exported by the root `nydus` crate), which
-carries the accessor read path without FUSE, CLI, or server dependencies:
+carries the core read path without FUSE, CLI, or server dependencies:
 
 ```bash
 cargo build -p nydus-core --features backend-registry

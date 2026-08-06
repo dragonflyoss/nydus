@@ -506,9 +506,9 @@ impl BlobCache for LocalBlobCache {
         // normally latches it through the shared ready counter, but a
         // historical writer crash between its bit and counter updates leaves
         // the counter short forever; the authoritative bitmap scan inside
-        // all_ready() latches the flag regardless.
+        // check_all_ready() latches the flag regardless.
         if !self.blob_meta.is_redirect_blob() {
-            self.groupmap.all_ready();
+            self.groupmap.check_all_ready();
         }
 
         Ok(())
@@ -629,7 +629,7 @@ impl BlobCache for LocalBlobCache {
             // so we can stop waiting; the caller's prefetch then reduces to a
             // cheap all-ready scan. A redirect blob never marks its own map,
             // so keep waiting for the lock and rely on segment skipping.
-            if !self.blob_meta.is_redirect_blob() && self.groupmap.all_ready() {
+            if !self.blob_meta.is_redirect_blob() && self.groupmap.check_all_ready() {
                 return None;
             }
             if !contention_logged {
@@ -647,7 +647,7 @@ impl BlobCache for LocalBlobCache {
         self.groupmap.is_ready(group_index).unwrap_or(false)
     }
 
-    fn fully_ready(&self) -> bool {
+    fn is_fully_ready(&self) -> bool {
         // A redirect blob never marks its own groupmap (its groups fill other
         // blobs' caches), so the flag is meaningless there.
         !self.blob_meta.is_redirect_blob() && self.groupmap.is_all_ready()

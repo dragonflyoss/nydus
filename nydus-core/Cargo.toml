@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "Apache-2.0"
-description = "Runtime accessor APIs for EROFS-based Nydus images: metadata parsing, on-demand blob caching and storage backends."
+description = "Runtime core APIs for EROFS-based Nydus images: metadata parsing, on-demand blob caching and storage backends."
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
 # Integration tests need the `nydus` builder (a path-only cyclic

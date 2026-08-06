@@ -7,7 +7,7 @@ use crate::storage::prefetch::DEFAULT_PREFETCH_THREADS;
 
 /// Top-level nydus configuration, typically loaded from a YAML file passed to
 /// `nydus fuse --config` or constructed by an embedding application before
-/// creating a [`NydusAccessor`](crate::accessor::NydusAccessor).
+/// creating a [`NydusCore`](crate::core::NydusCore).
 ///
 /// ```yaml
 /// backend:

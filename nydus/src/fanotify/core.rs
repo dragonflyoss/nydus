@@ -4,19 +4,19 @@
 //! shape is multi-device EROFS: the **bootstrap is a real local EROFS image**
 //! (superblock + all inode/dirent metadata + a device table) that the operator
 //! mounts directly, and each data **blob is a separate EROFS device** backed by
-//! the accessor's per-blob sparse cache file (`BlobInfo::cache_path`).
+//! the core's per-blob sparse cache file (`BlobInfo::cache_path`).
 //!
 //! Consequences:
 //! - The daemon marks each blob's cache file (the device), not the bootstrap.
 //!   Mount and metadata reads (`ls`, `stat`) hit the real local bootstrap and do
 //!   not involve fanotify at all; only cold blob-data reads fault.
-//! - Filling is `BlobAccessor::fetch(id, off, len)`, which decodes + validates +
+//! - Filling is `Blobs::fetch(id, off, len)`, which decodes + validates +
 //!   writes the blob's cache file *in place* (the same file the kernel reads) and
 //!   is idempotent — so no hand-rolled pwrite/dedup/fsync is needed here; that
 //!   I/O lives in (and is tested by) `nydus-core`.
 //!
 //! Kernel-independent logic here (device lookup, RANGE decision, fetch-range
-//! alignment) is unit-tested; the accessor fetch and the event loop are not
+//! alignment) is unit-tested; the core fetch and the event loop are not
 //! (they need a real image / kernel).
 
 use std::collections::HashMap;
@@ -30,11 +30,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
-use crate::{BlobID, Config, NydusAccessor};
+use crate::{BlobId, Config, NydusCore};
 
 use super::event::{PreContentEvent, Range, FAN_PRE_ACCESS};
 
-/// EROFS block size as u64 — reuses the canonical constant from the accessor.
+/// EROFS block size as u64 — reuses the canonical constant from the core.
 const BLOCK_SIZE: u64 = crate::metadata::EROFS_BLOCK_SIZE as u64;
 
 /// `fanotify_init(2)` flag: close-on-exec on the group descriptor.
@@ -94,7 +94,7 @@ pub enum RangeError {
 pub struct BlobDevice {
     /// 1-based device-table index, preserved from the bootstrap.
     pub index: u16,
-    pub id: BlobID,
+    pub id: BlobId,
     /// True for an "ondemand" redirect blob the guest must never read directly.
     pub is_redirect: bool,
     /// Host path of the blob's sparse cache file = the EROFS `device=` target.
@@ -108,7 +108,7 @@ pub struct BlobDevice {
 impl BlobDevice {
     pub(crate) fn for_test(
         index: u16,
-        id: BlobID,
+        id: BlobId,
         is_redirect: bool,
         cache_path: PathBuf,
         cache_size: u64,
@@ -124,21 +124,21 @@ impl BlobDevice {
 }
 
 pub struct FanotifyCore {
-    accessor: Arc<NydusAccessor>,
+    core: Arc<NydusCore>,
     devices: Vec<BlobDevice>,
     /// `(dev, ino)` → index into `devices` for O(1) event-fd lookup.
     device_index: HashMap<(u64, u64), usize>,
-    /// `BlobID` → index into `devices` for O(1) slot lookup by blob identity.
-    blob_slot: HashMap<BlobID, usize>,
+    /// `BlobId` → index into `devices` for O(1) slot lookup by blob identity.
+    blob_slot: HashMap<BlobId, usize>,
     /// Per-device-slot sticky flag: true once the fanotify mark has been removed
     /// (or was never added because the blob was already fully ready at startup).
-    /// Prevents redundant `fully_ready` probes and duplicate `FAN_MARK_REMOVE`
+    /// Prevents redundant `is_fully_ready` probes and duplicate `FAN_MARK_REMOVE`
     /// syscalls across concurrent fetch workers.
     unmarked: Vec<AtomicBool>,
 }
 
 impl FanotifyCore {
-    /// Build the accessor and enumerate the blob devices. `entries()` also
+    /// Build the core and enumerate the blob devices. `entries()` also
     /// prepares (creates + sizes) each blob's cache file, so the device files
     /// exist and can be marked/mounted immediately after this returns.
     ///
@@ -150,11 +150,10 @@ impl FanotifyCore {
     /// descriptor.
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
         validate_bounded_backend_timeout(&config)?;
-        let accessor = Arc::new(
-            NydusAccessor::new(bootstrap, config).context("failed to create nydus accessor")?,
-        );
-        let entries = accessor
-            .blob
+        let core =
+            Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
+        let entries = core
+            .blobs
             .entries()
             .context("failed to enumerate blob devices")?;
 
@@ -197,7 +196,7 @@ impl FanotifyCore {
 
         let unmarked: Vec<AtomicBool> = devices.iter().map(|_| AtomicBool::new(false)).collect();
         Ok(Self {
-            accessor,
+            core,
             devices,
             device_index,
             blob_slot,
@@ -221,13 +220,13 @@ impl FanotifyCore {
 
     /// Return true when the authoritative groupmap already covers the complete
     /// aligned range. This never triggers backend I/O.
-    pub fn range_ready(&self, id: &BlobID, offset: u64, len: u64) -> Result<bool> {
+    pub fn is_range_ready(&self, id: &BlobId, offset: u64, len: u64) -> Result<bool> {
         let end = offset
             .checked_add(len)
             .ok_or_else(|| anyhow::anyhow!("ready range overflow"))?;
         let ready = self
-            .accessor
-            .blob
+            .core
+            .blobs
             .ready_ranges(id, offset, len)
             .context("failed to inspect blob ready ranges")?;
         Ok(ready.len() == 1 && ready[0].start == offset && ready[0].end == end)
@@ -237,7 +236,7 @@ impl FanotifyCore {
     /// the blob's cache file (the same file the kernel reads).
     pub fn fetch(
         &self,
-        id: &BlobID,
+        id: &BlobId,
         cache_size: u64,
         offset: u64,
         count: u64,
@@ -246,7 +245,7 @@ impl FanotifyCore {
         debug_assert!(offset % BLOCK_SIZE == 0);
         debug_assert!(count % BLOCK_SIZE == 0);
         debug_assert!(offset <= cache_size && offset + count <= cache_size);
-        self.accessor.blob.fetch(id, offset, count).map_err(|e| {
+        self.core.blobs.fetch(id, offset, count).map_err(|e| {
             FetchError::Backend(
                 e.context(format!("failed to fetch blob range [{offset}, +{count})")),
             )
@@ -275,7 +274,7 @@ impl FanotifyCore {
     /// `fan_fd` must be a live fanotify group descriptor. `fanotify_mark` is
     /// thread-safe; concurrent calls with `FAN_MARK_REMOVE` on the same path
     /// are harmless (the loser gets `ENOENT`).
-    pub fn try_unmark(&self, fan_fd: RawFd, id: &BlobID) -> bool {
+    pub fn try_unmark(&self, fan_fd: RawFd, id: &BlobId) -> bool {
         let Some(&slot) = self.blob_slot.get(id) else {
             return false;
         };
@@ -286,7 +285,7 @@ impl FanotifyCore {
             return false;
         }
         // O(1) probe: single atomic load on the groupmap's shared ALL_READY flag.
-        if !self.accessor.blob.fully_ready(id).unwrap_or(false) {
+        if !self.core.blobs.is_fully_ready(id).unwrap_or(false) {
             return false;
         }
         // Claim the unmark: exactly one thread wins the CAS.
@@ -359,7 +358,7 @@ pub fn decide(event: &PreContentEvent) -> Decision {
 }
 
 /// Align `[offset, offset + count)` outward to whole 4 KiB blocks and clamp to
-/// `cache_size` (`BlobAccessor::fetch` requires block-aligned arguments), using
+/// `cache_size` (`Blobs::fetch` requires block-aligned arguments), using
 /// checked arithmetic throughout. Reports why the range is unusable instead of
 /// silently producing an empty range that a caller might treat as success.
 pub(crate) fn align_fetch_range(

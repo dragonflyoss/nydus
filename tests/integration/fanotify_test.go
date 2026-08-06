@@ -19,7 +19,7 @@ package integration
 //	C5  demand-paging proof: cache grows sparse -> filled, correlated to reads
 //	C6  event-driven proof: daemon logs show no unknown-fd / invalid-range /
 //	    backend-failure denies
-//	C7  warm fast-path: re-read triggers range_ready ALLOW, no new backend fetch
+//	C7  warm fast-path: re-read triggers is_range_ready ALLOW, no new backend fetch
 //	C8  concurrency/stress: many parallel readers, all correct, no deadlock/deny
 //	C9  persistence across restart: warm cache re-serves with no backend fetch
 //	C10 graceful shutdown: SIGTERM -> clean unmount, no leak
@@ -279,7 +279,7 @@ prefetch:
 
 // wipeCache removes every per-blob artifact so the next daemon starts COLD.
 // Leaving a stale .group.map behind makes the daemon believe groups are ready
-// while the re-created .blob.data is all zeros — range_ready would ALLOW
+// while the re-created .blob.data is all zeros — is_range_ready would ALLOW
 // without fetching and the reader gets a sparse hole. Wipe data+meta+map+lock.
 func (e *fanotifyEnv) wipeCache(t *testing.T) {
 	t.Helper()
@@ -439,14 +439,14 @@ func (e *fanotifyEnv) caseEventDriven(t *testing.T) { // C6 — daemon health un
 
 func (e *fanotifyEnv) caseWarmFastpath(t *testing.T) { // C7 — behavioural warm-path proof
 	// Everything is already cached from C4. A warm re-read must serve identical
-	// bytes AND allocate ~no new blocks (range_ready short-circuits the fetch).
+	// bytes AND allocate ~no new blocks (is_range_ready short-circuits the fetch).
 	blob := e.cacheBlob(t)
 	before := usedBytes(blob)
 	got := shaFile(t, filepath.Join(e.mntDir, "large.bin"))
 	want := shaFile(t, filepath.Join(e.sourceDir, "large.bin"))
 	after := usedBytes(blob)
 	assert.Equal(t, want, got, "warm re-read is byte-exact")
-	assert.Less(t, after-before, int64(1<<20), "warm re-read allocates ~no new cache blocks (range_ready fast path)")
+	assert.Less(t, after-before, int64(1<<20), "warm re-read allocates ~no new cache blocks (is_range_ready fast path)")
 }
 
 func (e *fanotifyEnv) caseConcurrency(t *testing.T) { // C8 — stress per-event tasks + singleflight

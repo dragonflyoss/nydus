@@ -183,7 +183,7 @@ func (e *nbdEnv) writeConfig(t *testing.T) {
 // ----------------------------------------------------------------- daemon ----
 
 // wipeCache removes every per-blob artifact so the next daemon starts COLD.
-// Leaving a stale .group.map behind makes the accessor believe groups are
+// Leaving a stale .group.map behind makes the core believe groups are
 // ready while the re-created .blob.data is all zeros — reads would return
 // zeros without fetching. Wipe data+meta+map+lock.
 func (e *nbdEnv) wipeCache(t *testing.T) {
@@ -298,7 +298,7 @@ func (e *nbdEnv) caseReadiness(t *testing.T) { // C0
 	assert.Greater(t, e.countLogs(`mounted `), 0, "daemon logged mount")
 	// EROFS metadata reads come from the local bootstrap, not blob cache: no
 	// whole-blob prefetch may have happened. Some blob-tail allocation IS
-	// expected before any file read: the accessor validates each blob's
+	// expected before any file read: the core validates each blob's
 	// footer (at the blob's tail) on its first flat-range resolve, and the
 	// kernel's block-device open scans the device tail too — every such read
 	// rounds outward to whole blob-meta groups. Bound the cache well below a
@@ -369,7 +369,7 @@ func (e *nbdEnv) caseDaemonHealth(t *testing.T) { // C6 — daemon health under 
 
 func (e *nbdEnv) caseWarmFastpath(t *testing.T) { // C7 — behavioural warm-path proof
 	// Everything is already cached from C4. A warm re-read must serve identical
-	// bytes AND allocate ~no new blocks (the accessor's fully-ready fast path
+	// bytes AND allocate ~no new blocks (the core's fully-ready fast path
 	// short-circuits the fetch).
 	before := e.cacheUsed()
 	got := shaFile(t, filepath.Join(e.mntDir, "large.bin"))
@@ -445,7 +445,7 @@ func (e *nbdEnv) casePersistence(t *testing.T) { // C9 — warm cache survives a
 	assert.Equal(t, want, got, "large.bin still byte-exact after restart")
 	after := e.cacheUsed()
 	// Warm cache: re-reading the same data should not grow the cache (the
-	// accessor's persisted groupmap short-circuits the fetch).
+	// core's persisted groupmap short-circuits the fetch).
 	assert.Less(t, after-before, int64(1<<20), "warm cache re-serves with no new cache allocation after restart")
 }
 

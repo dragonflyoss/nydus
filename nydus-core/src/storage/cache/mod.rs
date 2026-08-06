@@ -89,7 +89,7 @@ pub trait BlobCache: Send + Sync {
     /// skip readiness bookkeeping entirely once the blob is fully warmed.
     /// Sticky: once true it stays true, since ready groups are never evicted
     /// within a cache generation.
-    fn fully_ready(&self) -> bool {
+    fn is_fully_ready(&self) -> bool {
         false
     }
 

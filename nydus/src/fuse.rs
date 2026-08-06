@@ -116,7 +116,7 @@ impl ErofsFs {
         Ok(handle)
     }
 
-    fn get_dir_handle(&self, handle: u64) -> io::Result<Arc<DirHandle>> {
+    fn dir_handle(&self, handle: u64) -> io::Result<Arc<DirHandle>> {
         self.dir_handles
             .lock()
             .unwrap()
@@ -392,7 +392,7 @@ impl Filesystem for ErofsFs {
         mut reply: ReplyDirectory,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdir);
-        let dir_handle = match self.get_dir_handle(fh.0) {
+        let dir_handle = match self.dir_handle(fh.0) {
             Ok(h) => h,
             Err(e) => {
                 m.fail();
@@ -421,7 +421,7 @@ impl Filesystem for ErofsFs {
         mut reply: ReplyDirectoryPlus,
     ) {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdirplus);
-        let dir_handle = match self.get_dir_handle(fh.0) {
+        let dir_handle = match self.dir_handle(fh.0) {
             Ok(h) => h,
             Err(e) => {
                 m.fail();

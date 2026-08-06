@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::{Config, FdRange, NydusAccessor};
+use crate::{Config, FdRange, NydusCore};
 
 use super::proto::{DeviceRange, FaultPolicy, VmaRegion};
 
@@ -67,22 +67,19 @@ enum ResolveMode {
 }
 
 pub struct UffdCore {
-    accessor: Arc<NydusAccessor>,
+    core: Arc<NydusCore>,
     total_size: u64,
 }
 
 impl UffdCore {
     pub fn new(options: UffdOptions) -> Result<Self> {
-        let accessor = Arc::new(
-            NydusAccessor::new(&options.bootstrap, options.config)
-                .context("failed to create nydus accessor")?,
+        let core = Arc::new(
+            NydusCore::new(&options.bootstrap, options.config)
+                .context("failed to create nydus core")?,
         );
-        let total_size = align_up(accessor.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)?;
+        let total_size = align_up(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)?;
 
-        Ok(Self {
-            accessor,
-            total_size,
-        })
+        Ok(Self { core, total_size })
     }
 
     pub fn total_size(&self) -> u64 {
@@ -110,7 +107,7 @@ impl UffdCore {
             FaultPolicy::Copy => {
                 for range in ranges {
                     let addr = region.virt_addr + (range.source_offset - region.offset);
-                    if range.fd == self.accessor.zero_fd() {
+                    if range.fd == self.core.zero_fd() {
                         uffdio_zeropage(uffd_fd, addr, range.len)?;
                     } else {
                         uffdio_copy_from_fd(uffd_fd, addr, range.fd, range.offset, range.len)?;
@@ -157,23 +154,23 @@ impl UffdCore {
             .ok_or_else(|| anyhow!("device range overflow"))?;
         let mut ranges = Vec::new();
 
-        let flat_end = end.min(self.accessor.flat_size());
+        let flat_end = end.min(self.core.flat_size());
         if device_offset < flat_end {
             let flat_ranges = match mode {
                 ResolveMode::Fetch => self
-                    .accessor
+                    .core
                     .fetch_flat_ranges(device_offset, flat_end - device_offset)?,
                 ResolveMode::Probe => self
-                    .accessor
+                    .core
                     .probe_flat_ranges(device_offset, flat_end - device_offset)?,
             };
             ranges.extend(flat_ranges);
         }
 
-        let tail_start = device_offset.max(self.accessor.flat_size());
+        let tail_start = device_offset.max(self.core.flat_size());
         if tail_start < end {
             ranges.push(FdRange {
-                fd: self.accessor.zero_fd(),
+                fd: self.core.zero_fd(),
                 offset: 0,
                 len: end - tail_start,
                 source_offset: tail_start,
