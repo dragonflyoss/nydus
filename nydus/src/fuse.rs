@@ -21,6 +21,12 @@ use crate::fs::{ErofsReader, RawNameDirEntry};
 const FUSE_ROOT_ID: u64 = 1;
 const EROFS_FUSE_TIMEOUT: Duration = Duration::from_secs(86400 * 365 * 10);
 
+/// Longest name EROFS can encode, reported through statfs and enforced in
+/// lookup. The kernel only rejects names above FUSE_NAME_MAX (1024), so a
+/// filesystem that advertises a smaller f_namelen has to check it itself or
+/// callers get ENOENT where POSIX requires ENAMETOOLONG.
+const EROFS_NAME_MAX: usize = 255;
+
 pub struct ErofsFs {
     reader: Arc<ErofsReader>,
     dir_handles: Mutex<HashMap<u64, Arc<DirHandle>>>,
@@ -75,6 +81,17 @@ impl ErofsFs {
                 0
             };
 
+        // The root directory is created by whichever tool staged the layer, so
+        // its permission bits are really that tool's umask. A umask of 0077
+        // yields 0700 and locks every other uid out of the container rootfs,
+        // and `rootmode=` does not override them. nydus v2 pins the root to
+        // 0755 at runtime for the same reason.
+        let perm = if ino == FUSE_ROOT_ID {
+            (mode & !0o777) | 0o755
+        } else {
+            mode
+        } & 0o7777;
+
         FileAttr {
             ino: INodeNo(ino),
             size,
@@ -84,7 +101,7 @@ impl ErofsFs {
             ctime: time,
             crtime: time,
             kind,
-            perm: (mode & 0o7777) as u16,
+            perm: perm as u16,
             nlink: inode.nlink(),
             uid: inode.uid(),
             gid: inode.gid(),
@@ -193,6 +210,11 @@ impl Filesystem for ErofsFs {
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut m = FsOpMetric::new(metrics::FsOp::Lookup);
         let target = name.as_bytes();
+        if target.len() > EROFS_NAME_MAX {
+            m.fail();
+            reply.error(Errno::ENAMETOOLONG);
+            return;
+        }
         let mut found = None;
         let res = self.iterate_dir(parent.0, |entry_nid, _file_type, entry_name| {
             if entry_name == target {
@@ -479,7 +501,7 @@ impl Filesystem for ErofsFs {
             sb.inos(),
             0,
             block_size as u32,
-            255,
+            EROFS_NAME_MAX as u32,
             block_size as u32,
         );
     }

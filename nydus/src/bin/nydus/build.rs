@@ -14,7 +14,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 use tracing::Level;
 
 const MIB: u32 = 1_048_576;
@@ -229,11 +228,6 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         }
     }
 
-    let build_time = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .context("system time before UNIX epoch")?
-        .as_secs();
-
     let blob_output =
         prepare_blob_output(requested_blob_path.as_deref(), args.blob_dir.as_deref())?;
     let blob_file = open_blob_output(&blob_output)?;
@@ -246,11 +240,16 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     )?;
     let mut inodes = build_tree(&source, &mut blob_writer, args.chunk_size, &exclude)?;
     blob_writer.finish()?;
+    // The root's mtime is dropped to keep builds reproducible, so it would drag
+    // the epoch to zero and cost every compact inode the range above 2106. A
+    // tree with nothing but a root has no timestamp to anchor to, and reading
+    // the clock there would make the image differ on every build.
     let epoch = inodes
         .iter()
+        .skip(1)
         .map(|inode| inode.mtime)
         .min()
-        .unwrap_or(build_time);
+        .unwrap_or(0);
 
     let uuid_bytes = [0u8; 16];
     let blob_blocks = blob_writer.total_blocks();

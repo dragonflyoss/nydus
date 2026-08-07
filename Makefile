@@ -47,9 +47,9 @@ BLOCK_PERF_TIMEOUT ?= 1800s
 BLOCK_PERF_COUNT ?= 1
 BLOCK_PERF_GO_TEST_ARGS ?=
 
-XFSTESTS_TIMEOUT ?= 600s
-XFSTESTS_COUNT ?= 1
-XFSTESTS_GO_TEST_ARGS ?=
+FS_TIMEOUT ?= 1800s
+FS_COUNT ?= 1
+FS_GO_TEST_ARGS ?=
 
 PERF_TIMEOUT ?= 300s
 PERF_COUNT ?= 1
@@ -71,12 +71,13 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH
 	"GOMODCACHE=$$($(GO_BIN) env GOMODCACHE)" \
 	"EROFS_C_FUSE=$(EROFS_C_FUSE)" \
 	"EROFS_MKFS=$(EROFS_MKFS)"
-TEST_SUPPORT_FILES = util.go optimize_util.go
+TEST_SUPPORT_FILES = util.go optimize_util.go diff.go
 E2E_TEST_FILES = e2e_test.go $(TEST_SUPPORT_FILES)
+TOOCI_TEST_FILES = tooci_test.go $(TEST_SUPPORT_FILES)
 UFFD_TEST_FILES = uffd_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
 CORE_TEST_FILES = core_test.go $(TEST_SUPPORT_FILES)
-XFSTESTS_TEST_FILES = xfstests_test.go $(TEST_SUPPORT_FILES)
+FS_TEST_FILES = fs_test.go $(TEST_SUPPORT_FILES)
 PERF_TEST_FILES = perf_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
@@ -89,7 +90,7 @@ FANOTIFY_PERF_TEST_PKG = .
 # fanotify_test.go, so the entire package must be compiled together.
 NBD_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-uffd test-core test-fanotify test-nbd test-block-perf test-xfstests test-perf test-top-images crate clean
+.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-core test-fanotify test-nbd test-block-perf test-fs test-perf test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -118,6 +119,14 @@ test-e2e: release nydusify
 		NYDUSFS_MERGE_PAUSE_SECS="$(NYDUSFS_MERGE_PAUSE_SECS)" \
 		NYDUSFS_RUN_EROFS_COMPAT="$(NYDUSFS_RUN_EROFS_COMPAT)" \
 		$(GO_BIN) test -v $(if $(strip $(E2E_TEST)),-run '^$(E2E_TEST)$$',) -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(E2E_TEST_FILES)
+
+# Run the nydus-to-OCI round trip. Requires a local registry and root, since
+# the round trip has to reproduce ownership and device nodes.
+test-tooci: release nydusify
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	cd tests/integration && \
+		$(GO_TEST_ENV) \
+		$(GO_BIN) test -v -run '^TestNydusifyToOCIE2E$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(TOOCI_TEST_FILES)
 
 # Run the UFFD service smoke test. This builds nydus with the optional uffd
 # feature and does not require root because it exercises stateless socket
@@ -196,14 +205,14 @@ test-block-perf: release
 		BLOCK_RUN_PERF=1 \
 		$(GO_BIN) test -v -run '^TestBlockPerf$$' -count $(BLOCK_PERF_COUNT) -timeout $(BLOCK_PERF_TIMEOUT) $(BLOCK_PERF_GO_TEST_ARGS) $(NBD_TEST_PKG)
 
-# Run xfstests regression separately (requires root, builds release first).
-# First run will install xfstests dependencies via tests/scripts/setup_xfstests.sh.
-test-xfstests: release
+# Filesystem conformance suite. Pure Go, one mount per build config and corpus,
+# all cases in parallel; covers write rejection, dirent encoding, inode
+# identity, mmap, splice and xattr behaviour against the mounted image.
+test-fs: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/integration && \
 		$(GO_TEST_ENV) \
-		NYDUSFS_RUN_XFSTESTS=1 \
-		$(GO_BIN) test -v -run '^TestXfstests$$' -count $(XFSTESTS_COUNT) -timeout $(XFSTESTS_TIMEOUT) $(XFSTESTS_GO_TEST_ARGS) $(XFSTESTS_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestFilesystem' -parallel 32 -count $(FS_COUNT) -timeout $(FS_TIMEOUT) $(FS_GO_TEST_ARGS) $(FS_TEST_FILES)
 
 # Run performance benchmark (requires root, fio, ~5min).
 # Compares Nydus vs C erofsfuse.

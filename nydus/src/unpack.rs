@@ -112,7 +112,7 @@ impl Unpacker<'_> {
         header.set_size(0);
 
         let mut tar_path = path.to_vec();
-        let mut hardlink_target = None;
+        let mut link_target = None;
         match file_type {
             EROFS_FT_DIR => {
                 header.set_entry_type(EntryType::Directory);
@@ -121,7 +121,7 @@ impl Unpacker<'_> {
             EROFS_FT_REG_FILE => match self.hardlinks.get(&nid) {
                 Some(target) => {
                     header.set_entry_type(EntryType::Link);
-                    hardlink_target = Some(target.clone());
+                    link_target = Some(target.clone());
                 }
                 None => {
                     header.set_entry_type(EntryType::Regular);
@@ -134,7 +134,7 @@ impl Unpacker<'_> {
             EROFS_FT_SYMLINK => {
                 header.set_entry_type(EntryType::Symlink);
                 let target = self.reader.read_symlink(nid, &inode)?;
-                header.set_link_name(bytes_to_path(&target))?;
+                link_target = Some(bytes_to_path(&target));
             }
             EROFS_FT_CHRDEV | EROFS_FT_BLKDEV => {
                 header.set_entry_type(if file_type == EROFS_FT_CHRDEV {
@@ -150,17 +150,17 @@ impl Unpacker<'_> {
             other => bail!("unsupported inode file type {other}"),
         }
 
-        if let Some(target) = &hardlink_target {
-            header.set_link_name(target)?;
-        }
-
         let pax = self.pax_records(nid, &inode, mtime)?;
         if !pax.is_empty() {
             builder.append_pax_extensions(pax.iter().map(|(k, v)| (k.as_str(), v.as_slice())))?;
         }
 
         let tar_path = bytes_to_path(&tar_path);
-        if header.entry_type() == EntryType::Regular {
+        // append_link rather than set_link_name: a ustar header only has room
+        // for a 100-byte target, and a symlink target can run to PATH_MAX.
+        if let Some(target) = link_target {
+            builder.append_link(&mut header, tar_path, target)?;
+        } else if header.entry_type() == EntryType::Regular {
             builder.append_data(&mut header, tar_path, InodeReader::new(self.reader, nid)?)?;
         } else {
             builder.append_data(&mut header, tar_path, io::empty())?;

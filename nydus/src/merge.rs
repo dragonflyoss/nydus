@@ -13,8 +13,8 @@ use crate::fs::ErofsReader;
 use crate::metadata::*;
 use crate::utils::parse_sha256_hex;
 
-const OCI_WHITEOUT_PREFIX: &str = ".wh.";
-const OCI_OPAQUE_MARKER: &str = ".wh..wh..opq";
+const OCI_WHITEOUT_PREFIX: &[u8] = b".wh.";
+const OCI_OPAQUE_MARKER: &[u8] = b".wh..wh..opq";
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WhiteoutSpec {
@@ -48,7 +48,7 @@ enum MergeNodeData {
         chunkbits: u32,
     },
     Directory {
-        children: BTreeMap<String, MergeNode>,
+        children: BTreeMap<Vec<u8>, MergeNode>,
     },
     Symlink {
         target: Vec<u8>,
@@ -289,25 +289,32 @@ fn load_node(
         .inode(nid)
         .with_context(|| format!("failed to read inode {nid}"))?;
     let mode = inode.mode();
-    let xattrs = reader
+    let mut xattrs: Vec<(u8, Vec<u8>, Vec<u8>)> = reader
         .read_xattrs(nid, &inode)?
         .into_iter()
         .filter_map(|(name, value)| {
             erofs_xattr_name_split(&name).map(|(index, suffix)| (index, suffix.to_vec(), value))
         })
         .collect();
+    xattrs.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
 
     let data = match mode_to_erofs_file_type(mode) {
         EROFS_FT_DIR => {
             let mut children = BTreeMap::new();
             for entry in reader.read_dir(nid, &inode)? {
-                if entry.name == "." || entry.name == ".." {
+                if entry.name == b"." || entry.name == b".." {
                     continue;
                 }
                 children.insert(
                     entry.name.clone(),
-                    load_node(reader, layer_id, entry.nid, epoch, blob_indexes)
-                        .with_context(|| format!("failed to load child {}", entry.name))?,
+                    load_node(reader, layer_id, entry.nid, epoch, blob_indexes).with_context(
+                        || {
+                            format!(
+                                "failed to load child {}",
+                                String::from_utf8_lossy(&entry.name)
+                            )
+                        },
+                    )?,
                 );
             }
             MergeNodeData::Directory { children }
@@ -396,9 +403,9 @@ fn overlay_nodes(
 }
 
 fn overlay_directories(
-    lower_children: BTreeMap<String, MergeNode>,
+    lower_children: BTreeMap<Vec<u8>, MergeNode>,
     upper_meta: MergeNode,
-    upper_children: BTreeMap<String, MergeNode>,
+    upper_children: BTreeMap<Vec<u8>, MergeNode>,
     whiteout_spec: WhiteoutSpec,
 ) -> Result<MergeNode> {
     let mut merged_children = lower_children;
@@ -439,13 +446,13 @@ fn overlay_directories(
     })
 }
 
-fn is_opaque_marker(name: &str, whiteout_spec: WhiteoutSpec) -> bool {
+fn is_opaque_marker(name: &[u8], whiteout_spec: WhiteoutSpec) -> bool {
     match whiteout_spec {
         WhiteoutSpec::Oci => name == OCI_OPAQUE_MARKER,
     }
 }
 
-fn whiteout_target(name: &str, whiteout_spec: WhiteoutSpec) -> Option<&str> {
+fn whiteout_target(name: &[u8], whiteout_spec: WhiteoutSpec) -> Option<&[u8]> {
     match whiteout_spec {
         WhiteoutSpec::Oci => {
             if name == OCI_OPAQUE_MARKER {
@@ -580,6 +587,7 @@ fn flatten_node(
                 is_extended: needs_extended(size, node.uid, node.gid, nlink),
                 data: InodeData::Symlink {
                     target: target.clone(),
+                    startblk: 0,
                 },
                 xattrs: node.xattrs.clone(),
             });
@@ -633,10 +641,12 @@ fn needs_extended(size: u64, uid: u32, gid: u32, nlink: u32) -> bool {
 mod tests {
     use super::*;
 
+    const OPAQUE: &str = ".wh..wh..opq";
+
     fn directory(entries: Vec<(&str, MergeNode)>) -> MergeNode {
         let children = entries
             .into_iter()
-            .map(|(name, node)| (name.to_string(), node))
+            .map(|(name, node)| (name.as_bytes().to_vec(), node))
             .collect();
         merge_node(MergeNodeData::Directory { children })
     }
@@ -672,7 +682,10 @@ mod tests {
         let MergeNodeData::Directory { children } = &node.data else {
             panic!("not a directory")
         };
-        children.keys().cloned().collect()
+        children
+            .keys()
+            .map(|k| String::from_utf8_lossy(k).into_owned())
+            .collect()
     }
 
     #[test]
@@ -681,7 +694,7 @@ mod tests {
             "opt",
             directory(vec![(
                 "yarn-v1.22.19",
-                directory(vec![(OCI_OPAQUE_MARKER, regular_file())]),
+                directory(vec![(OPAQUE, regular_file())]),
             )]),
         )]);
 
@@ -690,11 +703,11 @@ mod tests {
         let MergeNodeData::Directory { children } = &root.data else {
             panic!("root should be a directory")
         };
-        let opt = children.get("opt").unwrap();
+        let opt = children.get(b"opt".as_slice()).unwrap();
         let MergeNodeData::Directory { children } = &opt.data else {
             panic!("opt should be a directory")
         };
-        let yarn = children.get("yarn-v1.22.19").unwrap();
+        let yarn = children.get(b"yarn-v1.22.19".as_slice()).unwrap();
         assert!(child_names(yarn).is_empty());
     }
 
@@ -721,10 +734,7 @@ mod tests {
         )]);
         let upper = directory(vec![(
             "opq",
-            directory(vec![
-                (OCI_OPAQUE_MARKER, regular_file()),
-                ("new.txt", regular_file()),
-            ]),
+            directory(vec![(OPAQUE, regular_file()), ("new.txt", regular_file())]),
         )]);
 
         let mut merged = overlay_nodes(lower, upper, WhiteoutSpec::Oci).unwrap();
@@ -733,7 +743,10 @@ mod tests {
         let MergeNodeData::Directory { children } = &merged.data else {
             panic!("root should be a directory")
         };
-        assert_eq!(child_names(children.get("opq").unwrap()), vec!["new.txt"]);
+        assert_eq!(
+            child_names(children.get(b"opq".as_slice()).unwrap()),
+            vec!["new.txt"]
+        );
     }
 
     #[test]
@@ -762,7 +775,10 @@ mod tests {
         let MergeNodeData::Directory { children } = &root.data else {
             panic!("root should be a directory")
         };
-        assert_eq!(child_names(children.get("newdir").unwrap()), vec!["fresh"]);
+        assert_eq!(
+            child_names(children.get(b"newdir".as_slice()).unwrap()),
+            vec!["fresh"]
+        );
     }
 
     #[test]

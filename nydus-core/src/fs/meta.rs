@@ -43,7 +43,7 @@ impl ErofsReader {
             entries.push(RawDirEntry {
                 nid: entry_nid,
                 file_type,
-                name: String::from_utf8_lossy(name).into_owned(),
+                name: name.to_vec(),
             });
             Ok(true)
         })?;
