@@ -344,8 +344,9 @@ path, restart persistence, graceful unmount), and — via an `strace` case —
 that the daemon reads pre-content events, writes responses, and pwrites the
 cache, i.e. that it is on the read path. It preflight-checks the kernel
 version, privileges, and required binaries, and skips loudly on an unsupported
-host. `make test-fanotify-perf` runs the fanotify vs FUSE comparison
-([`tests/integration/fanotify_perf_test.go`](../tests/integration/fanotify_perf_test.go)).
+host. `make test-bench` runs the unified cold-start benchmark that compares
+fanotify against the FUSE, NBD, and ublk transports
+([`tests/integration/bench_test.go`](../tests/integration/bench_test.go)).
 
 Sources: dragonflyoss/nydus#1826; erofs-utils `lib/backends/fanotify.c` and
 `mount/main.c` (`erofsmount_fanotify`); LWN "fanotify: add pre-content hooks".
