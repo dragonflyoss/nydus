@@ -279,20 +279,26 @@ impl<'a> TarballTreeBuilder<'a> {
             RafsVersion::V6 => RafsInodeFlags::default(),
         };
 
-        // Parse special files
-        let mut rdev = if entry_type.is_block_special()
-            || entry_type.is_character_special()
-            || entry_type.is_fifo()
-        {
+        // Parse special files.
+        //
+        // POSIX ustar defines `devmajor` and `devminor` for character and block special files
+        // only, so an implementation is free to leave them NUL for a fifo, and GNU tar does
+        // exactly that in all of its `gnu`, `ustar` and `posix` formats. A v7 entry carries no
+        // such fields at all. A fifo has no device number anyway: `stat()` reports `st_rdev` of
+        // 0 for it, which is what the directory builder stores, so store the same here instead
+        // of reading fields the entry is not required to carry.
+        let mut rdev = if entry_type.is_block_special() || entry_type.is_character_special() {
             let major = header
                 .device_major()
                 .context("tarball: failed to get device major from tar entry")?
                 .ok_or_else(|| anyhow!("tarball: failed to get major device from tar entry"))?;
             let minor = header
                 .device_minor()
-                .context("tarball: failed to get device major from tar entry")?
+                .context("tarball: failed to get device minor from tar entry")?
                 .ok_or_else(|| anyhow!("tarball: failed to get minor device from tar entry"))?;
             makedev(major as u64, minor as u64) as u32
+        } else if entry_type.is_fifo() {
+            0
         } else {
             u32::MAX
         };
@@ -926,6 +932,90 @@ mod tests {
     #[test]
     fn test_v6_hardlink_to_non_regular_file() {
         test_hardlink_to_non_regular_file(RafsVersion::V6);
+    }
+
+    // Append an entry whose `devmajor`/`devminor` fields are left NUL, the way Go's
+    // `archive/tar` writes every entry which is not a character or block special file.
+    fn append_entry_without_device_numbers(
+        tar: &mut tar::Builder<File>,
+        path: &str,
+        entry_type: EntryType,
+    ) {
+        let mut header = Header::new_ustar();
+        header.set_entry_type(entry_type);
+        header.set_mode(0o700);
+        header.set_size(0);
+        header.set_path(path).unwrap();
+        // `devmajor` and `devminor` occupy bytes 329..345 of a ustar header.
+        header.as_mut_bytes()[329..345].fill(0);
+        header.set_cksum();
+        tar.append(&header, &[][..]).unwrap();
+    }
+
+    fn test_fifo_without_device_numbers(version: RafsVersion) {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("fifo.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        append_entry_without_device_numbers(&mut tar, "fifo-entry", EntryType::Fifo);
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, version);
+        let bootstrap = build_rafs(&mut ctx);
+
+        let fifo = get_node(&bootstrap, "/fifo-entry");
+        assert!(fifo.is_special());
+        // A fifo has no device number, and `stat()` reports `st_rdev` of 0 for it, so a fifo
+        // built from a directory carries 0. One built from a tarball must match.
+        assert_eq!(fifo.inode.rdev(), 0);
+        assert_eq!(fifo.info.rdev, 0);
+    }
+
+    #[test]
+    fn test_v5_fifo_without_device_numbers() {
+        test_fifo_without_device_numbers(RafsVersion::V5);
+    }
+
+    #[test]
+    fn test_v6_fifo_without_device_numbers() {
+        test_fifo_without_device_numbers(RafsVersion::V6);
+    }
+
+    // Character and block special files are the two types POSIX defines `devmajor`/`devminor`
+    // for, so they must keep round-tripping their device number.
+    fn test_device_files_keep_rdev(version: RafsVersion) {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("devices.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        for (name, entry_type) in [("chr", EntryType::Char), ("blk", EntryType::Block)] {
+            let mut header = Header::new_ustar();
+            header.set_entry_type(entry_type);
+            header.set_mode(0o600);
+            header.set_size(0);
+            header.set_device_major(136).unwrap();
+            header.set_device_minor(3).unwrap();
+            tar.append_data(&mut header, name, &[][..]).unwrap();
+        }
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, version);
+        let bootstrap = build_rafs(&mut ctx);
+
+        let expected = makedev(136, 3) as u32;
+        for name in ["/chr", "/blk"] {
+            let node = get_node(&bootstrap, name);
+            assert!(node.is_special());
+            assert_eq!(node.inode.rdev(), expected);
+        }
+    }
+
+    #[test]
+    fn test_v5_device_files_keep_rdev() {
+        test_device_files_keep_rdev(RafsVersion::V5);
+    }
+
+    #[test]
+    fn test_v6_device_files_keep_rdev() {
+        test_device_files_keep_rdev(RafsVersion::V6);
     }
 
     #[test]
