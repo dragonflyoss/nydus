@@ -34,26 +34,17 @@ FANOTIFY_RUN_FAIL_CLOSED ?=
 # is installed).
 FANOTIFY_RUN_STRACE ?=
 
-FANOTIFY_PERF_TIMEOUT ?= 1800s
-FANOTIFY_PERF_COUNT ?= 1
-FANOTIFY_PERF_GO_TEST_ARGS ?=
-FANOTIFY_PERF_SOURCE_IMAGE ?=
-
 NBD_TIMEOUT ?= 600s
 NBD_COUNT ?= 1
 NBD_GO_TEST_ARGS ?=
-
-BLOCK_PERF_TIMEOUT ?= 1800s
-BLOCK_PERF_COUNT ?= 1
-BLOCK_PERF_GO_TEST_ARGS ?=
 
 FS_TIMEOUT ?= 1800s
 FS_COUNT ?= 1
 FS_GO_TEST_ARGS ?=
 
-PERF_TIMEOUT ?= 300s
-PERF_COUNT ?= 1
-PERF_GO_TEST_ARGS ?=
+BENCH_TIMEOUT ?= 1800s
+BENCH_COUNT ?= 1
+BENCH_GO_TEST_ARGS ?=
 
 TOP_IMAGES_TIMEOUT ?= 3600s
 TOP_IMAGES_COUNT ?= 1
@@ -78,19 +69,16 @@ UFFD_TEST_FILES = uffd_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
 CORE_TEST_FILES = core_test.go $(TEST_SUPPORT_FILES)
 FS_TEST_FILES = fs_test.go $(TEST_SUPPORT_FILES)
-PERF_TEST_FILES = perf_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
-# Package-based compilation (not file list) because fanotify_perf_test.go
-# depends on symbols from perf_test.go which itself depends on many other
-# files (mount helpers, c-erofsfuse helpers, etc.).
-FANOTIFY_PERF_TEST_PKG = .
-# NBD uses the same whole-package compilation: nbd_test.go reuses helpers
-# (shaFile, usedBytes, hashTree, writeRandomFile, etc.) defined in
-# fanotify_test.go, so the entire package must be compiled together.
+# NBD and bench use whole-package compilation: nbd_test.go and bench_test.go
+# reuse helpers (shaFile, usedBytes, kernelVersion, erofsSupported, etc.)
+# defined in fanotify_test.go and nbd_test.go, so the entire package must be
+# compiled together.
 NBD_TEST_PKG = .
+BENCH_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-core test-fanotify test-nbd test-block-perf test-fs test-perf test-top-images crate clean
+.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-core test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -185,25 +173,23 @@ test-nbd: release
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
 		$(GO_BIN) test -v -run '^TestNbdE2E$$' -count $(NBD_COUNT) -timeout $(NBD_TIMEOUT) $(NBD_GO_TEST_ARGS) $(NBD_TEST_PKG)
 
-# FUSE vs NBD vs ublk block-device performance comparison (requires root,
-# the nbd and ublk_drv modules, EROFS support, fio). All three modes serve
-# the same local-backend image with prefetch disabled; after prewarming the
-# nydus cache the comparison isolates the read transport: FUSE (request ->
-# daemon pread -> reply), NBD (EROFS -> block layer -> NBD socket -> daemon
-# pread), ublk (EROFS -> ublk_drv -> io_uring -> daemon pread). Columns per
-# mode: warm (page cache hot, NBD/ublk daemons should be idle) and cold-page
-# (dropCaches per job, warm nydus cache — the headline transport number);
-# direct=1 rows bypass the page cache for the purest per-request round-trip
-# comparison. Needs all three subcommands in one binary, hence
-# FEATURES=cli,fuse,nbd,ublk.
-test-block-perf: FEATURES=cli,fuse,nbd,ublk
-test-block-perf: release
+# Unified cold-start performance benchmark: FUSE vs NBD vs ublk vs fanotify
+# (plus an optional C erofsfuse column when the binary is available), all
+# serving the same local-backend image with prefetch disabled. Per mode:
+# cold start (mount-ready, first-1MiB read, full-file prewarm fetch), then
+# every fio job and metadata benchmark with the page cache dropped before
+# each job (warm nydus cache, cold page cache). Modes whose kernel support
+# is missing (nbd/ublk modules, Linux < 6.15 for fanotify) are skipped
+# individually. Requires root and fio; fanotify needs an ext4 cache dir —
+# TMPDIR is set to the repo's .test-tmp/ on the working tree filesystem.
+test-bench: FEATURES=cli,fuse,nbd,ublk,fanotify
+test-bench: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
 	cd tests/integration && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
-		BLOCK_RUN_PERF=1 \
-		$(GO_BIN) test -v -run '^TestBlockPerf$$' -count $(BLOCK_PERF_COUNT) -timeout $(BLOCK_PERF_TIMEOUT) $(BLOCK_PERF_GO_TEST_ARGS) $(NBD_TEST_PKG)
+		NYDUSFS_RUN_BENCH=1 \
+		$(GO_BIN) test -v -run '^TestBench$$' -count $(BENCH_COUNT) -timeout $(BENCH_TIMEOUT) $(BENCH_GO_TEST_ARGS) $(BENCH_TEST_PKG)
 
 # Filesystem conformance suite. Pure Go, one mount per build config and corpus,
 # all cases in parallel; covers write rejection, dirent encoding, inode
@@ -213,35 +199,6 @@ test-fs: release
 	cd tests/integration && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestFilesystem' -parallel 32 -count $(FS_COUNT) -timeout $(FS_TIMEOUT) $(FS_GO_TEST_ARGS) $(FS_TEST_FILES)
-
-# Run performance benchmark (requires root, fio, ~5min).
-# Compares Nydus vs C erofsfuse.
-test-perf: release
-	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	cd tests/integration && \
-		$(GO_TEST_ENV) \
-		NYDUSFS_RUN_PERF=1 \
-		$(GO_BIN) test -v -run '^TestPerf$$' -count $(PERF_COUNT) -timeout $(PERF_TIMEOUT) $(PERF_GO_TEST_ARGS) $(PERF_TEST_FILES)
-
-# Fanotify vs FUSE performance comparison (requires root, Linux >= 6.15, fio,
-# docker for the local registry). Both modes mount the same registry-backed
-# nydus image; after prewarming the nydus cache, the comparison isolates the
-# read path: fanotify (FAN_PRE_ACCESS event + kernel ext4 read) vs FUSE
-# (request + pread + reply). Two columns: warm (fully warm, steady-state)
-# and cold-page (warm nydus cache, cold page cache). Set
-# FANOTIFY_PERF_SOURCE_IMAGE to the OCI ref to pull and convert
-# (e.g. docker.io/library/openclaw:latest).
-# Cache dir must be on ext4 (not tmpfs) for FAN_PRE_ACCESS — TMPDIR is set
-# to the repo root's .test-tmp/ on the same filesystem as the working tree.
-test-fanotify-perf: FEATURES=cli,fanotify
-test-fanotify-perf: release nydusify
-	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	mkdir -p $(CURDIR)/.test-tmp
-	cd tests/integration && \
-		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
-		FANOTIFY_RUN_PERF=1 \
-		FANOTIFY_PERF_SOURCE_IMAGE="$(FANOTIFY_PERF_SOURCE_IMAGE)" \
-		$(GO_BIN) test -v -run '^TestFanotifyPerf$$' -count $(FANOTIFY_PERF_COUNT) -timeout $(FANOTIFY_PERF_TIMEOUT) $(FANOTIFY_PERF_GO_TEST_ARGS) $(FANOTIFY_PERF_TEST_PKG)
 
 # Convert and validate the top Docker Hub images, pushing the converted nydus
 # images to $(TOP_IMAGES_REGISTRY) (e.g. a GHCR namespace or a local registry).

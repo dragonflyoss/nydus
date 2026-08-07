@@ -481,6 +481,13 @@ func MakePerfCorpus(t *testing.T, dir string) {
 				fmt.Appendf(nil, "d%d/f%d", d, f))
 		}
 	}
+
+	// A small xattr-bearing tree for the listxattr/getxattr benchmarks.
+	for i := range 64 {
+		name := fmt.Sprintf("xattrs/file_%02d", i)
+		c.CreateFile(t, name, fmt.Appendf(nil, "xattr file %d\n", i))
+		c.SetXattr(t, name, "user.bench", []byte("value"))
+	}
 }
 
 // EnvInt reads an environment variable as an integer, returning a default value if the variable is

@@ -407,23 +407,6 @@ func unmountFuse(mnt string) {
 	_ = exec.Command("umount", "-l", mnt).Run()
 }
 
-// buildNydusFSImage invokes `nydus build` to create an NydusFS image and its
-// associated blob device file.
-func buildNydusFSImage(t *testing.T, nydusBin, imagePath, blobdev, srcDir string, chunkSize int) string {
-	args := []string{"build", "--blob", blobdev, "--chunk-size", fmt.Sprint(chunkSize), "--compressor", "zstd"}
-	if imagePath != "" {
-		args = append(args, "--bootstrap", imagePath)
-	}
-	args = append(args, srcDir)
-
-	out, err := exec.Command(nydusBin, args...).CombinedOutput()
-	require.NoError(t, err, "nydus build failed: %s", string(out))
-	if imagePath != "" {
-		fsckErofsImage(t, imagePath, filepath.Dir(blobdev))
-	}
-	return blobdev
-}
-
 func buildNydusFSImageToDir(t *testing.T, nydusBin, imagePath, blobDir, srcDir string, chunkSize int) string {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(blobDir, 0755))

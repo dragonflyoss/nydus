@@ -202,8 +202,8 @@ jobs:
         run: |
           make test-ublk
 
-  block-perf-tests:
-    name: Run block perf tests
+  bench-tests:
+    name: Run bench tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -230,15 +230,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fio
 
+      - name: Install erofsfuse (for the optional erofsfuse column)
+        run: |
+          sudo bash tests/scripts/setup_erofsfuse.sh
+
       - name: Load nbd, ublk_drv and erofs kernel modules
         run: |
           sudo modprobe nbd || true
           sudo modprobe ublk_drv || true
           sudo modprobe erofs || true
 
-      - name: Run block perf tests
+      - name: Run bench tests
         run: |
-          make test-block-perf
+          make test-bench
 
   fanotify-tests:
     name: Run fanotify tests
@@ -275,44 +279,3 @@ jobs:
       - name: Run fanotify E2E tests
         run: |
           make test-fanotify
-
-  fanotify-perf-tests:
-    name: Run fanotify perf tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.5'
-
-      - name: Install fio
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fio
-
-      - name: Load erofs kernel module
-        run: |
-          sudo modprobe erofs || true
-
-      - name: Start local registry
-        run: |
-          docker run -d --name registry -p 5000:5000 registry:2
-          timeout 30 bash -c 'until curl -sf http://localhost:5000/v2/; do sleep 1; done'
-
-      - name: Run fanotify perf tests
-        run: |
-          make test-fanotify-perf FANOTIFY_PERF_SOURCE_IMAGE=docker.io/library/wordpress:latest
