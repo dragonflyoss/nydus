@@ -225,7 +225,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
         .expect("read root dir");
     let file_nid = entries
         .iter()
-        .find(|entry| entry.name == "hello.txt")
+        .find(|entry| entry.name == b"hello.txt")
         .expect("hello entry")
         .nid;
     let inode = reader.inode(file_nid).expect("file inode");

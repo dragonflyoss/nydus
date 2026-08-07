@@ -1,7 +1,10 @@
 package integration
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,19 +23,6 @@ const (
 	erofsCFuseEnv = "EROFS_C_FUSE"
 	erofsMkfsEnv  = "EROFS_MKFS"
 )
-
-// setupXfstests checks if the xfstests "check" script is present in the given directory, and if not, runs the setup_xfstests.sh script to
-// set up the xfstests environment.
-func setupXfstests(t *testing.T, dir string) {
-	if _, err := os.Stat(filepath.Join(dir, "check")); os.IsNotExist(err) {
-		script, err := filepath.Abs(filepath.Join("..", "scripts", "setup_xfstests.sh"))
-		require.NoError(t, err)
-		require.FileExists(t, script)
-
-		out, err := exec.Command("bash", script).CombinedOutput()
-		require.NoError(t, err, "setup_xfstests.sh failed:\n%s", out)
-	}
-}
 
 // setupCErofsFuse checks if erofsfuse is available. An explicit EROFS_C_FUSE
 // path wins and skips the setup script.
@@ -139,6 +129,87 @@ func lookupCErofsMkfsExecutable() (string, error) {
 	}
 
 	return "", fmt.Errorf("mkfs.erofs not found, set %s=path if a test requires it", erofsMkfsEnv)
+}
+
+// fsckErofsImage validates a freshly built bootstrap with erofs-utils. A nydus
+// image is plain EROFS, so fsck.erofs is an oracle that is completely
+// independent of the nydus reader: it catches encoding bugs that the reader
+// happens to tolerate. Skipped when erofs-utils is not installed so the check
+// can be added everywhere without making it a hard dependency.
+func fsckErofsImage(t *testing.T, bootstrap, blobDir string) {
+	t.Helper()
+
+	fsck, err := exec.LookPath("fsck.erofs")
+	if err != nil {
+		t.Logf("fsck.erofs not found, skipping structural validation of %s", bootstrap)
+		return
+	}
+
+	devices, err := erofsDeviceArgs(bootstrap, blobDir)
+	require.NoError(t, err, "reading the device table of %s", bootstrap)
+
+	args := append([]string{"--extract"}, devices...)
+	args = append(args, bootstrap)
+
+	out, err := exec.Command(fsck, args...).CombinedOutput()
+	require.NoError(t, err, "fsck.erofs rejected %s: %s", bootstrap, out)
+	// fsck.erofs still exits 0 after reporting structural problems such as
+	// "wrong dirent name order", so the output has to be scanned as well.
+	require.NotContains(t, string(out), "filesystem corruption",
+		"fsck.erofs found corruption in %s", bootstrap)
+}
+
+// EROFS on-disk offsets needed to locate the device table.
+const (
+	erofsSuperOffset   = 1024
+	erofsSuperMagic    = 0xE0F5E1E2
+	erofsDevSlotSize   = 128
+	erofsDevTagLen     = 64
+	erofsExtraDevicesO = 86 // u16, relative to the superblock
+	erofsDevtSlotOffO  = 88 // u16, relative to the superblock
+)
+
+// erofsDeviceArgs builds the fsck.erofs --device flags from the image's own
+// device table. Listing the blob directory instead would be wrong for merged
+// images: the directory accumulates the blobs of every layer, while a given
+// bootstrap references only its own, and fsck rejects a count mismatch.
+func erofsDeviceArgs(bootstrap, blobDir string) ([]string, error) {
+	f, err := os.Open(bootstrap)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	header := make([]byte, erofsSuperOffset+128)
+	if _, err := io.ReadFull(f, header); err != nil {
+		return nil, fmt.Errorf("reading superblock: %w", err)
+	}
+	sb := header[erofsSuperOffset:]
+	if magic := binary.LittleEndian.Uint32(sb); magic != erofsSuperMagic {
+		return nil, fmt.Errorf("bad EROFS magic 0x%08x in %s", magic, bootstrap)
+	}
+
+	count := int(binary.LittleEndian.Uint16(sb[erofsExtraDevicesO:]))
+	if count == 0 {
+		return nil, nil
+	}
+	slotOff := int(binary.LittleEndian.Uint16(sb[erofsDevtSlotOffO:])) * erofsDevSlotSize
+
+	table := make([]byte, count*erofsDevSlotSize)
+	if _, err := f.ReadAt(table, int64(slotOff)); err != nil {
+		return nil, fmt.Errorf("reading device table at %d: %w", slotOff, err)
+	}
+
+	args := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		tag := table[i*erofsDevSlotSize : i*erofsDevSlotSize+erofsDevTagLen]
+		name := string(bytes.TrimRight(tag, "\x00"))
+		if name == "" {
+			return nil, fmt.Errorf("device slot %d of %s has an empty tag", i, bootstrap)
+		}
+		args = append(args, "--device="+filepath.Join(blobDir, name))
+	}
+	return args, nil
 }
 
 func validateExecutablePath(path, envName string) error {
@@ -298,7 +369,7 @@ func mountNydusBootstrapWithCache(
 	}, 10*time.Second, 200*time.Millisecond, "nydus bootstrap fuse failed to mount within 10s")
 
 	return func() {
-		_ = exec.Command("fusermount", "-u", mnt).Run()
+		unmountFuse(mnt)
 
 		if cmd.Process != nil {
 			_ = cmd.Process.Signal(syscall.SIGTERM)
@@ -313,6 +384,29 @@ func mountNydusBootstrapWithCache(
 	}
 }
 
+// unmountFuse detaches mnt, retrying while the kernel still holds references.
+// A umount straight after heavy I/O routinely returns EBUSY for a moment, and
+// giving up there leaves a dead mountpoint that later trips up directory
+// removal.
+func unmountFuse(mnt string) {
+	for i := 0; i < 50; i++ {
+		if !isMountpoint(mnt) {
+			return
+		}
+		for _, argv := range [][]string{
+			{"fusermount3", "-u", mnt},
+			{"fusermount", "-u", mnt},
+		} {
+			_ = exec.Command(argv[0], argv[1:]...).Run()
+			if !isMountpoint(mnt) {
+				return
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	_ = exec.Command("umount", "-l", mnt).Run()
+}
+
 // buildNydusFSImage invokes `nydus build` to create an NydusFS image and its
 // associated blob device file.
 func buildNydusFSImage(t *testing.T, nydusBin, imagePath, blobdev, srcDir string, chunkSize int) string {
@@ -324,6 +418,9 @@ func buildNydusFSImage(t *testing.T, nydusBin, imagePath, blobdev, srcDir string
 
 	out, err := exec.Command(nydusBin, args...).CombinedOutput()
 	require.NoError(t, err, "nydus build failed: %s", string(out))
+	if imagePath != "" {
+		fsckErofsImage(t, imagePath, filepath.Dir(blobdev))
+	}
 	return blobdev
 }
 
@@ -364,6 +461,9 @@ func buildNydusFSImageToDir(t *testing.T, nydusBin, imagePath, blobDir, srcDir s
 	require.Len(t, blobs, 1, "expected exactly one new blob in blob-dir")
 	require.Len(t, blobMetas, 1, "expected exactly one new blob_meta in blob-dir")
 	require.True(t, sha256FilenamePattern.MatchString(filepath.Base(blobs[0])), "blob file name must be sha256: %s", blobs[0])
+	if imagePath != "" {
+		fsckErofsImage(t, imagePath, blobDir)
+	}
 	return blobs[0]
 }
 

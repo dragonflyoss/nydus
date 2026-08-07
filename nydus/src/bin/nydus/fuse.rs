@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
-use fuser::{Config as FuseConfig, MountOption, Session};
+use fuser::{Config as FuseConfig, MountOption, Session, SessionACL};
 use nydus::config::Config;
 use nydus::fs::ErofsReader;
 use nydus::fuse::ErofsFs;
@@ -10,7 +10,6 @@ use nydus::tracing::init_tracing;
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use std::fs;
 use std::mem::MaybeUninit;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -84,20 +83,112 @@ impl Drop for TermSignalMask {
     }
 }
 
-fn is_mountpoint_active(mountpoint: &Path) -> std::io::Result<bool> {
-    let metadata = match fs::metadata(mountpoint) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+/// Returns the `major:minor` that /proc/self/mountinfo reports for
+/// `mountpoint`, or `None` when nothing is mounted there.
+///
+/// Read from mountinfo rather than stat() so that it stays answerable while the
+/// session is being torn down, and deliberately not the mount ID: the kernel
+/// recycles those as soon as a mount is destroyed, so a successor at the same
+/// path routinely inherits the ID its predecessor had.
+fn mount_dev_of(mountpoint: &Path) -> std::io::Result<Option<String>> {
+    let target = match fs::canonicalize(mountpoint) {
+        Ok(path) => path,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err),
     };
 
-    let Some(parent) = mountpoint.parent() else {
-        return Ok(true);
-    };
-    let parent_metadata = fs::metadata(parent)?;
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
+    let mut found = None;
+    for line in mountinfo.lines() {
+        let mut fields = line.split(' ');
+        let (Some(_id), Some(_parent), Some(dev), Some(_root), Some(point)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
+            continue;
+        };
+        if unescape_mountinfo(point) != target.as_os_str().to_string_lossy() {
+            continue;
+        }
+        // Later entries shadow earlier ones when mounts are stacked.
+        found = Some(dev.to_string());
+    }
 
-    Ok(metadata.dev() != parent_metadata.dev()
-        || (metadata.dev() == parent_metadata.dev() && metadata.ino() == parent_metadata.ino()))
+    Ok(found)
+}
+
+/// mountinfo escapes space, tab, newline and backslash as octal sequences.
+fn unescape_mountinfo(field: &str) -> String {
+    let mut out = String::with_capacity(field.len());
+    let mut chars = field.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let octal: String = chars.clone().take(3).collect();
+        match u8::from_str_radix(&octal, 8) {
+            Ok(byte) if octal.len() == 3 => {
+                out.push(byte as char);
+                for _ in 0..3 {
+                    chars.next();
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Tears the session down, unmounting only while the mount at `mountpoint` is
+/// still the one we created.
+///
+/// fuser unmounts by path: both `BackgroundSession::umount_and_join` and the
+/// `Mount` destructor reach `umount(2)` on the mountpoint string, which as root
+/// succeeds against whatever happens to be mounted there. Once our own mount is
+/// gone that would detach the next daemon's mount, and the victim then dies
+/// reporting "Unmount failed: Invalid argument".
+///
+/// A live session is the authoritative signal that the mount is still ours,
+/// because the kernel tears our channel down as soon as the mount goes away.
+/// The device number additionally covers a lazy unmount, which detaches the
+/// path while leaving the connection open. When neither holds we leak the
+/// session rather than dropping it; the process is exiting and there is nothing
+/// left to release.
+fn finish_session(
+    session: fuser::BackgroundSession,
+    mountpoint: &Path,
+    our_dev: Option<String>,
+) -> std::io::Result<()> {
+    let session_alive = !session.guard.is_finished();
+    let same_dev = match mount_dev_of(mountpoint) {
+        Ok(current) => current.is_some() && current == our_dev,
+        Err(err) => {
+            error!(
+                "failed to inspect mountpoint {} before unmount: {:?}",
+                mountpoint.display(),
+                err
+            );
+            false
+        }
+    };
+
+    if session_alive && same_dev {
+        info!("unmounting {}", mountpoint.display());
+        return session.umount_and_join();
+    }
+
+    for _ in 0..100 {
+        if session.guard.is_finished() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::mem::forget(session);
+    Ok(())
 }
 
 #[derive(Args)]
@@ -272,10 +363,18 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
     let reader = Arc::new(reader);
     let fs = ErofsFs::new(reader.clone());
     let mut config = FuseConfig::default();
+    // Matches nydus v2's fuse_kern_mount: a container rootfs is read by uids
+    // other than the daemon's, setuid binaries in the image have to keep
+    // working, and nothing on a read-only image can record an access time.
+    // fuser's default ACL rejects every request from another uid in userspace,
+    // before the kernel's own permission check is ever reached.
+    config.acl = SessionACL::All;
     config.mount_options = vec![
         MountOption::RO,
         MountOption::FSName(args.fsname.clone()),
         MountOption::DefaultPermissions,
+        MountOption::Suid,
+        MountOption::NoAtime,
     ];
     config.n_threads = Some(args.threads);
     config.clone_fd = true;
@@ -311,6 +410,10 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
 
     let wait_signals = TermSignalMask::new()?;
     let signal_mountpoint = mountpoint.to_path_buf();
+    // Captured before anything can replace the mount, so the teardown below can
+    // tell our own mount apart from a successor's at the same path.
+    let our_dev = mount_dev_of(mountpoint)
+        .with_context(|| format!("failed to read mount device of {}", mountpoint.display()))?;
     let (unmount_tx, unmount_rx) = mpsc::channel::<i32>();
     let (result_tx, result_rx) = mpsc::channel::<std::io::Result<()>>();
 
@@ -321,42 +424,17 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
 
             loop {
                 if bg.as_ref().is_some_and(|bg| bg.guard.is_finished()) {
-                    let result = bg.take().expect("background session already taken").join();
+                    let session = bg.take().expect("background session already taken");
+                    let result = finish_session(session, &signal_mountpoint, our_dev.clone());
                     let _ = result_tx.send(result);
                     return;
                 }
 
                 match unmount_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(signal) => {
-                        let result = match is_mountpoint_active(&signal_mountpoint) {
-                            Ok(true) => {
-                                info!("unmounting {}", signal_mountpoint.display());
-                                bg.take()
-                                    .expect("background session already taken")
-                                    .umount_and_join()
-                            }
-                            Ok(false) => {
-                                bg.take().expect("background session already taken").join()
-                            }
-                            Err(err) => {
-                                error!(
-                                    "failed to inspect mountpoint {} before unmount: {:?}",
-                                    signal_mountpoint.display(),
-                                    err
-                                );
-                                bg.take()
-                                    .expect("background session already taken")
-                                    .umount_and_join()
-                            }
-                        };
+                        let session = bg.take().expect("background session already taken");
+                        let result = finish_session(session, &signal_mountpoint, our_dev.clone());
                         if let Err(err) = &result {
-                            if err.raw_os_error() == Some(libc::EINVAL)
-                                && is_mountpoint_active(&signal_mountpoint)
-                                    .is_ok_and(|active| !active)
-                            {
-                                let _ = result_tx.send(Ok(()));
-                                return;
-                            }
                             error!(
                                 "failed to unmount after receiving signal {}: {:?}",
                                 signal, err
@@ -367,7 +445,8 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        let result = bg.take().expect("background session already taken").join();
+                        let session = bg.take().expect("background session already taken");
+                        let result = finish_session(session, &signal_mountpoint, our_dev.clone());
                         let _ = result_tx.send(result);
                         return;
                     }

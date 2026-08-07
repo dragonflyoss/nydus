@@ -5,7 +5,8 @@ use crate::build::image::{
     device_table_meta_blkaddr, write_erofs_superblock_checksum, write_image,
 };
 use crate::build::inode::{
-    erofs_inode_has_inline, erofs_inode_size, serialize_inode, InodeData, InodeInfo,
+    erofs_inode_has_inline, erofs_inode_size, serialize_inode, symlink_is_inline, InodeData,
+    InodeInfo,
 };
 use crate::metadata::layout::MetadataLayout;
 use crate::metadata::*;
@@ -113,16 +114,17 @@ fn render_bootstrap_inner(
     let blkszbits = EROFS_BLKSZBITS as u32;
 
     for inode in inodes.iter_mut() {
+        if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
+            inode.is_extended = true;
+        }
+        // A compact inode stores mtime as a 32-bit delta from the epoch, so a
+        // timestamp further out than that has to move to the extended layout
+        // rather than wrap.
+        if inode.mtime.wrapping_sub(epoch) > u32::MAX as u64 {
+            inode.is_extended = true;
+        }
         let inode_size = erofs_inode_size(inode, chunkbits, blkszbits);
         let has_inline = erofs_inode_has_inline(inode);
-        if has_inline && inode_size > EROFS_BLOCK_SIZE as usize {
-            bail!(
-                "inode {} inline data ({} bytes) does not fit in one {}-byte block",
-                inode.ino,
-                inode_size,
-                EROFS_BLOCK_SIZE
-            );
-        }
         let (offset, nid) = layout.alloc_inode(inode_size, has_inline);
         inode.meta_offset = offset;
         inode.nid = nid;
@@ -173,6 +175,33 @@ fn render_bootstrap_inner(
             *dds = dir_data_len;
         }
         inodes[index].size = dir_data_len as u64;
+    }
+
+    // Symlinks whose target is too long to ride behind the inode header get a
+    // data block of their own, in the same region as directory data.
+    let long_symlinks: Vec<usize> = inodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, inode)| match inode.data {
+            InodeData::Symlink { .. } if !symlink_is_inline(inode) => Some(index),
+            _ => None,
+        })
+        .collect();
+
+    for index in long_symlinks {
+        let target = match &inodes[index].data {
+            InodeData::Symlink { target, .. } => target.clone(),
+            _ => unreachable!(),
+        };
+        let (data_offset, startblk) = layout.alloc_dir_data(target.len());
+        layout.write_at(data_offset, &target);
+        if let InodeData::Symlink {
+            startblk: ref mut sb,
+            ..
+        } = inodes[index].data
+        {
+            *sb = startblk;
+        }
     }
 
     for inode in inodes.iter() {

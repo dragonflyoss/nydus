@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -20,6 +20,7 @@ import (
 	"github.com/pkg/xattr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 const nydusRunErofsCompatEnv = "NYDUSFS_RUN_EROFS_COMPAT"
@@ -51,19 +52,19 @@ func TestBlobMountE2E(t *testing.T) {
 			func() {
 				unmount := mountNydus(t, nydusBin, "", blobPath, mntDir)
 				defer unmount()
-				verifyMountedTree(t, corpusDir, mntDir)
+				roDiffTree(t, corpusDir, mntDir, true)
 			}()
 
 			func() {
 				unmount := mountNydusBootstrap(t, nydusBin, bootstrapPath, blobDir, mntDir)
 				defer unmount()
-				verifyMountedTree(t, corpusDir, mntDir)
+				roDiffTree(t, corpusDir, mntDir, true)
 			}()
 
 			func() {
 				unmount := mountNydusBootstrapWithCache(t, nydusBin, bootstrapPath, blobDir, cacheDir, mntDir)
 				defer unmount()
-				verifyMountedTree(t, corpusDir, mntDir)
+				roDiffTree(t, corpusDir, mntDir, true)
 				verifyBlobCacheArtifacts(t, cacheDir, blobPath)
 			}()
 		})
@@ -111,7 +112,7 @@ func TestMergedMountE2E(t *testing.T) {
 		defer unmount()
 		printMergeDebugPaths(t, layer1Dir, layer2Dir, layer3Dir, mountpoint)
 
-		verifyMountedTree(t, expectedDir, mountpoint)
+		roDiffTree(t, expectedDir, mountpoint, true)
 		verifyWhiteoutResults(t, mountpoint)
 	}()
 
@@ -119,7 +120,7 @@ func TestMergedMountE2E(t *testing.T) {
 		unmount := mountNydusBootstrapWithCache(t, nydusBin, mergedBootstrap, blobDir, cacheDir, mountpoint)
 		defer unmount()
 
-		verifyMountedTree(t, expectedDir, mountpoint)
+		roDiffTree(t, expectedDir, mountpoint, true)
 		verifyWhiteoutResults(t, mountpoint)
 		verifyBlobCacheArtifacts(t, cacheDir, layer1Blob, layer2Blob, layer3Blob)
 		verifyMergedMountMatchesErofsFuseWhenEnabled(
@@ -150,7 +151,7 @@ func verifyMergedMountMatchesErofsFuseWhenEnabled(
 	unmount := mountCErofsFuse(t, cErofsFuseBin, mergedBootstrap, erofsMountpoint, blobs...)
 	defer unmount()
 
-	verifyMountedTreeAgainstErofsCompat(t, erofsMountpoint, nydusMountpoint)
+	roDiffTree(t, erofsMountpoint, nydusMountpoint, false)
 }
 
 func cachedBlobDataDevicesForBlobs(t *testing.T, cacheDir string, blobs ...string) []string {
@@ -352,540 +353,6 @@ func addMergeBaseEntries(t *testing.T, corpus *texture.Corpus) {
 func removeExpectedPath(t *testing.T, root, rel string) {
 	t.Helper()
 	require.NoError(t, os.RemoveAll(filepath.Join(root, rel)))
-}
-
-func verifyMountedTree(t *testing.T, srcDir, mntDir string) {
-	verifyMountedTreeWithOptions(t, srcDir, mntDir, true)
-}
-
-func verifyMountedTreeAgainstErofsCompat(t *testing.T, srcDir, mntDir string) {
-	verifyMountedTreeWithOptions(t, srcDir, mntDir, false)
-}
-
-func verifyMountedTreeWithOptions(t *testing.T, srcDir, mntDir string, compareMtimeNsec bool) {
-	t.Helper()
-
-	t.Run("PathSet", func(t *testing.T) { verifyPathSet(t, srcDir, mntDir) })
-	t.Run("PathTypes", func(t *testing.T) { verifyPathTypes(t, srcDir, mntDir) })
-	t.Run("FileContent", func(t *testing.T) { verifyFileContent(t, srcDir, mntDir) })
-	t.Run("FileRangeReads", func(t *testing.T) { verifyFileRangeReads(t, srcDir, mntDir) })
-	t.Run("Symlinks", func(t *testing.T) { verifySymlinks(t, srcDir, mntDir) })
-	t.Run("SymlinkResolution", func(t *testing.T) { verifySymlinkResolution(t, srcDir, mntDir) })
-	t.Run("Metadata", func(t *testing.T) { verifyMetadata(t, srcDir, mntDir, compareMtimeNsec) })
-	t.Run("Hardlinks", func(t *testing.T) { verifyHardlinks(t, srcDir, mntDir) })
-	t.Run("SpecialFiles", func(t *testing.T) { verifySpecialFiles(t, srcDir, mntDir) })
-	t.Run("Xattrs", func(t *testing.T) { verifyXattrs(t, srcDir, mntDir) })
-}
-
-func verifyPathSet(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-	assert.Equal(t, collectRelativePaths(t, srcDir), collectRelativePaths(t, mntDir))
-}
-
-func collectRelativePaths(t *testing.T, root string) []string {
-	t.Helper()
-
-	var paths []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-
-		paths = append(paths, rel)
-		return nil
-	})
-	require.NoError(t, err)
-	sort.Strings(paths)
-	return paths
-}
-
-func verifyPathTypes(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil || rel == "." {
-			return err
-		}
-
-		srcInfo, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-
-		mntInfo, err := os.Lstat(filepath.Join(mntDir, rel))
-		require.NoError(t, err, "lstat mounted path: %s", rel)
-		assert.Equal(t, srcInfo.Mode()&fs.ModeType, mntInfo.Mode()&fs.ModeType, "type mismatch: %s", rel)
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func verifyFileContent(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
-			return err
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode()&fs.ModeType != 0 {
-			return nil
-		}
-
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		mntPath := filepath.Join(mntDir, rel)
-
-		srcData, err := os.ReadFile(path)
-		require.NoError(t, err, rel)
-
-		mntData, err := os.ReadFile(mntPath)
-		require.NoError(t, err, "read mounted file: %s", rel)
-		assert.True(t, bytes.Equal(srcData, mntData), "content mismatch: %s", rel)
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-type readWindow struct {
-	offset int64
-	length int
-}
-
-func verifyFileRangeReads(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
-			return err
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		mntPath := filepath.Join(mntDir, rel)
-
-		srcData, err := os.ReadFile(path)
-		require.NoError(t, err, rel)
-
-		mntFile, err := os.Open(mntPath)
-		require.NoError(t, err, "open mounted file: %s", rel)
-		defer func() {
-			require.NoError(t, mntFile.Close())
-		}()
-
-		if len(srcData) == 0 {
-			buf := make([]byte, 1)
-			n, readErr := mntFile.ReadAt(buf, 0)
-			assert.Equal(t, 0, n, "empty file should not return data: %s", rel)
-			assert.ErrorIs(t, readErr, io.EOF, "empty file should EOF on readat: %s", rel)
-			return nil
-		}
-
-		for _, window := range interestingReadWindows(int64(len(srcData))) {
-			want := expectedWindowBytes(srcData, window.offset, window.length)
-			got := make([]byte, window.length)
-			n, readErr := mntFile.ReadAt(got, window.offset)
-
-			assert.Equal(t, len(want), n,
-				"read length mismatch: %s off=%d len=%d", rel, window.offset, window.length)
-			assert.True(t, bytes.Equal(want, got[:n]),
-				"readat content mismatch: %s off=%d len=%d", rel, window.offset, window.length)
-			if len(want) < window.length {
-				assert.ErrorIs(t, readErr, io.EOF,
-					"short read should report EOF: %s off=%d len=%d", rel, window.offset, window.length)
-			} else {
-				assert.NoError(t, readErr,
-					"full read should succeed: %s off=%d len=%d", rel, window.offset, window.length)
-			}
-		}
-
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func interestingReadWindows(size int64) []readWindow {
-	base := []readWindow{
-		{offset: 0, length: 1},
-		{offset: 0, length: 17},
-		{offset: 1, length: 33},
-		{offset: 4095, length: 4},
-		{offset: 4095, length: 257},
-		{offset: 4095, length: 4097},
-		{offset: 4096, length: 1},
-		{offset: 4096, length: 257},
-		{offset: 4097, length: 33},
-		{offset: 8191, length: 4},
-		{offset: 8191, length: 513},
-		{offset: 8192, length: 17},
-		{offset: 16383, length: 4},
-		{offset: 16383, length: 1025},
-		{offset: 16384, length: 33},
-		{offset: size / 2, length: 257},
-		{offset: size - 2, length: 4},
-		{offset: size - 1, length: 2},
-	}
-
-	seen := make(map[readWindow]struct{})
-	var windows []readWindow
-	for _, window := range base {
-		if window.offset < 0 || window.offset >= size || window.length <= 0 {
-			continue
-		}
-		if _, ok := seen[window]; ok {
-			continue
-		}
-		seen[window] = struct{}{}
-		windows = append(windows, window)
-	}
-
-	return windows
-}
-
-func expectedWindowBytes(data []byte, offset int64, length int) []byte {
-	start := int(offset)
-	if start >= len(data) {
-		return nil
-	}
-	end := start + length
-	if end > len(data) {
-		end = len(data)
-	}
-	return data[start:end]
-}
-
-func verifySymlinks(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.Type()&fs.ModeSymlink == 0 {
-			return err
-		}
-
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		mntPath := filepath.Join(mntDir, rel)
-
-		srcTarget, err := os.Readlink(path)
-		require.NoError(t, err, rel)
-
-		mntTarget, err := os.Readlink(mntPath)
-		require.NoError(t, err, "readlink mounted: %s", rel)
-		assert.Equal(t, srcTarget, mntTarget, "symlink target: %s", rel)
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func verifySymlinkResolution(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.Type()&fs.ModeSymlink == 0 {
-			return err
-		}
-
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		mntPath := filepath.Join(mntDir, rel)
-
-		srcInfo, srcErr := os.Stat(path)
-		mntInfo, mntErr := os.Stat(mntPath)
-		if srcErr != nil {
-			assert.ErrorIs(t, srcErr, os.ErrNotExist, "unexpected symlink stat error: %s", rel)
-			assert.ErrorIs(t, mntErr, os.ErrNotExist, "dangling symlink should stay dangling: %s", rel)
-			return nil
-		}
-
-		require.NoError(t, mntErr, "stat mounted symlink target: %s", rel)
-		assert.Equal(t, srcInfo.Mode()&fs.ModeType, mntInfo.Mode()&fs.ModeType,
-			"resolved symlink type mismatch: %s", rel)
-
-		if srcInfo.IsDir() {
-			assert.Equal(t, readDirEntryNames(t, path), readDirEntryNames(t, mntPath),
-				"resolved symlink directory entries mismatch: %s", rel)
-			return nil
-		}
-
-		if srcInfo.Mode().IsRegular() {
-			srcData, err := os.ReadFile(path)
-			require.NoError(t, err, rel)
-
-			mntData, err := os.ReadFile(mntPath)
-			require.NoError(t, err, "read mounted symlink target: %s", rel)
-			assert.True(t, bytes.Equal(srcData, mntData), "resolved symlink content mismatch: %s", rel)
-		}
-
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func readDirEntryNames(t *testing.T, path string) []string {
-	t.Helper()
-
-	entries, err := os.ReadDir(path)
-	require.NoError(t, err, path)
-
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	sort.Strings(names)
-	return names
-}
-
-func verifyMetadata(t *testing.T, srcDir, mntDir string, compareMtimeNsec bool) {
-	t.Helper()
-
-	var compactMtimeNsec *int64
-
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		mntPath := filepath.Join(mntDir, rel)
-
-		srcInfo, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-
-		mntInfo, err := os.Lstat(mntPath)
-		require.NoError(t, err, "lstat failed for mounted path: %s", rel)
-
-		assert.Equal(t, srcInfo.Mode().Perm(), mntInfo.Mode().Perm(),
-			"mode mismatch: %s (src=%o, mnt=%o)", rel, srcInfo.Mode().Perm(), mntInfo.Mode().Perm())
-
-		srcSpecial := srcInfo.Mode() & (fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
-		mntSpecial := mntInfo.Mode() & (fs.ModeSetuid | fs.ModeSetgid | fs.ModeSticky)
-		assert.Equal(t, srcSpecial, mntSpecial, "special bits mismatch: %s", rel)
-
-		srcStat := srcInfo.Sys().(*syscall.Stat_t)
-		mntStat := mntInfo.Sys().(*syscall.Stat_t)
-		assert.Equal(t, srcStat.Uid, mntStat.Uid, "uid mismatch: %s", rel)
-		assert.Equal(t, srcStat.Gid, mntStat.Gid, "gid mismatch: %s", rel)
-		assert.Equal(t, srcStat.Mtim.Sec, mntStat.Mtim.Sec, "mtime sec mismatch: %s", rel)
-		if !compareMtimeNsec {
-			// erofsfuse currently reports second-level timestamps for getattr, so the
-			// compatibility comparison only verifies mtime seconds.
-		} else if expectsExtendedInodeEncoding(srcInfo, srcStat) {
-			assert.Equal(t, srcStat.Mtim.Nsec, mntStat.Mtim.Nsec, "mtime nsec mismatch: %s", rel)
-		} else {
-			mountedNsec := mntStat.Mtim.Nsec
-			if compactMtimeNsec == nil {
-				compactMtimeNsec = new(int64)
-				*compactMtimeNsec = mountedNsec
-			} else {
-				assert.Equal(t, *compactMtimeNsec, mountedNsec,
-					"compact inode fixed nsec mismatch: %s", rel)
-			}
-		}
-
-		if !srcInfo.IsDir() {
-			assert.Equal(t, srcStat.Nlink, mntStat.Nlink, "nlink mismatch: %s", rel)
-		}
-
-		if srcInfo.Mode().IsRegular() || srcInfo.Mode()&fs.ModeSymlink != 0 {
-			assert.Equal(t, srcInfo.Size(), mntInfo.Size(), "size mismatch: %s", rel)
-		}
-
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func expectsExtendedInodeEncoding(info os.FileInfo, stat *syscall.Stat_t) bool {
-	return info.Size() > int64(^uint32(0)) ||
-		stat.Uid > uint32(^uint16(0)) ||
-		stat.Gid > uint32(^uint16(0)) ||
-		stat.Nlink > 1
-}
-
-func verifyHardlinks(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-
-	groups := make(map[uint64][]string)
-	singletons := make(map[string]struct{})
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
-			return err
-		}
-
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() {
-			return err
-		}
-
-		stat := info.Sys().(*syscall.Stat_t)
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-
-		mntInfo, err := os.Stat(filepath.Join(mntDir, rel))
-		require.NoError(t, err, rel)
-		mntStat := mntInfo.Sys().(*syscall.Stat_t)
-		assert.Equal(t, stat.Nlink, mntStat.Nlink, "hardlink count mismatch: %s", rel)
-
-		if stat.Nlink < 2 {
-			singletons[rel] = struct{}{}
-			return nil
-		}
-		groups[stat.Ino] = append(groups[stat.Ino], rel)
-		return nil
-	})
-	require.NoError(t, err)
-
-	for _, rels := range groups {
-		if len(rels) < 2 {
-			continue
-		}
-		sort.Strings(rels)
-
-		var mountedIno uint64
-		for index, rel := range rels {
-			mntInfo, err := os.Stat(filepath.Join(mntDir, rel))
-			require.NoError(t, err, rel)
-
-			mntStat := mntInfo.Sys().(*syscall.Stat_t)
-			if index == 0 {
-				mountedIno = mntStat.Ino
-				continue
-			}
-
-			assert.Equal(t, mountedIno, mntStat.Ino, "hardlink inode mismatch: %v", rels)
-		}
-	}
-
-	seenMountedInodes := make(map[uint64]string)
-	for rel := range singletons {
-		mntInfo, err := os.Stat(filepath.Join(mntDir, rel))
-		require.NoError(t, err, rel)
-
-		mntStat := mntInfo.Sys().(*syscall.Stat_t)
-		if prev, ok := seenMountedInodes[mntStat.Ino]; ok {
-			assert.Failf(t, "unexpected hardlink alias",
-				"mounted singleton files %s and %s unexpectedly share inode %d", prev, rel, mntStat.Ino)
-			continue
-		}
-		seenMountedInodes[mntStat.Ino] = rel
-	}
-}
-
-func verifySpecialFiles(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-
-	err := filepath.WalkDir(srcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || d.Type()&fs.ModeSymlink != 0 {
-			return err
-		}
-
-		srcInfo, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-
-		modeType := srcInfo.Mode() & fs.ModeType
-		if modeType == 0 {
-			return nil
-		}
-
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-
-		mntInfo, err := os.Lstat(filepath.Join(mntDir, rel))
-		require.NoError(t, err, rel)
-		assert.Equal(t, modeType, mntInfo.Mode()&fs.ModeType, "special file type mismatch: %s", rel)
-
-		if modeType&fs.ModeDevice != 0 {
-			srcStat := srcInfo.Sys().(*syscall.Stat_t)
-			mntStat := mntInfo.Sys().(*syscall.Stat_t)
-			assert.Equal(t, srcStat.Rdev, mntStat.Rdev, "device mismatch: %s", rel)
-		}
-
-		return nil
-	})
-	require.NoError(t, err)
-}
-
-func verifyXattrs(t *testing.T, srcDir, mntDir string) {
-	t.Helper()
-
-	xattrDir := filepath.Join(srcDir, "xattrs")
-	err := filepath.WalkDir(xattrDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		mntPath := filepath.Join(mntDir, rel)
-		srcNames, err := xattr.List(path)
-		if err != nil {
-			return err
-		}
-
-		mntNames, err := xattr.List(mntPath)
-		require.NoError(t, err, "listxattr: %s", rel)
-
-		sort.Strings(srcNames)
-		sort.Strings(mntNames)
-		assert.Equal(t, srcNames, mntNames, "xattr names mismatch: %s", rel)
-		for _, name := range srcNames {
-			srcVal, err := xattr.Get(path, name)
-			require.NoError(t, err)
-
-			mntVal, err := xattr.Get(mntPath, name)
-			require.NoError(t, err, "getxattr %s on %s", name, rel)
-			assert.True(t, bytes.Equal(srcVal, mntVal),
-				"xattr value mismatch: %s key=%s", rel, name)
-		}
-		return nil
-	})
-	require.NoError(t, err)
 }
 
 func verifyWhiteoutResults(t *testing.T, mountpoint string) {
@@ -1146,4 +613,138 @@ func pseudoRandomTestBytes(n int, seed uint64) []byte {
 		buf[i] = byte(state)
 	}
 	return buf
+}
+
+// TestReproducibleBuildE2E pins the build against the inputs that historically
+// leak into an image: the wall clock, the order the source filesystem happens
+// to report things in, and the paths the build ran under. Two builds that agree
+// here produce the same layer digest, so a rebuild costs no registry storage.
+func TestReproducibleBuildE2E(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires root to build the corpus")
+	}
+
+	nydusBin := mustLookupExecutable(t, "nydus")
+	root := t.TempDir()
+
+	build := func(t *testing.T, src string) (bootstrap string, blob string) {
+		t.Helper()
+		out, err := os.MkdirTemp(root, "out-")
+		require.NoError(t, err)
+		bootstrap = filepath.Join(out, "boot")
+		blob = buildNydusFSImageToDir(t, nydusBin, bootstrap, filepath.Join(out, "blobs"), src, 4096)
+		return bootstrap, blob
+	}
+
+	sameImage := func(t *testing.T, aSrc, bSrc string) {
+		t.Helper()
+		aBoot, aBlob := build(t, aSrc)
+		bBoot, bBlob := build(t, bSrc)
+		require.Equal(t, sha256OfFile(t, aBoot), sha256OfFile(t, bBoot), "bootstrap differs")
+		require.Equal(t, filepath.Base(aBlob), filepath.Base(bBlob), "blob digest differs")
+	}
+
+	// A tree with one of everything the builder has to encode.
+	stage := func(t *testing.T, dir string, reverse bool) {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "d"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "d", "base"), []byte("payload"), 0o644))
+		require.NoError(t, os.Symlink("base", filepath.Join(dir, "d", "link")))
+
+		names := make([]int, 0, 24)
+		for i := 0; i < 24; i++ {
+			names = append(names, i)
+		}
+		if reverse {
+			for i, j := 0, len(names)-1; i < j; i, j = i+1, j-1 {
+				names[i], names[j] = names[j], names[i]
+			}
+		}
+		for _, i := range names {
+			p := filepath.Join(dir, "d", fmt.Sprintf("f%02d", i))
+			require.NoError(t, os.WriteFile(p, []byte(strings.Repeat("x", i*97)), 0o644))
+			require.NoError(t, os.Link(filepath.Join(dir, "d", "base"),
+				filepath.Join(dir, "d", fmt.Sprintf("h%02d", i))))
+			require.NoError(t, unix.Setxattr(filepath.Join(dir, "d", "base"),
+				fmt.Sprintf("user.a%02d", i), []byte("v"), 0))
+		}
+
+		// A fixed timestamp everywhere, so only the ordering varies.
+		require.NoError(t, filepath.WalkDir(dir, func(p string, _ os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			ts := unix.NsecToTimespec(time.Date(2022, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano())
+			return unix.UtimesNanoAt(unix.AT_FDCWD, p, []unix.Timespec{ts, ts}, unix.AT_SYMLINK_NOFOLLOW)
+		}))
+	}
+
+	t.Run("SameSourceTwice", func(t *testing.T) {
+		src := filepath.Join(root, "same")
+		stage(t, src, false)
+		sameImage(t, src, src)
+	})
+
+	t.Run("CreationOrderDoesNotMatter", func(t *testing.T) {
+		a := filepath.Join(root, "fwd")
+		b := filepath.Join(root, "rev")
+		stage(t, a, false)
+		stage(t, b, true)
+		sameImage(t, a, b)
+	})
+
+	t.Run("SourcePathDoesNotMatter", func(t *testing.T) {
+		a := filepath.Join(root, "p")
+		b := filepath.Join(root, "a", "much", "longer", "path", "to", "the", "same", "tree")
+		stage(t, a, false)
+		stage(t, b, false)
+		sameImage(t, a, b)
+	})
+
+	t.Run("EmptyTreeHasNoClock", func(t *testing.T) {
+		// Nothing but a root means no mtime to anchor the epoch to; reading the
+		// clock there would change the image on every build.
+		a := filepath.Join(root, "empty-a")
+		b := filepath.Join(root, "empty-b")
+		require.NoError(t, os.MkdirAll(a, 0o755))
+		require.NoError(t, os.MkdirAll(b, 0o755))
+		sameImage(t, a, b)
+	})
+
+	t.Run("RootMtimeDoesNotMatter", func(t *testing.T) {
+		a := filepath.Join(root, "rm-a")
+		b := filepath.Join(root, "rm-b")
+		stage(t, a, false)
+		stage(t, b, false)
+		for dir, when := range map[string]time.Time{
+			a: time.Date(2021, 6, 1, 0, 0, 0, 0, time.UTC),
+			b: time.Date(2024, 11, 30, 0, 0, 0, 0, time.UTC),
+		} {
+			ts := unix.NsecToTimespec(when.UnixNano())
+			require.NoError(t, unix.UtimesNanoAt(unix.AT_FDCWD, dir, []unix.Timespec{ts, ts}, 0))
+		}
+		sameImage(t, a, b)
+	})
+
+	t.Run("MergeIsStable", func(t *testing.T) {
+		l1 := filepath.Join(root, "l1")
+		l2 := filepath.Join(root, "l2")
+		stage(t, l1, false)
+		stage(t, l2, true)
+		_, blob1 := build(t, l1)
+		_, blob2 := build(t, l2)
+
+		first := filepath.Join(root, "merged-a")
+		second := filepath.Join(root, "merged-b")
+		mergeNydusBootstrap(t, nydusBin, first, blob1, blob2)
+		mergeNydusBootstrap(t, nydusBin, second, blob1, blob2)
+		require.Equal(t, sha256OfFile(t, first), sha256OfFile(t, second), "merged bootstrap differs")
+	})
+}
+
+func sha256OfFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

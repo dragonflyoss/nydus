@@ -93,7 +93,7 @@ jobs:
   fuse-e2e-tests:
     name: Run FUSE e2e tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -118,13 +118,25 @@ jobs:
           docker run -d --name registry -p 5000:5000 registry:2
           timeout 30 bash -c 'until curl -sf http://localhost:5000/v2/; do sleep 1; done'
 
+      - name: Install filesystem test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq acl attr erofs-utils fuse3 xfsprogs
+
       - name: Run e2e tests
         run: |
           make test-e2e
 
-      - name: Run xfstests
+      - name: Run the nydus-to-OCI round trip
         run: |
-          make test-xfstests
+          make test-tooci
+
+      # fstests is deliberately not run: every generic/ case builds its
+      # fixture by writing to $TEST_DIR, so none of them can pass on a
+      # read-only mount. The suite below covers that ground instead.
+      - name: Run read-only conformance tests
+        run: |
+          make test-fs
 
   nbd-tests:
     name: Run NBD tests

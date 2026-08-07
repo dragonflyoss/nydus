@@ -160,6 +160,13 @@ func makeToOCICorpus(t *testing.T, contextDir string) {
 	longName := texture.LongName('x', 200)
 	links.CreateFile(t, "symlinks/"+longName, []byte("long"))
 	links.CreateSymlink(t, "symlinks/link_to_long_name", longName)
+	// A ustar header has room for a 100-byte link target, so anything past
+	// that has to be encoded as a GNU long link. Symlink targets run to
+	// PATH_MAX, so straddle the boundary and go well beyond it.
+	for _, n := range []int{99, 100, 101, 255, 1024, 4095} {
+		links.CreateSymlink(t, fmt.Sprintf("symlinks/long_target_%04d", n),
+			texture.LongName('t', n))
+	}
 	links.CreateFile(t, "hardlinks/original", []byte("shared content"))
 	links.CreateHardlink(t, "hardlinks/link1", "hardlinks/original")
 	links.CreateDir(t, "hardlinks/subdir")

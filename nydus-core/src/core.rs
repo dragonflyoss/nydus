@@ -667,7 +667,7 @@ impl Fs {
                     let entries = self.reader.read_dir(ino, &inode)?;
                     let entry = entries
                         .into_iter()
-                        .find(|entry| entry.name == wanted)
+                        .find(|entry| entry.name == wanted.as_bytes())
                         .ok_or_else(|| anyhow::anyhow!("path not found: {}", path.display()))?;
                     ino = entry.nid;
                 }
@@ -704,7 +704,7 @@ impl FsEntry {
             .into_iter()
             .map(|entry| {
                 Ok(DirEntry {
-                    name: entry.name,
+                    name: String::from_utf8_lossy(&entry.name).into_owned(),
                     ino: entry.nid,
                     file_type: FileType::from_erofs_file_type(entry.file_type)?,
                 })

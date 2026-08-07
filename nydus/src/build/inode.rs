@@ -76,7 +76,13 @@ pub enum InodeData {
     },
 
     /// Symbolic link: target path.
-    Symlink { target: Vec<u8> },
+    ///
+    /// A target normally rides inline behind the inode header, but PATH_MAX is
+    /// 4096 and an inode header plus its xattrs plus a target that long cannot
+    /// fit in one 4096-byte block. Such a symlink falls back to a data block of
+    /// its own, exactly like a directory, so `startblk` is set during layout
+    /// and left at 0 for the inline case.
+    Symlink { target: Vec<u8>, startblk: u64 },
 
     /// Character/block device.
     Device { rdev: u32 },
@@ -87,8 +93,8 @@ pub enum InodeData {
 
 /// A directory entry referencing a child inode.
 pub struct DirEntry {
-    /// Entry name.
-    pub name: String,
+    /// Entry name, as the raw bytes the kernel reported.
+    pub name: Vec<u8>,
 
     /// File type.
     pub file_type: u8,
@@ -131,8 +137,37 @@ pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -
             }
         }
         InodeData::Directory { .. } => inode_isize + xattr_isize,
-        InodeData::Symlink { target } => inode_isize + xattr_isize + target.len(),
+        InodeData::Symlink { target, .. } => {
+            if symlink_is_inline(inode) {
+                inode_isize + xattr_isize + target.len()
+            } else {
+                inode_isize + xattr_isize
+            }
+        }
         InodeData::Device { .. } | InodeData::FifoOrSocket => inode_isize + xattr_isize,
+    }
+}
+
+/// Whether a symlink target still fits behind its own inode header within a
+/// single block. The header and its xattrs are already accounted for by
+/// `header_size`.
+fn symlink_fits_inline(header_size: usize, target_len: usize) -> bool {
+    header_size + target_len <= EROFS_BLOCK_SIZE as usize
+}
+
+/// Whether a symlink stores its target inline rather than in a data block.
+///
+/// A target that needs its own block forces the extended layout: a compact
+/// inode's `i_nb` field carries the link count, leaving nowhere to put the
+/// block address' high bits, whereas the extended layout has a separate
+/// `i_nlink`.
+pub fn symlink_is_inline(inode: &InodeInfo) -> bool {
+    match &inode.data {
+        InodeData::Symlink { target, .. } => symlink_fits_inline(
+            EROFS_INODE_COMPACT_SIZE + erofs_xattr_ibody_size(&inode.xattrs),
+            target.len(),
+        ),
+        _ => false,
     }
 }
 
@@ -140,7 +175,7 @@ pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -
 /// (`EROFS_INODE_FLAT_INLINE`), which the kernel requires to stay within the
 /// inode's own metadata block.
 pub fn erofs_inode_has_inline(inode: &InodeInfo) -> bool {
-    matches!(inode.data, InodeData::Symlink { .. })
+    symlink_is_inline(inode)
 }
 
 /// Set the root directory's trusted.nydus.prefetch_blobs xattr to a comma-separated list of
@@ -209,6 +244,16 @@ pub fn build_tree(
         &mut inode_counter,
         &mut hardlink_map,
     )?;
+
+    // The root directory is created by whatever staged the layer, so its mtime
+    // is the moment of the build rather than anything about the content. Left
+    // alone it makes the bootstrap, and with it the layer digest, differ
+    // between two builds of the same source. nydus v2 drops it for the same
+    // reason.
+    if let Some(root) = inodes.first_mut() {
+        root.mtime = 0;
+        root.mtime_nsec = 0;
+    }
 
     Ok(inodes)
 }
@@ -310,7 +355,7 @@ fn build_tree_recursive(
             };
 
             children.push(DirEntry {
-                name: entry.file_name().to_string_lossy().into_owned(),
+                name: entry.file_name().into_vec(),
                 file_type: mode_to_erofs_file_type(child_meta.mode() as u16),
                 inode_index: child_index,
             });
@@ -368,7 +413,10 @@ fn build_tree_recursive(
             nid: 0,
             meta_offset: 0,
             is_extended,
-            data: InodeData::Symlink { target },
+            data: InodeData::Symlink {
+                target,
+                startblk: 0,
+            },
             xattrs,
         });
 
@@ -507,13 +555,19 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
             }
         }
-        InodeData::Symlink { target } => {
-            let datalayout = EROFS_INODE_FLAT_INLINE;
+        InodeData::Symlink { target, startblk } => {
+            let inline = symlink_is_inline(inode);
+            let datalayout = if inline {
+                EROFS_INODE_FLAT_INLINE
+            } else {
+                EROFS_INODE_FLAT_PLAIN
+            };
             let inline_off = if inode.is_extended {
                 EROFS_INODE_EXTENDED_SIZE + xattr_size
             } else {
                 EROFS_INODE_COMPACT_SIZE + xattr_size
             };
+            let startblk_lo = if inline { 0 } else { *startblk as u32 };
 
             if inode.is_extended {
                 let i_format = erofs_extended_i_format(datalayout);
@@ -522,7 +576,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     inode.mode,
                     0,
                     inode.size,
-                    0,
+                    startblk_lo,
                     inode.ino,
                     inode.uid,
                     inode.gid,
@@ -541,7 +595,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                     1,
                     inode.size as u32,
                     i_mtime,
-                    0,
+                    startblk_lo,
                     inode.ino,
                     inode.uid as u16,
                     inode.gid as u16,
@@ -549,7 +603,9 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 buf[..EROFS_INODE_COMPACT_SIZE].copy_from_slice(hdr.as_bytes());
                 write_erofs_xattr_ibody(&mut buf, EROFS_INODE_COMPACT_SIZE, &inode.xattrs);
             }
-            buf[inline_off..inline_off + target.len()].copy_from_slice(target);
+            if inline {
+                buf[inline_off..inline_off + target.len()].copy_from_slice(target);
+            }
         }
         InodeData::Device { rdev } => {
             let datalayout = EROFS_INODE_FLAT_PLAIN;
@@ -688,13 +744,18 @@ fn read_xattrs_from_path(path: &Path) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
         return Vec::new();
     };
 
-    names
+    let mut xattrs: Vec<(u8, Vec<u8>, Vec<u8>)> = names
         .filter_map(|name| {
             let (prefix_index, suffix) = erofs_xattr_name_split(name.as_bytes())?;
             let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
             Some((prefix_index, suffix.to_vec(), value))
         })
-        .collect()
+        .collect();
+    // listxattr returns attributes in whatever order the source filesystem
+    // stored them, which is the order they were set in. Sorting keeps the
+    // bootstrap identical for two trees that differ only in that order.
+    xattrs.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    xattrs
 }
 
 #[cfg(test)]

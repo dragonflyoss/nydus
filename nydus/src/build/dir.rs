@@ -1,27 +1,35 @@
 use crate::metadata::{ErofsDirent, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_FT_DIR};
 
 /// A directory child entry with name, NID, and file type.
+///
+/// Names are raw bytes: a Linux filename is any byte sequence other than `/`
+/// and NUL, so converting through `String` would rewrite the invalid sequences
+/// and can make two distinct names collide.
 pub struct DirChild {
-    pub name: String,
+    pub name: Vec<u8>,
     pub nid: u64,
     pub file_type: u8,
 }
 
 /// Serialize directory entries into block-aligned data.
 ///
-/// Entries are sorted alphabetically.  "." and ".." are prepended.
+/// Entries are sorted by name in byte order, including "." and "..".  The
+/// kernel binary-searches dirents, so a name that sorts before "." -- anything
+/// starting below 0x2e, such as a space or "-" -- must come first rather than
+/// after the two conventional entries.
 /// Each block is independently formatted: dirent array followed by names.
 ///
 /// Returns the serialized directory data (multiple of EROFS_BLOCK_SIZE).
 pub fn serialize_directory(children: &[DirChild], self_nid: u64, parent_nid: u64) -> Vec<u8> {
     let block_size = EROFS_BLOCK_SIZE as usize;
 
-    let mut entries: Vec<(&str, u64, u8)> = Vec::with_capacity(children.len() + 2);
-    entries.push((".", self_nid, EROFS_FT_DIR));
-    entries.push(("..", parent_nid, EROFS_FT_DIR));
+    let mut entries: Vec<(&[u8], u64, u8)> = Vec::with_capacity(children.len() + 2);
+    entries.push((b".", self_nid, EROFS_FT_DIR));
+    entries.push((b"..", parent_nid, EROFS_FT_DIR));
     for c in children {
         entries.push((&c.name, c.nid, c.file_type));
     }
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
     let mut result = Vec::new();
     let mut index = 0;
@@ -54,9 +62,8 @@ pub fn serialize_directory(children: &[DirChild], self_nid: u64, parent_nid: u64
             let de = ErofsDirent::new(nid, name_offset as u16, ft);
             let de_offset = i * EROFS_DIRENT_SIZE;
             block[de_offset..de_offset + EROFS_DIRENT_SIZE].copy_from_slice(de.as_bytes());
-            let name_bytes = name.as_bytes();
-            block[name_offset..name_offset + name_bytes.len()].copy_from_slice(name_bytes);
-            name_offset += name_bytes.len();
+            block[name_offset..name_offset + name.len()].copy_from_slice(name);
+            name_offset += name.len();
         }
         let _ = dirent_area;
         result.extend_from_slice(&block);

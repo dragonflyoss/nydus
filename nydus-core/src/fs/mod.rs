@@ -21,7 +21,7 @@ use crate::storage::cache::{BlobCache, LocalBlobCache};
 pub struct RawDirEntry {
     pub nid: u64,
     pub file_type: u8,
-    pub name: String,
+    pub name: Vec<u8>,
 }
 
 /// Directory entry with an owned raw name, cached by directory handles in

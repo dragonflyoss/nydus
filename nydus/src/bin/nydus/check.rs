@@ -340,7 +340,7 @@ fn walk_inode(
         EROFS_FT_DIR => {
             stats.directories += 1;
             for entry in reader.read_dir(nid, &inode)? {
-                if entry.name == "." || entry.name == ".." {
+                if entry.name == b"." || entry.name == b".." {
                     continue;
                 }
                 stats.directory_entries += 1;
