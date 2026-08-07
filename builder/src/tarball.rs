@@ -331,7 +331,17 @@ impl<'a> TarballTreeBuilder<'a> {
             }
         }
 
-        // Parse xattrs
+        // Parse xattrs.
+        //
+        // A failed record fails the build, though only `SCHILY.xattr.*` is read here: tar 0.4.45
+        // splits the body on newlines before honouring a record's leading length, so the tail of
+        // a value comes back as a record of its own. A value holding "\n22 linkpath=/etc/evil\n"
+        // makes `entry.link_name()` report /etc/evil over the `harmless` in the ustar header,
+        // while a length-walking reader — Go's `archive/tar` — sees no `linkpath` at all. `path`
+        // and `size` come from those bytes too. See
+        // test_pax_record_smuggled_inside_a_value_cannot_reach_the_image.
+        //
+        // The fix belongs in tar; until it lands, such images do not convert.
         let mut xattrs = RafsXAttrs::new();
         if let Some(exts) = entry.pax_extensions()? {
             for p in exts {
@@ -346,7 +356,8 @@ impl<'a> TarballTreeBuilder<'a> {
                     }
                     Err(e) => {
                         return Err(anyhow!(
-                            "tarball: failed to parse PaxExtension from tar header, {}",
+                            "tarball: failed to parse the PAX extended header of {}, {}",
+                            path.display(),
                             e
                         ))
                     }
@@ -1048,26 +1059,103 @@ mod tests {
         assert!(err.to_string().contains("unknown target"), "{}", err);
     }
 
+    // Append a PAX extended header holding `body` verbatim, so that a record the tar crate
+    // writes correctly can be malformed on purpose.
+    fn append_pax_header(tar: &mut tar::Builder<File>, name: &str, body: &str) {
+        let mut header = Header::new_ustar();
+        header.set_entry_type(EntryType::XHeader);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_size(body.len() as u64);
+        tar.append_data(&mut header, format!("PaxHeaders/{}", name), body.as_bytes())
+            .unwrap();
+    }
+
+    // Frame `record` as "%d %s", where the leading decimal counts the whole record including the
+    // digits of the count itself. That is self-referential, so widening the count can widen the
+    // record: settle it by feeding the framed length back until it stops growing.
+    fn pax_record(record: &str) -> String {
+        let mut len = record.len() + 1;
+        loop {
+            let framed = format!("{} {}", len, record);
+            if framed.len() == len {
+                return framed;
+            }
+            len = framed.len();
+        }
+    }
+
     #[test]
     fn test_malformed_pax_extension_is_rejected() {
         let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
         let source_path = tmp_dir.as_path().join("bad-pax.tar");
         let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
         // A PAX record starts with its own length in decimal, here reported too long.
-        let pax = "99 SCHILY.xattr.user.key=value\n";
-        let mut header = Header::new_ustar();
-        header.set_entry_type(EntryType::XHeader);
-        header.set_mode(0o644);
-        header.set_mtime(0);
-        header.set_size(pax.len() as u64);
-        tar.append_data(&mut header, "PaxHeaders/foo", pax.as_bytes())
-            .unwrap();
+        append_pax_header(&mut tar, "foo", "99 SCHILY.xattr.user.key=value\n");
         append_entry(&mut tar, "foo", EntryType::Regular, None, b"hello");
         tar.finish().unwrap();
 
         let mut ctx = create_context(source_path, RafsVersion::V6);
         let err = build_tree(&mut ctx).err().unwrap();
-        assert!(err.to_string().contains("PaxExtension"), "{}", err);
+        // The entry is named, so an unconvertible image can be traced to what makes it one.
+        assert!(err.to_string().contains("/foo"), "{}", err);
+    }
+
+    // The npm .bin shim shape: a symlink whose `linkpath` value carries newlines, which is legal
+    // — the leading length is what makes it legal — and which tar 0.4.45 still reports as
+    // malformed. Rejected on purpose; converting it needs the fix in tar.
+    #[test]
+    fn test_pax_record_containing_newline_is_rejected() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("newline-pax.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        let target = "#!/bin/sh\nbasedir=$(dirname \"$(echo \"$0\" | sed -e 's,\\\\,/,g')\")\n\n\
+                      case `uname` in\n    *CYGWIN*) basedir=`cygpath -w \"$basedir\"`;;\nesac\n";
+        assert!(target.len() > 100, "the target must need a linkpath record");
+        let body = pax_record("SCHILY.xattr.user.key=value\n")
+            + &pax_record(&format!("linkpath={}", target));
+        append_pax_header(&mut tar, "acorn", &body);
+        let mut header = Header::new_ustar();
+        header.set_entry_type(EntryType::Symlink);
+        header.set_mode(0o777);
+        header.set_mtime(0);
+        header.set_size(0);
+        header.set_link_name(&target[..99]).unwrap();
+        tar.append_data(&mut header, "acorn", &[][..]).unwrap();
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let err = build_tree(&mut ctx).err().unwrap();
+        assert!(err.to_string().contains("/acorn"), "{}", err);
+    }
+
+    // Why the error may not be downgraded to a warning: `22 linkpath=/etc/evil` lives inside the
+    // value of user.a, yet it is what `Entry::link_name` reports, over the `harmless` in the
+    // ustar header. Warning instead would put a symlink target of the tarball author's choosing
+    // into an image which disagrees with the layer it came from.
+    #[test]
+    fn test_pax_record_smuggled_inside_a_value_cannot_reach_the_image() {
+        let tmp_dir = vmm_sys_util::tempdir::TempDir::new().unwrap();
+        let source_path = tmp_dir.as_path().join("smuggled-pax.tar");
+        let mut tar = tar::Builder::new(File::create(&source_path).unwrap());
+        let smuggled = pax_record("linkpath=/etc/evil\n");
+        append_pax_header(
+            &mut tar,
+            "shim",
+            &pax_record(&format!("SCHILY.xattr.user.a=AAA\n{}", smuggled)),
+        );
+        let mut header = Header::new_ustar();
+        header.set_entry_type(EntryType::Symlink);
+        header.set_mode(0o777);
+        header.set_mtime(0);
+        header.set_size(0);
+        header.set_link_name("harmless").unwrap();
+        tar.append_data(&mut header, "shim", &[][..]).unwrap();
+        tar.finish().unwrap();
+
+        let mut ctx = create_context(source_path, RafsVersion::V6);
+        let err = build_tree(&mut ctx).err().unwrap();
+        assert!(err.to_string().contains("/shim"), "{}", err);
     }
 
     #[test]
