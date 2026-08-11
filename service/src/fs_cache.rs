@@ -217,6 +217,23 @@ struct FsCacheBlobCache {
     cache: Option<Arc<dyn BlobCache>>,
     config: Arc<DataBlobConfig>,
     file: Arc<File>,
+    init_state: Arc<FsCacheBlobInitState>,
+}
+
+#[derive(Default)]
+struct FsCacheBlobInitState {
+    done: Mutex<bool>,
+    condvar: Condvar,
+}
+
+struct FsCacheBlobInitGuard {
+    init_state: Option<Arc<FsCacheBlobInitState>>,
+}
+
+struct FsCachePrefetchPlan {
+    blob_id: String,
+    request_size: u64,
+    blob_size: u64,
 }
 
 impl FsCacheBlobCache {
@@ -226,6 +243,43 @@ impl FsCacheBlobCache {
 
     fn get_blob_cache(&self) -> Option<Arc<dyn BlobCache>> {
         self.cache.clone()
+    }
+}
+
+impl FsCacheBlobInitState {
+    fn wait(&self) {
+        let mut done = self.done.lock().unwrap();
+        while !*done {
+            done = self.condvar.wait(done).unwrap();
+        }
+    }
+
+    fn mark_done(&self) {
+        let mut done = self.done.lock().unwrap();
+        *done = true;
+        self.condvar.notify_all();
+    }
+}
+
+impl FsCacheBlobInitGuard {
+    fn new(init_state: Arc<FsCacheBlobInitState>) -> Self {
+        Self {
+            init_state: Some(init_state),
+        }
+    }
+
+    fn mark_done(mut self) {
+        if let Some(init_state) = self.init_state.take() {
+            init_state.mark_done();
+        }
+    }
+}
+
+impl Drop for FsCacheBlobInitGuard {
+    fn drop(&mut self) {
+        if let Some(init_state) = self.init_state.take() {
+            init_state.mark_done();
+        }
     }
 }
 
@@ -474,19 +528,17 @@ impl FsCacheHandler {
     ) -> String {
         let mut state = self.state.lock().unwrap();
         if let Vacant(e) = state.id_to_object_map.entry(hdr.object_id) {
+            let init_state = Arc::new(FsCacheBlobInitState::default());
             let fsblob = Arc::new(RwLock::new(FsCacheBlobCache {
                 cache: None,
                 config: config.clone(),
                 file: Arc::new(unsafe { File::from_raw_fd(msg.fd as RawFd) }),
+                init_state: init_state.clone(),
             }));
             e.insert((FsCacheObject::DataBlob(fsblob.clone()), msg.fd));
             state.id_to_config_map.insert(hdr.object_id, config.clone());
             let blob_size = config.blob_info().deref().uncompressed_size();
-            let barrier = Arc::new(Barrier::new(2));
-            Self::init_blob_cache(fsblob, barrier.clone());
-            // make sure that the blobcache init thread have gotten writer lock before user daemon
-            // receives first request.
-            barrier.wait();
+            Self::init_blob_cache(fsblob, init_state);
             format!("copen {},{}", hdr.msg_id, blob_size)
         } else {
             unsafe { libc::close(msg.fd as i32) };
@@ -494,39 +546,65 @@ impl FsCacheHandler {
         }
     }
 
-    fn init_blob_cache(fsblob: Arc<RwLock<FsCacheBlobCache>>, barrier: Arc<Barrier>) {
+    fn init_blob_cache(
+        fsblob: Arc<RwLock<FsCacheBlobCache>>,
+        init_state: Arc<FsCacheBlobInitState>,
+    ) {
         thread::spawn(move || {
-            let mut guard = fsblob.write().unwrap();
-            barrier.wait();
-            //for now FsCacheBlobCache only init once, should not have blobcache associated with it
-            assert!(guard.get_blob_cache().is_none());
+            let init_guard = FsCacheBlobInitGuard::new(init_state);
+            let (config, file) = {
+                let guard = fsblob.read().unwrap();
+                // For now FsCacheBlobCache only init once, should not have blobcache associated
+                // with it.
+                assert!(guard.get_blob_cache().is_none());
+                (guard.config.clone(), guard.file.clone())
+            };
+
             for _ in 0..BLOB_CACHE_INIT_RETRY {
-                match Self::create_data_blob_object(&guard.config, guard.file.clone()) {
+                match Self::create_data_blob_object(&config, file.clone()) {
                     Err(e) => {
                         warn!("fscache: create_data_blob_object failed {}", e);
                         thread::sleep(time::Duration::from_millis(BLOB_CACHE_INIT_INTERVAL_MS));
                     }
                     Ok(blob) => {
-                        guard.set_blob_cache(Some(blob.clone()));
-                        if let Err(e) = Self::do_prefetch(&guard.config, blob.clone()) {
-                            warn!(
-                                "fscache: failed to prefetch data for blob {}, {}",
-                                blob.blob_id(),
-                                e
-                            );
+                        let prefetch_plan = match Self::start_prefetch(&config, blob.clone()) {
+                            Ok(plan) => plan,
+                            Err(e) => {
+                                warn!(
+                                    "fscache: failed to prefetch data for blob {}, {}",
+                                    blob.blob_id(),
+                                    e
+                                );
+                                None
+                            }
+                        };
+
+                        {
+                            let mut guard = fsblob.write().unwrap();
+                            guard.set_blob_cache(Some(blob.clone()));
                         }
-                        break;
+                        init_guard.mark_done();
+
+                        if let Some(plan) = prefetch_plan {
+                            Self::submit_prefetch(blob, plan);
+                        }
+                        return;
                     }
                 }
             }
+
+            init_guard.mark_done();
         });
     }
 
-    fn do_prefetch(cfg: &DataBlobConfig, blob: Arc<dyn BlobCache>) -> Result<()> {
+    fn start_prefetch(
+        cfg: &DataBlobConfig,
+        blob: Arc<dyn BlobCache>,
+    ) -> Result<Option<FsCachePrefetchPlan>> {
         let blob_info = cfg.blob_info().deref();
         let cache_cfg = cfg.config_v2().get_cache_config()?;
         if !cache_cfg.prefetch.enable {
-            return Ok(());
+            return Ok(None);
         }
         blob.start_prefetch()
             .map_err(|e| eother!(format!("failed to start prefetch worker, {}", e)))?;
@@ -537,29 +615,44 @@ impl FsCacheHandler {
             Some(s) => s as u64,
         };
         let size = std::cmp::max(0x4_0000u64, size);
-        let blob_size = blob_info.compressed_data_size();
-        let count = blob_size.div_ceil(size);
+        Ok(Some(FsCachePrefetchPlan {
+            blob_id: blob_info.blob_id().to_owned(),
+            request_size: size,
+            blob_size: blob_info.compressed_data_size(),
+        }))
+    }
+
+    fn submit_prefetch(blob: Arc<dyn BlobCache>, plan: FsCachePrefetchPlan) {
+        if !blob.is_prefetch_active() {
+            return;
+        }
+
+        let count = plan.blob_size.div_ceil(plan.request_size);
         let mut blob_req = Vec::with_capacity(count as usize);
         let mut pre_offset = 0u64;
         for _i in 0..count {
             blob_req.push(BlobPrefetchRequest {
-                blob_id: blob_info.blob_id().to_owned(),
+                blob_id: plan.blob_id.clone(),
                 offset: pre_offset,
-                len: cmp::min(size, blob_size - pre_offset),
+                len: cmp::min(plan.request_size, plan.blob_size - pre_offset),
             });
-            pre_offset += size;
-            if pre_offset >= blob_size {
+            pre_offset += plan.request_size;
+            if pre_offset >= plan.blob_size {
                 break;
             }
         }
 
-        let id = blob.blob_id();
-        info!("fscache: start to prefetch data for blob {}", id);
-        if let Err(e) = blob.prefetch(blob.clone(), &blob_req, &[]) {
-            warn!("fscache: failed to prefetch data for blob {}, {}", id, e);
+        if !blob.is_prefetch_active() {
+            return;
         }
 
-        Ok(())
+        info!("fscache: start to prefetch data for blob {}", plan.blob_id);
+        if let Err(e) = blob.prefetch(blob.clone(), &blob_req, &[]) {
+            warn!(
+                "fscache: failed to prefetch data for blob {}, {}",
+                plan.blob_id, e
+            );
+        }
     }
 
     /// The `fscache` factory essentially creates a namespace for blob objects cached by the
@@ -656,17 +749,31 @@ impl FsCacheHandler {
     }
 
     fn handle_close_request(&self, hdr: &FsCacheMsgHeader) {
-        let mut state = self.get_state();
+        let data_blob = {
+            let state = self.get_state();
+            match state.id_to_object_map.get(&hdr.object_id) {
+                // Safe to unwrap() because `id_to_config_map` and data blob entries in
+                // `id_to_object_map` are kept in consistence.
+                Some((FsCacheObject::DataBlob(fsblob), _)) => Some((
+                    fsblob.clone(),
+                    state.id_to_config_map.get(&hdr.object_id).unwrap().clone(),
+                )),
+                Some((FsCacheObject::Bootstrap(_), _)) | None => None,
+            }
+        };
 
-        if let Some((FsCacheObject::DataBlob(fsblob), _)) =
-            state.id_to_object_map.remove(&hdr.object_id)
-        {
-            // Safe to unwrap() because `id_to_config_map` and `id_to_object_map` is kept
-            // in consistence.
-            let config = state.id_to_config_map.remove(&hdr.object_id).unwrap();
+        if let Some((fsblob, config)) = data_blob {
+            let (init_state, mut blob) = {
+                let guard = fsblob.read().unwrap();
+                (guard.init_state.clone(), guard.get_blob_cache())
+            };
+            if blob.is_none() {
+                init_state.wait();
+                blob = fsblob.read().unwrap().get_blob_cache();
+            }
+
             let factory_config = config.config_v2();
-            let guard = fsblob.read().unwrap();
-            match guard.get_blob_cache() {
+            match blob {
                 Some(blob) => {
                     if let Ok(cache_cfg) = factory_config.get_cache_config() {
                         if cache_cfg.prefetch.enable {
@@ -679,6 +786,14 @@ impl FsCacheHandler {
                 }
                 _ => warn!("fscache: blob object not ready {}", hdr.object_id),
             }
+        }
+
+        let mut state = self.get_state();
+        match state.id_to_object_map.remove(&hdr.object_id) {
+            Some((FsCacheObject::DataBlob(_), _)) => {
+                state.id_to_config_map.remove(&hdr.object_id);
+            }
+            Some((FsCacheObject::Bootstrap(_), _)) | None => {}
         }
     }
 
@@ -695,8 +810,16 @@ impl FsCacheHandler {
             }
             Some((FsCacheObject::DataBlob(fsblob), u)) => {
                 fd = u;
-                let guard = fsblob.read().unwrap();
-                match guard.get_blob_cache() {
+                let (init_state, mut blob) = {
+                    let guard = fsblob.read().unwrap();
+                    (guard.init_state.clone(), guard.get_blob_cache())
+                };
+                if blob.is_none() {
+                    init_state.wait();
+                    blob = fsblob.read().unwrap().get_blob_cache();
+                }
+
+                match blob {
                     Some(blob) => match blob.get_blob_object() {
                         None => {
                             warn!("fscache: internal error: cached object is not BlobCache objects")
