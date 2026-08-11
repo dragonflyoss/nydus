@@ -354,6 +354,8 @@ Options:
 		File path to nydus blob
 	--mountpoint <MOUNTPOINT>
 		Directory path to mount nydus filesystem
+	--id-map <INTERNAL:EXTERNAL:RANGE>
+		ID mapping extent as INTERNAL:EXTERNAL:RANGE. May be specified multiple times
 	--apiserver <APISERVER>
 		Serve Prometheus metrics over a Unix socket, e.g. `unix:///run/nydus/api.sock`. The metrics are exposed at `/metrics`
 	-l, --log-level <LOG_LEVEL>
@@ -378,6 +380,13 @@ temporary cache directory that is removed on exit. When `--config` is provided,
 the cache directory, so `--blob-dir` and `--cache-dir` can be omitted. Explicit
 `--blob-dir`/`--cache-dir` flags take precedence over the config. See
 [Storage config](#storage-config).
+
+Linux 6.12 and newer can expose the FUSE filesystem through an ID-mapped mount
+using `id_mapping` in the storage config or repeatable `--id-map` arguments.
+This requires root privileges, `/dev/fuse`, `FUSE_ALLOW_IDMAP`, and the
+`CAP_SYS_ADMIN`, `CAP_SETUID`, and `CAP_SETGID` capabilities. If the kernel or
+required capabilities are unavailable, startup fails instead of falling back
+to an unmapped mount.
 
 ### Ublk
 

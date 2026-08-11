@@ -1,9 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 use fuser::{Config as FuseConfig, MountOption, Session, SessionACL};
-use nydus::config::Config;
+use nydus::config::{validate_id_mappings, Config, IdMapTriple};
 use nydus::fs::ErofsReader;
 use nydus::fuse::ErofsFs;
+use nydus::idmap::{IdmapMountPreparation, IdmappedSession};
 use nydus::storage::backend::{build_backend, BlobBackend, LocalBackend};
 use nydus::storage::prefetch::{BlobPrefetcher, DEFAULT_PREFETCH_THREADS};
 use nydus::tracing::init_tracing;
@@ -16,6 +17,8 @@ use std::sync::Arc;
 use std::thread::available_parallelism;
 use std::time::Duration;
 use tracing::{error, info, warn, Level};
+
+const IDMAP_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct TermSignalMask {
     mask: libc::sigset_t,
@@ -191,6 +194,35 @@ fn finish_session(
     Ok(())
 }
 
+enum RunningFuseSession {
+    Plain {
+        session: fuser::BackgroundSession,
+        mountpoint: PathBuf,
+        mount_dev: Option<String>,
+    },
+    Idmapped(IdmappedSession),
+}
+
+impl RunningFuseSession {
+    fn is_finished(&self) -> bool {
+        match self {
+            Self::Plain { session, .. } => session.guard.is_finished(),
+            Self::Idmapped(session) => session.session_finished(),
+        }
+    }
+
+    fn finish(self) -> Result<()> {
+        match self {
+            Self::Plain {
+                session,
+                mountpoint,
+                mount_dev,
+            } => finish_session(session, &mountpoint, mount_dev).map_err(anyhow::Error::from),
+            Self::Idmapped(session) => session.finish(),
+        }
+    }
+}
+
 #[derive(Args)]
 pub struct FuseArgs {
     /// Directory path including nydus data blob.
@@ -222,6 +254,10 @@ pub struct FuseArgs {
     /// Directory path to mount nydus filesystem.
     #[arg(long)]
     pub mountpoint: PathBuf,
+
+    /// ID mapping extent as INTERNAL:EXTERNAL:RANGE. May be specified multiple times.
+    #[arg(long = "id-map", value_name = "INTERNAL:EXTERNAL:RANGE", value_parser = parse_id_map)]
+    pub id_map: Vec<IdMapTriple>,
 
     /// Number of worker threads.
     #[arg(long, hide = true, default_value_t = default_threads())]
@@ -274,6 +310,45 @@ fn default_threads() -> usize {
     n.clamp(4, 16)
 }
 
+fn parse_id_map(value: &str) -> std::result::Result<IdMapTriple, String> {
+    let fields = value.split(':').collect::<Vec<_>>();
+    if fields.len() != 3 || fields.iter().any(|field| field.is_empty()) {
+        return Err("expected INTERNAL:EXTERNAL:RANGE".to_string());
+    }
+    let parse = |field: &str, name: &str| {
+        field
+            .parse::<u32>()
+            .map_err(|err| format!("invalid {name} value {field:?}: {err}"))
+    };
+    let mapping = IdMapTriple {
+        internal: parse(fields[0], "internal")?,
+        external: parse(fields[1], "external")?,
+        range: parse(fields[2], "range")?,
+    };
+    if mapping.range == 0 {
+        return Err("range must be greater than zero".to_string());
+    }
+    Ok(mapping)
+}
+
+fn effective_id_mappings(
+    cli_mappings: &[IdMapTriple],
+    config: Option<&Config>,
+) -> Result<Vec<IdMapTriple>> {
+    let mappings = if cli_mappings.is_empty() {
+        config
+            .and_then(|config| config.id_mapping.as_ref())
+            .map(|config| config.mapping.clone())
+            .unwrap_or_default()
+    } else {
+        cli_mappings.to_vec()
+    };
+    if !mappings.is_empty() {
+        validate_id_mappings(&mappings).context("invalid effective id mapping")?;
+    }
+    Ok(mappings)
+}
+
 /// Run the FUSE mount command.
 pub fn run_fuse(args: FuseArgs) -> Result<()> {
     // Block termination signals before starting any helper threads so later
@@ -299,6 +374,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         Some(path) => Some(Config::from_file(path).context("failed to load storage config")?),
         None => None,
     };
+    let id_mappings = effective_id_mappings(&args.id_map, storage_config.as_ref())?;
 
     let cache_dir = if let Some(dir) = args.cache_dir.clone() {
         Some(dir)
@@ -361,7 +437,6 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
     .context("failed to open EROFS image")?;
 
     let reader = Arc::new(reader);
-    let fs = ErofsFs::new(reader.clone());
     let mut config = FuseConfig::default();
     // Matches nydus v2's fuse_kern_mount: a container rootfs is read by uids
     // other than the daemon's, setuid binaries in the image have to keep
@@ -379,9 +454,36 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
     config.n_threads = Some(args.threads);
     config.clone_fd = true;
 
-    let session =
-        Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {e}"))?;
-    let bg = session.spawn().map_err(|e| anyhow!("spawn failed: {e}"))?;
+    let running_session = if id_mappings.is_empty() {
+        let fs = ErofsFs::new(reader.clone());
+        let session =
+            Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {e}"))?;
+        let bg = session.spawn().map_err(|e| anyhow!("spawn failed: {e}"))?;
+        let mount_dev = mount_dev_of(mountpoint)
+            .with_context(|| format!("failed to read mount device of {}", mountpoint.display()))?;
+        RunningFuseSession::Plain {
+            session: bg,
+            mountpoint: mountpoint.to_path_buf(),
+            mount_dev,
+        }
+    } else {
+        let mut preparation = IdmapMountPreparation::new(mountpoint)
+            .context("failed to prepare idmapped mount target")?;
+        let (fs, init_waiter) = ErofsFs::new_idmapped(reader.clone());
+        let session = Session::new(fs, preparation.staging_mountpoint(), &config)
+            .map_err(|e| anyhow!("staging FUSE mount failed: {e}"))?;
+        let bg = session
+            .spawn()
+            .map_err(|e| anyhow!("staging FUSE spawn failed: {e}"))?;
+        preparation.set_session(bg)?;
+        init_waiter
+            .wait(IDMAP_INIT_TIMEOUT)
+            .context("FUSE idmap negotiation failed")?;
+        let session = preparation
+            .attach(&id_mappings, IDMAP_INIT_TIMEOUT)
+            .context("failed to attach idmapped FUSE mount")?;
+        RunningFuseSession::Idmapped(session)
+    };
 
     if prefetch_enable {
         match BlobPrefetcher::new(reader.clone(), prefetch_threads, prefetch_full).spawn() {
@@ -409,34 +511,32 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
     };
 
     let wait_signals = TermSignalMask::new()?;
-    let signal_mountpoint = mountpoint.to_path_buf();
-    // Captured before anything can replace the mount, so the teardown below can
-    // tell our own mount apart from a successor's at the same path.
-    let our_dev = mount_dev_of(mountpoint)
-        .with_context(|| format!("failed to read mount device of {}", mountpoint.display()))?;
     let (unmount_tx, unmount_rx) = mpsc::channel::<i32>();
-    let (result_tx, result_rx) = mpsc::channel::<std::io::Result<()>>();
+    let (result_tx, result_rx) = mpsc::channel::<Result<()>>();
 
     std::thread::Builder::new()
         .name("nydus_fuse_controller".to_string())
         .spawn(move || {
-            let mut bg = Some(bg);
+            let mut session = Some(running_session);
 
             loop {
-                if bg.as_ref().is_some_and(|bg| bg.guard.is_finished()) {
-                    let session = bg.take().expect("background session already taken");
-                    let result = finish_session(session, &signal_mountpoint, our_dev.clone());
+                if session
+                    .as_ref()
+                    .is_some_and(|session| session.is_finished())
+                {
+                    let running = session.take().expect("running session already taken");
+                    let result = running.finish();
                     let _ = result_tx.send(result);
                     return;
                 }
 
                 match unmount_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(signal) => {
-                        let session = bg.take().expect("background session already taken");
-                        let result = finish_session(session, &signal_mountpoint, our_dev.clone());
+                        let running = session.take().expect("running session already taken");
+                        let result = running.finish();
                         if let Err(err) = &result {
                             error!(
-                                "failed to unmount after receiving signal {}: {:?}",
+                                "failed to unmount after receiving signal {}: {:#}",
                                 signal, err
                             );
                         }
@@ -445,8 +545,8 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        let session = bg.take().expect("background session already taken");
-                        let result = finish_session(session, &signal_mountpoint, our_dev.clone());
+                        let running = session.take().expect("running session already taken");
+                        let result = running.finish();
                         let _ = result_tx.send(result);
                         return;
                     }
@@ -481,7 +581,65 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         Err(e) => error!("background fuse session join returned error: {:?}", e),
     }
 
-    join_result.map_err(|e| anyhow!("join failed: {e}"))?;
+    join_result?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with_mapping(external: u32) -> Config {
+        Config::from_yaml(&format!(
+            r#"backend:
+  type: local
+  config:
+    dir: /blobs
+cache:
+  type: local
+  config:
+    dir: /cache
+id_mapping:
+  mapping:
+    - internal: 0
+      external: {external}
+      range: 65536
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn parses_id_map_cli_extent() {
+        assert_eq!(
+            parse_id_map("0:100000:65536").unwrap(),
+            IdMapTriple {
+                internal: 0,
+                external: 100000,
+                range: 65536,
+            }
+        );
+        for value in ["", "0:1", "0:1:2:3", "x:1:2", "0:1:0"] {
+            assert!(parse_id_map(value).is_err(), "{value} should be rejected");
+        }
+    }
+
+    #[test]
+    fn cli_id_map_replaces_config_mapping() {
+        let config = config_with_mapping(100000);
+        let cli = [IdMapTriple {
+            internal: 0,
+            external: 200000,
+            range: 65536,
+        }];
+        assert_eq!(
+            effective_id_mappings(&cli, Some(&config)).unwrap(),
+            cli.to_vec()
+        );
+        assert_eq!(
+            effective_id_mappings(&[], Some(&config)).unwrap()[0].external,
+            100000
+        );
+    }
 }
