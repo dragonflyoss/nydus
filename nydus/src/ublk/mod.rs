@@ -5,10 +5,10 @@
 //! or later (`CONFIG_BLK_DEV_UBLK`).
 
 pub mod core;
-pub mod target;
+pub mod service;
 
 pub use core::{UblkCore, UBLK_LOGICAL_BLOCK_SIZE};
-pub use target::{
-    default_queues, UblkHandle, UblkOptions, UblkTarget, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
-    MAX_DEFAULT_QUEUES,
+pub use service::{
+    default_queues, UblkHandle, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES,
+    DEFAULT_QUEUE_DEPTH, MAX_DEFAULT_QUEUES,
 };

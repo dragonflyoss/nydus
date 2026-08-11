@@ -6,7 +6,7 @@ use clap::Args;
 use nydus::config::Config;
 use nydus::tracing::init_tracing;
 use nydus::ublk::{
-    default_queues, UblkCore, UblkOptions, UblkTarget, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
+    default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use signal_hook::iterator::Signals;
@@ -107,10 +107,10 @@ pub fn run_ublk(args: UblkArgs) -> Result<()> {
         io_buf_bytes: args.io_buf_bytes,
         unprivileged: args.unprivileged,
     };
-    let target = UblkTarget::new(core, &options)?;
-    println!("{}", target.dev_path());
+    let service = UblkService::new(core, &options)?;
+    println!("{}", service.dev_path());
 
-    let handle = target.handle();
+    let handle = service.handle();
     let signal_thread = std::thread::Builder::new()
         .name("nydus_ublk_signal".to_string())
         .spawn(move || {
@@ -121,8 +121,8 @@ pub fn run_ublk(args: UblkArgs) -> Result<()> {
         })
         .context("failed to spawn ublk signal thread")?;
 
-    let result = target.run();
-    target.delete();
+    let result = service.run();
+    service.delete();
 
     signal_handle.close();
     signal_thread

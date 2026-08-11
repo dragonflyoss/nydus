@@ -63,14 +63,14 @@ impl Default for UblkOptions {
 }
 
 /// A running ublk device serving a nydus image.
-pub struct UblkTarget {
+pub struct UblkService {
     ctrl: Arc<UblkCtrl>,
     core: Arc<UblkCore>,
 }
 
-impl UblkTarget {
+impl UblkService {
     /// Create the ublk device. The device is added to the driver here but does
-    /// not serve I/O until [`UblkTarget::run`] is called.
+    /// not serve I/O until [`UblkService::run`] is called.
     pub fn new(core: Arc<UblkCore>, options: &UblkOptions) -> Result<Self> {
         let ctrl_flags = if options.unprivileged {
             libublk::sys::UBLK_F_UNPRIVILEGED_DEV as u64
@@ -130,14 +130,14 @@ impl UblkTarget {
     }
 }
 
-/// Thread-safe handle for stopping a running [`UblkTarget`].
+/// Thread-safe handle for stopping a running [`UblkService`].
 #[derive(Clone)]
 pub struct UblkHandle {
     ctrl: Arc<UblkCtrl>,
 }
 
 impl UblkHandle {
-    /// Stop the device, which makes [`UblkTarget::run`] return.
+    /// Stop the device, which makes [`UblkService::run`] return.
     pub fn stop(&self) {
         if let Err(err) = self.ctrl.kill_dev() {
             error!("failed to stop ublk device: {err}");
