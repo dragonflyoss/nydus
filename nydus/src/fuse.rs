@@ -3,15 +3,17 @@ use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use fuser::{
     AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier, ReplyAttr, ReplyData,
-    ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyPoll, ReplyStatfs,
-    ReplyXattr, Request,
+    INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier,
+    ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen,
+    ReplyPoll, ReplyStatfs, ReplyXattr, Request,
 };
+use tracing::{info, warn};
 
 use crate::metadata::*;
 use crate::metrics;
@@ -31,6 +33,31 @@ pub struct ErofsFs {
     reader: Arc<ErofsReader>,
     dir_handles: Mutex<HashMap<u64, Arc<DirHandle>>>,
     next_dir_handle: AtomicU64,
+    idmap_init_sender: Option<SyncSender<bool>>,
+}
+
+pub struct IdmapInitWaiter {
+    receiver: Receiver<bool>,
+}
+
+impl IdmapInitWaiter {
+    pub fn wait(self, timeout: Duration) -> io::Result<()> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "kernel did not accept FUSE_ALLOW_IDMAP",
+            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "timed out waiting for FUSE_INIT idmap negotiation",
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "FUSE session ended before idmap negotiation completed",
+            )),
+        }
+    }
 }
 
 struct DirHandle {
@@ -43,7 +70,21 @@ impl ErofsFs {
             reader,
             dir_handles: Mutex::new(HashMap::new()),
             next_dir_handle: AtomicU64::new(1),
+            idmap_init_sender: None,
         }
+    }
+
+    pub fn new_idmapped(reader: Arc<ErofsReader>) -> (Self, IdmapInitWaiter) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        (
+            Self {
+                reader,
+                dir_handles: Mutex::new(HashMap::new()),
+                next_dir_handle: AtomicU64::new(1),
+                idmap_init_sender: Some(sender),
+            },
+            IdmapInitWaiter { receiver },
+        )
     }
 
     fn ino_to_nid(&self, ino: u64) -> u64 {
@@ -207,6 +248,31 @@ fn should_hide_xattr(ino: u64, name: &[u8]) -> bool {
 }
 
 impl Filesystem for ErofsFs {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> io::Result<()> {
+        let Some(sender) = self.idmap_init_sender.take() else {
+            return Ok(());
+        };
+
+        let supported = match config.add_capabilities(InitFlags::FUSE_ALLOW_IDMAP) {
+            Ok(()) => {
+                info!("FUSE_ALLOW_IDMAP advertised to kernel");
+                true
+            }
+            Err(unsupported) => {
+                warn!(
+                    "kernel does not support FUSE_ALLOW_IDMAP (bits={:#x})",
+                    unsupported.bits()
+                );
+                false
+            }
+        };
+        // fuser sends the INIT reply after this callback returns. The receiver
+        // therefore confirms capability negotiation only; the idmap lifecycle
+        // uses a timed statfs request as the post-reply readiness barrier.
+        let _ = sender.send(supported);
+        Ok(())
+    }
+
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut m = FsOpMetric::new(metrics::FsOp::Lookup);
         let target = name.as_bytes();
@@ -613,5 +679,40 @@ impl Filesystem for ErofsFs {
             return;
         }
         reply.data(&names_buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idmap_init_waiter_distinguishes_outcomes() {
+        for (supported, expected_kind) in [(true, None), (false, Some(io::ErrorKind::Unsupported))]
+        {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            sender.send(supported).unwrap();
+            let result = IdmapInitWaiter { receiver }.wait(Duration::from_secs(1));
+            match expected_kind {
+                Some(kind) => assert_eq!(result.unwrap_err().kind(), kind),
+                None => result.unwrap(),
+            }
+        }
+    }
+
+    #[test]
+    fn idmap_init_waiter_times_out_or_observes_disconnect() {
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let err = IdmapInitWaiter { receiver }
+            .wait(Duration::ZERO)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(sender);
+        let err = IdmapInitWaiter { receiver }
+            .wait(Duration::from_secs(1))
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
     }
 }

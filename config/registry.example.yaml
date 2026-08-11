@@ -78,3 +78,19 @@ prefetch:
   # "ondemand" redirect blob is prefetched, warming the access-ordered hot set
   # without pulling the whole image.
   full: false
+
+# Optional ID-mapped FUSE mount (Linux 6.12+). Internal IDs are the IDs stored
+# in the image; external IDs are the IDs exposed to the host. This requires
+# root, /dev/fuse, FUSE_ALLOW_IDMAP, CAP_SYS_ADMIN, CAP_SETUID and CAP_SETGID.
+# Repeated CLI --id-map arguments replace this entire mapping.
+#
+# The example maps image IDs 0..65535 to host IDs 100000..165535 and maps
+# image ID 65536 separately to host ID 1000.
+# id_mapping:
+#   mapping:
+#     - internal: 0
+#       external: 100000
+#       range: 65536
+#     - internal: 65536
+#       external: 1000
+#       range: 1

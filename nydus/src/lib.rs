@@ -8,6 +8,8 @@ pub mod build;
 pub mod fanotify;
 #[cfg(feature = "fuse")]
 pub mod fuse;
+#[cfg(feature = "fuse")]
+pub mod idmap;
 pub mod merge;
 #[cfg(feature = "nbd")]
 pub mod nbd;
