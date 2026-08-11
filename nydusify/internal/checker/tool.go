@@ -9,6 +9,7 @@ package checker
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"context"
 	"io"
 	"os"
@@ -25,23 +26,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 )
-
-func builderBinary(bin string) string {
-	if bin == "" {
-		return "nydus"
-	}
-	return bin
-}
-
-// nydusLogLevel returns level, or "info" when level is empty, so a nydus
-// subprocess always receives a valid `--log-level` value.
-func nydusLogLevel(level string) string {
-	if level == "" {
-		return "info"
-	}
-	return level
-}
 
 // blobMetaLinkConcurrency bounds how many blob meta files are hardlinked/copied
 // into the cache directory in parallel.
@@ -275,7 +261,7 @@ func runNydusCheck(ctx context.Context, builder, bootstrapPath string) error {
 		"check",
 		"--bootstrap", bootstrapPath,
 	}
-	cmd := exec.CommandContext(ctx, builderBinary(builder), args...)
+	cmd := exec.CommandContext(ctx, cmp.Or(builder, pkgconv.DefaultBuilder), args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

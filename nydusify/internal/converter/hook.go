@@ -21,6 +21,7 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/converter"
 	"github.com/containerd/errdefs"
+	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -57,7 +58,7 @@ func ConvertHookFunc(opt MergeOption) converter.ConvertHookFunc {
 // contains only one entry, mirroring the nydus behavior.
 func convertIndex(ctx context.Context, cs content.Store, newDesc *ocispec.Descriptor) (*ocispec.Descriptor, error) {
 	var index ocispec.Index
-	if _, err := readJSON(ctx, cs, &index, *newDesc); err != nil {
+	if err := oci.ReadJSON(ctx, cs, *newDesc, &index); err != nil {
 		return nil, errors.Wrap(err, "read index json")
 	}
 	if len(index.Manifests) == 1 {
@@ -70,8 +71,11 @@ func convertIndex(ctx context.Context, cs content.Store, newDesc *ocispec.Descri
 // nydus bootstrap layer, rewrites the image config, and rewrites the manifest.
 func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Descriptor, opt MergeOption) (*ocispec.Descriptor, error) {
 	var manifest ocispec.Manifest
-	manifestLabels, err := readJSON(ctx, cs, &manifest, *newDesc)
+	manifestLabels, err := oci.Labels(ctx, cs, newDesc.Digest)
 	if err != nil {
+		return nil, err
+	}
+	if err := oci.ReadJSON(ctx, cs, *newDesc, &manifest); err != nil {
 		return nil, errors.Wrap(err, "read manifest json")
 	}
 
@@ -108,8 +112,11 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	}
 
 	var rawConfig json.RawMessage
-	configLabels, err := readJSON(ctx, cs, &rawConfig, manifest.Config)
+	configLabels, err := oci.Labels(ctx, cs, manifest.Config.Digest)
 	if err != nil {
+		return nil, err
+	}
+	if err := oci.ReadJSON(ctx, cs, manifest.Config, &rawConfig); err != nil {
 		return nil, errors.Wrap(err, "read image config")
 	}
 	newConfig, err := rewriteBootstrapConfig(rawConfig, diffIDs)
@@ -332,27 +339,6 @@ func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []
 			LayerAnnotationNydusFsVersion: NydusFsVersion,
 		},
 	}, nil
-}
-
-// readJSON reads and unmarshals a JSON blob (manifest/index/config) from the
-// content store, returning its labels.
-func readJSON(ctx context.Context, cs content.Store, x interface{}, desc ocispec.Descriptor) (map[string]string, error) {
-	info, err := cs.Info(ctx, desc.Digest)
-	if err != nil {
-		return nil, errors.Wrap(err, "stat content")
-	}
-	labels := info.Labels
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	b, err := content.ReadBlob(ctx, cs, desc)
-	if err != nil {
-		return nil, errors.Wrap(err, "read content blob")
-	}
-	if err := json.Unmarshal(b, x); err != nil {
-		return nil, errors.Wrap(err, "unmarshal json")
-	}
-	return labels, nil
 }
 
 // WriteJSON marshals x to JSON and commits it to the content store, returning a

@@ -8,6 +8,7 @@ package checker
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"io"
 	"os"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 )
 
 // OptimizeOption configures an Optimizer.
@@ -214,10 +216,10 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 		"--bootstrap", bootstrap,
 		"--blob-dir", blobDir,
 		"--config", configPath,
-		"--log-level", nydusLogLevel(o.opt.LogLevel),
+		"--log-level", cmp.Or(o.opt.LogLevel, pkgconv.DefaultLogLevel),
 		"--trace-file", o.opt.Pattern,
 	}
-	cmd := exec.CommandContext(ctx, builderBinary(o.opt.Builder), args...)
+	cmd := exec.CommandContext(ctx, cmp.Or(o.opt.Builder, pkgconv.DefaultBuilder), args...)
 	var output bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&output, os.Stderr)
 	cmd.Stderr = os.Stderr

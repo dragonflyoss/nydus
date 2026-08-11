@@ -519,7 +519,7 @@ impl BlobCache for LocalBlobCache {
         // The cache file mirrors the dense uncompressed address space, so once
         // the covering groups are decoded the absolute offset indexes straight
         // into it for a single contiguous read.
-        read_exact_at(cache_file.as_ref(), offset, dst)
+        cache_file.as_ref().read_exact_at(dst, offset)
     }
 
     fn prepare(&self) -> io::Result<PathBuf> {
@@ -842,21 +842,6 @@ fn load_cached_blob_meta(
     BlobMeta::load_checked_crc32_with_blob_id(blob_meta_path, blob_id).map_err(io::Error::other)
 }
 
-fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-    let mut read_total = 0usize;
-    while read_total < buf.len() {
-        let read = file.read_at(&mut buf[read_total..], offset + read_total as u64)?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "cache file read ended early",
-            ));
-        }
-        read_total += read;
-    }
-    Ok(())
-}
-
 /// Drop guard that ensures a leader always signals its flight and cleans up
 /// the inflight map, even when the fetch body panics. Without this, a panic in
 /// `fetch_decode_validate_group_into` (or any helper it calls) would leave
@@ -924,44 +909,7 @@ mod tests {
         .unwrap()
     }
 
-    fn write_full_blob(
-        dir: &Path,
-        payload: &[u8],
-        blob_meta: &BlobMeta,
-        save_sidecar: bool,
-    ) -> [u8; EROFS_BLOB_ID_SIZE] {
-        let mut bootstrap = vec![0u8; 8192];
-        let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]);
-        let sb_start = EROFS_SUPER_OFFSET as usize;
-        let sb_end = sb_start + sb.as_bytes().len();
-        bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
-
-        let footer = BlobFooter::new(
-            0,
-            payload.len() as u64,
-            payload.len() as u64,
-            (bootstrap.len() as u64 / EROFS_BLOCK_SIZE as u64) as u32,
-            payload.len() as u64 + bootstrap.len() as u64,
-            (blob_meta.metadata_size() / EROFS_BLOCK_SIZE as u64) as u32,
-        )
-        .unwrap();
-
-        let mut full_blob = Vec::new();
-        full_blob.write_all(payload).unwrap();
-        full_blob.write_all(&bootstrap).unwrap();
-        blob_meta.write_to(&mut full_blob).unwrap();
-        footer.write_to(&mut full_blob).unwrap();
-        let full_blob_id = sha256_bytes(&full_blob);
-
-        fs::write(dir.join(hex_string(&full_blob_id)), &full_blob).unwrap();
-        if save_sidecar {
-            blob_meta
-                .save(&dir.join(format!("{}.blob.meta", hex_string(&full_blob_id))))
-                .unwrap();
-        }
-
-        full_blob_id
-    }
+    use crate::storage::test_util::write_full_blob;
 
     /// Wraps a real backend and counts data-range reads, so tests can assert
     /// that cross-process sharing (groupmap + prefetch lock + segment skip)
