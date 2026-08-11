@@ -189,7 +189,7 @@ impl UffdConn {
             };
             match event {
                 ConnectionEvent::Socket(message) => self.dispatch_message(message).await?,
-                ConnectionEvent::Uffd(msg) => self.handle_uffd_event(msg).await?,
+                ConnectionEvent::Uffd(msg) => self.handle_page_fault(msg).await?,
             }
         }
         info!("nydus uffd connection stopped");
@@ -281,7 +281,7 @@ impl UffdConn {
         })
     }
 
-    async fn handle_uffd_event(&self, msg: UffdMsg) -> Result<()> {
+    async fn handle_page_fault(&self, msg: UffdMsg) -> Result<()> {
         let state = self
             .state
             .as_ref()
