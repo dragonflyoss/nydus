@@ -4,6 +4,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::EROFS_BLOCK_SIZE;
+use crate::utils::blocks_to_bytes;
+use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
 
 /// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the
 /// footer starts with the readable string. Same style and `magic + version +
@@ -174,16 +176,16 @@ impl BlobFooter {
         // that this reader ignores. Corruption is caught by the footer crc32c.
         let footer = Self {
             magic: data[0..8].try_into().expect("slice checked"),
-            version: read_u32(data, 8),
-            flags: read_u32(data, 12),
-            crc32: read_u32(data, 16),
-            reserved0: read_u32(data, 20),
-            compressed_data_offset: read_u64(data, 24),
-            bootstrap_offset: read_u64(data, 32),
-            blob_meta_offset: read_u64(data, 40),
-            compressed_data_size: read_u64(data, 48),
-            bootstrap_blocks: read_u32(data, 56),
-            blob_meta_blocks: read_u32(data, 60),
+            version: read_u32_at(data, 8),
+            flags: read_u32_at(data, 12),
+            crc32: read_u32_at(data, 16),
+            reserved0: read_u32_at(data, 20),
+            compressed_data_offset: read_u64_at(data, 24),
+            bootstrap_offset: read_u64_at(data, 32),
+            blob_meta_offset: read_u64_at(data, 40),
+            compressed_data_size: read_u64_at(data, 48),
+            bootstrap_blocks: read_u32_at(data, 56),
+            blob_meta_blocks: read_u32_at(data, 60),
         };
         footer.validate_common()?;
         // Verify the crc32 over the raw incoming bytes (with the crc32 field
@@ -202,16 +204,16 @@ impl BlobFooter {
     fn to_bytes(self) -> [u8; NYDUS_BLOB_FOOTER_SIZE] {
         let mut data = [0u8; NYDUS_BLOB_FOOTER_SIZE];
         data[0..8].copy_from_slice(&self.magic);
-        write_u32(&mut data, 8, self.version);
-        write_u32(&mut data, 12, self.flags);
-        write_u32(&mut data, 16, self.crc32);
-        write_u32(&mut data, 20, self.reserved0);
-        write_u64(&mut data, 24, self.compressed_data_offset);
-        write_u64(&mut data, 32, self.bootstrap_offset);
-        write_u64(&mut data, 40, self.blob_meta_offset);
-        write_u64(&mut data, 48, self.compressed_data_size);
-        write_u32(&mut data, 56, self.bootstrap_blocks);
-        write_u32(&mut data, 60, self.blob_meta_blocks);
+        write_u32_at(&mut data, 8, self.version);
+        write_u32_at(&mut data, 12, self.flags);
+        write_u32_at(&mut data, 16, self.crc32);
+        write_u32_at(&mut data, 20, self.reserved0);
+        write_u64_at(&mut data, 24, self.compressed_data_offset);
+        write_u64_at(&mut data, 32, self.bootstrap_offset);
+        write_u64_at(&mut data, 40, self.blob_meta_offset);
+        write_u64_at(&mut data, 48, self.compressed_data_size);
+        write_u32_at(&mut data, 56, self.bootstrap_blocks);
+        write_u32_at(&mut data, 60, self.blob_meta_blocks);
         data
     }
 
@@ -281,26 +283,6 @@ impl BlobFooter {
         data[16..20].fill(0);
         crc32c::crc32c(&data)
     }
-}
-
-fn blocks_to_bytes(blocks: u32) -> u64 {
-    blocks as u64 * EROFS_BLOCK_SIZE as u64
-}
-
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(data[offset..offset + 4].try_into().expect("slice checked"))
-}
-
-fn read_u64(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(data[offset..offset + 8].try_into().expect("slice checked"))
-}
-
-fn write_u32(data: &mut [u8], offset: usize, value: u32) {
-    data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-fn write_u64(data: &mut [u8], offset: usize, value: u64) {
-    data[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 
 #[cfg(test)]

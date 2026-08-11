@@ -1,18 +1,15 @@
 //! Helpers shared by the integration tests for assembling footer-based
-//! full blobs.
+//! full blobs. Thin infallible wrappers over the production helpers in
+//! `nydus_core::utils` — fixtures use static sizes, so failures are bugs.
 
 use std::io::Write;
 
-use nydus_core::metadata::EROFS_BLOCK_SIZE;
-
 pub fn align_up(value: u64, align: u64) -> u64 {
-    debug_assert!(align.is_power_of_two());
-    (value + align - 1) & !(align - 1)
+    nydus_core::utils::align_up(value, align).expect("test alignment overflow")
 }
 
 pub fn bytes_to_blocks(size: u64) -> u32 {
-    assert_eq!(size % EROFS_BLOCK_SIZE as u64, 0);
-    (size / EROFS_BLOCK_SIZE as u64) as u32
+    nydus_core::utils::bytes_to_blocks(size, "test region").expect("test region not block aligned")
 }
 
 pub fn write_zero_padding(
@@ -20,9 +17,5 @@ pub fn write_zero_padding(
     current: u64,
     aligned: u64,
 ) -> std::io::Result<()> {
-    let padding = aligned - current;
-    if padding > 0 {
-        writer.write_all(&vec![0u8; padding as usize])?;
-    }
-    Ok(())
+    nydus_core::utils::write_zero_padding(writer, current, aligned)
 }

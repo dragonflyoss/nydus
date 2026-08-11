@@ -8,10 +8,11 @@
 //! options, no option-length budget.
 
 use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+
+use crate::utils::path_cstring;
 
 /// Mount the NBD block device `device` at `mountpoint` as `fstype`, read-only.
 ///
@@ -47,18 +48,7 @@ pub fn mount_nbd(device: &str, mountpoint: &Path, fstype: &str) -> Result<()> {
 /// Unmount whatever is mounted at `mountpoint`. A plain `umount2(., 0)`; the
 /// EBUSY retry loop lives in the CLI, mirroring fanotify's shutdown ordering.
 pub fn unmount_nbd(mountpoint: &Path) -> Result<()> {
-    let target = path_cstring(mountpoint, "mountpoint")?;
-    let ret = unsafe { libc::umount2(target.as_ptr(), 0) };
-    if ret < 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("failed to unmount {}", mountpoint.display()));
-    }
-    Ok(())
-}
-
-fn path_cstring(path: &Path, kind: &str) -> Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("{kind} path contains an interior NUL byte"))
+    crate::utils::unmount(mountpoint)
 }
 
 #[cfg(test)]

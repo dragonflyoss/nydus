@@ -19,6 +19,7 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	"github.com/containerd/errdefs"
+	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -63,8 +64,11 @@ func ConvertToOCI(ctx context.Context, cs content.Store, srcDesc ocispec.Descrip
 
 func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt ToOCIOption) (*ocispec.Descriptor, error) {
 	var index ocispec.Index
-	labels, err := readJSON(ctx, cs, &index, desc)
+	labels, err := oci.Labels(ctx, cs, desc.Digest)
 	if err != nil {
+		return nil, err
+	}
+	if err := oci.ReadJSON(ctx, cs, desc, &index); err != nil {
 		return nil, errors.Wrap(err, "read index json")
 	}
 
@@ -83,8 +87,11 @@ func convertIndexToOCI(ctx context.Context, cs content.Store, desc ocispec.Descr
 
 func convertManifestToOCI(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt ToOCIOption) (*ocispec.Descriptor, error) {
 	var manifest ocispec.Manifest
-	manifestLabels, err := readJSON(ctx, cs, &manifest, desc)
+	manifestLabels, err := oci.Labels(ctx, cs, desc.Digest)
 	if err != nil {
+		return nil, err
+	}
+	if err := oci.ReadJSON(ctx, cs, desc, &manifest); err != nil {
 		return nil, errors.Wrap(err, "read manifest json")
 	}
 
@@ -111,8 +118,11 @@ func convertManifestToOCI(ctx context.Context, cs content.Store, desc ocispec.De
 	}
 
 	var rawConfig json.RawMessage
-	configLabels, err := readJSON(ctx, cs, &rawConfig, manifest.Config)
+	configLabels, err := oci.Labels(ctx, cs, manifest.Config.Digest)
 	if err != nil {
+		return nil, err
+	}
+	if err := oci.ReadJSON(ctx, cs, manifest.Config, &rawConfig); err != nil {
 		return nil, errors.Wrap(err, "read image config")
 	}
 	newConfig, err := rewriteOCIConfig(rawConfig, diffIDs, len(manifest.Layers)-len(layers))

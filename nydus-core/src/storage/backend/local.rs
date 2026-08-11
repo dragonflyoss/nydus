@@ -157,7 +157,7 @@ impl LocalBackend {
         if let (Some(offset), Some(size)) = (source.blob_meta_offset, source.blob_meta_size) {
             let file = File::open(&source.path)?;
             let mut data = vec![0u8; size as usize];
-            read_exact_at(&file, offset, &mut data)?;
+            file.read_exact_at(&mut data, offset)?;
             return Ok(data);
         }
 
@@ -220,7 +220,7 @@ impl BlobBackend for LocalBackend {
             ));
         }
         let file = self.source_file(blob_id)?;
-        read_exact_at(&file, source.data_offset + offset, dst)
+        file.read_exact_at(dst, source.data_offset + offset)
     }
 }
 
@@ -240,21 +240,6 @@ fn inspect_full_blob_source(
         blob_meta_offset: Some(footer.blob_meta_offset()),
         blob_meta_size: Some(footer.blob_meta_size()),
     }))
-}
-
-fn read_exact_at(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-    let mut read_total = 0usize;
-    while read_total < buf.len() {
-        let read = file.read_at(&mut buf[read_total..], offset + read_total as u64)?;
-        if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "backend range read ended early",
-            ));
-        }
-        read_total += read;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -278,52 +263,19 @@ mod tests {
         .unwrap()
     }
 
-    fn write_full_blob(
-        dir: &Path,
-        payload: &[u8],
-        save_sidecar: bool,
-    ) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
-        let data_blob_id = sha256_bytes(payload);
-        let mut bootstrap = vec![0u8; 8192];
-        let sb = ErofsSuperblock::new(0, 0, 0, 0, 0, 2, 1, 0, 0, &[0u8; 16]);
-        let sb_start = EROFS_SUPER_OFFSET as usize;
-        let sb_end = sb_start + sb.as_bytes().len();
-        bootstrap[sb_start..sb_end].copy_from_slice(sb.as_bytes());
-        let blob_meta = blob_meta(data_blob_id, payload);
-        let footer = BlobFooter::new(
-            0,
-            payload.len() as u64,
-            payload.len() as u64,
-            (bootstrap.len() as u64 / EROFS_BLOCK_SIZE as u64) as u32,
-            payload.len() as u64 + bootstrap.len() as u64,
-            (blob_meta.metadata_size() / EROFS_BLOCK_SIZE as u64) as u32,
-        )
-        .unwrap();
-
-        let temp_full_blob_path = dir.join("full-blob.bin");
-        let mut full_blob = File::create(&temp_full_blob_path).unwrap();
-        full_blob.write_all(payload).unwrap();
-        full_blob.write_all(&bootstrap).unwrap();
-        blob_meta.write_to(&mut full_blob).unwrap();
-        footer.write_to(&mut full_blob).unwrap();
-        let full_blob_id = sha256_file(&temp_full_blob_path).unwrap();
-        let full_blob_path = dir.join(hex_string(&full_blob_id));
-        fs::rename(&temp_full_blob_path, &full_blob_path).unwrap();
-
-        if save_sidecar {
-            blob_meta
-                .save(&dir.join(format!("{}.blob.meta", hex_string(&full_blob_id))))
-                .unwrap();
-        }
-
-        (full_blob_id, data_blob_id)
-    }
+    use crate::storage::test_util::write_full_blob;
 
     #[test]
     fn local_backend_reads_full_blob_file_and_sidecar_meta() {
         let dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
-        let (full_blob_id, _data_blob_id) = write_full_blob(dir.path(), &payload, true);
+        let data_blob_id = sha256_bytes(&payload);
+        let full_blob_id = write_full_blob(
+            dir.path(),
+            &payload,
+            &blob_meta(data_blob_id, &payload),
+            true,
+        );
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.load_blob_meta(&full_blob_id).unwrap();
@@ -339,7 +291,13 @@ mod tests {
     fn local_backend_reads_embedded_blob_meta_from_full_blob() {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
-        let (full_blob_id, data_blob_id) = write_full_blob(dir.path(), &payload, false);
+        let data_blob_id = sha256_bytes(&payload);
+        let full_blob_id = write_full_blob(
+            dir.path(),
+            &payload,
+            &blob_meta(data_blob_id, &payload),
+            false,
+        );
         let backend = LocalBackend::new(dir.path().to_path_buf());
 
         let blob_meta = backend.load_blob_meta(&full_blob_id).unwrap();
