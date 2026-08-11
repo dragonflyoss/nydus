@@ -2,17 +2,17 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use crate::cli_common;
+use nydus::build::blob_chunk::compression_is_worthwhile;
 use nydus::config::Config;
 use nydus::fs::{ErofsReader, RawBlobInfo};
-use nydus::{TraceDocument, TraceEntry};
-use nydus::metrics::trace::TRACE_DOCUMENT_VERSION;
-use nydus::build::blob_chunk::compression_is_worthwhile;
 use nydus::merge::rewrite_bootstrap_with_ondemand_blob;
 use nydus::metadata::*;
+use nydus::metrics::trace::TRACE_DOCUMENT_VERSION;
 use nydus::storage::backend::build_backend;
 use nydus::storage::cache::{BlobCache, LocalBlobCache};
 use nydus::tracing::init_command_tracing;
 use nydus::utils::{align_up, hex_string};
+use nydus::{TraceDocument, TraceEntry};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -20,7 +20,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{info};
+use tracing::info;
 
 #[derive(Args)]
 pub struct OptimizeArgs {

@@ -528,7 +528,9 @@ impl Registry {
             ReadContext::raw(ReadKind::OnDemand),
         )?;
 
-        BlobMeta::loader().blob_id(*blob_id).from_bytes(&blob_meta_bytes)
+        BlobMeta::loader()
+            .blob_id(*blob_id)
+            .from_bytes(&blob_meta_bytes)
             .map_err(|e| RegistryError::Io(io::Error::other(e.to_string())))
     }
 
@@ -674,7 +676,6 @@ impl BlobBackend for Registry {
         }
         Ok(())
     }
-
 }
 
 fn is_redirect(status: StatusCode) -> bool {

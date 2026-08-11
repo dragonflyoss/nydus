@@ -378,8 +378,7 @@ pub(crate) fn align_fetch_range(
     let end = raw_end.min(cache_size);
 
     let aligned_off = offset & !(BLOCK_SIZE - 1);
-    let aligned_end =
-        crate::utils::align_up(end, BLOCK_SIZE).ok_or(RangeError::Overflow)?;
+    let aligned_end = crate::utils::align_up(end, BLOCK_SIZE).ok_or(RangeError::Overflow)?;
     // `cache_size` is validated block-aligned at device enumeration, so rounding
     // `end` up never exceeds it; clamp as a safety net and verify the aligned
     // window stays inside the device.

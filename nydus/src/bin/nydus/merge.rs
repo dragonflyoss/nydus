@@ -1,6 +1,6 @@
+use crate::cli_common;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use crate::cli_common;
 use nydus::merge::{merge_sources_to_bootstrap_bytes, WhiteoutSpec as MergeWhiteoutSpec};
 use nydus::tracing::init_command_tracing;
 use std::fs::File;

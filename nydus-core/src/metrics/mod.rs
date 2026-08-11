@@ -457,12 +457,10 @@ pub fn track_blob_groups(cache_key: [u8; EROFS_BLOB_ID_SIZE], group_count: u64) 
         Ok(tracked) => tracked,
         Err(poisoned) => poisoned.into_inner(),
     };
-    let entry = tracked
-        .entry(cache_key)
-        .or_insert(TrackedBlob {
-            group_count,
-            holder_count: 0,
-        });
+    let entry = tracked.entry(cache_key).or_insert(TrackedBlob {
+        group_count,
+        holder_count: 0,
+    });
     entry.holder_count += 1;
     if entry.holder_count == 1 {
         METRICS.cache_total_group.add(entry.group_count as i64);

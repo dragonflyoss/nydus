@@ -965,7 +965,6 @@ impl BlobMeta {
             storage: BlobMetaStorage::Mapped(mmap),
         })
     }
-
 }
 
 /// Options for reading a [`BlobMeta`], created via [`BlobMeta::loader`].
@@ -1376,7 +1375,8 @@ mod tests {
         // A future format generation is readable: version is informational.
         let mut future = raw.clone();
         future[8..12].copy_from_slice(&(BLOB_META_VERSION + 1).to_le_bytes());
-        let loaded = BlobMeta::loader().from_bytes(&future)
+        let loaded = BlobMeta::loader()
+            .from_bytes(&future)
             .expect("future version must be readable");
         assert_eq!(loaded.header().version(), BLOB_META_VERSION + 1);
 
@@ -1384,7 +1384,8 @@ mod tests {
         let mut compat = raw.clone();
         let flags = u32::from_le_bytes(compat[12..16].try_into().unwrap()) | (1 << 31);
         compat[12..16].copy_from_slice(&flags.to_le_bytes());
-        BlobMeta::loader().from_bytes(&compat)
+        BlobMeta::loader()
+            .from_bytes(&compat)
             .expect("unknown compat flag must be ignored");
 
         // An unknown incompat (low-half) flag bit rejects the file.
@@ -1417,7 +1418,8 @@ mod tests {
         // sealed over a zero tail.
         raw[BLOB_META_HEADER_SIZE as usize - 1] = 0xff;
 
-        BlobMeta::loader().from_bytes(&raw)
+        BlobMeta::loader()
+            .from_bytes(&raw)
             .expect("nonzero reserved tail must be ignored");
         let err = match BlobMeta::loader().verify_crc32().from_bytes(&raw) {
             Ok(_) => panic!("crc check should catch the unsealed tail change"),

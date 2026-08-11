@@ -281,7 +281,6 @@ impl ErofsReader {
         Ok(result)
     }
 
-
     /// Resolve one chunk's data into `dst`. Handles holes, the legacy
     /// separate-blob layout (non-zero device_id, blob-relative address) and the
     /// flattened layout (device_id 0 with an absolute address, resolved to a
