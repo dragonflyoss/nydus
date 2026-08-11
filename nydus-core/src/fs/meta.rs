@@ -2,7 +2,7 @@ use std::io;
 
 use crate::metadata::*;
 
-use super::{ErofsReader, RawDirEntry, RawNameDirEntry};
+use super::{ErofsReader, RawDirEntry};
 
 impl ErofsReader {
     /// Get a zero-copy inode view from the mmap.
@@ -10,6 +10,18 @@ impl ErofsReader {
         let offset = self.nid_to_offset(nid);
         let data = self.mmap_slice(offset, EROFS_INODE_EXTENDED_SIZE)?;
         ErofsInode::parse(data)
+    }
+
+    /// Size of a FLAT_INLINE inode's full-block region; bytes past it live in
+    /// the inline tail. A file ending exactly on a block boundary has no tail.
+    pub(crate) fn inline_blocks_size(inode: &ErofsInode<'_>) -> usize {
+        let file_size = inode.size() as usize;
+        let blk_sz = EROFS_BLOCK_SIZE as usize;
+        if file_size % blk_sz == 0 && file_size > 0 {
+            file_size
+        } else {
+            file_size - file_size % blk_sz
+        }
     }
 
     /// Iterate directory entries without materializing the whole directory in memory.
@@ -41,25 +53,6 @@ impl ErofsReader {
         let mut entries = Vec::new();
         self.for_each_dir_entry(nid, inode, |entry_nid, file_type, name| {
             entries.push(RawDirEntry {
-                nid: entry_nid,
-                file_type,
-                name: name.to_vec(),
-            });
-            Ok(true)
-        })?;
-        Ok(entries)
-    }
-
-    /// Read directory entries with owned raw names, for FUSE directory
-    /// handle caching.
-    pub fn read_dir_raw(
-        &self,
-        nid: u64,
-        inode: &ErofsInode<'_>,
-    ) -> io::Result<Vec<RawNameDirEntry>> {
-        let mut entries = Vec::new();
-        self.for_each_dir_entry(nid, inode, |entry_nid, file_type, name| {
-            entries.push(RawNameDirEntry {
                 nid: entry_nid,
                 file_type,
                 name: name.to_vec(),
@@ -139,14 +132,7 @@ impl ErofsReader {
                 self.mmap_slice(data_offset, size)
             }
             EROFS_INODE_FLAT_INLINE => {
-                let file_size = inode.size() as usize;
-                let blk_sz = EROFS_BLOCK_SIZE as usize;
-                let tail_size = if file_size % blk_sz == 0 && file_size > 0 {
-                    0
-                } else {
-                    file_size % blk_sz
-                };
-                let blocks_size = file_size - tail_size;
+                let blocks_size = Self::inline_blocks_size(inode);
 
                 if blocks_size == 0 {
                     // All data is inline (small file/dir)
@@ -193,14 +179,7 @@ impl ErofsReader {
     ) -> io::Result<Vec<u8>> {
         let layout = inode.data_layout();
         if layout == EROFS_INODE_FLAT_INLINE {
-            let file_size = inode.size() as usize;
-            let blk_sz = EROFS_BLOCK_SIZE as usize;
-            let tail_size = if file_size % blk_sz == 0 && file_size > 0 {
-                0
-            } else {
-                file_size % blk_sz
-            };
-            let blocks_size = file_size - tail_size;
+            let blocks_size = Self::inline_blocks_size(inode);
 
             // Check if read spans block+inline boundary
             if blocks_size > 0

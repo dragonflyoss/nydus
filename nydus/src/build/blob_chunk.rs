@@ -29,8 +29,8 @@ pub struct BlobWriter {
 const MAX_COMPRESSED_SIZE_PERCENT: u128 = 70;
 
 impl BlobWriter {
-    pub fn new(path: &Path, chunksize: u32) -> Result<Self> {
-        Self::new_with_compressor(path, chunksize, BlobMetaCompressor::None)
+    pub fn new(path: &Path, chunk_size: u32) -> Result<Self> {
+        Self::new_with_compressor(path, chunk_size, BlobMetaCompressor::None)
     }
 
     pub fn new_with_compressor(
@@ -39,10 +39,10 @@ impl BlobWriter {
         compressor: BlobMetaCompressor,
     ) -> Result<Self> {
         if file_chunk_size < EROFS_BLOCK_SIZE {
-            bail!("blob writer file chunksize must be at least one EROFS block");
+            bail!("blob writer file chunk size must be at least one EROFS block");
         }
         if !file_chunk_size.is_power_of_two() || file_chunk_size % EROFS_BLOCK_SIZE != 0 {
-            bail!("blob writer file chunksize must be power-of-two and block-aligned");
+            bail!("blob writer file chunk size must be power-of-two and block-aligned");
         }
 
         let file = File::create(path)
@@ -58,10 +58,10 @@ impl BlobWriter {
         compressor: BlobMetaCompressor,
     ) -> Result<Self> {
         if file_chunk_size < EROFS_BLOCK_SIZE {
-            bail!("blob writer file chunksize must be at least one EROFS block");
+            bail!("blob writer file chunk size must be at least one EROFS block");
         }
         if !file_chunk_size.is_power_of_two() || file_chunk_size % EROFS_BLOCK_SIZE != 0 {
-            bail!("blob writer file chunksize must be power-of-two and block-aligned");
+            bail!("blob writer file chunk size must be power-of-two and block-aligned");
         }
         if group_size < file_chunk_size {
             bail!("blob writer group size must be at least the file chunk size");
@@ -292,7 +292,10 @@ impl BlobWriter {
     }
 }
 
-fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
+/// Format-compatibility policy shared by build and `nydus optimize`: a group
+/// is stored compressed only when it saves at least 30% — both paths must
+/// agree or an optimized blob would encode groups differently from its source.
+pub fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
     (compressed_len as u128) * 100 <= (uncompressed_len as u128) * MAX_COMPRESSED_SIZE_PERCENT
 }
 

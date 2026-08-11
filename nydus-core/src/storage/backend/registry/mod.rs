@@ -6,7 +6,7 @@
 //! meta. [`read_range`](BlobBackend::read_range) fetches data ranges; blob meta
 //! is normally hydrated from the cache directory (the bootstrap layer ships a
 //! `<full-blob>.blob.meta` per layer), and otherwise
-//! [`load_blob_meta`](BlobBackend::load_blob_meta) recovers it from the blob's
+//! [`blob_meta`](BlobBackend::blob_meta) recovers it from the blob's
 //! trailing footer via range reads.
 //!
 //! The HTTP transport stack (connection, DNS, HTTP proxy, request routing) lives
@@ -528,7 +528,7 @@ impl Registry {
             ReadContext::raw(ReadKind::OnDemand),
         )?;
 
-        BlobMeta::from_bytes_with_blob_id(&blob_meta_bytes, *blob_id)
+        BlobMeta::loader().blob_id(*blob_id).from_bytes(&blob_meta_bytes)
             .map_err(|e| RegistryError::Io(io::Error::other(e.to_string())))
     }
 
@@ -650,7 +650,7 @@ impl BlobBackend for Registry {
         self.target
     }
 
-    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+    fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
         self.fetch_blob_meta(blob_id).map_err(io::Error::from)
     }
 
@@ -675,17 +675,6 @@ impl BlobBackend for Registry {
         Ok(())
     }
 
-    fn read_range(
-        &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-        offset: u64,
-        len: u32,
-        ctx: ReadContext,
-    ) -> io::Result<Vec<u8>> {
-        let mut buf = vec![0u8; len as usize];
-        self.read_range_into(blob_id, offset, &mut buf, ctx)?;
-        Ok(buf)
-    }
 }
 
 fn is_redirect(status: StatusCode) -> bool {

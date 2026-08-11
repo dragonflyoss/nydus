@@ -21,5 +21,5 @@ pub mod proto;
 pub mod service;
 
 pub use core::NbdCore;
-pub use mount::{mount_nbd, unmount_nbd};
+pub use mount::mount_nbd;
 pub use service::NbdService;

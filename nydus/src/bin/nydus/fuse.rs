@@ -1,5 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
+
+use crate::cli_common;
 use fuser::{Config as FuseConfig, MountOption, Session, SessionACL};
 use nydus::config::Config;
 use nydus::fs::ErofsReader;
@@ -15,7 +17,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::available_parallelism;
 use std::time::Duration;
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn};
 
 struct TermSignalMask {
     mask: libc::sigset_t,
@@ -236,35 +238,8 @@ pub struct FuseArgs {
     #[arg(long)]
     pub apiserver: Option<String>,
 
-    #[arg(
-        short = 'l',
-        long,
-        default_value = "info",
-        help = "Specify the logging level [trace, debug, info, warn, error]"
-    )]
-    pub log_level: Level,
-
-    #[arg(
-        long,
-        default_value_os_t = PathBuf::from("/var/log/nydus/"),
-        help = "Specify the log directory"
-    )]
-    pub log_dir: PathBuf,
-
-    #[arg(
-        long,
-        default_value_t = 6,
-        help = "Specify the max number of log files"
-    )]
-    pub log_max_files: usize,
-
-    #[arg(
-        long,
-        hide = true,
-        default_value_t = true,
-        help = "Specify whether to print log"
-    )]
-    pub console: bool,
+    #[command(flatten)]
+    pub log: cli_common::DaemonLogArgs,
 }
 
 /// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
@@ -282,10 +257,10 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
 
     let _guards = init_tracing(
         "nydus",
-        args.log_dir.clone(),
-        args.log_level,
-        args.log_max_files,
-        args.console,
+        args.log.log_dir.clone(),
+        args.log.log_level,
+        args.log.log_max_files,
+        args.log.console,
     );
 
     let mountpoint = &args.mountpoint;

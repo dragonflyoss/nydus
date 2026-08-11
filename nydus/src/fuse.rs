@@ -16,7 +16,7 @@ use fuser::{
 use crate::metadata::*;
 use crate::metrics;
 
-use crate::fs::{ErofsReader, RawNameDirEntry};
+use crate::fs::{ErofsReader, RawDirEntry};
 
 const FUSE_ROOT_ID: u64 = 1;
 const EROFS_FUSE_TIMEOUT: Duration = Duration::from_secs(86400 * 365 * 10);
@@ -34,7 +34,7 @@ pub struct ErofsFs {
 }
 
 struct DirHandle {
-    entries: Vec<RawNameDirEntry>,
+    entries: Vec<RawDirEntry>,
 }
 
 impl ErofsFs {
@@ -126,7 +126,7 @@ impl ErofsFs {
     fn create_dir_handle(&self, inode: u64) -> io::Result<u64> {
         let nid = self.ino_to_nid(inode);
         let vi = self.reader.inode(nid)?;
-        let entries = self.reader.read_dir_raw(nid, &vi)?;
+        let entries = self.reader.read_dir(nid, &vi)?;
         let handle = self.next_dir_handle.fetch_add(1, Ordering::Relaxed);
         let dir_handle = Arc::new(DirHandle { entries });
         self.dir_handles.lock().unwrap().insert(handle, dir_handle);

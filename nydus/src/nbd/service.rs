@@ -80,7 +80,7 @@ fn nbd_ioctl(fd: RawFd, request: u32, arg: u64) -> std::io::Result<i32> {
 }
 
 /// Read the block device's current capacity in bytes via `BLKGETSIZE64`.
-fn device_size(fd: RawFd) -> std::io::Result<u64> {
+fn query_block_device_size(fd: RawFd) -> std::io::Result<u64> {
     let mut size: u64 = 0;
     // SAFETY: `fd` is a live block-device descriptor and BLKGETSIZE64 writes
     // a single u64 through the pointer.
@@ -159,7 +159,7 @@ impl NbdService {
         // A nonzero capacity means another client is already serving this
         // device; the NBD_CLEAR_SOCK below would shut that session's sockets
         // down and kill it, so refuse instead of hijacking.
-        let size = device_size(fd).context("BLKGETSIZE64 failed")?;
+        let size = query_block_device_size(fd).context("BLKGETSIZE64 failed")?;
         if size != 0 {
             bail!(
                 "NBD device {nbd_path} is busy (reports {size} bytes); \
@@ -235,7 +235,7 @@ impl NbdService {
         let deadline = Instant::now() + timeout;
         let fd = self.nbd_dev.as_raw_fd();
         loop {
-            let size = device_size(fd).context("BLKGETSIZE64 failed")?;
+            let size = query_block_device_size(fd).context("BLKGETSIZE64 failed")?;
             if size == bytes {
                 debug!("nbd device capacity committed: {size} bytes");
                 return Ok(());

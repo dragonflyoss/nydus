@@ -288,13 +288,6 @@ func sha256Bytes(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func sha256File(t *testing.T, path string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	return sha256Bytes(data)
-}
-
 // cacheFileInode returns the inode of a cache sidecar, identifying the file
 // across processes.
 func cacheFileInode(t *testing.T, path string) uint64 {

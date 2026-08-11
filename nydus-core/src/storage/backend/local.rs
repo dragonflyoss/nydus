@@ -176,30 +176,18 @@ impl BlobBackend for LocalBackend {
         Ok(self.resolve_source(blob_id)?.cache_key)
     }
 
-    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+    fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
         let source = self.resolve_source(blob_id)?;
         let data = self.read_blob_meta_bytes(&source)?;
-        BlobMeta::from_bytes_with_blob_id(&data, *blob_id).map_err(io::Error::other)
+        BlobMeta::loader().blob_id(*blob_id).from_bytes(&data).map_err(io::Error::other)
     }
 
-    fn download_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+    fn blob_meta_to(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
         let source = self.resolve_source(blob_id)?;
         let data = self.read_blob_meta_bytes(&source)?;
         let mut file = File::create(dst)?;
         file.write_all(&data)?;
         file.flush()
-    }
-
-    fn read_range(
-        &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-        offset: u64,
-        len: u32,
-        ctx: ReadContext,
-    ) -> io::Result<Vec<u8>> {
-        let mut buf = vec![0u8; len as usize];
-        self.read_range_into(blob_id, offset, &mut buf, ctx)?;
-        Ok(buf)
     }
 
     fn read_range_into(
@@ -260,14 +248,14 @@ mod tests {
         .unwrap()
     }
 
-    use crate::storage::test_util::write_full_blob;
+    use crate::storage::test_util::write_minimal_full_blob;
 
     #[test]
     fn local_backend_reads_full_blob_file_and_sidecar_meta() {
         let dir = tempdir().unwrap();
         let payload = vec![0xabu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
-        let full_blob_id = write_full_blob(
+        let full_blob_id = write_minimal_full_blob(
             dir.path(),
             &payload,
             &blob_meta(data_blob_id, &payload),
@@ -275,7 +263,7 @@ mod tests {
         );
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
-        let blob_meta = backend.load_blob_meta(&full_blob_id).unwrap();
+        let blob_meta = backend.blob_meta(&full_blob_id).unwrap();
         let data = backend
             .read_range(&full_blob_id, 0, 4096, ReadContext::raw(ReadKind::OnDemand))
             .unwrap();
@@ -289,7 +277,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let payload = vec![0xcdu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
-        let full_blob_id = write_full_blob(
+        let full_blob_id = write_minimal_full_blob(
             dir.path(),
             &payload,
             &blob_meta(data_blob_id, &payload),
@@ -297,13 +285,13 @@ mod tests {
         );
         let backend = LocalBackend::new(dir.path().to_path_buf());
 
-        let blob_meta = backend.load_blob_meta(&full_blob_id).unwrap();
+        let blob_meta = backend.blob_meta(&full_blob_id).unwrap();
         let data = backend
             .read_range(&full_blob_id, 0, 4096, ReadContext::raw(ReadKind::OnDemand))
             .unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);
         assert_eq!(data, payload);
-        assert!(backend.load_blob_meta(&data_blob_id).is_err());
+        assert!(backend.blob_meta(&data_blob_id).is_err());
     }
 }

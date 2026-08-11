@@ -2,13 +2,16 @@ package integration
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -251,6 +254,36 @@ func isMountpoint(path string) bool {
 	return exec.Command("mountpoint", "-q", path).Run() == nil
 }
 
+// startFuseMount starts a prepared FUSE daemon command, waits for mnt to
+// become a mountpoint, and returns a cleanup that unmounts (with EBUSY
+// retries) and reaps the child.
+func startFuseMount(t *testing.T, cmd *exec.Cmd, mnt, label string) (cleanup func()) {
+	t.Helper()
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	require.NoError(t, cmd.Start())
+
+	require.Eventually(t, func() bool {
+		return isMountpoint(mnt)
+	}, 10*time.Second, 200*time.Millisecond, label+" failed to mount within 10s")
+
+	return func() {
+		unmountFuse(mnt)
+
+		// Send SIGTERM and don't block indefinitely while waiting.
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			done := make(chan struct{})
+			go func() { _ = cmd.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = cmd.Process.Kill()
+			}
+		}
+	}
+}
+
 // mountCErofsFuse mounts the EROFS image at imagePath using the C erofsfuse implementation and
 // returns a cleanup function to unmount it.
 func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, mnt string, blobdevs ...string) (cleanup func()) {
@@ -267,31 +300,7 @@ func mountCErofsFuse(t *testing.T, cErofsFuseBin, imagePath, mnt string, blobdev
 	}
 	args = append(args, imagePath, mnt, "-f")
 
-	cmd := exec.Command(cErofsFuseBin, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
-
-	// Wait for the mountpoint to become ready.
-	require.Eventually(t, func() bool {
-		return isMountpoint(mnt)
-	}, 10*time.Second, 200*time.Millisecond, "erofsfuse failed to mount within 10s")
-
-	return func() {
-		_ = exec.Command("fusermount", "-u", mnt).Run()
-
-		// Send SIGTERM and don't block indefinitely while waiting.
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-			done := make(chan struct{})
-			go func() { _ = cmd.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				_ = cmd.Process.Kill()
-			}
-		}
-	}
+	return startFuseMount(t, exec.Command(cErofsFuseBin, args...), mnt, "erofsfuse")
 }
 
 // mountNydus runs `nydus fuse` in the background and returns a cleanup
@@ -309,31 +318,7 @@ func mountNydus(t *testing.T, nydusBin, imagePath, blobdev, mnt string) (cleanup
 		require.FailNow(t, "mountNydus requires either blobdev or imagePath+blobdev")
 	}
 
-	cmd := exec.Command(nydusBin, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
-
-	// Wait for the mountpoint to become ready.
-	require.Eventually(t, func() bool {
-		return isMountpoint(mnt)
-	}, 10*time.Second, 200*time.Millisecond, "nydus fuse failed to mount within 10s")
-
-	return func() {
-		_ = exec.Command("fusermount", "-u", mnt).Run()
-
-		// Send SIGTERM and don't block indefinitely while waiting.
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-			done := make(chan struct{})
-			go func() { _ = cmd.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				_ = cmd.Process.Kill()
-			}
-		}
-	}
+	return startFuseMount(t, exec.Command(nydusBin, args...), mnt, "nydus fuse")
 }
 
 // mountNydusBootstrap runs `nydus fuse` using a bootstrap plus a blob directory.
@@ -359,29 +344,7 @@ func mountNydusBootstrapWithCache(
 		require.NoError(t, os.MkdirAll(cacheDir, 0755))
 		args = append(args, "--cache-dir", cacheDir)
 	}
-	cmd := exec.Command(nydusBin, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	require.NoError(t, cmd.Start())
-
-	require.Eventually(t, func() bool {
-		return isMountpoint(mnt)
-	}, 10*time.Second, 200*time.Millisecond, "nydus bootstrap fuse failed to mount within 10s")
-
-	return func() {
-		unmountFuse(mnt)
-
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(syscall.SIGTERM)
-			done := make(chan struct{})
-			go func() { _ = cmd.Wait(); close(done) }()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				_ = cmd.Process.Kill()
-			}
-		}
-	}
+	return startFuseMount(t, exec.Command(nydusBin, args...), mnt, "nydus bootstrap fuse")
 }
 
 // unmountFuse detaches mnt, retrying while the kernel still holds references.
@@ -470,4 +433,145 @@ func listFilesInDir(t *testing.T, dir string) map[string]struct{} {
 		}
 	}
 	return files
+}
+
+// sha256File returns the hex SHA-256 of a file, streaming to support large
+// files. Shared by every transport suite.
+func sha256File(t *testing.T, path string) string {
+	t.Helper()
+	f, err := os.Open(path)
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	_, err = io.Copy(h, f)
+	require.NoError(t, err)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// wipeCacheDir removes every per-blob artifact so the next daemon starts
+// COLD. Leaving a stale .group.map behind makes the daemon believe groups
+// are ready while the re-created .blob.data is all zeros — reads would
+// return zeros without fetching. Wipe data+meta+map+lock.
+func wipeCacheDir(cacheDir string) {
+	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.group.map", "*.prefetch.lock"} {
+		matches, _ := filepath.Glob(filepath.Join(cacheDir, pattern))
+		for _, m := range matches {
+			_ = os.Remove(m)
+		}
+	}
+}
+
+// countMatchingLines counts the lines of corpus matching re.
+func countMatchingLines(corpus string, re *regexp.Regexp) int {
+	count := 0
+	for _, line := range strings.Split(corpus, "\n") {
+		if re.MatchString(line) {
+			count++
+		}
+	}
+	return count
+}
+
+// lookupBinFromEnv resolves a test binary: an explicit env override wins,
+// otherwise the name is resolved from PATH.
+func lookupBinFromEnv(t *testing.T, envName, name string) string {
+	t.Helper()
+	if p := os.Getenv(envName); p != "" {
+		require.NoError(t, validateExecutablePath(p, envName))
+		return p
+	}
+	return mustLookupExecutable(t, name)
+}
+
+// writeLocalStorageConfig writes the standard local-backend storage config
+// (prefetch disabled) used by the transport test suites.
+func writeLocalStorageConfig(t *testing.T, path, blobDir, cacheDir string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+	config := fmt.Sprintf(
+		"backend:\n  type: local\n  config:\n    dir: %s\ncache:\n  type: local\n  config:\n    dir: %s\nprefetch:\n  enable: false\n",
+		blobDir,
+		cacheDir,
+	)
+	require.NoError(t, os.WriteFile(path, []byte(config), 0644))
+}
+
+// readFileOrEmpty reads path for log dumps, treating missing or unreadable
+// files as empty.
+func readFileOrEmpty(path string) []byte {
+	data, _ := os.ReadFile(path)
+	return data
+}
+
+// daemonProc tracks a spawned transport daemon (nydus nbd/fanotify): the
+// command, its exit channel, and its log locations. Embedded by the
+// per-transport test envs so spawn/stop/liveness/log logic is shared.
+type daemonProc struct {
+	daemonCmd    *exec.Cmd
+	daemonExited chan struct{} // closed when cmd.Wait() returns
+	daemonLog    string
+	logDir       string
+}
+
+// spawnDaemonCmd starts cmd with its output tee'd to the daemon log and
+// tracks its exit; readiness polling stays with the caller (per-transport).
+func (d *daemonProc) spawnDaemonCmd(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	logFile, err := os.Create(d.daemonLog)
+	require.NoError(t, err)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	require.NoError(t, cmd.Start())
+	d.daemonCmd = cmd
+	d.daemonExited = make(chan struct{})
+	go func() { _ = cmd.Wait(); close(d.daemonExited) }()
+	_ = logFile.Close()
+}
+
+// stopDaemon SIGTERMs the daemon and reaps it, escalating to SIGKILL after
+// 20s. Safe to call when the daemon already exited or was never started.
+func (d *daemonProc) stopDaemon(t *testing.T) {
+	t.Helper()
+	if d.daemonCmd == nil || d.daemonCmd.Process == nil {
+		return
+	}
+	// If already exited (e.g. crash detected elsewhere), just reap.
+	if d.daemonExited != nil {
+		select {
+		case <-d.daemonExited:
+			d.daemonCmd = nil
+			return
+		default:
+		}
+	}
+	_ = d.daemonCmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-d.daemonExited:
+	case <-time.After(20 * time.Second):
+		_ = d.daemonCmd.Process.Kill()
+		<-d.daemonExited
+	}
+	d.daemonCmd = nil
+}
+
+func (d *daemonProc) daemonAlive() bool {
+	return d.daemonCmd != nil && d.daemonCmd.ProcessState == nil
+}
+
+// logCorpus concatenates the console log and every file-log sink.
+func (d *daemonProc) logCorpus() string {
+	var b strings.Builder
+	b.Write(readFileOrEmpty(d.daemonLog))
+	entries, _ := os.ReadDir(d.logDir)
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			b.Write(readFileOrEmpty(filepath.Join(d.logDir, entry.Name())))
+		}
+	}
+	return b.String()
+}
+
+// countLogs counts lines across every log sink matching the ERE-style pattern.
+func (d *daemonProc) countLogs(pattern string) int {
+	return countMatchingLines(d.logCorpus(), regexp.MustCompile(pattern))
 }

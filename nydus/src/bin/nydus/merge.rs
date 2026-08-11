@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
+use crate::cli_common;
 use nydus::merge::{merge_sources_to_bootstrap_bytes, WhiteoutSpec as MergeWhiteoutSpec};
 use nydus::tracing::init_command_tracing;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use tracing::Level;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 pub enum WhiteoutSpec {
@@ -26,20 +26,12 @@ pub struct MergeArgs {
     #[arg(long, value_enum, default_value_t = WhiteoutSpec::Oci)]
     pub whiteout_spec: WhiteoutSpec,
 
-    #[arg(
-        short = 'l',
-        long,
-        default_value = "info",
-        help = "Specify the logging level [trace, debug, info, warn, error]"
-    )]
-    pub log_level: Level,
-
-    #[arg(long, hide = true, default_value_t = true)]
-    pub console: bool,
+    #[command(flatten)]
+    pub log: cli_common::CommandLogArgs,
 }
 
 pub fn run_merge(args: MergeArgs) -> Result<()> {
-    let _guards = init_command_tracing(args.log_level, args.console);
+    let _guards = init_command_tracing(args.log.log_level, args.log.console);
 
     let whiteout_spec = match args.whiteout_spec {
         WhiteoutSpec::Oci => MergeWhiteoutSpec::Oci,

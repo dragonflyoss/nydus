@@ -24,14 +24,6 @@ pub struct RawDirEntry {
     pub name: Vec<u8>,
 }
 
-/// Directory entry with an owned raw name, cached by directory handles in
-/// FUSE frontends (see the `fuse` module in the `nydus` crate).
-pub struct RawNameDirEntry {
-    pub nid: u64,
-    pub file_type: u8,
-    pub name: Vec<u8>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RawBlobInfo {
     /// 1-based index of the blob in the bootstrap device table.
@@ -281,27 +273,10 @@ impl ErofsReader {
         Ok(cast_ref::<ErofsSuperblock>(&mmap[sb_offset..]))
     }
 
-    /// Validate the superblock magic and reject images declaring incompat
-    /// features this reader does not implement (the standard EROFS incompat
-    /// contract: unknown bits mean the image cannot be read correctly).
+    /// Validate the superblock; see [`crate::metadata::validate_superblock`]
+    /// for the supported-incompat contract (single source of truth).
     fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
-        if sb.magic() != EROFS_SUPER_MAGIC_V1 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("bad EROFS magic: 0x{:08X}", sb.magic()),
-            ));
-        }
-        const SUPPORTED_INCOMPAT: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
-            | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
-            | EROFS_FEATURE_INCOMPAT_48BIT;
-        let unknown = sb.feature_incompat() & !SUPPORTED_INCOMPAT;
-        if unknown != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("unsupported EROFS incompat features: {unknown:#x}"),
-            ));
-        }
-        Ok(())
+        crate::metadata::validate_superblock(sb)
     }
 
     fn blob_infos_from(mmap: &[u8], sb_offset: usize) -> io::Result<Vec<RawBlobInfo>> {
@@ -400,7 +375,7 @@ impl ErofsReader {
         // cache directory: with many identical instances cold-starting on one
         // node, only the lock owner streams from the backend while the others
         // wait and then find the work already done through the shared
-        // groupmap. On-demand reads never pass through here, so they are
+        // group_map. On-demand reads never pass through here, so they are
         // never delayed by the lock. Held (via the guard's file descriptor)
         // until this function returns.
         let _prefetch_lock = cache.prefetch_lock();
@@ -443,7 +418,7 @@ impl ErofsReader {
     ) -> io::Result<()> {
         // A redirect group is already done when its bytes are resident in the
         // source blob's cache (readiness is shared across processes through
-        // the source groupmap). Segments made entirely of done groups are not
+        // the source group_map). Segments made entirely of done groups are not
         // fetched, so re-running the warmup behind another process's progress
         // does close to zero backend work.
         let skip = |group: &BlobMetaGroup| -> bool {

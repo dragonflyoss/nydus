@@ -224,15 +224,8 @@ mod tests {
         }
     }
 
-    fn event_fd() -> OwnedFd {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        assert!(fd >= 0, "eventfd failed: {}", io::Error::last_os_error());
-        // SAFETY: eventfd returned a fresh, owned descriptor.
-        unsafe { OwnedFd::from_raw_fd(fd) }
-    }
-
     fn pending(writer: Arc<MockWriter>) -> PendingPermission {
-        PendingPermission::new(event_fd(), writer)
+        PendingPermission::new(crate::fanotify::service::create_eventfd().unwrap(), writer)
     }
 
     #[test]

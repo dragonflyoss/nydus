@@ -6,12 +6,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use nydus::config::Config;
-use nydus::fanotify::{mount_erofs, unmount_erofs, FanotifyCore, FanotifyService};
-use nydus::tracing::init_tracing;
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use signal_hook::iterator::Signals;
-use tracing::{debug, error, info, warn, Level};
+
+use crate::cli_common;
+use nydus::fanotify::{mount_erofs, FanotifyCore, FanotifyService};
+use nydus::utils::unmount;
+use tracing::{debug, error, info, warn};
 
 const STOP_WAKE_BYTES: usize = 1;
 
@@ -43,30 +42,8 @@ pub struct FanotifyArgs {
     #[arg(long, default_value_t = default_fetch_concurrency())]
     pub fetch_concurrency: NonZeroUsize,
 
-    #[arg(
-        short = 'l',
-        long,
-        default_value = "info",
-        help = "Specify the logging level [trace, debug, info, warn, error]"
-    )]
-    pub log_level: Level,
-
-    #[arg(
-        long,
-        default_value_os_t = PathBuf::from("/var/log/nydus/"),
-        help = "Specify the log directory"
-    )]
-    pub log_dir: PathBuf,
-
-    #[arg(
-        long,
-        default_value_t = 6,
-        help = "Specify the max number of log files"
-    )]
-    pub log_max_files: usize,
-
-    #[arg(long, hide = true, default_value_t = true)]
-    pub console: bool,
+    #[command(flatten)]
+    pub log: cli_common::DaemonLogArgs,
 }
 
 fn default_fetch_concurrency() -> NonZeroUsize {
@@ -109,21 +86,10 @@ fn raise_nofile_limit() {
 }
 
 pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
-    let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
-        .context("failed to register termination signals")?;
+    let (mut signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
     let signal_handle = signals.handle();
 
-    let _guards = init_tracing(
-        "nydus",
-        args.log_dir.clone(),
-        args.log_level,
-        args.log_max_files,
-        args.console,
-    );
-
     raise_nofile_limit();
-
-    let config = Config::from_file(&args.config).context("failed to load storage config")?;
     let core = std::sync::Arc::new(
         FanotifyCore::new(&args.bootstrap, config).context("failed to build fanotify core")?,
     );
@@ -233,7 +199,7 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     // racing the shutdown gets EPERM (fail-closed) instead of blocking forever
     // and wedging the unmount.
     for attempt in 1..=UNMOUNT_RETRY_ATTEMPTS {
-        match unmount_erofs(&mountpoint) {
+        match unmount(&mountpoint) {
             Ok(()) => {
                 info!("unmounted {}", mountpoint.display());
                 break;

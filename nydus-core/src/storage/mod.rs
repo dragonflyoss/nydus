@@ -19,7 +19,7 @@ pub(crate) mod test_util {
     /// Assemble a minimal full blob (`payload + trivial bootstrap + blob meta
     /// + footer`) into `dir`, named by its full SHA256, optionally with a
     /// `.blob.meta` sidecar. Returns the full blob id.
-    pub(crate) fn write_full_blob(
+    pub(crate) fn write_minimal_full_blob(
         dir: &Path,
         payload: &[u8],
         blob_meta: &BlobMeta,

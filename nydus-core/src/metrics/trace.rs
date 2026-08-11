@@ -13,13 +13,13 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Version of the serialized trace document, bumped on incompatible changes.
 pub const TRACE_DOCUMENT_VERSION: u32 = 1;
 
 /// A single group access in the on-demand trace.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TraceEntry {
     /// Device/blob index in the merged image (external blobs are 1-based;
     /// device 0 is the primary bootstrap image and never produces group reads).
@@ -32,7 +32,7 @@ pub struct TraceEntry {
 /// explicit format version lets future fields be added (or the pattern shape
 /// change) without breaking consumers, and keeps the document self-describing
 /// wherever it travels (files, HTTP bodies, embedding hosts).
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TraceDocument {
     pub version: u32,
     pub patterns: Vec<TraceEntry>,

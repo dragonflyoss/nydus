@@ -24,8 +24,8 @@ type Option struct {
 	Source string
 	// Target is the target image reference (OCI or nydus). May be empty.
 	Target string
-	// Builder is the nydus binary path (PATH-resolvable). Defaults to "nydus".
-	Builder string
+	// BuilderPath is the nydus binary path (PATH-resolvable). Defaults to "nydus".
+	BuilderPath string
 	// WorkDir is the scratch directory backing the content store and rule
 	// staging. It must already exist.
 	WorkDir string
@@ -122,8 +122,8 @@ func (c *Checker) Check(ctx context.Context) error {
 
 	rules := []Rule{
 		&manifestRule{source: source, target: target},
-		&bootstrapRule{cs: cs, builder: c.opt.Builder, workDir: scratchDir, source: source, target: target},
-		&filesystemRule{cs: cs, provider: provider, builder: c.opt.Builder, logLevel: c.opt.LogLevel, workDir: scratchDir, source: source, target: target},
+		&bootstrapRule{cs: cs, builder: c.opt.BuilderPath, workDir: scratchDir, source: source, target: target},
+		&filesystemRule{cs: cs, provider: provider, builder: c.opt.BuilderPath, logLevel: c.opt.LogLevel, workDir: scratchDir, source: source, target: target},
 	}
 
 	for _, rule := range rules {

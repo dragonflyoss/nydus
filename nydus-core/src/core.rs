@@ -565,6 +565,19 @@ impl Blobs {
             .expect("flat layout is initialised above"))
     }
 
+    /// Resolve a blob id to its device-table index and opened cache.
+    fn blob_cache_for(&self, id: &BlobId) -> Result<(u16, Arc<dyn crate::storage::cache::BlobCache>)> {
+        let blob_index = *self
+            .index_by_blob_id
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
+        let cache = self
+            .reader
+            .blob_cache(blob_index)
+            .with_context(|| format!("failed to open blob {blob_index}"))?;
+        Ok((blob_index, cache))
+    }
+
     /// Ensure `[offset, offset + len)` of the blob's dense uncompressed
     /// address space is decoded, CRC-validated, and written to its cache data
     /// file, fetching missing groups through the backend. Both `offset` and
@@ -579,21 +592,14 @@ impl Blobs {
             return Ok(());
         }
 
-        let blob_index = *self
-            .index_by_blob_id
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
-        let cache = self
-            .reader
-            .blob_cache(blob_index)
-            .with_context(|| format!("failed to open blob {blob_index}"))?;
+        let (blob_index, cache) = self.blob_cache_for(id)?;
         cache
             .ensure_range(offset, len)
             .with_context(|| format!("failed to fetch blob {blob_index} range [{offset}, +{len})"))
     }
 
     /// Return cache-ready byte intervals overlapping `[offset, offset + len)`
-    /// without triggering a backend fetch. The groupmap remains authoritative.
+    /// without triggering a backend fetch. The group_map remains authoritative.
     pub fn ready_ranges(
         &self,
         id: &BlobId,
@@ -603,14 +609,7 @@ impl Blobs {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let blob_index = *self
-            .index_by_blob_id
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
-        let cache = self
-            .reader
-            .blob_cache(blob_index)
-            .with_context(|| format!("failed to open blob {blob_index}"))?;
+        let (blob_index, cache) = self.blob_cache_for(id)?;
         cache.ready_ranges(offset, len).with_context(|| {
             format!("failed to inspect blob {blob_index} ready range [{offset}, +{len})")
         })
@@ -622,14 +621,7 @@ impl Blobs {
     /// event — or once per blob, since the answer is sticky — to bypass range
     /// readiness checks and fetch plumbing entirely for fully warmed blobs.
     pub fn is_all_ready(&self, id: &BlobId) -> Result<bool> {
-        let blob_index = *self
-            .index_by_blob_id
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
-        let cache = self
-            .reader
-            .blob_cache(blob_index)
-            .with_context(|| format!("failed to open blob {blob_index}"))?;
+        let (_, cache) = self.blob_cache_for(id)?;
         Ok(cache.is_all_ready())
     }
 }
@@ -798,38 +790,37 @@ impl FsEntry {
             bail!("not a regular file");
         }
         self.reader
-            .read_file_data_sync(self.ino, inode, offset, size)
+            .read_file_data(self.ino, inode, offset, size)
             .with_context(|| format!("failed to read file inode {}", self.ino))
     }
 
     fn fetch_chunk_data(&self, inode: &ErofsInode<'_>, offset: u64, len: u64) -> Result<()> {
         let chunkbits = self.reader.sb().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F);
-        let chunksize = 1u64 << chunkbits;
-        let chunk_indexes = self
+        let chunk_size = 1u64 << chunkbits;
+        let chunk_index_entries = self
             .reader
-            .read_chunk_indexes(self.ino, inode)
+            .read_chunk_index_entries(self.ino, inode)
             .with_context(|| format!("failed to read chunk indexes for inode {}", self.ino))?;
 
         let mut remaining = len;
         let mut file_pos = offset;
         while remaining > 0 {
-            let file_chunk_index = (file_pos / chunksize) as usize;
-            let chunk_off = file_pos % chunksize;
-            let to_fetch = remaining.min(chunksize - chunk_off);
-            let Some(chunk_index) = chunk_indexes.get(file_chunk_index) else {
+            let file_chunk_index = (file_pos / chunk_size) as usize;
+            let chunk_off = file_pos % chunk_size;
+            let to_fetch = remaining.min(chunk_size - chunk_off);
+            let Some(entry) = chunk_index_entries.get(file_chunk_index) else {
                 break;
             };
 
-            if chunk_index.blkaddr != u64::MAX {
-                let chunk_addr = chunk_index
-                    .blkaddr
+            if entry.blkaddr != u64::MAX {
+                let chunk_addr = entry.blkaddr
                     .checked_mul(EROFS_BLOCK_SIZE as u64)
                     .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
                 // Resolve the chunk to a blob: the legacy layout names the blob
                 // by a non-zero device_id with a blob-relative address; the
                 // flattened layout uses device_id 0 with an absolute address.
-                let resolved = if chunk_index.device_id > 0 {
-                    Some((chunk_index.device_id, chunk_addr))
+                let resolved = if entry.device_id > 0 {
+                    Some((entry.device_id, chunk_addr))
                 } else {
                     self.reader.flat_blob_at(chunk_addr)?
                 };
@@ -894,10 +885,10 @@ impl FsEntry {
         mode: ResolveMode,
     ) -> Result<Vec<FdRange>> {
         let chunkbits = self.reader.sb().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F);
-        let chunksize = 1u64 << chunkbits;
-        let chunk_indexes = self
+        let chunk_size = 1u64 << chunkbits;
+        let chunk_index_entries = self
             .reader
-            .read_chunk_indexes(self.ino, inode)
+            .read_chunk_index_entries(self.ino, inode)
             .with_context(|| format!("failed to read chunk indexes for inode {}", self.ino))?;
         let blob_layout = self.reader.blob_infos()?;
 
@@ -905,27 +896,26 @@ impl FsEntry {
         let mut remaining = len;
         let mut file_pos = offset;
         while remaining > 0 {
-            let file_chunk_index = (file_pos / chunksize) as usize;
-            let chunk_off = file_pos % chunksize;
-            let to_resolve = remaining.min(chunksize - chunk_off);
-            let Some(chunk_index) = chunk_indexes.get(file_chunk_index) else {
+            let file_chunk_index = (file_pos / chunk_size) as usize;
+            let chunk_off = file_pos % chunk_size;
+            let to_resolve = remaining.min(chunk_size - chunk_off);
+            let Some(entry) = chunk_index_entries.get(file_chunk_index) else {
                 break;
             };
 
-            if chunk_index.blkaddr == EROFS_NULL_ADDR {
+            if entry.blkaddr == EROFS_NULL_ADDR {
                 push_fd_range(
                     &mut ranges,
                     FdRange::new(self.zero_file.as_raw_fd(), 0, to_resolve, file_pos),
                     self.zero_file.as_raw_fd(),
                 );
             } else {
-                let chunk_addr = chunk_index
-                    .blkaddr
+                let chunk_addr = entry.blkaddr
                     .checked_mul(EROFS_BLOCK_SIZE as u64)
                     .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
-                let resolved = if chunk_index.device_id > 0 {
+                let resolved = if entry.device_id > 0 {
                     // Legacy layout: device_id directly names the blob.
-                    Some((chunk_index.device_id, chunk_addr))
+                    Some((entry.device_id, chunk_addr))
                 } else {
                     // Flattened layout: device_id 0 stores a flat device address.
                     blob_layout.iter().find_map(|blob| {
@@ -979,8 +969,11 @@ fn metadata_from_inode(reader: &ErofsReader, ino: u64, inode: &ErofsInode<'_>) -
     })
 }
 
-#[derive(Clone, Copy)]
-enum ResolveMode {
+/// How a range resolution treats missing data: `Fetch` pulls it into the
+/// cache, `Probe` only reports readiness. Shared by the flat-device and
+/// per-file resolution paths here and by transports (e.g. uffd).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolveMode {
     Fetch,
     Probe,
 }

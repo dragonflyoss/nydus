@@ -15,9 +15,10 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+
+	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
 )
 
 // exportImage writes the metadata of a single-image check into destDir for
@@ -76,16 +77,9 @@ func extractBootstrapTree(ctx context.Context, cs content.Store, desc ocispec.De
 		return errors.Wrap(err, "create bootstrap dir")
 	}
 
-	ra, err := cs.ReaderAt(ctx, desc)
+	decompressed, err := converter.OpenDecompressedBlob(ctx, cs, desc)
 	if err != nil {
-		return errors.Wrap(err, "open bootstrap reader")
-	}
-	defer func() { _ = ra.Close() }()
-
-	sr := io.NewSectionReader(ra, 0, ra.Size())
-	decompressed, err := compression.DecompressStream(sr)
-	if err != nil {
-		return errors.Wrap(err, "decompress bootstrap layer")
+		return errors.Wrap(err, "open bootstrap layer")
 	}
 	defer func() { _ = decompressed.Close() }()
 

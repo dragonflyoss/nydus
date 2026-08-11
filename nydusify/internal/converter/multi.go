@@ -340,24 +340,9 @@ func buildImageConfig(base json.RawMessage, platform ocispec.Platform, diffIDs [
 		})
 	}
 
-	var rawConfig map[string]json.RawMessage
-	if err := json.Unmarshal(base, &rawConfig); err != nil {
-		return nil, errors.Wrap(err, "unmarshal image config")
-	}
-
-	rootFSRaw, err := json.Marshal(ocispec.RootFS{Type: "layers", DiffIDs: diffIDs})
-	if err != nil {
-		return nil, errors.Wrap(err, "marshal image config rootfs")
-	}
-	rawConfig["rootfs"] = rootFSRaw
-
-	historyRaw, err := json.Marshal(history)
-	if err != nil {
-		return nil, errors.Wrap(err, "marshal image config history")
-	}
-	rawConfig["history"] = historyRaw
-
-	return json.Marshal(rawConfig)
+	return patchImageConfig(base, diffIDs, func(_ []ocispec.History, _ bool) ([]ocispec.History, bool) {
+		return history, true
+	})
 }
 
 // labelNydusBlobDiffIDs sets the containerd.io/uncompressed content-store

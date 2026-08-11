@@ -108,17 +108,11 @@ pub fn cast_ref<T>(data: &[u8]) -> &T {
     unsafe { &*(data.as_ptr() as *const T) }
 }
 
-/// Cast a mutable byte slice to a mutable reference of `T`.
-#[inline]
-pub fn cast_mut<T>(data: &mut [u8]) -> &mut T {
-    assert!(data.len() >= mem::size_of::<T>());
-    unsafe { &mut *(data.as_mut_ptr() as *mut T) }
-}
-
 /// Round `val` up to the next multiple of `align` (power of two).
+/// Unchecked builder-path twin of [`crate::utils::align_up`]; panics on overflow.
 #[inline]
 pub fn round_up(val: usize, align: usize) -> usize {
-    (val + align - 1) & !(align - 1)
+    crate::utils::align_up(val as u64, align as u64).expect("size rounding overflowed") as usize
 }
 
 #[cfg(test)]

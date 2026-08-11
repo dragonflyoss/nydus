@@ -446,23 +446,26 @@ static TRACKED_BLOBS: LazyLock<Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], TrackedBl
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct TrackedBlob {
-    groups: u64,
-    caches: usize,
+    group_count: u64,
+    holder_count: usize,
 }
 
 /// Count `groups` towards the total-groups gauge for the blob `cache_key`,
 /// unless another cache already counted it.
-pub fn track_blob_groups(cache_key: [u8; EROFS_BLOB_ID_SIZE], groups: u64) {
+pub fn track_blob_groups(cache_key: [u8; EROFS_BLOB_ID_SIZE], group_count: u64) {
     let mut tracked = match TRACKED_BLOBS.lock() {
         Ok(tracked) => tracked,
         Err(poisoned) => poisoned.into_inner(),
     };
     let entry = tracked
         .entry(cache_key)
-        .or_insert(TrackedBlob { groups, caches: 0 });
-    entry.caches += 1;
-    if entry.caches == 1 {
-        METRICS.cache_total_group.add(entry.groups as i64);
+        .or_insert(TrackedBlob {
+            group_count,
+            holder_count: 0,
+        });
+    entry.holder_count += 1;
+    if entry.holder_count == 1 {
+        METRICS.cache_total_group.add(entry.group_count as i64);
     }
 }
 
@@ -476,9 +479,9 @@ pub fn untrack_blob_groups(cache_key: &[u8; EROFS_BLOB_ID_SIZE]) {
     let Some(entry) = tracked.get_mut(cache_key) else {
         return;
     };
-    entry.caches -= 1;
-    if entry.caches == 0 {
-        METRICS.cache_total_group.sub(entry.groups as i64);
+    entry.holder_count -= 1;
+    if entry.holder_count == 0 {
+        METRICS.cache_total_group.sub(entry.group_count as i64);
         tracked.remove(cache_key);
     }
 }
@@ -530,7 +533,7 @@ fn tracked_blob_refs(cache_key: &[u8; EROFS_BLOB_ID_SIZE]) -> Option<usize> {
         Ok(tracked) => tracked,
         Err(poisoned) => poisoned.into_inner(),
     };
-    tracked.get(cache_key).map(|entry| entry.caches)
+    tracked.get(cache_key).map(|entry| entry.holder_count)
 }
 
 /// A serializable view over the live prometheus registry.

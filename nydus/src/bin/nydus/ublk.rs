@@ -3,14 +3,12 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Args;
-use nydus::config::Config;
-use nydus::tracing::init_tracing;
+
+use crate::cli_common;
 use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use signal_hook::iterator::Signals;
-use tracing::{info, Level};
+use tracing::{info};
 
 #[derive(Args)]
 pub struct UblkArgs {
@@ -45,30 +43,8 @@ pub struct UblkArgs {
     #[arg(long)]
     pub unprivileged: bool,
 
-    #[arg(
-        short = 'l',
-        long,
-        default_value = "info",
-        help = "Specify the logging level [trace, debug, info, warn, error]"
-    )]
-    pub log_level: Level,
-
-    #[arg(
-        long,
-        default_value_os_t = PathBuf::from("/var/log/nydus/"),
-        help = "Specify the log directory"
-    )]
-    pub log_dir: PathBuf,
-
-    #[arg(
-        long,
-        default_value_t = 6,
-        help = "Specify the max number of log files"
-    )]
-    pub log_max_files: usize,
-
-    #[arg(long, hide = true, default_value_t = true)]
-    pub console: bool,
+    #[command(flatten)]
+    pub log: cli_common::DaemonLogArgs,
 }
 
 /// Serve a nydus image as a read-only ublk block device.
@@ -80,19 +56,8 @@ pub struct UblkArgs {
 /// device. Otherwise the unmount triggered while the daemon exits flushes I/O
 /// to a device that is no longer being served, and both sides deadlock.
 pub fn run_ublk(args: UblkArgs) -> Result<()> {
-    let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
-        .context("failed to register termination signals")?;
+    let (mut signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
     let signal_handle = signals.handle();
-
-    let _guards = init_tracing(
-        "nydus",
-        args.log_dir.clone(),
-        args.log_level,
-        args.log_max_files,
-        args.console,
-    );
-
-    let config = Config::from_file(&args.config).context("failed to load storage config")?;
     let core = Arc::new(UblkCore::new(&args.bootstrap, config)?);
     info!(
         "serving {} as a {} byte block device",

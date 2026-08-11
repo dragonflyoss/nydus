@@ -52,11 +52,6 @@ pub fn mount_erofs(bootstrap: &Path, devices: &[BlobDevice], mountpoint: &Path) 
     Ok(())
 }
 
-/// Unmount the EROFS at `mountpoint`.
-pub fn unmount_erofs(mountpoint: &Path) -> Result<()> {
-    crate::utils::unmount(mountpoint)
-}
-
 /// Build the binary mount data without lossy UTF-8 conversion. A comma in a
 /// device path is rejected because the kernel option grammar cannot distinguish
 /// it from the next mount option.

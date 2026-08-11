@@ -86,16 +86,13 @@ type fanotifyEnv struct {
 	blobDir    string
 	cacheDir   string
 	mntDir     string
-	logDir     string
 	checkDir   string
 	configPath string
-	daemonLog  string
 	straceLog  string
 	bootstrap  string
 
-	registryCID  string // docker container id, if we started one
-	daemonCmd    *exec.Cmd
-	daemonExited chan struct{} // closed when cmd.Wait() returns
+	registryCID string // docker container id, if we started one
+	daemonProc
 
 	sourceHashes map[string]string // rel path -> sha256
 }
@@ -118,11 +115,11 @@ func TestFanotifyE2E(t *testing.T) {
 	}
 	env.imageRef = fmt.Sprintf("%s/%s:%s", env.registry, env.repo, env.tag)
 
-	env.nydusBin = lookupFanotifyBin(t, "NYDUS_BIN", "nydus")
+	env.nydusBin = lookupBinFromEnv(t, "NYDUS_BIN", "nydus")
 	if out, err := exec.Command(env.nydusBin, "fanotify", "--help").CombinedOutput(); err != nil {
 		t.Skipf("nydus binary lacks the fanotify subcommand; build with --features cli,fanotify: %s", out)
 	}
-	env.nydusifyBin = lookupFanotifyBin(t, "NYDUSIFY_BIN", "nydusify")
+	env.nydusifyBin = lookupBinFromEnv(t, "NYDUSIFY_BIN", "nydusify")
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker required for the throwaway local registry")
 	}
@@ -277,18 +274,11 @@ prefetch:
 
 // ----------------------------------------------------------------- daemon ----
 
-// wipeCache removes every per-blob artifact so the next daemon starts COLD.
-// Leaving a stale .group.map behind makes the daemon believe groups are ready
-// while the re-created .blob.data is all zeros — is_range_ready would ALLOW
-// without fetching and the reader gets a sparse hole. Wipe data+meta+map+lock.
+// wipeCache removes every per-blob artifact so the next daemon starts COLD
+// (see wipeCacheDir in util.go for why the stale .group.map matters).
 func (e *fanotifyEnv) wipeCache(t *testing.T) {
 	t.Helper()
-	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.group.map", "*.prefetch.lock"} {
-		matches, _ := filepath.Glob(filepath.Join(e.cacheDir, pattern))
-		for _, m := range matches {
-			_ = os.Remove(m)
-		}
-	}
+	wipeCacheDir(e.cacheDir)
 }
 
 // startDaemon starts a COLD daemon (wipes the cache first) and waits for it to
@@ -304,9 +294,6 @@ func (e *fanotifyEnv) startDaemon(t *testing.T) {
 func (e *fanotifyEnv) spawnDaemon(t *testing.T) {
 	t.Helper()
 	t.Log("starting nydus fanotify daemon")
-	logFile, err := os.Create(e.daemonLog)
-	require.NoError(t, err)
-
 	cmd := exec.Command(e.nydusBin, "fanotify",
 		"--bootstrap", e.bootstrap,
 		"--config", e.configPath,
@@ -314,13 +301,7 @@ func (e *fanotifyEnv) spawnDaemon(t *testing.T) {
 		"--log-level", "debug",
 		"--log-dir", e.logDir,
 	)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	require.NoError(t, cmd.Start())
-	e.daemonCmd = cmd
-	e.daemonExited = make(chan struct{})
-	go func() { _ = cmd.Wait(); close(e.daemonExited) }()
-	_ = logFile.Close()
+	e.spawnDaemonCmd(t, cmd)
 
 	require.Eventually(t, func() bool {
 		select {
@@ -331,30 +312,6 @@ func (e *fanotifyEnv) spawnDaemon(t *testing.T) {
 		return isMountpoint(e.mntDir) && e.countLogs(`event loop ready`) > 0
 	}, 60*time.Second, time.Second, "daemon did not mount / become ready within 60s:\n%s", e.logCorpus())
 	t.Logf("  daemon ready (pid=%d)", cmd.Process.Pid)
-}
-
-func (e *fanotifyEnv) stopDaemon(t *testing.T) {
-	t.Helper()
-	if e.daemonCmd == nil || e.daemonCmd.Process == nil {
-		return
-	}
-	// If already exited (e.g. crash detected elsewhere), just reap.
-	if e.daemonExited != nil {
-		select {
-		case <-e.daemonExited:
-			e.daemonCmd = nil
-			return
-		default:
-		}
-	}
-	_ = e.daemonCmd.Process.Signal(syscall.SIGTERM)
-	select {
-	case <-e.daemonExited:
-	case <-time.After(20 * time.Second):
-		_ = e.daemonCmd.Process.Kill()
-		<-e.daemonExited
-	}
-	e.daemonCmd = nil
 }
 
 func (e *fanotifyEnv) restartDaemonCold(t *testing.T) {
@@ -385,8 +342,8 @@ func (e *fanotifyEnv) caseMetadataOffpath(t *testing.T) { // C1
 }
 
 func (e *fanotifyEnv) caseTinyFile(t *testing.T) { // C2
-	got := shaFile(t, filepath.Join(e.mntDir, "hello.txt"))
-	want := shaFile(t, filepath.Join(e.sourceDir, "hello.txt"))
+	got := sha256File(t, filepath.Join(e.mntDir, "hello.txt"))
+	want := sha256File(t, filepath.Join(e.sourceDir, "hello.txt"))
 	assert.Equal(t, want, got, "hello.txt byte-exact over fanotify")
 	content, err := os.ReadFile(filepath.Join(e.mntDir, "hello.txt"))
 	require.NoError(t, err)
@@ -442,8 +399,8 @@ func (e *fanotifyEnv) caseWarmFastpath(t *testing.T) { // C7 — behavioural war
 	// bytes AND allocate ~no new blocks (is_range_ready short-circuits the fetch).
 	blob := e.cacheBlob(t)
 	before := usedBytes(blob)
-	got := shaFile(t, filepath.Join(e.mntDir, "large.bin"))
-	want := shaFile(t, filepath.Join(e.sourceDir, "large.bin"))
+	got := sha256File(t, filepath.Join(e.mntDir, "large.bin"))
+	want := sha256File(t, filepath.Join(e.sourceDir, "large.bin"))
 	after := usedBytes(blob)
 	assert.Equal(t, want, got, "warm re-read is byte-exact")
 	assert.Less(t, after-before, int64(1<<20), "warm re-read allocates ~no new cache blocks (is_range_ready fast path)")
@@ -486,7 +443,7 @@ func (e *fanotifyEnv) caseConcurrency(t *testing.T) { // C8 — stress per-event
 	srcMany, _ := filepath.Glob(filepath.Join(e.sourceDir, "many", "*.bin"))
 	for _, f := range srcMany {
 		name := filepath.Base(f)
-		if shaFile(t, filepath.Join(e.mntDir, "many", name)) != shaFile(t, f) {
+		if sha256File(t, filepath.Join(e.mntDir, "many", name)) != sha256File(t, f) {
 			bad++
 		}
 	}
@@ -510,8 +467,8 @@ func (e *fanotifyEnv) casePersistence(t *testing.T) { // C9 — warm cache survi
 	e.spawnDaemon(t)
 
 	beforeFetch := e.countLogs(`job [0-9]+ dispatched`)
-	got := shaFile(t, filepath.Join(e.mntDir, "large.bin"))
-	want := shaFile(t, filepath.Join(e.sourceDir, "large.bin"))
+	got := sha256File(t, filepath.Join(e.mntDir, "large.bin"))
+	want := sha256File(t, filepath.Join(e.sourceDir, "large.bin"))
 	assert.Equal(t, want, got, "large.bin still byte-exact after restart")
 	afterFetch := e.countLogs(`job [0-9]+ dispatched`)
 	assert.Equal(t, beforeFetch, afterFetch, "warm cache re-serves with NO backend fetch after restart")
@@ -667,10 +624,6 @@ func (e *fanotifyEnv) registryIsLoopback() bool {
 		strings.HasPrefix(e.registry, "[::1]:")
 }
 
-func (e *fanotifyEnv) daemonAlive() bool {
-	return e.daemonCmd != nil && e.daemonCmd.ProcessState == nil
-}
-
 // cacheBlob returns the first *.blob.data file in the cache dir.
 func (e *fanotifyEnv) cacheBlob(t *testing.T) string {
 	t.Helper()
@@ -681,31 +634,6 @@ func (e *fanotifyEnv) cacheBlob(t *testing.T) string {
 	return matches[0]
 }
 
-// logCorpus concatenates the daemon console log and every file under logDir.
-func (e *fanotifyEnv) logCorpus() string {
-	var b strings.Builder
-	b.Write(readFileOrEmpty(e.daemonLog))
-	entries, _ := os.ReadDir(e.logDir)
-	for _, entry := range entries {
-		if entry.Type().IsRegular() {
-			b.Write(readFileOrEmpty(filepath.Join(e.logDir, entry.Name())))
-		}
-	}
-	return b.String()
-}
-
-// countLogs counts lines across every log sink matching the ERE-style pattern.
-func (e *fanotifyEnv) countLogs(pattern string) int {
-	re := regexp.MustCompile(pattern)
-	count := 0
-	for _, line := range strings.Split(e.logCorpus(), "\n") {
-		if re.MatchString(line) {
-			count++
-		}
-	}
-	return count
-}
-
 // usedBytes returns the actual on-disk allocated bytes (blocks * 512), NOT the
 // apparent size — the demand-paging signal (a hole file reports ~0).
 func usedBytes(path string) int64 {
@@ -714,17 +642,6 @@ func usedBytes(path string) int64 {
 		return 0
 	}
 	return st.Blocks * 512
-}
-
-func shaFile(t *testing.T, path string) string {
-	t.Helper()
-	f, err := os.Open(path)
-	require.NoError(t, err)
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	_, err = io.Copy(h, f)
-	require.NoError(t, err)
-	return hex.EncodeToString(h.Sum(nil))
 }
 
 // sliceSHA reads countMiB starting at skipMiB (bs=1M semantics) and returns the
@@ -781,7 +698,7 @@ func hashTree(t *testing.T, dir string) map[string]string {
 		if err != nil {
 			return err
 		}
-		hashes[rel] = shaFile(t, path)
+		hashes[rel] = sha256File(t, path)
 		return nil
 	})
 	require.NoError(t, err)
@@ -841,27 +758,11 @@ func nonDigitTrim(s string) string {
 	return s
 }
 
-func lookupFanotifyBin(t *testing.T, envName, name string) string {
-	t.Helper()
-	if p := os.Getenv(envName); p != "" {
-		require.NoError(t, validateExecutablePath(p, envName))
-		return p
-	}
-	return mustLookupExecutable(t, name)
-}
-
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return def
-}
-
-// readFileOrEmpty reads path for log dumps, treating missing or unreadable
-// files as empty.
-func readFileOrEmpty(path string) []byte {
-	data, _ := os.ReadFile(path)
-	return data
 }
 
 func findFile(root, name string) string {

@@ -65,7 +65,7 @@ impl Unpacker<'_> {
             .with_context(|| format!("failed to read inode {nid}"))?;
         let entries = self
             .reader
-            .read_dir_raw(nid, &inode)
+            .read_dir(nid, &inode)
             .with_context(|| format!("failed to read directory inode {nid}"))?;
 
         for entry in entries {

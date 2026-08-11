@@ -9,7 +9,7 @@ use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
 
 /// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the
 /// footer starts with the readable string. Same style and `magic + version +
-/// flags` header prefix as the blob meta (`LPBLMETA`) and groupmap
+/// flags` header prefix as the blob meta (`LPBLMETA`) and group_map
 /// (`LPGRPMAP`) sidecars.
 pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"LPFOOTER";
 /// On-disk format generation, informational only: readers do not gate on it.

@@ -491,18 +491,6 @@ func ublkAvailable() bool {
 	return true
 }
 
-// wipeCacheDir removes every per-blob artifact so the next daemon starts
-// COLD. Leaving a stale .group.map behind makes the daemon believe groups
-// are ready while the re-created .blob.data is all zeros.
-func wipeCacheDir(cacheDir string) {
-	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.group.map", "*.prefetch.lock"} {
-		matches, _ := filepath.Glob(filepath.Join(cacheDir, pattern))
-		for _, m := range matches {
-			_ = os.Remove(m)
-		}
-	}
-}
-
 // cacheDirUsedBytes returns the allocated (not apparent) MiB of the blob
 // cache files in cacheDir.
 func cacheDirUsedBytes(cacheDir string) float64 {

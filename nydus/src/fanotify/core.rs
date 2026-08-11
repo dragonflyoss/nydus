@@ -220,7 +220,7 @@ impl FanotifyCore {
             .map(|&idx| &self.devices[idx])
     }
 
-    /// Return true when the authoritative groupmap already covers the complete
+    /// Return true when the authoritative group_map already covers the complete
     /// aligned range. This never triggers backend I/O.
     pub fn is_range_ready(&self, id: &BlobId, offset: u64, len: u64) -> Result<bool> {
         let end = offset
@@ -262,7 +262,7 @@ impl FanotifyCore {
         }
     }
 
-    /// Remove the fanotify mark on a blob whose groupmap is fully ready.
+    /// Remove the fanotify mark on a blob whose group_map is fully ready.
     ///
     /// Called from fetch worker threads after a successful fetch. The per-slot
     /// [`AtomicBool`] ensures the readiness probe and the `FAN_MARK_REMOVE`
@@ -286,7 +286,7 @@ impl FanotifyCore {
         if self.unmarked[slot].load(Ordering::Acquire) {
             return false;
         }
-        // O(1) probe: single atomic load on the groupmap's shared ALL_READY flag.
+        // O(1) probe: single atomic load on the group_map's shared ALL_READY flag.
         if !self.core.blobs.is_all_ready(id).unwrap_or(false) {
             return false;
         }
@@ -378,10 +378,8 @@ pub(crate) fn align_fetch_range(
     let end = raw_end.min(cache_size);
 
     let aligned_off = offset & !(BLOCK_SIZE - 1);
-    let aligned_end = end
-        .checked_add(BLOCK_SIZE - 1)
-        .ok_or(RangeError::Overflow)?
-        & !(BLOCK_SIZE - 1);
+    let aligned_end =
+        crate::utils::align_up(end, BLOCK_SIZE).ok_or(RangeError::Overflow)?;
     // `cache_size` is validated block-aligned at device enumeration, so rounding
     // `end` up never exceeds it; clamp as a safety net and verify the aligned
     // window stays inside the device.

@@ -137,6 +137,17 @@ pub fn is_rafs_v7_bootstrap(path: &Path) -> io::Result<bool> {
     // EROFS_SB_BASE_SIZE bytes, and valid for any bit pattern.
     let sb: &ErofsSuperblock = unsafe { &*(buf.as_ptr() as *const ErofsSuperblock) };
 
+    validate_superblock(sb)?;
+    Ok(sb.feature_compat() & EROFS_FEATURE_COMPAT_RAFS_V6 == 0)
+}
+
+/// Validate the superblock magic and reject images declaring incompat
+/// features this reader does not implement (the standard EROFS incompat
+/// contract: unknown bits mean the image cannot be read correctly).
+///
+/// The single source of truth for the supported-incompat feature set —
+/// extend the list here when a new feature bit is implemented.
+pub fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
     if sb.magic() != EROFS_SUPER_MAGIC_V1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -153,7 +164,7 @@ pub fn is_rafs_v7_bootstrap(path: &Path) -> io::Result<bool> {
             format!("unsupported EROFS incompat features: {unknown:#x}"),
         ));
     }
-    Ok(sb.feature_compat() & EROFS_FEATURE_COMPAT_RAFS_V6 == 0)
+    Ok(())
 }
 
 #[cfg(test)]

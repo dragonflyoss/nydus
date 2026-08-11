@@ -251,7 +251,8 @@ impl BlobMetaHeader {
     }
 
     pub fn metadata_size(&self) -> u64 {
-        align_to_block(self.records_end())
+        crate::utils::align_up(self.records_end(), EROFS_BLOCK_SIZE as u64)
+            .expect("blob meta size overflowed")
     }
 
     fn set_counts_and_offsets(&mut self, chunk_count: u32, group_count: u32) -> Result<()> {
@@ -332,11 +333,11 @@ impl BlobMetaHeader {
     }
 
     fn write_to_with_crc32(&self, writer: &mut dyn Write, crc32: u32) -> Result<()> {
-        writer.write_all(&self.as_bytes_with_crc32(crc32))?;
+        writer.write_all(&self.to_bytes_with_crc32(crc32))?;
         Ok(())
     }
 
-    fn as_bytes_with_crc32(&self, crc32: u32) -> [u8; BLOB_META_HEADER_SIZE as usize] {
+    fn to_bytes_with_crc32(&self, crc32: u32) -> [u8; BLOB_META_HEADER_SIZE as usize] {
         let mut data = [0u8; BLOB_META_HEADER_SIZE as usize];
         data[0..8].copy_from_slice(&self.magic);
         data[8..12].copy_from_slice(&self.version.to_le_bytes());
@@ -834,7 +835,7 @@ impl BlobMeta {
     }
 
     fn compute_crc32(&self) -> u32 {
-        let mut crc32 = crc32c_append(0, &self.header.as_bytes_with_crc32(0));
+        let mut crc32 = crc32c_append(0, &self.header.to_bytes_with_crc32(0));
         for chunk in self.chunks() {
             crc32 = crc32c_append(crc32, &chunk.to_bytes());
         }
@@ -873,18 +874,13 @@ impl BlobMeta {
         Ok(())
     }
 
-    pub fn from_bytes_with_blob_id(data: &[u8], blob_id: [u8; EROFS_BLOB_ID_SIZE]) -> Result<Self> {
-        Self::from_bytes_with_blob_id_inner(data, blob_id, false)
+    /// Start configuring a blob meta read; finish with
+    /// [`load`](BlobMetaLoader::load) or [`from_bytes`](BlobMetaLoader::from_bytes).
+    pub fn loader() -> BlobMetaLoader {
+        BlobMetaLoader::default()
     }
 
-    pub fn from_bytes_checked_crc32_with_blob_id(
-        data: &[u8],
-        blob_id: [u8; EROFS_BLOB_ID_SIZE],
-    ) -> Result<Self> {
-        Self::from_bytes_with_blob_id_inner(data, blob_id, true)
-    }
-
-    fn from_bytes_with_blob_id_inner(
+    fn from_bytes_inner(
         data: &[u8],
         blob_id: [u8; EROFS_BLOB_ID_SIZE],
         check_crc32: bool,
@@ -936,10 +932,6 @@ impl BlobMeta {
         Self::load_inner(path, false)
     }
 
-    pub fn load_checked_crc32(path: &Path) -> Result<Self> {
-        Self::load_inner(path, true)
-    }
-
     fn load_inner(path: &Path, check_crc32: bool) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("failed to open blob meta: {}", path.display()))?;
@@ -974,19 +966,46 @@ impl BlobMeta {
         })
     }
 
-    pub fn load_with_blob_id(path: &Path, blob_id: [u8; EROFS_BLOB_ID_SIZE]) -> Result<Self> {
-        let mut blob_meta = Self::load(path)?;
-        blob_meta.blob_id = blob_id;
+}
+
+/// Options for reading a [`BlobMeta`], created via [`BlobMeta::loader`].
+/// The two orthogonal knobs (CRC32 verification, attached blob id) replace
+/// the previous per-combination constructors.
+#[derive(Default, Clone, Copy)]
+pub struct BlobMetaLoader {
+    verify_crc32: bool,
+    blob_id: Option<[u8; EROFS_BLOB_ID_SIZE]>,
+}
+
+impl BlobMetaLoader {
+    /// Verify the header CRC32 over the full metadata during the read.
+    pub fn verify_crc32(mut self) -> Self {
+        self.verify_crc32 = true;
+        self
+    }
+
+    /// Attach the owning blob id to the loaded metadata.
+    pub fn blob_id(mut self, blob_id: [u8; EROFS_BLOB_ID_SIZE]) -> Self {
+        self.blob_id = Some(blob_id);
+        self
+    }
+
+    /// Read blob metadata from a file (mmap-backed).
+    pub fn load(self, path: &Path) -> Result<BlobMeta> {
+        let mut blob_meta = BlobMeta::load_inner(path, self.verify_crc32)?;
+        if let Some(blob_id) = self.blob_id {
+            blob_meta.blob_id = blob_id;
+        }
         Ok(blob_meta)
     }
 
-    pub fn load_checked_crc32_with_blob_id(
-        path: &Path,
-        blob_id: [u8; EROFS_BLOB_ID_SIZE],
-    ) -> Result<Self> {
-        let mut blob_meta = Self::load_checked_crc32(path)?;
-        blob_meta.blob_id = blob_id;
-        Ok(blob_meta)
+    /// Read blob metadata from an in-memory byte slice.
+    pub fn from_bytes(self, data: &[u8]) -> Result<BlobMeta> {
+        BlobMeta::from_bytes_inner(
+            data,
+            self.blob_id.unwrap_or([0u8; EROFS_BLOB_ID_SIZE]),
+            self.verify_crc32,
+        )
     }
 }
 
@@ -1002,11 +1021,6 @@ fn block_count_to_bits(blocks: u32, what: &str) -> Result<u8> {
         bail!("blob meta {what} block count too large: {blocks}");
     }
     Ok(bits)
-}
-
-pub fn align_to_block(value: u64) -> u64 {
-    let block_size = EROFS_BLOCK_SIZE as u64;
-    value.div_ceil(block_size) * block_size
 }
 
 fn validate_padding(data: &[u8], header: &BlobMetaHeader) -> Result<()> {
@@ -1312,13 +1326,10 @@ mod tests {
                 .unwrap(),
         );
 
-        let loaded = BlobMeta::from_bytes_with_blob_id(&raw, [0u8; EROFS_BLOB_ID_SIZE]).unwrap();
+        let loaded = BlobMeta::loader().from_bytes(&raw).unwrap();
 
         assert_eq!(loaded.header().crc32(), corrupted_crc32);
-        let err = match BlobMeta::from_bytes_checked_crc32_with_blob_id(
-            &raw,
-            [0u8; EROFS_BLOB_ID_SIZE],
-        ) {
+        let err = match BlobMeta::loader().verify_crc32().from_bytes(&raw) {
             Ok(_) => panic!("corrupted blob meta crc32 should be rejected"),
             Err(err) => err,
         };
@@ -1365,7 +1376,7 @@ mod tests {
         // A future format generation is readable: version is informational.
         let mut future = raw.clone();
         future[8..12].copy_from_slice(&(BLOB_META_VERSION + 1).to_le_bytes());
-        let loaded = BlobMeta::from_bytes_with_blob_id(&future, [0u8; EROFS_BLOB_ID_SIZE])
+        let loaded = BlobMeta::loader().from_bytes(&future)
             .expect("future version must be readable");
         assert_eq!(loaded.header().version(), BLOB_META_VERSION + 1);
 
@@ -1373,14 +1384,14 @@ mod tests {
         let mut compat = raw.clone();
         let flags = u32::from_le_bytes(compat[12..16].try_into().unwrap()) | (1 << 31);
         compat[12..16].copy_from_slice(&flags.to_le_bytes());
-        BlobMeta::from_bytes_with_blob_id(&compat, [0u8; EROFS_BLOB_ID_SIZE])
+        BlobMeta::loader().from_bytes(&compat)
             .expect("unknown compat flag must be ignored");
 
         // An unknown incompat (low-half) flag bit rejects the file.
         let mut incompat = raw;
         let flags = u32::from_le_bytes(incompat[12..16].try_into().unwrap()) | (1 << 15);
         incompat[12..16].copy_from_slice(&flags.to_le_bytes());
-        let err = match BlobMeta::from_bytes_with_blob_id(&incompat, [0u8; EROFS_BLOB_ID_SIZE]) {
+        let err = match BlobMeta::loader().from_bytes(&incompat) {
             Ok(_) => panic!("unknown incompat flag should be rejected"),
             Err(err) => err,
         };
@@ -1406,12 +1417,9 @@ mod tests {
         // sealed over a zero tail.
         raw[BLOB_META_HEADER_SIZE as usize - 1] = 0xff;
 
-        BlobMeta::from_bytes_with_blob_id(&raw, [0u8; EROFS_BLOB_ID_SIZE])
+        BlobMeta::loader().from_bytes(&raw)
             .expect("nonzero reserved tail must be ignored");
-        let err = match BlobMeta::from_bytes_checked_crc32_with_blob_id(
-            &raw,
-            [0u8; EROFS_BLOB_ID_SIZE],
-        ) {
+        let err = match BlobMeta::loader().verify_crc32().from_bytes(&raw) {
             Ok(_) => panic!("crc check should catch the unsealed tail change"),
             Err(err) => err,
         };

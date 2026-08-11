@@ -12,7 +12,6 @@ package checker
 import (
 	"context"
 	"os"
-	"path/filepath"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/log"
@@ -58,8 +57,8 @@ func (r *bootstrapRule) validateImage(ctx context.Context, label string, img *Im
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
-	bootstrapPath := filepath.Join(dir, "image.boot")
-	if err := extractBootstrap(ctx, r.cs, *img.Bootstrap, bootstrapPath); err != nil {
+	bootstrapPath, _, err := extractBootstrapLayer(ctx, r.cs, *img.Bootstrap, dir)
+	if err != nil {
 		return errors.Wrap(err, "extract bootstrap")
 	}
 

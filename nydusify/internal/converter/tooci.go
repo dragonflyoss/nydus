@@ -294,41 +294,12 @@ func materializeBlob(ctx context.Context, cs content.Store, desc ocispec.Descrip
 // entries of the layers the reverse conversion removed, patching the raw JSON
 // so unrelated fields stay byte-for-byte intact.
 func rewriteOCIConfig(configJSON json.RawMessage, diffIDs []digest.Digest, droppedLayers int) (json.RawMessage, error) {
-	var rawConfig map[string]json.RawMessage
-	if err := json.Unmarshal(configJSON, &rawConfig); err != nil {
-		return nil, errors.Wrap(err, "unmarshal image config")
-	}
-
-	var rootFS ocispec.RootFS
-	if raw, ok := rawConfig["rootfs"]; ok {
-		if err := json.Unmarshal(raw, &rootFS); err != nil {
-			return nil, errors.Wrap(err, "unmarshal image config rootfs")
+	return patchImageConfig(configJSON, diffIDs, func(history []ocispec.History, present bool) ([]ocispec.History, bool) {
+		if !present {
+			return nil, false
 		}
-	}
-	rootFS.DiffIDs = diffIDs
-	rootFSRaw, err := json.Marshal(rootFS)
-	if err != nil {
-		return nil, errors.Wrap(err, "marshal image config rootfs")
-	}
-	rawConfig["rootfs"] = rootFSRaw
-
-	if raw, ok := rawConfig["history"]; ok {
-		var history []ocispec.History
-		if err := json.Unmarshal(raw, &history); err != nil {
-			return nil, errors.Wrap(err, "unmarshal image config history")
-		}
-		historyRaw, err := json.Marshal(trimHistory(history, droppedLayers))
-		if err != nil {
-			return nil, errors.Wrap(err, "marshal image config history")
-		}
-		rawConfig["history"] = historyRaw
-	}
-
-	out, err := json.Marshal(rawConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, "marshal image config")
-	}
-	return out, nil
+		return trimHistory(history, droppedLayers), true
+	})
 }
 
 // trimHistory drops the last droppedLayers non-empty history entries. The
