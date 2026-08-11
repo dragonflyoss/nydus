@@ -2,8 +2,6 @@ package integration
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -161,20 +159,12 @@ func cachedBlobDataDevicesForBlobs(t *testing.T, cacheDir string, blobs ...strin
 	// full blobs, so compat mode must use the cache files populated by nydus fuse.
 	devices := make([]string, 0, len(blobs))
 	for _, blob := range blobs {
-		blobID := fullBlobDigest(t, blob)
+		blobID := sha256File(t, blob)
 		cachedBlob := filepath.Join(cacheDir, blobID+".blob.data")
 		require.FileExists(t, cachedBlob, "cached uncompressed blob data should exist after nydus cached mount")
 		devices = append(devices, cachedBlob)
 	}
 	return devices
-}
-
-func fullBlobDigest(t *testing.T, blob string) string {
-	t.Helper()
-
-	data, err := os.ReadFile(blob)
-	require.NoError(t, err)
-	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 func prepareMergedE2ECorpora(t *testing.T, layer1Dir, layer2Dir, layer3Dir, expectedDir string) {
@@ -442,7 +432,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 	assert.Equal(t, blobCount, blobMetaCount, "unexpected cached blob_meta count")
 
 	for _, blob := range blobs {
-		prefix := fullBlobDigest(t, blob)
+		prefix := sha256File(t, blob)
 		require.FileExists(t, filepath.Join(cacheDir, prefix+".blob.data"))
 		require.FileExists(t, filepath.Join(cacheDir, prefix+".blob.meta"))
 		require.FileExists(t, filepath.Join(cacheDir, prefix+".group.map"))
@@ -640,7 +630,7 @@ func TestReproducibleBuildE2E(t *testing.T) {
 		t.Helper()
 		aBoot, aBlob := build(t, aSrc)
 		bBoot, bBlob := build(t, bSrc)
-		require.Equal(t, sha256OfFile(t, aBoot), sha256OfFile(t, bBoot), "bootstrap differs")
+		require.Equal(t, sha256File(t, aBoot), sha256File(t, bBoot), "bootstrap differs")
 		require.Equal(t, filepath.Base(aBlob), filepath.Base(bBlob), "blob digest differs")
 	}
 
@@ -737,14 +727,6 @@ func TestReproducibleBuildE2E(t *testing.T) {
 		second := filepath.Join(root, "merged-b")
 		mergeNydusBootstrap(t, nydusBin, first, blob1, blob2)
 		mergeNydusBootstrap(t, nydusBin, second, blob1, blob2)
-		require.Equal(t, sha256OfFile(t, first), sha256OfFile(t, second), "merged bootstrap differs")
+		require.Equal(t, sha256File(t, first), sha256File(t, second), "merged bootstrap differs")
 	})
-}
-
-func sha256OfFile(t *testing.T, path string) string {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	require.NoError(t, err)
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }

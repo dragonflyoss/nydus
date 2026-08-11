@@ -349,7 +349,10 @@ func isMounted(mountpoint, parent string) (bool, error) {
 }
 
 // unmountFuse unmounts a FUSE mountpoint, trying the userspace helpers before
-// falling back to umount.
+// falling back to umount. The unmount is retried briefly: right after heavy
+// I/O (the filesystem walk this checker just did) the kernel can still hold
+// references and return EBUSY for a moment; giving up there leaves a dead
+// mountpoint behind.
 func unmountFuse(mountpoint string) error {
 	candidates := [][]string{
 		{"fusermount3", "-u", mountpoint},
@@ -357,17 +360,20 @@ func unmountFuse(mountpoint string) error {
 		{"umount", mountpoint},
 	}
 	var lastErr error
-	for _, c := range candidates {
-		bin, err := exec.LookPath(c[0])
-		if err != nil {
-			lastErr = err
-			continue
+	for attempt := 0; attempt < 50; attempt++ {
+		for _, c := range candidates {
+			bin, err := exec.LookPath(c[0])
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if err := exec.Command(bin, c[1:]...).Run(); err != nil {
+				lastErr = err
+				continue
+			}
+			return nil
 		}
-		if err := exec.Command(bin, c[1:]...).Run(); err != nil {
-			lastErr = err
-			continue
-		}
-		return nil
+		time.Sleep(100 * time.Millisecond)
 	}
 	if lastErr == nil {
 		return nil
