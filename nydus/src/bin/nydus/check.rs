@@ -354,11 +354,11 @@ fn walk_inode(
                     stats.chunked_files += 1;
                     let chunk_size = 1u64 << chunkbits(reader, &inode);
                     stats.chunk_sizes.insert(chunk_size);
-                    let chunk_indexes = reader.read_chunk_indexes(nid, &inode)?;
-                    stats.total_chunks += chunk_indexes.len() as u64;
+                    let chunk_index_entries = reader.read_chunk_index_entries(nid, &inode)?;
+                    stats.total_chunks += chunk_index_entries.len() as u64;
                     stats.total_logical_bytes += inode.size();
 
-                    for (index, chunk) in chunk_indexes.iter().enumerate() {
+                    for (index, chunk) in chunk_index_entries.iter().enumerate() {
                         let remaining = inode.size().saturating_sub(index as u64 * chunk_size);
                         let logical_bytes = remaining.min(chunk_size);
                         // Hole chunks reference no blob at all (their on-disk
@@ -535,7 +535,7 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
 }
 
 fn blob_meta_summary_from_bytes(data: &[u8]) -> Result<BlobMetaSummary> {
-    let blob_meta = BlobMeta::from_bytes_with_blob_id(data, [0u8; EROFS_BLOB_ID_SIZE])?;
+    let blob_meta = BlobMeta::loader().from_bytes(data)?;
     Ok(BlobMetaSummary {
         chunk_count: blob_meta.chunk_count(),
         group_count: blob_meta.group_count(),

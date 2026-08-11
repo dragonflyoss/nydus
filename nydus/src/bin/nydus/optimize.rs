@@ -1,14 +1,18 @@
 use anyhow::{bail, Context, Result};
 use clap::Args;
+
+use crate::cli_common;
 use nydus::config::Config;
 use nydus::fs::{ErofsReader, RawBlobInfo};
+use nydus::{TraceDocument, TraceEntry};
+use nydus::metrics::trace::TRACE_DOCUMENT_VERSION;
+use nydus::build::blob_chunk::compression_is_worthwhile;
 use nydus::merge::rewrite_bootstrap_with_ondemand_blob;
 use nydus::metadata::*;
 use nydus::storage::backend::build_backend;
 use nydus::storage::cache::{BlobCache, LocalBlobCache};
 use nydus::tracing::init_command_tracing;
 use nydus::utils::{align_up, hex_string};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -16,9 +20,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{info, Level};
-
-const MAX_COMPRESSED_SIZE_PERCENT: u128 = 70;
+use tracing::{info};
 
 #[derive(Args)]
 pub struct OptimizeArgs {
@@ -53,41 +55,13 @@ pub struct OptimizeArgs {
     #[arg(long)]
     pub config: PathBuf,
 
-    #[arg(
-        short = 'l',
-        long,
-        default_value = "info",
-        help = "Specify the logging level [trace, debug, info, warn, error]"
-    )]
-    pub log_level: Level,
-
-    #[arg(
-        long,
-        hide = true,
-        default_value_t = true,
-        help = "Specify whether to print log"
-    )]
-    pub console: bool,
+    #[command(flatten)]
+    pub log: cli_common::CommandLogArgs,
 }
-
-#[derive(Deserialize)]
-struct TraceEnvelope {
-    version: u32,
-    patterns: Vec<TraceEntry>,
-}
-
-#[derive(Deserialize)]
-struct TraceEntry {
-    blob_index: u32,
-    group_index: u32,
-}
-
-/// Supported trace document version (see `metrics::trace::TRACE_DOCUMENT_VERSION`).
-const TRACE_DOCUMENT_VERSION: u32 = 1;
 
 /// Parse the versioned trace document `{"version":1,"patterns":[...]}`.
 fn parse_trace_document(raw: &[u8]) -> Result<Vec<(u16, u32)>> {
-    let envelope: TraceEnvelope =
+    let envelope: TraceDocument =
         serde_json::from_slice(raw).context("failed to parse trace document")?;
     if envelope.version != TRACE_DOCUMENT_VERSION {
         bail!("unsupported trace document version: {}", envelope.version);
@@ -99,7 +73,7 @@ fn parse_trace_document(raw: &[u8]) -> Result<Vec<(u16, u32)>> {
 /// the bootstrap so the runtime prefetches it first, warming the source blobs'
 /// caches in recorded access order before on-demand reads arrive.
 pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
-    let _guards = init_command_tracing(args.log_level, args.console);
+    let _guards = init_command_tracing(args.log.log_level, args.log.console);
 
     if args.parent_bootstrap == args.bootstrap {
         bail!("--parent-bootstrap and --bootstrap must point to different files");
@@ -388,10 +362,6 @@ fn assemble_artifact(data: &[u8], blob_meta: &BlobMeta) -> Result<(Vec<u8>, [u8;
     let mut digest = [0u8; 32];
     digest.copy_from_slice(&hasher.finalize());
     Ok((artifact, digest, footer))
-}
-
-fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
-    (compressed_len as u128) * 100 <= (uncompressed_len as u128) * MAX_COMPRESSED_SIZE_PERCENT
 }
 
 #[cfg(test)]

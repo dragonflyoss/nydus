@@ -111,19 +111,42 @@ func convertLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor
 	}, nil
 }
 
-// extractOCILayer reads an OCI layer blob from the content store, decompresses
-// it (gzip/zstd/uncompressed are auto-detected) and extracts it into dir.
-func extractOCILayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor, dir string) error {
+// OpenDecompressedBlob opens a content-store blob and returns a reader over
+// its decompressed bytes (gzip/zstd/uncompressed are auto-detected). Closing
+// the returned reader also releases the underlying content-store ReaderAt.
+func OpenDecompressedBlob(ctx context.Context, cs content.Store, desc ocispec.Descriptor) (io.ReadCloser, error) {
 	ra, err := cs.ReaderAt(ctx, desc)
 	if err != nil {
-		return errors.Wrap(err, "open layer reader")
+		return nil, errors.Wrap(err, "open blob reader")
 	}
-	defer func() { _ = ra.Close() }()
-
 	sr := io.NewSectionReader(ra, 0, ra.Size())
 	decompressed, err := compression.DecompressStream(sr)
 	if err != nil {
-		return errors.Wrap(err, "decompress layer")
+		_ = ra.Close()
+		return nil, errors.Wrap(err, "decompress blob")
+	}
+	return &decompressedBlob{ReadCloser: decompressed, ra: ra}, nil
+}
+
+type decompressedBlob struct {
+	io.ReadCloser
+	ra content.ReaderAt
+}
+
+func (b *decompressedBlob) Close() error {
+	err := b.ReadCloser.Close()
+	if raErr := b.ra.Close(); err == nil {
+		err = raErr
+	}
+	return err
+}
+
+// extractOCILayer reads an OCI layer blob from the content store, decompresses
+// it (gzip/zstd/uncompressed are auto-detected) and extracts it into dir.
+func extractOCILayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor, dir string) error {
+	decompressed, err := OpenDecompressedBlob(ctx, cs, desc)
+	if err != nil {
+		return errors.Wrap(err, "open layer")
 	}
 	defer func() { _ = decompressed.Close() }()
 

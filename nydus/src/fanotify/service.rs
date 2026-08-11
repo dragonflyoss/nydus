@@ -183,7 +183,7 @@ fn epoll_add(epfd: RawFd, fd: RawFd, events: u32, data: u64) -> io::Result<()> {
 
 /// Non-blocking, close-on-exec eventfd used to wake the coordinator from a
 /// blocking `epoll_wait` when a fetch completes.
-fn create_eventfd() -> io::Result<OwnedFd> {
+pub(crate) fn create_eventfd() -> io::Result<OwnedFd> {
     let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -730,7 +730,7 @@ fn admit_event(
             core.fetch(&id, cache_size, offset, count)
         }));
         // After a successful fetch, check whether this was the last group of
-        // the blob. If the groupmap's sticky ALL_READY flag is now set, remove
+        // the blob. If the group_map's sticky ALL_READY flag is now set, remove
         // the fanotify mark so the kernel stops generating events for this
         // file entirely — subsequent reads hit the page cache without any
         // daemon involvement.
@@ -952,14 +952,8 @@ mod tests {
         }
     }
 
-    fn eventfd() -> OwnedFd {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        assert!(fd >= 0, "eventfd: {}", io::Error::last_os_error());
-        unsafe { OwnedFd::from_raw_fd(fd) }
-    }
-
     fn perm(writer: &Arc<dyn ResponseWriter>) -> PendingPermission {
-        PendingPermission::new(eventfd(), writer.clone())
+        PendingPermission::new(create_eventfd().unwrap(), writer.clone())
     }
 
     fn key() -> FetchKey {

@@ -20,7 +20,6 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/pkg/archive"
-	"github.com/containerd/containerd/v2/pkg/archive/compression"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
@@ -42,16 +41,9 @@ func extractBootstrapLayer(ctx context.Context, cs content.Store, desc ocispec.D
 		return "", nil, errors.Wrap(err, "create bootstrap dir")
 	}
 
-	ra, err := cs.ReaderAt(ctx, desc)
+	decompressed, err := converter.OpenDecompressedBlob(ctx, cs, desc)
 	if err != nil {
-		return "", nil, errors.Wrap(err, "open bootstrap reader")
-	}
-	defer func() { _ = ra.Close() }()
-
-	sr := io.NewSectionReader(ra, 0, ra.Size())
-	decompressed, err := compression.DecompressStream(sr)
-	if err != nil {
-		return "", nil, errors.Wrap(err, "decompress bootstrap layer")
+		return "", nil, errors.Wrap(err, "open bootstrap layer")
 	}
 	defer func() { _ = decompressed.Close() }()
 
@@ -173,50 +165,6 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// extractBootstrap reads a nydus bootstrap layer (gzip(tar(image/image.boot)))
-// from the content store and writes the embedded bootstrap file to destPath.
-func extractBootstrap(ctx context.Context, cs content.Store, desc ocispec.Descriptor, destPath string) error {
-	ra, err := cs.ReaderAt(ctx, desc)
-	if err != nil {
-		return errors.Wrap(err, "open bootstrap reader")
-	}
-	defer func() { _ = ra.Close() }()
-
-	sr := io.NewSectionReader(ra, 0, ra.Size())
-	decompressed, err := compression.DecompressStream(sr)
-	if err != nil {
-		return errors.Wrap(err, "decompress bootstrap layer")
-	}
-	defer func() { _ = decompressed.Close() }()
-
-	tr := tar.NewReader(decompressed)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return errors.Wrap(err, "read bootstrap tar")
-		}
-		if hdr.Name != converter.BootstrapFileNameInLayer {
-			continue
-		}
-		out, err := os.Create(destPath)
-		if err != nil {
-			return errors.Wrap(err, "create bootstrap file")
-		}
-		if _, err := io.Copy(out, tr); err != nil {
-			_ = out.Close()
-			return errors.Wrap(err, "write bootstrap file")
-		}
-		if err := out.Close(); err != nil {
-			return errors.Wrap(err, "close bootstrap file")
-		}
-		return nil
-	}
-	return errors.Errorf("bootstrap entry %q not found in layer", converter.BootstrapFileNameInLayer)
-}
-
 // applyOCIImage applies all OCI layers of img sequentially into rootfs,
 // resolving whiteouts so the result is the fully merged root filesystem.
 func applyOCIImage(ctx context.Context, cs content.Store, img *Image, rootfs string) error {
@@ -232,16 +180,9 @@ func applyOCIImage(ctx context.Context, cs content.Store, img *Image, rootfs str
 }
 
 func applyOCILayer(ctx context.Context, cs content.Store, layer ocispec.Descriptor, rootfs string) error {
-	ra, err := cs.ReaderAt(ctx, layer)
+	decompressed, err := converter.OpenDecompressedBlob(ctx, cs, layer)
 	if err != nil {
-		return errors.Wrap(err, "open layer reader")
-	}
-	defer func() { _ = ra.Close() }()
-
-	sr := io.NewSectionReader(ra, 0, ra.Size())
-	decompressed, err := compression.DecompressStream(sr)
-	if err != nil {
-		return errors.Wrap(err, "decompress layer")
+		return errors.Wrap(err, "open layer")
 	}
 	defer func() { _ = decompressed.Close() }()
 

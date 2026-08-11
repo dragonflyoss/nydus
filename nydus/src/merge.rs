@@ -44,7 +44,7 @@ struct MergeLinkId {
 #[derive(Clone)]
 enum MergeNodeData {
     RegularFile {
-        chunk_indexes: Vec<ChunkIndex>,
+        chunk_index_entries: Vec<ChunkIndex>,
         chunkbits: u32,
     },
     Directory {
@@ -324,8 +324,8 @@ fn load_node(
                 bail!("merge currently only supports chunk-based regular files")
             }
             let chunkbits = reader.sb().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F);
-            let chunk_indexes = reader
-                .read_chunk_indexes(nid, &inode)?
+            let chunk_index_entries = reader
+                .read_chunk_index_entries(nid, &inode)?
                 .into_iter()
                 .map(|index| {
                     // A hole chunk carries no blob reference at all (its
@@ -350,7 +350,7 @@ fn load_node(
                 })
                 .collect::<Result<Vec<_>>>()?;
             MergeNodeData::RegularFile {
-                chunk_indexes,
+                chunk_index_entries,
                 chunkbits,
             }
         }
@@ -506,7 +506,7 @@ fn flatten_node(
                 ino,
                 nid: 0,
                 meta_offset: 0,
-                is_extended: needs_extended(0, node.uid, node.gid, 0),
+                is_extended: needs_erofs_extended_inode(0, node.uid, node.gid, 0),
                 data: InodeData::Directory {
                     children: Vec::new(),
                     startblk: 0,
@@ -532,7 +532,7 @@ fn flatten_node(
             }
 
             let nlink = 2 + subdir_count;
-            let is_extended = needs_extended(0, node.uid, node.gid, nlink);
+            let is_extended = needs_erofs_extended_inode(0, node.uid, node.gid, nlink as u64);
             inodes[inode_index].nlink = nlink;
             inodes[inode_index].is_extended = is_extended;
             if let InodeData::Directory {
@@ -544,7 +544,7 @@ fn flatten_node(
             }
         }
         MergeNodeData::RegularFile {
-            chunk_indexes,
+            chunk_index_entries,
             chunkbits,
         } => {
             let nlink = node.nlink.max(1);
@@ -559,9 +559,9 @@ fn flatten_node(
                 ino,
                 nid: 0,
                 meta_offset: 0,
-                is_extended: needs_extended(node.size, node.uid, node.gid, nlink),
+                is_extended: needs_erofs_extended_inode(node.size, node.uid, node.gid, nlink as u64),
                 data: InodeData::RegularFile {
-                    chunk_indexes: chunk_indexes.clone(),
+                    chunk_index_entries: chunk_index_entries.clone(),
                     chunk_size_bits: *chunkbits,
                 },
                 xattrs: node.xattrs.clone(),
@@ -584,7 +584,7 @@ fn flatten_node(
                 ino,
                 nid: 0,
                 meta_offset: 0,
-                is_extended: needs_extended(size, node.uid, node.gid, nlink),
+                is_extended: needs_erofs_extended_inode(size, node.uid, node.gid, nlink as u64),
                 data: InodeData::Symlink {
                     target: target.clone(),
                     startblk: 0,
@@ -605,7 +605,7 @@ fn flatten_node(
                 ino,
                 nid: 0,
                 meta_offset: 0,
-                is_extended: needs_extended(0, node.uid, node.gid, nlink),
+                is_extended: needs_erofs_extended_inode(0, node.uid, node.gid, nlink as u64),
                 data: InodeData::Device { rdev: *rdev },
                 xattrs: node.xattrs.clone(),
             });
@@ -623,7 +623,7 @@ fn flatten_node(
                 ino,
                 nid: 0,
                 meta_offset: 0,
-                is_extended: needs_extended(0, node.uid, node.gid, nlink),
+                is_extended: needs_erofs_extended_inode(0, node.uid, node.gid, nlink as u64),
                 data: InodeData::FifoOrSocket,
                 xattrs: node.xattrs.clone(),
             });
@@ -631,10 +631,6 @@ fn flatten_node(
     }
 
     inode_index
-}
-
-fn needs_extended(size: u64, uid: u32, gid: u32, nlink: u32) -> bool {
-    size > u32::MAX as u64 || uid > u16::MAX as u32 || gid > u16::MAX as u32 || nlink > 1
 }
 
 #[cfg(test)]
@@ -653,7 +649,7 @@ mod tests {
 
     fn regular_file() -> MergeNode {
         merge_node(MergeNodeData::RegularFile {
-            chunk_indexes: Vec::new(),
+            chunk_index_entries: Vec::new(),
             chunkbits: EROFS_BLKSZBITS as u32,
         })
     }

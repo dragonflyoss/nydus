@@ -4,12 +4,9 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use clap::Args;
-use nydus::config::Config;
-use nydus::tracing::init_tracing;
+
+use crate::cli_common;
 use nydus::uffd::{UffdCore, UffdService};
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use signal_hook::iterator::Signals;
-use tracing::Level;
 
 #[derive(Args)]
 pub struct UffdArgs {
@@ -29,46 +26,13 @@ pub struct UffdArgs {
     #[arg(long)]
     pub threads: Option<NonZeroUsize>,
 
-    #[arg(
-        short = 'l',
-        long,
-        default_value = "info",
-        help = "Specify the logging level [trace, debug, info, warn, error]"
-    )]
-    pub log_level: Level,
-
-    #[arg(
-        long,
-        default_value_os_t = PathBuf::from("/var/log/nydus/"),
-        help = "Specify the log directory"
-    )]
-    pub log_dir: PathBuf,
-
-    #[arg(
-        long,
-        default_value_t = 6,
-        help = "Specify the max number of log files"
-    )]
-    pub log_max_files: usize,
-
-    #[arg(long, hide = true, default_value_t = true)]
-    pub console: bool,
+    #[command(flatten)]
+    pub log: cli_common::DaemonLogArgs,
 }
 
 pub fn run_uffd(args: UffdArgs) -> Result<()> {
-    let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
-        .context("failed to register termination signals")?;
+    let (mut signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
     let signal_handle = signals.handle();
-
-    let _guards = init_tracing(
-        "nydus",
-        args.log_dir.clone(),
-        args.log_level,
-        args.log_max_files,
-        args.console,
-    );
-
-    let config = Config::from_file(&args.config).context("failed to load storage config")?;
     let core = Arc::new(UffdCore::new(&args.bootstrap, config)?);
     let service = Arc::new(UffdService::new(core, args.socket));
     let signal_service = service.clone();

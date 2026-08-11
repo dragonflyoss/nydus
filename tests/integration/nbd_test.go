@@ -61,6 +61,8 @@ var nbdReadFailurePattern = regexp.MustCompile(`nbd: read .* failed:`)
 
 // nbdEnv holds the paths, binaries and process handles for one E2E run.
 type nbdEnv struct {
+	daemonProc
+
 	nydusBin string
 	device   string
 
@@ -69,13 +71,8 @@ type nbdEnv struct {
 	blobDir    string
 	cacheDir   string
 	mntDir     string
-	logDir     string
 	configPath string
-	daemonLog  string
 	bootstrap  string
-
-	daemonCmd    *exec.Cmd
-	daemonExited chan struct{} // closed when cmd.Wait() returns
 
 	sourceHashes map[string]string // rel path -> sha256
 }
@@ -97,7 +94,7 @@ func TestNbdE2E(t *testing.T) {
 	}
 
 	env := &nbdEnv{device: device}
-	env.nydusBin = lookupFanotifyBin(t, "NYDUS_BIN", "nydus")
+	env.nydusBin = lookupBinFromEnv(t, "NYDUS_BIN", "nydus")
 	if out, err := exec.Command(env.nydusBin, "nbd", "--help").CombinedOutput(); err != nil {
 		t.Skipf("nydus binary lacks the nbd subcommand; build with --features cli,nbd: %s", out)
 	}
@@ -182,18 +179,11 @@ func (e *nbdEnv) writeConfig(t *testing.T) {
 
 // ----------------------------------------------------------------- daemon ----
 
-// wipeCache removes every per-blob artifact so the next daemon starts COLD.
-// Leaving a stale .group.map behind makes the core believe groups are
-// ready while the re-created .blob.data is all zeros — reads would return
-// zeros without fetching. Wipe data+meta+map+lock.
+// wipeCache removes every per-blob artifact so the next daemon starts COLD
+// (see wipeCacheDir in util.go for why the stale .group.map matters).
 func (e *nbdEnv) wipeCache(t *testing.T) {
 	t.Helper()
-	for _, pattern := range []string{"*.blob.data", "*.blob.meta", "*.group.map", "*.prefetch.lock"} {
-		matches, _ := filepath.Glob(filepath.Join(e.cacheDir, pattern))
-		for _, m := range matches {
-			_ = os.Remove(m)
-		}
-	}
+	wipeCacheDir(e.cacheDir)
 }
 
 // startDaemon starts a COLD daemon (wipes the cache first) and waits for it
@@ -209,9 +199,6 @@ func (e *nbdEnv) startDaemon(t *testing.T) {
 func (e *nbdEnv) spawnDaemon(t *testing.T) {
 	t.Helper()
 	t.Logf("starting nydus nbd daemon on %s", e.device)
-	logFile, err := os.Create(e.daemonLog)
-	require.NoError(t, err)
-
 	cmd := exec.Command(e.nydusBin, "nbd",
 		"--bootstrap", e.bootstrap,
 		"--config", e.configPath,
@@ -220,13 +207,7 @@ func (e *nbdEnv) spawnDaemon(t *testing.T) {
 		"--log-level", "debug",
 		"--log-dir", e.logDir,
 	)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	require.NoError(t, cmd.Start())
-	e.daemonCmd = cmd
-	e.daemonExited = make(chan struct{})
-	go func() { _ = cmd.Wait(); close(e.daemonExited) }()
-	_ = logFile.Close()
+	e.spawnDaemonCmd(t, cmd)
 
 	require.Eventually(t, func() bool {
 		select {
@@ -237,30 +218,6 @@ func (e *nbdEnv) spawnDaemon(t *testing.T) {
 		return isMountpoint(e.mntDir) && e.countLogs(`mounted `) > 0
 	}, 60*time.Second, time.Second, "daemon did not mount / become ready within 60s:\n%s", e.logCorpus())
 	t.Logf("  daemon ready (pid=%d, device=%s)", cmd.Process.Pid, e.device)
-}
-
-func (e *nbdEnv) stopDaemon(t *testing.T) {
-	t.Helper()
-	if e.daemonCmd == nil || e.daemonCmd.Process == nil {
-		return
-	}
-	// If already exited (e.g. crash detected elsewhere), just reap.
-	if e.daemonExited != nil {
-		select {
-		case <-e.daemonExited:
-			e.daemonCmd = nil
-			return
-		default:
-		}
-	}
-	_ = e.daemonCmd.Process.Signal(syscall.SIGTERM)
-	select {
-	case <-e.daemonExited:
-	case <-time.After(20 * time.Second):
-		_ = e.daemonCmd.Process.Kill()
-		<-e.daemonExited
-	}
-	e.daemonCmd = nil
 }
 
 // waitForDeviceRelease waits for the kernel to finalize NBD device teardown
@@ -320,8 +277,8 @@ func (e *nbdEnv) caseMetadataOffpath(t *testing.T) { // C1
 }
 
 func (e *nbdEnv) caseTinyFile(t *testing.T) { // C2
-	got := shaFile(t, filepath.Join(e.mntDir, "hello.txt"))
-	want := shaFile(t, filepath.Join(e.sourceDir, "hello.txt"))
+	got := sha256File(t, filepath.Join(e.mntDir, "hello.txt"))
+	want := sha256File(t, filepath.Join(e.sourceDir, "hello.txt"))
 	assert.Equal(t, want, got, "hello.txt byte-exact over NBD")
 	content, err := os.ReadFile(filepath.Join(e.mntDir, "hello.txt"))
 	require.NoError(t, err)
@@ -372,8 +329,8 @@ func (e *nbdEnv) caseWarmFastpath(t *testing.T) { // C7 — behavioural warm-pat
 	// bytes AND allocate ~no new blocks (the core's fully-ready fast path
 	// short-circuits the fetch).
 	before := e.cacheUsed()
-	got := shaFile(t, filepath.Join(e.mntDir, "large.bin"))
-	want := shaFile(t, filepath.Join(e.sourceDir, "large.bin"))
+	got := sha256File(t, filepath.Join(e.mntDir, "large.bin"))
+	want := sha256File(t, filepath.Join(e.sourceDir, "large.bin"))
 	after := e.cacheUsed()
 	assert.Equal(t, want, got, "warm re-read is byte-exact")
 	assert.Less(t, after-before, int64(1<<20), "warm re-read allocates ~no new cache blocks (fully-ready fast path)")
@@ -416,7 +373,7 @@ func (e *nbdEnv) caseConcurrency(t *testing.T) { // C8 — stress per-worker req
 	srcMany, _ := filepath.Glob(filepath.Join(e.sourceDir, "many", "*.bin"))
 	for _, f := range srcMany {
 		name := filepath.Base(f)
-		if shaFile(t, filepath.Join(e.mntDir, "many", name)) != shaFile(t, f) {
+		if sha256File(t, filepath.Join(e.mntDir, "many", name)) != sha256File(t, f) {
 			bad++
 		}
 	}
@@ -440,8 +397,8 @@ func (e *nbdEnv) casePersistence(t *testing.T) { // C9 — warm cache survives a
 	t.Log("  restarting daemon with warm cache (no wipe)")
 	e.spawnDaemon(t)
 
-	got := shaFile(t, filepath.Join(e.mntDir, "large.bin"))
-	want := shaFile(t, filepath.Join(e.sourceDir, "large.bin"))
+	got := sha256File(t, filepath.Join(e.mntDir, "large.bin"))
+	want := sha256File(t, filepath.Join(e.sourceDir, "large.bin"))
 	assert.Equal(t, want, got, "large.bin still byte-exact after restart")
 	after := e.cacheUsed()
 	// Warm cache: re-reading the same data should not grow the cache (the
@@ -534,16 +491,6 @@ func (e *nbdEnv) logCorpus() string {
 // countLogs counts lines across every log sink matching the pattern.
 func (e *nbdEnv) countLogs(pattern string) int {
 	return countMatchingLines(e.logCorpus(), regexp.MustCompile(pattern))
-}
-
-func countMatchingLines(corpus string, re *regexp.Regexp) int {
-	count := 0
-	for _, line := range strings.Split(corpus, "\n") {
-		if re.MatchString(line) {
-			count++
-		}
-	}
-	return count
 }
 
 func TestCountMatchingLinesCountsOnlyNbdReadFailures(t *testing.T) {

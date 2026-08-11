@@ -84,7 +84,7 @@ pub struct LocalBlobCache {
     /// Device/blob index in the merged image, used to attribute on-demand group
     /// accesses in the access trace.
     blob_index: u32,
-    groupmap: GroupMap,
+    group_map: GroupMap,
     blob_meta: BlobMeta,
     cache_blob_path: PathBuf,
     prefetch_lock_path: PathBuf,
@@ -119,23 +119,23 @@ impl LocalBlobCache {
         let cache_key = backend.cache_key(&blob_id)?;
         let cache_key_hex = hex_string(&cache_key);
         let blob_meta_path = cache_dir.join(format!("{cache_key_hex}.blob.meta"));
-        let blob_meta = load_cached_blob_meta(blob_id, cache_dir, &blob_meta_path, &backend)?;
+        let blob_meta = cached_blob_meta(blob_id, cache_dir, &blob_meta_path, &backend)?;
         crate::metrics::track_blob_groups(cache_key, blob_meta.group_count() as u64);
 
         let cache_blob_path = cache_dir.join(format!("{cache_key_hex}.blob.data"));
 
         let groupmap_path = cache_dir.join(format!("{cache_key_hex}.group.map"));
-        // The groupmap is only meaningful together with the cache data file it
-        // describes: a leftover groupmap whose data file has been removed
+        // The group_map is only meaningful together with the cache data file it
+        // describes: a leftover group_map whose data file has been removed
         // would claim groups are ready while reads hit sparse zeros. Note this
         // before creating the data file below, which would otherwise mask it.
         // (Removing the map while keeping the data is the safe direction and
         // needs no handling.)
         let stale_groupmap = groupmap_path.exists() && !cache_blob_path.exists();
 
-        // Create the cache data file eagerly, before the groupmap, so that
-        // "groupmap file exists => data file exists" holds and the check above
-        // can only fire for a genuinely orphaned groupmap.
+        // Create the cache data file eagerly, before the group_map, so that
+        // "group_map file exists => data file exists" holds and the check above
+        // can only fire for a genuinely orphaned group_map.
         let data_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -145,14 +145,14 @@ impl LocalBlobCache {
         data_file.set_len(blob_meta.total_uncompressed_size())?;
         drop(data_file);
 
-        let groupmap = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
+        let group_map = GroupMap::open(&groupmap_path, blob_meta.group_count())?;
         if stale_groupmap {
             // Reset in place rather than unlinking: handles already mapping
             // this file observe the reset, whereas a replacement inode would
             // split them off with their readiness invisible to each other.
-            groupmap.reset()?;
+            group_map.reset()?;
             warn!(
-                "stale groupmap without cache data file, reset: {}",
+                "stale group_map without cache data file, reset: {}",
                 groupmap_path.display()
             );
         }
@@ -164,7 +164,7 @@ impl LocalBlobCache {
             blob_id,
             cache_key,
             blob_index,
-            groupmap,
+            group_map,
             blob_meta,
             cache_blob_path,
             prefetch_lock_path,
@@ -205,7 +205,7 @@ impl LocalBlobCache {
     ///
     /// The descriptor keeps an unlinked inode alive, so writes through it
     /// still succeed — but they land somewhere nobody else can reach, while
-    /// the shared groupmap goes on advertising those groups as ready. Better
+    /// the shared group_map goes on advertising those groups as ready. Better
     /// to stop than to publish readiness for bytes other processes cannot see.
     fn ensure_data_file_linked(&self, cache_file: &File) -> io::Result<()> {
         if cache_file.metadata()?.nlink() == 0 {
@@ -226,7 +226,7 @@ impl LocalBlobCache {
         group: &BlobMetaGroup,
         cache_file: &File,
     ) -> io::Result<()> {
-        if self.groupmap.is_ready(group_index)? {
+        if self.group_map.is_ready(group_index)? {
             crate::metrics::inc_cache_hit_group();
             return Ok(());
         }
@@ -261,7 +261,7 @@ impl LocalBlobCache {
         };
 
         let result = (|| {
-            if self.groupmap.is_ready(group_index)? {
+            if self.group_map.is_ready(group_index)? {
                 crate::metrics::inc_cache_hit_group();
                 return Ok(());
             }
@@ -278,7 +278,7 @@ impl LocalBlobCache {
             // so the re-check below is what actually removes the duplicate
             // backend traffic.
             let _claim = self.group_locks.acquire(group_index);
-            if self.groupmap.is_ready(group_index)? {
+            if self.group_map.is_ready(group_index)? {
                 crate::metrics::inc_cache_hit_group();
                 return Ok(());
             }
@@ -293,7 +293,7 @@ impl LocalBlobCache {
                 ReadKind::OnDemand,
             )?;
             write_all_at(cache_file, group.uncompressed_byte_offset(), decoded)?;
-            self.groupmap.set_ready(group_index)?;
+            self.group_map.set_ready(group_index)?;
             crate::metrics::inc_cache_ondemand_fill_group();
             Ok(())
         })();
@@ -324,7 +324,7 @@ impl LocalBlobCache {
 
         // Fast path: the sticky all-ready flag says every group is already
         // decoded into the cache file, so skip the per-group walk entirely.
-        if self.groupmap.is_all_ready() {
+        if self.group_map.is_all_ready() {
             crate::metrics::inc_cache_hit_group();
             return Ok(());
         }
@@ -350,21 +350,21 @@ impl LocalBlobCache {
         Ok(())
     }
 
-    /// Fetch one redirect-blob segment (a contiguous range of groups) in a
+    /// Fetch one redirect-blob batch (a contiguous range of groups) in a
     /// single backend read, then decode and hand each group to `cb`. `window`
     /// and `decoded` are caller-owned scratch buffers so a worker thread can
-    /// reuse them across segments. Per-group decode/CRC failures are skipped
+    /// reuse them across batches. Per-group decode/CRC failures are skipped
     /// with a warning; `cb` errors propagate to abort the stream.
-    fn stream_redirect_segment(
+    fn stream_redirect_batch(
         &self,
         groups: &[BlobMetaGroup],
-        segment: std::ops::Range<usize>,
+        batch: std::ops::Range<usize>,
         window: &mut Vec<u8>,
         decoded: &mut Vec<u8>,
         cb: &(dyn Fn(&BlobMetaGroup, &[u8]) -> io::Result<()> + Sync),
     ) -> io::Result<()> {
-        let window_base = groups[segment.start].compressed_byte_offset();
-        let window_end = groups[segment.end - 1].compressed_byte_end();
+        let window_base = groups[batch.start].compressed_byte_offset();
+        let window_end = groups[batch.end - 1].compressed_byte_end();
         let window_len = usize::try_from(window_end - window_base).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -372,15 +372,15 @@ impl LocalBlobCache {
             )
         })?;
         window.resize(window_len, 0);
-        let uncompressed_offset = groups[segment.start].uncompressed_byte_offset();
+        let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
         let uncompressed_size =
-            groups[segment.end - 1].uncompressed_byte_end() - uncompressed_offset;
+            groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
         let ctx = ReadContext::group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
         self.backend
             .read_range_into(&self.blob_id, window_base, window, ctx)?;
         crate::metrics::record_backend_redirect_read(window_len as u64);
 
-        for index in segment {
+        for index in batch {
             let group = &groups[index];
             if let Err(err) =
                 decode_group_from_window(&self.blob_meta, group, window_base, window, decoded)
@@ -422,7 +422,7 @@ impl BlobCache for LocalBlobCache {
         }
         // Fast path: another process (or an earlier run) already decoded every
         // group; skip the batch planning and per-group readiness scan.
-        if !self.blob_meta.is_redirect_blob() && self.groupmap.is_all_ready() {
+        if !self.blob_meta.is_redirect_blob() && self.group_map.is_all_ready() {
             return Ok(());
         }
 
@@ -431,7 +431,7 @@ impl BlobCache for LocalBlobCache {
         // make sure the file it fills is still the one other processes read.
         self.ensure_data_file_linked(&cache_file)?;
         // Prefetch owns its decode buffers and does not take `fetch_lock`, so it
-        // never blocks on-demand FUSE reads. The groupmap is internally locked
+        // never blocks on-demand FUSE reads. The group_map is internally locked
         // and `set_ready` is idempotent, so racing with a read at worst decodes
         // the same group twice into identical bytes at the same cache offset.
         let mut decoded = Vec::new();
@@ -440,7 +440,7 @@ impl BlobCache for LocalBlobCache {
         for batch in plan_prefetch_batches(groups, BLOB_META_DEFAULT_CHUNK_SIZE as u64) {
             if batch
                 .clone()
-                .map(|index| self.groupmap.is_ready(index))
+                .map(|index| self.group_map.is_ready(index))
                 .collect::<io::Result<Vec<_>>>()?
                 .into_iter()
                 .all(|ready| ready)
@@ -468,7 +468,7 @@ impl BlobCache for LocalBlobCache {
                 .read_range_into(&self.blob_id, window_base, &mut window, ctx)?;
 
             for index in batch {
-                if self.groupmap.is_ready(index)? {
+                if self.group_map.is_ready(index)? {
                     continue;
                 }
                 let group = &groups[index];
@@ -489,7 +489,7 @@ impl BlobCache for LocalBlobCache {
                     group.uncompressed_byte_offset(),
                     &decoded,
                 )?;
-                self.groupmap.set_ready(index)?;
+                self.group_map.set_ready(index)?;
                 crate::metrics::inc_cache_fill_group();
             }
         }
@@ -500,9 +500,9 @@ impl BlobCache for LocalBlobCache {
         // normally latches it through the shared ready counter, but a
         // historical writer crash between its bit and counter updates leaves
         // the counter short forever; the authoritative bitmap scan inside
-        // check_all_ready() latches the flag regardless.
+        // latch_all_ready() latches the flag regardless.
         if !self.blob_meta.is_redirect_blob() {
-            self.groupmap.check_all_ready();
+            self.group_map.latch_all_ready();
         }
 
         Ok(())
@@ -557,7 +557,7 @@ impl BlobCache for LocalBlobCache {
             .group_index_for_byte_offset(end - 1)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "blob meta group not found"))?;
 
-        self.groupmap
+        self.group_map
             .ready_ranges(first, last)?
             .into_iter()
             .map(|groups| {
@@ -582,7 +582,7 @@ impl BlobCache for LocalBlobCache {
     /// prefetcher: locking failures degrade to prefetching without the lock
     /// rather than failing the prefetch, and the guard is released when the
     /// returned file is dropped — including on process death, so a crashed
-    /// owner's lock is taken over and the groupmap-driven skip logic resumes
+    /// owner's lock is taken over and the group_map-driven skip logic resumes
     /// where it left off.
     fn prefetch_lock(&self) -> Option<File> {
         let file = match OpenOptions::new()
@@ -619,11 +619,11 @@ impl BlobCache for LocalBlobCache {
                 return None;
             }
             // Another process is prefetching this blob. For a regular blob the
-            // shared groupmap tells us when the owner has finished everything,
+            // shared group_map tells us when the owner has finished everything,
             // so we can stop waiting; the caller's prefetch then reduces to a
             // cheap all-ready scan. A redirect blob never marks its own map,
-            // so keep waiting for the lock and rely on segment skipping.
-            if !self.blob_meta.is_redirect_blob() && self.groupmap.check_all_ready() {
+            // so keep waiting for the lock and rely on batch skipping.
+            if !self.blob_meta.is_redirect_blob() && self.group_map.latch_all_ready() {
                 return None;
             }
             if !contention_logged {
@@ -638,13 +638,13 @@ impl BlobCache for LocalBlobCache {
     }
 
     fn group_ready(&self, group_index: usize) -> bool {
-        self.groupmap.is_ready(group_index).unwrap_or(false)
+        self.group_map.is_ready(group_index).unwrap_or(false)
     }
 
     fn is_all_ready(&self) -> bool {
-        // A redirect blob never marks its own groupmap (its groups fill other
+        // A redirect blob never marks its own group_map (its groups fill other
         // blobs' caches), so the flag is meaningless there.
-        !self.blob_meta.is_redirect_blob() && self.groupmap.is_all_ready()
+        !self.blob_meta.is_redirect_blob() && self.group_map.is_all_ready()
     }
 
     fn stream_redirect(
@@ -715,43 +715,43 @@ impl BlobCache for LocalBlobCache {
         // Segments whose groups are all already done (per `skip`, typically
         // backed by the shared source groupmaps) are not fetched at all, so a
         // process re-running the warmup behind another one does close to zero
-        // backend work. Partially-done segments are still fetched whole to
+        // backend work. Partially-done batches are still fetched whole to
         // keep the backend reads contiguous.
-        let segment_done = |segment: &std::ops::Range<usize>| -> bool {
-            segment.clone().all(|index| skip(&groups[index]))
+        let batch_done = |batch: &std::ops::Range<usize>| -> bool {
+            batch.clone().all(|index| skip(&groups[index]))
         };
 
-        // A small ondemand blob (fits in one segment) or a single worker is
-        // streamed sequentially with default-sized segments: segmentation and
+        // A small ondemand blob (fits in one batch) or a single worker is
+        // streamed sequentially with default-sized batches: batching and
         // extra registry connections would add overhead without overlapping any
         // work.
         let total_uncompressed: u64 = groups
             .iter()
             .map(|group| group.uncompressed_byte_size())
             .sum();
-        if threads <= 1 || total_uncompressed <= super::REDIRECT_PREFETCH_SEGMENT_SIZE {
+        if threads <= 1 || total_uncompressed <= super::REDIRECT_PREFETCH_BATCH_SIZE {
             let mut window = Vec::new();
             let mut decoded = Vec::new();
-            for segment in plan_prefetch_batches(groups, super::REDIRECT_PREFETCH_SEGMENT_SIZE) {
-                if segment_done(&segment) {
+            for batch in plan_prefetch_batches(groups, super::REDIRECT_PREFETCH_BATCH_SIZE) {
+                if batch_done(&batch) {
                     continue;
                 }
-                self.stream_redirect_segment(groups, segment, &mut window, &mut decoded, cb)?;
+                self.stream_redirect_batch(groups, batch, &mut window, &mut decoded, cb)?;
             }
             return Ok(());
         }
 
-        // Larger blob: fetch segments concurrently. The earliest groups are
-        // emitted one per segment (a "ramp") so they land in the first wave of
+        // Larger blob: fetch batches concurrently. The earliest groups are
+        // emitted one per batch (a "ramp") so they land in the first wave of
         // workers within a single round trip, ahead of the workload's first
-        // faults; the rest are bundled into REDIRECT_PREFETCH_SEGMENT_SIZE
-        // segments for throughput.
-        let segments = super::plan_redirect_segments(
+        // faults; the rest are bundled into REDIRECT_PREFETCH_BATCH_SIZE
+        // batches for throughput.
+        let batches = super::plan_redirect_batches(
             groups,
-            super::REDIRECT_PREFETCH_SEGMENT_SIZE,
+            super::REDIRECT_PREFETCH_BATCH_SIZE,
             super::REDIRECT_PREFETCH_RAMP_GROUPS,
         );
-        let worker_count = threads.min(segments.len());
+        let worker_count = threads.min(batches.len());
         let next = AtomicUsize::new(0);
         let first_err: Mutex<Option<io::Error>> = Mutex::new(None);
         std::thread::scope(|scope| {
@@ -764,15 +764,15 @@ impl BlobCache for LocalBlobCache {
                             break;
                         }
                         let idx = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(segment) = segments.get(idx) else {
+                        let Some(batch) = batches.get(idx) else {
                             break;
                         };
-                        if segment_done(segment) {
+                        if batch_done(batch) {
                             continue;
                         }
-                        if let Err(err) = self.stream_redirect_segment(
+                        if let Err(err) = self.stream_redirect_batch(
                             groups,
-                            segment.clone(),
+                            batch.clone(),
                             &mut window,
                             &mut decoded,
                             cb,
@@ -798,7 +798,7 @@ impl BlobCache for LocalBlobCache {
                 "redirect fill group index out of range",
             )
         })?;
-        if self.groupmap.is_ready(group_index)? {
+        if self.group_map.is_ready(group_index)? {
             crate::metrics::inc_cache_hit_group();
             return Ok(());
         }
@@ -813,13 +813,13 @@ impl BlobCache for LocalBlobCache {
             group.uncompressed_byte_offset(),
             decoded,
         )?;
-        self.groupmap.set_ready(group_index)?;
+        self.group_map.set_ready(group_index)?;
         crate::metrics::inc_cache_redirect_fill_group();
         Ok(())
     }
 }
 
-fn load_cached_blob_meta(
+fn cached_blob_meta(
     blob_id: [u8; EROFS_BLOB_ID_SIZE],
     cache_dir: &Path,
     blob_meta_path: &Path,
@@ -832,14 +832,14 @@ fn load_cached_blob_meta(
             .prefix(".blob-meta-")
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
-        backend.download_blob_meta(&blob_id, tmp.path())?;
-        if let Err(err) = BlobMeta::load_checked_crc32_with_blob_id(tmp.path(), blob_id) {
+        backend.blob_meta_to(&blob_id, tmp.path())?;
+        if let Err(err) = BlobMeta::loader().verify_crc32().blob_id(blob_id).load(tmp.path()) {
             return Err(io::Error::other(err));
         }
         tmp.persist(blob_meta_path).map_err(|err| err.error)?;
     }
 
-    BlobMeta::load_checked_crc32_with_blob_id(blob_meta_path, blob_id).map_err(io::Error::other)
+    BlobMeta::loader().verify_crc32().blob_id(blob_id).load(blob_meta_path).map_err(io::Error::other)
 }
 
 /// Drop guard that ensures a leader always signals its flight and cleans up
@@ -905,10 +905,10 @@ mod tests {
         .unwrap()
     }
 
-    use crate::storage::test_util::write_full_blob;
+    use crate::storage::test_util::write_minimal_full_blob;
 
     /// Wraps a real backend and counts data-range reads, so tests can assert
-    /// that cross-process sharing (groupmap + prefetch lock + segment skip)
+    /// that cross-process sharing (group_map + prefetch lock + batch skip)
     /// actually eliminates duplicate backend traffic.
     struct CountingBackend {
         inner: LocalBackend,
@@ -929,19 +929,19 @@ mod tests {
     }
 
     impl BlobBackend for CountingBackend {
-        fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
-            self.inner.load_blob_meta(blob_id)
+        fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+            self.inner.blob_meta(blob_id)
         }
 
-        fn read_range(
+        fn read_range_into(
             &self,
             blob_id: &[u8; EROFS_BLOB_ID_SIZE],
             offset: u64,
-            len: u32,
+            dst: &mut [u8],
             ctx: ReadContext,
-        ) -> io::Result<Vec<u8>> {
+        ) -> io::Result<()> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            self.inner.read_range(blob_id, offset, len, ctx)
+            self.inner.read_range_into(blob_id, offset, dst, ctx)
         }
     }
 
@@ -952,7 +952,7 @@ mod tests {
         let payload = vec![0xceu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
@@ -962,7 +962,7 @@ mod tests {
         cached.read_at(512, &mut buf).unwrap();
 
         assert_eq!(buf, payload[512..1536]);
-        assert!(cached.groupmap.is_ready(0).unwrap());
+        assert!(cached.group_map.is_ready(0).unwrap());
     }
 
     #[test]
@@ -972,7 +972,7 @@ mod tests {
         let payload = vec![0x3du8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
 
@@ -983,19 +983,19 @@ mod tests {
                 LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
             let mut buf = vec![0u8; 1024];
             cached.read_at(0, &mut buf).unwrap();
-            assert!(cached.groupmap.is_all_ready());
+            assert!(cached.group_map.is_all_ready());
         }
 
         // Model the operational accident: the data file is removed while the
-        // groupmap survives. Reopening must reset the groupmap instead of
+        // group_map survives. Reopening must reset the group_map instead of
         // trusting ready bits that now point at sparse holes.
         let cache_key = backend.cache_key(&full_blob_id).unwrap();
         let prefix = hex_string(&cache_key);
         fs::remove_file(cache_dir.path().join(format!("{prefix}.blob.data"))).unwrap();
 
         let reopened = LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend).unwrap();
-        assert!(!reopened.groupmap.is_ready(0).unwrap());
-        assert!(!reopened.groupmap.is_all_ready());
+        assert!(!reopened.group_map.is_ready(0).unwrap());
+        assert!(!reopened.group_map.is_all_ready());
 
         // The blob still reads correctly end-to-end after the reset.
         let mut buf = vec![0u8; 1024];
@@ -1012,17 +1012,17 @@ mod tests {
         let payload = vec![0x2eu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
 
-        // A live handle keeps the groupmap mapped throughout, standing in for
+        // A live handle keeps the group_map mapped throughout, standing in for
         // a process that is already running when the accident happens.
         let live =
             LocalBlobCache::open(full_blob_id, 1, cache_dir.path(), backend.clone()).unwrap();
         let mut buf = vec![0u8; 1024];
         live.read_at(0, &mut buf).unwrap();
-        assert!(live.groupmap.is_ready(0).unwrap());
+        assert!(live.group_map.is_ready(0).unwrap());
 
         let cache_key = backend.cache_key(&full_blob_id).unwrap();
         let prefix = hex_string(&cache_key);
@@ -1034,14 +1034,14 @@ mod tests {
         assert_eq!(
             fs::metadata(&groupmap_path).unwrap().ino(),
             before,
-            "the reset must not replace the groupmap file"
+            "the reset must not replace the group_map file"
         );
 
         // Because the inode is unchanged, the reset is visible through the
         // mapping the live handle already holds; a replacement inode would
         // have left it advertising readiness nobody else can see.
-        assert!(!live.groupmap.is_ready(0).unwrap());
-        assert!(!reopened.groupmap.is_ready(0).unwrap());
+        assert!(!live.group_map.is_ready(0).unwrap());
+        assert!(!reopened.group_map.is_ready(0).unwrap());
     }
 
     #[test]
@@ -1051,7 +1051,7 @@ mod tests {
         let payload = vec![0x5au8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
@@ -1065,9 +1065,9 @@ mod tests {
         let guard = owner.prefetch_lock().expect("first handle takes the lock");
 
         // The owner finished all groups: the contender must give up on the
-        // lock (returning None) instead of waiting, since the shared groupmap
+        // lock (returning None) instead of waiting, since the shared group_map
         // already reports everything ready.
-        owner.groupmap.set_ready(0).unwrap();
+        owner.group_map.set_ready(0).unwrap();
         assert!(waiter.prefetch_lock().is_none());
         assert!(waiter.group_ready(0));
 
@@ -1083,7 +1083,7 @@ mod tests {
         let payload = vec![0x21u8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
@@ -1106,7 +1106,7 @@ mod tests {
         let payload = vec![0x77u8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
@@ -1130,7 +1130,7 @@ mod tests {
         let payload = vec![0x42u8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend = CountingBackend::new(backend_dir.path());
         let first = LocalBlobCache::open(
@@ -1155,7 +1155,7 @@ mod tests {
         assert!(after_owner > 0, "owner must stream from the backend");
 
         // While the owner still holds the lock, a contending instance sees
-        // every group ready through the shared groupmap and gives up on the
+        // every group ready through the shared group_map and gives up on the
         // lock (None) instead of waiting.
         assert!(second.prefetch_lock().is_none());
         drop(guard);
@@ -1173,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn redirect_stream_skips_fully_done_segments() {
+    fn redirect_stream_skips_fully_done_batches() {
         let backend_dir = tempdir().unwrap();
         let payload = vec![0x9cu8; 4096];
         let crc32 = crc32c::crc32c(&payload);
@@ -1188,7 +1188,7 @@ mod tests {
         )
         .unwrap();
         assert!(redirect_meta.is_redirect_blob());
-        let redirect_blob_id = write_full_blob(backend_dir.path(), &payload, &redirect_meta, true);
+        let redirect_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &redirect_meta, true);
 
         let run = |skip_all: bool| -> (usize, usize) {
             let cache_dir = tempdir().unwrap();
@@ -1213,7 +1213,7 @@ mod tests {
             (backend.reads() - baseline, delivered.load(Ordering::SeqCst))
         };
 
-        // Nothing done yet: the segment is fetched and the group delivered.
+        // Nothing done yet: the batch is fetched and the group delivered.
         let (reads, delivered) = run(false);
         assert!(reads > 0);
         assert_eq!(delivered, 1);
@@ -1221,7 +1221,7 @@ mod tests {
         // Every group reported done (e.g. resident in the source caches of a
         // faster sibling instance): no backend fetch, no callback at all.
         let (reads, delivered) = run(true);
-        assert_eq!(reads, 0, "fully-done segment must not be fetched");
+        assert_eq!(reads, 0, "fully-done batch must not be fetched");
         assert_eq!(delivered, 0);
     }
 
@@ -1232,7 +1232,7 @@ mod tests {
         let payload = vec![0xbdu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
         let blob_meta_path = backend_dir
             .path()
             .join(format!("{}.blob.meta", hex_string(&full_blob_id)));
@@ -1267,7 +1267,7 @@ mod tests {
             &payload,
             crc32c::crc32c(&payload).wrapping_add(1),
         );
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
@@ -1278,7 +1278,7 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("crc32"));
-        assert!(!cached.groupmap.is_ready(0).unwrap());
+        assert!(!cached.group_map.is_ready(0).unwrap());
     }
 
     #[test]
@@ -1288,7 +1288,7 @@ mod tests {
         let payload = vec![0x3du8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, false);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, false);
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
@@ -1298,7 +1298,7 @@ mod tests {
         cached.read_at(256, &mut buf).unwrap();
 
         assert_eq!(buf, payload[256..768]);
-        assert!(cached.groupmap.is_ready(0).unwrap());
+        assert!(cached.group_map.is_ready(0).unwrap());
         assert!(cache_dir
             .path()
             .join(format!("{}.blob.data", hex_string(&full_blob_id)))
@@ -1324,7 +1324,7 @@ mod tests {
         let payload = vec![0x6eu8; 4096];
         let data_blob_id = sha256_bytes(&payload);
         let meta = blob_meta(data_blob_id, &payload);
-        let full_blob_id = write_full_blob(backend_dir.path(), &payload, &meta, true);
+        let full_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &meta, true);
 
         let backend: Arc<dyn BlobBackend> =
             Arc::new(LocalBackend::new(backend_dir.path().to_path_buf()));
@@ -1336,18 +1336,18 @@ mod tests {
             .fill_group_from_redirect(0, &payload[..1024])
             .unwrap_err();
         assert!(err.to_string().contains("length mismatch"));
-        assert!(!cached.groupmap.is_ready(0).unwrap());
+        assert!(!cached.group_map.is_ready(0).unwrap());
 
         // Corrupted bytes fail the CRC cross-check.
         let mut corrupted = payload.clone();
         corrupted[0] ^= 0xff;
         let err = cached.fill_group_from_redirect(0, &corrupted).unwrap_err();
         assert!(super::super::is_group_crc_mismatch(&err));
-        assert!(!cached.groupmap.is_ready(0).unwrap());
+        assert!(!cached.group_map.is_ready(0).unwrap());
 
         // Valid bytes are cached, marked ready, and served without the backend.
         cached.fill_group_from_redirect(0, &payload).unwrap();
-        assert!(cached.groupmap.is_ready(0).unwrap());
+        assert!(cached.group_map.is_ready(0).unwrap());
         let mut buf = vec![0u8; 1024];
         cached.read_at(512, &mut buf).unwrap();
         assert_eq!(buf, payload[512..1536]);

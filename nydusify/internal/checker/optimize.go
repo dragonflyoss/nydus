@@ -39,8 +39,8 @@ type OptimizeOption struct {
 	// Pattern is the path to a JSON access-pattern file (the same document
 	// served by the `/trace` endpoint). Required.
 	Pattern string
-	// Builder is the nydus binary path (PATH-resolvable). Defaults to "nydus".
-	Builder string
+	// BuilderPath is the nydus binary path (PATH-resolvable). Defaults to "nydus".
+	BuilderPath string
 	// WorkDir is the scratch directory backing the content store and the
 	// optimize staging area. It must already exist.
 	WorkDir string
@@ -164,7 +164,7 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 	log.G(ctx).Infof("built ondemand blob %s", ondemandHex)
 
 	// Commit the ondemand blob as a nydus data layer.
-	ondemandDesc, err := ingestBlobFile(ctx, cs, filepath.Join(blobDir, ondemandHex))
+	ondemandDesc, err := ingestDigestNamedBlobFile(ctx, cs, filepath.Join(blobDir, ondemandHex))
 	if err != nil {
 		return errors.Wrap(err, "commit ondemand blob")
 	}
@@ -219,7 +219,7 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 		"--log-level", cmp.Or(o.opt.LogLevel, pkgconv.DefaultLogLevel),
 		"--trace-file", o.opt.Pattern,
 	}
-	cmd := exec.CommandContext(ctx, cmp.Or(o.opt.Builder, pkgconv.DefaultBuilder), args...)
+	cmd := exec.CommandContext(ctx, cmp.Or(o.opt.BuilderPath, pkgconv.DefaultBuilder), args...)
 	var output bytes.Buffer
 	cmd.Stdout = io.MultiWriter(&output, os.Stderr)
 	cmd.Stderr = os.Stderr
@@ -233,9 +233,11 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 	return string(match[1]), nil
 }
 
-// ingestBlobFile commits a digest-named nydus blob file from disk into the
-// content store as a nydus data layer descriptor.
-func ingestBlobFile(ctx context.Context, cs content.Store, path string) (*ocispec.Descriptor, error) {
+// ingestDigestNamedBlobFile commits a nydus blob file into the content store,
+// trusting the file name as its SHA-256 digest (it does NOT re-hash the
+// contents — unlike converter.ingestBlobFile, which computes the digest by
+// streaming the file).
+func ingestDigestNamedBlobFile(ctx context.Context, cs content.Store, path string) (*ocispec.Descriptor, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, errors.Wrapf(err, "open blob %q", path)

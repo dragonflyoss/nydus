@@ -54,7 +54,7 @@ pub enum InodeData {
     /// Regular file: chunk indexes for chunk-based layout.
     RegularFile {
         /// List of chunk indexes (EROFS_CHUNK_INDEX_SIZE bytes each) for the file's data chunks.
-        chunk_indexes: Vec<ChunkIndex>,
+        chunk_index_entries: Vec<ChunkIndex>,
 
         /// Number of bits for the chunk size (e.g. 12 for 4KB chunks).
         chunk_size_bits: u32,
@@ -128,12 +128,12 @@ pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -
 
     let xattr_isize = erofs_xattr_ibody_size(&inode.xattrs);
     match &inode.data {
-        InodeData::RegularFile { chunk_indexes, .. } => {
-            if chunk_indexes.is_empty() {
+        InodeData::RegularFile { chunk_index_entries, .. } => {
+            if chunk_index_entries.is_empty() {
                 inode_isize + xattr_isize
             } else {
                 round_up(inode_isize + xattr_isize, EROFS_CHUNK_INDEX_SIZE)
-                    + chunk_indexes.len() * EROFS_CHUNK_INDEX_SIZE
+                    + chunk_index_entries.len() * EROFS_CHUNK_INDEX_SIZE
             }
         }
         InodeData::Directory { .. } => inode_isize + xattr_isize,
@@ -169,13 +169,6 @@ pub fn symlink_is_inline(inode: &InodeInfo) -> bool {
         ),
         _ => false,
     }
-}
-
-/// Whether the inode stores tail-packed data inline behind its header
-/// (`EROFS_INODE_FLAT_INLINE`), which the kernel requires to stay within the
-/// inode's own metadata block.
-pub fn erofs_inode_has_inline(inode: &InodeInfo) -> bool {
-    symlink_is_inline(inode)
 }
 
 /// Set the root directory's trusted.nydus.prefetch_blobs xattr to a comma-separated list of
@@ -289,7 +282,7 @@ fn build_tree_recursive(
 
     *inode_counter += 1;
     let ino = *inode_counter;
-    let is_extended = needs_erofs_extended_inode(&meta);
+    let is_extended = needs_erofs_extended_inode(meta.size(), meta.uid(), meta.gid(), meta.nlink());
     let xattrs = read_xattrs_from_path(path);
     if ft.is_dir() {
         let inode_index = inodes.len();
@@ -372,7 +365,7 @@ fn build_tree_recursive(
         Ok(inode_index)
     } else if ft.is_file() {
         let file_size = meta.size();
-        let chunk_indexes = blob_writer.write_file_chunks(path, file_size)?;
+        let chunk_index_entries = blob_writer.write_file_chunks(path, file_size)?;
         let inode_index = inodes.len();
         inodes.push(InodeInfo {
             mode,
@@ -387,7 +380,7 @@ fn build_tree_recursive(
             meta_offset: 0,
             is_extended,
             data: InodeData::RegularFile {
-                chunk_indexes,
+                chunk_index_entries,
                 chunk_size_bits: chunk_size.trailing_zeros(),
             },
             xattrs,
@@ -461,7 +454,7 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
 
     match &inode.data {
         InodeData::RegularFile {
-            chunk_indexes,
+            chunk_index_entries,
             chunk_size_bits,
         } => {
             let datalayout = EROFS_INODE_CHUNK_BASED;
@@ -509,8 +502,8 @@ pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
                 EROFS_INODE_COMPACT_SIZE
             };
             let extent_offset = round_up(base + xattr_size, EROFS_CHUNK_INDEX_SIZE);
-            for (i, ci) in chunk_indexes.iter().enumerate() {
-                let index = ErofsChunkIndex::new(ci.blkaddr, ci.device_id);
+            for (i, entry) in chunk_index_entries.iter().enumerate() {
+                let index = ErofsChunkIndex::new(entry.blkaddr, entry.device_id);
                 let off = extent_offset + i * EROFS_CHUNK_INDEX_SIZE;
                 buf[off..off + EROFS_CHUNK_INDEX_SIZE].copy_from_slice(index.as_bytes());
             }

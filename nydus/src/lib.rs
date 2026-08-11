@@ -27,6 +27,7 @@ pub use nydus_core::Registry;
 pub use nydus_core::{
     build_backend, BlobBackend, BlobId, BlobInfo, BlobMeta, BlobMetaChunk, BlobMetaGroup,
     BlobMetaHeader, BlobPrefetcher, Blobs, Config, DirEntry, FdRange, FileType, Fs, FsEntry,
-    GroupMap, LocalBackend, Metadata, MetricsSnapshot, NydusCore, ReadKind, TraceDocument,
-    TraceEntry, TraceRecorder, BLOB_META_HEADER_SIZE, BLOB_META_MAGIC, DEFAULT_PREFETCH_THREADS,
+    GroupMap, LocalBackend, Metadata, MetricsSnapshot, NydusCore, ReadKind, ResolveMode,
+    TraceDocument, TraceEntry, TraceRecorder, BLOB_META_HEADER_SIZE, BLOB_META_MAGIC,
+    DEFAULT_PREFETCH_THREADS,
 };

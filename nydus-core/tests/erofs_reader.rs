@@ -4,7 +4,6 @@
 
 mod common;
 
-use common::{align_up, bytes_to_blocks, write_zero_padding};
 
 use std::collections::HashSet;
 use std::fs;
@@ -17,8 +16,8 @@ use nydus::build::bootstrap::render_bootstrap;
 use nydus::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
 use nydus_core::fs::ErofsReader;
 use nydus_core::metadata::{
-    erofs_xattr_ibody_size, BlobFooter, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS,
-    EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER, NYDUS_BLOB_FOOTER_ALIGNMENT,
+    erofs_xattr_ibody_size, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS,
+    EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER,
 };
 use nydus_core::utils::sha256_file;
 
@@ -73,7 +72,7 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
             meta_offset: 0,
             is_extended: false,
             data: InodeData::RegularFile {
-                chunk_indexes: vec![
+                chunk_index_entries: vec![
                     ChunkIndex {
                         blkaddr: 11,
                         device_id: 0,
@@ -112,14 +111,14 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
         assert_eq!(value, expected_value);
     }
 
-    let chunk_indexes = reader
-        .read_chunk_indexes(file_nid, &inode)
+    let chunk_index_entries = reader
+        .read_chunk_index_entries(file_nid, &inode)
         .expect("read chunk indexes");
-    assert_eq!(chunk_indexes.len(), 2);
-    assert_eq!(chunk_indexes[0].blkaddr, 11);
-    assert_eq!(chunk_indexes[0].device_id, 0);
-    assert_eq!(chunk_indexes[1].blkaddr, 22);
-    assert_eq!(chunk_indexes[1].device_id, 0);
+    assert_eq!(chunk_index_entries.len(), 2);
+    assert_eq!(chunk_index_entries[0].blkaddr, 11);
+    assert_eq!(chunk_index_entries[0].device_id, 0);
+    assert_eq!(chunk_index_entries[1].blkaddr, 22);
+    assert_eq!(chunk_index_entries[1].device_id, 0);
 }
 
 #[test]
@@ -155,47 +154,8 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     .expect("render embedded bootstrap");
     let blob_meta = blob_writer.blob_meta(data_blob_id, 0).expect("blob meta");
 
-    let data_size = fs::metadata(&data_path).expect("stat data blob").len();
-    let bootstrap_offset = align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
-    let bootstrap_blocks = bytes_to_blocks(embedded_bootstrap.len() as u64);
-    let blob_meta_offset = align_up(
-        bootstrap_offset + embedded_bootstrap.len() as u64,
-        NYDUS_BLOB_FOOTER_ALIGNMENT,
-    );
-    let blob_meta_blocks = bytes_to_blocks(blob_meta.metadata_size());
-    let footer = BlobFooter::new(
-        0,
-        data_size,
-        bootstrap_offset,
-        bootstrap_blocks,
-        blob_meta_offset,
-        blob_meta_blocks,
-    )
-    .expect("footer");
-
-    let full_blob_path = dir.path().join("full.blob");
-    let mut full_blob = fs::File::create(&full_blob_path).expect("create full blob");
     let data = fs::read(&data_path).expect("read data blob");
-    full_blob.write_all(&data).expect("write data blob");
-    write_zero_padding(&mut full_blob, data_size, bootstrap_offset).expect("pad data");
-    full_blob
-        .write_all(&embedded_bootstrap)
-        .expect("write bootstrap");
-    write_zero_padding(
-        &mut full_blob,
-        bootstrap_offset + embedded_bootstrap.len() as u64,
-        blob_meta_offset,
-    )
-    .expect("pad bootstrap");
-    blob_meta.write_to(&mut full_blob).expect("write blob meta");
-    footer.write_to(&mut full_blob).expect("write footer");
-    drop(full_blob);
-
-    let full_blob_id = sha256_file(&full_blob_path).expect("hash full blob");
-    let final_full_blob_path = dir
-        .path()
-        .join(nydus_core::utils::hex_string(&full_blob_id));
-    fs::rename(&full_blob_path, final_full_blob_path).expect("rename full blob");
+    let full_blob_id = common::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_meta);
 
     let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
         blob_writer.total_blocks(),
@@ -230,7 +190,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
         .nid;
     let inode = reader.inode(file_nid).expect("file inode");
     let data = reader
-        .read_file_data_sync(file_nid, &inode, 0, inode.size() as u32)
+        .read_file_data(file_nid, &inode, 0, inode.size() as u32)
         .expect("read file data");
 
     assert_eq!(data, b"hello nydus\n");

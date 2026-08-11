@@ -7,7 +7,6 @@
 package converter
 
 import (
-	"bytes"
 	"encoding/binary"
 	"io"
 	"os"
@@ -43,7 +42,7 @@ const (
 // NydusBlobFooterMagic is the 8 raw ASCII bytes at the start of the footer,
 // written as-is (same style as the "LPBLMETA" blob meta and "LPGRPMAP"
 // groupmap sidecars).
-var NydusBlobFooterMagic = []byte("LPFOOTER")
+const NydusBlobFooterMagic = "LPFOOTER"
 
 // BlobMetaFile is a per-layer blob meta artifact packed into the bootstrap layer
 // alongside image.boot, named "<full_blob_sha256>.blob.meta".
@@ -68,7 +67,7 @@ func readFooter(ra io.ReaderAt, size int64) ([]byte, error) {
 	if _, err := ra.ReadAt(footer, size-NydusBlobFooterSize); err != nil {
 		return nil, errors.Wrap(err, "read nydus footer")
 	}
-	if !bytes.Equal(footer[0:8], NydusBlobFooterMagic) {
+	if string(footer[0:8]) != NydusBlobFooterMagic {
 		return nil, errors.Errorf("not a nydus blob: bad footer magic %q", footer[0:8])
 	}
 	if incompat := binary.LittleEndian.Uint32(footer[12:16]) & footerIncompatMask; incompat != 0 {

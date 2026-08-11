@@ -21,6 +21,7 @@ pub mod utils;
 pub use config::Config;
 pub use core::{
     BlobId, BlobInfo, Blobs, DirEntry, FdRange, FileType, Fs, FsEntry, Metadata, NydusCore,
+    ResolveMode,
 };
 pub use metadata::{
     is_rafs_v7_bootstrap, BlobMeta, BlobMetaChunk, BlobMetaGroup, BlobMetaHeader,

@@ -4,7 +4,6 @@
 
 mod common;
 
-use common::{align_up, bytes_to_blocks, write_zero_padding};
 
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
@@ -19,14 +18,13 @@ use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
 use nydus_core::config::Config;
 use nydus_core::fs::ErofsReader;
 use nydus_core::metadata::{
-    BlobFooter, BlobMetaCompressor, ErofsDeviceSlot, NYDUS_BLOB_FOOTER_ALIGNMENT,
+    BlobMetaCompressor, ErofsDeviceSlot,
 };
 use nydus_core::metadata::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
-use nydus_core::utils::{hex_string, sha256_file};
+use nydus_core::utils::hex_string;
 use nydus_core::{BlobId, FileType, NydusCore};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::symlink;
 use tempfile::tempdir;
 
@@ -167,42 +165,7 @@ fn write_full_blob(
     blob_meta: &nydus_core::metadata::BlobMeta,
 ) -> [u8; EROFS_BLOB_ID_SIZE] {
     let data = fs::read(data_path).unwrap();
-    let data_size = data.len() as u64;
-    let bootstrap_offset = align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
-    let bootstrap_blocks = bytes_to_blocks(bootstrap_bytes.len() as u64);
-    let blob_meta_offset = align_up(
-        bootstrap_offset + bootstrap_bytes.len() as u64,
-        NYDUS_BLOB_FOOTER_ALIGNMENT,
-    );
-    let blob_meta_blocks = bytes_to_blocks(blob_meta.metadata_size());
-    let footer = BlobFooter::new(
-        0,
-        data_size,
-        bootstrap_offset,
-        bootstrap_blocks,
-        blob_meta_offset,
-        blob_meta_blocks,
-    )
-    .unwrap();
-
-    let full_blob_path = blob_dir.join("full.blob");
-    let mut full_blob = fs::File::create(&full_blob_path).unwrap();
-    full_blob.write_all(&data).unwrap();
-    write_zero_padding(&mut full_blob, data_size, bootstrap_offset).unwrap();
-    full_blob.write_all(bootstrap_bytes).unwrap();
-    write_zero_padding(
-        &mut full_blob,
-        bootstrap_offset + bootstrap_bytes.len() as u64,
-        blob_meta_offset,
-    )
-    .unwrap();
-    blob_meta.write_to(&mut full_blob).unwrap();
-    footer.write_to(&mut full_blob).unwrap();
-    drop(full_blob);
-
-    let full_blob_id = sha256_file(&full_blob_path).unwrap();
-    let final_blob_path = blob_dir.join(hex_string(&full_blob_id));
-    fs::rename(&full_blob_path, &final_blob_path).unwrap();
+    let full_blob_id = common::assemble_full_blob(blob_dir, &data, bootstrap_bytes, blob_meta);
     blob_meta
         .save(&blob_dir.join(format!("{}.blob.meta", hex_string(&full_blob_id))))
         .unwrap();

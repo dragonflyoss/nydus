@@ -117,12 +117,35 @@ func convertCommand() *cli.Command {
 	}
 }
 
-func runConvert(c *cli.Context) error {
+// setupCommand applies the --log-level flag and returns the logger-carrying
+// base context shared by every subcommand.
+func setupCommand(c *cli.Context) context.Context {
 	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
 		logrus.SetLevel(level)
 	}
+	return log.WithLogger(context.Background(), log.L)
+}
 
-	ctx := log.WithLogger(context.Background(), log.L)
+// scratchWorkDir resolves --work-dir: an explicit directory is created and
+// kept; otherwise a temp dir with the given prefix is created and the
+// returned cleanup removes it.
+func scratchWorkDir(c *cli.Context, prefix string) (string, func(), error) {
+	workDir := c.String("work-dir")
+	if workDir == "" {
+		tmp, err := os.MkdirTemp("", prefix)
+		if err != nil {
+			return "", nil, errors.Wrap(err, "create work dir")
+		}
+		return tmp, func() { _ = os.RemoveAll(tmp) }, nil
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		return "", nil, errors.Wrapf(err, "create work dir %q", workDir)
+	}
+	return workDir, func() {}, nil
+}
+
+func runConvert(c *cli.Context) error {
+	ctx := setupCommand(c)
 
 	sources := c.StringSlice("source")
 	source := sources[0]
@@ -161,22 +184,11 @@ func runConvert(c *cli.Context) error {
 		platformMC = platforms.Only(platform)
 	}
 
-	// Prepare a scratch work directory.
-	workDir := c.String("work-dir")
-	cleanup := false
-	if workDir == "" {
-		tmp, err := os.MkdirTemp("", "nydusify-")
-		if err != nil {
-			return errors.Wrap(err, "create work dir")
-		}
-		workDir = tmp
-		cleanup = true
-	} else if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return errors.Wrapf(err, "create work dir %q", workDir)
+	workDir, cleanupWorkDir, err := scratchWorkDir(c, "nydusify-")
+	if err != nil {
+		return err
 	}
-	if cleanup {
-		defer func() { _ = os.RemoveAll(workDir) }()
-	}
+	defer cleanupWorkDir()
 
 	contentDir := joinWork(workDir, "content")
 	scratchDir := joinWork(workDir, "scratch")
@@ -403,11 +415,7 @@ func checkCommand() *cli.Command {
 }
 
 func runCheck(c *cli.Context) error {
-	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
-		logrus.SetLevel(level)
-	}
-
-	ctx := log.WithLogger(context.Background(), log.L)
+	ctx := setupCommand(c)
 
 	source := c.String("source")
 	target := c.String("target")
@@ -437,7 +445,7 @@ func runCheck(c *cli.Context) error {
 	chk, err := checker.New(checker.Option{
 		Source:          source,
 		Target:          target,
-		Builder:         c.String("builder"),
+		BuilderPath:     c.String("builder"),
 		WorkDir:         workDir,
 		SourceInsecure:  c.Bool("source-insecure"),
 		SourcePlainHTTP: c.Bool("source-plain-http"),
@@ -515,11 +523,7 @@ func mountCommand() *cli.Command {
 }
 
 func runMount(c *cli.Context) error {
-	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
-		logrus.SetLevel(level)
-	}
-
-	ctx := log.WithLogger(context.Background(), log.L)
+	ctx := setupCommand(c)
 
 	target := c.String("target")
 	mountpoint := c.String("mountpoint")
@@ -537,27 +541,16 @@ func runMount(c *cli.Context) error {
 		return errors.Wrapf(err, "create mountpoint %q", mountpoint)
 	}
 
-	// Prepare a scratch work directory.
-	workDir := c.String("work-dir")
-	cleanup := false
-	if workDir == "" {
-		tmp, err := os.MkdirTemp("", "nydusify-mount-")
-		if err != nil {
-			return errors.Wrap(err, "create work dir")
-		}
-		workDir = tmp
-		cleanup = true
-	} else if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return errors.Wrapf(err, "create work dir %q", workDir)
+	workDir, cleanupWorkDir, err := scratchWorkDir(c, "nydusify-mount-")
+	if err != nil {
+		return err
 	}
-	if cleanup {
-		defer func() { _ = os.RemoveAll(workDir) }()
-	}
+	defer cleanupWorkDir()
 
 	mnt, err := checker.NewMounter(checker.MountOption{
 		Target:          target,
 		Mountpoint:      mountpoint,
-		Builder:         c.String("builder"),
+		BuilderPath:     c.String("builder"),
 		WorkDir:         workDir,
 		TargetInsecure:  c.Bool("target-insecure"),
 		TargetPlainHTTP: c.Bool("target-plain-http"),
@@ -637,11 +630,7 @@ func optimizeCommand() *cli.Command {
 }
 
 func runOptimize(c *cli.Context) error {
-	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
-		logrus.SetLevel(level)
-	}
-
-	ctx := log.WithLogger(context.Background(), log.L)
+	ctx := setupCommand(c)
 
 	platformMC := platforms.Default()
 	if p := c.String("platform"); p != "" {
@@ -652,28 +641,17 @@ func runOptimize(c *cli.Context) error {
 		platformMC = platforms.Only(parsed)
 	}
 
-	// Prepare a scratch work directory.
-	workDir := c.String("work-dir")
-	cleanup := false
-	if workDir == "" {
-		tmp, err := os.MkdirTemp("", "nydusify-optimize-")
-		if err != nil {
-			return errors.Wrap(err, "create work dir")
-		}
-		workDir = tmp
-		cleanup = true
-	} else if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return errors.Wrapf(err, "create work dir %q", workDir)
+	workDir, cleanupWorkDir, err := scratchWorkDir(c, "nydusify-optimize-")
+	if err != nil {
+		return err
 	}
-	if cleanup {
-		defer func() { _ = os.RemoveAll(workDir) }()
-	}
+	defer cleanupWorkDir()
 
 	opt, err := checker.NewOptimizer(checker.OptimizeOption{
 		Source:          c.String("source"),
 		Target:          c.String("target"),
 		Pattern:         c.String("pattern"),
-		Builder:         c.String("builder"),
+		BuilderPath:     c.String("builder"),
 		WorkDir:         workDir,
 		SourceInsecure:  c.Bool("source-insecure"),
 		SourcePlainHTTP: c.Bool("source-plain-http"),

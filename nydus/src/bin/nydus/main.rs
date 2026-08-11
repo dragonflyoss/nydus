@@ -1,6 +1,7 @@
 // nydus — single CLI for nydus image creation, merge and mounting.
 
 mod api_server;
+mod cli_common;
 mod build;
 mod check;
 #[cfg(feature = "fanotify")]

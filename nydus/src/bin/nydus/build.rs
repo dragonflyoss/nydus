@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
+use crate::cli_common;
 use nydus::build::blob_chunk::BlobWriter;
 use nydus::build::bootstrap::{render_bootstrap, render_flattened_bootstrap};
 use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
@@ -14,7 +15,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-use tracing::Level;
 
 const MIB: u32 = 1_048_576;
 const DEFAULT_CHUNK_SIZE: u32 = MIB;
@@ -82,21 +82,8 @@ pub struct BuildArgs {
     #[arg(long, value_enum, default_value_t = Compressor::Zstd)]
     pub compressor: Compressor,
 
-    #[arg(
-        short = 'l',
-        long,
-        default_value = "info",
-        help = "Specify the logging level [trace, debug, info, warn, error]"
-    )]
-    pub log_level: Level,
-
-    #[arg(
-        long,
-        hide = true,
-        default_value_t = true,
-        help = "Specify whether to print log"
-    )]
-    pub console: bool,
+    #[command(flatten)]
+    pub log: cli_common::CommandLogArgs,
 
     /// Absolute or current-working-directory-relative paths to exclude.
     /// May be specified multiple times. Entries inside the source tree are
@@ -111,9 +98,9 @@ pub fn run_build(args: BuildArgs) -> Result<()> {
         args.conversion_type == ConversionType::NydusTar && args.output == Path::new("-");
     // Logging to stdout would corrupt a tar stream written to stdout.
     let _guards = if tar_to_stdout {
-        init_command_tracing_stderr(args.log_level, args.console)
+        init_command_tracing_stderr(args.log.log_level, args.log.console)
     } else {
-        init_command_tracing(args.log_level, args.console)
+        init_command_tracing(args.log.log_level, args.log.console)
     };
 
     match args.conversion_type {
@@ -161,20 +148,20 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         }
     }
 
-    // Validate EROFS file chunksize. BlobMeta groups are formed separately and
+    // Validate EROFS file chunk size. BlobMeta groups are formed separately and
     // are at least 1MiB even when file chunk indexes are smaller.
     if args.chunk_size < EROFS_BLOCK_SIZE {
         bail!(
-            "chunksize {} must be >= block size {}",
+            "chunk size {} must be >= block size {}",
             args.chunk_size,
             EROFS_BLOCK_SIZE
         );
     }
     if !args.chunk_size.is_power_of_two() {
-        bail!("chunksize {} must be a power of two", args.chunk_size);
+        bail!("chunk size {} must be a power of two", args.chunk_size);
     }
     if args.chunk_size % EROFS_BLOCK_SIZE != 0 {
-        bail!("chunksize {} must be block aligned", args.chunk_size);
+        bail!("chunk size {} must be block aligned", args.chunk_size);
     }
     let chunkbits = args.chunk_size.trailing_zeros();
 
@@ -597,8 +584,10 @@ mod tests {
             chunk_size: DEFAULT_CHUNK_SIZE,
             compress_size: DEFAULT_COMPRESS_SIZE,
             compressor: Compressor::Zstd,
-            log_level: Level::ERROR,
-            console: false,
+            log: crate::cli_common::CommandLogArgs {
+                log_level: tracing::Level::ERROR,
+                console: false,
+            },
             exclude: Vec::new(),
         })
         .unwrap();
@@ -743,8 +732,10 @@ mod tests {
             chunk_size: DEFAULT_CHUNK_SIZE,
             compress_size: DEFAULT_COMPRESS_SIZE,
             compressor: Compressor::Zstd,
-            log_level: Level::ERROR,
-            console: false,
+            log: crate::cli_common::CommandLogArgs {
+                log_level: tracing::Level::ERROR,
+                console: false,
+            },
             exclude: Vec::new(),
         })
         .unwrap_err();
@@ -763,8 +754,10 @@ mod tests {
             chunk_size: EROFS_BLOCK_SIZE,
             compress_size: MIB,
             compressor: Compressor::Zstd,
-            log_level: Level::ERROR,
-            console: false,
+            log: crate::cli_common::CommandLogArgs {
+                log_level: tracing::Level::ERROR,
+                console: false,
+            },
             exclude: Vec::new(),
         })
         .unwrap();
@@ -779,8 +772,10 @@ mod tests {
             chunk_size: DEFAULT_CHUNK_SIZE,
             compress_size: DEFAULT_COMPRESS_SIZE,
             compressor: Compressor::Zstd,
-            log_level: Level::ERROR,
-            console: false,
+            log: crate::cli_common::CommandLogArgs {
+                log_level: tracing::Level::ERROR,
+                console: false,
+            },
             exclude: Vec::new(),
         })
         .unwrap();

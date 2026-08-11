@@ -45,12 +45,6 @@ pub fn mount_nbd(device: &str, mountpoint: &Path, fstype: &str) -> Result<()> {
     Ok(())
 }
 
-/// Unmount whatever is mounted at `mountpoint`. A plain `umount2(., 0)`; the
-/// EBUSY retry loop lives in the CLI, mirroring fanotify's shutdown ordering.
-pub fn unmount_nbd(mountpoint: &Path) -> Result<()> {
-    crate::utils::unmount(mountpoint)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,10 +54,5 @@ mod tests {
         let mp = Path::new("/mnt/x");
         assert!(mount_nbd("/dev/nbd\0bad", mp, "erofs").is_err());
         assert!(mount_nbd("/dev/nbd0", mp, "ero\0fs").is_err());
-    }
-
-    #[test]
-    fn unmount_nbd_rejects_interior_nul_in_mountpoint() {
-        assert!(unmount_nbd(Path::new("/mnt/\0bad")).is_err());
     }
 }

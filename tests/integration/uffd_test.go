@@ -3,7 +3,6 @@ package integration
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -58,7 +57,7 @@ func TestUffdServiceSmoke(t *testing.T) {
 
 	texture.MakeStandardCorpus(t, corpusDir)
 	buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, uffdSmokeRequestBlock)
-	writeUffdSmokeConfig(t, configPath, blobDir, cacheDir)
+	writeLocalStorageConfig(t, configPath, blobDir, cacheDir)
 
 	cmd := startUffdService(t, nydusBin, bootstrapPath, configPath, socketPath, logDir)
 	defer stopUffdService(t, cmd)
@@ -104,17 +103,6 @@ type uffdRange struct {
 	deviceOffset uint64
 	fileOffset   uint64
 	length       uint64
-}
-
-func writeUffdSmokeConfig(t *testing.T, path, blobDir, cacheDir string) {
-	t.Helper()
-	require.NoError(t, os.MkdirAll(cacheDir, 0755))
-	config := fmt.Sprintf(
-		"backend:\n  type: local\n  config:\n    dir: %s\ncache:\n  type: local\n  config:\n    dir: %s\nprefetch:\n  enable: false\n",
-		blobDir,
-		cacheDir,
-	)
-	require.NoError(t, os.WriteFile(path, []byte(config), 0644))
 }
 
 func startUffdService(t *testing.T, nydusBin, bootstrapPath, configPath, socketPath, logDir string) *exec.Cmd {

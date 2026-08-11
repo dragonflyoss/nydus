@@ -1,6 +1,4 @@
-use std::fs;
 use std::mem;
-use std::os::unix::fs::MetadataExt;
 
 use super::*;
 
@@ -461,11 +459,8 @@ pub fn erofs_xattr_icount(xattr_ibody_size: usize) -> u16 {
 /// - uid / gid  <= u16::MAX
 /// - nlink == 1 (hardlinks need a real link count)
 /// - no per-inode mtime (falls back to the global build time)
-pub fn needs_erofs_extended_inode(meta: &fs::Metadata) -> bool {
-    meta.size() > u32::MAX as u64
-        || meta.uid() > u16::MAX as u32
-        || meta.gid() > u16::MAX as u32
-        || meta.nlink() > 1
+pub fn needs_erofs_extended_inode(size: u64, uid: u32, gid: u32, nlink: u64) -> bool {
+    size > u32::MAX as u64 || uid > u16::MAX as u32 || gid > u16::MAX as u32 || nlink > 1
 }
 
 /// Check if an xattr name (as bytes) is a Nydus internal xattr (starts with "trusted.nydus.").

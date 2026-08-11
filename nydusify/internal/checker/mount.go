@@ -31,8 +31,8 @@ type MountOption struct {
 	// Mountpoint is the directory the image is mounted at. Required, and must
 	// already exist.
 	Mountpoint string
-	// Builder is the nydus binary path (PATH-resolvable). Defaults to "nydus".
-	Builder string
+	// BuilderPath is the nydus binary path (PATH-resolvable). Defaults to "nydus".
+	BuilderPath string
 	// WorkDir is the scratch directory backing the content store and the
 	// extracted bootstrap/cache. It must already exist.
 	WorkDir string
@@ -171,7 +171,7 @@ func (m *Mounter) mountNydus(ctx context.Context, provider *remote.Provider, cs 
 		"--log-dir", logDir,
 		"--console",
 	}
-	cmd := exec.Command(cmp.Or(m.opt.Builder, pkgconv.DefaultBuilder), args...)
+	cmd := exec.Command(cmp.Or(m.opt.BuilderPath, pkgconv.DefaultBuilder), args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

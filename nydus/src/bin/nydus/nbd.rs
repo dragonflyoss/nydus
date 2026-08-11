@@ -4,12 +4,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
-use nydus::config::Config;
-use nydus::nbd::{mount_nbd, unmount_nbd, NbdCore, NbdService};
-use nydus::tracing::init_tracing;
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use signal_hook::iterator::Signals;
-use tracing::{debug, error, info, warn, Level};
+
+use crate::cli_common;
+use nydus::nbd::{mount_nbd, NbdCore, NbdService};
+use nydus::utils::unmount;
+use tracing::{debug, error, info, warn};
 
 /// EBUSY is expected while readers still hold files open, so keep trying for a
 /// bounded window before giving up — mirrors the fanotify shutdown ordering.
@@ -54,30 +53,8 @@ pub struct NbdArgs {
     #[arg(long)]
     pub mountpoint: Option<PathBuf>,
 
-    #[arg(
-        short = 'l',
-        long,
-        default_value = "info",
-        help = "Specify the logging level [trace, debug, info, warn, error]"
-    )]
-    pub log_level: Level,
-
-    #[arg(
-        long,
-        default_value_os_t = PathBuf::from("/var/log/nydus/"),
-        help = "Specify the log directory"
-    )]
-    pub log_dir: PathBuf,
-
-    #[arg(
-        long,
-        default_value_t = 6,
-        help = "Specify the max number of log files"
-    )]
-    pub log_max_files: usize,
-
-    #[arg(long, hide = true, default_value_t = true)]
-    pub console: bool,
+    #[command(flatten)]
+    pub log: cli_common::DaemonLogArgs,
 }
 
 /// Default worker-thread cap: connection-level parallelism saturates well
@@ -103,19 +80,8 @@ fn is_not_mounted(err: &anyhow::Error) -> bool {
 }
 
 pub fn run_nbd(args: NbdArgs) -> Result<()> {
-    let mut signals = Signals::new(TERM_SIGNALS.iter().copied().chain([SIGHUP]))
-        .context("failed to register termination signals")?;
+    let (mut signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
     let signal_handle = signals.handle();
-
-    let _guards = init_tracing(
-        "nydus",
-        args.log_dir.clone(),
-        args.log_level,
-        args.log_max_files,
-        args.console,
-    );
-
-    let config = Config::from_file(&args.config).context("failed to load storage config")?;
     let core = Arc::new(NbdCore::new(&args.bootstrap, config).context("failed to build nbd core")?);
     let service = Arc::new(NbdService::new(
         core.clone(),
@@ -165,7 +131,7 @@ pub fn run_nbd(args: NbdArgs) -> Result<()> {
                     info!("received signal {signal}, stopping nydus nbd service");
                     if let Some(mp) = &signal_mountpoint {
                         for attempt in 1..=UNMOUNT_RETRY_ATTEMPTS {
-                            match unmount_nbd(mp) {
+                            match unmount(mp) {
                                 Ok(()) => {
                                     info!("unmounted {}", mp.display());
                                     break;
@@ -228,7 +194,7 @@ pub fn run_nbd(args: NbdArgs) -> Result<()> {
                 // The signal path already unmounted on a signal-driven
                 // shutdown; if the session self-exited the mount is still up
                 // over a dead device, so try a final best-effort umount.
-                if let Err(err) = unmount_nbd(&mp) {
+                if let Err(err) = unmount(&mp) {
                     debug!("post-join unmount of {}: {err:#}", mp.display());
                 }
                 joined

@@ -2,10 +2,7 @@ package integration
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -56,7 +53,7 @@ func TestUblkTarget(t *testing.T) {
 
 	texture.MakeStandardCorpus(t, corpusDir)
 	buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, ublkChunkSize)
-	writeUblkConfig(t, configPath, blobDir, cacheDir)
+	writeLocalStorageConfig(t, configPath, blobDir, cacheDir)
 
 	devPath, stopDaemon := startUblkTarget(t, nydusBin, bootstrapPath, configPath, logDir)
 	defer stopDaemon()
@@ -97,7 +94,7 @@ func compareTrees(t *testing.T, want, got string) {
 		if !info.mode.IsRegular() {
 			continue
 		}
-		require.Equal(t, hashFile(t, filepath.Join(want, rel)), hashFile(t, filepath.Join(got, rel)),
+		require.Equal(t, sha256File(t, filepath.Join(want, rel)), sha256File(t, filepath.Join(got, rel)),
 			"content mismatch for %s", rel)
 	}
 }
@@ -143,30 +140,6 @@ func describeTree(t *testing.T, root string) map[string]entryInfo {
 	}))
 
 	return entries
-}
-
-func hashFile(t *testing.T, path string) string {
-	t.Helper()
-
-	file, err := os.Open(path)
-	require.NoError(t, err)
-	defer func() { _ = file.Close() }()
-
-	digest := sha256.New()
-	_, err = io.Copy(digest, file)
-	require.NoError(t, err)
-	return hex.EncodeToString(digest.Sum(nil))
-}
-
-func writeUblkConfig(t *testing.T, path, blobDir, cacheDir string) {
-	t.Helper()
-	require.NoError(t, os.MkdirAll(cacheDir, 0755))
-	config := fmt.Sprintf(
-		"backend:\n  type: local\n  config:\n    dir: %s\ncache:\n  type: local\n  config:\n    dir: %s\nprefetch:\n  enable: false\n",
-		blobDir,
-		cacheDir,
-	)
-	require.NoError(t, os.WriteFile(path, []byte(config), 0644))
 }
 
 // startUblkTarget runs `nydus ublk` and returns the device path it prints on

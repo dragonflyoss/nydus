@@ -30,5 +30,5 @@ pub mod service;
 
 pub use core::{BlobDevice, FanotifyCore, Response};
 pub use event::{EventIter, ParseError, ParseErrorKind, PreContentEvent, Range};
-pub use mount::{mount_erofs, unmount_erofs};
+pub use mount::mount_erofs;
 pub use service::FanotifyService;

@@ -78,10 +78,10 @@ pub trait BlobBackend: Send + Sync {
         Ok(*blob_id)
     }
 
-    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta>;
+    fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta>;
 
-    fn download_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
-        let blob_meta = self.load_blob_meta(blob_id)?;
+    fn blob_meta_to(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+        let blob_meta = self.blob_meta(blob_id)?;
         blob_meta.save(dst).map_err(io::Error::other)
     }
 
@@ -91,17 +91,7 @@ pub trait BlobBackend: Send + Sync {
         offset: u64,
         dst: &mut [u8],
         ctx: ReadContext,
-    ) -> io::Result<()> {
-        let data = self.read_range(blob_id, offset, dst.len() as u32, ctx)?;
-        if data.len() != dst.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "backend returned short range",
-            ));
-        }
-        dst.copy_from_slice(&data);
-        Ok(())
-    }
+    ) -> io::Result<()>;
 
     fn read_range(
         &self,
@@ -109,7 +99,11 @@ pub trait BlobBackend: Send + Sync {
         offset: u64,
         len: u32,
         ctx: ReadContext,
-    ) -> io::Result<Vec<u8>>;
+    ) -> io::Result<Vec<u8>> {
+        let mut buf = vec![0u8; len as usize];
+        self.read_range_into(blob_id, offset, &mut buf, ctx)?;
+        Ok(buf)
+    }
 }
 
 /// Wrap `backend` so every read it serves reports to [`crate::metrics`].
@@ -158,12 +152,12 @@ impl BlobBackend for MeteredBackend {
         self.inner.cache_key(blob_id)
     }
 
-    fn load_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
-        self.inner.load_blob_meta(blob_id)
+    fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+        self.inner.blob_meta(blob_id)
     }
 
-    fn download_blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
-        self.inner.download_blob_meta(blob_id, dst)
+    fn blob_meta_to(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+        self.inner.blob_meta_to(blob_id, dst)
     }
 
     fn read_range_into(

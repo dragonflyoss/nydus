@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::utils::align_up;
-use crate::{Config, FdRange, NydusCore};
+use crate::{Config, FdRange, NydusCore, ResolveMode};
 
 use super::proto::{DeviceRange, FaultPolicy, VmaRegion};
 
@@ -53,12 +53,6 @@ struct UffdioZeropage {
     range_len: u64,
     mode: u64,
     zeropage: i64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ResolveMode {
-    Fetch,
-    Probe,
 }
 
 pub struct UffdCore {
