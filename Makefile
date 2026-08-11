@@ -12,6 +12,10 @@ NYDUSFS_MERGE_PAUSE_SECS ?= 0
 EROFS_C_FUSE ?=
 EROFS_MKFS ?=
 
+IDMAP_TIMEOUT ?= 600s
+IDMAP_COUNT ?= 1
+IDMAP_GO_TEST_ARGS ?=
+
 UFFD_TIMEOUT ?= 300s
 UFFD_COUNT ?= 1
 UFFD_GO_TEST_ARGS ?=
@@ -64,6 +68,7 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH
 	"EROFS_MKFS=$(EROFS_MKFS)"
 TEST_SUPPORT_FILES = util.go optimize_util.go diff.go
 E2E_TEST_FILES = e2e_test.go $(TEST_SUPPORT_FILES)
+IDMAP_TEST_FILES = idmap_test.go $(TEST_SUPPORT_FILES)
 TOOCI_TEST_FILES = tooci_test.go $(TEST_SUPPORT_FILES)
 UFFD_TEST_FILES = uffd_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
@@ -78,7 +83,7 @@ FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
 NBD_TEST_PKG = .
 BENCH_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-core test-fanotify test-nbd test-bench test-fs test-top-images crate clean
+.PHONY: build release nydusify test test-e2e test-idmap test-tooci test-uffd test-core test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -107,6 +112,17 @@ test-e2e: release nydusify
 		NYDUSFS_MERGE_PAUSE_SECS="$(NYDUSFS_MERGE_PAUSE_SECS)" \
 		NYDUSFS_RUN_EROFS_COMPAT="$(NYDUSFS_RUN_EROFS_COMPAT)" \
 		$(GO_BIN) test -v $(if $(strip $(E2E_TEST)),-run '^$(E2E_TEST)$$',) -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(E2E_TEST_FILES)
+
+# Run FUSE idmapped-mount tests. Requires root and Linux 6.12+ with
+# FUSE_ALLOW_IDMAP. The Rust tests exercise kernel request identity and
+# fd-pinned attachment; the Go E2E covers the real CLI lifecycle and cleanup.
+test-idmap: release
+	$(SUDO) env "HOME=$(HOME)" "CARGO_HOME=$(or $(CARGO_HOME),$(HOME)/.cargo)" "PATH=$(PATH)" \
+		$(CARGO) test -p nydus --features cli idmap::tests -- --ignored --test-threads=1
+	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
+	cd tests/integration && \
+		$(GO_TEST_ENV) \
+		$(GO_BIN) test -v -run '^TestFuseIdmap$$' -count $(IDMAP_COUNT) -timeout $(IDMAP_TIMEOUT) $(IDMAP_GO_TEST_ARGS) $(IDMAP_TEST_FILES)
 
 # Run the nydus-to-OCI round trip. Requires a local registry and root, since
 # the round trip has to reproduce ownership and device nodes.
