@@ -559,7 +559,12 @@ fn flatten_node(
                 ino,
                 nid: 0,
                 meta_offset: 0,
-                is_extended: needs_erofs_extended_inode(node.size, node.uid, node.gid, nlink as u64),
+                is_extended: needs_erofs_extended_inode(
+                    node.size,
+                    node.uid,
+                    node.gid,
+                    nlink as u64,
+                ),
                 data: InodeData::RegularFile {
                     chunk_index_entries: chunk_index_entries.clone(),
                     chunk_size_bits: *chunkbits,

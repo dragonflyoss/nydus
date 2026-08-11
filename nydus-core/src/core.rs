@@ -566,7 +566,10 @@ impl Blobs {
     }
 
     /// Resolve a blob id to its device-table index and opened cache.
-    fn blob_cache_for(&self, id: &BlobId) -> Result<(u16, Arc<dyn crate::storage::cache::BlobCache>)> {
+    fn blob_cache_for(
+        &self,
+        id: &BlobId,
+    ) -> Result<(u16, Arc<dyn crate::storage::cache::BlobCache>)> {
         let blob_index = *self
             .index_by_blob_id
             .get(id)
@@ -813,7 +816,8 @@ impl FsEntry {
             };
 
             if entry.blkaddr != u64::MAX {
-                let chunk_addr = entry.blkaddr
+                let chunk_addr = entry
+                    .blkaddr
                     .checked_mul(EROFS_BLOCK_SIZE as u64)
                     .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
                 // Resolve the chunk to a blob: the legacy layout names the blob
@@ -910,7 +914,8 @@ impl FsEntry {
                     self.zero_file.as_raw_fd(),
                 );
             } else {
-                let chunk_addr = entry.blkaddr
+                let chunk_addr = entry
+                    .blkaddr
                     .checked_mul(EROFS_BLOCK_SIZE as u64)
                     .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
                 let resolved = if entry.device_id > 0 {

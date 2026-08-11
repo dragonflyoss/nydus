@@ -4,7 +4,6 @@
 
 mod common;
 
-
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
@@ -16,8 +15,8 @@ use nydus::build::bootstrap::render_bootstrap;
 use nydus::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
 use nydus_core::fs::ErofsReader;
 use nydus_core::metadata::{
-    erofs_xattr_ibody_size, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS,
-    EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER,
+    erofs_xattr_ibody_size, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
+    EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER,
 };
 use nydus_core::utils::sha256_file;
 
@@ -155,7 +154,8 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let blob_meta = blob_writer.blob_meta(data_blob_id, 0).expect("blob meta");
 
     let data = fs::read(&data_path).expect("read data blob");
-    let full_blob_id = common::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_meta);
+    let full_blob_id =
+        common::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_meta);
 
     let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
         blob_writer.total_blocks(),

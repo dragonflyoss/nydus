@@ -128,7 +128,10 @@ pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -
 
     let xattr_isize = erofs_xattr_ibody_size(&inode.xattrs);
     match &inode.data {
-        InodeData::RegularFile { chunk_index_entries, .. } => {
+        InodeData::RegularFile {
+            chunk_index_entries,
+            ..
+        } => {
             if chunk_index_entries.is_empty() {
                 inode_isize + xattr_isize
             } else {

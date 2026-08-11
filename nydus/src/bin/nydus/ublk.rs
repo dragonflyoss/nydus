@@ -8,7 +8,7 @@ use crate::cli_common;
 use nydus::ublk::{
     default_queues, UblkCore, UblkOptions, UblkService, DEFAULT_IO_BUF_BYTES, DEFAULT_QUEUE_DEPTH,
 };
-use tracing::{info};
+use tracing::info;
 
 #[derive(Args)]
 pub struct UblkArgs {

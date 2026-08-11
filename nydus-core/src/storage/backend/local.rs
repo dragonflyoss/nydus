@@ -179,7 +179,10 @@ impl BlobBackend for LocalBackend {
     fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
         let source = self.resolve_source(blob_id)?;
         let data = self.read_blob_meta_bytes(&source)?;
-        BlobMeta::loader().blob_id(*blob_id).from_bytes(&data).map_err(io::Error::other)
+        BlobMeta::loader()
+            .blob_id(*blob_id)
+            .from_bytes(&data)
+            .map_err(io::Error::other)
     }
 
     fn blob_meta_to(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {

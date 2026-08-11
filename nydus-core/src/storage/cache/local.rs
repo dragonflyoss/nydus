@@ -373,8 +373,7 @@ impl LocalBlobCache {
         })?;
         window.resize(window_len, 0);
         let uncompressed_offset = groups[batch.start].uncompressed_byte_offset();
-        let uncompressed_size =
-            groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
+        let uncompressed_size = groups[batch.end - 1].uncompressed_byte_end() - uncompressed_offset;
         let ctx = ReadContext::group(ReadKind::Prefetch, uncompressed_offset, uncompressed_size);
         self.backend
             .read_range_into(&self.blob_id, window_base, window, ctx)?;
@@ -833,13 +832,21 @@ fn cached_blob_meta(
             .suffix(".tmp")
             .tempfile_in(cache_dir)?;
         backend.blob_meta_to(&blob_id, tmp.path())?;
-        if let Err(err) = BlobMeta::loader().verify_crc32().blob_id(blob_id).load(tmp.path()) {
+        if let Err(err) = BlobMeta::loader()
+            .verify_crc32()
+            .blob_id(blob_id)
+            .load(tmp.path())
+        {
             return Err(io::Error::other(err));
         }
         tmp.persist(blob_meta_path).map_err(|err| err.error)?;
     }
 
-    BlobMeta::loader().verify_crc32().blob_id(blob_id).load(blob_meta_path).map_err(io::Error::other)
+    BlobMeta::loader()
+        .verify_crc32()
+        .blob_id(blob_id)
+        .load(blob_meta_path)
+        .map_err(io::Error::other)
 }
 
 /// Drop guard that ensures a leader always signals its flight and cleans up
@@ -1188,7 +1195,8 @@ mod tests {
         )
         .unwrap();
         assert!(redirect_meta.is_redirect_blob());
-        let redirect_blob_id = write_minimal_full_blob(backend_dir.path(), &payload, &redirect_meta, true);
+        let redirect_blob_id =
+            write_minimal_full_blob(backend_dir.path(), &payload, &redirect_meta, true);
 
         let run = |skip_all: bool| -> (usize, usize) {
             let cache_dir = tempdir().unwrap();

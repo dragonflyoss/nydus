@@ -5,8 +5,7 @@ use crate::build::image::{
     device_table_meta_blkaddr, write_erofs_superblock_checksum, write_image,
 };
 use crate::build::inode::{
-    erofs_inode_size, serialize_inode, symlink_is_inline, InodeData,
-    InodeInfo,
+    erofs_inode_size, serialize_inode, symlink_is_inline, InodeData, InodeInfo,
 };
 use crate::metadata::layout::MetadataLayout;
 use crate::metadata::*;

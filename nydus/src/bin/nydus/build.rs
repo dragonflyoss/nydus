@@ -1,6 +1,6 @@
+use crate::cli_common;
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
-use crate::cli_common;
 use nydus::build::blob_chunk::BlobWriter;
 use nydus::build::bootstrap::{render_bootstrap, render_flattened_bootstrap};
 use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};

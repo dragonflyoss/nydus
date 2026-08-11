@@ -54,7 +54,9 @@ pub fn assemble_full_blob(
     let mut full_blob = std::fs::File::create(&full_blob_path).expect("create full blob");
     full_blob.write_all(data).expect("write data");
     write_zero_padding(&mut full_blob, data_size, bootstrap_offset).expect("pad data");
-    full_blob.write_all(bootstrap_bytes).expect("write bootstrap");
+    full_blob
+        .write_all(bootstrap_bytes)
+        .expect("write bootstrap");
     write_zero_padding(
         &mut full_blob,
         bootstrap_offset + bootstrap_bytes.len() as u64,

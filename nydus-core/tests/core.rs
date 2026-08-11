@@ -4,7 +4,6 @@
 
 mod common;
 
-
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -17,9 +16,7 @@ use nydus::build::bootstrap::{
 use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
 use nydus_core::config::Config;
 use nydus_core::fs::ErofsReader;
-use nydus_core::metadata::{
-    BlobMetaCompressor, ErofsDeviceSlot,
-};
+use nydus_core::metadata::{BlobMetaCompressor, ErofsDeviceSlot};
 use nydus_core::metadata::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use nydus_core::utils::hex_string;
 use nydus_core::{BlobId, FileType, NydusCore};
