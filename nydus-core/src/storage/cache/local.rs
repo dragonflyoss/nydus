@@ -881,13 +881,9 @@ fn write_all_at(file: &File, offset: u64, buf: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{
-        BlobFooter, BlobMetaChunk, BlobMetaGroup, ErofsSuperblock, EROFS_BLOCK_SIZE,
-        EROFS_SUPER_OFFSET,
-    };
+    use crate::metadata::{BlobMetaChunk, BlobMetaGroup};
     use crate::storage::backend::LocalBackend;
     use crate::utils::sha256_bytes;
-    use std::io::Write;
     use std::path::Path;
     use tempfile::tempdir;
 

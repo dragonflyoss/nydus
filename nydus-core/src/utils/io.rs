@@ -53,7 +53,6 @@ pub fn write_zero_padding(writer: &mut dyn Write, current: u64, aligned: u64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write as _;
     use std::os::fd::AsRawFd as _;
 
     #[test]

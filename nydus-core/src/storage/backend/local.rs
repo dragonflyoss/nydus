@@ -245,12 +245,9 @@ fn inspect_full_blob_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{
-        BlobMetaChunk, BlobMetaGroup, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
-    };
+    use crate::metadata::{BlobMetaChunk, BlobMetaGroup};
     use crate::storage::backend::ReadKind;
     use crate::utils::sha256_bytes;
-    use std::io::Write;
     use tempfile::tempdir;
 
     fn blob_meta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
