@@ -32,6 +32,13 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
             use ApiResponsePayload::*;
             match r {
                 Empty => success_response(None),
+                // dbs-uhttp has no 202 status variant. This dedicated endpoint uses a
+                // structured 200 response for pending while 204 remains the done signal.
+                Pending(reason) => success_response(Some(format!(
+                    r#"{{"status":"pending","reason":{}}}"#,
+                    serde_json::to_string(&reason).expect("serialize cull pending reason")
+                ))),
+                PendingCulls(d) => success_response(Some(d)),
                 DaemonInfo(d) => success_response(Some(d)),
                 BlobObjectList(d) => success_response(Some(d)),
                 _ => panic!("Unexpected response message from API service"),
@@ -40,6 +47,35 @@ fn convert_to_response<O: FnOnce(ApiError) -> HttpError>(api_resp: ApiResponse, 
         Err(e) => {
             let status_code = translate_status_code(&e);
             error_response(op(e), status_code)
+        }
+    }
+}
+
+/// Reclaim a blob from the kernel fscache and report whether it completed.
+pub struct BlobCullHandlerV2 {}
+impl EndpointHandler for BlobCullHandlerV2 {
+    fn handle_request(
+        &self,
+        req: &Request,
+        kicker: &dyn Fn(ApiRequest) -> ApiResponse,
+    ) -> HttpResult {
+        match (req.method(), req.body.as_ref()) {
+            (Method::Delete, None) => {
+                let blob_id = extract_query_part(req, "blob_id")
+                    .filter(|blob_id| !blob_id.is_empty())
+                    .ok_or(HttpError::BadRequest)?;
+                let background = extract_query_part(req, "background")
+                    .map(|value| value.parse::<bool>().map_err(|_| HttpError::BadRequest))
+                    .transpose()?
+                    .unwrap_or(false);
+                let r = kicker(ApiRequest::CullBlobFile(blob_id, background));
+                Ok(convert_to_response(r, HttpError::CullBlobFile))
+            }
+            (Method::Get, None) => {
+                let r = kicker(ApiRequest::GetPendingBlobCulls);
+                Ok(convert_to_response(r, HttpError::CullBlobFile))
+            }
+            _ => Err(HttpError::BadRequest),
         }
     }
 }
@@ -226,6 +262,70 @@ mod tests {
         let handler = BlobObjectListHandlerV2 {};
         let raw = b"POST http://localhost/api/v2/blobs HTTP/1.0\r\n\r\n";
         let req = Request::try_from(raw.as_slice(), None).unwrap();
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_blob_cull_handler_done() {
+        let handler = BlobCullHandlerV2 {};
+        let req = delete_req("http://localhost/api/v2/blobs/cull?blob_id=test_blob");
+        let result = handler
+            .handle_request(&req, &|request| {
+                assert!(matches!(
+                    request,
+                    ApiRequest::CullBlobFile(blob_id, false) if blob_id == "test_blob"
+                ));
+                ok_empty()
+            })
+            .unwrap();
+        assert_eq!(result.status(), dbs_uhttp::StatusCode::NoContent);
+    }
+
+    #[test]
+    fn test_blob_cull_handler_pending() {
+        let handler = BlobCullHandlerV2 {};
+        let req =
+            delete_req("http://localhost/api/v2/blobs/cull?blob_id=test_blob&background=true");
+        let result = handler
+            .handle_request(&req, &|request| {
+                assert!(matches!(
+                    request,
+                    ApiRequest::CullBlobFile(blob_id, true) if blob_id == "test_blob"
+                ));
+                Ok(ApiResponsePayload::Pending("open".to_string()))
+            })
+            .unwrap();
+        assert_eq!(result.status(), dbs_uhttp::StatusCode::OK);
+    }
+
+    #[test]
+    fn test_blob_cull_handler_lists_pending() {
+        let handler = BlobCullHandlerV2 {};
+        let req = get_req("http://localhost/api/v2/blobs/cull");
+        let result = handler
+            .handle_request(&req, &|_| {
+                Ok(ApiResponsePayload::PendingCulls(
+                    r#"{"blob":"open"}"#.to_string(),
+                ))
+            })
+            .unwrap();
+        assert_eq!(result.status(), dbs_uhttp::StatusCode::OK);
+    }
+
+    #[test]
+    fn test_blob_cull_handler_requires_blob_id() {
+        let handler = BlobCullHandlerV2 {};
+        let req = delete_req("http://localhost/api/v2/blobs/cull");
+        let result = handler.handle_request(&req, &|_| ok_empty());
+        assert!(matches!(result, Err(HttpError::BadRequest)));
+    }
+
+    #[test]
+    fn test_blob_cull_handler_rejects_invalid_background() {
+        let handler = BlobCullHandlerV2 {};
+        let req =
+            delete_req("http://localhost/api/v2/blobs/cull?blob_id=test_blob&background=invalid");
         let result = handler.handle_request(&req, &|_| ok_empty());
         assert!(matches!(result, Err(HttpError::BadRequest)));
     }

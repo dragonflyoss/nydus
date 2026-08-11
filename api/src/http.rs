@@ -125,6 +125,10 @@ pub enum ApiRequest {
     DeleteBlobObject(BlobCacheObjectId),
     /// Delete a blob cache file
     DeleteBlobFile(String),
+    /// Cull a blob cache file and optionally retain pending work in the background.
+    CullBlobFile(String, bool),
+    /// List blob culls that are still pending in nydusd.
+    GetPendingBlobCulls,
 }
 
 /// Kinds for daemon related error messages.
@@ -186,6 +190,10 @@ pub enum ApiResponsePayload {
     DaemonInfo(String),
     /// No data is sent on the channel.
     Empty,
+    /// The request has not completed yet.
+    Pending(String),
+    /// JSON map of blob IDs to pending reasons.
+    PendingCulls(String),
     /// Global error events.
     Events(String),
 
@@ -261,6 +269,8 @@ pub enum HttpError {
     DeleteBlobObject(ApiError),
     /// Failed to delete blob file
     DeleteBlobFile(ApiError),
+    /// Failed to cull blob file
+    CullBlobFile(ApiError),
     /// Failed to list existing blob objects
     GetBlobObjects(ApiError),
 }
