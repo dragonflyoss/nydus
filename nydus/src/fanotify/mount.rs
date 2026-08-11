@@ -11,6 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::core::BlobDevice;
+use crate::utils::path_cstring;
 
 /// The kernel copies `mount(2)` data into a single page (`copy_mount_options`),
 /// so a longer option string is silently truncated — dropping `device=` slots
@@ -53,18 +54,7 @@ pub fn mount_erofs(bootstrap: &Path, devices: &[BlobDevice], mountpoint: &Path) 
 
 /// Unmount the EROFS at `mountpoint`.
 pub fn unmount_erofs(mountpoint: &Path) -> Result<()> {
-    let target = path_cstring(mountpoint, "mountpoint")?;
-    let ret = unsafe { libc::umount2(target.as_ptr(), 0) };
-    if ret < 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("failed to unmount {}", mountpoint.display()));
-    }
-    Ok(())
-}
-
-fn path_cstring(path: &Path, kind: &str) -> Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("{kind} path contains an interior NUL byte"))
+    crate::utils::unmount(mountpoint)
 }
 
 /// Build the binary mount data without lossy UTF-8 conversion. A comma in a

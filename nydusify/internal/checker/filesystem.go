@@ -8,6 +8,7 @@ package checker
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 )
 
 // filesystemRule mounts both the source and target images and compares their
@@ -169,7 +171,7 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 	// nydus fuse runs in the foreground; start it detached and wait for the
 	// mountpoint to become active. Keep its output buffered for startup errors;
 	// the check command itself owns the user-facing progress logs.
-	cmd := exec.Command(builderBinary(r.builder), args...)
+	cmd := exec.Command(cmp.Or(r.builder, pkgconv.DefaultBuilder), args...)
 	var fuseLog bytes.Buffer
 	cmd.Stdout = &fuseLog
 	cmd.Stderr = &fuseLog

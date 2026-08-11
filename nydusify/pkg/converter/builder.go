@@ -8,6 +8,7 @@ package converter
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"io"
 	"os/exec"
@@ -15,6 +16,14 @@ import (
 
 	"github.com/pkg/errors"
 )
+
+// DefaultBuilder is the PATH-resolvable nydus binary name used when no
+// explicit builder path is configured.
+const DefaultBuilder = "nydus"
+
+// DefaultLogLevel is passed to nydus subprocesses when no level is set, so
+// they always receive a valid `--log-level` value.
+const DefaultLogLevel = "info"
 
 // BuildOption describes a single `nydus build` invocation that converts a
 // directory tree into a nydus full blob.
@@ -69,22 +78,6 @@ type UnpackOption struct {
 	LogLevel string
 }
 
-func builderBinary(path string) string {
-	if path == "" {
-		return "nydus"
-	}
-	return path
-}
-
-// nydusLogLevel returns level, or "info" when level is empty, so a nydus
-// subprocess always receives a valid `--log-level` value.
-func nydusLogLevel(level string) string {
-	if level == "" {
-		return "info"
-	}
-	return level
-}
-
 // RunNydusBuild executes `nydus build` to produce a full blob at opt.BlobPath.
 //
 // The blob is written strictly sequentially (data -> bootstrap -> blob meta ->
@@ -97,18 +90,19 @@ func RunNydusBuild(ctx context.Context, opt BuildOption) error {
 		"--chunk-size", strconv.FormatUint(uint64(opt.ChunkSize), 10),
 		"--compress-size", strconv.FormatUint(uint64(opt.CompressSize), 10),
 		"--compressor", opt.Compressor,
-		"--log-level", nydusLogLevel(opt.LogLevel),
+		"--log-level", cmp.Or(opt.LogLevel, DefaultLogLevel),
 	}
 	for _, excl := range opt.Excludes {
 		args = append(args, "--exclude", excl)
 	}
 
-	cmd := exec.CommandContext(ctx, builderBinary(opt.BuilderPath), args...)
+	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return errors.Wrapf(err, "nydus build failed: %s", stderr.String())
 	}
+
 	return nil
 }
 
@@ -121,10 +115,10 @@ func RunNydusMerge(ctx context.Context, opt MergeBuildOption) error {
 	args = append(args,
 		"--bootstrap", opt.BootstrapPath,
 		"--whiteout-spec", "oci",
-		"--log-level", nydusLogLevel(opt.LogLevel),
+		"--log-level", cmp.Or(opt.LogLevel, DefaultLogLevel),
 	)
 
-	cmd := exec.CommandContext(ctx, builderBinary(opt.BuilderPath), args...)
+	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -143,15 +137,16 @@ func RunNydusToTar(ctx context.Context, opt UnpackOption, dest io.Writer) error 
 		"build", opt.BlobPath,
 		"--type", "nydus-tar",
 		"--output", "-",
-		"--log-level", nydusLogLevel(opt.LogLevel),
+		"--log-level", cmp.Or(opt.LogLevel, DefaultLogLevel),
 	}
 
-	cmd := exec.CommandContext(ctx, builderBinary(opt.BuilderPath), args...)
+	cmd := exec.CommandContext(ctx, cmp.Or(opt.BuilderPath, DefaultBuilder), args...)
 	cmd.Stdout = dest
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		return errors.Wrapf(err, "nydus build --type nydus-tar failed: %s", stderr.String())
 	}
+
 	return nil
 }
