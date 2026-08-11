@@ -7,7 +7,6 @@
 package checker
 
 import (
-	"cmp"
 	"context"
 	"os"
 	"os/exec"
@@ -21,7 +20,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
-	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 )
 
 // MountOption configures a Mounter.
@@ -167,11 +165,11 @@ func (m *Mounter) mountNydus(ctx context.Context, provider *remote.Provider, cs 
 		"--config", configPath,
 		"--mountpoint", m.opt.Mountpoint,
 		"--apiserver", "unix://" + apiSocket,
-		"--log-level", cmp.Or(m.opt.LogLevel, pkgconv.DefaultLogLevel),
+		"--log-level", nydusLogLevel(m.opt.LogLevel),
 		"--log-dir", logDir,
 		"--console",
 	}
-	cmd := exec.Command(cmp.Or(m.opt.Builder, pkgconv.DefaultBuilder), args...)
+	cmd := exec.Command(builderBinary(m.opt.Builder), args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

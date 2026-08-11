@@ -8,10 +8,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	"github.com/dustin/go-humanize"
@@ -22,7 +24,6 @@ import (
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/checker"
 	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
-	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 )
 
@@ -328,14 +329,18 @@ func isDir(path string) bool {
 // totalLayerSize resolves rootDesc (a manifest or a multi-platform index) for
 // the requested platform and returns the sum of its layer descriptor sizes.
 func totalLayerSize(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (uint64, error) {
-	manifestDesc, err := oci.ResolveManifest(ctx, cs, rootDesc, platformMC)
+	manifestDesc, err := resolveManifest(ctx, cs, rootDesc, platformMC)
 	if err != nil {
 		return 0, err
 	}
 
 	var manifest ocispec.Manifest
-	if err := oci.ReadJSON(ctx, cs, manifestDesc, &manifest); err != nil {
-		return 0, errors.Wrap(err, "read manifest")
+	b, err := content.ReadBlob(ctx, cs, manifestDesc)
+	if err != nil {
+		return 0, errors.Wrap(err, "read manifest blob")
+	}
+	if err := json.Unmarshal(b, &manifest); err != nil {
+		return 0, errors.Wrap(err, "unmarshal manifest")
 	}
 
 	var total uint64
@@ -345,6 +350,32 @@ func totalLayerSize(ctx context.Context, cs content.Store, rootDesc ocispec.Desc
 		}
 	}
 	return total, nil
+}
+
+// resolveManifest returns the platform-specific manifest descriptor, selecting
+// from an index when rootDesc is multi-platform.
+func resolveManifest(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (ocispec.Descriptor, error) {
+	if images.IsManifestType(rootDesc.MediaType) {
+		return rootDesc, nil
+	}
+	if !images.IsIndexType(rootDesc.MediaType) {
+		return ocispec.Descriptor{}, errors.Errorf("unsupported root media type %q", rootDesc.MediaType)
+	}
+
+	var index ocispec.Index
+	b, err := content.ReadBlob(ctx, cs, rootDesc)
+	if err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "read index blob")
+	}
+	if err := json.Unmarshal(b, &index); err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "unmarshal index")
+	}
+	for _, m := range index.Manifests {
+		if m.Platform == nil || platformMC.Match(*m.Platform) {
+			return m, nil
+		}
+	}
+	return ocispec.Descriptor{}, errors.New("no manifest matches the requested platform")
 }
 
 func checkCommand() *cli.Command {

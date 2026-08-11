@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::utils::align_up;
 use crate::{Config, FdRange, NydusCore};
 
 use super::proto::{DeviceRange, FaultPolicy, VmaRegion};
@@ -70,8 +69,7 @@ impl UffdCore {
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
         let core =
             Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
-        let device_size = align_up(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)
-            .ok_or_else(|| anyhow!("alignment overflow"))?;
+        let device_size = align_up(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)?;
 
         Ok(Self { core, device_size })
     }
@@ -323,4 +321,11 @@ fn uffdio_zeropage(uffd_fd: RawFd, start: u64, len: u64) -> Result<()> {
         bail!("UFFDIO_ZEROPAGE failed: {err}");
     }
     Ok(())
+}
+
+fn align_up(value: u64, alignment: u64) -> Result<u64> {
+    Ok(value
+        .checked_add(alignment - 1)
+        .ok_or_else(|| anyhow!("alignment overflow"))?
+        & !(alignment - 1))
 }

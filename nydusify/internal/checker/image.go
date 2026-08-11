@@ -8,15 +8,16 @@ package checker
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
-	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 )
 
@@ -80,18 +81,18 @@ func loadImage(ctx context.Context, provider *remote.Provider, ref string, platf
 // Image, reading the manifest and config from cs and classifying the image as
 // OCI or nydus.
 func parseImage(ctx context.Context, cs content.Store, ref string, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (*Image, error) {
-	manifestDesc, err := oci.ResolveManifest(ctx, cs, rootDesc, platformMC)
+	manifestDesc, err := resolveManifest(ctx, cs, rootDesc, platformMC)
 	if err != nil {
 		return nil, errors.Wrap(err, "select platform manifest")
 	}
 
 	var manifest ocispec.Manifest
-	if err := oci.ReadJSON(ctx, cs, manifestDesc, &manifest); err != nil {
+	if err := readJSON(ctx, cs, manifestDesc, &manifest); err != nil {
 		return nil, errors.Wrap(err, "read manifest")
 	}
 
 	var config ocispec.Image
-	if err := oci.ReadJSON(ctx, cs, manifest.Config, &config); err != nil {
+	if err := readJSON(ctx, cs, manifest.Config, &config); err != nil {
 		return nil, errors.Wrap(err, "read image config")
 	}
 
@@ -120,4 +121,57 @@ func parseImage(ctx context.Context, cs content.Store, ref string, rootDesc ocis
 	}
 
 	return img, nil
+}
+
+// resolveManifest returns the manifest descriptor for the requested platform. If
+// rootDesc is already a manifest it is returned as-is.
+func resolveManifest(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (ocispec.Descriptor, error) {
+	if images.IsManifestType(rootDesc.MediaType) {
+		return rootDesc, nil
+	}
+	if !images.IsIndexType(rootDesc.MediaType) {
+		return ocispec.Descriptor{}, errors.Errorf("unsupported root media type %q", rootDesc.MediaType)
+	}
+
+	var index ocispec.Index
+	if err := readJSON(ctx, cs, rootDesc, &index); err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "read index")
+	}
+	if len(index.Manifests) == 0 {
+		return ocispec.Descriptor{}, errors.New("image index has no manifests")
+	}
+
+	var candidates []ocispec.Descriptor
+	for _, m := range index.Manifests {
+		if !images.IsManifestType(m.MediaType) {
+			continue
+		}
+		if m.Platform == nil || platformMC.Match(*m.Platform) {
+			candidates = append(candidates, m)
+		}
+	}
+	if len(candidates) == 0 {
+		return ocispec.Descriptor{}, errors.New("no manifest matches the requested platform")
+	}
+
+	// Prefer the platform the matcher considers most specific.
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.Platform != nil && best.Platform != nil && platformMC.Less(*c.Platform, *best.Platform) {
+			best = c
+		}
+	}
+	return best, nil
+}
+
+// readJSON reads desc from cs and unmarshals it into v.
+func readJSON(ctx context.Context, cs content.Store, desc ocispec.Descriptor, v interface{}) error {
+	b, err := content.ReadBlob(ctx, cs, desc)
+	if err != nil {
+		return errors.Wrapf(err, "read blob %s", desc.Digest)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		return errors.Wrapf(err, "unmarshal %s", desc.Digest)
+	}
+	return nil
 }

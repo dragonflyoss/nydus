@@ -22,8 +22,6 @@ import (
 	"github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
-
-	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 )
 
 // Source describes one input of a multi-source conversion. Exactly one of the
@@ -294,13 +292,13 @@ func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 		newDesc = &srcDesc
 	}
 
-	manifestDesc, err := oci.ResolveManifest(ctx, cs, *newDesc, platformMC)
+	manifestDesc, err := resolveManifest(ctx, cs, *newDesc, platformMC)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var manifest ocispec.Manifest
-	if err := oci.ReadJSON(ctx, cs, manifestDesc, &manifest); err != nil {
+	if _, err := readJSON(ctx, cs, &manifest, manifestDesc); err != nil {
 		return nil, nil, errors.Wrap(err, "read manifest json")
 	}
 
@@ -318,7 +316,7 @@ func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	}
 
 	var config json.RawMessage
-	if err := oci.ReadJSON(ctx, cs, manifest.Config, &config); err != nil {
+	if _, err := readJSON(ctx, cs, &config, manifest.Config); err != nil {
 		return nil, nil, errors.Wrap(err, "read image config")
 	}
 	return blobs, config, nil
@@ -373,7 +371,7 @@ func labelNydusBlobDiffIDs(ctx context.Context, cs content.Store, rootDesc ocisp
 		manifestDescs = []ocispec.Descriptor{rootDesc}
 	case images.IsIndexType(rootDesc.MediaType):
 		var index ocispec.Index
-		if err := oci.ReadJSON(ctx, cs, rootDesc, &index); err != nil {
+		if _, err := readJSON(ctx, cs, &index, rootDesc); err != nil {
 			return errors.Wrap(err, "read index json")
 		}
 		for _, m := range index.Manifests {
@@ -387,7 +385,7 @@ func labelNydusBlobDiffIDs(ctx context.Context, cs content.Store, rootDesc ocisp
 
 	for _, manifestDesc := range manifestDescs {
 		var manifest ocispec.Manifest
-		if err := oci.ReadJSON(ctx, cs, manifestDesc, &manifest); err != nil {
+		if _, err := readJSON(ctx, cs, &manifest, manifestDesc); err != nil {
 			return errors.Wrap(err, "read manifest json")
 		}
 		for _, layer := range manifest.Layers {
@@ -415,4 +413,26 @@ func labelNydusBlobDiffIDs(ctx context.Context, cs content.Store, rootDesc ocisp
 		}
 	}
 	return nil
+}
+
+// resolveManifest returns the platform-specific manifest descriptor,
+// selecting from an index when rootDesc is multi-platform.
+func resolveManifest(ctx context.Context, cs content.Store, rootDesc ocispec.Descriptor, platformMC platforms.MatchComparer) (ocispec.Descriptor, error) {
+	if images.IsManifestType(rootDesc.MediaType) {
+		return rootDesc, nil
+	}
+	if !images.IsIndexType(rootDesc.MediaType) {
+		return ocispec.Descriptor{}, errors.Errorf("unsupported root media type %q", rootDesc.MediaType)
+	}
+
+	var index ocispec.Index
+	if _, err := readJSON(ctx, cs, &index, rootDesc); err != nil {
+		return ocispec.Descriptor{}, errors.Wrap(err, "read index json")
+	}
+	for _, m := range index.Manifests {
+		if m.Platform == nil || platformMC.Match(*m.Platform) {
+			return m, nil
+		}
+	}
+	return ocispec.Descriptor{}, errors.New("no manifest matches the requested platform")
 }

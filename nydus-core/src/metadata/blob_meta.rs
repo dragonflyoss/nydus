@@ -1,5 +1,4 @@
 use super::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
-use crate::utils::le::{read_u16_from, read_u32_from, read_u64_from};
 use anyhow::{bail, Context, Result};
 use bitflags::bitflags;
 use crc32c::crc32c_append;
@@ -358,14 +357,14 @@ impl BlobMetaHeader {
     fn read_from(reader: &mut dyn Read) -> Result<Self> {
         let header = Self {
             magic: read_magic(reader)?,
-            version: read_u32_from(reader)?,
-            flags: read_u32_from(reader)?,
-            crc32: read_u32_from(reader)?,
-            reserved0: read_u32_from(reader)?,
-            chunks_offset: read_u64_from(reader)?,
-            groups_offset: read_u64_from(reader)?,
-            chunk_count: read_u32_from(reader)?,
-            group_count: read_u32_from(reader)?,
+            version: read_u32(reader)?,
+            flags: read_u32(reader)?,
+            crc32: read_u32(reader)?,
+            reserved0: read_u32(reader)?,
+            chunks_offset: read_u64(reader)?,
+            groups_offset: read_u64(reader)?,
+            chunk_count: read_u32(reader)?,
+            group_count: read_u32(reader)?,
             chunk_block_bits: read_u8(reader)?,
             group_block_bits: {
                 let bits = read_u8(reader)?;
@@ -542,13 +541,13 @@ impl BlobMetaGroup {
 
     pub fn read_from(reader: &mut dyn Read) -> Result<Self> {
         let group = Self {
-            uncompressed_block_offset: read_u64_from(reader)?,
-            compressed_byte_offset: read_u64_from(reader)?,
-            uncompressed_block_count: read_u32_from(reader)?,
-            compressed_size: read_u32_from(reader)?,
-            crc32: read_u32_from(reader)?,
-            source_group_index: read_u32_from(reader)?,
-            source_blob_index: read_u16_from(reader)?,
+            uncompressed_block_offset: read_u64(reader)?,
+            compressed_byte_offset: read_u64(reader)?,
+            uncompressed_block_count: read_u32(reader)?,
+            compressed_size: read_u32(reader)?,
+            crc32: read_u32(reader)?,
+            source_group_index: read_u32(reader)?,
+            source_blob_index: read_u16(reader)?,
             reserved: read_group_reserved(reader)?,
         };
         group.validate()?;
@@ -649,9 +648,9 @@ impl BlobMetaChunk {
     pub fn read_from(reader: &mut dyn Read) -> Result<Self> {
         let chunk = Self {
             digest: read_digest(reader)?,
-            uncompressed_block_offset: read_u64_from(reader)?,
-            uncompressed_block_count: read_u32_from(reader)?,
-            reserved: read_u32_from(reader)?,
+            uncompressed_block_offset: read_u64(reader)?,
+            uncompressed_block_count: read_u32(reader)?,
+            reserved: read_u32(reader)?,
         };
         chunk.validate()?;
         Ok(chunk)
@@ -1169,6 +1168,12 @@ fn mapped_groups<'a>(data: &'a [u8], header: &BlobMetaHeader) -> &'a [BlobMetaGr
     unsafe { std::slice::from_raw_parts(ptr, header.group_count() as usize) }
 }
 
+fn read_u32(reader: &mut dyn Read) -> Result<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
 fn read_u8(reader: &mut dyn Read) -> Result<u8> {
     let mut buf = [0u8; 1];
     reader.read_exact(&mut buf)?;
@@ -1181,10 +1186,22 @@ fn read_magic(reader: &mut dyn Read) -> Result<[u8; 8]> {
     Ok(buf)
 }
 
+fn read_u16(reader: &mut dyn Read) -> Result<u16> {
+    let mut buf = [0u8; 2];
+    reader.read_exact(&mut buf)?;
+    Ok(u16::from_le_bytes(buf))
+}
+
 fn read_group_reserved(reader: &mut dyn Read) -> Result<[u8; 6]> {
     let mut buf = [0u8; 6];
     reader.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+fn read_u64(reader: &mut dyn Read) -> Result<u64> {
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
 }
 
 fn read_digest(reader: &mut dyn Read) -> Result<[u8; 32]> {
