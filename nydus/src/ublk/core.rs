@@ -18,7 +18,6 @@ use anyhow::{Context, Result};
 use crate::config::Config;
 use crate::core::{FdRange, NydusCore};
 use crate::metadata::EROFS_BLOCK_SIZE;
-use crate::utils::{align_up, pread_exact};
 
 /// Logical block size exposed by the ublk device. Matching the EROFS block size
 /// keeps every incoming request aligned to a whole number of EROFS blocks.
@@ -263,6 +262,38 @@ impl Drop for Mapping {
 /// space, but a short read can still happen when the core resolved a range
 /// that extends past the current file size; treat it the same way a block
 /// device treats an unwritten sector.
+fn pread_exact(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let ret = unsafe {
+            libc::pread(
+                fd,
+                buf[done..].as_mut_ptr() as *mut libc::c_void,
+                buf.len() - done,
+                (offset + done as u64) as libc::off_t,
+            )
+        };
+        match ret {
+            0 => {
+                buf[done..].fill(0);
+                return Ok(());
+            }
+            n if n > 0 => done += n as usize,
+            _ => {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn align_up(value: u64, align: u64) -> Option<u64> {
+    value.checked_add(align - 1).map(|v| v & !(align - 1))
+}
 
 #[cfg(test)]
 mod tests {
@@ -286,6 +317,24 @@ mod tests {
             len,
             source_offset,
         }
+    }
+
+    #[test]
+    fn rounds_size_up_to_block() {
+        assert_eq!(align_up(0, 4096), Some(0));
+        assert_eq!(align_up(1, 4096), Some(4096));
+        assert_eq!(align_up(4096, 4096), Some(4096));
+        assert_eq!(align_up(4097, 4096), Some(8192));
+        assert_eq!(align_up(u64::MAX, 4096), None);
+    }
+
+    #[test]
+    fn pread_exact_zero_fills_past_eof() {
+        let file = temp_file(b"nydus");
+
+        let mut buf = [0xffu8; 8];
+        pread_exact(file.as_raw_fd(), &mut buf, 0).unwrap();
+        assert_eq!(&buf, b"nydus\0\0\0");
     }
 
     #[test]

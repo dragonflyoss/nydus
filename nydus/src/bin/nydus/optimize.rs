@@ -7,7 +7,7 @@ use nydus::metadata::*;
 use nydus::storage::backend::build_backend;
 use nydus::storage::cache::{BlobCache, LocalBlobCache};
 use nydus::tracing::init_command_tracing;
-use nydus::utils::{align_up, hex_string};
+use nydus::utils::hex_string;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -351,8 +351,7 @@ fn fetch_trace(apiserver: &str) -> Result<Vec<u8>> {
 /// embedded bootstrap) and return its bytes, full SHA256 digest, and footer.
 fn assemble_artifact(data: &[u8], blob_meta: &BlobMeta) -> Result<(Vec<u8>, [u8; 32], BlobFooter)> {
     let compressed_data_size = data.len() as u64;
-    let bootstrap_offset = align_up(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
-        .context("bootstrap offset overflow")?;
+    let bootstrap_offset = align_up(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);
     let blob_meta_offset = bootstrap_offset;
     let blob_meta_size = blob_meta.metadata_size();
     let blob_meta_blocks = u32::try_from(blob_meta_size / EROFS_BLOCK_SIZE as u64)
@@ -388,6 +387,11 @@ fn assemble_artifact(data: &[u8], blob_meta: &BlobMeta) -> Result<(Vec<u8>, [u8;
     let mut digest = [0u8; 32];
     digest.copy_from_slice(&hasher.finalize());
     Ok((artifact, digest, footer))
+}
+
+fn align_up(value: u64, align: u64) -> u64 {
+    debug_assert!(align.is_power_of_two());
+    (value + align - 1) & !(align - 1)
 }
 
 fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {

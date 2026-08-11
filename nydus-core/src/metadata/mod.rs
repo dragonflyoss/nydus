@@ -97,9 +97,36 @@ pub const EROFS_NULL_ADDR: u64 = u64::MAX;
 /// Nydus internal xattr suffix for prefetch blobs ("trusted.nydus.prefetch.blobs").
 pub const NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"nydus.prefetch.blobs";
 
-// Little-endian field helpers live in `utils::le`; re-exported so the
-// `use super::*` metadata modules keep resolving them unqualified.
-pub(crate) use crate::utils::le::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
+/// Read a little-endian integer from a byte array.
+#[inline(always)]
+pub(crate) fn read_u16(b: &[u8; 2]) -> u16 {
+    u16::from_le_bytes(*b)
+}
+
+#[inline(always)]
+pub(crate) fn write_u16(b: &mut [u8; 2], v: u16) {
+    *b = v.to_le_bytes();
+}
+
+#[inline(always)]
+pub(crate) fn read_u32(b: &[u8; 4]) -> u32 {
+    u32::from_le_bytes(*b)
+}
+
+#[inline(always)]
+pub(crate) fn write_u32(b: &mut [u8; 4], v: u32) {
+    *b = v.to_le_bytes();
+}
+
+#[inline(always)]
+pub(crate) fn read_u64(b: &[u8; 8]) -> u64 {
+    u64::from_le_bytes(*b)
+}
+
+#[inline(always)]
+pub(crate) fn write_u64(b: &mut [u8; 8], v: u64) {
+    *b = v.to_le_bytes();
+}
 
 /// Cast a byte slice to a reference of `T` (`#[repr(C, packed)]`).
 #[inline]

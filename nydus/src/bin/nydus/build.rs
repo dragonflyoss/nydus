@@ -7,7 +7,7 @@ use nydus::fs::ErofsReader;
 use nydus::metadata::*;
 use nydus::tracing::{init_command_tracing, init_command_tracing_stderr};
 use nydus::unpack::unpack_to_tar;
-use nydus::utils::{align_up, bytes_to_blocks, hex_string, write_zero_padding};
+use nydus::utils::hex_string;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
@@ -282,8 +282,7 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     let bootstrap_offset = align_up(
         compressed_data_offset + compressed_data_size,
         NYDUS_BLOB_FOOTER_ALIGNMENT,
-    )
-    .context("bootstrap offset overflow")?;
+    );
     write_zero_padding(
         &mut blob_writer_stream,
         compressed_data_offset + compressed_data_size,
@@ -304,8 +303,7 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     let blob_meta_offset = align_up(
         bootstrap_offset + bootstrap_size,
         NYDUS_BLOB_FOOTER_ALIGNMENT,
-    )
-    .context("blob meta offset overflow")?;
+    );
     write_zero_padding(
         &mut blob_writer_stream,
         bootstrap_offset + bootstrap_size,
@@ -373,6 +371,30 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         blob_meta_path: &blob_meta_path,
         bootstrap_path: args.bootstrap.as_deref(),
     });
+    Ok(())
+}
+
+fn align_up(value: u64, align: u64) -> u64 {
+    debug_assert!(align.is_power_of_two());
+    (value + align - 1) & !(align - 1)
+}
+
+fn bytes_to_blocks(size: u64, name: &str) -> Result<u32> {
+    if size % EROFS_BLOCK_SIZE as u64 != 0 {
+        bail!("{name} size is not block aligned: {size}");
+    }
+    u32::try_from(size / EROFS_BLOCK_SIZE as u64)
+        .with_context(|| format!("{name} exceeds u32 block count"))
+}
+
+fn write_zero_padding(writer: &mut dyn Write, current: u64, aligned: u64) -> Result<()> {
+    if aligned < current {
+        bail!("invalid blob region alignment");
+    }
+    let padding = (aligned - current) as usize;
+    if padding > 0 {
+        writer.write_all(&vec![0u8; padding])?;
+    }
     Ok(())
 }
 
@@ -562,6 +584,13 @@ mod tests {
     #[test]
     fn default_chunk_size_is_one_megabyte() {
         assert_eq!(DEFAULT_CHUNK_SIZE, 1_048_576);
+    }
+
+    #[test]
+    fn align_up_rounds_up_to_alignment() {
+        assert_eq!(align_up(0, 8), 0);
+        assert_eq!(align_up(1, 8), 8);
+        assert_eq!(align_up(16, 8), 16);
     }
 
     #[test]
