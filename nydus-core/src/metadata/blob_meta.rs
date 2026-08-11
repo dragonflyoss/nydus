@@ -337,7 +337,7 @@ impl BlobMetaHeader {
         Ok(())
     }
 
-    fn to_bytes_with_crc32(&self, crc32: u32) -> [u8; BLOB_META_HEADER_SIZE as usize] {
+    fn to_bytes_with_crc32(self, crc32: u32) -> [u8; BLOB_META_HEADER_SIZE as usize] {
         let mut data = [0u8; BLOB_META_HEADER_SIZE as usize];
         data[0..8].copy_from_slice(&self.magic);
         data[8..12].copy_from_slice(&self.version.to_le_bytes());
