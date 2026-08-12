@@ -1,5 +1,13 @@
 mod data;
+mod entry;
 mod meta;
+mod range;
+
+pub use entry::{DirEntry, FileType, Fs, FsEntry, Metadata};
+pub(crate) use range::{
+    checked_range_end, mapped_range_offset, push_blob_fd_ranges, push_fd_range, BlobRangeSpec,
+};
+pub use range::{copy_ranges, FdRange, FileMaps, ResolveMode};
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -12,10 +20,11 @@ use memmap2::Mmap;
 use tempfile::TempDir;
 use tracing::{info, warn};
 
+use crate::blob::*;
 use crate::metadata::*;
-use crate::metrics::trace::TraceRecorder;
 use crate::storage::backend::{BlobBackend, LocalBackend};
 use crate::storage::cache::{BlobCache, LocalBlobCache};
+use crate::telemetry::trace::TraceRecorder;
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct RawDirEntry {
@@ -383,20 +392,20 @@ impl ErofsReader {
             // Time the ondemand (redirect) blob prefetch and report how many
             // source groups it warmed vs skipped, so operators can tell
             // whether the streaming warmup outran the workload.
-            let fill_before = crate::metrics::cache_redirect_fill_group_total();
-            let skip_before = crate::metrics::cache_redirect_skip_group_total();
-            let bytes_before = crate::metrics::backend_redirect_read_bytes_total();
+            let fill_before = crate::telemetry::metrics::cache_redirect_fill_group_total();
+            let skip_before = crate::telemetry::metrics::cache_redirect_skip_group_total();
+            let bytes_before = crate::telemetry::metrics::backend_redirect_read_bytes_total();
             let start = Instant::now();
-            let result = self.prefetch_redirect_blob(blob_index, blob, cache.as_ref(), threads);
+            let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), threads);
             let elapsed = start.elapsed();
             info!(
                 "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} groups, skipped {} groups, fetched {} bytes",
                 blob_index,
                 elapsed,
                 threads.max(1),
-                crate::metrics::cache_redirect_fill_group_total() - fill_before,
-                crate::metrics::cache_redirect_skip_group_total() - skip_before,
-                crate::metrics::backend_redirect_read_bytes_total() - bytes_before,
+                crate::telemetry::metrics::cache_redirect_fill_group_total() - fill_before,
+                crate::telemetry::metrics::cache_redirect_skip_group_total() - skip_before,
+                crate::telemetry::metrics::backend_redirect_read_bytes_total() - bytes_before,
             );
             result
         } else {
@@ -412,7 +421,6 @@ impl ErofsReader {
     fn prefetch_redirect_blob(
         &self,
         blob_index: u16,
-        blob: &Blob,
         cache: &dyn BlobCache,
         threads: usize,
     ) -> io::Result<()> {
@@ -435,7 +443,7 @@ impl ErofsReader {
         };
         cache.stream_redirect_parallel(threads, &skip, &|group, decoded| {
             if !group.is_redirect() {
-                crate::metrics::inc_cache_redirect_skip_group();
+                crate::telemetry::metrics::inc_cache_redirect_skip_group();
                 warn!("ondemand blob {blob_index} contains a non-redirect group; skipping");
                 return Ok(());
             }
@@ -444,7 +452,7 @@ impl ErofsReader {
             let source = match self.blobs.get(&source_blob_index) {
                 Some(source) => source,
                 None => {
-                    crate::metrics::inc_cache_redirect_skip_group();
+                    crate::telemetry::metrics::inc_cache_redirect_skip_group();
                     warn!("ondemand blob {blob_index} redirects to unknown blob {source_blob_index}; skipping group");
                     return Ok(());
                 }
@@ -452,16 +460,13 @@ impl ErofsReader {
             let source_cache = match source.cache() {
                 Ok(cache) => cache,
                 Err(err) => {
-                    crate::metrics::inc_cache_redirect_skip_group();
+                    crate::telemetry::metrics::inc_cache_redirect_skip_group();
                     warn!("failed to open source blob {source_blob_index} for redirect: {err}");
                     return Ok(());
                 }
             };
             if let Err(err) = source_cache.fill_group_from_redirect(source_index, decoded) {
-                if crate::storage::cache::is_group_crc_mismatch(&err) {
-                    crate::metrics::record_backend_crc_error(blob.backend.backend_target());
-                }
-                crate::metrics::inc_cache_redirect_skip_group();
+                crate::telemetry::metrics::inc_cache_redirect_skip_group();
                 warn!(
                     "failed to fill blob {source_blob_index} group {source_index} from ondemand blob {blob_index}: {err}"
                 );
@@ -580,6 +585,20 @@ impl ErofsReader {
     pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {
         (self.sb().meta_blkaddr() as u64 * EROFS_BLOCK_SIZE as u64 + nid * EROFS_SLOTSIZE as u64)
             as usize
+    }
+}
+
+impl crate::storage::prefetch::PrefetchSource for ErofsReader {
+    fn prefetch_plan(&self) -> (Vec<u16>, Vec<u16>) {
+        self.prefetch_plan()
+    }
+
+    fn is_redirect_blob(&self, blob_index: u16) -> io::Result<bool> {
+        self.is_redirect_blob(blob_index)
+    }
+
+    fn prefetch_blob(&self, blob_index: u16, threads: usize) -> io::Result<()> {
+        self.prefetch_blob(blob_index, threads)
     }
 }
 

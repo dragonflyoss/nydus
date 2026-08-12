@@ -290,11 +290,6 @@ impl RequestDispatcher {
     }
 }
 
-/// Whether an HTTP status code denotes success (2xx).
-pub(crate) fn is_success_status(status: StatusCode) -> bool {
-    status.is_success()
-}
-
 /// Log a completed backend request at debug level so it can be inspected during
 /// a `check` (run with `--log-level debug`). The line carries the request
 /// source, the transport that served it, the method, final URL and full request

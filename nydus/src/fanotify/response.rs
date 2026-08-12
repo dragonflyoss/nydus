@@ -188,7 +188,6 @@ impl Drop for PendingPermission {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::os::fd::{FromRawFd, OwnedFd};
     use std::sync::Mutex;
 
     use super::*;

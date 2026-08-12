@@ -1,13 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
-use memmap2::Mmap;
-use nydus::build::inode::mode_to_erofs_file_type;
-use nydus::config::Config;
-use nydus::fs::{ErofsReader, RawBlobInfo};
-use nydus::metadata::*;
-use nydus::utils::{hex_string, sha256_bytes};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs;
+use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
+use nydus_core::config::Config;
+use nydus_core::metadata::*;
+use nydus_core::utils::hex_string;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Args)]
@@ -28,145 +25,6 @@ pub struct CheckArgs {
     /// When set, --blob-dir can be omitted.
     #[arg(long)]
     pub config: Option<PathBuf>,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ImageKind {
-    Blob,
-    Bootstrap,
-}
-
-#[derive(Default)]
-struct ImageStats {
-    visited_inodes: u64,
-    max_depth: u32,
-    directory_entries: u64,
-    regular_files: u64,
-    directories: u64,
-    symlinks: u64,
-    char_devices: u64,
-    block_devices: u64,
-    fifos: u64,
-    sockets: u64,
-    chunked_files: u64,
-    flat_plain_files: u64,
-    flat_inline_files: u64,
-    other_layout_files: u64,
-    xattr_entries: u64,
-    hardlink_inodes: u64,
-    hardlink_paths: u64,
-    total_chunks: u64,
-    hole_chunks: u64,
-    total_logical_bytes: u64,
-    chunk_sizes: BTreeSet<u64>,
-    inline_overflows: Vec<InlineOverflow>,
-}
-
-/// An inode whose tail-packed inline data crosses its metadata block, which
-/// the kernel rejects with `-EFSCORRUPTED` when the inode is read.
-struct InlineOverflow {
-    nid: u64,
-    block_offset: u64,
-    header_size: u64,
-    xattr_size: u64,
-    inline_size: u64,
-}
-
-struct BlobSummary {
-    slot_sha256: [u8; EROFS_BLOB_ID_SIZE],
-    slot_sha256_kind: SlotSha256Kind,
-    declared_blocks: u64,
-    mapped_blkaddr: u64,
-    mapped_offset: u64,
-    declared_data_size: u64,
-    resolved_path: Option<PathBuf>,
-    blob_size: Option<u64>,
-    blob_sha256: Option<[u8; EROFS_BLOB_ID_SIZE]>,
-    data_sha256: Option<[u8; EROFS_BLOB_ID_SIZE]>,
-    data_size: Option<u64>,
-    blob_meta: Option<BlobMetaSummary>,
-    verified: bool,
-    chunk_refs: u64,
-    unique_blkaddrs: HashSet<u64>,
-    logical_bytes: u64,
-    chunk_sizes: BTreeSet<u64>,
-}
-
-impl BlobSummary {
-    fn new(blob: &RawBlobInfo) -> Self {
-        let mapped_offset = blob.mapped_blkaddr * EROFS_BLOCK_SIZE as u64;
-        Self {
-            slot_sha256: blob.blob_id,
-            slot_sha256_kind: SlotSha256Kind::Unknown,
-            declared_blocks: blob.blocks,
-            mapped_blkaddr: blob.mapped_blkaddr,
-            mapped_offset,
-            declared_data_size: blob.blocks * EROFS_BLOCK_SIZE as u64,
-            resolved_path: None,
-            blob_size: None,
-            blob_sha256: None,
-            data_sha256: None,
-            data_size: None,
-            blob_meta: None,
-            verified: false,
-            chunk_refs: 0,
-            unique_blkaddrs: HashSet::new(),
-            logical_bytes: 0,
-            chunk_sizes: BTreeSet::new(),
-        }
-    }
-
-    fn data_size_for_display(&self) -> u64 {
-        self.data_size.unwrap_or(self.declared_data_size)
-    }
-}
-
-#[derive(Clone)]
-struct ResolvedBlob {
-    path: PathBuf,
-    blob_size: u64,
-    blob_sha256: [u8; EROFS_BLOB_ID_SIZE],
-    data_sha256: [u8; EROFS_BLOB_ID_SIZE],
-    data_size: u64,
-    blob_meta: Option<BlobMetaSummary>,
-    slot_sha256_kind: SlotSha256Kind,
-    verified: bool,
-}
-
-struct BlobInspection {
-    data_sha256: [u8; EROFS_BLOB_ID_SIZE],
-    data_size: u64,
-    blob_sha256: [u8; EROFS_BLOB_ID_SIZE],
-    blob_size: u64,
-    blob_meta: Option<BlobMetaSummary>,
-}
-
-#[derive(Clone)]
-struct BlobMetaSummary {
-    chunk_count: usize,
-    group_count: usize,
-    chunk_size: u32,
-    digester: BlobMetaDigester,
-    compressor: BlobMetaCompressor,
-    total_uncompressed_size: u64,
-    total_compressed_size: u64,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum SlotSha256Kind {
-    Blob,
-    Data,
-    Unknown,
-}
-
-impl SlotSha256Kind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Blob => "full_blob",
-            Self::Data => "data_blob",
-            Self::Unknown => "unknown",
-        }
-    }
 }
 
 pub fn run_check(args: CheckArgs) -> Result<()> {
@@ -211,353 +69,26 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
         }
     };
 
-    let reader = ErofsReader::open_metadata_only(path)
-        .with_context(|| format!("failed to open image for inspection: {}", path.display()))?;
-    let sb = reader.sb();
-    let image_file_bytes = fs::metadata(path)
-        .with_context(|| format!("failed to stat image: {}", path.display()))?
-        .len();
-    let primary_image_bytes = sb.blocks() * EROFS_BLOCK_SIZE as u64;
-    let blob_infos = reader.blob_infos().context("failed to read device slots")?;
-    let resolved_blobs = resolve_blobs(kind, path, blob_dir.as_deref(), &blob_infos)?;
-    let mut blobs = blob_infos
-        .iter()
-        .map(|blob| {
-            let mut summary = BlobSummary::new(blob);
-            if let Some(resolved) = resolved_blobs.get(&blob.blob_index) {
-                summary.resolved_path = Some(resolved.path.clone());
-                summary.blob_size = Some(resolved.blob_size);
-                summary.blob_sha256 = Some(resolved.blob_sha256);
-                summary.data_sha256 = Some(resolved.data_sha256);
-                summary.data_size = Some(resolved.data_size);
-                summary.blob_meta = resolved.blob_meta.clone();
-                summary.slot_sha256_kind = resolved.slot_sha256_kind;
-                summary.verified = resolved.verified;
-            }
-            (blob.blob_index, summary)
-        })
-        .collect::<BTreeMap<_, _>>();
+    let report = check_image(kind, path, blob_dir.as_deref())?;
 
-    let mut stats = ImageStats::default();
-    let epoch = sb.epoch();
-    let mut visited = HashSet::new();
-    walk_inode(
-        &reader,
-        sb.root_nid(),
-        epoch,
-        0,
-        &mut visited,
-        &mut stats,
-        &mut blobs,
-    )?;
+    print_header(kind, path, &report);
+    print_superblock(&report.superblock);
+    print_summary(&report.stats, &report.blobs);
+    print_blobs(&report.blobs);
+    print_inline_across_blocks(&report.stats);
 
-    print_header(kind, path, image_file_bytes, primary_image_bytes, &blobs);
-    print_superblock(sb);
-    print_summary(&stats, &blobs);
-    print_blobs(&blobs);
-    print_inline_across_blocks(&stats);
-
-    if !stats.inline_overflows.is_empty() {
+    if !report.stats.inline_overflows.is_empty() {
         bail!(
             "{} inode(s) have inline data crossing a metadata block; \
              the kernel cannot read them",
-            stats.inline_overflows.len()
+            report.stats.inline_overflows.len()
         );
     }
 
     Ok(())
 }
 
-/// Report an inode whose tail-packed inline data would cross its metadata
-/// block. EROFS requires that tail to stay inside the inode's own block; the
-/// kernel fails `erofs_map_blocks()` with `-EFSCORRUPTED` otherwise, making the
-/// inode unreadable.
-fn inline_overflow(nid: u64, inode: &ErofsInode<'_>) -> Option<InlineOverflow> {
-    if inode.data_layout() != EROFS_INODE_FLAT_INLINE {
-        return None;
-    }
-    check_inline_fit(
-        nid,
-        inode.header_size() as u64,
-        inode.xattr_size() as u64,
-        inode.size(),
-    )
-}
-
-fn check_inline_fit(
-    nid: u64,
-    header_size: u64,
-    xattr_size: u64,
-    file_size: u64,
-) -> Option<InlineOverflow> {
-    let block = EROFS_BLOCK_SIZE as u64;
-    let block_offset = (nid * EROFS_SLOTSIZE as u64) % block;
-    // Full blocks live in the data area; only the remainder is packed inline.
-    let inline_size = file_size % block;
-    if block_offset + header_size + xattr_size + inline_size > block {
-        Some(InlineOverflow {
-            nid,
-            block_offset,
-            header_size,
-            xattr_size,
-            inline_size,
-        })
-    } else {
-        None
-    }
-}
-
-fn walk_inode(
-    reader: &ErofsReader,
-    nid: u64,
-    epoch: u64,
-    depth: u32,
-    visited: &mut HashSet<u64>,
-    stats: &mut ImageStats,
-    blobs: &mut BTreeMap<u16, BlobSummary>,
-) -> Result<()> {
-    if !visited.insert(nid) {
-        return Ok(());
-    }
-
-    let inode = reader
-        .inode(nid)
-        .with_context(|| format!("failed to read inode {nid}"))?;
-    let file_type = mode_to_erofs_file_type(inode.mode());
-
-    stats.visited_inodes += 1;
-    stats.max_depth = stats.max_depth.max(depth);
-    stats.xattr_entries += reader.read_xattrs(nid, &inode)?.len() as u64;
-    if file_type != EROFS_FT_DIR && inode.nlink() > 1 {
-        stats.hardlink_inodes += 1;
-        stats.hardlink_paths += inode.nlink() as u64;
-    }
-    if let Some(overflow) = inline_overflow(nid, &inode) {
-        stats.inline_overflows.push(overflow);
-    }
-
-    match file_type {
-        EROFS_FT_DIR => {
-            stats.directories += 1;
-            for entry in reader.read_dir(nid, &inode)? {
-                if entry.name == b"." || entry.name == b".." {
-                    continue;
-                }
-                stats.directory_entries += 1;
-                walk_inode(reader, entry.nid, epoch, depth + 1, visited, stats, blobs)?;
-            }
-        }
-        EROFS_FT_REG_FILE => {
-            stats.regular_files += 1;
-            match inode.data_layout() {
-                EROFS_INODE_CHUNK_BASED => {
-                    stats.chunked_files += 1;
-                    let chunk_size = 1u64 << chunkbits(reader, &inode);
-                    stats.chunk_sizes.insert(chunk_size);
-                    let chunk_index_entries = reader.read_chunk_index_entries(nid, &inode)?;
-                    stats.total_chunks += chunk_index_entries.len() as u64;
-                    stats.total_logical_bytes += inode.size();
-
-                    for (index, chunk) in chunk_index_entries.iter().enumerate() {
-                        let remaining = inode.size().saturating_sub(index as u64 * chunk_size);
-                        let logical_bytes = remaining.min(chunk_size);
-                        // Hole chunks reference no blob at all (their on-disk
-                        // device_id bits are part of the null sentinel), so
-                        // they must not fabricate a blob summary entry.
-                        if chunk.blkaddr == EROFS_NULL_ADDR {
-                            stats.hole_chunks += 1;
-                            continue;
-                        }
-                        let blob = blobs.entry(chunk.device_id).or_insert_with(|| BlobSummary {
-                            slot_sha256: [0u8; EROFS_BLOB_ID_SIZE],
-                            slot_sha256_kind: SlotSha256Kind::Unknown,
-                            declared_blocks: 0,
-                            mapped_blkaddr: 0,
-                            mapped_offset: 0,
-                            declared_data_size: 0,
-                            resolved_path: None,
-                            blob_size: None,
-                            blob_sha256: None,
-                            data_sha256: None,
-                            data_size: None,
-                            blob_meta: None,
-                            verified: false,
-                            chunk_refs: 0,
-                            unique_blkaddrs: HashSet::new(),
-                            logical_bytes: 0,
-                            chunk_sizes: BTreeSet::new(),
-                        });
-                        blob.chunk_refs += 1;
-                        blob.logical_bytes += logical_bytes;
-                        blob.chunk_sizes.insert(chunk_size);
-                        blob.unique_blkaddrs.insert(chunk.blkaddr);
-                    }
-                }
-                EROFS_INODE_FLAT_PLAIN => {
-                    stats.flat_plain_files += 1;
-                }
-                EROFS_INODE_FLAT_INLINE => {
-                    stats.flat_inline_files += 1;
-                }
-                _ => {
-                    stats.other_layout_files += 1;
-                }
-            }
-        }
-        EROFS_FT_SYMLINK => {
-            let _ = inode.mtime(epoch);
-            stats.symlinks += 1;
-        }
-        EROFS_FT_CHRDEV => {
-            stats.char_devices += 1;
-        }
-        EROFS_FT_BLKDEV => {
-            stats.block_devices += 1;
-        }
-        EROFS_FT_FIFO => {
-            stats.fifos += 1;
-        }
-        EROFS_FT_SOCK => {
-            stats.sockets += 1;
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
-fn resolve_blobs(
-    kind: ImageKind,
-    image_path: &Path,
-    blob_dir: Option<&Path>,
-    blob_infos: &[RawBlobInfo],
-) -> Result<HashMap<u16, ResolvedBlob>> {
-    let mut resolved = HashMap::new();
-
-    if kind == ImageKind::Blob && blob_infos.len() == 1 {
-        if let Some(inspection) = inspect_blob(image_path)? {
-            resolved.insert(
-                blob_infos[0].blob_index,
-                ResolvedBlob {
-                    path: image_path.to_path_buf(),
-                    blob_size: inspection.blob_size,
-                    blob_sha256: inspection.blob_sha256,
-                    data_sha256: inspection.data_sha256,
-                    data_size: inspection.data_size,
-                    blob_meta: inspection.blob_meta,
-                    slot_sha256_kind: SlotSha256Kind::Data,
-                    verified: inspection.data_sha256 == blob_infos[0].blob_id,
-                },
-            );
-        }
-    }
-
-    let Some(blob_dir) = blob_dir else {
-        return Ok(resolved);
-    };
-
-    let mut blob_sha_matches = HashMap::new();
-
-    for entry in fs::read_dir(blob_dir)
-        .with_context(|| format!("failed to read blob-dir: {}", blob_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-
-        let Some(inspection) = inspect_blob(&path)? else {
-            continue;
-        };
-
-        blob_sha_matches
-            .entry(inspection.blob_sha256)
-            .or_insert_with(|| ResolvedBlob {
-                path: path.clone(),
-                blob_size: inspection.blob_size,
-                blob_sha256: inspection.blob_sha256,
-                data_sha256: inspection.data_sha256,
-                data_size: inspection.data_size,
-                blob_meta: inspection.blob_meta.clone(),
-                slot_sha256_kind: SlotSha256Kind::Blob,
-                verified: true,
-            });
-    }
-
-    for blob in blob_infos {
-        if let Some(match_by_blob) = blob_sha_matches.get(&blob.blob_id) {
-            resolved
-                .entry(blob.blob_index)
-                .or_insert_with(|| match_by_blob.clone());
-        }
-    }
-
-    Ok(resolved)
-}
-
-fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open blob candidate: {}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("failed to map blob candidate: {}", path.display()))?;
-    if mmap.len() < NYDUS_BLOB_FOOTER_SIZE {
-        return Ok(None);
-    }
-    let footer_bytes = &mmap[mmap.len() - NYDUS_BLOB_FOOTER_SIZE..];
-    if !BlobFooter::has_magic(footer_bytes) {
-        return Ok(None);
-    }
-
-    let footer = BlobFooter::parse_from_tail(&mmap)?;
-    let data_start = usize::try_from(footer.compressed_data_offset())
-        .context("compressed data offset too large")?;
-    let data_size =
-        usize::try_from(footer.compressed_data_size()).context("compressed data size too large")?;
-    let data_end = data_start
-        .checked_add(data_size)
-        .context("data range overflow")?;
-    let meta_start =
-        usize::try_from(footer.blob_meta_offset()).context("blob meta offset too large")?;
-    let meta_end = meta_start
-        .checked_add(footer.blob_meta_size() as usize)
-        .context("blob meta range overflow")?;
-
-    let data_digest = sha256_bytes(&mmap[data_start..data_end]);
-    let blob_sha256 = sha256_bytes(&mmap);
-    Ok(Some(BlobInspection {
-        data_sha256: data_digest,
-        data_size: footer.compressed_data_size(),
-        blob_sha256,
-        blob_size: mmap.len() as u64,
-        blob_meta: Some(blob_meta_summary_from_bytes(&mmap[meta_start..meta_end])?),
-    }))
-}
-
-fn blob_meta_summary_from_bytes(data: &[u8]) -> Result<BlobMetaSummary> {
-    let blob_meta = BlobMeta::loader().from_bytes(data)?;
-    Ok(BlobMetaSummary {
-        chunk_count: blob_meta.chunk_count(),
-        group_count: blob_meta.group_count(),
-        chunk_size: blob_meta.chunk_size(),
-        digester: blob_meta.digester(),
-        compressor: blob_meta.compressor(),
-        total_uncompressed_size: blob_meta.total_uncompressed_size(),
-        total_compressed_size: blob_meta.total_compressed_size(),
-    })
-}
-
-fn chunkbits(reader: &ErofsReader, inode: &ErofsInode<'_>) -> u32 {
-    reader.sb().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F)
-}
-
-fn print_header(
-    kind: ImageKind,
-    path: &Path,
-    image_file_bytes: u64,
-    primary_image_bytes: u64,
-    blobs: &BTreeMap<u16, BlobSummary>,
-) {
+fn print_header(kind: ImageKind, path: &Path, report: &CheckReport) {
     println!("Image");
     println!(
         "  kind: {}",
@@ -567,10 +98,10 @@ fn print_header(
         }
     );
     println!("  path: {}", path.display());
-    println!("  file_size: {image_file_bytes}");
-    println!("  primary_image_size: {primary_image_bytes}");
-    if kind == ImageKind::Blob && blobs.len() == 1 {
-        let blob = blobs.values().next().expect("single blob summary");
+    println!("  file_size: {}", report.image_file_bytes);
+    println!("  primary_image_size: {}", report.primary_image_bytes);
+    if kind == ImageKind::Blob && report.blobs.len() == 1 {
+        let blob = report.blobs.values().next().expect("single blob summary");
         println!(
             "  compressed_data_region_size: {}",
             blob.data_size_for_display()
@@ -782,7 +313,7 @@ fn digest_or_unknown(digest: &[u8; EROFS_BLOB_ID_SIZE]) -> String {
 
 fn blob_meta_field<T: ToString>(
     blob: &BlobSummary,
-    field: impl FnOnce(&BlobMetaSummary) -> T,
+    field: impl FnOnce(&nydus::check::BlobMetaSummary) -> T,
 ) -> String {
     blob.blob_meta
         .as_ref()
@@ -792,7 +323,7 @@ fn blob_meta_field<T: ToString>(
 
 fn blob_meta_field_or<T: ToString>(
     blob: &BlobSummary,
-    field: impl FnOnce(&BlobMetaSummary) -> T,
+    field: impl FnOnce(&nydus::check::BlobMetaSummary) -> T,
     fallback: Option<T>,
 ) -> String {
     blob.blob_meta
@@ -849,109 +380,4 @@ fn format_u64_set(values: &BTreeSet<u64>) -> String {
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(",")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn inline_fit_flags_only_block_crossing_inodes() {
-        // nid 2557 sits 4000 bytes into its block; a 65-byte symlink target
-        // behind a 32-byte header ends one byte past the block.
-        let overflow = check_inline_fit(2557, 32, 0, 65).expect("should overflow");
-        assert_eq!(overflow.block_offset, 4000);
-        assert_eq!(overflow.inline_size, 65);
-
-        // 64 bytes exactly fills the block tail.
-        assert!(check_inline_fit(2557, 32, 0, 64).is_none());
-        // An inode at the start of a block has room to spare.
-        assert!(check_inline_fit(128, 32, 0, 4000).is_none());
-    }
-
-    #[test]
-    fn inline_fit_accounts_for_xattrs_and_full_blocks() {
-        // xattrs push the tail past the block end.
-        assert!(check_inline_fit(2557, 32, 0, 60).is_none());
-        assert!(check_inline_fit(2557, 32, 12, 60).is_some());
-
-        // Only the remainder is inline: a whole-block file packs nothing.
-        assert!(check_inline_fit(2557, 32, 0, EROFS_BLOCK_SIZE as u64).is_none());
-    }
-
-    #[test]
-    fn resolve_bootstrap_blob_dir_by_full_blob_digest_only() {
-        let dir = tempdir().unwrap();
-        let blob_path = dir.path().join("blob");
-        let (full_blob_digest, data_blob_digest) = write_minimal_blob(&blob_path);
-
-        let full_blob_info = RawBlobInfo {
-            blob_index: 1,
-            blob_id: full_blob_digest,
-            blocks: 1,
-            mapped_blkaddr: 0,
-        };
-        let resolved = resolve_blobs(
-            ImageKind::Bootstrap,
-            Path::new("bootstrap.boot"),
-            Some(dir.path()),
-            &[full_blob_info],
-        )
-        .unwrap();
-        let resolved_blob = resolved.get(&1).unwrap();
-
-        assert_eq!(resolved_blob.slot_sha256_kind, SlotSha256Kind::Blob);
-        assert_eq!(resolved_blob.blob_sha256, full_blob_digest);
-        assert!(resolved_blob.verified);
-
-        let data_blob_info = RawBlobInfo {
-            blob_index: 2,
-            blob_id: data_blob_digest,
-            blocks: 1,
-            mapped_blkaddr: 0,
-        };
-        let resolved = resolve_blobs(
-            ImageKind::Bootstrap,
-            Path::new("bootstrap.boot"),
-            Some(dir.path()),
-            &[data_blob_info],
-        )
-        .unwrap();
-
-        assert!(!resolved.contains_key(&2));
-    }
-
-    fn write_minimal_blob(path: &Path) -> ([u8; EROFS_BLOB_ID_SIZE], [u8; EROFS_BLOB_ID_SIZE]) {
-        let data = [0x5au8; EROFS_BLOCK_SIZE as usize];
-        let data_digest = sha256_bytes(&data);
-        let blob_meta = BlobMeta::from_parts(
-            [0u8; EROFS_BLOB_ID_SIZE],
-            BLOB_META_DEFAULT_CHUNK_BLOCK_COUNT,
-            Vec::new(),
-            Vec::new(),
-        )
-        .unwrap();
-        let mut blob_meta_bytes = Vec::new();
-        blob_meta.write_to(&mut blob_meta_bytes).unwrap();
-        assert_eq!(blob_meta_bytes.len(), EROFS_BLOCK_SIZE as usize);
-
-        let footer = BlobFooter::new(
-            0,
-            data.len() as u64,
-            data.len() as u64,
-            0,
-            data.len() as u64,
-            1,
-        )
-        .unwrap();
-        let mut blob = Vec::new();
-        blob.extend_from_slice(&data);
-        blob.extend_from_slice(&blob_meta_bytes);
-        footer.write_to(&mut blob).unwrap();
-        fs::write(path, &blob).unwrap();
-
-        (sha256_bytes(&blob), data_digest)
-    }
 }

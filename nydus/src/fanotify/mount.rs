@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::core::BlobDevice;
-use crate::utils::path_cstring;
+use nydus_core::utils::path_cstring;
 
 /// The kernel copies `mount(2)` data into a single page (`copy_mount_options`),
 /// so a longer option string is silently truncated — dropping `device=` slots
@@ -101,7 +101,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
-    use crate::BlobId;
+    use nydus_core::BlobId;
 
     fn device(index: u16, path: &str) -> BlobDevice {
         BlobDevice::for_test(

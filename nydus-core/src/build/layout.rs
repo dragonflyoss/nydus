@@ -1,4 +1,5 @@
-use super::{round_up, EROFS_BLOCK_SIZE, EROFS_SLOTSIZE};
+use crate::metadata::{EROFS_BLOCK_SIZE, EROFS_SLOTSIZE};
+use crate::utils::round_up;
 
 /// Metadata layout allocator.
 ///

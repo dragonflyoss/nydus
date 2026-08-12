@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	"io"
 	"os"
 	"path/filepath"
@@ -156,11 +157,11 @@ func nydusDataLayers(layers []ocispec.Descriptor) ([]ocispec.Descriptor, error) 
 	bootstrap := false
 	for _, layer := range layers {
 		switch {
-		case IsNydusBootstrap(layer):
+		case pkgconv.IsNydusBootstrap(layer):
 			bootstrap = true
-		case IsNydusOptimizedBlob(layer):
+		case pkgconv.IsNydusOptimizedBlob(layer):
 			// Its data is a rearranged copy of the other blobs'.
-		case IsNydusBlob(layer):
+		case pkgconv.IsNydusBlob(layer):
 			blobs = append(blobs, layer)
 		default:
 			return nil, errors.Errorf("layer %s is not a nydus layer (%s)", layer.Digest, layer.MediaType)
@@ -232,7 +233,7 @@ func unpackLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor,
 	if err != nil {
 		return ocispec.Descriptor{}, "", errors.Wrap(err, "open compressor")
 	}
-	unpackErr := runNydusToTar(ctx, UnpackOption{
+	unpackErr := pkgconv.RunNydusToTar(ctx, pkgconv.UnpackOption{
 		BuilderPath: opt.BuilderPath,
 		BlobPath:    blobPath,
 		LogLevel:    opt.LogLevel,
@@ -247,7 +248,7 @@ func unpackLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor,
 	diffID := diffIDer.Digest()
 	layerDigest := cw.Digest()
 	if err := cw.Commit(ctx, 0, "", content.WithLabels(map[string]string{
-		LayerAnnotationUncompressed: diffID.String(),
+		pkgconv.LayerAnnotationUncompressed: diffID.String(),
 	})); err != nil && !errdefs.IsAlreadyExists(err) {
 		return ocispec.Descriptor{}, "", errors.Wrap(err, "commit layer")
 	}
@@ -262,7 +263,7 @@ func unpackLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor,
 		Digest:    layerDigest,
 		Size:      info.Size,
 		Annotations: map[string]string{
-			LayerAnnotationUncompressed: diffID.String(),
+			pkgconv.LayerAnnotationUncompressed: diffID.String(),
 		},
 	}, diffID, nil
 }
@@ -360,7 +361,7 @@ func stripNydusOSFeature(platform *ocispec.Platform) *ocispec.Platform {
 	stripped := *platform
 	features := make([]string, 0, len(platform.OSFeatures))
 	for _, feature := range platform.OSFeatures {
-		if feature != ManifestOSFeatureNydus {
+		if feature != pkgconv.ManifestOSFeatureNydus {
 			features = append(features, feature)
 		}
 	}

@@ -21,7 +21,7 @@ use std::thread;
 use anyhow::{anyhow, Context, Result};
 use tracing::{debug, warn};
 
-use crate::BlobId;
+use nydus_core::BlobId;
 
 use super::core::{
     align_fetch_range, decide, fd_identity, Decision, DenyReason, FanotifyCore, FetchError,

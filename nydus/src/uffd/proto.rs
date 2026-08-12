@@ -9,8 +9,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use crate::FdRange;
 use anyhow::{anyhow, bail, Context, Result};
+use nydus_core::FdRange;
 use sendfd::{RecvWithFd, SendWithFd};
 use tokio::io::unix::AsyncFd;
 use tracing::warn;
@@ -103,6 +103,7 @@ pub struct VmaRegion {
     pub flags: i32,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlobRange {
     pub device_offset: u64,
@@ -116,6 +117,7 @@ pub struct DeviceRange {
     pub len: u64,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatResponse {
     pub size: u64,
@@ -266,6 +268,9 @@ impl ProtoConn {
     }
 }
 
+// Client-side codec: the in-tree consumer is the guest kernel driver,
+// so these are exercised only by the protocol tests below.
+#[cfg(test)]
 pub fn encode_handshake(
     ver: u16,
     policy: FaultPolicy,
@@ -348,6 +353,7 @@ pub fn encode_range_response(ranges: &[(u64, u64, u64)], next: bool) -> Vec<u8> 
     buf
 }
 
+#[cfg(test)]
 pub fn decode_range_response(payload: &[u8]) -> Option<Vec<BlobRange>> {
     if payload.len() < RANGE_COUNT_SIZE {
         return None;
@@ -370,6 +376,7 @@ pub fn decode_range_response(payload: &[u8]) -> Option<Vec<BlobRange>> {
     Some(ranges)
 }
 
+#[cfg(test)]
 pub fn encode_stat_request() -> Vec<u8> {
     Header::new(MSG_STAT_REQUEST, 0).to_bytes().to_vec()
 }
@@ -384,6 +391,7 @@ pub fn encode_stat_response(size: u64, block_size: u32, flags: u32) -> Vec<u8> {
     buf
 }
 
+#[cfg(test)]
 pub fn decode_stat_response(payload: &[u8]) -> Option<StatResponse> {
     if payload.len() != STAT_RESPONSE_SIZE {
         return None;
@@ -395,6 +403,7 @@ pub fn decode_stat_response(payload: &[u8]) -> Option<StatResponse> {
     })
 }
 
+#[cfg(test)]
 pub fn encode_fetch_request(offset: u64, len: u64) -> Vec<u8> {
     let header = Header::new(MSG_FETCH_REQUEST, FETCH_REQUEST_SIZE as u32);
     let mut buf = Vec::with_capacity(HEADER_SIZE + FETCH_REQUEST_SIZE);
@@ -414,6 +423,7 @@ pub fn decode_fetch_request(payload: &[u8]) -> Option<DeviceRange> {
     })
 }
 
+#[cfg(test)]
 pub fn encode_probe_request() -> Vec<u8> {
     Header::new(MSG_PROBE_REQUEST, 0).to_bytes().to_vec()
 }

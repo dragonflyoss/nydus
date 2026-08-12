@@ -103,23 +103,9 @@ pub struct DirEntry {
     pub inode_index: usize,
 }
 
-/// Convert a Unix file mode to an EROFS file type value for directory entries.
-pub fn mode_to_erofs_file_type(mode: u16) -> u8 {
-    match mode as u32 & libc::S_IFMT {
-        libc::S_IFREG => EROFS_FT_REG_FILE,
-        libc::S_IFDIR => EROFS_FT_DIR,
-        libc::S_IFCHR => EROFS_FT_CHRDEV,
-        libc::S_IFBLK => EROFS_FT_BLKDEV,
-        libc::S_IFIFO => EROFS_FT_FIFO,
-        libc::S_IFSOCK => EROFS_FT_SOCK,
-        libc::S_IFLNK => EROFS_FT_SYMLINK,
-        _ => 0,
-    }
-}
-
 /// Calculate the size of an inode's metadata (header + xattr ibody + chunk indexes) for the final
 /// image.
-pub fn erofs_inode_size(inode: &InodeInfo, _chunk_bits: u32, _blksz_bits: u32) -> usize {
+pub fn erofs_inode_size(inode: &InodeInfo) -> usize {
     let inode_isize = if inode.is_extended {
         EROFS_INODE_EXTENDED_SIZE
     } else {
@@ -449,7 +435,7 @@ fn build_tree_recursive(
 /// Serialize an inode to bytes and write it at the given offset in a buffer.
 pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     let blkszbits = EROFS_BLKSZBITS as u32;
-    let inode_size = erofs_inode_size(inode, blkszbits, blkszbits);
+    let inode_size = erofs_inode_size(inode);
     let mut buf = vec![0u8; inode_size];
 
     let xattr_size = erofs_xattr_ibody_size(&inode.xattrs);

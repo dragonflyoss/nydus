@@ -1,14 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::build::bootstrap::render_flattened_bootstrap;
-use crate::build::inode::{
-    mode_to_erofs_file_type, set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo,
-};
+use crate::build::inode::{set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo};
 use crate::fs::ErofsReader;
 use crate::metadata::*;
 use crate::utils::parse_sha256_hex;
@@ -101,27 +98,15 @@ pub fn merge_sources_to_bootstrap_bytes(
         &mut hardlink_indexes,
     );
 
-    let build_time = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .context("system time before UNIX epoch")?
-        .as_secs();
-    let epoch = inodes
-        .iter()
-        .map(|inode| inode.mtime)
-        .min()
-        .unwrap_or(build_time);
+    // `build_tree` zeroes the root mtime for reproducibility, so the minimum
+    // inode mtime read back from any layer is always 0.
+    let epoch = 0;
     let uuid = [0u8; 16];
     let blob_count = u16::try_from(device_slots.len()).context("device slot count exceeds u16")?;
     let prefetch_blob_indexes = (1..=blob_count).collect::<Vec<_>>();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_blob_indexes)?;
 
-    render_flattened_bootstrap(
-        &mut inodes,
-        epoch,
-        EROFS_BLKSZBITS as u32,
-        &device_slots,
-        &uuid,
-    )
+    render_flattened_bootstrap(&mut inodes, epoch, &device_slots, &uuid)
 }
 
 /// Rewrite an existing merged bootstrap for the `optimize` flow: append an
@@ -190,19 +175,10 @@ pub fn rewrite_bootstrap_with_ondemand_blob(
     }
     set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_indexes)?;
 
-    let epoch = inodes
-        .iter()
-        .map(|inode| inode.mtime)
-        .min()
-        .unwrap_or_else(|| reader.sb().epoch());
+    // See merge_sources_to_bootstrap_bytes: the root mtime is always 0.
+    let epoch = 0;
     let uuid = [0u8; 16];
-    render_flattened_bootstrap(
-        &mut inodes,
-        epoch,
-        EROFS_BLKSZBITS as u32,
-        &device_slots,
-        &uuid,
-    )
+    render_flattened_bootstrap(&mut inodes, epoch, &device_slots, &uuid)
 }
 
 fn load_layer(
@@ -323,7 +299,7 @@ fn load_node(
             if inode.data_layout() != EROFS_INODE_CHUNK_BASED {
                 bail!("merge currently only supports chunk-based regular files")
             }
-            let chunkbits = reader.sb().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F);
+            let chunkbits = reader.chunkbits(&inode);
             let chunk_index_entries = reader
                 .read_chunk_index_entries(nid, &inode)?
                 .into_iter()

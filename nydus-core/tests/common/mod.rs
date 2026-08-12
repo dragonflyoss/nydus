@@ -9,7 +9,8 @@ pub fn align_up(value: u64, align: u64) -> u64 {
 }
 
 pub fn bytes_to_blocks(size: u64) -> u32 {
-    nydus_core::utils::bytes_to_blocks(size, "test region").expect("test region not block aligned")
+    nydus_core::metadata::bytes_to_blocks(size, "test region")
+        .expect("test region not block aligned")
 }
 
 pub fn write_zero_padding(
@@ -28,9 +29,9 @@ pub fn assemble_full_blob(
     blob_dir: &std::path::Path,
     data: &[u8],
     bootstrap_bytes: &[u8],
-    blob_meta: &nydus_core::metadata::BlobMeta,
+    blob_meta: &nydus_core::blob::BlobMeta,
 ) -> [u8; nydus_core::metadata::EROFS_BLOB_ID_SIZE] {
-    use nydus_core::metadata::{BlobFooter, NYDUS_BLOB_FOOTER_ALIGNMENT};
+    use nydus_core::blob::{BlobFooter, NYDUS_BLOB_FOOTER_ALIGNMENT};
 
     let data_size = data.len() as u64;
     let bootstrap_offset = align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT);

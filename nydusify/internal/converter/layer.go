@@ -23,37 +23,13 @@ import (
 	"github.com/pkg/errors"
 )
 
-// IsNydusBlob reports whether desc is a converted nydus data blob layer.
-func IsNydusBlob(desc ocispec.Descriptor) bool {
-	return desc.MediaType == MediaTypeNydusBlob
-}
-
-// IsNydusBootstrap reports whether desc is a nydus bootstrap layer.
-func IsNydusBootstrap(desc ocispec.Descriptor) bool {
-	if desc.Annotations == nil {
-		return false
-	}
-	_, ok := desc.Annotations[LayerAnnotationNydusBootstrap]
-	return ok
-}
-
-// IsNydusOptimizedBlob reports whether desc is the ondemand blob appended by
-// `nydusify optimize`, which carries no filesystem tree of its own.
-func IsNydusOptimizedBlob(desc ocispec.Descriptor) bool {
-	if desc.Annotations == nil {
-		return false
-	}
-	_, ok := desc.Annotations[LayerAnnotationNydusBlobOptimized]
-	return ok
-}
-
 // LayerConvertFunc returns a converter.ConvertFunc that converts a single OCI
 // image layer into a nydus data blob layer.
 //
 // The OCI layer is decompressed and extracted into a scratch directory
 // (preserving OCI whiteouts), then `nydus build` streams the resulting full
 // blob through a FIFO directly into the content store.
-func LayerConvertFunc(opt PackOption) converter.ConvertFunc {
+func LayerConvertFunc(opt pkgconv.PackOption) converter.ConvertFunc {
 	return func(ctx context.Context, cs content.Store, desc ocispec.Descriptor) (*ocispec.Descriptor, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -62,7 +38,7 @@ func LayerConvertFunc(opt PackOption) converter.ConvertFunc {
 			return nil, nil
 		}
 		// Skip layers that are already in nydus format.
-		if IsNydusBlob(desc) || IsNydusBootstrap(desc) {
+		if pkgconv.IsNydusBlob(desc) || pkgconv.IsNydusBootstrap(desc) {
 			return nil, nil
 		}
 
@@ -74,7 +50,7 @@ func LayerConvertFunc(opt PackOption) converter.ConvertFunc {
 	}
 }
 
-func convertLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt PackOption) (*ocispec.Descriptor, error) {
+func convertLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor, opt pkgconv.PackOption) (*ocispec.Descriptor, error) {
 	// Prepare a unique scratch area for this layer.
 	layerDir, err := os.MkdirTemp(opt.WorkDir, "layer-")
 	if err != nil {
@@ -99,14 +75,14 @@ func convertLayer(ctx context.Context, cs content.Store, desc ocispec.Descriptor
 	}
 
 	return &ocispec.Descriptor{
-		MediaType: MediaTypeNydusBlob,
+		MediaType: pkgconv.MediaTypeNydusBlob,
 		Digest:    blobDigest,
 		Size:      blobSize,
 		Annotations: map[string]string{
 			// A nydus full blob is self-describing and uncompressed at the
 			// layer level, so the diff id equals the blob digest.
-			LayerAnnotationUncompressed: blobDigest.String(),
-			LayerAnnotationNydusBlob:    "true",
+			pkgconv.LayerAnnotationUncompressed: blobDigest.String(),
+			pkgconv.LayerAnnotationNydusBlob:    "true",
 		},
 	}, nil
 }
@@ -150,7 +126,7 @@ func extractOCILayer(ctx context.Context, cs content.Store, desc ocispec.Descrip
 	}
 	defer func() { _ = decompressed.Close() }()
 
-	if err := extractTar(ctx, decompressed, dir); err != nil {
+	if err := pkgconv.ExtractTar(ctx, decompressed, dir); err != nil {
 		return errors.Wrap(err, "extract layer tar")
 	}
 	return nil
@@ -159,7 +135,7 @@ func extractOCILayer(ctx context.Context, cs content.Store, desc ocispec.Descrip
 // buildBlobToStore runs `nydus build` via pkg/converter, streaming the full
 // blob straight into the content store, and returns the committed blob digest
 // and size.
-func buildBlobToStore(ctx context.Context, cs content.Store, srcRef, sourceDir string, opt PackOption) (digest.Digest, int64, error) {
+func buildBlobToStore(ctx context.Context, cs content.Store, srcRef, sourceDir string, opt pkgconv.PackOption) (digest.Digest, int64, error) {
 	cw, err := content.OpenWriter(ctx, cs, content.WithRef("nydus-build-"+srcRef))
 	if err != nil {
 		return "", 0, errors.Wrap(err, "open content writer")
@@ -176,7 +152,7 @@ func buildBlobToStore(ctx context.Context, cs content.Store, srcRef, sourceDir s
 	// level, so its diff id equals the blob digest.
 	dgst := cw.Digest()
 	if err := cw.Commit(ctx, 0, "", content.WithLabels(map[string]string{
-		LayerAnnotationUncompressed: dgst.String(),
+		pkgconv.LayerAnnotationUncompressed: dgst.String(),
 	})); err != nil && !errdefs.IsAlreadyExists(err) {
 		return "", 0, errors.Wrap(err, "commit blob")
 	}

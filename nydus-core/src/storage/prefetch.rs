@@ -1,13 +1,27 @@
+//! Post-mount blob prefetch: warms the local caches with the priority blobs
+//! declared in the image (and optionally every remaining blob) so on-demand
+//! reads hit the cache instead of the backend.
+
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use tracing::{info, warn};
 
-use crate::fs::ErofsReader;
+/// What [`BlobPrefetcher`] needs from the mounted image: the prefetch plan
+/// and per-blob prefetch. Implemented by the image reader in [`crate::fs`],
+/// keeping the dependency direction fs -> storage.
+pub trait PrefetchSource: Send + Sync {
+    /// The blob indexes to prefetch: the priority list declared in the root
+    /// `trusted.nydus.prefetch.blobs` xattr (in declared order), and the rest.
+    fn prefetch_plan(&self) -> (Vec<u16>, Vec<u16>);
 
-/// Default number of worker threads used for concurrent blob prefetch.
-pub const DEFAULT_PREFETCH_THREADS: usize = 10;
+    /// Whether `blob_index` is an "ondemand" redirect blob.
+    fn is_redirect_blob(&self, blob_index: u16) -> io::Result<bool>;
+
+    /// Prefetch every group of `blob_index` into the local cache.
+    fn prefetch_blob(&self, blob_index: u16, threads: usize) -> io::Result<()>;
+}
 
 /// Drives blob-level prefetch after a nydus filesystem is mounted.
 ///
@@ -19,15 +33,15 @@ pub const DEFAULT_PREFETCH_THREADS: usize = 10;
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" redirect blob).
 pub struct BlobPrefetcher {
-    reader: Arc<ErofsReader>,
+    source: Arc<dyn PrefetchSource>,
     threads: usize,
     full: bool,
 }
 
 impl BlobPrefetcher {
-    pub fn new(reader: Arc<ErofsReader>, threads: usize, full: bool) -> Self {
+    pub fn new(source: Arc<dyn PrefetchSource>, threads: usize, full: bool) -> Self {
         Self {
-            reader,
+            source,
             threads: threads.max(1),
             full,
         }
@@ -46,7 +60,7 @@ impl BlobPrefetcher {
     /// set) the remaining blobs through a worker pool. Per-blob failures are
     /// logged and skipped.
     pub fn run(self) {
-        let (priority, rest) = self.reader.prefetch_plan();
+        let (priority, rest) = self.source.prefetch_plan();
 
         // Phase 1: priority blobs, sequential, in declared order. When full
         // prefetch is disabled, only the "ondemand" redirect blob is warmed
@@ -55,7 +69,7 @@ impl BlobPrefetcher {
         // not spent pulling whole source blobs.
         for blob_index in priority {
             if !self.full {
-                match self.reader.is_redirect_blob(blob_index) {
+                match self.source.is_redirect_blob(blob_index) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(err) => {
@@ -64,7 +78,7 @@ impl BlobPrefetcher {
                     }
                 }
             }
-            match self.reader.prefetch_blob(blob_index, self.threads) {
+            match self.source.prefetch_blob(blob_index, self.threads) {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
                 Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
             }
@@ -79,7 +93,7 @@ impl BlobPrefetcher {
         let queue = Arc::new(Mutex::new(rest));
         let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let reader = self.reader.clone();
+            let source = self.source.clone();
             let queue = queue.clone();
             let handle = thread::Builder::new()
                 .name("nydus_prefetch_worker".to_string())
@@ -89,7 +103,7 @@ impl BlobPrefetcher {
                         guard.pop()
                     };
                     match blob_index {
-                        Some(blob_index) => match reader.prefetch_blob(blob_index, 1) {
+                        Some(blob_index) => match source.prefetch_blob(blob_index, 1) {
                             Ok(()) => info!("prefetched blob {}", blob_index),
                             Err(err) => warn!("failed to prefetch blob {}: {}", blob_index, err),
                         },

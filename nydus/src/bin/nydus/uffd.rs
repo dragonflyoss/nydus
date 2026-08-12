@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::cli_common;
@@ -31,20 +31,14 @@ pub struct UffdArgs {
 }
 
 pub fn run_uffd(args: UffdArgs) -> Result<()> {
-    let (mut signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
-    let signal_handle = signals.handle();
+    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
     let core = Arc::new(UffdCore::new(&args.bootstrap, config)?);
     let service = Arc::new(UffdService::new(core, args.socket));
     let signal_service = service.clone();
-    let signal_thread = std::thread::Builder::new()
-        .name("nydus_uffd_signal".to_string())
-        .spawn(move || {
-            if let Some(signal) = signals.forever().next() {
-                tracing::info!("received signal {signal}, stopping nydus uffd service");
-                signal_service.stop();
-            }
-        })
-        .context("failed to spawn UFFD signal thread")?;
+    let signal_thread =
+        cli_common::spawn_signal_thread("uffd", "nydus uffd service", signals, move || {
+            signal_service.stop();
+        })?;
 
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all().thread_name("nydus_uffd");
@@ -53,9 +47,6 @@ pub fn run_uffd(args: UffdArgs) -> Result<()> {
     }
     let rt = runtime.build().context("failed to build tokio runtime")?;
     let result = rt.block_on(service.run());
-    signal_handle.close();
-    signal_thread
-        .join()
-        .map_err(|_| anyhow!("UFFD signal thread panicked"))?;
+    signal_thread.shutdown()?;
     result
 }

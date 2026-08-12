@@ -48,8 +48,9 @@ pub(crate) struct ProxyConfig {
     #[serde(default)]
     pub url: Option<String>,
     /// Dragonfly scheduler endpoint (gRPC), e.g. `http://127.0.0.1:65000`. Only
-    /// honored when built with the `backend-dragonfly-proxy` feature.
-    #[cfg(feature = "backend-dragonfly-proxy")]
+    /// honored when built with the `backend-dragonfly-proxy` feature; parsed
+    /// unconditionally so a build without the feature can reject the key
+    /// loudly instead of silently ignoring it.
     #[serde(default)]
     pub dragonfly_scheduler_endpoint: Option<String>,
 }

@@ -9,14 +9,15 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use crc32c::crc32c_append;
-use nydus::build::blob_chunk::BlobWriter;
-use nydus::build::bootstrap::{
+use nydus_core::blob::BlobMetaCompressor;
+use nydus_core::build::blob_chunk::BlobWriter;
+use nydus_core::build::bootstrap::{
     render_bootstrap, render_flattened_bootstrap, FLATTENED_BLOB_ALIGNMENT,
 };
-use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
+use nydus_core::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
 use nydus_core::config::Config;
 use nydus_core::fs::ErofsReader;
-use nydus_core::metadata::{BlobMetaCompressor, ErofsDeviceSlot};
+use nydus_core::metadata::ErofsDeviceSlot;
 use nydus_core::metadata::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use nydus_core::utils::hex_string;
 use nydus_core::{BlobId, FileType, NydusCore};
@@ -89,14 +90,14 @@ fn build_test_image_with_layout(
     let staging = blob_dir.join("staging");
     let mut writer = BlobWriter::new_with_compressor(
         &staging,
-        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        nydus_core::blob::BLOB_META_DEFAULT_CHUNK_SIZE,
         BlobMetaCompressor::Zstd,
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        nydus_core::blob::BLOB_META_DEFAULT_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();
@@ -107,14 +108,8 @@ fn build_test_image_with_layout(
     let blocks = writer.total_blocks();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1]).unwrap();
     let embedded_device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &data_blob_id)];
-    let embedded_bootstrap_bytes = render_bootstrap(
-        &mut inodes,
-        0,
-        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
-        &embedded_device_slots,
-        &[0u8; 16],
-    )
-    .unwrap();
+    let embedded_bootstrap_bytes =
+        render_bootstrap(&mut inodes, 0, &embedded_device_slots, &[0u8; 16]).unwrap();
     assert_eq!(
         embedded_bootstrap_bytes.len() % EROFS_BLOCK_SIZE as usize,
         0
@@ -124,23 +119,9 @@ fn build_test_image_with_layout(
 
     let device_slots = [ErofsDeviceSlot::with_blob_id(blocks, &full_blob_id)];
     let bootstrap_bytes = if flattened {
-        render_flattened_bootstrap(
-            &mut inodes,
-            0,
-            nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
-            &device_slots,
-            &[0u8; 16],
-        )
-        .unwrap()
+        render_flattened_bootstrap(&mut inodes, 0, &device_slots, &[0u8; 16]).unwrap()
     } else {
-        render_bootstrap(
-            &mut inodes,
-            0,
-            nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
-            &device_slots,
-            &[0u8; 16],
-        )
-        .unwrap()
+        render_bootstrap(&mut inodes, 0, &device_slots, &[0u8; 16]).unwrap()
     };
     let bootstrap = root.join("bootstrap");
     fs::write(&bootstrap, &bootstrap_bytes).unwrap();
@@ -159,7 +140,7 @@ fn write_full_blob(
     data_path: &Path,
     blob_dir: &Path,
     bootstrap_bytes: &[u8],
-    blob_meta: &nydus_core::metadata::BlobMeta,
+    blob_meta: &nydus_core::blob::BlobMeta,
 ) -> [u8; EROFS_BLOB_ID_SIZE] {
     let data = fs::read(data_path).unwrap();
     let full_blob_id = common::assemble_full_blob(blob_dir, &data, bootstrap_bytes, blob_meta);
@@ -277,14 +258,14 @@ fn flattened_bootstrap_records_mapped_device_slots() {
     let staging = blob_dir.join("staging");
     let mut writer = BlobWriter::new_with_compressor(
         &staging,
-        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        nydus_core::blob::BLOB_META_DEFAULT_CHUNK_SIZE,
         BlobMetaCompressor::Zstd,
     )
     .unwrap();
     let mut inodes = build_tree(
         &corpus_dir,
         &mut writer,
-        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE,
+        nydus_core::blob::BLOB_META_DEFAULT_CHUNK_SIZE,
         &HashSet::new(),
     )
     .unwrap();
@@ -296,14 +277,7 @@ fn flattened_bootstrap_records_mapped_device_slots() {
         ErofsDeviceSlot::with_blob_id(writer.total_blocks(), &second_blob_id),
     ];
     set_root_prefetch_blobs_xattr(&mut inodes[0], &[1, 2]).unwrap();
-    let flattened = render_flattened_bootstrap(
-        &mut inodes,
-        0,
-        nydus_core::metadata::BLOB_META_DEFAULT_CHUNK_SIZE.trailing_zeros(),
-        &device_slots,
-        &[0u8; 16],
-    )
-    .unwrap();
+    let flattened = render_flattened_bootstrap(&mut inodes, 0, &device_slots, &[0u8; 16]).unwrap();
     assert_eq!(flattened.len() % EROFS_BLOCK_SIZE as usize, 0);
 
     let sb_offset = nydus_core::metadata::EROFS_SUPER_OFFSET as usize;

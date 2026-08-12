@@ -56,8 +56,6 @@ impl ErofsChunkIndex {
     }
 }
 
-pub const EROFS_BLOB_ID_SIZE: usize = 32;
-
 /// Information about a single chunk index stored in an inode.
 #[derive(Clone)]
 pub struct ChunkIndex {

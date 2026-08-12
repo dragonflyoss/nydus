@@ -1,4 +1,4 @@
-use super::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
+use crate::metadata::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use crate::utils::le::{read_u16_from, read_u32_from, read_u64_from};
 use anyhow::{bail, Context, Result};
 use bitflags::bitflags;
@@ -26,6 +26,8 @@ pub const BLOB_META_HEADER_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 pub const BLOB_META_DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
 pub const BLOB_META_DEFAULT_CHUNK_BLOCK_COUNT: u32 =
     BLOB_META_DEFAULT_CHUNK_SIZE / EROFS_BLOCK_SIZE;
+/// File-name suffix of a blob meta sidecar file (`<blob>.blob.meta`).
+pub const BLOB_META_SUFFIX: &str = ".blob.meta";
 
 /// Largest allowed block-count exponent (`chunk_block_bits` /
 /// `group_block_bits`): keeps the derived byte size (`4096 << bits`)
@@ -782,10 +784,6 @@ impl BlobMeta {
             BlobMetaStorage::Owned { groups, .. } => groups,
             BlobMetaStorage::Mapped(mmap) => mapped_groups(mmap, &self.header),
         }
-    }
-
-    pub fn chunk_at(&self, index: usize) -> Option<&BlobMetaChunk> {
-        self.chunks().get(index)
     }
 
     pub fn group_at(&self, index: usize) -> Option<&BlobMetaGroup> {

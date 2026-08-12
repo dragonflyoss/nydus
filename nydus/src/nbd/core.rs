@@ -25,9 +25,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::metadata::EROFS_BLOCK_SIZE;
-use crate::utils::pread_exact;
-use crate::{Config, NydusCore};
+use nydus_core::fs::{copy_ranges, FileMaps};
+use nydus_core::metadata::EROFS_BLOCK_SIZE;
+use nydus_core::{Config, NydusCore};
 
 /// EROFS block size as u64 — reuses the canonical constant from the core.
 const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
@@ -41,6 +41,7 @@ const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 pub struct NbdCore {
     core: Arc<NydusCore>,
     device_size: u64,
+    maps: FileMaps,
 }
 
 impl NbdCore {
@@ -63,6 +64,7 @@ impl NbdCore {
         Ok(Self {
             core,
             device_size: flat_size,
+            maps: FileMaps::default(),
         })
     }
 
@@ -102,12 +104,11 @@ impl NbdCore {
             .core
             .fetch_flat_ranges(offset, len)
             .context("failed to fetch flat ranges for nbd read")?;
-        let zero_fd = self.core.zero_fd();
+        // The fetch contract is a gapless cover of the request window; check it
+        // explicitly so a contract drift surfaces as an error instead of
+        // silently misplacing bytes (the shared copy below is gap-tolerant).
         let mut written = 0usize;
-        for range in ranges {
-            // The fetch contract is a gapless cover of the request window;
-            // check it explicitly so a contract drift surfaces as an error
-            // instead of silently misplacing bytes.
+        for range in &ranges {
             if range.source_offset != offset + written as u64 {
                 anyhow::bail!(
                     "flat ranges are not contiguous: expected source offset {}, got {}",
@@ -122,25 +123,13 @@ impl NbdCore {
                     buf.len()
                 );
             }
-            let seg = &mut buf[written..written + seg_len];
-            if range.fd == zero_fd {
-                // Hole / redirect slot / unfetched tail: serve zeros.
-                seg.fill(0);
-            } else {
-                pread_exact(range.fd, seg, range.offset).with_context(|| {
-                    format!(
-                        "failed to pread {seg_len} bytes at offset {} from flat-range fd",
-                        range.offset
-                    )
-                })?;
-            }
             written += seg_len;
         }
-        // The core resolves the whole requested window, so every byte is
-        // accounted for; pad the tail with zeros defensively if it ever is not.
-        if written < buf.len() {
-            buf[written..].fill(0);
-        }
+        // Copy through the shared engine: zero fds serve zeros, everything else
+        // is copied out of a shared mapping when possible (pread fallback), and
+        // any uncovered tail is zero-filled defensively.
+        copy_ranges(&ranges, offset, self.core.zero_fd(), buf, &self.maps)
+            .context("failed to copy flat ranges for nbd read")?;
         Ok(())
     }
 }

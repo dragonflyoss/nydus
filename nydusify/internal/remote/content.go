@@ -20,7 +20,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 
-	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
+	converter "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 )
 
 // fetch resolves ref and downloads the image (index/manifests/config and a

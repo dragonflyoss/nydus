@@ -10,9 +10,9 @@ use std::io::Write;
 
 use tempfile::{tempdir, NamedTempFile};
 
-use nydus::build::blob_chunk::BlobWriter;
-use nydus::build::bootstrap::render_bootstrap;
-use nydus::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
+use nydus_core::build::blob_chunk::BlobWriter;
+use nydus_core::build::bootstrap::render_bootstrap;
+use nydus_core::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
 use nydus_core::fs::ErofsReader;
 use nydus_core::metadata::{
     erofs_xattr_ibody_size, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
@@ -87,14 +87,8 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
         },
     ];
 
-    let bootstrap = render_bootstrap(
-        &mut inodes,
-        1_700_000_000,
-        EROFS_BLKSZBITS as u32,
-        &[],
-        &[0u8; 16],
-    )
-    .expect("render bootstrap");
+    let bootstrap =
+        render_bootstrap(&mut inodes, 1_700_000_000, &[], &[0u8; 16]).expect("render bootstrap");
     let mut image = NamedTempFile::new().expect("create temp image");
     image.write_all(&bootstrap).expect("write bootstrap");
 
@@ -146,7 +140,6 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let embedded_bootstrap = render_bootstrap(
         &mut inodes,
         1_700_000_000,
-        EROFS_BLKSZBITS as u32,
         &embedded_device_slots,
         &[0u8; 16],
     )
@@ -164,7 +157,6 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     let bootstrap = render_bootstrap(
         &mut inodes,
         1_700_000_000,
-        EROFS_BLKSZBITS as u32,
         &standalone_device_slots,
         &[0u8; 16],
     )

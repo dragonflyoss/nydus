@@ -66,13 +66,13 @@ func ConvertLocalDir(ctx context.Context, cs content.Store, opt LocalDirOption) 
 // It returns two parallel slices: the AppendFile entries (with basename and
 // data) and the original absolute paths (used by the caller to compute
 // exclusions from the source directory).
-func validateAndReadAppendFiles(paths []string) ([]AppendFile, error) {
+func validateAndReadAppendFiles(paths []string) ([]pkgconv.AppendFile, error) {
 	if len(paths) == 0 {
 		return nil, nil
 	}
 
 	seen := make(map[string]bool, len(paths))
-	result := make([]AppendFile, 0, len(paths))
+	result := make([]pkgconv.AppendFile, 0, len(paths))
 
 	for _, p := range paths {
 		info, err := os.Stat(p)
@@ -99,14 +99,16 @@ func validateAndReadAppendFiles(paths []string) ([]AppendFile, error) {
 		if err != nil {
 			return nil, errors.Wrapf(err, "read append-in-bootstrap file %q", p)
 		}
-		result = append(result, AppendFile{Name: name, Data: data})
+		result = append(result, pkgconv.AppendFile{Name: name, Data: data})
 	}
 	return result, nil
 }
 
-// ingestBlobFile hashes a blob file and copies it into the content store,
-// returning its descriptor.
-func ingestBlobFile(ctx context.Context, cs content.Store, path string) (ocispec.Descriptor, error) {
+// IngestBlobFile commits a nydus full blob file into the content store as a
+// nydus data blob layer, returning its descriptor. When dgst is empty, the
+// digest is computed by streaming the file; otherwise the given digest is
+// trusted and verified by the content store on commit.
+func IngestBlobFile(ctx context.Context, cs content.Store, path string, dgst digest.Digest) (ocispec.Descriptor, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return ocispec.Descriptor{}, errors.Wrap(err, "open blob file")
@@ -119,14 +121,16 @@ func ingestBlobFile(ctx context.Context, cs content.Store, path string) (ocispec
 	}
 	size := info.Size()
 
-	digester := digest.SHA256.Digester()
-	if _, err := io.Copy(digester.Hash(), f); err != nil {
-		return ocispec.Descriptor{}, errors.Wrap(err, "hash blob file")
-	}
-	dgst := digester.Digest()
+	if dgst == "" {
+		digester := digest.SHA256.Digester()
+		if _, err := io.Copy(digester.Hash(), f); err != nil {
+			return ocispec.Descriptor{}, errors.Wrap(err, "hash blob file")
+		}
+		dgst = digester.Digest()
 
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return ocispec.Descriptor{}, errors.Wrap(err, "seek blob file")
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return ocispec.Descriptor{}, errors.Wrap(err, "seek blob file")
+		}
 	}
 
 	cw, err := content.OpenWriter(ctx, cs, content.WithRef("nydus-local-blob-"+dgst.String()))
@@ -136,51 +140,18 @@ func ingestBlobFile(ctx context.Context, cs content.Store, path string) (ocispec
 	defer func() { _ = cw.Close() }()
 
 	if err := content.Copy(ctx, cw, f, size, dgst, content.WithLabels(map[string]string{
-		LayerAnnotationUncompressed: dgst.String(),
+		pkgconv.LayerAnnotationUncompressed: dgst.String(),
 	})); err != nil && !errdefs.IsAlreadyExists(err) {
 		return ocispec.Descriptor{}, errors.Wrap(err, "commit blob to content store")
 	}
 
 	return ocispec.Descriptor{
-		MediaType: MediaTypeNydusBlob,
+		MediaType: pkgconv.MediaTypeNydusBlob,
 		Digest:    dgst,
 		Size:      size,
 		Annotations: map[string]string{
-			LayerAnnotationUncompressed: dgst.String(),
-			LayerAnnotationNydusBlob:    "true",
+			pkgconv.LayerAnnotationUncompressed: dgst.String(),
+			pkgconv.LayerAnnotationNydusBlob:    "true",
 		},
 	}, nil
-}
-
-// stageNydusMetadataFromFile is like stageNydusMetadata but reads from a
-// local file instead of the content store.
-func stageNydusMetadataFromFile(blobPath string, blobDigest digest.Digest, dir string) (string, error) {
-	f, err := os.Open(blobPath)
-	if err != nil {
-		return "", errors.Wrap(err, "open blob file")
-	}
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return "", errors.Wrap(err, "stat blob file")
-	}
-
-	return pkgconv.StageNydusMetadata(f, info.Size(), blobDigest.Encoded(), dir)
-}
-
-// extractBlobMetaFromFile reads the blob meta region from a local blob file.
-func extractBlobMetaFromFile(blobPath string) ([]byte, error) {
-	f, err := os.Open(blobPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "open blob file")
-	}
-	defer func() { _ = f.Close() }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, errors.Wrap(err, "stat blob file")
-	}
-
-	return pkgconv.ExtractBlobMeta(f, info.Size())
 }

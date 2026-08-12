@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 
-use crate::metadata::EROFS_BLOCK_SIZE;
+use super::EROFS_BLOCK_SIZE;
 
 /// Convert a byte size to a 4 KiB block count. `name` labels the region in
 /// error messages.

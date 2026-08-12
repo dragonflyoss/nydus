@@ -10,9 +10,9 @@ pub(crate) mod test_util {
     use std::io::Write;
     use std::path::Path;
 
+    use crate::blob::{BlobFooter, BlobMeta, BLOB_META_SUFFIX};
     use crate::metadata::{
-        BlobFooter, BlobMeta, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
-        EROFS_SUPER_OFFSET,
+        ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_SUPER_OFFSET,
     };
     use crate::utils::{hex_string, sha256_bytes};
 
@@ -51,7 +51,7 @@ pub(crate) mod test_util {
         fs::write(dir.join(hex_string(&full_blob_id)), &full_blob).unwrap();
         if save_sidecar {
             blob_meta
-                .save(&dir.join(format!("{}.blob.meta", hex_string(&full_blob_id))))
+                .save(&dir.join(format!("{}{BLOB_META_SUFFIX}", hex_string(&full_blob_id))))
                 .unwrap();
         }
 

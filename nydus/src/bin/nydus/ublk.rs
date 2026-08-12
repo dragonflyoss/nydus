@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use clap::Args;
 
 use crate::cli_common;
@@ -56,8 +56,7 @@ pub struct UblkArgs {
 /// device. Otherwise the unmount triggered while the daemon exits flushes I/O
 /// to a device that is no longer being served, and both sides deadlock.
 pub fn run_ublk(args: UblkArgs) -> Result<()> {
-    let (mut signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
-    let signal_handle = signals.handle();
+    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
     let core = Arc::new(UblkCore::new(&args.bootstrap, config)?);
     info!(
         "serving {} as a {} byte block device",
@@ -76,22 +75,14 @@ pub fn run_ublk(args: UblkArgs) -> Result<()> {
     println!("{}", service.dev_path());
 
     let handle = service.handle();
-    let signal_thread = std::thread::Builder::new()
-        .name("nydus_ublk_signal".to_string())
-        .spawn(move || {
-            if let Some(signal) = signals.forever().next() {
-                info!("received signal {signal}, stopping nydus ublk device");
-                handle.stop();
-            }
-        })
-        .context("failed to spawn ublk signal thread")?;
+    let signal_thread =
+        cli_common::spawn_signal_thread("ublk", "nydus ublk device", signals, move || {
+            handle.stop();
+        })?;
 
     let result = service.run();
     service.delete();
 
-    signal_handle.close();
-    signal_thread
-        .join()
-        .map_err(|_| anyhow!("ublk signal thread panicked"))?;
+    signal_thread.shutdown()?;
     result
 }

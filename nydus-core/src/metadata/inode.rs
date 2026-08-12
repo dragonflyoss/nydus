@@ -249,10 +249,6 @@ impl<'a> ErofsInode<'a> {
         (self.format() >> EROFS_I_DATALAYOUT_BIT) & 0x07
     }
 
-    pub fn is_compact(&self) -> bool {
-        matches!(self, Self::Compact(_))
-    }
-
     pub fn header_size(&self) -> usize {
         match self {
             Self::Compact(_) => EROFS_INODE_COMPACT_SIZE,
@@ -297,13 +293,6 @@ impl<'a> ErofsInode<'a> {
         match self {
             Self::Compact(c) => epoch + c.mtime_delta() as u64,
             Self::Extended(e) => e.mtime(),
-        }
-    }
-
-    pub fn mtime_nsec(&self) -> u32 {
-        match self {
-            Self::Compact(_) => 0,
-            Self::Extended(e) => e.mtime_nsec(),
         }
     }
 
@@ -461,6 +450,20 @@ pub fn erofs_xattr_icount(xattr_ibody_size: usize) -> u16 {
 /// - no per-inode mtime (falls back to the global build time)
 pub fn needs_erofs_extended_inode(size: u64, uid: u32, gid: u32, nlink: u64) -> bool {
     size > u32::MAX as u64 || uid > u16::MAX as u32 || gid > u16::MAX as u32 || nlink > 1
+}
+
+/// Convert a Unix file mode to an EROFS file type value for directory entries.
+pub fn mode_to_erofs_file_type(mode: u16) -> u8 {
+    match mode as u32 & libc::S_IFMT {
+        libc::S_IFREG => EROFS_FT_REG_FILE,
+        libc::S_IFDIR => EROFS_FT_DIR,
+        libc::S_IFCHR => EROFS_FT_CHRDEV,
+        libc::S_IFBLK => EROFS_FT_BLKDEV,
+        libc::S_IFIFO => EROFS_FT_FIFO,
+        libc::S_IFSOCK => EROFS_FT_SOCK,
+        libc::S_IFLNK => EROFS_FT_SYMLINK,
+        _ => 0,
+    }
 }
 
 /// Check if an xattr name (as bytes) is a Nydus internal xattr (starts with "trusted.nydus.").

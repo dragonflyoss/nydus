@@ -27,14 +27,14 @@ use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use url::Url;
 
-use super::pauser::Pauser;
 use super::{BlobBackend, ReadContext, ReadKind};
-use crate::metadata::{BlobFooter, BlobMeta, EROFS_BLOB_ID_SIZE, NYDUS_BLOB_FOOTER_SIZE};
+use crate::blob::{BlobFooter, BlobMeta, NYDUS_BLOB_FOOTER_SIZE};
+use crate::metadata::EROFS_BLOB_ID_SIZE;
 use crate::utils::hex_string;
 
 use super::http::{ConnectionConfig, HttpClient};
 use super::proxy::{HttpProxy, ProxyConfig};
-use super::request::{is_success_status, RequestDispatcher, RequestError, Response};
+use super::request::{RequestDispatcher, RequestError, Response};
 
 #[cfg(feature = "backend-dragonfly-proxy")]
 use super::dragonfly_sdk::DragonflySdk;
@@ -254,10 +254,7 @@ pub struct Registry {
     request: Arc<RequestDispatcher>,
     /// Whether reads are served through a proxy (HTTP mirror or Dragonfly),
     /// used to attribute backend read and CRC metrics.
-    target: crate::metrics::BackendTarget,
-    /// Throttles only this registry's reads, so backends in the same process
-    /// back off independently.
-    pauser: Arc<Pauser>,
+    target: crate::telemetry::metrics::BackendTarget,
     // Ensures the first authenticated request completes before a burst of
     // concurrent reads, so they can reuse the cached token instead of each
     // performing their own auth handshake.
@@ -298,6 +295,20 @@ impl Registry {
             Some(endpoint) => Some(DragonflySdk::new(endpoint)?),
             None => None,
         };
+        #[cfg(not(feature = "backend-dragonfly-proxy"))]
+        if let Some(endpoint) = config
+            .proxy
+            .as_ref()
+            .and_then(|p| p.dragonfly_scheduler_endpoint.as_deref())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "proxy.dragonfly_scheduler_endpoint is set ({endpoint}) but this \
+                     build lacks the `backend-dragonfly-proxy` feature"
+                ),
+            ));
+        }
 
         // Reads are proxied when an HTTP proxy or Dragonfly endpoint is set.
         #[cfg(feature = "backend-dragonfly-proxy")]
@@ -305,9 +316,9 @@ impl Registry {
         #[cfg(not(feature = "backend-dragonfly-proxy"))]
         let via_proxy = proxy.is_some();
         let target = if via_proxy {
-            crate::metrics::BackendTarget::Proxy
+            crate::telemetry::metrics::BackendTarget::Proxy
         } else {
-            crate::metrics::BackendTarget::Origin
+            crate::telemetry::metrics::BackendTarget::Origin
         };
 
         let request = RequestDispatcher::new(
@@ -336,7 +347,6 @@ impl Registry {
             state,
             request,
             target,
-            pauser: Arc::new(Pauser::new()),
             first_done: AtomicBool::new(false),
         })
     }
@@ -349,8 +359,6 @@ impl Registry {
         dst: &mut [u8],
         ctx: ReadContext,
     ) -> RegistryResult<()> {
-        self.pauser.wait_if_paused();
-
         let max_attempts = match ctx.kind {
             ReadKind::Prefetch => 1,
             ReadKind::OnDemand => self.state.retry_limit.max(1),
@@ -404,7 +412,7 @@ impl Registry {
             if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 // The signed link expired; drop it and fall through to re-resolve.
                 self.state.remove_redirect(&hex);
-            } else if is_success_status(status) {
+            } else if status.is_success() {
                 return fill_exact(resp, dst);
             } else {
                 return Err(status_error(resp));
@@ -417,7 +425,7 @@ impl Registry {
         let resp = self.authorized_request(Method::GET, &url, headers, ctx)?;
         let status = resp.status();
 
-        if is_redirect(status) {
+        if status.is_redirection() {
             let location = resp
                 .headers()
                 .get(LOCATION)
@@ -430,12 +438,12 @@ impl Registry {
             let redirected =
                 self.request
                     .call(Method::GET, &location, redirect_headers, ctx, true)?;
-            if !is_success_status(redirected.status()) {
+            if !redirected.status().is_success() {
                 return Err(status_error(redirected));
             }
             self.state.set_redirect(&hex, location);
             fill_exact(redirected, dst)
-        } else if is_success_status(status) {
+        } else if status.is_success() {
             fill_exact(resp, dst)
         } else {
             Err(status_error(resp))
@@ -455,7 +463,7 @@ impl Registry {
         )?;
         let status = resp.status();
 
-        let resp = if is_redirect(status) {
+        let resp = if status.is_redirection() {
             let location = resp
                 .headers()
                 .get(LOCATION)
@@ -469,11 +477,11 @@ impl Registry {
                 ReadContext::raw(ReadKind::OnDemand),
                 true,
             )?;
-            if !is_success_status(redirected.status()) {
+            if !redirected.status().is_success() {
                 return Err(status_error(redirected));
             }
             redirected
-        } else if is_success_status(status) {
+        } else if status.is_success() {
             resp
         } else {
             return Err(status_error(resp));
@@ -575,7 +583,7 @@ impl Registry {
         let auth_header = self.obtain_auth(challenge)?;
         headers.insert(AUTHORIZATION, auth_header.parse().unwrap());
         let resp = self.request.call(method, url, headers, ctx, true)?;
-        if is_success_status(resp.status()) || is_redirect(resp.status()) {
+        if resp.status().is_success() || resp.status().is_redirection() {
             self.state.set_auth(auth_header);
         }
         Ok(resp)
@@ -626,7 +634,7 @@ impl Registry {
             ReadContext::raw(ReadKind::OnDemand),
             false,
         )?;
-        if !is_success_status(resp.status()) {
+        if !resp.status().is_success() {
             return Err(status_error(resp));
         }
 
@@ -648,7 +656,7 @@ impl Registry {
 }
 
 impl BlobBackend for Registry {
-    fn backend_target(&self) -> crate::metrics::BackendTarget {
+    fn backend_target(&self) -> crate::telemetry::metrics::BackendTarget {
         self.target
     }
 
@@ -676,10 +684,6 @@ impl BlobBackend for Registry {
         }
         Ok(())
     }
-}
-
-fn is_redirect(status: StatusCode) -> bool {
-    status.is_redirection()
 }
 
 /// Read the response body and ensure it exactly fills `dst`.

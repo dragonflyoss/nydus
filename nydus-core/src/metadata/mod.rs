@@ -4,16 +4,13 @@
 //! runtime. All on-disk structs are `#[repr(C, packed)]` and can be cast
 //! directly from mmap'd memory (zero-copy) or constructed in-place for writing.
 
-pub mod blob_footer;
-pub mod blob_meta;
+pub mod block;
 pub mod chunk;
 pub mod dir;
 pub mod inode;
-pub mod layout;
 pub mod superblock;
 
-pub use blob_footer::*;
-pub use blob_meta::*;
+pub use block::*;
 pub use chunk::*;
 pub use dir::*;
 pub use inode::*;
@@ -25,6 +22,10 @@ use std::mem;
 pub const EROFS_SUPER_MAGIC_V1: u32 = 0xE0F5_E1E2;
 pub const EROFS_SUPER_OFFSET: u64 = 1024;
 pub const EROFS_SB_BASE_SIZE: usize = 128;
+
+// Blob identity.
+/// On-disk blob ID field size: blob IDs are SHA-256 digests.
+pub const EROFS_BLOB_ID_SIZE: usize = crate::utils::digest::SHA256_DIGEST_SIZE;
 
 // Block / slot sizes.
 pub const EROFS_BLOCK_SIZE: u32 = 4096;
@@ -60,7 +61,6 @@ pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
 // Inode flag bits.
 pub const EROFS_I_VERSION_BIT: u16 = 0;
 pub const EROFS_I_DATALAYOUT_BIT: u16 = 1;
-pub const EROFS_I_NLINK_1_BIT: u16 = 4;
 
 // Chunk.
 pub const EROFS_CHUNK_FORMAT_INDEXES: u16 = 0x0020;
@@ -100,19 +100,20 @@ pub const NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"nydus.prefetch.blobs";
 // Little-endian field helpers live in `utils::le`; re-exported so the
 // `use super::*` metadata modules keep resolving them unqualified.
 pub(crate) use crate::utils::le::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
+// Same for the size-rounding helper shared with the builder.
+pub(crate) use crate::utils::round_up;
 
 /// Cast a byte slice to a reference of `T` (`#[repr(C, packed)]`).
+///
+/// `T` must be a packed on-disk struct (alignment 1): the data comes from
+/// arbitrary offsets of mmap'd files, so a type with a stricter alignment
+/// would make this cast undefined behaviour. Asserted below so a misuse
+/// fails loudly instead.
 #[inline]
 pub fn cast_ref<T>(data: &[u8]) -> &T {
     assert!(data.len() >= mem::size_of::<T>());
+    assert_eq!(mem::align_of::<T>(), 1);
     unsafe { &*(data.as_ptr() as *const T) }
-}
-
-/// Round `val` up to the next multiple of `align` (power of two).
-/// Unchecked builder-path twin of [`crate::utils::align_up`]; panics on overflow.
-#[inline]
-pub fn round_up(val: usize, align: usize) -> usize {
-    crate::utils::align_up(val as u64, align as u64).expect("size rounding overflowed") as usize
 }
 
 #[cfg(test)]

@@ -1,6 +1,8 @@
+use crate::blob::{
+    BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE,
+};
 use crate::metadata::{
-    round_up, BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup, ChunkIndex,
-    BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR,
+    round_up, ChunkIndex, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR,
 };
 use anyhow::{bail, Context, Result};
 use crc32c::crc32c;
@@ -102,10 +104,6 @@ impl BlobWriter {
         let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
         digest.copy_from_slice(&self.data_hasher.clone().finalize());
         digest
-    }
-
-    pub fn into_file(self) -> File {
-        self.file
     }
 
     pub fn into_file_and_data_hasher(self) -> (File, Sha256) {
