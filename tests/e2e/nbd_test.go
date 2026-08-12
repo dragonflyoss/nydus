@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 // NBD END-TO-END test (local backend, no docker/registry).
 //

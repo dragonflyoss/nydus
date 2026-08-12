@@ -1914,7 +1914,7 @@ expected; directory sources and stacking do not apply.
 
 Every nydus data layer is a self-contained full blob covering exactly one OCI
 layer, so each one is unpacked on its own and the merged bootstrap is simply
-dropped (`internal/converter/tooci.go`):
+dropped (`internal/pipeline/tooci.go`):
 
 1. Pull `--source` and classify its layers by annotation. Layers carrying
    `nydus-bootstrap` or `nydus-blob-optimized` describe no filesystem tree and

@@ -1,10 +1,10 @@
-// Package texture provides helpers for generating an NydusFS filesystem test
+// Package corpus provides helpers for generating an NydusFS filesystem test
 // corpus.
 //
-// The Corpus type follows a builder pattern similar to nydus
-// smoke/tests/tool/layer.go and creates real files on disk to exercise the
-// `nydus build` and `nydus fuse` code paths.
-package texture
+// The Corpus type follows a builder pattern (originally modeled on the
+// upstream image-service smoke tests' layer builder) and creates real files
+// on disk to exercise the `nydus build` and `nydus fuse` code paths.
+package corpus
 
 import (
 	"crypto/rand"

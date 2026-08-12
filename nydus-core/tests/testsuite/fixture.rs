@@ -1,5 +1,5 @@
-//! Helpers shared by the integration tests for assembling footer-based
-//! full blobs, delegating to the production `nydus_core::blob` assembler.
+//! Helpers shared by the test suite for assembling footer-based full
+//! blobs, delegating to the production `nydus_core::blob` assembler.
 
 use std::io::Write;
 
@@ -7,7 +7,6 @@ use std::io::Write;
 /// blob meta | footer`) in `blob_dir` via the production
 /// `nydus_core::blob::assemble_full_blob`, rename it to its hex digest, and
 /// return the digest.
-#[allow(dead_code)]
 pub fn assemble_full_blob(
     blob_dir: &std::path::Path,
     data: &[u8],

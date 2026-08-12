@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/dragonflyoss/nydus/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
@@ -56,8 +56,8 @@ func TestFilesystemSemantics(t *testing.T) {
 		"standard": filepath.Join(root, "corpus-standard"),
 		"stress":   filepath.Join(root, "corpus-stress"),
 	}
-	texture.MakeStandardCorpus(t, corpora["standard"])
-	texture.MakeStressCorpus(t, corpora["stress"], readOnlyCorpusSeed)
+	corpus.MakeStandardCorpus(t, corpora["standard"])
+	corpus.MakeStressCorpus(t, corpora["stress"], readOnlyCorpusSeed)
 
 	for _, cfg := range fsBuildConfigs {
 		for corpusName, corpus := range corpora {
@@ -964,14 +964,14 @@ func roPathResolution(t *testing.T, f *roFixture) {
 		// The kernel FUSE layer only rejects names above FUSE_NAME_MAX (1024),
 		// so advertising f_namelen=255 obliges lookup to enforce NAME_MAX too.
 		var st unix.Stat_t
-		err := unix.Lstat(f.at("files/"+texture.LongName('z', 300)), &st)
+		err := unix.Lstat(f.at("files/"+corpus.LongName('z', 300)), &st)
 		require.ErrorIs(t, err, unix.ENAMETOOLONG)
 	})
 
 	t.Run("MaxLengthNameResolves", func(t *testing.T) {
 		t.Parallel()
 		var st unix.Stat_t
-		require.NoError(t, unix.Lstat(f.at("names/"+texture.LongName('a', 250)), &st))
+		require.NoError(t, unix.Lstat(f.at("names/"+corpus.LongName('a', 250)), &st))
 	})
 
 	t.Run("MissingEntry", func(t *testing.T) {

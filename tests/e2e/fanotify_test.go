@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 // Nydus fanotify pre-content END-TO-END test (registry backend).
 //

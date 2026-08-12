@@ -62,12 +62,12 @@ GO_TEST_ENV = $(SUDO) env "PATH=$(CURDIR)/target/release:$(dir $(GO_BIN)):$(PATH
 	"GOMODCACHE=$$($(GO_BIN) env GOMODCACHE)" \
 	"EROFS_C_FUSE=$(EROFS_C_FUSE)" \
 	"EROFS_MKFS=$(EROFS_MKFS)"
-TEST_SUPPORT_FILES = util.go optimize_util.go diff.go
-E2E_TEST_FILES = e2e_test.go $(TEST_SUPPORT_FILES)
+TEST_SUPPORT_FILES = harness.go optimize.go diff.go
+E2E_TEST_FILES = roundtrip_test.go $(TEST_SUPPORT_FILES)
 TOOCI_TEST_FILES = tooci_test.go $(TEST_SUPPORT_FILES)
 UFFD_TEST_FILES = uffd_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
-CORE_TEST_FILES = core_test.go $(TEST_SUPPORT_FILES)
+CORE_TEST_FILES = cache_sharing_test.go $(TEST_SUPPORT_FILES)
 FS_TEST_FILES = fs_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
@@ -99,10 +99,10 @@ test:
 	$(CARGO) test --workspace
 
 # Run end-to-end integration tests (requires root, builds release first).
-# Only runs tests/integration/e2e_test.go.
+# Only runs tests/e2e/roundtrip_test.go.
 test-e2e: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		NYDUSFS_MERGE_PAUSE_SECS="$(NYDUSFS_MERGE_PAUSE_SECS)" \
 		NYDUSFS_RUN_EROFS_COMPAT="$(NYDUSFS_RUN_EROFS_COMPAT)" \
@@ -112,7 +112,7 @@ test-e2e: release nydusify
 # the round trip has to reproduce ownership and device nodes.
 test-tooci: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestNydusifyToOCIE2E$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(TOOCI_TEST_FILES)
 
@@ -122,7 +122,7 @@ test-tooci: release nydusify
 test-uffd: FEATURES=cli,uffd
 test-uffd: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestUffdServiceSmoke$$' -count $(UFFD_COUNT) -timeout $(UFFD_TIMEOUT) $(UFFD_GO_TEST_ARGS) $(UFFD_TEST_FILES)
 
@@ -131,7 +131,7 @@ test-uffd: release
 test-ublk: FEATURES=cli,ublk
 test-ublk: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestUblkTarget$$' -count $(UBLK_COUNT) -timeout $(UBLK_TIMEOUT) $(UBLK_GO_TEST_ARGS) $(UBLK_TEST_FILES)
 
@@ -140,7 +140,7 @@ test-ublk: release
 # cache directory plus each instance's /metrics endpoint.
 test-core: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestCore' -count $(CORE_COUNT) -timeout $(CORE_TIMEOUT) $(CORE_GO_TEST_ARGS) $(CORE_TEST_FILES)
 
@@ -153,7 +153,7 @@ test-fanotify: FEATURES=cli,fanotify
 test-fanotify: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
 		FANOTIFY_RUN_FAIL_CLOSED="$(FANOTIFY_RUN_FAIL_CLOSED)" \
 		FANOTIFY_RUN_STRACE="$(FANOTIFY_RUN_STRACE)" \
@@ -169,7 +169,7 @@ test-nbd: FEATURES=cli,nbd
 test-nbd: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
 		$(GO_BIN) test -v -run '^TestNbdE2E$$' -count $(NBD_COUNT) -timeout $(NBD_TIMEOUT) $(NBD_GO_TEST_ARGS) $(NBD_TEST_PKG)
 
@@ -186,7 +186,7 @@ test-bench: FEATURES=cli,fuse,nbd,ublk,fanotify
 test-bench: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	mkdir -p $(CURDIR)/.test-tmp
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
 		NYDUSFS_RUN_BENCH=1 \
 		$(GO_BIN) test -v -run '^TestBench$$' -count $(BENCH_COUNT) -timeout $(BENCH_TIMEOUT) $(BENCH_GO_TEST_ARGS) $(BENCH_TEST_PKG)
@@ -196,7 +196,7 @@ test-bench: release
 # identity, mmap, splice and xattr behaviour against the mounted image.
 test-fs: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		$(GO_BIN) test -v -run '^TestFilesystem' -parallel 32 -count $(FS_COUNT) -timeout $(FS_TIMEOUT) $(FS_GO_TEST_ARGS) $(FS_TEST_FILES)
 
@@ -205,7 +205,7 @@ test-fs: release
 # Requires root and credentials for the target registry. Builds nydusify on demand.
 test-top-images: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
-	cd tests/integration && \
+	cd tests/e2e && \
 		$(GO_TEST_ENV) \
 		NYDUSFS_RUN_TOP_IMAGES=1 \
 		NYDUSFS_TOP_IMAGES_REGISTRY=$(TOP_IMAGES_REGISTRY) \

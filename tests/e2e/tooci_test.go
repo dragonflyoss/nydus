@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dragonflyoss/nydus/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/require"
 )
@@ -131,7 +131,7 @@ func makeToOCICorpus(t *testing.T, contextDir string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(contextDir, 0755))
 
-	base := texture.NewCorpus(t, filepath.Join(contextDir, "layer1"))
+	base := corpus.NewCorpus(t, filepath.Join(contextDir, "layer1"))
 	base.CreateFile(t, "files/empty", nil)
 	base.CreateFile(t, "files/tiny", []byte("hi"))
 	base.CreateFile(t, "files/just_under_block", []byte(strings.Repeat("A", 4095)))
@@ -152,12 +152,12 @@ func makeToOCICorpus(t *testing.T, contextDir string) {
 	base.CreateFile(t, "perms/sticky", []byte("sticky"))
 	base.Chmod(t, "perms/sticky", 01755)
 
-	links := texture.NewCorpus(t, filepath.Join(contextDir, "layer2"))
+	links := corpus.NewCorpus(t, filepath.Join(contextDir, "layer2"))
 	links.CreateFile(t, "symlinks/target_file", []byte("target"))
 	links.CreateSymlink(t, "symlinks/link_to_file", "target_file")
 	links.CreateSymlink(t, "symlinks/relative_link", "../files/tiny")
 	links.CreateSymlink(t, "symlinks/dangling", "nonexistent_target")
-	longName := texture.LongName('x', 200)
+	longName := corpus.LongName('x', 200)
 	links.CreateFile(t, "symlinks/"+longName, []byte("long"))
 	links.CreateSymlink(t, "symlinks/link_to_long_name", longName)
 	// A ustar header has room for a 100-byte link target, so anything past
@@ -165,14 +165,14 @@ func makeToOCICorpus(t *testing.T, contextDir string) {
 	// PATH_MAX, so straddle the boundary and go well beyond it.
 	for _, n := range []int{99, 100, 101, 255, 1024, 4095} {
 		links.CreateSymlink(t, fmt.Sprintf("symlinks/long_target_%04d", n),
-			texture.LongName('t', n))
+			corpus.LongName('t', n))
 	}
 	links.CreateFile(t, "hardlinks/original", []byte("shared content"))
 	links.CreateHardlink(t, "hardlinks/link1", "hardlinks/original")
 	links.CreateDir(t, "hardlinks/subdir")
 	links.CreateHardlink(t, "hardlinks/subdir/link2", "hardlinks/original")
 
-	top := texture.NewCorpus(t, filepath.Join(contextDir, "layer3"))
+	top := corpus.NewCorpus(t, filepath.Join(contextDir, "layer3"))
 	top.CreateFile(t, "files/overridden", []byte("from layer3"))
 	top.CreateDir(t, "dirs/many_entries")
 	for i := 1; i <= 200; i++ {

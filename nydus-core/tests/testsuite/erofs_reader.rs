@@ -1,8 +1,7 @@
-//! Integration tests for `ErofsReader`. They live in `tests/` (not as unit
-//! tests) because building fixture images requires the `nydus` builder,
-//! which itself depends on this crate.
+//! Tests for `ErofsReader`: fixture images are built through the public
+//! `build` module and then read back through the reader.
 
-mod common;
+use crate::fixture;
 
 use std::collections::HashSet;
 use std::fs;
@@ -148,7 +147,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
 
     let data = fs::read(&data_path).expect("read data blob");
     let full_blob_id =
-        common::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_meta);
+        fixture::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_meta);
 
     let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
         blob_writer.total_blocks(),

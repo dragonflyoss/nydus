@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -51,7 +51,7 @@ func TestUblkTarget(t *testing.T) {
 	blockMnt := filepath.Join(tmpDir, "mnt-ublk")
 	fuseMnt := filepath.Join(tmpDir, "mnt-fuse")
 
-	texture.MakeStandardCorpus(t, corpusDir)
+	corpus.MakeStandardCorpus(t, corpusDir)
 	buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, ublkChunkSize)
 	writeLocalStorageConfig(t, configPath, blobDir, cacheDir)
 
