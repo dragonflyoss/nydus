@@ -148,7 +148,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_init_tracing_comprehensive() {
+    fn init_tracing_creates_log_dir_and_returns_guards() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let log_dir = temp_dir.path().join("logs");
         assert!(!log_dir.exists());

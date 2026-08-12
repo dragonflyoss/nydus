@@ -1,7 +1,7 @@
 name: Mirror Top Images
 
 # Manually-triggered job that mirrors the top Docker Hub images referenced by
-# tests/integration/texture/top-images.txt into this repository's GHCR
+# tests/e2e/corpus/top-images.txt into this repository's GHCR
 # namespace (ghcr.io/<owner>/<repo>/<image>) so CI is not subject to Docker
 # Hub pull rate limits. Docker Hub rate limiting (HTTP 429) is handled by
 # capped exponential backoff with jitter and per-image wait limits.
@@ -37,7 +37,7 @@ jobs:
         run: |
           set -u
 
-          list_file=tests/integration/texture/top-images.txt
+          list_file=tests/e2e/corpus/top-images.txt
           if [ -n "$IMAGES_OVERRIDE" ]; then
             images="$IMAGES_OVERRIDE"
           else

@@ -391,7 +391,7 @@ fn core_static_filesystem_api_reads_metadata_and_data() {
 }
 
 #[test]
-fn fs_entry_fetch_populates_blob_cache_without_reading_data() {
+fn node_fetch_populates_blob_cache_without_reading_data() {
     let dir = tempdir().unwrap();
     let (bootstrap, config, _blob_id, _corpus) = build_test_image(dir.path());
 

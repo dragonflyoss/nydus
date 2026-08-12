@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_rafs_v7_bootstrap() {
+    fn detects_rafs_v7_and_rejects_v6_and_corrupt_bootstraps() {
         // Pure EROFS with standard bits only: rafs v7.
         let v7 = write_bootstrap(
             EROFS_FEATURE_COMPAT_SB_CHKSUM,

@@ -1788,7 +1788,7 @@ binary for the actual filesystem work (`nydus build`, `nydus merge`,
 
 A converted nydus image reuses the nydus on-wire manifest layout so existing
 nydus-aware snapshotters and tooling can consume it (see
-`internal/converter/constants.go`):
+`pkg/nydus/constants.go`):
 
 - Each OCI data layer becomes one nydus **blob** layer with media type
   `application/vnd.oci.image.layer.nydus.blob.v1`, annotated with
@@ -1885,14 +1885,14 @@ Pipeline (single image source):
    whiteouts) and run `nydus build` with the configured `--chunk-size`,
    `--compress-size` and `--compressor`. The build output is streamed straight
    into the content store through a FIFO, so the full blob is never staged on
-   disk twice (`internal/converter/layer.go`).
+   disk twice (`internal/pipeline/layer.go`).
 3. A post-convert index hook runs `nydus merge` over the per-layer blobs to
    produce the overlaid bootstrap, which is written back as the final bootstrap
-   layer (`internal/converter/hook.go`).
+   layer (`internal/pipeline/hook.go`).
 4. Push the rewritten manifest and all new layers to `--target`
    (`internal/remote`).
 
-Pipeline (multiple and/or directory sources, `internal/converter/multi.go`):
+Pipeline (multiple and/or directory sources, `internal/pipeline/multi.go`):
 
 1. Pull each image source; directory sources are used in place.
 2. Per source, produce nydus blob layers: `nydus build` on each directory,

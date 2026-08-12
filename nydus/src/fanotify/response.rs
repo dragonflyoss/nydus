@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn retries_eintr() {
+    fn retries_write_after_eintr() {
         let writer = MockWriter::scripted([
             WriteResult::Error(libc::EINTR),
             WriteResult::Written(RESPONSE_SIZE),
