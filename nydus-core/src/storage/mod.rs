@@ -1,7 +1,6 @@
 pub mod backend;
 pub mod cache;
 pub mod group_map;
-pub mod prefetch;
 
 /// Fixture builders shared by the storage unit tests.
 #[cfg(test)]

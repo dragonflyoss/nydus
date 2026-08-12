@@ -4,10 +4,7 @@ use std::thread::{self, JoinHandle};
 
 use tracing::{info, warn};
 
-use crate::fs::ErofsReader;
-
-/// Default number of worker threads used for concurrent blob prefetch.
-pub const DEFAULT_PREFETCH_THREADS: usize = 10;
+use super::ErofsReader;
 
 /// Drives blob-level prefetch after a nydus filesystem is mounted.
 ///

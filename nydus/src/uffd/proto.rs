@@ -9,7 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use crate::FdRange;
+use nydus_core::FdRange;
 use anyhow::{anyhow, bail, Context, Result};
 use sendfd::{RecvWithFd, SendWithFd};
 use tokio::io::unix::AsyncFd;

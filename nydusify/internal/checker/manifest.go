@@ -8,6 +8,7 @@ package checker
 
 import (
 	"context"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	"reflect"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -90,7 +91,7 @@ func isNydusBlobLayer(layer ocispec.Descriptor) bool {
 	if layer.Annotations == nil {
 		return false
 	}
-	_, ok := layer.Annotations[converter.LayerAnnotationNydusBlob]
+	_, ok := layer.Annotations[pkgconv.LayerAnnotationNydusBlob]
 	return ok
 }
 

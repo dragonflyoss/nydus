@@ -13,10 +13,10 @@ use fuser::{
     ReplyXattr, Request,
 };
 
-use crate::metadata::*;
-use crate::metrics;
+use nydus_core::metadata::*;
+use nydus_core::metrics;
 
-use crate::fs::{ErofsReader, RawDirEntry};
+use nydus_core::fs::{ErofsReader, RawDirEntry};
 
 const FUSE_ROOT_ID: u64 = 1;
 const EROFS_FUSE_TIMEOUT: Duration = Duration::from_secs(86400 * 365 * 10);

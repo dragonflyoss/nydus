@@ -3,8 +3,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use super::EROFS_BLOCK_SIZE;
-use crate::utils::blocks_to_bytes;
+use super::{blocks_to_bytes, EROFS_BLOCK_SIZE};
 use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
 
 /// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the

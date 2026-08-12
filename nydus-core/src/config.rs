@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::storage::prefetch::DEFAULT_PREFETCH_THREADS;
+/// Default number of worker threads used for concurrent blob prefetch.
+pub const DEFAULT_PREFETCH_THREADS: usize = 10;
 
 /// Top-level nydus configuration, typically loaded from a YAML file passed to
 /// `nydus fuse --config` or constructed by an embedding application before

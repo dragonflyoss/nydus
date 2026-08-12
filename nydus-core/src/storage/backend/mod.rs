@@ -31,10 +31,18 @@ pub use pauser::Pauser;
 #[cfg(feature = "backend-registry")]
 pub use registry::Registry;
 
-/// Kind of a backend read (on-demand vs prefetch), used to apply different
-/// retry, throttling and proxy-priority policies to user-triggered versus
-/// background reads.
-pub use crate::metrics::ReadKind;
+/// What kind of backend read this is — a user-triggered on-demand read or a
+/// background prefetch — used to apply different retry, throttling,
+/// proxy-priority and metering policies to user-triggered versus background
+/// reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadKind {
+    /// User-triggered read that blocks a FUSE request.
+    #[default]
+    OnDemand,
+    /// Background prefetch read after mount.
+    Prefetch,
+}
 
 /// Diagnostic context for a backend read: its kind plus the uncompressed
 /// `(offset, size)` span it decodes to, when the read maps to blob-meta groups.

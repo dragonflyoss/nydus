@@ -25,9 +25,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::metadata::EROFS_BLOCK_SIZE;
-use crate::utils::pread_exact;
-use crate::{Config, NydusCore};
+use nydus_core::metadata::EROFS_BLOCK_SIZE;
+use nydus_core::utils::pread_exact;
+use nydus_core::{Config, NydusCore};
 
 /// EROFS block size as u64 — reuses the canonical constant from the core.
 const BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;

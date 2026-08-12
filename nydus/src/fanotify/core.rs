@@ -30,12 +30,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
-use crate::{BlobId, Config, NydusCore};
+use nydus_core::{BlobId, Config, NydusCore};
 
 use super::event::{PreContentEvent, Range, FAN_PRE_ACCESS};
 
 /// EROFS block size as u64 — reuses the canonical constant from the core.
-const BLOCK_SIZE: u64 = crate::metadata::EROFS_BLOCK_SIZE as u64;
+const BLOCK_SIZE: u64 = nydus_core::metadata::EROFS_BLOCK_SIZE as u64;
 
 /// `fanotify_init(2)` flag: close-on-exec on the group descriptor.
 pub(crate) const FAN_CLOEXEC: u32 = 0x0000_0001;
@@ -379,7 +379,7 @@ pub(crate) fn align_fetch_range(
 
     let aligned_off = offset & !(BLOCK_SIZE - 1);
     let aligned_end =
-        crate::utils::align_up(end, BLOCK_SIZE).ok_or(RangeError::Overflow)?;
+        nydus_core::utils::align_up(end, BLOCK_SIZE).ok_or(RangeError::Overflow)?;
     // `cache_size` is validated block-aligned at device enumeration, so rounding
     // `end` up never exceeds it; clamp as a safety net and verify the aligned
     // window stays inside the device.

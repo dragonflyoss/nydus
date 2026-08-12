@@ -7,9 +7,6 @@ license = "Apache-2.0"
 description = "Runtime core APIs for EROFS-based Nydus images: metadata parsing, on-demand blob caching and storage backends."
 repository = "https://github.com/dragonflyoss/nydus"
 readme = "README.md"
-# Integration tests need the `nydus` builder (a path-only cyclic
-# dev-dependency stripped on publish), so keep them out of the package.
-exclude = ["/tests"]
 
 [features]
 default = []
@@ -32,6 +29,7 @@ backend-dragonfly-proxy = [
 anyhow = "1"
 arc-swap = { version = "1", optional = true }
 bitflags = "2"
+blake3 = "1"
 crc32c = "0.6"
 dragonfly-client-request = { version = "=1.4.0", optional = true }
 futures = { version = "0.3", optional = true }
@@ -57,10 +55,7 @@ tokio = { version = "1", features = [
 ], optional = true }
 tracing = "0.1"
 url = { version = "2", optional = true }
+xattr = "1"
 zstd = "0.13"
 
 [dev-dependencies]
-blake3 = "1"
-# Path-only cyclic dev-dependency: tests build fixture images with the
-# `nydus` builder. Stripped automatically by `cargo publish`.
-nydus = { path = "../nydus", default-features = false }

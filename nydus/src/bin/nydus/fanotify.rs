@@ -9,7 +9,7 @@ use clap::Args;
 
 use crate::cli_common;
 use nydus::fanotify::{mount_erofs, FanotifyCore, FanotifyService};
-use nydus::utils::unmount;
+use nydus_core::utils::unmount;
 use tracing::{debug, error, info, warn};
 
 const STOP_WAKE_BYTES: usize = 1;

@@ -19,9 +19,9 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use tar::{Builder, EntryType, Header};
 
-use crate::build::inode::mode_to_erofs_file_type;
-use crate::fs::ErofsReader;
-use crate::metadata::*;
+use nydus_core::build::inode::mode_to_erofs_file_type;
+use nydus_core::fs::ErofsReader;
+use nydus_core::metadata::*;
 
 /// Guards against unbounded recursion on a corrupted or hostile image.
 const MAX_DEPTH: u32 = 1024;

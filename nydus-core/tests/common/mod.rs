@@ -9,7 +9,7 @@ pub fn align_up(value: u64, align: u64) -> u64 {
 }
 
 pub fn bytes_to_blocks(size: u64) -> u32 {
-    nydus_core::utils::bytes_to_blocks(size, "test region").expect("test region not block aligned")
+    nydus_core::metadata::bytes_to_blocks(size, "test region").expect("test region not block aligned")
 }
 
 pub fn write_zero_padding(

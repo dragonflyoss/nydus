@@ -8,6 +8,7 @@ package converter
 
 import (
 	"context"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images/converter"
@@ -54,7 +55,7 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		platformMC = platforms.All
 	}
 
-	layerFn := LayerConvertFunc(PackOption{
+	layerFn := LayerConvertFunc(pkgconv.PackOption{
 		BuilderPath:  opt.BuilderPath,
 		WorkDir:      opt.WorkDir,
 		ChunkSize:    opt.ChunkSize,
@@ -62,7 +63,7 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		Compressor:   opt.Compressor,
 		LogLevel:     opt.LogLevel,
 	})
-	hookFn := ConvertHookFunc(MergeOption{
+	hookFn := ConvertHookFunc(pkgconv.MergeOption{
 		BuilderPath: opt.BuilderPath,
 		WorkDir:     opt.WorkDir,
 		LogLevel:    opt.LogLevel,

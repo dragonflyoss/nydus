@@ -5,13 +5,13 @@ use std::time::SystemTime;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::build::bootstrap::render_flattened_bootstrap;
-use crate::build::inode::{
+use nydus_core::build::bootstrap::render_flattened_bootstrap;
+use nydus_core::build::inode::{
     mode_to_erofs_file_type, set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo,
 };
-use crate::fs::ErofsReader;
-use crate::metadata::*;
-use crate::utils::parse_sha256_hex;
+use nydus_core::fs::ErofsReader;
+use nydus_core::metadata::*;
+use nydus_core::utils::parse_sha256_hex;
 
 const OCI_WHITEOUT_PREFIX: &[u8] = b".wh.";
 const OCI_OPAQUE_MARKER: &[u8] = b".wh..wh..opq";

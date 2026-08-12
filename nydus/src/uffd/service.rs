@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, info, warn};
 
-use crate::FdRange;
+use nydus_core::FdRange;
 
 use super::core::{read_uffd_msg, UffdCore, UffdMsg};
 use super::proto::{FaultPolicy, ProtoConn, Request, VmaRegion};

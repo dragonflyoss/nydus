@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::utils::align_up;
-use crate::{Config, FdRange, NydusCore, ResolveMode};
+use nydus_core::utils::align_up;
+use nydus_core::{Config, FdRange, NydusCore, ResolveMode};
 
 use super::proto::{DeviceRange, FaultPolicy, VmaRegion};
 

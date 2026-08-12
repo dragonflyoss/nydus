@@ -6,6 +6,7 @@
 
 pub mod blob_footer;
 pub mod blob_meta;
+pub mod block;
 pub mod chunk;
 pub mod dir;
 pub mod inode;
@@ -14,6 +15,7 @@ pub mod superblock;
 
 pub use blob_footer::*;
 pub use blob_meta::*;
+pub use block::*;
 pub use chunk::*;
 pub use dir::*;
 pub use inode::*;

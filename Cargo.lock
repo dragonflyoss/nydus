@@ -2836,9 +2836,7 @@ name = "nydus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "blake3",
  "clap",
- "crc32c",
  "fuser",
  "http-body-util",
  "hyper",
@@ -2878,7 +2876,6 @@ dependencies = [
  "futures",
  "libc",
  "memmap2",
- "nydus",
  "prometheus",
  "rand 0.8.6",
  "reqwest 0.12.28",
@@ -2890,6 +2887,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "xattr",
  "zstd",
 ]
 

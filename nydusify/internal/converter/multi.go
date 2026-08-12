@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	"os"
 	"path/filepath"
 
@@ -102,7 +103,7 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	var (
 		blobDescs   []ocispec.Descriptor
 		stagedPaths []string
-		blobMetas   []BlobMetaFile
+		blobMetas   []pkgconv.BlobMetaFile
 		baseConfig  json.RawMessage
 	)
 
@@ -132,7 +133,7 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 				}
 				blobDescs = append(blobDescs, desc)
 				stagedPaths = append(stagedPaths, staged)
-				blobMetas = append(blobMetas, BlobMetaFile{
+				blobMetas = append(blobMetas, pkgconv.BlobMetaFile{
 					Name: desc.Digest.Encoded() + ".blob.meta",
 					Data: meta,
 				})
@@ -148,7 +149,7 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 
 	// Merge all staged blobs (in stacking order) into a single bootstrap.
 	bootstrapPath := filepath.Join(mergeDir, "bootstrap")
-	if err := runNydusMerge(ctx, MergeBuildOption{
+	if err := pkgconv.RunNydusMerge(ctx, pkgconv.MergeBuildOption{
 		BuilderPath:   opt.BuilderPath,
 		SourcePaths:   stagedPaths,
 		BootstrapPath: bootstrapPath,
@@ -174,12 +175,12 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 	diffIDs := make([]digest.Digest, 0, len(layers))
 	history := make([]ocispec.History, 0, len(layers))
 	for _, l := range layers[:len(layers)-1] {
-		diffIDs = append(diffIDs, digest.Digest(l.Annotations[LayerAnnotationUncompressed]))
+		diffIDs = append(diffIDs, digest.Digest(l.Annotations[pkgconv.LayerAnnotationUncompressed]))
 		history = append(history, ocispec.History{
 			CreatedBy: "Nydus Build", Comment: "Nydus Data Layer",
 		})
 	}
-	diffIDs = append(diffIDs, digest.Digest(bootstrapDesc.Annotations[LayerAnnotationUncompressed]))
+	diffIDs = append(diffIDs, digest.Digest(bootstrapDesc.Annotations[pkgconv.LayerAnnotationUncompressed]))
 	history = append(history, ocispec.History{
 		CreatedBy: "Nydus Converter", Comment: "Nydus Bootstrap Layer",
 	})
@@ -217,10 +218,10 @@ func ConvertMultiSource(ctx context.Context, cs content.Store, opt MultiSourceOp
 // buildDirBlob runs `nydus build` on dir, ingests the resulting full blob into
 // the content store, stages its metadata into mergeDir for `nydus merge`, and
 // extracts its blob meta artifact.
-func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, dir, mergeDir string) (ocispec.Descriptor, string, BlobMetaFile, error) {
+func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, dir, mergeDir string) (ocispec.Descriptor, string, pkgconv.BlobMetaFile, error) {
 	buildDir, err := os.MkdirTemp(opt.WorkDir, "local-build-")
 	if err != nil {
-		return ocispec.Descriptor{}, "", BlobMetaFile{}, errors.Wrap(err, "create build scratch dir")
+		return ocispec.Descriptor{}, "", pkgconv.BlobMetaFile{}, errors.Wrap(err, "create build scratch dir")
 	}
 	defer func() { _ = os.RemoveAll(buildDir) }()
 
@@ -228,7 +229,7 @@ func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, 
 	// Rust side resolves each path against the source directory and
 	// canonicalizes it, so files outside the source are simply ignored.
 	blobPath := filepath.Join(buildDir, "blob.nydus")
-	if err := runNydusBuild(ctx, BuildOption{
+	if err := pkgconv.RunNydusBuild(ctx, pkgconv.BuildOption{
 		BuilderPath:  opt.BuilderPath,
 		SourceDir:    dir,
 		BlobPath:     blobPath,
@@ -238,25 +239,25 @@ func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, 
 		LogLevel:     opt.LogLevel,
 		Excludes:     opt.AppendInBootstrap,
 	}); err != nil {
-		return ocispec.Descriptor{}, "", BlobMetaFile{}, err
+		return ocispec.Descriptor{}, "", pkgconv.BlobMetaFile{}, err
 	}
 
 	blobDesc, err := ingestBlobFile(ctx, cs, blobPath)
 	if err != nil {
-		return ocispec.Descriptor{}, "", BlobMetaFile{}, errors.Wrap(err, "ingest blob")
+		return ocispec.Descriptor{}, "", pkgconv.BlobMetaFile{}, errors.Wrap(err, "ingest blob")
 	}
 
 	stagedPath, err := stageNydusMetadataFromFile(blobPath, blobDesc.Digest, mergeDir)
 	if err != nil {
-		return ocispec.Descriptor{}, "", BlobMetaFile{}, errors.Wrap(err, "stage blob for merge")
+		return ocispec.Descriptor{}, "", pkgconv.BlobMetaFile{}, errors.Wrap(err, "stage blob for merge")
 	}
 
 	metaData, err := extractBlobMetaFromFile(blobPath)
 	if err != nil {
-		return ocispec.Descriptor{}, "", BlobMetaFile{}, errors.Wrap(err, "extract blob meta")
+		return ocispec.Descriptor{}, "", pkgconv.BlobMetaFile{}, errors.Wrap(err, "extract blob meta")
 	}
 
-	return blobDesc, stagedPath, BlobMetaFile{
+	return blobDesc, stagedPath, pkgconv.BlobMetaFile{
 		Name: blobDesc.Digest.Encoded() + ".blob.meta",
 		Data: metaData,
 	}, nil
@@ -269,7 +270,7 @@ func buildDirBlob(ctx context.Context, cs content.Store, opt MultiSourceOption, 
 func convertImageSource(ctx context.Context, cs content.Store, opt MultiSourceOption, srcDesc ocispec.Descriptor) ([]ocispec.Descriptor, json.RawMessage, error) {
 	platformMC := platforms.Only(opt.Platform)
 
-	layerFn := LayerConvertFunc(PackOption{
+	layerFn := LayerConvertFunc(pkgconv.PackOption{
 		BuilderPath:  opt.BuilderPath,
 		WorkDir:      opt.WorkDir,
 		ChunkSize:    opt.ChunkSize,
@@ -376,7 +377,7 @@ func labelNydusBlobDiffIDs(ctx context.Context, cs content.Store, rootDesc ocisp
 			return errors.Wrap(err, "read manifest json")
 		}
 		for _, layer := range manifest.Layers {
-			uncompressed := layer.Annotations[LayerAnnotationUncompressed]
+			uncompressed := layer.Annotations[pkgconv.LayerAnnotationUncompressed]
 			if !IsNydusBlob(layer) || uncompressed == "" {
 				continue
 			}
@@ -387,13 +388,13 @@ func labelNydusBlobDiffIDs(ctx context.Context, cs content.Store, rootDesc ocisp
 				}
 				return errors.Wrapf(err, "stat blob %s", layer.Digest)
 			}
-			if info.Labels[LayerAnnotationUncompressed] == uncompressed {
+			if info.Labels[pkgconv.LayerAnnotationUncompressed] == uncompressed {
 				continue
 			}
 			if info.Labels == nil {
 				info.Labels = map[string]string{}
 			}
-			info.Labels[LayerAnnotationUncompressed] = uncompressed
+			info.Labels[pkgconv.LayerAnnotationUncompressed] = uncompressed
 			if _, err := cs.Update(ctx, info, "labels"); err != nil {
 				return errors.Wrapf(err, "label blob %s", layer.Digest)
 			}

@@ -3,11 +3,12 @@ use clap::Args;
 
 use crate::cli_common;
 use fuser::{Config as FuseConfig, MountOption, Session, SessionACL};
-use nydus::config::Config;
-use nydus::fs::ErofsReader;
+use nydus_core::config::Config;
+use nydus_core::fs::ErofsReader;
 use nydus::fuse::ErofsFs;
-use nydus::storage::backend::{build_backend, BlobBackend, LocalBackend};
-use nydus::storage::prefetch::{BlobPrefetcher, DEFAULT_PREFETCH_THREADS};
+use nydus_core::storage::backend::{build_backend, BlobBackend, LocalBackend};
+use nydus_core::config::DEFAULT_PREFETCH_THREADS;
+use nydus_core::fs::prefetch::BlobPrefetcher;
 use nydus::tracing::init_tracing;
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use std::fs;
@@ -305,7 +306,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         if !dir.is_dir() {
             bail!("blob-dir {} is not a directory", dir.display());
         }
-        Some(nydus::storage::backend::metered(Arc::new(
+        Some(nydus_core::storage::backend::metered(Arc::new(
             LocalBackend::new(dir.clone()),
         )))
     } else if let Some(config) = storage_config.as_ref() {

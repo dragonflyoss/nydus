@@ -12,7 +12,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::utils::path_cstring;
+use nydus_core::utils::path_cstring;
 
 /// Mount the NBD block device `device` at `mountpoint` as `fstype`, read-only.
 ///

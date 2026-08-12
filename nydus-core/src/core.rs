@@ -30,7 +30,7 @@ use crate::metadata::{
 };
 use crate::metrics::trace::{TraceDocument, TraceRecorder};
 use crate::storage::backend::build_backend;
-use crate::storage::prefetch::BlobPrefetcher;
+use crate::fs::prefetch::BlobPrefetcher;
 use crate::utils::{hex_string, parse_sha256_hex};
 
 /// Blob digest used by public core APIs.

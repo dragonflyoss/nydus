@@ -7,7 +7,7 @@ use clap::Args;
 
 use crate::cli_common;
 use nydus::nbd::{mount_nbd, NbdCore, NbdService};
-use nydus::utils::unmount;
+use nydus_core::utils::unmount;
 use tracing::{debug, error, info, warn};
 
 /// EBUSY is expected while readers still hold files open, so keep trying for a

@@ -1,5 +1,6 @@
 mod data;
 mod meta;
+pub mod prefetch;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;

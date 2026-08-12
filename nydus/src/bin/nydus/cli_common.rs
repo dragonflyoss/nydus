@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args;
-use nydus::config::Config;
+use nydus_core::config::Config;
 use nydus::tracing::init_tracing;
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use signal_hook::iterator::Signals;

@@ -2,17 +2,18 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use crate::cli_common;
-use nydus::config::Config;
-use nydus::fs::{ErofsReader, RawBlobInfo};
-use nydus::{TraceDocument, TraceEntry};
-use nydus::metrics::trace::TRACE_DOCUMENT_VERSION;
-use nydus::build::blob_chunk::compression_is_worthwhile;
+use nydus_core::config::Config;
+use nydus_core::fs::{ErofsReader, RawBlobInfo};
+use nydus_core::{TraceDocument, TraceEntry};
+use nydus_core::metrics::trace::TRACE_DOCUMENT_VERSION;
+use nydus_core::build::blob_chunk::compression_is_worthwhile;
+use nydus_core::build::assemble_ondemand_artifact;
 use nydus::merge::rewrite_bootstrap_with_ondemand_blob;
-use nydus::metadata::*;
-use nydus::storage::backend::build_backend;
-use nydus::storage::cache::{BlobCache, LocalBlobCache};
+use nydus_core::metadata::*;
+use nydus_core::storage::backend::build_backend;
+use nydus_core::storage::cache::{BlobCache, LocalBlobCache};
 use nydus::tracing::init_command_tracing;
-use nydus::utils::{align_up, hex_string};
+use nydus_core::utils::hex_string;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -197,7 +198,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     )
     .context("failed to assemble ondemand blob meta")?;
 
-    let (artifact, full_digest, footer) = assemble_artifact(&ondemand_data, &blob_meta)?;
+    let (artifact, full_digest, footer) = assemble_ondemand_artifact(&ondemand_data, &blob_meta)?;
     let digest_hex = hex_string(&full_digest);
 
     fs::create_dir_all(&args.blob_dir).with_context(|| {
@@ -319,49 +320,6 @@ fn fetch_trace(apiserver: &str) -> Result<Vec<u8>> {
         bail!("apiserver /trace returned non-200 status: {status_line}");
     }
     Ok(response[header_end + 4..].to_vec())
-}
-
-/// Assemble the ondemand artifact `[group data][blob.meta][footer]` (no
-/// embedded bootstrap) and return its bytes, full SHA256 digest, and footer.
-fn assemble_artifact(data: &[u8], blob_meta: &BlobMeta) -> Result<(Vec<u8>, [u8; 32], BlobFooter)> {
-    let compressed_data_size = data.len() as u64;
-    let bootstrap_offset = align_up(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
-        .context("bootstrap offset overflow")?;
-    let blob_meta_offset = bootstrap_offset;
-    let blob_meta_size = blob_meta.metadata_size();
-    let blob_meta_blocks = u32::try_from(blob_meta_size / EROFS_BLOCK_SIZE as u64)
-        .context("blob meta exceeds u32 block count")?;
-
-    let footer = BlobFooter::new(
-        0,
-        compressed_data_size,
-        bootstrap_offset,
-        0,
-        blob_meta_offset,
-        blob_meta_blocks,
-    )?;
-
-    let mut artifact = Vec::with_capacity(
-        usize::try_from(blob_meta_offset + blob_meta_size).context("artifact exceeds usize")?
-            + NYDUS_BLOB_FOOTER_SIZE,
-    );
-    artifact.extend_from_slice(data);
-    artifact.resize(
-        usize::try_from(bootstrap_offset).context("artifact padding exceeds usize")?,
-        0,
-    );
-    blob_meta
-        .write_to(&mut artifact)
-        .context("failed to serialize ondemand blob meta")?;
-    footer
-        .write_to(&mut artifact)
-        .context("failed to serialize ondemand blob footer")?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(&artifact);
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&hasher.finalize());
-    Ok((artifact, digest, footer))
 }
 
 #[cfg(test)]

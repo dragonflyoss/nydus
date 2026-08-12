@@ -1,5 +1,4 @@
 pub mod align;
-pub mod block;
 pub mod digest;
 pub mod io;
 pub mod le;
@@ -7,9 +6,9 @@ pub mod le;
 pub mod mount;
 
 pub use self::align::align_up;
-pub use self::block::{blocks_to_bytes, bytes_to_blocks};
 pub use self::digest::{
     hex_string, parse_sha256_hex, sha256_bytes, sha256_file, sha256_file_range, sha256_file_region,
+    SHA256_DIGEST_SIZE,
 };
 pub use self::io::{pread_exact, write_zero_padding};
 #[cfg(target_os = "linux")]

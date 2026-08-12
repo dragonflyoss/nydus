@@ -15,10 +15,10 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 
-use crate::config::Config;
-use crate::core::{FdRange, NydusCore};
-use crate::metadata::EROFS_BLOCK_SIZE;
-use crate::utils::{align_up, pread_exact};
+use nydus_core::config::Config;
+use nydus_core::core::{FdRange, NydusCore};
+use nydus_core::metadata::EROFS_BLOCK_SIZE;
+use nydus_core::utils::{align_up, pread_exact};
 
 /// Logical block size exposed by the ublk device. Matching the EROFS block size
 /// keeps every incoming request aligned to a whole number of EROFS blocks.

@@ -56,7 +56,8 @@ impl ErofsChunkIndex {
     }
 }
 
-pub const EROFS_BLOB_ID_SIZE: usize = 32;
+/// On-disk blob ID field size: blob IDs are SHA-256 digests.
+pub const EROFS_BLOB_ID_SIZE: usize = crate::utils::digest::SHA256_DIGEST_SIZE;
 
 /// Information about a single chunk index stored in an inode.
 #[derive(Clone)]

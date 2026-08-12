@@ -5,6 +5,7 @@ use std::mem;
 use std::path::Path;
 
 /// EROFS superblock — 128 bytes, `#[repr(C, packed)]`.
+#[derive(Clone, Copy)]
 #[repr(C, packed)]
 pub struct ErofsSuperblock {
     pub magic: [u8; 4],
