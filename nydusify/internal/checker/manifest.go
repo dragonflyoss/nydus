@@ -8,12 +8,11 @@ package checker
 
 import (
 	"context"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	"reflect"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
-
-	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
 )
 
 // manifestRule validates the structural correctness of each image's manifest
@@ -84,13 +83,13 @@ func validateNydusManifest(img *Image) error {
 }
 
 func isNydusBlobLayer(layer ocispec.Descriptor) bool {
-	if converter.IsNydusBlob(layer) {
+	if pkgconv.IsNydusBlob(layer) {
 		return true
 	}
 	if layer.Annotations == nil {
 		return false
 	}
-	_, ok := layer.Annotations[converter.LayerAnnotationNydusBlob]
+	_, ok := layer.Annotations[pkgconv.LayerAnnotationNydusBlob]
 	return ok
 }
 

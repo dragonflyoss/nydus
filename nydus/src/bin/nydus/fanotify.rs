@@ -9,16 +9,9 @@ use clap::Args;
 
 use crate::cli_common;
 use nydus::fanotify::{mount_erofs, FanotifyCore, FanotifyService};
-use nydus::utils::unmount;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
 const STOP_WAKE_BYTES: usize = 1;
-
-// Shutdown unmount retry window: EBUSY is expected while readers still hold
-// files open, so keep trying (deny-draining new events in between) for 10 s
-// before giving up.
-const UNMOUNT_RETRY_ATTEMPTS: u32 = 40;
-const UNMOUNT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Args)]
 pub struct FanotifyArgs {
@@ -86,8 +79,7 @@ fn raise_nofile_limit() {
 }
 
 pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
-    let (mut signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
-    let signal_handle = signals.handle();
+    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
 
     raise_nofile_limit();
     let core = std::sync::Arc::new(
@@ -116,32 +108,21 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     let stop_write = pipe_fds[1]; // raw fd, handed to signal thread
 
     let stop_write_signal = stop_write;
-    let _signal_thread = std::thread::Builder::new()
-        .name("nydus_fanotify_signal".to_string())
-        .spawn(move || {
-            let mut first = true;
-            for signal in signals.forever() {
-                if first {
-                    first = false;
-                    info!("received signal {signal}, stopping nydus fanotify service");
-                    let buf = [1u8; STOP_WAKE_BYTES];
-                    unsafe {
-                        libc::write(
-                            stop_write_signal,
-                            buf.as_ptr() as *const libc::c_void,
-                            buf.len(),
-                        )
-                    };
-                } else {
-                    // A second signal while a graceful shutdown is in progress
-                    // (e.g. a stuck backend keeping readers blocked) forces exit
-                    // rather than requiring SIGKILL.
-                    warn!("received second signal {signal}, forcing immediate exit");
-                    std::process::exit(130);
-                }
-            }
-        })
-        .context("failed to spawn fanotify signal thread")?;
+    let signal_thread = cli_common::spawn_signal_thread(
+        "fanotify",
+        "nydus fanotify service",
+        signals,
+        move || {
+            let buf = [1u8; STOP_WAKE_BYTES];
+            unsafe {
+                libc::write(
+                    stop_write_signal,
+                    buf.as_ptr() as *const libc::c_void,
+                    buf.len(),
+                )
+            };
+        },
+    )?;
 
     let (ready_tx, ready_rx) = mpsc::channel();
 
@@ -198,33 +179,19 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     // bounded window, deny-draining newly queued events in between — a reader
     // racing the shutdown gets EPERM (fail-closed) instead of blocking forever
     // and wedging the unmount.
-    for attempt in 1..=UNMOUNT_RETRY_ATTEMPTS {
-        match unmount(&mountpoint) {
-            Ok(()) => {
-                info!("unmounted {}", mountpoint.display());
-                break;
+    cli_common::unmount_with_retry(
+        &mountpoint,
+        || {
+            if let Err(err) = nydus::fanotify::service::deny_queued_events(&fan_fd) {
+                warn!("deny-draining fanotify events between unmount retries failed: {err:#}");
             }
-            Err(err) if attempt < UNMOUNT_RETRY_ATTEMPTS => {
-                debug!("unmount attempt {attempt} failed: {err:#}; retrying");
-                if let Err(err) = nydus::fanotify::service::deny_queued_events(&fan_fd) {
-                    warn!("deny-draining fanotify events between unmount retries failed: {err:#}");
-                }
-                std::thread::sleep(UNMOUNT_RETRY_DELAY);
-            }
-            Err(err) => {
-                error!(
-                    "failed to unmount {} after {UNMOUNT_RETRY_ATTEMPTS} attempts: {err:#}; \
-                     dropping the fanotify group fd will fail-open residual events and \
-                     unfetched ranges on the still-live mount will read as zeros — stop \
-                     remaining readers and unmount manually",
-                    mountpoint.display()
-                );
-            }
-        }
-    }
+        },
+        "dropping the fanotify group fd will fail-open residual events and unfetched ranges on \
+         the still-live mount will read as zeros — stop remaining readers and unmount manually",
+    );
     drop(fan_fd);
 
-    signal_handle.close();
+    signal_thread.shutdown()?;
     let _ = unsafe { libc::close(stop_write) };
 
     outcome

@@ -18,7 +18,6 @@ import (
 	"strconv"
 
 	"github.com/containerd/containerd/v2/core/content"
-	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 	digest "github.com/opencontainers/go-digest"
@@ -175,19 +174,19 @@ func (o *Optimizer) Optimize(ctx context.Context) error {
 	if err != nil {
 		return errors.Wrap(err, "read optimized bootstrap")
 	}
-	blobMetas := make([]converter.BlobMetaFile, 0, len(blobMetaPaths)+1)
+	blobMetas := make([]pkgconv.BlobMetaFile, 0, len(blobMetaPaths)+1)
 	for _, p := range blobMetaPaths {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			return errors.Wrapf(err, "read blob meta %q", p)
 		}
-		blobMetas = append(blobMetas, converter.BlobMetaFile{Name: filepath.Base(p), Data: data})
+		blobMetas = append(blobMetas, pkgconv.BlobMetaFile{Name: filepath.Base(p), Data: data})
 	}
 	ondemandMeta, err := os.ReadFile(filepath.Join(blobDir, ondemandHex+".blob.meta"))
 	if err != nil {
 		return errors.Wrap(err, "read ondemand blob meta")
 	}
-	blobMetas = append(blobMetas, converter.BlobMetaFile{Name: ondemandHex + ".blob.meta", Data: ondemandMeta})
+	blobMetas = append(blobMetas, pkgconv.BlobMetaFile{Name: ondemandHex + ".blob.meta", Data: ondemandMeta})
 
 	bootstrapDesc, err := converter.WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas, nil)
 	if err != nil {
@@ -234,45 +233,20 @@ func (o *Optimizer) runNydusOptimize(ctx context.Context, parentBootstrap, boots
 }
 
 // ingestDigestNamedBlobFile commits a nydus blob file into the content store,
-// trusting the file name as its SHA-256 digest (it does NOT re-hash the
-// contents — unlike converter.ingestBlobFile, which computes the digest by
-// streaming the file).
+// trusting the file name as its SHA-256 digest (the content store verifies it
+// on commit), and marks it as the ondemand blob appended by optimize.
 func ingestDigestNamedBlobFile(ctx context.Context, cs content.Store, path string) (*ocispec.Descriptor, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, errors.Wrapf(err, "open blob %q", path)
-	}
-	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, errors.Wrap(err, "stat blob")
-	}
 	dgst := digest.NewDigestFromEncoded(digest.SHA256, filepath.Base(path))
 	if err := dgst.Validate(); err != nil {
 		return nil, errors.Wrapf(err, "invalid blob digest %q", filepath.Base(path))
 	}
 
-	cw, err := content.OpenWriter(ctx, cs, content.WithRef("nydus-ondemand-"+dgst.String()))
+	desc, err := converter.IngestBlobFile(ctx, cs, path, dgst)
 	if err != nil {
-		return nil, errors.Wrap(err, "open blob writer")
+		return nil, err
 	}
-	defer func() { _ = cw.Close() }()
-	if err := content.Copy(ctx, cw, file, info.Size(), dgst); err != nil && !errdefs.IsAlreadyExists(err) {
-		return nil, errors.Wrap(err, "commit blob")
-	}
-
-	return &ocispec.Descriptor{
-		MediaType: converter.MediaTypeNydusBlob,
-		Digest:    dgst,
-		Size:      info.Size(),
-		Annotations: map[string]string{
-			// A nydus full blob is self-describing and uncompressed at the
-			// layer level, so the diff id equals the blob digest.
-			converter.LayerAnnotationUncompressed:       dgst.String(),
-			converter.LayerAnnotationNydusBlob:          "true",
-			converter.LayerAnnotationNydusBlobOptimized: "true",
-		},
-	}, nil
+	desc.Annotations[pkgconv.LayerAnnotationNydusBlobOptimized] = "true"
+	return &desc, nil
 }
 
 // writeOptimizedImage assembles the optimized manifest: the original data
@@ -282,11 +256,11 @@ func (o *Optimizer) writeOptimizedImage(ctx context.Context, cs content.Store, i
 	layers := make([]ocispec.Descriptor, 0, len(img.Manifest.Layers)+1)
 	diffIDs := make([]digest.Digest, 0, len(img.Manifest.Layers)+2)
 	for i, layer := range img.Manifest.Layers {
-		if converter.IsNydusBootstrap(layer) {
+		if pkgconv.IsNydusBootstrap(layer) {
 			continue
 		}
 		layers = append(layers, layer)
-		if uncompressed := layer.Annotations[converter.LayerAnnotationUncompressed]; uncompressed != "" {
+		if uncompressed := layer.Annotations[pkgconv.LayerAnnotationUncompressed]; uncompressed != "" {
 			diffIDs = append(diffIDs, digest.Digest(uncompressed))
 		} else if i < len(img.Config.RootFS.DiffIDs) {
 			// Data layers from other builders may lack the uncompressed
@@ -298,7 +272,7 @@ func (o *Optimizer) writeOptimizedImage(ctx context.Context, cs content.Store, i
 		}
 	}
 	for _, l := range []ocispec.Descriptor{ondemandDesc, bootstrapDesc} {
-		uncompressed := l.Annotations[converter.LayerAnnotationUncompressed]
+		uncompressed := l.Annotations[pkgconv.LayerAnnotationUncompressed]
 		if uncompressed == "" {
 			return nil, errors.Errorf("missing uncompressed annotation on appended layer %s", l.Digest)
 		}

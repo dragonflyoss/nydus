@@ -13,7 +13,7 @@
 //! through the NBD socket protocol instead of fanotify pre-content hooks, so
 //! it works on kernels without `FAN_CLASS_PRE_CONTENT` (Linux < 6.15).
 //!
-//! [`NydusCore`]: crate::NydusCore
+//! [`NydusCore`]: nydus_core::NydusCore
 
 pub mod core;
 pub mod mount;

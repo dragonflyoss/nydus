@@ -8,7 +8,7 @@ use super::{ErofsReader, RawBlobInfo};
 /// Resolve an absolute byte offset in the flattened device to the blob that
 /// backs it, returning `(blob_index, offset_within_blob)`. Returns `None` when
 /// the address is bootstrap-local (not in any blob's mapped range).
-fn locate_flat_blob(blob_layout: &[RawBlobInfo], abs_byte: u64) -> Option<(u16, u64)> {
+pub(crate) fn locate_flat_blob(blob_layout: &[RawBlobInfo], abs_byte: u64) -> Option<(u16, u64)> {
     let block_size = EROFS_BLOCK_SIZE as u64;
     for info in blob_layout {
         let start = info.mapped_blkaddr * block_size;
@@ -20,9 +20,59 @@ fn locate_flat_blob(blob_layout: &[RawBlobInfo], abs_byte: u64) -> Option<(u16, 
     None
 }
 
+/// One chunk-aligned span of a file byte range, as visited by
+/// [`for_each_chunk_span`].
+pub(crate) struct ChunkSpan {
+    /// Chunk index within the inode.
+    pub index: usize,
+    /// Byte offset of the span within the chunk.
+    pub chunk_off: u64,
+    /// Span length in bytes.
+    pub len: u64,
+    /// File position of the span start.
+    pub file_pos: u64,
+}
+
+/// Walk the file byte range `[offset, offset + len)` chunk by chunk, calling
+/// `f` once per span. Stops silently once the range runs past the last chunk;
+/// returns the number of bytes covered.
+pub(crate) fn for_each_chunk_span<E>(
+    offset: u64,
+    len: u64,
+    chunk_size: u64,
+    nchunks: usize,
+    mut f: impl FnMut(ChunkSpan) -> Result<(), E>,
+) -> Result<u64, E> {
+    let mut remaining = len;
+    let mut file_pos = offset;
+    while remaining > 0 {
+        let index = (file_pos / chunk_size) as usize;
+        if index >= nchunks {
+            break;
+        }
+        let chunk_off = file_pos % chunk_size;
+        let step = remaining.min(chunk_size - chunk_off);
+        f(ChunkSpan {
+            index,
+            chunk_off,
+            len: step,
+            file_pos,
+        })?;
+        file_pos += step;
+        remaining -= step;
+    }
+    Ok(len - remaining)
+}
+
 impl ErofsReader {
-    fn chunkbits(&self, inode: &ErofsInode<'_>) -> u32 {
+    /// Log2 of the chunk size for a chunk-based inode.
+    pub fn chunkbits(&self, inode: &ErofsInode<'_>) -> u32 {
         self.sb().blkszbits as u32 + (inode.chunk_format() as u32 & 0x1F)
+    }
+
+    /// Chunk size in bytes for a chunk-based inode.
+    pub fn chunk_size(&self, inode: &ErofsInode<'_>) -> u64 {
+        1u64 << self.chunkbits(inode)
     }
 
     fn chunk_index_bytes<'a>(&'a self, nid: u64, inode: &ErofsInode<'_>) -> io::Result<&'a [u8]> {
@@ -32,8 +82,7 @@ impl ErofsReader {
                 "not a chunk-based inode",
             ));
         }
-        let chunkbits = self.chunkbits(inode);
-        let chunk_size = 1u64 << chunkbits;
+        let chunk_size = self.chunk_size(inode);
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
         let inode_offset = self.nid_to_offset(nid);
         let header_size = inode.header_size() + inode.xattr_size();
@@ -56,8 +105,7 @@ impl ErofsReader {
             return Ok(Vec::new());
         }
 
-        let chunkbits = self.chunkbits(inode);
-        let chunk_size = 1u64 << chunkbits;
+        let chunk_size = self.chunk_size(inode);
         let index_bytes = self.chunk_index_bytes(nid, inode)?;
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
         let mut result = Vec::with_capacity(nchunks);
@@ -148,61 +196,55 @@ impl ErofsReader {
         size: usize,
         w: &mut dyn Write,
     ) -> io::Result<usize> {
-        let chunkbits = self.chunkbits(inode);
-        let chunk_size = 1u64 << chunkbits;
+        let chunk_size = self.chunk_size(inode);
         let index_bytes = self.chunk_index_bytes(nid, inode)?;
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
         let blob_layout = self.blob_infos()?;
 
-        let mut remaining = size;
-        let mut file_pos = offset;
-
-        while remaining > 0 {
-            let chunk_index = (file_pos / chunk_size) as usize;
-            let chunk_off = file_pos % chunk_size;
-            let to_read = std::cmp::min(remaining, (chunk_size - chunk_off) as usize);
-
-            if chunk_index >= nchunks {
-                break;
-            }
-
-            let entry = Self::chunk_index_entry_at(index_bytes, chunk_index);
-            let blkaddr = entry.blkaddr();
-            if blkaddr == EROFS_NULL_ADDR {
-                // Hole — write zeros (use small stack buffer to avoid large alloc)
-                let zeros = [0u8; 4096];
-                let mut left = to_read;
-                while left > 0 {
-                    let n = std::cmp::min(left, zeros.len());
-                    w.write_all(&zeros[..n])?;
-                    left -= n;
-                }
-            } else if entry.device_id() > 0 {
-                // Legacy separate-blob layout: blob-relative address.
-                self.write_blob_to(
-                    entry.device_id(),
-                    blkaddr * EROFS_BLOCK_SIZE as u64,
-                    chunk_off,
-                    to_read,
-                    w,
-                )?;
-            } else {
-                // Flattened layout: device_id 0 with an absolute address.
-                let abs = blkaddr * EROFS_BLOCK_SIZE as u64;
-                if let Some((blob_index, blob_rel)) = locate_flat_blob(&blob_layout, abs) {
-                    self.write_blob_to(blob_index, blob_rel, chunk_off, to_read, w)?;
+        let written = for_each_chunk_span(
+            offset,
+            size as u64,
+            chunk_size,
+            nchunks,
+            |span| -> io::Result<()> {
+                let chunk_off = span.chunk_off;
+                let to_read = span.len as usize;
+                let entry = Self::chunk_index_entry_at(index_bytes, span.index);
+                let blkaddr = entry.blkaddr();
+                if blkaddr == EROFS_NULL_ADDR {
+                    // Hole — write zeros (use small stack buffer to avoid large alloc)
+                    let zeros = [0u8; 4096];
+                    let mut left = to_read;
+                    while left > 0 {
+                        let n = std::cmp::min(left, zeros.len());
+                        w.write_all(&zeros[..n])?;
+                        left -= n;
+                    }
+                } else if entry.device_id() > 0 {
+                    // Legacy separate-blob layout: blob-relative address.
+                    self.write_blob_to(
+                        entry.device_id(),
+                        blkaddr * EROFS_BLOCK_SIZE as u64,
+                        chunk_off,
+                        to_read,
+                        w,
+                    )?;
                 } else {
-                    let data_offset = (abs + chunk_off) as usize;
-                    let slice = self.mmap_slice(data_offset, to_read)?;
-                    w.write_all(slice)?;
+                    // Flattened layout: device_id 0 with an absolute address.
+                    let abs = blkaddr * EROFS_BLOCK_SIZE as u64;
+                    if let Some((blob_index, blob_rel)) = locate_flat_blob(&blob_layout, abs) {
+                        self.write_blob_to(blob_index, blob_rel, chunk_off, to_read, w)?;
+                    } else {
+                        let data_offset = (abs + chunk_off) as usize;
+                        let slice = self.mmap_slice(data_offset, to_read)?;
+                        w.write_all(slice)?;
+                    }
                 }
-            }
+                Ok(())
+            },
+        )?;
 
-            file_pos += to_read as u64;
-            remaining -= to_read;
-        }
-
-        Ok(size - remaining)
+        Ok(written as usize)
     }
 
     // ------------------------------------------------------------------
@@ -245,38 +287,22 @@ impl ErofsReader {
         offset: u64,
         size: usize,
     ) -> io::Result<Vec<u8>> {
-        let chunkbits = self.chunkbits(inode);
-        let chunk_size = 1u64 << chunkbits;
+        let chunk_size = self.chunk_size(inode);
         let index_bytes = self.chunk_index_bytes(nid, inode)?;
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
         let blob_layout = self.blob_infos()?;
 
         let mut result = vec![0u8; size];
-        let mut remaining = size;
-        let mut file_pos = offset;
-        let mut buf_pos = 0;
-
-        while remaining > 0 {
-            let chunk_index = (file_pos / chunk_size) as usize;
-            let chunk_off = file_pos % chunk_size;
-            let to_read = std::cmp::min(remaining, (chunk_size - chunk_off) as usize);
-
-            if chunk_index >= nchunks {
-                break;
-            }
-
-            let entry = Self::chunk_index_entry_at(index_bytes, chunk_index);
+        for_each_chunk_span(offset, size as u64, chunk_size, nchunks, |span| {
+            let entry = Self::chunk_index_entry_at(index_bytes, span.index);
+            let buf_pos = (span.file_pos - offset) as usize;
             self.read_chunk_slice(
                 &blob_layout,
                 entry,
-                chunk_off,
-                &mut result[buf_pos..buf_pos + to_read],
-            )?;
-
-            file_pos += to_read as u64;
-            buf_pos += to_read;
-            remaining -= to_read;
-        }
+                span.chunk_off,
+                &mut result[buf_pos..buf_pos + span.len as usize],
+            )
+        })?;
 
         Ok(result)
     }

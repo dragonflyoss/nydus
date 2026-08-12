@@ -8,7 +8,8 @@ use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::metadata::{BlobMeta, BlobMetaCompressor, BlobMetaGroup, EROFS_BLOB_ID_SIZE};
+use crate::blob::{BlobMeta, BlobMetaCompressor, BlobMetaGroup};
+use crate::metadata::EROFS_BLOB_ID_SIZE;
 use crate::storage::backend::{BlobBackend, ReadContext, ReadKind};
 
 pub use local::LocalBlobCache;
@@ -93,34 +94,20 @@ pub trait BlobCache: Send + Sync {
         false
     }
 
-    /// Stream every group of a redirect blob: fetch, decode, and validate each
-    /// group, then hand `(group, decoded_bytes)` to `cb`. This never touches
-    /// the blob's own cache file. Groups that fail decode or CRC validation
-    /// are skipped with a warning so a single bad group cannot poison the
-    /// whole redirect prefetch; `cb` errors abort the stream.
-    fn stream_redirect(
-        &self,
-        _cb: &mut dyn FnMut(&BlobMetaGroup, &[u8]) -> io::Result<()>,
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "redirect stream is not supported by this blob cache",
-        ))
-    }
-
-    /// Like [`stream_redirect`], but split the redirect blob's groups into
-    /// fixed-size batches and fetch/decode them concurrently with up to
+    /// Stream every group of a redirect blob: fetch, decode, and validate
+    /// each group, then hand `(group, decoded_bytes)` to `cb`. This never
+    /// touches the blob's own cache file. The groups are split into
+    /// fixed-size batches and fetched/decoded concurrently with up to
     /// `threads` worker threads. A blob small enough to fit in a single batch
     /// (or `threads <= 1`) is streamed sequentially, since batching would
     /// add registry connections without overlapping any work. Segments whose
     /// groups are all reported done by `skip` are not fetched at all, so a
     /// process re-running the warmup behind another one's progress does close
     /// to zero backend work. `cb` must be callable concurrently (it fills
-    /// distinct source-blob caches, which is safe); per-group decode/CRC
-    /// failures are skipped, and the first `cb` or backend error aborts the
-    /// stream.
-    ///
-    /// [`stream_redirect`]: Self::stream_redirect
+    /// distinct source-blob caches, which is safe); groups that fail decode
+    /// or CRC validation are skipped with a warning so a single bad group
+    /// cannot poison the whole redirect prefetch, and the first `cb` or
+    /// backend error aborts the stream.
     fn stream_redirect_parallel(
         &self,
         _threads: usize,
@@ -201,9 +188,11 @@ pub(crate) fn plan_redirect_batches(
 
 /// Decode and validate a single group from an in-memory window of compressed
 /// bytes that starts at blob offset `window_base_offset`, writing the validated
-/// uncompressed bytes into `decoded`.
+/// uncompressed bytes into `decoded`. CRC failures are attributed to `backend`,
+/// which served the window.
 pub(crate) fn decode_group_from_window(
     blob_meta: &BlobMeta,
+    backend: &Arc<dyn BlobBackend>,
     group: &BlobMetaGroup,
     window_base_offset: u64,
     window_bytes: &[u8],
@@ -245,7 +234,7 @@ pub(crate) fn decode_group_from_window(
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     }
 
-    validate_decoded_group(group, decoded)
+    validate_group_with_metrics(backend, group, decoded)
 }
 
 #[derive(Default)]
@@ -311,7 +300,7 @@ pub(crate) fn validate_group_with_metrics(
 ) -> io::Result<()> {
     if let Err(err) = validate_decoded_group(group, decoded) {
         if is_group_crc_mismatch(&err) {
-            crate::metrics::record_backend_crc_error(backend.backend_target());
+            crate::telemetry::metrics::record_backend_crc_error(backend.backend_target());
         }
         return Err(err);
     }
@@ -367,7 +356,8 @@ pub(crate) fn is_group_crc_mismatch(err: &io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{BLOB_META_DEFAULT_CHUNK_SIZE, EROFS_BLOCK_SIZE};
+    use crate::blob::BLOB_META_DEFAULT_CHUNK_SIZE;
+    use crate::metadata::EROFS_BLOCK_SIZE;
 
     fn group(uncompressed_block_offset: u64, uncompressed_block_count: u32) -> BlobMetaGroup {
         BlobMetaGroup::new(

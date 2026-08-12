@@ -1,8 +1,10 @@
 use crate::cli_common;
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
-use nydus::merge::{merge_sources_to_bootstrap_bytes, WhiteoutSpec as MergeWhiteoutSpec};
-use nydus::tracing::init_command_tracing;
+use nydus_core::build::merge::{
+    merge_sources_to_bootstrap_bytes, WhiteoutSpec as MergeWhiteoutSpec,
+};
+use nydus_core::telemetry::logging::init_command_tracing;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;

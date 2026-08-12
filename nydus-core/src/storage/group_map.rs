@@ -323,7 +323,8 @@ impl GroupMap {
 
     /// Number of groups currently marked ready (advisory shared counter,
     /// exact once ALL_READY is latched).
-    pub fn ready_count(&self) -> usize {
+    #[cfg(test)]
+    fn ready_count(&self) -> usize {
         self.header_u32(GROUP_MAP_READY_COUNT_OFFSET)
             .load(Ordering::Acquire) as usize
     }

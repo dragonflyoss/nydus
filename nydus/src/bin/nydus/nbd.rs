@@ -7,13 +7,8 @@ use clap::Args;
 
 use crate::cli_common;
 use nydus::nbd::{mount_nbd, NbdCore, NbdService};
-use nydus::utils::unmount;
-use tracing::{debug, error, info, warn};
-
-/// EBUSY is expected while readers still hold files open, so keep trying for a
-/// bounded window before giving up — mirrors the fanotify shutdown ordering.
-const UNMOUNT_RETRY_ATTEMPTS: u32 = 40;
-const UNMOUNT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+use nydus_core::utils::unmount;
+use tracing::{debug, info, warn};
 
 /// How long to wait for the kernel to commit the NBD device geometry after
 /// `NBD_DO_IT` starts before giving up on the mount; the commit normally
@@ -69,19 +64,8 @@ fn default_nbd_threads() -> NonZeroUsize {
     NonZeroUsize::new(cpus.min(DEFAULT_MAX_THREADS)).unwrap()
 }
 
-/// True when an unmount error means "nothing is mounted there" (EINVAL: not a
-/// mount point; ENOENT: the path is gone), so retrying is pointless.
-fn is_not_mounted(err: &anyhow::Error) -> bool {
-    matches!(
-        err.downcast_ref::<std::io::Error>()
-            .and_then(|io| io.raw_os_error()),
-        Some(libc::EINVAL) | Some(libc::ENOENT)
-    )
-}
-
 pub fn run_nbd(args: NbdArgs) -> Result<()> {
-    let (mut signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
-    let signal_handle = signals.handle();
+    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
     let core = Arc::new(NbdCore::new(&args.bootstrap, config).context("failed to build nbd core")?);
     let service = Arc::new(NbdService::new(
         core.clone(),
@@ -121,52 +105,17 @@ pub fn run_nbd(args: NbdArgs) -> Result<()> {
     // A second signal forces immediate exit.
     let signal_service = service.clone();
     let signal_mountpoint = mountpoint.clone();
-    let signal_thread = std::thread::Builder::new()
-        .name("nydus_nbd_signal".to_string())
-        .spawn(move || {
-            let mut first = true;
-            for signal in signals.forever() {
-                if first {
-                    first = false;
-                    info!("received signal {signal}, stopping nydus nbd service");
-                    if let Some(mp) = &signal_mountpoint {
-                        for attempt in 1..=UNMOUNT_RETRY_ATTEMPTS {
-                            match unmount(mp) {
-                                Ok(()) => {
-                                    info!("unmounted {}", mp.display());
-                                    break;
-                                }
-                                // Nothing mounted (signal arrived before the
-                                // mount happened): retrying would only stall
-                                // the shutdown for the whole retry window.
-                                Err(err) if is_not_mounted(&err) => {
-                                    debug!("nothing mounted at {}: {err:#}", mp.display());
-                                    break;
-                                }
-                                Err(err) if attempt < UNMOUNT_RETRY_ATTEMPTS => {
-                                    debug!("unmount attempt {attempt} failed: {err:#}; retrying");
-                                    std::thread::sleep(UNMOUNT_RETRY_DELAY);
-                                }
-                                Err(err) => {
-                                    error!(
-                                        "failed to unmount {} after {UNMOUNT_RETRY_ATTEMPTS} \
-                                         attempts: {err:#}; the device will be detached anyway — \
-                                         unmount manually if needed",
-                                        mp.display()
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    signal_service.stop();
-                } else {
-                    warn!("received second signal {signal}, forcing immediate exit");
-                    std::process::exit(130);
-                }
+    let signal_thread =
+        cli_common::spawn_signal_thread("nbd", "nydus nbd service", signals, move || {
+            if let Some(mp) = &signal_mountpoint {
+                cli_common::unmount_with_retry(
+                    mp,
+                    || {},
+                    "the device will be detached anyway — unmount manually if needed",
+                );
             }
-        })
-        .context("failed to spawn nbd signal thread")?;
+            signal_service.stop();
+        })?;
 
     let outcome = if let Some(mp) = mountpoint {
         // `NBD_DO_IT` blocks its thread, so run it on a dedicated one and
@@ -223,7 +172,6 @@ pub fn run_nbd(args: NbdArgs) -> Result<()> {
         }
     }
 
-    signal_handle.close();
-    let _ = signal_thread.join();
+    signal_thread.shutdown()?;
     outcome
 }

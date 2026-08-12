@@ -1,22 +1,19 @@
 use crate::cli_common;
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
-use nydus::build::blob_chunk::BlobWriter;
-use nydus::build::bootstrap::{render_bootstrap, render_flattened_bootstrap};
-use nydus::build::inode::{build_tree, set_root_prefetch_blobs_xattr};
-use nydus::fs::ErofsReader;
-use nydus::metadata::*;
-use nydus::tracing::{init_command_tracing, init_command_tracing_stderr};
 use nydus::unpack::unpack_to_tar;
-use nydus::utils::{align_up, bytes_to_blocks, hex_string, write_zero_padding};
-use sha2::{Digest, Sha256};
+use nydus_core::blob::*;
+use nydus_core::build::{build_dir_image, DirImageOptions};
+use nydus_core::fs::ErofsReader;
+use nydus_core::metadata::*;
+use nydus_core::telemetry::logging::{init_command_tracing, init_command_tracing_stderr};
+use nydus_core::utils::{hex_string, MIB};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-const MIB: u32 = 1_048_576;
 const DEFAULT_CHUNK_SIZE: u32 = MIB;
 const DEFAULT_COMPRESS_SIZE: u32 = 4 * MIB;
 
@@ -148,41 +145,6 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         }
     }
 
-    // Validate EROFS file chunk size. BlobMeta groups are formed separately and
-    // are at least 1MiB even when file chunk indexes are smaller.
-    if args.chunk_size < EROFS_BLOCK_SIZE {
-        bail!(
-            "chunk size {} must be >= block size {}",
-            args.chunk_size,
-            EROFS_BLOCK_SIZE
-        );
-    }
-    if !args.chunk_size.is_power_of_two() {
-        bail!("chunk size {} must be a power of two", args.chunk_size);
-    }
-    if args.chunk_size % EROFS_BLOCK_SIZE != 0 {
-        bail!("chunk size {} must be block aligned", args.chunk_size);
-    }
-    let chunkbits = args.chunk_size.trailing_zeros();
-
-    // Validate compress (group uncompressed) size: a power of two (the blob
-    // meta header stores it as the log2 exponent `group_block_bits`), at
-    // least 1MiB, and at least the file chunk size so a chunk always fits in
-    // a group.
-    if !args.compress_size.is_power_of_two() || args.compress_size < MIB {
-        bail!(
-            "compress size {} must be a power of two and at least 1MiB",
-            args.compress_size
-        );
-    }
-    if args.compress_size < args.chunk_size {
-        bail!(
-            "compress size {} must be >= chunk size {}",
-            args.compress_size,
-            args.chunk_size
-        );
-    }
-
     // Validate source is a directory and canonicalize it so that all paths
     // produced by the recursive directory walk are absolute and match
     // correctly against the exclude set.
@@ -215,182 +177,50 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         }
     }
 
+    let options = DirImageOptions {
+        source: &source,
+        chunk_size: args.chunk_size,
+        compress_size: args.compress_size,
+        compressor: args.compressor.into(),
+        exclude: &exclude,
+        standalone_bootstrap: args.bootstrap.is_some(),
+    };
+    // Fail on invalid chunk/compress geometry before creating output files.
+    options.validate()?;
+
     let blob_output =
         prepare_blob_output(requested_blob_path.as_deref(), args.blob_dir.as_deref())?;
     let blob_file = open_blob_output(&blob_output)?;
-
-    let mut blob_writer = BlobWriter::from_file(
-        blob_file,
-        args.chunk_size,
-        args.compress_size,
-        args.compressor.into(),
-    )?;
-    let mut inodes = build_tree(&source, &mut blob_writer, args.chunk_size, &exclude)?;
-    blob_writer.finish()?;
-    // The root's mtime is dropped to keep builds reproducible, so it would drag
-    // the epoch to zero and cost every compact inode the range above 2106. A
-    // tree with nothing but a root has no timestamp to anchor to, and reading
-    // the clock there would make the image differ on every build.
-    let epoch = inodes
-        .iter()
-        .skip(1)
-        .map(|inode| inode.mtime)
-        .min()
-        .unwrap_or(0);
-
-    let uuid_bytes = [0u8; 16];
-    let blob_blocks = blob_writer.total_blocks();
-    let blob_id = blob_writer.data_digest();
-    let device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &blob_id)];
-    set_root_prefetch_blobs_xattr(&mut inodes[0], &[1])?;
-    let bootstrap_bytes =
-        render_bootstrap(&mut inodes, epoch, chunkbits, &device_slots, &uuid_bytes)?;
-
-    let compressed_data_size = blob_writer.data_size();
-    let blob_meta = blob_writer.blob_meta(blob_id, 0)?;
-    let blob_meta_size = blob_meta.metadata_size();
-    let mut blob_meta_bytes = Vec::with_capacity(
-        usize::try_from(blob_meta_size).context("blob meta size exceeds usize")?,
-    );
-    blob_meta
-        .write_to(&mut blob_meta_bytes)
-        .context("failed to serialize blob meta")?;
-    if blob_meta_bytes.len() as u64 != blob_meta_size {
-        bail!(
-            "serialized blob meta size mismatch: expected {}, got {}",
-            blob_meta_size,
-            blob_meta_bytes.len()
-        );
-    }
-    let (blob_file, full_blob_hasher) = blob_writer.into_file_and_data_hasher();
-    let mut blob_writer_stream = HashingWriter::new(BufWriter::new(blob_file), full_blob_hasher);
-
-    let compressed_data_offset = 0u64;
-    let bootstrap_offset = align_up(
-        compressed_data_offset + compressed_data_size,
-        NYDUS_BLOB_FOOTER_ALIGNMENT,
-    )
-    .context("bootstrap offset overflow")?;
-    write_zero_padding(
-        &mut blob_writer_stream,
-        compressed_data_offset + compressed_data_size,
-        bootstrap_offset,
-    )?;
-    blob_writer_stream
-        .write_all(&bootstrap_bytes)
-        .with_context(|| {
-            format!(
-                "failed to write blob bootstrap: {}",
-                blob_output.write_path.display()
-            )
-        })?;
-
-    let bootstrap_size = u64::try_from(bootstrap_bytes.len()).context("bootstrap exceeds u64")?;
-    let bootstrap_blocks = bytes_to_blocks(bootstrap_size, "bootstrap")?;
-    let blob_meta_blocks = bytes_to_blocks(blob_meta_size, "blob meta")?;
-    let blob_meta_offset = align_up(
-        bootstrap_offset + bootstrap_size,
-        NYDUS_BLOB_FOOTER_ALIGNMENT,
-    )
-    .context("blob meta offset overflow")?;
-    write_zero_padding(
-        &mut blob_writer_stream,
-        bootstrap_offset + bootstrap_size,
-        blob_meta_offset,
-    )?;
-    blob_writer_stream
-        .write_all(&blob_meta_bytes)
-        .with_context(|| {
-            format!(
-                "failed to write blob meta: {}",
-                blob_output.write_path.display()
-            )
-        })?;
-
-    let footer = BlobFooter::new(
-        compressed_data_offset,
-        compressed_data_size,
-        bootstrap_offset,
-        bootstrap_blocks,
-        blob_meta_offset,
-        blob_meta_blocks,
-    )?;
-    footer.write_to(&mut blob_writer_stream).with_context(|| {
+    let image = build_dir_image(&options, blob_file).with_context(|| {
         format!(
-            "failed to write blob footer: {}",
+            "failed to build nydus blob: {}",
             blob_output.write_path.display()
         )
     })?;
-    let full_blob_id = blob_writer_stream
-        .finish()
-        .with_context(|| format!("failed to flush blob: {}", blob_output.write_path.display()))?;
-    let final_blob_path = finalize_blob_output(&blob_output, &full_blob_id)?;
+
+    let final_blob_path = finalize_blob_output(&blob_output, &image.full_blob_id)?;
     let blob_meta_path = blob_meta_output_path(&final_blob_path)?;
-    blob_meta
+    image
+        .blob_meta
         .save(&blob_meta_path)
         .with_context(|| format!("failed to save blob meta: {}", blob_meta_path.display()))?;
 
-    if let Some(bootstrap) = &args.bootstrap {
-        let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(blob_blocks, &full_blob_id)];
-        let standalone_bootstrap_bytes = render_flattened_bootstrap(
-            &mut inodes,
-            epoch,
-            chunkbits,
-            &standalone_device_slots,
-            &uuid_bytes,
-        )?;
-        let bootstrap_file = File::create(bootstrap)
-            .with_context(|| format!("failed to create bootstrap: {}", bootstrap.display()))?;
-        let mut writer = BufWriter::new(bootstrap_file);
-        writer
-            .write_all(&standalone_bootstrap_bytes)
+    if let (Some(bootstrap), Some(bytes)) = (&args.bootstrap, &image.standalone_bootstrap) {
+        fs::write(bootstrap, bytes)
             .with_context(|| format!("failed to write bootstrap: {}", bootstrap.display()))?;
-        writer
-            .flush()
-            .with_context(|| format!("failed to flush bootstrap: {}", bootstrap.display()))?;
     }
 
     print_blob_summary(BlobSummary {
         index: 0,
-        data_blob_digest: &blob_id,
-        full_blob_digest: &full_blob_id,
-        blob_meta: &blob_meta,
-        footer: &footer,
+        data_blob_digest: &image.data_digest,
+        full_blob_digest: &image.full_blob_id,
+        blob_meta: &image.blob_meta,
+        footer: &image.footer,
         full_blob_path: &final_blob_path,
         blob_meta_path: &blob_meta_path,
         bootstrap_path: args.bootstrap.as_deref(),
     });
     Ok(())
-}
-
-struct HashingWriter<W> {
-    inner: W,
-    hasher: Sha256,
-}
-
-impl<W: Write> HashingWriter<W> {
-    fn new(inner: W, hasher: Sha256) -> Self {
-        Self { inner, hasher }
-    }
-
-    fn finish(mut self) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
-        self.inner.flush()?;
-        let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
-        digest.copy_from_slice(&self.hasher.finalize());
-        Ok(digest)
-    }
-}
-
-impl<W: Write> Write for HashingWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let written = self.inner.write(buf)?;
-        self.hasher.update(&buf[..written]);
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
 }
 
 struct BlobSummary<'a> {
@@ -457,7 +287,7 @@ fn blob_meta_output_path(blob_path: &Path) -> Result<PathBuf> {
     let file_name = blob_path
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("blob path has no file name: {}", blob_path.display()))?;
-    Ok(blob_path.with_file_name(format!("{}.blob.meta", file_name.to_string_lossy())))
+    Ok(blob_path.with_file_name(format!("{}{BLOB_META_SUFFIX}", file_name.to_string_lossy())))
 }
 
 struct BlobOutput {

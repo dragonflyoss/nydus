@@ -5,37 +5,22 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::metadata::EROFS_BLOB_ID_SIZE;
+/// Byte length of a SHA-256 digest.
+pub const SHA256_DIGEST_SIZE: usize = 32;
 
-pub fn sha256_bytes(data: &[u8]) -> [u8; EROFS_BLOB_ID_SIZE] {
-    let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
+pub fn sha256_bytes(data: &[u8]) -> [u8; SHA256_DIGEST_SIZE] {
+    let mut digest = [0u8; SHA256_DIGEST_SIZE];
     digest.copy_from_slice(&Sha256::digest(data));
     digest
 }
 
-pub fn sha256_file(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
+pub fn sha256_file(path: &Path) -> Result<[u8; SHA256_DIGEST_SIZE]> {
     let mut file = File::open(path)
         .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
     sha256_reader(&mut file, path)
 }
 
-pub fn sha256_file_region(path: &Path, offset: u64) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
-    let file_len = file
-        .metadata()
-        .with_context(|| format!("failed to stat file for hashing: {}", path.display()))?
-        .len();
-    if offset > file_len {
-        bail!("hash region offset exceeds file size: {}", path.display());
-    }
-
-    file.seek(SeekFrom::Start(offset))
-        .with_context(|| format!("failed to seek file for hashing: {}", path.display()))?;
-    sha256_reader(&mut file, path)
-}
-
-pub fn sha256_file_range(path: &Path, offset: u64, len: u64) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
+pub fn sha256_file_range(path: &Path, offset: u64, len: u64) -> Result<[u8; SHA256_DIGEST_SIZE]> {
     let mut file = File::open(path)
         .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
     let file_len = file
@@ -55,15 +40,15 @@ pub fn sha256_file_range(path: &Path, offset: u64, len: u64) -> Result<[u8; EROF
     sha256_reader(&mut limited, path)
 }
 
-pub fn parse_sha256_hex(value: &str) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
-    if value.len() != EROFS_BLOB_ID_SIZE * 2 {
+pub fn parse_sha256_hex(value: &str) -> Result<[u8; SHA256_DIGEST_SIZE]> {
+    if value.len() != SHA256_DIGEST_SIZE * 2 {
         bail!(
             "expected a {}-character sha256 hex string",
-            EROFS_BLOB_ID_SIZE * 2
+            SHA256_DIGEST_SIZE * 2
         );
     }
 
-    let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
+    let mut digest = [0u8; SHA256_DIGEST_SIZE];
     for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
         let hi = hex_value(chunk[0]).ok_or_else(|| anyhow!("invalid sha256 hex string"))?;
         let lo = hex_value(chunk[1]).ok_or_else(|| anyhow!("invalid sha256 hex string"))?;
@@ -81,7 +66,7 @@ pub fn hex_string(bytes: &[u8]) -> String {
     hex
 }
 
-fn sha256_reader(reader: &mut dyn Read, path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
+fn sha256_reader(reader: &mut dyn Read, path: &Path) -> Result<[u8; SHA256_DIGEST_SIZE]> {
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
 
@@ -95,7 +80,7 @@ fn sha256_reader(reader: &mut dyn Read, path: &Path) -> Result<[u8; EROFS_BLOB_I
         hasher.update(&buf[..read]);
     }
 
-    let mut digest = [0u8; EROFS_BLOB_ID_SIZE];
+    let mut digest = [0u8; SHA256_DIGEST_SIZE];
     digest.copy_from_slice(&hasher.finalize());
     Ok(digest)
 }
@@ -115,9 +100,7 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
-    use super::{
-        hex_string, parse_sha256_hex, sha256_bytes, sha256_file_range, sha256_file_region,
-    };
+    use super::{hex_string, parse_sha256_hex, sha256_bytes, sha256_file_range};
 
     #[test]
     fn parse_sha256_hex_round_trips_hex_string() {
@@ -129,17 +112,6 @@ mod tests {
         let encoded = hex_string(&digest);
 
         assert_eq!(parse_sha256_hex(&encoded).unwrap(), digest);
-    }
-
-    #[test]
-    fn sha256_file_region_hashes_from_offset() {
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(b"prefix-payload").unwrap();
-
-        assert_eq!(
-            sha256_file_region(file.path(), 7).unwrap(),
-            sha256_bytes(b"payload")
-        );
     }
 
     #[test]

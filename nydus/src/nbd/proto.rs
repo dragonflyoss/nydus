@@ -41,7 +41,7 @@ pub const NBD_EINVAL: u32 = 22;
 /// Block size in bytes reported to the NBD driver and enforced as the
 /// alignment unit for read offsets and lengths. Equals the EROFS block size,
 /// so cache-fetch preconditions are always satisfied for a valid request.
-pub const NBD_BLOCK_SIZE: u64 = crate::metadata::EROFS_BLOCK_SIZE as u64;
+pub const NBD_BLOCK_SIZE: u64 = nydus_core::metadata::EROFS_BLOCK_SIZE as u64;
 
 /// Why a request header could not be parsed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

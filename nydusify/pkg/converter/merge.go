@@ -60,50 +60,9 @@ type MergeOption struct {
 // It returns the blob digests referenced by the merged bootstrap, in layer
 // order.
 func Merge(ctx context.Context, layers []Layer, dest io.Writer, opt MergeOption) ([]digest.Digest, error) {
-	if len(layers) == 0 {
-		return nil, errors.New("no layers to merge")
-	}
-
-	mergeDir, err := os.MkdirTemp(opt.WorkDir, "nydus-merge-")
+	bootstrapData, blobMetas, err := MergeBootstrap(ctx, layers, opt)
 	if err != nil {
-		return nil, errors.Wrap(err, "create merge scratch dir")
-	}
-	defer func() { _ = os.RemoveAll(mergeDir) }()
-
-	sourcePaths := make([]string, 0, len(layers))
-	blobMetas := make([]BlobMetaFile, 0, len(layers))
-	blobDigests := make([]digest.Digest, 0, len(layers))
-	for _, layer := range layers {
-		blobPath, err := StageNydusMetadata(layer.ReaderAt, layer.ReaderAt.Size(), layer.Digest.Encoded(), mergeDir)
-		if err != nil {
-			return nil, errors.Wrapf(err, "stage blob %s", layer.Digest)
-		}
-		sourcePaths = append(sourcePaths, blobPath)
-
-		meta, err := ExtractBlobMeta(layer.ReaderAt, layer.ReaderAt.Size())
-		if err != nil {
-			return nil, errors.Wrapf(err, "extract blob meta %s", layer.Digest)
-		}
-		blobMetas = append(blobMetas, BlobMetaFile{
-			Name: layer.Digest.Encoded() + ".blob.meta",
-			Data: meta,
-		})
-		blobDigests = append(blobDigests, layer.Digest)
-	}
-
-	bootstrapPath := filepath.Join(mergeDir, "bootstrap")
-	if err := RunNydusMerge(ctx, MergeBuildOption{
-		BuilderPath:   opt.BuilderPath,
-		SourcePaths:   sourcePaths,
-		BootstrapPath: bootstrapPath,
-		LogLevel:      opt.LogLevel,
-	}); err != nil {
 		return nil, err
-	}
-
-	bootstrapData, err := os.ReadFile(bootstrapPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "read bootstrap")
 	}
 
 	tw := tar.NewWriter(dest)
@@ -114,5 +73,63 @@ func Merge(ctx context.Context, layers []Layer, dest io.Writer, opt MergeOption)
 		return nil, errors.Wrap(err, "close bootstrap tar writer")
 	}
 
+	blobDigests := make([]digest.Digest, 0, len(layers))
+	for _, layer := range layers {
+		blobDigests = append(blobDigests, layer.Digest)
+	}
 	return blobDigests, nil
+}
+
+// MergeBootstrap stages the given nydus full blob layers (in order), runs
+// `nydus merge` over them, and returns the merged bootstrap bytes together
+// with the per-layer `<full_blob_sha256>.blob.meta` artifacts. It is the shared
+// core of Merge and of the store-backed merge pipelines in nydusify.
+//
+// Each layer is staged as a sparse file that materializes only the metadata
+// tail (bootstrap + blob meta + footer); the data region is never read.
+func MergeBootstrap(ctx context.Context, layers []Layer, opt MergeOption) ([]byte, []BlobMetaFile, error) {
+	if len(layers) == 0 {
+		return nil, nil, errors.New("no layers to merge")
+	}
+
+	mergeDir, err := os.MkdirTemp(opt.WorkDir, "nydus-merge-")
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "create merge scratch dir")
+	}
+	defer func() { _ = os.RemoveAll(mergeDir) }()
+
+	sourcePaths := make([]string, 0, len(layers))
+	blobMetas := make([]BlobMetaFile, 0, len(layers))
+	for _, layer := range layers {
+		blobPath, err := StageNydusMetadata(layer.ReaderAt, layer.ReaderAt.Size(), layer.Digest.Encoded(), mergeDir)
+		if err != nil {
+			return nil, nil, errors.Wrapf(err, "stage blob %s", layer.Digest)
+		}
+		sourcePaths = append(sourcePaths, blobPath)
+
+		meta, err := ExtractBlobMeta(layer.ReaderAt, layer.ReaderAt.Size())
+		if err != nil {
+			return nil, nil, errors.Wrapf(err, "extract blob meta %s", layer.Digest)
+		}
+		blobMetas = append(blobMetas, BlobMetaFile{
+			Name: layer.Digest.Encoded() + ".blob.meta",
+			Data: meta,
+		})
+	}
+
+	bootstrapPath := filepath.Join(mergeDir, "bootstrap")
+	if err := RunNydusMerge(ctx, MergeBuildOption{
+		BuilderPath:   opt.BuilderPath,
+		SourcePaths:   sourcePaths,
+		BootstrapPath: bootstrapPath,
+		LogLevel:      opt.LogLevel,
+	}); err != nil {
+		return nil, nil, err
+	}
+
+	bootstrapData, err := os.ReadFile(bootstrapPath)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "read bootstrap")
+	}
+	return bootstrapData, blobMetas, nil
 }

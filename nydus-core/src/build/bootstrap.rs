@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 
+use super::layout::MetadataLayout;
 use crate::build::dir::{serialize_directory, DirChild};
 use crate::build::image::{
     device_table_meta_blkaddr, write_erofs_superblock_checksum, write_image,
@@ -7,7 +8,6 @@ use crate::build::image::{
 use crate::build::inode::{
     erofs_inode_size, serialize_inode, symlink_is_inline, InodeData, InodeInfo,
 };
-use crate::metadata::layout::MetadataLayout;
 use crate::metadata::*;
 
 pub const FLATTENED_BLOB_ALIGNMENT: u64 = 0x8_0000;
@@ -15,11 +15,10 @@ pub const FLATTENED_BLOB_ALIGNMENT: u64 = 0x8_0000;
 pub fn render_bootstrap(
     inodes: &mut [InodeInfo],
     epoch: u64,
-    chunkbits: u32,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
 ) -> Result<Vec<u8>> {
-    let bootstrap = render_bootstrap_inner(inodes, epoch, chunkbits, device_slots, uuid)?;
+    let bootstrap = render_bootstrap_inner(inodes, epoch, device_slots, uuid)?;
     debug_assert_eq!(bootstrap.len() % EROFS_BLOCK_SIZE as usize, 0);
     Ok(bootstrap)
 }
@@ -27,12 +26,11 @@ pub fn render_bootstrap(
 pub fn render_flattened_bootstrap(
     inodes: &mut [InodeInfo],
     epoch: u64,
-    chunkbits: u32,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
 ) -> Result<Vec<u8>> {
     let mut device_slots = device_slots.to_vec();
-    let mut bootstrap = render_bootstrap_inner(inodes, epoch, chunkbits, &device_slots, uuid)?;
+    let mut bootstrap = render_bootstrap_inner(inodes, epoch, &device_slots, uuid)?;
     debug_assert_eq!(bootstrap.len() % EROFS_BLOCK_SIZE as usize, 0);
     set_flattened_mapped_blkaddrs(
         &mut device_slots,
@@ -96,7 +94,6 @@ fn patch_device_slots(bootstrap: &mut [u8], device_slots: &[ErofsDeviceSlot]) ->
 fn render_bootstrap_inner(
     inodes: &mut [InodeInfo],
     epoch: u64,
-    chunkbits: u32,
     device_slots: &[ErofsDeviceSlot],
     uuid: &[u8; 16],
 ) -> Result<Vec<u8>> {
@@ -110,7 +107,6 @@ fn render_bootstrap_inner(
     // layout must use the same metadata block address as the image writer for
     // directory data block addresses to be correct.
     layout.meta_blkaddr = device_table_meta_blkaddr(device_slots.len())?;
-    let blkszbits = EROFS_BLKSZBITS as u32;
 
     for inode in inodes.iter_mut() {
         if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
@@ -122,7 +118,7 @@ fn render_bootstrap_inner(
         if inode.mtime.wrapping_sub(epoch) > u32::MAX as u64 {
             inode.is_extended = true;
         }
-        let inode_size = erofs_inode_size(inode, chunkbits, blkszbits);
+        let inode_size = erofs_inode_size(inode);
         let has_inline = symlink_is_inline(inode);
         let (offset, nid) = layout.alloc_inode(inode_size, has_inline);
         inode.meta_offset = offset;

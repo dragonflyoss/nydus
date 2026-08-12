@@ -6,8 +6,6 @@
 //! HTTP `/metrics` endpoint, [`encode_text`]. Keeping all metric definitions
 //! here makes the exported surface easy to audit and keeps callers trivial.
 
-pub mod trace;
-
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -19,6 +17,7 @@ use prometheus::{
 use serde::Serialize;
 
 use crate::metadata::EROFS_BLOB_ID_SIZE;
+use crate::storage::backend::ReadKind;
 
 /// Reads slower than this are counted as "high latency" for their source.
 const HIGH_LATENCY_THRESHOLD: Duration = Duration::from_millis(250);
@@ -34,18 +33,6 @@ fn latency_buckets() -> Vec<f64> {
 pub enum BackendTarget {
     Origin,
     Proxy,
-}
-
-/// What kind of backend read this is — a user-triggered on-demand read or a
-/// background prefetch — used to apply different retry, throttling,
-/// proxy-priority and metering policies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadKind {
-    /// User-triggered read that blocks a FUSE request.
-    #[default]
-    OnDemand,
-    /// Background prefetch read after mount.
-    Prefetch,
 }
 
 /// A FUSE filesystem operation, mirroring nydus `StatsFop` for label parity.

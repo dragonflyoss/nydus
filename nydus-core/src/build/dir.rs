@@ -36,7 +36,6 @@ pub fn serialize_directory(children: &[DirChild], self_nid: u64, parent_nid: u64
 
     while index < entries.len() {
         let block_start = index;
-        let mut dirent_area = 0usize;
         let mut name_area = 0usize;
 
         while index < entries.len() {
@@ -45,7 +44,6 @@ pub fn serialize_directory(children: &[DirChild], self_nid: u64, parent_nid: u64
             if new_dirent_area + new_name_area > block_size {
                 break;
             }
-            dirent_area = new_dirent_area;
             name_area = new_name_area;
             index += 1;
         }
@@ -65,7 +63,6 @@ pub fn serialize_directory(children: &[DirChild], self_nid: u64, parent_nid: u64
             block[name_offset..name_offset + name.len()].copy_from_slice(name);
             name_offset += name.len();
         }
-        let _ = dirent_area;
         result.extend_from_slice(&block);
     }
 

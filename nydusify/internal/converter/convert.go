@@ -8,6 +8,7 @@ package converter
 
 import (
 	"context"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images/converter"
@@ -41,20 +42,20 @@ type Option struct {
 // written back into cs.
 func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, opt Option) (*ocispec.Descriptor, error) {
 	if opt.Compressor == "" {
-		opt.Compressor = "zstd"
+		opt.Compressor = pkgconv.DefaultCompressor
 	}
 	if opt.ChunkSize == 0 {
-		opt.ChunkSize = 1 << 20
+		opt.ChunkSize = pkgconv.DefaultChunkSize
 	}
 	if opt.CompressSize == 0 {
-		opt.CompressSize = 4 << 20
+		opt.CompressSize = pkgconv.DefaultCompressSize
 	}
 	platformMC := opt.PlatformMC
 	if platformMC == nil {
 		platformMC = platforms.All
 	}
 
-	layerFn := LayerConvertFunc(PackOption{
+	layerFn := LayerConvertFunc(pkgconv.PackOption{
 		BuilderPath:  opt.BuilderPath,
 		WorkDir:      opt.WorkDir,
 		ChunkSize:    opt.ChunkSize,
@@ -62,7 +63,7 @@ func Convert(ctx context.Context, cs content.Store, srcDesc ocispec.Descriptor, 
 		Compressor:   opt.Compressor,
 		LogLevel:     opt.LogLevel,
 	})
-	hookFn := ConvertHookFunc(MergeOption{
+	hookFn := ConvertHookFunc(pkgconv.MergeOption{
 		BuilderPath: opt.BuilderPath,
 		WorkDir:     opt.WorkDir,
 		LogLevel:    opt.LogLevel,

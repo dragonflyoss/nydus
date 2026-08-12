@@ -2,7 +2,7 @@ use rolling_file::*;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{info, Level};
-use tracing_appender::non_blocking::WorkerGuard;
+pub use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
     filter::LevelFilter,
     fmt::{time::ChronoLocal, Layer},
@@ -72,7 +72,9 @@ pub fn init_tracing(
         .with(env_filter)
         .with(file_logging_layer)
         .with(stdout_logging_layer);
-    subscriber.init();
+    // try_init: a process only installs one global subscriber; tolerate an
+    // existing one so repeated init calls (e.g. tests sharing a binary) work.
+    let _ = subscriber.try_init();
 
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
     info!(
@@ -131,7 +133,9 @@ where
     let subscriber = Registry::default()
         .with(env_filter)
         .with(console_logging_layer);
-    subscriber.init();
+    // try_init: a process only installs one global subscriber; tolerate an
+    // existing one so repeated init calls (e.g. tests sharing a binary) work.
+    let _ = subscriber.try_init();
 
     std::panic::set_hook(Box::new(tracing_panic::panic_hook));
 

@@ -8,6 +8,13 @@ pub fn align_up(value: u64, align: u64) -> Option<u64> {
     value.checked_add(align - 1).map(|v| v & !(align - 1))
 }
 
+/// Round `val` up to the next multiple of `align` (power of two).
+/// Unchecked builder-path twin of [`align_up`]; panics on overflow.
+#[inline]
+pub fn round_up(val: usize, align: usize) -> usize {
+    align_up(val as u64, align as u64).expect("size rounding overflowed") as usize
+}
+
 #[cfg(test)]
 mod tests {
     use super::align_up;

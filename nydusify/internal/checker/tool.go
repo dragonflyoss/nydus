@@ -59,7 +59,7 @@ func extractBootstrapLayer(ctx context.Context, cs content.Store, desc ocispec.D
 			return "", nil, errors.Wrap(err, "read bootstrap tar")
 		}
 		switch {
-		case hdr.Name == converter.BootstrapFileNameInLayer:
+		case hdr.Name == pkgconv.BootstrapFileNameInLayer:
 			bootstrapPath = filepath.Join(destDir, "image.boot")
 			if err := writeTarEntry(tr, bootstrapPath); err != nil {
 				return "", nil, errors.Wrap(err, "write bootstrap file")
@@ -73,7 +73,7 @@ func extractBootstrapLayer(ctx context.Context, cs content.Store, desc ocispec.D
 		}
 	}
 	if bootstrapPath == "" {
-		return "", nil, errors.Errorf("bootstrap entry %q not found in layer", converter.BootstrapFileNameInLayer)
+		return "", nil, errors.Errorf("bootstrap entry %q not found in layer", pkgconv.BootstrapFileNameInLayer)
 	}
 	return bootstrapPath, blobMetaPaths, nil
 }

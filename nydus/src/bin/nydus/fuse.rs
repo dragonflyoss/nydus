@@ -2,196 +2,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
 
 use crate::cli_common;
-use fuser::{Config as FuseConfig, MountOption, Session, SessionACL};
-use nydus::config::Config;
-use nydus::fs::ErofsReader;
-use nydus::fuse::ErofsFs;
-use nydus::storage::backend::{build_backend, BlobBackend, LocalBackend};
-use nydus::storage::prefetch::{BlobPrefetcher, DEFAULT_PREFETCH_THREADS};
-use nydus::tracing::init_tracing;
-use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
-use std::fs;
-use std::mem::MaybeUninit;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use fuser::{Config as FuseConfig, MountOption, SessionACL};
+use nydus::fuse::{ErofsFs, FuseSession, TermSignalMask};
+use nydus_core::config::Config;
+use nydus_core::config::DEFAULT_PREFETCH_THREADS;
+use nydus_core::fs::ErofsReader;
+use nydus_core::storage::backend::{build_backend, BlobBackend, LocalBackend};
+use nydus_core::storage::prefetch::BlobPrefetcher;
+use nydus_core::telemetry::logging::init_tracing;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::available_parallelism;
-use std::time::Duration;
 use tracing::{error, info, warn};
-
-struct TermSignalMask {
-    mask: libc::sigset_t,
-    restore_on_drop: bool,
-}
-
-impl TermSignalMask {
-    fn new() -> Result<Self> {
-        let mut mask = unsafe { MaybeUninit::<libc::sigset_t>::zeroed().assume_init() };
-        let empty_ret = unsafe { libc::sigemptyset(&mut mask) };
-        if empty_ret != 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("failed to initialize signal mask");
-        }
-        for signal in termination_signals() {
-            let add_ret = unsafe { libc::sigaddset(&mut mask, *signal) };
-            if add_ret != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("failed to add signal {signal} to mask"));
-            }
-        }
-
-        Ok(Self {
-            mask,
-            restore_on_drop: false,
-        })
-    }
-
-    fn block() -> Result<Self> {
-        let mut mask = Self::new()?;
-
-        let mask_ret =
-            unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &mask.mask, std::ptr::null_mut()) };
-        if mask_ret != 0 {
-            return Err(std::io::Error::from_raw_os_error(mask_ret))
-                .context("failed to block termination signals");
-        }
-
-        mask.restore_on_drop = true;
-        Ok(mask)
-    }
-
-    fn wait(&self) -> Result<i32> {
-        let mut signal = 0;
-        let wait_ret = unsafe { libc::sigwait(&self.mask, &mut signal) };
-        if wait_ret != 0 {
-            return Err(std::io::Error::from_raw_os_error(wait_ret))
-                .context("failed to wait for termination signal");
-        }
-        Ok(signal)
-    }
-}
-
-fn termination_signals() -> impl Iterator<Item = &'static libc::c_int> {
-    TERM_SIGNALS.iter().chain(std::iter::once(&SIGHUP))
-}
-
-impl Drop for TermSignalMask {
-    fn drop(&mut self) {
-        if self.restore_on_drop {
-            let _ = unsafe {
-                libc::pthread_sigmask(libc::SIG_UNBLOCK, &self.mask, std::ptr::null_mut())
-            };
-        }
-    }
-}
-
-/// Returns the `major:minor` that /proc/self/mountinfo reports for
-/// `mountpoint`, or `None` when nothing is mounted there.
-///
-/// Read from mountinfo rather than stat() so that it stays answerable while the
-/// session is being torn down, and deliberately not the mount ID: the kernel
-/// recycles those as soon as a mount is destroyed, so a successor at the same
-/// path routinely inherits the ID its predecessor had.
-fn mount_dev_of(mountpoint: &Path) -> std::io::Result<Option<String>> {
-    let target = match fs::canonicalize(mountpoint) {
-        Ok(path) => path,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err),
-    };
-
-    let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
-    let mut found = None;
-    for line in mountinfo.lines() {
-        let mut fields = line.split(' ');
-        let (Some(_id), Some(_parent), Some(dev), Some(_root), Some(point)) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-        ) else {
-            continue;
-        };
-        if unescape_mountinfo(point) != target.as_os_str().to_string_lossy() {
-            continue;
-        }
-        // Later entries shadow earlier ones when mounts are stacked.
-        found = Some(dev.to_string());
-    }
-
-    Ok(found)
-}
-
-/// mountinfo escapes space, tab, newline and backslash as octal sequences.
-fn unescape_mountinfo(field: &str) -> String {
-    let mut out = String::with_capacity(field.len());
-    let mut chars = field.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        let octal: String = chars.clone().take(3).collect();
-        match u8::from_str_radix(&octal, 8) {
-            Ok(byte) if octal.len() == 3 => {
-                out.push(byte as char);
-                for _ in 0..3 {
-                    chars.next();
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Tears the session down, unmounting only while the mount at `mountpoint` is
-/// still the one we created.
-///
-/// fuser unmounts by path: both `BackgroundSession::umount_and_join` and the
-/// `Mount` destructor reach `umount(2)` on the mountpoint string, which as root
-/// succeeds against whatever happens to be mounted there. Once our own mount is
-/// gone that would detach the next daemon's mount, and the victim then dies
-/// reporting "Unmount failed: Invalid argument".
-///
-/// A live session is the authoritative signal that the mount is still ours,
-/// because the kernel tears our channel down as soon as the mount goes away.
-/// The device number additionally covers a lazy unmount, which detaches the
-/// path while leaving the connection open. When neither holds we leak the
-/// session rather than dropping it; the process is exiting and there is nothing
-/// left to release.
-fn finish_session(
-    session: fuser::BackgroundSession,
-    mountpoint: &Path,
-    our_dev: Option<String>,
-) -> std::io::Result<()> {
-    let session_alive = !session.guard.is_finished();
-    let same_dev = match mount_dev_of(mountpoint) {
-        Ok(current) => current.is_some() && current == our_dev,
-        Err(err) => {
-            error!(
-                "failed to inspect mountpoint {} before unmount: {:?}",
-                mountpoint.display(),
-                err
-            );
-            false
-        }
-    };
-
-    if session_alive && same_dev {
-        info!("unmounting {}", mountpoint.display());
-        return session.umount_and_join();
-    }
-
-    for _ in 0..100 {
-        if session.guard.is_finished() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    std::mem::forget(session);
-    Ok(())
-}
 
 #[derive(Args)]
 pub struct FuseArgs {
@@ -305,7 +127,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         if !dir.is_dir() {
             bail!("blob-dir {} is not a directory", dir.display());
         }
-        Some(nydus::storage::backend::metered(Arc::new(
+        Some(nydus_core::storage::backend::metered(Arc::new(
             LocalBackend::new(dir.clone()),
         )))
     } else if let Some(config) = storage_config.as_ref() {
@@ -354,9 +176,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
     config.n_threads = Some(args.threads);
     config.clone_fd = true;
 
-    let session =
-        Session::new(fs, mountpoint, &config).map_err(|e| anyhow!("mount failed: {e}"))?;
-    let bg = session.spawn().map_err(|e| anyhow!("spawn failed: {e}"))?;
+    let session = FuseSession::mount(fs, mountpoint, &config)?;
 
     if prefetch_enable {
         match BlobPrefetcher::new(reader.clone(), prefetch_threads, prefetch_full).spawn() {
@@ -383,68 +203,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         None => None,
     };
 
-    let wait_signals = TermSignalMask::new()?;
-    let signal_mountpoint = mountpoint.to_path_buf();
-    // Captured before anything can replace the mount, so the teardown below can
-    // tell our own mount apart from a successor's at the same path.
-    let our_dev = mount_dev_of(mountpoint)
-        .with_context(|| format!("failed to read mount device of {}", mountpoint.display()))?;
-    let (unmount_tx, unmount_rx) = mpsc::channel::<i32>();
-    let (result_tx, result_rx) = mpsc::channel::<std::io::Result<()>>();
-
-    std::thread::Builder::new()
-        .name("nydus_fuse_controller".to_string())
-        .spawn(move || {
-            let mut bg = Some(bg);
-
-            loop {
-                if bg.as_ref().is_some_and(|bg| bg.guard.is_finished()) {
-                    let session = bg.take().expect("background session already taken");
-                    let result = finish_session(session, &signal_mountpoint, our_dev.clone());
-                    let _ = result_tx.send(result);
-                    return;
-                }
-
-                match unmount_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(signal) => {
-                        let session = bg.take().expect("background session already taken");
-                        let result = finish_session(session, &signal_mountpoint, our_dev.clone());
-                        if let Err(err) = &result {
-                            error!(
-                                "failed to unmount after receiving signal {}: {:?}",
-                                signal, err
-                            );
-                        }
-                        let _ = result_tx.send(result);
-                        return;
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        let session = bg.take().expect("background session already taken");
-                        let result = finish_session(session, &signal_mountpoint, our_dev.clone());
-                        let _ = result_tx.send(result);
-                        return;
-                    }
-                }
-            }
-        })
-        .context("failed to spawn fuse controller thread")?;
-
-    std::thread::Builder::new()
-        .name("nydus_fuse_signal".to_string())
-        .spawn(move || match wait_signals.wait() {
-            Ok(signal) => {
-                let _ = unmount_tx.send(signal);
-            }
-            Err(e) => {
-                error!("signal wait error: {:?}", e)
-            }
-        })
-        .context("failed to spawn signal thread")?;
-
-    let join_result = result_rx
-        .recv()
-        .context("failed to receive fuse controller result")?;
+    let join_result = session.serve()?;
 
     // Tear down the metrics server before reporting the mount result.
     if let Some(server) = api_server {

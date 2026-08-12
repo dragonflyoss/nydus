@@ -14,8 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
@@ -28,12 +26,10 @@ import (
 	"github.com/pkg/errors"
 )
 
-// MergeOption is aliased from pkg/converter (see constants.go).
-
 // ConvertHookFunc returns a converter.ConvertHookFunc invoked after each blob
 // is converted. It hooks index and manifest conversion to merge the per-layer
 // nydus blobs into a single bootstrap layer.
-func ConvertHookFunc(opt MergeOption) converter.ConvertHookFunc {
+func ConvertHookFunc(opt pkgconv.MergeOption) converter.ConvertHookFunc {
 	return func(ctx context.Context, cs content.Store, orgDesc ocispec.Descriptor, newDesc *ocispec.Descriptor) (*ocispec.Descriptor, error) {
 		// No conversion happened for this blob: return nil so the parent does
 		// not consider it modified. Returning a non-nil descriptor here would
@@ -69,7 +65,7 @@ func convertIndex(ctx context.Context, cs content.Store, newDesc *ocispec.Descri
 
 // convertManifest merges all nydus blob layers in the manifest into a single
 // nydus bootstrap layer, rewrites the image config, and rewrites the manifest.
-func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Descriptor, opt MergeOption) (*ocispec.Descriptor, error) {
+func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Descriptor, opt pkgconv.MergeOption) (*ocispec.Descriptor, error) {
 	var manifest ocispec.Manifest
 	manifestLabels, err := oci.Labels(ctx, cs, newDesc.Digest)
 	if err != nil {
@@ -106,7 +102,7 @@ func convertManifest(ctx context.Context, cs content.Store, newDesc *ocispec.Des
 	// Rewrite the image config: diff ids and history.
 	diffIDs := make([]digest.Digest, 0, len(layers))
 	for _, l := range layers {
-		if uncompressed := l.Annotations[LayerAnnotationUncompressed]; uncompressed != "" {
+		if uncompressed := l.Annotations[pkgconv.LayerAnnotationUncompressed]; uncompressed != "" {
 			diffIDs = append(diffIDs, digest.Digest(uncompressed))
 		}
 	}
@@ -220,97 +216,40 @@ func isMergeableBlobManifest(manifest ocispec.Manifest) bool {
 		return false
 	}
 	for _, layer := range manifest.Layers {
-		if !IsNydusBlob(layer) {
+		if !pkgconv.IsNydusBlob(layer) {
 			return false
 		}
 	}
 	return true
 }
 
-// mergeLayers stages each nydus blob to the work dir (named by its content
-// digest, as required by `nydus merge`), runs the merge, and packs the
-// resulting bootstrap into a gzip-compressed layer committed to the store.
-func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descriptor, opt MergeOption) (*ocispec.Descriptor, error) {
-	mergeDir, err := os.MkdirTemp(opt.WorkDir, "merge-")
-	if err != nil {
-		return nil, errors.Wrap(err, "create merge scratch dir")
-	}
-	defer func() { _ = os.RemoveAll(mergeDir) }()
-
-	sourcePaths := make([]string, 0, len(descs))
-	blobMetas := make([]BlobMetaFile, 0, len(descs))
+// mergeLayers merges the nydus blob layers (read from the content store) into
+// a single bootstrap via pkg/converter.MergeBootstrap and packs the resulting
+// bootstrap into a gzip-compressed layer committed to the store.
+func mergeLayers(ctx context.Context, cs content.Store, descs []ocispec.Descriptor, opt pkgconv.MergeOption) (*ocispec.Descriptor, error) {
+	layers := make([]pkgconv.Layer, 0, len(descs))
 	for _, desc := range descs {
-		blobPath, err := stageNydusMetadata(ctx, cs, desc, mergeDir)
+		ra, err := cs.ReaderAt(ctx, desc)
 		if err != nil {
-			return nil, errors.Wrapf(err, "stage blob %s", desc.Digest)
+			return nil, errors.Wrapf(err, "open blob %s", desc.Digest)
 		}
-		sourcePaths = append(sourcePaths, blobPath)
-
-		meta, err := extractBlobMeta(ctx, cs, desc)
-		if err != nil {
-			return nil, errors.Wrapf(err, "extract blob meta %s", desc.Digest)
-		}
-		blobMetas = append(blobMetas, BlobMetaFile{
-			Name: desc.Digest.Encoded() + ".blob.meta",
-			Data: meta,
-		})
+		defer func() { _ = ra.Close() }()
+		layers = append(layers, pkgconv.Layer{Digest: desc.Digest, ReaderAt: ra})
 	}
 
-	bootstrapPath := filepath.Join(mergeDir, "bootstrap")
-	if err := runNydusMerge(ctx, MergeBuildOption{
-		BuilderPath:   opt.BuilderPath,
-		SourcePaths:   sourcePaths,
-		BootstrapPath: bootstrapPath,
-		LogLevel:      opt.LogLevel,
-	}); err != nil {
+	bootstrapData, blobMetas, err := pkgconv.MergeBootstrap(ctx, layers, opt)
+	if err != nil {
 		return nil, err
 	}
 
-	return writeBootstrapLayerFromFile(ctx, cs, bootstrapPath, blobMetas, opt.AppendFiles)
-}
-
-// stageNydusMetadata stages a blob from the content store for `nydus merge`
-// without materializing the (large) compressed data region. See
-// pkg/converter.StageNydusMetadata for the layout details.
-func stageNydusMetadata(ctx context.Context, cs content.Store, desc ocispec.Descriptor, dir string) (string, error) {
-	ra, err := cs.ReaderAt(ctx, desc)
-	if err != nil {
-		return "", errors.Wrap(err, "open blob reader")
-	}
-	defer func() { _ = ra.Close() }()
-
-	return pkgconv.StageNydusMetadata(ra, ra.Size(), desc.Digest.Encoded(), dir)
-}
-
-// extractBlobMeta reads the blob meta region of a nydus full blob from the
-// content store, locating it via the trailing footer. The returned bytes are the
-// exact `<full_blob_sha256>.blob.meta` artifact produced by `nydus build`.
-func extractBlobMeta(ctx context.Context, cs content.Store, desc ocispec.Descriptor) ([]byte, error) {
-	ra, err := cs.ReaderAt(ctx, desc)
-	if err != nil {
-		return nil, errors.Wrap(err, "open blob reader")
-	}
-	defer func() { _ = ra.Close() }()
-
-	return pkgconv.ExtractBlobMeta(ra, ra.Size())
-}
-
-// writeBootstrapLayerFromFile packs the bootstrap file and the per-layer blob meta
-// artifacts into a gzip-compressed tar layer (under `image/`) and commits it to
-// the content store.
-func writeBootstrapLayerFromFile(ctx context.Context, cs content.Store, bootstrapPath string, blobMetas []BlobMetaFile, appendFiles []AppendFile) (*ocispec.Descriptor, error) {
-	bootstrapData, err := os.ReadFile(bootstrapPath)
-	if err != nil {
-		return nil, errors.Wrap(err, "read bootstrap")
-	}
-	return WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas, appendFiles)
+	return WriteBootstrapLayer(ctx, cs, bootstrapData, blobMetas, opt.AppendFiles)
 }
 
 // WriteBootstrapLayer packs bootstrap bytes and per-layer blob meta artifacts
 // into a gzip-compressed tar layer (under `image/`) and commits it to the
 // content store, returning the bootstrap layer descriptor. If appendFiles is
 // non-empty, each file is placed under "image/" alongside image.boot.
-func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []byte, blobMetas []BlobMetaFile, appendFiles []AppendFile) (*ocispec.Descriptor, error) {
+func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []byte, blobMetas []pkgconv.BlobMetaFile, appendFiles []pkgconv.AppendFile) (*ocispec.Descriptor, error) {
 	var compressedBuf bytes.Buffer
 	compressedDigester := digest.SHA256.Digester()
 	uncompressedDigester := digest.SHA256.Digester()
@@ -340,7 +279,7 @@ func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []
 
 	if err := content.Copy(ctx, cw, bytes.NewReader(layerBytes), int64(len(layerBytes)), compressedDigest,
 		content.WithLabels(map[string]string{
-			LayerAnnotationUncompressed: uncompressedDigest.String(),
+			pkgconv.LayerAnnotationUncompressed: uncompressedDigest.String(),
 		}),
 	); err != nil && !errdefs.IsAlreadyExists(err) {
 		return nil, errors.Wrap(err, "commit bootstrap layer")
@@ -351,9 +290,9 @@ func WriteBootstrapLayer(ctx context.Context, cs content.Store, bootstrapData []
 		Digest:    compressedDigest,
 		Size:      int64(len(layerBytes)),
 		Annotations: map[string]string{
-			LayerAnnotationUncompressed:   uncompressedDigest.String(),
-			LayerAnnotationNydusBootstrap: "true",
-			LayerAnnotationNydusFsVersion: NydusFsVersion,
+			pkgconv.LayerAnnotationUncompressed:   uncompressedDigest.String(),
+			pkgconv.LayerAnnotationNydusBootstrap: "true",
+			pkgconv.LayerAnnotationNydusFsVersion: pkgconv.NydusFsVersion,
 		},
 	}, nil
 }

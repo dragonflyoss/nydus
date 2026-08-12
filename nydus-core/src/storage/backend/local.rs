@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use super::{BlobBackend, ReadContext};
-use crate::metadata::{BlobFooter, BlobMeta, EROFS_BLOB_ID_SIZE};
+use crate::blob::{BlobFooter, BlobMeta, BLOB_META_SUFFIX};
+use crate::config::LocalDirConfig;
+use crate::metadata::EROFS_BLOB_ID_SIZE;
 use crate::utils::{hex_string, sha256_file, sha256_file_range};
 
 #[derive(Clone)]
@@ -72,10 +74,6 @@ impl LocalBackend {
     /// Build a `LocalBackend` from its YAML configuration, which only carries
     /// the `dir` field pointing at the blob source directory.
     pub fn from_value(config: &serde_yaml::Value) -> io::Result<Self> {
-        #[derive(serde::Deserialize)]
-        struct LocalDirConfig {
-            dir: PathBuf,
-        }
         let cfg: LocalDirConfig = serde_yaml::from_value(config.clone()).map_err(|e| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -93,7 +91,7 @@ impl LocalBackend {
             )
         })?;
 
-        let blob_meta_name = format!("{}.blob.meta", file_name.to_string_lossy());
+        let blob_meta_name = format!("{}{BLOB_META_SUFFIX}", file_name.to_string_lossy());
         Ok(self.root.join(blob_meta_name))
     }
 
@@ -236,7 +234,7 @@ fn inspect_full_blob_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{BlobMetaChunk, BlobMetaGroup};
+    use crate::blob::{BlobMetaChunk, BlobMetaGroup};
     use crate::storage::backend::ReadKind;
     use crate::utils::sha256_bytes;
     use tempfile::tempdir;
@@ -267,8 +265,14 @@ mod tests {
 
         let backend = LocalBackend::new(dir.path().to_path_buf());
         let blob_meta = backend.blob_meta(&full_blob_id).unwrap();
-        let data = backend
-            .read_range(&full_blob_id, 0, 4096, ReadContext::raw(ReadKind::OnDemand))
+        let mut data = vec![0u8; 4096];
+        backend
+            .read_range_into(
+                &full_blob_id,
+                0,
+                &mut data,
+                ReadContext::raw(ReadKind::OnDemand),
+            )
             .unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);
@@ -289,8 +293,14 @@ mod tests {
         let backend = LocalBackend::new(dir.path().to_path_buf());
 
         let blob_meta = backend.blob_meta(&full_blob_id).unwrap();
-        let data = backend
-            .read_range(&full_blob_id, 0, 4096, ReadContext::raw(ReadKind::OnDemand))
+        let mut data = vec![0u8; 4096];
+        backend
+            .read_range_into(
+                &full_blob_id,
+                0,
+                &mut data,
+                ReadContext::raw(ReadKind::OnDemand),
+            )
             .unwrap();
 
         assert_eq!(blob_meta.header().chunk_count(), 1);

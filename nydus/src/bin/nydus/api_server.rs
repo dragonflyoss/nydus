@@ -1,12 +1,13 @@
 //! Lightweight HTTP server exposing Prometheus metrics over a Unix socket.
 //!
 //! The server is intentionally tiny: it serves `GET /metrics` (the Prometheus
-//! text exposition produced by [`nydus::metrics`]) and returns `404` for
+//! text exposition produced by [`nydus_core::telemetry::metrics`]) and returns `404` for
 //! everything else. It runs on its own current-thread Tokio runtime in a
 //! background thread so it stays independent of the backend's runtime and of
 //! any cargo feature, and is shut down cleanly when the mount exits.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
+use nydus_core::build::optimize::parse_unix_address;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -119,14 +120,14 @@ async fn handle_request(
     req: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let response = if req.method() == Method::GET && req.uri().path() == "/metrics" {
-        let body = nydus::metrics::encode_text();
+        let body = nydus_core::telemetry::metrics::encode_text();
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain; version=0.0.4")
             .body(Full::new(Bytes::from(body)))
             .expect("valid metrics response")
     } else if req.method() == Method::GET && req.uri().path() == "/trace" {
-        let body = nydus::metrics::trace::encode_json();
+        let body = nydus_core::telemetry::trace::encode_json();
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -139,14 +140,4 @@ async fn handle_request(
             .expect("valid 404 response")
     };
     Ok(response)
-}
-
-pub(crate) fn parse_unix_address(address: &str) -> Result<PathBuf> {
-    let path = address
-        .strip_prefix("unix://")
-        .ok_or_else(|| anyhow!("apiserver address must start with unix:// (got {address})"))?;
-    if path.is_empty() {
-        bail!("apiserver unix socket path is empty");
-    }
-    Ok(PathBuf::from(path))
 }

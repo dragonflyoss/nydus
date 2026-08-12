@@ -9,6 +9,7 @@ package converter
 import (
 	"bytes"
 	"encoding/json"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	"reflect"
 	"testing"
 
@@ -97,19 +98,19 @@ func TestRewriteOCIConfigResetsDiffIDsAndTrimsHistory(t *testing.T) {
 
 func TestNydusDataLayersSkipsBootstrapAndOptimizedBlobs(t *testing.T) {
 	blob := func(dgst string, extra ...string) ocispec.Descriptor {
-		annotations := map[string]string{LayerAnnotationNydusBlob: "true"}
+		annotations := map[string]string{pkgconv.LayerAnnotationNydusBlob: "true"}
 		for _, name := range extra {
 			annotations[name] = "true"
 		}
 		return ocispec.Descriptor{
-			MediaType:   MediaTypeNydusBlob,
+			MediaType:   pkgconv.MediaTypeNydusBlob,
 			Digest:      digest.Digest(dgst),
 			Annotations: annotations,
 		}
 	}
 	bootstrap := ocispec.Descriptor{
 		MediaType:   ocispec.MediaTypeImageLayerGzip,
-		Annotations: map[string]string{LayerAnnotationNydusBootstrap: "true"},
+		Annotations: map[string]string{pkgconv.LayerAnnotationNydusBootstrap: "true"},
 	}
 	oci := ocispec.Descriptor{MediaType: ocispec.MediaTypeImageLayerGzip}
 
@@ -123,7 +124,7 @@ func TestNydusDataLayersSkipsBootstrapAndOptimizedBlobs(t *testing.T) {
 	blobs, err := nydusDataLayers([]ocispec.Descriptor{
 		blob("sha256:a"),
 		blob("sha256:b"),
-		blob("sha256:c", LayerAnnotationNydusBlobOptimized),
+		blob("sha256:c", pkgconv.LayerAnnotationNydusBlobOptimized),
 		bootstrap,
 	})
 	if err != nil {
@@ -172,7 +173,7 @@ func TestParseCompressorAndLayerMediaType(t *testing.T) {
 func TestStripNydusOSFeature(t *testing.T) {
 	platform := &ocispec.Platform{
 		OS:         "linux",
-		OSFeatures: []string{ManifestOSFeatureNydus, "other"},
+		OSFeatures: []string{pkgconv.ManifestOSFeatureNydus, "other"},
 	}
 	got := stripNydusOSFeature(platform)
 	if !reflect.DeepEqual(got.OSFeatures, []string{"other"}) {

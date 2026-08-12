@@ -92,11 +92,6 @@ func (p *Provider) ContentStore() content.Store {
 	return p.store
 }
 
-// PlatformMC returns the platform matcher used for pull/push and conversion.
-func (p *Provider) PlatformMC() platforms.MatchComparer {
-	return p.platformMC
-}
-
 // Insecure reports whether TLS certificate verification is skipped for the
 // given registry side.
 func (p *Provider) Insecure(reg Side) bool {

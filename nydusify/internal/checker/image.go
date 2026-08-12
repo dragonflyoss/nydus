@@ -15,9 +15,9 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 
-	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
+	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 )
 
 // ImageKind distinguishes a plain OCI image from a converted nydus image.
@@ -55,8 +55,6 @@ type Image struct {
 	Kind ImageKind
 	// Bootstrap is the nydus bootstrap layer (only set for KindNydus).
 	Bootstrap *ocispec.Descriptor
-	// Blobs are the nydus data blob layers (only set for KindNydus).
-	Blobs []ocispec.Descriptor
 }
 
 // loadImage pulls ref through provider and parses it into a single-platform
@@ -104,18 +102,13 @@ func parseImage(ctx context.Context, cs content.Store, ref string, rootDesc ocis
 		Kind:     KindOCI,
 	}
 
-	// A nydus image carries a bootstrap layer (marked by annotation). The
-	// remaining layers are nydus data blobs.
+	// A nydus image carries a bootstrap layer (marked by annotation).
 	for i := range manifest.Layers {
 		layer := manifest.Layers[i]
-		if converter.IsNydusBootstrap(layer) {
+		if pkgconv.IsNydusBootstrap(layer) {
 			img.Kind = KindNydus
 			bootstrap := layer
 			img.Bootstrap = &bootstrap
-			continue
-		}
-		if converter.IsNydusBlob(layer) {
-			img.Blobs = append(img.Blobs, layer)
 		}
 	}
 

@@ -2,24 +2,17 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use crate::cli_common;
-use nydus::build::blob_chunk::compression_is_worthwhile;
-use nydus::config::Config;
-use nydus::fs::{ErofsReader, RawBlobInfo};
-use nydus::merge::rewrite_bootstrap_with_ondemand_blob;
-use nydus::metadata::*;
-use nydus::metrics::trace::TRACE_DOCUMENT_VERSION;
-use nydus::storage::backend::build_backend;
-use nydus::storage::cache::{BlobCache, LocalBlobCache};
-use nydus::tracing::init_command_tracing;
-use nydus::utils::{align_up, hex_string};
-use nydus::{TraceDocument, TraceEntry};
-use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use nydus_core::blob::*;
+use nydus_core::build::optimize::{
+    build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file,
+};
+use nydus_core::config::Config;
+use nydus_core::metadata::*;
+use nydus_core::storage::backend::build_backend;
+use nydus_core::telemetry::logging::init_command_tracing;
+use nydus_core::utils::hex_string;
 use std::fs;
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::Duration;
 use tracing::info;
 
 #[derive(Args)]
@@ -59,19 +52,8 @@ pub struct OptimizeArgs {
     pub log: cli_common::CommandLogArgs,
 }
 
-/// Parse the versioned trace document `{"version":1,"patterns":[...]}`.
-fn parse_trace_document(raw: &[u8]) -> Result<Vec<(u16, u32)>> {
-    let envelope: TraceDocument =
-        serde_json::from_slice(raw).context("failed to parse trace document")?;
-    if envelope.version != TRACE_DOCUMENT_VERSION {
-        bail!("unsupported trace document version: {}", envelope.version);
-    }
-    dedup_patterns(envelope.patterns)
-}
-
-/// Build an "ondemand" redirect blob from a `/trace` access pattern and rewrite
-/// the bootstrap so the runtime prefetches it first, warming the source blobs'
-/// caches in recorded access order before on-demand reads arrive.
+/// Resolve the CLI arguments, run the optimize pipeline from
+/// [`nydus_core::build::optimize`], and write out its artifacts.
 pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     let _guards = init_command_tracing(args.log.log_level, args.log.console);
 
@@ -81,7 +63,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
 
     let patterns = match (&args.trace_file, &args.apiserver) {
         (Some(path), _) => load_patterns_from_file(path)?,
-        (None, Some(apiserver)) => load_patterns(apiserver)?,
+        (None, Some(apiserver)) => load_patterns_from_apiserver(apiserver)?,
         (None, None) => bail!("either --trace-file or --apiserver must be provided"),
     };
     if patterns.is_empty() {
@@ -99,106 +81,8 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("failed to create cache directory: {}", cache_dir.display()))?;
 
-    let reader = ErofsReader::open_metadata_only(&args.parent_bootstrap).with_context(|| {
-        format!(
-            "failed to open parent bootstrap: {}",
-            args.parent_bootstrap.display()
-        )
-    })?;
-    let blob_infos = reader.blob_infos()?;
-    let infos_by_index: HashMap<u16, &RawBlobInfo> = blob_infos
-        .iter()
-        .map(|info| (info.blob_index, info))
-        .collect();
-    drop(reader);
-
-    // Pull each accessed group's decoded bytes through the regular blob cache:
-    // warm groups are served from the cache directory, cold groups are fetched
-    // from the backend, and CRC validation happens on every path.
-    let mut source_caches: HashMap<u16, LocalBlobCache> = HashMap::new();
-    let mut ondemand_data = Vec::new();
-    let mut ondemand_groups = Vec::new();
-    let mut next_block_offset = 0u64;
-    let mut decoded = Vec::new();
-
-    for (blob_index, group_index) in &patterns {
-        let info = infos_by_index
-            .get(blob_index)
-            .ok_or_else(|| anyhow::anyhow!("pattern references unknown blob {blob_index}"))?;
-        let cache = match source_caches.entry(*blob_index) {
-            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
-                LocalBlobCache::open(
-                    info.blob_id,
-                    *blob_index as u32,
-                    &cache_dir,
-                    backend.clone(),
-                )
-                .with_context(|| format!("failed to open source blob {blob_index}"))?,
-            ),
-        };
-
-        let group = *cache
-            .blob_meta()
-            .group_at(*group_index as usize)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "pattern references group {group_index} out of range for blob {blob_index}"
-                )
-            })?;
-        if group.is_redirect() {
-            bail!("source blob {blob_index} is already an ondemand blob; refusing to optimize");
-        }
-
-        let decoded_len = usize::try_from(group.uncompressed_byte_size())
-            .context("group uncompressed size exceeds usize")?;
-        decoded.resize(decoded_len, 0);
-        cache
-            .read_at(group.uncompressed_byte_offset(), &mut decoded)
-            .with_context(|| {
-                format!("failed to read blob {blob_index} group {group_index} bytes")
-            })?;
-
-        // Recompress the decoded bytes for the ondemand artifact, storing them
-        // plain when compression is not worthwhile (same policy as build).
-        let compressed = zstd::bulk::compress(&decoded, 0)
-            .context("failed to compress ondemand group with zstd")?;
-        let encoded: &[u8] = if compression_is_worthwhile(compressed.len(), decoded.len()) {
-            &compressed
-        } else {
-            &decoded
-        };
-
-        let compressed_offset = ondemand_data.len() as u64;
-        ondemand_data.extend_from_slice(encoded);
-        ondemand_groups.push(BlobMetaGroup::new_redirect(
-            next_block_offset,
-            group.uncompressed_block_count(),
-            compressed_offset,
-            u32::try_from(encoded.len()).context("ondemand group compressed size exceeds u32")?,
-            group.crc32(),
-            *blob_index,
-            *group_index,
-        )?);
-        next_block_offset += group.uncompressed_block_count() as u64;
-    }
-
-    let mut data_hasher = Sha256::new();
-    data_hasher.update(&ondemand_data);
-    let mut data_digest = [0u8; EROFS_BLOB_ID_SIZE];
-    data_digest.copy_from_slice(&data_hasher.finalize());
-
-    let blob_meta = BlobMeta::from_parts_with_options(
-        data_digest,
-        BLOB_META_DEFAULT_CHUNK_BLOCK_COUNT,
-        BlobMetaCompressor::Zstd,
-        ondemand_groups,
-        Vec::new(),
-    )
-    .context("failed to assemble ondemand blob meta")?;
-
-    let (artifact, full_digest, footer) = assemble_artifact(&ondemand_data, &blob_meta)?;
-    let digest_hex = hex_string(&full_digest);
+    let ondemand = build_ondemand_blob(&args.parent_bootstrap, &patterns, backend, &cache_dir)?;
+    let digest_hex = hex_string(&ondemand.full_digest);
 
     fs::create_dir_all(&args.blob_dir).with_context(|| {
         format!(
@@ -207,20 +91,17 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
         )
     })?;
     let blob_path = args.blob_dir.join(&digest_hex);
-    fs::write(&blob_path, &artifact)
+    fs::write(&blob_path, &ondemand.artifact)
         .with_context(|| format!("failed to write ondemand blob: {}", blob_path.display()))?;
-    let blob_meta_path = args.blob_dir.join(format!("{digest_hex}.blob.meta"));
-    blob_meta
+    let blob_meta_path = args
+        .blob_dir
+        .join(format!("{digest_hex}{BLOB_META_SUFFIX}"));
+    ondemand
+        .blob_meta
         .save(&blob_meta_path)
         .with_context(|| format!("failed to save blob meta: {}", blob_meta_path.display()))?;
 
-    let bootstrap_bytes = rewrite_bootstrap_with_ondemand_blob(
-        &args.parent_bootstrap,
-        &full_digest,
-        next_block_offset,
-    )
-    .context("failed to rewrite bootstrap with ondemand device")?;
-    fs::write(&args.bootstrap, &bootstrap_bytes).with_context(|| {
+    fs::write(&args.bootstrap, &ondemand.bootstrap).with_context(|| {
         format!(
             "failed to write rewritten bootstrap: {}",
             args.bootstrap.display()
@@ -230,7 +111,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     info!(
         "optimized {} groups from {} source blobs into ondemand blob",
         patterns.len(),
-        source_caches.len()
+        ondemand.source_blob_count
     );
     println!("[ondemand blob]");
     println!("    ondemand_blob_digest: {digest_hex}");
@@ -240,148 +121,11 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     println!("    group_count: {}", patterns.len());
     println!(
         "    compressed_data_size: {}",
-        footer.compressed_data_size()
+        ondemand.footer.compressed_data_size()
     );
     println!(
         "    uncompressed_data_size: {}",
-        next_block_offset * EROFS_BLOCK_SIZE as u64
+        ondemand.uncompressed_blocks * EROFS_BLOCK_SIZE as u64
     );
     Ok(())
-}
-
-/// Fetch the `/trace` JSON from a running mount's apiserver and return the
-/// deduplicated `(blob_index, group_index)` list in first-access order.
-fn load_patterns(apiserver: &str) -> Result<Vec<(u16, u32)>> {
-    let raw = fetch_trace(apiserver)
-        .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
-    parse_trace_document(&raw)
-        .with_context(|| format!("failed to parse /trace response from {apiserver}"))
-}
-
-/// Load access patterns from a versioned JSON trace document
-/// (`{"version":1,"trace":{"patterns":[...]}}`), exactly as produced by the
-/// apiserver `/trace` endpoint.
-fn load_patterns_from_file(path: &std::path::Path) -> Result<Vec<(u16, u32)>> {
-    let raw =
-        fs::read(path).with_context(|| format!("failed to read trace file: {}", path.display()))?;
-    parse_trace_document(&raw)
-        .with_context(|| format!("failed to parse trace file: {}", path.display()))
-}
-
-/// Deduplicate `(blob_index, group_index)` pairs while preserving first-access
-/// order, validating that every blob index fits in a non-zero `u16`.
-fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<(u16, u32)>> {
-    let mut ordered = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for pattern in patterns {
-        let blob_index = u16::try_from(pattern.blob_index)
-            .with_context(|| format!("pattern blob index {} exceeds u16", pattern.blob_index))?;
-        if blob_index == 0 {
-            bail!("pattern blob index must be non-zero");
-        }
-        if seen.insert((blob_index, pattern.group_index)) {
-            ordered.push((blob_index, pattern.group_index));
-        }
-    }
-    Ok(ordered)
-}
-
-/// Issue a `GET /trace` over the apiserver's Unix socket and return the
-/// response body. A minimal HTTP/1.0 exchange is enough here: the server
-/// replies with a complete body and closes the connection, so the body is
-/// everything after the header terminator.
-fn fetch_trace(apiserver: &str) -> Result<Vec<u8>> {
-    let socket_path = crate::api_server::parse_unix_address(apiserver)?;
-    let mut stream = UnixStream::connect(&socket_path).with_context(|| {
-        format!(
-            "failed to connect to apiserver socket: {}",
-            socket_path.display()
-        )
-    })?;
-    let timeout = Some(Duration::from_secs(10));
-    stream.set_read_timeout(timeout)?;
-    stream.set_write_timeout(timeout)?;
-
-    stream.write_all(b"GET /trace HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
-
-    let header_end = response
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| anyhow::anyhow!("malformed HTTP response from apiserver"))?;
-    let status_line = response[..header_end]
-        .split(|byte| *byte == b'\r')
-        .next()
-        .unwrap_or_default();
-    let status_line = String::from_utf8_lossy(status_line);
-    if !status_line.contains(" 200 ") {
-        bail!("apiserver /trace returned non-200 status: {status_line}");
-    }
-    Ok(response[header_end + 4..].to_vec())
-}
-
-/// Assemble the ondemand artifact `[group data][blob.meta][footer]` (no
-/// embedded bootstrap) and return its bytes, full SHA256 digest, and footer.
-fn assemble_artifact(data: &[u8], blob_meta: &BlobMeta) -> Result<(Vec<u8>, [u8; 32], BlobFooter)> {
-    let compressed_data_size = data.len() as u64;
-    let bootstrap_offset = align_up(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
-        .context("bootstrap offset overflow")?;
-    let blob_meta_offset = bootstrap_offset;
-    let blob_meta_size = blob_meta.metadata_size();
-    let blob_meta_blocks = u32::try_from(blob_meta_size / EROFS_BLOCK_SIZE as u64)
-        .context("blob meta exceeds u32 block count")?;
-
-    let footer = BlobFooter::new(
-        0,
-        compressed_data_size,
-        bootstrap_offset,
-        0,
-        blob_meta_offset,
-        blob_meta_blocks,
-    )?;
-
-    let mut artifact = Vec::with_capacity(
-        usize::try_from(blob_meta_offset + blob_meta_size).context("artifact exceeds usize")?
-            + NYDUS_BLOB_FOOTER_SIZE,
-    );
-    artifact.extend_from_slice(data);
-    artifact.resize(
-        usize::try_from(bootstrap_offset).context("artifact padding exceeds usize")?,
-        0,
-    );
-    blob_meta
-        .write_to(&mut artifact)
-        .context("failed to serialize ondemand blob meta")?;
-    footer
-        .write_to(&mut artifact)
-        .context("failed to serialize ondemand blob footer")?;
-
-    let mut hasher = Sha256::new();
-    hasher.update(&artifact);
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&hasher.finalize());
-    Ok((artifact, digest, footer))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_trace_document_accepts_versioned_envelope_only() {
-        let doc = br#"{"version":1,"patterns":[
-            {"blob_index":1,"group_index":4},
-            {"blob_index":1,"group_index":4},
-            {"blob_index":2,"group_index":7}]}"#;
-        let patterns = parse_trace_document(doc).unwrap();
-        assert_eq!(patterns, vec![(1, 4), (2, 7)]);
-
-        // Wrong version is rejected.
-        let err = parse_trace_document(br#"{"version":2,"patterns":[]}"#).unwrap_err();
-        assert!(err.to_string().contains("version"), "{err}");
-
-        // The legacy unversioned document is no longer accepted.
-        assert!(parse_trace_document(br#"{"patterns":[]}"#).is_err());
-    }
 }

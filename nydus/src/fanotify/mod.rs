@@ -20,7 +20,7 @@
 //! and response ownership — is unit-tested; the full on-demand data path has
 //! been verified end-to-end with a registry backend on a 6.15 kernel.
 //!
-//! [`NydusCore`]: crate::NydusCore
+//! [`NydusCore`]: nydus_core::NydusCore
 
 pub mod core;
 pub mod event;

@@ -5,12 +5,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::utils::align_up;
-use crate::{Config, FdRange, NydusCore, ResolveMode};
+use nydus_core::metadata::EROFS_BLOCK_SIZE;
+use nydus_core::utils::align_up;
+use nydus_core::{Config, FdRange, NydusCore, ResolveMode};
 
 use super::proto::{DeviceRange, FaultPolicy, VmaRegion};
 
-pub const UFFD_BLOCK_SIZE: u64 = 4096;
+pub const UFFD_BLOCK_SIZE: u64 = EROFS_BLOCK_SIZE as u64;
 pub const UFFD_TOTAL_SIZE_ALIGNMENT: u64 = 2 * 1024 * 1024;
 
 #[cfg(target_env = "musl")]

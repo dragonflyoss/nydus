@@ -13,28 +13,32 @@ mod proxy;
 mod request;
 
 #[cfg(feature = "backend-registry")]
-mod pauser;
-#[cfg(feature = "backend-registry")]
 mod registry;
 
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::blob::BlobMeta;
 use crate::config::BackendConfig;
-use crate::metadata::{BlobMeta, EROFS_BLOB_ID_SIZE};
+use crate::metadata::EROFS_BLOB_ID_SIZE;
 
 pub use local::LocalBackend;
 
 #[cfg(feature = "backend-registry")]
-pub use pauser::Pauser;
-#[cfg(feature = "backend-registry")]
 pub use registry::Registry;
 
-/// Kind of a backend read (on-demand vs prefetch), used to apply different
-/// retry, throttling and proxy-priority policies to user-triggered versus
-/// background reads.
-pub use crate::metrics::ReadKind;
+/// What kind of backend read this is — a user-triggered on-demand read or a
+/// background prefetch — used to apply different retry, throttling and
+/// proxy-priority policies to user-triggered versus background reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReadKind {
+    /// User-triggered read that blocks a FUSE request.
+    #[default]
+    OnDemand,
+    /// Background prefetch read after mount.
+    Prefetch,
+}
 
 /// Diagnostic context for a backend read: its kind plus the uncompressed
 /// `(offset, size)` span it decodes to, when the read maps to blob-meta groups.
@@ -67,8 +71,8 @@ impl ReadContext {
 pub trait BlobBackend: Send + Sync {
     /// Which side serves this backend's reads, used to attribute read and CRC
     /// metrics. Defaults to the origin; proxied backends override it.
-    fn backend_target(&self) -> crate::metrics::BackendTarget {
-        crate::metrics::BackendTarget::Origin
+    fn backend_target(&self) -> crate::telemetry::metrics::BackendTarget {
+        crate::telemetry::metrics::BackendTarget::Origin
     }
 
     fn cache_key(
@@ -92,21 +96,9 @@ pub trait BlobBackend: Send + Sync {
         dst: &mut [u8],
         ctx: ReadContext,
     ) -> io::Result<()>;
-
-    fn read_range(
-        &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-        offset: u64,
-        len: u32,
-        ctx: ReadContext,
-    ) -> io::Result<Vec<u8>> {
-        let mut buf = vec![0u8; len as usize];
-        self.read_range_into(blob_id, offset, &mut buf, ctx)?;
-        Ok(buf)
-    }
 }
 
-/// Wrap `backend` so every read it serves reports to [`crate::metrics`].
+/// Wrap `backend` so every read it serves reports to [`crate::telemetry::metrics`].
 ///
 /// Metering lives here rather than in each backend so all of them report the
 /// same counters; an individual backend must not report reads on its own or
@@ -129,7 +121,7 @@ impl MeteredBackend {
     ) -> io::Result<T> {
         let start = std::time::Instant::now();
         let result = read();
-        crate::metrics::record_backend_read(
+        crate::telemetry::metrics::record_backend_read(
             self.inner.backend_target(),
             ctx.kind,
             bytes,
@@ -141,7 +133,7 @@ impl MeteredBackend {
 }
 
 impl BlobBackend for MeteredBackend {
-    fn backend_target(&self) -> crate::metrics::BackendTarget {
+    fn backend_target(&self) -> crate::telemetry::metrics::BackendTarget {
         self.inner.backend_target()
     }
 
@@ -173,21 +165,6 @@ impl BlobBackend for MeteredBackend {
         let bytes = dst.len() as u64;
         self.record(ctx, bytes, || {
             self.inner.read_range_into(blob_id, offset, dst, ctx)
-        })
-    }
-
-    fn read_range(
-        &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-        offset: u64,
-        len: u32,
-        ctx: ReadContext,
-    ) -> io::Result<Vec<u8>> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        self.record(ctx, len as u64, || {
-            self.inner.read_range(blob_id, offset, len, ctx)
         })
     }
 }
