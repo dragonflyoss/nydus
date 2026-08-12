@@ -1930,9 +1930,21 @@ func roFaultIn(t *testing.T, f *roFixture) {
 
 // roProcessView covers the syscalls a process uses to locate itself, which
 // depend on the parent chain and on dentry names being reported correctly.
+// cwdMu serializes every subtest that changes the process working directory.
+// The per-config suites run in parallel and the cwd is process-global, so
+// without this the GetcwdInsideMount instances of different build configs
+// race: one config's chdir (or deferred restore, or unmount) corrupts what
+// another config's getcwd observes.
+var cwdMu sync.Mutex
+
 func roProcessView(t *testing.T, f *roFixture) {
 	t.Run("GetcwdInsideMount", func(t *testing.T) {
-		// Not parallel: it changes the process working directory.
+		// Not parallel: it changes the process working directory. cwdMu
+		// additionally serializes it against the same subtest in other
+		// parallel build configs.
+		cwdMu.Lock()
+		defer cwdMu.Unlock()
+
 		rel := "dirs/a/b/c"
 		saved, err := os.Getwd()
 		require.NoError(t, err)
