@@ -54,7 +54,7 @@ import (
 //	                                 Base wait between retries; the delay grows
 //	                                 linearly with each attempt to give an unstable
 //	                                 registry more room to recover (default 30s).
-//	NYDUSFS_TOP_IMAGES_LIST         Path to the image list (default texture/top-images.txt).
+//	NYDUSFS_TOP_IMAGES_LIST         Path to the image list (default corpus/top-images.txt).
 //	NYDUSFS_TOP_IMAGES_WORKDIR      Base directory for the per-image convert/check
 //	                                 scratch work directories. Point this at a mount
 //	                                 with ample free space (e.g. /mnt on GitHub
@@ -132,7 +132,7 @@ func TestTopImages(t *testing.T) {
 
 	listPath := os.Getenv("NYDUSFS_TOP_IMAGES_LIST")
 	if listPath == "" {
-		listPath = filepath.Join("texture", "top-images.txt")
+		listPath = filepath.Join("corpus", "top-images.txt")
 	}
 	images := readImageList(t, listPath)
 	require.NotEmpty(t, images, "image list %q is empty", listPath)
