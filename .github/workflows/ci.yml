@@ -57,7 +57,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.7
-          working-directory: tests/integration
+          working-directory: tests/e2e
 
   test:
     name: Run tests

@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 // Unified cold-start performance benchmark: `nydus fuse`, `nydus nbd`,
 // `nydus ublk`, and `nydus fanotify` (plus an optional C erofsfuse column)
@@ -62,13 +62,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/jedib0t/go-pretty/v6/text"
 	"github.com/stretchr/testify/require"
 )
 
-// Fixed corpus layout produced by texture.MakePerfCorpus.
+// Fixed corpus layout produced by corpus.MakePerfCorpus.
 const (
 	benchTargetRel   = "large/file_0.bin"
 	benchStatRel     = "small"
@@ -128,7 +128,7 @@ func TestBench(t *testing.T) {
 	e.bootstrap = filepath.Join(e.workDir, "bootstrap.boot")
 
 	t.Log("Generating performance corpus...")
-	texture.MakePerfCorpus(t, corpusDir)
+	corpus.MakePerfCorpus(t, corpusDir)
 	t.Log("Building NydusFS image (chunksize=1MiB)...")
 	e.blobPath = buildNydusFSImageToDir(t, e.nydusBin, e.bootstrap, e.blobDir, corpusDir, 1024*1024)
 
@@ -622,9 +622,9 @@ func printBenchTable(t *testing.T, modes []*benchMode, results map[string]*bench
 func runBenchmarks(t *testing.T, fioBin, targetFile, statDir, readdirDir string) map[string]*benchResult {
 	require.FileExists(t, targetFile)
 
-	fioRuntime := texture.EnvInt("NYDUSFS_PERF_FIO_RUNTIME", 20)
-	fioSeqNumjobs := texture.EnvInt("NYDUSFS_PERF_FIO_SEQ_NUMJOBS", 4)
-	fioRandNumjobs := texture.EnvInt("NYDUSFS_PERF_FIO_RAND_NUMJOBS", 4)
+	fioRuntime := corpus.EnvInt("NYDUSFS_PERF_FIO_RUNTIME", 20)
+	fioSeqNumjobs := corpus.EnvInt("NYDUSFS_PERF_FIO_SEQ_NUMJOBS", 4)
+	fioRandNumjobs := corpus.EnvInt("NYDUSFS_PERF_FIO_RAND_NUMJOBS", 4)
 	results := make(map[string]*benchResult)
 
 	dropCaches(t)
@@ -698,7 +698,7 @@ func runBenchmarks(t *testing.T, fioBin, targetFile, statDir, readdirDir string)
 // benchStat repeatedly stats every file in dir for the configured metadata duration and
 // reports the achieved ops/s and latency.
 func benchStat(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(texture.EnvInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
+	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
 
 	var files []string
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -733,8 +733,8 @@ func benchStat(t *testing.T, dir string) *benchResult {
 // benchReaddir repeatedly reads every subdirectory of dir for the configured
 // metadata duration and reports the achieved ops/s and latency.
 func benchReaddir(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(texture.EnvInt("NYDUSFS_PERF_READDIR_META_SECS", 5)) * time.Second
-	passesPerDir := texture.EnvInt("NYDUSFS_PERF_READDIR_PASSES_PER_DIR", 8)
+	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_READDIR_META_SECS", 5)) * time.Second
+	passesPerDir := corpus.EnvInt("NYDUSFS_PERF_READDIR_PASSES_PER_DIR", 8)
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
@@ -786,7 +786,7 @@ func addMetaBenchmarks(t *testing.T, results map[string]*benchResult, xattrDir, 
 // the configured metadata duration and reports the achieved ops/s and latency.
 // Returns nil when no regular files are found.
 func benchListxattr(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(texture.EnvInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
+	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
 
 	var files []string
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
@@ -823,7 +823,7 @@ func benchListxattr(t *testing.T, dir string) *benchResult {
 // for the configured metadata duration and reports the achieved ops/s and
 // latency. Returns nil when no regular files are found.
 func benchGetxattr(t *testing.T, dir, xattrName string) *benchResult {
-	metaDuration := time.Duration(texture.EnvInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
+	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
 
 	var files []string
 	_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
@@ -860,7 +860,7 @@ func benchGetxattr(t *testing.T, dir, xattrName string) *benchResult {
 // simulating an "ls -l" workload, for the configured metadata duration.
 // Returns nil when dir has no entries.
 func benchReaddirStat(t *testing.T, dir string) *benchResult {
-	metaDuration := time.Duration(texture.EnvInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
+	metaDuration := time.Duration(corpus.EnvInt("NYDUSFS_PERF_META_SECS", 5)) * time.Second
 
 	// Verify the directory is non-empty.
 	entries, err := os.ReadDir(dir)

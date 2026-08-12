@@ -240,7 +240,7 @@ Options:
 
 ## Verification
 
-`make test-nbd` runs the end-to-end suite (`tests/integration/nbd_test.go`,
+`make test-nbd` runs the end-to-end suite (`tests/e2e/nbd_test.go`,
 cases C0-C10) against a local backend: readiness, metadata off-path, byte
 exactness for tiny/partial/full reads, demand-paging cache-growth bounds,
 daemon health, warm fast path, concurrency, cache persistence across

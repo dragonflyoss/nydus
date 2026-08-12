@@ -1,8 +1,8 @@
-//! Integration tests for the `NydusCore` public API. They live in
-//! `tests/` (not as unit tests) because building fixture images requires the
-//! `nydus` builder, which itself depends on this crate.
+//! Tests for the [`nydus_core::NydusCore`] public API: fixture images are
+//! built through the public `build` module and served back through
+//! `NydusCore`.
 
-mod common;
+use crate::fixture;
 
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
@@ -143,7 +143,7 @@ fn write_full_blob(
     blob_meta: &nydus_core::blob::BlobMeta,
 ) -> [u8; EROFS_BLOB_ID_SIZE] {
     let data = fs::read(data_path).unwrap();
-    let full_blob_id = common::assemble_full_blob(blob_dir, &data, bootstrap_bytes, blob_meta);
+    let full_blob_id = fixture::assemble_full_blob(blob_dir, &data, bootstrap_bytes, blob_meta);
     blob_meta
         .save(&blob_dir.join(format!("{}.blob.meta", hex_string(&full_blob_id))))
         .unwrap();

@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
 	"github.com/pkg/xattr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +41,7 @@ func TestBlobMountE2E(t *testing.T) {
 			mntDir := filepath.Join(tmpDir, "mnt")
 
 			t.Log("Generating corpus...")
-			corpus := texture.MakeStandardCorpus(t, corpusDir)
+			corpus := corpus.MakeStandardCorpus(t, corpusDir)
 			corpus.CreateUnixSocket(t, "special/socket")
 
 			t.Log("Building blob and mounting it directly...")
@@ -180,10 +180,10 @@ func fullBlobDigest(t *testing.T, blob string) string {
 func prepareMergedE2ECorpora(t *testing.T, layer1Dir, layer2Dir, layer3Dir, expectedDir string) {
 	t.Helper()
 
-	base := texture.MakeStandardCorpus(t, layer1Dir)
+	base := corpus.MakeStandardCorpus(t, layer1Dir)
 	addMergeBaseEntries(t, base)
 
-	layer2 := texture.NewCorpus(t, layer2Dir)
+	layer2 := corpus.NewCorpus(t, layer2Dir)
 	layer2.CreateFile(t, "merge/.wh.remove.txt", nil)
 	layer2.CreateFile(t, "merge/middle.txt", []byte("middle-from-layer2"))
 	layer2.CreateFile(t, "merge/dir/mid.txt", []byte("mid-from-layer2"))
@@ -200,7 +200,7 @@ func prepareMergedE2ECorpora(t *testing.T, layer1Dir, layer2Dir, layer3Dir, expe
 	layer2.CreateHardlink(t, "upperhard/link1", "upperhard/original")
 	layer2.CreateSymlink(t, "merge/type_file_to_link", "../files/tiny_2b")
 
-	layer3 := texture.NewCorpus(t, layer3Dir)
+	layer3 := corpus.NewCorpus(t, layer3Dir)
 	layer3.CreateFile(t, "files/tiny_2b", []byte("ok"))
 	layer3.CreateFile(t, "merge/lower.txt", []byte("lower-v3"))
 	layer3.CreateFile(t, "merge/type_link_to_file", []byte("layer3-file-wins"))
@@ -335,7 +335,7 @@ func syncXattrs(srcPath, dstPath string) error {
 	return nil
 }
 
-func addMergeBaseEntries(t *testing.T, corpus *texture.Corpus) {
+func addMergeBaseEntries(t *testing.T, corpus *corpus.Corpus) {
 	t.Helper()
 
 	corpus.CreateFile(t, "merge/lower.txt", []byte("lower-v1"))
@@ -390,7 +390,7 @@ func logNydusCheckOutput(t *testing.T, nydusBin string, args ...string) {
 
 func pauseMergeDebugIfRequested(t *testing.T, mountpoint string) {
 	t.Helper()
-	pauseSecs := texture.EnvInt("NYDUSFS_MERGE_PAUSE_SECS", 0)
+	pauseSecs := corpus.EnvInt("NYDUSFS_MERGE_PAUSE_SECS", 0)
 	if pauseSecs <= 0 {
 		return
 	}

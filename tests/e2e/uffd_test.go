@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dragonflyoss/nydus/tests/integration/texture"
+	"github.com/dragonflyoss/nydus/tests/e2e/corpus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,7 +55,7 @@ func TestUffdServiceSmoke(t *testing.T) {
 	logDir := filepath.Join(tmpDir, "logs")
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
-	texture.MakeStandardCorpus(t, corpusDir)
+	corpus.MakeStandardCorpus(t, corpusDir)
 	buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, uffdSmokeRequestBlock)
 	writeLocalStorageConfig(t, configPath, blobDir, cacheDir)
 

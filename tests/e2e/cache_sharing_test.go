@@ -1,4 +1,4 @@
-package integration
+package e2e
 
 // Cross-process tests for the shared blob cache. Several `nydus fuse`
 // processes are pointed at one --cache-dir, which is the state they contend

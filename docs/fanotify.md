@@ -335,7 +335,7 @@ core builds unless explicitly enabled.
 ## Verification
 
 `make test-fanotify` runs the end-to-end suite
-([`tests/integration/fanotify_test.go`](../tests/integration/fanotify_test.go),
+([`tests/e2e/fanotify_test.go`](../tests/e2e/fanotify_test.go),
 cases C0–C12). It builds a nydus image, pushes it to a throwaway local
 `registry:2`, exports the bootstrap, starts the daemon against the registry
 backend, and asserts correctness (byte-exact partial and full reads,
@@ -346,7 +346,7 @@ cache, i.e. that it is on the read path. It preflight-checks the kernel
 version, privileges, and required binaries, and skips loudly on an unsupported
 host. `make test-bench` runs the unified cold-start benchmark that compares
 fanotify against the FUSE, NBD, and ublk transports
-([`tests/integration/bench_test.go`](../tests/integration/bench_test.go)).
+([`tests/e2e/bench_test.go`](../tests/e2e/bench_test.go)).
 
 Sources: dragonflyoss/nydus#1826; erofs-utils `lib/backends/fanotify.c` and
 `mount/main.c` (`erofsmount_fanotify`); LWN "fanotify: add pre-content hooks".
