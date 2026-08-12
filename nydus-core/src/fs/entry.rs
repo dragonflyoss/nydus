@@ -1,5 +1,5 @@
 //! Path-based, owned-type filesystem API over [`ErofsReader`]: resolve a
-//! path once into an [`FsEntry`] handle, then read metadata, directory
+//! path once into a [`Node`] handle, then read metadata, directory
 //! entries, file data and xattrs without FUSE or mmap lifetimes.
 
 use std::fs::File;
@@ -9,15 +9,15 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 
-use super::data::{for_each_chunk_span, locate_flat_blob};
+use super::data::{for_each_chunk_span, locate_chunk, ChunkLocation};
 use super::range::{
     checked_range_end, push_blob_fd_ranges, push_fd_range, BlobRangeSpec, FdRange, ResolveMode,
 };
 use super::ErofsReader;
 use crate::metadata::{
-    ErofsInode, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO,
-    EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED,
-    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
+    ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
+    EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+    EROFS_INODE_FLAT_PLAIN,
 };
 
 /// File type exposed by the static core API, independent of FUSE types.
@@ -84,7 +84,7 @@ pub struct DirEntry {
 }
 
 /// Static path-based filesystem APIs.
-pub struct Fs {
+pub struct ImageFs {
     reader: Arc<ErofsReader>,
     zero_file: Arc<File>,
 }
@@ -92,21 +92,21 @@ pub struct Fs {
 /// Resolved static filesystem entry. Reuse this handle for repeated operations
 /// on the same path to avoid resolving the path for every `read_at` call.
 #[derive(Clone)]
-pub struct FsEntry {
+pub struct Node {
     reader: Arc<ErofsReader>,
     zero_file: Arc<File>,
     ino: u64,
 }
 
-impl Fs {
+impl ImageFs {
     pub(crate) fn new(reader: Arc<ErofsReader>, zero_file: Arc<File>) -> Self {
         Self { reader, zero_file }
     }
 
     /// Resolve `path` once and return a reusable entry handle.
-    pub fn open(&self, path: impl AsRef<Path>) -> Result<FsEntry> {
+    pub fn open(&self, path: impl AsRef<Path>) -> Result<Node> {
         let ino = self.resolve_path(path.as_ref())?;
-        Ok(FsEntry {
+        Ok(Node {
             reader: self.reader.clone(),
             zero_file: self.zero_file.clone(),
             ino,
@@ -148,7 +148,7 @@ impl Fs {
     }
 }
 
-impl FsEntry {
+impl Node {
     /// Inode number of this resolved entry.
     pub fn ino(&self) -> u64 {
         self.ino
@@ -276,6 +276,7 @@ impl FsEntry {
             .reader
             .read_chunk_index_entries(self.ino, inode)
             .with_context(|| format!("failed to read chunk indexes for inode {}", self.ino))?;
+        let blob_layout = self.reader.cached_blob_infos()?;
 
         for_each_chunk_span(
             offset,
@@ -284,35 +285,25 @@ impl FsEntry {
             chunk_index_entries.len(),
             |span| -> Result<()> {
                 let entry = &chunk_index_entries[span.index];
-                if entry.blkaddr != EROFS_NULL_ADDR {
-                    let chunk_addr = entry
-                        .blkaddr
-                        .checked_mul(EROFS_BLOCK_SIZE as u64)
-                        .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
-                    // Resolve the chunk to a blob: the legacy layout names the blob
-                    // by a non-zero device_id with a blob-relative address; the
-                    // flattened layout uses device_id 0 with an absolute address.
-                    let resolved = if entry.device_id > 0 {
-                        Some((entry.device_id, chunk_addr))
-                    } else {
-                        self.reader.flat_blob_at(chunk_addr)?
-                    };
-                    if let Some((blob_index, blob_rel)) = resolved {
-                        let blob_offset = blob_rel
+                match locate_chunk(blob_layout, entry.blkaddr, entry.device_id)? {
+                    ChunkLocation::Hole => {}
+                    ChunkLocation::Blob { index, offset } => {
+                        let blob_offset = offset
                             .checked_add(span.chunk_off)
                             .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
                         self.reader
-                            .blob_cache(blob_index)
-                            .with_context(|| format!("failed to open blob {blob_index}"))?
+                            .blob_cache(index)
+                            .with_context(|| format!("failed to open blob {index}"))?
                             .ensure_range(blob_offset, span.len)
                             .with_context(|| {
                                 format!(
                                     "failed to fetch inode {} blob {} range [{}, +{})",
-                                    self.ino, blob_index, blob_offset, span.len
+                                    self.ino, index, blob_offset, span.len
                                 )
                             })?;
                     }
-                    // Otherwise the chunk is bootstrap-local; nothing to fetch.
+                    // The chunk is bootstrap-local; nothing to fetch.
+                    ChunkLocation::Local { .. } => {}
                 }
                 Ok(())
             },
@@ -340,7 +331,7 @@ impl FsEntry {
 
         match inode.data_layout() {
             EROFS_INODE_FLAT_PLAIN | EROFS_INODE_FLAT_INLINE => {
-                bail!("flat file data is not supported by FsEntry range API")
+                bail!("flat file data is not supported by Node range API")
             }
             EROFS_INODE_CHUNK_BASED => {
                 self.resolve_chunk_file_ranges(&inode, offset, end - offset, mode)
@@ -361,31 +352,21 @@ impl FsEntry {
             .reader
             .read_chunk_index_entries(self.ino, inode)
             .with_context(|| format!("failed to read chunk indexes for inode {}", self.ino))?;
-        let blob_layout = self.reader.blob_infos()?;
+        let blob_layout = self.reader.cached_blob_infos()?;
 
         let mut ranges = Vec::new();
         for_each_chunk_span(offset, len, chunk_size, chunk_index_entries.len(), |span| {
             let entry = &chunk_index_entries[span.index];
-            if entry.blkaddr == EROFS_NULL_ADDR {
-                push_fd_range(
-                    &mut ranges,
-                    FdRange::new(self.zero_file.as_raw_fd(), 0, span.len, span.file_pos),
-                    self.zero_file.as_raw_fd(),
-                );
-            } else {
-                let chunk_addr = entry
-                    .blkaddr
-                    .checked_mul(EROFS_BLOCK_SIZE as u64)
-                    .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
-                let resolved = if entry.device_id > 0 {
-                    // Legacy layout: device_id directly names the blob.
-                    Some((entry.device_id, chunk_addr))
-                } else {
-                    // Flattened layout: device_id 0 stores a flat device address.
-                    locate_flat_blob(&blob_layout, chunk_addr)
-                };
-                if let Some((blob_index, blob_rel)) = resolved {
-                    let blob_offset = blob_rel
+            match locate_chunk(blob_layout, entry.blkaddr, entry.device_id)? {
+                ChunkLocation::Hole => {
+                    push_fd_range(
+                        &mut ranges,
+                        FdRange::new(self.zero_file.as_raw_fd(), 0, span.len, span.file_pos),
+                        self.zero_file.as_raw_fd(),
+                    );
+                }
+                ChunkLocation::Blob { index, offset } => {
+                    let blob_offset = offset
                         .checked_add(span.chunk_off)
                         .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
                     push_blob_fd_ranges(
@@ -393,15 +374,16 @@ impl FsEntry {
                         self.zero_file.as_raw_fd(),
                         &mut ranges,
                         BlobRangeSpec {
-                            index: blob_index,
+                            index,
                             offset: blob_offset,
                             len: span.len,
                             source_offset: span.file_pos,
                         },
                         mode,
                     )?;
-                } else {
-                    bail!("bootstrap-local file data is not supported by FsEntry range API");
+                }
+                ChunkLocation::Local { .. } => {
+                    bail!("bootstrap-local file data is not supported by Node range API");
                 }
             }
             Ok(())

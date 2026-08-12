@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/containerd/containerd/v2/core/content"
@@ -19,10 +20,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+	"golang.org/x/sys/unix"
 
 	"github.com/dragonflyoss/nydus/nydusify/internal/checker"
-	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
+	"github.com/dragonflyoss/nydus/nydusify/internal/mounter"
 	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
+	"github.com/dragonflyoss/nydus/nydusify/internal/optimizer"
+	"github.com/dragonflyoss/nydus/nydusify/internal/pipeline"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 )
 
@@ -118,12 +122,16 @@ func convertCommand() *cli.Command {
 }
 
 // setupCommand applies the --log-level flag and returns the logger-carrying
-// base context shared by every subcommand.
-func setupCommand(c *cli.Context) context.Context {
+// base context shared by every subcommand. The context is canceled on
+// SIGINT/SIGTERM so `nydus` subprocesses are terminated and deferred cleanups
+// (e.g. work dir removal) still run; the returned stop function releases the
+// signal registration and must be deferred by the caller.
+func setupCommand(c *cli.Context) (context.Context, context.CancelFunc) {
 	if level, err := logrus.ParseLevel(c.String("log-level")); err == nil {
 		logrus.SetLevel(level)
 	}
-	return log.WithLogger(context.Background(), log.L)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, unix.SIGTERM)
+	return log.WithLogger(ctx, log.L), stop
 }
 
 // scratchWorkDir resolves --work-dir: an explicit directory is created and
@@ -145,7 +153,8 @@ func scratchWorkDir(c *cli.Context, prefix string) (string, func(), error) {
 }
 
 func runConvert(c *cli.Context) error {
-	ctx := setupCommand(c)
+	ctx, stop := setupCommand(c)
+	defer stop()
 
 	sources := c.StringSlice("source")
 	source := sources[0]
@@ -156,7 +165,7 @@ func runConvert(c *cli.Context) error {
 	// The compressor picks the conversion direction, so reject unknown values
 	// instead of silently running the wrong one.
 	compressor := c.String("compressor")
-	toOCI := converter.IsOCICompressor(compressor)
+	toOCI := pipeline.IsOCICompressor(compressor)
 	if !toOCI && compressor != "none" && compressor != "zstd" {
 		return errors.Errorf("unsupported --compressor %q, expected none, zstd, oci-gzip, oci-zstd or oci-tar", compressor)
 	}
@@ -224,7 +233,7 @@ func runConvert(c *cli.Context) error {
 		}
 
 		logrus.Infof("converting image back to OCI format")
-		newDesc, err = converter.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, converter.ToOCIOption{
+		newDesc, err = pipeline.ConvertToOCI(ctx, provider.ContentStore(), srcDesc, pipeline.ToOCIOption{
 			BuilderPath: c.String("builder"),
 			WorkDir:     scratchDir,
 			Compressor:  compressor,
@@ -243,10 +252,10 @@ func runConvert(c *cli.Context) error {
 	}
 
 	if multiSource {
-		srcs := make([]converter.Source, 0, len(sources))
+		srcs := make([]pipeline.Source, 0, len(sources))
 		for _, s := range sources {
 			if isDir(s) {
-				srcs = append(srcs, converter.Source{Dir: s})
+				srcs = append(srcs, pipeline.Source{Dir: s})
 				continue
 			}
 			logrus.Infof("pulling source image %s", s)
@@ -254,11 +263,11 @@ func runConvert(c *cli.Context) error {
 			if err != nil {
 				return errors.Wrapf(err, "pull %q", s)
 			}
-			srcs = append(srcs, converter.Source{Image: &desc})
+			srcs = append(srcs, pipeline.Source{Image: &desc})
 		}
 
 		logrus.Infof("converting %d sources to nydus format", len(srcs))
-		newDesc, err = converter.ConvertMultiSource(ctx, provider.ContentStore(), converter.MultiSourceOption{
+		newDesc, err = pipeline.ConvertMultiSource(ctx, provider.ContentStore(), pipeline.MultiSourceOption{
 			BuilderPath:       c.String("builder"),
 			WorkDir:           scratchDir,
 			ChunkSize:         uint32(c.Uint("chunk-size")),
@@ -274,7 +283,7 @@ func runConvert(c *cli.Context) error {
 		}
 	} else if isLocalDir {
 		logrus.Infof("converting local directory %s to nydus format", source)
-		newDesc, err = converter.ConvertLocalDir(ctx, provider.ContentStore(), converter.LocalDirOption{
+		newDesc, err = pipeline.ConvertLocalDir(ctx, provider.ContentStore(), pipeline.LocalDirOption{
 			BuilderPath:       c.String("builder"),
 			WorkDir:           scratchDir,
 			ChunkSize:         uint32(c.Uint("chunk-size")),
@@ -295,7 +304,7 @@ func runConvert(c *cli.Context) error {
 		}
 
 		logrus.Infof("converting image to nydus format")
-		newDesc, err = converter.Convert(ctx, provider.ContentStore(), srcDesc, converter.Option{
+		newDesc, err = pipeline.Convert(ctx, provider.ContentStore(), srcDesc, pipeline.Option{
 			BuilderPath:  c.String("builder"),
 			WorkDir:      scratchDir,
 			ChunkSize:    uint32(c.Uint("chunk-size")),
@@ -415,7 +424,8 @@ func checkCommand() *cli.Command {
 }
 
 func runCheck(c *cli.Context) error {
-	ctx := setupCommand(c)
+	ctx, stop := setupCommand(c)
+	defer stop()
 
 	source := c.String("source")
 	target := c.String("target")
@@ -523,7 +533,8 @@ func mountCommand() *cli.Command {
 }
 
 func runMount(c *cli.Context) error {
-	ctx := setupCommand(c)
+	ctx, stop := setupCommand(c)
+	defer stop()
 
 	target := c.String("target")
 	mountpoint := c.String("mountpoint")
@@ -547,7 +558,7 @@ func runMount(c *cli.Context) error {
 	}
 	defer cleanupWorkDir()
 
-	mnt, err := checker.NewMounter(checker.MountOption{
+	mnt, err := mounter.NewMounter(mounter.MountOption{
 		Target:          target,
 		Mountpoint:      mountpoint,
 		BuilderPath:     c.String("builder"),
@@ -630,7 +641,8 @@ func optimizeCommand() *cli.Command {
 }
 
 func runOptimize(c *cli.Context) error {
-	ctx := setupCommand(c)
+	ctx, stop := setupCommand(c)
+	defer stop()
 
 	platformMC := platforms.Default()
 	if p := c.String("platform"); p != "" {
@@ -647,7 +659,7 @@ func runOptimize(c *cli.Context) error {
 	}
 	defer cleanupWorkDir()
 
-	opt, err := checker.NewOptimizer(checker.OptimizeOption{
+	opt, err := optimizer.NewOptimizer(optimizer.OptimizeOption{
 		Source:          c.String("source"),
 		Target:          c.String("target"),
 		Pattern:         c.String("pattern"),

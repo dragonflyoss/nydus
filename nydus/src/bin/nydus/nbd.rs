@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::cli_common;
+use nydus::mount::unmount;
 use nydus::nbd::{mount_nbd, NbdCore, NbdService};
-use nydus_core::utils::unmount;
 use tracing::{debug, info, warn};
 
 /// How long to wait for the kernel to commit the NBD device geometry after
@@ -17,13 +17,8 @@ const CAPACITY_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 
 #[derive(Args)]
 pub struct NbdArgs {
-    /// File path to nydus bootstrap.
-    #[arg(long)]
-    pub bootstrap: PathBuf,
-
-    /// File path to a YAML storage config providing backend/cache directories.
-    #[arg(long)]
-    pub config: PathBuf,
+    #[command(flatten)]
+    pub source: cli_common::ImageSourceArgs,
 
     /// Path to the NBD device node to attach (e.g. /dev/nbd0).
     #[arg(long)]
@@ -58,15 +53,13 @@ pub struct NbdArgs {
 const DEFAULT_MAX_THREADS: usize = 16;
 
 fn default_nbd_threads() -> NonZeroUsize {
-    let cpus = std::thread::available_parallelism()
-        .map(NonZeroUsize::get)
-        .unwrap_or(1);
-    NonZeroUsize::new(cpus.min(DEFAULT_MAX_THREADS)).unwrap()
+    NonZeroUsize::new(cli_common::default_parallelism(1, DEFAULT_MAX_THREADS)).unwrap()
 }
 
 pub fn run_nbd(args: NbdArgs) -> Result<()> {
-    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
-    let core = Arc::new(NbdCore::new(&args.bootstrap, config).context("failed to build nbd core")?);
+    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.source.config)?;
+    let core =
+        Arc::new(NbdCore::new(&args.source.bootstrap, config).context("failed to build nbd core")?);
     let service = Arc::new(NbdService::new(
         core.clone(),
         &args.device,

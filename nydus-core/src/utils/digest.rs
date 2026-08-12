@@ -20,7 +20,11 @@ pub fn sha256_file(path: &Path) -> Result<[u8; SHA256_DIGEST_SIZE]> {
     sha256_reader(&mut file, path)
 }
 
-pub fn sha256_file_range(path: &Path, offset: u64, len: u64) -> Result<[u8; SHA256_DIGEST_SIZE]> {
+pub(crate) fn sha256_file_range(
+    path: &Path,
+    offset: u64,
+    len: u64,
+) -> Result<[u8; SHA256_DIGEST_SIZE]> {
     let mut file = File::open(path)
         .with_context(|| format!("failed to open file for hashing: {}", path.display()))?;
     let file_len = file
@@ -40,7 +44,7 @@ pub fn sha256_file_range(path: &Path, offset: u64, len: u64) -> Result<[u8; SHA2
     sha256_reader(&mut limited, path)
 }
 
-pub fn parse_sha256_hex(value: &str) -> Result<[u8; SHA256_DIGEST_SIZE]> {
+pub(crate) fn parse_sha256_hex(value: &str) -> Result<[u8; SHA256_DIGEST_SIZE]> {
     if value.len() != SHA256_DIGEST_SIZE * 2 {
         bail!(
             "expected a {}-character sha256 hex string",

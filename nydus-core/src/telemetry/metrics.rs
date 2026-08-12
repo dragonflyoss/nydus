@@ -16,8 +16,8 @@ use prometheus::{
 };
 use serde::Serialize;
 
-use crate::metadata::EROFS_BLOB_ID_SIZE;
 use crate::storage::backend::ReadKind;
+use crate::utils::SHA256_DIGEST_SIZE;
 
 /// Reads slower than this are counted as "high latency" for their source.
 const HIGH_LATENCY_THRESHOLD: Duration = Duration::from_millis(250);
@@ -335,7 +335,7 @@ static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
 /// Record a single logical backend read: its target, kind, transferred byte
 /// count (on success), duration and outcome. One call updates every relevant
 /// origin/proxy and on-demand/prefetch counter, byte total and latency series.
-pub fn record_backend_read(
+pub(crate) fn record_backend_read(
     target: BackendTarget,
     kind: ReadKind,
     bytes: u64,
@@ -394,7 +394,7 @@ pub fn record_backend_read(
 }
 
 /// Record a CRC validation failure on data fetched from `target`.
-pub fn record_backend_crc_error(target: BackendTarget) {
+pub(crate) fn record_backend_crc_error(target: BackendTarget) {
     let m = &*METRICS;
     match target {
         BackendTarget::Origin => m.backend_origin_crc_check_errors.inc(),
@@ -416,12 +416,12 @@ pub fn record_fs_op(op: FsOp, duration: Duration, is_err: bool) {
 }
 
 /// Increment the count of open blob data cache files.
-pub fn inc_cache_opened_files() {
+pub(crate) fn inc_cache_opened_files() {
     METRICS.cache_opened_files.inc();
 }
 
 /// Decrement the count of open blob data cache files.
-pub fn dec_cache_opened_files() {
+pub(crate) fn dec_cache_opened_files() {
     METRICS.cache_opened_files.dec();
 }
 
@@ -429,7 +429,7 @@ pub fn dec_cache_opened_files() {
 /// hold each one. Blobs are keyed by cache key, so several caches over the
 /// same blob — including ones reached through different images — only count
 /// its groups once.
-static TRACKED_BLOBS: LazyLock<Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], TrackedBlob>>> =
+static TRACKED_BLOBS: LazyLock<Mutex<HashMap<[u8; SHA256_DIGEST_SIZE], TrackedBlob>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct TrackedBlob {
@@ -439,7 +439,7 @@ struct TrackedBlob {
 
 /// Count `groups` towards the total-groups gauge for the blob `cache_key`,
 /// unless another cache already counted it.
-pub fn track_blob_groups(cache_key: [u8; EROFS_BLOB_ID_SIZE], group_count: u64) {
+pub(crate) fn track_blob_groups(cache_key: [u8; SHA256_DIGEST_SIZE], group_count: u64) {
     let mut tracked = match TRACKED_BLOBS.lock() {
         Ok(tracked) => tracked,
         Err(poisoned) => poisoned.into_inner(),
@@ -456,7 +456,7 @@ pub fn track_blob_groups(cache_key: [u8; EROFS_BLOB_ID_SIZE], group_count: u64) 
 
 /// Drop one cache's claim on the blob `cache_key`, uncounting its groups once
 /// the last cache over that blob is gone.
-pub fn untrack_blob_groups(cache_key: &[u8; EROFS_BLOB_ID_SIZE]) {
+pub(crate) fn untrack_blob_groups(cache_key: &[u8; SHA256_DIGEST_SIZE]) {
     let mut tracked = match TRACKED_BLOBS.lock() {
         Ok(tracked) => tracked,
         Err(poisoned) => poisoned.into_inner(),
@@ -472,40 +472,40 @@ pub fn untrack_blob_groups(cache_key: &[u8; EROFS_BLOB_ID_SIZE]) {
 }
 
 /// Record a group served from cache without a backend read.
-pub fn inc_cache_hit_group() {
+pub(crate) fn inc_cache_hit_group() {
     METRICS.cache_hit_group.inc();
 }
 
 /// Record a backend read that fetched ondemand (redirect) blob data. These
 /// reads are a subset of the prefetch reads and identify the phase-0 redirect
 /// warmup traffic.
-pub fn record_backend_redirect_read(bytes: u64) {
+pub(crate) fn record_backend_redirect_read(bytes: u64) {
     let m = &*METRICS;
     m.backend_redirect_read_count.inc();
     m.backend_redirect_read_bytes.inc_by(bytes);
 }
 
 /// Record a group decoded into a blob's own cache by regular blob prefetch.
-pub fn inc_cache_fill_group() {
+pub(crate) fn inc_cache_fill_group() {
     METRICS.cache_fill_group.inc();
 }
 
 /// Record a group decoded into a blob's own cache to satisfy an on-demand
 /// read. Summing this across the processes sharing a cache directory shows how
 /// much duplicate fetching they do.
-pub fn inc_cache_ondemand_fill_group() {
+pub(crate) fn inc_cache_ondemand_fill_group() {
     METRICS.cache_ondemand_fill_group.inc();
 }
 
 /// Record a group decoded from a redirect (ondemand) blob and written into its
 /// source blob's cache.
-pub fn inc_cache_redirect_fill_group() {
+pub(crate) fn inc_cache_redirect_fill_group() {
     METRICS.cache_redirect_fill_group.inc();
 }
 
 /// Record a redirect group skipped during ondemand prefetch (decode or CRC
 /// failure, unknown source device, or a failed source-cache fill).
-pub fn inc_cache_redirect_skip_group() {
+pub(crate) fn inc_cache_redirect_skip_group() {
     METRICS.cache_redirect_skip_group.inc();
 }
 
@@ -513,7 +513,7 @@ pub fn inc_cache_redirect_skip_group() {
 /// itself is process-global and other tests move it concurrently, so the
 /// refcount is what can be asserted deterministically.
 #[cfg(test)]
-fn tracked_blob_refs(cache_key: &[u8; EROFS_BLOB_ID_SIZE]) -> Option<usize> {
+fn tracked_blob_refs(cache_key: &[u8; SHA256_DIGEST_SIZE]) -> Option<usize> {
     let tracked = match TRACKED_BLOBS.lock() {
         Ok(tracked) => tracked,
         Err(poisoned) => poisoned.into_inner(),
@@ -596,17 +596,17 @@ pub fn snapshot() -> MetricsSnapshot {
 }
 
 /// Current count of groups filled into source blob caches from redirect blobs.
-pub fn cache_redirect_fill_group_total() -> u64 {
+pub(crate) fn cache_redirect_fill_group_total() -> u64 {
     METRICS.cache_redirect_fill_group.get()
 }
 
 /// Current count of redirect groups skipped during ondemand prefetch.
-pub fn cache_redirect_skip_group_total() -> u64 {
+pub(crate) fn cache_redirect_skip_group_total() -> u64 {
     METRICS.cache_redirect_skip_group.get()
 }
 
 /// Current total bytes of ondemand (redirect) blob data fetched from the backend.
-pub fn backend_redirect_read_bytes_total() -> u64 {
+pub(crate) fn backend_redirect_read_bytes_total() -> u64 {
     METRICS.backend_redirect_read_bytes.get()
 }
 
@@ -636,7 +636,7 @@ mod tests {
         );
         record_fs_op(FsOp::Read, Duration::from_millis(2), false);
         inc_cache_hit_group();
-        track_blob_groups([7u8; EROFS_BLOB_ID_SIZE], 3);
+        track_blob_groups([7u8; SHA256_DIGEST_SIZE], 3);
         inc_cache_opened_files();
 
         let text = encode_text();
@@ -692,7 +692,7 @@ mod tests {
     fn blob_groups_are_counted_once_per_blob_and_released() {
         // The gauge moves with the refcount transitions asserted here, and is
         // itself process-global, so this pins the transitions instead.
-        let key = [42u8; EROFS_BLOB_ID_SIZE];
+        let key = [42u8; SHA256_DIGEST_SIZE];
         assert_eq!(tracked_blob_refs(&key), None);
 
         // A second cache over the same blob joins the existing entry rather

@@ -18,7 +18,8 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 
-	"github.com/dragonflyoss/nydus/nydusify/internal/converter"
+	"github.com/dragonflyoss/nydus/nydusify/internal/nydusfs"
+	"github.com/dragonflyoss/nydus/nydusify/internal/oci"
 )
 
 // exportImage writes the metadata of a single-image check into destDir for
@@ -29,7 +30,7 @@ import (
 //   - config.json   the image config;
 //   - bootstrap/    the extracted bootstrap layer, preserving its directory
 //     structure (nydus images only).
-func exportImage(ctx context.Context, cs content.Store, img *Image, destDir string) error {
+func exportImage(ctx context.Context, cs content.Store, img *nydusfs.Image, destDir string) error {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return errors.Wrapf(err, "create export dir %q", destDir)
 	}
@@ -46,7 +47,7 @@ func exportImage(ctx context.Context, cs content.Store, img *Image, destDir stri
 		return errors.Wrap(err, "write config.json")
 	}
 
-	if img.Kind == KindNydus {
+	if img.Kind == nydusfs.KindNydus {
 		if img.Bootstrap == nil {
 			return errors.New("nydus image is missing its bootstrap layer")
 		}
@@ -77,7 +78,7 @@ func extractBootstrapTree(ctx context.Context, cs content.Store, desc ocispec.De
 		return errors.Wrap(err, "create bootstrap dir")
 	}
 
-	decompressed, err := converter.OpenDecompressedBlob(ctx, cs, desc)
+	decompressed, err := oci.OpenDecompressedBlob(ctx, cs, desc)
 	if err != nil {
 		return errors.Wrap(err, "open bootstrap layer")
 	}
@@ -106,7 +107,7 @@ func extractBootstrapTree(ctx context.Context, cs content.Store, desc ocispec.De
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return errors.Wrapf(err, "create parent dir for %q", target)
 			}
-			if err := writeTarEntry(tr, target); err != nil {
+			if err := nydusfs.WriteTarEntry(tr, target); err != nil {
 				return errors.Wrapf(err, "write %q", target)
 			}
 		default:

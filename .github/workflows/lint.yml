@@ -45,4 +45,4 @@ jobs:
 
       - name: Run cargo clippy
         run: |
-          cargo clippy --all --all-targets -- -D warnings
+          cargo clippy --all --all-targets --all-features -- -D warnings

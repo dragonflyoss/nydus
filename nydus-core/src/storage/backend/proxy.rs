@@ -43,6 +43,7 @@ pub(crate) fn dragonfly_priority(kind: ReadKind) -> i32 {
 /// Proxy configuration. Either or both transports may be set; an omitted block
 /// talks to the origin directly.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ProxyConfig {
     /// HTTP forward-proxy URL, e.g. `http://127.0.0.1:65001`.
     #[serde(default)]

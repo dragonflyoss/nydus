@@ -1,30 +1,31 @@
 mod data;
 mod entry;
-mod meta;
+mod metadata;
 mod range;
 
-pub use entry::{DirEntry, FileType, Fs, FsEntry, Metadata};
+pub use entry::{DirEntry, FileType, ImageFs, Metadata, Node};
 pub(crate) use range::{
     checked_range_end, mapped_range_offset, push_blob_fd_ranges, push_fd_range, BlobRangeSpec,
 };
 pub use range::{copy_ranges, FdRange, FileMaps, ResolveMode};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 use memmap2::Mmap;
-use tempfile::TempDir;
-use tracing::{info, warn};
 
-use crate::blob::*;
-use crate::metadata::*;
+use crate::blob::{BlobFooter, NYDUS_BLOB_FOOTER_SIZE};
+use crate::metadata::{
+    cast_ref, is_nydus_prefetch_blobs_xattr, ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOB_ID_SIZE,
+    EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE, EROFS_SLOTSIZE,
+    EROFS_SUPER_OFFSET,
+};
 use crate::storage::backend::{BlobBackend, LocalBackend};
-use crate::storage::cache::{BlobCache, LocalBlobCache};
-use crate::telemetry::trace::TraceRecorder;
+use crate::storage::cache::BlobCacheSet;
+use crate::telemetry::access_trace::TraceRecorder;
 
 /// Parsed directory entry (name must be owned since it is sliced from mmap).
 pub struct RawDirEntry {
@@ -40,36 +41,6 @@ pub struct RawBlobInfo {
     pub blob_id: [u8; EROFS_BLOB_ID_SIZE],
     pub blocks: u64,
     pub mapped_blkaddr: u64,
-}
-
-/// A blob referenced by the bootstrap device table. The blob cache is opened
-/// lazily on first read or prefetch so mounting does not pay a blob.meta
-/// download per blob up front.
-struct Blob {
-    blob_id: [u8; EROFS_BLOB_ID_SIZE],
-    blob_index: u16,
-    cache_dir: PathBuf,
-    backend: Arc<dyn BlobBackend>,
-    trace_recorder: Option<Arc<TraceRecorder>>,
-    cache: Mutex<Option<Arc<dyn BlobCache>>>,
-}
-
-impl Blob {
-    fn cache(&self) -> io::Result<Arc<dyn BlobCache>> {
-        let mut guard = self.cache.lock().unwrap();
-        if let Some(cache) = guard.as_ref() {
-            return Ok(cache.clone());
-        }
-        let cache: Arc<dyn BlobCache> = Arc::new(LocalBlobCache::open_with_trace(
-            self.blob_id,
-            self.blob_index as u32,
-            &self.cache_dir,
-            self.backend.clone(),
-            self.trace_recorder.clone(),
-        )?);
-        *guard = Some(cache.clone());
-        Ok(cache)
-    }
 }
 
 /// Parse a `trusted.nydus.prefetch.blobs` xattr value such as `"2,5,1"` into an
@@ -97,10 +68,12 @@ fn parse_prefetch_blobs_value(value: &[u8]) -> Vec<u16> {
 /// On-disk structs are cast directly from the mapped memory.
 pub struct ErofsReader {
     pub(crate) mmap: Mmap,
-    blobs: HashMap<u16, Blob>,
+    blobs: Arc<BlobCacheSet>,
+    /// Memoised device table. Pre-populated by the open paths that already
+    /// parse it; metadata-only readers fill it on first use.
+    blob_infos: OnceLock<Vec<RawBlobInfo>>,
     image_offset: usize,
     pub(crate) sb_offset: usize,
-    _temporary_cache_dir: Option<TempDir>,
 }
 
 impl ErofsReader {
@@ -147,10 +120,10 @@ impl ErofsReader {
 
         Ok(Self {
             mmap,
-            blobs: HashMap::new(),
+            blobs: Arc::new(BlobCacheSet::empty()),
+            blob_infos: OnceLock::new(),
             image_offset,
             sb_offset,
-            _temporary_cache_dir: None,
         })
     }
 
@@ -177,8 +150,10 @@ impl ErofsReader {
             )?),
             _ => Arc::new(LocalBackend::new(blob_dir.to_path_buf())),
         };
-        let (blobs, temporary_cache_dir) = Self::open_blobs(
-            blob_infos,
+        let blobs = BlobCacheSet::new(
+            blob_infos
+                .iter()
+                .map(|info| (info.blob_index, info.blob_id)),
             crate::storage::backend::metered(backend),
             None,
             None,
@@ -186,10 +161,10 @@ impl ErofsReader {
 
         Ok(Self {
             mmap,
-            blobs,
+            blobs: Arc::new(blobs),
+            blob_infos: OnceLock::from(blob_infos),
             image_offset,
             sb_offset,
-            _temporary_cache_dir: temporary_cache_dir,
         })
     }
 
@@ -206,15 +181,21 @@ impl ErofsReader {
 
         let blob_infos = Self::blob_infos_from(&mmap, sb_offset)?;
 
-        let (blobs, temporary_cache_dir) =
-            Self::open_blobs(blob_infos, backend, cache_dir, trace_recorder)?;
+        let blobs = BlobCacheSet::new(
+            blob_infos
+                .iter()
+                .map(|info| (info.blob_index, info.blob_id)),
+            backend,
+            cache_dir,
+            trace_recorder,
+        )?;
 
         Ok(Self {
             mmap,
-            blobs,
+            blobs: Arc::new(blobs),
+            blob_infos: OnceLock::from(blob_infos),
             image_offset: 0,
             sb_offset,
-            _temporary_cache_dir: temporary_cache_dir,
         })
     }
 
@@ -236,39 +217,6 @@ impl ErofsReader {
         usize::try_from(footer.bootstrap_offset())
             .map(Some)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bootstrap offset too large"))
-    }
-
-    fn open_blobs(
-        blob_infos: Vec<RawBlobInfo>,
-        backend: Arc<dyn BlobBackend>,
-        cache_dir: Option<&Path>,
-        trace_recorder: Option<Arc<TraceRecorder>>,
-    ) -> io::Result<(HashMap<u16, Blob>, Option<TempDir>)> {
-        let temporary_cache_dir = if cache_dir.is_none() {
-            Some(tempfile::Builder::new().prefix("nydus-cache-").tempdir()?)
-        } else {
-            None
-        };
-        let cache_dir = cache_dir
-            .or_else(|| temporary_cache_dir.as_ref().map(|dir| dir.path()))
-            .ok_or_else(|| io::Error::other("failed to create cache directory"))?;
-        let blobs = blob_infos
-            .into_iter()
-            .map(|info| {
-                (
-                    info.blob_index,
-                    Blob {
-                        blob_id: info.blob_id,
-                        blob_index: info.blob_index,
-                        cache_dir: cache_dir.to_path_buf(),
-                        backend: backend.clone(),
-                        trace_recorder: trace_recorder.clone(),
-                        cache: Mutex::new(None),
-                    },
-                )
-            })
-            .collect();
-        Ok((blobs, temporary_cache_dir))
     }
 
     fn superblock_from(mmap: &[u8], sb_offset: usize) -> io::Result<&ErofsSuperblock> {
@@ -337,7 +285,24 @@ impl ErofsReader {
     }
 
     pub fn blob_infos(&self) -> io::Result<Vec<RawBlobInfo>> {
-        Self::blob_infos_from(&self.mmap, self.sb_offset)
+        self.cached_blob_infos().map(<[RawBlobInfo]>::to_vec)
+    }
+
+    /// Memoised device table: parsed once (or taken from the open path, which
+    /// already parses it) and cached for the reader's lifetime. Parse errors
+    /// are not cached, so a failed parse stays retryable.
+    pub(crate) fn cached_blob_infos(&self) -> io::Result<&[RawBlobInfo]> {
+        if let Some(infos) = self.blob_infos.get() {
+            return Ok(infos);
+        }
+        let infos = Self::blob_infos_from(&self.mmap, self.sb_offset)?;
+        Ok(self.blob_infos.get_or_init(|| infos))
+    }
+
+    /// The storage-side cache set shared with the read and prefetch paths,
+    /// e.g. to construct a [`crate::storage::prefetch::BlobPrefetcher`].
+    pub fn blob_cache_set(&self) -> Arc<BlobCacheSet> {
+        self.blobs.clone()
     }
 
     /// The (lazily opened) blob cache for the blob identified by `blob_index`,
@@ -346,26 +311,14 @@ impl ErofsReader {
         &self,
         blob_index: u16,
     ) -> io::Result<std::sync::Arc<dyn crate::storage::cache::BlobCache>> {
-        let blob = self.blobs.get(&blob_index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("blob {blob_index} not found"),
-            )
-        })?;
-        blob.cache()
+        self.blobs.cache(blob_index)
     }
 
     /// Return whether the blob identified by `blob_index` is an "ondemand"
     /// redirect blob (produced by `nydus optimize`). Opens the blob cache,
     /// which reads the local blob meta but performs no data prefetch.
     pub fn is_redirect_blob(&self, blob_index: u16) -> io::Result<bool> {
-        let blob = self.blobs.get(&blob_index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("blob {blob_index} not found"),
-            )
-        })?;
-        Ok(blob.cache()?.is_redirect_blob())
+        self.blobs.is_redirect_blob(blob_index)
     }
 
     /// Prefetch every group of the blob identified by `blob_index`. An
@@ -373,106 +326,7 @@ impl ErofsReader {
     /// blobs' caches instead of building its own cache file, fetching its
     /// segments concurrently with up to `threads` workers.
     pub fn prefetch_blob(&self, blob_index: u16, threads: usize) -> io::Result<()> {
-        let blob = self.blobs.get(&blob_index).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("blob {blob_index} not found"),
-            )
-        })?;
-        let cache = blob.cache()?;
-        // Serialize prefetch of the same blob across processes sharing the
-        // cache directory: with many identical instances cold-starting on one
-        // node, only the lock owner streams from the backend while the others
-        // wait and then find the work already done through the shared
-        // group_map. On-demand reads never pass through here, so they are
-        // never delayed by the lock. Held (via the guard's file descriptor)
-        // until this function returns.
-        let _prefetch_lock = cache.prefetch_lock();
-        if cache.is_redirect_blob() {
-            // Time the ondemand (redirect) blob prefetch and report how many
-            // source groups it warmed vs skipped, so operators can tell
-            // whether the streaming warmup outran the workload.
-            let fill_before = crate::telemetry::metrics::cache_redirect_fill_group_total();
-            let skip_before = crate::telemetry::metrics::cache_redirect_skip_group_total();
-            let bytes_before = crate::telemetry::metrics::backend_redirect_read_bytes_total();
-            let start = Instant::now();
-            let result = self.prefetch_redirect_blob(blob_index, cache.as_ref(), threads);
-            let elapsed = start.elapsed();
-            info!(
-                "ondemand blob {} prefetch finished in {:.3?} ({} workers): filled {} groups, skipped {} groups, fetched {} bytes",
-                blob_index,
-                elapsed,
-                threads.max(1),
-                crate::telemetry::metrics::cache_redirect_fill_group_total() - fill_before,
-                crate::telemetry::metrics::cache_redirect_skip_group_total() - skip_before,
-                crate::telemetry::metrics::backend_redirect_read_bytes_total() - bytes_before,
-            );
-            result
-        } else {
-            cache.prefetch_all()
-        }
-    }
-
-    /// Phase-0 prefetch for a redirect blob: stream its groups in optimized
-    /// order and fill the decoded bytes into the source blobs' caches so early
-    /// on-demand reads hit cache. Segments are fetched concurrently with up to
-    /// `threads` workers. Per-group failures are logged and skipped so a bad
-    /// group can never poison the source caches or abort the warmup.
-    fn prefetch_redirect_blob(
-        &self,
-        blob_index: u16,
-        cache: &dyn BlobCache,
-        threads: usize,
-    ) -> io::Result<()> {
-        // A redirect group is already done when its bytes are resident in the
-        // source blob's cache (readiness is shared across processes through
-        // the source group_map). Segments made entirely of done groups are not
-        // fetched, so re-running the warmup behind another process's progress
-        // does close to zero backend work.
-        let skip = |group: &BlobMetaGroup| -> bool {
-            if !group.is_redirect() {
-                return false;
-            }
-            let Some(source) = self.blobs.get(&group.source_blob_index()) else {
-                return false;
-            };
-            match source.cache() {
-                Ok(source_cache) => source_cache.group_ready(group.source_group_index() as usize),
-                Err(_) => false,
-            }
-        };
-        cache.stream_redirect_parallel(threads, &skip, &|group, decoded| {
-            if !group.is_redirect() {
-                crate::telemetry::metrics::inc_cache_redirect_skip_group();
-                warn!("ondemand blob {blob_index} contains a non-redirect group; skipping");
-                return Ok(());
-            }
-            let source_blob_index = group.source_blob_index();
-            let source_index = group.source_group_index() as usize;
-            let source = match self.blobs.get(&source_blob_index) {
-                Some(source) => source,
-                None => {
-                    crate::telemetry::metrics::inc_cache_redirect_skip_group();
-                    warn!("ondemand blob {blob_index} redirects to unknown blob {source_blob_index}; skipping group");
-                    return Ok(());
-                }
-            };
-            let source_cache = match source.cache() {
-                Ok(cache) => cache,
-                Err(err) => {
-                    crate::telemetry::metrics::inc_cache_redirect_skip_group();
-                    warn!("failed to open source blob {source_blob_index} for redirect: {err}");
-                    return Ok(());
-                }
-            };
-            if let Err(err) = source_cache.fill_group_from_redirect(source_index, decoded) {
-                crate::telemetry::metrics::inc_cache_redirect_skip_group();
-                warn!(
-                    "failed to fill blob {source_blob_index} group {source_index} from ondemand blob {blob_index}: {err}"
-                );
-            }
-            Ok(())
-        })
+        self.blobs.prefetch_blob(blob_index, threads)
     }
 
     /// Build the blob prefetch plan: blobs listed in the root prefetch xattr (in
@@ -482,14 +336,13 @@ impl ErofsReader {
         let mut ordered = Vec::new();
         let mut seen = HashSet::new();
         for blob_index in self.read_prefetch_order() {
-            if self.blobs.contains_key(&blob_index) && seen.insert(blob_index) {
+            if self.blobs.contains(blob_index) && seen.insert(blob_index) {
                 ordered.push(blob_index);
             }
         }
         let mut rest: Vec<u16> = self
             .blobs
-            .keys()
-            .copied()
+            .indexes()
             .filter(|id| !seen.contains(id))
             .collect();
         rest.sort_unstable();
@@ -548,16 +401,16 @@ impl ErofsReader {
         chunk_off: u64,
         dst: &mut [u8],
     ) -> io::Result<()> {
-        let blob = self.blobs.get(&blob_index).ok_or_else(|| {
+        let cache = self.blobs.try_cache(blob_index).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("blob {blob_index} not available"),
             )
-        })?;
+        })??;
         let absolute_offset = source_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob read offset overflow")
         })?;
-        blob.cache()?.read_at(absolute_offset, dst)
+        cache.read_at(absolute_offset, dst)
     }
 
     pub(crate) fn write_blob_to(
@@ -568,37 +421,23 @@ impl ErofsReader {
         len: usize,
         writer: &mut dyn Write,
     ) -> io::Result<()> {
-        let blob = self.blobs.get(&blob_index).ok_or_else(|| {
+        let cache = self.blobs.try_cache(blob_index).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("blob {blob_index} not available"),
             )
-        })?;
+        })??;
         let absolute_offset = source_offset.checked_add(chunk_off).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob write offset overflow")
         })?;
         let mut buf = vec![0u8; len];
-        blob.cache()?.read_at(absolute_offset, &mut buf)?;
+        cache.read_at(absolute_offset, &mut buf)?;
         writer.write_all(&buf)
     }
 
     pub(crate) fn nid_to_offset(&self, nid: u64) -> usize {
         (self.sb().meta_blkaddr() as u64 * EROFS_BLOCK_SIZE as u64 + nid * EROFS_SLOTSIZE as u64)
             as usize
-    }
-}
-
-impl crate::storage::prefetch::PrefetchSource for ErofsReader {
-    fn prefetch_plan(&self) -> (Vec<u16>, Vec<u16>) {
-        self.prefetch_plan()
-    }
-
-    fn is_redirect_blob(&self, blob_index: u16) -> io::Result<bool> {
-        self.is_redirect_blob(blob_index)
-    }
-
-    fn prefetch_blob(&self, blob_index: u16, threads: usize) -> io::Result<()> {
-        self.prefetch_blob(blob_index, threads)
     }
 }
 

@@ -8,7 +8,11 @@ use crate::build::image::{
 use crate::build::inode::{
     erofs_inode_size, serialize_inode, symlink_is_inline, InodeData, InodeInfo,
 };
-use crate::metadata::*;
+use crate::metadata::{
+    ErofsDeviceSlot, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_FT_DIR, EROFS_SB_BASE_SIZE,
+    EROFS_SUPER_OFFSET,
+};
+use crate::utils::round_up;
 
 pub const FLATTENED_BLOB_ALIGNMENT: u64 = 0x8_0000;
 
@@ -101,12 +105,12 @@ fn render_bootstrap_inner(
         bail!("cannot render bootstrap for empty inode set");
     }
 
-    let mut layout = MetadataLayout::new();
     // The device table is laid out right after the superblock and may push the
     // metadata region past block 0 when there are many external blobs, so the
     // layout must use the same metadata block address as the image writer for
     // directory data block addresses to be correct.
-    layout.meta_blkaddr = device_table_meta_blkaddr(device_slots.len())?;
+    let mut layout =
+        MetadataLayout::with_meta_blkaddr(device_table_meta_blkaddr(device_slots.len())?);
 
     for inode in inodes.iter_mut() {
         if !symlink_is_inline(inode) && matches!(inode.data, InodeData::Symlink { .. }) {
@@ -213,7 +217,7 @@ fn render_bootstrap_inner(
     let mut bootstrap = Vec::new();
     write_image(
         &mut bootstrap,
-        &layout.buf,
+        layout.buf(),
         root_nid as u16,
         inodes.len() as u64,
         epoch,
@@ -224,7 +228,7 @@ fn render_bootstrap_inner(
     Ok(bootstrap)
 }
 
-pub fn set_parent_nids(inodes: &mut [InodeInfo]) {
+pub(crate) fn set_parent_nids(inodes: &mut [InodeInfo]) {
     let root_nid = inodes[0].nid;
     if let InodeData::Directory {
         ref mut parent_nid, ..

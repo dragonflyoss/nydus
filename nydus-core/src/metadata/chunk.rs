@@ -2,11 +2,12 @@ use std::mem;
 
 use super::*;
 use crate::utils::digest::{hex_string, parse_sha256_hex};
+use crate::utils::le::{read_u16, read_u32, write_u16, write_u32};
 use anyhow::{anyhow, Context, Result};
 
 /// EROFS chunk index entry — 8 bytes, `#[repr(C, packed)]`.
 #[repr(C, packed)]
-pub struct ErofsChunkIndex {
+pub(crate) struct ErofsChunkIndex {
     pub startblk_hi: [u8; 2],
     pub device_id: [u8; 2],
     pub startblk_lo: [u8; 4],
@@ -19,7 +20,7 @@ const EROFS_CHUNK_NULL_ADDR: u64 = 0xFFFF_FFFF_FFFF;
 const _: () = assert!(mem::size_of::<ErofsChunkIndex>() == EROFS_CHUNK_INDEX_SIZE);
 
 impl ErofsChunkIndex {
-    pub fn new(blkaddr: u64, device_id: u16) -> Self {
+    pub(crate) fn new(blkaddr: u64, device_id: u16) -> Self {
         let mut v: Self = unsafe { mem::zeroed() };
         if blkaddr == EROFS_NULL_ADDR {
             v.startblk_hi = [0xFF; 2];
@@ -33,11 +34,11 @@ impl ErofsChunkIndex {
         v
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self as *const _ as *const u8, EROFS_CHUNK_INDEX_SIZE) }
     }
 
-    pub fn blkaddr(&self) -> u64 {
+    pub(crate) fn blkaddr(&self) -> u64 {
         let hi = read_u16(&self.startblk_hi) as u64;
         let lo = read_u32(&self.startblk_lo) as u64;
         let addr = (hi << 32) | lo;
@@ -51,14 +52,14 @@ impl ErofsChunkIndex {
         }
     }
 
-    pub fn device_id(&self) -> u16 {
+    pub(crate) fn device_id(&self) -> u16 {
         read_u16(&self.device_id)
     }
 }
 
 /// Information about a single chunk index stored in an inode.
 #[derive(Clone)]
-pub struct ChunkIndex {
+pub struct ChunkAddr {
     pub blkaddr: u64,
     pub device_id: u16,
 }

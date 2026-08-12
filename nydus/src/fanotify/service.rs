@@ -27,17 +27,47 @@ use super::core::{
     align_fetch_range, decide, fd_identity, Decision, DenyReason, FanotifyCore, FetchError,
     Response, FAN_CLASS_PRE_CONTENT, FAN_CLOEXEC, FAN_MARK_ADD, FAN_NONBLOCK,
 };
-use super::event::{EventIter, PreContentEvent, FAN_PRE_ACCESS};
+use super::proto::{EventIter, PreContentEvent, FAN_PRE_ACCESS};
 use super::response::{FdResponseWriter, PendingPermission, ResponseWriter};
 
 // 256 KiB holds ~5400 minimum-size events per read(2)
 // (24-byte fanotify_event_metadata + 24-byte RANGE record).
 const EVENT_BUFFER_SIZE: usize = 256 * 1024;
 
+/// Bytes written to the stop pipe per wake-up of the event loop.
+const STOP_WAKE_BYTES: usize = 1;
+
 /// A live fanotify pre-content group marking every external-device cache file.
 pub struct FanotifyService {
     fan: OwnedFd,
     core: Arc<FanotifyCore>,
+    /// Read end of the stop self-pipe, consumed by [`FanotifyService::run`].
+    stop_read: OwnedFd,
+    /// Write end of the stop self-pipe, shared out via [`StopHandle`]s.
+    stop_write: Arc<OwnedFd>,
+}
+
+/// Wakes the event loop out of its blocking `epoll_wait` for shutdown. Handed
+/// out by [`FanotifyService::stop_handle`]; cloneable so the signal thread and
+/// the mount-failure path can each hold one.
+#[derive(Clone)]
+pub struct StopHandle {
+    write: Arc<OwnedFd>,
+}
+
+impl StopHandle {
+    /// Ask the event loop to stop. Idempotent: every write just wakes the
+    /// loop's epoll, and the pipe is non-blocking so a full pipe is harmless.
+    pub fn stop(&self) {
+        let buf = [1u8; STOP_WAKE_BYTES];
+        let _ = unsafe {
+            libc::write(
+                self.write.as_raw_fd(),
+                buf.as_ptr() as *const libc::c_void,
+                buf.len(),
+            )
+        };
+    }
 }
 
 /// The terminal outcome of one fetch job.
@@ -297,7 +327,34 @@ impl FanotifyService {
             );
         }
 
-        Ok(Self { fan, core })
+        // Self-pipe for the stop signal: a `StopHandle` writes to the pipe to
+        // wake the epoll-based event loop.
+        let mut pipe_fds = [-1i32; 2];
+        let ret = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        anyhow::ensure!(
+            ret == 0,
+            "pipe2 failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // Each pipe end is wrapped into exactly one OwnedFd here; wrapping
+        // either raw fd into a second OwnedFd would double-close it.
+        let stop_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
+        let stop_write = Arc::new(unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) });
+
+        Ok(Self {
+            fan,
+            core,
+            stop_read,
+            stop_write,
+        })
+    }
+
+    /// A handle that stops the event loop, for the signal thread and the
+    /// mount-failure path. Valid before and while [`FanotifyService::run`] runs.
+    pub fn stop_handle(&self) -> StopHandle {
+        StopHandle {
+            write: Arc::clone(&self.stop_write),
+        }
     }
 
     /// Run the event loop synchronously on the calling thread and return the
@@ -308,16 +365,11 @@ impl FanotifyService {
     /// a filesystem no reader can reach. Returning the fd on the error path too
     /// is what keeps that invariant across fatal exits (overflow, parse error).
     ///
-    /// `stop_fd` is the read end of a self-pipe: the signal thread writes to it
-    /// to wake this loop for shutdown.
-    pub fn run(
-        self,
-        stop_fd: OwnedFd,
-        ready: mpsc::Sender<()>,
-        pool: Arc<FetchPool>,
-    ) -> (Arc<OwnedFd>, Result<()>) {
+    /// The loop exits cleanly when a [`StopHandle`] writes to the service's
+    /// stop pipe.
+    pub fn run(self, ready: mpsc::Sender<()>, pool: Arc<FetchPool>) -> (Arc<OwnedFd>, Result<()>) {
         let fan_fd = Arc::new(self.fan);
-        let outcome = serve(&fan_fd, &self.core, stop_fd, ready, pool);
+        let outcome = serve(&fan_fd, &self.core, self.stop_read, ready, pool);
         (fan_fd, outcome)
     }
 }

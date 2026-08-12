@@ -23,12 +23,12 @@
 //! [`NydusCore`]: nydus_core::NydusCore
 
 pub mod core;
-pub mod event;
 pub mod mount;
+pub mod proto;
 pub mod response;
 pub mod service;
 
 pub use core::{BlobDevice, FanotifyCore, Response};
-pub use event::{EventIter, ParseError, ParseErrorKind, PreContentEvent, Range};
 pub use mount::mount_erofs;
-pub use service::FanotifyService;
+pub use proto::{EventIter, ParseError, ParseErrorKind, PreContentEvent, Range};
+pub use service::{deny_queued_events, FanotifyService, FetchPool, StopHandle};

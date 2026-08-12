@@ -1649,7 +1649,7 @@ through `ublk_drv` over `io_uring`; see
 	blob meta groups with the O(1) division lookup and reuses the regular cache
 	chain (`ensure_group`), so it is idempotent, concurrency-safe, and shares
 	trace/metrics recording with the FUSE path. Redirect blobs are rejected.
-- `fs.open(path)` resolves a path once and returns an `FsEntry`; use
+- `fs.open(path)` resolves a path once and returns a `Node`; use
 	`entry.metadata()`, `entry.read_dir()`, `entry.read()`,
 	`entry.read_at(...)`, `entry.read_link()`, and `entry.xattrs()` for
 	metadata/data access without FUSE. Holding the entry avoids repeated path
@@ -1696,7 +1696,7 @@ fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> 
 	}
 
 	// Static filesystem inspection without FUSE. Resolve a path once and
-	// reuse the FsEntry for hot loops.
+	// reuse the Node for hot loops.
 	let file = core.fs.open("path/to/file")?;
 	let meta = file.metadata()?;
 	println!("ino={} size={} mode={:o}", meta.ino, meta.size, meta.mode);

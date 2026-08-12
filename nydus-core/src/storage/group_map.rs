@@ -71,7 +71,7 @@ impl Drop for FileLock<'_> {
 /// `is_all_ready` becomes a single atomic load. On-demand services (uffd,
 /// fanotify, FUSE) use it as a fast path to skip per-group readiness
 /// bookkeeping entirely once a blob is fully cached.
-pub struct GroupMap {
+pub(crate) struct GroupMap {
     map: MmapRaw,
     group_count: usize,
     // Keep the backing file open for the lifetime of the mapping.
@@ -79,7 +79,7 @@ pub struct GroupMap {
 }
 
 impl GroupMap {
-    pub fn open(path: &Path, group_count: usize) -> io::Result<Self> {
+    pub(crate) fn open(path: &Path, group_count: usize) -> io::Result<Self> {
         let bytes_len = group_count.div_ceil(8);
         let expected_len = (GROUP_MAP_HEADER_SIZE + bytes_len) as u64;
 
@@ -199,7 +199,7 @@ impl GroupMap {
     /// on a different inode, and from then on neither side could see the
     /// other's readiness — the survivor would keep waiting for groups that,
     /// from its map's point of view, never turn ready.
-    pub fn reset(&self) -> io::Result<()> {
+    pub(crate) fn reset(&self) -> io::Result<()> {
         // Serialize with other processes resetting the same map.
         let _guard = FileLock::exclusive(&self._file)?;
         // Stepping by 8 visits each bitmap byte exactly once.
@@ -213,13 +213,13 @@ impl GroupMap {
         Ok(())
     }
 
-    pub fn is_ready(&self, index: usize) -> io::Result<bool> {
+    pub(crate) fn is_ready(&self, index: usize) -> io::Result<bool> {
         validate_index(index, self.group_count)?;
         let mask = 1u8 << (index % 8);
         Ok(self.bit_byte(index).load(Ordering::Acquire) & mask != 0)
     }
 
-    pub fn ready_ranges(&self, first: usize, last: usize) -> io::Result<Vec<Range<usize>>> {
+    pub(crate) fn ready_ranges(&self, first: usize, last: usize) -> io::Result<Vec<Range<usize>>> {
         validate_range(first, last, self.group_count)?;
 
         // Fast path: a fully-ready blob needs no bit scanning at all.
@@ -247,7 +247,7 @@ impl GroupMap {
         Ok(ranges)
     }
 
-    pub fn set_ready(&self, index: usize) -> io::Result<()> {
+    pub(crate) fn set_ready(&self, index: usize) -> io::Result<()> {
         validate_index(index, self.group_count)?;
         let mask = 1u8 << (index % 8);
         let previous = self.bit_byte(index).fetch_or(mask, Ordering::AcqRel);
@@ -271,7 +271,7 @@ impl GroupMap {
     /// A single atomic load on the shared mapping — no bitmap scan — so
     /// per-fault handlers (uffd, fanotify, FUSE reads) can consult it on
     /// every event at effectively zero cost.
-    pub fn is_all_ready(&self) -> bool {
+    pub(crate) fn is_all_ready(&self) -> bool {
         self.header_u32(GROUP_MAP_FLAGS_OFFSET)
             .load(Ordering::Acquire)
             & GROUP_MAP_FLAG_ALL_READY
@@ -282,7 +282,7 @@ impl GroupMap {
     /// first; otherwise scans the shared bitmap and latches the flag when the
     /// scan proves completion (also healing any ready-count skew left by a
     /// crashed writer). The answer reflects updates from other processes.
-    pub fn latch_all_ready(&self) -> bool {
+    pub(crate) fn latch_all_ready(&self) -> bool {
         if self.is_all_ready() {
             return true;
         }

@@ -1,0 +1,17 @@
+use std::path::PathBuf;
+
+use anyhow::{anyhow, bail, Result};
+
+/// Parse a `unix:///path/to.sock` address into its socket path.
+///
+/// The path is taken literally after the scheme prefix — no percent-decoding
+/// or normalization, matching the convention for unix socket addresses.
+pub fn parse_unix_address(address: &str) -> Result<PathBuf> {
+    let path = address
+        .strip_prefix("unix://")
+        .ok_or_else(|| anyhow!("address must start with unix:// (got {address})"))?;
+    if path.is_empty() {
+        bail!("unix socket path is empty");
+    }
+    Ok(PathBuf::from(path))
+}

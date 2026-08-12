@@ -5,15 +5,49 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
+use anyhow::anyhow;
+use anyhow::{Context, Result};
 use clap::Args;
+#[cfg(any(feature = "fanotify", feature = "nbd"))]
+use nydus::mount::unmount;
 use nydus_core::config::Config;
-use nydus_core::telemetry::logging::init_tracing;
-use nydus_core::telemetry::logging::WorkerGuard;
-use nydus_core::utils::unmount;
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
+use nydus_core::telemetry::logging::{init_tracing, WorkerGuard};
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
 use signal_hook::iterator::{Handle, Signals};
-use tracing::{debug, error, info, warn, Level};
+use tracing::Level;
+#[cfg(any(feature = "fanotify", feature = "nbd"))]
+use tracing::{debug, error};
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
+use tracing::{info, warn};
 
 /// Log flags shared by the long-running daemon subcommands
 /// (fuse/fanotify/nbd/ublk/uffd). Flatten with `#[command(flatten)]`.
@@ -66,10 +100,50 @@ pub struct CommandLogArgs {
     pub console: bool,
 }
 
+/// Image source flags shared by the daemon subcommands
+/// (fanotify/nbd/ublk/uffd): the bootstrap to serve and the storage config it
+/// is served with. Flatten with `#[command(flatten)]`.
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
+#[derive(Args)]
+pub struct ImageSourceArgs {
+    /// File path to nydus bootstrap.
+    #[arg(long)]
+    pub bootstrap: PathBuf,
+
+    /// File path to a YAML storage config providing backend/cache directories.
+    #[arg(long)]
+    pub config: PathBuf,
+}
+
+/// Load the YAML storage config from `path` with the shared error context.
+pub fn load_storage_config(path: &Path) -> Result<Config> {
+    Config::from_file(path).context("failed to load storage config")
+}
+
+/// Default worker parallelism: the available CPU count clamped to
+/// `[min, max]`.
+pub fn default_parallelism(min: usize, max: usize) -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(min)
+        .clamp(min, max)
+}
+
 /// The daemon startup preamble shared by uffd/nbd/ublk/fanotify: register
 /// termination signals (TERM set + SIGHUP), initialize file tracing, and load
 /// the storage config. The returned guards must stay alive for the daemon's
 /// lifetime or file logging stops.
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
 pub fn daemon_preamble(
     log: &DaemonLogArgs,
     config_path: &Path,
@@ -83,17 +157,20 @@ pub fn daemon_preamble(
         log.log_max_files,
         log.console,
     );
-    let config = Config::from_file(config_path).context("failed to load storage config")?;
+    let config = load_storage_config(config_path)?;
     Ok((signals, guards, config))
 }
 
 /// Shutdown unmount retry window: EBUSY is expected while readers still hold
 /// files open, so keep trying for a bounded window (10 s) before giving up.
+#[cfg(any(feature = "fanotify", feature = "nbd"))]
 const UNMOUNT_RETRY_ATTEMPTS: u32 = 40;
+#[cfg(any(feature = "fanotify", feature = "nbd"))]
 const UNMOUNT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// True when an unmount error means "nothing is mounted there" (EINVAL: not a
 /// mount point; ENOENT: the path is gone), so retrying is pointless.
+#[cfg(any(feature = "fanotify", feature = "nbd"))]
 fn is_not_mounted(err: &anyhow::Error) -> bool {
     matches!(
         err.downcast_ref::<std::io::Error>()
@@ -107,6 +184,7 @@ fn is_not_mounted(err: &anyhow::Error) -> bool {
 /// `between_attempts` runs between two attempts (e.g. fanotify deny-drains
 /// newly queued events); `failure_hint` is appended to the error logged when
 /// the final attempt still fails.
+#[cfg(any(feature = "fanotify", feature = "nbd"))]
 pub fn unmount_with_retry(
     mountpoint: &Path,
     mut between_attempts: impl FnMut(),
@@ -143,12 +221,24 @@ pub fn unmount_with_retry(
 }
 
 /// A running daemon signal thread, spawned by [`spawn_signal_thread`].
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
 pub struct SignalThread {
     name: String,
     handle: Handle,
     thread: std::thread::JoinHandle<()>,
 }
 
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
 impl SignalThread {
     /// Stop listening for signals and join the thread.
     pub fn shutdown(self) -> Result<()> {
@@ -165,6 +255,12 @@ impl SignalThread {
 /// progress (e.g. a stuck backend keeping readers blocked) forces exit rather
 /// than requiring SIGKILL. `name` is the short daemon name used for the
 /// thread name and error contexts.
+#[cfg(any(
+    feature = "fanotify",
+    feature = "nbd",
+    feature = "ublk",
+    feature = "uffd"
+))]
 pub fn spawn_signal_thread(
     name: &str,
     stopping: &str,

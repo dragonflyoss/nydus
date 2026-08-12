@@ -5,7 +5,7 @@ use std::os::fd::RawFd;
 /// file position (safe on a shared fd). Retries on `EINTR` and zero-fills the
 /// remainder on EOF: the cache file's block-aligned sizing should never
 /// produce one, but block-device replies must be full-length.
-pub fn pread_exact(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<()> {
+pub(crate) fn pread_exact(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<()> {
     let mut filled = 0usize;
     while filled < buf.len() {
         let ret = unsafe {
@@ -36,7 +36,11 @@ pub fn pread_exact(fd: RawFd, buf: &mut [u8], offset: u64) -> io::Result<()> {
 
 /// Write `aligned - current` zero bytes to pad a region up to its aligned
 /// end. Errors when `aligned < current`.
-pub fn write_zero_padding(writer: &mut dyn Write, current: u64, aligned: u64) -> io::Result<()> {
+pub(crate) fn write_zero_padding(
+    writer: &mut dyn Write,
+    current: u64,
+    aligned: u64,
+) -> io::Result<()> {
     if aligned < current {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

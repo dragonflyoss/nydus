@@ -1,7 +1,7 @@
 //! Resolved-range delivery primitives: [`FdRange`] describes an mmap-ready
 //! byte range backed by a real file descriptor, shared by the crate-root
 //! [`NydusCore`](crate::NydusCore) flat-device view and the per-file
-//! [`FsEntry`](crate::FsEntry) API.
+//! [`Node`](crate::fs::Node) API.
 
 use std::collections::HashMap;
 use std::io;
@@ -30,7 +30,7 @@ pub struct FdRange {
     pub len: u64,
     /// Offset in the source view: flattened-device offset for
     /// [`NydusCore`](crate::NydusCore) ranges, file-relative offset for
-    /// [`FsEntry`](crate::FsEntry) ranges.
+    /// [`Node`](crate::fs::Node) ranges.
     pub source_offset: u64,
 }
 
@@ -220,7 +220,7 @@ pub struct FileMaps {
 
 /// A single `mmap`ed file. `addr` is kept as a `usize` so the map stays
 /// `Send`/`Sync`: the mapping is read-only and shared by all queue threads.
-pub struct Mapping {
+struct Mapping {
     addr: usize,
     len: usize,
 }

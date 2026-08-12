@@ -8,20 +8,7 @@ use std::thread::{self, JoinHandle};
 
 use tracing::{info, warn};
 
-/// What [`BlobPrefetcher`] needs from the mounted image: the prefetch plan
-/// and per-blob prefetch. Implemented by the image reader in [`crate::fs`],
-/// keeping the dependency direction fs -> storage.
-pub trait PrefetchSource: Send + Sync {
-    /// The blob indexes to prefetch: the priority list declared in the root
-    /// `trusted.nydus.prefetch.blobs` xattr (in declared order), and the rest.
-    fn prefetch_plan(&self) -> (Vec<u16>, Vec<u16>);
-
-    /// Whether `blob_index` is an "ondemand" redirect blob.
-    fn is_redirect_blob(&self, blob_index: u16) -> io::Result<bool>;
-
-    /// Prefetch every group of `blob_index` into the local cache.
-    fn prefetch_blob(&self, blob_index: u16, threads: usize) -> io::Result<()>;
-}
+use crate::storage::cache::BlobCacheSet;
 
 /// Drives blob-level prefetch after a nydus filesystem is mounted.
 ///
@@ -33,15 +20,28 @@ pub trait PrefetchSource: Send + Sync {
 ///    backend bandwidth stays focused on the access-ordered hot set (e.g. an
 ///    optimized image's "ondemand" redirect blob).
 pub struct BlobPrefetcher {
-    source: Arc<dyn PrefetchSource>,
+    blobs: Arc<BlobCacheSet>,
+    priority: Vec<u16>,
+    rest: Vec<u16>,
     threads: usize,
     full: bool,
 }
 
 impl BlobPrefetcher {
-    pub fn new(source: Arc<dyn PrefetchSource>, threads: usize, full: bool) -> Self {
+    /// `plan` is the `(priority, rest)` blob-index plan, typically the result
+    /// of [`crate::fs::ErofsReader::prefetch_plan`], and `blobs` the matching
+    /// cache set ([`crate::fs::ErofsReader::blob_cache_set`]).
+    pub fn new(
+        blobs: Arc<BlobCacheSet>,
+        plan: (Vec<u16>, Vec<u16>),
+        threads: usize,
+        full: bool,
+    ) -> Self {
+        let (priority, rest) = plan;
         Self {
-            source,
+            blobs,
+            priority,
+            rest,
             threads: threads.max(1),
             full,
         }
@@ -60,16 +60,14 @@ impl BlobPrefetcher {
     /// set) the remaining blobs through a worker pool. Per-blob failures are
     /// logged and skipped.
     pub fn run(self) {
-        let (priority, rest) = self.source.prefetch_plan();
-
         // Phase 1: priority blobs, sequential, in declared order. When full
         // prefetch is disabled, only the "ondemand" redirect blob is warmed
         // (it streams the access-ordered hot set into the source caches);
         // non-redirect priority blobs are skipped so the backend bandwidth is
         // not spent pulling whole source blobs.
-        for blob_index in priority {
+        for blob_index in self.priority {
             if !self.full {
-                match self.source.is_redirect_blob(blob_index) {
+                match self.blobs.is_redirect_blob(blob_index) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(err) => {
@@ -78,7 +76,7 @@ impl BlobPrefetcher {
                     }
                 }
             }
-            match self.source.prefetch_blob(blob_index, self.threads) {
+            match self.blobs.prefetch_blob(blob_index, self.threads) {
                 Ok(()) => info!("prefetched priority blob {}", blob_index),
                 Err(err) => warn!("failed to prefetch priority blob {}: {}", blob_index, err),
             }
@@ -86,14 +84,14 @@ impl BlobPrefetcher {
 
         // Phase 2: remaining blobs, concurrent worker pool. Skipped unless full
         // prefetch is requested.
-        if !self.full || rest.is_empty() {
+        if !self.full || self.rest.is_empty() {
             return;
         }
-        let worker_count = self.threads.min(rest.len());
-        let queue = Arc::new(Mutex::new(rest));
+        let worker_count = self.threads.min(self.rest.len());
+        let queue = Arc::new(Mutex::new(self.rest));
         let mut handles = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let source = self.source.clone();
+            let blobs = self.blobs.clone();
             let queue = queue.clone();
             let handle = thread::Builder::new()
                 .name("nydus_prefetch_worker".to_string())
@@ -103,7 +101,7 @@ impl BlobPrefetcher {
                         guard.pop()
                     };
                     match blob_index {
-                        Some(blob_index) => match source.prefetch_blob(blob_index, 1) {
+                        Some(blob_index) => match blobs.prefetch_blob(blob_index, 1) {
                             Ok(()) => info!("prefetched blob {}", blob_index),
                             Err(err) => warn!("failed to prefetch blob {}: {}", blob_index, err),
                         },

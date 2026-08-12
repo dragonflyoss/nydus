@@ -1,7 +1,11 @@
 use std::io;
 use std::io::Write;
 
-use crate::metadata::*;
+use crate::metadata::{
+    cast_ref, ChunkAddr, ErofsChunkIndex, ErofsInode, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE,
+    EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR,
+};
+use crate::utils::round_up;
 
 use super::{ErofsReader, RawBlobInfo};
 
@@ -18,6 +22,50 @@ pub(crate) fn locate_flat_blob(blob_layout: &[RawBlobInfo], abs_byte: u64) -> Op
         }
     }
     None
+}
+
+/// Where a chunk's data lives, as decided by [`locate_chunk`].
+pub(crate) enum ChunkLocation {
+    /// Null chunk address: a sparse hole.
+    Hole,
+    /// The chunk starts at `offset` within blob `index`, either via the legacy
+    /// separate-blob layout (non-zero device_id, blob-relative address) or via
+    /// the flattened layout (device_id 0 with an absolute address falling in a
+    /// blob's mapped range).
+    Blob { index: u16, offset: u64 },
+    /// The chunk is bootstrap-local: a flattened-layout absolute address that
+    /// falls outside every blob's mapped range, resolved against the bootstrap
+    /// mmap at absolute byte `offset`.
+    Local { offset: u64 },
+}
+
+/// Resolve one chunk index entry to the location backing its data. Captures
+/// the shared decision (null address → hole, non-zero device_id → legacy
+/// blob-relative, otherwise flat-layout lookup) once for every read, write,
+/// fetch and range-resolution path.
+pub(crate) fn locate_chunk(
+    blob_layout: &[RawBlobInfo],
+    blkaddr: u64,
+    device_id: u16,
+) -> io::Result<ChunkLocation> {
+    if blkaddr == EROFS_NULL_ADDR {
+        return Ok(ChunkLocation::Hole);
+    }
+    let chunk_addr = blkaddr
+        .checked_mul(EROFS_BLOCK_SIZE as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "blob fetch offset overflow"))?;
+    if device_id > 0 {
+        // Legacy separate-blob layout: blob-relative address.
+        return Ok(ChunkLocation::Blob {
+            index: device_id,
+            offset: chunk_addr,
+        });
+    }
+    // Flattened layout: device_id 0 with an absolute address.
+    match locate_flat_blob(blob_layout, chunk_addr) {
+        Some((index, offset)) => Ok(ChunkLocation::Blob { index, offset }),
+        None => Ok(ChunkLocation::Local { offset: chunk_addr }),
+    }
 }
 
 /// One chunk-aligned span of a file byte range, as visited by
@@ -100,7 +148,7 @@ impl ErofsReader {
         &self,
         nid: u64,
         inode: &ErofsInode<'_>,
-    ) -> io::Result<Vec<ChunkIndex>> {
+    ) -> io::Result<Vec<ChunkAddr>> {
         if inode.size() == 0 {
             return Ok(Vec::new());
         }
@@ -111,7 +159,7 @@ impl ErofsReader {
         let mut result = Vec::with_capacity(nchunks);
         for index in 0..nchunks {
             let entry = Self::chunk_index_entry_at(index_bytes, index);
-            result.push(ChunkIndex {
+            result.push(ChunkAddr {
                 blkaddr: entry.blkaddr(),
                 device_id: entry.device_id(),
             });
@@ -199,7 +247,7 @@ impl ErofsReader {
         let chunk_size = self.chunk_size(inode);
         let index_bytes = self.chunk_index_bytes(nid, inode)?;
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
-        let blob_layout = self.blob_infos()?;
+        let blob_layout = self.cached_blob_infos()?;
 
         let written = for_each_chunk_span(
             offset,
@@ -210,32 +258,22 @@ impl ErofsReader {
                 let chunk_off = span.chunk_off;
                 let to_read = span.len as usize;
                 let entry = Self::chunk_index_entry_at(index_bytes, span.index);
-                let blkaddr = entry.blkaddr();
-                if blkaddr == EROFS_NULL_ADDR {
-                    // Hole — write zeros (use small stack buffer to avoid large alloc)
-                    let zeros = [0u8; 4096];
-                    let mut left = to_read;
-                    while left > 0 {
-                        let n = std::cmp::min(left, zeros.len());
-                        w.write_all(&zeros[..n])?;
-                        left -= n;
+                match locate_chunk(blob_layout, entry.blkaddr(), entry.device_id())? {
+                    ChunkLocation::Hole => {
+                        // Hole — write zeros (use small stack buffer to avoid large alloc)
+                        let zeros = [0u8; 4096];
+                        let mut left = to_read;
+                        while left > 0 {
+                            let n = std::cmp::min(left, zeros.len());
+                            w.write_all(&zeros[..n])?;
+                            left -= n;
+                        }
                     }
-                } else if entry.device_id() > 0 {
-                    // Legacy separate-blob layout: blob-relative address.
-                    self.write_blob_to(
-                        entry.device_id(),
-                        blkaddr * EROFS_BLOCK_SIZE as u64,
-                        chunk_off,
-                        to_read,
-                        w,
-                    )?;
-                } else {
-                    // Flattened layout: device_id 0 with an absolute address.
-                    let abs = blkaddr * EROFS_BLOCK_SIZE as u64;
-                    if let Some((blob_index, blob_rel)) = locate_flat_blob(&blob_layout, abs) {
-                        self.write_blob_to(blob_index, blob_rel, chunk_off, to_read, w)?;
-                    } else {
-                        let data_offset = (abs + chunk_off) as usize;
+                    ChunkLocation::Blob { index, offset } => {
+                        self.write_blob_to(index, offset, chunk_off, to_read, w)?;
+                    }
+                    ChunkLocation::Local { offset } => {
+                        let data_offset = (offset + chunk_off) as usize;
                         let slice = self.mmap_slice(data_offset, to_read)?;
                         w.write_all(slice)?;
                     }
@@ -290,14 +328,14 @@ impl ErofsReader {
         let chunk_size = self.chunk_size(inode);
         let index_bytes = self.chunk_index_bytes(nid, inode)?;
         let nchunks = inode.size().div_ceil(chunk_size) as usize;
-        let blob_layout = self.blob_infos()?;
+        let blob_layout = self.cached_blob_infos()?;
 
         let mut result = vec![0u8; size];
         for_each_chunk_span(offset, size as u64, chunk_size, nchunks, |span| {
             let entry = Self::chunk_index_entry_at(index_bytes, span.index);
             let buf_pos = (span.file_pos - offset) as usize;
             self.read_chunk_slice(
-                &blob_layout,
+                blob_layout,
                 entry,
                 span.chunk_off,
                 &mut result[buf_pos..buf_pos + span.len as usize],
@@ -318,37 +356,22 @@ impl ErofsReader {
         chunk_off: u64,
         dst: &mut [u8],
     ) -> io::Result<()> {
-        let blkaddr = entry.blkaddr();
-        if blkaddr == EROFS_NULL_ADDR {
-            // Hole — zero the destination explicitly rather than relying on
-            // callers to hand in a fresh zeroed buffer.
-            dst.fill(0);
-            return Ok(());
+        match locate_chunk(blob_layout, entry.blkaddr(), entry.device_id())? {
+            ChunkLocation::Hole => {
+                // Hole — zero the destination explicitly rather than relying on
+                // callers to hand in a fresh zeroed buffer.
+                dst.fill(0);
+                Ok(())
+            }
+            ChunkLocation::Blob { index, offset } => {
+                self.read_blob_into(index, offset, chunk_off, dst)
+            }
+            ChunkLocation::Local { offset } => {
+                let data_offset = (offset + chunk_off) as usize;
+                let slice = self.mmap_slice(data_offset, dst.len())?;
+                dst.copy_from_slice(slice);
+                Ok(())
+            }
         }
-        if entry.device_id() > 0 {
-            return self.read_blob_into(
-                entry.device_id(),
-                blkaddr * EROFS_BLOCK_SIZE as u64,
-                chunk_off,
-                dst,
-            );
-        }
-        let abs = blkaddr * EROFS_BLOCK_SIZE as u64;
-        if let Some((blob_index, blob_rel)) = locate_flat_blob(blob_layout, abs) {
-            self.read_blob_into(blob_index, blob_rel, chunk_off, dst)
-        } else {
-            let data_offset = (abs + chunk_off) as usize;
-            let slice = self.mmap_slice(data_offset, dst.len())?;
-            dst.copy_from_slice(slice);
-            Ok(())
-        }
-    }
-
-    /// Resolve an absolute byte offset in the flattened device to the blob that
-    /// backs it, returning `(blob_index, offset_within_blob)`, or `None` when it
-    /// is bootstrap-local. Used by the prefetch/on-demand fetch path.
-    pub(crate) fn flat_blob_at(&self, abs_byte: u64) -> io::Result<Option<(u16, u64)>> {
-        let blob_layout = self.blob_infos()?;
-        Ok(locate_flat_blob(&blob_layout, abs_byte))
     }
 }

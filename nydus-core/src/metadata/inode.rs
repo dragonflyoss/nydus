@@ -1,6 +1,8 @@
 use std::mem;
 
 use super::*;
+use crate::utils::le::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
+use crate::utils::round_up;
 
 /// EROFS on-disk inode in compact format (32 bytes).
 #[repr(C, packed)]
@@ -359,7 +361,7 @@ impl<'a> ErofsInode<'a> {
 }
 
 /// Compute the chunk format value for chunk-based inodes.
-pub fn erofs_chunk_format(chunk_bits: u32, blksz_bits: u32) -> u16 {
+pub(crate) fn erofs_chunk_format(chunk_bits: u32, blksz_bits: u32) -> u16 {
     EROFS_CHUNK_FORMAT_INDEXES | ((chunk_bits - blksz_bits) as u16)
 }
 
@@ -371,17 +373,17 @@ pub fn erofs_chunk_format(chunk_bits: u32, blksz_bits: u32) -> u16 {
 /// outside `EROFS_I_ALL` (0xF). Since `needs_extended` forces every inode with
 /// nlink > 1 to the extended layout, all compact inodes have nlink == 1, which
 /// is written directly into the standard compact i_nlink field by the callers.
-pub fn erofs_compact_i_format(datalayout: u16) -> u16 {
+pub(crate) fn erofs_compact_i_format(datalayout: u16) -> u16 {
     (EROFS_INODE_LAYOUT_COMPACT << EROFS_I_VERSION_BIT) | (datalayout << EROFS_I_DATALAYOUT_BIT)
 }
 
 /// Helper function to construct i_format value for extended inodes.
-pub fn erofs_extended_i_format(datalayout: u16) -> u16 {
+pub(crate) fn erofs_extended_i_format(datalayout: u16) -> u16 {
     (EROFS_INODE_LAYOUT_EXTENDED << EROFS_I_VERSION_BIT) | (datalayout << EROFS_I_DATALAYOUT_BIT)
 }
 
 /// Map xattr name index to its byte prefix.
-pub fn erofs_xattr_prefix(index: u8) -> Option<&'static [u8]> {
+pub(crate) fn erofs_xattr_prefix(index: u8) -> Option<&'static [u8]> {
     match index {
         EROFS_XATTR_INDEX_USER => Some(b"user."),
         EROFS_XATTR_INDEX_POSIX_ACL_ACCESS => Some(b"system.posix_acl_access"),
@@ -395,7 +397,7 @@ pub fn erofs_xattr_prefix(index: u8) -> Option<&'static [u8]> {
 
 /// Split a full xattr name (as bytes) into (prefix_index, suffix).
 /// Returns None if the name doesn't match any known EROFS xattr prefix.
-pub fn erofs_xattr_name_split(name: &[u8]) -> Option<(u8, &[u8])> {
+pub(crate) fn erofs_xattr_name_split(name: &[u8]) -> Option<(u8, &[u8])> {
     // Order matters: check longer prefixes first to avoid partial matches
     if let Some(suffix) = name.strip_prefix(b"security." as &[u8]) {
         Some((EROFS_XATTR_INDEX_SECURITY, suffix))
@@ -432,7 +434,7 @@ pub fn erofs_xattr_ibody_size(xattrs: &[(u8, Vec<u8>, Vec<u8>)]) -> usize {
 
 /// Compute i_xattr_icount from the xattr ibody size.
 /// xattr_ibody_size = 12 + 4 * (icount - 1), so icount = (size - 12) / 4 + 1 = (size - 8) / 4
-pub fn erofs_xattr_icount(xattr_ibody_size: usize) -> u16 {
+pub(crate) fn erofs_xattr_icount(xattr_ibody_size: usize) -> u16 {
     if xattr_ibody_size == 0 {
         0
     } else {
@@ -448,7 +450,7 @@ pub fn erofs_xattr_icount(xattr_ibody_size: usize) -> u16 {
 /// - uid / gid  <= u16::MAX
 /// - nlink == 1 (hardlinks need a real link count)
 /// - no per-inode mtime (falls back to the global build time)
-pub fn needs_erofs_extended_inode(size: u64, uid: u32, gid: u32, nlink: u64) -> bool {
+pub(crate) fn needs_erofs_extended_inode(size: u64, uid: u32, gid: u32, nlink: u64) -> bool {
     size > u32::MAX as u64 || uid > u16::MAX as u32 || gid > u16::MAX as u32 || nlink > 1
 }
 
@@ -472,6 +474,6 @@ pub fn is_nydus_xattr(name: &[u8]) -> bool {
 }
 
 /// Check if an xattr name is the Nydus prefetch blobs xattr ("trusted.nydus.prefetch.blobs").
-pub fn is_nydus_prefetch_blobs_xattr(name: &[u8]) -> bool {
+pub(crate) fn is_nydus_prefetch_blobs_xattr(name: &[u8]) -> bool {
     is_nydus_xattr(name) && name.ends_with(NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
 }

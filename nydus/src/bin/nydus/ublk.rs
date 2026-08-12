@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -12,15 +11,8 @@ use tracing::info;
 
 #[derive(Args)]
 pub struct UblkArgs {
-    /// File path to nydus bootstrap. Every blob it references is served
-    /// automatically, so no blob needs to be listed on the command line.
-    #[arg(long)]
-    pub bootstrap: PathBuf,
-
-    /// File path to a YAML storage config providing the backend and cache
-    /// directories.
-    #[arg(long)]
-    pub config: PathBuf,
+    #[command(flatten)]
+    pub source: cli_common::ImageSourceArgs,
 
     /// Device id to create. Defaults to letting the driver allocate one.
     #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
@@ -56,11 +48,11 @@ pub struct UblkArgs {
 /// device. Otherwise the unmount triggered while the daemon exits flushes I/O
 /// to a device that is no longer being served, and both sides deadlock.
 pub fn run_ublk(args: UblkArgs) -> Result<()> {
-    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
-    let core = Arc::new(UblkCore::new(&args.bootstrap, config)?);
+    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.source.config)?;
+    let core = Arc::new(UblkCore::new(&args.source.bootstrap, config)?);
     info!(
         "serving {} as a {} byte block device",
-        args.bootstrap.display(),
+        args.source.bootstrap.display(),
         core.device_size()
     );
 

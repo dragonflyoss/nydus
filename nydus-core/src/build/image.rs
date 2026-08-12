@@ -3,7 +3,12 @@ use std::io::Write;
 use anyhow::{bail, Result};
 use crc32c::crc32c_append;
 
-use crate::metadata::*;
+use crate::metadata::{
+    ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
+    EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_48BIT,
+    EROFS_FEATURE_INCOMPAT_CHUNKED_FILE, EROFS_FEATURE_INCOMPAT_DEVICE_TABLE, EROFS_SB_BASE_SIZE,
+    EROFS_SUPER_OFFSET,
+};
 
 /// Write the complete EROFS image file.
 ///
@@ -18,7 +23,7 @@ use crate::metadata::*;
 /// regions never overlap. For images with up to 23 device slots the table fits
 /// in block 0 and `meta_blkaddr` stays 1, matching the previous layout.
 #[allow(clippy::too_many_arguments)]
-pub fn write_image(
+pub(crate) fn write_image(
     image: &mut impl Write,
     metadata_buf: &[u8],
     root_nid: u16,
@@ -112,7 +117,7 @@ pub fn write_image(
 /// the first block boundary at or after the end of the device table so the two
 /// regions never overlap. With up to 23 device slots the table fits in block 0
 /// and this returns 1, preserving the original layout.
-pub fn device_table_meta_blkaddr(device_count: usize) -> Result<u32> {
+pub(crate) fn device_table_meta_blkaddr(device_count: usize) -> Result<u32> {
     let block_size = EROFS_BLOCK_SIZE as usize;
     let table_end = EROFS_SUPER_OFFSET as usize
         + EROFS_SB_BASE_SIZE
@@ -151,6 +156,7 @@ pub(crate) fn write_erofs_superblock_checksum(head: &mut [u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::EROFS_BLOB_ID_SIZE;
 
     #[test]
     fn write_image_sets_erofs_superblock_checksum() {

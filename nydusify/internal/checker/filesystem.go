@@ -10,7 +10,6 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"encoding/base64"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,13 +18,12 @@ import (
 
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/log"
-	"github.com/distribution/reference"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
-	"gopkg.in/yaml.v3"
 
+	"github.com/dragonflyoss/nydus/nydusify/internal/nydusfs"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
-	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
 // filesystemRule mounts both the source and target images and compares their
@@ -37,8 +35,8 @@ type filesystemRule struct {
 	builder  string
 	logLevel string
 	workDir  string
-	source   *Image
-	target   *Image
+	source   *nydusfs.Image
+	target   *nydusfs.Image
 }
 
 func (r *filesystemRule) Name() string { return "filesystem" }
@@ -97,16 +95,16 @@ func (r *filesystemRule) Validate(ctx context.Context) error {
 // cleanup function. OCI images are extracted to a directory; nydus images are
 // mounted through `nydus fuse`. reg selects which registry side's TLS/HTTP
 // settings back the nydus FUSE mount.
-func (r *filesystemRule) mount(ctx context.Context, label string, reg remote.Side, img *Image) (string, func(), error) {
+func (r *filesystemRule) mount(ctx context.Context, label string, reg remote.Side, img *nydusfs.Image) (string, func(), error) {
 	dir, err := os.MkdirTemp(r.workDir, "fs-"+label+"-")
 	if err != nil {
 		return "", nil, errors.Wrap(err, "create scratch dir")
 	}
 	cleanupDir := func() { _ = os.RemoveAll(dir) }
 
-	if img.Kind == KindOCI {
+	if img.Kind == nydusfs.KindOCI {
 		rootfs := filepath.Join(dir, "rootfs")
-		if err := applyOCIImage(ctx, r.cs, img, rootfs); err != nil {
+		if err := nydusfs.ApplyOCIImage(ctx, r.cs, img, rootfs); err != nil {
 			cleanupDir()
 			return "", nil, errors.Wrap(err, "apply oci image")
 		}
@@ -129,7 +127,7 @@ func (r *filesystemRule) mount(ctx context.Context, label string, reg remote.Sid
 // `nydus fuse` daemon mounting them, waits for the mount to become ready, and
 // returns the mountpoint with an unmount function. Blob data is fetched on
 // demand from the registry rather than materialized locally.
-func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.Side, img *Image) (string, func(), error) {
+func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.Side, img *nydusfs.Image) (string, func(), error) {
 	if img.Bootstrap == nil {
 		return "", nil, errors.New("nydus image is missing its bootstrap layer")
 	}
@@ -146,16 +144,16 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 	// artifacts) and hardlink the blob metas into the cache dir so the registry
 	// backend loads metadata from disk instead of fetching each blob footer.
 	bootDir := filepath.Join(dir, "bootstrap")
-	bootstrapPath, blobMetaPaths, err := extractBootstrapLayer(ctx, r.cs, *img.Bootstrap, bootDir)
+	bootstrapPath, blobMetaPaths, err := nydusfs.ExtractBootstrapLayer(ctx, r.cs, *img.Bootstrap, bootDir)
 	if err != nil {
 		return "", nil, errors.Wrap(err, "extract bootstrap")
 	}
-	if err := linkBlobMetaFiles(ctx, blobMetaPaths, cacheDir); err != nil {
+	if err := nydusfs.LinkBlobMetaFiles(ctx, blobMetaPaths, cacheDir); err != nil {
 		return "", nil, errors.Wrap(err, "link blob meta to cache")
 	}
 
 	configPath := filepath.Join(dir, "config.yaml")
-	_, err = writeRegistryConfig(r.provider, reg, img, cacheDir, configPath, false)
+	_, err = nydusfs.WriteRegistryConfig(r.provider, reg, img, cacheDir, configPath, false)
 	if err != nil {
 		return "", nil, errors.Wrap(err, "generate storage config")
 	}
@@ -171,7 +169,7 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 	// nydus fuse runs in the foreground; start it detached and wait for the
 	// mountpoint to become active. Keep its output buffered for startup errors;
 	// the check command itself owns the user-facing progress logs.
-	cmd := exec.Command(cmp.Or(r.builder, pkgconv.DefaultBuilder), args...)
+	cmd := exec.Command(cmp.Or(r.builder, nydus.DefaultBuilder), args...)
 	var fuseLog bytes.Buffer
 	cmd.Stdout = &fuseLog
 	cmd.Stderr = &fuseLog
@@ -179,138 +177,37 @@ func (r *filesystemRule) fuseMount(ctx context.Context, dir string, reg remote.S
 		return "", nil, errors.Wrap(err, "start nydus fuse")
 	}
 
+	// unmount terminates the daemon and reaps it with cmd.Wait, which also
+	// joins exec's copier goroutine feeding fuseLog — so the buffer must only
+	// be read after unmount has returned.
 	unmount := func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Signal(unix.SIGTERM)
-			done := make(chan struct{})
-			go func() {
-				_, _ = cmd.Process.Wait()
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				_ = unmountFuse(mountpoint)
-				_ = cmd.Process.Kill()
-				<-done
-			}
+		_ = cmd.Process.Signal(unix.SIGTERM)
+		done := make(chan struct{})
+		go func() {
+			_ = cmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			_ = unmountFuse(mountpoint)
+			_ = cmd.Process.Kill()
+			<-done
 		}
 	}
 
 	if err := waitForMount(ctx, mountpoint, 30*time.Second); err != nil {
-		// Surface whatever the daemon printed (e.g. a permission error opening
-		// /dev/fuse) instead of letting it look like a bare timeout.
-		output := strings.TrimSpace(fuseLog.String())
+		// Reap the daemon first, then surface whatever it printed (e.g. a
+		// permission error opening /dev/fuse) instead of letting it look like
+		// a bare timeout.
 		unmount()
+		output := strings.TrimSpace(fuseLog.String())
 		if output == "" {
 			output = "<no output; the FUSE mount may require root or access to /dev/fuse>"
 		}
 		return "", nil, errors.Wrapf(err, "nydus fuse did not mount %q (nydus output: %s)", mountpoint, output)
 	}
 	return mountpoint, unmount, nil
-}
-
-// registryBackendConfig is the `backend.config` section for the registry
-// backend understood by `nydus fuse --config`.
-type registryBackendConfig struct {
-	Host string `yaml:"host"`
-	Repo string `yaml:"repo"`
-	// PlainHTTP uses the http scheme to talk to the registry. The nydus-core
-	// config calls this key "insecure", unlike the rest of nydusify where
-	// Insecure means skip-TLS-verify.
-	PlainHTTP  bool   `yaml:"insecure"`
-	SkipVerify bool   `yaml:"skip_verify"`
-	Auth       string `yaml:"auth,omitempty"`
-}
-
-type backendSection struct {
-	Type   string                `yaml:"type"`
-	Config registryBackendConfig `yaml:"config"`
-}
-
-type localDirSection struct {
-	Dir string `yaml:"dir"`
-}
-
-type cacheSection struct {
-	Type   string          `yaml:"type"`
-	Config localDirSection `yaml:"config"`
-}
-
-type prefetchSection struct {
-	Enable  bool `yaml:"enable"`
-	Threads int  `yaml:"threads"`
-}
-
-type storageConfig struct {
-	Backend  backendSection  `yaml:"backend"`
-	Cache    cacheSection    `yaml:"cache"`
-	Prefetch prefetchSection `yaml:"prefetch"`
-}
-
-// prefetchThreads returns the worker thread count for the prefetch section:
-// the nydus default when prefetch is enabled, zero otherwise.
-func prefetchThreads(enable bool) int {
-	if enable {
-		return 10
-	}
-	return 0
-}
-
-// writeRegistryConfig derives a registry-backed storage config for img, writes
-// it to configPath, and returns the rendered YAML. The registry host and
-// repository are parsed from the image reference; credentials, TLS and HTTP
-// settings come from the provider's reg side (source or target) used to pull
-// the image. Blob prefetch runs only when prefetchEnable is set (a live mount
-// wants production-like warmup, while check and optimize want fully on-demand
-// reads).
-func writeRegistryConfig(provider *remote.Provider, reg remote.Side, img *Image, cacheDir, configPath string, prefetchEnable bool) (string, error) {
-	named, err := reference.ParseNormalizedNamed(img.Ref)
-	if err != nil {
-		return "", errors.Wrapf(err, "parse image reference %q", img.Ref)
-	}
-	host := reference.Domain(named)
-	repo := reference.Path(named)
-	// The normalized Docker Hub domain is not the actual registry endpoint.
-	if host == "docker.io" {
-		host = "registry-1.docker.io"
-	}
-
-	var auth string
-	if username, password, err := provider.Credentials(host); err == nil && username != "" {
-		auth = basicAuthConfig(username, password)
-	}
-
-	cfg := storageConfig{
-		Backend: backendSection{
-			Type: "registry",
-			Config: registryBackendConfig{
-				Host:       host,
-				Repo:       repo,
-				PlainHTTP:  provider.PlainHTTP(reg),
-				SkipVerify: provider.Insecure(reg),
-				Auth:       auth,
-			},
-		},
-		Cache: cacheSection{
-			Type:   "local",
-			Config: localDirSection{Dir: cacheDir},
-		},
-		Prefetch: prefetchSection{Enable: prefetchEnable, Threads: prefetchThreads(prefetchEnable)},
-	}
-
-	out, err := yaml.Marshal(cfg)
-	if err != nil {
-		return "", errors.Wrap(err, "marshal storage config")
-	}
-	if err := os.WriteFile(configPath, out, 0o600); err != nil {
-		return "", errors.Wrapf(err, "write storage config %q", configPath)
-	}
-	return string(out), nil
-}
-
-func basicAuthConfig(username, password string) string {
-	return base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 }
 
 // waitForMount polls until mountpoint is backed by a different device than its

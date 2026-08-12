@@ -3,44 +3,60 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use super::{BlobBackend, ReadContext};
 use crate::blob::{BlobFooter, BlobMeta, BLOB_META_SUFFIX};
 use crate::config::LocalDirConfig;
-use crate::metadata::EROFS_BLOB_ID_SIZE;
-use crate::utils::{hex_string, sha256_file, sha256_file_range};
+use crate::utils::{hex_string, sha256_file, sha256_file_range, SHA256_DIGEST_SIZE};
 
 #[derive(Clone)]
 struct ResolvedSource {
     path: PathBuf,
     /// Digest naming this blob's cache files. Resolved once, because deriving
     /// it means hashing the whole source file.
-    cache_key: [u8; EROFS_BLOB_ID_SIZE],
+    cache_key: [u8; SHA256_DIGEST_SIZE],
     data_offset: u64,
     data_size: u64,
     blob_meta_offset: Option<u64>,
     blob_meta_size: Option<u64>,
 }
 
+/// A resolved source and its lazily opened file handle, looked up together so
+/// the per-read hot path pays a single lock round-trip.
+struct SourceEntry {
+    resolved: ResolvedSource,
+    /// Opened on first data read; a failed open is not cached and retried.
+    file: OnceLock<Arc<File>>,
+}
+
+impl SourceEntry {
+    fn file(&self) -> io::Result<Arc<File>> {
+        if let Some(file) = self.file.get() {
+            return Ok(file.clone());
+        }
+        // A racing open wastes at most one descriptor, which is dropped below.
+        let file = Arc::new(File::open(&self.resolved.path)?);
+        Ok(self.file.get_or_init(|| file).clone())
+    }
+}
+
 pub struct LocalBackend {
     root: PathBuf,
-    resolved_sources: Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], ResolvedSource>>,
-    source_files: Mutex<HashMap<[u8; EROFS_BLOB_ID_SIZE], Arc<File>>>,
+    sources: RwLock<HashMap<[u8; SHA256_DIGEST_SIZE], Arc<SourceEntry>>>,
 }
 
 impl LocalBackend {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
-            resolved_sources: Mutex::new(HashMap::new()),
-            source_files: Mutex::new(HashMap::new()),
+            sources: RwLock::new(HashMap::new()),
         }
     }
 
     pub(crate) fn with_full_blob_source(
         root: PathBuf,
-        blob_id: [u8; EROFS_BLOB_ID_SIZE],
+        blob_id: [u8; SHA256_DIGEST_SIZE],
         path: &Path,
     ) -> io::Result<Self> {
         // `blob_id` only covers the data region here, so the cache key is the
@@ -63,11 +79,7 @@ impl LocalBackend {
         }
 
         let backend = Self::new(root);
-        backend
-            .resolved_sources
-            .lock()
-            .unwrap()
-            .insert(blob_id, source);
+        backend.insert_source(blob_id, source);
         Ok(backend)
     }
 
@@ -95,9 +107,32 @@ impl LocalBackend {
         Ok(self.root.join(blob_meta_name))
     }
 
-    fn resolve_source(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<ResolvedSource> {
-        if let Some(source) = self.resolved_sources.lock().unwrap().get(blob_id).cloned() {
-            return Ok(source);
+    /// Insert a resolved source, keeping an existing entry (and its opened
+    /// file) if a racing resolution won.
+    fn insert_source(
+        &self,
+        blob_id: [u8; SHA256_DIGEST_SIZE],
+        resolved: ResolvedSource,
+    ) -> Arc<SourceEntry> {
+        self.sources
+            .write()
+            .unwrap()
+            .entry(blob_id)
+            .or_insert_with(|| {
+                Arc::new(SourceEntry {
+                    resolved,
+                    file: OnceLock::new(),
+                })
+            })
+            .clone()
+    }
+
+    /// Look up (or resolve and memoise) the source entry for `blob_id`. The
+    /// hit path is a single read-lock round-trip; resolution (which hashes the
+    /// source file) runs without holding the lock, exactly as before.
+    fn source_entry(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<Arc<SourceEntry>> {
+        if let Some(entry) = self.sources.read().unwrap().get(blob_id).cloned() {
+            return Ok(entry);
         }
 
         let exact = self.root.join(hex_string(blob_id));
@@ -116,11 +151,7 @@ impl LocalBackend {
                     format!("nydus blob footer not found: {}", exact.display()),
                 )
             })?;
-            self.resolved_sources
-                .lock()
-                .unwrap()
-                .insert(*blob_id, source.clone());
-            return Ok(source);
+            return Ok(self.insert_source(*blob_id, source));
         }
 
         Err(io::Error::new(
@@ -132,18 +163,8 @@ impl LocalBackend {
         ))
     }
 
-    fn source_file(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<Arc<File>> {
-        if let Some(file) = self.source_files.lock().unwrap().get(blob_id).cloned() {
-            return Ok(file);
-        }
-
-        let source = self.resolve_source(blob_id)?;
-        let file = Arc::new(File::open(&source.path)?);
-        self.source_files
-            .lock()
-            .unwrap()
-            .insert(*blob_id, file.clone());
-        Ok(file)
+    fn resolve_source(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<ResolvedSource> {
+        Ok(self.source_entry(blob_id)?.resolved.clone())
     }
 
     fn read_blob_meta_bytes(&self, source: &ResolvedSource) -> io::Result<Vec<u8>> {
@@ -169,12 +190,12 @@ impl LocalBackend {
 impl BlobBackend for LocalBackend {
     fn cache_key(
         &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-    ) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<[u8; SHA256_DIGEST_SIZE]> {
         Ok(self.resolve_source(blob_id)?.cache_key)
     }
 
-    fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+    fn blob_meta(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMeta> {
         let source = self.resolve_source(blob_id)?;
         let data = self.read_blob_meta_bytes(&source)?;
         BlobMeta::loader()
@@ -183,7 +204,7 @@ impl BlobBackend for LocalBackend {
             .map_err(io::Error::other)
     }
 
-    fn blob_meta_to(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+    fn blob_meta_to(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
         let source = self.resolve_source(blob_id)?;
         let data = self.read_blob_meta_bytes(&source)?;
         let mut file = File::create(dst)?;
@@ -193,29 +214,31 @@ impl BlobBackend for LocalBackend {
 
     fn read_range_into(
         &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         dst: &mut [u8],
         _ctx: ReadContext,
     ) -> io::Result<()> {
-        let source = self.resolve_source(blob_id)?;
+        // One lock round-trip resolves both the source metadata and the file.
+        let entry = self.source_entry(blob_id)?;
         let end = offset.checked_add(dst.len() as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "blob range offset overflow")
         })?;
-        if end > source.data_size {
+        if end > entry.resolved.data_size {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "backend range read exceeds data region",
             ));
         }
-        let file = self.source_file(blob_id)?;
-        file.read_exact_at(dst, source.data_offset + offset)
+        entry
+            .file()?
+            .read_exact_at(dst, entry.resolved.data_offset + offset)
     }
 }
 
 fn inspect_full_blob_source(
     path: &Path,
-    cache_key: [u8; EROFS_BLOB_ID_SIZE],
+    cache_key: [u8; SHA256_DIGEST_SIZE],
 ) -> io::Result<Option<ResolvedSource>> {
     let footer = match BlobFooter::read_from_path(path) {
         Ok(footer) => footer,
@@ -239,7 +262,7 @@ mod tests {
     use crate::utils::sha256_bytes;
     use tempfile::tempdir;
 
-    fn blob_meta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
+    fn blob_meta(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMeta {
         BlobMeta::from_parts(
             blob_id,
             1,

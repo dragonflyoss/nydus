@@ -20,7 +20,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 
-	converter "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
 // fetch resolves ref and downloads the image (index/manifests/config and a
@@ -87,9 +87,9 @@ func selectLayersHandler(h images.HandlerFunc, opt PullOption) images.HandlerFun
 		filtered := children[:0]
 		for _, child := range children {
 			switch {
-			case converter.IsNydusBootstrap(child):
+			case nydus.IsBootstrap(child):
 				filtered = append(filtered, child)
-			case converter.IsNydusBlob(child):
+			case nydus.IsBlob(child):
 				if opt.PullNydusBlobs {
 					filtered = append(filtered, child)
 				}

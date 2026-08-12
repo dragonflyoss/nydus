@@ -8,18 +8,19 @@ package checker
 
 import (
 	"context"
-	pkgconv "github.com/dragonflyoss/nydus/nydusify/pkg/converter"
 	"reflect"
 
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
+
+	"github.com/dragonflyoss/nydus/nydusify/internal/nydusfs"
+	"github.com/dragonflyoss/nydus/nydusify/pkg/nydus"
 )
 
 // manifestRule validates the structural correctness of each image's manifest
 // and, when both images are present, that their runtime configs are equivalent.
 type manifestRule struct {
-	source *Image
-	target *Image
+	source *nydusfs.Image
+	target *nydusfs.Image
 }
 
 func (r *manifestRule) Name() string { return "manifest" }
@@ -41,17 +42,17 @@ func (r *manifestRule) Validate(_ context.Context) error {
 
 // validateImageManifest checks layer/diff-id counts and nydus layer
 // annotations for a single image.
-func validateImageManifest(img *Image) error {
+func validateImageManifest(img *nydusfs.Image) error {
 	if img == nil {
 		return nil
 	}
-	if img.Kind == KindNydus {
+	if img.Kind == nydusfs.KindNydus {
 		return validateNydusManifest(img)
 	}
 	return validateOCIManifest(img)
 }
 
-func validateOCIManifest(img *Image) error {
+func validateOCIManifest(img *nydusfs.Image) error {
 	if len(img.Manifest.Layers) != len(img.Config.RootFS.DiffIDs) {
 		return errors.Errorf("layer count (%d) does not match diff id count (%d)",
 			len(img.Manifest.Layers), len(img.Config.RootFS.DiffIDs))
@@ -59,44 +60,32 @@ func validateOCIManifest(img *Image) error {
 	return nil
 }
 
-func validateNydusManifest(img *Image) error {
+func validateNydusManifest(img *nydusfs.Image) error {
 	layers := img.Manifest.Layers
 	if len(layers) == 0 {
 		return errors.New("nydus image has no layers")
 	}
 
-	// The last layer must be the bootstrap; all preceding layers must be blobs.
-	bootstrap := layers[len(layers)-1]
-	if img.Bootstrap == nil || bootstrap.Digest != img.Bootstrap.Digest {
+	// The canonical layout: data blobs, optionally the ondemand blob appended
+	// by optimize, and the bootstrap last.
+	_, bootstrap, _, err := nydus.SplitLayers(layers)
+	if err != nil {
+		return err
+	}
+	if bootstrap == nil || img.Bootstrap == nil || bootstrap.Digest != img.Bootstrap.Digest {
 		return errors.New("the last layer is not a nydus bootstrap")
 	}
-	for _, layer := range layers[:len(layers)-1] {
-		if !isNydusBlobLayer(layer) {
-			return errors.Errorf("layer %s is neither a nydus blob nor the bootstrap", layer.Digest)
-		}
-	}
-	if len(img.Manifest.Layers) != len(img.Config.RootFS.DiffIDs) {
+	if len(layers) != len(img.Config.RootFS.DiffIDs) {
 		return errors.Errorf("layer count (%d) does not match diff id count (%d)",
-			len(img.Manifest.Layers), len(img.Config.RootFS.DiffIDs))
+			len(layers), len(img.Config.RootFS.DiffIDs))
 	}
 	return nil
-}
-
-func isNydusBlobLayer(layer ocispec.Descriptor) bool {
-	if pkgconv.IsNydusBlob(layer) {
-		return true
-	}
-	if layer.Annotations == nil {
-		return false
-	}
-	_, ok := layer.Annotations[pkgconv.LayerAnnotationNydusBlob]
-	return ok
 }
 
 // compareConfigs verifies that the runtime-relevant fields of the source and
 // target configs are equivalent. The conversion only rewrites RootFS.DiffIDs
 // and History, so the remaining config must be identical.
-func compareConfigs(source, target *Image) error {
+func compareConfigs(source, target *nydusfs.Image) error {
 	if !reflect.DeepEqual(source.Config.Config, target.Config.Config) {
 		return errors.New("image config (env/cmd/entrypoint/working dir/etc) differs between source and target")
 	}

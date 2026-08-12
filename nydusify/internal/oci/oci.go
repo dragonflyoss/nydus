@@ -1,5 +1,5 @@
-// Package oci reads OCI image structures (manifests, indexes, configs) from
-// a containerd content store.
+// Package oci reads and writes OCI image structures (manifests, indexes,
+// configs, layer blobs) in a containerd content store.
 package oci
 
 import (

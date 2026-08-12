@@ -5,9 +5,16 @@
 
 use anyhow::{Context, Result};
 use memmap2::Mmap;
-use nydus_core::blob::*;
+use nydus_core::blob::{
+    BlobFooter, BlobMeta, BlobMetaCompressor, BlobMetaDigester, NYDUS_BLOB_FOOTER_SIZE,
+};
 use nydus_core::fs::{ErofsReader, RawBlobInfo};
-use nydus_core::metadata::*;
+use nydus_core::metadata::{
+    mode_to_erofs_file_type, ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
+    EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
+    EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
+    EROFS_INODE_FLAT_PLAIN, EROFS_NULL_ADDR, EROFS_SLOTSIZE,
+};
 use nydus_core::utils::sha256_bytes;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -476,6 +483,7 @@ fn blob_meta_summary_from_bytes(data: &[u8]) -> Result<BlobMetaSummary> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nydus_core::blob::BLOB_META_DEFAULT_CHUNK_BLOCK_COUNT;
     use std::fs;
     use tempfile::tempdir;
 
