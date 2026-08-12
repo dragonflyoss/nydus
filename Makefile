@@ -20,9 +20,9 @@ UBLK_TIMEOUT ?= 300s
 UBLK_COUNT ?= 1
 UBLK_GO_TEST_ARGS ?=
 
-CORE_TIMEOUT ?= 900s
-CORE_COUNT ?= 1
-CORE_GO_TEST_ARGS ?=
+CACHE_SHARING_TIMEOUT ?= 900s
+CACHE_SHARING_COUNT ?= 1
+CACHE_SHARING_GO_TEST_ARGS ?=
 
 FANOTIFY_TIMEOUT ?= 600s
 FANOTIFY_COUNT ?= 1
@@ -67,7 +67,7 @@ E2E_TEST_FILES = roundtrip_test.go $(TEST_SUPPORT_FILES)
 TOOCI_TEST_FILES = tooci_test.go $(TEST_SUPPORT_FILES)
 UFFD_TEST_FILES = uffd_test.go $(TEST_SUPPORT_FILES)
 UBLK_TEST_FILES = ublk_test.go $(TEST_SUPPORT_FILES)
-CORE_TEST_FILES = cache_sharing_test.go $(TEST_SUPPORT_FILES)
+CACHE_SHARING_TEST_FILES = cache_sharing_test.go $(TEST_SUPPORT_FILES)
 FS_TEST_FILES = fs_test.go $(TEST_SUPPORT_FILES)
 TOP_IMAGES_TEST_FILES = top_image_test.go $(TEST_SUPPORT_FILES)
 FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
@@ -78,7 +78,7 @@ FANOTIFY_TEST_FILES = fanotify_test.go $(TEST_SUPPORT_FILES)
 NBD_TEST_PKG = .
 BENCH_TEST_PKG = .
 
-.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-core test-fanotify test-nbd test-bench test-fs test-top-images crate clean
+.PHONY: build release nydusify test test-e2e test-tooci test-uffd test-cache-sharing test-fanotify test-nbd test-bench test-fs test-top-images crate clean
 
 build:
 	$(CARGO) build -p nydus --features "$(FEATURES)"
@@ -114,7 +114,7 @@ test-tooci: release nydusify
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		$(GO_BIN) test -v -run '^TestNydusifyToOCIE2E$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(TOOCI_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestNydusifyToOCI$$' -count $(E2E_COUNT) -timeout $(E2E_TIMEOUT) $(E2E_GO_TEST_ARGS) $(TOOCI_TEST_FILES)
 
 # Run the UFFD service smoke test. This builds nydus with the optional uffd
 # feature and does not require root because it exercises stateless socket
@@ -133,16 +133,16 @@ test-ublk: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		$(GO_BIN) test -v -run '^TestUblkTarget$$' -count $(UBLK_COUNT) -timeout $(UBLK_TIMEOUT) $(UBLK_GO_TEST_ARGS) $(UBLK_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestUblkService$$' -count $(UBLK_COUNT) -timeout $(UBLK_TIMEOUT) $(UBLK_GO_TEST_ARGS) $(UBLK_TEST_FILES)
 
 # Run the cross-process blob cache tests. Requires root because they mount
 # several nydus FUSE instances against one shared --cache-dir and assert on the
 # cache directory plus each instance's /metrics endpoint.
-test-core: release
+test-cache-sharing: release
 	@test -n "$(GO_BIN)" || { echo "go not found; set GO=/abs/path/to/go or GO_BIN=/abs/path/to/go"; exit 1; }
 	cd tests/e2e && \
 		$(GO_TEST_ENV) \
-		$(GO_BIN) test -v -run '^TestCore' -count $(CORE_COUNT) -timeout $(CORE_TIMEOUT) $(CORE_GO_TEST_ARGS) $(CORE_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestCacheSharing' -count $(CACHE_SHARING_COUNT) -timeout $(CACHE_SHARING_TIMEOUT) $(CACHE_SHARING_GO_TEST_ARGS) $(CACHE_SHARING_TEST_FILES)
 
 # Run the fanotify pre-content E2E test (requires root, Linux >= 6.15, docker
 # for the throwaway local registry). Builds nydus with the fanotify feature.
@@ -157,7 +157,7 @@ test-fanotify: release nydusify
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
 		FANOTIFY_RUN_FAIL_CLOSED="$(FANOTIFY_RUN_FAIL_CLOSED)" \
 		FANOTIFY_RUN_STRACE="$(FANOTIFY_RUN_STRACE)" \
-		$(GO_BIN) test -v -run '^TestFanotifyE2E$$' -count $(FANOTIFY_COUNT) -timeout $(FANOTIFY_TIMEOUT) $(FANOTIFY_GO_TEST_ARGS) $(FANOTIFY_TEST_FILES)
+		$(GO_BIN) test -v -run '^TestFanotify$$' -count $(FANOTIFY_COUNT) -timeout $(FANOTIFY_TIMEOUT) $(FANOTIFY_GO_TEST_ARGS) $(FANOTIFY_TEST_FILES)
 
 # Run the NBD E2E test (requires root, the nbd kernel module, EROFS support).
 # Builds nydus with the nbd feature. Uses a LOCAL backend (nydus build
@@ -171,7 +171,7 @@ test-nbd: release
 	mkdir -p $(CURDIR)/.test-tmp
 	cd tests/e2e && \
 		$(GO_TEST_ENV) "TMPDIR=$(CURDIR)/.test-tmp" \
-		$(GO_BIN) test -v -run '^TestNbdE2E$$' -count $(NBD_COUNT) -timeout $(NBD_TIMEOUT) $(NBD_GO_TEST_ARGS) $(NBD_TEST_PKG)
+		$(GO_BIN) test -v -run '^TestNbd$$' -count $(NBD_COUNT) -timeout $(NBD_TIMEOUT) $(NBD_GO_TEST_ARGS) $(NBD_TEST_PKG)
 
 # Unified cold-start performance benchmark: FUSE vs NBD vs ublk vs fanotify
 # (plus an optional C erofsfuse column when the binary is available), all

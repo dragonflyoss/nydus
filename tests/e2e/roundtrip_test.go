@@ -25,7 +25,7 @@ import (
 
 const nydusRunErofsCompatEnv = "NYDUSFS_RUN_EROFS_COMPAT"
 
-func TestBlobMountE2E(t *testing.T) {
+func TestBlobMount(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
 	}
@@ -71,7 +71,7 @@ func TestBlobMountE2E(t *testing.T) {
 	}
 }
 
-func TestMergedMountE2E(t *testing.T) {
+func TestMergedMount(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
 	}
@@ -467,7 +467,7 @@ func verifyBlobCacheArtifacts(t *testing.T, cacheDir string, blobs ...string) {
 //     - the workload triggered zero on-demand backend reads
 //     (backend_ondemand_read_count == 0), proving the optimization works,
 //     - file contents are byte-identical to the corpus.
-func TestNydusifyOptimizeE2E(t *testing.T) {
+func TestNydusifyOptimize(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
 	}
@@ -619,7 +619,7 @@ func pseudoRandomTestBytes(n int, seed uint64) []byte {
 // leak into an image: the wall clock, the order the source filesystem happens
 // to report things in, and the paths the build ran under. Two builds that agree
 // here produce the same layer digest, so a rebuild costs no registry storage.
-func TestReproducibleBuildE2E(t *testing.T) {
+func TestReproducibleBuild(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root to build the corpus")
 	}

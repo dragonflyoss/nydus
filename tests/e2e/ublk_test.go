@@ -19,10 +19,10 @@ import (
 
 const ublkChunkSize = 4096
 
-// TestUblkTarget serves an image as a ublk block device, mounts it with the
+// TestUblkService serves an image as a ublk block device, mounts it with the
 // kernel EROFS driver and checks the result matches the same image mounted
 // through FUSE.
-func TestUblkTarget(t *testing.T) {
+func TestUblkService(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("ublk target requires Linux")
 	}
@@ -55,7 +55,7 @@ func TestUblkTarget(t *testing.T) {
 	buildNydusFSImageToDir(t, nydusBin, bootstrapPath, blobDir, corpusDir, ublkChunkSize)
 	writeLocalStorageConfig(t, configPath, blobDir, cacheDir)
 
-	devPath, stopDaemon := startUblkTarget(t, nydusBin, bootstrapPath, configPath, logDir)
+	devPath, stopDaemon := startUblkService(t, nydusBin, bootstrapPath, configPath, logDir)
 	defer stopDaemon()
 
 	require.NoError(t, os.MkdirAll(blockMnt, 0755))
@@ -142,9 +142,9 @@ func describeTree(t *testing.T, root string) map[string]entryInfo {
 	return entries
 }
 
-// startUblkTarget runs `nydus ublk` and returns the device path it prints on
+// startUblkService runs `nydus ublk` and returns the device path it prints on
 // stdout together with a shutdown function.
-func startUblkTarget(t *testing.T, nydusBin, bootstrapPath, configPath, logDir string) (string, func()) {
+func startUblkService(t *testing.T, nydusBin, bootstrapPath, configPath, logDir string) (string, func()) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(logDir, 0755))
 

@@ -29,7 +29,7 @@ var toOCILayers = []string{"layer1", "layer2", "layer3"}
 //     through FUSE and diffs it against the rebuilt OCI rootfs.
 //  3. Assert the rebuilt image is a plain OCI image: ordinary layer media
 //     types, no bootstrap layer and no nydus annotations left behind.
-func TestNydusifyToOCIE2E(t *testing.T) {
+func TestNydusifyToOCI(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("requires root")
 	}
