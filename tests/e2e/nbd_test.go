@@ -77,7 +77,7 @@ type nbdEnv struct {
 	sourceHashes map[string]string // rel path -> sha256
 }
 
-func TestNbdE2E(t *testing.T) {
+func TestNbd(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("NBD E2E requires Linux")
 	}

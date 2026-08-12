@@ -97,7 +97,7 @@ type fanotifyEnv struct {
 	sourceHashes map[string]string // rel path -> sha256
 }
 
-func TestFanotifyE2E(t *testing.T) {
+func TestFanotify(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("fanotify pre-content E2E requires Linux")
 	}

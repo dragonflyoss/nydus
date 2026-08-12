@@ -370,7 +370,7 @@ func sumMetric(t *testing.T, mounts []*coreMount, name string) float64 {
 // TestCoreConcurrentColdReadIsConsistent covers the baseline guarantee:
 // however much duplicate work the processes do, they all observe the same
 // bytes and the cache never serves a torn group.
-func TestCoreConcurrentColdReadIsConsistent(t *testing.T) {
+func TestCacheSharingConcurrentColdReadIsConsistent(t *testing.T) {
 	skipUnlessRoot(t)
 
 	root := t.TempDir()
@@ -398,7 +398,7 @@ func TestCoreConcurrentColdReadIsConsistent(t *testing.T) {
 // TestCoreConcurrentColdReadAmplification measures how much duplicate
 // fetching the processes do, calibrated against a single process doing the
 // same read so the assertion does not depend on the blob's group count.
-func TestCoreConcurrentColdReadAmplification(t *testing.T) {
+func TestCacheSharingConcurrentColdReadAmplification(t *testing.T) {
 	skipUnlessRoot(t)
 
 	root := t.TempDir()
@@ -446,7 +446,7 @@ func TestCoreConcurrentColdReadAmplification(t *testing.T) {
 // TestCoreConcurrentPrefetchDeduplicates checks the path that already has
 // cross-process exclusion: the per-blob prefetch lock should keep all but one
 // process from streaming the blob.
-func TestCoreConcurrentPrefetchDeduplicates(t *testing.T) {
+func TestCacheSharingConcurrentPrefetchDeduplicates(t *testing.T) {
 	skipUnlessRoot(t)
 
 	root := t.TempDir()
@@ -500,7 +500,7 @@ func TestCoreConcurrentPrefetchDeduplicates(t *testing.T) {
 // TestCoreSharedBlobUsesOneCacheEntry checks that two images referencing
 // the same blob converge on one set of cache files, which is what makes a node
 // running many images cheap.
-func TestCoreSharedBlobUsesOneCacheEntry(t *testing.T) {
+func TestCacheSharingSharedBlobUsesOneCacheEntry(t *testing.T) {
 	skipUnlessRoot(t)
 
 	root := t.TempDir()
@@ -543,7 +543,7 @@ func TestCoreSharedBlobUsesOneCacheEntry(t *testing.T) {
 // TestCorePrefetchAndOnDemandConcurrent runs a prefetching process against
 // an on-demand one on the same cache. Neither may deadlock and both must see
 // correct data.
-func TestCorePrefetchAndOnDemandConcurrent(t *testing.T) {
+func TestCacheSharingPrefetchAndOnDemandConcurrent(t *testing.T) {
 	skipUnlessRoot(t)
 
 	root := t.TempDir()
@@ -581,7 +581,7 @@ func TestCorePrefetchAndOnDemandConcurrent(t *testing.T) {
 // TestCoreSurvivesPeerCrash kills one process mid-flight; the survivors
 // must still complete their reads. Once per-group locks land this also covers
 // a dead lock holder being taken over.
-func TestCoreSurvivesPeerCrash(t *testing.T) {
+func TestCacheSharingSurvivesPeerCrash(t *testing.T) {
 	skipUnlessRoot(t)
 
 	root := t.TempDir()
@@ -628,7 +628,7 @@ func TestCoreSurvivesPeerCrash(t *testing.T) {
 // live mount. The readiness bitmap has to be reset, but every process must end
 // up on the same bitmap file: if the reset swaps the inode, a live process
 // keeps publishing readiness that newcomers can never see.
-func TestCoreStaleGroupmapKeepsInode(t *testing.T) {
+func TestCacheSharingStaleGroupmapKeepsInode(t *testing.T) {
 	skipUnlessRoot(t)
 
 	root := t.TempDir()
