@@ -5,9 +5,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::build::bootstrap::render_flattened_bootstrap;
-use crate::build::inode::{set_root_prefetch_blobs_xattr, DirEntry, InodeData, InodeInfo};
+use crate::build::inode::{
+    flatten_tree, set_root_prefetch_blobs_xattr, InodeData, NamedChildren, NodeAttrs, TreeNode,
+};
 use crate::fs::ErofsReader;
-use crate::metadata::*;
+use crate::metadata::{
+    erofs_xattr_name_split, mode_to_erofs_file_type, ChunkAddr, ErofsDeviceSlot,
+    EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR,
+    EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED,
+    EROFS_NULL_ADDR,
+};
 use crate::utils::parse_sha256_hex;
 
 const OCI_WHITEOUT_PREFIX: &[u8] = b".wh.";
@@ -41,7 +48,7 @@ struct MergeLinkId {
 #[derive(Clone)]
 enum MergeNodeData {
     RegularFile {
-        chunk_index_entries: Vec<ChunkIndex>,
+        chunk_index_entries: Vec<ChunkAddr>,
         chunkbits: u32,
     },
     Directory {
@@ -88,15 +95,8 @@ pub fn merge_sources_to_bootstrap_bytes(
     let mut merged_root = merged_root.ok_or_else(|| anyhow!("merge produced no root node"))?;
     strip_whiteout_entries(&mut merged_root, whiteout_spec);
 
-    let mut inodes = Vec::new();
-    let mut ino_counter = 0u32;
-    let mut hardlink_indexes = HashMap::new();
-    flatten_node(
-        &merged_root,
-        &mut inodes,
-        &mut ino_counter,
-        &mut hardlink_indexes,
-    );
+    // `flatten_tree` always yields at least the root inode.
+    let mut inodes = flatten_tree(&merged_root, &mut ())?;
 
     // `build_tree` zeroes the root mtime for reproducibility, so the minimum
     // inode mtime read back from any layer is always 0.
@@ -113,7 +113,7 @@ pub fn merge_sources_to_bootstrap_bytes(
 /// "ondemand" device slot for the redirect blob and put its blob index first
 /// in the root prefetch xattr so it is warmed before everything else. The
 /// parent bootstrap is read-only; the rewritten bootstrap bytes are returned.
-pub fn rewrite_bootstrap_with_ondemand_blob(
+pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
     parent_bootstrap: &Path,
     ondemand_blob_id: &[u8; EROFS_BLOB_ID_SIZE],
     ondemand_blocks: u64,
@@ -145,13 +145,8 @@ pub fn rewrite_bootstrap_with_ondemand_blob(
     )
     .context("failed to load bootstrap inode tree")?;
 
-    let mut inodes = Vec::new();
-    let mut ino_counter = 0u32;
-    let mut hardlink_indexes = HashMap::new();
-    flatten_node(&root, &mut inodes, &mut ino_counter, &mut hardlink_indexes);
-    if inodes.is_empty() {
-        bail!("bootstrap produced no inodes");
-    }
+    // `flatten_tree` always yields at least the root inode.
+    let mut inodes = flatten_tree(&root, &mut ())?;
 
     let mut device_slots: Vec<ErofsDeviceSlot> = blob_infos
         .iter()
@@ -318,7 +313,7 @@ fn load_node(
                                     index.device_id
                                 )
                             })?;
-                        Ok(ChunkIndex {
+                        Ok(ChunkAddr {
                             blkaddr: index.blkaddr,
                             device_id: mapped,
                         })
@@ -453,170 +448,70 @@ fn strip_whiteout_entries(node: &mut MergeNode, whiteout_spec: WhiteoutSpec) {
     }
 }
 
-fn flatten_node(
-    node: &MergeNode,
-    inodes: &mut Vec<InodeInfo>,
-    ino_counter: &mut u32,
-    hardlink_indexes: &mut HashMap<MergeLinkId, usize>,
-) -> usize {
-    if let Some(link_id) = node.link_id {
-        if let Some(inode_index) = hardlink_indexes.get(&link_id) {
-            return *inode_index;
+/// [`TreeNode`] over the in-memory merge tree, so [`flatten_tree`] produces
+/// exactly the same inodes for a merged layer as for a directory build.
+impl<'a> TreeNode<()> for &'a MergeNode {
+    type LinkKey = MergeLinkId;
+
+    fn attrs(&self) -> NodeAttrs {
+        NodeAttrs {
+            mode: self.mode,
+            uid: self.uid,
+            gid: self.gid,
+            size: self.size,
+            mtime: self.mtime,
+            mtime_nsec: self.mtime_nsec,
+            nlink: self.nlink,
+            xattrs: self.xattrs.clone(),
         }
     }
 
-    *ino_counter += 1;
-    let ino = *ino_counter;
-    let inode_index = inodes.len();
+    fn link_key(&self) -> Option<MergeLinkId> {
+        self.link_id
+    }
 
-    match &node.data {
-        MergeNodeData::Directory { children } => {
-            inodes.push(InodeInfo {
-                mode: node.mode,
-                uid: node.uid,
-                gid: node.gid,
-                size: 0,
-                mtime: node.mtime,
-                mtime_nsec: node.mtime_nsec,
-                nlink: 0,
-                ino,
-                nid: 0,
-                meta_offset: 0,
-                is_extended: needs_erofs_extended_inode(0, node.uid, node.gid, 0),
-                data: InodeData::Directory {
-                    children: Vec::new(),
-                    startblk: 0,
-                    data_size: 0,
-                    parent_nid: 0,
-                },
-                xattrs: node.xattrs.clone(),
-            });
-
-            let mut child_entries = Vec::new();
-            let mut subdir_count = 0u32;
-            for (name, child) in children {
-                let child_index = flatten_node(child, inodes, ino_counter, hardlink_indexes);
-                let file_type = mode_to_erofs_file_type(child.mode);
-                if file_type == EROFS_FT_DIR {
-                    subdir_count += 1;
-                }
-                child_entries.push(DirEntry {
-                    name: name.clone(),
-                    file_type,
-                    inode_index: child_index,
-                });
-            }
-
-            let nlink = 2 + subdir_count;
-            let is_extended = needs_erofs_extended_inode(0, node.uid, node.gid, nlink as u64);
-            inodes[inode_index].nlink = nlink;
-            inodes[inode_index].is_extended = is_extended;
-            if let InodeData::Directory {
-                children: ref mut dir_children,
-                ..
-            } = inodes[inode_index].data
-            {
-                *dir_children = child_entries;
-            }
-        }
-        MergeNodeData::RegularFile {
-            chunk_index_entries,
-            chunkbits,
-        } => {
-            let nlink = node.nlink.max(1);
-            inodes.push(InodeInfo {
-                mode: node.mode,
-                uid: node.uid,
-                gid: node.gid,
-                size: node.size,
-                mtime: node.mtime,
-                mtime_nsec: node.mtime_nsec,
-                nlink,
-                ino,
-                nid: 0,
-                meta_offset: 0,
-                is_extended: needs_erofs_extended_inode(
-                    node.size,
-                    node.uid,
-                    node.gid,
-                    nlink as u64,
-                ),
-                data: InodeData::RegularFile {
-                    chunk_index_entries: chunk_index_entries.clone(),
-                    chunk_size_bits: *chunkbits,
-                },
-                xattrs: node.xattrs.clone(),
-            });
-            if let Some(link_id) = node.link_id {
-                hardlink_indexes.insert(link_id, inode_index);
-            }
-        }
-        MergeNodeData::Symlink { target } => {
-            let size = target.len() as u64;
-            let nlink = node.nlink.max(1);
-            inodes.push(InodeInfo {
-                mode: node.mode,
-                uid: node.uid,
-                gid: node.gid,
-                size,
-                mtime: node.mtime,
-                mtime_nsec: node.mtime_nsec,
-                nlink,
-                ino,
-                nid: 0,
-                meta_offset: 0,
-                is_extended: needs_erofs_extended_inode(size, node.uid, node.gid, nlink as u64),
-                data: InodeData::Symlink {
-                    target: target.clone(),
-                    startblk: 0,
-                },
-                xattrs: node.xattrs.clone(),
-            });
-        }
-        MergeNodeData::SpecialDev { rdev } => {
-            let nlink = node.nlink.max(1);
-            inodes.push(InodeInfo {
-                mode: node.mode,
-                uid: node.uid,
-                gid: node.gid,
-                size: 0,
-                mtime: node.mtime,
-                mtime_nsec: node.mtime_nsec,
-                nlink,
-                ino,
-                nid: 0,
-                meta_offset: 0,
-                is_extended: needs_erofs_extended_inode(0, node.uid, node.gid, nlink as u64),
-                data: InodeData::Device { rdev: *rdev },
-                xattrs: node.xattrs.clone(),
-            });
-        }
-        MergeNodeData::SpecialNoData => {
-            let nlink = node.nlink.max(1);
-            inodes.push(InodeInfo {
-                mode: node.mode,
-                uid: node.uid,
-                gid: node.gid,
-                size: 0,
-                mtime: node.mtime,
-                mtime_nsec: node.mtime_nsec,
-                nlink,
-                ino,
-                nid: 0,
-                meta_offset: 0,
-                is_extended: needs_erofs_extended_inode(0, node.uid, node.gid, nlink as u64),
-                data: InodeData::FifoOrSocket,
-                xattrs: node.xattrs.clone(),
-            });
+    fn children(&self, _ctx: &mut ()) -> Result<Option<NamedChildren<Self>>> {
+        let node: &'a MergeNode = self;
+        match &node.data {
+            MergeNodeData::Directory { children } => Ok(Some(
+                children
+                    .iter()
+                    .map(|(name, child)| (name.clone(), child))
+                    .collect(),
+            )),
+            _ => Ok(None),
         }
     }
 
-    inode_index
+    fn leaf_data(&self, _ctx: &mut ()) -> Result<InodeData> {
+        Ok(match &self.data {
+            MergeNodeData::RegularFile {
+                chunk_index_entries,
+                chunkbits,
+            } => InodeData::RegularFile {
+                chunk_index_entries: chunk_index_entries.clone(),
+                chunk_size_bits: *chunkbits,
+            },
+            MergeNodeData::Symlink { target } => InodeData::Symlink {
+                target: target.clone(),
+                startblk: 0,
+            },
+            MergeNodeData::SpecialDev { rdev } => InodeData::Device { rdev: *rdev },
+            MergeNodeData::SpecialNoData => InodeData::FifoOrSocket,
+            MergeNodeData::Directory { .. } => {
+                unreachable!("leaf_data is only called for non-directories")
+            }
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::{
+        needs_erofs_extended_inode, EROFS_BLKSZBITS, EROFS_XATTR_INDEX_TRUSTED,
+        NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
+    };
 
     const OPAQUE: &str = ".wh..wh..opq";
 
@@ -781,5 +676,239 @@ mod tests {
         strip_whiteout_entries(&mut merged, WhiteoutSpec::Oci);
 
         assert_eq!(child_names(&merged), vec![".dotfile"]);
+    }
+
+    /// Set a path's mtime to whole seconds (no nanoseconds), without
+    /// following symlinks. Compact EROFS inodes store no mtime nanoseconds,
+    /// so a layer read back cannot reproduce them; pinning fixture mtimes to
+    /// whole seconds keeps the build and merge paths exactly comparable.
+    fn set_mtime_seconds(path: &Path, secs: i64) {
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT,
+            },
+            libc::timespec {
+                tv_sec: secs,
+                tv_nsec: 0,
+            },
+        ];
+        let rc = unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                c_path.as_ptr(),
+                times.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        assert_eq!(rc, 0, "utimensat failed for {}", path.display());
+    }
+
+    /// Guards against the build and merge flatteners drifting apart: building
+    /// a directory tree directly and merging a single layer built from that
+    /// same tree must emit identical inode sequences (the merged root's
+    /// prefetch xattr aside, which is stamped on after flattening).
+    #[test]
+    fn build_and_single_layer_merge_produce_identical_inodes() {
+        use crate::blob::BlobMetaCompressor;
+        use crate::build::blob_chunk::BlobWriter;
+        use crate::build::inode::build_tree;
+        use crate::build::{build_dir_image, DirImageOptions};
+        use crate::utils::hex_string;
+        use std::collections::HashSet;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        fs::create_dir_all(source.join("dir1").join("subdir")).unwrap();
+        fs::write(source.join("dir1").join("file_a"), b"hardlinked contents").unwrap();
+        fs::write(source.join("file_b"), vec![b'x'; 5000]).unwrap();
+        fs::write(source.join("empty"), b"").unwrap();
+        fs::hard_link(source.join("dir1").join("file_a"), source.join("link_a")).unwrap();
+        std::os::unix::fs::symlink("file_b", source.join("sym")).unwrap();
+        let fifo = std::ffi::CString::new(source.join("fifo").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+        // `link_a` shares its inode with `dir1/file_a`, so its mtime is set
+        // through that path.
+        for (i, rel) in [
+            "dir1/subdir",
+            "dir1/file_a",
+            "dir1",
+            "file_b",
+            "empty",
+            "sym",
+            "fifo",
+        ]
+        .iter()
+        .enumerate()
+        {
+            set_mtime_seconds(&source.join(rel), 1_700_000_000 + i as i64);
+        }
+
+        // Path A: build the tree straight from the host directory.
+        let exclude = HashSet::new();
+        let scratch_blob = dir.path().join("scratch.blob");
+        let mut blob_writer = BlobWriter::new(&scratch_blob, EROFS_BLOCK_SIZE).unwrap();
+        let built = build_tree(&source, &mut blob_writer, EROFS_BLOCK_SIZE, &exclude).unwrap();
+
+        // Path B: build the same tree into a full blob, then load it back as
+        // a single merge layer and flatten it.
+        let blob_path = dir.path().join("layer.blob");
+        let image = build_dir_image(
+            &DirImageOptions {
+                source: &source,
+                chunk_size: EROFS_BLOCK_SIZE,
+                compress_size: 1 << 20,
+                compressor: BlobMetaCompressor::None,
+                exclude: &exclude,
+                standalone_bootstrap: false,
+            },
+            fs::File::create(&blob_path).unwrap(),
+        )
+        .unwrap();
+        let merge_source = dir.path().join(hex_string(&image.full_blob_id));
+        fs::rename(&blob_path, &merge_source).unwrap();
+
+        let source_blob_id = parse_source_blob_id(&merge_source).unwrap();
+        let mut device_slots = Vec::new();
+        let mut blob_indexes = HashMap::new();
+        let root = load_layer(
+            0,
+            &merge_source,
+            source_blob_id,
+            &mut device_slots,
+            &mut blob_indexes,
+        )
+        .unwrap();
+        let mut merged = flatten_tree(&root, &mut ()).unwrap();
+
+        // The layer bootstrap carries the prefetch xattr the build stamps on
+        // its root after flattening; drop it so the roots compare equal.
+        merged[0].xattrs.retain(|(index, suffix, _)| {
+            !(*index == EROFS_XATTR_INDEX_TRUSTED
+                && suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
+        });
+
+        assert_eq!(built.len(), merged.len(), "inode count differs");
+        for (i, (a, b)) in built.iter().zip(merged.iter()).enumerate() {
+            assert_eq!(a.mode, b.mode, "mode differs at inode {i}");
+            assert_eq!(a.uid, b.uid, "uid differs at inode {i}");
+            assert_eq!(a.gid, b.gid, "gid differs at inode {i}");
+            assert_eq!(a.size, b.size, "size differs at inode {i}");
+            assert_eq!(a.mtime, b.mtime, "mtime differs at inode {i}");
+            assert_eq!(
+                a.mtime_nsec, b.mtime_nsec,
+                "mtime_nsec differs at inode {i}"
+            );
+            assert_eq!(a.nlink, b.nlink, "nlink differs at inode {i}");
+            assert_eq!(a.ino, b.ino, "ino differs at inode {i}");
+            assert_eq!(
+                a.is_extended, b.is_extended,
+                "is_extended differs at inode {i}"
+            );
+            assert_eq!(a.xattrs, b.xattrs, "xattrs differ at inode {i}");
+            match (&a.data, &b.data) {
+                (
+                    InodeData::RegularFile {
+                        chunk_index_entries: chunks_a,
+                        chunk_size_bits: bits_a,
+                    },
+                    InodeData::RegularFile {
+                        chunk_index_entries: chunks_b,
+                        chunk_size_bits: bits_b,
+                    },
+                ) => {
+                    assert_eq!(bits_a, bits_b, "chunk_size_bits differ at inode {i}");
+                    assert_eq!(
+                        chunks_a.len(),
+                        chunks_b.len(),
+                        "chunk count differs at inode {i}"
+                    );
+                    for (ca, cb) in chunks_a.iter().zip(chunks_b.iter()) {
+                        assert_eq!(ca.blkaddr, cb.blkaddr, "chunk blkaddr differs at inode {i}");
+                        assert_eq!(
+                            ca.device_id, cb.device_id,
+                            "chunk device differs at inode {i}"
+                        );
+                    }
+                }
+                (
+                    InodeData::Directory {
+                        children: children_a,
+                        ..
+                    },
+                    InodeData::Directory {
+                        children: children_b,
+                        ..
+                    },
+                ) => {
+                    assert_eq!(
+                        children_a.len(),
+                        children_b.len(),
+                        "child count differs at inode {i}"
+                    );
+                    for (ca, cb) in children_a.iter().zip(children_b.iter()) {
+                        assert_eq!(ca.name, cb.name, "child name differs at inode {i}");
+                        assert_eq!(
+                            ca.file_type, cb.file_type,
+                            "child type differs at inode {i}"
+                        );
+                        assert_eq!(
+                            ca.inode_index, cb.inode_index,
+                            "child index differs at inode {i}"
+                        );
+                    }
+                }
+                (
+                    InodeData::Symlink {
+                        target: target_a,
+                        startblk: startblk_a,
+                    },
+                    InodeData::Symlink {
+                        target: target_b,
+                        startblk: startblk_b,
+                    },
+                ) => {
+                    assert_eq!(target_a, target_b, "symlink target differs at inode {i}");
+                    assert_eq!(
+                        startblk_a, startblk_b,
+                        "symlink startblk differs at inode {i}"
+                    );
+                }
+                (InodeData::Device { rdev: rdev_a }, InodeData::Device { rdev: rdev_b }) => {
+                    assert_eq!(rdev_a, rdev_b, "rdev differs at inode {i}");
+                }
+                (InodeData::FifoOrSocket, InodeData::FifoOrSocket) => {}
+                _ => panic!("inode {i} kind differs between build and merge"),
+            }
+        }
+
+        // Pin the directory policy host-independently: nlink counts `.`, the
+        // parent's entry, and one `..` per subdirectory, and the format
+        // decision uses the computed values — whatever the host filesystem
+        // reports for directories.
+        let mut directories = 0;
+        for (i, inode) in built.iter().enumerate() {
+            if let InodeData::Directory { children, .. } = &inode.data {
+                directories += 1;
+                let subdirs = children
+                    .iter()
+                    .filter(|child| child.file_type == EROFS_FT_DIR)
+                    .count() as u32;
+                assert_eq!(
+                    inode.nlink,
+                    2 + subdirs,
+                    "directory nlink policy at inode {i}"
+                );
+                assert_eq!(
+                    inode.is_extended,
+                    needs_erofs_extended_inode(0, inode.uid, inode.gid, inode.nlink as u64),
+                    "directory format policy at inode {i}"
+                );
+            }
+        }
+        assert_eq!(directories, 3);
     }
 }

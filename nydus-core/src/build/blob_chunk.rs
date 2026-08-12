@@ -1,9 +1,8 @@
 use crate::blob::{
     BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE,
 };
-use crate::metadata::{
-    round_up, ChunkIndex, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR,
-};
+use crate::metadata::{ChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
+use crate::utils::round_up;
 use anyhow::{bail, Context, Result};
 use crc32c::crc32c;
 use sha2::{Digest, Sha256};
@@ -151,7 +150,7 @@ impl BlobWriter {
     /// Process a regular file: read it in chunk-sized pieces and append every
     /// chunk to the blob device. Chunk-level digests are recorded in blob meta;
     /// deduplication is intentionally disabled for now.
-    pub fn write_file_chunks(&mut self, path: &Path, file_size: u64) -> Result<Vec<ChunkIndex>> {
+    pub fn write_file_chunks(&mut self, path: &Path, file_size: u64) -> Result<Vec<ChunkAddr>> {
         if file_size == 0 {
             return Ok(Vec::new());
         }
@@ -178,7 +177,7 @@ impl BlobWriter {
             // traffic is ever spent on it — native EROFS mounts handle the
             // null address the same way in-kernel.
             if chunk_buf[..to_read].iter().all(|&byte| byte == 0) {
-                indexes.push(ChunkIndex {
+                indexes.push(ChunkAddr {
                     blkaddr: EROFS_NULL_ADDR,
                     device_id: 0,
                 });
@@ -192,7 +191,7 @@ impl BlobWriter {
             let write_len = round_up(to_read, EROFS_BLOCK_SIZE as usize);
             let blkaddr = self.append_chunk(&chunk_buf[..to_read], write_len)?;
 
-            indexes.push(ChunkIndex {
+            indexes.push(ChunkAddr {
                 blkaddr,
                 device_id: 1,
             });
@@ -293,7 +292,7 @@ impl BlobWriter {
 /// Format-compatibility policy shared by build and `nydus optimize`: a group
 /// is stored compressed only when it saves at least 30% — both paths must
 /// agree or an optimized blob would encode groups differently from its source.
-pub fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
+pub(crate) fn compression_is_worthwhile(compressed_len: usize, uncompressed_len: usize) -> bool {
     (compressed_len as u128) * 100 <= (uncompressed_len as u128) * MAX_COMPRESSED_SIZE_PERCENT
 }
 

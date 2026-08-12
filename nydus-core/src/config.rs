@@ -24,9 +24,10 @@ pub const DEFAULT_PREFETCH_THREADS: usize = 10;
 ///   threads: 10
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub backend: BackendConfig,
-    pub cache: CacheConfig,
+    pub(crate) cache: CacheConfig,
     #[serde(default)]
     pub prefetch: PrefetchConfig,
 }
@@ -34,6 +35,7 @@ pub struct Config {
 /// Backend configuration. `type` selects the backend implementation and the
 /// opaque `config` map is interpreted by that backend (e.g. `local`, `registry`).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     #[serde(rename = "type")]
     pub kind: String,
@@ -44,7 +46,8 @@ pub struct BackendConfig {
 /// Cache configuration. `type` selects the cache implementation and the opaque
 /// `config` map is interpreted by that cache (currently only `local`).
 #[derive(Debug, Clone, Deserialize)]
-pub struct CacheConfig {
+#[serde(deny_unknown_fields)]
+pub(crate) struct CacheConfig {
     #[serde(rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -53,16 +56,16 @@ pub struct CacheConfig {
 
 /// Settings for the local cache: a single directory path.
 #[derive(Debug, Clone, Deserialize)]
-pub struct LocalDirConfig {
+#[serde(deny_unknown_fields)]
+pub(crate) struct LocalDirConfig {
     pub dir: PathBuf,
 }
 
 /// Prefetch configuration controlling background blob prefetch.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct PrefetchConfig {
-    #[serde(default = "default_prefetch_enable")]
     pub enable: bool,
-    #[serde(default = "default_prefetch_threads")]
     pub threads: usize,
     /// Whether to also prefetch every remaining blob in full (phase 2) after
     /// the priority blobs. When false (the default), only the priority blobs
@@ -70,28 +73,15 @@ pub struct PrefetchConfig {
     /// image that is just the "ondemand" redirect blob, which warms the hot
     /// working set without pulling the whole image and keeps the backend
     /// bandwidth focused on the access-ordered groups.
-    #[serde(default = "default_prefetch_full")]
     pub full: bool,
-}
-
-fn default_prefetch_enable() -> bool {
-    true
-}
-
-fn default_prefetch_threads() -> usize {
-    DEFAULT_PREFETCH_THREADS
-}
-
-fn default_prefetch_full() -> bool {
-    false
 }
 
 impl Default for PrefetchConfig {
     fn default() -> Self {
         Self {
-            enable: default_prefetch_enable(),
-            threads: default_prefetch_threads(),
-            full: default_prefetch_full(),
+            enable: true,
+            threads: DEFAULT_PREFETCH_THREADS,
+            full: false,
         }
     }
 }

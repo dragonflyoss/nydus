@@ -7,7 +7,7 @@
 //! any cargo feature, and is shut down cleanly when the mount exits.
 
 use anyhow::{Context, Result};
-use nydus_core::build::optimize::parse_unix_address;
+use nydus_core::utils::parse_unix_address;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -127,7 +127,7 @@ async fn handle_request(
             .body(Full::new(Bytes::from(body)))
             .expect("valid metrics response")
     } else if req.method() == Method::GET && req.uri().path() == "/trace" {
-        let body = nydus_core::telemetry::trace::encode_json();
+        let body = nydus_core::telemetry::access_trace::encode_json();
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")

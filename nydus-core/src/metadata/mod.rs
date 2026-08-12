@@ -10,16 +10,23 @@ pub mod dir;
 pub mod inode;
 pub mod superblock;
 
-pub use block::*;
-pub use chunk::*;
-pub use dir::*;
-pub use inode::*;
-pub use superblock::*;
+pub(crate) use block::{blocks_to_bytes, bytes_to_blocks};
+pub(crate) use chunk::ErofsChunkIndex;
+pub use chunk::{ChunkAddr, ErofsDeviceSlot};
+pub(crate) use dir::ErofsDirent;
+pub(crate) use inode::{
+    erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_icount,
+    erofs_xattr_name_split, erofs_xattr_prefix, is_nydus_prefetch_blobs_xattr,
+    needs_erofs_extended_inode, ErofsInodeCompact, ErofsInodeExtended,
+};
+pub use inode::{erofs_xattr_ibody_size, is_nydus_xattr, mode_to_erofs_file_type, ErofsInode};
+pub(crate) use superblock::validate_superblock;
+pub use superblock::ErofsSuperblock;
 
 use std::mem;
 
 // Superblock.
-pub const EROFS_SUPER_MAGIC_V1: u32 = 0xE0F5_E1E2;
+pub(crate) const EROFS_SUPER_MAGIC_V1: u32 = 0xE0F5_E1E2;
 pub const EROFS_SUPER_OFFSET: u64 = 1024;
 pub const EROFS_SB_BASE_SIZE: usize = 128;
 
@@ -30,7 +37,7 @@ pub const EROFS_BLOB_ID_SIZE: usize = crate::utils::digest::SHA256_DIGEST_SIZE;
 // Block / slot sizes.
 pub const EROFS_BLOCK_SIZE: u32 = 4096;
 pub const EROFS_BLKSZBITS: u8 = 12;
-pub const EROFS_ISLOTBITS: u32 = 5;
+pub(crate) const EROFS_ISLOTBITS: u32 = 5;
 pub const EROFS_SLOTSIZE: u32 = 1 << EROFS_ISLOTBITS;
 
 // Feature flags.
@@ -45,13 +52,13 @@ pub const EROFS_FEATURE_INCOMPAT_CHUNKED_FILE: u32 = 0x0000_0004;
 pub const EROFS_FEATURE_INCOMPAT_DEVICE_TABLE: u32 = 0x0000_0008;
 /// 48-bit block addressing: the kernel interprets the `*_hi` halves of chunk
 /// index and device slot addresses only when this bit is set.
-pub const EROFS_FEATURE_INCOMPAT_48BIT: u32 = 0x0000_0080;
+pub(crate) const EROFS_FEATURE_INCOMPAT_48BIT: u32 = 0x0000_0080;
 
 // Inode layout.
-pub const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;
-pub const EROFS_INODE_LAYOUT_EXTENDED: u16 = 1;
-pub const EROFS_INODE_COMPACT_SIZE: usize = 32;
-pub const EROFS_INODE_EXTENDED_SIZE: usize = 64;
+pub(crate) const EROFS_INODE_LAYOUT_COMPACT: u16 = 0;
+pub(crate) const EROFS_INODE_LAYOUT_EXTENDED: u16 = 1;
+pub(crate) const EROFS_INODE_COMPACT_SIZE: usize = 32;
+pub(crate) const EROFS_INODE_EXTENDED_SIZE: usize = 64;
 
 // Inode data layout.
 pub const EROFS_INODE_FLAT_PLAIN: u16 = 0;
@@ -59,12 +66,12 @@ pub const EROFS_INODE_FLAT_INLINE: u16 = 2;
 pub const EROFS_INODE_CHUNK_BASED: u16 = 4;
 
 // Inode flag bits.
-pub const EROFS_I_VERSION_BIT: u16 = 0;
-pub const EROFS_I_DATALAYOUT_BIT: u16 = 1;
+pub(crate) const EROFS_I_VERSION_BIT: u16 = 0;
+pub(crate) const EROFS_I_DATALAYOUT_BIT: u16 = 1;
 
 // Chunk.
-pub const EROFS_CHUNK_FORMAT_INDEXES: u16 = 0x0020;
-pub const EROFS_CHUNK_INDEX_SIZE: usize = 8;
+pub(crate) const EROFS_CHUNK_FORMAT_INDEXES: u16 = 0x0020;
+pub(crate) const EROFS_CHUNK_INDEX_SIZE: usize = 8;
 
 // File types.
 pub const EROFS_FT_REG_FILE: u8 = 1;
@@ -77,31 +84,25 @@ pub const EROFS_FT_SYMLINK: u8 = 7;
 
 // Xattr name indexes.
 pub const EROFS_XATTR_INDEX_USER: u8 = 1;
-pub const EROFS_XATTR_INDEX_POSIX_ACL_ACCESS: u8 = 2;
-pub const EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
-pub const EROFS_XATTR_INDEX_TRUSTED: u8 = 4;
-pub const EROFS_XATTR_INDEX_LUSTRE: u8 = 5;
-pub const EROFS_XATTR_INDEX_SECURITY: u8 = 6;
+pub(crate) const EROFS_XATTR_INDEX_POSIX_ACL_ACCESS: u8 = 2;
+pub(crate) const EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
+pub(crate) const EROFS_XATTR_INDEX_TRUSTED: u8 = 4;
+pub(crate) const EROFS_XATTR_INDEX_LUSTRE: u8 = 5;
+pub(crate) const EROFS_XATTR_INDEX_SECURITY: u8 = 6;
 
 // Xattr ibody and entry header sizes.
-pub const EROFS_XATTR_IBODY_HEADER_SIZE: usize = 12;
-pub const EROFS_XATTR_ENTRY_HEADER_SIZE: usize = 4;
+pub(crate) const EROFS_XATTR_IBODY_HEADER_SIZE: usize = 12;
+pub(crate) const EROFS_XATTR_ENTRY_HEADER_SIZE: usize = 4;
 
 // Misc on-disk sizes.
-pub const EROFS_DIRENT_SIZE: usize = 12;
+pub(crate) const EROFS_DIRENT_SIZE: usize = 12;
 pub const EROFS_DEVICESLOT_SIZE: usize = 128;
 
 // Sentinel.
 pub const EROFS_NULL_ADDR: u64 = u64::MAX;
 
 /// Nydus internal xattr suffix for prefetch blobs ("trusted.nydus.prefetch.blobs").
-pub const NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"nydus.prefetch.blobs";
-
-// Little-endian field helpers live in `utils::le`; re-exported so the
-// `use super::*` metadata modules keep resolving them unqualified.
-pub(crate) use crate::utils::le::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
-// Same for the size-rounding helper shared with the builder.
-pub(crate) use crate::utils::round_up;
+pub(crate) const NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS: &[u8] = b"nydus.prefetch.blobs";
 
 /// Cast a byte slice to a reference of `T` (`#[repr(C, packed)]`).
 ///

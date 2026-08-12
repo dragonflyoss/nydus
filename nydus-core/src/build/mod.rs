@@ -12,7 +12,6 @@ pub mod image;
 pub mod inode;
 pub mod layout;
 pub mod merge;
-pub mod optimize;
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -22,9 +21,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::blob::*;
-use crate::metadata::*;
-use crate::utils::{align_up, sha256_bytes, write_zero_padding, MIB};
+use crate::blob::{BlobFooter, BlobMeta, BlobMetaCompressor, NYDUS_BLOB_FOOTER_SIZE};
+use crate::metadata::{ErofsDeviceSlot, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
+use crate::utils::{sha256_bytes, MIB};
 use blob_chunk::BlobWriter;
 use bootstrap::{render_bootstrap, render_flattened_bootstrap};
 use inode::{build_tree, set_root_prefetch_blobs_xattr};
@@ -142,66 +141,15 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
 
     let compressed_data_size = blob_writer.data_size();
     let blob_meta = blob_writer.blob_meta(blob_id, 0)?;
-    let blob_meta_size = blob_meta.metadata_size();
-    let mut blob_meta_bytes = Vec::with_capacity(
-        usize::try_from(blob_meta_size).context("blob meta size exceeds usize")?,
-    );
-    blob_meta
-        .write_to(&mut blob_meta_bytes)
-        .context("failed to serialize blob meta")?;
-    if blob_meta_bytes.len() as u64 != blob_meta_size {
-        bail!(
-            "serialized blob meta size mismatch: expected {}, got {}",
-            blob_meta_size,
-            blob_meta_bytes.len()
-        );
-    }
     let (blob_file, full_blob_hasher) = blob_writer.into_file_and_data_hasher();
     let mut blob_writer_stream = HashingWriter::new(BufWriter::new(blob_file), full_blob_hasher);
 
-    let compressed_data_offset = 0u64;
-    let bootstrap_offset = align_up(
-        compressed_data_offset + compressed_data_size,
-        NYDUS_BLOB_FOOTER_ALIGNMENT,
-    )
-    .context("bootstrap offset overflow")?;
-    write_zero_padding(
+    let footer = crate::blob::assemble_full_blob(
         &mut blob_writer_stream,
-        compressed_data_offset + compressed_data_size,
-        bootstrap_offset,
-    )?;
-    blob_writer_stream
-        .write_all(&bootstrap_bytes)
-        .context("failed to write blob bootstrap")?;
-
-    let bootstrap_size = u64::try_from(bootstrap_bytes.len()).context("bootstrap exceeds u64")?;
-    let bootstrap_blocks = bytes_to_blocks(bootstrap_size, "bootstrap")?;
-    let blob_meta_blocks = bytes_to_blocks(blob_meta_size, "blob meta")?;
-    let blob_meta_offset = align_up(
-        bootstrap_offset + bootstrap_size,
-        NYDUS_BLOB_FOOTER_ALIGNMENT,
-    )
-    .context("blob meta offset overflow")?;
-    write_zero_padding(
-        &mut blob_writer_stream,
-        bootstrap_offset + bootstrap_size,
-        blob_meta_offset,
-    )?;
-    blob_writer_stream
-        .write_all(&blob_meta_bytes)
-        .context("failed to write blob meta")?;
-
-    let footer = BlobFooter::new(
-        compressed_data_offset,
         compressed_data_size,
-        bootstrap_offset,
-        bootstrap_blocks,
-        blob_meta_offset,
-        blob_meta_blocks,
+        &bootstrap_bytes,
+        &blob_meta,
     )?;
-    footer
-        .write_to(&mut blob_writer_stream)
-        .context("failed to write blob footer")?;
     let full_blob_id = blob_writer_stream
         .finish()
         .context("failed to flush blob")?;
@@ -229,42 +177,17 @@ pub fn build_dir_image(options: &DirImageOptions<'_>, blob_out: File) -> Result<
 
 /// Assemble an ondemand artifact `[group data][blob.meta][footer]` (no
 /// embedded bootstrap) and return its bytes, full SHA256 digest, and footer.
-pub fn assemble_ondemand_artifact(
+pub(crate) fn assemble_ondemand_artifact(
     data: &[u8],
     blob_meta: &BlobMeta,
 ) -> Result<(Vec<u8>, [u8; EROFS_BLOB_ID_SIZE], BlobFooter)> {
-    let compressed_data_size = data.len() as u64;
-    let bootstrap_offset = align_up(compressed_data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
-        .context("bootstrap offset overflow")?;
-    let blob_meta_offset = bootstrap_offset;
-    let blob_meta_size = blob_meta.metadata_size();
-    let blob_meta_blocks = u32::try_from(blob_meta_size / EROFS_BLOCK_SIZE as u64)
-        .context("blob meta exceeds u32 block count")?;
-
-    let footer = BlobFooter::new(
-        0,
-        compressed_data_size,
-        bootstrap_offset,
-        0,
-        blob_meta_offset,
-        blob_meta_blocks,
-    )?;
-
     let mut artifact = Vec::with_capacity(
-        usize::try_from(blob_meta_offset + blob_meta_size).context("artifact exceeds usize")?
+        usize::try_from(data.len() as u64 + blob_meta.metadata_size())
+            .context("artifact exceeds usize")?
             + NYDUS_BLOB_FOOTER_SIZE,
     );
     artifact.extend_from_slice(data);
-    artifact.resize(
-        usize::try_from(bootstrap_offset).context("artifact padding exceeds usize")?,
-        0,
-    );
-    blob_meta
-        .write_to(&mut artifact)
-        .context("failed to serialize ondemand blob meta")?;
-    footer
-        .write_to(&mut artifact)
-        .context("failed to serialize ondemand blob footer")?;
+    let footer = crate::blob::assemble_full_blob(&mut artifact, data.len() as u64, &[], blob_meta)?;
 
     let digest = sha256_bytes(&artifact);
     Ok((artifact, digest, footer))

@@ -2,10 +2,10 @@ use crate::cli_common;
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 use nydus::unpack::unpack_to_tar;
-use nydus_core::blob::*;
+use nydus_core::blob::{BlobFooter, BlobMeta, BlobMetaCompressor, BLOB_META_SUFFIX};
 use nydus_core::build::{build_dir_image, DirImageOptions};
 use nydus_core::fs::ErofsReader;
-use nydus_core::metadata::*;
+use nydus_core::metadata::EROFS_BLOB_ID_SIZE;
 use nydus_core::telemetry::logging::{init_command_tracing, init_command_tracing_stderr};
 use nydus_core::utils::{hex_string, MIB};
 use std::collections::HashSet;
@@ -370,6 +370,10 @@ fn finalize_blob_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nydus_core::metadata::{
+        cast_ref, ErofsDeviceSlot, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE,
+        EROFS_SUPER_OFFSET,
+    };
     use std::collections::BTreeMap;
     use std::ffi::CString;
     use std::io::Read;

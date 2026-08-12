@@ -1,11 +1,16 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::Args;
 use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
-use nydus_core::config::Config;
-use nydus_core::metadata::*;
+use nydus_core::metadata::{
+    ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FEATURE_COMPAT_MTIME,
+    EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
+    EROFS_FEATURE_INCOMPAT_DEVICE_TABLE,
+};
 use nydus_core::utils::hex_string;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+
+use crate::cli_common;
 
 #[derive(Args)]
 pub struct CheckArgs {
@@ -34,7 +39,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
         Some(dir) => Some(dir.clone()),
         None => match &args.config {
             Some(path) => {
-                let config = Config::from_file(path).context("failed to load storage config")?;
+                let config = cli_common::load_storage_config(path)?;
                 if config.backend.kind == "local" {
                     let dir = config
                         .backend

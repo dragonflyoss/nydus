@@ -6,16 +6,15 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::blob::{BlobMeta, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE, BLOB_META_SUFFIX};
-use crate::metadata::EROFS_BLOB_ID_SIZE;
 use crate::storage::backend::{BlobBackend, ReadContext, ReadKind};
 use crate::storage::group_map::GroupMap;
-use crate::telemetry::trace::TraceRecorder;
-use crate::utils::hex_string;
+use crate::telemetry::access_trace::TraceRecorder;
+use crate::utils::{hex_string, SHA256_DIGEST_SIZE};
 
 use super::group_lock::GroupLocks;
 use super::{
@@ -77,11 +76,11 @@ impl GroupFlight {
     }
 }
 
-pub struct LocalBlobCache {
-    blob_id: [u8; EROFS_BLOB_ID_SIZE],
+pub(crate) struct LocalBlobCache {
+    blob_id: [u8; SHA256_DIGEST_SIZE],
     /// Digest naming this blob's cache files, shared by every image that
     /// references the same blob.
-    cache_key: [u8; EROFS_BLOB_ID_SIZE],
+    cache_key: [u8; SHA256_DIGEST_SIZE],
     /// Device/blob index in the merged image, used to attribute on-demand group
     /// accesses in the access trace.
     blob_index: u32,
@@ -89,7 +88,10 @@ pub struct LocalBlobCache {
     blob_meta: BlobMeta,
     cache_blob_path: PathBuf,
     prefetch_lock_path: PathBuf,
-    cache_file: Mutex<Option<Arc<File>>>,
+    /// Lazily opened cache data file. Double-checked: reads take the read
+    /// lock (per-I/O hot path), the first opener takes the write lock and
+    /// re-checks. A failed open leaves the slot empty and retryable.
+    cache_file: RwLock<Option<Arc<File>>>,
     backend: Arc<dyn BlobBackend>,
     trace_recorder: Option<Arc<TraceRecorder>>,
     inflight_groups: Mutex<HashMap<usize, Arc<GroupFlight>>>,
@@ -99,8 +101,8 @@ pub struct LocalBlobCache {
 }
 
 impl LocalBlobCache {
-    pub fn open(
-        blob_id: [u8; EROFS_BLOB_ID_SIZE],
+    pub(crate) fn open(
+        blob_id: [u8; SHA256_DIGEST_SIZE],
         blob_index: u32,
         cache_dir: &Path,
         backend: Arc<dyn BlobBackend>,
@@ -108,8 +110,8 @@ impl LocalBlobCache {
         Self::open_with_trace(blob_id, blob_index, cache_dir, backend, None)
     }
 
-    pub fn open_with_trace(
-        blob_id: [u8; EROFS_BLOB_ID_SIZE],
+    pub(crate) fn open_with_trace(
+        blob_id: [u8; SHA256_DIGEST_SIZE],
         blob_index: u32,
         cache_dir: &Path,
         backend: Arc<dyn BlobBackend>,
@@ -169,7 +171,7 @@ impl LocalBlobCache {
             blob_meta,
             cache_blob_path,
             prefetch_lock_path,
-            cache_file: Mutex::new(None),
+            cache_file: RwLock::new(None),
             backend,
             trace_recorder,
             inflight_groups: Mutex::new(HashMap::new()),
@@ -178,12 +180,16 @@ impl LocalBlobCache {
     }
 
     /// The blob meta backing this cache (groups, chunks, compressor).
-    pub fn blob_meta(&self) -> &BlobMeta {
+    pub(crate) fn blob_meta(&self) -> &BlobMeta {
         &self.blob_meta
     }
 
     fn cache_file(&self) -> io::Result<Arc<File>> {
-        let mut cache_file = self.cache_file.lock().unwrap();
+        if let Some(file) = self.cache_file.read().unwrap().as_ref() {
+            return Ok(file.clone());
+        }
+
+        let mut cache_file = self.cache_file.write().unwrap();
         if let Some(file) = cache_file.as_ref() {
             return Ok(file.clone());
         }
@@ -272,7 +278,10 @@ impl LocalBlobCache {
             if let Some(recorder) = self.trace_recorder.as_ref() {
                 recorder.record_group_access(self.blob_index, group_index as u32);
             } else {
-                crate::telemetry::trace::record_group_access(self.blob_index, group_index as u32);
+                crate::telemetry::access_trace::record_group_access(
+                    self.blob_index,
+                    group_index as u32,
+                );
             }
 
             // Claim the group across the processes sharing this cache. The
@@ -764,7 +773,7 @@ impl BlobCache for LocalBlobCache {
 }
 
 fn cached_blob_meta(
-    blob_id: [u8; EROFS_BLOB_ID_SIZE],
+    blob_id: [u8; SHA256_DIGEST_SIZE],
     cache_dir: &Path,
     blob_meta_path: &Path,
     backend: &Arc<dyn BlobBackend>,
@@ -839,12 +848,12 @@ mod tests {
     use std::path::Path;
     use tempfile::tempdir;
 
-    fn blob_meta(blob_id: [u8; EROFS_BLOB_ID_SIZE], payload: &[u8]) -> BlobMeta {
+    fn blob_meta(blob_id: [u8; SHA256_DIGEST_SIZE], payload: &[u8]) -> BlobMeta {
         blob_meta_with_crc32(blob_id, payload, crc32c::crc32c(payload))
     }
 
     fn blob_meta_with_crc32(
-        blob_id: [u8; EROFS_BLOB_ID_SIZE],
+        blob_id: [u8; SHA256_DIGEST_SIZE],
         payload: &[u8],
         crc32: u32,
     ) -> BlobMeta {
@@ -881,13 +890,13 @@ mod tests {
     }
 
     impl BlobBackend for CountingBackend {
-        fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+        fn blob_meta(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMeta> {
             self.inner.blob_meta(blob_id)
         }
 
         fn read_range_into(
             &self,
-            blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+            blob_id: &[u8; SHA256_DIGEST_SIZE],
             offset: u64,
             dst: &mut [u8],
             ctx: ReadContext,

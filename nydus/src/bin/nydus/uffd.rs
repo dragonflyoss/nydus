@@ -10,13 +10,8 @@ use nydus::uffd::{UffdCore, UffdService};
 
 #[derive(Args)]
 pub struct UffdArgs {
-    /// File path to nydus bootstrap.
-    #[arg(long)]
-    pub bootstrap: PathBuf,
-
-    /// File path to a YAML storage config providing backend/cache directories.
-    #[arg(long)]
-    pub config: PathBuf,
+    #[command(flatten)]
+    pub source: cli_common::ImageSourceArgs,
 
     /// Unix socket path for the UFFD protocol.
     #[arg(long)]
@@ -31,8 +26,8 @@ pub struct UffdArgs {
 }
 
 pub fn run_uffd(args: UffdArgs) -> Result<()> {
-    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
-    let core = Arc::new(UffdCore::new(&args.bootstrap, config)?);
+    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.source.config)?;
+    let core = Arc::new(UffdCore::new(&args.source.bootstrap, config)?);
     let service = Arc::new(UffdService::new(core, args.socket));
     let signal_service = service.clone();
     let signal_thread =

@@ -1,5 +1,4 @@
 use std::num::NonZeroUsize;
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -8,20 +7,13 @@ use anyhow::{Context, Result};
 use clap::Args;
 
 use crate::cli_common;
-use nydus::fanotify::{mount_erofs, FanotifyCore, FanotifyService};
+use nydus::fanotify::{deny_queued_events, mount_erofs, FanotifyCore, FanotifyService, FetchPool};
 use tracing::{info, warn};
-
-const STOP_WAKE_BYTES: usize = 1;
 
 #[derive(Args)]
 pub struct FanotifyArgs {
-    /// File path to nydus bootstrap.
-    #[arg(long)]
-    pub bootstrap: PathBuf,
-
-    /// File path to a YAML storage config providing backend/cache directories.
-    #[arg(long)]
-    pub config: PathBuf,
+    #[command(flatten)]
+    pub source: cli_common::ImageSourceArgs,
 
     /// Mountpoint for the file-backed EROFS bootstrap. The daemon mounts the
     /// bootstrap with `device=` options after the fanotify group is ready, and
@@ -40,10 +32,7 @@ pub struct FanotifyArgs {
 }
 
 fn default_fetch_concurrency() -> NonZeroUsize {
-    let ncpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    NonZeroUsize::new(ncpu.max(64)).unwrap()
+    NonZeroUsize::new(cli_common::default_parallelism(64, usize::MAX)).unwrap()
 }
 
 /// Raise the open-file soft limit to the hard limit. Each in-flight cold read
@@ -79,66 +68,42 @@ fn raise_nofile_limit() {
 }
 
 pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
-    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.config)?;
+    let (signals, _guards, config) = cli_common::daemon_preamble(&args.log, &args.source.config)?;
 
     raise_nofile_limit();
     let core = std::sync::Arc::new(
-        FanotifyCore::new(&args.bootstrap, config).context("failed to build fanotify core")?,
+        FanotifyCore::new(&args.source.bootstrap, config)
+            .context("failed to build fanotify core")?,
     );
 
     let service = FanotifyService::new(core.clone())?;
     let device_count = core.devices().len();
 
     // Thread pool for fetch jobs, bounded by --fetch-concurrency.
-    let pool = Arc::new(nydus::fanotify::service::FetchPool::new(
-        args.fetch_concurrency.get(),
-    )?);
+    let pool = Arc::new(FetchPool::new(args.fetch_concurrency.get())?);
 
-    // Self-pipe for stop signal: the signal thread writes to the pipe to
-    // wake the epoll-based event loop.
-    let mut pipe_fds = [-1i32; 2];
-    let ret = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
-    anyhow::ensure!(
-        ret == 0,
-        "pipe2 failed: {}",
-        std::io::Error::last_os_error()
-    );
-    // pipe_fds[0] is owned exclusively by the event-loop thread below;
-    // wrapping it into a second OwnedFd here would double-close it.
-    let stop_write = pipe_fds[1]; // raw fd, handed to signal thread
+    // Stop handle for the service's self-pipe: writing wakes the epoll-based
+    // event loop for shutdown.
+    let stop = service.stop_handle();
 
-    let stop_write_signal = stop_write;
-    let signal_thread = cli_common::spawn_signal_thread(
-        "fanotify",
-        "nydus fanotify service",
-        signals,
-        move || {
-            let buf = [1u8; STOP_WAKE_BYTES];
-            unsafe {
-                libc::write(
-                    stop_write_signal,
-                    buf.as_ptr() as *const libc::c_void,
-                    buf.len(),
-                )
-            };
-        },
-    )?;
+    let signal_thread = {
+        let stop = stop.clone();
+        cli_common::spawn_signal_thread("fanotify", "nydus fanotify service", signals, move || {
+            stop.stop()
+        })?
+    };
 
     let (ready_tx, ready_rx) = mpsc::channel();
 
     // Spawn the event loop on a dedicated thread so we can wait for readiness
     // before mounting.  `service.run` blocks until the stop signal arrives or
     // a fatal error occurs.
-    let bootstrap = args.bootstrap.clone();
+    let bootstrap = args.source.bootstrap.clone();
     let mountpoint = args.mountpoint.clone();
-    let loop_handle = {
-        let service = service;
-        let stop_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
-        std::thread::Builder::new()
-            .name("nydus_fanotify_loop".to_string())
-            .spawn(move || service.run(stop_read, ready_tx, pool))
-            .context("failed to spawn fanotify event loop thread")?
-    };
+    let loop_handle = std::thread::Builder::new()
+        .name("nydus_fanotify_loop".to_string())
+        .spawn(move || service.run(ready_tx, pool))
+        .context("failed to spawn fanotify event loop thread")?;
 
     // Wait for the event loop to be ready.
     ready_rx
@@ -158,8 +123,7 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
             warn!("failed to mount file-backed EROFS: {err:#}");
             // Stop the loop and join it. The loop never served a request, so its
             // returned fd can be dropped without unmounting (nothing is mounted).
-            let buf = [1u8; STOP_WAKE_BYTES];
-            unsafe { libc::write(stop_write, buf.as_ptr() as *const libc::c_void, buf.len()) };
+            stop.stop();
             let _ = loop_handle.join();
             return Err(err).context("failed to mount file-backed EROFS");
         }
@@ -182,7 +146,7 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     cli_common::unmount_with_retry(
         &mountpoint,
         || {
-            if let Err(err) = nydus::fanotify::service::deny_queued_events(&fan_fd) {
+            if let Err(err) = deny_queued_events(&fan_fd) {
                 warn!("deny-draining fanotify events between unmount retries failed: {err:#}");
             }
         },
@@ -192,7 +156,6 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     drop(fan_fd);
 
     signal_thread.shutdown()?;
-    let _ = unsafe { libc::close(stop_write) };
 
     outcome
 }

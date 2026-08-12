@@ -5,7 +5,7 @@ use crate::metadata::{ErofsDirent, EROFS_BLOCK_SIZE, EROFS_DIRENT_SIZE, EROFS_FT
 /// Names are raw bytes: a Linux filename is any byte sequence other than `/`
 /// and NUL, so converting through `String` would rewrite the invalid sequences
 /// and can make two distinct names collide.
-pub struct DirChild {
+pub(crate) struct DirChild {
     pub name: Vec<u8>,
     pub nid: u64,
     pub file_type: u8,
@@ -20,7 +20,11 @@ pub struct DirChild {
 /// Each block is independently formatted: dirent array followed by names.
 ///
 /// Returns the serialized directory data (multiple of EROFS_BLOCK_SIZE).
-pub fn serialize_directory(children: &[DirChild], self_nid: u64, parent_nid: u64) -> Vec<u8> {
+pub(crate) fn serialize_directory(
+    children: &[DirChild],
+    self_nid: u64,
+    parent_nid: u64,
+) -> Vec<u8> {
     let block_size = EROFS_BLOCK_SIZE as usize;
 
     let mut entries: Vec<(&[u8], u64, u8)> = Vec::with_capacity(children.len() + 2);

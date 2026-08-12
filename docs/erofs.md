@@ -395,7 +395,7 @@ Offset  Size  Field         Description
 
 A hole (sparse region) is represented by all-`0xFF` bytes.
 
-→ source: `nydus-core/src/metadata/chunk.rs` :: `ChunkIndex`
+→ source: `nydus-core/src/metadata/chunk.rs` :: `ChunkAddr`
 
 ### Chunk format (stored in i_u)
 
@@ -457,7 +457,7 @@ Nydus deduplicates at build time using a hash map:
                          │           │
                          └─────┬─────┘
                                │
-                    Return ChunkIndex { blkaddr, device_id=1 }
+                    Return ChunkAddr { blkaddr, device_id=1 }
 ```
 
 **Key detail**: only the **actual data bytes** are hashed (not padded to
@@ -789,13 +789,13 @@ on-demand loading for container use cases.
 
 | Name | Value | Defined in |
 |------|-------|-----------|
-| `EROFS_SUPER_MAGIC_V1` | `0xE0F5E1E2` | `nydus-core/src/metadata/mod.rs` |
-| `EROFS_SUPER_OFFSET` | 1024 | `nydus-core/src/metadata/mod.rs` |
-| `EROFS_BLOCK_SIZE` | 4096 | `nydus-core/src/metadata/mod.rs` |
-| `EROFS_BLKSZBITS` | 12 | `nydus-core/src/metadata/mod.rs` |
-| `EROFS_ISLOTBITS` | 5 | `nydus-core/src/metadata/mod.rs` |
-| `EROFS_SLOTSIZE` | 32 | `nydus-core/src/metadata/mod.rs` |
-| `EROFS_NULL_ADDR` | `0xFFFFFFFFFFFFFFFF` | `nydus-core/src/metadata/mod.rs` |
+| `EROFS_SUPER_MAGIC_V1` | `0xE0F5E1E2` | `nydus-core/src/metadata.rs` |
+| `EROFS_SUPER_OFFSET` | 1024 | `nydus-core/src/metadata.rs` |
+| `EROFS_BLOCK_SIZE` | 4096 | `nydus-core/src/metadata.rs` |
+| `EROFS_BLKSZBITS` | 12 | `nydus-core/src/metadata.rs` |
+| `EROFS_ISLOTBITS` | 5 | `nydus-core/src/metadata.rs` |
+| `EROFS_SLOTSIZE` | 32 | `nydus-core/src/metadata.rs` |
+| `EROFS_NULL_ADDR` | `0xFFFFFFFFFFFFFFFF` | `nydus-core/src/metadata.rs` |
 
 ### File type constants
 

@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::core::BlobDevice;
-use nydus_core::utils::path_cstring;
+use crate::mount::path_cstring;
 
 /// The kernel copies `mount(2)` data into a single page (`copy_mount_options`),
 /// so a longer option string is silently truncated — dropping `device=` slots

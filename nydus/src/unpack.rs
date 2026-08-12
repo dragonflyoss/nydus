@@ -20,7 +20,10 @@ use anyhow::{bail, Context, Result};
 use tar::{Builder, EntryType, Header};
 
 use nydus_core::fs::ErofsReader;
-use nydus_core::metadata::*;
+use nydus_core::metadata::{
+    is_nydus_xattr, mode_to_erofs_file_type, ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV,
+    EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE, EROFS_FT_SOCK, EROFS_FT_SYMLINK,
+};
 
 /// Guards against unbounded recursion on a corrupted or hostile image.
 const MAX_DEPTH: u32 = 1024;

@@ -2,12 +2,12 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 
 use crate::cli_common;
-use nydus_core::blob::*;
-use nydus_core::build::optimize::{
+use nydus_core::blob::BLOB_META_SUFFIX;
+use nydus_core::config::Config;
+use nydus_core::metadata::EROFS_BLOCK_SIZE;
+use nydus_core::optimize::{
     build_ondemand_blob, load_patterns_from_apiserver, load_patterns_from_file,
 };
-use nydus_core::config::Config;
-use nydus_core::metadata::*;
 use nydus_core::storage::backend::build_backend;
 use nydus_core::telemetry::logging::init_command_tracing;
 use nydus_core::utils::hex_string;
@@ -53,7 +53,7 @@ pub struct OptimizeArgs {
 }
 
 /// Resolve the CLI arguments, run the optimize pipeline from
-/// [`nydus_core::build::optimize`], and write out its artifacts.
+/// [`nydus_core::optimize`], and write out its artifacts.
 pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     let _guards = init_command_tracing(args.log.log_level, args.log.console);
 

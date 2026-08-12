@@ -12,10 +12,10 @@ use tempfile::{tempdir, NamedTempFile};
 
 use nydus_core::build::blob_chunk::BlobWriter;
 use nydus_core::build::bootstrap::render_bootstrap;
-use nydus_core::build::inode::{build_tree, DirEntry as BuildDirEntry, InodeData, InodeInfo};
+use nydus_core::build::inode::{build_tree, ChildRef, InodeData, InodeInfo};
 use nydus_core::fs::ErofsReader;
 use nydus_core::metadata::{
-    erofs_xattr_ibody_size, ChunkIndex, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
+    erofs_xattr_ibody_size, ChunkAddr, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
     EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER,
 };
 use nydus_core::utils::sha256_file;
@@ -47,7 +47,7 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
             meta_offset: 0,
             is_extended: true,
             data: InodeData::Directory {
-                children: vec![BuildDirEntry {
+                children: vec![ChildRef {
                     name: "huge_xattrs".into(),
                     file_type: EROFS_FT_REG_FILE,
                     inode_index: 1,
@@ -72,11 +72,11 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
             is_extended: false,
             data: InodeData::RegularFile {
                 chunk_index_entries: vec![
-                    ChunkIndex {
+                    ChunkAddr {
                         blkaddr: 11,
                         device_id: 0,
                     },
-                    ChunkIndex {
+                    ChunkAddr {
                         blkaddr: 22,
                         device_id: 0,
                     },

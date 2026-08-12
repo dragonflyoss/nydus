@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crate::blob::format::{crc32_with_zeroed_field, validate_incompat_flags};
 use crate::metadata::{blocks_to_bytes, EROFS_BLOCK_SIZE};
 use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
 
@@ -10,19 +11,21 @@ use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
 /// footer starts with the readable string. Same style and `magic + version +
 /// flags` header prefix as the blob meta (`LPBLMETA`) and group_map
 /// (`LPGRPMAP`) sidecars.
-pub const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"LPFOOTER";
+pub(crate) const NYDUS_BLOB_FOOTER_MAGIC: [u8; 8] = *b"LPFOOTER";
 /// On-disk format generation, informational only: readers do not gate on it.
 /// Compatibility is governed EROFS-style by the magic and the incompat half
 /// of `flags` (unknown incompat bits reject the footer).
-pub const NYDUS_BLOB_FOOTER_VERSION: u32 = 1;
+pub(crate) const NYDUS_BLOB_FOOTER_VERSION: u32 = 1;
 pub const NYDUS_BLOB_FOOTER_SIZE: usize = 4096;
-pub const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
+pub(crate) const NYDUS_BLOB_FOOTER_ALIGNMENT: u64 = EROFS_BLOCK_SIZE as u64;
 
-/// `flags` is split EROFS-style: the low 16 bits are incompatible features
-/// (unknown bits reject), the high 16 bits are compatible features (unknown
-/// bits are ignored). No bits are defined yet.
-const NYDUS_BLOB_FOOTER_INCOMPAT_MASK: u32 = 0x0000_FFFF;
+/// `flags` is split EROFS-style (see [`crate::blob::format`]): the low 16
+/// bits are incompatible features (unknown bits reject), the high 16 bits
+/// are compatible features (unknown bits are ignored). No bits are defined
+/// yet.
 const NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT: u32 = 0;
+/// Byte offset of the crc32 field within the footer.
+const NYDUS_BLOB_FOOTER_CRC32_OFFSET: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlobFooter {
@@ -191,10 +194,7 @@ impl BlobFooter {
         // zeroed), not over a re-serialization of the parsed struct: the
         // reserved tail may carry nonzero compat fields from a newer writer,
         // which `to_bytes` would drop and thereby corrupt the checksum.
-        let mut raw = [0u8; NYDUS_BLOB_FOOTER_SIZE];
-        raw.copy_from_slice(data);
-        raw[16..20].fill(0);
-        if footer.crc32 != crc32c::crc32c(&raw) {
+        if footer.crc32 != crc32_with_zeroed_field(data, Self::crc32_field()) {
             bail!("nydus footer crc32 mismatch");
         }
         Ok(footer)
@@ -227,11 +227,11 @@ impl BlobFooter {
         }
         // `version` is informational and deliberately not gated on:
         // compatibility is carried by the magic and the incompat flag bits.
-        let unknown_incompat =
-            self.flags & NYDUS_BLOB_FOOTER_INCOMPAT_MASK & !NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT;
-        if unknown_incompat != 0 {
-            bail!("unsupported nydus footer incompat flags: {unknown_incompat:#x}");
-        }
+        validate_incompat_flags(
+            self.flags,
+            NYDUS_BLOB_FOOTER_SUPPORTED_INCOMPAT,
+            "nydus footer",
+        )?;
         // `reserved0` is a future compat-field slot and deliberately not
         // enforced to zero; corruption is caught by the footer crc32c.
         // `bootstrap_blocks` may be zero: an "ondemand" redirect blob carries
@@ -277,10 +277,12 @@ impl BlobFooter {
         Ok(())
     }
 
+    fn crc32_field() -> std::ops::Range<usize> {
+        NYDUS_BLOB_FOOTER_CRC32_OFFSET..NYDUS_BLOB_FOOTER_CRC32_OFFSET + 4
+    }
+
     fn compute_crc32(&self) -> u32 {
-        let mut data = self.to_bytes();
-        data[16..20].fill(0);
-        crc32c::crc32c(&data)
+        crc32_with_zeroed_field(&self.to_bytes(), Self::crc32_field())
     }
 }
 
@@ -304,9 +306,8 @@ mod tests {
         // Re-seal the footer bytes after poking a field: crc32 covers
         // everything but itself.
         let reseal = |mut data: [u8; NYDUS_BLOB_FOOTER_SIZE]| {
-            data[16..20].fill(0);
-            let crc32 = crc32c::crc32c(&data);
-            data[16..20].copy_from_slice(&crc32.to_le_bytes());
+            let crc32 = crc32_with_zeroed_field(&data, BlobFooter::crc32_field());
+            data[BlobFooter::crc32_field()].copy_from_slice(&crc32.to_le_bytes());
             data
         };
 

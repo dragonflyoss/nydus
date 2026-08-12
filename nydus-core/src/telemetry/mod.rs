@@ -4,9 +4,9 @@
 //!   + panic hook) for daemons and CLI commands;
 //! - [`metrics`]: the process-wide Prometheus registry and every metric the
 //!   daemon exports;
-//! - [`trace`]: group-level on-demand access tracing, consumed by
+//! - [`access_trace`]: group-level on-demand access tracing, consumed by
 //!   `nydus optimize` to reorder prefetch.
 
+pub mod access_trace;
 pub mod logging;
 pub mod metrics;
-pub mod trace;

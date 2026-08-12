@@ -15,6 +15,7 @@ import (
 	"github.com/containerd/platforms"
 	"github.com/pkg/errors"
 
+	"github.com/dragonflyoss/nydus/nydusify/internal/nydusfs"
 	"github.com/dragonflyoss/nydus/nydusify/internal/remote"
 )
 
@@ -138,9 +139,9 @@ func (c *Checker) Check(ctx context.Context) error {
 }
 
 // load pulls and parses an image reference, returning nil for an empty ref.
-func (c *Checker) load(ctx context.Context, provider *remote.Provider, ref string, pullOpt remote.PullOption, reg remote.Side) (*Image, error) {
+func (c *Checker) load(ctx context.Context, provider *remote.Provider, ref string, pullOpt remote.PullOption, reg remote.Side) (*nydusfs.Image, error) {
 	if ref == "" {
 		return nil, nil
 	}
-	return loadImage(ctx, provider, ref, c.opt.PlatformMC, pullOpt, reg)
+	return nydusfs.LoadImage(ctx, provider, ref, c.opt.PlatformMC, pullOpt, reg)
 }

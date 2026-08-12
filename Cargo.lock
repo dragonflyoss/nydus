@@ -2856,7 +2856,6 @@ dependencies = [
  "tracing",
  "uuid",
  "xattr",
- "zstd",
 ]
 
 [[package]]

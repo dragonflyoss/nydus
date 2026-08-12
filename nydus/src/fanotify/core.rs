@@ -32,7 +32,7 @@ use tracing::{debug, warn};
 
 use nydus_core::{BlobId, Config, NydusCore};
 
-use super::event::{PreContentEvent, Range, FAN_PRE_ACCESS};
+use super::proto::{PreContentEvent, Range, FAN_PRE_ACCESS};
 
 /// EROFS block size as u64 — reuses the canonical constant from the core.
 const BLOCK_SIZE: u64 = nydus_core::metadata::EROFS_BLOCK_SIZE as u64;
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn missing_range_denies() {
         assert_eq!(
-            decide(&ev(crate::fanotify::event::FAN_PRE_ACCESS, None)),
+            decide(&ev(crate::fanotify::proto::FAN_PRE_ACCESS, None)),
             Decision::Deny(DenyReason::InvalidRange)
         );
     }
@@ -493,7 +493,7 @@ mod tests {
             count: 8192,
         };
         assert_eq!(
-            decide(&ev(crate::fanotify::event::FAN_PRE_ACCESS, Some(r))),
+            decide(&ev(crate::fanotify::proto::FAN_PRE_ACCESS, Some(r))),
             Decision::Fill(r)
         );
     }

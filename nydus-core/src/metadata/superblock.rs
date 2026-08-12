@@ -1,4 +1,5 @@
 use super::*;
+use crate::utils::le::{read_u16, read_u32, read_u64, write_u16, write_u32, write_u64};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::mem;
@@ -148,7 +149,7 @@ pub fn is_rafs_v7_bootstrap(path: &Path) -> io::Result<bool> {
 ///
 /// The single source of truth for the supported-incompat feature set —
 /// extend the list here when a new feature bit is implemented.
-pub fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
+pub(crate) fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
     if sb.magic() != EROFS_SUPER_MAGIC_V1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

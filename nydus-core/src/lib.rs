@@ -24,18 +24,21 @@
 //!
 //! [`blobs.fetch`]: Blobs::fetch
 
+#![warn(unreachable_pub)]
+
 pub mod blob;
 pub mod build;
 pub mod config;
 pub mod fs;
 pub mod metadata;
+pub mod optimize;
 pub mod storage;
 pub mod telemetry;
 pub mod utils;
 
 pub use config::Config;
 pub use fs::{FdRange, FileType, ResolveMode};
-pub use telemetry::trace::{TraceDocument, TraceEntry};
+pub use telemetry::access_trace::{TraceDocument, TraceEntry};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -49,28 +52,28 @@ use anyhow::{bail, Context, Result};
 
 use crate::fs::{
     checked_range_end, mapped_range_offset, push_blob_fd_ranges, push_fd_range, BlobRangeSpec,
-    ErofsReader, Fs, RawBlobInfo,
+    ErofsReader, ImageFs, RawBlobInfo,
 };
-use crate::metadata::{EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
+use crate::metadata::EROFS_BLOCK_SIZE;
 use crate::storage::backend::build_backend;
 use crate::storage::prefetch::BlobPrefetcher;
-use crate::telemetry::trace::TraceRecorder;
-use crate::utils::{hex_string, parse_sha256_hex};
+use crate::telemetry::access_trace::TraceRecorder;
+use crate::utils::{hex_string, parse_sha256_hex, SHA256_DIGEST_SIZE};
 
 /// Blob digest used by public core APIs.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct BlobId([u8; EROFS_BLOB_ID_SIZE]);
+pub struct BlobId([u8; SHA256_DIGEST_SIZE]);
 
 impl BlobId {
-    pub fn new(bytes: [u8; EROFS_BLOB_ID_SIZE]) -> Self {
+    pub fn new(bytes: [u8; SHA256_DIGEST_SIZE]) -> Self {
         Self(bytes)
     }
 
-    pub fn as_bytes(&self) -> &[u8; EROFS_BLOB_ID_SIZE] {
+    pub fn as_bytes(&self) -> &[u8; SHA256_DIGEST_SIZE] {
         &self.0
     }
 
-    pub fn into_bytes(self) -> [u8; EROFS_BLOB_ID_SIZE] {
+    pub fn into_bytes(self) -> [u8; SHA256_DIGEST_SIZE] {
         self.0
     }
 
@@ -79,13 +82,13 @@ impl BlobId {
     }
 }
 
-impl From<[u8; EROFS_BLOB_ID_SIZE]> for BlobId {
-    fn from(value: [u8; EROFS_BLOB_ID_SIZE]) -> Self {
+impl From<[u8; SHA256_DIGEST_SIZE]> for BlobId {
+    fn from(value: [u8; SHA256_DIGEST_SIZE]) -> Self {
         Self::new(value)
     }
 }
 
-impl From<BlobId> for [u8; EROFS_BLOB_ID_SIZE] {
+impl From<BlobId> for [u8; SHA256_DIGEST_SIZE] {
     fn from(value: BlobId) -> Self {
         value.into_bytes()
     }
@@ -139,7 +142,7 @@ pub struct NydusCore {
     /// Blob table and decoded-cache preparation/fetch APIs.
     pub blobs: Blobs,
     /// Static path-based filesystem APIs.
-    pub fs: Fs,
+    pub fs: ImageFs,
     bootstrap: Arc<File>,
     zero_file: Arc<File>,
     flat_size: u64,
@@ -169,10 +172,10 @@ impl NydusCore {
     /// spawned before returning: for an optimized image it streams the
     /// "ondemand" redirect blob first (priority) to warm the source blobs'
     /// caches in recorded access order, then prefetches the remaining blobs.
-    /// The worker borrows the shared reader, so callers that want network
-    /// access (e.g. the virtio-pmem backend) must construct the core while
-    /// the desired network namespace is active so the spawned thread inherits
-    /// it.
+    /// The worker shares the reader's blob cache set, so callers that want
+    /// network access (e.g. the virtio-pmem backend) must construct the core
+    /// while the desired network namespace is active so the spawned thread
+    /// inherits it.
     ///
     /// [`blobs`]: Self::blobs
     /// [`fetch`]: Self::fetch
@@ -243,12 +246,19 @@ impl NydusCore {
         let reader = Arc::new(reader);
 
         // Kick off background prefetch as soon as the core is built when the
-        // config opts in. The worker holds its own `Arc` clone of the reader,
-        // so it keeps running (and keeps the reader alive) independently of the
-        // returned core. The handle is detached: prefetch is best-effort
-        // warmup and must never block core construction or teardown.
+        // config opts in. The worker holds its own `Arc` of the blob cache
+        // set, so it keeps running (and keeps the caches alive) independently
+        // of the returned core. The handle is detached: prefetch is
+        // best-effort warmup and must never block core construction or
+        // teardown.
         if prefetch_enable {
-            match BlobPrefetcher::new(reader.clone(), prefetch_threads, prefetch_full).spawn() {
+            let prefetcher = BlobPrefetcher::new(
+                reader.blob_cache_set(),
+                reader.prefetch_plan(),
+                prefetch_threads,
+                prefetch_full,
+            );
+            match prefetcher.spawn() {
                 Ok(_handle) => {
                     tracing::info!(
                         "nydus core: background prefetch started (full={prefetch_full})"
@@ -268,7 +278,7 @@ impl NydusCore {
                 index_by_blob_id,
                 flat_layout: OnceLock::new(),
             },
-            fs: Fs::new(reader, zero_file.clone()),
+            fs: ImageFs::new(reader, zero_file.clone()),
             bootstrap: bootstrap_file,
             zero_file,
             flat_size,
@@ -351,12 +361,19 @@ impl NydusCore {
             .context("failed to describe blob device layout")?;
 
         while pos < end {
-            let blob_index = blobs.iter().position(|blob| {
-                mapped_range_offset(blob.mapped_offset, blob.cache_size, pos).is_some()
-            });
+            // `blobs` is sorted by `mapped_offset` and blob ranges never
+            // overlap (device-table layout), so the only candidate containing
+            // `pos` is the last blob starting at or before it — found with a
+            // binary search instead of a linear scan (this runs per I/O).
+            let after = blobs.partition_point(|blob| blob.mapped_offset <= pos);
+            let covering = after
+                .checked_sub(1)
+                .map(|index| &blobs[index])
+                .filter(|blob| {
+                    mapped_range_offset(blob.mapped_offset, blob.cache_size, pos).is_some()
+                });
 
-            if let Some(blob_index) = blob_index {
-                let blob = &blobs[blob_index];
+            if let Some(blob) = covering {
                 let blob_end = blob
                     .mapped_offset
                     .checked_add(blob.cache_size)
@@ -377,11 +394,11 @@ impl NydusCore {
                 )?;
                 pos = seg_end;
             } else {
+                // `blobs[after]` is the first blob starting after `pos`, so it
+                // bounds the hole (or the view ends first).
                 let next_blob = blobs
-                    .iter()
-                    .filter(|blob| blob.mapped_offset > pos)
+                    .get(after)
                     .map(|blob| blob.mapped_offset)
-                    .min()
                     .unwrap_or(end);
                 let hole_end = end.min(next_blob);
                 if hole_end <= pos {

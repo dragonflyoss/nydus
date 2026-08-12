@@ -25,6 +25,7 @@ cli = [
   "dep:hyper-util",
   "dep:signal-hook",
   "dep:tokio",
+  "dep:uuid",
 ]
 # Device-level userfaultfd service for microVM virtio-pmem use cases.
 # This is intentionally not part of the default or builtin core path.
@@ -49,23 +50,23 @@ backend-dragonfly-proxy = [
 ublk = ["dep:libublk"]
 
 [dependencies]
-anyhow = "1"
+anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"], optional = true }
 fuser = { version = "0.17", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
-libc = "0.2"
+libc = { workspace = true }
 libublk = { version = "0.4", default-features = false, optional = true }
-memmap2 = "0.9"
+memmap2 = { workspace = true }
 nydus-core = { version = "0.1.0", path = "../nydus-core" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 sendfd = { version = "0.4", optional = true }
-sha2 = "0.10"
+sha2 = { workspace = true }
 signal-hook = { version = "0.3", optional = true }
 tar = "0.4"
-tokio = { version = "1", features = [
+tokio = { workspace = true, features = [
   "fs",
   "io-util",
   "macros",
@@ -74,10 +75,9 @@ tokio = { version = "1", features = [
   "rt-multi-thread",
   "sync"
 ], optional = true }
-tracing = "0.1"
-uuid = { version = "1", features = ["v4"] }
-xattr = "1"
-zstd = "0.13"
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+xattr = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.1.0"
+tempfile = { workspace = true }

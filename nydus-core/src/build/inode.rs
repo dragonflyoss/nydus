@@ -1,5 +1,14 @@
 use crate::build::blob_chunk::BlobWriter;
-use crate::metadata::*;
+use crate::metadata::{
+    erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_ibody_size,
+    erofs_xattr_icount, erofs_xattr_name_split, mode_to_erofs_file_type,
+    needs_erofs_extended_inode, ChunkAddr, ErofsChunkIndex, ErofsInodeCompact, ErofsInodeExtended,
+    EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_FT_DIR,
+    EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE,
+    EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_ENTRY_HEADER_SIZE,
+    EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
+};
+use crate::utils::round_up;
 use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -54,7 +63,7 @@ pub enum InodeData {
     /// Regular file: chunk indexes for chunk-based layout.
     RegularFile {
         /// List of chunk indexes (EROFS_CHUNK_INDEX_SIZE bytes each) for the file's data chunks.
-        chunk_index_entries: Vec<ChunkIndex>,
+        chunk_index_entries: Vec<ChunkAddr>,
 
         /// Number of bits for the chunk size (e.g. 12 for 4KB chunks).
         chunk_size_bits: u32,
@@ -63,7 +72,7 @@ pub enum InodeData {
     /// Directory: sorted children.
     Directory {
         // List of child entries (name, file type, inode index in the inodes vector).
-        children: Vec<DirEntry>,
+        children: Vec<ChildRef>,
 
         /// Starting block address of the directory data (set during layout).
         startblk: u64,
@@ -92,7 +101,7 @@ pub enum InodeData {
 }
 
 /// A directory entry referencing a child inode.
-pub struct DirEntry {
+pub struct ChildRef {
     /// Entry name, as the raw bytes the kernel reported.
     pub name: Vec<u8>,
 
@@ -105,7 +114,7 @@ pub struct DirEntry {
 
 /// Calculate the size of an inode's metadata (header + xattr ibody + chunk indexes) for the final
 /// image.
-pub fn erofs_inode_size(inode: &InodeInfo) -> usize {
+pub(crate) fn erofs_inode_size(inode: &InodeInfo) -> usize {
     let inode_isize = if inode.is_extended {
         EROFS_INODE_EXTENDED_SIZE
     } else {
@@ -150,7 +159,7 @@ fn symlink_fits_inline(header_size: usize, target_len: usize) -> bool {
 /// inode's `i_nb` field carries the link count, leaving nowhere to put the
 /// block address' high bits, whereas the extended layout has a separate
 /// `i_nlink`.
-pub fn symlink_is_inline(inode: &InodeInfo) -> bool {
+pub(crate) fn symlink_is_inline(inode: &InodeInfo) -> bool {
     match &inode.data {
         InodeData::Symlink { target, .. } => symlink_fits_inline(
             EROFS_INODE_COMPACT_SIZE + erofs_xattr_ibody_size(&inode.xattrs),
@@ -213,19 +222,12 @@ pub fn build_tree(
     chunk_size: u32,
     exclude: &HashSet<PathBuf>,
 ) -> Result<Vec<InodeInfo>> {
-    let mut inodes: Vec<InodeInfo> = Vec::new();
-    let mut inode_counter: u32 = 0;
-    let mut hardlink_map: HashMap<(u64, u64), usize> = HashMap::new();
-
-    build_tree_recursive(
-        source,
+    let mut ctx = FsBuildContext {
         blob_writer,
         chunk_size,
         exclude,
-        &mut inodes,
-        &mut inode_counter,
-        &mut hardlink_map,
-    )?;
+    };
+    let mut inodes = flatten_tree(FsTreeNode::new(source.to_path_buf())?, &mut ctx)?;
 
     // The root directory is created by whatever staged the layer, so its mtime
     // is the moment of the build rather than anything about the content. Left
@@ -240,200 +242,286 @@ pub fn build_tree(
     Ok(inodes)
 }
 
-/// Recursively create inodes for `path` and its descendants, appending to
-/// `inodes` in DFS pre-order and returning the index of `path`'s inode.
+/// Inode attributes gathered once per node by a [`TreeNode`] implementation.
+pub(crate) struct NodeAttrs {
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+    /// Content size; only used for regular files (the flattener derives the
+    /// size of every other inode kind itself).
+    pub size: u64,
+    pub mtime: u64,
+    pub mtime_nsec: u32,
+    /// Source link count; only used for non-directories (a directory's link
+    /// count is recomputed from the tree being flattened).
+    pub nlink: u32,
+    /// Inline xattr entries: (prefix_index, name_suffix, value), sorted.
+    pub xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>,
+}
+
+/// A directory's children as (name, node) pairs, sorted by name.
+pub(crate) type NamedChildren<N> = Vec<(Vec<u8>, N)>;
+
+/// A node of a source tree that [`flatten_tree`] can turn into [`InodeInfo`]s.
 ///
-/// Directories push their inode first, then recurse into children in sorted
-/// name order; regular files write chunks via `blob_writer`; symlinks store
-/// the target inline; devices record `rdev`. Non-directory entries with
-/// `nlink > 1` are deduplicated through `hardlink_map` (keyed by source
-/// `(dev, ino)`) so later links reuse the existing inode index.
-#[allow(clippy::only_used_in_recursion)]
-fn build_tree_recursive(
-    path: &Path,
-    blob_writer: &mut BlobWriter,
-    chunk_size: u32,
-    exclude: &HashSet<PathBuf>,
+/// Implemented by the host-filesystem walker below and by the in-memory merge
+/// tree in [`crate::build::merge`], so building a directory and merging layers
+/// share a single flattening pass and cannot drift apart. `C` is the traversal
+/// state threaded through the walk (e.g. the blob writer receiving file
+/// contents).
+pub(crate) trait TreeNode<C>: Sized {
+    /// Identifies a hardlink group across the whole tree, e.g. host
+    /// `(dev, ino)`.
+    type LinkKey: Copy + Eq + std::hash::Hash;
+
+    /// Common inode attributes.
+    fn attrs(&self) -> NodeAttrs;
+
+    /// Hardlink-group key; `Some` only for non-directories that may share
+    /// their inode with other links.
+    fn link_key(&self) -> Option<Self::LinkKey>;
+
+    /// `Some(children)` sorted by name when the node is a directory, `None`
+    /// otherwise.
+    fn children(&self, ctx: &mut C) -> Result<Option<NamedChildren<Self>>>;
+
+    /// Type-specific data for a non-directory node; called exactly once per
+    /// inode (regular-file contents are chunked into the blob here).
+    fn leaf_data(&self, ctx: &mut C) -> Result<InodeData>;
+}
+
+/// Flatten a source tree into one [`InodeInfo`] per filesystem object, as a
+/// flat list in DFS pre-order; directories reference children by index into
+/// this list.
+///
+/// The returned list is never empty: the root's inode is always at index 0.
+/// Nodes sharing a [`TreeNode::link_key`] are deduplicated into a single
+/// entry. A directory's `nlink` (`2 + subdirectory count`) and its
+/// compact/extended format are computed from the tree being flattened rather
+/// than taken from source metadata, keeping the output independent of how the
+/// source filesystem reports directories. Layout fields (`nid`, `meta_offset`,
+/// etc.) are left 0 for a later pass.
+pub(crate) fn flatten_tree<C, N: TreeNode<C>>(root: N, ctx: &mut C) -> Result<Vec<InodeInfo>> {
+    let mut inodes = Vec::new();
+    let mut ino_counter = 0u32;
+    let mut hardlink_map = HashMap::new();
+    flatten_tree_node(&root, ctx, &mut inodes, &mut ino_counter, &mut hardlink_map)?;
+    Ok(inodes)
+}
+
+/// Recursively flatten `node` and its descendants, appending to `inodes` in
+/// DFS pre-order and returning the index of `node`'s inode (the existing
+/// index when `node` is a later link of an already-flattened hardlink group).
+fn flatten_tree_node<C, N: TreeNode<C>>(
+    node: &N,
+    ctx: &mut C,
     inodes: &mut Vec<InodeInfo>,
-    inode_counter: &mut u32,
-    hardlink_map: &mut HashMap<(u64, u64), usize>,
+    ino_counter: &mut u32,
+    hardlink_map: &mut HashMap<N::LinkKey, usize>,
 ) -> Result<usize> {
-    let meta = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to stat: {}", path.display()))?;
+    let link_key = node.link_key();
+    if let Some(key) = link_key {
+        if let Some(existing_index) = hardlink_map.get(&key) {
+            return Ok(*existing_index);
+        }
+    }
 
-    let ft = meta.file_type();
-    let mode = meta.mode() as u16;
-    let uid = meta.uid();
-    let gid = meta.gid();
-    let mtime = meta.mtime() as u64;
-    let mtime_nsec = meta.mtime_nsec() as u32;
-    let nlink = meta.nlink() as u32;
+    let attrs = node.attrs();
+    *ino_counter += 1;
+    let ino = *ino_counter;
+    let inode_index = inodes.len();
 
-    *inode_counter += 1;
-    let ino = *inode_counter;
-    let is_extended = needs_erofs_extended_inode(meta.size(), meta.uid(), meta.gid(), meta.nlink());
-    let xattrs = read_xattrs_from_path(path);
-    if ft.is_dir() {
-        let inode_index = inodes.len();
+    if let Some(children) = node.children(ctx)? {
+        // Push the directory before its children to keep DFS pre-order; the
+        // fields that depend on the children are patched below.
         inodes.push(InodeInfo {
-            mode,
-            uid,
-            gid,
+            mode: attrs.mode,
+            uid: attrs.uid,
+            gid: attrs.gid,
             size: 0,
-            mtime,
-            mtime_nsec,
-            nlink,
+            mtime: attrs.mtime,
+            mtime_nsec: attrs.mtime_nsec,
+            nlink: 0,
             ino,
             nid: 0,
             meta_offset: 0,
-            is_extended,
+            is_extended: false,
             data: InodeData::Directory {
                 children: Vec::new(),
                 startblk: 0,
                 data_size: 0,
                 parent_nid: 0,
             },
-            xattrs,
+            xattrs: attrs.xattrs,
         });
 
-        let mut entries: Vec<fs::DirEntry> = fs::read_dir(path)
-            .with_context(|| format!("failed to read directory: {}", path.display()))?
-            .collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_cached_key(|entry| entry.file_name());
-
-        let mut children = Vec::new();
-        for entry in &entries {
-            let child_path = entry.path();
-
-            // Skip entries whose absolute path is in the exclude set.
-            if exclude.contains(&child_path) {
-                continue;
+        let mut child_entries = Vec::with_capacity(children.len());
+        let mut subdir_count = 0u32;
+        for (name, child) in children {
+            let child_index = flatten_tree_node(&child, ctx, inodes, ino_counter, hardlink_map)?;
+            let file_type = mode_to_erofs_file_type(inodes[child_index].mode);
+            if file_type == EROFS_FT_DIR {
+                subdir_count += 1;
             }
-
-            let child_meta = fs::symlink_metadata(&child_path)
-                .with_context(|| format!("failed to stat: {}", child_path.display()))?;
-            let hardlink_key = (!child_meta.file_type().is_dir() && child_meta.nlink() > 1)
-                .then(|| (child_meta.dev(), child_meta.ino()));
-
-            let child_index = match hardlink_key.and_then(|key| hardlink_map.get(&key).copied()) {
-                Some(existing_index) => existing_index,
-                None => {
-                    let index = build_tree_recursive(
-                        &child_path,
-                        blob_writer,
-                        chunk_size,
-                        exclude,
-                        inodes,
-                        inode_counter,
-                        hardlink_map,
-                    )?;
-
-                    if let Some(key) = hardlink_key {
-                        hardlink_map.insert(key, index);
-                    }
-
-                    index
-                }
-            };
-
-            children.push(DirEntry {
-                name: entry.file_name().into_vec(),
-                file_type: mode_to_erofs_file_type(child_meta.mode() as u16),
+            child_entries.push(ChildRef {
+                name,
+                file_type,
                 inode_index: child_index,
             });
         }
 
+        // A directory's link count is `.`, its entry in the parent, and one
+        // `..` per subdirectory. Deriving it (and the format decision) from
+        // the flattened tree instead of source metadata keeps the bootstrap
+        // identical however the source filesystem counts directory links.
+        let nlink = 2 + subdir_count;
+        inodes[inode_index].nlink = nlink;
+        inodes[inode_index].is_extended =
+            needs_erofs_extended_inode(0, attrs.uid, attrs.gid, nlink as u64);
         if let InodeData::Directory {
             children: ref mut dir_children,
             ..
         } = inodes[inode_index].data
         {
-            *dir_children = children;
+            *dir_children = child_entries;
+        }
+    } else {
+        let data = node.leaf_data(ctx)?;
+        let size = match &data {
+            InodeData::RegularFile { .. } => attrs.size,
+            InodeData::Symlink { target, .. } => target.len() as u64,
+            InodeData::Device { .. } | InodeData::FifoOrSocket => 0,
+            InodeData::Directory { .. } => {
+                unreachable!("leaf_data is only called for non-directories")
+            }
+        };
+        let nlink = attrs.nlink.max(1);
+        inodes.push(InodeInfo {
+            mode: attrs.mode,
+            uid: attrs.uid,
+            gid: attrs.gid,
+            size,
+            mtime: attrs.mtime,
+            mtime_nsec: attrs.mtime_nsec,
+            nlink,
+            ino,
+            nid: 0,
+            meta_offset: 0,
+            is_extended: needs_erofs_extended_inode(size, attrs.uid, attrs.gid, nlink as u64),
+            data,
+            xattrs: attrs.xattrs,
+        });
+    }
+
+    if let Some(key) = link_key {
+        hardlink_map.insert(key, inode_index);
+    }
+
+    Ok(inode_index)
+}
+
+/// Traversal state for the host-filesystem walk: the blob writer receiving
+/// file contents, the file chunk size, and the exclusion set.
+struct FsBuildContext<'a> {
+    blob_writer: &'a mut BlobWriter,
+    chunk_size: u32,
+    exclude: &'a HashSet<PathBuf>,
+}
+
+/// A host filesystem object: its path plus the (symlink-aware) metadata,
+/// stat'ed once when the node is created.
+struct FsTreeNode {
+    path: PathBuf,
+    meta: fs::Metadata,
+}
+
+impl FsTreeNode {
+    fn new(path: PathBuf) -> Result<Self> {
+        let meta = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to stat: {}", path.display()))?;
+        Ok(Self { path, meta })
+    }
+}
+
+impl<'a> TreeNode<FsBuildContext<'a>> for FsTreeNode {
+    type LinkKey = (u64, u64);
+
+    fn attrs(&self) -> NodeAttrs {
+        NodeAttrs {
+            mode: self.meta.mode() as u16,
+            uid: self.meta.uid(),
+            gid: self.meta.gid(),
+            size: self.meta.size(),
+            mtime: self.meta.mtime() as u64,
+            mtime_nsec: self.meta.mtime_nsec() as u32,
+            nlink: self.meta.nlink() as u32,
+            xattrs: read_xattrs_from_path(&self.path),
+        }
+    }
+
+    fn link_key(&self) -> Option<(u64, u64)> {
+        (!self.meta.file_type().is_dir() && self.meta.nlink() > 1)
+            .then(|| (self.meta.dev(), self.meta.ino()))
+    }
+
+    fn children(&self, ctx: &mut FsBuildContext<'a>) -> Result<Option<NamedChildren<Self>>> {
+        if !self.meta.file_type().is_dir() {
+            return Ok(None);
         }
 
-        Ok(inode_index)
-    } else if ft.is_file() {
-        let file_size = meta.size();
-        let chunk_index_entries = blob_writer.write_file_chunks(path, file_size)?;
-        let inode_index = inodes.len();
-        inodes.push(InodeInfo {
-            mode,
-            uid,
-            gid,
-            size: file_size,
-            mtime,
-            mtime_nsec,
-            nlink,
-            ino,
-            nid: 0,
-            meta_offset: 0,
-            is_extended,
-            data: InodeData::RegularFile {
+        let entries = fs::read_dir(&self.path)
+            .with_context(|| format!("failed to read directory: {}", self.path.display()))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut children = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let child_path = entry.path();
+
+            // Skip entries whose absolute path is in the exclude set.
+            if ctx.exclude.contains(&child_path) {
+                continue;
+            }
+
+            children.push((entry.file_name().into_vec(), FsTreeNode::new(child_path)?));
+        }
+        children.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Some(children))
+    }
+
+    fn leaf_data(&self, ctx: &mut FsBuildContext<'a>) -> Result<InodeData> {
+        let ft = self.meta.file_type();
+        if ft.is_file() {
+            let chunk_index_entries = ctx
+                .blob_writer
+                .write_file_chunks(&self.path, self.meta.size())?;
+            Ok(InodeData::RegularFile {
                 chunk_index_entries,
-                chunk_size_bits: chunk_size.trailing_zeros(),
-            },
-            xattrs,
-        });
-
-        Ok(inode_index)
-    } else if ft.is_symlink() {
-        let target = fs::read_link(path)
-            .with_context(|| format!("failed to read symlink: {}", path.display()))?
-            .into_os_string()
-            .into_vec();
-
-        let inode_index = inodes.len();
-        inodes.push(InodeInfo {
-            mode,
-            uid,
-            gid,
-            size: target.len() as u64,
-            mtime,
-            mtime_nsec,
-            nlink,
-            ino,
-            nid: 0,
-            meta_offset: 0,
-            is_extended,
-            data: InodeData::Symlink {
+                chunk_size_bits: ctx.chunk_size.trailing_zeros(),
+            })
+        } else if ft.is_symlink() {
+            let target = fs::read_link(&self.path)
+                .with_context(|| format!("failed to read symlink: {}", self.path.display()))?
+                .into_os_string()
+                .into_vec();
+            Ok(InodeData::Symlink {
                 target,
                 startblk: 0,
-            },
-            xattrs,
-        });
-
-        Ok(inode_index)
-    } else {
-        let rdev = meta.rdev() as u32;
-        let file_type = mode as u32 & libc::S_IFMT;
-        let is_dev = file_type == libc::S_IFCHR || file_type == libc::S_IFBLK;
-        let inode_index = inodes.len();
-        inodes.push(InodeInfo {
-            mode,
-            uid,
-            gid,
-            size: 0,
-            mtime,
-            mtime_nsec,
-            nlink,
-            ino,
-            nid: 0,
-            meta_offset: 0,
-            is_extended,
-            data: if is_dev {
-                InodeData::Device { rdev }
+            })
+        } else {
+            let file_type = self.meta.mode() & libc::S_IFMT;
+            if file_type == libc::S_IFCHR || file_type == libc::S_IFBLK {
+                Ok(InodeData::Device {
+                    rdev: self.meta.rdev() as u32,
+                })
             } else {
-                InodeData::FifoOrSocket
-            },
-            xattrs,
-        });
-
-        Ok(inode_index)
+                Ok(InodeData::FifoOrSocket)
+            }
+        }
     }
 }
 
 /// Serialize an inode to bytes and write it at the given offset in a buffer.
-pub fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
+pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     let blkszbits = EROFS_BLKSZBITS as u32;
     let inode_size = erofs_inode_size(inode);
     let mut buf = vec![0u8; inode_size];
@@ -743,6 +831,7 @@ fn read_xattrs_from_path(path: &Path) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metadata::EROFS_XATTR_INDEX_USER;
 
     fn root_inode_with_xattrs(xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>) -> InodeInfo {
         InodeInfo {

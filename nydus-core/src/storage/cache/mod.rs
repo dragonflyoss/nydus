@@ -1,5 +1,6 @@
 mod group_lock;
 pub mod local;
+mod set;
 
 use std::io;
 use std::io::Cursor;
@@ -9,11 +10,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::blob::{BlobMeta, BlobMetaCompressor, BlobMetaGroup};
-use crate::metadata::EROFS_BLOB_ID_SIZE;
 use crate::storage::backend::{BlobBackend, ReadContext, ReadKind};
+use crate::utils::SHA256_DIGEST_SIZE;
 
-pub use local::LocalBlobCache;
-pub trait BlobCache: Send + Sync {
+pub(crate) use local::LocalBlobCache;
+pub use set::BlobCacheSet;
+
+pub(crate) trait BlobCache: Send + Sync {
     fn read_at(&self, offset: u64, dst: &mut [u8]) -> io::Result<()>;
 
     /// Return the raw fd of the cache data file for mmap use.
@@ -244,7 +247,7 @@ pub(crate) struct BlobCacheBuffers {
 }
 
 pub(crate) fn fetch_decode_validate_group_into<'a>(
-    blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+    blob_id: &[u8; SHA256_DIGEST_SIZE],
     blob_meta: &BlobMeta,
     backend: &Arc<dyn BlobBackend>,
     group: &BlobMetaGroup,

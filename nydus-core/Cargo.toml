@@ -26,15 +26,15 @@ backend-dragonfly-proxy = [
 ]
 
 [dependencies]
-anyhow = "1"
+anyhow = { workspace = true }
 arc-swap = { version = "1", optional = true }
 bitflags = "2"
 blake3 = "1"
 crc32c = "0.6"
 dragonfly-client-request = { version = "=1.4.0", optional = true }
 futures = { version = "0.3", optional = true }
-libc = "0.2"
-memmap2 = "0.9"
+libc = { workspace = true }
+memmap2 = { workspace = true }
 prometheus = { version = "0.13", default-features = false }
 rand = { version = "0.8", optional = true }
 rolling-file = "0.2.0"
@@ -42,19 +42,19 @@ reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "stream",
 ], optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = "0.9"
-sha2 = "0.10"
-tempfile = "3.1.0"
-tokio = { version = "1", features = [
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = [
   "io-util",
   "net",
   "rt",
   "rt-multi-thread",
   "sync"
 ], optional = true }
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-appender = "0.2.4"
 tracing-panic = "0.1.2"
 tracing-subscriber = { version = "0.3", features = [
@@ -63,7 +63,7 @@ tracing-subscriber = { version = "0.3", features = [
   "time"
 ] }
 url = { version = "2", optional = true }
-xattr = "1"
+xattr = { workspace = true }
 zstd = "0.13"
 
 [dev-dependencies]

@@ -3,8 +3,7 @@ use clap::Args;
 
 use crate::cli_common;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
-use nydus::fuse::{ErofsFs, FuseSession, TermSignalMask};
-use nydus_core::config::Config;
+use nydus::fuse::{ErofsFs, FuseService, TermSignalMask};
 use nydus_core::config::DEFAULT_PREFETCH_THREADS;
 use nydus_core::fs::ErofsReader;
 use nydus_core::storage::backend::{build_backend, BlobBackend, LocalBackend};
@@ -12,7 +11,6 @@ use nydus_core::storage::prefetch::BlobPrefetcher;
 use nydus_core::telemetry::logging::init_tracing;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::thread::available_parallelism;
 use tracing::{error, info, warn};
 
 #[derive(Args)]
@@ -67,8 +65,7 @@ pub struct FuseArgs {
 /// Determine the default number of worker threads for FUSE mounting, clamped to a reasonable
 /// range.
 fn default_threads() -> usize {
-    let n = available_parallelism().map(|x| x.get()).unwrap_or(4);
-    n.clamp(4, 16)
+    cli_common::default_parallelism(4, 16)
 }
 
 /// Run the FUSE mount command.
@@ -93,7 +90,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
     // Load the optional storage config. CLI flags take precedence over config
     // values, so --blob-dir/--cache-dir override the backend/cache directories.
     let storage_config = match &args.config {
-        Some(path) => Some(Config::from_file(path).context("failed to load storage config")?),
+        Some(path) => Some(cli_common::load_storage_config(path)?),
         None => None,
     };
 
@@ -176,10 +173,16 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
     config.n_threads = Some(args.threads);
     config.clone_fd = true;
 
-    let session = FuseSession::mount(fs, mountpoint, &config)?;
+    let session = FuseService::mount(fs, mountpoint, &config)?;
 
     if prefetch_enable {
-        match BlobPrefetcher::new(reader.clone(), prefetch_threads, prefetch_full).spawn() {
+        let prefetcher = BlobPrefetcher::new(
+            reader.blob_cache_set(),
+            reader.prefetch_plan(),
+            prefetch_threads,
+            prefetch_full,
+        );
+        match prefetcher.spawn() {
             Ok(_handle) => info!(
                 "started blob prefetch with {} worker threads (full={})",
                 prefetch_threads, prefetch_full

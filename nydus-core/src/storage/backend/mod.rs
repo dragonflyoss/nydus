@@ -21,12 +21,12 @@ use std::sync::Arc;
 
 use crate::blob::BlobMeta;
 use crate::config::BackendConfig;
-use crate::metadata::EROFS_BLOB_ID_SIZE;
+use crate::utils::SHA256_DIGEST_SIZE;
 
 pub use local::LocalBackend;
 
 #[cfg(feature = "backend-registry")]
-pub use registry::Registry;
+pub(crate) use registry::Registry;
 
 /// What kind of backend read this is — a user-triggered on-demand read or a
 /// background prefetch — used to apply different retry, throttling and
@@ -77,21 +77,21 @@ pub trait BlobBackend: Send + Sync {
 
     fn cache_key(
         &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-    ) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<[u8; SHA256_DIGEST_SIZE]> {
         Ok(*blob_id)
     }
 
-    fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta>;
+    fn blob_meta(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMeta>;
 
-    fn blob_meta_to(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+    fn blob_meta_to(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
         let blob_meta = self.blob_meta(blob_id)?;
         blob_meta.save(dst).map_err(io::Error::other)
     }
 
     fn read_range_into(
         &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         dst: &mut [u8],
         ctx: ReadContext,
@@ -139,22 +139,22 @@ impl BlobBackend for MeteredBackend {
 
     fn cache_key(
         &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
-    ) -> io::Result<[u8; EROFS_BLOB_ID_SIZE]> {
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
+    ) -> io::Result<[u8; SHA256_DIGEST_SIZE]> {
         self.inner.cache_key(blob_id)
     }
 
-    fn blob_meta(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE]) -> io::Result<BlobMeta> {
+    fn blob_meta(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMeta> {
         self.inner.blob_meta(blob_id)
     }
 
-    fn blob_meta_to(&self, blob_id: &[u8; EROFS_BLOB_ID_SIZE], dst: &Path) -> io::Result<()> {
+    fn blob_meta_to(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
         self.inner.blob_meta_to(blob_id, dst)
     }
 
     fn read_range_into(
         &self,
-        blob_id: &[u8; EROFS_BLOB_ID_SIZE],
+        blob_id: &[u8; SHA256_DIGEST_SIZE],
         offset: u64,
         dst: &mut [u8],
         ctx: ReadContext,

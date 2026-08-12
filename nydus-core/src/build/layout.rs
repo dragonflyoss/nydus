@@ -11,15 +11,15 @@ use crate::utils::round_up;
 /// 2. Call `pad_to_block()` to align for directory data.
 /// 3. Allocate directory data blocks with `alloc_dir_data()`.
 /// 4. Write serialized data at the reserved offsets with `write_at()`.
-pub struct MetadataLayout {
+pub(crate) struct MetadataLayout {
     /// The metadata byte buffer.
-    pub buf: Vec<u8>,
+    buf: Vec<u8>,
 
     /// Current allocation cursor.
     cursor: usize,
 
     /// Starting block address of the metadata area in the image.
-    pub meta_blkaddr: u32,
+    meta_blkaddr: u32,
 }
 
 impl Default for MetadataLayout {
@@ -29,12 +29,24 @@ impl Default for MetadataLayout {
 }
 
 impl MetadataLayout {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
+        Self::with_meta_blkaddr(1)
+    }
+
+    /// A layout whose metadata area starts at `meta_blkaddr` instead of the
+    /// default block 1, for images whose device table pushes the metadata
+    /// region past block 0.
+    pub(crate) fn with_meta_blkaddr(meta_blkaddr: u32) -> Self {
         Self {
             buf: Vec::new(),
             cursor: 0,
-            meta_blkaddr: 1,
+            meta_blkaddr,
         }
+    }
+
+    /// The serialized metadata area.
+    pub(crate) fn buf(&self) -> &[u8] {
+        &self.buf
     }
 
     /// Allocate space for an inode. Returns `(offset_in_buf, nid)`.
@@ -43,7 +55,7 @@ impl MetadataLayout {
     /// the inode header (`EROFS_INODE_FLAT_INLINE`). The kernel requires that
     /// tail to stay inside the inode's own metadata block, so such an inode is
     /// pushed to the next block instead of straddling the boundary.
-    pub fn alloc_inode(&mut self, size: usize, has_inline: bool) -> (usize, u64) {
+    pub(crate) fn alloc_inode(&mut self, size: usize, has_inline: bool) -> (usize, u64) {
         let block = EROFS_BLOCK_SIZE as usize;
         if has_inline && self.cursor % block + size > block {
             self.cursor = round_up(self.cursor, block);
@@ -61,7 +73,7 @@ impl MetadataLayout {
     }
 
     /// Pad the metadata buffer to the next block boundary.
-    pub fn pad_to_block(&mut self) -> usize {
+    pub(crate) fn pad_to_block(&mut self) -> usize {
         let aligned = round_up(self.cursor, EROFS_BLOCK_SIZE as usize);
         self.cursor = aligned;
         if self.buf.len() < self.cursor {
@@ -73,7 +85,7 @@ impl MetadataLayout {
 
     /// Allocate block-aligned space for directory data.
     /// Returns (offset_in_buf, start_block_address).
-    pub fn alloc_dir_data(&mut self, size: usize) -> (usize, u64) {
+    pub(crate) fn alloc_dir_data(&mut self, size: usize) -> (usize, u64) {
         self.cursor = round_up(self.cursor, EROFS_BLOCK_SIZE as usize);
         let offset = self.cursor;
         let aligned_size = round_up(size, EROFS_BLOCK_SIZE as usize);
@@ -87,13 +99,8 @@ impl MetadataLayout {
     }
 
     /// Write data at a previously allocated offset.
-    pub fn write_at(&mut self, offset: usize, data: &[u8]) {
+    pub(crate) fn write_at(&mut self, offset: usize, data: &[u8]) {
         self.buf[offset..offset + data.len()].copy_from_slice(data);
-    }
-
-    /// Total number of blocks used by metadata (rounded up).
-    pub fn total_blocks(&self) -> u64 {
-        round_up(self.buf.len(), EROFS_BLOCK_SIZE as usize) as u64 / EROFS_BLOCK_SIZE as u64
     }
 }
 
