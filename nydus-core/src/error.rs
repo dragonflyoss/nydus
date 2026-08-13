@@ -11,6 +11,11 @@
 //! [`Error`] wraps `io::Error` transparently, so data-plane failures cross
 //! into the control plane with a plain `?`. Use [`Context`] to attach
 //! human-readable context while keeping the source chain intact.
+//!
+//! Following the std guidance that an error exposes its cause either through
+//! `source()` or through `Display` but not both, `Display` prints only the
+//! outermost layer. Print edges (logs, `eprintln!`) must format errors with
+//! [`Error::report`] to keep the whole cause chain on one line.
 
 use std::fmt;
 use std::io;
@@ -79,8 +84,9 @@ pub enum Error {
     Runtime(String),
 
     /// The error wrapped with additional context by [`Context`]. Display
-    /// prints the whole chain, matching how these errors are logged.
-    #[error("{context}: {source}")]
+    /// prints only the context; the wrapped error stays reachable through
+    /// `source()`, and print edges use [`Error::report`] for the full chain.
+    #[error("{context}")]
     Context {
         /// Human-readable description of the failed operation.
         context: String,
@@ -111,6 +117,32 @@ impl Error {
                 _ => return None,
             }
         }
+    }
+
+    /// Returns an adapter that prints this error and every `source()` beneath
+    /// it as one `": "`-separated line, like `std::error::Report`.
+    ///
+    /// `Display` on [`Error`] prints only the outermost layer, so a plain
+    /// `{err}` in a log line silently drops the cause chain — print edges
+    /// format errors as `err.report()` instead.
+    pub fn report(&self) -> impl fmt::Display + '_ {
+        struct Report<'a>(&'a Error);
+
+        impl fmt::Display for Report<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                use std::error::Error as _;
+
+                write!(f, "{}", self.0)?;
+                let mut source = self.0.source();
+                while let Some(cause) = source {
+                    write!(f, ": {cause}")?;
+                    source = cause.source();
+                }
+                Ok(())
+            }
+        }
+
+        Report(self)
     }
 }
 
@@ -160,16 +192,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_prints_the_context_chain() {
+    fn display_prints_only_the_outermost_layer() {
+        let root: Result<()> = Err(io::Error::other("inner error").into());
+        let err = root
+            .context("failed to open blob")
+            .context("mount failed")
+            .unwrap_err();
+        assert_eq!(err.to_string(), "mount failed");
+    }
+
+    #[test]
+    fn report_prints_the_context_chain() {
         let root: Result<()> = Err(io::Error::other("inner error").into());
         let err = root
             .context("failed to open blob")
             .context("mount failed")
             .unwrap_err();
         assert_eq!(
-            err.to_string(),
+            err.report().to_string(),
             "mount failed: failed to open blob: inner error"
         );
+    }
+
+    #[test]
+    fn report_on_an_unwrapped_error_prints_a_single_message() {
+        let err = Error::InvalidImage("bad superblock".to_string());
+        assert_eq!(err.report().to_string(), "bad superblock");
     }
 
     #[test]

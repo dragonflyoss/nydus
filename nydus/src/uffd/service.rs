@@ -335,9 +335,9 @@ fn log_connection_exit(result: std::result::Result<Result<()>, tokio::task::Join
     match result {
         Ok(Ok(())) => {}
         Ok(Err(err)) if is_client_disconnect(&err) => {
-            debug!("nydus uffd connection closed: {err}");
+            debug!("nydus uffd connection closed: {}", err.report());
         }
-        Ok(Err(err)) => warn!("nydus uffd connection exited: {err}"),
+        Ok(Err(err)) => warn!("nydus uffd connection exited: {}", err.report()),
         Err(err) => warn!("nydus uffd connection task failed: {err}"),
     }
 }
@@ -353,8 +353,9 @@ fn is_client_disconnect(err: &Error) -> bool {
             return true;
         }
     }
-    // Protocol-level exits carry no errno and are only identifiable by text.
-    let text = err.to_string();
+    // Protocol-level exits carry no errno and are only identifiable by text;
+    // scan the whole chain since Display prints only the outermost layer.
+    let text = err.report().to_string();
     text.contains("client disconnected")
         || text.contains("peer closed")
         || text.contains("Connection reset")

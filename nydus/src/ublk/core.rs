@@ -94,7 +94,7 @@ impl UblkCore {
             // here before converting.
             match err.io_error().and_then(|io_err| io_err.raw_os_error()) {
                 Some(errno) => {
-                    warn!("ublk fetch at {offset} (+{len}) failed: {err}");
+                    warn!("ublk fetch at {offset} (+{len}) failed: {}", err.report());
                     io::Error::from_raw_os_error(errno)
                 }
                 None => io::Error::other(err),

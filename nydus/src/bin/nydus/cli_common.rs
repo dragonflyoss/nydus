@@ -199,19 +199,27 @@ pub fn unmount_with_retry(
             // happened): retrying would only stall the shutdown for the
             // whole retry window.
             Err(err) if is_not_mounted(&err) => {
-                debug!("nothing mounted at {}: {err}", mountpoint.display());
+                debug!(
+                    "nothing mounted at {}: {}",
+                    mountpoint.display(),
+                    err.report()
+                );
                 break;
             }
             Err(err) if attempt < UNMOUNT_RETRY_ATTEMPTS => {
-                debug!("unmount attempt {attempt} failed: {err}; retrying");
+                debug!(
+                    "unmount attempt {attempt} failed: {}; retrying",
+                    err.report()
+                );
                 between_attempts();
                 std::thread::sleep(UNMOUNT_RETRY_DELAY);
             }
             Err(err) => {
                 error!(
-                    "failed to unmount {} after {UNMOUNT_RETRY_ATTEMPTS} attempts: {err}; \
+                    "failed to unmount {} after {UNMOUNT_RETRY_ATTEMPTS} attempts: {}; \
                      {failure_hint}",
-                    mountpoint.display()
+                    mountpoint.display(),
+                    err.report()
                 );
                 break;
             }
