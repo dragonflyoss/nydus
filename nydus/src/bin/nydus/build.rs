@@ -176,8 +176,8 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     for raw in &args.exclude {
         let abs = match Path::new(raw).canonicalize() {
             Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("--exclude {}: canonicalize failed ({})", raw, e);
+            Err(err) => {
+                tracing::warn!("--exclude {}: canonicalize failed ({})", raw, err);
                 continue;
             }
         };
@@ -208,7 +208,7 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         )
     })?;
 
-    let final_blob_path = finalize_blob_output(&blob_output, &image.full_blob_id)?;
+    let final_blob_path = finalize_blob_output(&blob_output, &image.full_blob_digest)?;
     let blob_metadata_path = blob_metadata_output_path(&final_blob_path)?;
     image
         .blob_metadata
@@ -220,10 +220,10 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
             .with_context(|| format!("failed to write bootstrap: {}", bootstrap.display()))?;
     }
 
-    print_blob_summary(BlobSummary {
+    print_blob_summary(BlobBuildReport {
         index: 0,
         data_blob_digest: &image.data_digest,
-        full_blob_digest: &image.full_blob_id,
+        full_blob_digest: &image.full_blob_digest,
         blob_metadata: &image.blob_metadata,
         footer: &image.footer,
         full_blob_path: &final_blob_path,
@@ -233,7 +233,7 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
-struct BlobSummary<'a> {
+struct BlobBuildReport<'a> {
     index: usize,
     data_blob_digest: &'a [u8; EROFS_BLOB_ID_SIZE],
     full_blob_digest: &'a [u8; EROFS_BLOB_ID_SIZE],
@@ -244,8 +244,8 @@ struct BlobSummary<'a> {
     bootstrap_path: Option<&'a Path>,
 }
 
-fn print_blob_summary(summary: BlobSummary<'_>) {
-    let BlobSummary {
+fn print_blob_summary(summary: BlobBuildReport<'_>) {
+    let BlobBuildReport {
         index,
         data_blob_digest,
         full_blob_digest,

@@ -87,7 +87,7 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
         .with_context(|| format!("failed to create cache directory: {}", cache_dir.display()))?;
 
     let ondemand = build_ondemand_blob(&args.parent_bootstrap, &patterns, backend, &cache_dir)?;
-    let digest_hex = hex_string(&ondemand.full_digest);
+    let digest_hex = hex_string(&ondemand.full_blob_digest);
 
     fs::create_dir_all(&args.blob_dir).with_context(|| {
         format!(

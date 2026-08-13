@@ -35,21 +35,24 @@ pub struct TraceEntry {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TraceDocument {
     pub version: u32,
-    pub patterns: Vec<TraceEntry>,
+    /// Serialized as `patterns` — the `/trace` wire key predates the rename
+    /// and is asserted byte-for-byte by consumers.
+    #[serde(rename = "patterns")]
+    pub entries: Vec<TraceEntry>,
 }
 
 impl Default for TraceDocument {
     fn default() -> Self {
         Self {
             version: TRACE_DOCUMENT_VERSION,
-            patterns: Vec::new(),
+            entries: Vec::new(),
         }
     }
 }
 
 #[derive(Default)]
 struct TraceState {
-    patterns: Vec<TraceEntry>,
+    entries: Vec<TraceEntry>,
     seen: HashSet<(u32, u32)>,
 }
 
@@ -65,7 +68,7 @@ impl TraceRecorder {
     pub fn record_group_access(&self, blob_index: u32, group_index: u32) {
         let mut state = self.state.lock().unwrap();
         if state.seen.insert((blob_index, group_index)) {
-            state.patterns.push(TraceEntry {
+            state.entries.push(TraceEntry {
                 blob_index,
                 group_index,
             });
@@ -77,7 +80,7 @@ impl TraceRecorder {
         let state = self.state.lock().unwrap();
         TraceDocument {
             version: TRACE_DOCUMENT_VERSION,
-            patterns: state.patterns.clone(),
+            entries: state.entries.clone(),
         }
     }
 
@@ -92,7 +95,7 @@ impl TraceRecorder {
     #[cfg(test)]
     pub fn clear(&self) {
         let mut state = self.state.lock().unwrap();
-        state.patterns.clear();
+        state.entries.clear();
         state.seen.clear();
     }
 }
@@ -151,7 +154,7 @@ mod tests {
         let snapshot = recorder.snapshot();
         assert_eq!(snapshot.version, TRACE_DOCUMENT_VERSION);
         assert_eq!(
-            snapshot.patterns,
+            snapshot.entries,
             vec![
                 TraceEntry {
                     blob_index: 1,
@@ -169,6 +172,6 @@ mod tests {
         );
 
         recorder.clear();
-        assert!(recorder.snapshot().patterns.is_empty());
+        assert!(recorder.snapshot().entries.is_empty());
     }
 }

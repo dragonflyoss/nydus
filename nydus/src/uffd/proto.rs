@@ -103,8 +103,9 @@ pub struct VmaRegion {
     pub flags: i32,
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One wire range of a RANGE_RESPONSE: `[device_offset, +len)` of the
+/// flattened device, served from `blob_offset` of the accompanying fd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlobRange {
     pub device_offset: u64,
     pub blob_offset: u64,
@@ -138,14 +139,12 @@ pub enum Request {
     Probe,
 }
 
-pub type ResolvedRange = Extent;
-
 #[derive(Clone)]
-pub struct ProtoConn {
+pub struct Connection {
     stream: Arc<AsyncFd<UnixStream>>,
 }
 
-impl ProtoConn {
+impl Connection {
     pub fn new(stream: UnixStream) -> Result<Self> {
         Ok(Self {
             stream: Arc::new(
@@ -162,11 +161,12 @@ impl ProtoConn {
             };
             let request = match msg_type {
                 MSG_HANDSHAKE => {
-                    let (version, policy, prefault, regions) = decode_handshake(&payload)
+                    let handshake = decode_handshake(&payload)
                         .ok_or_else(|| Error::Protocol("invalid HANDSHAKE payload".to_string()))?;
-                    if version != UFFD_PROTOCOL_VERSION {
+                    if handshake.version != UFFD_PROTOCOL_VERSION {
                         return Err(Error::Unsupported(format!(
-                            "unsupported UFFD protocol version {version}"
+                            "unsupported UFFD protocol version {}",
+                            handshake.version
                         )));
                     }
                     if fds.len() != 1 {
@@ -176,9 +176,9 @@ impl ProtoConn {
                         )));
                     }
                     Request::Handshake {
-                        policy,
-                        prefault,
-                        regions,
+                        policy: handshake.policy,
+                        prefault: handshake.prefault,
+                        regions: handshake.regions,
                         uffd: fds.pop().expect("validated HANDSHAKE fd count"),
                     }
                 }
@@ -244,7 +244,7 @@ impl ProtoConn {
         Ok(Some((header.msg_type, payload, fds)))
     }
 
-    pub async fn send_ranges(&self, ranges: &[ResolvedRange]) -> Result<()> {
+    pub async fn send_ranges(&self, ranges: &[Extent]) -> Result<()> {
         if ranges.is_empty() {
             return send_with_fd(&self.stream, &encode_range_response(&[], false), &[]).await;
         }
@@ -253,7 +253,11 @@ impl ProtoConn {
         while let Some(chunk) = chunks.next() {
             let wire_ranges = chunk
                 .iter()
-                .map(|range| (range.source_offset, range.offset, range.len))
+                .map(|range| BlobRange {
+                    device_offset: range.source_offset,
+                    blob_offset: range.offset,
+                    len: range.len,
+                })
                 .collect::<Vec<_>>();
             let fds = chunk.iter().map(|range| range.fd).collect::<Vec<_>>();
             send_with_fd(
@@ -311,7 +315,16 @@ pub fn encode_handshake(
     buf
 }
 
-pub fn decode_handshake(payload: &[u8]) -> Option<(u16, FaultPolicy, bool, Vec<VmaRegion>)> {
+/// A decoded HANDSHAKE message.
+#[derive(Debug)]
+pub struct HandshakeRequest {
+    pub version: u16,
+    pub policy: FaultPolicy,
+    pub prefault: bool,
+    pub regions: Vec<VmaRegion>,
+}
+
+pub fn decode_handshake(payload: &[u8]) -> Option<HandshakeRequest> {
     if payload.len() < HANDSHAKE_PREFIX_SIZE {
         return None;
     }
@@ -341,10 +354,15 @@ pub fn decode_handshake(payload: &[u8]) -> Option<(u16, FaultPolicy, bool, Vec<V
         });
         off += REGION_SIZE;
     }
-    Some((ver, policy, enable_prefault, regions))
+    Some(HandshakeRequest {
+        version: ver,
+        policy,
+        prefault: enable_prefault,
+        regions,
+    })
 }
 
-pub fn encode_range_response(ranges: &[(u64, u64, u64)], next: bool) -> Vec<u8> {
+pub fn encode_range_response(ranges: &[BlobRange], next: bool) -> Vec<u8> {
     let payload_len = RANGE_COUNT_SIZE + ranges.len() * RANGE_SIZE;
     let mut header = Header::new(MSG_RANGE_RESPONSE, payload_len as u32);
     if next {
@@ -353,10 +371,10 @@ pub fn encode_range_response(ranges: &[(u64, u64, u64)], next: bool) -> Vec<u8> 
     let mut buf = Vec::with_capacity(HEADER_SIZE + payload_len);
     buf.extend_from_slice(&header.to_bytes());
     buf.extend_from_slice(&(ranges.len() as u32).to_le_bytes());
-    for &(device_offset, blob_offset, len) in ranges {
-        buf.extend_from_slice(&device_offset.to_le_bytes());
-        buf.extend_from_slice(&blob_offset.to_le_bytes());
-        buf.extend_from_slice(&len.to_le_bytes());
+    for range in ranges {
+        buf.extend_from_slice(&range.device_offset.to_le_bytes());
+        buf.extend_from_slice(&range.blob_offset.to_le_bytes());
+        buf.extend_from_slice(&range.len.to_le_bytes());
     }
     buf
 }
@@ -536,10 +554,10 @@ mod tests {
 
     use super::*;
 
-    fn proto_pair() -> (ProtoConn, UnixStream) {
+    fn proto_pair() -> (Connection, UnixStream) {
         let (server, client) = UnixStream::pair().unwrap();
         server.set_nonblocking(true).unwrap();
-        (ProtoConn::new(server).unwrap(), client)
+        (Connection::new(server).unwrap(), client)
     }
 
     #[test]
@@ -561,7 +579,14 @@ mod tests {
 
     #[test]
     fn range_response_roundtrip() {
-        let buf = encode_range_response(&[(0, 4096, 8192)], false);
+        let buf = encode_range_response(
+            &[BlobRange {
+                device_offset: 0,
+                blob_offset: 4096,
+                len: 8192,
+            }],
+            false,
+        );
         let hdr = Header::from_bytes(&buf[..HEADER_SIZE].try_into().unwrap());
         assert_eq!(hdr.magic, UFFD_MAGIC);
         assert_eq!(hdr.msg_type, MSG_RANGE_RESPONSE);
@@ -722,7 +747,7 @@ mod tests {
         let (proto, mut client) = proto_pair();
         let file = File::open("/dev/zero").unwrap();
         let ranges = (0..17)
-            .map(|index| ResolvedRange {
+            .map(|index| Extent {
                 fd: file.as_raw_fd(),
                 offset: index * 4096,
                 len: 4096,

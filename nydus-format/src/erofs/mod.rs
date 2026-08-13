@@ -17,7 +17,7 @@ pub use dir::ErofsDirent;
 pub use inode::{
     erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_icount,
     erofs_xattr_name_split, erofs_xattr_prefix, is_nydus_prefetch_blobs_xattr,
-    needs_erofs_extended_inode, ErofsInodeCompact, ErofsInodeExtended,
+    needs_erofs_extended_inode, ErofsInodeCompact, ErofsInodeExtended, XattrEntry,
 };
 pub use inode::{erofs_xattr_ibody_size, is_nydus_xattr, mode_to_erofs_file_type, ErofsInode};
 pub use superblock::validate_superblock;

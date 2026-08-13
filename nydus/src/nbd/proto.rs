@@ -98,7 +98,7 @@ impl Request {
     }
 
     /// True when the offset and length are whole-block aligned, the
-    /// precondition for [`super::core::NbdCore::read`].
+    /// precondition for [`super::core::NbdCore::read_at`].
     pub fn is_block_aligned(&self) -> bool {
         self.offset % NBD_BLOCK_SIZE == 0 && (self.len as u64) % NBD_BLOCK_SIZE == 0
     }

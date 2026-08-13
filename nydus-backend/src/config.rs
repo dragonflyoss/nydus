@@ -13,8 +13,9 @@ use serde::Deserialize;
 pub struct BackendConfig {
     #[serde(rename = "type")]
     pub kind: String,
-    #[serde(default)]
-    pub config: serde_yaml::Value,
+    /// Serialized as `config` — the YAML key predates the rename.
+    #[serde(default, rename = "config")]
+    pub options: serde_yaml::Value,
 }
 
 /// Settings for a directory-backed component: a single directory path. Shared

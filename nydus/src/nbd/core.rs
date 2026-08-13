@@ -76,7 +76,7 @@ impl NbdCore {
     }
 
     /// Total block count (4 KiB units) reported to the NBD driver.
-    pub fn blocks(&self) -> u64 {
+    pub fn block_count(&self) -> u64 {
         self.device_size / BLOCK_SIZE
     }
 

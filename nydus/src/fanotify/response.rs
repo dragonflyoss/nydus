@@ -4,10 +4,15 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
+/// What to answer the kernel with for one event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Response {
+    Allow,
+    Deny,
+}
+
 use nydus_error::{Context, Error, Result};
 use tracing::{error, warn};
-
-use super::core::Response;
 
 const FAN_ALLOW: u32 = 0x01;
 const FAN_DENY: u32 = 0x02;
@@ -24,7 +29,7 @@ const RESPONSE_SIZE: usize = std::mem::size_of::<FanotifyResponse>();
 
 /// Injectable response sink used by the real fanotify fd and unit tests.
 pub trait ResponseWriter: Send + Sync {
-    fn write_response(&self, event_fd: RawFd, decision: Response) -> io::Result<usize>;
+    fn write_response(&self, event_fd: RawFd, response: Response) -> io::Result<usize>;
 }
 
 /// `ResponseWriter` backed by the live fanotify group fd.
@@ -45,10 +50,10 @@ impl FdResponseWriter {
 }
 
 impl ResponseWriter for FdResponseWriter {
-    fn write_response(&self, event_fd: RawFd, decision: Response) -> io::Result<usize> {
+    fn write_response(&self, event_fd: RawFd, response: Response) -> io::Result<usize> {
         let response = FanotifyResponse {
             fd: event_fd,
-            response: match decision {
+            response: match response {
                 Response::Allow => FAN_ALLOW,
                 Response::Deny => FAN_DENY,
             },
@@ -68,15 +73,15 @@ impl ResponseWriter for FdResponseWriter {
     }
 }
 
-/// The sole owner of one permission event fd and its terminal decision.
+/// The sole owner of one permission event fd and its terminal response.
 ///
-/// A decision may be selected once. The fd is released only after one complete
+/// A response may be selected once. The fd is released only after one complete
 /// response is successfully written. Dropping an unresolved value logs an
 /// invariant violation, makes one best-effort deny submission, then closes the fd.
 pub struct PendingPermission {
     event_fd: Option<OwnedFd>,
     writer: Arc<dyn ResponseWriter>,
-    decision: Option<Response>,
+    response: Option<Response>,
     submitted: bool,
 }
 
@@ -85,7 +90,7 @@ impl PendingPermission {
         Self {
             event_fd: Some(event_fd),
             writer,
-            decision: None,
+            response: None,
             submitted: false,
         }
     }
@@ -97,20 +102,20 @@ impl PendingPermission {
             .as_raw_fd()
     }
 
-    pub fn decide(&mut self, decision: Response) -> Result<()> {
-        if self.decision.is_some() || self.submitted {
+    pub fn decide(&mut self, response: Response) -> Result<()> {
+        if self.response.is_some() || self.submitted {
             return Err(Error::Runtime(
-                "permission event already has a terminal decision".to_string(),
+                "permission event already has a terminal response".to_string(),
             ));
         }
-        self.decision = Some(decision);
+        self.response = Some(response);
         Ok(())
     }
 
-    /// Attempt to submit the selected decision.
+    /// Attempt to submit the selected response.
     ///
     /// EINTR is retried internally. `Ok(false)` means EAGAIN and preserves both
-    /// the decision and fd for a later writable retry. ENOENT is treated as
+    /// the response and fd for a later writable retry. ENOENT is treated as
     /// success (the event was already answered by the kernel). Any other error
     /// is fatal.
     pub fn try_submit(&mut self) -> Result<bool> {
@@ -119,13 +124,13 @@ impl PendingPermission {
                 "permission response was already submitted".to_string(),
             ));
         }
-        let decision = self.decision.ok_or_else(|| {
-            Error::Runtime("permission response has no terminal decision".to_string())
+        let response = self.response.ok_or_else(|| {
+            Error::Runtime("permission response has no terminal response".to_string())
         })?;
         let event_fd = self.event_fd();
 
         loop {
-            match self.writer.write_response(event_fd, decision) {
+            match self.writer.write_response(event_fd, response) {
                 Ok(RESPONSE_SIZE) => {
                     self.submitted = true;
                     self.event_fd.take();
@@ -155,8 +160,8 @@ impl PendingPermission {
         }
     }
 
-    pub fn decision(&self) -> Option<Response> {
-        self.decision
+    pub fn response(&self) -> Option<Response> {
+        self.response
     }
 }
 
@@ -166,12 +171,12 @@ impl Drop for PendingPermission {
             return;
         };
 
-        let decision = self.decision.unwrap_or(Response::Deny);
+        let response = self.response.unwrap_or(Response::Deny);
         error!(
-            "fanotify permission fd={event_fd} dropped before response submission; attempting {decision:?}"
+            "fanotify permission fd={event_fd} dropped before response submission; attempting {response:?}"
         );
         loop {
-            match self.writer.write_response(event_fd, decision) {
+            match self.writer.write_response(event_fd, response) {
                 Ok(RESPONSE_SIZE) => break,
                 Ok(written) => {
                     warn!(
@@ -217,8 +222,8 @@ mod tests {
     }
 
     impl ResponseWriter for MockWriter {
-        fn write_response(&self, _event_fd: RawFd, decision: Response) -> io::Result<usize> {
-            self.decisions.lock().unwrap().push(decision);
+        fn write_response(&self, _event_fd: RawFd, response: Response) -> io::Result<usize> {
+            self.decisions.lock().unwrap().push(response);
             match self.results.lock().unwrap().pop_front() {
                 Some(WriteResult::Written(size)) => Ok(size),
                 Some(WriteResult::Error(errno)) => Err(io::Error::from_raw_os_error(errno)),
@@ -233,12 +238,12 @@ mod tests {
 
     #[test]
     fn submits_allow_and_deny() {
-        for decision in [Response::Allow, Response::Deny] {
+        for response in [Response::Allow, Response::Deny] {
             let writer = MockWriter::scripted([]);
             let mut event = pending(writer.clone());
-            event.decide(decision).unwrap();
+            event.decide(response).unwrap();
             assert!(event.try_submit().unwrap());
-            assert_eq!(*writer.decisions.lock().unwrap(), vec![decision]);
+            assert_eq!(*writer.decisions.lock().unwrap(), vec![response]);
         }
     }
 
@@ -263,7 +268,7 @@ mod tests {
         let mut event = pending(writer.clone());
         event.decide(Response::Deny).unwrap();
         assert!(!event.try_submit().unwrap());
-        assert_eq!(event.decision(), Some(Response::Deny));
+        assert_eq!(event.response(), Some(Response::Deny));
         assert!(event.try_submit().unwrap());
         assert_eq!(
             *writer.decisions.lock().unwrap(),

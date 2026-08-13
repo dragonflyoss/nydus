@@ -34,7 +34,7 @@ use config::BackendConfig;
 use nydus_format::blob::BlobMetadata;
 use nydus_format::utils::SHA256_DIGEST_SIZE;
 
-pub use local::LocalBackend;
+pub use local::Local;
 
 #[cfg(feature = "backend-registry")]
 pub(crate) use registry::Registry;
@@ -44,13 +44,21 @@ pub(crate) use registry::Registry;
 /// in [`nydus_telemetry::metrics`] so that crate stays a dependency leaf.
 pub use nydus_telemetry::metrics::ReadKind;
 
+/// The uncompressed span a backend read decodes to, when it maps to
+/// blob-metadata groups.
+#[derive(Debug, Clone, Copy)]
+pub struct UncompressedSpan {
+    pub offset: u64,
+    pub size: u64,
+}
+
 /// Diagnostic context for a backend read: its kind plus the uncompressed
-/// `(offset, size)` span it decodes to, when the read maps to blob-meta groups.
-/// Raw reads (e.g. the blob footer or blob meta region) carry `None`.
+/// span it decodes to, when the read maps to blob-meta groups. Raw reads
+/// (e.g. the blob footer or blob meta region) carry `None`.
 #[derive(Debug, Clone, Copy)]
 pub struct ReadContext {
     pub kind: ReadKind,
-    pub uncompressed: Option<(u64, u64)>,
+    pub uncompressed: Option<UncompressedSpan>,
 }
 
 impl ReadContext {
@@ -58,7 +66,10 @@ impl ReadContext {
     pub fn group(kind: ReadKind, uncompressed_offset: u64, uncompressed_size: u64) -> Self {
         Self {
             kind,
-            uncompressed: Some((uncompressed_offset, uncompressed_size)),
+            uncompressed: Some(UncompressedSpan {
+                offset: uncompressed_offset,
+                size: uncompressed_size,
+            }),
         }
     }
 
@@ -88,7 +99,7 @@ pub trait BlobBackend: Send + Sync {
 
     fn blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE]) -> io::Result<BlobMetadata>;
 
-    fn blob_metadata_to(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
+    fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
         let blob_metadata = self.blob_metadata(blob_id)?;
         blob_metadata.save(dst).map_err(io::Error::other)
     }
@@ -152,8 +163,8 @@ impl BlobBackend for MeteredBackend {
         self.inner.blob_metadata(blob_id)
     }
 
-    fn blob_metadata_to(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
-        self.inner.blob_metadata_to(blob_id, dst)
+    fn save_blob_metadata(&self, blob_id: &[u8; SHA256_DIGEST_SIZE], dst: &Path) -> io::Result<()> {
+        self.inner.save_blob_metadata(blob_id, dst)
     }
 
     fn read_range_into(
@@ -176,9 +187,9 @@ impl BlobBackend for MeteredBackend {
 /// Construct a blob backend from its configuration.
 pub fn build_backend(config: &BackendConfig) -> io::Result<Arc<dyn BlobBackend>> {
     let backend: Arc<dyn BlobBackend> = match config.kind.as_str() {
-        "local" => Arc::new(LocalBackend::from_value(&config.config)?),
+        "local" => Arc::new(Local::from_value(&config.options)?),
         #[cfg(feature = "backend-registry")]
-        "registry" => Arc::new(Registry::from_value(&config.config)?),
+        "registry" => Arc::new(Registry::from_value(&config.options)?),
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

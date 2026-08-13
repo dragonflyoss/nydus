@@ -4,7 +4,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use crate::error::{Context, FormatError, Result};
+use crate::error::{Context, Error, Result};
 
 /// Byte length of a SHA-256 digest.
 pub const SHA256_DIGEST_SIZE: usize = 32;
@@ -30,9 +30,9 @@ pub fn sha256_file_range(path: &Path, offset: u64, len: u64) -> Result<[u8; SHA2
         .len();
     let end = offset
         .checked_add(len)
-        .ok_or_else(|| FormatError::Overflow("hash range offset overflow".to_string()))?;
+        .ok_or_else(|| Error::Overflow("hash range offset overflow".to_string()))?;
     if end > file_len {
-        return Err(FormatError::InvalidParameter(format!(
+        return Err(Error::InvalidParameter(format!(
             "hash range exceeds file size: {}",
             path.display()
         )));
@@ -46,7 +46,7 @@ pub fn sha256_file_range(path: &Path, offset: u64, len: u64) -> Result<[u8; SHA2
 
 pub fn parse_sha256_hex(value: &str) -> Result<[u8; SHA256_DIGEST_SIZE]> {
     if value.len() != SHA256_DIGEST_SIZE * 2 {
-        return Err(FormatError::InvalidParameter(format!(
+        return Err(Error::InvalidParameter(format!(
             "expected a {}-character sha256 hex string",
             SHA256_DIGEST_SIZE * 2
         )));
@@ -54,12 +54,10 @@ pub fn parse_sha256_hex(value: &str) -> Result<[u8; SHA256_DIGEST_SIZE]> {
 
     let mut digest = [0u8; SHA256_DIGEST_SIZE];
     for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        let hi = hex_value(chunk[0]).ok_or_else(|| {
-            FormatError::InvalidParameter("invalid sha256 hex string".to_string())
-        })?;
-        let lo = hex_value(chunk[1]).ok_or_else(|| {
-            FormatError::InvalidParameter("invalid sha256 hex string".to_string())
-        })?;
+        let hi = hex_value(chunk[0])
+            .ok_or_else(|| Error::InvalidParameter("invalid sha256 hex string".to_string()))?;
+        let lo = hex_value(chunk[1])
+            .ok_or_else(|| Error::InvalidParameter("invalid sha256 hex string".to_string()))?;
         digest[index] = (hi << 4) | lo;
     }
     Ok(digest)

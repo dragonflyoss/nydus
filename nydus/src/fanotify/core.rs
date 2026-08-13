@@ -49,13 +49,6 @@ pub(crate) const FAN_MARK_ADD: u32 = 0x0000_0001;
 /// `fanotify_mark(2)` flag: remove a mark instead of adding one.
 pub(crate) const FAN_MARK_REMOVE: u32 = 0x0000_0002;
 
-/// What to answer the kernel with for one event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Response {
-    Allow,
-    Deny,
-}
-
 /// Why an event was denied, kept distinct so metrics and logs can separate a
 /// client/kernel range problem from a backend/data failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,7 +103,6 @@ pub struct BlobDevice {
     pub cache_size: u64,
 }
 
-/// Read-side handle for the fanotify pre-content service.
 #[cfg(test)]
 impl BlobDevice {
     pub(crate) fn for_test(
@@ -130,13 +122,14 @@ impl BlobDevice {
     }
 }
 
+/// Read-side handle for the fanotify pre-content service.
 pub struct FanotifyCore {
     core: Arc<NydusCore>,
     devices: Vec<BlobDevice>,
-    /// `(dev, ino)` → index into `devices` for O(1) event-fd lookup.
-    device_index: HashMap<(u64, u64), usize>,
-    /// `BlobId` → index into `devices` for O(1) slot lookup by blob identity.
-    blob_slot: HashMap<BlobId, usize>,
+    /// File identity → `devices` vec position, for O(1) event-fd lookup.
+    slot_by_identity: HashMap<FileId, usize>,
+    /// `BlobId` → `devices` vec position, for O(1) lookup by blob identity.
+    slot_by_blob_id: HashMap<BlobId, usize>,
     /// Per-device-slot sticky flag: true once the fanotify mark has been removed
     /// (or was never added because the blob was already fully ready at startup).
     /// Prevents redundant `is_all_ready` probes and duplicate `FAN_MARK_REMOVE`
@@ -165,8 +158,8 @@ impl FanotifyCore {
             .context("failed to enumerate blob devices")?;
 
         let mut devices = Vec::with_capacity(entries.len());
-        let mut device_index = HashMap::with_capacity(entries.len());
-        let mut blob_slot = HashMap::with_capacity(entries.len());
+        let mut slot_by_identity = HashMap::with_capacity(entries.len());
+        let mut slot_by_blob_id = HashMap::with_capacity(entries.len());
         for (slot, b) in entries.into_iter().enumerate() {
             let expected_index = u16::try_from(slot + 1).map_err(|err| {
                 Error::InvalidImage(format!(
@@ -188,10 +181,10 @@ impl FanotifyCore {
                 )));
             }
 
-            let (dev, ino) = cache_identity(&b.cache_path, b.cache_size).with_context(|| {
+            let identity = cache_identity(&b.cache_path, b.cache_size).with_context(|| {
                 format!("failed to validate blob device {}", b.cache_path.display())
             })?;
-            blob_slot.insert(b.id, slot);
+            slot_by_blob_id.insert(b.id, slot);
             devices.push(BlobDevice {
                 index: b.index,
                 id: b.id,
@@ -199,15 +192,15 @@ impl FanotifyCore {
                 cache_path: b.cache_path,
                 cache_size: b.cache_size,
             });
-            device_index.insert((dev, ino), slot);
+            slot_by_identity.insert(identity, slot);
         }
 
         let unmarked: Vec<AtomicBool> = devices.iter().map(|_| AtomicBool::new(false)).collect();
         Ok(Self {
             core,
             devices,
-            device_index,
-            blob_slot,
+            slot_by_identity,
+            slot_by_blob_id,
             unmarked,
         })
     }
@@ -218,11 +211,11 @@ impl FanotifyCore {
         &self.devices
     }
 
-    /// Find the blob device an event fd refers to, by its `(dev, ino)`.
+    /// Find the blob device an event fd refers to, by its file identity.
     /// O(1) HashMap lookup.
-    pub fn device_for(&self, dev: u64, ino: u64) -> Option<&BlobDevice> {
-        self.device_index
-            .get(&(dev, ino))
+    pub fn device_for(&self, identity: FileId) -> Option<&BlobDevice> {
+        self.slot_by_identity
+            .get(&identity)
             .map(|&idx| &self.devices[idx])
     }
 
@@ -253,9 +246,9 @@ impl FanotifyCore {
         debug_assert!(offset % BLOCK_SIZE == 0);
         debug_assert!(count % BLOCK_SIZE == 0);
         debug_assert!(offset <= cache_size && offset + count <= cache_size);
-        self.core.blobs.fetch(id, offset, count).map_err(|e| {
+        self.core.blobs.fetch(id, offset, count).map_err(|err| {
             FetchError::Backend(
-                e.context(format!("failed to fetch blob range [{offset}, +{count})")),
+                err.context(format!("failed to fetch blob range [{offset}, +{count})")),
             )
         })
     }
@@ -283,7 +276,7 @@ impl FanotifyCore {
     /// thread-safe; concurrent calls with `FAN_MARK_REMOVE` on the same path
     /// are harmless (the loser gets `ENOENT`).
     pub fn try_unmark(&self, fan_fd: RawFd, id: &BlobId) -> bool {
-        let Some(&slot) = self.blob_slot.get(id) else {
+        let Some(&slot) = self.slot_by_blob_id.get(id) else {
             return false;
         };
         // Fast path: the mark was already removed by an earlier successful
@@ -374,7 +367,7 @@ pub(crate) fn align_fetch_range(
     offset: u64,
     count: u64,
     cache_size: u64,
-) -> std::result::Result<(u64, u64), RangeError> {
+) -> std::result::Result<Range, RangeError> {
     if count == 0 {
         return Err(RangeError::ZeroCount);
     }
@@ -393,7 +386,10 @@ pub(crate) fn align_fetch_range(
     if aligned_off >= aligned_end {
         return Err(RangeError::EmptyAfterAlign);
     }
-    Ok((aligned_off, aligned_end - aligned_off))
+    Ok(Range {
+        offset: aligned_off,
+        count: aligned_end - aligned_off,
+    })
 }
 
 /// The daemon's only fetch deadline is the backend's HTTP timeout plus its
@@ -406,7 +402,7 @@ fn validate_bounded_backend_timeout(config: &Config) -> Result<()> {
     if config.backend.kind == "registry"
         && config
             .backend
-            .config
+            .options
             .get("timeout")
             .and_then(|v| v.as_u64())
             == Some(0)
@@ -421,8 +417,15 @@ fn validate_bounded_backend_timeout(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Read the `(st_dev, st_ino)` of an fd (the accessed blob device file).
-pub fn fd_identity(fd: RawFd) -> Result<(u64, u64)> {
+/// The `(st_dev, st_ino)` identity of a file, matching event fds to devices.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FileId {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// Read the file identity of an fd (the accessed blob device file).
+pub fn fd_identity(fd: RawFd) -> Result<FileId> {
     let mut st = std::mem::MaybeUninit::<libc::stat>::zeroed();
     let ret = unsafe { libc::fstat(fd, st.as_mut_ptr()) };
     if ret < 0 {
@@ -432,13 +435,16 @@ pub fn fd_identity(fd: RawFd) -> Result<(u64, u64)> {
     // st_dev/st_ino widths vary by platform (glibc/musl, 32/64-bit), so the cast
     // is intentional for portability even where it is a u64→u64 no-op.
     #[allow(clippy::unnecessary_cast)]
-    Ok((st.st_dev as u64, st.st_ino as u64))
+    Ok(FileId {
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
+    })
 }
 
 /// Open the cache file with `O_NOFOLLOW`, confirm it is a regular file of the
 /// expected size, and take its `(dev, ino)` identity from that same descriptor.
 /// Refusing symlinks and non-regular files closes the path-stat/mark/open race.
-fn cache_identity(path: &Path, expected_size: u64) -> Result<(u64, u64)> {
+fn cache_identity(path: &Path, expected_size: u64) -> Result<FileId> {
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|err| {
         Error::InvalidParameter(format!(
             "blob device path contains an interior NUL byte: {err}"
@@ -476,7 +482,10 @@ fn cache_identity(path: &Path, expected_size: u64) -> Result<(u64, u64)> {
         )));
     }
     #[allow(clippy::unnecessary_cast)]
-    Ok((st.st_dev as u64, st.st_ino as u64))
+    Ok(FileId {
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
+    })
 }
 
 #[cfg(test)]
@@ -527,21 +536,45 @@ mod tests {
 
     #[test]
     fn align_block_aligned_range_unchanged() {
-        assert_eq!(align_fetch_range(4096, 8192, 65536), Ok((4096, 8192)));
+        assert_eq!(
+            align_fetch_range(4096, 8192, 65536),
+            Ok(Range {
+                offset: 4096,
+                count: 8192
+            })
+        );
     }
 
     #[test]
     fn align_rounds_offset_down_and_len_up() {
         // offset 100 → down to 0; end 100+50=150 → up to 4096
-        assert_eq!(align_fetch_range(100, 50, 65536), Ok((0, 4096)));
+        assert_eq!(
+            align_fetch_range(100, 50, 65536),
+            Ok(Range {
+                offset: 0,
+                count: 4096
+            })
+        );
         // offset 5000 (→4096), end 5000+100=5100 (→8192)
-        assert_eq!(align_fetch_range(5000, 100, 65536), Ok((4096, 4096)));
+        assert_eq!(
+            align_fetch_range(5000, 100, 65536),
+            Ok(Range {
+                offset: 4096,
+                count: 4096
+            })
+        );
     }
 
     #[test]
     fn align_clamps_to_cache_size() {
         // end spills past the device → clamped to cache_size (block-aligned)
-        assert_eq!(align_fetch_range(4096, 999_999, 8192), Ok((4096, 4096)));
+        assert_eq!(
+            align_fetch_range(4096, 999_999, 8192),
+            Ok(Range {
+                offset: 4096,
+                count: 4096
+            })
+        );
     }
 
     #[test]
@@ -586,9 +619,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("blob.data");
         std::fs::write(&path, vec![0u8; 4096]).unwrap();
-        let (dev, ino) = cache_identity(&path, 4096).unwrap();
+        let identity = cache_identity(&path, 4096).unwrap();
         let md = std::fs::metadata(&path).unwrap();
-        assert_eq!((dev, ino), (md.dev(), md.ino()));
+        assert_eq!((identity.dev, identity.ino), (md.dev(), md.ino()));
     }
 
     #[test]

@@ -115,11 +115,11 @@ impl ErofsFs {
         }
     }
 
-    fn iterate_dir<F>(&self, inode: u64, mut cb: F) -> io::Result<()>
+    fn iterate_dir<F>(&self, ino: u64, mut cb: F) -> io::Result<()>
     where
         F: FnMut(u64, u8, &[u8]) -> io::Result<bool>,
     {
-        let nid = self.ino_to_nid(inode);
+        let nid = self.ino_to_nid(ino);
         let vi = self.reader.inode(nid)?;
         self.reader
             .for_each_dir_entry(nid, &vi, |entry_nid, file_type, name| {
@@ -127,8 +127,8 @@ impl ErofsFs {
             })
     }
 
-    fn create_dir_handle(&self, inode: u64) -> io::Result<u64> {
-        let nid = self.ino_to_nid(inode);
+    fn create_dir_handle(&self, ino: u64) -> io::Result<u64> {
+        let nid = self.ino_to_nid(ino);
         let vi = self.reader.inode(nid)?;
         let entries = self.reader.read_dir(nid, &vi)?;
         let handle = self.next_dir_handle.fetch_add(1, Ordering::Relaxed);
@@ -227,9 +227,9 @@ impl Filesystem for ErofsFs {
             }
             Ok(true)
         });
-        if let Err(e) = res {
+        if let Err(err) = res {
             m.fail();
-            reply.error(io_errno(&e));
+            reply.error(io_errno(&err));
             return;
         }
 
@@ -239,9 +239,9 @@ impl Filesystem for ErofsFs {
                     let attr = self.make_attr(child_nid, &child_inode);
                     reply.entry(&EROFS_FUSE_TIMEOUT, &attr, Generation(0));
                 }
-                Err(e) => {
+                Err(err) => {
                     m.fail();
-                    reply.error(io_errno(&e));
+                    reply.error(io_errno(&err));
                 }
             }
             return;
@@ -263,9 +263,9 @@ impl Filesystem for ErofsFs {
                 let attr = self.make_attr(nid, &vi);
                 reply.attr(&EROFS_FUSE_TIMEOUT, &attr);
             }
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
             }
         }
     }
@@ -281,9 +281,9 @@ impl Filesystem for ErofsFs {
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
@@ -339,9 +339,9 @@ impl Filesystem for ErofsFs {
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
@@ -353,9 +353,9 @@ impl Filesystem for ErofsFs {
             .write_file_data_to(nid, &vi, offset, size, &mut buf)
         {
             Ok(_) => reply.data(&buf),
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
             }
         }
     }
@@ -365,17 +365,17 @@ impl Filesystem for ErofsFs {
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
         match self.reader.read_symlink(nid, &vi) {
             Ok(data) => reply.data(&data),
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
             }
         }
     }
@@ -385,9 +385,9 @@ impl Filesystem for ErofsFs {
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
@@ -402,9 +402,9 @@ impl Filesystem for ErofsFs {
                 FileHandle(handle),
                 FopenFlags::FOPEN_KEEP_CACHE | FopenFlags::FOPEN_CACHE_DIR,
             ),
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
             }
         }
     }
@@ -420,9 +420,9 @@ impl Filesystem for ErofsFs {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdir);
         let dir_handle = match self.dir_handle(fh.0) {
             Ok(h) => h,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
@@ -449,9 +449,9 @@ impl Filesystem for ErofsFs {
         let mut m = FsOpMetric::new(metrics::FsOp::Readdirplus);
         let dir_handle = match self.dir_handle(fh.0) {
             Ok(h) => h,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
@@ -459,9 +459,9 @@ impl Filesystem for ErofsFs {
         for (index, entry) in dir_handle.entries.iter().enumerate().skip(start) {
             let child_inode = match self.reader.inode(entry.nid) {
                 Ok(vi) => vi,
-                Err(e) => {
+                Err(err) => {
                     m.fail();
-                    reply.error(io_errno(&e));
+                    reply.error(io_errno(&err));
                     return;
                 }
             };
@@ -536,9 +536,9 @@ impl Filesystem for ErofsFs {
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
@@ -551,9 +551,9 @@ impl Filesystem for ErofsFs {
 
         let xattrs = match self.reader.read_xattrs(nid, &vi) {
             Ok(x) => x,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
@@ -582,17 +582,17 @@ impl Filesystem for ErofsFs {
         let nid = self.ino_to_nid(ino.0);
         let vi = match self.reader.inode(nid) {
             Ok(vi) => vi,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };
         let xattrs = match self.reader.read_xattrs(nid, &vi) {
             Ok(x) => x,
-            Err(e) => {
+            Err(err) => {
                 m.fail();
-                reply.error(io_errno(&e));
+                reply.error(io_errno(&err));
                 return;
             }
         };

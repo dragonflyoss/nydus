@@ -41,7 +41,7 @@ pub struct OndemandBlob {
     /// The ondemand artifact bytes `[group data][blob.meta][footer]`.
     pub artifact: Vec<u8>,
     /// SHA256 of the whole artifact (the ondemand blob's name).
-    pub full_digest: [u8; EROFS_BLOB_ID_SIZE],
+    pub full_blob_digest: [u8; EROFS_BLOB_ID_SIZE],
     pub blob_metadata: BlobMetadata,
     pub footer: BlobFooter,
     /// The parent bootstrap rewritten so the runtime prefetches the ondemand
@@ -53,12 +53,20 @@ pub struct OndemandBlob {
     pub source_blob_count: usize,
 }
 
+/// One validated group reference from the trace: a [`TraceEntry`] narrowed
+/// to the device-table index width, deduplicated and order-preserving.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GroupRef {
+    pub blob_index: u16,
+    pub group_index: u32,
+}
+
 /// Build an "ondemand" redirect blob from a `/trace` access pattern and rewrite
 /// the bootstrap so the runtime prefetches it first, warming the source blobs'
 /// caches in recorded access order before on-demand reads arrive.
 pub fn build_ondemand_blob(
     parent_bootstrap: &Path,
-    patterns: &[(u16, u32)],
+    patterns: &[GroupRef],
     backend: Arc<dyn BlobBackend>,
     cache_dir: &Path,
 ) -> Result<OndemandBlob> {
@@ -84,7 +92,11 @@ pub fn build_ondemand_blob(
     let mut next_block_offset = 0u64;
     let mut decoded = Vec::new();
 
-    for (blob_index, group_index) in patterns {
+    for GroupRef {
+        blob_index,
+        group_index,
+    } in patterns
+    {
         let info = infos_by_index.get(blob_index).ok_or_else(|| {
             Error::InvalidParameter(format!("pattern references unknown blob {blob_index}"))
         })?;
@@ -160,16 +172,19 @@ pub fn build_ondemand_blob(
     )
     .context("failed to assemble ondemand blob meta")?;
 
-    let (artifact, full_digest, footer) =
+    let (artifact, full_blob_digest, footer) =
         assemble_ondemand_artifact(&ondemand_data, &blob_metadata)?;
 
-    let bootstrap =
-        rewrite_bootstrap_with_ondemand_blob(parent_bootstrap, &full_digest, next_block_offset)
-            .context("failed to rewrite bootstrap with ondemand device")?;
+    let bootstrap = rewrite_bootstrap_with_ondemand_blob(
+        parent_bootstrap,
+        &full_blob_digest,
+        next_block_offset,
+    )
+    .context("failed to rewrite bootstrap with ondemand device")?;
 
     Ok(OndemandBlob {
         artifact,
-        full_digest,
+        full_blob_digest,
         blob_metadata,
         footer,
         bootstrap,
@@ -179,8 +194,8 @@ pub fn build_ondemand_blob(
 }
 
 /// Fetch the `/trace` JSON from a running mount's apiserver and return the
-/// deduplicated `(blob_index, group_index)` list in first-access order.
-pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<(u16, u32)>> {
+/// deduplicated [`GroupRef`] list in first-access order.
+pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<GroupRef>> {
     let raw = fetch_trace(apiserver)
         .with_context(|| format!("failed to fetch /trace from apiserver {apiserver}"))?;
     parse_trace_document(&raw)
@@ -188,9 +203,9 @@ pub fn load_patterns_from_apiserver(apiserver: &str) -> Result<Vec<(u16, u32)>> 
 }
 
 /// Load access patterns from a versioned JSON trace document
-/// (`{"version":1,"trace":{"patterns":[...]}}`), exactly as produced by the
+/// (`{"version":1,"patterns":[...]}`), exactly as produced by the
 /// apiserver `/trace` endpoint.
-pub fn load_patterns_from_file(path: &Path) -> Result<Vec<(u16, u32)>> {
+pub fn load_patterns_from_file(path: &Path) -> Result<Vec<GroupRef>> {
     let raw =
         fs::read(path).with_context(|| format!("failed to read trace file: {}", path.display()))?;
     parse_trace_document(&raw)
@@ -198,7 +213,7 @@ pub fn load_patterns_from_file(path: &Path) -> Result<Vec<(u16, u32)>> {
 }
 
 /// Parse the versioned trace document `{"version":1,"patterns":[...]}`.
-fn parse_trace_document(raw: &[u8]) -> Result<Vec<(u16, u32)>> {
+fn parse_trace_document(raw: &[u8]) -> Result<Vec<GroupRef>> {
     let envelope: TraceDocument =
         serde_json::from_slice(raw).context("failed to parse trace document")?;
     if envelope.version != TRACE_DOCUMENT_VERSION {
@@ -207,12 +222,12 @@ fn parse_trace_document(raw: &[u8]) -> Result<Vec<(u16, u32)>> {
             envelope.version
         )));
     }
-    dedup_patterns(envelope.patterns)
+    dedup_patterns(envelope.entries)
 }
 
 /// Deduplicate `(blob_index, group_index)` pairs while preserving first-access
 /// order, validating that every blob index fits in a non-zero `u16`.
-fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<(u16, u32)>> {
+fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<GroupRef>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for pattern in patterns {
@@ -227,8 +242,12 @@ fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<(u16, u32)>> {
                 "pattern blob index must be non-zero".to_string(),
             ));
         }
-        if seen.insert((blob_index, pattern.group_index)) {
-            ordered.push((blob_index, pattern.group_index));
+        let group = GroupRef {
+            blob_index,
+            group_index: pattern.group_index,
+        };
+        if seen.insert(group) {
+            ordered.push(group);
         }
     }
     Ok(ordered)
@@ -282,7 +301,19 @@ mod tests {
             {"blob_index":1,"group_index":4},
             {"blob_index":2,"group_index":7}]}"#;
         let patterns = parse_trace_document(doc).unwrap();
-        assert_eq!(patterns, vec![(1, 4), (2, 7)]);
+        assert_eq!(
+            patterns,
+            vec![
+                GroupRef {
+                    blob_index: 1,
+                    group_index: 4
+                },
+                GroupRef {
+                    blob_index: 2,
+                    group_index: 7
+                }
+            ]
+        );
 
         // Wrong version is rejected.
         let err = parse_trace_document(br#"{"version":2,"patterns":[]}"#).unwrap_err();

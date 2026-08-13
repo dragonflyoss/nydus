@@ -43,7 +43,7 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
                 if config.backend.kind == "local" {
                     let dir = config
                         .backend
-                        .config
+                        .options
                         .get("dir")
                         .and_then(|value| value.as_str())
                         .map(PathBuf::from)

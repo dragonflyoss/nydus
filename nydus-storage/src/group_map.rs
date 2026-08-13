@@ -219,7 +219,7 @@ impl GroupMap {
         Ok(self.bit_byte(index).load(Ordering::Acquire) & mask != 0)
     }
 
-    pub fn ready_ranges(&self, first: usize, last: usize) -> io::Result<Vec<Range<usize>>> {
+    pub fn ready_group_ranges(&self, first: usize, last: usize) -> io::Result<Vec<Range<usize>>> {
         validate_range(first, last, self.group_count)?;
 
         // Fast path: a fully-ready blob needs no bit scanning at all.
@@ -415,10 +415,16 @@ mod tests {
             map.set_ready(index).unwrap();
         }
 
-        assert_eq!(map.ready_ranges(0, 9).unwrap(), vec![1..3, 4..5, 7..10]);
-        assert_eq!(map.ready_ranges(7, 9).unwrap(), vec![7..10]);
-        assert_eq!(map.ready_ranges(0, 8).unwrap(), vec![1..3, 4..5, 7..9]);
-        assert_eq!(map.ready_ranges(8, 9).unwrap(), vec![8..10]);
+        assert_eq!(
+            map.ready_group_ranges(0, 9).unwrap(),
+            vec![1..3, 4..5, 7..10]
+        );
+        assert_eq!(map.ready_group_ranges(7, 9).unwrap(), vec![7..10]);
+        assert_eq!(
+            map.ready_group_ranges(0, 8).unwrap(),
+            vec![1..3, 4..5, 7..9]
+        );
+        assert_eq!(map.ready_group_ranges(8, 9).unwrap(), vec![8..10]);
     }
 
     #[test]
@@ -496,8 +502,8 @@ mod tests {
         assert!(observer.is_all_ready());
         assert!(observer.latch_all_ready());
 
-        // ready_ranges collapses to the whole span on the fast path.
-        assert_eq!(observer.ready_ranges(0, 8).unwrap(), vec![0..9]);
+        // ready_group_ranges collapses to the whole span on the fast path.
+        assert_eq!(observer.ready_group_ranges(0, 8).unwrap(), vec![0..9]);
 
         // And the flag persists on disk.
         let reopened = GroupMap::open(&path, 9).unwrap();

@@ -4,8 +4,8 @@ use nydus_format::erofs::{
     erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_ibody_size,
     erofs_xattr_icount, erofs_xattr_name_split, mode_to_erofs_file_type,
     needs_erofs_extended_inode, ErofsChunkAddr, ErofsChunkIndex, ErofsInodeCompact,
-    ErofsInodeExtended, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE, EROFS_FT_DIR,
-    EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE,
+    ErofsInodeExtended, XattrEntry, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE, EROFS_CHUNK_INDEX_SIZE,
+    EROFS_FT_DIR, EROFS_INODE_CHUNK_BASED, EROFS_INODE_COMPACT_SIZE, EROFS_INODE_EXTENDED_SIZE,
     EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_PLAIN, EROFS_XATTR_ENTRY_HEADER_SIZE,
     EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
 };
@@ -54,8 +54,8 @@ pub struct InodeInfo {
     /// File-type-specific data.
     pub data: InodeData,
 
-    /// Inline xattr entries: (prefix_index, name_suffix, value).
-    pub xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>,
+    /// Inline xattr entries, in EROFS ibody order.
+    pub xattrs: Vec<XattrEntry>,
 }
 
 /// File-type-specific data for an inode.
@@ -194,16 +194,16 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]
         ));
     }
 
-    inode.xattrs.retain(|(index, suffix, _)| {
-        !(*index == EROFS_XATTR_INDEX_TRUSTED
-            && suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
+    inode.xattrs.retain(|entry| {
+        !(entry.name_index == EROFS_XATTR_INDEX_TRUSTED
+            && entry.suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS)
     });
 
-    inode.xattrs.push((
-        EROFS_XATTR_INDEX_TRUSTED,
-        NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
-        value.into_bytes(),
-    ));
+    inode.xattrs.push(XattrEntry {
+        name_index: EROFS_XATTR_INDEX_TRUSTED,
+        suffix: NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
+        value: value.into_bytes(),
+    });
 
     Ok(())
 }
@@ -258,7 +258,7 @@ pub(crate) struct NodeAttrs {
     /// count is recomputed from the tree being flattened).
     pub nlink: u32,
     /// Inline xattr entries: (prefix_index, name_suffix, value), sorted.
-    pub xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>,
+    pub xattrs: Vec<XattrEntry>,
 }
 
 /// A directory's children as (name, node) pairs, sorted by name.
@@ -522,7 +522,7 @@ impl<'a> TreeNode<FsBuildContext<'a>> for FsTreeNode {
     }
 }
 
-/// Serialize an inode to bytes and write it at the given offset in a buffer.
+/// Serialize an inode (header, xattrs, chunk indexes and inline tail) to bytes.
 pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
     let blkszbits = EROFS_BLKSZBITS as u32;
     let inode_size = erofs_inode_size(inode);
@@ -773,11 +773,7 @@ pub(crate) fn serialize_inode(inode: &InodeInfo, epoch: u64) -> Vec<u8> {
 ///
 /// Returns the ibody size in bytes, or 0 when `xattrs` is empty.
 /// Panics if the ibody does not fit in `buf` at `offset`.
-fn write_erofs_xattr_ibody(
-    buf: &mut [u8],
-    offset: usize,
-    xattrs: &[(u8, Vec<u8>, Vec<u8>)],
-) -> usize {
+fn write_erofs_xattr_ibody(buf: &mut [u8], offset: usize, xattrs: &[XattrEntry]) -> usize {
     if xattrs.is_empty() {
         return 0;
     }
@@ -789,7 +785,8 @@ fn write_erofs_xattr_ibody(
 
     // Entries start right after the header; `entry_start` stays 4-byte aligned.
     let mut entry_start = EROFS_XATTR_IBODY_HEADER_SIZE;
-    for (name_index, name_suffix, value) in xattrs {
+    for entry in xattrs {
+        let (name_index, name_suffix, value) = (&entry.name_index, &entry.suffix, &entry.value);
         // EROFS XATTR Entry: e_name_len(u8) + e_name_index(u8) +
         // e_value_size(u16 LE), followed by the name suffix and the value.
         let name_start = entry_start + EROFS_XATTR_ENTRY_HEADER_SIZE;
@@ -810,23 +807,27 @@ fn write_erofs_xattr_ibody(
 }
 
 /// Read xattrs from a filesystem path, returning (prefix_index, suffix_bytes, value) triples.
-fn read_xattrs_from_path(path: &Path) -> Vec<(u8, Vec<u8>, Vec<u8>)> {
+fn read_xattrs_from_path(path: &Path) -> Vec<XattrEntry> {
     use std::os::unix::ffi::OsStrExt;
     let Ok(names) = xattr::list(path) else {
         return Vec::new();
     };
 
-    let mut xattrs: Vec<(u8, Vec<u8>, Vec<u8>)> = names
+    let mut xattrs: Vec<XattrEntry> = names
         .filter_map(|name| {
             let (prefix_index, suffix) = erofs_xattr_name_split(name.as_bytes())?;
             let value = xattr::get(path, &name).ok().flatten().unwrap_or_default();
-            Some((prefix_index, suffix.to_vec(), value))
+            Some(XattrEntry {
+                name_index: prefix_index,
+                suffix: suffix.to_vec(),
+                value,
+            })
         })
         .collect();
     // listxattr returns attributes in whatever order the source filesystem
     // stored them, which is the order they were set in. Sorting keeps the
     // bootstrap identical for two trees that differ only in that order.
-    xattrs.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    xattrs.sort_by(|a, b| (a.name_index, &a.suffix).cmp(&(b.name_index, &b.suffix)));
     xattrs
 }
 
@@ -835,7 +836,7 @@ mod tests {
     use super::*;
     use nydus_format::erofs::EROFS_XATTR_INDEX_USER;
 
-    fn root_inode_with_xattrs(xattrs: Vec<(u8, Vec<u8>, Vec<u8>)>) -> InodeInfo {
+    fn root_inode_with_xattrs(xattrs: Vec<XattrEntry>) -> InodeInfo {
         InodeInfo {
             mode: 0o040755,
             uid: 0,
@@ -861,12 +862,16 @@ mod tests {
     #[test]
     fn set_root_prefetch_blobs_xattr_replaces_and_deduplicates_value() {
         let mut inode = root_inode_with_xattrs(vec![
-            (
-                EROFS_XATTR_INDEX_TRUSTED,
-                NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
-                b"old".to_vec(),
-            ),
-            (EROFS_XATTR_INDEX_USER, b"keep".to_vec(), b"value".to_vec()),
+            XattrEntry {
+                name_index: EROFS_XATTR_INDEX_TRUSTED,
+                suffix: NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS.to_vec(),
+                value: b"old".to_vec(),
+            },
+            XattrEntry {
+                name_index: EROFS_XATTR_INDEX_USER,
+                suffix: b"keep".to_vec(),
+                value: b"value".to_vec(),
+            },
         ]);
 
         set_root_prefetch_blobs_xattr(&mut inode, &[2, 5, 2, 0, 1]).unwrap();
@@ -874,17 +879,17 @@ mod tests {
         let prefetch_xattrs = inode
             .xattrs
             .iter()
-            .filter(|(index, suffix, _)| {
-                *index == EROFS_XATTR_INDEX_TRUSTED
-                    && suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS
+            .filter(|entry| {
+                entry.name_index == EROFS_XATTR_INDEX_TRUSTED
+                    && entry.suffix.as_slice() == NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS
             })
             .collect::<Vec<_>>();
         assert_eq!(prefetch_xattrs.len(), 1);
-        assert_eq!(prefetch_xattrs[0].2, b"2,5,1");
-        assert!(inode.xattrs.iter().any(|(index, suffix, value)| {
-            *index == EROFS_XATTR_INDEX_USER
-                && suffix.as_slice() == b"keep"
-                && value.as_slice() == b"value"
+        assert_eq!(prefetch_xattrs[0].value, b"2,5,1");
+        assert!(inode.xattrs.iter().any(|entry| {
+            entry.name_index == EROFS_XATTR_INDEX_USER
+                && entry.suffix.as_slice() == b"keep"
+                && entry.value.as_slice() == b"value"
         }));
     }
 }

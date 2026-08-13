@@ -170,7 +170,7 @@ impl NbdService {
         // Clear any previous session so a fresh socket/flags set applies.
         let _ = nbd_ioctl(fd, NBD_CLEAR_SOCK, 0);
         nbd_ioctl(fd, NBD_SET_BLOCK_SIZE, NBD_BLOCK_SIZE).context("NBD_SET_BLOCK_SIZE failed")?;
-        nbd_ioctl(fd, NBD_SET_BLOCKS, core.blocks()).context("NBD_SET_BLOCKS failed")?;
+        nbd_ioctl(fd, NBD_SET_BLOCKS, core.block_count()).context("NBD_SET_BLOCKS failed")?;
         nbd_ioctl(fd, NBD_SET_TIMEOUT, timeout_secs).context("NBD_SET_TIMEOUT failed")?;
         nbd_ioctl(
             fd,

@@ -1,7 +1,7 @@
 //! The format-layer error type.
 //!
 //! On-disk format parsing is consumed by both of nydus's error planes: the
-//! data plane wraps [`FormatError`] into `io::Error` (`InvalidData`) so the
+//! data plane wraps [`Error`] into `io::Error` (`InvalidData`) so the
 //! errno-carrying read path stays uniform, and the control plane converts it
 //! into the project-wide error (`Error::InvalidImage` and friends) via a
 //! `From` impl there. Keeping the format error local to this crate lets both
@@ -16,7 +16,7 @@ use std::fmt;
 use std::io;
 
 /// The result type for format-layer operations.
-pub type Result<T> = std::result::Result<T, FormatError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// The error type for parsing and writing nydus on-disk structures.
 ///
@@ -24,7 +24,7 @@ pub type Result<T> = std::result::Result<T, FormatError>;
 /// break, so downstream matches need a wildcard arm.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FormatError {
+pub enum Error {
     /// The error for IO operations. Kept transparent so the OS errno survives
     /// into the data plane's `io::Error` wrapping.
     #[error(transparent)]
@@ -54,7 +54,7 @@ pub enum FormatError {
         /// Human-readable description of the failed operation.
         context: String,
         /// The underlying error.
-        source: Box<FormatError>,
+        source: Box<Error>,
     },
 }
 
@@ -63,13 +63,13 @@ mod private {
     /// one intended.
     pub trait Sealed {}
 
-    impl<T, E: Into<super::FormatError>> Sealed for std::result::Result<T, E> {}
+    impl<T, E: Into<super::Error>> Sealed for std::result::Result<T, E> {}
 }
 
 /// Extension trait that wraps an error with context, keeping the original
-/// error as the source of the returned [`FormatError::Context`].
+/// error as the source of the returned [`Error::Context`].
 ///
-/// Sealed: implemented for `Result<T, E>` where `E: Into<FormatError>` and
+/// Sealed: implemented for `Result<T, E>` where `E: Into<Error>` and
 /// not implementable outside this crate.
 pub trait Context<T>: private::Sealed {
     /// Wraps the error with `context`.
@@ -80,16 +80,16 @@ pub trait Context<T>: private::Sealed {
     fn with_context<C: fmt::Display, F: FnOnce() -> C>(self, f: F) -> Result<T>;
 }
 
-impl<T, E: Into<FormatError>> Context<T> for std::result::Result<T, E> {
+impl<T, E: Into<Error>> Context<T> for std::result::Result<T, E> {
     fn context<C: fmt::Display>(self, context: C) -> Result<T> {
-        self.map_err(|err| FormatError::Context {
+        self.map_err(|err| Error::Context {
             context: context.to_string(),
             source: Box::new(err.into()),
         })
     }
 
     fn with_context<C: fmt::Display, F: FnOnce() -> C>(self, f: F) -> Result<T> {
-        self.map_err(|err| FormatError::Context {
+        self.map_err(|err| Error::Context {
             context: f().to_string(),
             source: Box::new(err.into()),
         })

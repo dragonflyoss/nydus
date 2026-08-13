@@ -14,20 +14,18 @@ use nydus::build::bootstrap::render_bootstrap;
 use nydus::build::inode::{build_tree, ChildRef, InodeData, InodeInfo};
 use nydus_core::ErofsReader;
 use nydus_format::erofs::{
-    erofs_xattr_ibody_size, ErofsChunkAddr, ErofsDeviceSlot, EROFS_BLKSZBITS, EROFS_BLOCK_SIZE,
-    EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER,
+    erofs_xattr_ibody_size, ErofsChunkAddr, ErofsDeviceSlot, XattrEntry, EROFS_BLKSZBITS,
+    EROFS_BLOCK_SIZE, EROFS_FT_REG_FILE, EROFS_XATTR_INDEX_USER,
 };
 use nydus_format::utils::sha256_file;
 
 #[test]
 fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
-    let file_xattrs: Vec<(u8, Vec<u8>, Vec<u8>)> = (0..8)
-        .map(|index| {
-            (
-                EROFS_XATTR_INDEX_USER,
-                format!("large_{index:02}").into_bytes(),
-                vec![b'A' + index as u8; 700],
-            )
+    let file_xattrs: Vec<XattrEntry> = (0..8)
+        .map(|index| XattrEntry {
+            name_index: EROFS_XATTR_INDEX_USER,
+            suffix: format!("large_{index:02}").into_bytes(),
+            value: vec![b'A' + index as u8; 700],
         })
         .collect();
     assert!(erofs_xattr_ibody_size(&file_xattrs) > EROFS_BLOCK_SIZE as usize);
@@ -97,10 +95,10 @@ fn reads_large_xattrs_and_chunk_indexes_after_large_ibody() {
 
     let xattrs = reader.read_xattrs(file_nid, &inode).expect("read xattrs");
     assert_eq!(xattrs.len(), file_xattrs.len());
-    for ((name, value), (_, suffix, expected_value)) in xattrs.iter().zip(file_xattrs.iter()) {
-        let expected_name = [b"user.".as_slice(), suffix.as_slice()].concat();
+    for ((name, value), expected) in xattrs.iter().zip(file_xattrs.iter()) {
+        let expected_name = [b"user.".as_slice(), expected.suffix.as_slice()].concat();
         assert_eq!(name, &expected_name);
-        assert_eq!(value, expected_value);
+        assert_eq!(value, &expected.value);
     }
 
     let chunk_index_entries = reader
@@ -148,12 +146,12 @@ fn reads_chunk_data_from_footer_based_full_blob() {
         .expect("blob meta");
 
     let data = fs::read(&data_path).expect("read data blob");
-    let full_blob_id =
+    let full_blob_digest =
         fixture::assemble_full_blob(dir.path(), &data, &embedded_bootstrap, &blob_metadata);
 
     let standalone_device_slots = [ErofsDeviceSlot::with_blob_id(
         blob_writer.total_blocks(),
-        &full_blob_id,
+        &full_blob_digest,
     )];
     let bootstrap = render_bootstrap(
         &mut inodes,
@@ -167,7 +165,7 @@ fn reads_chunk_data_from_footer_based_full_blob() {
     fs::write(&bootstrap_path, &bootstrap).expect("write bootstrap file");
 
     let backend: std::sync::Arc<dyn nydus_backend::BlobBackend> =
-        std::sync::Arc::new(nydus_backend::LocalBackend::new(dir.path().to_path_buf()));
+        std::sync::Arc::new(nydus_backend::Local::new(dir.path().to_path_buf()));
     let reader =
         ErofsReader::open_bootstrap(&bootstrap_path, backend, None, None).expect("open reader");
     let root = reader

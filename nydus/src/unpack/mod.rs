@@ -192,9 +192,9 @@ impl Unpacker<'_> {
             }
             match String::from_utf8(name) {
                 Ok(name) => records.push((format!("SCHILY.xattr.{name}"), value)),
-                Err(e) => tracing::warn!(
+                Err(err) => tracing::warn!(
                     "skipping non-UTF-8 xattr on inode {nid}: {}",
-                    String::from_utf8_lossy(e.as_bytes())
+                    String::from_utf8_lossy(err.as_bytes())
                 ),
             }
         }

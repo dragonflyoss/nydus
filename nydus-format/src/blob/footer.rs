@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::blob::validate::{crc32_with_zeroed_field, validate_incompat_flags};
 use crate::erofs::{blocks_to_bytes, EROFS_BLOCK_SIZE};
-use crate::error::{Context, FormatError, Result};
+use crate::error::{Context, Error, Result};
 use crate::utils::le::{read_u32_at, read_u64_at, write_u32_at, write_u64_at};
 
 /// On-disk magic: 8 raw ASCII bytes, written as-is so a hexdump of the
@@ -67,7 +67,7 @@ impl BlobFooter {
         footer.validate_layout(
             blob_metadata_offset
                 .checked_add(blocks_to_bytes(blob_metadata_blocks))
-                .ok_or_else(|| FormatError::Overflow("blob footer offset overflow".to_string()))?,
+                .ok_or_else(|| Error::Overflow("blob footer offset overflow".to_string()))?,
         )?;
         footer.crc32 = footer.compute_crc32();
         Ok(footer)
@@ -75,7 +75,7 @@ impl BlobFooter {
 
     pub fn parse_from_tail(data: &[u8]) -> Result<Self> {
         if data.len() < NYDUS_BLOB_FOOTER_SIZE {
-            return Err(FormatError::InvalidImage(
+            return Err(Error::InvalidImage(
                 "blob too small for nydus footer".to_string(),
             ));
         }
@@ -91,7 +91,7 @@ impl BlobFooter {
     /// read) rather than reading the whole blob.
     pub fn parse(footer_bytes: &[u8], blob_size: u64) -> Result<Self> {
         if footer_bytes.len() != NYDUS_BLOB_FOOTER_SIZE {
-            return Err(FormatError::InvalidImage(format!(
+            return Err(Error::InvalidImage(format!(
                 "invalid nydus footer size: {} (expected {})",
                 footer_bytes.len(),
                 NYDUS_BLOB_FOOTER_SIZE
@@ -110,7 +110,7 @@ impl BlobFooter {
             .with_context(|| format!("failed to stat blob footer: {}", path.display()))?
             .len();
         if file_size < NYDUS_BLOB_FOOTER_SIZE as u64 {
-            return Err(FormatError::InvalidImage(format!(
+            return Err(Error::InvalidImage(format!(
                 "blob too small for nydus footer: {}",
                 path.display()
             )));
@@ -170,12 +170,12 @@ impl BlobFooter {
     pub fn footer_offset(file_size: u64) -> Result<u64> {
         file_size
             .checked_sub(NYDUS_BLOB_FOOTER_SIZE as u64)
-            .ok_or_else(|| FormatError::InvalidImage("blob too small for nydus footer".to_string()))
+            .ok_or_else(|| Error::InvalidImage("blob too small for nydus footer".to_string()))
     }
 
     fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() != NYDUS_BLOB_FOOTER_SIZE {
-            return Err(FormatError::InvalidImage(format!(
+            return Err(Error::InvalidImage(format!(
                 "invalid nydus footer size: {}",
                 data.len()
             )));
@@ -203,7 +203,7 @@ impl BlobFooter {
         // reserved tail may carry nonzero compat fields from a newer writer,
         // which `to_bytes` would drop and thereby corrupt the checksum.
         if footer.crc32 != crc32_with_zeroed_field(data, Self::crc32_field()) {
-            return Err(FormatError::InvalidImage(
+            return Err(Error::InvalidImage(
                 "nydus footer crc32 mismatch".to_string(),
             ));
         }
@@ -233,7 +233,7 @@ impl BlobFooter {
 
     fn validate_common(&self) -> Result<()> {
         if self.magic != NYDUS_BLOB_FOOTER_MAGIC {
-            return Err(FormatError::InvalidImage(
+            return Err(Error::InvalidImage(
                 "invalid nydus footer magic".to_string(),
             ));
         }
@@ -249,7 +249,7 @@ impl BlobFooter {
         // `bootstrap_blocks` may be zero: an "ondemand" redirect blob carries
         // only group data plus blob meta and embeds no bootstrap image.
         if self.blob_metadata_blocks == 0 {
-            return Err(FormatError::InvalidImage(
+            return Err(Error::InvalidImage(
                 "nydus footer blob meta block count must be non-zero".to_string(),
             ));
         }
@@ -265,7 +265,7 @@ impl BlobFooter {
             ("footer_offset", footer_offset),
         ] {
             if value % NYDUS_BLOB_FOOTER_ALIGNMENT != 0 {
-                return Err(FormatError::InvalidImage(format!(
+                return Err(Error::InvalidImage(format!(
                     "nydus footer {name} is not 4KiB aligned"
                 )));
             }
@@ -275,26 +275,22 @@ impl BlobFooter {
             .compressed_data_offset
             .checked_add(self.compressed_data_size)
             .ok_or_else(|| {
-                FormatError::Overflow("nydus footer compressed data region overflow".to_string())
+                Error::Overflow("nydus footer compressed data region overflow".to_string())
             })?;
         let bootstrap_end = self
             .bootstrap_offset
             .checked_add(self.bootstrap_size())
-            .ok_or_else(|| {
-                FormatError::Overflow("nydus footer bootstrap region overflow".to_string())
-            })?;
+            .ok_or_else(|| Error::Overflow("nydus footer bootstrap region overflow".to_string()))?;
         let blob_metadata_end = self
             .blob_metadata_offset
             .checked_add(self.blob_metadata_size())
-            .ok_or_else(|| {
-                FormatError::Overflow("nydus footer blob meta region overflow".to_string())
-            })?;
+            .ok_or_else(|| Error::Overflow("nydus footer blob meta region overflow".to_string()))?;
 
         if !(compressed_data_end <= self.bootstrap_offset
             && bootstrap_end <= self.blob_metadata_offset
             && blob_metadata_end == footer_offset)
         {
-            return Err(FormatError::InvalidImage(
+            return Err(Error::InvalidImage(
                 "invalid nydus footer region layout".to_string(),
             ));
         }

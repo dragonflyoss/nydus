@@ -75,9 +75,9 @@ impl HttpProxy {
         &self.client
     }
 
-    /// Attach Dragonfly hint headers (priority + P2P opt-in) to a request the
-    /// HTTP proxy will serve.
-    pub(crate) fn decorate(headers: &mut HeaderMap, kind: ReadKind) {
+    /// Attach Dragonfly hint headers (priority + P2P opt-in). Shared by the
+    /// HTTP-proxy and SDK transports.
+    pub(crate) fn apply_dragonfly_hints(headers: &mut HeaderMap, kind: ReadKind) {
         if let Ok(priority) = dragonfly_priority(kind).to_string().parse() {
             headers.insert(HEADER_DRAGONFLY_PRIORITY, priority);
         }

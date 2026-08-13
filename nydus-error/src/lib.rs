@@ -155,10 +155,10 @@ impl Error {
 /// code crosses the boundary with a plain `?`. Each variant maps to its
 /// project-wide counterpart and `Context` chains are rebuilt recursively, so
 /// the printed chain text is unchanged. The data plane never uses this: it
-/// wraps [`nydus_format::FormatError`] into `io::Error` instead.
-impl From<nydus_format::FormatError> for Error {
-    fn from(err: nydus_format::FormatError) -> Self {
-        use nydus_format::FormatError;
+/// wraps [`nydus_format::Error`] into `io::Error` instead.
+impl From<nydus_format::Error> for Error {
+    fn from(err: nydus_format::Error) -> Self {
+        use nydus_format::Error as FormatError;
         match err {
             FormatError::Io(source) => Error::Io(source),
             FormatError::InvalidImage(msg) => Error::InvalidImage(msg),

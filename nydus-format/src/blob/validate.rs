@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use crc32c::crc32c_append;
 
-use crate::error::{FormatError, Result};
+use crate::error::{Error, Result};
 
 /// The incompatible (reject-when-unknown) half of a format `flags` word.
 pub const INCOMPAT_MASK: u32 = 0x0000_FFFF;
@@ -19,7 +19,7 @@ pub const INCOMPAT_MASK: u32 = 0x0000_FFFF;
 pub fn validate_incompat_flags(flags: u32, supported: u32, what: &str) -> Result<()> {
     let unknown_incompat = flags & INCOMPAT_MASK & !supported;
     if unknown_incompat != 0 {
-        return Err(FormatError::Unsupported(format!(
+        return Err(Error::Unsupported(format!(
             "unsupported {what} incompat flags: {unknown_incompat:#x}"
         )));
     }

@@ -25,8 +25,9 @@ pub fn assemble_full_blob(
     .expect("assemble full blob");
     drop(full_blob);
 
-    let full_blob_id = nydus_format::utils::sha256_file(&full_blob_path).expect("hash full blob");
-    let final_path = blob_dir.join(nydus_format::utils::hex_string(&full_blob_id));
+    let full_blob_digest =
+        nydus_format::utils::sha256_file(&full_blob_path).expect("hash full blob");
+    let final_path = blob_dir.join(nydus_format::utils::hex_string(&full_blob_digest));
     std::fs::rename(&full_blob_path, final_path).expect("rename full blob");
-    full_blob_id
+    full_blob_digest
 }
