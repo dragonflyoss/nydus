@@ -1,13 +1,13 @@
 use crate::cli_common;
 use clap::{Args, ValueEnum};
+use nydus::build::{build_dir_image, DirImageOptions};
 use nydus::error::{Context, Error, Result};
 use nydus::unpack::unpack_to_tar;
-use nydus_core::blob::{BlobFooter, BlobMeta, BlobMetaCompressor, BLOB_META_SUFFIX};
-use nydus_core::build::{build_dir_image, DirImageOptions};
-use nydus_core::fs::ErofsReader;
-use nydus_core::metadata::EROFS_BLOB_ID_SIZE;
-use nydus_core::telemetry::logging::{init_command_tracing, init_command_tracing_stderr};
-use nydus_core::utils::{hex_string, MIB};
+use nydus_core::ErofsReader;
+use nydus_format::blob::{BlobFooter, BlobMetadata, BlobMetadataCompressor, BLOB_METADATA_SUFFIX};
+use nydus_format::erofs::EROFS_BLOB_ID_SIZE;
+use nydus_format::utils::{hex_string, MIB};
+use nydus_telemetry::logging::{init_command_tracing, init_command_tracing_stderr};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter};
@@ -29,7 +29,7 @@ pub enum Compressor {
     Zstd,
 }
 
-impl From<Compressor> for BlobMetaCompressor {
+impl From<Compressor> for BlobMetadataCompressor {
     fn from(value: Compressor) -> Self {
         match value {
             Compressor::None => Self::None,
@@ -127,7 +127,7 @@ fn run_nydus_to_tar(args: BuildArgs) -> Result<()> {
         )));
     }
 
-    let reader = ErofsReader::open(Some(&args.source), None, None, None)
+    let reader = ErofsReader::open_blob(&args.source)
         .with_context(|| format!("failed to open nydus blob: {}", args.source.display()))?;
 
     if args.output == Path::new("-") {
@@ -209,11 +209,11 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     })?;
 
     let final_blob_path = finalize_blob_output(&blob_output, &image.full_blob_id)?;
-    let blob_meta_path = blob_meta_output_path(&final_blob_path)?;
+    let blob_metadata_path = blob_metadata_output_path(&final_blob_path)?;
     image
-        .blob_meta
-        .save(&blob_meta_path)
-        .with_context(|| format!("failed to save blob meta: {}", blob_meta_path.display()))?;
+        .blob_metadata
+        .save(&blob_metadata_path)
+        .with_context(|| format!("failed to save blob meta: {}", blob_metadata_path.display()))?;
 
     if let (Some(bootstrap), Some(bytes)) = (&args.bootstrap, &image.standalone_bootstrap) {
         fs::write(bootstrap, bytes)
@@ -224,10 +224,10 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
         index: 0,
         data_blob_digest: &image.data_digest,
         full_blob_digest: &image.full_blob_id,
-        blob_meta: &image.blob_meta,
+        blob_metadata: &image.blob_metadata,
         footer: &image.footer,
         full_blob_path: &final_blob_path,
-        blob_meta_path: &blob_meta_path,
+        blob_metadata_path: &blob_metadata_path,
         bootstrap_path: args.bootstrap.as_deref(),
     });
     Ok(())
@@ -237,10 +237,10 @@ struct BlobSummary<'a> {
     index: usize,
     data_blob_digest: &'a [u8; EROFS_BLOB_ID_SIZE],
     full_blob_digest: &'a [u8; EROFS_BLOB_ID_SIZE],
-    blob_meta: &'a BlobMeta,
+    blob_metadata: &'a BlobMetadata,
     footer: &'a BlobFooter,
     full_blob_path: &'a Path,
-    blob_meta_path: &'a Path,
+    blob_metadata_path: &'a Path,
     bootstrap_path: Option<&'a Path>,
 }
 
@@ -249,10 +249,10 @@ fn print_blob_summary(summary: BlobSummary<'_>) {
         index,
         data_blob_digest,
         full_blob_digest,
-        blob_meta,
+        blob_metadata,
         footer,
         full_blob_path,
-        blob_meta_path,
+        blob_metadata_path,
         bootstrap_path,
     } = summary;
 
@@ -261,18 +261,18 @@ fn print_blob_summary(summary: BlobSummary<'_>) {
     println!("    blob_index: {index}");
     println!("    data_blob_digest: {}", hex_string(data_blob_digest));
     println!("    full_blob_digest: {}", hex_string(full_blob_digest));
-    println!("    chunk_size: {}", blob_meta.chunk_size());
-    println!("    chunk_count: {}", blob_meta.chunk_count());
-    println!("    group_count: {}", blob_meta.group_count());
-    println!("    chunk_digester: {}", blob_meta.digester());
-    println!("    chunk_compressor: {}", blob_meta.compressor());
+    println!("    chunk_size: {}", blob_metadata.chunk_size());
+    println!("    chunk_count: {}", blob_metadata.chunk_count());
+    println!("    group_count: {}", blob_metadata.group_count());
+    println!("    chunk_digester: {}", blob_metadata.digester());
+    println!("    chunk_compressor: {}", blob_metadata.compressor());
     println!(
         "    blob_compressed_size: {}",
-        blob_meta.total_compressed_size()
+        blob_metadata.total_compressed_size()
     );
     println!(
         "    blob_uncompressed_size: {}",
-        blob_meta.total_uncompressed_size()
+        blob_metadata.total_uncompressed_size()
     );
     println!(
         "    compressed_data_offset: {}",
@@ -284,23 +284,32 @@ fn print_blob_summary(summary: BlobSummary<'_>) {
     );
     println!("    bootstrap_offset: {}", footer.bootstrap_offset());
     println!("    bootstrap_blocks: {}", footer.bootstrap_blocks());
-    println!("    blob_meta_offset: {}", footer.blob_meta_offset());
-    println!("    blob_meta_blocks: {}", footer.blob_meta_blocks());
+    println!(
+        "    blob_metadata_offset: {}",
+        footer.blob_metadata_offset()
+    );
+    println!(
+        "    blob_metadata_blocks: {}",
+        footer.blob_metadata_blocks()
+    );
     println!("    full_blob_path: {}", full_blob_path.display());
-    println!("    blob_meta_path: {}", blob_meta_path.display());
+    println!("    blob_metadata_path: {}", blob_metadata_path.display());
     if let Some(bootstrap_path) = bootstrap_path {
         println!("    bootstrap_path: {}", bootstrap_path.display());
     }
 }
 
-fn blob_meta_output_path(blob_path: &Path) -> Result<PathBuf> {
+fn blob_metadata_output_path(blob_path: &Path) -> Result<PathBuf> {
     let file_name = blob_path.file_name().ok_or_else(|| {
         Error::InvalidParameter(format!(
             "blob path has no file name: {}",
             blob_path.display()
         ))
     })?;
-    Ok(blob_path.with_file_name(format!("{}{BLOB_META_SUFFIX}", file_name.to_string_lossy())))
+    Ok(blob_path.with_file_name(format!(
+        "{}{BLOB_METADATA_SUFFIX}",
+        file_name.to_string_lossy()
+    )))
 }
 
 struct BlobOutput {
@@ -385,7 +394,7 @@ fn finalize_blob_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nydus_core::metadata::{
+    use nydus_format::erofs::{
         cast_ref, ErofsDeviceSlot, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_SB_BASE_SIZE,
         EROFS_SUPER_OFFSET,
     };

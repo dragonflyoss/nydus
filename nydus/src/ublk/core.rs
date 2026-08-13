@@ -11,12 +11,12 @@ use std::io;
 use std::os::fd::RawFd;
 use std::path::Path;
 
-use nydus_core::config::Config;
-use nydus_core::error::{Context, Error, Result};
-use nydus_core::fs::{copy_ranges, FileMaps};
-use nydus_core::metadata::EROFS_BLOCK_SIZE;
-use nydus_core::utils::align_up;
+use nydus_config::Config;
+use nydus_core::extent::MmapCache;
 use nydus_core::NydusCore;
+use nydus_error::{Context, Error, Result};
+use nydus_format::erofs::EROFS_BLOCK_SIZE;
+use nydus_format::utils::align_up;
 use tracing::warn;
 
 /// Logical block size exposed by the ublk device. Matching the EROFS block size
@@ -28,7 +28,7 @@ pub struct UblkCore {
     core: NydusCore,
     zero_fd: RawFd,
     device_size: u64,
-    maps: FileMaps,
+    maps: MmapCache,
 }
 
 impl UblkCore {
@@ -56,7 +56,7 @@ impl UblkCore {
             core,
             zero_fd,
             device_size,
-            maps: FileMaps::default(),
+            maps: MmapCache::default(),
         })
     }
 
@@ -101,6 +101,6 @@ impl UblkCore {
             }
         })?;
 
-        copy_ranges(&ranges, offset, self.zero_fd, buf, &self.maps)
+        self.maps.copy_ranges(&ranges, offset, self.zero_fd, buf)
     }
 }

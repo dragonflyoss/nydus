@@ -1,10 +1,16 @@
-//! Runtime core APIs for EROFS-based Nydus images.
+//! Expose a nydus image as a mountable EROFS filesystem.
 //!
-//! This crate provides the host-side building blocks used to serve Nydus
-//! images at runtime: EROFS metadata parsing ([`metadata`]), an on-demand
-//! blob cache and storage backends ([`storage`]), an image reader ([`fs`]),
-//! an image builder ([`build`]), telemetry ([`telemetry`]), and the
-//! high-level [`NydusCore`] entry point defined at the crate root.
+//! Every view this crate assembles from the data plane
+//! (`nydus-storage`/`nydus-backend`) exists to let a kernel or FUSE mount
+//! the image: the file-tree reader ([`reader`] + [`entry`]) behind FUSE and
+//! image inspection, and the flattened device views ([`NydusCore`] /
+//! [`Blobs`]) that NBD / ublk / fanotify / userfaultfd hand to the kernel
+//! EROFS driver.
+//!
+//! Naming gradient: `Erofs*` types (in `nydus-format`) are zero-copy on-disk
+//! views, `Raw*` types here are minimally-parsed lifetime-free forms, and
+//! bare names ([`DirEntry`](entry::DirEntry), [`BlobInfo`]) are the owned,
+//! user-facing API.
 //!
 //! # NydusCore and virtio-pmem
 //!
@@ -17,122 +23,34 @@
 //! that guarantees a block-aligned range is decoded and resident before the
 //! guest touches it.
 //!
-//! Optional cargo features:
-//! - `backend-registry`: container image registry backend (OCI distribution).
-//! - `backend-dragonfly-proxy`: Dragonfly P2P SDK proxy for the registry
-//!   backend.
-//!
-//! [`blobs.fetch`]: Blobs::fetch
+//! [`blobs.fetch`]: crate::blob::Blobs::fetch
 
 #![warn(unreachable_pub)]
 
 pub mod blob;
-pub mod build;
-pub mod config;
-pub mod error;
-pub mod fs;
-pub mod metadata;
-pub mod optimize;
-pub mod storage;
-pub mod telemetry;
-pub mod utils;
+pub mod entry;
+pub mod extent;
+pub mod reader;
 
-pub use config::Config;
-pub use error::{Error, Result};
-pub use fs::{FdRange, FileType, ResolveMode};
-pub use telemetry::access_trace::{TraceDocument, TraceEntry};
+pub use blob::{BlobId, BlobInfo, Blobs};
+pub use entry::FileType;
+pub use extent::{Extent, ResolveMode};
+pub use reader::ErofsReader;
 
-use std::collections::HashMap;
-use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use crate::error::Context;
+use nydus_config::Config;
+use nydus_error::{Context, Error, Result};
 
-use crate::fs::{
-    checked_range_end, mapped_range_offset, push_blob_fd_ranges, push_fd_range, BlobRangeSpec,
-    ErofsReader, ImageFs, RawBlobInfo,
-};
-use crate::metadata::EROFS_BLOCK_SIZE;
-use crate::storage::backend::build_backend;
-use crate::storage::prefetch::BlobPrefetcher;
-use crate::telemetry::access_trace::TraceRecorder;
-use crate::utils::{hex_string, parse_sha256_hex, SHA256_DIGEST_SIZE};
-
-/// Blob digest used by public core APIs.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct BlobId([u8; SHA256_DIGEST_SIZE]);
-
-impl BlobId {
-    pub fn new(bytes: [u8; SHA256_DIGEST_SIZE]) -> Self {
-        Self(bytes)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; SHA256_DIGEST_SIZE] {
-        &self.0
-    }
-
-    pub fn into_bytes(self) -> [u8; SHA256_DIGEST_SIZE] {
-        self.0
-    }
-
-    pub fn to_hex(self) -> String {
-        hex_string(&self.0)
-    }
-}
-
-impl From<[u8; SHA256_DIGEST_SIZE]> for BlobId {
-    fn from(value: [u8; SHA256_DIGEST_SIZE]) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<BlobId> for [u8; SHA256_DIGEST_SIZE] {
-    fn from(value: BlobId) -> Self {
-        value.into_bytes()
-    }
-}
-
-impl FromStr for BlobId {
-    type Err = Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        Ok(Self(parse_sha256_hex(value)?))
-    }
-}
-
-impl fmt::Display for BlobId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&hex_string(&self.0))
-    }
-}
-
-/// One blob entry from the bootstrap device table.
-#[derive(Clone, Debug)]
-pub struct BlobInfo {
-    /// 1-based blob index, matching the EROFS device table order.
-    pub index: u16,
-    /// Blob digest recorded in the device slot.
-    pub id: BlobId,
-    /// Start block of this blob in the flattened single-device layout.
-    pub mapped_blkaddr: u64,
-    /// Start byte offset of this blob in the flattened single-device layout.
-    pub mapped_offset: u64,
-    /// Dense uncompressed size in 4 KiB blocks (the pmem device size).
-    pub blocks: u64,
-    /// Size in bytes of the cache data file (`blocks * 4096`).
-    pub cache_size: u64,
-    /// Host path of the sparse cache data file backing the pmem device.
-    pub cache_path: PathBuf,
-    /// True when this is an "ondemand" redirect blob produced by
-    /// `nydus optimize`. Its data file is never read by the guest (no chunk
-    /// index points at it); it only feeds the phase-0 prefetch that warms the
-    /// source blobs' caches.
-    pub is_redirect: bool,
-}
+use entry::ImageFs;
+use extent::{clamped_range_end, mapped_range_offset, BlobRangeSpec, ExtentResolver};
+use nydus_backend::build_backend;
+use nydus_format::erofs::EROFS_BLOCK_SIZE;
+use nydus_storage::access_trace::{TraceDocument, TraceRecorder};
+use nydus_storage::prefetch::BlobPrefetcher;
 
 /// Read-side handle over a nydus image, split into blob data access and
 /// static filesystem metadata/data access.
@@ -151,20 +69,11 @@ pub struct NydusCore {
     trace_recorder: Arc<TraceRecorder>,
 }
 
-/// Blob table and decoded-cache preparation/fetch APIs.
-pub struct Blobs {
-    reader: Arc<ErofsReader>,
-    raw_blob_infos: Vec<RawBlobInfo>,
-    index_by_blob_id: HashMap<BlobId, u16>,
-    /// Memoised result of [`Blobs::flat_layout`].
-    flat_layout: OnceLock<Vec<BlobInfo>>,
-}
-
 impl NydusCore {
     /// Parse the bootstrap and config and build the blob table,
     /// deferring all per-blob work: no blob meta is downloaded and no cache
-    /// file is created until [`blobs`], [`fetch`], or [`prefetch`] first
-    /// touches a blob.
+    /// file is created until [`blobs`], [`fetch`], or the prefetch worker
+    /// first touches a blob.
     ///
     /// `config` uses the same structure as `nydus fuse --config` and must
     /// provide both the backend serving the blobs and a persistent local cache
@@ -180,7 +89,7 @@ impl NydusCore {
     /// inherits it.
     ///
     /// [`blobs`]: Self::blobs
-    /// [`fetch`]: Self::fetch
+    /// [`fetch`]: Blobs::fetch
     pub fn new(bootstrap: &Path, config: Config) -> Result<Self> {
         let bootstrap_file = Arc::new(
             OpenOptions::new()
@@ -210,15 +119,17 @@ impl NydusCore {
         })?;
 
         let trace_recorder = Arc::new(TraceRecorder::default());
-        let reader = ErofsReader::open_with_trace(
-            None,
-            Some(bootstrap),
-            Some(backend),
+        let reader = ErofsReader::open_bootstrap(
+            bootstrap,
+            backend,
             Some(&cache_dir),
             Some(trace_recorder.clone()),
         )
         .context("failed to open nydus bootstrap")?;
-        let raw_blob_infos = reader.blob_infos().context("failed to read blob table")?;
+        let raw_blob_infos = reader
+            .blob_infos()
+            .context("failed to read blob table")?
+            .to_vec();
         if raw_blob_infos.is_empty() {
             return Err(Error::InvalidImage(
                 "bootstrap contains no blobs".to_string(),
@@ -308,7 +219,7 @@ impl NydusCore {
     /// Fetch `[offset, offset + len)` in the flattened device view and return
     /// mmap-ready ranges. The bootstrap is exposed at the beginning of the
     /// view, and gaps between blob files are returned as `/dev/zero` ranges.
-    pub fn fetch_flat_ranges(&self, offset: u64, len: u64) -> Result<Vec<FdRange>> {
+    pub fn fetch_flat_ranges(&self, offset: u64, len: u64) -> Result<Vec<Extent>> {
         self.resolve_flat_ranges(offset, len, ResolveMode::Fetch)
     }
 
@@ -316,7 +227,7 @@ impl NydusCore {
     /// downloading missing blob data. Bootstrap and gaps are returned when
     /// ready; cold blob cache ranges are omitted, so the result may be
     /// discontinuous.
-    pub fn probe_flat_ranges(&self, offset: u64, len: u64) -> Result<Vec<FdRange>> {
+    pub fn probe_flat_ranges(&self, offset: u64, len: u64) -> Result<Vec<Extent>> {
         self.resolve_flat_ranges(offset, len, ResolveMode::Probe)
     }
 
@@ -330,33 +241,25 @@ impl NydusCore {
         self.trace_recorder.encode_json()
     }
 
-    fn resolve_flat_ranges(
-        &self,
-        offset: u64,
-        len: u64,
-        mode: ResolveMode,
-    ) -> Result<Vec<FdRange>> {
-        let end = match checked_range_end(offset, len)? {
-            Some(end) => end.min(self.flat_size),
-            None => return Ok(Vec::new()),
-        };
-        if offset >= end {
+    fn resolve_flat_ranges(&self, offset: u64, len: u64, mode: ResolveMode) -> Result<Vec<Extent>> {
+        let Some(end) = clamped_range_end(offset, len, self.flat_size)? else {
             return Ok(Vec::new());
-        }
+        };
 
-        let mut ranges = Vec::new();
+        let mut resolver = ExtentResolver::new(&self.blobs.reader, self.zero_file.as_raw_fd());
         let mut pos = offset;
         let bootstrap_end = end.min(self.bootstrap_size);
         if pos < bootstrap_end {
-            push_fd_range(
-                &mut ranges,
-                FdRange::new(self.bootstrap.as_raw_fd(), pos, bootstrap_end - pos, pos),
-                self.zero_file.as_raw_fd(),
-            );
+            resolver.push(Extent::new(
+                self.bootstrap.as_raw_fd(),
+                pos,
+                bootstrap_end - pos,
+                pos,
+            ));
             pos = bootstrap_end;
         }
         if pos >= end {
-            return Ok(ranges);
+            return Ok(resolver.finish());
         }
 
         let blobs = self
@@ -384,10 +287,7 @@ impl NydusCore {
                     .ok_or_else(|| Error::Overflow("blob device range overflow".to_string()))?;
                 let seg_end = end.min(blob_end);
                 let blob_offset = pos - blob.mapped_offset;
-                push_blob_fd_ranges(
-                    &self.blobs.reader,
-                    self.zero_file.as_raw_fd(),
-                    &mut ranges,
+                resolver.push_blob(
                     BlobRangeSpec {
                         index: blob.index,
                         offset: blob_offset,
@@ -408,143 +308,16 @@ impl NydusCore {
                 if hole_end <= pos {
                     break;
                 }
-                push_fd_range(
-                    &mut ranges,
-                    FdRange::new(self.zero_file.as_raw_fd(), 0, hole_end - pos, pos),
+                resolver.push(Extent::new(
                     self.zero_file.as_raw_fd(),
-                );
+                    0,
+                    hole_end - pos,
+                    pos,
+                ));
                 pos = hole_end;
             }
         }
 
-        Ok(ranges)
-    }
-}
-
-impl Blobs {
-    /// Describe every blob in device-table order, preparing each on first
-    /// use: the blob meta is downloaded and validated, and the sparse cache
-    /// data file is created and sized to the dense uncompressed address
-    /// space. Idempotent.
-    pub fn prepare_entries(&self) -> Result<Vec<BlobInfo>> {
-        let block_size = EROFS_BLOCK_SIZE as u64;
-        self.raw_blob_infos
-            .iter()
-            .map(|info| {
-                let mapped_offset = info
-                    .mapped_blkaddr
-                    .checked_mul(block_size)
-                    .ok_or_else(|| Error::Overflow("mapped blob offset overflow".to_string()))?;
-                let cache = self
-                    .reader
-                    .blob_cache(info.blob_index)
-                    .with_context(|| format!("failed to open blob {}", info.blob_index))?;
-                let cache_path = cache.prepare().with_context(|| {
-                    format!("failed to prepare cache file for blob {}", info.blob_index)
-                })?;
-                let cache_size = info
-                    .blocks
-                    .checked_mul(block_size)
-                    .ok_or_else(|| Error::Overflow("blob cache size overflow".to_string()))?;
-                Ok(BlobInfo {
-                    index: info.blob_index,
-                    id: BlobId::from(info.blob_id),
-                    mapped_blkaddr: info.mapped_blkaddr,
-                    mapped_offset,
-                    blocks: info.blocks,
-                    cache_size,
-                    cache_path,
-                    is_redirect: cache.is_redirect_blob(),
-                })
-            })
-            .collect()
-    }
-
-    /// Describe the blobs that back the flattened single-device address
-    /// space, sorted by `mapped_offset` and with redirect blobs removed.
-    ///
-    /// The layout is fixed for the lifetime of the core, so it is computed
-    /// once and memoised: block-device style workloads resolve ranges on every
-    /// I/O and must not pay for re-enumerating (and re-sorting) the blob table
-    /// each time. The first call prepares every blob, exactly as
-    /// [`Blobs::prepare_entries`] does.
-    pub fn flat_layout(&self) -> Result<&[BlobInfo]> {
-        if let Some(layout) = self.flat_layout.get() {
-            return Ok(layout);
-        }
-        let mut blobs = self.prepare_entries()?;
-        blobs.retain(|blob| !blob.is_redirect);
-        blobs.sort_by_key(|blob| blob.mapped_offset);
-        // A racing caller may have won the initialisation; either value is
-        // equally valid because the layout is deterministic.
-        let _ = self.flat_layout.set(blobs);
-        Ok(self
-            .flat_layout
-            .get()
-            .expect("flat layout is initialised above"))
-    }
-
-    /// Resolve a blob id to its device-table index and opened cache.
-    fn blob_cache_for(
-        &self,
-        id: &BlobId,
-    ) -> Result<(u16, Arc<dyn crate::storage::cache::BlobCache>)> {
-        let blob_index = *self.index_by_blob_id.get(id).ok_or_else(|| {
-            Error::NotFound("blob is not referenced by the bootstrap".to_string())
-        })?;
-        let cache = self
-            .reader
-            .blob_cache(blob_index)
-            .with_context(|| format!("failed to open blob {blob_index}"))?;
-        Ok((blob_index, cache))
-    }
-
-    /// Ensure `[offset, offset + len)` of the blob's dense uncompressed
-    /// address space is decoded, CRC-validated, and written to its cache data
-    /// file, fetching missing groups through the backend. Both `offset` and
-    /// `len` must be 4 KiB block aligned; the fetch rounds outward to whole
-    /// blob meta groups. Idempotent and safe to call concurrently.
-    pub fn fetch(&self, id: &BlobId, offset: u64, len: u64) -> Result<()> {
-        let block_size = EROFS_BLOCK_SIZE as u64;
-        if offset % block_size != 0 || len % block_size != 0 {
-            return Err(Error::InvalidParameter(format!(
-                "fetch range must be 4 KiB block aligned: offset={offset} len={len}"
-            )));
-        }
-        if len == 0 {
-            return Ok(());
-        }
-
-        let (blob_index, cache) = self.blob_cache_for(id)?;
-        cache
-            .ensure_range(offset, len)
-            .with_context(|| format!("failed to fetch blob {blob_index} range [{offset}, +{len})"))
-    }
-
-    /// Return cache-ready byte intervals overlapping `[offset, offset + len)`
-    /// without triggering a backend fetch. The group_map remains authoritative.
-    pub fn ready_ranges(
-        &self,
-        id: &BlobId,
-        offset: u64,
-        len: u64,
-    ) -> Result<Vec<std::ops::Range<u64>>> {
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let (blob_index, cache) = self.blob_cache_for(id)?;
-        cache.ready_ranges(offset, len).with_context(|| {
-            format!("failed to inspect blob {blob_index} ready range [{offset}, +{len})")
-        })
-    }
-
-    /// O(1) fast-path probe: true when every group of the blob is already
-    /// decoded into its local cache (a single shared-flag load, no bitmap
-    /// scan). On-demand services (uffd, fanotify, FUSE) can consult this per
-    /// event — or once per blob, since the answer is sticky — to bypass range
-    /// readiness checks and fetch plumbing entirely for fully warmed blobs.
-    pub fn is_all_ready(&self, id: &BlobId) -> Result<bool> {
-        let (_, cache) = self.blob_cache_for(id)?;
-        Ok(cache.is_all_ready())
+        Ok(resolver.finish())
     }
 }

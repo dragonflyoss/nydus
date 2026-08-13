@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use nydus_core::error::{Context, Error, Result};
+use nydus_error::{Context, Error, Result};
 
 use super::core::BlobDevice;
 use crate::mount::path_cstring;

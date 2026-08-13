@@ -39,18 +39,20 @@ fanotify = []
 # Export a nydus image as a block device through the NBD protocol.
 nbd = []
 # Container image registry backend (OCI distribution).
-backend-registry = ["nydus-core/backend-registry"]
+backend-registry = ["nydus-backend/backend-registry"]
 # Dragonfly P2P SDK proxy support for the registry backend.
 backend-dragonfly-proxy = [
   "backend-registry",
-  "nydus-core/backend-dragonfly-proxy",
+  "nydus-backend/backend-dragonfly-proxy",
 ]
 # ublk block device target: expose the flattened image as /dev/ublkbN so the
 # kernel EROFS driver can mount it directly. Requires Linux >= 6.0 (ublk_drv).
 ublk = ["dep:libublk"]
 
 [dependencies]
+blake3 = "1"
 clap = { version = "4", features = ["derive"], optional = true }
+crc32c = "0.6"
 fuser = { version = "0.17", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["server", "http1"], optional = true }
@@ -58,13 +60,22 @@ hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 libc = { workspace = true }
 libublk = { version = "0.4", default-features = false, optional = true }
 memmap2 = { workspace = true }
+nydus-backend = { version = "0.1.0", path = "../nydus-backend" }
+nydus-config = { version = "0.1.0", path = "../nydus-config" }
+nydus-error = { version = "0.1.0", path = "../nydus-error" }
+nydus-format = { version = "0.1.0", path = "../nydus-format" }
 nydus-core = { version = "0.1.0", path = "../nydus-core" }
+nydus-storage = { version = "0.1.0", path = "../nydus-storage" }
+nydus-telemetry = { version = "0.1.0", path = "../nydus-telemetry", features = [
+  "logging",
+] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sendfd = { version = "0.4", optional = true }
 sha2 = { workspace = true }
 signal-hook = { version = "0.3", optional = true }
 tar = "0.4"
+zstd = "0.13"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "fs",

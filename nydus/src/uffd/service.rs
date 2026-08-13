@@ -11,8 +11,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, info, warn};
 
-use nydus_core::error::{Context, Error, Result};
-use nydus_core::FdRange;
+use nydus_core::Extent;
+use nydus_error::{Context, Error, Result};
 
 use super::core::{read_uffd_msg, UffdCore, UffdMsg};
 use super::proto::{FaultPolicy, ProtoConn, Request, VmaRegion};
@@ -313,7 +313,7 @@ impl UffdConn {
         Ok(())
     }
 
-    async fn send_ranges(&self, regions: Option<&[VmaRegion]>, ranges: &[FdRange]) -> Result<()> {
+    async fn send_ranges(&self, regions: Option<&[VmaRegion]>, ranges: &[Extent]) -> Result<()> {
         for range in ranges {
             if let Some(regions) = regions {
                 if !regions.iter().any(|region| {

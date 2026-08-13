@@ -1,0 +1,39 @@
+[package]
+name = "nydus-telemetry"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "Process-wide telemetry for nydus: the Prometheus metrics registry and, behind the `logging` feature, tracing-subscriber installation for binaries."
+repository = "https://github.com/dragonflyoss/nydus"
+readme = "README.md"
+
+[features]
+default = []
+# tracing-subscriber installation (stdout + rolling files + panic hook).
+# Only binaries enable this: libraries emit through the `tracing` facade and
+# never install subscribers.
+logging = [
+  "dep:rolling-file",
+  "dep:tracing",
+  "dep:tracing-appender",
+  "dep:tracing-panic",
+  "dep:tracing-subscriber",
+]
+
+[dependencies]
+prometheus = { version = "0.13", default-features = false }
+rolling-file = { version = "0.2.0", optional = true }
+serde = { workspace = true }
+tracing = { workspace = true, optional = true }
+tracing-appender = { version = "0.2.4", optional = true }
+tracing-panic = { version = "0.1.2", optional = true }
+tracing-subscriber = { version = "0.3", features = [
+  "chrono",
+  "env-filter",
+  "time"
+], optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }

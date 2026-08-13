@@ -10,7 +10,7 @@
 use std::ffi::CString;
 use std::path::Path;
 
-use nydus_core::error::{Context, Error, Result};
+use nydus_error::{Context, Error, Result};
 
 use crate::mount::path_cstring;
 

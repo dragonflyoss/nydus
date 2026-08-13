@@ -1,0 +1,26 @@
+[package]
+name = "nydus-storage"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Apache-2.0"
+description = "Local data plane for nydus images: sparse blob caches, group-level fill tracking, background prefetch and on-demand access tracing. All APIs return io::Result so the OS errno survives to the service edges."
+repository = "https://github.com/dragonflyoss/nydus"
+readme = "README.md"
+
+[dependencies]
+crc32c = "0.6"
+libc = { workspace = true }
+memmap2 = { workspace = true }
+nydus-backend = { version = "0.1.0", path = "../nydus-backend" }
+nydus-format = { version = "0.1.0", path = "../nydus-format" }
+nydus-telemetry = { version = "0.1.0", path = "../nydus-telemetry" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tracing = { workspace = true }
+xattr = { workspace = true }
+zstd = "0.13"
+
+[dev-dependencies]
+blake3 = "1"

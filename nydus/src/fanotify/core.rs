@@ -29,13 +29,14 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use nydus_core::error::{Context, Error, Result};
-use nydus_core::{BlobId, Config, NydusCore};
+use nydus_config::Config;
+use nydus_core::{BlobId, NydusCore};
+use nydus_error::{Context, Error, Result};
 
 use super::proto::{PreContentEvent, Range, FAN_PRE_ACCESS};
 
 /// EROFS block size as u64 — reuses the canonical constant from the core.
-const BLOCK_SIZE: u64 = nydus_core::metadata::EROFS_BLOCK_SIZE as u64;
+const BLOCK_SIZE: u64 = nydus_format::erofs::EROFS_BLOCK_SIZE as u64;
 
 /// `fanotify_init(2)` flag: close-on-exec on the group descriptor.
 pub(crate) const FAN_CLOEXEC: u32 = 0x0000_0001;
@@ -160,7 +161,7 @@ impl FanotifyCore {
             Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
         let entries = core
             .blobs
-            .prepare_entries()
+            .prepare_all()
             .context("failed to enumerate blob devices")?;
 
         let mut devices = Vec::with_capacity(entries.len());
@@ -384,7 +385,7 @@ pub(crate) fn align_fetch_range(
     let end = raw_end.min(cache_size);
 
     let aligned_off = offset & !(BLOCK_SIZE - 1);
-    let aligned_end = nydus_core::utils::align_up(end, BLOCK_SIZE).ok_or(RangeError::Overflow)?;
+    let aligned_end = nydus_format::utils::align_up(end, BLOCK_SIZE).ok_or(RangeError::Overflow)?;
     // `cache_size` is validated block-aligned at device enumeration, so rounding
     // `end` up never exceeds it; clamp as a safety net and verify the aligned
     // window stays inside the device.

@@ -9,8 +9,8 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use nydus_core::error::{Context, Error, Result};
-use nydus_core::FdRange;
+use nydus_core::Extent;
+use nydus_error::{Context, Error, Result};
 use sendfd::{RecvWithFd, SendWithFd};
 use tokio::io::unix::AsyncFd;
 use tracing::warn;
@@ -138,7 +138,7 @@ pub enum Request {
     Probe,
 }
 
-pub type ResolvedRange = FdRange;
+pub type ResolvedRange = Extent;
 
 #[derive(Clone)]
 pub struct ProtoConn {

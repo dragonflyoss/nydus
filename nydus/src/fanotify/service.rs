@@ -20,8 +20,8 @@ use std::thread;
 
 use tracing::{debug, warn};
 
-use nydus_core::error::{Context, Error, Result};
 use nydus_core::BlobId;
+use nydus_error::{Context, Error, Result};
 
 use super::core::{
     align_fetch_range, decide, fd_identity, Decision, DenyReason, FanotifyCore, FetchError,

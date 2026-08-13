@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use nydus_core::error::{Context, Error, Result};
+use nydus_error::{Context, Error, Result};
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use tracing::{error, info, warn};
 
