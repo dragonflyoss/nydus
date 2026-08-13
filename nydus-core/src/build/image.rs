@@ -1,8 +1,8 @@
 use std::io::Write;
 
-use anyhow::{bail, Result};
 use crc32c::crc32c_append;
 
+use crate::error::{Error, Result};
 use crate::metadata::{
     ErofsDeviceSlot, ErofsSuperblock, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE,
     EROFS_FEATURE_COMPAT_MTIME, EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_48BIT,
@@ -85,7 +85,9 @@ pub(crate) fn write_image(
     let devslot_offset = sb_offset + EROFS_SB_BASE_SIZE;
     let device_table_end = devslot_offset + device_slots.len() * EROFS_DEVICESLOT_SIZE;
     if device_table_end > head.len() {
-        bail!("device table does not fit in the reserved metadata head region")
+        return Err(Error::InvalidImage(
+            "device table does not fit in the reserved metadata head region".to_string(),
+        ));
     }
 
     for (index, devslot) in device_slots.iter().enumerate() {
@@ -123,16 +125,19 @@ pub(crate) fn device_table_meta_blkaddr(device_count: usize) -> Result<u32> {
         + EROFS_SB_BASE_SIZE
         + device_count
             .checked_mul(EROFS_DEVICESLOT_SIZE)
-            .ok_or_else(|| anyhow::anyhow!("device table size overflow"))?;
+            .ok_or_else(|| Error::Overflow("device table size overflow".to_string()))?;
     let blocks = table_end.div_ceil(block_size).max(1);
-    u32::try_from(blocks).map_err(|_| anyhow::anyhow!("metadata block address exceeds u32"))
+    u32::try_from(blocks)
+        .map_err(|_| Error::Overflow("metadata block address exceeds u32".to_string()))
 }
 
 pub(crate) fn write_erofs_superblock_checksum(head: &mut [u8]) -> Result<()> {
     let sb_offset = EROFS_SUPER_OFFSET as usize;
     let block_size = EROFS_BLOCK_SIZE as usize;
     if head.len() < block_size {
-        bail!("image block is too small for EROFS superblock checksum")
+        return Err(Error::InvalidImage(
+            "image block is too small for EROFS superblock checksum".to_string(),
+        ));
     }
 
     // The EROFS superblock checksum covers only block 0 from the superblock

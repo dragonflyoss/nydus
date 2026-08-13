@@ -1,5 +1,5 @@
-use anyhow::{anyhow, bail, Context, Result};
 use clap::Args;
+use nydus::error::{Context, Error, Result};
 
 use crate::cli_common;
 use fuser::{Config as FuseConfig, MountOption, SessionACL};
@@ -84,7 +84,10 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
 
     let mountpoint = &args.mountpoint;
     if !mountpoint.is_dir() {
-        bail!("mountpoint {} is not a directory", mountpoint.display());
+        return Err(Error::InvalidParameter(format!(
+            "mountpoint {} is not a directory",
+            mountpoint.display()
+        )));
     }
 
     // Load the optional storage config. CLI flags take precedence over config
@@ -122,7 +125,10 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         None
     } else if let Some(dir) = args.blob_dir.as_ref() {
         if !dir.is_dir() {
-            bail!("blob-dir {} is not a directory", dir.display());
+            return Err(Error::InvalidParameter(format!(
+                "blob-dir {} is not a directory",
+                dir.display()
+            )));
         }
         Some(nydus_core::storage::backend::metered(Arc::new(
             LocalBackend::new(dir.clone()),
@@ -137,12 +143,17 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         (Some(_), None, _) => {}
         (None, Some(_), Some(_)) => {}
         _ => {
-            bail!("fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config")
+            return Err(Error::InvalidParameter(
+                "fuse expects either --blob <path> or --bootstrap <path> with a backend from --blob-dir or --config".to_string(),
+            ))
         }
     }
     if let Some(cache_dir) = &cache_dir {
         if cache_dir.exists() && !cache_dir.is_dir() {
-            bail!("cache-dir {} is not a directory", cache_dir.display());
+            return Err(Error::InvalidParameter(format!(
+                "cache-dir {} is not a directory",
+                cache_dir.display()
+            )));
         }
     }
 
@@ -199,7 +210,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         Some(address) => match crate::api_server::ApiServer::start(address) {
             Ok(server) => Some(server),
             Err(err) => {
-                warn!("failed to start metrics apiserver: {:#}", err);
+                warn!("failed to start metrics apiserver: {}", err);
                 None
             }
         },
@@ -218,7 +229,7 @@ pub fn run_fuse(args: FuseArgs) -> Result<()> {
         Err(e) => error!("background fuse session join returned error: {:?}", e),
     }
 
-    join_result.map_err(|e| anyhow!("join failed: {e}"))?;
+    join_result.context("join failed")?;
 
     Ok(())
 }

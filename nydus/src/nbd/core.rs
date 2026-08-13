@@ -23,8 +23,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-
+use nydus_core::error::{Context, Error, Result};
 use nydus_core::fs::{copy_ranges, FileMaps};
 use nydus_core::metadata::EROFS_BLOCK_SIZE;
 use nydus_core::{Config, NydusCore};
@@ -54,12 +53,14 @@ impl NbdCore {
 
         let flat_size = core.flat_size();
         if flat_size == 0 {
-            anyhow::bail!("flattened image size is zero");
+            return Err(Error::InvalidImage(
+                "flattened image size is zero".to_string(),
+            ));
         }
         if flat_size % BLOCK_SIZE != 0 {
-            anyhow::bail!(
+            return Err(Error::InvalidImage(format!(
                 "flattened image size {flat_size} is not a multiple of the {BLOCK_SIZE} B EROFS block size"
-            );
+            )));
         }
         Ok(Self {
             core,
@@ -92,12 +93,12 @@ impl NbdCore {
         let len = buf.len() as u64;
         let end = offset
             .checked_add(len)
-            .ok_or_else(|| anyhow::anyhow!("nbd read range overflow"))?;
+            .ok_or_else(|| Error::Overflow("nbd read range overflow".to_string()))?;
         if end > self.device_size {
-            anyhow::bail!(
+            return Err(Error::InvalidParameter(format!(
                 "nbd read [{offset}, +{len}) past flattened device size {}",
                 self.device_size
-            );
+            )));
         }
 
         let ranges = self
@@ -110,18 +111,18 @@ impl NbdCore {
         let mut written = 0usize;
         for range in &ranges {
             if range.source_offset != offset + written as u64 {
-                anyhow::bail!(
+                return Err(Error::Runtime(format!(
                     "flat ranges are not contiguous: expected source offset {}, got {}",
                     offset + written as u64,
                     range.source_offset
-                );
+                )));
             }
             let seg_len = range.len as usize;
             if written + seg_len > buf.len() {
-                anyhow::bail!(
+                return Err(Error::Runtime(format!(
                     "flat range segment overflows read buffer: written={written} seg_len={seg_len} buf={}",
                     buf.len()
-                );
+                )));
             }
             written += seg_len;
         }

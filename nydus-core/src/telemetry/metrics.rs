@@ -440,6 +440,9 @@ struct TrackedBlob {
 /// Count `groups` towards the total-groups gauge for the blob `cache_key`,
 /// unless another cache already counted it.
 pub(crate) fn track_blob_groups(cache_key: [u8; SHA256_DIGEST_SIZE], group_count: u64) {
+    // Telemetry is best-effort: recover from a poisoned lock instead of
+    // propagating the panic (unlike the fail-fast `.unwrap()` policy used on
+    // cache-state locks).
     let mut tracked = match TRACKED_BLOBS.lock() {
         Ok(tracked) => tracked,
         Err(poisoned) => poisoned.into_inner(),

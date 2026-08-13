@@ -44,11 +44,13 @@ pub const NBD_EINVAL: u32 = 22;
 pub const NBD_BLOCK_SIZE: u64 = nydus_core::metadata::EROFS_BLOCK_SIZE as u64;
 
 /// Why a request header could not be parsed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ParseError {
     /// The buffer is shorter than [`NBD_REQUEST_HEADER_SIZE`].
+    #[error("request header is too short")]
     ShortBuffer,
     /// The magic field did not match [`NBD_REQUEST_MAGIC`].
+    #[error("invalid request magic {got:#x}")]
     BadMagic { got: u32 },
 }
 

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use nydus_core::error::{Context, Error, Result};
 use signal_hook::consts::{signal::SIGHUP, TERM_SIGNALS};
 use tracing::{error, info, warn};
 
@@ -91,9 +91,8 @@ pub struct FuseService {
 impl FuseService {
     /// Mounts `fs` at `mountpoint` and starts serving it in the background.
     pub fn mount(fs: ErofsFs, mountpoint: &Path, config: &fuser::Config) -> Result<Self> {
-        let session = fuser::Session::new(fs, mountpoint, config)
-            .map_err(|e| anyhow!("mount failed: {e}"))?;
-        let session = session.spawn().map_err(|e| anyhow!("spawn failed: {e}"))?;
+        let session = fuser::Session::new(fs, mountpoint, config).context("mount failed")?;
+        let session = session.spawn().context("spawn failed")?;
         Ok(Self {
             session,
             mountpoint: mountpoint.to_path_buf(),
@@ -177,7 +176,7 @@ impl FuseService {
                             }
                         },
                         Err(e) => {
-                            error!("signal wait error: {:?}", e);
+                            error!("signal wait error: {}", e);
                             return;
                         }
                     }
@@ -185,8 +184,8 @@ impl FuseService {
             })
             .context("failed to spawn signal thread")?;
 
-        result_rx
-            .recv()
-            .context("failed to receive fuse controller result")
+        result_rx.recv().map_err(|err| {
+            Error::Runtime(format!("failed to receive fuse controller result: {err}"))
+        })
     }
 }

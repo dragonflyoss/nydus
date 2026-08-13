@@ -3,11 +3,11 @@
 //! blobs, and report format violations such as inline data crossing a
 //! metadata block.
 
-use anyhow::{Context, Result};
 use memmap2::Mmap;
 use nydus_core::blob::{
     BlobFooter, BlobMeta, BlobMetaCompressor, BlobMetaDigester, NYDUS_BLOB_FOOTER_SIZE,
 };
+use nydus_core::error::{Context, Error, Result};
 use nydus_core::fs::{ErofsReader, RawBlobInfo};
 use nydus_core::metadata::{
     mode_to_erofs_file_type, ErofsInode, ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE,
@@ -444,17 +444,17 @@ fn inspect_blob(path: &Path) -> Result<Option<BlobInspection>> {
 
     let footer = BlobFooter::parse_from_tail(&mmap)?;
     let data_start = usize::try_from(footer.compressed_data_offset())
-        .context("compressed data offset too large")?;
-    let data_size =
-        usize::try_from(footer.compressed_data_size()).context("compressed data size too large")?;
+        .map_err(|err| Error::Overflow(format!("compressed data offset too large: {err}")))?;
+    let data_size = usize::try_from(footer.compressed_data_size())
+        .map_err(|err| Error::Overflow(format!("compressed data size too large: {err}")))?;
     let data_end = data_start
         .checked_add(data_size)
-        .context("data range overflow")?;
-    let meta_start =
-        usize::try_from(footer.blob_meta_offset()).context("blob meta offset too large")?;
+        .ok_or_else(|| Error::Overflow("data range overflow".to_string()))?;
+    let meta_start = usize::try_from(footer.blob_meta_offset())
+        .map_err(|err| Error::Overflow(format!("blob meta offset too large: {err}")))?;
     let meta_end = meta_start
         .checked_add(footer.blob_meta_size() as usize)
-        .context("blob meta range overflow")?;
+        .ok_or_else(|| Error::Overflow("blob meta range overflow".to_string()))?;
 
     let data_digest = sha256_bytes(&mmap[data_start..data_end]);
     let blob_sha256 = sha256_bytes(&mmap);

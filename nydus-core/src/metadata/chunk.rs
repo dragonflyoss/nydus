@@ -1,9 +1,9 @@
 use std::mem;
 
 use super::*;
+use crate::error::{Context, Error, Result};
 use crate::utils::digest::{hex_string, parse_sha256_hex};
 use crate::utils::le::{read_u16, read_u32, write_u16, write_u32};
-use anyhow::{anyhow, Context, Result};
 
 /// EROFS chunk index entry — 8 bytes, `#[repr(C, packed)]`.
 #[repr(C, packed)]
@@ -136,8 +136,9 @@ impl ErofsDeviceSlot {
         // string (nydus RAFS v6 compatible). Anything else is a corrupt or
         // foreign device slot and must be rejected rather than silently
         // reinterpreted as raw digest bytes.
-        let text = std::str::from_utf8(&self.tag)
-            .map_err(|_| anyhow!("device slot tag is not a sha256 hex blob id"))?;
+        let text = std::str::from_utf8(&self.tag).map_err(|_| {
+            Error::InvalidImage("device slot tag is not a sha256 hex blob id".to_string())
+        })?;
         parse_sha256_hex(text).context("device slot tag is not a sha256 hex blob id")
     }
 }

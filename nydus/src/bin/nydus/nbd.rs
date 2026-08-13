@@ -2,8 +2,8 @@ use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use clap::Args;
+use nydus::error::{Context, Error, Result};
 
 use crate::cli_common;
 use nydus::mount::unmount;
@@ -132,22 +132,24 @@ pub fn run_nbd(args: NbdArgs) -> Result<()> {
                 // from the signal thread).
                 let joined = doit_handle
                     .join()
-                    .map_err(|_| anyhow::anyhow!("nbd event loop thread panicked"));
+                    .map_err(|_| Error::Runtime("nbd event loop thread panicked".to_string()));
                 // The signal path already unmounted on a signal-driven
                 // shutdown; if the session self-exited the mount is still up
                 // over a dead device, so try a final best-effort umount.
                 if let Err(err) = unmount(&mp) {
-                    debug!("post-join unmount of {}: {err:#}", mp.display());
+                    debug!("post-join unmount of {}: {err}", mp.display());
                 }
                 joined
             }
             Err(err) => {
                 // The session is live but nothing got mounted: stop it so the
                 // event loop and the workers drain through the joins below.
-                warn!("failed to mount {device} at {}: {err:#}", mp.display());
+                warn!("failed to mount {device} at {}: {err}", mp.display());
                 service.stop();
                 let _ = doit_handle.join();
-                Err(err).context("failed to mount nbd device")
+                // Both `wait_for_capacity` and `mount_nbd` already attach
+                // self-sufficient context — no extra layer needed.
+                Err(err)
             }
         }
     } else {

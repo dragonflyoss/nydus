@@ -1,5 +1,5 @@
-use anyhow::{bail, Context, Result};
 use clap::Args;
+use nydus::error::{Context, Error, Result};
 
 use crate::cli_common;
 use nydus_core::blob::BLOB_META_SUFFIX;
@@ -58,18 +58,25 @@ pub fn run_optimize(args: OptimizeArgs) -> Result<()> {
     let _guards = init_command_tracing(args.log.log_level, args.log.console);
 
     if args.parent_bootstrap == args.bootstrap {
-        bail!("--parent-bootstrap and --bootstrap must point to different files");
+        return Err(Error::InvalidParameter(
+            "--parent-bootstrap and --bootstrap must point to different files".to_string(),
+        ));
     }
 
     let patterns = match (&args.trace_file, &args.apiserver) {
         (Some(path), _) => load_patterns_from_file(path)?,
         (None, Some(apiserver)) => load_patterns_from_apiserver(apiserver)?,
-        (None, None) => bail!("either --trace-file or --apiserver must be provided"),
+        (None, None) => {
+            return Err(Error::InvalidParameter(
+                "either --trace-file or --apiserver must be provided".to_string(),
+            ))
+        }
     };
     if patterns.is_empty() {
-        bail!(
+        return Err(Error::InvalidParameter(
             "no group accesses found in the access trace; exercise the workload before optimizing"
-        );
+                .to_string(),
+        ));
     }
 
     let storage_config =

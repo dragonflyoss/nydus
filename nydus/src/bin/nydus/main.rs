@@ -16,7 +16,6 @@ mod ublk;
 #[cfg(feature = "uffd")]
 mod uffd;
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::build::{run_build, BuildArgs};
@@ -66,9 +65,9 @@ enum Commands {
     Nbd(NbdArgs),
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    match cli.command {
+    let result = match cli.command {
         Commands::Build(args) => run_build(args),
         Commands::Check(args) => run_check(args),
         Commands::Merge(args) => run_merge(args),
@@ -82,5 +81,12 @@ fn main() -> Result<()> {
         Commands::Fanotify(args) => run_fanotify(args),
         #[cfg(feature = "nbd")]
         Commands::Nbd(args) => run_nbd(args),
+    };
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }

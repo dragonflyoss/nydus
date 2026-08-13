@@ -1,6 +1,6 @@
-use anyhow::{anyhow, bail, Result};
 use clap::Args;
 use nydus::check::{check_image, BlobSummary, CheckReport, ImageKind, ImageStats};
+use nydus::error::{Error, Result};
 use nydus_core::metadata::{
     ErofsSuperblock, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_FEATURE_COMPAT_MTIME,
     EROFS_FEATURE_COMPAT_SB_CHKSUM, EROFS_FEATURE_INCOMPAT_CHUNKED_FILE,
@@ -47,13 +47,17 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
                         .get("dir")
                         .and_then(|value| value.as_str())
                         .map(PathBuf::from)
-                        .ok_or_else(|| anyhow!("local backend config is missing 'dir'"))?;
+                        .ok_or_else(|| {
+                            Error::InvalidConfig(
+                                "local backend config is missing 'dir'".to_string(),
+                            )
+                        })?;
                     Some(dir)
                 } else {
-                    bail!(
+                    return Err(Error::InvalidConfig(format!(
                         "check only supports a local backend, but config backend is '{}'",
                         config.backend.kind
-                    )
+                    )));
                 }
             }
             None => None,
@@ -67,10 +71,15 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
             (ImageKind::Bootstrap, bootstrap.as_path())
         }
         (None, Some(_), Some(blob_dir)) => {
-            bail!("blob-dir {} is not a directory", blob_dir.display())
+            return Err(Error::InvalidParameter(format!(
+                "blob-dir {} is not a directory",
+                blob_dir.display()
+            )))
         }
         _ => {
-            bail!("check expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-dir or --config")
+            return Err(Error::InvalidParameter(
+                "check expects either --blob <path> or --bootstrap <path> with a blob directory from --blob-dir or --config".to_string(),
+            ))
         }
     };
 
@@ -83,11 +92,11 @@ pub fn run_check(args: CheckArgs) -> Result<()> {
     print_inline_across_blocks(&report.stats);
 
     if !report.stats.inline_overflows.is_empty() {
-        bail!(
+        return Err(Error::InvalidImage(format!(
             "{} inode(s) have inline data crossing a metadata block; \
              the kernel cannot read them",
             report.stats.inline_overflows.len()
-        );
+        )));
     }
 
     Ok(())

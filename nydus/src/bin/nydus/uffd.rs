@@ -2,8 +2,8 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use clap::Args;
+use nydus::error::{Context, Result};
 
 use crate::cli_common;
 use nydus::uffd::{UffdCore, UffdService};

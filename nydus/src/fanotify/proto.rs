@@ -77,29 +77,47 @@ impl PreContentEvent {
 }
 
 /// The specific reason an event batch or record failed validation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ParseErrorKind {
+    #[error("truncated event metadata")]
     TruncatedMetadata,
+    #[error("unsupported metadata version {version}")]
     InvalidVersion { version: u8 },
+    #[error("event metadata length {len} too short")]
     MetadataTooShort { len: usize },
+    #[error("event metadata length {len} exceeds event length {event_len}")]
     MetadataOutOfBounds { len: usize, event_len: usize },
+    #[error("event length {len} too short")]
     EventTooShort { len: usize },
+    #[error("event length {len} out of bounds")]
     EventOutOfBounds { len: usize },
+    #[error("truncated info record header")]
     InfoHeaderTruncated,
+    #[error("info record length {len} too short")]
     InfoRecordTooShort { len: usize },
+    #[error("info record length {len} out of bounds")]
     InfoRecordOutOfBounds { len: usize },
+    #[error("range record length {len} too short")]
     RangeRecordTooShort { len: usize },
+    #[error("duplicate range record")]
     DuplicateRange,
+    #[error("missing range record")]
     MissingRange,
+    #[error("range record count is zero")]
     RangeCountZero,
+    #[error("range record overflows")]
     RangeOverflow,
 }
 
 /// A parser error. `event_fd` is present only when the metadata version
 /// matched — i.e. the header layout is trusted, so the fd field is a real
 /// descriptor the service may deny and close.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{kind} at offset {offset}")]
 pub struct ParseError {
+    /// Where the violation was detected. Event-level kinds carry the offset
+    /// within the batch buffer; info-record kinds carry the offset within
+    /// the current event.
     pub offset: usize,
     pub kind: ParseErrorKind,
     event_fd: Option<RawFd>,

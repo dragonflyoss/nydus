@@ -10,7 +10,7 @@
 use std::ffi::CString;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use nydus_core::error::{Context, Error, Result};
 
 use crate::mount::path_cstring;
 
@@ -20,10 +20,15 @@ use crate::mount::path_cstring;
 /// through `fetch`, never through the NBD device; `MS_NODEV`/`MS_NOSUID` match
 /// the fanotify EROFS mount policy for a content-addressed image.
 pub fn mount_nbd(device: &str, mountpoint: &Path, fstype: &str) -> Result<()> {
-    let source = CString::new(device).context("device path contains an interior NUL byte")?;
+    let source = CString::new(device).map_err(|err| {
+        Error::InvalidParameter(format!("device path contains an interior NUL byte: {err}"))
+    })?;
     let target = path_cstring(mountpoint, "mountpoint")?;
-    let fs_type = CString::new(fstype)
-        .with_context(|| format!("fs type {fstype} contains an interior NUL byte"))?;
+    let fs_type = CString::new(fstype).map_err(|err| {
+        Error::InvalidParameter(format!(
+            "fs type {fstype} contains an interior NUL byte: {err}"
+        ))
+    })?;
 
     let ret = unsafe {
         libc::mount(

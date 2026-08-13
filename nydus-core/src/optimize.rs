@@ -17,7 +17,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::blob::{
@@ -26,6 +25,7 @@ use crate::blob::{
 use crate::build::assemble_ondemand_artifact;
 use crate::build::blob_chunk::compression_is_worthwhile;
 use crate::build::merge::rewrite_bootstrap_with_ondemand_blob;
+use crate::error::{Context, Error, Result};
 use crate::fs::{ErofsReader, RawBlobInfo};
 use crate::metadata::EROFS_BLOB_ID_SIZE;
 use crate::storage::backend::BlobBackend;
@@ -83,9 +83,9 @@ pub fn build_ondemand_blob(
     let mut decoded = Vec::new();
 
     for (blob_index, group_index) in patterns {
-        let info = infos_by_index
-            .get(blob_index)
-            .ok_or_else(|| anyhow!("pattern references unknown blob {blob_index}"))?;
+        let info = infos_by_index.get(blob_index).ok_or_else(|| {
+            Error::InvalidParameter(format!("pattern references unknown blob {blob_index}"))
+        })?;
         let cache = match source_caches.entry(*blob_index) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
@@ -98,14 +98,19 @@ pub fn build_ondemand_blob(
             .blob_meta()
             .group_at(*group_index as usize)
             .ok_or_else(|| {
-                anyhow!("pattern references group {group_index} out of range for blob {blob_index}")
+                Error::InvalidParameter(format!(
+                    "pattern references group {group_index} out of range for blob {blob_index}"
+                ))
             })?;
         if group.is_redirect() {
-            bail!("source blob {blob_index} is already an ondemand blob; refusing to optimize");
+            return Err(Error::InvalidImage(format!(
+                "source blob {blob_index} is already an ondemand blob; refusing to optimize"
+            )));
         }
 
-        let decoded_len = usize::try_from(group.uncompressed_byte_size())
-            .context("group uncompressed size exceeds usize")?;
+        let decoded_len = usize::try_from(group.uncompressed_byte_size()).map_err(|err| {
+            Error::Overflow(format!("group uncompressed size exceeds usize: {err}"))
+        })?;
         decoded.resize(decoded_len, 0);
         cache
             .read_at(group.uncompressed_byte_offset(), &mut decoded)
@@ -129,7 +134,9 @@ pub fn build_ondemand_blob(
             next_block_offset,
             group.uncompressed_block_count(),
             compressed_offset,
-            u32::try_from(encoded.len()).context("ondemand group compressed size exceeds u32")?,
+            u32::try_from(encoded.len()).map_err(|err| {
+                Error::Overflow(format!("ondemand group compressed size exceeds u32: {err}"))
+            })?,
             group.crc32(),
             *blob_index,
             *group_index,
@@ -192,7 +199,10 @@ fn parse_trace_document(raw: &[u8]) -> Result<Vec<(u16, u32)>> {
     let envelope: TraceDocument =
         serde_json::from_slice(raw).context("failed to parse trace document")?;
     if envelope.version != TRACE_DOCUMENT_VERSION {
-        bail!("unsupported trace document version: {}", envelope.version);
+        return Err(Error::Unsupported(format!(
+            "unsupported trace document version: {}",
+            envelope.version
+        )));
     }
     dedup_patterns(envelope.patterns)
 }
@@ -203,10 +213,16 @@ fn dedup_patterns(patterns: Vec<TraceEntry>) -> Result<Vec<(u16, u32)>> {
     let mut ordered = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for pattern in patterns {
-        let blob_index = u16::try_from(pattern.blob_index)
-            .with_context(|| format!("pattern blob index {} exceeds u16", pattern.blob_index))?;
+        let blob_index = u16::try_from(pattern.blob_index).map_err(|err| {
+            Error::InvalidParameter(format!(
+                "pattern blob index {} exceeds u16: {err}",
+                pattern.blob_index
+            ))
+        })?;
         if blob_index == 0 {
-            bail!("pattern blob index must be non-zero");
+            return Err(Error::InvalidParameter(
+                "pattern blob index must be non-zero".to_string(),
+            ));
         }
         if seen.insert((blob_index, pattern.group_index)) {
             ordered.push((blob_index, pattern.group_index));
@@ -238,14 +254,16 @@ fn fetch_trace(apiserver: &str) -> Result<Vec<u8>> {
     let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| anyhow!("malformed HTTP response from apiserver"))?;
+        .ok_or_else(|| Error::Backend("malformed HTTP response from apiserver".to_string()))?;
     let status_line = response[..header_end]
         .split(|byte| *byte == b'\r')
         .next()
         .unwrap_or_default();
     let status_line = String::from_utf8_lossy(status_line);
     if !status_line.contains(" 200 ") {
-        bail!("apiserver /trace returned non-200 status: {status_line}");
+        return Err(Error::Backend(format!(
+            "apiserver /trace returned non-200 status: {status_line}"
+        )));
     }
     Ok(response[header_end + 4..].to_vec())
 }

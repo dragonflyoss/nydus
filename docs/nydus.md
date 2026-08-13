@@ -1662,7 +1662,7 @@ use std::path::Path;
 
 use nydus_core::{Config, NydusCore};
 
-fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> anyhow::Result<()> {
+fn wire_nydus_image(bootstrap: &Path, config_path: &Path) -> nydus_core::Result<()> {
 	// Load the same YAML schema accepted by `nydus fuse --config`.
 	let config = Config::from_file(config_path)?;
 	let core = NydusCore::new(bootstrap, config)?;

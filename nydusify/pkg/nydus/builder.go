@@ -100,7 +100,7 @@ func RunNydusBuild(ctx context.Context, opt BuildOption) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return errors.Wrapf(err, "nydus build failed: %s", stderr.String())
+		return errors.Wrapf(err, "nydus build: %s", stderr.String())
 	}
 
 	return nil
@@ -122,7 +122,7 @@ func RunNydusMerge(ctx context.Context, opt MergeBuildOption) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return errors.Wrapf(err, "nydus merge failed: %s", stderr.String())
+		return errors.Wrapf(err, "nydus merge: %s", stderr.String())
 	}
 	return nil
 }
@@ -145,7 +145,7 @@ func RunNydusToTar(ctx context.Context, opt UnpackOption, dest io.Writer) error 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return errors.Wrapf(err, "nydus build --type nydus-tar failed: %s", stderr.String())
+		return errors.Wrapf(err, "nydus build --type nydus-tar: %s", stderr.String())
 	}
 
 	return nil

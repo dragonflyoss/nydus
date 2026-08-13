@@ -4,12 +4,13 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use nydus_core::error::{Context, Error, Result};
 
 /// NUL-check a path before handing it to a `mount(2)`-family syscall.
 pub fn path_cstring(path: &Path, kind: &str) -> Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("{kind} path contains an interior NUL byte"))
+    CString::new(path.as_os_str().as_bytes()).map_err(|err| {
+        Error::InvalidParameter(format!("{kind} path contains an interior NUL byte: {err}"))
+    })
 }
 
 /// Unmount whatever is mounted at `mountpoint`. A plain `umount2(., 0)`; any

@@ -5,15 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
+use clap::Args;
 #[cfg(any(
     feature = "fanotify",
     feature = "nbd",
     feature = "ublk",
     feature = "uffd"
 ))]
-use anyhow::anyhow;
-use anyhow::{Context, Result};
-use clap::Args;
+use nydus::error::Error;
+use nydus::error::{Context, Result};
 #[cfg(any(feature = "fanotify", feature = "nbd"))]
 use nydus::mount::unmount;
 use nydus_core::config::Config;
@@ -171,10 +171,9 @@ const UNMOUNT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_milli
 /// True when an unmount error means "nothing is mounted there" (EINVAL: not a
 /// mount point; ENOENT: the path is gone), so retrying is pointless.
 #[cfg(any(feature = "fanotify", feature = "nbd"))]
-fn is_not_mounted(err: &anyhow::Error) -> bool {
+fn is_not_mounted(err: &Error) -> bool {
     matches!(
-        err.downcast_ref::<std::io::Error>()
-            .and_then(|io| io.raw_os_error()),
+        err.io_error().and_then(|io| io.raw_os_error()),
         Some(libc::EINVAL) | Some(libc::ENOENT)
     )
 }
@@ -200,17 +199,17 @@ pub fn unmount_with_retry(
             // happened): retrying would only stall the shutdown for the
             // whole retry window.
             Err(err) if is_not_mounted(&err) => {
-                debug!("nothing mounted at {}: {err:#}", mountpoint.display());
+                debug!("nothing mounted at {}: {err}", mountpoint.display());
                 break;
             }
             Err(err) if attempt < UNMOUNT_RETRY_ATTEMPTS => {
-                debug!("unmount attempt {attempt} failed: {err:#}; retrying");
+                debug!("unmount attempt {attempt} failed: {err}; retrying");
                 between_attempts();
                 std::thread::sleep(UNMOUNT_RETRY_DELAY);
             }
             Err(err) => {
                 error!(
-                    "failed to unmount {} after {UNMOUNT_RETRY_ATTEMPTS} attempts: {err:#}; \
+                    "failed to unmount {} after {UNMOUNT_RETRY_ATTEMPTS} attempts: {err}; \
                      {failure_hint}",
                     mountpoint.display()
                 );
@@ -245,7 +244,7 @@ impl SignalThread {
         self.handle.close();
         self.thread
             .join()
-            .map_err(|_| anyhow!("{} signal thread panicked", self.name))
+            .map_err(|_| Error::Runtime(format!("{} signal thread panicked", self.name)))
     }
 }
 

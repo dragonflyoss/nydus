@@ -2,8 +2,9 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
+
+use crate::error::{Context, Error, Result};
 
 /// Byte length of a SHA-256 digest.
 pub const SHA256_DIGEST_SIZE: usize = 32;
@@ -33,9 +34,12 @@ pub(crate) fn sha256_file_range(
         .len();
     let end = offset
         .checked_add(len)
-        .context("hash range offset overflow")?;
+        .ok_or_else(|| Error::Overflow("hash range offset overflow".to_string()))?;
     if end > file_len {
-        bail!("hash range exceeds file size: {}", path.display());
+        return Err(Error::InvalidParameter(format!(
+            "hash range exceeds file size: {}",
+            path.display()
+        )));
     }
 
     file.seek(SeekFrom::Start(offset))
@@ -46,16 +50,18 @@ pub(crate) fn sha256_file_range(
 
 pub(crate) fn parse_sha256_hex(value: &str) -> Result<[u8; SHA256_DIGEST_SIZE]> {
     if value.len() != SHA256_DIGEST_SIZE * 2 {
-        bail!(
+        return Err(Error::InvalidParameter(format!(
             "expected a {}-character sha256 hex string",
             SHA256_DIGEST_SIZE * 2
-        );
+        )));
     }
 
     let mut digest = [0u8; SHA256_DIGEST_SIZE];
     for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        let hi = hex_value(chunk[0]).ok_or_else(|| anyhow!("invalid sha256 hex string"))?;
-        let lo = hex_value(chunk[1]).ok_or_else(|| anyhow!("invalid sha256 hex string"))?;
+        let hi = hex_value(chunk[0])
+            .ok_or_else(|| Error::InvalidParameter("invalid sha256 hex string".to_string()))?;
+        let lo = hex_value(chunk[1])
+            .ok_or_else(|| Error::InvalidParameter("invalid sha256 hex string".to_string()))?;
         digest[index] = (hi << 4) | lo;
     }
     Ok(digest)

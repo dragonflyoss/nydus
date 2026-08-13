@@ -29,6 +29,7 @@
 pub mod blob;
 pub mod build;
 pub mod config;
+pub mod error;
 pub mod fs;
 pub mod metadata;
 pub mod optimize;
@@ -37,6 +38,7 @@ pub mod telemetry;
 pub mod utils;
 
 pub use config::Config;
+pub use error::{Error, Result};
 pub use fs::{FdRange, FileType, ResolveMode};
 pub use telemetry::access_trace::{TraceDocument, TraceEntry};
 
@@ -48,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
-use anyhow::{bail, Context, Result};
+use crate::error::Context;
 
 use crate::fs::{
     checked_range_end, mapped_range_offset, push_blob_fd_ranges, push_fd_range, BlobRangeSpec,
@@ -95,9 +97,9 @@ impl From<BlobId> for [u8; SHA256_DIGEST_SIZE] {
 }
 
 impl FromStr for BlobId {
-    type Err = anyhow::Error;
+    type Err = Error;
 
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
+    fn from_str(value: &str) -> Result<Self> {
         Ok(Self(parse_sha256_hex(value)?))
     }
 }
@@ -218,7 +220,9 @@ impl NydusCore {
         .context("failed to open nydus bootstrap")?;
         let raw_blob_infos = reader.blob_infos().context("failed to read blob table")?;
         if raw_blob_infos.is_empty() {
-            bail!("bootstrap contains no blobs");
+            return Err(Error::InvalidImage(
+                "bootstrap contains no blobs".to_string(),
+            ));
         }
         let flat_size = raw_blob_infos
             .iter()
@@ -226,16 +230,16 @@ impl NydusCore {
                 let offset = info
                     .mapped_blkaddr
                     .checked_mul(EROFS_BLOCK_SIZE as u64)
-                    .context("mapped blob offset overflow")?;
+                    .ok_or_else(|| Error::Overflow("mapped blob offset overflow".to_string()))?;
                 let len = info
                     .blocks
                     .checked_mul(EROFS_BLOCK_SIZE as u64)
-                    .context("blob size overflow")?;
-                Ok::<u64, anyhow::Error>(
+                    .ok_or_else(|| Error::Overflow("blob size overflow".to_string()))?;
+                Ok::<u64, Error>(
                     size.max(
-                        offset
-                            .checked_add(len)
-                            .context("flat blob range overflow")?,
+                        offset.checked_add(len).ok_or_else(|| {
+                            Error::Overflow("flat blob range overflow".to_string())
+                        })?,
                     ),
                 )
             })?;
@@ -377,7 +381,7 @@ impl NydusCore {
                 let blob_end = blob
                     .mapped_offset
                     .checked_add(blob.cache_size)
-                    .context("blob device range overflow")?;
+                    .ok_or_else(|| Error::Overflow("blob device range overflow".to_string()))?;
                 let seg_end = end.min(blob_end);
                 let blob_offset = pos - blob.mapped_offset;
                 push_blob_fd_ranges(
@@ -430,7 +434,7 @@ impl Blobs {
                 let mapped_offset = info
                     .mapped_blkaddr
                     .checked_mul(block_size)
-                    .context("mapped blob offset overflow")?;
+                    .ok_or_else(|| Error::Overflow("mapped blob offset overflow".to_string()))?;
                 let cache = self
                     .reader
                     .blob_cache(info.blob_index)
@@ -441,7 +445,7 @@ impl Blobs {
                 let cache_size = info
                     .blocks
                     .checked_mul(block_size)
-                    .context("blob cache size overflow")?;
+                    .ok_or_else(|| Error::Overflow("blob cache size overflow".to_string()))?;
                 Ok(BlobInfo {
                     index: info.blob_index,
                     id: BlobId::from(info.blob_id),
@@ -485,10 +489,9 @@ impl Blobs {
         &self,
         id: &BlobId,
     ) -> Result<(u16, Arc<dyn crate::storage::cache::BlobCache>)> {
-        let blob_index = *self
-            .index_by_blob_id
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("blob is not referenced by the bootstrap"))?;
+        let blob_index = *self.index_by_blob_id.get(id).ok_or_else(|| {
+            Error::NotFound("blob is not referenced by the bootstrap".to_string())
+        })?;
         let cache = self
             .reader
             .blob_cache(blob_index)
@@ -504,7 +507,9 @@ impl Blobs {
     pub fn fetch(&self, id: &BlobId, offset: u64, len: u64) -> Result<()> {
         let block_size = EROFS_BLOCK_SIZE as u64;
         if offset % block_size != 0 || len % block_size != 0 {
-            bail!("fetch range must be 4 KiB block aligned: offset={offset} len={len}");
+            return Err(Error::InvalidParameter(format!(
+                "fetch range must be 4 KiB block aligned: offset={offset} len={len}"
+            )));
         }
         if len == 0 {
             return Ok(());

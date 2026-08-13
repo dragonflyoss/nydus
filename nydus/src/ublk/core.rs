@@ -11,13 +11,13 @@ use std::io;
 use std::os::fd::RawFd;
 use std::path::Path;
 
-use anyhow::{Context, Result};
-
 use nydus_core::config::Config;
+use nydus_core::error::{Context, Error, Result};
 use nydus_core::fs::{copy_ranges, FileMaps};
 use nydus_core::metadata::EROFS_BLOCK_SIZE;
 use nydus_core::utils::align_up;
 use nydus_core::NydusCore;
+use tracing::warn;
 
 /// Logical block size exposed by the ublk device. Matching the EROFS block size
 /// keeps every incoming request aligned to a whole number of EROFS blocks.
@@ -43,7 +43,7 @@ impl UblkCore {
         // Round the device size up to a whole block: the kernel always reads in
         // block units, and the tail block of the last blob may be partial.
         let device_size = align_up(core.flat_size(), UBLK_LOGICAL_BLOCK_SIZE)
-            .context("flattened device size overflow")?;
+            .ok_or_else(|| Error::Overflow("flattened device size overflow".to_string()))?;
         // Preparing a blob downloads and validates its meta and sizes its cache
         // file, which takes seconds for a large image. Left to the first block
         // read it stalls whoever gets there first — typically `mount`, which
@@ -87,10 +87,19 @@ impl UblkCore {
         }
 
         let len = (buf.len() as u64).min(self.device_size - offset);
-        let ranges = self
-            .core
-            .fetch_flat_ranges(offset, len)
-            .map_err(|err| io::Error::other(format!("{err:#}")))?;
+        let ranges = self.core.fetch_flat_ranges(offset, len).map_err(|err| {
+            // Recover the OS errno when the fetch failed on IO, so the ublk
+            // reply carries the real code instead of collapsing to EIO. A
+            // bare `from_raw_os_error` drops the context chain, so log it
+            // here before converting.
+            match err.io_error().and_then(|io_err| io_err.raw_os_error()) {
+                Some(errno) => {
+                    warn!("ublk fetch at {offset} (+{len}) failed: {err}");
+                    io::Error::from_raw_os_error(errno)
+                }
+                None => io::Error::other(err),
+            }
+        })?;
 
         copy_ranges(&ranges, offset, self.zero_fd, buf, &self.maps)
     }

@@ -1,5 +1,3 @@
-use anyhow::{bail, Context, Result};
-
 use super::layout::MetadataLayout;
 use crate::build::dir::{serialize_directory, DirChild};
 use crate::build::image::{
@@ -8,6 +6,7 @@ use crate::build::image::{
 use crate::build::inode::{
     erofs_inode_size, serialize_inode, symlink_is_inline, InodeData, InodeInfo,
 };
+use crate::error::{Error, Result};
 use crate::metadata::{
     ErofsDeviceSlot, EROFS_BLOCK_SIZE, EROFS_DEVICESLOT_SIZE, EROFS_FT_DIR, EROFS_SB_BASE_SIZE,
     EROFS_SUPER_OFFSET,
@@ -54,22 +53,30 @@ fn set_flattened_mapped_blkaddrs(
     let block_size = EROFS_BLOCK_SIZE as u64;
     let mut next_offset = bootstrap_size;
     for slot in device_slots {
-        let next_offset_usize = usize::try_from(next_offset)
-            .context("flattened blob offset exceeds addressable size")?;
-        let alignment_usize = usize::try_from(alignment)
-            .context("flattened blob alignment exceeds addressable size")?;
+        let next_offset_usize = usize::try_from(next_offset).map_err(|err| {
+            Error::Overflow(format!(
+                "flattened blob offset exceeds addressable size: {err}"
+            ))
+        })?;
+        let alignment_usize = usize::try_from(alignment).map_err(|err| {
+            Error::Overflow(format!(
+                "flattened blob alignment exceeds addressable size: {err}"
+            ))
+        })?;
         let mapped_offset = round_up(next_offset_usize, alignment_usize) as u64;
         if mapped_offset % block_size != 0 {
-            bail!("flattened blob offset must be block aligned");
+            return Err(Error::InvalidImage(
+                "flattened blob offset must be block aligned".to_string(),
+            ));
         }
         slot.set_mapped_blkaddr(mapped_offset / block_size);
         next_offset = mapped_offset
             .checked_add(
                 slot.blocks()
                     .checked_mul(block_size)
-                    .context("flattened blob size overflow")?,
+                    .ok_or_else(|| Error::Overflow("flattened blob size overflow".to_string()))?,
             )
-            .context("flattened blob offset overflow")?;
+            .ok_or_else(|| Error::Overflow("flattened blob offset overflow".to_string()))?;
     }
     Ok(())
 }
@@ -79,12 +86,14 @@ fn patch_device_slots(bootstrap: &mut [u8], device_slots: &[ErofsDeviceSlot]) ->
     let device_table_size = device_slots
         .len()
         .checked_mul(EROFS_DEVICESLOT_SIZE)
-        .context("device table size overflow")?;
+        .ok_or_else(|| Error::Overflow("device table size overflow".to_string()))?;
     let device_table_end = devslot_offset
         .checked_add(device_table_size)
-        .context("device table offset overflow")?;
+        .ok_or_else(|| Error::Overflow("device table offset overflow".to_string()))?;
     if device_table_end > bootstrap.len() {
-        bail!("device table out of bounds");
+        return Err(Error::InvalidImage(
+            "device table out of bounds".to_string(),
+        ));
     }
 
     for (index, devslot) in device_slots.iter().enumerate() {
@@ -102,7 +111,9 @@ fn render_bootstrap_inner(
     uuid: &[u8; 16],
 ) -> Result<Vec<u8>> {
     if inodes.is_empty() {
-        bail!("cannot render bootstrap for empty inode set");
+        return Err(Error::InvalidParameter(
+            "cannot render bootstrap for empty inode set".to_string(),
+        ));
     }
 
     // The device table is laid out right after the superblock and may push the
@@ -211,7 +222,7 @@ fn render_bootstrap_inner(
 
     let root_nid = inodes[0].nid;
     if root_nid > u16::MAX as u64 {
-        bail!("root NID exceeds 16-bit range");
+        return Err(Error::Overflow("root NID exceeds 16-bit range".to_string()));
     }
 
     let mut bootstrap = Vec::new();

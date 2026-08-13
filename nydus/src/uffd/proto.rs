@@ -9,7 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use nydus_core::error::{Context, Error, Result};
 use nydus_core::FdRange;
 use sendfd::{RecvWithFd, SendWithFd};
 use tokio::io::unix::AsyncFd;
@@ -163,15 +163,17 @@ impl ProtoConn {
             let request = match msg_type {
                 MSG_HANDSHAKE => {
                     let (version, policy, prefault, regions) = decode_handshake(&payload)
-                        .ok_or_else(|| anyhow!("invalid HANDSHAKE payload"))?;
+                        .ok_or_else(|| Error::Protocol("invalid HANDSHAKE payload".to_string()))?;
                     if version != UFFD_PROTOCOL_VERSION {
-                        bail!("unsupported UFFD protocol version {version}");
+                        return Err(Error::Unsupported(format!(
+                            "unsupported UFFD protocol version {version}"
+                        )));
                     }
                     if fds.len() != 1 {
-                        bail!(
+                        return Err(Error::Protocol(format!(
                             "HANDSHAKE must carry exactly one userfaultfd, received {}",
                             fds.len()
-                        );
+                        )));
                     }
                     Request::Handshake {
                         policy,
@@ -187,7 +189,7 @@ impl ProtoConn {
                 MSG_FETCH_REQUEST => {
                     validate_no_fds(&fds, "FETCH")?;
                     let request = decode_fetch_request(&payload)
-                        .ok_or_else(|| anyhow!("invalid FETCH payload"))?;
+                        .ok_or_else(|| Error::Protocol("invalid FETCH payload".to_string()))?;
                     Request::Fetch(DeviceRange {
                         offset: request.offset,
                         len: request.len,
@@ -223,11 +225,17 @@ impl ProtoConn {
 
         let header = Header::from_bytes(&header_buf);
         if header.magic != UFFD_MAGIC {
-            bail!("invalid UFFD magic 0x{:08x}", header.magic);
+            return Err(Error::Protocol(format!(
+                "invalid UFFD magic 0x{:08x}",
+                header.magic
+            )));
         }
-        let payload_len = usize::try_from(header.len).context("invalid UFFD payload length")?;
+        let payload_len = usize::try_from(header.len)
+            .map_err(|err| Error::Protocol(format!("invalid UFFD payload length: {err}")))?;
         if payload_len > MAX_PAYLOAD_SIZE {
-            bail!("UFFD payload length {payload_len} exceeds limit {MAX_PAYLOAD_SIZE}");
+            return Err(Error::Protocol(format!(
+                "UFFD payload length {payload_len} exceeds limit {MAX_PAYLOAD_SIZE}"
+            )));
         }
         let mut payload = vec![0u8; payload_len];
         if !payload.is_empty() {
@@ -430,7 +438,9 @@ pub fn encode_probe_request() -> Vec<u8> {
 
 fn validate_no_fds(fds: &[OwnedFd], name: &str) -> Result<()> {
     if !fds.is_empty() {
-        bail!("{name} request must not carry file descriptors");
+        return Err(Error::Protocol(format!(
+            "{name} request must not carry file descriptors"
+        )));
     }
     Ok(())
 }
@@ -438,7 +448,9 @@ fn validate_no_fds(fds: &[OwnedFd], name: &str) -> Result<()> {
 fn validate_empty_request(payload: &[u8], fds: &[OwnedFd], name: &str) -> Result<()> {
     validate_no_fds(fds, name)?;
     if !payload.is_empty() {
-        bail!("{name} request must have an empty payload");
+        return Err(Error::Protocol(format!(
+            "{name} request must have an empty payload"
+        )));
     }
     Ok(())
 }
@@ -485,7 +497,9 @@ async fn recv_exact(stream: &AsyncFd<UnixStream>, buf: &mut [u8]) -> Result<()> 
             return Err(err).context("recv failed");
         }
         if read == 0 {
-            bail!("peer closed while reading UFFD protocol message");
+            return Err(Error::Runtime(
+                "peer closed while reading UFFD protocol message".to_string(),
+            ));
         }
         offset += read as usize;
     }
@@ -506,7 +520,7 @@ async fn send_with_fd(stream: &AsyncFd<UnixStream>, data: &[u8], fds: &[RawFd]) 
             socket.write(&data[sent..])
         };
         match result {
-            Ok(0) => bail!("short send_with_fd"),
+            Ok(0) => return Err(Error::Runtime("short send_with_fd".to_string())),
             Ok(written) => sent += written,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => guard.clear_ready(),
             Err(err) => return Err(err).context("send_with_fd failed"),
@@ -645,7 +659,7 @@ mod tests {
         let (proto, client) = proto_pair();
         client.send_with_fd(&handshake, &[]).unwrap();
         let err = proto.recv().await.unwrap_err();
-        assert!(format!("{err:#}").contains("exactly one userfaultfd, received 0"));
+        assert!(format!("{err}").contains("exactly one userfaultfd, received 0"));
 
         let (proto, client) = proto_pair();
         let first = File::open("/dev/null").unwrap();
@@ -654,7 +668,7 @@ mod tests {
             .send_with_fd(&handshake, &[first.as_raw_fd(), second.as_raw_fd()])
             .unwrap();
         let err = proto.recv().await.unwrap_err();
-        assert!(format!("{err:#}").contains("exactly one userfaultfd, received 2"));
+        assert!(format!("{err}").contains("exactly one userfaultfd, received 2"));
     }
 
     #[tokio::test]
@@ -689,7 +703,7 @@ mod tests {
         let header = Header::new(MSG_FETCH_REQUEST, (MAX_PAYLOAD_SIZE + 1) as u32);
         client.send_with_fd(&header.to_bytes(), &[]).unwrap();
         let err = proto.recv().await.unwrap_err();
-        assert!(format!("{err:#}").contains("exceeds limit"));
+        assert!(format!("{err}").contains("exceeds limit"));
     }
 
     #[tokio::test]
@@ -700,7 +714,7 @@ mod tests {
             .send_with_fd(&encode_stat_request(), &[file.as_raw_fd()])
             .unwrap();
         let err = proto.recv().await.unwrap_err();
-        assert!(format!("{err:#}").contains("must not carry file descriptors"));
+        assert!(format!("{err}").contains("must not carry file descriptors"));
     }
 
     #[tokio::test]

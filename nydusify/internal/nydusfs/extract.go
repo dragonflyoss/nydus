@@ -10,6 +10,7 @@ import (
 	"archive/tar"
 	"context"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -121,7 +122,7 @@ func linkOrCopyFile(src, dst string) error {
 	}
 	if err := os.Link(src, dst); err == nil {
 		return nil
-	} else if os.IsExist(err) {
+	} else if errors.Is(err, fs.ErrExist) {
 		return nil
 	}
 	return copyFile(src, dst)
@@ -154,7 +155,7 @@ func copyFile(src, dst string) error {
 	if err := tmp.Close(); err != nil {
 		return errors.Wrap(err, "close temp file")
 	}
-	if err := os.Rename(tmpPath, dst); err != nil && !os.IsExist(err) {
+	if err := os.Rename(tmpPath, dst); err != nil && !errors.Is(err, fs.ErrExist) {
 		return errors.Wrap(err, "rename temp file")
 	}
 	committed = true

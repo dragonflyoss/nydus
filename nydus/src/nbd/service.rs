@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use nydus_core::error::{Context, Error, Result};
 use tracing::{debug, warn};
 
 use super::core::NbdCore;
@@ -161,10 +161,10 @@ impl NbdService {
         // down and kill it, so refuse instead of hijacking.
         let size = query_block_device_size(fd).context("BLKGETSIZE64 failed")?;
         if size != 0 {
-            bail!(
+            return Err(Error::InvalidParameter(format!(
                 "NBD device {nbd_path} is busy (reports {size} bytes); \
                  pick a free device or detach the other client first"
-            );
+            )));
         }
 
         // Clear any previous session so a fresh socket/flags set applies.
@@ -216,7 +216,7 @@ impl NbdService {
         // An error is expected on a clean shutdown: `stop()` clears the sock
         // first, so DO_IT may return EBADR/EINVAL.
         if let Err(err) = nbd_ioctl(fd, NBD_DO_IT, 0) {
-            debug!("NBD_DO_IT returned {err:#}; clearing socket");
+            debug!("NBD_DO_IT returned {err}; clearing socket");
         }
         self.active.store(false, Ordering::Release);
         let _ = nbd_ioctl(fd, NBD_CLEAR_SOCK, 0);
@@ -241,10 +241,10 @@ impl NbdService {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                bail!(
+                return Err(Error::Runtime(format!(
                     "timed out after {timeout:?} waiting for the nbd device to \
                      report {bytes} bytes (got {size}); NBD_DO_IT may not be running"
-                );
+                )));
             }
             std::thread::sleep(CAPACITY_POLL_INTERVAL);
         }
@@ -283,7 +283,7 @@ impl NbdWorker {
         while self.active.load(Ordering::Acquire) {
             if let Err(err) = self.sock_user.read_exact(&mut header) {
                 if self.active.load(Ordering::Acquire) {
-                    warn!("nbd: failed to read request header: {err:#}");
+                    warn!("nbd: failed to read request header: {err}");
                 }
                 break;
             }
@@ -291,7 +291,7 @@ impl NbdWorker {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(err) => {
-                    warn!("nbd: failed to handle request: {err:#}");
+                    warn!("nbd: failed to handle request: {err}");
                     break;
                 }
             }
@@ -353,10 +353,7 @@ impl NbdWorker {
                 match core.read_at(req.offset, buf) {
                     Ok(()) => wrote_data = true,
                     Err(err) => {
-                        warn!(
-                            "nbd: read [{:#x}, +{}) failed: {err:#}",
-                            req.offset, req.len
-                        );
+                        warn!("nbd: read [{:#x}, +{}) failed: {err}", req.offset, req.len);
                         code = NBD_EIO;
                     }
                 }
