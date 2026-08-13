@@ -2835,7 +2835,6 @@ dependencies = [
 name = "nydus"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clap",
  "fuser",
  "http-body-util",
@@ -2852,6 +2851,7 @@ dependencies = [
  "signal-hook",
  "tar",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -2862,7 +2862,6 @@ dependencies = [
 name = "nydus-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "bitflags 2.11.0",
  "blake3",
@@ -2880,6 +2879,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.10.9",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-appender",

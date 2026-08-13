@@ -1,8 +1,8 @@
 use crate::blob::format::{crc32_with_zeroed_field, validate_incompat_flags};
+use crate::error::{Context, Error, Result};
 use crate::metadata::EROFS_BLOCK_SIZE;
 use crate::utils::le::{read_u16_from, read_u32_from, read_u64_from};
 use crate::utils::SHA256_DIGEST_SIZE;
-use anyhow::{bail, Context, Result};
 use bitflags::bitflags;
 use crc32c::crc32c_append;
 use memmap2::{Mmap, MmapOptions};
@@ -87,13 +87,15 @@ impl fmt::Display for BlobMetaCompressor {
 }
 
 impl TryFrom<BlobMetaFlags> for BlobMetaCompressor {
-    type Error = anyhow::Error;
+    type Error = crate::error::Error;
 
     fn try_from(value: BlobMetaFlags) -> Result<Self> {
         match value.bits() & BLOB_META_COMPRESSOR_MASK {
             0 => Ok(Self::None),
             bits if bits == BlobMetaFlags::COMPRESSOR_ZSTD.bits() => Ok(Self::Zstd),
-            bits => bail!("unsupported blob meta compressor flag set: {bits:#x}"),
+            bits => Err(crate::error::Error::Unsupported(format!(
+                "unsupported blob meta compressor flag set: {bits:#x}"
+            ))),
         }
     }
 }
@@ -121,13 +123,17 @@ impl fmt::Display for BlobMetaDigester {
 }
 
 impl TryFrom<BlobMetaFlags> for BlobMetaDigester {
-    type Error = anyhow::Error;
+    type Error = crate::error::Error;
 
     fn try_from(value: BlobMetaFlags) -> Result<Self> {
         match value.bits() & BLOB_META_DIGESTER_MASK {
             bits if bits == BlobMetaFlags::DIGESTER_BLAKE3.bits() => Ok(Self::Blake3),
-            0 => bail!("blob meta digester flag is missing"),
-            bits => bail!("unsupported blob meta digester flag set: {bits:#x}"),
+            0 => Err(crate::error::Error::InvalidImage(
+                "blob meta digester flag is missing".to_string(),
+            )),
+            bits => Err(crate::error::Error::Unsupported(format!(
+                "unsupported blob meta digester flag set: {bits:#x}"
+            ))),
         }
     }
 }
@@ -259,7 +265,7 @@ impl BlobMetaHeader {
         self.groups_offset = self
             .chunks_offset
             .checked_add(chunk_count as u64 * size_of::<BlobMetaChunk>() as u64)
-            .context("blob meta group offset overflow")?;
+            .ok_or_else(|| Error::Overflow("blob meta group offset overflow".to_string()))?;
         Ok(())
     }
 
@@ -277,40 +283,50 @@ impl BlobMetaHeader {
 
     fn validate(&self) -> Result<()> {
         if self.magic != BLOB_META_MAGIC {
-            bail!("invalid blob meta magic");
+            return Err(Error::InvalidImage("invalid blob meta magic".to_string()));
         }
         // `version` is informational and deliberately not gated on:
         // compatibility is carried by the magic and the incompat flag bits.
         // `reserved0` is likewise not enforced to zero: it is a future
         // compat-field slot, and corruption is caught by the file crc32c.
         if self.chunk_block_bits > BLOB_META_MAX_BLOCK_BITS {
-            bail!(
+            return Err(Error::InvalidImage(format!(
                 "blob meta chunk block bits too large: {}",
                 self.chunk_block_bits
-            );
+            )));
         }
         if self.group_block_bits > BLOB_META_MAX_BLOCK_BITS {
-            bail!(
+            return Err(Error::InvalidImage(format!(
                 "blob meta group block bits too large: {}",
                 self.group_block_bits
-            );
+            )));
         }
         self.validated_flags()?;
         if self.chunks_offset != BLOB_META_HEADER_SIZE {
-            bail!("invalid blob meta chunks offset: {}", self.chunks_offset);
+            return Err(Error::InvalidImage(format!(
+                "invalid blob meta chunks offset: {}",
+                self.chunks_offset
+            )));
         }
         let expected_groups_offset = self
             .chunks_offset
             .checked_add(self.chunk_bytes())
-            .context("blob meta group offset overflow")?;
+            .ok_or_else(|| Error::Overflow("blob meta group offset overflow".to_string()))?;
         if self.groups_offset != expected_groups_offset {
-            bail!("invalid blob meta groups offset: {}", self.groups_offset);
+            return Err(Error::InvalidImage(format!(
+                "invalid blob meta groups offset: {}",
+                self.groups_offset
+            )));
         }
         if self.chunks_offset % align_of::<BlobMetaChunk>() as u64 != 0 {
-            bail!("blob meta chunks offset is not aligned");
+            return Err(Error::InvalidImage(
+                "blob meta chunks offset is not aligned".to_string(),
+            ));
         }
         if self.groups_offset % align_of::<BlobMetaGroup>() as u64 != 0 {
-            bail!("blob meta groups offset is not aligned");
+            return Err(Error::InvalidImage(
+                "blob meta groups offset is not aligned".to_string(),
+            ));
         }
         Ok(())
     }
@@ -435,7 +451,9 @@ impl BlobMetaGroup {
         source_group_index: u32,
     ) -> Result<Self> {
         if source_blob_index == 0 {
-            bail!("blob meta redirect group source blob index must be non-zero");
+            return Err(Error::InvalidImage(
+                "blob meta redirect group source blob index must be non-zero".to_string(),
+            ));
         }
         let group = Self {
             uncompressed_block_offset,
@@ -509,7 +527,9 @@ impl BlobMetaGroup {
             compressed_byte_offset: self
                 .compressed_byte_offset()
                 .checked_add(byte_bias)
-                .context("blob meta compressed byte offset overflow")?,
+                .ok_or_else(|| {
+                    Error::Overflow("blob meta compressed byte offset overflow".to_string())
+                })?,
             ..*self
         };
         group.validate()?;
@@ -552,25 +572,39 @@ impl BlobMetaGroup {
 
     fn validate(&self) -> Result<()> {
         if self.uncompressed_block_count == 0 {
-            bail!("blob meta group uncompressed block count must be non-zero");
+            return Err(Error::InvalidImage(
+                "blob meta group uncompressed block count must be non-zero".to_string(),
+            ));
         }
         if self.compressed_size == 0 {
-            bail!("blob meta group compressed size must be non-zero");
+            return Err(Error::InvalidImage(
+                "blob meta group compressed size must be non-zero".to_string(),
+            ));
         }
         self.uncompressed_block_offset
             .checked_mul(EROFS_BLOCK_SIZE as u64)
-            .context("blob meta group uncompressed byte offset overflow")?;
+            .ok_or_else(|| {
+                Error::Overflow("blob meta group uncompressed byte offset overflow".to_string())
+            })?;
         self.uncompressed_byte_offset()
             .checked_add(self.uncompressed_byte_size())
-            .context("blob meta group uncompressed byte range overflow")?;
+            .ok_or_else(|| {
+                Error::Overflow("blob meta group uncompressed byte range overflow".to_string())
+            })?;
         self.compressed_byte_offset
             .checked_add(self.compressed_size as u64)
-            .context("blob meta group compressed byte range overflow")?;
+            .ok_or_else(|| {
+                Error::Overflow("blob meta group compressed byte range overflow".to_string())
+            })?;
         if self.source_blob_index == 0 && self.source_group_index != 0 {
-            bail!("blob meta group source group index requires a source blob index");
+            return Err(Error::InvalidImage(
+                "blob meta group source group index requires a source blob index".to_string(),
+            ));
         }
         if self.reserved != BLOB_META_GROUP_RESERVED {
-            bail!("blob meta group reserved field must be zero");
+            return Err(Error::InvalidImage(
+                "blob meta group reserved field must be zero".to_string(),
+            ));
         }
         Ok(())
     }
@@ -654,13 +688,17 @@ impl BlobMetaChunk {
 
     fn validate(&self) -> Result<()> {
         if self.uncompressed_block_count == 0 {
-            bail!("blob meta chunk uncompressed block count must be non-zero");
+            return Err(Error::InvalidImage(
+                "blob meta chunk uncompressed block count must be non-zero".to_string(),
+            ));
         }
         self.uncompressed_byte_offset()
             .checked_add(self.uncompressed_byte_size())
-            .context("blob meta chunk byte range overflow")?;
+            .ok_or_else(|| Error::Overflow("blob meta chunk byte range overflow".to_string()))?;
         if self.reserved != BLOB_META_CHUNK_RESERVED {
-            bail!("blob meta chunk reserved field must be zero");
+            return Err(Error::InvalidImage(
+                "blob meta chunk reserved field must be zero".to_string(),
+            ));
         }
         Ok(())
     }
@@ -880,17 +918,17 @@ impl BlobMeta {
         check_crc32: bool,
     ) -> Result<Self> {
         if data.len() < BLOB_META_HEADER_SIZE as usize {
-            bail!("blob meta data too small");
+            return Err(Error::InvalidImage("blob meta data too small".to_string()));
         }
 
         let mut cursor = Cursor::new(data);
         let header = BlobMetaHeader::read_from(&mut cursor)?;
         if data.len() as u64 != header.metadata_size() {
-            bail!(
+            return Err(Error::InvalidImage(format!(
                 "blob meta data size mismatch: expected {}, got {}",
                 header.metadata_size(),
                 data.len()
-            );
+            )));
         }
         validate_padding(data, &header)?;
         if check_crc32 {
@@ -931,18 +969,18 @@ impl BlobMeta {
             .with_context(|| format!("failed to open blob meta: {}", path.display()))?;
         let file_len = file.metadata()?.len();
         if file_len < BLOB_META_HEADER_SIZE {
-            bail!("blob meta file too small");
+            return Err(Error::InvalidImage("blob meta file too small".to_string()));
         }
         let mmap = unsafe { MmapOptions::new().map(&file) }
             .with_context(|| format!("failed to mmap blob meta: {}", path.display()))?;
         let mut cursor = Cursor::new(&mmap[..BLOB_META_HEADER_SIZE as usize]);
         let header = BlobMetaHeader::read_from(&mut cursor)?;
         if file_len != header.metadata_size() {
-            bail!(
+            return Err(Error::InvalidImage(format!(
                 "blob meta file size mismatch: expected {}, got {}",
                 header.metadata_size(),
                 file_len
-            );
+            )));
         }
         validate_padding(&mmap, &header)?;
         if check_crc32 {
@@ -1004,14 +1042,20 @@ impl BlobMetaLoader {
 
 fn block_count_to_bits(blocks: u32, what: &str) -> Result<u8> {
     if blocks == 0 {
-        bail!("blob meta {what} block count must be non-zero");
+        return Err(Error::InvalidImage(format!(
+            "blob meta {what} block count must be non-zero"
+        )));
     }
     if !blocks.is_power_of_two() {
-        bail!("blob meta {what} block count must be a power of two");
+        return Err(Error::InvalidImage(format!(
+            "blob meta {what} block count must be a power of two"
+        )));
     }
     let bits = blocks.trailing_zeros() as u8;
     if bits > BLOB_META_MAX_BLOCK_BITS {
-        bail!("blob meta {what} block count too large: {blocks}");
+        return Err(Error::InvalidImage(format!(
+            "blob meta {what} block count too large: {blocks}"
+        )));
     }
     Ok(bits)
 }
@@ -1019,7 +1063,9 @@ fn block_count_to_bits(blocks: u32, what: &str) -> Result<u8> {
 fn validate_padding(data: &[u8], header: &BlobMetaHeader) -> Result<()> {
     let padding_start = header.records_end() as usize;
     if data[padding_start..].iter().any(|byte| *byte != 0) {
-        bail!("blob meta padding must be zero");
+        return Err(Error::InvalidImage(
+            "blob meta padding must be zero".to_string(),
+        ));
     }
     Ok(())
 }
@@ -1027,11 +1073,11 @@ fn validate_padding(data: &[u8], header: &BlobMetaHeader) -> Result<()> {
 fn validate_blob_meta_crc32(data: &[u8], header: &BlobMetaHeader) -> Result<()> {
     let computed = compute_blob_meta_crc32(data);
     if computed != header.crc32() {
-        bail!(
+        return Err(Error::InvalidImage(format!(
             "blob meta header crc32 mismatch: stored {:#010x}, computed {:#010x}",
             header.crc32(),
             computed
-        );
+        )));
     }
     Ok(())
 }
@@ -1076,7 +1122,9 @@ fn infer_group_block_bits(groups: &[BlobMetaGroup]) -> Result<u8> {
 
 fn validate_groups(groups: &[BlobMetaGroup], group_block_count: u32) -> Result<()> {
     if group_block_count == 0 {
-        bail!("blob meta group block count must be non-zero");
+        return Err(Error::InvalidImage(
+            "blob meta group block count must be non-zero".to_string(),
+        ));
     }
     // Redirect blobs copy groups from arbitrary source blobs, so their group
     // sizes are inherently non-uniform and `group_index_for_byte_offset` is
@@ -1091,7 +1139,9 @@ fn validate_groups(groups: &[BlobMetaGroup], group_block_count: u32) -> Result<(
             .validate()
             .with_context(|| format!("invalid blob meta group {index}"))?;
         if group.uncompressed_block_offset() != previous_uncompressed_block_end {
-            bail!("blob meta groups must be dense at index {index}");
+            return Err(Error::InvalidImage(format!(
+                "blob meta groups must be dense at index {index}"
+            )));
         }
         // Groups pack whole blocks up to the compress size regardless of chunk
         // boundaries, so every group but the last holds exactly
@@ -1099,28 +1149,32 @@ fn validate_groups(groups: &[BlobMetaGroup], group_block_count: u32) -> Result<(
         if !allow_nonuniform {
             if index < last_index {
                 if group.uncompressed_block_count() != group_block_count {
-                    bail!(
+                    return Err(Error::InvalidImage(format!(
                         "blob meta group {index} must be exactly {group_block_count} blocks, got {}",
                         group.uncompressed_block_count()
-                    );
+                    )));
                 }
             } else if group.uncompressed_block_count() > group_block_count {
-                bail!(
+                return Err(Error::InvalidImage(format!(
                     "blob meta final group {index} exceeds {group_block_count} blocks, got {}",
                     group.uncompressed_block_count()
-                );
+                )));
             }
         }
         // Encoded payloads are packed back-to-back in the data region, so each
         // group must start at or after the previous group's byte end. No block
         // alignment is required between compressed groups.
         if index > 0 && group.compressed_byte_offset() < previous_compressed_byte_end {
-            bail!("blob meta groups overlap compressed ranges at index {index}");
+            return Err(Error::InvalidImage(format!(
+                "blob meta groups overlap compressed ranges at index {index}"
+            )));
         }
         previous_uncompressed_block_end = group
             .uncompressed_block_offset()
             .checked_add(group.uncompressed_block_count() as u64)
-            .context("blob meta group uncompressed block range overflow")?;
+            .ok_or_else(|| {
+                Error::Overflow("blob meta group uncompressed block range overflow".to_string())
+            })?;
         previous_compressed_byte_end = group.compressed_byte_end();
     }
     Ok(())
@@ -1140,9 +1194,11 @@ fn validate_chunks(groups: &[BlobMetaGroup], chunks: &[BlobMetaChunk]) -> Result
         let chunk_end = chunk
             .uncompressed_block_offset()
             .checked_add(chunk.uncompressed_block_count() as u64)
-            .context("blob meta chunk block range overflow")?;
+            .ok_or_else(|| Error::Overflow("blob meta chunk block range overflow".to_string()))?;
         if chunk_end > total_blocks {
-            bail!("blob meta chunk {index} exceeds the blob block range");
+            return Err(Error::InvalidImage(format!(
+                "blob meta chunk {index} exceeds the blob block range"
+            )));
         }
     }
     Ok(())

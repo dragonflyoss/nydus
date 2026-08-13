@@ -267,6 +267,10 @@ func materializeBlob(ctx context.Context, cs content.Store, desc ocispec.Descrip
 		_ = os.Remove(path)
 		return "", errors.Wrap(err, "write blob file")
 	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", errors.Wrap(err, "close blob file")
+	}
 	return path, nil
 }
 

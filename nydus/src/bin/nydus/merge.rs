@@ -1,6 +1,6 @@
 use crate::cli_common;
-use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
+use nydus::error::{Context, Result};
 use nydus_core::build::merge::{
     merge_sources_to_bootstrap_bytes, WhiteoutSpec as MergeWhiteoutSpec,
 };

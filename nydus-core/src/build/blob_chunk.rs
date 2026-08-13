@@ -1,9 +1,9 @@
 use crate::blob::{
     BlobMeta, BlobMetaChunk, BlobMetaCompressor, BlobMetaGroup, BLOB_META_DEFAULT_CHUNK_SIZE,
 };
+use crate::error::{Context, Error, Result};
 use crate::metadata::{ChunkAddr, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE, EROFS_NULL_ADDR};
 use crate::utils::round_up;
-use anyhow::{bail, Context, Result};
 use crc32c::crc32c;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -40,10 +40,14 @@ impl BlobWriter {
         compressor: BlobMetaCompressor,
     ) -> Result<Self> {
         if file_chunk_size < EROFS_BLOCK_SIZE {
-            bail!("blob writer file chunk size must be at least one EROFS block");
+            return Err(Error::InvalidParameter(
+                "blob writer file chunk size must be at least one EROFS block".to_string(),
+            ));
         }
         if !file_chunk_size.is_power_of_two() || file_chunk_size % EROFS_BLOCK_SIZE != 0 {
-            bail!("blob writer file chunk size must be power-of-two and block-aligned");
+            return Err(Error::InvalidParameter(
+                "blob writer file chunk size must be power-of-two and block-aligned".to_string(),
+            ));
         }
 
         let file = File::create(path)
@@ -59,20 +63,28 @@ impl BlobWriter {
         compressor: BlobMetaCompressor,
     ) -> Result<Self> {
         if file_chunk_size < EROFS_BLOCK_SIZE {
-            bail!("blob writer file chunk size must be at least one EROFS block");
+            return Err(Error::InvalidParameter(
+                "blob writer file chunk size must be at least one EROFS block".to_string(),
+            ));
         }
         if !file_chunk_size.is_power_of_two() || file_chunk_size % EROFS_BLOCK_SIZE != 0 {
-            bail!("blob writer file chunk size must be power-of-two and block-aligned");
+            return Err(Error::InvalidParameter(
+                "blob writer file chunk size must be power-of-two and block-aligned".to_string(),
+            ));
         }
         if group_size < file_chunk_size {
-            bail!("blob writer group size must be at least the file chunk size");
+            return Err(Error::InvalidParameter(
+                "blob writer group size must be at least the file chunk size".to_string(),
+            ));
         }
         // The blob meta header stores the group size as a log2 exponent
         // (`group_block_bits`), so it must be a power of two; being a power
         // of two >= the (block-aligned) chunk size also makes it block
         // aligned by construction.
         if !group_size.is_power_of_two() {
-            bail!("blob writer group size must be a power of two");
+            return Err(Error::InvalidParameter(
+                "blob writer group size must be a power of two".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -202,8 +214,9 @@ impl BlobWriter {
 
     fn append_chunk(&mut self, data: &[u8], write_len: usize) -> Result<u64> {
         let addr = self.next_blkaddr;
-        let block_count = u32::try_from(write_len / EROFS_BLOCK_SIZE as usize)
-            .context("blob meta chunk block count exceeds u32")?;
+        let block_count = u32::try_from(write_len / EROFS_BLOCK_SIZE as usize).map_err(|err| {
+            Error::Overflow(format!("blob meta chunk block count exceeds u32: {err}"))
+        })?;
 
         // Block-aligned chunk payload: real bytes followed by zero padding only
         // in its final block.
@@ -274,8 +287,12 @@ impl BlobWriter {
         self.data_hasher.update(encoded);
         self.next_compressed_offset = compressed_offset + encoded.len() as u64;
 
-        let block_count = u32::try_from(uncompressed.len() / EROFS_BLOCK_SIZE as usize)
-            .context("blob meta group uncompressed block count exceeds u32")?;
+        let block_count =
+            u32::try_from(uncompressed.len() / EROFS_BLOCK_SIZE as usize).map_err(|err| {
+                Error::Overflow(format!(
+                    "blob meta group uncompressed block count exceeds u32: {err}"
+                ))
+            })?;
         let entry = BlobMetaGroup::new(
             self.group_block_offset,
             block_count,

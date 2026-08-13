@@ -6,7 +6,7 @@
 //! background thread so it stays independent of the backend's runtime and of
 //! any cargo feature, and is shut down cleanly when the mount exits.
 
-use anyhow::{Context, Result};
+use nydus::error::{Context, Result};
 use nydus_core::utils::parse_unix_address;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -118,7 +118,7 @@ async fn serve(listener: UnixListener, shutdown: Arc<Notify>) {
 
 async fn handle_request(
     req: Request<Incoming>,
-) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+) -> std::result::Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let response = if req.method() == Method::GET && req.uri().path() == "/metrics" {
         let body = nydus_core::telemetry::metrics::encode_text();
         Response::builder()

@@ -8,7 +8,7 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use nydus_core::error::{Context, Error, Result};
 
 use super::core::BlobDevice;
 use crate::mount::path_cstring;
@@ -60,37 +60,38 @@ fn mount_options(devices: &[BlobDevice]) -> Result<Vec<u8>> {
     let mut expected_index = 1u16;
     for device in devices {
         if device.index != expected_index {
-            anyhow::bail!(
+            return Err(Error::InvalidParameter(format!(
                 "device slot {} is out of order; expected {}",
-                device.index,
-                expected_index
-            );
+                device.index, expected_index
+            )));
         }
         expected_index = expected_index
             .checked_add(1)
-            .context("EROFS device index overflow")?;
+            .ok_or_else(|| Error::Overflow("EROFS device index overflow".to_string()))?;
 
         let path = device.cache_path.as_os_str().as_bytes();
         if path.contains(&0) {
-            anyhow::bail!("device path contains an interior NUL byte");
+            return Err(Error::InvalidParameter(
+                "device path contains an interior NUL byte".to_string(),
+            ));
         }
         if path.contains(&b',') {
-            anyhow::bail!(
+            return Err(Error::InvalidParameter(format!(
                 "device path contains a comma and cannot be encoded safely: {}",
                 device.cache_path.display()
-            );
+            )));
         }
         options.extend_from_slice(b",device=");
         options.extend_from_slice(path);
     }
     if options.len() > MOUNT_DATA_MAX {
-        anyhow::bail!(
+        return Err(Error::InvalidParameter(format!(
             "mount options for {} devices are {} bytes, over the {} B mount(2) data limit; \
              use a shorter cache directory path",
             devices.len(),
             options.len(),
             MOUNT_DATA_MAX
-        );
+        )));
     }
     Ok(options)
 }

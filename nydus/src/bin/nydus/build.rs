@@ -1,6 +1,6 @@
 use crate::cli_common;
-use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
+use nydus::error::{Context, Error, Result};
 use nydus::unpack::unpack_to_tar;
 use nydus_core::blob::{BlobFooter, BlobMeta, BlobMetaCompressor, BLOB_META_SUFFIX};
 use nydus_core::build::{build_dir_image, DirImageOptions};
@@ -115,11 +115,16 @@ fn run_nydus_to_tar(args: BuildArgs) -> Result<()> {
         ("--exclude", !args.exclude.is_empty()),
     ] {
         if set {
-            bail!("{name} is not supported with --type nydus-tar");
+            return Err(Error::InvalidParameter(format!(
+                "{name} is not supported with --type nydus-tar"
+            )));
         }
     }
     if !args.source.is_file() {
-        bail!("source {} is not a nydus blob file", args.source.display());
+        return Err(Error::InvalidParameter(format!(
+            "source {} is not a nydus blob file",
+            args.source.display()
+        )));
     }
 
     let reader = ErofsReader::open(Some(&args.source), None, None, None)
@@ -141,7 +146,9 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     let requested_blob_path = args.blob.clone();
     if let (Some(bootstrap), Some(blob)) = (&args.bootstrap, requested_blob_path.as_ref()) {
         if *bootstrap == *blob {
-            bail!("--bootstrap and --blob must point to different files");
+            return Err(Error::InvalidParameter(
+                "--bootstrap and --blob must point to different files".to_string(),
+            ));
         }
     }
 
@@ -149,7 +156,10 @@ fn run_dir_to_nydus(args: BuildArgs) -> Result<()> {
     // produced by the recursive directory walk are absolute and match
     // correctly against the exclude set.
     if !args.source.is_dir() {
-        bail!("source {} is not a directory", args.source.display());
+        return Err(Error::InvalidParameter(format!(
+            "source {} is not a directory",
+            args.source.display()
+        )));
     }
     let source = args.source.canonicalize().with_context(|| {
         format!(
@@ -284,9 +294,12 @@ fn print_blob_summary(summary: BlobSummary<'_>) {
 }
 
 fn blob_meta_output_path(blob_path: &Path) -> Result<PathBuf> {
-    let file_name = blob_path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("blob path has no file name: {}", blob_path.display()))?;
+    let file_name = blob_path.file_name().ok_or_else(|| {
+        Error::InvalidParameter(format!(
+            "blob path has no file name: {}",
+            blob_path.display()
+        ))
+    })?;
     Ok(blob_path.with_file_name(format!("{}{BLOB_META_SUFFIX}", file_name.to_string_lossy())))
 }
 
@@ -313,7 +326,9 @@ fn prepare_blob_output(blob: Option<&Path>, blob_dir: Option<&Path>) -> Result<B
                 is_fifo: false,
             })
         }
-        _ => bail!("build expects either --blob <path> or --blob-dir <dir>"),
+        _ => Err(Error::InvalidParameter(
+            "build expects either --blob <path> or --blob-dir <dir>".to_string(),
+        )),
     }
 }
 

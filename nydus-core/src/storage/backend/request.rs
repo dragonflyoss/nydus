@@ -22,26 +22,19 @@ use super::{ReadContext, ReadKind};
 use super::dragonfly_sdk::{DragonflyError, DragonflyResponse, DragonflySdk};
 
 /// Errors produced while issuing a request.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum RequestError {
     /// Transient network/transport failure (connection, timeout, ...).
+    #[error("network error: {0}")]
     Network(io::Error),
     /// Proxy denied the request (`403`).
     #[cfg_attr(not(feature = "backend-dragonfly-proxy"), allow(dead_code))]
+    #[error("proxy forbidden: {0}")]
     ProxyForbidden(String),
     /// Proxy rate-limited the request (`429`).
     #[cfg_attr(not(feature = "backend-dragonfly-proxy"), allow(dead_code))]
+    #[error("proxy too many requests: {0}")]
     ProxyTooManyRequests(String),
-}
-
-impl std::fmt::Display for RequestError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RequestError::Network(e) => write!(f, "network error: {e}"),
-            RequestError::ProxyForbidden(s) => write!(f, "proxy forbidden: {s}"),
-            RequestError::ProxyTooManyRequests(s) => write!(f, "proxy too many requests: {s}"),
-        }
-    }
 }
 
 pub(crate) type RequestResult<T> = Result<T, RequestError>;

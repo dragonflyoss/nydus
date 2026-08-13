@@ -21,3 +21,6 @@ pub mod unpack;
 
 #[cfg(feature = "fuse")]
 pub use fuse::ErofsFs;
+
+pub use nydus_core::error;
+pub use nydus_core::error::{Error, Result};

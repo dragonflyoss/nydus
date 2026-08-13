@@ -8,9 +8,8 @@ use std::io;
 use std::os::fd::RawFd;
 use std::sync::RwLock;
 
-use anyhow::{Context, Result};
-
 use super::ErofsReader;
+use crate::error::{Context, Error, Result};
 use crate::utils::pread_exact;
 
 /// Resolved mmap-ready byte range.
@@ -68,7 +67,7 @@ pub(crate) fn checked_range_end(offset: u64, len: u64) -> Result<Option<u64>> {
         return Ok(None);
     }
     Ok(Some(offset.checked_add(len).ok_or_else(|| {
-        anyhow::anyhow!("range offset + length overflow")
+        Error::Overflow("range offset + length overflow".to_string())
     })?))
 }
 

@@ -17,8 +17,7 @@ pub use metadata::{
 
 use std::io::Write;
 
-use anyhow::{bail, Context, Result};
-
+use crate::error::{Context, Error, Result};
 use crate::metadata::bytes_to_blocks;
 use crate::utils::{align_up, write_zero_padding};
 
@@ -33,32 +32,34 @@ pub fn assemble_full_blob(
     bootstrap: &[u8],
     blob_meta: &BlobMeta,
 ) -> Result<BlobFooter> {
-    let bootstrap_size = u64::try_from(bootstrap.len()).context("bootstrap exceeds u64")?;
+    let bootstrap_size = u64::try_from(bootstrap.len())
+        .map_err(|err| Error::Overflow(format!("bootstrap exceeds u64: {err}")))?;
     let bootstrap_blocks = bytes_to_blocks(bootstrap_size, "bootstrap")?;
-    let bootstrap_offset =
-        align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT).context("bootstrap offset overflow")?;
+    let bootstrap_offset = align_up(data_size, NYDUS_BLOB_FOOTER_ALIGNMENT)
+        .ok_or_else(|| Error::Overflow("bootstrap offset overflow".to_string()))?;
     let blob_meta_offset = align_up(
         bootstrap_offset
             .checked_add(bootstrap_size)
-            .context("blob meta offset overflow")?,
+            .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?,
         NYDUS_BLOB_FOOTER_ALIGNMENT,
     )
-    .context("blob meta offset overflow")?;
+    .ok_or_else(|| Error::Overflow("blob meta offset overflow".to_string()))?;
     let blob_meta_size = blob_meta.metadata_size();
     let blob_meta_blocks = bytes_to_blocks(blob_meta_size, "blob meta")?;
 
     let mut blob_meta_bytes = Vec::with_capacity(
-        usize::try_from(blob_meta_size).context("blob meta size exceeds usize")?,
+        usize::try_from(blob_meta_size)
+            .map_err(|err| Error::Overflow(format!("blob meta size exceeds usize: {err}")))?,
     );
     blob_meta
         .write_to(&mut blob_meta_bytes)
         .context("failed to serialize blob meta")?;
     if blob_meta_bytes.len() as u64 != blob_meta_size {
-        bail!(
+        return Err(Error::InvalidImage(format!(
             "serialized blob meta size mismatch: expected {}, got {}",
             blob_meta_size,
             blob_meta_bytes.len()
-        );
+        )));
     }
 
     let footer = BlobFooter::new(

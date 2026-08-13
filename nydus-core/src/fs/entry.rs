@@ -7,13 +7,12 @@ use std::os::fd::AsRawFd;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-
 use super::data::{for_each_chunk_span, locate_chunk, ChunkLocation};
 use super::range::{
     checked_range_end, push_blob_fd_ranges, push_fd_range, BlobRangeSpec, FdRange, ResolveMode,
 };
 use super::ErofsReader;
+use crate::error::{Context, Error, Result};
 use crate::metadata::{
     ErofsInode, EROFS_FT_BLKDEV, EROFS_FT_CHRDEV, EROFS_FT_DIR, EROFS_FT_FIFO, EROFS_FT_REG_FILE,
     EROFS_FT_SOCK, EROFS_FT_SYMLINK, EROFS_INODE_CHUNK_BASED, EROFS_INODE_FLAT_INLINE,
@@ -42,7 +41,9 @@ impl FileType {
             EROFS_FT_CHRDEV => Ok(Self::CharDevice),
             EROFS_FT_FIFO => Ok(Self::Fifo),
             EROFS_FT_SOCK => Ok(Self::Socket),
-            other => bail!("unsupported EROFS file type: {other}"),
+            other => Err(Error::Unsupported(format!(
+                "unsupported EROFS file type: {other}"
+            ))),
         }
     }
 
@@ -55,7 +56,9 @@ impl FileType {
             x if x == libc::S_IFCHR as u16 => Ok(Self::CharDevice),
             x if x == libc::S_IFIFO as u16 => Ok(Self::Fifo),
             x if x == libc::S_IFSOCK as u16 => Ok(Self::Socket),
-            other => bail!("unsupported inode mode file type: {other:#o}"),
+            other => Err(Error::Unsupported(format!(
+                "unsupported inode mode file type: {other:#o}"
+            ))),
         }
     }
 }
@@ -125,22 +128,29 @@ impl ImageFs {
             match component {
                 Component::RootDir | Component::CurDir => continue,
                 Component::Normal(name) => {
-                    let wanted = name
-                        .to_str()
-                        .ok_or_else(|| anyhow::anyhow!("path component is not valid UTF-8"))?;
+                    let wanted = name.to_str().ok_or_else(|| {
+                        Error::InvalidParameter("path component is not valid UTF-8".to_string())
+                    })?;
                     let inode = self.inode(ino)?;
                     if FileType::from_mode(inode.mode())? != FileType::Directory {
-                        bail!("path component is not a directory: {wanted}");
+                        return Err(Error::InvalidParameter(format!(
+                            "path component is not a directory: {wanted}"
+                        )));
                     }
                     let entries = self.reader.read_dir(ino, &inode)?;
                     let entry = entries
                         .into_iter()
                         .find(|entry| entry.name == wanted.as_bytes())
-                        .ok_or_else(|| anyhow::anyhow!("path not found: {}", path.display()))?;
+                        .ok_or_else(|| {
+                            Error::NotFound(format!("path not found: {}", path.display()))
+                        })?;
                     ino = entry.nid;
                 }
                 Component::ParentDir | Component::Prefix(_) => {
-                    bail!("unsupported path component in {}", path.display())
+                    return Err(Error::Unsupported(format!(
+                        "unsupported path component in {}",
+                        path.display()
+                    )))
                 }
             }
         }
@@ -164,7 +174,7 @@ impl Node {
     pub fn read_dir(&self) -> Result<Vec<DirEntry>> {
         let inode = self.inode()?;
         if FileType::from_mode(inode.mode())? != FileType::Directory {
-            bail!("not a directory");
+            return Err(Error::InvalidParameter("not a directory".to_string()));
         }
         self.reader
             .read_dir(self.ino, &inode)
@@ -206,7 +216,7 @@ impl Node {
         }
         let inode = self.inode()?;
         if FileType::from_mode(inode.mode())? != FileType::RegularFile {
-            bail!("not a regular file");
+            return Err(Error::InvalidParameter("not a regular file".to_string()));
         }
         if offset >= inode.size() {
             return Ok(());
@@ -216,7 +226,9 @@ impl Node {
         match inode.data_layout() {
             EROFS_INODE_FLAT_PLAIN | EROFS_INODE_FLAT_INLINE => Ok(()),
             EROFS_INODE_CHUNK_BASED => self.fetch_chunk_data(&inode, offset, actual_end - offset),
-            other => bail!("unsupported data layout: {other}"),
+            other => Err(Error::Unsupported(format!(
+                "unsupported data layout: {other}"
+            ))),
         }
     }
 
@@ -240,7 +252,7 @@ impl Node {
     pub fn read_link(&self) -> Result<Vec<u8>> {
         let inode = self.inode()?;
         if FileType::from_mode(inode.mode())? != FileType::Symlink {
-            bail!("not a symlink");
+            return Err(Error::InvalidParameter("not a symlink".to_string()));
         }
         self.reader
             .read_symlink(self.ino, &inode)
@@ -263,7 +275,7 @@ impl Node {
 
     fn read_inode(&self, inode: &ErofsInode<'_>, offset: u64, size: u32) -> Result<Vec<u8>> {
         if FileType::from_mode(inode.mode())? != FileType::RegularFile {
-            bail!("not a regular file");
+            return Err(Error::InvalidParameter("not a regular file".to_string()));
         }
         self.reader
             .read_file_data(self.ino, inode, offset, size)
@@ -288,9 +300,9 @@ impl Node {
                 match locate_chunk(blob_layout, entry.blkaddr, entry.device_id)? {
                     ChunkLocation::Hole => {}
                     ChunkLocation::Blob { index, offset } => {
-                        let blob_offset = offset
-                            .checked_add(span.chunk_off)
-                            .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
+                        let blob_offset = offset.checked_add(span.chunk_off).ok_or_else(|| {
+                            Error::Overflow("blob fetch offset overflow".to_string())
+                        })?;
                         self.reader
                             .blob_cache(index)
                             .with_context(|| format!("failed to open blob {index}"))?
@@ -319,7 +331,7 @@ impl Node {
     ) -> Result<Vec<FdRange>> {
         let inode = self.inode()?;
         if FileType::from_mode(inode.mode())? != FileType::RegularFile {
-            bail!("not a regular file");
+            return Err(Error::InvalidParameter("not a regular file".to_string()));
         }
         let end = match checked_range_end(offset, len)? {
             Some(end) => end.min(inode.size()),
@@ -330,13 +342,15 @@ impl Node {
         }
 
         match inode.data_layout() {
-            EROFS_INODE_FLAT_PLAIN | EROFS_INODE_FLAT_INLINE => {
-                bail!("flat file data is not supported by Node range API")
-            }
+            EROFS_INODE_FLAT_PLAIN | EROFS_INODE_FLAT_INLINE => Err(Error::Unsupported(
+                "flat file data is not supported by Node range API".to_string(),
+            )),
             EROFS_INODE_CHUNK_BASED => {
                 self.resolve_chunk_file_ranges(&inode, offset, end - offset, mode)
             }
-            other => bail!("unsupported data layout: {other}"),
+            other => Err(Error::Unsupported(format!(
+                "unsupported data layout: {other}"
+            ))),
         }
     }
 
@@ -368,7 +382,7 @@ impl Node {
                 ChunkLocation::Blob { index, offset } => {
                     let blob_offset = offset
                         .checked_add(span.chunk_off)
-                        .ok_or_else(|| anyhow::anyhow!("blob fetch offset overflow"))?;
+                        .ok_or_else(|| Error::Overflow("blob fetch offset overflow".to_string()))?;
                     push_blob_fd_ranges(
                         &self.reader,
                         self.zero_file.as_raw_fd(),
@@ -383,7 +397,9 @@ impl Node {
                     )?;
                 }
                 ChunkLocation::Local { .. } => {
-                    bail!("bootstrap-local file data is not supported by Node range API");
+                    return Err(Error::Unsupported(
+                        "bootstrap-local file data is not supported by Node range API".to_string(),
+                    ));
                 }
             }
             Ok(())

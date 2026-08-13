@@ -18,10 +18,10 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::blob::{BlobFooter, BlobMeta, BlobMetaCompressor, NYDUS_BLOB_FOOTER_SIZE};
+use crate::error::{Context, Error, Result};
 use crate::metadata::{ErofsDeviceSlot, EROFS_BLOB_ID_SIZE, EROFS_BLOCK_SIZE};
 use crate::utils::{sha256_bytes, MIB};
 use blob_chunk::BlobWriter;
@@ -69,17 +69,22 @@ impl DirImageOptions<'_> {
         // separately and are at least 1MiB even when file chunk indexes are
         // smaller.
         if self.chunk_size < EROFS_BLOCK_SIZE {
-            bail!(
+            return Err(Error::InvalidParameter(format!(
                 "chunk size {} must be >= block size {}",
-                self.chunk_size,
-                EROFS_BLOCK_SIZE
-            );
+                self.chunk_size, EROFS_BLOCK_SIZE
+            )));
         }
         if !self.chunk_size.is_power_of_two() {
-            bail!("chunk size {} must be a power of two", self.chunk_size);
+            return Err(Error::InvalidParameter(format!(
+                "chunk size {} must be a power of two",
+                self.chunk_size
+            )));
         }
         if self.chunk_size % EROFS_BLOCK_SIZE != 0 {
-            bail!("chunk size {} must be block aligned", self.chunk_size);
+            return Err(Error::InvalidParameter(format!(
+                "chunk size {} must be block aligned",
+                self.chunk_size
+            )));
         }
 
         // Validate compress (group uncompressed) size: a power of two (the
@@ -87,17 +92,16 @@ impl DirImageOptions<'_> {
         // at least 1MiB, and at least the file chunk size so a chunk always
         // fits in a group.
         if !self.compress_size.is_power_of_two() || self.compress_size < MIB {
-            bail!(
+            return Err(Error::InvalidParameter(format!(
                 "compress size {} must be a power of two and at least 1MiB",
                 self.compress_size
-            );
+            )));
         }
         if self.compress_size < self.chunk_size {
-            bail!(
+            return Err(Error::InvalidParameter(format!(
                 "compress size {} must be >= chunk size {}",
-                self.compress_size,
-                self.chunk_size
-            );
+                self.compress_size, self.chunk_size
+            )));
         }
         Ok(())
     }
@@ -183,7 +187,7 @@ pub(crate) fn assemble_ondemand_artifact(
 ) -> Result<(Vec<u8>, [u8; EROFS_BLOB_ID_SIZE], BlobFooter)> {
     let mut artifact = Vec::with_capacity(
         usize::try_from(data.len() as u64 + blob_meta.metadata_size())
-            .context("artifact exceeds usize")?
+            .map_err(|err| Error::Overflow(format!("artifact exceeds usize: {err}")))?
             + NYDUS_BLOB_FOOTER_SIZE,
     );
     artifact.extend_from_slice(data);

@@ -85,7 +85,12 @@ impl ErofsReader {
 
             let first_de: &ErofsDirent = cast_ref(&block_data[..EROFS_DIRENT_SIZE]);
             let first_nameoff = first_de.nameoff() as usize;
-            let dirent_count = first_nameoff / EROFS_DIRENT_SIZE;
+            // Cap by the entries that physically fit in this block:
+            // `first_nameoff` comes from untrusted image data, and an
+            // inflated value would push the `i + 1` look-ahead below past
+            // the block end (`cast_ref` asserts on short slices).
+            let dirent_count =
+                (first_nameoff / EROFS_DIRENT_SIZE).min(block_len / EROFS_DIRENT_SIZE);
 
             for i in 0..dirent_count {
                 let de_off = i * EROFS_DIRENT_SIZE;

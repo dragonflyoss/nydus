@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::error::{Context, Error, Result};
+
 /// Default number of worker threads used for concurrent blob prefetch.
 pub const DEFAULT_PREFETCH_THREADS: usize = 10;
 
@@ -88,25 +90,27 @@ impl Default for PrefetchConfig {
 
 impl Config {
     /// Load and parse a nydus configuration from a YAML file.
-    pub fn from_file(path: &Path) -> anyhow::Result<Self> {
+    pub fn from_file(path: &Path) -> Result<Self> {
         let contents = fs::read_to_string(path)
-            .map_err(|err| anyhow::anyhow!("failed to read config {}: {}", path.display(), err))?;
+            .with_context(|| format!("failed to read config {}", path.display()))?;
         Self::from_yaml(&contents)
     }
 
     /// Parse a nydus configuration from a YAML string.
-    pub fn from_yaml(contents: &str) -> anyhow::Result<Self> {
-        serde_yaml::from_str(contents)
-            .map_err(|err| anyhow::anyhow!("failed to parse nydus config: {err}"))
+    pub fn from_yaml(contents: &str) -> Result<Self> {
+        serde_yaml::from_str(contents).context("failed to parse nydus config")
     }
 
     /// Directory used by the local cache to store decoded chunks.
-    pub fn cache_dir(&self) -> anyhow::Result<PathBuf> {
+    pub fn cache_dir(&self) -> Result<PathBuf> {
         if self.cache.kind != "local" {
-            anyhow::bail!("unsupported cache type: {}", self.cache.kind);
+            return Err(Error::InvalidConfig(format!(
+                "unsupported cache type: {}",
+                self.cache.kind
+            )));
         }
         let cfg: LocalDirConfig = serde_yaml::from_value(self.cache.config.clone())
-            .map_err(|err| anyhow::anyhow!("invalid local cache config: {err}"))?;
+            .context("invalid local cache config")?;
         Ok(cfg.dir)
     }
 }

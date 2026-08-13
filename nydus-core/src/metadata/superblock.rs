@@ -156,6 +156,15 @@ pub(crate) fn validate_superblock(sb: &ErofsSuperblock) -> io::Result<()> {
             format!("bad EROFS magic: 0x{:08X}", sb.magic()),
         ));
     }
+    // This reader hardcodes 4 KiB blocks (`EROFS_BLOCK_SIZE`); an untrusted
+    // `blkszbits` would otherwise feed unchecked `1 << blkszbits` shifts in
+    // the block-geometry math.
+    if sb.blkszbits != EROFS_BLKSZBITS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported EROFS block size bits: {}", sb.blkszbits),
+        ));
+    }
     const SUPPORTED_INCOMPAT: u32 = EROFS_FEATURE_INCOMPAT_CHUNKED_FILE
         | EROFS_FEATURE_INCOMPAT_DEVICE_TABLE
         | EROFS_FEATURE_INCOMPAT_48BIT;

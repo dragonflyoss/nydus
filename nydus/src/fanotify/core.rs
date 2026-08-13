@@ -27,9 +27,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use tracing::{debug, warn};
 
+use nydus_core::error::{Context, Error, Result};
 use nydus_core::{BlobId, Config, NydusCore};
 
 use super::proto::{PreContentEvent, Range, FAN_PRE_ACCESS};
@@ -79,11 +79,15 @@ pub enum Decision {
 }
 
 /// A range that cannot be turned into a valid, non-empty, in-device fetch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum RangeError {
+    #[error("range count is zero")]
     ZeroCount,
+    #[error("range offset is past the device end")]
     OffsetPastEnd,
+    #[error("range end overflows")]
     Overflow,
+    #[error("range is empty after alignment")]
     EmptyAfterAlign,
 }
 
@@ -163,23 +167,24 @@ impl FanotifyCore {
         let mut device_index = HashMap::with_capacity(entries.len());
         let mut blob_slot = HashMap::with_capacity(entries.len());
         for (slot, b) in entries.into_iter().enumerate() {
-            let expected_index = u16::try_from(slot + 1)
-                .context("blob device table has more slots than the EROFS index space")?;
+            let expected_index = u16::try_from(slot + 1).map_err(|err| {
+                Error::InvalidImage(format!(
+                    "blob device table has more slots than the EROFS index space: {err}"
+                ))
+            })?;
             if b.index != expected_index {
-                anyhow::bail!(
+                return Err(Error::InvalidImage(format!(
                     "blob device index {} is not contiguous from 1 (expected {} at slot {})",
-                    b.index,
-                    expected_index,
-                    slot
-                );
+                    b.index, expected_index, slot
+                )));
             }
             if b.cache_size % BLOCK_SIZE != 0 {
-                anyhow::bail!(
+                return Err(Error::InvalidImage(format!(
                     "blob device {} size {} is not a multiple of the {} B EROFS block size",
                     b.cache_path.display(),
                     b.cache_size,
                     BLOCK_SIZE
-                );
+                )));
             }
 
             let (dev, ino) = cache_identity(&b.cache_path, b.cache_size).with_context(|| {
@@ -225,7 +230,7 @@ impl FanotifyCore {
     pub fn is_range_ready(&self, id: &BlobId, offset: u64, len: u64) -> Result<bool> {
         let end = offset
             .checked_add(len)
-            .ok_or_else(|| anyhow::anyhow!("ready range overflow"))?;
+            .ok_or_else(|| Error::Overflow("ready range overflow".to_string()))?;
         let ready = self
             .core
             .blobs
@@ -242,7 +247,7 @@ impl FanotifyCore {
         cache_size: u64,
         offset: u64,
         count: u64,
-    ) -> Result<(), FetchError> {
+    ) -> std::result::Result<(), FetchError> {
         debug_assert!(count > 0);
         debug_assert!(offset % BLOCK_SIZE == 0);
         debug_assert!(count % BLOCK_SIZE == 0);
@@ -341,9 +346,10 @@ impl FanotifyCore {
 
 /// The failure mode of a fill attempt, so the service can deny with the right
 /// reason instead of collapsing every failure into one response.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FetchError {
-    Backend(anyhow::Error),
+    #[error(transparent)]
+    Backend(Error),
 }
 
 /// Decide the response purely from the parsed event. A missing RANGE record is a
@@ -367,7 +373,7 @@ pub(crate) fn align_fetch_range(
     offset: u64,
     count: u64,
     cache_size: u64,
-) -> Result<(u64, u64), RangeError> {
+) -> std::result::Result<(u64, u64), RangeError> {
     if count == 0 {
         return Err(RangeError::ZeroCount);
     }
@@ -404,11 +410,12 @@ fn validate_bounded_backend_timeout(config: &Config) -> Result<()> {
             .and_then(|v| v.as_u64())
             == Some(0)
     {
-        anyhow::bail!(
+        return Err(Error::InvalidConfig(
             "fanotify mode requires a bounded registry `timeout`: `0` disables HTTP \
              timeouts and lets a stalled registry block readers indefinitely — set a \
              large value (e.g. 600) instead"
-        );
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -431,8 +438,11 @@ pub fn fd_identity(fd: RawFd) -> Result<(u64, u64)> {
 /// expected size, and take its `(dev, ino)` identity from that same descriptor.
 /// Refusing symlinks and non-regular files closes the path-stat/mark/open race.
 fn cache_identity(path: &Path, expected_size: u64) -> Result<(u64, u64)> {
-    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
-        .context("blob device path contains an interior NUL byte")?;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).map_err(|err| {
+        Error::InvalidParameter(format!(
+            "blob device path contains an interior NUL byte: {err}"
+        ))
+    })?;
     let fd = unsafe {
         libc::open(
             c_path.as_ptr(),
@@ -453,12 +463,16 @@ fn cache_identity(path: &Path, expected_size: u64) -> Result<(u64, u64)> {
     }
     let st = unsafe { st.assume_init() };
     if st.st_mode & libc::S_IFMT != libc::S_IFREG {
-        anyhow::bail!("blob cache file is not a regular file");
+        return Err(Error::InvalidParameter(
+            "blob cache file is not a regular file".to_string(),
+        ));
     }
     #[allow(clippy::unnecessary_cast)]
     let size = st.st_size as u64;
     if size != expected_size {
-        anyhow::bail!("blob cache file size {size} does not match device size {expected_size}");
+        return Err(Error::InvalidParameter(format!(
+            "blob cache file size {size} does not match device size {expected_size}"
+        )));
     }
     #[allow(clippy::unnecessary_cast)]
     Ok((st.st_dev as u64, st.st_ino as u64))

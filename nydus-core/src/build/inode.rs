@@ -1,4 +1,5 @@
 use crate::build::blob_chunk::BlobWriter;
+use crate::error::{Context, Error, Result};
 use crate::metadata::{
     erofs_chunk_format, erofs_compact_i_format, erofs_extended_i_format, erofs_xattr_ibody_size,
     erofs_xattr_icount, erofs_xattr_name_split, mode_to_erofs_file_type,
@@ -9,7 +10,6 @@ use crate::metadata::{
     EROFS_XATTR_IBODY_HEADER_SIZE, EROFS_XATTR_INDEX_TRUSTED, NYDUS_XATTR_SUFFIX_PREFETCH_BLOBS,
 };
 use crate::utils::round_up;
-use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
@@ -189,7 +189,9 @@ pub fn set_root_prefetch_blobs_xattr(inode: &mut InodeInfo, blob_indexes: &[u16]
         .collect::<Vec<_>>()
         .join(",");
     if value.len() > u16::MAX as usize {
-        bail!("root prefetch xattr value exceeds EROFS xattr value size limit");
+        return Err(Error::InvalidParameter(
+            "root prefetch xattr value exceeds EROFS xattr value size limit".to_string(),
+        ));
     }
 
     inode.xattrs.retain(|(index, suffix, _)| {
@@ -471,7 +473,7 @@ impl<'a> TreeNode<FsBuildContext<'a>> for FsTreeNode {
 
         let entries = fs::read_dir(&self.path)
             .with_context(|| format!("failed to read directory: {}", self.path.display()))?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<std::io::Result<Vec<_>>>()?;
 
         let mut children = Vec::with_capacity(entries.len());
         for entry in entries {

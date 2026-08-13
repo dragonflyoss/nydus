@@ -16,7 +16,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use nydus_core::error::{Context, Error, Result};
 use tar::{Builder, EntryType, Header};
 
 use nydus_core::fs::ErofsReader;
@@ -59,7 +59,9 @@ impl Unpacker<'_> {
         depth: u32,
     ) -> Result<()> {
         if depth > MAX_DEPTH {
-            bail!("directory nesting exceeds {MAX_DEPTH} levels at inode {nid}");
+            return Err(Error::InvalidImage(format!(
+                "directory nesting exceeds {MAX_DEPTH} levels at inode {nid}"
+            )));
         }
         let inode = self
             .reader
@@ -149,7 +151,11 @@ impl Unpacker<'_> {
                 header.set_device_minor(minor)?;
             }
             EROFS_FT_FIFO => header.set_entry_type(EntryType::Fifo),
-            other => bail!("unsupported inode file type {other}"),
+            other => {
+                return Err(Error::Unsupported(format!(
+                    "unsupported inode file type {other}"
+                )))
+            }
         }
 
         let pax = self.pax_records(nid, &inode, mtime)?;

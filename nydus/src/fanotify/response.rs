@@ -4,7 +4,7 @@ use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use nydus_core::error::{Context, Error, Result};
 use tracing::{error, warn};
 
 use super::core::Response;
@@ -99,7 +99,9 @@ impl PendingPermission {
 
     pub fn decide(&mut self, decision: Response) -> Result<()> {
         if self.decision.is_some() || self.submitted {
-            return Err(anyhow!("permission event already has a terminal decision"));
+            return Err(Error::Runtime(
+                "permission event already has a terminal decision".to_string(),
+            ));
         }
         self.decision = Some(decision);
         Ok(())
@@ -113,11 +115,13 @@ impl PendingPermission {
     /// is fatal.
     pub fn try_submit(&mut self) -> Result<bool> {
         if self.submitted {
-            return Err(anyhow!("permission response was already submitted"));
+            return Err(Error::Runtime(
+                "permission response was already submitted".to_string(),
+            ));
         }
-        let decision = self
-            .decision
-            .ok_or_else(|| anyhow!("permission response has no terminal decision"))?;
+        let decision = self.decision.ok_or_else(|| {
+            Error::Runtime("permission response has no terminal decision".to_string())
+        })?;
         let event_fd = self.event_fd();
 
         loop {
@@ -128,9 +132,9 @@ impl PendingPermission {
                     return Ok(true);
                 }
                 Ok(written) => {
-                    return Err(anyhow!(
+                    return Err(Error::Runtime(format!(
                         "short fanotify response write for fd={event_fd}: {written}/{RESPONSE_SIZE}"
-                    ));
+                    )));
                 }
                 Err(err) if err.raw_os_error() == Some(libc::EINTR) => continue,
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(false),

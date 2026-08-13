@@ -437,6 +437,8 @@ impl Drop for LocalBlobCache {
     fn drop(&mut self) {
         // Mirror the gauge updates from `open_with_trace` and `cache_file` so
         // repeatedly opening and dropping caches does not inflate them.
+        // Recover from a poisoned lock: panicking in `Drop` during an unwind
+        // would abort the process.
         let opened = self
             .cache_file
             .get_mut()

@@ -3,8 +3,7 @@ use std::os::fd::RawFd;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
-
+use nydus_core::error::{Context, Error, Result};
 use nydus_core::metadata::EROFS_BLOCK_SIZE;
 use nydus_core::utils::align_up;
 use nydus_core::{Config, FdRange, NydusCore, ResolveMode};
@@ -66,7 +65,7 @@ impl UffdCore {
         let core =
             Arc::new(NydusCore::new(bootstrap, config).context("failed to create nydus core")?);
         let device_size = align_up(core.flat_size(), UFFD_TOTAL_SIZE_ALIGNMENT)
-            .ok_or_else(|| anyhow!("alignment overflow"))?;
+            .ok_or_else(|| Error::Overflow("alignment overflow".to_string()))?;
 
         Ok(Self { core, device_size })
     }
@@ -140,7 +139,7 @@ impl UffdCore {
         ensure_device_range(self.device_size, device_offset, len)?;
         let end = device_offset
             .checked_add(len)
-            .ok_or_else(|| anyhow!("device range overflow"))?;
+            .ok_or_else(|| Error::Overflow("device range overflow".to_string()))?;
         let mut ranges = Vec::new();
 
         let flat_end = end.min(self.core.flat_size());
@@ -218,11 +217,11 @@ fn resolve_fault_range<'a>(
     let start = region
         .offset
         .checked_add(aligned_region_offset)
-        .ok_or_else(|| anyhow!("UFFD fault device offset overflow"))?;
+        .ok_or_else(|| Error::Overflow("UFFD fault device offset overflow".to_string()))?;
     let region_end = region
         .offset
         .checked_add(region.size)
-        .ok_or_else(|| anyhow!("UFFD region end overflow"))?;
+        .ok_or_else(|| Error::Overflow("UFFD region end overflow".to_string()))?;
     let end = start.saturating_add(fault_size).min(region_end);
     if end <= start {
         return Ok(None);
@@ -239,16 +238,22 @@ fn resolve_fault_range<'a>(
 
 fn ensure_device_range(device_size: u64, offset: u64, len: u64) -> Result<()> {
     if len == 0 {
-        bail!("device range length must be non-zero");
+        return Err(Error::InvalidParameter(
+            "device range length must be non-zero".to_string(),
+        ));
     }
     if offset % UFFD_BLOCK_SIZE != 0 || len % UFFD_BLOCK_SIZE != 0 {
-        bail!("device range must be 4 KiB aligned: offset={offset} len={len}");
+        return Err(Error::InvalidParameter(format!(
+            "device range must be 4 KiB aligned: offset={offset} len={len}"
+        )));
     }
     let end = offset
         .checked_add(len)
-        .ok_or_else(|| anyhow!("device range overflow"))?;
+        .ok_or_else(|| Error::Overflow("device range overflow".to_string()))?;
     if end > device_size {
-        bail!("device range [{offset}, {end}) exceeds device size {device_size}");
+        return Err(Error::InvalidParameter(format!(
+            "device range [{offset}, {end}) exceeds device size {device_size}"
+        )));
     }
     Ok(())
 }
@@ -260,9 +265,12 @@ fn uffdio_copy_from_fd(
     offset: u64,
     len: u64,
 ) -> Result<()> {
-    let mut buf = vec![0u8; usize::try_from(len)?];
-    let source_offset = libc::off_t::try_from(offset)
-        .context("UFFD backing file offset exceeds the platform off_t range")?;
+    let mut buf = vec![0u8; usize::try_from(len).map_err(|err| Error::Overflow(err.to_string()))?];
+    let source_offset = libc::off_t::try_from(offset).map_err(|err| {
+        Error::Overflow(format!(
+            "UFFD backing file offset exceeds the platform off_t range: {err}"
+        ))
+    })?;
     let read = unsafe {
         libc::pread(
             source_fd,
@@ -272,17 +280,14 @@ fn uffdio_copy_from_fd(
         )
     };
     if read < 0 {
-        bail!(
-            "failed to read file for UFFDIO_COPY: {}",
-            io::Error::last_os_error()
-        );
+        return Err(io::Error::last_os_error()).context("failed to read file for UFFDIO_COPY");
     }
     if read as usize != buf.len() {
-        bail!(
+        return Err(Error::Runtime(format!(
             "short read from UFFD backing file: expected {}, got {}",
             buf.len(),
             read
-        );
+        )));
     }
 
     let mut arg = UffdioCopy {
@@ -294,7 +299,7 @@ fn uffdio_copy_from_fd(
     };
     let ret = unsafe { libc::ioctl(uffd_fd, UFFDIO_COPY as IoctlRequest, &mut arg) };
     if ret < 0 {
-        bail!("UFFDIO_COPY failed: {}", io::Error::last_os_error());
+        return Err(io::Error::last_os_error()).context("UFFDIO_COPY failed");
     }
     Ok(())
 }
@@ -315,7 +320,7 @@ fn uffdio_zeropage(uffd_fd: RawFd, start: u64, len: u64) -> Result<()> {
         if err.raw_os_error() == Some(libc::EEXIST) {
             return Ok(());
         }
-        bail!("UFFDIO_ZEROPAGE failed: {err}");
+        return Err(err).context("UFFDIO_ZEROPAGE failed");
     }
     Ok(())
 }

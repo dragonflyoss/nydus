@@ -5,13 +5,13 @@ use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
 use tokio::io::unix::AsyncFd;
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::{debug, info, warn};
 
+use nydus_core::error::{Context, Error, Result};
 use nydus_core::FdRange;
 
 use super::core::{read_uffd_msg, UffdCore, UffdMsg};
@@ -169,7 +169,7 @@ impl UffdConn {
                     _ = self.shutdown.changed() => break,
                     message = self.message_rx.recv() => {
                         ConnectionEvent::Socket(
-                            message.ok_or_else(|| anyhow!("socket reader exited"))?
+                            message.ok_or_else(|| Error::Runtime("socket reader exited".to_string()))?
                         )
                     }
                     msg = read_next_uffd_msg(&state.uffd) => {
@@ -182,7 +182,7 @@ impl UffdConn {
                     _ = self.shutdown.changed() => break,
                     message = self.message_rx.recv() => {
                         ConnectionEvent::Socket(
-                            message.ok_or_else(|| anyhow!("socket reader exited"))?
+                            message.ok_or_else(|| Error::Runtime("socket reader exited".to_string()))?
                         )
                     }
                 }
@@ -198,7 +198,7 @@ impl UffdConn {
 
     async fn dispatch_message(&mut self, message: Result<Option<Request>>) -> Result<()> {
         let request = match message {
-            Ok(None) => bail!("client disconnected"),
+            Ok(None) => return Err(Error::Runtime("client disconnected".to_string())),
             Err(err) if is_client_disconnect(&err) => return Err(err),
             Err(err) => return Err(err).context("failed to receive uffd protocol message"),
             Ok(Some(request)) => request,
@@ -211,7 +211,7 @@ impl UffdConn {
                 uffd,
             } => {
                 if self.state.is_some() {
-                    bail!("duplicate UFFD handshake");
+                    return Err(Error::Protocol("duplicate UFFD handshake".to_string()));
                 }
                 self.state = Some(
                     self.handle_handshake(policy, prefault, regions, uffd)
@@ -229,7 +229,9 @@ impl UffdConn {
                     core.fetch_ranges(request.offset, request.len)
                 })
                 .await
-                .context("UFFD FETCH blocking task failed")??;
+                .map_err(|err| {
+                    Error::Runtime(format!("UFFD FETCH blocking task failed: {err}"))
+                })??;
                 self.send_ranges(None, &ranges).await?;
             }
             Request::Probe => {
@@ -285,7 +287,7 @@ impl UffdConn {
         let state = self
             .state
             .as_ref()
-            .ok_or_else(|| anyhow!("received UFFD event before handshake"))?;
+            .ok_or_else(|| Error::Protocol("received UFFD event before handshake".to_string()))?;
         let uffd_fd = state.uffd.get_ref().as_raw_fd();
         let policy = state.policy;
         let regions = state.regions.clone();
@@ -298,7 +300,7 @@ impl UffdConn {
             core.resolve_page_fault(uffd_fd, &regions, policy, &msg)
         })
         .await
-        .context("UFFD page-fault blocking task failed")??;
+        .map_err(|err| Error::Runtime(format!("UFFD page-fault blocking task failed: {err}")))??;
         debug!(
             "nydus uffd resolved fault: policy={:?} ranges={}",
             policy,
@@ -318,7 +320,9 @@ impl UffdConn {
                     range.source_offset >= region.offset
                         && range.source_offset < region.offset.saturating_add(region.size)
                 }) {
-                    bail!("resolved range is outside registered regions");
+                    return Err(Error::Runtime(
+                        "resolved range is outside registered regions".to_string(),
+                    ));
                 }
             }
         }
@@ -331,15 +335,26 @@ fn log_connection_exit(result: std::result::Result<Result<()>, tokio::task::Join
     match result {
         Ok(Ok(())) => {}
         Ok(Err(err)) if is_client_disconnect(&err) => {
-            debug!("nydus uffd connection closed: {err:#}");
+            debug!("nydus uffd connection closed: {err}");
         }
-        Ok(Err(err)) => warn!("nydus uffd connection exited: {err:#}"),
+        Ok(Err(err)) => warn!("nydus uffd connection exited: {err}"),
         Err(err) => warn!("nydus uffd connection task failed: {err}"),
     }
 }
 
-fn is_client_disconnect(err: &anyhow::Error) -> bool {
-    let text = format!("{err:#}");
+fn is_client_disconnect(err: &Error) -> bool {
+    // Typed check first: recover the io::Error beneath any context wrappers
+    // so disconnect detection survives message rewording.
+    if let Some(io_err) = err.io_error() {
+        if matches!(
+            io_err.kind(),
+            io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+        ) {
+            return true;
+        }
+    }
+    // Protocol-level exits carry no errno and are only identifiable by text.
+    let text = err.to_string();
     text.contains("client disconnected")
         || text.contains("peer closed")
         || text.contains("Connection reset")

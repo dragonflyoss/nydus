@@ -18,9 +18,9 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
-use anyhow::{anyhow, Context, Result};
 use tracing::{debug, warn};
 
+use nydus_core::error::{Context, Error, Result};
 use nydus_core::BlobId;
 
 use super::core::{
@@ -72,7 +72,7 @@ impl StopHandle {
 
 /// The terminal outcome of one fetch job.
 enum CompletionResult {
-    Fetch(Result<(), FetchError>),
+    Fetch(std::result::Result<(), FetchError>),
     Panicked,
 }
 
@@ -271,7 +271,9 @@ impl FanotifyService {
     /// Create the group and marks while retaining an unregistered `OwnedFd`.
     pub fn new(core: Arc<FanotifyCore>) -> Result<Self> {
         if core.devices().is_empty() {
-            anyhow::bail!("image has no blob devices to serve");
+            return Err(Error::InvalidImage(
+                "image has no blob devices to serve".to_string(),
+            ));
         }
 
         let fan_fd = unsafe {
@@ -301,8 +303,11 @@ impl FanotifyService {
                 );
                 continue;
             }
-            let path = CString::new(device.cache_path.as_os_str().as_bytes())
-                .context("blob device path contains an interior NUL byte")?;
+            let path = CString::new(device.cache_path.as_os_str().as_bytes()).map_err(|err| {
+                Error::InvalidParameter(format!(
+                    "blob device path contains an interior NUL byte: {err}"
+                ))
+            })?;
             let ret = unsafe {
                 libc::fanotify_mark(
                     fan.as_raw_fd(),
@@ -331,11 +336,9 @@ impl FanotifyService {
         // wake the epoll-based event loop.
         let mut pipe_fds = [-1i32; 2];
         let ret = unsafe { libc::pipe2(pipe_fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };
-        anyhow::ensure!(
-            ret == 0,
-            "pipe2 failed: {}",
-            std::io::Error::last_os_error()
-        );
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error()).context("pipe2 failed");
+        }
         // Each pipe end is wrapped into exactly one OwnedFd here; wrapping
         // either raw fd into a second OwnedFd would double-close it.
         let stop_read = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
@@ -409,7 +412,7 @@ fn serve(
 
     ready
         .send(())
-        .map_err(|_| anyhow!("fanotify readiness receiver was dropped"))?;
+        .map_err(|_| Error::Runtime("fanotify readiness receiver was dropped".to_string()))?;
 
     let mut pending_jobs = HashMap::new();
     let mut pending_table = PendingTable::new();
@@ -572,15 +575,15 @@ fn shutdown_cleanup(
     in_flight: &mut HashMap<FetchKey, u64>,
 ) {
     if let Err(err) = deny_undecided(pending_jobs, pending_table, in_flight) {
-        warn!("fanotify: denying outstanding events during shutdown failed: {err:#}");
+        warn!("fanotify: denying outstanding events during shutdown failed: {err}");
     }
     // In-flight fetches may still be completing; answer them so their readers
     // unblock too.
     if let Err(err) = drain_completions(completion_rx, pending_jobs, pending_table, in_flight) {
-        warn!("fanotify: draining completions during shutdown failed: {err:#}");
+        warn!("fanotify: draining completions during shutdown failed: {err}");
     }
     if let Err(err) = drain_kernel_queue(fan_fd, writer) {
-        warn!("fanotify: draining kernel queue during shutdown failed: {err:#}");
+        warn!("fanotify: draining kernel queue during shutdown failed: {err}");
     }
 }
 
@@ -597,7 +600,9 @@ fn drain_completions(
             }
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => {
-                return Err(anyhow!("fanotify completion channel closed unexpectedly"))
+                return Err(Error::Runtime(
+                    "fanotify completion channel closed unexpectedly".to_string(),
+                ))
             }
         }
     }
@@ -620,7 +625,9 @@ fn admit_batch(
     for parsed in EventIter::new(bytes) {
         let event = match parsed {
             Ok(event) if event.is_overflow() => {
-                return Err(anyhow!("fanotify queue overflow; stopping fail-closed"));
+                return Err(Error::Runtime(
+                    "fanotify queue overflow; stopping fail-closed".to_string(),
+                ));
             }
             Ok(event) => event,
             Err(err) => {
@@ -649,11 +656,10 @@ fn admit_batch(
                     "fanotify: batch corruption at offset {}: {:?}; stopping fail-closed",
                     err.offset, err.kind
                 );
-                return Err(anyhow!(
+                return Err(Error::Protocol(format!(
                     "fanotify batch parse error at offset {}: {:?}; stopping fail-closed",
-                    err.offset,
-                    err.kind
-                ));
+                    err.offset, err.kind
+                )));
             }
         };
 
@@ -699,7 +705,7 @@ fn admit_event(
     let (dev, ino) = match fd_identity(permission.event_fd()) {
         Ok(identity) => identity,
         Err(err) => {
-            warn!("fanotify: fstat event fd failed: {err:#}");
+            warn!("fanotify: fstat event fd failed: {err}");
             respond(&mut permission, Response::Deny)?;
             return Ok(());
         }
@@ -744,7 +750,7 @@ fn admit_event(
         }
         Ok(false) => {}
         Err(err) => {
-            warn!("fanotify: ready-range lookup failed: {err:#}");
+            warn!("fanotify: ready-range lookup failed: {err}");
             respond(&mut permission, Response::Deny)?;
             return Ok(());
         }
@@ -765,7 +771,11 @@ fn admit_event(
                 );
                 return Ok(());
             }
-            None => return Err(anyhow!("in-flight key maps to missing job {job_id}")),
+            None => {
+                return Err(Error::Runtime(format!(
+                    "in-flight key maps to missing job {job_id}"
+                )))
+            }
         }
     }
 
@@ -806,7 +816,9 @@ fn admit_event(
         },
     );
     if previous.is_some() {
-        return Err(anyhow!("duplicate fanotify job id {job_id}"));
+        return Err(Error::Runtime(format!(
+            "duplicate fanotify job id {job_id}"
+        )));
     }
     in_flight.insert(key, job_id);
     debug!(
@@ -827,7 +839,10 @@ fn handle_completion(
     match pending_table.on_completion(completion.job_id) {
         CompletionAction::Decide => {
             let mut event = pending_jobs.remove(&completion.job_id).ok_or_else(|| {
-                anyhow!("completion has no permission event: {}", completion.job_id)
+                Error::Runtime(format!(
+                    "completion has no permission event: {}",
+                    completion.job_id
+                ))
             })?;
             in_flight.remove(&event.key);
             let decision = match completion.result {
@@ -839,7 +854,7 @@ fn handle_completion(
                     Response::Allow
                 }
                 CompletionResult::Fetch(Err(FetchError::Backend(err))) => {
-                    warn!("fanotify fetch backend failure: {err:#}");
+                    warn!("fanotify fetch backend failure: {err}");
                     Response::Deny
                 }
                 CompletionResult::Panicked => {
@@ -860,10 +875,10 @@ fn handle_completion(
             );
             Ok(())
         }
-        CompletionAction::Unknown => Err(anyhow!(
+        CompletionAction::Unknown => Err(Error::Runtime(format!(
             "unknown or duplicate fanotify completion for job {}",
             completion.job_id
-        )),
+        ))),
     }
 }
 
@@ -905,7 +920,9 @@ fn drain_kernel_queue(fan_fd: RawFd, writer: &Arc<dyn ResponseWriter>) -> Result
                 for parsed in EventIter::new(&buffer[..n]) {
                     match parsed {
                         Ok(event) if event.is_overflow() => {
-                            return Err(anyhow!("fanotify queue overflow during shutdown drain"));
+                            return Err(Error::Runtime(
+                                "fanotify queue overflow during shutdown drain".to_string(),
+                            ));
                         }
                         Ok(event) => {
                             let fd = owned_event_fd(event.fd)?;
@@ -926,11 +943,10 @@ fn drain_kernel_queue(fan_fd: RawFd, writer: &Arc<dyn ResponseWriter>) -> Result
                                     }
                                 }
                             }
-                            return Err(anyhow!(
+                            return Err(Error::Protocol(format!(
                                 "fanotify parse error during shutdown drain at offset {}: {:?}",
-                                err.offset,
-                                err.kind
-                            ));
+                                err.offset, err.kind
+                            )));
                         }
                     }
                 }
@@ -954,7 +970,7 @@ fn respond(permission: &mut PendingPermission, response: Response) -> Result<()>
 
 fn owned_event_fd(fd: RawFd) -> Result<OwnedFd> {
     if fd < 0 {
-        return Err(anyhow!("invalid fanotify event fd {fd}"));
+        return Err(Error::Protocol(format!("invalid fanotify event fd {fd}")));
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
@@ -1071,7 +1087,9 @@ mod tests {
         handle_completion(
             Completion {
                 job_id: job,
-                result: CompletionResult::Fetch(Err(FetchError::Backend(anyhow!("boom")))),
+                result: CompletionResult::Fetch(Err(FetchError::Backend(Error::Backend(
+                    "boom".to_string(),
+                )))),
             },
             &mut pending_jobs,
             &mut table,

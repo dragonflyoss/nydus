@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use clap::Args;
+use nydus::error::Result;
 
 use crate::cli_common;
 use nydus::ublk::{

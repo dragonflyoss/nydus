@@ -7,10 +7,10 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
 use libublk::ctrl::{UblkCtrl, UblkCtrlBuilder};
 use libublk::io::{BufDescList, UblkDev, UblkIOCtx, UblkQueue};
 use libublk::{BufDesc, UblkError, UblkFlags, UblkIORes};
+use nydus_core::error::{Error, Result};
 use tracing::{error, info};
 
 use super::core::{UblkCore, UBLK_LOGICAL_BLOCK_SIZE};
@@ -86,7 +86,7 @@ impl UblkService {
             .ctrl_flags(ctrl_flags)
             .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
             .build()
-            .map_err(|err| anyhow!("failed to create ublk device: {err}"))?;
+            .map_err(|err| Error::Runtime(format!("failed to create ublk device: {err}")))?;
 
         Ok(Self {
             ctrl: Arc::new(ctrl),
@@ -118,7 +118,7 @@ impl UblkService {
                 move |qid, dev| serve_queue(qid, dev, core.clone()),
                 move |_ctrl| info!("nydus ublk device ready at {dev_path}"),
             )
-            .map_err(|err| anyhow!("ublk device failed: {err}"))?;
+            .map_err(|err| Error::Runtime(format!("ublk device failed: {err}")))?;
 
         Ok(())
     }
@@ -146,7 +146,7 @@ impl UblkHandle {
 }
 
 /// Describe the device to the driver: read-only, EROFS-block-sized.
-fn init_target(dev: &mut UblkDev, device_size: u64) -> Result<(), UblkError> {
+fn init_target(dev: &mut UblkDev, device_size: u64) -> std::result::Result<(), UblkError> {
     let block_shift = UBLK_LOGICAL_BLOCK_SIZE.trailing_zeros() as u8;
     let tgt = &mut dev.tgt;
     tgt.dev_size = device_size;

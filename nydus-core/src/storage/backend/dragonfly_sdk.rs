@@ -20,24 +20,19 @@ use super::http::runtime;
 
 /// Error categories surfaced by the Dragonfly SDK proxy, mapped to the retry
 /// policy by the request layer.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum DragonflyError {
     /// Proxy rate-limited the request (`429`).
+    #[error("dragonfly too many requests: {0}")]
     TooManyRequests(String),
-    /// Proxy denied the request (`403`).
-    Forbidden(String),
-    /// Any other transport or scheduler failure.
-    Other(String),
-}
 
-impl std::fmt::Display for DragonflyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DragonflyError::TooManyRequests(s) => write!(f, "dragonfly too many requests: {s}"),
-            DragonflyError::Forbidden(s) => write!(f, "dragonfly forbidden: {s}"),
-            DragonflyError::Other(s) => write!(f, "dragonfly error: {s}"),
-        }
-    }
+    /// Proxy denied the request (`403`).
+    #[error("dragonfly forbidden: {0}")]
+    Forbidden(String),
+
+    /// Any other transport or scheduler failure.
+    #[error("dragonfly error: {0}")]
+    Other(String),
 }
 
 /// A streaming response from a Dragonfly SDK request.
@@ -120,7 +115,7 @@ impl DragonflySdk {
                 Some(StatusCode::FORBIDDEN) => Err(DragonflyError::Forbidden(format!("{err}"))),
                 _ => Err(DragonflyError::Other(format!("{err}"))),
             },
-            Err(e) => Err(DragonflyError::Other(format!("{e:?}"))),
+            Err(e) => Err(DragonflyError::Other(format!("{e}"))),
         }
     }
 }

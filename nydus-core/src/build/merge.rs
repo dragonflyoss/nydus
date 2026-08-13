@@ -2,12 +2,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
-
 use crate::build::bootstrap::render_flattened_bootstrap;
 use crate::build::inode::{
     flatten_tree, set_root_prefetch_blobs_xattr, InodeData, NamedChildren, NodeAttrs, TreeNode,
 };
+use crate::error::{Context, Error, Result};
 use crate::fs::ErofsReader;
 use crate::metadata::{
     erofs_xattr_name_split, mode_to_erofs_file_type, ChunkAddr, ErofsDeviceSlot,
@@ -68,7 +67,9 @@ pub fn merge_sources_to_bootstrap_bytes(
     whiteout_spec: WhiteoutSpec,
 ) -> Result<Vec<u8>> {
     if sources.is_empty() {
-        bail!("merge requires at least one source");
+        return Err(Error::InvalidParameter(
+            "merge requires at least one source".to_string(),
+        ));
     }
 
     let mut merged_root: Option<MergeNode> = None;
@@ -92,7 +93,8 @@ pub fn merge_sources_to_bootstrap_bytes(
         });
     }
 
-    let mut merged_root = merged_root.ok_or_else(|| anyhow!("merge produced no root node"))?;
+    let mut merged_root = merged_root
+        .ok_or_else(|| Error::InvalidImage("merge produced no root node".to_string()))?;
     strip_whiteout_entries(&mut merged_root, whiteout_spec);
 
     // `flatten_tree` always yields at least the root inode.
@@ -102,7 +104,8 @@ pub fn merge_sources_to_bootstrap_bytes(
     // inode mtime read back from any layer is always 0.
     let epoch = 0;
     let uuid = [0u8; 16];
-    let blob_count = u16::try_from(device_slots.len()).context("device slot count exceeds u16")?;
+    let blob_count = u16::try_from(device_slots.len())
+        .map_err(|err| Error::Overflow(format!("device slot count exceeds u16: {err}")))?;
     let prefetch_blob_indexes = (1..=blob_count).collect::<Vec<_>>();
     set_root_prefetch_blobs_xattr(&mut inodes[0], &prefetch_blob_indexes)?;
 
@@ -122,13 +125,17 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
         .with_context(|| format!("failed to open bootstrap: {}", parent_bootstrap.display()))?;
     let blob_infos = reader.blob_infos()?;
     if blob_infos.is_empty() {
-        bail!("parent bootstrap contains no blobs");
+        return Err(Error::InvalidImage(
+            "parent bootstrap contains no blobs".to_string(),
+        ));
     }
     if blob_infos
         .iter()
         .any(|info| info.blob_id == *ondemand_blob_id)
     {
-        bail!("parent bootstrap already contains the ondemand blob");
+        return Err(Error::InvalidImage(
+            "parent bootstrap already contains the ondemand blob".to_string(),
+        ));
     }
 
     // Blobs keep their indexes, so chunk indexes round-trip unchanged.
@@ -152,8 +159,11 @@ pub(crate) fn rewrite_bootstrap_with_ondemand_blob(
         .iter()
         .map(|info| ErofsDeviceSlot::with_blob_id(info.blocks, &info.blob_id))
         .collect();
-    let ondemand_blob_index = u16::try_from(device_slots.len() + 1)
-        .context("ondemand blob index exceeds u16 device table range")?;
+    let ondemand_blob_index = u16::try_from(device_slots.len() + 1).map_err(|err| {
+        Error::Overflow(format!(
+            "ondemand blob index exceeds u16 device table range: {err}"
+        ))
+    })?;
     device_slots.push(ErofsDeviceSlot::with_blob_id(
         ondemand_blocks,
         ondemand_blob_id,
@@ -204,9 +214,9 @@ fn register_blobs(
 ) -> Result<HashMap<u16, u16>> {
     let mut local_to_global = HashMap::new();
     let infos = reader.blob_infos()?;
-    let info = infos
-        .first()
-        .ok_or_else(|| anyhow!("merge source does not contain an external blob"))?;
+    let info = infos.first().ok_or_else(|| {
+        Error::InvalidImage("merge source does not contain an external blob".to_string())
+    })?;
     // The device slot stores the full-blob digest (the merge source file name),
     // not the per-layer data digest embedded in the source bootstrap, so a
     // registry backend can address the blob by the same digest.
@@ -221,7 +231,9 @@ fn register_blobs(
     local_to_global.insert(info.blob_index, global_blob_index);
 
     if infos.len() > 1 {
-        bail!("merge source currently supports exactly one external blob")
+        return Err(Error::Unsupported(
+            "merge source currently supports exactly one external blob".to_string(),
+        ));
     }
     Ok(local_to_global)
 }
@@ -230,7 +242,11 @@ fn parse_source_blob_id(path: &Path) -> Result<[u8; EROFS_BLOB_ID_SIZE]> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("merge source file name must be valid UTF-8 sha256 hex"))?;
+        .ok_or_else(|| {
+            Error::InvalidParameter(
+                "merge source file name must be valid UTF-8 sha256 hex".to_string(),
+            )
+        })?;
     parse_sha256_hex(file_name).context("merge source file name must be a sha256 hex string")
 }
 
@@ -241,10 +257,14 @@ fn validate_single_layer_blob_source(path: &Path, reader: &ErofsReader) -> Resul
     let primary_image_size = reader.sb().blocks() * EROFS_BLOCK_SIZE as u64;
     let blob_infos = reader.blob_infos()?;
     if blob_infos.len() != 1 {
-        bail!("merge source must contain exactly one external blob");
+        return Err(Error::InvalidImage(
+            "merge source must contain exactly one external blob".to_string(),
+        ));
     }
     if blob_infos[0].blocks > 0 && file_size == primary_image_size {
-        bail!("merge source must be a full blob file, not a metadata-only bootstrap");
+        return Err(Error::InvalidImage(
+            "merge source must be a full blob file, not a metadata-only bootstrap".to_string(),
+        ));
     }
     Ok(())
 }
@@ -292,7 +312,9 @@ fn load_node(
         }
         EROFS_FT_REG_FILE => {
             if inode.data_layout() != EROFS_INODE_CHUNK_BASED {
-                bail!("merge currently only supports chunk-based regular files")
+                return Err(Error::Unsupported(
+                    "merge currently only supports chunk-based regular files".to_string(),
+                ));
             }
             let chunkbits = reader.chunkbits(&inode);
             let chunk_index_entries = reader
@@ -308,10 +330,10 @@ fn load_node(
                     } else {
                         let mapped =
                             blob_indexes.get(&index.device_id).copied().ok_or_else(|| {
-                                anyhow!(
+                                Error::InvalidImage(format!(
                                     "missing global blob index mapping for source blob {}",
                                     index.device_id
-                                )
+                                ))
                             })?;
                         Ok(ChunkAddr {
                             blkaddr: index.blkaddr,
@@ -330,7 +352,11 @@ fn load_node(
         },
         EROFS_FT_CHRDEV | EROFS_FT_BLKDEV => MergeNodeData::SpecialDev { rdev: inode.rdev() },
         EROFS_FT_FIFO | EROFS_FT_SOCK => MergeNodeData::SpecialNoData,
-        other => bail!("unsupported inode file type {other} while loading layer"),
+        other => {
+            return Err(Error::Unsupported(format!(
+                "unsupported inode file type {other} while loading layer"
+            )))
+        }
     };
 
     Ok(MergeNode {

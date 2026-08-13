@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
 use clap::Args;
+use nydus::error::{Context, Error, Result};
 
 use crate::cli_common;
 use nydus::fanotify::{deny_queued_events, mount_erofs, FanotifyCore, FanotifyService, FetchPool};
@@ -106,9 +106,11 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
         .context("failed to spawn fanotify event loop thread")?;
 
     // Wait for the event loop to be ready.
-    ready_rx
-        .recv()
-        .context("fanotify event loop exited before becoming ready")?;
+    ready_rx.recv().map_err(|err| {
+        Error::Runtime(format!(
+            "fanotify event loop exited before becoming ready: {err}"
+        ))
+    })?;
 
     info!(
         "nydus fanotify event loop ready for {} blob device(s), bootstrap {}",
@@ -120,12 +122,14 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     match mount_erofs(&bootstrap, core.devices(), &mountpoint) {
         Ok(()) => info!("mounted file-backed EROFS at {}", mountpoint.display()),
         Err(err) => {
-            warn!("failed to mount file-backed EROFS: {err:#}");
+            warn!("failed to mount file-backed EROFS: {err}");
             // Stop the loop and join it. The loop never served a request, so its
             // returned fd can be dropped without unmounting (nothing is mounted).
             stop.stop();
             let _ = loop_handle.join();
-            return Err(err).context("failed to mount file-backed EROFS");
+            // `mount_erofs` already reports "failed to mount file-backed
+            // EROFS {bootstrap} at {mountpoint}" — no extra layer needed.
+            return Err(err);
         }
     }
 
@@ -134,7 +138,7 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
     // mount is quiescent.
     let (fan_fd, outcome) = loop_handle
         .join()
-        .map_err(|_| anyhow::anyhow!("fanotify event loop thread panicked"))?;
+        .map_err(|_| Error::Runtime("fanotify event loop thread panicked".to_string()))?;
 
     // Unmount BEFORE dropping the fd: `fanotify_release` fail-opens any residue,
     // and unmounting first ensures those ALLOWs cannot reach a live filesystem.
@@ -147,7 +151,7 @@ pub fn run_fanotify(args: FanotifyArgs) -> Result<()> {
         &mountpoint,
         || {
             if let Err(err) = deny_queued_events(&fan_fd) {
-                warn!("deny-draining fanotify events between unmount retries failed: {err:#}");
+                warn!("deny-draining fanotify events between unmount retries failed: {err}");
             }
         },
         "dropping the fanotify group fd will fail-open residual events and unfetched ranges on \

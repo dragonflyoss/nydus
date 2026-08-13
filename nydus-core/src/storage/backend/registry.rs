@@ -89,34 +89,35 @@ fn default_retry_limit() -> u8 {
 }
 
 /// Errors produced by the registry backend.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 enum RegistryError {
+    #[error(transparent)]
     Io(io::Error),
-    Url(String),
-    Auth(String),
-    Status(StatusCode, String),
-    ProxyForbidden(String),
-    ProxyTooManyRequests(String),
-}
 
-impl std::fmt::Display for RegistryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RegistryError::Io(e) => write!(f, "{e}"),
-            RegistryError::Url(s) => write!(f, "invalid url: {s}"),
-            RegistryError::Auth(s) => write!(f, "authentication failed: {s}"),
-            RegistryError::Status(code, s) => write!(f, "unexpected status {code}: {s}"),
-            RegistryError::ProxyForbidden(s) => write!(f, "proxy forbidden: {s}"),
-            RegistryError::ProxyTooManyRequests(s) => write!(f, "proxy too many requests: {s}"),
-        }
-    }
+    #[error("invalid url: {0}")]
+    InvalidUrl(String),
+
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
+    #[error("unexpected response: {0}")]
+    UnexpectedResponse(String),
+
+    #[error("unexpected status {0}: {1}")]
+    UnexpectedStatus(StatusCode, String),
+
+    #[error("proxy forbidden: {0}")]
+    ProxyForbidden(String),
+
+    #[error("proxy too many requests: {0}")]
+    ProxyTooManyRequests(String),
 }
 
 impl From<RegistryError> for io::Error {
     fn from(err: RegistryError) -> Self {
         match err {
             RegistryError::Io(e) => e,
-            other => io::Error::other(other.to_string()),
+            other => io::Error::other(other),
         }
     }
 }
@@ -132,6 +133,18 @@ impl From<RequestError> for RegistryError {
 }
 
 type RegistryResult<T> = Result<T, RegistryError>;
+
+/// Parse a credential string into an `Authorization` header value. Tokens come
+/// from the remote auth server and basic credentials from the config, so bytes
+/// that are invalid in an HTTP header (e.g. newlines) must surface as an auth
+/// error instead of a panic.
+fn auth_header_value(value: &str) -> RegistryResult<reqwest::header::HeaderValue> {
+    value.parse().map_err(|_| {
+        RegistryError::Unauthorized(
+            "credentials contain bytes that are invalid in an HTTP header".to_string(),
+        )
+    })
+}
 
 /// Authentication challenge parsed from a `www-authenticate` header.
 enum Challenge {
@@ -430,7 +443,9 @@ impl Registry {
                 .headers()
                 .get(LOCATION)
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| RegistryError::Url("missing redirect location".to_string()))?
+                .ok_or_else(|| {
+                    RegistryError::UnexpectedResponse("missing redirect location".to_string())
+                })?
                 .to_string();
 
             let mut redirect_headers = HeaderMap::new();
@@ -468,7 +483,9 @@ impl Registry {
                 .headers()
                 .get(LOCATION)
                 .and_then(|v| v.to_str().ok())
-                .ok_or_else(|| RegistryError::Url("missing redirect location".to_string()))?
+                .ok_or_else(|| {
+                    RegistryError::UnexpectedResponse("missing redirect location".to_string())
+                })?
                 .to_string();
             let redirected = self.request.call(
                 Method::HEAD,
@@ -520,7 +537,7 @@ impl Registry {
             ReadContext::raw(ReadKind::OnDemand),
         )?;
         let footer = BlobFooter::parse(&footer_bytes, size)
-            .map_err(|e| RegistryError::Io(io::Error::other(e.to_string())))?;
+            .map_err(|e| RegistryError::Io(io::Error::other(e)))?;
 
         let blob_meta_size = usize::try_from(footer.blob_meta_size()).map_err(|_| {
             RegistryError::Io(io::Error::new(
@@ -539,7 +556,7 @@ impl Registry {
         BlobMeta::loader()
             .blob_id(*blob_id)
             .from_bytes(&blob_meta_bytes)
-            .map_err(|e| RegistryError::Io(io::Error::other(e.to_string())))
+            .map_err(|e| RegistryError::Io(io::Error::other(e)))
     }
 
     /// Issue a request, transparently performing the auth handshake on `401`.
@@ -552,7 +569,7 @@ impl Registry {
     ) -> RegistryResult<Response> {
         let cached_auth = self.state.current_auth();
         if !cached_auth.is_empty() {
-            headers.insert(AUTHORIZATION, cached_auth.parse().unwrap());
+            headers.insert(AUTHORIZATION, auth_header_value(&cached_auth)?);
         }
 
         let resp = self
@@ -581,7 +598,7 @@ impl Registry {
         };
 
         let auth_header = self.obtain_auth(challenge)?;
-        headers.insert(AUTHORIZATION, auth_header.parse().unwrap());
+        headers.insert(AUTHORIZATION, auth_header_value(&auth_header)?);
         let resp = self.request.call(method, url, headers, ctx, true)?;
         if resp.status().is_success() || resp.status().is_redirection() {
             self.state.set_auth(auth_header);
@@ -593,7 +610,9 @@ impl Registry {
         match challenge {
             Challenge::Basic => {
                 let basic = self.state.basic_auth.as_ref().ok_or_else(|| {
-                    RegistryError::Auth("registry requires basic-auth credentials".to_string())
+                    RegistryError::Unauthorized(
+                        "registry requires basic-auth credentials".to_string(),
+                    )
                 })?;
                 Ok(format!("Basic {basic}"))
             }
@@ -609,7 +628,8 @@ impl Registry {
     }
 
     fn fetch_token(&self, realm: &str, service: &str, scope: &str) -> RegistryResult<String> {
-        let mut url = Url::parse(realm).map_err(|e| RegistryError::Url(format!("{realm}: {e}")))?;
+        let mut url =
+            Url::parse(realm).map_err(|e| RegistryError::InvalidUrl(format!("{realm}: {e}")))?;
         {
             let mut query = url.query_pairs_mut();
             if !service.is_empty() {
@@ -623,7 +643,7 @@ impl Registry {
 
         let mut headers = HeaderMap::new();
         if let Some(basic) = &self.state.basic_auth {
-            headers.insert(AUTHORIZATION, format!("Basic {basic}").parse().unwrap());
+            headers.insert(AUTHORIZATION, auth_header_value(&format!("Basic {basic}"))?);
         }
 
         // Auth requests always go directly to the auth server, never via proxy.
@@ -639,13 +659,16 @@ impl Registry {
         }
 
         let body = resp.text().map_err(RegistryError::Io)?;
-        let mut token: TokenResponse = serde_json::from_str(&body)
-            .map_err(|e| RegistryError::Auth(format!("invalid token response: {e}")))?;
+        let mut token: TokenResponse = serde_json::from_str(&body).map_err(|e| {
+            RegistryError::UnexpectedResponse(format!("invalid token response: {e}"))
+        })?;
         if token.token.is_empty() {
             token.token = token.access_token.clone();
         }
         if token.token.is_empty() {
-            return Err(RegistryError::Auth("empty token from registry".to_string()));
+            return Err(RegistryError::UnexpectedResponse(
+                "empty token from registry".to_string(),
+            ));
         }
 
         self.state
@@ -702,7 +725,7 @@ fn fill_exact(resp: Response, dst: &mut [u8]) -> RegistryResult<()> {
 fn status_error(resp: Response) -> RegistryError {
     let status = resp.status();
     let body = resp.text().unwrap_or_default();
-    RegistryError::Status(status, body)
+    RegistryError::UnexpectedStatus(status, body)
 }
 
 #[cfg(test)]
